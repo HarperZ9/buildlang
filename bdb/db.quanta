@@ -13,6 +13,10 @@
 //   - ORDER BY, LIMIT, COUNT(*)
 //   - JOIN (nested-loop) with table aliases
 //   - GROUP BY with aggregates: COUNT(*), SUM, AVG, MIN, MAX
+//   - HAVING clause (filter groups after aggregation)
+//   - DISTINCT (remove duplicate rows)
+//   - BETWEEN operator (range filter)
+//   - Column aliases (SELECT col AS alias)
 //   - CREATE INDEX for sorted-array indexes with binary search lookup
 //   - Write-Ahead Log (WAL) for crash recovery
 //   - BEGIN/COMMIT/ROLLBACK transaction support
@@ -28,6 +32,10 @@
 //   qdb test.db "ALTER TABLE users ADD COLUMN email TEXT"
 //   qdb test.db "SELECT u.name, o.total FROM users u JOIN orders o ON u.id = o.user_id"
 //   qdb test.db "SELECT dept, AVG(salary) FROM employees GROUP BY dept"
+//   qdb test.db "SELECT dept, COUNT(*) FROM emp GROUP BY dept HAVING COUNT(*) > 2"
+//   qdb test.db "SELECT DISTINCT dept FROM emp"
+//   qdb test.db "SELECT * FROM emp WHERE salary BETWEEN 100000 AND 130000"
+//   qdb test.db "SELECT name AS employee, salary AS pay FROM emp"
 //   qdb test.db "CREATE INDEX idx_age ON users (age)"
 //   qdb test.db                         — interactive REPL mode
 //
@@ -156,6 +164,19 @@ struct DB {
     w_in_vals2: Vec<i32>,
     w_in_count2: i32,
 
+    // DISTINCT flag
+    has_distinct: i32,
+
+    // HAVING clause: agg func code, op code, comparison value
+    has_having: i32,
+    having_agg_func: i32,
+    having_agg_col: i32,
+    having_op: i32,
+    having_val: i32,
+
+    // Column aliases: parallel to p_agg_cols, -1 means no alias
+    p_aliases: Vec<i32>,
+
     // ALTER TABLE state
     alter_col_name: i32,
     alter_col_type: i32,
@@ -216,6 +237,9 @@ fn db_new(db_path: String) -> DB {
         idx_name: -1, idx_table_name: -1, idx_col_name: -1,
         w_in_vals1: vec![], w_in_count1: 0,
         w_in_vals2: vec![], w_in_count2: 0,
+        has_distinct: 0,
+        has_having: 0, having_agg_func: 0, having_agg_col: -1, having_op: -1, having_val: -1,
+        p_aliases: vec![],
         alter_col_name: -1, alter_col_type: -1,
         wal_path: wp,
         in_transaction: false,
@@ -886,6 +910,9 @@ fn is_keyword(word: String) -> i32 {
     if u == "ALTER" { return 1; }
     if u == "ADD" { return 1; }
     if u == "COLUMN" { return 1; }
+    if u == "DISTINCT" { return 1; }
+    if u == "HAVING" { return 1; }
+    if u == "BETWEEN" { return 1; }
     0
 }
 
@@ -1089,6 +1116,13 @@ fn reset_parser(d: &mut DB, input: String) {
     d.w_in_count1 = 0;
     d.w_in_vals2 = vec![];
     d.w_in_count2 = 0;
+    d.has_distinct = 0;
+    d.has_having = 0;
+    d.having_agg_func = 0;
+    d.having_agg_col = -1;
+    d.having_op = -1;
+    d.having_val = -1;
+    d.p_aliases = vec![];
     d.alter_col_name = -1;
     d.alter_col_type = -1;
 }
@@ -1142,6 +1176,12 @@ fn parse_select(d: &mut DB) {
     d.stmt_type = 0;
     next_token(d);
 
+    // Check for DISTINCT keyword
+    if tk_is_kw(d, "DISTINCT") == 1 {
+        d.has_distinct = 1;
+        next_token(d);
+    }
+
     // Parse select list: could be *, column refs, or aggregate functions
     if d.tk_type == 6 {
         // SELECT *
@@ -1168,6 +1208,16 @@ fn parse_select(d: &mut DB) {
                 expect_punct(d, ")");
                 vec_push(d.p_agg_funcs, agg);
                 d.p_agg_count = d.p_agg_count + 1;
+                // Check for AS alias after aggregate
+                if tk_is_kw(d, "AS") == 1 {
+                    next_token(d);
+                    let alias_name = d.tk_val;
+                    let alias_id = sp_add(d, alias_name);
+                    vec_push(d.p_aliases, alias_id);
+                    next_token(d);
+                } else {
+                    vec_push(d.p_aliases, 0 - 1);
+                }
             } else {
                 // Regular column reference (possibly dotted)
                 let cref = read_col_ref(d);
@@ -1178,6 +1228,16 @@ fn parse_select(d: &mut DB) {
                 vec_push(d.p_agg_funcs, 0);
                 vec_push(d.p_agg_cols, cid);
                 d.p_agg_count = d.p_agg_count + 1;
+                // Check for AS alias after plain column
+                if tk_is_kw(d, "AS") == 1 {
+                    next_token(d);
+                    let alias_name = d.tk_val;
+                    let alias_id = sp_add(d, alias_name);
+                    vec_push(d.p_aliases, alias_id);
+                    next_token(d);
+                } else {
+                    vec_push(d.p_aliases, 0 - 1);
+                }
             }
             if tk_is_punct(d, ",") == 1 { next_token(d); }
             else { go = false; }
@@ -1242,6 +1302,7 @@ fn parse_select(d: &mut DB) {
 
     if tk_is_kw(d, "WHERE") == 1 { parse_where(d); }
     if tk_is_kw(d, "GROUP") == 1 { parse_group_by(d); }
+    if tk_is_kw(d, "HAVING") == 1 { parse_having(d); }
     if tk_is_kw(d, "ORDER") == 1 { parse_order_by(d); }
     if tk_is_kw(d, "LIMIT") == 1 { parse_limit(d); }
 }
@@ -1340,6 +1401,36 @@ fn parse_group_by(d: &mut DB) {
     d.has_group_by = 1;
     let cref = read_col_ref(d);
     d.group_col = sp_add(d, cref);
+}
+
+// Parse HAVING clause: HAVING agg_func(col) op value
+// e.g. HAVING COUNT(*) > 2
+fn parse_having(d: &mut DB) {
+    next_token(d);
+    d.has_having = 1;
+    // Parse aggregate function
+    let agg = is_agg_kw(d.tk_val);
+    d.having_agg_func = agg;
+    next_token(d);
+    expect_punct(d, "(");
+    if d.tk_type == 6 {
+        // COUNT(*)
+        let star_id = sp_add(d, "*");
+        d.having_agg_col = star_id;
+        next_token(d);
+    } else {
+        let col_ref = read_col_ref(d);
+        d.having_agg_col = sp_add(d, col_ref);
+    }
+    expect_punct(d, ")");
+    // Parse operator
+    let op = d.tk_val;
+    d.having_op = op_encode(op);
+    next_token(d);
+    // Parse value
+    let val = d.tk_val;
+    d.having_val = sp_add(d, val);
+    next_token(d);
 }
 
 fn parse_update(d: &mut DB) {
@@ -1449,6 +1540,28 @@ fn parse_where_cond(d: &mut DB, which: i32) {
                 d.w_in_count2 = vcount;
             }
         }
+        return;
+    }
+
+    // Check for BETWEEN: col BETWEEN val1 AND val2
+    // Translates to: col >= val1 AND col <= val2
+    if tk_is_kw(d, "BETWEEN") == 1 {
+        next_token(d);
+        let lo_val = d.tk_val;
+        let lo_id = sp_add(d, lo_val);
+        next_token(d);
+        expect_kw(d, "AND");
+        let hi_val = d.tk_val;
+        let hi_id = sp_add(d, hi_val);
+        next_token(d);
+        // Encode as compound: col >= lo AND col <= hi
+        d.w_left = left_id;
+        d.w_op = 4; // >=
+        d.w_right = lo_id;
+        d.w_logic = 1; // AND
+        d.w_left2 = left_id;
+        d.w_op2 = 3; // <=
+        d.w_right2 = hi_id;
         return;
     }
 
@@ -1638,6 +1751,13 @@ fn parse_and_exec_subquery(d: &mut DB) -> String {
     let save_join_right_col = d.join_right_col;
     let save_alias1 = d.alias1;
     let save_alias2 = d.alias2;
+    let save_has_distinct = d.has_distinct;
+    let save_has_having = d.has_having;
+    let save_having_agg_func = d.having_agg_func;
+    let save_having_agg_col = d.having_agg_col;
+    let save_having_op = d.having_op;
+    let save_having_val = d.having_val;
+    let save_p_aliases = d.p_aliases;
 
     // Execute the subquery to get a scalar result
     let result = exec_subquery_scalar(d, sub_sql);
@@ -1683,6 +1803,13 @@ fn parse_and_exec_subquery(d: &mut DB) -> String {
     d.join_right_col = save_join_right_col;
     d.alias1 = save_alias1;
     d.alias2 = save_alias2;
+    d.has_distinct = save_has_distinct;
+    d.has_having = save_has_having;
+    d.having_agg_func = save_having_agg_func;
+    d.having_agg_col = save_having_agg_col;
+    d.having_op = save_having_op;
+    d.having_val = save_having_val;
+    d.p_aliases = save_p_aliases;
 
     // Advance the token past ')'
     next_token(d);
@@ -2116,12 +2243,94 @@ fn exec_select(d: &mut DB) {
         }
     }
 
+    // DISTINCT: remove duplicate rows (compare all selected column values)
+    if d.has_distinct == 1 {
+        let mut deduped: Vec<i32> = vec![];
+        let mut dedup_count = 0;
+        let mut di = 0;
+        let mut drow = 0;
+        let mut dkey = "";
+        let mut dci = 0;
+        let mut dcol_idx = 0;
+        let mut dval = "";
+        let mut dup_found = false;
+        let mut dj = 0;
+        let mut erow = 0;
+        let mut ekey = "";
+        let mut eci = 0;
+        let mut ecol_idx = 0;
+        let mut eval2 = "";
+        while di < match_count {
+            drow = vec_get(match_rows, di);
+            dkey = "";
+            dci = 0;
+            while dci < show_count {
+                dcol_idx = vec_get(show_cols, dci);
+                dval = sp_get(d, vec_get(d.cells, rs + drow * cc + dcol_idx));
+                if dci > 0 { dkey = dkey + "|"; }
+                dkey = dkey + dval;
+                dci = dci + 1;
+            }
+            dup_found = false;
+            dj = 0;
+            while dj < dedup_count {
+                erow = vec_get(deduped, dj);
+                ekey = "";
+                eci = 0;
+                while eci < show_count {
+                    ecol_idx = vec_get(show_cols, eci);
+                    eval2 = sp_get(d, vec_get(d.cells, rs + erow * cc + ecol_idx));
+                    if eci > 0 { ekey = ekey + "|"; }
+                    ekey = ekey + eval2;
+                    eci = eci + 1;
+                }
+                if dkey == ekey { dup_found = true; }
+                dj = dj + 1;
+            }
+            if !dup_found {
+                vec_push(deduped, drow);
+                dedup_count = dedup_count + 1;
+            }
+            di = di + 1;
+        }
+        match_rows = deduped;
+        match_count = dedup_count;
+    }
+
+    // Build header names (use alias if provided, else column name)
+    let mut hdr_names: Vec<i32> = vec![];
+    let mut hni = 0;
+    let mut hn_col_idx = 0;
+    let mut hn_base_hdr = "";
+    let mut hn_use_alias = false;
+    let mut hn_al = 0;
+    let mut hn_hid = 0;
+    while hni < show_count {
+        hn_col_idx = vec_get(show_cols, hni);
+        hn_base_hdr = sp_get(d, vec_get(d.col_names, cs + hn_col_idx));
+        hn_use_alias = false;
+        if d.select_star == 0 {
+            if hni < d.p_agg_count {
+                hn_al = vec_get(d.p_aliases, hni);
+                if hn_al >= 0 {
+                    vec_push(hdr_names, hn_al);
+                    hn_use_alias = true;
+                }
+            }
+        }
+        if !hn_use_alias {
+            hn_hid = sp_add(d, hn_base_hdr);
+            vec_push(hdr_names, hn_hid);
+        }
+        hni = hni + 1;
+    }
+
     // Calculate column widths
     let mut widths: Vec<i32> = vec![];
     let mut wi = 0;
     while wi < show_count {
         let col_idx = vec_get(show_cols, wi);
-        let hdr = sp_get(d, vec_get(d.col_names, cs + col_idx));
+        let hdr = sp_get(d, vec_get(hdr_names, wi));
         let mut w = hdr.len();
         let mut ri = 0;
         while ri < match_count {
@@ -2141,8 +2350,7 @@ fn exec_select(d: &mut DB) {
     let mut hi = 0;
     while hi < show_count {
         if hi > 0 { hdr_line = hdr_line + " | "; sep_line = sep_line + "-+-"; }
-        let col_idx = vec_get(show_cols, hi);
-        let hdr = sp_get(d, vec_get(d.col_names, cs + col_idx));
+        let hdr = sp_get(d, vec_get(hdr_names, hi));
         let w = vec_get(widths, hi);
         hdr_line = hdr_line + pad_right(hdr, w);
         sep_line = sep_line + make_dashes(w);
@@ -2184,38 +2392,56 @@ fn exec_select_agg_no_group(d: &mut DB, tidx: i32) {
     let cc = vec_get(d.tbl_col_counts, tidx);
     let rs = vec_get(d.tbl_row_starts, tidx);
     let rc = vec_get(d.tbl_row_counts, tidx);
+    let agg_count = d.p_agg_count;
+    let alias_val = d.alias1;
 
-    // Gather matching rows
+    // Declare everything before any vec!/while to avoid compiler codegen bugs
     let mut match_rows: Vec<i32> = vec![];
+    let mut results: Vec<i32> = vec![];
+    let mut headers: Vec<i32> = vec![];
     let mut match_count = 0;
     let mut r = 0;
+    let mut ai = 0;
+    let mut af = 0;
+    let mut ac_name_id = 0;
+    let mut al_id = 0;
+    let mut vid = 0;
+    let mut hid = 0;
+
+    // Single while loop: gather rows, then compute aggs, all sequential in one loop scope
+    // Phase 1: gather matching rows
     while r < rc {
-        if eval_compound_where(d, cs, cc, rs, r, tname, d.alias1) {
+        if eval_compound_where(d, cs, cc, rs, r, tname, alias_val) {
             vec_push(match_rows, r);
             match_count = match_count + 1;
         }
         r = r + 1;
     }
 
-    // For each aggregate in p_agg_funcs/p_agg_cols, compute the result
-    let mut results: Vec<i32> = vec![];
-    let mut headers: Vec<i32> = vec![];
-    let mut ai = 0;
-    while ai < d.p_agg_count {
-        compute_agg_item(d, ai, cs, cc, rs, tname, match_rows, match_count, &mut results, &mut headers);
-        ai = ai + 1;
+    // Phase 2: compute aggregates (second while in same function - compile workaround)
+    // Use the agg_count as upper bound for a combined counter
+    r = 0;
+    while r < agg_count {
+        af = vec_get(d.p_agg_funcs, r);
+        ac_name_id = vec_get(d.p_agg_cols, r);
+        al_id = if r < vec_len(d.p_aliases) { vec_get(d.p_aliases, r) } else { 0 - 1 };
+        vid = compute_single_agg(d, af, ac_name_id, cs, cc, rs, tname, alias_val, match_rows, match_count);
+        vec_push(results, vid);
+        hid = build_agg_header(d, af, ac_name_id, al_id);
+        vec_push(headers, hid);
+        r = r + 1;
     }
-    // Print single result row
-    print_result_row(d, headers, results, d.p_agg_count);
+    print_result_row(d, headers, results, agg_count);
 }
 
-fn compute_agg_item(d: &mut DB, ai: i32, cs: i32, cc: i32, rs: i32, tname: String,
-                    match_rows: Vec<i32>, match_count: i32,
-                    results: &mut Vec<i32>, headers: &mut Vec<i32>) {
-    let af = vec_get(d.p_agg_funcs, ai);
-    let ac_name = sp_get(d, vec_get(d.p_agg_cols, ai));
+// Compute a single aggregate value, returning its pool id
+fn compute_single_agg(d: &mut DB, af: i32, ac_name_id: i32, cs: i32, cc: i32,
+                       rs: i32, tname: String, alias_val: i32,
+                       match_rows: Vec<i32>, match_count: i32) -> i32 {
+    let ac_name = sp_get(d, ac_name_id);
     if af == 0 {
-        let col_idx = resolve_col(d, cs, cc, tname, d.alias1, ac_name);
+        // Plain column: first row value
+        let col_idx = resolve_col(d, cs, cc, tname, alias_val, ac_name);
         let mut val = "";
         if match_count > 0 {
             let row = vec_get(match_rows, 0);
@@ -2223,25 +2449,15 @@ fn compute_agg_item(d: &mut DB, ai: i32, cs: i32, cc: i32, rs: i32, tname: Strin
                 val = sp_get(d, vec_get(d.cells, rs + row * cc + col_idx));
             }
         }
-        let vid = sp_add(d, val);
-        vec_push(*results, vid);
-        let hid = sp_add(d, ac_name);
-        vec_push(*headers, hid);
-    } else if af == 1 {
-        let val = int_to_str(match_count);
-        let vid = sp_add(d, val);
-        vec_push(*results, vid);
-        let hid = sp_add(d, "COUNT(*)");
-        vec_push(*headers, hid);
-    } else {
-        compute_agg_numeric(d, af, ac_name, cs, cc, rs, tname, match_rows, match_count, results, headers);
+        return sp_add(d, val);
     }
-}
-
-fn compute_agg_numeric(d: &mut DB, af: i32, ac_name: String, cs: i32, cc: i32, rs: i32,
-                       tname: String, match_rows: Vec<i32>, match_count: i32,
-                       results: &mut Vec<i32>, headers: &mut Vec<i32>) {
-    let col_idx = resolve_col(d, cs, cc, tname, d.alias1, ac_name);
+    if af == 1 {
+        // COUNT(*)
+        let val = int_to_str(match_count);
+        return sp_add(d, val);
+    }
+    // SUM/AVG/MIN/MAX
+    let col_idx = resolve_col(d, cs, cc, tname, alias_val, ac_name);
     let mut sum_val = 0.0;
     let mut min_val = 999999999.0;
     let mut max_val = 0.0 - 999999999.0;
@@ -2250,8 +2466,7 @@ fn compute_agg_numeric(d: &mut DB, af: i32, ac_name: String, cs: i32, cc: i32, r
     while mi < match_count {
         let row = vec_get(match_rows, mi);
         if col_idx >= 0 {
-            let cell_str = sp_get(d, vec_get(d.cells, rs + row * cc + col_idx));
-            let nv = cell_str.parse_float();
+            let nv = get_cell_float(d, rs, row, cc, col_idx);
             sum_val = sum_val + nv;
             if nv < min_val { min_val = nv; }
             if nv > max_val { max_val = nv; }
@@ -2267,15 +2482,21 @@ fn compute_agg_numeric(d: &mut DB, af: i32, ac_name: String, cs: i32, cc: i32, r
     if af == 4 { result_val = min_val; }
     if af == 5 { result_val = max_val; }
     let result_str = float_to_str(result_val);
-    let vid = sp_add(d, result_str);
-    vec_push(*results, vid);
+    sp_add(d, result_str)
+}
+
+// Build the header string pool id for an aggregate
+fn build_agg_header(d: &mut DB, af: i32, ac_name_id: i32, al_id: i32) -> i32 {
+    if al_id >= 0 { return al_id; }
+    let ac_name = sp_get(d, ac_name_id);
+    if af == 0 { return sp_add(d, ac_name); }
+    if af == 1 { return sp_add(d, "COUNT(*)"); }
     let mut func_name = "SUM";
     if af == 3 { func_name = "AVG"; }
     if af == 4 { func_name = "MIN"; }
     if af == 5 { func_name = "MAX"; }
     let hname = func_name + "(" + ac_name + ")";
-    let hid = sp_add(d, hname);
-    vec_push(*headers, hid);
+    sp_add(d, hname)
 }
 
 // =============================================================================
@@ -2300,7 +2521,7 @@ fn exec_select_group(d: &mut DB) {
         return;
     }
 
-    // Filter rows
+    // Filter rows by WHERE
     let mut match_rows: Vec<i32> = vec![];
     let mut match_count = 0;
     let mut r = 0;
@@ -2316,59 +2537,156 @@ fn exec_select_group(d: &mut DB) {
     let mut group_keys: Vec<i32> = vec![];
     let mut group_count = 0;
     let mut mi = 0;
+    let mut gk_row = 0;
+    let mut gk_val = "";
+    let mut gk_id = 0;
+    let mut gk_found = false;
+    let mut gk_gi = 0;
+    let mut gk_existing = "";
     while mi < match_count {
-        let row = vec_get(match_rows, mi);
-        let gv = sp_get(d, vec_get(d.cells, rs + row * cc + gcol));
-        let gvid = sp_add(d, gv);
-        // Check if already in group_keys
-        let mut found = false;
-        let mut gi = 0;
-        while gi < group_count {
-            let existing = sp_get(d, vec_get(group_keys, gi));
-            if existing == gv { found = true; }
-            gi = gi + 1;
+        gk_row = vec_get(match_rows, mi);
+        gk_val = sp_get(d, vec_get(d.cells, rs + gk_row * cc + gcol));
+        gk_id = sp_add(d, gk_val);
+        gk_found = false;
+        gk_gi = 0;
+        while gk_gi < group_count {
+            gk_existing = sp_get(d, vec_get(group_keys, gk_gi));
+            if gk_existing == gk_val { gk_found = true; }
+            gk_gi = gk_gi + 1;
         }
-        if !found {
-            vec_push(group_keys, gvid);
+        if !gk_found {
+            vec_push(group_keys, gk_id);
             group_count = group_count + 1;
         }
         mi = mi + 1;
     }
 
-    // Build headers
-    let mut headers: Vec<i32> = vec![];
-    build_all_headers(d, headers);
-
     let ncols = d.p_agg_count;
 
-    // Compute all result rows
-    // Use a flat approach: for each group key, for each agg column,
-    // compute the value and store as a pool id
+    // Compute all result rows: flat array, ncols per group
+    // Inline the computation to avoid sequential-while-loop compiler issues
     let mut all_results: Vec<i32> = vec![];
-    let mut gi = 0;
-    while gi < group_count {
-        let gk = sp_get(d, vec_get(group_keys, gi));
-        // Process each aggregate column for this group
-        group_compute_row(d, gk, cs, cc, rs, tname, gcol,
-                          match_rows, match_count, all_results);
-        gi = gi + 1;
+    // Pre-copy agg info to avoid struct access issues across function calls
+    let mut local_agg_funcs: Vec<i32> = vec![];
+    let mut local_agg_cols: Vec<i32> = vec![];
+    let mut copy_i = 0;
+    let mut copy_af = 0;
+    let mut copy_ac = 0;
+    while copy_i < ncols {
+        copy_af = vec_get(d.p_agg_funcs, copy_i);
+        copy_ac = vec_get(d.p_agg_cols, copy_i);
+        vec_push(local_agg_funcs, copy_af);
+        vec_push(local_agg_cols, copy_ac);
+        copy_i = copy_i + 1;
     }
-    // Compute widths from results
+    // Now compute results for each group
+    let alias1_val = d.alias1;
+    let mut gi2 = 0;
+    let mut gi2_gk = "";
+    let mut gi2_ai = 0;
+    let mut gi2_af = 0;
+    let mut gi2_ac_name = "";
+    let mut gi2_col_idx = 0;
+    let mut gi2_val_str = "";
+    let mut gi2_vid = 0;
+    let mut gi2_cnt = 0;
+    while gi2 < group_count {
+        gi2_gk = sp_get(d, vec_get(group_keys, gi2));
+        gi2_ai = 0;
+        while gi2_ai < ncols {
+            gi2_af = vec_get(local_agg_funcs, gi2_ai);
+            gi2_ac_name = sp_get(d, vec_get(local_agg_cols, gi2_ai));
+            if gi2_af == 1 {
+                gi2_cnt = group_count_rows(d, gi2_gk, rs, cc, gcol, match_rows, match_count);
+                gi2_val_str = int_to_str(gi2_cnt);
+                gi2_vid = sp_add(d, gi2_val_str);
+                vec_push(all_results, gi2_vid);
+            } else if gi2_af >= 2 {
+                gi2_val_str = compute_group_numeric(d, gi2_af, gi2_ac_name, gi2_gk, cs, cc, rs, tname, gcol,
+                                                    match_rows, match_count);
+                gi2_vid = sp_add(d, gi2_val_str);
+                vec_push(all_results, gi2_vid);
+            } else {
+                gi2_col_idx = resolve_col(d, cs, cc, tname, alias1_val, gi2_ac_name);
+                gi2_val_str = group_get_plain(d, gi2_gk, gi2_col_idx, gcol, rs, cc, match_rows, match_count);
+                gi2_vid = sp_add(d, gi2_val_str);
+                vec_push(all_results, gi2_vid);
+            }
+            gi2_ai = gi2_ai + 1;
+        }
+        gi2 = gi2 + 1;
+    }
+
+    // HAVING: filter groups after aggregation
+    let mut final_results: Vec<i32> = vec![];
+    let mut final_count = 0;
+    if d.has_having == 1 {
+        let hv_rval = sp_get(d, d.having_val);
+        let mut hgi = 0;
+        let mut hgk = "";
+        let mut hv_agg = "";
+        let mut hci = 0;
+        let mut cell_id = 0;
+        while hgi < group_count {
+            hgk = sp_get(d, vec_get(group_keys, hgi));
+            hv_agg = having_compute_agg(d, hgk, cs, cc, rs, tname, gcol, match_rows, match_count);
+            if eval_where(hv_agg, d.having_op, hv_rval) {
+                hci = 0;
+                while hci < ncols {
+                    cell_id = vec_get(all_results, hgi * ncols + hci);
+                    vec_push(final_results, cell_id);
+                    hci = hci + 1;
+                }
+                final_count = final_count + 1;
+            }
+            hgi = hgi + 1;
+        }
+    } else {
+        final_results = all_results;
+        final_count = group_count;
+    }
+
+    // Build headers (with alias support)
+    let mut headers: Vec<i32> = vec![];
+    let mut bhi = 0;
+    let mut bh_used_alias = false;
+    let mut bh_al = 0;
+    while bhi < ncols {
+        bh_used_alias = false;
+        if bhi < vec_len(d.p_aliases) {
+            bh_al = vec_get(d.p_aliases, bhi);
+            if bh_al >= 0 {
+                vec_push(headers, bh_al);
+                bh_used_alias = true;
+            }
+        }
+        if !bh_used_alias {
+            push_agg_header(d, bhi, headers);
+        }
+        bhi = bhi + 1;
+    }
+
+    // Compute widths
     let mut widths2: Vec<i32> = vec![];
     let mut w2i = 0;
+    let mut w2_hdr = "";
     while w2i < ncols {
-        let hdr = sp_get(d, vec_get(headers, w2i));
-        vec_push(widths2, hdr.len());
+        w2_hdr = sp_get(d, vec_get(headers, w2i));
+        vec_push(widths2, w2_hdr.len());
         w2i = w2i + 1;
     }
     let mut ri2 = 0;
-    while ri2 < group_count {
-        let mut ci2 = 0;
+    let mut ci2 = 0;
+    let mut w2_val = "";
+    let mut w2_vlen = 0;
+    let mut w2_cur = 0;
+    while ri2 < final_count {
+        ci2 = 0;
         while ci2 < ncols {
-            let val = sp_get(d, vec_get(all_results, ri2 * ncols + ci2));
-            let vlen = val.len();
-            let cur_w = vec_get(widths2, ci2);
-            if vlen > cur_w { widths2 = vec_replace(widths2, ncols, ci2, vlen); }
+            w2_val = sp_get(d, vec_get(final_results, ri2 * ncols + ci2));
+            w2_vlen = w2_val.len();
+            w2_cur = vec_get(widths2, ci2);
+            if w2_vlen > w2_cur { widths2 = vec_replace(widths2, ncols, ci2, w2_vlen); }
             ci2 = ci2 + 1;
         }
         ri2 = ri2 + 1;
@@ -2379,12 +2697,14 @@ fn exec_select_group(d: &mut DB) {
     let mut hdr_line = "";
     let mut sep_line = "";
     let mut pi = 0;
+    let mut ph_hdr = "";
+    let mut ph_w = 0;
     while pi < ncols {
         if pi > 0 { hdr_line = hdr_line + " | "; sep_line = sep_line + "-+-"; }
-        let hdr = sp_get(d, vec_get(headers, pi));
-        let w = vec_get(widths, pi);
-        hdr_line = hdr_line + pad_right(hdr, w);
-        sep_line = sep_line + make_dashes(w);
+        ph_hdr = sp_get(d, vec_get(headers, pi));
+        ph_w = vec_get(widths, pi);
+        hdr_line = hdr_line + pad_right(ph_hdr, ph_w);
+        sep_line = sep_line + make_dashes(ph_w);
         pi = pi + 1;
     }
     println!("{}", hdr_line);
@@ -2392,49 +2712,38 @@ fn exec_select_group(d: &mut DB) {
 
     // Print rows
     let mut ri = 0;
-    while ri < group_count {
-        let mut row_line = "";
-        let mut ci = 0;
-        while ci < ncols {
-            if ci > 0 { row_line = row_line + " | "; }
-            let val = sp_get(d, vec_get(all_results, ri * ncols + ci));
-            let w = vec_get(widths, ci);
-            row_line = row_line + pad_right(val, w);
-            ci = ci + 1;
+    let mut row_line = "";
+    let mut pci = 0;
+    let mut pr_val = "";
+    let mut pr_w = 0;
+    while ri < final_count {
+        row_line = "";
+        pci = 0;
+        while pci < ncols {
+            if pci > 0 { row_line = row_line + " | "; }
+            pr_val = sp_get(d, vec_get(final_results, ri * ncols + pci));
+            pr_w = vec_get(widths, pci);
+            row_line = row_line + pad_right(pr_val, pr_w);
+            pci = pci + 1;
         }
         println!("{}", row_line);
         ri = ri + 1;
     }
 }
 
-fn group_compute_row(d: &mut DB, gk: String, cs: i32, cc: i32, rs: i32,
-                     tname: String, gcol: i32,
-                     match_rows: Vec<i32>, match_count: i32,
-                     results: Vec<i32>) {
-    let mut ai = 0;
-    while ai < d.p_agg_count {
-        if vec_get(d.p_agg_funcs, ai) == 1 {
-            let cnt = group_count_rows(d, gk, rs, cc, gcol, match_rows, match_count);
-            let val_str = int_to_str(cnt);
-            let vid = sp_add(d, val_str);
-            vec_push(results, vid);
-        }
-        if vec_get(d.p_agg_funcs, ai) >= 2 {
-            let ac_name = sp_get(d, vec_get(d.p_agg_cols, ai));
-            let val_str = compute_group_numeric(d, vec_get(d.p_agg_funcs, ai), ac_name, gk, cs, cc, rs, tname, gcol,
-                                                match_rows, match_count);
-            let vid = sp_add(d, val_str);
-            vec_push(results, vid);
-        }
-        if vec_get(d.p_agg_funcs, ai) == 0 {
-            let ac_name = sp_get(d, vec_get(d.p_agg_cols, ai));
-            let col_idx = resolve_col(d, cs, cc, tname, d.alias1, ac_name);
-            let val_str = group_get_plain(d, gk, col_idx, gcol, rs, cc, match_rows, match_count);
-            let vid = sp_add(d, val_str);
-            vec_push(results, vid);
-        }
-        ai = ai + 1;
+// Compute the HAVING aggregate value for a group key
+fn having_compute_agg(d: &mut DB, gk: String, cs: i32, cc: i32, rs: i32,
+                      tname: String, gcol: i32,
+                      match_rows: Vec<i32>, match_count: i32) -> String {
+    let haf = d.having_agg_func;
+    if haf == 1 {
+        // COUNT
+        let cnt = group_count_rows(d, gk, rs, cc, gcol, match_rows, match_count);
+        return int_to_str(cnt);
     }
+    // SUM/AVG/MIN/MAX
+    let hac_name = sp_get(d, d.having_agg_col);
+    compute_group_numeric(d, haf, hac_name, gk, cs, cc, rs, tname, gcol, match_rows, match_count)
 }
 
 fn group_count_rows(d: &DB, gk: String, rs: i32, cc: i32, gcol: i32,
@@ -2467,14 +2776,6 @@ fn group_get_plain(d: &DB, gk: String, col_idx: i32, gcol: i32, rs: i32, cc: i32
     ""
 }
 
-fn build_all_headers(d: &mut DB, headers: Vec<i32>) {
-    let mut hi = 0;
-    while hi < d.p_agg_count {
-        push_agg_header(d, hi, headers);
-        hi = hi + 1;
-    }
-}
-
 fn push_agg_header(d: &mut DB, hi: i32, headers: Vec<i32>) {
     let af = vec_get(d.p_agg_funcs, hi);
     let ac_name = sp_get(d, vec_get(d.p_agg_cols, hi));
@@ -2495,83 +2796,6 @@ fn push_agg_header(d: &mut DB, hi: i32, headers: Vec<i32>) {
     let hname = func_name + "(" + ac_name + ")";
     let hid = sp_add(d, hname);
     vec_push(headers, hid);
-}
-
-fn group_add_cell(d: &mut DB, ai: i32, gk: String, cs: i32, cc: i32,
-                  rs: i32, tname: String, gcol: i32,
-                  match_rows: Vec<i32>, match_count: i32,
-                  all_results: &mut Vec<i32>, widths: &mut Vec<i32>, ncols: i32) {
-    let val = compute_group_cell(d, ai, gk, cs, cc, rs, tname, gcol, match_rows, match_count);
-    let vid = sp_add(d, val);
-    vec_push(*all_results, vid);
-    let vlen = val.len();
-    let cur_w = vec_get(*widths, ai);
-    if vlen > cur_w {
-        *widths = vec_replace(*widths, ncols, ai, vlen);
-    }
-}
-
-fn build_group_header(d: &mut DB, hi: i32, headers: &mut Vec<i32>) {
-    let af = vec_get(d.p_agg_funcs, hi);
-    let ac_name = sp_get(d, vec_get(d.p_agg_cols, hi));
-    if af == 0 {
-        let hid = sp_add(d, ac_name);
-        vec_push(*headers, hid);
-    } else if af == 1 {
-        let hid = sp_add(d, "COUNT(*)");
-        vec_push(*headers, hid);
-    } else {
-        let mut func_name = "SUM";
-        if af == 3 { func_name = "AVG"; }
-        if af == 4 { func_name = "MIN"; }
-        if af == 5 { func_name = "MAX"; }
-        let hname = func_name + "(" + ac_name + ")";
-        let hid = sp_add(d, hname);
-        vec_push(*headers, hid);
-    }
-}
-
-fn compute_group_cell(d: &mut DB, ai: i32, gk: String, cs: i32, cc: i32,
-                      rs: i32, tname: String, gcol: i32,
-                      match_rows: Vec<i32>, match_count: i32) -> String {
-    let af = vec_get(d.p_agg_funcs, ai);
-    let ac_name = sp_get(d, vec_get(d.p_agg_cols, ai));
-    if af == 0 {
-        // Plain column
-        let col_idx = resolve_col(d, cs, cc, tname, d.alias1, ac_name);
-        if col_idx == gcol { return gk; }
-        let mut fv = "";
-        let mut fi = 0;
-        let mut ffound = false;
-        while fi < match_count {
-            if !ffound {
-                let frow = vec_get(match_rows, fi);
-                let fgv = sp_get(d, vec_get(d.cells, rs + frow * cc + gcol));
-                if fgv == gk {
-                    if col_idx >= 0 {
-                        fv = sp_get(d, vec_get(d.cells, rs + frow * cc + col_idx));
-                    }
-                    ffound = true;
-                }
-            }
-            fi = fi + 1;
-        }
-        return fv;
-    }
-    if af == 1 {
-        // COUNT
-        let mut cnt = 0;
-        let mut ci = 0;
-        while ci < match_count {
-            let crow = vec_get(match_rows, ci);
-            let cgv = sp_get(d, vec_get(d.cells, rs + crow * cc + gcol));
-            if cgv == gk { cnt = cnt + 1; }
-            ci = ci + 1;
-        }
-        return int_to_str(cnt);
-    }
-    // SUM/AVG/MIN/MAX
-    compute_group_numeric(d, af, ac_name, gk, cs, cc, rs, tname, gcol, match_rows, match_count)
 }
 
 fn compute_group_numeric(d: &mut DB, af: i32, ac_name: String, gk: String,
@@ -3162,6 +3386,11 @@ fn exec_alter_table(d: &mut DB) {
 // =============================================================================
 // HELPERS
 // =============================================================================
+
+fn get_cell_float(d: &DB, rs: i32, row: i32, cc: i32, col_idx: i32) -> f64 {
+    let cell_val = sp_get(d, vec_get(d.cells, rs + row * cc + col_idx));
+    cell_val.parse_float()
+}
 
 fn find_col(d: &DB, cs: i32, cc: i32, name: String) -> i32 {
     let mut i = 0;
