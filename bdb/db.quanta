@@ -1,0 +1,3382 @@
+// =============================================================================
+// qdb — SQL database engine written in QuantaLang
+// =============================================================================
+// Steps 3-6 of the SQLite roadmap: table storage engine + integrated SQL
+// parser with advanced features. Supports:
+//   - CREATE TABLE, INSERT, SELECT, UPDATE, DELETE, DROP TABLE
+//   - WHERE with AND/OR compound conditions
+//   - ORDER BY, LIMIT, COUNT(*)
+//   - JOIN (nested-loop) with table aliases
+//   - GROUP BY with aggregates: COUNT(*), SUM, AVG, MIN, MAX
+//   - CREATE INDEX for sorted-array indexes with binary search lookup
+//   - Write-Ahead Log (WAL) for crash recovery
+//   - BEGIN/COMMIT/ROLLBACK transaction support
+// Persists data via a simple line-based file format. Includes interactive REPL.
+//
+// Usage:
+//   qdb test.db "CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)"
+//   qdb test.db "SELECT * FROM users WHERE age > 24 AND name = 'Zain'"
+//   qdb test.db "SELECT u.name, o.total FROM users u JOIN orders o ON u.id = o.user_id"
+//   qdb test.db "SELECT dept, AVG(salary) FROM employees GROUP BY dept"
+//   qdb test.db "CREATE INDEX idx_age ON users (age)"
+//   qdb test.db                         — interactive REPL mode
+//
+// Storage format:
+//   TABLE users
+//   SCHEMA id:INTEGER name:TEXT age:INTEGER
+//   ROW 1|Zain|25
+//   ROW 2|Harper|30
+//   END
+//   INDEX idx_age ON users (age)
+//
+// Design: ALL state lives in one flat struct (DB). SQL parser state is
+// embedded directly. String pool pattern + flat i32 Vecs for everything.
+// =============================================================================
+
+// --- Character helpers ---
+fn is_ws(c: String) -> bool { c == " " || c == "\n" || c == "\r" || c == "\t" }
+fn is_digit(c: String) -> bool { c == "0" || c == "1" || c == "2" || c == "3" || c == "4" || c == "5" || c == "6" || c == "7" || c == "8" || c == "9" }
+fn is_lower(c: String) -> bool { c == "a" || c == "b" || c == "c" || c == "d" || c == "e" || c == "f" || c == "g" || c == "h" || c == "i" || c == "j" || c == "k" || c == "l" || c == "m" || c == "n" || c == "o" || c == "p" || c == "q" || c == "r" || c == "s" || c == "t" || c == "u" || c == "v" || c == "w" || c == "x" || c == "y" || c == "z" }
+fn is_upper(c: String) -> bool { c == "A" || c == "B" || c == "C" || c == "D" || c == "E" || c == "F" || c == "G" || c == "H" || c == "I" || c == "J" || c == "K" || c == "L" || c == "M" || c == "N" || c == "O" || c == "P" || c == "Q" || c == "R" || c == "S" || c == "T" || c == "U" || c == "V" || c == "W" || c == "X" || c == "Y" || c == "Z" }
+fn is_alpha(c: String) -> bool { is_lower(c) || is_upper(c) }
+fn is_alnum(c: String) -> bool { is_alpha(c) || is_digit(c) || c == "_" }
+
+// --- Token types ---
+// 0=Keyword, 1=Ident, 2=String literal, 3=Number literal
+// 4=Operator, 5=Punctuation, 6=Star, 7=EOF
+
+// =============================================================================
+// DATABASE STRUCT — all state in one flat struct
+// =============================================================================
+struct DB {
+    // Database file path
+    db_path: String,
+
+    // String pool
+    pool: String,
+    ps: Vec<i32>,
+    pl: Vec<i32>,
+    pn: i32,
+
+    // Tables: parallel arrays indexed by table index
+    tbl_names: Vec<i32>,
+    tbl_count: i32,
+
+    // Per-table column schema (flattened)
+    col_names: Vec<i32>,
+    col_types: Vec<i32>,
+    tbl_col_starts: Vec<i32>,
+    tbl_col_counts: Vec<i32>,
+
+    // Per-table row data: cells stored as pool indices
+    cells: Vec<i32>,
+    tbl_row_starts: Vec<i32>,
+    tbl_row_counts: Vec<i32>,
+
+    // Indexes: parallel arrays indexed by index number
+    // Each index stores: name, table index, column index, sorted key+rowid pairs
+    idx_names: Vec<i32>,
+    idx_tables: Vec<i32>,
+    idx_col_indices: Vec<i32>,
+    idx_count: i32,
+    // Flattened sorted pairs: for index i, keys start at idx_key_starts[i]
+    // and run for idx_key_counts[i] entries.
+    // idx_keys[start+j] = pool id of key value, idx_rowids[start+j] = row index
+    idx_keys: Vec<i32>,
+    idx_rowids: Vec<i32>,
+    idx_key_starts: Vec<i32>,
+    idx_key_counts: Vec<i32>,
+
+    // SQL parser state
+    input: String,
+    ilen: i32,
+    pos: i32,
+    tk_type: i32,
+    tk_val: String,
+
+    // Parsed statement
+    stmt_type: i32,
+    p_table: i32,
+    p_cols: Vec<i32>,
+    p_col_count: i32,
+    p_types: Vec<i32>,
+    p_vals: Vec<i32>,
+    p_val_count: i32,
+    has_where: i32,
+    w_left: i32,
+    w_op: i32,
+    w_right: i32,
+    // Compound WHERE: AND/OR with second condition
+    w_logic: i32,
+    w_left2: i32,
+    w_op2: i32,
+    w_right2: i32,
+    has_order: i32,
+    order_col: i32,
+    order_desc: i32,
+    has_limit: i32,
+    limit_val: i32,
+    set_col: i32,
+    set_val: i32,
+    select_star: i32,
+    select_count: i32,
+    // Aggregate functions for GROUP BY: 0=none, 1=COUNT, 2=SUM, 3=AVG, 4=MIN, 5=MAX
+    p_agg_funcs: Vec<i32>,
+    p_agg_cols: Vec<i32>,
+    p_agg_count: i32,
+    has_group_by: i32,
+    group_col: i32,
+    // JOIN state
+    has_join: i32,
+    join_table: i32,
+    join_left_col: i32,
+    join_right_col: i32,
+    // Table aliases: alias pool ids for table1 and table2
+    alias1: i32,
+    alias2: i32,
+    // CREATE INDEX state
+    idx_name: i32,
+    idx_table_name: i32,
+    idx_col_name: i32,
+
+    // WAL state
+    wal_path: String,
+    in_transaction: bool,
+    txn_id: i32,
+    wal_buf: String,
+    // Snapshot for rollback (saved at BEGIN)
+    snap_cells: Vec<i32>,
+    snap_row_starts: Vec<i32>,
+    snap_row_counts: Vec<i32>,
+    snap_tbl_names: Vec<i32>,
+    snap_tbl_count: i32,
+    snap_col_names: Vec<i32>,
+    snap_col_types: Vec<i32>,
+    snap_col_starts: Vec<i32>,
+    snap_col_counts: Vec<i32>,
+    snap_idx_names: Vec<i32>,
+    snap_idx_tables: Vec<i32>,
+    snap_idx_col_indices: Vec<i32>,
+    snap_idx_count: i32,
+    snap_idx_keys: Vec<i32>,
+    snap_idx_rowids: Vec<i32>,
+    snap_idx_key_starts: Vec<i32>,
+    snap_idx_key_counts: Vec<i32>,
+}
+
+fn db_new(db_path: String) -> DB {
+    let wp = db_path + ".wal";
+    DB {
+        db_path: db_path,
+        pool: "", ps: vec![], pl: vec![], pn: 0,
+        tbl_names: vec![], tbl_count: 0,
+        col_names: vec![], col_types: vec![],
+        tbl_col_starts: vec![], tbl_col_counts: vec![],
+        cells: vec![],
+        tbl_row_starts: vec![], tbl_row_counts: vec![],
+        idx_names: vec![], idx_tables: vec![], idx_col_indices: vec![], idx_count: 0,
+        idx_keys: vec![], idx_rowids: vec![], idx_key_starts: vec![], idx_key_counts: vec![],
+        input: "", ilen: 0, pos: 0,
+        tk_type: 7, tk_val: "",
+        stmt_type: 0, p_table: -1,
+        p_cols: vec![], p_col_count: 0,
+        p_types: vec![],
+        p_vals: vec![], p_val_count: 0,
+        has_where: 0, w_left: -1, w_op: -1, w_right: -1,
+        w_logic: 0, w_left2: -1, w_op2: -1, w_right2: -1,
+        has_order: 0, order_col: -1, order_desc: 0,
+        has_limit: 0, limit_val: 0,
+        set_col: -1, set_val: -1,
+        select_star: 0, select_count: 0,
+        p_agg_funcs: vec![], p_agg_cols: vec![], p_agg_count: 0,
+        has_group_by: 0, group_col: -1,
+        has_join: 0, join_table: -1, join_left_col: -1, join_right_col: -1,
+        alias1: -1, alias2: -1,
+        idx_name: -1, idx_table_name: -1, idx_col_name: -1,
+        wal_path: wp,
+        in_transaction: false,
+        txn_id: 0,
+        wal_buf: "",
+        snap_cells: vec![], snap_row_starts: vec![], snap_row_counts: vec![],
+        snap_tbl_names: vec![], snap_tbl_count: 0,
+        snap_col_names: vec![], snap_col_types: vec![],
+        snap_col_starts: vec![], snap_col_counts: vec![],
+        snap_idx_names: vec![], snap_idx_tables: vec![], snap_idx_col_indices: vec![], snap_idx_count: 0,
+        snap_idx_keys: vec![], snap_idx_rowids: vec![], snap_idx_key_starts: vec![], snap_idx_key_counts: vec![],
+    }
+}
+
+// =============================================================================
+// STRING POOL
+// =============================================================================
+fn sp_add(d: &mut DB, text: String) -> i32 {
+    let id = d.pn;
+    let st = d.pool.len();
+    d.pool = d.pool + text;
+    let en = d.pool.len();
+    vec_push(d.ps, st);
+    vec_push(d.pl, en - st);
+    d.pn = d.pn + 1;
+    id
+}
+
+fn sp_get(d: &DB, id: i32) -> String {
+    if id < 0 { return ""; }
+    let st = vec_get(d.ps, id);
+    let ln = vec_get(d.pl, id);
+    d.pool.substring(st, ln)
+}
+
+// =============================================================================
+// DATABASE FILE I/O
+// =============================================================================
+
+fn db_save(d: &DB) {
+    let mut out = "";
+    let mut t = 0;
+    while t < d.tbl_count {
+        let tname = sp_get(d, vec_get(d.tbl_names, t));
+        out = out + "TABLE " + tname + "\n";
+        // Schema line
+        let cs = vec_get(d.tbl_col_starts, t);
+        let cc = vec_get(d.tbl_col_counts, t);
+        let mut schema = "SCHEMA";
+        let mut c = 0;
+        while c < cc {
+            let cname = sp_get(d, vec_get(d.col_names, cs + c));
+            let ctype = vec_get(d.col_types, cs + c);
+            let tstr = if ctype == 0 { "INTEGER" } else if ctype == 1 { "REAL" } else { "TEXT" };
+            schema = schema + " " + cname + ":" + tstr;
+            c = c + 1;
+        }
+        out = out + schema + "\n";
+        // Rows
+        let rs = vec_get(d.tbl_row_starts, t);
+        let rc = vec_get(d.tbl_row_counts, t);
+        let mut r = 0;
+        while r < rc {
+            let mut row_str = "ROW ";
+            let mut ci = 0;
+            while ci < cc {
+                if ci > 0 { row_str = row_str + "|"; }
+                let cell = sp_get(d, vec_get(d.cells, rs + r * cc + ci));
+                row_str = row_str + cell;
+                ci = ci + 1;
+            }
+            out = out + row_str + "\n";
+            r = r + 1;
+        }
+        out = out + "END\n";
+        if t + 1 < d.tbl_count {
+            out = out + "\n";
+        }
+        t = t + 1;
+    }
+    // Save indexes
+    let mut ix = 0;
+    while ix < d.idx_count {
+        let iname = sp_get(d, vec_get(d.idx_names, ix));
+        let tbl_idx = vec_get(d.idx_tables, ix);
+        let tname = sp_get(d, vec_get(d.tbl_names, tbl_idx));
+        let col_i = vec_get(d.idx_col_indices, ix);
+        let tcs = vec_get(d.tbl_col_starts, tbl_idx);
+        let cname = sp_get(d, vec_get(d.col_names, tcs + col_i));
+        out = out + "\nINDEX " + iname + " ON " + tname + " (" + cname + ")\n";
+        ix = ix + 1;
+    }
+    write_file(d.db_path, out);
+}
+
+fn db_load(d: &mut DB) {
+    if !file_exists(d.db_path) { return; }
+    let content = read_file(d.db_path);
+    let clen = content.len();
+    if clen == 0 { return; }
+
+    let mut fpos: i64 = 0;
+    let mut go = true;
+    while go {
+        if fpos >= clen { go = false; }
+        else {
+            let rest = content.substring(fpos, clen - fpos);
+            let nl = rest.index_of("\n");
+            let line = if nl < 0 { rest } else { rest.substring(0, nl) };
+            if nl < 0 { fpos = clen; } else { fpos = fpos + nl + 1; }
+
+            // Strip \r
+            let llen = line.len();
+            let clean = if llen > 0 {
+                let last = line.char_at(llen - 1);
+                if last == "\r" { line.substring(0, llen - 1) } else { line }
+            } else { line };
+
+            let clen2 = clean.len();
+            if clen2 == 0 {
+                // skip empty
+            } else if clean.starts_with("TABLE ") {
+                let tname = clean.substring(6, clen2 - 6);
+                let tid = sp_add(d, tname);
+                vec_push(d.tbl_names, tid);
+                vec_push(d.tbl_col_starts, vec_len(d.col_names));
+                vec_push(d.tbl_col_counts, 0);
+                vec_push(d.tbl_row_starts, vec_len(d.cells));
+                vec_push(d.tbl_row_counts, 0);
+                d.tbl_count = d.tbl_count + 1;
+            } else if clean.starts_with("SCHEMA ") {
+                let schema_str = clean.substring(7, clen2 - 7);
+                let slen = schema_str.len();
+                let mut sp: i64 = 0;
+                let mut col_c = 0;
+                let mut sgo = true;
+                while sgo {
+                    if sp >= slen { sgo = false; }
+                    else {
+                        // Skip spaces
+                        let mut skip = true;
+                        while skip {
+                            if sp >= slen { skip = false; }
+                            else {
+                                let sc = schema_str.char_at(sp);
+                                if sc == " " { sp = sp + 1; } else { skip = false; }
+                            }
+                        }
+                        if sp >= slen { sgo = false; }
+                        else {
+                            // Read col_name:type token
+                            let tok_start = sp;
+                            let mut tgo = true;
+                            while tgo {
+                                if sp >= slen { tgo = false; }
+                                else {
+                                    let tc = schema_str.char_at(sp);
+                                    if tc == " " { tgo = false; }
+                                    else { sp = sp + 1; }
+                                }
+                            }
+                            let tok = schema_str.substring(tok_start, sp - tok_start);
+                            // Split on ':'
+                            let colon = tok.index_of(":");
+                            if colon > 0 {
+                                let tlen = tok.len();
+                                let cname = tok.substring(0, colon);
+                                let ctype_str = tok.substring(colon + 1, tlen - colon - 1);
+                                let ctype_up = ctype_str.to_uppercase();
+                                let cnid = sp_add(d, cname);
+                                vec_push(d.col_names, cnid);
+                                let ct = if ctype_up == "INTEGER" { 0 } else if ctype_up == "REAL" { 1 } else { 2 };
+                                vec_push(d.col_types, ct);
+                                col_c = col_c + 1;
+                            }
+                        }
+                    }
+                }
+                // Update col count for current table
+                let tidx = d.tbl_count - 1;
+                let mut new_cc: Vec<i32> = vec![];
+                let mut ci = 0;
+                while ci < d.tbl_count {
+                    if ci == tidx { vec_push(new_cc, col_c); }
+                    else { vec_push(new_cc, vec_get(d.tbl_col_counts, ci)); }
+                    ci = ci + 1;
+                }
+                d.tbl_col_counts = new_cc;
+            } else if clean.starts_with("ROW ") {
+                let row_str = clean.substring(4, clen2 - 4);
+                let rlen = row_str.len();
+                let mut rp: i64 = 0;
+                let mut rgo = true;
+                while rgo {
+                    if rp >= rlen { rgo = false; }
+                    else {
+                        let mut cell_val = "";
+                        let mut cgo = true;
+                        while cgo {
+                            if rp >= rlen { cgo = false; }
+                            else {
+                                let rc = row_str.char_at(rp);
+                                if rc == "|" { rp = rp + 1; cgo = false; }
+                                else { cell_val = cell_val + rc; rp = rp + 1; }
+                            }
+                        }
+                        let cid = sp_add(d, cell_val);
+                        vec_push(d.cells, cid);
+                    }
+                }
+                // Increment row count for current table
+                let tidx = d.tbl_count - 1;
+                let old_rc = vec_get(d.tbl_row_counts, tidx);
+                let mut new_rc: Vec<i32> = vec![];
+                let mut ri = 0;
+                while ri < d.tbl_count {
+                    if ri == tidx { vec_push(new_rc, old_rc + 1); }
+                    else { vec_push(new_rc, vec_get(d.tbl_row_counts, ri)); }
+                    ri = ri + 1;
+                }
+                d.tbl_row_counts = new_rc;
+            // Parse INDEX lines: INDEX idx_name ON table_name (col_name)
+            } else if clean.starts_with("INDEX ") {
+                let idx_rest = clean.substring(6, clen2 - 6);
+                // Parse: idx_name ON table_name (col_name)
+                let sp1 = idx_rest.index_of(" ");
+                if sp1 > 0 {
+                    let iname = idx_rest.substring(0, sp1);
+                    let after_name = idx_rest.substring(sp1 + 1, idx_rest.len() - sp1 - 1);
+                    // skip "ON "
+                    let trimmed_an = after_name.trim();
+                    if trimmed_an.starts_with("ON ") {
+                        let after_on = trimmed_an.substring(3, trimmed_an.len() - 3);
+                        let trimmed_ao = after_on.trim();
+                        let sp2 = trimmed_ao.index_of(" ");
+                        if sp2 > 0 {
+                            let tname_idx = trimmed_ao.substring(0, sp2);
+                            let paren_part = trimmed_ao.substring(sp2 + 1, trimmed_ao.len() - sp2 - 1).trim();
+                            // Extract col name from (col_name)
+                            if paren_part.starts_with("(") {
+                                let pp_len = paren_part.len();
+                                let col_name_idx = paren_part.substring(1, pp_len - 2);
+                                // Build the index
+                                let tidx = find_table(d, tname_idx);
+                                if tidx >= 0 {
+                                    let ics = vec_get(d.tbl_col_starts, tidx);
+                                    let icc = vec_get(d.tbl_col_counts, tidx);
+                                    let icol = find_col(d, ics, icc, col_name_idx);
+                                    if icol >= 0 {
+                                        let inid = sp_add(d, iname);
+                                        vec_push(d.idx_names, inid);
+                                        vec_push(d.idx_tables, tidx);
+                                        vec_push(d.idx_col_indices, icol);
+                                        vec_push(d.idx_key_starts, vec_len(d.idx_keys));
+                                        vec_push(d.idx_key_counts, 0);
+                                        d.idx_count = d.idx_count + 1;
+                                        // Rebuild index data from table rows
+                                        rebuild_index(d, d.idx_count - 1);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // END and unknown lines are skipped
+        }
+    }
+}
+
+// =============================================================================
+// WRITE-AHEAD LOG (WAL)
+// =============================================================================
+
+// Append a line to the WAL file
+fn wal_write(d: &mut DB, line: String) {
+    let existing = if file_exists(d.wal_path) { read_file(d.wal_path) } else { "" };
+    write_file(d.wal_path, existing + line + "\n");
+}
+
+// Checkpoint: merge WAL into main .db file, then clear WAL
+fn wal_checkpoint(d: &mut DB) {
+    db_save(d);
+    // Clear the WAL file
+    if file_exists(d.wal_path) {
+        write_file(d.wal_path, "");
+    }
+}
+
+// Replay committed transactions from WAL into a freshly-loaded DB
+fn wal_replay(d: &mut DB) {
+    if !file_exists(d.wal_path) { return; }
+    let content = read_file(d.wal_path);
+    let clen = content.len();
+    if clen == 0 { return; }
+
+    // First pass: collect lines and find which TXIDs have COMMIT markers
+    let mut all_lines: Vec<i32> = vec![];
+    let mut line_count = 0;
+    let mut fpos: i64 = 0;
+    let mut go = true;
+    while go {
+        if fpos >= clen { go = false; }
+        else {
+            let rest = content.substring(fpos, clen - fpos);
+            let nl = rest.index_of("\n");
+            let line = if nl < 0 { rest } else { rest.substring(0, nl) };
+            if nl < 0 { fpos = clen; } else { fpos = fpos + nl + 1; }
+            // Strip \r
+            let llen = line.len();
+            let clean = if llen > 0 {
+                let last = line.char_at(llen - 1);
+                if last == "\r" { line.substring(0, llen - 1) } else { line }
+            } else { line };
+            let lid = sp_add(d, clean);
+            vec_push(all_lines, lid);
+            line_count = line_count + 1;
+        }
+    }
+
+    // Find committed transaction IDs
+    // We track which TXID values appear before a COMMIT line
+    let mut committed_ids: Vec<i32> = vec![];
+    let mut committed_count = 0;
+    let mut current_txid: i32 = -1;
+    let mut li = 0;
+    while li < line_count {
+        let wl: String = sp_get(d, vec_get(all_lines, li));
+        let wlen = wl.len();
+        if wl.starts_with("TXID ") {
+            let id_part: String = wl.substring(5, wlen - 5);
+            current_txid = id_part.parse_int();
+        } else if wl.starts_with("COMMIT") {
+            if current_txid >= 0 {
+                vec_push(committed_ids, current_txid);
+                committed_count = committed_count + 1;
+            }
+        }
+        li = li + 1;
+    }
+
+    // Second pass: replay only OP lines from committed TXIDs
+    current_txid = -1;
+    li = 0;
+    while li < line_count {
+        let rl: String = sp_get(d, vec_get(all_lines, li));
+        let rlen = rl.len();
+        if rl.starts_with("TXID ") {
+            let id_part2: String = rl.substring(5, rlen - 5);
+            current_txid = id_part2.parse_int();
+        } else if rl.starts_with("OP ") {
+            // Check if current_txid is in committed list
+            let mut is_committed = false;
+            let mut ci = 0;
+            while ci < committed_count {
+                if vec_get(committed_ids, ci) == current_txid {
+                    is_committed = true;
+                }
+                ci = ci + 1;
+            }
+            if is_committed {
+                // Extract the SQL from "OP <sql>"
+                let sql: String = rl.substring(3, rlen - 3);
+                exec_sql_no_wal(d, sql);
+            }
+        }
+        li = li + 1;
+    }
+
+    // After replay, checkpoint to merge into .db and clear WAL
+    wal_checkpoint(d);
+}
+
+// Take a snapshot of current state for ROLLBACK
+fn take_snapshot(d: &mut DB) {
+    // Copy cells
+    d.snap_cells = vec![];
+    let nc = vec_len(d.cells);
+    let mut i: i64 = 0;
+    while i < nc {
+        vec_push(d.snap_cells, vec_get(d.cells, i));
+        i = i + 1;
+    }
+    // Copy row starts
+    d.snap_row_starts = vec![];
+    i = 0;
+    while i < d.tbl_count {
+        vec_push(d.snap_row_starts, vec_get(d.tbl_row_starts, i));
+        i = i + 1;
+    }
+    // Copy row counts
+    d.snap_row_counts = vec![];
+    i = 0;
+    while i < d.tbl_count {
+        vec_push(d.snap_row_counts, vec_get(d.tbl_row_counts, i));
+        i = i + 1;
+    }
+    // Copy table names
+    d.snap_tbl_names = vec![];
+    i = 0;
+    while i < d.tbl_count {
+        vec_push(d.snap_tbl_names, vec_get(d.tbl_names, i));
+        i = i + 1;
+    }
+    d.snap_tbl_count = d.tbl_count;
+    // Copy col names
+    d.snap_col_names = vec![];
+    let ncn = vec_len(d.col_names);
+    i = 0;
+    while i < ncn {
+        vec_push(d.snap_col_names, vec_get(d.col_names, i));
+        i = i + 1;
+    }
+    // Copy col types
+    d.snap_col_types = vec![];
+    i = 0;
+    while i < ncn {
+        vec_push(d.snap_col_types, vec_get(d.col_types, i));
+        i = i + 1;
+    }
+    // Copy col starts
+    d.snap_col_starts = vec![];
+    i = 0;
+    while i < d.tbl_count {
+        vec_push(d.snap_col_starts, vec_get(d.tbl_col_starts, i));
+        i = i + 1;
+    }
+    // Copy col counts
+    d.snap_col_counts = vec![];
+    i = 0;
+    while i < d.tbl_count {
+        vec_push(d.snap_col_counts, vec_get(d.tbl_col_counts, i));
+        i = i + 1;
+    }
+    // Copy index state
+    d.snap_idx_names = vec![];
+    d.snap_idx_tables = vec![];
+    d.snap_idx_col_indices = vec![];
+    i = 0;
+    while i < d.idx_count {
+        vec_push(d.snap_idx_names, vec_get(d.idx_names, i));
+        vec_push(d.snap_idx_tables, vec_get(d.idx_tables, i));
+        vec_push(d.snap_idx_col_indices, vec_get(d.idx_col_indices, i));
+        i = i + 1;
+    }
+    d.snap_idx_count = d.idx_count;
+    d.snap_idx_keys = vec![];
+    let nk = vec_len(d.idx_keys);
+    i = 0;
+    while i < nk {
+        vec_push(d.snap_idx_keys, vec_get(d.idx_keys, i));
+        i = i + 1;
+    }
+    d.snap_idx_rowids = vec![];
+    let nr = vec_len(d.idx_rowids);
+    i = 0;
+    while i < nr {
+        vec_push(d.snap_idx_rowids, vec_get(d.idx_rowids, i));
+        i = i + 1;
+    }
+    d.snap_idx_key_starts = vec![];
+    i = 0;
+    while i < d.idx_count {
+        vec_push(d.snap_idx_key_starts, vec_get(d.idx_key_starts, i));
+        i = i + 1;
+    }
+    d.snap_idx_key_counts = vec![];
+    i = 0;
+    while i < d.idx_count {
+        vec_push(d.snap_idx_key_counts, vec_get(d.idx_key_counts, i));
+        i = i + 1;
+    }
+}
+
+// Restore state from snapshot (for ROLLBACK)
+fn restore_snapshot(d: &mut DB) {
+    d.cells = d.snap_cells;
+    d.tbl_row_starts = d.snap_row_starts;
+    d.tbl_row_counts = d.snap_row_counts;
+    d.tbl_names = d.snap_tbl_names;
+    d.tbl_count = d.snap_tbl_count;
+    d.col_names = d.snap_col_names;
+    d.col_types = d.snap_col_types;
+    d.tbl_col_starts = d.snap_col_starts;
+    d.tbl_col_counts = d.snap_col_counts;
+    d.idx_names = d.snap_idx_names;
+    d.idx_tables = d.snap_idx_tables;
+    d.idx_col_indices = d.snap_idx_col_indices;
+    d.idx_count = d.snap_idx_count;
+    d.idx_keys = d.snap_idx_keys;
+    d.idx_rowids = d.snap_idx_rowids;
+    d.idx_key_starts = d.snap_idx_key_starts;
+    d.idx_key_counts = d.snap_idx_key_counts;
+}
+
+// BEGIN — start a new explicit transaction
+fn wal_begin(d: &mut DB) {
+    if d.in_transaction {
+        println!("Error: transaction already in progress");
+        return;
+    }
+    d.in_transaction = true;
+    d.txn_id = d.txn_id + 1;
+    take_snapshot(d);
+    wal_write(d, "TXID " + to_string_i32(d.txn_id));
+}
+
+// COMMIT — finalize the current transaction
+fn wal_commit(d: &mut DB) {
+    if !d.in_transaction {
+        println!("Error: no transaction in progress");
+        return;
+    }
+    wal_write(d, "COMMIT");
+    d.in_transaction = false;
+    wal_checkpoint(d);
+}
+
+// ROLLBACK — discard changes since BEGIN
+fn wal_rollback(d: &mut DB) {
+    if !d.in_transaction {
+        println!("Error: no transaction in progress");
+        return;
+    }
+    restore_snapshot(d);
+    d.in_transaction = false;
+    // Discard WAL entries for this txn by checkpointing restored state
+    wal_checkpoint(d);
+}
+
+// Write a mutation to WAL and optionally auto-commit
+fn wal_log_mutation(d: &mut DB, sql: String) {
+    if d.in_transaction {
+        // In explicit transaction — just append OP to WAL
+        wal_write(d, "OP " + sql);
+    } else {
+        // Auto-commit: wrap in a single-statement transaction
+        d.txn_id = d.txn_id + 1;
+        wal_write(d, "TXID " + to_string_i32(d.txn_id));
+        wal_write(d, "OP " + sql);
+        wal_write(d, "COMMIT");
+        wal_checkpoint(d);
+    }
+}
+
+// Count WAL entries and pending status (for .wal command)
+fn cmd_wal(d: &DB) {
+    if !file_exists(d.wal_path) {
+        println!("WAL status: empty (no WAL file)");
+        return;
+    }
+    let content = read_file(d.wal_path);
+    let clen = content.len();
+    if clen == 0 {
+        println!("WAL status: empty");
+        return;
+    }
+    let mut op_count = 0;
+    let mut pending = 0;
+    let mut in_txn = false;
+    let mut fpos: i64 = 0;
+    let mut go = true;
+    while go {
+        if fpos >= clen { go = false; }
+        else {
+            let rest = content.substring(fpos, clen - fpos);
+            let nl = rest.index_of("\n");
+            let line = if nl < 0 { rest } else { rest.substring(0, nl) };
+            if nl < 0 { fpos = clen; } else { fpos = fpos + nl + 1; }
+            let llen = line.len();
+            let clean = if llen > 0 {
+                let last = line.char_at(llen - 1);
+                if last == "\r" { line.substring(0, llen - 1) } else { line }
+            } else { line };
+            if clean.starts_with("OP ") { op_count = op_count + 1; }
+            if clean.starts_with("TXID ") { in_txn = true; }
+            if clean == "COMMIT" { in_txn = false; }
+        }
+    }
+    if in_txn { pending = 1; }
+    println!("WAL status: {} entries, {} pending transaction", op_count, pending);
+}
+
+// =============================================================================
+// TABLE LOOKUP
+// =============================================================================
+fn find_table(d: &DB, name: String) -> i32 {
+    let mut i = 0;
+    while i < d.tbl_count {
+        let tn = sp_get(d, vec_get(d.tbl_names, i));
+        if tn == name { return i; }
+        i = i + 1;
+    }
+    0 - 1
+}
+
+// =============================================================================
+// SQL LEXER (embedded from sql.quanta)
+// =============================================================================
+fn skip_ws_sql(d: &mut DB) {
+    let mut go = true;
+    while go {
+        if d.pos >= d.ilen { go = false; }
+        else {
+            let c = d.input.char_at(d.pos);
+            if is_ws(c) { d.pos = d.pos + 1; } else { go = false; }
+        }
+    }
+}
+
+fn is_keyword(word: String) -> i32 {
+    let u = word.to_uppercase();
+    if u == "SELECT" { return 1; }
+    if u == "FROM" { return 1; }
+    if u == "WHERE" { return 1; }
+    if u == "INSERT" { return 1; }
+    if u == "INTO" { return 1; }
+    if u == "VALUES" { return 1; }
+    if u == "CREATE" { return 1; }
+    if u == "TABLE" { return 1; }
+    if u == "UPDATE" { return 1; }
+    if u == "SET" { return 1; }
+    if u == "DELETE" { return 1; }
+    if u == "DROP" { return 1; }
+    if u == "ORDER" { return 1; }
+    if u == "BY" { return 1; }
+    if u == "ASC" { return 1; }
+    if u == "DESC" { return 1; }
+    if u == "LIMIT" { return 1; }
+    if u == "AND" { return 1; }
+    if u == "OR" { return 1; }
+    if u == "NOT" { return 1; }
+    if u == "NULL" { return 1; }
+    if u == "INTEGER" { return 1; }
+    if u == "REAL" { return 1; }
+    if u == "TEXT" { return 1; }
+    if u == "BLOB" { return 1; }
+    if u == "PRIMARY" { return 1; }
+    if u == "KEY" { return 1; }
+    if u == "COUNT" { return 1; }
+    if u == "INDEX" { return 1; }
+    if u == "ON" { return 1; }
+    if u == "JOIN" { return 1; }
+    if u == "GROUP" { return 1; }
+    if u == "SUM" { return 1; }
+    if u == "AVG" { return 1; }
+    if u == "MIN" { return 1; }
+    if u == "MAX" { return 1; }
+    if u == "AS" { return 1; }
+    if u == "BEGIN" { return 1; }
+    if u == "COMMIT" { return 1; }
+    if u == "ROLLBACK" { return 1; }
+    0
+}
+
+fn next_token(d: &mut DB) {
+    skip_ws_sql(d);
+    if d.pos >= d.ilen {
+        d.tk_type = 7; d.tk_val = ""; return;
+    }
+    let c = d.input.char_at(d.pos);
+
+    // String literal
+    if c == "'" {
+        d.pos = d.pos + 1;
+        let mut val = "";
+        let mut go = true;
+        while go {
+            if d.pos >= d.ilen { go = false; }
+            else {
+                let qc = d.input.char_at(d.pos);
+                if qc == "'" {
+                    if d.pos + 1 < d.ilen {
+                        let nx = d.input.char_at(d.pos + 1);
+                        if nx == "'" { val = val + "'"; d.pos = d.pos + 2; }
+                        else { d.pos = d.pos + 1; go = false; }
+                    } else { d.pos = d.pos + 1; go = false; }
+                } else { val = val + qc; d.pos = d.pos + 1; }
+            }
+        }
+        d.tk_type = 2; d.tk_val = val; return;
+    }
+
+    // Number literal
+    if is_digit(c) || (c == "-" && d.pos + 1 < d.ilen) {
+        let mut is_neg = false;
+        if c == "-" {
+            let nx = d.input.char_at(d.pos + 1);
+            if is_digit(nx) { is_neg = true; }
+        }
+        if is_digit(c) || is_neg {
+            let mut val = "";
+            if is_neg { val = "-"; d.pos = d.pos + 1; }
+            let mut ngo = true;
+            while ngo {
+                if d.pos >= d.ilen { ngo = false; }
+                else {
+                    let nc = d.input.char_at(d.pos);
+                    if is_digit(nc) { val = val + nc; d.pos = d.pos + 1; }
+                    else if nc == "." { val = val + nc; d.pos = d.pos + 1; }
+                    else { ngo = false; }
+                }
+            }
+            d.tk_type = 3; d.tk_val = val; return;
+        }
+    }
+
+    // Identifier or keyword
+    if is_alpha(c) || c == "_" {
+        let mut val = "";
+        let mut go = true;
+        while go {
+            if d.pos >= d.ilen { go = false; }
+            else {
+                let ic = d.input.char_at(d.pos);
+                if is_alnum(ic) { val = val + ic; d.pos = d.pos + 1; }
+                else { go = false; }
+            }
+        }
+        let kw = is_keyword(val);
+        if kw == 1 { d.tk_type = 0; d.tk_val = val.to_uppercase(); }
+        else { d.tk_type = 1; d.tk_val = val; }
+        return;
+    }
+
+    // Operators
+    if c == "<" {
+        d.pos = d.pos + 1;
+        if d.pos < d.ilen {
+            let nx = d.input.char_at(d.pos);
+            if nx == "=" { d.pos = d.pos + 1; d.tk_type = 4; d.tk_val = "<="; return; }
+            if nx == ">" { d.pos = d.pos + 1; d.tk_type = 4; d.tk_val = "<>"; return; }
+        }
+        d.tk_type = 4; d.tk_val = "<"; return;
+    }
+    if c == ">" {
+        d.pos = d.pos + 1;
+        if d.pos < d.ilen {
+            let nx = d.input.char_at(d.pos);
+            if nx == "=" { d.pos = d.pos + 1; d.tk_type = 4; d.tk_val = ">="; return; }
+        }
+        d.tk_type = 4; d.tk_val = ">"; return;
+    }
+    if c == "!" {
+        d.pos = d.pos + 1;
+        if d.pos < d.ilen {
+            let nx = d.input.char_at(d.pos);
+            if nx == "=" { d.pos = d.pos + 1; d.tk_type = 4; d.tk_val = "!="; return; }
+        }
+        d.tk_type = 4; d.tk_val = "!"; return;
+    }
+    if c == "=" { d.pos = d.pos + 1; d.tk_type = 4; d.tk_val = "="; return; }
+    if c == "+" { d.pos = d.pos + 1; d.tk_type = 4; d.tk_val = "+"; return; }
+    if c == "-" { d.pos = d.pos + 1; d.tk_type = 4; d.tk_val = "-"; return; }
+    if c == "/" { d.pos = d.pos + 1; d.tk_type = 4; d.tk_val = "/"; return; }
+    if c == "*" { d.pos = d.pos + 1; d.tk_type = 6; d.tk_val = "*"; return; }
+    if c == "(" { d.pos = d.pos + 1; d.tk_type = 5; d.tk_val = "("; return; }
+    if c == ")" { d.pos = d.pos + 1; d.tk_type = 5; d.tk_val = ")"; return; }
+    if c == "," { d.pos = d.pos + 1; d.tk_type = 5; d.tk_val = ","; return; }
+    if c == ";" { d.pos = d.pos + 1; d.tk_type = 5; d.tk_val = ";"; return; }
+    if c == "." { d.pos = d.pos + 1; d.tk_type = 5; d.tk_val = "."; return; }
+
+    d.pos = d.pos + 1; d.tk_type = 1; d.tk_val = c;
+}
+
+fn tk_is_kw(d: &DB, kw: String) -> i32 {
+    if d.tk_type == 0 { if d.tk_val == kw { return 1; } }
+    0
+}
+
+fn tk_is_punct(d: &DB, p: String) -> i32 {
+    if d.tk_type == 5 { if d.tk_val == p { return 1; } }
+    0
+}
+
+fn expect_kw(d: &mut DB, kw: String) {
+    if tk_is_kw(d, kw) == 0 {
+        println!("Error: expected keyword '{}', got '{}'", kw, d.tk_val);
+        process_exit(1);
+    }
+    next_token(d);
+}
+
+fn expect_punct(d: &mut DB, p: String) {
+    if tk_is_punct(d, p) == 0 {
+        println!("Error: expected '{}', got '{}'", p, d.tk_val);
+        process_exit(1);
+    }
+    next_token(d);
+}
+
+fn op_encode(op: String) -> i32 {
+    if op == "=" { return 0; }
+    if op == "<" { return 1; }
+    if op == ">" { return 2; }
+    if op == "<=" { return 3; }
+    if op == ">=" { return 4; }
+    if op == "<>" { return 5; }
+    if op == "!=" { return 5; }
+    0 - 1
+}
+
+// =============================================================================
+// SQL PARSER
+// =============================================================================
+
+fn reset_parser(d: &mut DB, input: String) {
+    d.input = input;
+    d.ilen = input.len();
+    d.pos = 0;
+    d.tk_type = 7;
+    d.tk_val = "";
+    d.stmt_type = 0;
+    d.p_table = -1;
+    d.p_cols = vec![];
+    d.p_col_count = 0;
+    d.p_types = vec![];
+    d.p_vals = vec![];
+    d.p_val_count = 0;
+    d.has_where = 0;
+    d.w_left = -1;
+    d.w_op = -1;
+    d.w_right = -1;
+    d.w_logic = 0;
+    d.w_left2 = -1;
+    d.w_op2 = -1;
+    d.w_right2 = -1;
+    d.has_order = 0;
+    d.order_col = -1;
+    d.order_desc = 0;
+    d.has_limit = 0;
+    d.limit_val = 0;
+    d.set_col = -1;
+    d.set_val = -1;
+    d.select_star = 0;
+    d.select_count = 0;
+    d.p_agg_funcs = vec![];
+    d.p_agg_cols = vec![];
+    d.p_agg_count = 0;
+    d.has_group_by = 0;
+    d.group_col = -1;
+    d.has_join = 0;
+    d.join_table = -1;
+    d.join_left_col = -1;
+    d.join_right_col = -1;
+    d.alias1 = -1;
+    d.alias2 = -1;
+    d.idx_name = -1;
+    d.idx_table_name = -1;
+    d.idx_col_name = -1;
+}
+
+fn parse_sql(d: &mut DB) {
+    next_token(d);
+    if tk_is_kw(d, "SELECT") == 1 { parse_select(d); return; }
+    if tk_is_kw(d, "INSERT") == 1 { parse_insert(d); return; }
+    if tk_is_kw(d, "CREATE") == 1 {
+        // Peek: CREATE TABLE or CREATE INDEX?
+        next_token(d);
+        if tk_is_kw(d, "INDEX") == 1 { next_token(d); parse_create_index(d); return; }
+        if tk_is_kw(d, "TABLE") == 1 { next_token(d); parse_create_table(d); return; }
+        println!("Error: expected TABLE or INDEX after CREATE, got '{}'", d.tk_val);
+        process_exit(1);
+    }
+    if tk_is_kw(d, "UPDATE") == 1 { parse_update(d); return; }
+    if tk_is_kw(d, "DELETE") == 1 { parse_delete(d); return; }
+    if tk_is_kw(d, "DROP") == 1 { parse_drop(d); return; }
+    println!("Error: unrecognized statement starting with '{}'", d.tk_val);
+    process_exit(1);
+}
+
+// Helper: read a possibly dotted identifier (table.col or just col).
+// Returns the full string including the dot.
+fn read_col_ref(d: &mut DB) -> String {
+    let first = d.tk_val;
+    next_token(d);
+    if tk_is_punct(d, ".") == 1 {
+        next_token(d);
+        let second = d.tk_val;
+        next_token(d);
+        return first + "." + second;
+    }
+    first
+}
+
+// Helper: check if a string is an aggregate keyword
+fn is_agg_kw(val: String) -> i32 {
+    let u = val.to_uppercase();
+    if u == "COUNT" { return 1; }
+    if u == "SUM" { return 2; }
+    if u == "AVG" { return 3; }
+    if u == "MIN" { return 4; }
+    if u == "MAX" { return 5; }
+    0
+}
+
+fn parse_select(d: &mut DB) {
+    d.stmt_type = 0;
+    next_token(d);
+
+    // Parse select list: could be *, column refs, or aggregate functions
+    if d.tk_type == 6 {
+        // SELECT *
+        d.select_star = 1;
+        next_token(d);
+    } else {
+        let mut go = true;
+        while go {
+            // Check for aggregate function: COUNT(*), SUM(col), AVG(col), MIN(col), MAX(col)
+            let agg = is_agg_kw(d.tk_val);
+            if agg > 0 {
+                next_token(d);
+                expect_punct(d, "(");
+                if d.tk_type == 6 {
+                    // COUNT(*)
+                    let star_id = sp_add(d, "*");
+                    vec_push(d.p_agg_cols, star_id);
+                    next_token(d);
+                } else {
+                    let agg_col_name = read_col_ref(d);
+                    let acid = sp_add(d, agg_col_name);
+                    vec_push(d.p_agg_cols, acid);
+                }
+                expect_punct(d, ")");
+                vec_push(d.p_agg_funcs, agg);
+                d.p_agg_count = d.p_agg_count + 1;
+            } else {
+                // Regular column reference (possibly dotted)
+                let cref = read_col_ref(d);
+                let cid = sp_add(d, cref);
+                vec_push(d.p_cols, cid);
+                d.p_col_count = d.p_col_count + 1;
+                // 0 = no aggregate
+                vec_push(d.p_agg_funcs, 0);
+                vec_push(d.p_agg_cols, cid);
+                d.p_agg_count = d.p_agg_count + 1;
+            }
+            if tk_is_punct(d, ",") == 1 { next_token(d); }
+            else { go = false; }
+        }
+        // If all items are aggregates with no plain cols AND we have a COUNT(*),
+        // mark select_count for backward compat if it is a simple COUNT(*)
+        if d.p_col_count == 0 {
+            if d.p_agg_count == 1 {
+                let f0 = vec_get(d.p_agg_funcs, 0);
+                if f0 == 1 {
+                    let c0 = sp_get(d, vec_get(d.p_agg_cols, 0));
+                    if c0 == "*" { d.select_count = 1; }
+                }
+            }
+        }
+    }
+
+    expect_kw(d, "FROM");
+    let tname = d.tk_val;
+    d.p_table = sp_add(d, tname);
+    next_token(d);
+
+    // Check for table alias (not a keyword)
+    if d.tk_type == 1 {
+        if tk_is_kw(d, "WHERE") == 0 {
+            if tk_is_kw(d, "JOIN") == 0 {
+                if tk_is_kw(d, "ORDER") == 0 {
+                    if tk_is_kw(d, "LIMIT") == 0 {
+                        if tk_is_kw(d, "GROUP") == 0 {
+                            d.alias1 = sp_add(d, d.tk_val);
+                            next_token(d);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // JOIN clause
+    if tk_is_kw(d, "JOIN") == 1 {
+        d.has_join = 1;
+        next_token(d);
+        let jt_name = d.tk_val;
+        d.join_table = sp_add(d, jt_name);
+        next_token(d);
+        // Optional alias for join table
+        if d.tk_type == 1 {
+            if tk_is_kw(d, "ON") == 0 {
+                d.alias2 = sp_add(d, d.tk_val);
+                next_token(d);
+            }
+        }
+        expect_kw(d, "ON");
+        // Parse ON left_col = right_col (dotted refs)
+        let left_ref = read_col_ref(d);
+        d.join_left_col = sp_add(d, left_ref);
+        // Expect =
+        if d.tk_type == 4 { if d.tk_val == "=" { next_token(d); } }
+        let right_ref = read_col_ref(d);
+        d.join_right_col = sp_add(d, right_ref);
+    }
+
+    if tk_is_kw(d, "WHERE") == 1 { parse_where(d); }
+    if tk_is_kw(d, "GROUP") == 1 { parse_group_by(d); }
+    if tk_is_kw(d, "ORDER") == 1 { parse_order_by(d); }
+    if tk_is_kw(d, "LIMIT") == 1 { parse_limit(d); }
+}
+
+fn parse_insert(d: &mut DB) {
+    d.stmt_type = 1;
+    next_token(d);
+    expect_kw(d, "INTO");
+    let tname = d.tk_val;
+    d.p_table = sp_add(d, tname);
+    next_token(d);
+
+    // Optional column list before VALUES
+    if tk_is_punct(d, "(") == 1 {
+        if tk_is_kw(d, "VALUES") == 0 {
+            // This is a column list, not VALUES
+            next_token(d);
+            let mut go = true;
+            while go {
+                let cname = d.tk_val;
+                let cid = sp_add(d, cname);
+                vec_push(d.p_cols, cid);
+                d.p_col_count = d.p_col_count + 1;
+                next_token(d);
+                if tk_is_punct(d, ",") == 1 { next_token(d); }
+                else { go = false; }
+            }
+            expect_punct(d, ")");
+        }
+    }
+
+    expect_kw(d, "VALUES");
+    expect_punct(d, "(");
+    let mut vgo = true;
+    while vgo {
+        let vtext = d.tk_val;
+        let vid = sp_add(d, vtext);
+        vec_push(d.p_vals, vid);
+        d.p_val_count = d.p_val_count + 1;
+        next_token(d);
+        if tk_is_punct(d, ",") == 1 { next_token(d); }
+        else { vgo = false; }
+    }
+    expect_punct(d, ")");
+}
+
+fn parse_create_table(d: &mut DB) {
+    d.stmt_type = 2;
+    // TABLE keyword already consumed by parse_sql
+    let tname = d.tk_val;
+    d.p_table = sp_add(d, tname);
+    next_token(d);
+    expect_punct(d, "(");
+    let mut go = true;
+    while go {
+        let cname = d.tk_val;
+        let cid = sp_add(d, cname);
+        vec_push(d.p_cols, cid);
+        d.p_col_count = d.p_col_count + 1;
+        next_token(d);
+        let ctype = d.tk_val;
+        let tid = sp_add(d, ctype);
+        vec_push(d.p_types, tid);
+        next_token(d);
+        // Skip optional PRIMARY KEY
+        if tk_is_kw(d, "PRIMARY") == 1 {
+            next_token(d);
+            expect_kw(d, "KEY");
+        }
+        if tk_is_punct(d, ",") == 1 { next_token(d); }
+        else { go = false; }
+    }
+    expect_punct(d, ")");
+}
+
+fn parse_create_index(d: &mut DB) {
+    d.stmt_type = 6;
+    // INDEX keyword already consumed by parse_sql
+    let iname = d.tk_val;
+    d.idx_name = sp_add(d, iname);
+    next_token(d);
+    expect_kw(d, "ON");
+    let tname = d.tk_val;
+    d.idx_table_name = sp_add(d, tname);
+    next_token(d);
+    expect_punct(d, "(");
+    let cname = d.tk_val;
+    d.idx_col_name = sp_add(d, cname);
+    next_token(d);
+    expect_punct(d, ")");
+}
+
+fn parse_group_by(d: &mut DB) {
+    next_token(d);
+    expect_kw(d, "BY");
+    d.has_group_by = 1;
+    let cref = read_col_ref(d);
+    d.group_col = sp_add(d, cref);
+}
+
+fn parse_update(d: &mut DB) {
+    d.stmt_type = 3;
+    next_token(d);
+    let tname = d.tk_val;
+    d.p_table = sp_add(d, tname);
+    next_token(d);
+    expect_kw(d, "SET");
+    let cname = d.tk_val;
+    d.set_col = sp_add(d, cname);
+    next_token(d);
+    if d.tk_type == 4 { if d.tk_val == "=" { next_token(d); } }
+    let vtext = d.tk_val;
+    d.set_val = sp_add(d, vtext);
+    next_token(d);
+    if tk_is_kw(d, "WHERE") == 1 { parse_where(d); }
+}
+
+fn parse_delete(d: &mut DB) {
+    d.stmt_type = 4;
+    next_token(d);
+    expect_kw(d, "FROM");
+    let tname = d.tk_val;
+    d.p_table = sp_add(d, tname);
+    next_token(d);
+    if tk_is_kw(d, "WHERE") == 1 { parse_where(d); }
+}
+
+fn parse_drop(d: &mut DB) {
+    d.stmt_type = 5;
+    next_token(d);
+    expect_kw(d, "TABLE");
+    let tname = d.tk_val;
+    d.p_table = sp_add(d, tname);
+    next_token(d);
+}
+
+fn parse_where(d: &mut DB) {
+    next_token(d);
+    d.has_where = 1;
+    // First condition: read left (possibly dotted), operator, right
+    let lref = read_col_ref(d);
+    d.w_left = sp_add(d, lref);
+    let op = d.tk_val;
+    d.w_op = op_encode(op);
+    next_token(d);
+    let rval = d.tk_val;
+    d.w_right = sp_add(d, rval);
+    next_token(d);
+    // Check for AND / OR
+    if tk_is_kw(d, "AND") == 1 {
+        d.w_logic = 1;
+        next_token(d);
+        let lref2 = read_col_ref(d);
+        d.w_left2 = sp_add(d, lref2);
+        let op2 = d.tk_val;
+        d.w_op2 = op_encode(op2);
+        next_token(d);
+        let rval2 = d.tk_val;
+        d.w_right2 = sp_add(d, rval2);
+        next_token(d);
+    } else if tk_is_kw(d, "OR") == 1 {
+        d.w_logic = 2;
+        next_token(d);
+        let lref2 = read_col_ref(d);
+        d.w_left2 = sp_add(d, lref2);
+        let op2 = d.tk_val;
+        d.w_op2 = op_encode(op2);
+        next_token(d);
+        let rval2 = d.tk_val;
+        d.w_right2 = sp_add(d, rval2);
+        next_token(d);
+    }
+}
+
+fn parse_order_by(d: &mut DB) {
+    next_token(d);
+    expect_kw(d, "BY");
+    d.has_order = 1;
+    let cname = d.tk_val;
+    d.order_col = sp_add(d, cname);
+    next_token(d);
+    if tk_is_kw(d, "DESC") == 1 { d.order_desc = 1; next_token(d); }
+    else if tk_is_kw(d, "ASC") == 1 { d.order_desc = 0; next_token(d); }
+}
+
+fn parse_limit(d: &mut DB) {
+    next_token(d);
+    d.has_limit = 1;
+    let val = d.tk_val;
+    d.limit_val = parse_int_str(val);
+    next_token(d);
+}
+
+fn parse_int_str(s: String) -> i32 {
+    let slen = s.len();
+    let mut num = 0;
+    let mut neg = false;
+    let mut i = 0;
+    if slen > 0 {
+        let first = s.char_at(0);
+        if first == "-" { neg = true; i = 1; }
+    }
+    while i < slen {
+        let ch = s.char_at(i);
+        if ch == "0" { num = num * 10; }
+        else if ch == "1" { num = num * 10 + 1; }
+        else if ch == "2" { num = num * 10 + 2; }
+        else if ch == "3" { num = num * 10 + 3; }
+        else if ch == "4" { num = num * 10 + 4; }
+        else if ch == "5" { num = num * 10 + 5; }
+        else if ch == "6" { num = num * 10 + 6; }
+        else if ch == "7" { num = num * 10 + 7; }
+        else if ch == "8" { num = num * 10 + 8; }
+        else if ch == "9" { num = num * 10 + 9; }
+        i = i + 1;
+    }
+    if neg { 0 - num } else { num }
+}
+
+// =============================================================================
+// QUERY EXECUTION
+// =============================================================================
+
+fn exec_create(d: &mut DB) {
+    let tname = sp_get(d, d.p_table);
+    let existing = find_table(d, tname);
+    if existing >= 0 {
+        println!("Error: table '{}' already exists", tname);
+        return;
+    }
+    let tid = sp_add(d, tname);
+    vec_push(d.tbl_names, tid);
+    let col_start = vec_len(d.col_names);
+    vec_push(d.tbl_col_starts, col_start);
+    vec_push(d.tbl_col_counts, d.p_col_count);
+    vec_push(d.tbl_row_starts, vec_len(d.cells));
+    vec_push(d.tbl_row_counts, 0);
+    // Add columns
+    let mut i = 0;
+    while i < d.p_col_count {
+        let cname = sp_get(d, vec_get(d.p_cols, i));
+        let cnid = sp_add(d, cname);
+        vec_push(d.col_names, cnid);
+        let type_str = sp_get(d, vec_get(d.p_types, i));
+        let type_up = type_str.to_uppercase();
+        let ct = if type_up == "INTEGER" { 0 } else if type_up == "REAL" { 1 } else { 2 };
+        vec_push(d.col_types, ct);
+        i = i + 1;
+    }
+    d.tbl_count = d.tbl_count + 1;
+}
+
+fn exec_insert(d: &mut DB) {
+    let tname = sp_get(d, d.p_table);
+    let tidx = find_table(d, tname);
+    if tidx < 0 {
+        println!("Error: table '{}' not found", tname);
+        return;
+    }
+    let cc = vec_get(d.tbl_col_counts, tidx);
+    if d.p_val_count != cc {
+        println!("Error: expected {} values, got {}", cc, d.p_val_count);
+        return;
+    }
+
+    // We need to insert cells at the right position for this table.
+    // The table's rows start at tbl_row_starts[tidx] and span
+    // tbl_row_counts[tidx] * cc cells. We insert after those.
+    let rs = vec_get(d.tbl_row_starts, tidx);
+    let rc = vec_get(d.tbl_row_counts, tidx);
+    let insert_at = rs + rc * cc;
+
+    // Rebuild cells vec with new row inserted at correct position
+    let total_cells = vec_len(d.cells);
+    let mut new_cells: Vec<i32> = vec![];
+    let mut ci: i64 = 0;
+    while ci < insert_at {
+        vec_push(new_cells, vec_get(d.cells, ci));
+        ci = ci + 1;
+    }
+    // Insert new values
+    let mut vi = 0;
+    while vi < d.p_val_count {
+        let vtext = sp_get(d, vec_get(d.p_vals, vi));
+        let cid = sp_add(d, vtext);
+        vec_push(new_cells, cid);
+        vi = vi + 1;
+    }
+    // Copy remaining cells
+    while ci < total_cells {
+        vec_push(new_cells, vec_get(d.cells, ci));
+        ci = ci + 1;
+    }
+    d.cells = new_cells;
+
+    // Update row count for this table
+    let mut new_rc: Vec<i32> = vec![];
+    let mut ri = 0;
+    while ri < d.tbl_count {
+        if ri == tidx { vec_push(new_rc, rc + 1); }
+        else { vec_push(new_rc, vec_get(d.tbl_row_counts, ri)); }
+        ri = ri + 1;
+    }
+    d.tbl_row_counts = new_rc;
+
+    // Update row_starts for tables after this one
+    let mut new_rs: Vec<i32> = vec![];
+    let mut si = 0;
+    while si < d.tbl_count {
+        if si > tidx {
+            vec_push(new_rs, vec_get(d.tbl_row_starts, si) + cc);
+        } else {
+            vec_push(new_rs, vec_get(d.tbl_row_starts, si));
+        }
+        si = si + 1;
+    }
+    d.tbl_row_starts = new_rs;
+
+    // Update any indexes on this table
+    update_indexes_for_table(d, tidx);
+}
+
+// Resolve a column reference: could be "col", "table.col", or "alias.col"
+// Returns the column index within the given table, or -1
+fn resolve_col(d: &DB, cs: i32, cc: i32, tname: String, alias: i32, ref_str: String) -> i32 {
+    let dot_pos = ref_str.index_of(".");
+    if dot_pos > 0 {
+        // Dotted: prefix.colname
+        let prefix = ref_str.substring(0, dot_pos);
+        let col_part = ref_str.substring(dot_pos + 1, ref_str.len() - dot_pos - 1);
+        let alias_str = if alias >= 0 { sp_get(d, alias) } else { "" };
+        if prefix == tname || prefix == alias_str {
+            return find_col(d, cs, cc, col_part);
+        }
+        return 0 - 1;
+    }
+    find_col(d, cs, cc, ref_str)
+}
+
+// Evaluate compound WHERE for a single-table row
+fn eval_compound_where(d: &DB, cs: i32, cc: i32, rs: i32, row: i32,
+                       tname: String, alias: i32) -> bool {
+    if d.has_where == 0 { return true; }
+    let wl = sp_get(d, d.w_left);
+    let wr = sp_get(d, d.w_right);
+    let wc1 = resolve_col(d, cs, cc, tname, alias, wl);
+    let mut pass1 = false;
+    if wc1 >= 0 {
+        let cv1 = sp_get(d, vec_get(d.cells, rs + row * cc + wc1));
+        pass1 = eval_where(cv1, d.w_op, wr);
+    }
+    if d.w_logic == 0 { return pass1; }
+    // Second condition
+    let wl2 = sp_get(d, d.w_left2);
+    let wr2 = sp_get(d, d.w_right2);
+    let wc2 = resolve_col(d, cs, cc, tname, alias, wl2);
+    let mut pass2 = false;
+    if wc2 >= 0 {
+        let cv2 = sp_get(d, vec_get(d.cells, rs + row * cc + wc2));
+        pass2 = eval_where(cv2, d.w_op2, wr2);
+    }
+    if d.w_logic == 1 { return pass1 && pass2; }
+    if d.w_logic == 2 { return pass1 || pass2; }
+    pass1
+}
+
+fn check_has_agg(d: &DB) -> i32 {
+    let mut ai = 0;
+    while ai < d.p_agg_count {
+        if vec_get(d.p_agg_funcs, ai) > 0 { return 1; }
+        ai = ai + 1;
+    }
+    0
+}
+
+fn exec_select(d: &mut DB) {
+    // Dispatch to JOIN handler
+    if d.has_join == 1 { exec_select_join(d); return; }
+    // Dispatch to GROUP BY handler
+    if d.has_group_by == 1 { exec_select_group(d); return; }
+
+    let tname = sp_get(d, d.p_table);
+    let tidx = find_table(d, tname);
+    if tidx < 0 {
+        println!("Error: table '{}' not found", tname);
+        return;
+    }
+    let cs = vec_get(d.tbl_col_starts, tidx);
+    let cc = vec_get(d.tbl_col_counts, tidx);
+    let rs = vec_get(d.tbl_row_starts, tidx);
+    let rc = vec_get(d.tbl_row_counts, tidx);
+
+    // Handle simple COUNT(*)
+    if d.select_count == 1 {
+        if d.p_agg_count == 1 {
+            if d.p_col_count == 0 {
+                let mut count = 0;
+                let mut r = 0;
+                while r < rc {
+                    if eval_compound_where(d, cs, cc, rs, r, tname, d.alias1) {
+                        count = count + 1;
+                    }
+                    r = r + 1;
+                }
+                println!("{}", count);
+                return;
+            }
+        }
+    }
+
+    // Check if we have any aggregate functions (mixed with columns) without GROUP BY
+    // Handle aggregates: COUNT, SUM, AVG, MIN, MAX without GROUP BY
+    // Aggregate check moved to dispatch:
+    // If p_agg_count > 0 and p_col_count == 0, handle as aggregate
+    if d.p_agg_count > 0 {
+        if d.p_col_count == 0 {
+            exec_select_agg_no_group(d, tidx);
+            return;
+        }
+    }
+
+    // Determine which columns to show
+    let mut show_cols: Vec<i32> = vec![];
+    let mut show_count = 0;
+    if d.select_star == 1 {
+        let mut ci = 0;
+        while ci < cc {
+            vec_push(show_cols, ci);
+            show_count = show_count + 1;
+            ci = ci + 1;
+        }
+    } else {
+        let mut ci = 0;
+        while ci < d.p_col_count {
+            let cname = sp_get(d, vec_get(d.p_cols, ci));
+            let idx = resolve_col(d, cs, cc, tname, d.alias1, cname);
+            if idx < 0 {
+                println!("Error: column '{}' not found", cname);
+                return;
+            }
+            vec_push(show_cols, idx);
+            show_count = show_count + 1;
+            ci = ci + 1;
+        }
+    }
+
+    // Filter rows (with compound WHERE and optional index acceleration)
+    let mut match_rows: Vec<i32> = vec![];
+    let mut match_count = 0;
+
+    // Try index lookup for simple WHERE on indexed column
+    let mut used_index = false;
+    if d.has_where == 1 {
+        if d.w_logic == 0 {
+            let wl = sp_get(d, d.w_left);
+            let wcol = resolve_col(d, cs, cc, tname, d.alias1, wl);
+            if wcol >= 0 {
+                let ix_id = find_index_for(d, tidx, wcol);
+                if ix_id >= 0 {
+                    let wr = sp_get(d, d.w_right);
+                    match_rows = index_scan(d, ix_id, d.w_op, wr);
+                    match_count = vec_len(match_rows);
+                    used_index = true;
+                }
+            }
+        }
+    }
+
+    if !used_index {
+        let mut r = 0;
+        while r < rc {
+            if eval_compound_where(d, cs, cc, rs, r, tname, d.alias1) {
+                vec_push(match_rows, r);
+                match_count = match_count + 1;
+            }
+            r = r + 1;
+        }
+    }
+
+    // ORDER BY
+    if d.has_order == 1 {
+        let ocol_name = sp_get(d, d.order_col);
+        let ocol_idx = resolve_col(d, cs, cc, tname, d.alias1, ocol_name);
+        if ocol_idx >= 0 {
+            let ocol_type = vec_get(d.col_types, cs + ocol_idx);
+            match_rows = sort_rows(d, match_rows, match_count, rs, cc, ocol_idx, ocol_type, d.order_desc);
+        }
+    }
+
+    // LIMIT
+    if d.has_limit == 1 {
+        if d.limit_val < match_count {
+            let mut limited: Vec<i32> = vec![];
+            let mut li = 0;
+            while li < d.limit_val {
+                vec_push(limited, vec_get(match_rows, li));
+                li = li + 1;
+            }
+            match_rows = limited;
+            match_count = d.limit_val;
+        }
+    }
+
+    // Calculate column widths
+    let mut widths: Vec<i32> = vec![];
+    let mut wi = 0;
+    while wi < show_count {
+        let col_idx = vec_get(show_cols, wi);
+        let hdr = sp_get(d, vec_get(d.col_names, cs + col_idx));
+        let mut w = hdr.len();
+        let mut ri = 0;
+        while ri < match_count {
+            let row = vec_get(match_rows, ri);
+            let val = sp_get(d, vec_get(d.cells, rs + row * cc + col_idx));
+            let vlen = val.len();
+            if vlen > w { w = vlen; }
+            ri = ri + 1;
+        }
+        vec_push(widths, w);
+        wi = wi + 1;
+    }
+
+    // Print header
+    let mut hdr_line = "";
+    let mut sep_line = "";
+    let mut hi = 0;
+    while hi < show_count {
+        if hi > 0 { hdr_line = hdr_line + " | "; sep_line = sep_line + "-+-"; }
+        let col_idx = vec_get(show_cols, hi);
+        let hdr = sp_get(d, vec_get(d.col_names, cs + col_idx));
+        let w = vec_get(widths, hi);
+        hdr_line = hdr_line + pad_right(hdr, w);
+        sep_line = sep_line + make_dashes(w);
+        hi = hi + 1;
+    }
+    println!("{}", hdr_line);
+    println!("{}", sep_line);
+
+    // Print rows
+    let mut ri = 0;
+    while ri < match_count {
+        let row = vec_get(match_rows, ri);
+        let mut row_line = "";
+        let mut ci = 0;
+        while ci < show_count {
+            if ci > 0 { row_line = row_line + " | "; }
+            let col_idx = vec_get(show_cols, ci);
+            let val = sp_get(d, vec_get(d.cells, rs + row * cc + col_idx));
+            let w = vec_get(widths, ci);
+            let col_type = vec_get(d.col_types, cs + col_idx);
+            if col_type == 0 || col_type == 1 {
+                row_line = row_line + pad_left(val, w);
+            } else {
+                row_line = row_line + pad_right(val, w);
+            }
+            ci = ci + 1;
+        }
+        println!("{}", row_line);
+        ri = ri + 1;
+    }
+}
+
+// =============================================================================
+// SELECT with aggregates (no GROUP BY)
+// =============================================================================
+fn exec_select_agg_no_group(d: &mut DB, tidx: i32) {
+    let tname = sp_get(d, d.p_table);
+    let cs = vec_get(d.tbl_col_starts, tidx);
+    let cc = vec_get(d.tbl_col_counts, tidx);
+    let rs = vec_get(d.tbl_row_starts, tidx);
+    let rc = vec_get(d.tbl_row_counts, tidx);
+
+    // Gather matching rows
+    let mut match_rows: Vec<i32> = vec![];
+    let mut match_count = 0;
+    let mut r = 0;
+    while r < rc {
+        if eval_compound_where(d, cs, cc, rs, r, tname, d.alias1) {
+            vec_push(match_rows, r);
+            match_count = match_count + 1;
+        }
+        r = r + 1;
+    }
+
+    // For each aggregate in p_agg_funcs/p_agg_cols, compute the result
+    let mut results: Vec<i32> = vec![];
+    let mut headers: Vec<i32> = vec![];
+    let mut ai = 0;
+    while ai < d.p_agg_count {
+        compute_agg_item(d, ai, cs, cc, rs, tname, match_rows, match_count, &mut results, &mut headers);
+        ai = ai + 1;
+    }
+    // Print single result row
+    print_result_row(d, headers, results, d.p_agg_count);
+}
+
+fn compute_agg_item(d: &mut DB, ai: i32, cs: i32, cc: i32, rs: i32, tname: String,
+                    match_rows: Vec<i32>, match_count: i32,
+                    results: &mut Vec<i32>, headers: &mut Vec<i32>) {
+    let af = vec_get(d.p_agg_funcs, ai);
+    let ac_name = sp_get(d, vec_get(d.p_agg_cols, ai));
+    if af == 0 {
+        let col_idx = resolve_col(d, cs, cc, tname, d.alias1, ac_name);
+        let mut val = "";
+        if match_count > 0 {
+            let row = vec_get(match_rows, 0);
+            if col_idx >= 0 {
+                val = sp_get(d, vec_get(d.cells, rs + row * cc + col_idx));
+            }
+        }
+        let vid = sp_add(d, val);
+        vec_push(*results, vid);
+        let hid = sp_add(d, ac_name);
+        vec_push(*headers, hid);
+    } else if af == 1 {
+        let val = int_to_str(match_count);
+        let vid = sp_add(d, val);
+        vec_push(*results, vid);
+        let hid = sp_add(d, "COUNT(*)");
+        vec_push(*headers, hid);
+    } else {
+        compute_agg_numeric(d, af, ac_name, cs, cc, rs, tname, match_rows, match_count, results, headers);
+    }
+}
+
+fn compute_agg_numeric(d: &mut DB, af: i32, ac_name: String, cs: i32, cc: i32, rs: i32,
+                       tname: String, match_rows: Vec<i32>, match_count: i32,
+                       results: &mut Vec<i32>, headers: &mut Vec<i32>) {
+    let col_idx = resolve_col(d, cs, cc, tname, d.alias1, ac_name);
+    let mut sum_val = 0.0;
+    let mut min_val = 999999999.0;
+    let mut max_val = 0.0 - 999999999.0;
+    let mut cnt = 0;
+    let mut mi = 0;
+    while mi < match_count {
+        let row = vec_get(match_rows, mi);
+        if col_idx >= 0 {
+            let cell_str = sp_get(d, vec_get(d.cells, rs + row * cc + col_idx));
+            let nv = cell_str.parse_float();
+            sum_val = sum_val + nv;
+            if nv < min_val { min_val = nv; }
+            if nv > max_val { max_val = nv; }
+            cnt = cnt + 1;
+        }
+        mi = mi + 1;
+    }
+    let mut result_val = sum_val;
+    if af == 3 {
+        if cnt > 0 { result_val = sum_val / cnt; }
+        else { result_val = 0.0; }
+    }
+    if af == 4 { result_val = min_val; }
+    if af == 5 { result_val = max_val; }
+    let result_str = float_to_str(result_val);
+    let vid = sp_add(d, result_str);
+    vec_push(*results, vid);
+    let mut func_name = "SUM";
+    if af == 3 { func_name = "AVG"; }
+    if af == 4 { func_name = "MIN"; }
+    if af == 5 { func_name = "MAX"; }
+    let hname = func_name + "(" + ac_name + ")";
+    let hid = sp_add(d, hname);
+    vec_push(*headers, hid);
+}
+
+// =============================================================================
+// SELECT with GROUP BY
+// =============================================================================
+fn exec_select_group(d: &mut DB) {
+    let tname = sp_get(d, d.p_table);
+    let tidx = find_table(d, tname);
+    if tidx < 0 {
+        println!("Error: table '{}' not found", tname);
+        return;
+    }
+    let cs = vec_get(d.tbl_col_starts, tidx);
+    let cc = vec_get(d.tbl_col_counts, tidx);
+    let rs = vec_get(d.tbl_row_starts, tidx);
+    let rc = vec_get(d.tbl_row_counts, tidx);
+
+    let gcol_name = sp_get(d, d.group_col);
+    let gcol = resolve_col(d, cs, cc, tname, d.alias1, gcol_name);
+    if gcol < 0 {
+        println!("Error: GROUP BY column '{}' not found", gcol_name);
+        return;
+    }
+
+    // Filter rows
+    let mut match_rows: Vec<i32> = vec![];
+    let mut match_count = 0;
+    let mut r = 0;
+    while r < rc {
+        if eval_compound_where(d, cs, cc, rs, r, tname, d.alias1) {
+            vec_push(match_rows, r);
+            match_count = match_count + 1;
+        }
+        r = r + 1;
+    }
+
+    // Collect distinct group keys
+    let mut group_keys: Vec<i32> = vec![];
+    let mut group_count = 0;
+    let mut mi = 0;
+    while mi < match_count {
+        let row = vec_get(match_rows, mi);
+        let gv = sp_get(d, vec_get(d.cells, rs + row * cc + gcol));
+        let gvid = sp_add(d, gv);
+        // Check if already in group_keys
+        let mut found = false;
+        let mut gi = 0;
+        while gi < group_count {
+            let existing = sp_get(d, vec_get(group_keys, gi));
+            if existing == gv { found = true; }
+            gi = gi + 1;
+        }
+        if !found {
+            vec_push(group_keys, gvid);
+            group_count = group_count + 1;
+        }
+        mi = mi + 1;
+    }
+
+    // Build headers
+    let mut headers: Vec<i32> = vec![];
+    build_all_headers(d, headers);
+
+    let ncols = d.p_agg_count;
+
+    // Compute all result rows
+    // Use a flat approach: for each group key, for each agg column,
+    // compute the value and store as a pool id
+    let mut all_results: Vec<i32> = vec![];
+    let mut gi = 0;
+    while gi < group_count {
+        let gk = sp_get(d, vec_get(group_keys, gi));
+        // Process each aggregate column for this group
+        group_compute_row(d, gk, cs, cc, rs, tname, gcol,
+                          match_rows, match_count, all_results);
+        gi = gi + 1;
+    }
+    // Compute widths from results
+    let mut widths2: Vec<i32> = vec![];
+    let mut w2i = 0;
+    while w2i < ncols {
+        let hdr = sp_get(d, vec_get(headers, w2i));
+        vec_push(widths2, hdr.len());
+        w2i = w2i + 1;
+    }
+    let mut ri2 = 0;
+    while ri2 < group_count {
+        let mut ci2 = 0;
+        while ci2 < ncols {
+            let val = sp_get(d, vec_get(all_results, ri2 * ncols + ci2));
+            let vlen = val.len();
+            let cur_w = vec_get(widths2, ci2);
+            if vlen > cur_w { widths2 = vec_replace(widths2, ncols, ci2, vlen); }
+            ci2 = ci2 + 1;
+        }
+        ri2 = ri2 + 1;
+    }
+    let widths = widths2;
+
+    // Print header
+    let mut hdr_line = "";
+    let mut sep_line = "";
+    let mut pi = 0;
+    while pi < ncols {
+        if pi > 0 { hdr_line = hdr_line + " | "; sep_line = sep_line + "-+-"; }
+        let hdr = sp_get(d, vec_get(headers, pi));
+        let w = vec_get(widths, pi);
+        hdr_line = hdr_line + pad_right(hdr, w);
+        sep_line = sep_line + make_dashes(w);
+        pi = pi + 1;
+    }
+    println!("{}", hdr_line);
+    println!("{}", sep_line);
+
+    // Print rows
+    let mut ri = 0;
+    while ri < group_count {
+        let mut row_line = "";
+        let mut ci = 0;
+        while ci < ncols {
+            if ci > 0 { row_line = row_line + " | "; }
+            let val = sp_get(d, vec_get(all_results, ri * ncols + ci));
+            let w = vec_get(widths, ci);
+            row_line = row_line + pad_right(val, w);
+            ci = ci + 1;
+        }
+        println!("{}", row_line);
+        ri = ri + 1;
+    }
+}
+
+fn group_compute_row(d: &mut DB, gk: String, cs: i32, cc: i32, rs: i32,
+                     tname: String, gcol: i32,
+                     match_rows: Vec<i32>, match_count: i32,
+                     results: Vec<i32>) {
+    let mut ai = 0;
+    while ai < d.p_agg_count {
+        if vec_get(d.p_agg_funcs, ai) == 1 {
+            let cnt = group_count_rows(d, gk, rs, cc, gcol, match_rows, match_count);
+            let val_str = int_to_str(cnt);
+            let vid = sp_add(d, val_str);
+            vec_push(results, vid);
+        }
+        if vec_get(d.p_agg_funcs, ai) >= 2 {
+            let ac_name = sp_get(d, vec_get(d.p_agg_cols, ai));
+            let val_str = compute_group_numeric(d, vec_get(d.p_agg_funcs, ai), ac_name, gk, cs, cc, rs, tname, gcol,
+                                                match_rows, match_count);
+            let vid = sp_add(d, val_str);
+            vec_push(results, vid);
+        }
+        if vec_get(d.p_agg_funcs, ai) == 0 {
+            let ac_name = sp_get(d, vec_get(d.p_agg_cols, ai));
+            let col_idx = resolve_col(d, cs, cc, tname, d.alias1, ac_name);
+            let val_str = group_get_plain(d, gk, col_idx, gcol, rs, cc, match_rows, match_count);
+            let vid = sp_add(d, val_str);
+            vec_push(results, vid);
+        }
+        ai = ai + 1;
+    }
+}
+
+fn group_count_rows(d: &DB, gk: String, rs: i32, cc: i32, gcol: i32,
+                    match_rows: Vec<i32>, match_count: i32) -> i32 {
+    let mut cnt = 0;
+    let mut ci = 0;
+    while ci < match_count {
+        let crow = vec_get(match_rows, ci);
+        let cgv = sp_get(d, vec_get(d.cells, rs + crow * cc + gcol));
+        if cgv == gk { cnt = cnt + 1; }
+        ci = ci + 1;
+    }
+    cnt
+}
+
+fn group_get_plain(d: &DB, gk: String, col_idx: i32, gcol: i32, rs: i32, cc: i32,
+                   match_rows: Vec<i32>, match_count: i32) -> String {
+    if col_idx == gcol { return gk; }
+    let mut fi = 0;
+    while fi < match_count {
+        let frow = vec_get(match_rows, fi);
+        let fgv = sp_get(d, vec_get(d.cells, rs + frow * cc + gcol));
+        if fgv == gk {
+            if col_idx >= 0 {
+                return sp_get(d, vec_get(d.cells, rs + frow * cc + col_idx));
+            }
+        }
+        fi = fi + 1;
+    }
+    ""
+}
+
+fn build_all_headers(d: &mut DB, headers: Vec<i32>) {
+    let mut hi = 0;
+    while hi < d.p_agg_count {
+        push_agg_header(d, hi, headers);
+        hi = hi + 1;
+    }
+}
+
+fn push_agg_header(d: &mut DB, hi: i32, headers: Vec<i32>) {
+    let af = vec_get(d.p_agg_funcs, hi);
+    let ac_name = sp_get(d, vec_get(d.p_agg_cols, hi));
+    if af == 0 {
+        let hid = sp_add(d, ac_name);
+        vec_push(headers, hid);
+        return;
+    }
+    if af == 1 {
+        let hid = sp_add(d, "COUNT(*)");
+        vec_push(headers, hid);
+        return;
+    }
+    let mut func_name = "SUM";
+    if af == 3 { func_name = "AVG"; }
+    if af == 4 { func_name = "MIN"; }
+    if af == 5 { func_name = "MAX"; }
+    let hname = func_name + "(" + ac_name + ")";
+    let hid = sp_add(d, hname);
+    vec_push(headers, hid);
+}
+
+fn group_add_cell(d: &mut DB, ai: i32, gk: String, cs: i32, cc: i32,
+                  rs: i32, tname: String, gcol: i32,
+                  match_rows: Vec<i32>, match_count: i32,
+                  all_results: &mut Vec<i32>, widths: &mut Vec<i32>, ncols: i32) {
+    let val = compute_group_cell(d, ai, gk, cs, cc, rs, tname, gcol, match_rows, match_count);
+    let vid = sp_add(d, val);
+    vec_push(*all_results, vid);
+    let vlen = val.len();
+    let cur_w = vec_get(*widths, ai);
+    if vlen > cur_w {
+        *widths = vec_replace(*widths, ncols, ai, vlen);
+    }
+}
+
+fn build_group_header(d: &mut DB, hi: i32, headers: &mut Vec<i32>) {
+    let af = vec_get(d.p_agg_funcs, hi);
+    let ac_name = sp_get(d, vec_get(d.p_agg_cols, hi));
+    if af == 0 {
+        let hid = sp_add(d, ac_name);
+        vec_push(*headers, hid);
+    } else if af == 1 {
+        let hid = sp_add(d, "COUNT(*)");
+        vec_push(*headers, hid);
+    } else {
+        let mut func_name = "SUM";
+        if af == 3 { func_name = "AVG"; }
+        if af == 4 { func_name = "MIN"; }
+        if af == 5 { func_name = "MAX"; }
+        let hname = func_name + "(" + ac_name + ")";
+        let hid = sp_add(d, hname);
+        vec_push(*headers, hid);
+    }
+}
+
+fn compute_group_cell(d: &mut DB, ai: i32, gk: String, cs: i32, cc: i32,
+                      rs: i32, tname: String, gcol: i32,
+                      match_rows: Vec<i32>, match_count: i32) -> String {
+    let af = vec_get(d.p_agg_funcs, ai);
+    let ac_name = sp_get(d, vec_get(d.p_agg_cols, ai));
+    if af == 0 {
+        // Plain column
+        let col_idx = resolve_col(d, cs, cc, tname, d.alias1, ac_name);
+        if col_idx == gcol { return gk; }
+        let mut fv = "";
+        let mut fi = 0;
+        let mut ffound = false;
+        while fi < match_count {
+            if !ffound {
+                let frow = vec_get(match_rows, fi);
+                let fgv = sp_get(d, vec_get(d.cells, rs + frow * cc + gcol));
+                if fgv == gk {
+                    if col_idx >= 0 {
+                        fv = sp_get(d, vec_get(d.cells, rs + frow * cc + col_idx));
+                    }
+                    ffound = true;
+                }
+            }
+            fi = fi + 1;
+        }
+        return fv;
+    }
+    if af == 1 {
+        // COUNT
+        let mut cnt = 0;
+        let mut ci = 0;
+        while ci < match_count {
+            let crow = vec_get(match_rows, ci);
+            let cgv = sp_get(d, vec_get(d.cells, rs + crow * cc + gcol));
+            if cgv == gk { cnt = cnt + 1; }
+            ci = ci + 1;
+        }
+        return int_to_str(cnt);
+    }
+    // SUM/AVG/MIN/MAX
+    compute_group_numeric(d, af, ac_name, gk, cs, cc, rs, tname, gcol, match_rows, match_count)
+}
+
+fn compute_group_numeric(d: &mut DB, af: i32, ac_name: String, gk: String,
+                         cs: i32, cc: i32, rs: i32, tname: String, gcol: i32,
+                         match_rows: Vec<i32>, match_count: i32) -> String {
+    let col_idx = resolve_col(d, cs, cc, tname, d.alias1, ac_name);
+    let mut sum_v = 0.0;
+    let mut min_v = 999999999.0;
+    let mut max_v = 0.0 - 999999999.0;
+    let mut cnt = 0;
+    let mut si = 0;
+    while si < match_count {
+        let srow = vec_get(match_rows, si);
+        let sgv = sp_get(d, vec_get(d.cells, rs + srow * cc + gcol));
+        if sgv == gk {
+            if col_idx >= 0 {
+                let sv = sp_get(d, vec_get(d.cells, rs + srow * cc + col_idx));
+                let nv = sv.parse_float();
+                sum_v = sum_v + nv;
+                if nv < min_v { min_v = nv; }
+                if nv > max_v { max_v = nv; }
+                cnt = cnt + 1;
+            }
+        }
+        si = si + 1;
+    }
+    let mut result_val = sum_v;
+    if af == 3 {
+        if cnt > 0 { result_val = sum_v / cnt; }
+        else { result_val = 0.0; }
+    }
+    if af == 4 { result_val = min_v; }
+    if af == 5 { result_val = max_v; }
+    float_to_str(result_val)
+}
+
+// =============================================================================
+// SELECT with JOIN (nested loop)
+// =============================================================================
+fn exec_select_join(d: &mut DB) {
+    let tname1 = sp_get(d, d.p_table);
+    let tname2 = sp_get(d, d.join_table);
+    let t1 = find_table(d, tname1);
+    let t2 = find_table(d, tname2);
+    if t1 < 0 { println!("Error: table '{}' not found", tname1); return; }
+    if t2 < 0 { println!("Error: table '{}' not found", tname2); return; }
+
+    let cs1 = vec_get(d.tbl_col_starts, t1);
+    let cc1 = vec_get(d.tbl_col_counts, t1);
+    let rs1 = vec_get(d.tbl_row_starts, t1);
+    let rc1 = vec_get(d.tbl_row_counts, t1);
+
+    let cs2 = vec_get(d.tbl_col_starts, t2);
+    let cc2 = vec_get(d.tbl_col_counts, t2);
+    let rs2 = vec_get(d.tbl_row_starts, t2);
+    let rc2 = vec_get(d.tbl_row_counts, t2);
+
+    // Resolve ON columns
+    let jl_ref = sp_get(d, d.join_left_col);
+    let jr_ref = sp_get(d, d.join_right_col);
+
+    // Try to resolve each ref against both tables
+    let mut jc1 = resolve_col(d, cs1, cc1, tname1, d.alias1, jl_ref);
+    let mut jc2 = resolve_col(d, cs2, cc2, tname2, d.alias2, jr_ref);
+    // If that didn't work, try swapped
+    if jc1 < 0 {
+        jc1 = resolve_col(d, cs1, cc1, tname1, d.alias1, jr_ref);
+        jc2 = resolve_col(d, cs2, cc2, tname2, d.alias2, jl_ref);
+    }
+    if jc1 < 0 || jc2 < 0 {
+        println!("Error: cannot resolve JOIN columns");
+        return;
+    }
+
+    // Resolve SELECT columns: each is "table.col" or "alias.col"
+    // For each, determine which table (1 or 2) and column index
+    let mut sel_table: Vec<i32> = vec![];
+    let mut sel_col: Vec<i32> = vec![];
+    let mut sel_names: Vec<i32> = vec![];
+    let mut sel_count = 0;
+
+    if d.select_star == 1 {
+        // All columns from table1 then table2
+        let mut ci = 0;
+        while ci < cc1 {
+            vec_push(sel_table, 1);
+            vec_push(sel_col, ci);
+            let cn = sp_get(d, vec_get(d.col_names, cs1 + ci));
+            let nid = sp_add(d, cn);
+            vec_push(sel_names, nid);
+            sel_count = sel_count + 1;
+            ci = ci + 1;
+        }
+        ci = 0;
+        while ci < cc2 {
+            vec_push(sel_table, 2);
+            vec_push(sel_col, ci);
+            let cn = sp_get(d, vec_get(d.col_names, cs2 + ci));
+            let nid = sp_add(d, cn);
+            vec_push(sel_names, nid);
+            sel_count = sel_count + 1;
+            ci = ci + 1;
+        }
+    } else {
+        let mut pi = 0;
+        while pi < d.p_agg_count {
+            let cref = sp_get(d, vec_get(d.p_agg_cols, pi));
+            // Try table1
+            let c1 = resolve_col(d, cs1, cc1, tname1, d.alias1, cref);
+            if c1 >= 0 {
+                vec_push(sel_table, 1);
+                vec_push(sel_col, c1);
+                let cn = sp_get(d, vec_get(d.col_names, cs1 + c1));
+                let nid = sp_add(d, cn);
+                vec_push(sel_names, nid);
+                sel_count = sel_count + 1;
+            } else {
+                let c2 = resolve_col(d, cs2, cc2, tname2, d.alias2, cref);
+                if c2 >= 0 {
+                    vec_push(sel_table, 2);
+                    vec_push(sel_col, c2);
+                    let cn = sp_get(d, vec_get(d.col_names, cs2 + c2));
+                    let nid = sp_add(d, cn);
+                    vec_push(sel_names, nid);
+                    sel_count = sel_count + 1;
+                } else {
+                    println!("Error: column '{}' not found in either table", cref);
+                    return;
+                }
+            }
+            pi = pi + 1;
+        }
+    }
+
+    // Nested loop join: collect matching result rows as pool-id strings
+    // Store flattened: result_vals[row * sel_count + col] = pool id
+    let mut result_vals: Vec<i32> = vec![];
+    let mut result_count = 0;
+
+    let mut r1 = 0;
+    while r1 < rc1 {
+        let key1 = sp_get(d, vec_get(d.cells, rs1 + r1 * cc1 + jc1));
+        let mut r2 = 0;
+        while r2 < rc2 {
+            let key2 = sp_get(d, vec_get(d.cells, rs2 + r2 * cc2 + jc2));
+            if key1 == key2 {
+                // Check WHERE if present (evaluate against combined row)
+                let mut passes = true;
+                if d.has_where == 1 {
+                    passes = eval_join_where(d, cs1, cc1, rs1, r1, tname1, d.alias1,
+                                             cs2, cc2, rs2, r2, tname2, d.alias2);
+                }
+                if passes {
+                    // Build result row
+                    let mut si = 0;
+                    while si < sel_count {
+                        let st = vec_get(sel_table, si);
+                        let sc = vec_get(sel_col, si);
+                        let val = if st == 1 {
+                            sp_get(d, vec_get(d.cells, rs1 + r1 * cc1 + sc))
+                        } else {
+                            sp_get(d, vec_get(d.cells, rs2 + r2 * cc2 + sc))
+                        };
+                        let vid = sp_add(d, val);
+                        vec_push(result_vals, vid);
+                        si = si + 1;
+                    }
+                    result_count = result_count + 1;
+                }
+            }
+            r2 = r2 + 1;
+        }
+        r1 = r1 + 1;
+    }
+
+    // Calculate widths
+    let mut widths: Vec<i32> = vec![];
+    let mut wi = 0;
+    while wi < sel_count {
+        let hdr = sp_get(d, vec_get(sel_names, wi));
+        vec_push(widths, hdr.len());
+        wi = wi + 1;
+    }
+    let mut ri = 0;
+    while ri < result_count {
+        let mut ci = 0;
+        while ci < sel_count {
+            let val = sp_get(d, vec_get(result_vals, ri * sel_count + ci));
+            let vlen = val.len();
+            let old_w = vec_get(widths, ci);
+            if vlen > old_w { widths = vec_replace(widths, sel_count, ci, vlen); }
+            ci = ci + 1;
+        }
+        ri = ri + 1;
+    }
+
+    // Print
+    let mut hdr_line = "";
+    let mut sep_line = "";
+    let mut hi = 0;
+    while hi < sel_count {
+        if hi > 0 { hdr_line = hdr_line + " | "; sep_line = sep_line + "-+-"; }
+        let hdr = sp_get(d, vec_get(sel_names, hi));
+        let w = vec_get(widths, hi);
+        hdr_line = hdr_line + pad_right(hdr, w);
+        sep_line = sep_line + make_dashes(w);
+        hi = hi + 1;
+    }
+    println!("{}", hdr_line);
+    println!("{}", sep_line);
+
+    ri = 0;
+    while ri < result_count {
+        let mut row_line = "";
+        let mut ci = 0;
+        while ci < sel_count {
+            if ci > 0 { row_line = row_line + " | "; }
+            let val = sp_get(d, vec_get(result_vals, ri * sel_count + ci));
+            let w = vec_get(widths, ci);
+            row_line = row_line + pad_right(val, w);
+            ci = ci + 1;
+        }
+        println!("{}", row_line);
+        ri = ri + 1;
+    }
+}
+
+// Evaluate WHERE for a JOIN row (needs to check both tables)
+fn eval_join_where(d: &DB, cs1: i32, cc1: i32, rs1: i32, r1: i32,
+                   tname1: String, alias1: i32,
+                   cs2: i32, cc2: i32, rs2: i32, r2: i32,
+                   tname2: String, alias2: i32) -> bool {
+    if d.has_where == 0 { return true; }
+    let wl = sp_get(d, d.w_left);
+    let wr = sp_get(d, d.w_right);
+    // Try to find the WHERE column in either table
+    let wc1 = resolve_col(d, cs1, cc1, tname1, alias1, wl);
+    let wc2 = resolve_col(d, cs2, cc2, tname2, alias2, wl);
+    let mut pass1 = false;
+    if wc1 >= 0 {
+        let cv = sp_get(d, vec_get(d.cells, rs1 + r1 * cc1 + wc1));
+        pass1 = eval_where(cv, d.w_op, wr);
+    } else if wc2 >= 0 {
+        let cv = sp_get(d, vec_get(d.cells, rs2 + r2 * cc2 + wc2));
+        pass1 = eval_where(cv, d.w_op, wr);
+    }
+    if d.w_logic == 0 { return pass1; }
+    let wl2 = sp_get(d, d.w_left2);
+    let wr2 = sp_get(d, d.w_right2);
+    let wc1b = resolve_col(d, cs1, cc1, tname1, alias1, wl2);
+    let wc2b = resolve_col(d, cs2, cc2, tname2, alias2, wl2);
+    let mut pass2 = false;
+    if wc1b >= 0 {
+        let cv = sp_get(d, vec_get(d.cells, rs1 + r1 * cc1 + wc1b));
+        pass2 = eval_where(cv, d.w_op2, wr2);
+    } else if wc2b >= 0 {
+        let cv = sp_get(d, vec_get(d.cells, rs2 + r2 * cc2 + wc2b));
+        pass2 = eval_where(cv, d.w_op2, wr2);
+    }
+    if d.w_logic == 1 { return pass1 && pass2; }
+    if d.w_logic == 2 { return pass1 || pass2; }
+    pass1
+}
+
+fn exec_update(d: &mut DB) {
+    let tname = sp_get(d, d.p_table);
+    let tidx = find_table(d, tname);
+    if tidx < 0 {
+        println!("Error: table '{}' not found", tname);
+        return;
+    }
+    let cs = vec_get(d.tbl_col_starts, tidx);
+    let cc = vec_get(d.tbl_col_counts, tidx);
+    let rs = vec_get(d.tbl_row_starts, tidx);
+    let rc = vec_get(d.tbl_row_counts, tidx);
+
+    let set_col_name = sp_get(d, d.set_col);
+    let set_val_text = sp_get(d, d.set_val);
+    let scol = find_col(d, cs, cc, set_col_name);
+    if scol < 0 {
+        println!("Error: column '{}' not found", set_col_name);
+        return;
+    }
+
+    let new_val_id = sp_add(d, set_val_text);
+    let total_cells = vec_len(d.cells);
+    let mut new_cells: Vec<i32> = vec![];
+    let mut updated = 0;
+    let mut ci: i64 = 0;
+    while ci < total_cells {
+        let mut cell_id = vec_get(d.cells, ci);
+        if ci >= rs {
+            let offset = ci - rs;
+            if offset < rc * cc {
+                let row_in_tbl = offset / cc;
+                let col_in_row = offset - row_in_tbl * cc;
+                if col_in_row == scol {
+                    let do_update = eval_compound_where(d, cs, cc, rs, row_in_tbl, tname, d.alias1);
+                    if do_update {
+                        cell_id = new_val_id;
+                        updated = updated + 1;
+                    }
+                }
+            }
+        }
+        vec_push(new_cells, cell_id);
+        ci = ci + 1;
+    }
+    d.cells = new_cells;
+    update_indexes_for_table(d, tidx);
+}
+
+fn exec_delete(d: &mut DB) {
+    let tname = sp_get(d, d.p_table);
+    let tidx = find_table(d, tname);
+    if tidx < 0 {
+        println!("Error: table '{}' not found", tname);
+        return;
+    }
+    let cs = vec_get(d.tbl_col_starts, tidx);
+    let cc = vec_get(d.tbl_col_counts, tidx);
+    let rs = vec_get(d.tbl_row_starts, tidx);
+    let rc = vec_get(d.tbl_row_counts, tidx);
+
+    // Find rows to keep using compound WHERE
+    let mut keep_rows: Vec<i32> = vec![];
+    let mut keep_count = 0;
+    let mut r = 0;
+    while r < rc {
+        let should_delete = eval_compound_where(d, cs, cc, rs, r, tname, d.alias1);
+        if !should_delete {
+            vec_push(keep_rows, r);
+            keep_count = keep_count + 1;
+        }
+        r = r + 1;
+    }
+
+    let deleted = rc - keep_count;
+    if deleted == 0 { return; }
+
+    // Rebuild cells: copy non-table cells, then kept rows, then rest
+    let total_cells = vec_len(d.cells);
+    let mut new_cells: Vec<i32> = vec![];
+
+    // Copy cells before this table's rows
+    let mut ci: i64 = 0;
+    while ci < rs {
+        vec_push(new_cells, vec_get(d.cells, ci));
+        ci = ci + 1;
+    }
+
+    // Copy kept rows
+    let mut ki = 0;
+    while ki < keep_count {
+        let row = vec_get(keep_rows, ki);
+        let mut col = 0;
+        while col < cc {
+            vec_push(new_cells, vec_get(d.cells, rs + row * cc + col));
+            col = col + 1;
+        }
+        ki = ki + 1;
+    }
+
+    // Copy cells after this table's rows
+    let after = rs + rc * cc;
+    ci = after;
+    while ci < total_cells {
+        vec_push(new_cells, vec_get(d.cells, ci));
+        ci = ci + 1;
+    }
+    d.cells = new_cells;
+
+    // Update row count
+    let mut new_rc: Vec<i32> = vec![];
+    let mut ri = 0;
+    while ri < d.tbl_count {
+        if ri == tidx { vec_push(new_rc, keep_count); }
+        else { vec_push(new_rc, vec_get(d.tbl_row_counts, ri)); }
+        ri = ri + 1;
+    }
+    d.tbl_row_counts = new_rc;
+
+    // Update row_starts for tables after this one
+    let shift = deleted * cc;
+    let mut new_rs: Vec<i32> = vec![];
+    let mut si = 0;
+    while si < d.tbl_count {
+        if si > tidx {
+            vec_push(new_rs, vec_get(d.tbl_row_starts, si) - shift);
+        } else {
+            vec_push(new_rs, vec_get(d.tbl_row_starts, si));
+        }
+        si = si + 1;
+    }
+    d.tbl_row_starts = new_rs;
+
+    update_indexes_for_table(d, tidx);
+}
+
+fn exec_drop(d: &mut DB) {
+    let tname = sp_get(d, d.p_table);
+    let tidx = find_table(d, tname);
+    if tidx < 0 {
+        println!("Error: table '{}' not found", tname);
+        return;
+    }
+
+    let cs = vec_get(d.tbl_col_starts, tidx);
+    let cc = vec_get(d.tbl_col_counts, tidx);
+    let rs = vec_get(d.tbl_row_starts, tidx);
+    let rc = vec_get(d.tbl_row_counts, tidx);
+    let cell_count = rc * cc;
+
+    // Rebuild all arrays without this table
+
+    // Remove cells
+    let total_cells = vec_len(d.cells);
+    let mut new_cells: Vec<i32> = vec![];
+    let mut ci: i64 = 0;
+    while ci < rs {
+        vec_push(new_cells, vec_get(d.cells, ci));
+        ci = ci + 1;
+    }
+    ci = rs + cell_count;
+    while ci < total_cells {
+        vec_push(new_cells, vec_get(d.cells, ci));
+        ci = ci + 1;
+    }
+    d.cells = new_cells;
+
+    // Remove column defs
+    let total_cols = vec_len(d.col_names);
+    let mut new_cn: Vec<i32> = vec![];
+    let mut new_ct: Vec<i32> = vec![];
+    let mut coi: i64 = 0;
+    while coi < total_cols {
+        if coi < cs || coi >= cs + cc {
+            vec_push(new_cn, vec_get(d.col_names, coi));
+            vec_push(new_ct, vec_get(d.col_types, coi));
+        }
+        coi = coi + 1;
+    }
+    d.col_names = new_cn;
+    d.col_types = new_ct;
+
+    // Rebuild table arrays
+    let mut new_tn: Vec<i32> = vec![];
+    let mut new_tcs: Vec<i32> = vec![];
+    let mut new_tcc: Vec<i32> = vec![];
+    let mut new_trs: Vec<i32> = vec![];
+    let mut new_trc: Vec<i32> = vec![];
+    let mut ti = 0;
+    while ti < d.tbl_count {
+        if ti != tidx {
+            vec_push(new_tn, vec_get(d.tbl_names, ti));
+            let old_cs = vec_get(d.tbl_col_starts, ti);
+            let adj_cs = if ti > tidx { old_cs - cc } else { old_cs };
+            vec_push(new_tcs, adj_cs);
+            vec_push(new_tcc, vec_get(d.tbl_col_counts, ti));
+            let old_rs = vec_get(d.tbl_row_starts, ti);
+            let adj_rs = if ti > tidx { old_rs - cell_count } else { old_rs };
+            vec_push(new_trs, adj_rs);
+            vec_push(new_trc, vec_get(d.tbl_row_counts, ti));
+        }
+        ti = ti + 1;
+    }
+    d.tbl_names = new_tn;
+    d.tbl_col_starts = new_tcs;
+    d.tbl_col_counts = new_tcc;
+    d.tbl_row_starts = new_trs;
+    d.tbl_row_counts = new_trc;
+    d.tbl_count = d.tbl_count - 1;
+}
+
+// =============================================================================
+// HELPERS
+// =============================================================================
+
+fn find_col(d: &DB, cs: i32, cc: i32, name: String) -> i32 {
+    let mut i = 0;
+    while i < cc {
+        let cn = sp_get(d, vec_get(d.col_names, cs + i));
+        if cn == name { return i; }
+        i = i + 1;
+    }
+    0 - 1
+}
+
+fn eval_where(cell_val: String, op: i32, rval: String) -> bool {
+    // Try numeric comparison first
+    let cv_num = cell_val.parse_float();
+    let rv_num = rval.parse_float();
+    let is_num_cmp = is_numeric_str(cell_val) && is_numeric_str(rval);
+
+    if is_num_cmp {
+        if op == 0 { return cv_num == rv_num; }
+        if op == 1 { return cv_num < rv_num; }
+        if op == 2 { return cv_num > rv_num; }
+        if op == 3 { return cv_num <= rv_num; }
+        if op == 4 { return cv_num >= rv_num; }
+        if op == 5 { return cv_num != rv_num; }
+    }
+    // String comparison
+    let cmp = cell_val.compare(rval);
+    if op == 0 { return cmp == 0; }
+    if op == 1 { return cmp < 0; }
+    if op == 2 { return cmp > 0; }
+    if op == 3 { return cmp <= 0; }
+    if op == 4 { return cmp >= 0; }
+    if op == 5 { return cmp != 0; }
+    false
+}
+
+fn is_numeric_str(s: String) -> bool {
+    let slen = s.len();
+    if slen == 0 { return false; }
+    let mut i = 0;
+    let first = s.char_at(0);
+    if first == "-" { i = 1; }
+    if i >= slen { return false; }
+    let d0 = s.char_at(i);
+    if !is_digit(d0) { return false; }
+    let mut has_dot = false;
+    while i < slen {
+        let ch = s.char_at(i);
+        if is_digit(ch) { i = i + 1; }
+        else if ch == "." {
+            if has_dot { return false; }
+            has_dot = true;
+            i = i + 1;
+        }
+        else { return false; }
+    }
+    true
+}
+
+fn sort_rows(d: &DB, rows: Vec<i32>, count: i32, rs: i32, cc: i32, ocol: i32, ocol_type: i32, desc: i32) -> Vec<i32> {
+    // Selection sort
+    let mut used: Vec<i32> = vec![];
+    let mut i = 0;
+    while i < count {
+        vec_push(used, 0);
+        i = i + 1;
+    }
+
+    let mut result: Vec<i32> = vec![];
+    let mut picked = 0;
+    while picked < count {
+        let mut best = 0 - 1;
+        let mut best_val = "";
+        let mut j = 0;
+        while j < count {
+            if vec_get(used, j) == 0 {
+                let row = vec_get(rows, j);
+                let val = sp_get(d, vec_get(d.cells, rs + row * cc + ocol));
+                if best < 0 {
+                    best = j;
+                    best_val = val;
+                } else {
+                    let cmp = compare_vals(val, best_val, ocol_type);
+                    if desc == 1 {
+                        if cmp > 0 { best = j; best_val = val; }
+                    } else {
+                        if cmp < 0 { best = j; best_val = val; }
+                    }
+                }
+            }
+            j = j + 1;
+        }
+        // Mark used
+        let mut new_used: Vec<i32> = vec![];
+        let mut k = 0;
+        while k < count {
+            if k == best { vec_push(new_used, 1); }
+            else { vec_push(new_used, vec_get(used, k)); }
+            k = k + 1;
+        }
+        used = new_used;
+        vec_push(result, vec_get(rows, best));
+        picked = picked + 1;
+    }
+    result
+}
+
+fn compare_vals(a: String, b: String, col_type: i32) -> i64 {
+    if col_type == 0 || col_type == 1 {
+        let na = a.parse_float();
+        let nb = b.parse_float();
+        if na < nb { return 0 - 1; }
+        if na > nb { return 1; }
+        return 0;
+    }
+    a.compare(b)
+}
+
+fn pad_right(s: String, w: i32) -> String {
+    let slen = s.len();
+    let mut out = s;
+    let mut i = slen;
+    while i < w {
+        out = out + " ";
+        i = i + 1;
+    }
+    out
+}
+
+fn pad_left(s: String, w: i32) -> String {
+    let slen = s.len();
+    let mut out = "";
+    let mut i = slen;
+    while i < w {
+        out = out + " ";
+        i = i + 1;
+    }
+    out + s
+}
+
+fn make_dashes(w: i32) -> String {
+    let mut out = "";
+    let mut i = 0;
+    while i < w {
+        out = out + "-";
+        i = i + 1;
+    }
+    out
+}
+
+// =============================================================================
+// NUMERIC/STRING CONVERSION HELPERS
+// =============================================================================
+
+fn int_to_str(n: i32) -> String {
+    if n == 0 { return "0"; }
+    let mut val = n;
+    let mut neg = false;
+    if val < 0 { neg = true; val = 0 - val; }
+    let mut out = "";
+    let mut go = true;
+    while go {
+        if val == 0 { go = false; }
+        else {
+            let digit = val - (val / 10) * 10;
+            let ch = if digit == 0 { "0" } else if digit == 1 { "1" }
+                else if digit == 2 { "2" } else if digit == 3 { "3" }
+                else if digit == 4 { "4" } else if digit == 5 { "5" }
+                else if digit == 6 { "6" } else if digit == 7 { "7" }
+                else if digit == 8 { "8" } else { "9" };
+            out = ch + out;
+            val = val / 10;
+        }
+    }
+    if neg { out = "-" + out; }
+    out
+}
+
+fn digit_char(d: i32) -> String {
+    if d == 0 { return "0"; }
+    if d == 1 { return "1"; }
+    if d == 2 { return "2"; }
+    if d == 3 { return "3"; }
+    if d == 4 { return "4"; }
+    if d == 5 { return "5"; }
+    if d == 6 { return "6"; }
+    if d == 7 { return "7"; }
+    if d == 8 { return "8"; }
+    "9"
+}
+
+fn float_to_str(f: f64) -> String {
+    // Handle zero
+    if f == 0.0 { return "0"; }
+    let neg = f < 0.0;
+    let abs_f = if neg { 0.0 - f } else { f };
+    // Multiply by 100, round to integer, then extract int and decimal parts
+    // Use i32 cast via parse trick: format as int
+    let scaled = abs_f * 100.0 + 0.5;
+    // Floor to integer by subtracting 0.5 and comparing
+    let int_val = parse_int_str(int_part_str(scaled));
+    let int_portion = int_val / 100;
+    let rem = int_val - int_portion * 100;
+    let d1 = rem / 10;
+    let d0 = rem - d1 * 10;
+    let int_str = int_to_str(int_portion);
+    let prefix = if neg { "-" + int_str } else { int_str };
+    if d1 == 0 && d0 == 0 { return prefix; }
+    if d0 == 0 { return prefix + "." + digit_char(d1); }
+    prefix + "." + digit_char(d1) + digit_char(d0)
+}
+
+// Extract integer part of a float as a string (manual floor)
+fn int_part_str(f: f64) -> String {
+    // Build string by extracting digits from the integer portion
+    if f < 1.0 { return "0"; }
+    let mut result = "";
+    let mut remaining = f;
+    // Find the largest power of 10
+    let mut pow10 = 1.0;
+    let mut going = true;
+    while going {
+        if pow10 * 10.0 > remaining { going = false; }
+        else { pow10 = pow10 * 10.0; }
+    }
+    // Extract digits
+    let mut extracting = true;
+    while extracting {
+        if pow10 < 1.0 { extracting = false; }
+        else {
+            let mut digit = 0;
+            let mut sub = true;
+            while sub {
+                if remaining >= pow10 {
+                    remaining = remaining - pow10;
+                    digit = digit + 1;
+                } else { sub = false; }
+            }
+            result = result + digit_char(digit);
+            pow10 = pow10 / 10.0;
+        }
+    }
+    if result == "" { return "0"; }
+    result
+}
+
+// =============================================================================
+// VEC HELPER: rebuild vec with one element replaced
+// =============================================================================
+fn vec_replace(v: Vec<i32>, vlen: i32, idx: i32, new_val: i32) -> Vec<i32> {
+    let mut result: Vec<i32> = vec![];
+    let mut i = 0;
+    while i < vlen {
+        if i == idx { vec_push(result, new_val); }
+        else { vec_push(result, vec_get(v, i)); }
+        i = i + 1;
+    }
+    result
+}
+
+// =============================================================================
+// PRINT HELPERS
+// =============================================================================
+
+fn print_result_row(d: &DB, headers: Vec<i32>, results: Vec<i32>, count: i32) {
+    // Calculate widths
+    let mut widths: Vec<i32> = vec![];
+    let mut wi = 0;
+    while wi < count {
+        let hdr = sp_get(d, vec_get(headers, wi));
+        let val = sp_get(d, vec_get(results, wi));
+        let hw = hdr.len();
+        let vw = val.len();
+        let w = if hw > vw { hw } else { vw };
+        vec_push(widths, w);
+        wi = wi + 1;
+    }
+    // Print header
+    let mut hdr_line = "";
+    let mut sep_line = "";
+    let mut hi = 0;
+    while hi < count {
+        if hi > 0 { hdr_line = hdr_line + " | "; sep_line = sep_line + "-+-"; }
+        let hdr = sp_get(d, vec_get(headers, hi));
+        let w = vec_get(widths, hi);
+        hdr_line = hdr_line + pad_right(hdr, w);
+        sep_line = sep_line + make_dashes(w);
+        hi = hi + 1;
+    }
+    println!("{}", hdr_line);
+    println!("{}", sep_line);
+    // Print value row
+    let mut row_line = "";
+    let mut ri = 0;
+    while ri < count {
+        if ri > 0 { row_line = row_line + " | "; }
+        let val = sp_get(d, vec_get(results, ri));
+        let w = vec_get(widths, ri);
+        row_line = row_line + pad_right(val, w);
+        ri = ri + 1;
+    }
+    println!("{}", row_line);
+}
+
+// =============================================================================
+// INDEX OPERATIONS
+// =============================================================================
+
+// Find an index on table tidx, column col_idx. Returns index id or -1.
+fn find_index_for(d: &DB, tidx: i32, col_idx: i32) -> i32 {
+    let mut i = 0;
+    while i < d.idx_count {
+        if vec_get(d.idx_tables, i) == tidx {
+            if vec_get(d.idx_col_indices, i) == col_idx {
+                return i;
+            }
+        }
+        i = i + 1;
+    }
+    0 - 1
+}
+
+// Rebuild index data from table rows (called after load or create)
+fn rebuild_index(d: &mut DB, ix_id: i32) {
+    let tidx = vec_get(d.idx_tables, ix_id);
+    let col_i = vec_get(d.idx_col_indices, ix_id);
+    let cs = vec_get(d.tbl_col_starts, tidx);
+    let cc = vec_get(d.tbl_col_counts, tidx);
+    let rs = vec_get(d.tbl_row_starts, tidx);
+    let rc = vec_get(d.tbl_row_counts, tidx);
+
+    // Collect (key_pool_id, row_index) pairs
+    let mut keys: Vec<i32> = vec![];
+    let mut rowids: Vec<i32> = vec![];
+    let mut r = 0;
+    while r < rc {
+        let cell_id = vec_get(d.cells, rs + r * cc + col_i);
+        vec_push(keys, cell_id);
+        vec_push(rowids, r);
+        r = r + 1;
+    }
+
+    // Sort by key value (numeric if possible, else string) using selection sort
+    let col_type = vec_get(d.col_types, cs + col_i);
+    let mut sorted_keys: Vec<i32> = vec![];
+    let mut sorted_rowids: Vec<i32> = vec![];
+    let mut used: Vec<i32> = vec![];
+    let mut ui = 0;
+    while ui < rc {
+        vec_push(used, 0);
+        ui = ui + 1;
+    }
+    let mut picked = 0;
+    while picked < rc {
+        let mut best = 0 - 1;
+        let mut best_val = "";
+        let mut j = 0;
+        while j < rc {
+            if vec_get(used, j) == 0 {
+                let kval = sp_get(d, vec_get(keys, j));
+                if best < 0 {
+                    best = j;
+                    best_val = kval;
+                } else {
+                    let cmp = compare_vals(kval, best_val, col_type);
+                    if cmp < 0 { best = j; best_val = kval; }
+                }
+            }
+            j = j + 1;
+        }
+        let mut new_used: Vec<i32> = vec![];
+        let mut k = 0;
+        while k < rc {
+            if k == best { vec_push(new_used, 1); }
+            else { vec_push(new_used, vec_get(used, k)); }
+            k = k + 1;
+        }
+        used = new_used;
+        vec_push(sorted_keys, vec_get(keys, best));
+        vec_push(sorted_rowids, vec_get(rowids, best));
+        picked = picked + 1;
+    }
+
+    // Replace this index's key data in the flattened arrays
+    // Since we can't do random writes, rebuild the entire idx_keys/idx_rowids arrays
+    let old_start = vec_get(d.idx_key_starts, ix_id);
+    let old_count = vec_get(d.idx_key_counts, ix_id);
+    let total_keys = vec_len(d.idx_keys);
+
+    let mut new_keys: Vec<i32> = vec![];
+    let mut new_rowids: Vec<i32> = vec![];
+    // Copy keys before this index
+    let mut ci2 = 0;
+    while ci2 < old_start {
+        vec_push(new_keys, vec_get(d.idx_keys, ci2));
+        vec_push(new_rowids, vec_get(d.idx_rowids, ci2));
+        ci2 = ci2 + 1;
+    }
+    // Insert new sorted keys
+    let mut ni = 0;
+    while ni < rc {
+        vec_push(new_keys, vec_get(sorted_keys, ni));
+        vec_push(new_rowids, vec_get(sorted_rowids, ni));
+        ni = ni + 1;
+    }
+    // Copy keys after this index
+    ci2 = old_start + old_count;
+    while ci2 < total_keys {
+        vec_push(new_keys, vec_get(d.idx_keys, ci2));
+        vec_push(new_rowids, vec_get(d.idx_rowids, ci2));
+        ci2 = ci2 + 1;
+    }
+    d.idx_keys = new_keys;
+    d.idx_rowids = new_rowids;
+
+    // Update key count
+    let size_diff = rc - old_count;
+    d.idx_key_counts = vec_replace(d.idx_key_counts, d.idx_count, ix_id, rc);
+    // Update starts for indexes after this one
+    let mut si2 = 0;
+    let mut new_starts: Vec<i32> = vec![];
+    while si2 < d.idx_count {
+        if si2 > ix_id {
+            vec_push(new_starts, vec_get(d.idx_key_starts, si2) + size_diff);
+        } else {
+            vec_push(new_starts, vec_get(d.idx_key_starts, si2));
+        }
+        si2 = si2 + 1;
+    }
+    d.idx_key_starts = new_starts;
+}
+
+// Binary search scan: returns row indices matching the WHERE condition
+fn index_scan(d: &DB, ix_id: i32, op: i32, rval: String) -> Vec<i32> {
+    let ks = vec_get(d.idx_key_starts, ix_id);
+    let kc = vec_get(d.idx_key_counts, ix_id);
+    let tidx = vec_get(d.idx_tables, ix_id);
+    let col_i = vec_get(d.idx_col_indices, ix_id);
+    let tcs = vec_get(d.tbl_col_starts, tidx);
+    let col_type = vec_get(d.col_types, tcs + col_i);
+
+    let mut result: Vec<i32> = vec![];
+
+    if op == 0 {
+        // Equality: binary search for the value
+        let mut lo = 0;
+        let mut hi = kc - 1;
+        let mut found_pos = 0 - 1;
+        let mut searching = true;
+        while searching {
+            if lo > hi { searching = false; }
+            else {
+                let mid = (lo + hi) / 2;
+                let mval = sp_get(d, vec_get(d.idx_keys, ks + mid));
+                let cmp = compare_vals(mval, rval, col_type);
+                if cmp == 0 { found_pos = mid; searching = false; }
+                else if cmp < 0 { lo = mid + 1; }
+                else { hi = mid - 1; }
+            }
+        }
+        if found_pos >= 0 {
+            // Scan left and right for duplicates
+            let mut left = found_pos;
+            let mut lgo = true;
+            while lgo {
+                if left <= 0 { lgo = false; }
+                else {
+                    let lv = sp_get(d, vec_get(d.idx_keys, ks + left - 1));
+                    let lc = compare_vals(lv, rval, col_type);
+                    if lc == 0 { left = left - 1; }
+                    else { lgo = false; }
+                }
+            }
+            let mut right = found_pos;
+            let mut rgo = true;
+            while rgo {
+                if right >= kc - 1 { rgo = false; }
+                else {
+                    let rv = sp_get(d, vec_get(d.idx_keys, ks + right + 1));
+                    let rc2 = compare_vals(rv, rval, col_type);
+                    if rc2 == 0 { right = right + 1; }
+                    else { rgo = false; }
+                }
+            }
+            let mut si3 = left;
+            while si3 <= right {
+                vec_push(result, vec_get(d.idx_rowids, ks + si3));
+                si3 = si3 + 1;
+            }
+        }
+    } else {
+        // For range queries, linear scan the sorted index
+        // (could be optimized with binary search to find start point)
+        let mut si3 = 0;
+        while si3 < kc {
+            let kval = sp_get(d, vec_get(d.idx_keys, ks + si3));
+            if eval_where(kval, op, rval) {
+                vec_push(result, vec_get(d.idx_rowids, ks + si3));
+            }
+            si3 = si3 + 1;
+        }
+    }
+    result
+}
+
+// Update all indexes for a table after INSERT (rebuild affected indexes)
+fn update_indexes_for_table(d: &mut DB, tidx: i32) {
+    let mut i = 0;
+    while i < d.idx_count {
+        if vec_get(d.idx_tables, i) == tidx {
+            rebuild_index(d, i);
+        }
+        i = i + 1;
+    }
+}
+
+// =============================================================================
+// CREATE INDEX EXECUTION
+// =============================================================================
+fn exec_create_index(d: &mut DB) {
+    let iname = sp_get(d, d.idx_name);
+    let tname = sp_get(d, d.idx_table_name);
+    let cname = sp_get(d, d.idx_col_name);
+
+    let tidx = find_table(d, tname);
+    if tidx < 0 {
+        println!("Error: table '{}' not found", tname);
+        return;
+    }
+    let cs = vec_get(d.tbl_col_starts, tidx);
+    let cc = vec_get(d.tbl_col_counts, tidx);
+    let col_i = find_col(d, cs, cc, cname);
+    if col_i < 0 {
+        println!("Error: column '{}' not found in table '{}'", cname, tname);
+        return;
+    }
+
+    // Check for existing index with same name
+    let mut ei = 0;
+    while ei < d.idx_count {
+        let existing_name = sp_get(d, vec_get(d.idx_names, ei));
+        if existing_name == iname {
+            println!("Error: index '{}' already exists", iname);
+            return;
+        }
+        ei = ei + 1;
+    }
+
+    let inid = sp_add(d, iname);
+    vec_push(d.idx_names, inid);
+    vec_push(d.idx_tables, tidx);
+    vec_push(d.idx_col_indices, col_i);
+    vec_push(d.idx_key_starts, vec_len(d.idx_keys));
+    vec_push(d.idx_key_counts, 0);
+    d.idx_count = d.idx_count + 1;
+
+    // Build index data from existing rows
+    rebuild_index(d, d.idx_count - 1);
+}
+
+// =============================================================================
+// DISPATCH
+// =============================================================================
+
+// exec_sql_no_wal: used during WAL replay — executes + saves directly, no WAL logging
+fn exec_sql_no_wal(d: &mut DB, input: String) {
+    reset_parser(d, input);
+    parse_sql(d);
+    let st = d.stmt_type;
+    if st == 0 { exec_select(d); }
+    else if st == 1 { exec_insert(d); }
+    else if st == 2 { exec_create(d); }
+    else if st == 3 { exec_update(d); }
+    else if st == 4 { exec_delete(d); }
+    else if st == 5 { exec_drop(d); }
+    else if st == 6 { exec_create_index(d); }
+    else if st == 7 { wal_begin(d); }
+    else if st == 8 { wal_commit(d); }
+    else if st == 9 { wal_rollback(d); }
+}
+
+fn exec_sql(d: &mut DB, input: String) {
+    // Handle transaction control keywords before parsing
+    let trimmed_upper = input.to_uppercase();
+    if trimmed_upper == "BEGIN" {
+        wal_begin(d);
+        return;
+    }
+    if trimmed_upper == "COMMIT" {
+        wal_commit(d);
+        return;
+    }
+    if trimmed_upper == "ROLLBACK" {
+        wal_rollback(d);
+        return;
+    }
+
+    reset_parser(d, input);
+    parse_sql(d);
+    let st = d.stmt_type;
+
+    // Read-only: SELECT — no WAL
+    if st == 0 { exec_select(d); return; }
+
+    // Mutations: log to WAL, then execute in memory
+    if st == 1 { exec_insert(d); wal_log_mutation(d, input); }
+    else if st == 2 { exec_create(d); wal_log_mutation(d, input); }
+    else if st == 3 { exec_update(d); wal_log_mutation(d, input); }
+    else if st == 4 { exec_delete(d); wal_log_mutation(d, input); }
+    else if st == 5 { exec_drop(d); wal_log_mutation(d, input); }
+    else if st == 6 { exec_create_index(d); wal_log_mutation(d, input); }
+}
+
+// =============================================================================
+// REPL DOT-COMMANDS
+// =============================================================================
+
+fn cmd_tables(d: &DB) {
+    let mut i = 0;
+    while i < d.tbl_count {
+        let tn = sp_get(d, vec_get(d.tbl_names, i));
+        println!("{}", tn);
+        i = i + 1;
+    }
+}
+
+fn cmd_schema(d: &DB, tname: String) {
+    let tidx = find_table(d, tname);
+    if tidx < 0 {
+        println!("Error: table '{}' not found", tname);
+        return;
+    }
+    let cs = vec_get(d.tbl_col_starts, tidx);
+    let cc = vec_get(d.tbl_col_counts, tidx);
+    let tn = sp_get(d, vec_get(d.tbl_names, tidx));
+    let mut out = "CREATE TABLE " + tn + " (";
+    let mut ci = 0;
+    while ci < cc {
+        if ci > 0 { out = out + ", "; }
+        let cname = sp_get(d, vec_get(d.col_names, cs + ci));
+        let ct = vec_get(d.col_types, cs + ci);
+        let tstr = if ct == 0 { "INTEGER" } else if ct == 1 { "REAL" } else { "TEXT" };
+        out = out + cname + " " + tstr;
+        ci = ci + 1;
+    }
+    out = out + ");";
+    println!("{}", out);
+}
+
+// =============================================================================
+// REPL
+// =============================================================================
+
+fn run_repl(d: &mut DB) {
+    let mut go = true;
+    while go {
+        print!("qdb> ");
+        let line = read_line();
+        let llen = line.len();
+        // Strip trailing \n and \r
+        let mut clean = line;
+        let clen = clean.len();
+        if clen > 0 {
+            let last = clean.char_at(clen - 1);
+            if last == "\n" { clean = clean.substring(0, clen - 1); }
+        }
+        let clen2 = clean.len();
+        if clen2 > 0 {
+            let last2 = clean.char_at(clen2 - 1);
+            if last2 == "\r" { clean = clean.substring(0, clen2 - 1); }
+        }
+
+        let trimmed = clean.trim();
+        let tlen = trimmed.len();
+        if tlen == 0 {
+            // skip
+        } else if trimmed == ".quit" || trimmed == ".exit" {
+            go = false;
+        } else if trimmed == ".tables" {
+            cmd_tables(d);
+        } else if trimmed == ".wal" {
+            cmd_wal(d);
+        } else if trimmed.starts_with(".schema") {
+            if tlen > 8 {
+                let tname = trimmed.substring(8, tlen - 8);
+                cmd_schema(d, tname.trim());
+            } else {
+                // Show all tables
+                let mut ti = 0;
+                while ti < d.tbl_count {
+                    let tn = sp_get(d, vec_get(d.tbl_names, ti));
+                    cmd_schema(d, tn);
+                    ti = ti + 1;
+                }
+            }
+        } else {
+            // Strip trailing semicolon
+            let mut sql = trimmed;
+            let sql_len = sql.len();
+            if sql_len > 0 {
+                let last_ch = sql.char_at(sql_len - 1);
+                if last_ch == ";" {
+                    sql = sql.substring(0, sql_len - 1);
+                }
+            }
+            let sql_trimmed = sql.trim();
+            if sql_trimmed.len() > 0 {
+                exec_sql(d, sql_trimmed);
+            }
+        }
+    }
+}
+
+// =============================================================================
+// MAIN
+// =============================================================================
+
+fn main() {
+    let nargs = args_count();
+    if nargs < 2 {
+        println!("Usage: qdb <database> [sql]");
+        println!("       qdb <database>          — interactive REPL mode");
+        process_exit(0);
+    }
+
+    let db_path = args_get(1);
+    let mut d = db_new(db_path);
+    db_load(&mut d);
+    // Replay any committed transactions from WAL (crash recovery)
+    wal_replay(&mut d);
+
+    if nargs >= 3 {
+        // Single command mode
+        let sql = args_get(2);
+        // Strip trailing semicolon
+        let slen = sql.len();
+        let mut clean_sql = sql;
+        if slen > 0 {
+            let last = sql.char_at(slen - 1);
+            if last == ";" {
+                clean_sql = sql.substring(0, slen - 1);
+            }
+        }
+        let trimmed = clean_sql.trim();
+        if trimmed.len() > 0 {
+            exec_sql(&mut d, trimmed);
+        }
+    } else {
+        // REPL mode
+        run_repl(&mut d);
+    }
+}
