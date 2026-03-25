@@ -4,7 +4,12 @@
 // Steps 3-6 of the SQLite roadmap: table storage engine + integrated SQL
 // parser with advanced features. Supports:
 //   - CREATE TABLE, INSERT, SELECT, UPDATE, DELETE, DROP TABLE
+//   - ALTER TABLE ADD COLUMN
 //   - WHERE with AND/OR compound conditions
+//   - LIKE operator (%, starts_with/ends_with/contains patterns)
+//   - IN operator (value list membership)
+//   - IS NULL / IS NOT NULL
+//   - Scalar subqueries in WHERE: (SELECT AVG(...) FROM ...)
 //   - ORDER BY, LIMIT, COUNT(*)
 //   - JOIN (nested-loop) with table aliases
 //   - GROUP BY with aggregates: COUNT(*), SUM, AVG, MIN, MAX
@@ -16,6 +21,11 @@
 // Usage:
 //   qdb test.db "CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)"
 //   qdb test.db "SELECT * FROM users WHERE age > 24 AND name = 'Zain'"
+//   qdb test.db "SELECT * FROM users WHERE name LIKE 'Z%'"
+//   qdb test.db "SELECT * FROM users WHERE dept IN ('eng', 'sales')"
+//   qdb test.db "SELECT * FROM users WHERE email IS NULL"
+//   qdb test.db "SELECT * FROM users WHERE age > (SELECT AVG(age) FROM users)"
+//   qdb test.db "ALTER TABLE users ADD COLUMN email TEXT"
 //   qdb test.db "SELECT u.name, o.total FROM users u JOIN orders o ON u.id = o.user_id"
 //   qdb test.db "SELECT dept, AVG(salary) FROM employees GROUP BY dept"
 //   qdb test.db "CREATE INDEX idx_age ON users (age)"
@@ -139,6 +149,17 @@ struct DB {
     idx_table_name: i32,
     idx_col_name: i32,
 
+    // IN operator: list of values for WHERE col IN (...)
+    // w_in_vals1 / w_in_count1 for first condition, w_in_vals2 / w_in_count2 for second
+    w_in_vals1: Vec<i32>,
+    w_in_count1: i32,
+    w_in_vals2: Vec<i32>,
+    w_in_count2: i32,
+
+    // ALTER TABLE state
+    alter_col_name: i32,
+    alter_col_type: i32,
+
     // WAL state
     wal_path: String,
     in_transaction: bool,
@@ -193,6 +214,9 @@ fn db_new(db_path: String) -> DB {
         has_join: 0, join_table: -1, join_left_col: -1, join_right_col: -1,
         alias1: -1, alias2: -1,
         idx_name: -1, idx_table_name: -1, idx_col_name: -1,
+        w_in_vals1: vec![], w_in_count1: 0,
+        w_in_vals2: vec![], w_in_count2: 0,
+        alter_col_name: -1, alter_col_type: -1,
         wal_path: wp,
         in_transaction: false,
         txn_id: 0,
@@ -384,6 +408,7 @@ fn db_load(d: &mut DB) {
                 let row_str = clean.substring(4, clen2 - 4);
                 let rlen = row_str.len();
                 let mut rp: i64 = 0;
+                let mut cell_count_in_row = 0;
                 let mut rgo = true;
                 while rgo {
                     if rp >= rlen { rgo = false; }
@@ -400,7 +425,18 @@ fn db_load(d: &mut DB) {
                         }
                         let cid = sp_add(d, cell_val);
                         vec_push(d.cells, cid);
+                        cell_count_in_row = cell_count_in_row + 1;
                     }
+                }
+                // Pad with empty cells if row has fewer cells than schema columns
+                // (handles trailing pipe for NULL/empty values)
+                let tidx = d.tbl_count - 1;
+                let expected_cc = vec_get(d.tbl_col_counts, tidx);
+                let mut pad_i = cell_count_in_row;
+                while pad_i < expected_cc {
+                    let empty_id = sp_add(d, "");
+                    vec_push(d.cells, empty_id);
+                    pad_i = pad_i + 1;
                 }
                 // Increment row count for current table
                 let tidx = d.tbl_count - 1;
@@ -844,6 +880,12 @@ fn is_keyword(word: String) -> i32 {
     if u == "BEGIN" { return 1; }
     if u == "COMMIT" { return 1; }
     if u == "ROLLBACK" { return 1; }
+    if u == "LIKE" { return 1; }
+    if u == "IN" { return 1; }
+    if u == "IS" { return 1; }
+    if u == "ALTER" { return 1; }
+    if u == "ADD" { return 1; }
+    if u == "COLUMN" { return 1; }
     0
 }
 
@@ -991,6 +1033,7 @@ fn op_encode(op: String) -> i32 {
     if op == ">=" { return 4; }
     if op == "<>" { return 5; }
     if op == "!=" { return 5; }
+    // 6=LIKE, 7=IN, 8=IS_NULL, 9=IS_NOT_NULL (set directly by parser)
     0 - 1
 }
 
@@ -1042,6 +1085,12 @@ fn reset_parser(d: &mut DB, input: String) {
     d.idx_name = -1;
     d.idx_table_name = -1;
     d.idx_col_name = -1;
+    d.w_in_vals1 = vec![];
+    d.w_in_count1 = 0;
+    d.w_in_vals2 = vec![];
+    d.w_in_count2 = 0;
+    d.alter_col_name = -1;
+    d.alter_col_type = -1;
 }
 
 fn parse_sql(d: &mut DB) {
@@ -1059,6 +1108,7 @@ fn parse_sql(d: &mut DB) {
     if tk_is_kw(d, "UPDATE") == 1 { parse_update(d); return; }
     if tk_is_kw(d, "DELETE") == 1 { parse_delete(d); return; }
     if tk_is_kw(d, "DROP") == 1 { parse_drop(d); return; }
+    if tk_is_kw(d, "ALTER") == 1 { parse_alter_table(d); return; }
     println!("Error: unrecognized statement starting with '{}'", d.tk_val);
     process_exit(1);
 }
@@ -1328,42 +1378,399 @@ fn parse_drop(d: &mut DB) {
     next_token(d);
 }
 
+// Parse a single WHERE condition: handles normal ops, LIKE, IN, IS NULL, IS NOT NULL, subqueries
+fn parse_where_cond(d: &mut DB, which: i32) {
+    // which: 1 = first condition, 2 = second condition
+    let lref = read_col_ref(d);
+    let left_id = sp_add(d, lref);
+
+    // Check for LIKE
+    if tk_is_kw(d, "LIKE") == 1 {
+        next_token(d);
+        let pattern = d.tk_val;
+        let pat_id = sp_add(d, pattern);
+        next_token(d);
+        if which == 1 {
+            d.w_left = left_id;
+            d.w_op = 6;
+            d.w_right = pat_id;
+        } else {
+            d.w_left2 = left_id;
+            d.w_op2 = 6;
+            d.w_right2 = pat_id;
+        }
+        return;
+    }
+
+    // Check for IN
+    if tk_is_kw(d, "IN") == 1 {
+        next_token(d);
+        expect_punct(d, "(");
+        // Check for subquery: IN (SELECT ...)
+        if tk_is_kw(d, "SELECT") == 1 {
+            let sub_result = parse_and_exec_subquery(d);
+            let rid = sp_add(d, sub_result);
+            if which == 1 {
+                d.w_left = left_id;
+                d.w_op = 0;
+                d.w_right = rid;
+            } else {
+                d.w_left2 = left_id;
+                d.w_op2 = 0;
+                d.w_right2 = rid;
+            }
+            expect_punct(d, ")");
+        } else {
+            // Parse value list
+            let mut vals: Vec<i32> = vec![];
+            let mut vcount = 0;
+            let mut go = true;
+            while go {
+                let vtext = d.tk_val;
+                let vid = sp_add(d, vtext);
+                vec_push(vals, vid);
+                vcount = vcount + 1;
+                next_token(d);
+                if tk_is_punct(d, ",") == 1 { next_token(d); }
+                else { go = false; }
+            }
+            expect_punct(d, ")");
+            if which == 1 {
+                d.w_left = left_id;
+                d.w_op = 7;
+                d.w_right = -1;
+                d.w_in_vals1 = vals;
+                d.w_in_count1 = vcount;
+            } else {
+                d.w_left2 = left_id;
+                d.w_op2 = 7;
+                d.w_right2 = -1;
+                d.w_in_vals2 = vals;
+                d.w_in_count2 = vcount;
+            }
+        }
+        return;
+    }
+
+    // Check for IS NULL / IS NOT NULL
+    if tk_is_kw(d, "IS") == 1 {
+        next_token(d);
+        if tk_is_kw(d, "NOT") == 1 {
+            next_token(d);
+            expect_kw(d, "NULL");
+            if which == 1 {
+                d.w_left = left_id;
+                d.w_op = 9;
+                d.w_right = -1;
+            } else {
+                d.w_left2 = left_id;
+                d.w_op2 = 9;
+                d.w_right2 = -1;
+            }
+        } else {
+            expect_kw(d, "NULL");
+            if which == 1 {
+                d.w_left = left_id;
+                d.w_op = 8;
+                d.w_right = -1;
+            } else {
+                d.w_left2 = left_id;
+                d.w_op2 = 8;
+                d.w_right2 = -1;
+            }
+        }
+        return;
+    }
+
+    // Normal operator: =, <, >, <=, >=, <>, !=
+    let op = d.tk_val;
+    let op_code = op_encode(op);
+    next_token(d);
+
+    // Check for scalar subquery: (SELECT ...)
+    if tk_is_punct(d, "(") == 1 {
+        next_token(d);
+        if tk_is_kw(d, "SELECT") == 1 {
+            let sub_result = parse_and_exec_subquery(d);
+            let rid = sp_add(d, sub_result);
+            expect_punct(d, ")");
+            if which == 1 {
+                d.w_left = left_id;
+                d.w_op = op_code;
+                d.w_right = rid;
+            } else {
+                d.w_left2 = left_id;
+                d.w_op2 = op_code;
+                d.w_right2 = rid;
+            }
+            return;
+        }
+    }
+
+    // Plain value
+    let rval = d.tk_val;
+    let rid = sp_add(d, rval);
+    next_token(d);
+    if which == 1 {
+        d.w_left = left_id;
+        d.w_op = op_code;
+        d.w_right = rid;
+    } else {
+        d.w_left2 = left_id;
+        d.w_op2 = op_code;
+        d.w_right2 = rid;
+    }
+}
+
 fn parse_where(d: &mut DB) {
     next_token(d);
     d.has_where = 1;
-    // First condition: read left (possibly dotted), operator, right
-    let lref = read_col_ref(d);
-    d.w_left = sp_add(d, lref);
-    let op = d.tk_val;
-    d.w_op = op_encode(op);
-    next_token(d);
-    let rval = d.tk_val;
-    d.w_right = sp_add(d, rval);
-    next_token(d);
+    parse_where_cond(d, 1);
     // Check for AND / OR
     if tk_is_kw(d, "AND") == 1 {
         d.w_logic = 1;
         next_token(d);
-        let lref2 = read_col_ref(d);
-        d.w_left2 = sp_add(d, lref2);
-        let op2 = d.tk_val;
-        d.w_op2 = op_encode(op2);
-        next_token(d);
-        let rval2 = d.tk_val;
-        d.w_right2 = sp_add(d, rval2);
-        next_token(d);
+        parse_where_cond(d, 2);
     } else if tk_is_kw(d, "OR") == 1 {
         d.w_logic = 2;
         next_token(d);
-        let lref2 = read_col_ref(d);
-        d.w_left2 = sp_add(d, lref2);
-        let op2 = d.tk_val;
-        d.w_op2 = op_encode(op2);
-        next_token(d);
-        let rval2 = d.tk_val;
-        d.w_right2 = sp_add(d, rval2);
-        next_token(d);
+        parse_where_cond(d, 2);
     }
+}
+
+// ALTER TABLE tname ADD COLUMN cname TYPE
+fn parse_alter_table(d: &mut DB) {
+    d.stmt_type = 10;
+    next_token(d);
+    expect_kw(d, "TABLE");
+    let tname = d.tk_val;
+    d.p_table = sp_add(d, tname);
+    next_token(d);
+    expect_kw(d, "ADD");
+    // COLUMN keyword is optional
+    if tk_is_kw(d, "COLUMN") == 1 { next_token(d); }
+    let cname = d.tk_val;
+    d.alter_col_name = sp_add(d, cname);
+    next_token(d);
+    let ctype = d.tk_val;
+    d.alter_col_type = sp_add(d, ctype);
+    next_token(d);
+}
+
+// Parse and immediately execute a scalar subquery.
+// The parser is currently pointing at the SELECT keyword inside "( SELECT ... )".
+// We save parser state, run the subquery, restore state, and return the scalar result.
+fn parse_and_exec_subquery(d: &mut DB) -> String {
+    // Capture the rest of the input from current position up to the matching ')'
+    // The SELECT keyword has been recognized but not consumed yet.
+    // We need to grab everything from d.pos (which is past SELECT keyword) up to
+    // the closing ')'. But tk_val is "SELECT" and pos has advanced past it.
+    // We need to collect the full subquery text.
+    let sub_start = d.pos;
+    // We know tk_val == "SELECT", so the subquery starts a bit before pos.
+    // Find the SELECT keyword start: it's pos - 6 (length of "SELECT")
+    // Actually, the tokenizer advanced pos past SELECT. Let's find the closing paren.
+    let mut depth = 1;
+    let mut scan_pos = d.pos;
+    let mut sgo = true;
+    while sgo {
+        if scan_pos >= d.ilen { sgo = false; }
+        else {
+            let sc = d.input.char_at(scan_pos);
+            if sc == "(" { depth = depth + 1; }
+            if sc == ")" {
+                depth = depth - 1;
+                if depth == 0 { sgo = false; }
+                else { scan_pos = scan_pos + 1; }
+            } else {
+                scan_pos = scan_pos + 1;
+            }
+        }
+    }
+    // The subquery SQL is "SELECT" + input[sub_start..scan_pos]
+    let rest_len = scan_pos - sub_start;
+    let rest_part = if rest_len > 0 { d.input.substring(sub_start, rest_len) } else { "" };
+    let sub_sql = "SELECT" + rest_part;
+
+    // Advance main parser past the closing ')'
+    // Set pos to scan_pos (pointing at ')'), then call next_token to consume it
+    d.pos = scan_pos;
+    // The ')' will be consumed by the caller via expect_punct
+
+    // Save main parser state
+    let save_input = d.input;
+    let save_ilen = d.ilen;
+    let save_pos = d.pos;
+    let save_tk_type = d.tk_type;
+    let save_tk_val = d.tk_val;
+    let save_stmt_type = d.stmt_type;
+    let save_p_table = d.p_table;
+    let save_p_cols = d.p_cols;
+    let save_p_col_count = d.p_col_count;
+    let save_p_types = d.p_types;
+    let save_p_vals = d.p_vals;
+    let save_p_val_count = d.p_val_count;
+    let save_has_where = d.has_where;
+    let save_w_left = d.w_left;
+    let save_w_op = d.w_op;
+    let save_w_right = d.w_right;
+    let save_w_logic = d.w_logic;
+    let save_w_left2 = d.w_left2;
+    let save_w_op2 = d.w_op2;
+    let save_w_right2 = d.w_right2;
+    let save_has_order = d.has_order;
+    let save_order_col = d.order_col;
+    let save_order_desc = d.order_desc;
+    let save_has_limit = d.has_limit;
+    let save_limit_val = d.limit_val;
+    let save_set_col = d.set_col;
+    let save_set_val = d.set_val;
+    let save_select_star = d.select_star;
+    let save_select_count = d.select_count;
+    let save_p_agg_funcs = d.p_agg_funcs;
+    let save_p_agg_cols = d.p_agg_cols;
+    let save_p_agg_count = d.p_agg_count;
+    let save_has_group_by = d.has_group_by;
+    let save_group_col = d.group_col;
+    let save_has_join = d.has_join;
+    let save_join_table = d.join_table;
+    let save_join_left_col = d.join_left_col;
+    let save_join_right_col = d.join_right_col;
+    let save_alias1 = d.alias1;
+    let save_alias2 = d.alias2;
+
+    // Execute the subquery to get a scalar result
+    let result = exec_subquery_scalar(d, sub_sql);
+
+    // Restore main parser state
+    d.input = save_input;
+    d.ilen = save_ilen;
+    d.pos = save_pos;
+    d.tk_type = save_tk_type;
+    d.tk_val = save_tk_val;
+    d.stmt_type = save_stmt_type;
+    d.p_table = save_p_table;
+    d.p_cols = save_p_cols;
+    d.p_col_count = save_p_col_count;
+    d.p_types = save_p_types;
+    d.p_vals = save_p_vals;
+    d.p_val_count = save_p_val_count;
+    d.has_where = save_has_where;
+    d.w_left = save_w_left;
+    d.w_op = save_w_op;
+    d.w_right = save_w_right;
+    d.w_logic = save_w_logic;
+    d.w_left2 = save_w_left2;
+    d.w_op2 = save_w_op2;
+    d.w_right2 = save_w_right2;
+    d.has_order = save_has_order;
+    d.order_col = save_order_col;
+    d.order_desc = save_order_desc;
+    d.has_limit = save_has_limit;
+    d.limit_val = save_limit_val;
+    d.set_col = save_set_col;
+    d.set_val = save_set_val;
+    d.select_star = save_select_star;
+    d.select_count = save_select_count;
+    d.p_agg_funcs = save_p_agg_funcs;
+    d.p_agg_cols = save_p_agg_cols;
+    d.p_agg_count = save_p_agg_count;
+    d.has_group_by = save_has_group_by;
+    d.group_col = save_group_col;
+    d.has_join = save_has_join;
+    d.join_table = save_join_table;
+    d.join_left_col = save_join_left_col;
+    d.join_right_col = save_join_right_col;
+    d.alias1 = save_alias1;
+    d.alias2 = save_alias2;
+
+    // Advance the token past ')'
+    next_token(d);
+
+    result
+}
+
+// Execute a subquery and return a single scalar value as a string.
+// Handles aggregate queries like SELECT AVG(age) FROM users.
+fn exec_subquery_scalar(d: &mut DB, sql: String) -> String {
+    reset_parser(d, sql);
+    parse_sql(d);
+
+    let tname = sp_get(d, d.p_table);
+    let tidx = find_table(d, tname);
+    if tidx < 0 { return "0"; }
+
+    let cs = vec_get(d.tbl_col_starts, tidx);
+    let cc = vec_get(d.tbl_col_counts, tidx);
+    let rs = vec_get(d.tbl_row_starts, tidx);
+    let rc = vec_get(d.tbl_row_counts, tidx);
+
+    // Gather matching rows
+    let mut match_rows: Vec<i32> = vec![];
+    let mut match_count = 0;
+    let mut r = 0;
+    while r < rc {
+        if eval_compound_where(d, cs, cc, rs, r, tname, d.alias1) {
+            vec_push(match_rows, r);
+            match_count = match_count + 1;
+        }
+        r = r + 1;
+    }
+
+    // If it is an aggregate query, compute and return the scalar
+    if d.p_agg_count > 0 {
+        if d.p_col_count == 0 {
+            let af = vec_get(d.p_agg_funcs, 0);
+            let ac_name = sp_get(d, vec_get(d.p_agg_cols, 0));
+            if af == 1 {
+                // COUNT(*)
+                return int_to_str(match_count);
+            }
+            // SUM/AVG/MIN/MAX
+            let col_idx = resolve_col(d, cs, cc, tname, d.alias1, ac_name);
+            let mut sum_val = 0.0;
+            let mut min_val = 999999999.0;
+            let mut max_val = 0.0 - 999999999.0;
+            let mut cnt = 0;
+            let mut mi = 0;
+            while mi < match_count {
+                let row = vec_get(match_rows, mi);
+                if col_idx >= 0 {
+                    let cell_str = sp_get(d, vec_get(d.cells, rs + row * cc + col_idx));
+                    let nv = cell_str.parse_float();
+                    sum_val = sum_val + nv;
+                    if nv < min_val { min_val = nv; }
+                    if nv > max_val { max_val = nv; }
+                    cnt = cnt + 1;
+                }
+                mi = mi + 1;
+            }
+            let mut result_val = sum_val;
+            if af == 3 {
+                if cnt > 0 { result_val = sum_val / cnt; }
+                else { result_val = 0.0; }
+            }
+            if af == 4 { result_val = min_val; }
+            if af == 5 { result_val = max_val; }
+            return float_to_str(result_val);
+        }
+    }
+
+    // Non-aggregate: return the first matching value of the first column
+    if match_count > 0 {
+        let row = vec_get(match_rows, 0);
+        if d.p_col_count > 0 {
+            let cname = sp_get(d, vec_get(d.p_cols, 0));
+            let col_idx = resolve_col(d, cs, cc, tname, d.alias1, cname);
+            if col_idx >= 0 {
+                return sp_get(d, vec_get(d.cells, rs + row * cc + col_idx));
+            }
+        }
+        if d.select_star == 1 {
+            return sp_get(d, vec_get(d.cells, rs + row * cc));
+        }
+    }
+    "0"
 }
 
 fn parse_order_by(d: &mut DB) {
@@ -1536,22 +1943,36 @@ fn eval_compound_where(d: &DB, cs: i32, cc: i32, rs: i32, row: i32,
                        tname: String, alias: i32) -> bool {
     if d.has_where == 0 { return true; }
     let wl = sp_get(d, d.w_left);
-    let wr = sp_get(d, d.w_right);
     let wc1 = resolve_col(d, cs, cc, tname, alias, wl);
     let mut pass1 = false;
     if wc1 >= 0 {
         let cv1 = sp_get(d, vec_get(d.cells, rs + row * cc + wc1));
-        pass1 = eval_where(cv1, d.w_op, wr);
+        if d.w_op == 7 {
+            // IN operator
+            pass1 = eval_in(d, cv1, d.w_in_vals1, d.w_in_count1);
+        } else {
+            let wr = sp_get(d, d.w_right);
+            pass1 = eval_where(cv1, d.w_op, wr);
+        }
+    } else {
+        // Column not found — for IS NULL on missing cols, treat as NULL
+        if d.w_op == 8 { pass1 = true; }
     }
     if d.w_logic == 0 { return pass1; }
     // Second condition
     let wl2 = sp_get(d, d.w_left2);
-    let wr2 = sp_get(d, d.w_right2);
     let wc2 = resolve_col(d, cs, cc, tname, alias, wl2);
     let mut pass2 = false;
     if wc2 >= 0 {
         let cv2 = sp_get(d, vec_get(d.cells, rs + row * cc + wc2));
-        pass2 = eval_where(cv2, d.w_op2, wr2);
+        if d.w_op2 == 7 {
+            pass2 = eval_in(d, cv2, d.w_in_vals2, d.w_in_count2);
+        } else {
+            let wr2 = sp_get(d, d.w_right2);
+            pass2 = eval_where(cv2, d.w_op2, wr2);
+        }
+    } else {
+        if d.w_op2 == 8 { pass2 = true; }
     }
     if d.w_logic == 1 { return pass1 && pass2; }
     if d.w_logic == 2 { return pass1 || pass2; }
@@ -2626,6 +3047,119 @@ fn exec_drop(d: &mut DB) {
 }
 
 // =============================================================================
+// ALTER TABLE ADD COLUMN
+// =============================================================================
+fn exec_alter_table(d: &mut DB) {
+    let tname = sp_get(d, d.p_table);
+    let tidx = find_table(d, tname);
+    if tidx < 0 {
+        println!("Error: table '{}' not found", tname);
+        return;
+    }
+
+    let new_col_name = sp_get(d, d.alter_col_name);
+    let new_col_type_str = sp_get(d, d.alter_col_type);
+    let type_up = new_col_type_str.to_uppercase();
+    let ct = if type_up == "INTEGER" { 0 } else if type_up == "REAL" { 1 } else { 2 };
+
+    let cs = vec_get(d.tbl_col_starts, tidx);
+    let old_cc = vec_get(d.tbl_col_counts, tidx);
+    let new_cc = old_cc + 1;
+    let rs = vec_get(d.tbl_row_starts, tidx);
+    let rc = vec_get(d.tbl_row_counts, tidx);
+
+    // 1. Insert the new column definition into col_names/col_types at position cs + old_cc
+    let insert_col_at = cs + old_cc;
+    let total_cols = vec_len(d.col_names);
+    let mut new_cn: Vec<i32> = vec![];
+    let mut new_ct: Vec<i32> = vec![];
+    let mut ci: i64 = 0;
+    while ci < insert_col_at {
+        vec_push(new_cn, vec_get(d.col_names, ci));
+        vec_push(new_ct, vec_get(d.col_types, ci));
+        ci = ci + 1;
+    }
+    let cnid = sp_add(d, new_col_name);
+    vec_push(new_cn, cnid);
+    vec_push(new_ct, ct);
+    while ci < total_cols {
+        vec_push(new_cn, vec_get(d.col_names, ci));
+        vec_push(new_ct, vec_get(d.col_types, ci));
+        ci = ci + 1;
+    }
+    d.col_names = new_cn;
+    d.col_types = new_ct;
+
+    // 2. Update tbl_col_counts for this table
+    d.tbl_col_counts = vec_replace(d.tbl_col_counts, d.tbl_count, tidx, new_cc);
+
+    // 3. Shift col_starts for tables after this one (they gained 1 col def)
+    let mut new_tcs: Vec<i32> = vec![];
+    let mut ti = 0;
+    while ti < d.tbl_count {
+        if ti > tidx {
+            vec_push(new_tcs, vec_get(d.tbl_col_starts, ti) + 1);
+        } else {
+            vec_push(new_tcs, vec_get(d.tbl_col_starts, ti));
+        }
+        ti = ti + 1;
+    }
+    d.tbl_col_starts = new_tcs;
+
+    // 4. For each existing row, insert an empty-string cell at the end of that row's data.
+    // The NULL sentinel is an empty string "".
+    let null_id = sp_add(d, "");
+    let total_cells = vec_len(d.cells);
+    let mut new_cells: Vec<i32> = vec![];
+
+    // Copy cells before this table
+    let mut cell_i: i64 = 0;
+    while cell_i < rs {
+        vec_push(new_cells, vec_get(d.cells, cell_i));
+        cell_i = cell_i + 1;
+    }
+
+    // For each row in the table, copy old_cc cells then add NULL
+    let mut r = 0;
+    while r < rc {
+        let row_start = rs + r * old_cc;
+        let mut col = 0;
+        while col < old_cc {
+            vec_push(new_cells, vec_get(d.cells, row_start + col));
+            col = col + 1;
+        }
+        vec_push(new_cells, null_id);
+        r = r + 1;
+    }
+
+    // Copy cells after this table
+    cell_i = rs + rc * old_cc;
+    while cell_i < total_cells {
+        vec_push(new_cells, vec_get(d.cells, cell_i));
+        cell_i = cell_i + 1;
+    }
+    d.cells = new_cells;
+
+    // 5. Update row_starts for tables after this one
+    // Each row grew by 1 cell, so total added = rc cells
+    let shift = rc;
+    let mut new_trs: Vec<i32> = vec![];
+    let mut si = 0;
+    while si < d.tbl_count {
+        if si > tidx {
+            vec_push(new_trs, vec_get(d.tbl_row_starts, si) + shift);
+        } else {
+            vec_push(new_trs, vec_get(d.tbl_row_starts, si));
+        }
+        si = si + 1;
+    }
+    d.tbl_row_starts = new_trs;
+
+    // 6. Rebuild indexes for this table
+    update_indexes_for_table(d, tidx);
+}
+
+// =============================================================================
 // HELPERS
 // =============================================================================
 
@@ -2645,6 +3179,20 @@ fn eval_where(cell_val: String, op: i32, rval: String) -> bool {
     let rv_num = rval.parse_float();
     let is_num_cmp = is_numeric_str(cell_val) && is_numeric_str(rval);
 
+    // LIKE operator (op 6)
+    if op == 6 { return eval_like(cell_val, rval); }
+    // IS NULL (op 8): cell is empty string
+    if op == 8 {
+        let clen = cell_val.len();
+        return clen == 0;
+    }
+    // IS NOT NULL (op 9): cell is not empty
+    if op == 9 {
+        let clen = cell_val.len();
+        return clen > 0;
+    }
+    // IN (op 7) is handled separately in eval_compound_where
+
     if is_num_cmp {
         if op == 0 { return cv_num == rv_num; }
         if op == 1 { return cv_num < rv_num; }
@@ -2661,6 +3209,77 @@ fn eval_where(cell_val: String, op: i32, rval: String) -> bool {
     if op == 3 { return cmp <= 0; }
     if op == 4 { return cmp >= 0; }
     if op == 5 { return cmp != 0; }
+    false
+}
+
+// LIKE pattern matching: supports % wildcard
+// 'prefix%' -> starts_with, '%suffix' -> ends_with, '%mid%' -> contains, 'exact' -> equality
+fn eval_like(cell_val: String, pattern: String) -> bool {
+    let plen = pattern.len();
+    if plen == 0 { return cell_val == ""; }
+    let clen = cell_val.len();
+    let starts_pct = pattern.char_at(0) == "%";
+    let ends_pct = if plen > 0 { pattern.char_at(plen - 1) == "%" } else { false };
+
+    if starts_pct && ends_pct {
+        // %mid% -> contains
+        if plen <= 2 { return true; }
+        let mid = pattern.substring(1, plen - 2);
+        return str_contains(cell_val, mid);
+    }
+    if starts_pct {
+        // %suffix -> ends_with
+        let suffix = pattern.substring(1, plen - 1);
+        return str_ends_with(cell_val, suffix);
+    }
+    if ends_pct {
+        // prefix% -> starts_with
+        let prefix = pattern.substring(0, plen - 1);
+        return str_starts_with(cell_val, prefix);
+    }
+    // Exact match
+    cell_val == pattern
+}
+
+fn str_starts_with(s: String, prefix: String) -> bool {
+    let slen = s.len();
+    let plen = prefix.len();
+    if plen > slen { return false; }
+    let sub = s.substring(0, plen);
+    sub == prefix
+}
+
+fn str_ends_with(s: String, suffix: String) -> bool {
+    let slen = s.len();
+    let xlen = suffix.len();
+    if xlen > slen { return false; }
+    let sub = s.substring(slen - xlen, xlen);
+    sub == suffix
+}
+
+fn str_contains(s: String, needle: String) -> bool {
+    let slen = s.len();
+    let nlen = needle.len();
+    if nlen > slen { return false; }
+    if nlen == 0 { return true; }
+    let limit = slen - nlen + 1;
+    let mut i = 0;
+    while i < limit {
+        let sub = s.substring(i, nlen);
+        if sub == needle { return true; }
+        i = i + 1;
+    }
+    false
+}
+
+// Evaluate IN operator: check if cell value matches any value in the list
+fn eval_in(d: &DB, cell_val: String, in_vals: Vec<i32>, in_count: i32) -> bool {
+    let mut i = 0;
+    while i < in_count {
+        let v = sp_get(d, vec_get(in_vals, i));
+        if cell_val == v { return true; }
+        i = i + 1;
+    }
     false
 }
 
@@ -3207,6 +3826,7 @@ fn exec_sql_no_wal(d: &mut DB, input: String) {
     else if st == 7 { wal_begin(d); }
     else if st == 8 { wal_commit(d); }
     else if st == 9 { wal_rollback(d); }
+    else if st == 10 { exec_alter_table(d); }
 }
 
 fn exec_sql(d: &mut DB, input: String) {
@@ -3239,6 +3859,7 @@ fn exec_sql(d: &mut DB, input: String) {
     else if st == 4 { exec_delete(d); wal_log_mutation(d, input); }
     else if st == 5 { exec_drop(d); wal_log_mutation(d, input); }
     else if st == 6 { exec_create_index(d); wal_log_mutation(d, input); }
+    else if st == 10 { exec_alter_table(d); wal_log_mutation(d, input); }
 }
 
 // =============================================================================
