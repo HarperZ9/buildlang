@@ -1,41 +1,70 @@
 // =============================================================================
-// qdb — SQL database engine written in QuantaLang
+// qdb — SQL Database Engine written in QuantaLang
 // =============================================================================
-// Steps 3-6 of the SQLite roadmap: table storage engine + integrated SQL
-// parser with advanced features. Supports:
-//   - CREATE TABLE, INSERT, SELECT, UPDATE, DELETE, DROP TABLE
-//   - ALTER TABLE ADD COLUMN
-//   - WHERE with AND/OR compound conditions
-//   - LIKE operator (%, starts_with/ends_with/contains patterns)
-//   - IN operator (value list membership)
-//   - IS NULL / IS NOT NULL
-//   - Scalar subqueries in WHERE: (SELECT AVG(...) FROM ...)
-//   - ORDER BY, LIMIT, COUNT(*)
-//   - JOIN (nested-loop) with table aliases
-//   - GROUP BY with aggregates: COUNT(*), SUM, AVG, MIN, MAX
-//   - HAVING clause (filter groups after aggregation)
-//   - DISTINCT (remove duplicate rows)
-//   - BETWEEN operator (range filter)
-//   - Column aliases (SELECT col AS alias)
-//   - CREATE INDEX for sorted-array indexes with binary search lookup
-//   - Write-Ahead Log (WAL) for crash recovery
-//   - BEGIN/COMMIT/ROLLBACK transaction support
-// Persists data via a simple line-based file format. Includes interactive REPL.
+//
+// Architecture (sections in order of appearance):
+//
+//   SECTION 0: PRIMITIVES     (lines ~55-65)    — Character classification helpers
+//   SECTION 1: DATA MODEL     (lines ~69-276)   — struct DB, constructor, string pool
+//   SECTION 2: STORAGE        (lines ~278-523)  — File persistence (save/load)
+//   SECTION 3: WAL            (lines ~525-850)   — Write-ahead log, snapshots, transactions
+//   SECTION 4: TOKENIZER      (lines ~854-1027) — SQL lexical analysis
+//   SECTION 5: PARSER         (lines ~1067-1920)— SQL statement parsing
+//   SECTION 6: EXECUTOR       (lines ~1948-3384)— Query execution engine
+//     6a: DDL execution (CREATE TABLE, DROP, ALTER)
+//     6b: DML execution (INSERT, UPDATE, DELETE)
+//     6c: SELECT — basic single-table queries
+//     6d: SELECT — aggregate functions (no GROUP BY)
+//     6e: SELECT — GROUP BY with aggregates + HAVING
+//     6f: SELECT — JOIN (nested loop)
+//     6g: Subquery execution
+//   SECTION 7: HELPERS        (lines ~3386-3781)— WHERE eval, LIKE, sorting, formatting
+//   SECTION 8: INDEX          (lines ~3783-4038)— Sorted-array indexes, binary search
+//   SECTION 9: DISPATCH       (lines ~4040-4092)— SQL routing (exec_sql, exec_sql_no_wal)
+//   SECTION 10: REPL          (lines ~4094-4192)— Interactive shell, dot-commands
+//   SECTION 11: MAIN          (lines ~4194-end) — Entry point, argument handling
+//
+// Design Decisions:
+//
+//   - Single file: QuantaLang does not support multi-file compilation or
+//     `use` imports between .quanta files. All code must live in one file.
+//     Sections are separated by banner comments to maintain logical modularity.
+//
+//   - Single flat struct (DB): QuantaLang's C codegen does not reliably emit
+//     struct field assignments on local variables. All state passes through
+//     &mut DB references to a single top-level struct.
+//
+//   - String pool pattern: The DB stores all strings in a contiguous `pool`
+//     buffer, with parallel Vec<i32> arrays for starts and lengths. This
+//     avoids Vec<String> which has incomplete codegen support.
+//
+//   - Text-based file format: Each line is a DDL statement or pipe-delimited
+//     data row. Simple and human-readable. Not page-based like SQLite.
+//
+//   - Sorted-array indexes with binary search: Simpler than B-trees. Each
+//     index maintains sorted key+rowid pairs. Equality uses binary search;
+//     range queries scan the sorted array.
+//
+//   - Selection sort for ORDER BY / index rebuilds: O(n^2) but simple and
+//     correct. Adequate for the datasets this engine targets.
+//
+//   - WAL for crash recovery: Append-only log of mutations. On startup,
+//     committed transactions are replayed. ROLLBACK restores from snapshot.
+//
+// SQL Support:
+//   CREATE TABLE, INSERT, SELECT, UPDATE, DELETE, DROP TABLE
+//   ALTER TABLE ADD COLUMN
+//   WHERE (AND/OR, LIKE, IN, IS NULL, IS NOT NULL, BETWEEN, subqueries)
+//   JOIN (nested-loop with aliases), GROUP BY, HAVING, DISTINCT
+//   ORDER BY (ASC/DESC), LIMIT, column aliases (AS)
+//   Aggregates: COUNT(*), SUM, AVG, MIN, MAX
+//   CREATE INDEX, BEGIN/COMMIT/ROLLBACK
 //
 // Usage:
 //   qdb test.db "CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)"
 //   qdb test.db "SELECT * FROM users WHERE age > 24 AND name = 'Zain'"
-//   qdb test.db "SELECT * FROM users WHERE name LIKE 'Z%'"
-//   qdb test.db "SELECT * FROM users WHERE dept IN ('eng', 'sales')"
-//   qdb test.db "SELECT * FROM users WHERE email IS NULL"
-//   qdb test.db "SELECT * FROM users WHERE age > (SELECT AVG(age) FROM users)"
-//   qdb test.db "ALTER TABLE users ADD COLUMN email TEXT"
 //   qdb test.db "SELECT u.name, o.total FROM users u JOIN orders o ON u.id = o.user_id"
 //   qdb test.db "SELECT dept, AVG(salary) FROM employees GROUP BY dept"
-//   qdb test.db "SELECT dept, COUNT(*) FROM emp GROUP BY dept HAVING COUNT(*) > 2"
-//   qdb test.db "SELECT DISTINCT dept FROM emp"
-//   qdb test.db "SELECT * FROM emp WHERE salary BETWEEN 100000 AND 130000"
-//   qdb test.db "SELECT name AS employee, salary AS pay FROM emp"
 //   qdb test.db "CREATE INDEX idx_age ON users (age)"
 //   qdb test.db                         — interactive REPL mode
 //
@@ -46,12 +75,15 @@
 //   ROW 2|Harper|30
 //   END
 //   INDEX idx_age ON users (age)
-//
-// Design: ALL state lives in one flat struct (DB). SQL parser state is
-// embedded directly. String pool pattern + flat i32 Vecs for everything.
 // =============================================================================
 
-// --- Character helpers ---
+// =========================================================================
+// SECTION 0: PRIMITIVES — Character Classification
+// =========================================================================
+// Pure functions for character-class tests. Used by both the SQL tokenizer
+// and the file-format parser. QuantaLang has no char type; single-char
+// strings are compared by value.
+// =========================================================================
 fn is_ws(c: String) -> bool { c == " " || c == "\n" || c == "\r" || c == "\t" }
 fn is_digit(c: String) -> bool { c == "0" || c == "1" || c == "2" || c == "3" || c == "4" || c == "5" || c == "6" || c == "7" || c == "8" || c == "9" }
 fn is_lower(c: String) -> bool { c == "a" || c == "b" || c == "c" || c == "d" || c == "e" || c == "f" || c == "g" || c == "h" || c == "i" || c == "j" || c == "k" || c == "l" || c == "m" || c == "n" || c == "o" || c == "p" || c == "q" || c == "r" || c == "s" || c == "t" || c == "u" || c == "v" || c == "w" || c == "x" || c == "y" || c == "z" }
@@ -59,13 +91,24 @@ fn is_upper(c: String) -> bool { c == "A" || c == "B" || c == "C" || c == "D" ||
 fn is_alpha(c: String) -> bool { is_lower(c) || is_upper(c) }
 fn is_alnum(c: String) -> bool { is_alpha(c) || is_digit(c) || c == "_" }
 
-// --- Token types ---
-// 0=Keyword, 1=Ident, 2=String literal, 3=Number literal
-// 4=Operator, 5=Punctuation, 6=Star, 7=EOF
+// Token type codes (used by the tokenizer in Section 4):
+//   0=Keyword, 1=Ident, 2=String literal, 3=Number literal
+//   4=Operator, 5=Punctuation, 6=Star, 7=EOF
 
-// =============================================================================
-// DATABASE STRUCT — all state in one flat struct
-// =============================================================================
+// =========================================================================
+// SECTION 1: DATA MODEL — struct DB, Constructor, String Pool
+// =========================================================================
+// ALL engine state lives in one flat struct. This is not a design preference
+// but a constraint: QuantaLang's C codegen cannot reliably emit struct field
+// assignments on local variables, so we pass &mut DB everywhere.
+//
+// The struct is organized into logical groups:
+//   - File path and string pool (the interning mechanism)
+//   - Table metadata (names, column schema, row data)
+//   - Index metadata (sorted-array indexes)
+//   - SQL parser state (tokenizer position, parsed AST fields)
+//   - WAL/transaction state (log path, snapshot for rollback)
+// =========================================================================
 struct DB {
     // Database file path
     db_path: String,
@@ -206,6 +249,8 @@ struct DB {
     snap_idx_key_counts: Vec<i32>,
 }
 
+// Initialize a new empty DB. All parallel arrays start empty; pn (pool next
+// id) starts at 0. The WAL path is derived by appending ".wal" to the db path.
 fn db_new(db_path: String) -> DB {
     let wp = db_path + ".wal";
     DB {
@@ -254,9 +299,12 @@ fn db_new(db_path: String) -> DB {
     }
 }
 
-// =============================================================================
-// STRING POOL
-// =============================================================================
+// --- String Pool ---
+// All strings in the engine are interned into a single contiguous buffer
+// (d.pool). sp_add appends text and returns an integer ID. sp_get retrieves
+// text by ID. This avoids Vec<String> which has incomplete codegen in
+// QuantaLang. Pool IDs are used everywhere: table names, column names,
+// cell values, parsed tokens.
 fn sp_add(d: &mut DB, text: String) -> i32 {
     let id = d.pn;
     let st = d.pool.len();
@@ -275,10 +323,27 @@ fn sp_get(d: &DB, id: i32) -> String {
     d.pool.substring(st, ln)
 }
 
-// =============================================================================
-// DATABASE FILE I/O
-// =============================================================================
+// =========================================================================
+// SECTION 2: STORAGE — File Persistence (Save / Load)
+// =========================================================================
+// The database file uses a simple line-oriented text format:
+//
+//   TABLE <name>
+//   SCHEMA <col1>:<TYPE> <col2>:<TYPE> ...
+//   ROW <val1>|<val2>|...
+//   ROW ...
+//   END
+//
+//   INDEX <name> ON <table> (<column>)
+//
+// db_save serializes the entire in-memory state to this format.
+// db_load parses the file back into the parallel-array structures.
+// There is no incremental I/O; the full file is read/written each time.
+// =========================================================================
 
+// Serialize the entire database (all tables, rows, and index declarations)
+// to the text-based file format and write to d.db_path.
+// Does NOT write WAL — this is the "clean" checkpoint format.
 fn db_save(d: &DB) {
     let mut out = "";
     let mut t = 0;
@@ -335,6 +400,11 @@ fn db_save(d: &DB) {
     write_file(d.db_path, out);
 }
 
+// Load the database from the text file at d.db_path.
+// Parses TABLE/SCHEMA/ROW/END/INDEX lines and populates all parallel arrays.
+// If the file doesn't exist or is empty, returns immediately (empty database).
+// After loading, the caller should also call wal_replay() to recover any
+// committed transactions from the WAL that haven't been checkpointed.
 fn db_load(d: &mut DB) {
     if !file_exists(d.db_path) { return; }
     let content = read_file(d.db_path);
@@ -522,9 +592,30 @@ fn db_load(d: &mut DB) {
     }
 }
 
-// =============================================================================
-// WRITE-AHEAD LOG (WAL)
-// =============================================================================
+// =========================================================================
+// SECTION 3: WAL — Write-Ahead Log, Snapshots, Transactions
+// =========================================================================
+// The WAL provides crash recovery and transaction support.
+//
+// WAL file format (append-only):
+//   TXID <n>        — start of transaction n
+//   OP <sql>        — a mutation SQL statement within the transaction
+//   COMMIT          — marks transaction n as committed
+//
+// Recovery flow (wal_replay):
+//   1. Parse all WAL lines, identify which TXIDs have COMMIT markers
+//   2. Replay only OP lines from committed TXIDs via exec_sql_no_wal
+//   3. Checkpoint (save + clear WAL)
+//
+// Transaction flow:
+//   BEGIN    -> take_snapshot() + write TXID to WAL
+//   mutations-> each logs "OP <sql>" to WAL
+//   COMMIT   -> write COMMIT to WAL + checkpoint
+//   ROLLBACK -> restore_snapshot() + checkpoint (discards WAL entries)
+//
+// Auto-commit: mutations outside an explicit transaction are wrapped in
+// a single-statement transaction (TXID + OP + COMMIT + checkpoint).
+// =========================================================================
 
 // Append a line to the WAL file
 fn wal_write(d: &mut DB, line: String) {
@@ -541,7 +632,16 @@ fn wal_checkpoint(d: &mut DB) {
     }
 }
 
-// Replay committed transactions from WAL into a freshly-loaded DB
+// Replay committed transactions from WAL into a freshly-loaded DB.
+//
+// Called once at startup after db_load(). Two-pass algorithm:
+//   Pass 1: Scan all lines, collect TXID values that have a matching COMMIT.
+//   Pass 2: For each OP line whose TXID is in the committed set, execute
+//           the SQL via exec_sql_no_wal (no re-logging).
+// After replay, checkpoints to merge into the .db file and clears the WAL.
+//
+// Assumes: DB is already loaded from the .db file. WAL contains only
+// mutations that happened after the last checkpoint.
 fn wal_replay(d: &mut DB) {
     if !file_exists(d.wal_path) { return; }
     let content = read_file(d.wal_path);
@@ -625,7 +725,9 @@ fn wal_replay(d: &mut DB) {
     wal_checkpoint(d);
 }
 
-// Take a snapshot of current state for ROLLBACK
+// Take a deep copy of all mutable DB state into snap_* fields.
+// Called at BEGIN to enable ROLLBACK. Copies: cells, row starts/counts,
+// table names/count, column names/types/starts/counts, and all index arrays.
 fn take_snapshot(d: &mut DB) {
     // Copy cells
     d.snap_cells = vec![];
@@ -835,9 +937,8 @@ fn cmd_wal(d: &DB) {
     println!("WAL status: {} entries, {} pending transaction", op_count, pending);
 }
 
-// =============================================================================
-// TABLE LOOKUP
-// =============================================================================
+// --- Table Lookup ---
+// Linear scan of tbl_names to find a table by name. Returns table index or -1.
 fn find_table(d: &DB, name: String) -> i32 {
     let mut i = 0;
     while i < d.tbl_count {
@@ -848,9 +949,26 @@ fn find_table(d: &DB, name: String) -> i32 {
     0 - 1
 }
 
-// =============================================================================
-// SQL LEXER (embedded from sql.quanta)
-// =============================================================================
+// =========================================================================
+// SECTION 4: TOKENIZER — SQL Lexical Analysis
+// =========================================================================
+// Converts the raw SQL input string into a stream of tokens. The tokenizer
+// is stateful: d.pos tracks position in d.input, d.tk_type and d.tk_val
+// hold the current token. Calling next_token() advances to the next token.
+//
+// Token types:
+//   0 = Keyword (SELECT, FROM, WHERE, etc. — uppercased)
+//   1 = Identifier (table/column names — preserved case)
+//   2 = String literal (single-quoted, '' for escaped quotes)
+//   3 = Number literal (integer or decimal, optional leading minus)
+//   4 = Operator (=, <, >, <=, >=, <>, !=, +, -, /)
+//   5 = Punctuation ((, ), ,, ;, .)
+//   6 = Star (*)
+//   7 = EOF
+//
+// The tokenizer recognizes all SQL keywords via is_keyword() and
+// automatically uppercases them. Identifiers are NOT uppercased.
+// =========================================================================
 fn skip_ws_sql(d: &mut DB) {
     let mut go = true;
     while go {
@@ -1064,10 +1182,28 @@ fn op_encode(op: String) -> i32 {
     0 - 1
 }
 
-// =============================================================================
-// SQL PARSER
-// =============================================================================
+// =========================================================================
+// SECTION 5: PARSER — SQL Statement Parsing
+// =========================================================================
+// Parses tokenized SQL into the "AST" fields of the DB struct. There is no
+// separate AST data structure; parsed state is written directly into d.p_*,
+// d.has_*, d.w_* fields. The parser is recursive-descent.
+//
+// Statement types (d.stmt_type):
+//   0 = SELECT    1 = INSERT     2 = CREATE TABLE
+//   3 = UPDATE    4 = DELETE     5 = DROP TABLE
+//   6 = CREATE INDEX  7 = BEGIN  8 = COMMIT  9 = ROLLBACK
+//   10 = ALTER TABLE
+//
+// parse_sql() is the top-level dispatcher. It peeks at the first keyword
+// and delegates to parse_select, parse_insert, parse_create_table, etc.
+//
+// reset_parser() must be called before each new statement to clear all
+// parsed state back to defaults.
+// =========================================================================
 
+// Clear all parser state fields to defaults. Must be called before parsing
+// each new SQL statement to avoid stale values from previous parses.
 fn reset_parser(d: &mut DB, input: String) {
     d.input = input;
     d.ilen = input.len();
@@ -1172,6 +1308,21 @@ fn is_agg_kw(val: String) -> i32 {
     0
 }
 
+// Parse a SELECT statement.
+//
+// Grammar (simplified):
+//   SELECT [DISTINCT] <select_list> FROM <table> [alias]
+//     [JOIN <table2> [alias2] ON <col> = <col>]
+//     [WHERE <conditions>]
+//     [GROUP BY <col>]
+//     [HAVING <agg_condition>]
+//     [ORDER BY <col> [ASC|DESC]]
+//     [LIMIT <n>]
+//
+// Populates: d.select_star, d.p_cols, d.p_agg_funcs, d.p_agg_cols,
+//   d.p_aliases, d.p_table, d.alias1, d.has_join, d.join_table, d.alias2,
+//   d.join_left_col, d.join_right_col, d.has_where, d.has_group_by,
+//   d.has_having, d.has_order, d.has_limit, d.has_distinct
 fn parse_select(d: &mut DB) {
     d.stmt_type = 0;
     next_token(d);
@@ -1470,6 +1621,12 @@ fn parse_drop(d: &mut DB) {
 }
 
 // Parse a single WHERE condition: handles normal ops, LIKE, IN, IS NULL, IS NOT NULL, subqueries
+// Parse a single WHERE condition (the left-hand side, operator, right-hand side).
+// `which` selects which set of fields to populate:
+//   0 -> w_left, w_op, w_right, w_in_vals1, w_in_count1
+//   1 -> w_left2, w_op2, w_right2, w_in_vals2, w_in_count2
+// Handles: comparison ops, LIKE, IN (...), IS NULL, IS NOT NULL, BETWEEN,
+// and scalar subqueries (SELECT inside parentheses).
 fn parse_where_cond(d: &mut DB, which: i32) {
     // which: 1 = first condition, 2 = second condition
     let lref = read_col_ref(d);
@@ -1673,6 +1830,15 @@ fn parse_alter_table(d: &mut DB) {
 // Parse and immediately execute a scalar subquery.
 // The parser is currently pointing at the SELECT keyword inside "( SELECT ... )".
 // We save parser state, run the subquery, restore state, and return the scalar result.
+// Parse and execute a scalar subquery found inside a WHERE clause.
+// Example: WHERE age > (SELECT AVG(age) FROM users)
+//
+// Saves all current parser state (input, pos, token, stmt_type, etc.),
+// collects the subquery SQL text by scanning tokens until the closing ')',
+// executes it via exec_subquery_scalar (which captures stdout), then
+// restores the original parser state so the outer query can continue.
+//
+// Returns: the scalar result string from the subquery.
 fn parse_and_exec_subquery(d: &mut DB) -> String {
     // Capture the rest of the input from current position up to the matching ')'
     // The SELECT keyword has been recognized but not consumed yet.
@@ -1945,10 +2111,27 @@ fn parse_int_str(s: String) -> i32 {
     if neg { 0 - num } else { num }
 }
 
-// =============================================================================
-// QUERY EXECUTION
-// =============================================================================
+// =========================================================================
+// SECTION 6: EXECUTOR — Query Execution Engine
+// =========================================================================
+// Executes parsed SQL statements against the in-memory database.
+// All exec_* functions read from the parser state fields (d.p_table,
+// d.p_cols, d.has_where, etc.) and modify the data arrays (d.cells,
+// d.tbl_row_counts, etc.) as needed.
+//
+// Subsections:
+//   6a: DDL — exec_create (CREATE TABLE), exec_drop, exec_alter_table
+//   6b: DML — exec_insert, exec_update, exec_delete
+//   6c: SELECT — exec_select (basic single-table, dispatches to 6d/6e/6f)
+//   6d: Aggregates without GROUP BY — exec_select_agg_no_group
+//   6e: GROUP BY — exec_select_group
+//   6f: JOIN — exec_select_join
+// =========================================================================
 
+// --- 6a: DDL Execution ---
+
+// Execute CREATE TABLE. Adds a new table entry to the parallel arrays.
+// Fails if a table with the same name already exists.
 fn exec_create(d: &mut DB) {
     let tname = sp_get(d, d.p_table);
     let existing = find_table(d, tname);
@@ -1978,6 +2161,12 @@ fn exec_create(d: &mut DB) {
     d.tbl_count = d.tbl_count + 1;
 }
 
+// --- 6b: DML Execution ---
+
+// Execute INSERT INTO. Inserts a new row into the target table.
+// Values are read from d.p_vals. The row is inserted at the correct
+// position in the flat cells array (after existing rows for this table),
+// and subsequent tables' row starts are shifted. Indexes are rebuilt.
 fn exec_insert(d: &mut DB) {
     let tname = sp_get(d, d.p_table);
     let tidx = find_table(d, tname);
@@ -2066,6 +2255,10 @@ fn resolve_col(d: &DB, cs: i32, cc: i32, tname: String, alias: i32, ref_str: Str
 }
 
 // Evaluate compound WHERE for a single-table row
+// Evaluate the full WHERE clause (up to two conditions joined by AND/OR).
+// If has_where==0, returns true (no filter). Otherwise evaluates condition 1,
+// then condition 2 if w_logic is set (1=AND, 2=OR). Handles special ops:
+// IN (op 7) via eval_in, IS NULL (op 8), IS NOT NULL (op 9), BETWEEN (op 10).
 fn eval_compound_where(d: &DB, cs: i32, cc: i32, rs: i32, row: i32,
                        tname: String, alias: i32) -> bool {
     if d.has_where == 0 { return true; }
@@ -2115,6 +2308,27 @@ fn check_has_agg(d: &DB) -> i32 {
     0
 }
 
+// --- 6c: SELECT — Single-Table Query ---
+
+// Execute a SELECT query. This is the main SELECT dispatcher.
+//
+// Reads parsed state: d.p_table, d.select_star, d.p_cols, d.p_agg_funcs,
+//   d.has_where, d.w_* (filter conditions), d.has_order / d.order_col /
+//   d.order_desc, d.has_limit / d.limit_val, d.has_distinct
+//
+// Flow:
+//   1. Dispatch to exec_select_join if has_join == 1
+//   2. Dispatch to exec_select_group if has_group_by == 1
+//   3. Handle COUNT(*) shortcut
+//   4. Dispatch to exec_select_agg_no_group if aggregates present
+//   5. Otherwise: scan all rows, evaluate WHERE for each, collect matches
+//   6. Apply ORDER BY via sort_rows() (selection sort)
+//   7. Apply LIMIT to truncate result set
+//   8. Apply DISTINCT to remove duplicates
+//   9. Print formatted table output (header + separator + rows)
+//
+// Calls: eval_compound_where(), sort_rows(), resolve_col(), find_index_for(),
+//        index_scan(), sp_get(), pad_right(), make_dashes()
 fn exec_select(d: &mut DB) {
     // Dispatch to JOIN handler
     if d.has_join == 1 { exec_select_join(d); return; }
@@ -2383,9 +2597,18 @@ fn exec_select(d: &mut DB) {
     }
 }
 
-// =============================================================================
-// SELECT with aggregates (no GROUP BY)
-// =============================================================================
+// --- 6d: SELECT with Aggregates (no GROUP BY) ---
+
+// Execute a SELECT with aggregate functions but no GROUP BY clause.
+// Example: SELECT COUNT(*), AVG(salary) FROM employees WHERE dept = 'eng'
+//
+// Flow:
+//   1. Filter rows by WHERE into match_rows
+//   2. For each aggregate in d.p_agg_funcs, compute the result over match_rows
+//   3. Print a single result row with computed values
+//
+// Calls: eval_compound_where(), compute_single_agg(), build_agg_header(),
+//        print_result_row()
 fn exec_select_agg_no_group(d: &mut DB, tidx: i32) {
     let tname = sp_get(d, d.p_table);
     let cs = vec_get(d.tbl_col_starts, tidx);
@@ -2499,9 +2722,22 @@ fn build_agg_header(d: &mut DB, af: i32, ac_name_id: i32, al_id: i32) -> i32 {
     sp_add(d, hname)
 }
 
-// =============================================================================
-// SELECT with GROUP BY
-// =============================================================================
+// --- 6e: SELECT with GROUP BY ---
+
+// Execute a SELECT with GROUP BY and optional HAVING clause.
+// Example: SELECT dept, COUNT(*), AVG(salary) FROM emp GROUP BY dept HAVING COUNT(*) > 2
+//
+// Flow:
+//   1. Filter rows by WHERE
+//   2. Collect distinct group key values from the GROUP BY column
+//   3. For each group key, compute all requested aggregates over matching rows
+//   4. Apply HAVING filter to discard groups that don't match
+//   5. Apply ORDER BY if present (sorts the group result rows)
+//   6. Print formatted output
+//
+// Group keys are collected into a Vec<i32> of pool IDs. For each key,
+// helper functions (group_count_rows, compute_group_numeric, group_get_plain)
+// scan match_rows to compute aggregates for that group.
 fn exec_select_group(d: &mut DB) {
     let tname = sp_get(d, d.p_table);
     let tidx = find_table(d, tname);
@@ -2832,9 +3068,22 @@ fn compute_group_numeric(d: &mut DB, af: i32, ac_name: String, gk: String,
     float_to_str(result_val)
 }
 
-// =============================================================================
-// SELECT with JOIN (nested loop)
-// =============================================================================
+// --- 6f: SELECT with JOIN (nested loop) ---
+
+// Execute a SELECT with JOIN. Uses nested-loop join algorithm.
+// Example: SELECT u.name, o.total FROM users u JOIN orders o ON u.id = o.user_id
+//
+// Flow:
+//   1. Resolve both tables and their column schemas
+//   2. Resolve ON clause columns (try both orderings)
+//   3. Resolve SELECT column list against both tables
+//   4. Nested loop: for each row in table1, scan all rows in table2
+//   5. For matching pairs (ON condition), evaluate WHERE if present
+//   6. Collect selected columns from matching row pairs
+//   7. Apply ORDER BY, LIMIT, DISTINCT
+//   8. Print formatted output
+//
+// Table aliases (u, o) are resolved via d.alias1 and d.alias2.
 fn exec_select_join(d: &mut DB) {
     let tname1 = sp_get(d, d.p_table);
     let tname2 = sp_get(d, d.join_table);
@@ -3060,6 +3309,10 @@ fn eval_join_where(d: &DB, cs1: i32, cc1: i32, rs1: i32, r1: i32,
     pass1
 }
 
+// Execute UPDATE. Scans all cells for the target table, replacing the
+// SET column value for rows that match the WHERE condition. Rebuilds
+// the entire cells array (no in-place mutation due to Vec immutability
+// constraints). Rebuilds affected indexes afterward.
 fn exec_update(d: &mut DB) {
     let tname = sp_get(d, d.p_table);
     let tidx = find_table(d, tname);
@@ -3108,6 +3361,9 @@ fn exec_update(d: &mut DB) {
     update_indexes_for_table(d, tidx);
 }
 
+// Execute DELETE FROM. Rebuilds the cells array, skipping rows that match
+// the WHERE condition. Adjusts row counts and row starts for all tables.
+// Rebuilds affected indexes afterward.
 fn exec_delete(d: &mut DB) {
     let tname = sp_get(d, d.p_table);
     let tidx = find_table(d, tname);
@@ -3383,9 +3639,25 @@ fn exec_alter_table(d: &mut DB) {
     update_indexes_for_table(d, tidx);
 }
 
-// =============================================================================
-// HELPERS
-// =============================================================================
+// =========================================================================
+// SECTION 7: HELPERS — WHERE Evaluation, Sorting, Formatting
+// =========================================================================
+// Pure or nearly-pure helper functions used by the executor.
+//
+// WHERE evaluation:
+//   eval_where()          — evaluate a single comparison (op codes 0-9)
+//   eval_compound_where() — evaluate compound WHERE (AND/OR of two conditions)
+//   eval_like()           — LIKE pattern matching (%, starts_with/ends_with/contains)
+//   eval_in()             — IN (value list) membership test
+//
+// Sorting:
+//   sort_rows()           — selection sort on row indices by column value
+//   compare_vals()        — compare two values (numeric or string)
+//
+// Formatting:
+//   pad_right(), pad_left(), make_dashes() — output alignment
+//   print_result_row()    — print a single formatted result row
+// =========================================================================
 
 fn get_cell_float(d: &DB, rs: i32, row: i32, cc: i32, col_idx: i32) -> f64 {
     let cell_val = sp_get(d, vec_get(d.cells, rs + row * cc + col_idx));
@@ -3626,9 +3898,9 @@ fn make_dashes(w: i32) -> String {
     out
 }
 
-// =============================================================================
-// NUMERIC/STRING CONVERSION HELPERS
-// =============================================================================
+// --- Numeric / String Conversion ---
+// QuantaLang has limited stdlib for number formatting, so these are
+// hand-rolled: int_to_str, float_to_str, digit_char, int_part_str.
 
 fn int_to_str(n: i32) -> String {
     if n == 0 { return "0"; }
@@ -3780,9 +4052,20 @@ fn print_result_row(d: &DB, headers: Vec<i32>, results: Vec<i32>, count: i32) {
     println!("{}", row_line);
 }
 
-// =============================================================================
-// INDEX OPERATIONS
-// =============================================================================
+// =========================================================================
+// SECTION 8: INDEX — Sorted-Array Indexes with Binary Search
+// =========================================================================
+// Each index maintains sorted (key, rowid) pairs in flattened parallel arrays.
+// idx_keys[start..start+count] and idx_rowids[start..start+count] hold the
+// sorted entries for one index.
+//
+// Key operations:
+//   find_index_for()  — look up whether an index exists for a table+column
+//   rebuild_index()   — reconstruct sorted pairs from table rows (selection sort)
+//   index_scan()      — binary search (equality) or linear scan (range)
+//   update_indexes_for_table() — rebuild all indexes for a table after mutation
+//   exec_create_index() — CREATE INDEX handler
+// =========================================================================
 
 // Find an index on table tidx, column col_idx. Returns index id or -1.
 fn find_index_for(d: &DB, tidx: i32, col_idx: i32) -> i32 {
@@ -3798,7 +4081,10 @@ fn find_index_for(d: &DB, tidx: i32, col_idx: i32) -> i32 {
     0 - 1
 }
 
-// Rebuild index data from table rows (called after load or create)
+// Rebuild index data from table rows. Called after db_load, CREATE INDEX,
+// INSERT, UPDATE, or DELETE. Collects all (key, rowid) pairs for the
+// indexed column, sorts them via selection sort, then replaces this index's
+// entries in the flattened idx_keys/idx_rowids arrays.
 fn rebuild_index(d: &mut DB, ix_id: i32) {
     let tidx = vec_get(d.idx_tables, ix_id);
     let col_i = vec_get(d.idx_col_indices, ix_id);
@@ -3908,7 +4194,10 @@ fn rebuild_index(d: &mut DB, ix_id: i32) {
     d.idx_key_starts = new_starts;
 }
 
-// Binary search scan: returns row indices matching the WHERE condition
+// Scan an index for rows matching a WHERE condition.
+// For equality (op==0): binary search to find the key, then scan left/right
+// for duplicates. For range queries: linear scan of the sorted array.
+// Returns a Vec of row indices that match.
 fn index_scan(d: &DB, ix_id: i32, op: i32, rval: String) -> Vec<i32> {
     let ks = vec_get(d.idx_key_starts, ix_id);
     let kc = vec_get(d.idx_key_counts, ix_id);
@@ -3992,9 +4281,7 @@ fn update_indexes_for_table(d: &mut DB, tidx: i32) {
     }
 }
 
-// =============================================================================
-// CREATE INDEX EXECUTION
-// =============================================================================
+// Execute CREATE INDEX. Registers a new index entry and rebuilds its sorted data.
 fn exec_create_index(d: &mut DB) {
     let iname = sp_get(d, d.idx_name);
     let tname = sp_get(d, d.idx_table_name);
@@ -4036,9 +4323,17 @@ fn exec_create_index(d: &mut DB) {
     rebuild_index(d, d.idx_count - 1);
 }
 
-// =============================================================================
-// DISPATCH
-// =============================================================================
+// =========================================================================
+// SECTION 9: DISPATCH — SQL Routing
+// =========================================================================
+// Two entry points:
+//   exec_sql()        — full execution with WAL logging (normal operation)
+//   exec_sql_no_wal() — execution without WAL logging (used during WAL replay)
+//
+// Both call reset_parser + parse_sql, then dispatch by d.stmt_type.
+// exec_sql also handles transaction keywords (BEGIN/COMMIT/ROLLBACK) as
+// special cases before parsing, and routes mutations through wal_log_mutation.
+// =========================================================================
 
 // exec_sql_no_wal: used during WAL replay — executes + saves directly, no WAL logging
 fn exec_sql_no_wal(d: &mut DB, input: String) {
@@ -4091,9 +4386,13 @@ fn exec_sql(d: &mut DB, input: String) {
     else if st == 10 { exec_alter_table(d); wal_log_mutation(d, input); }
 }
 
-// =============================================================================
-// REPL DOT-COMMANDS
-// =============================================================================
+// =========================================================================
+// SECTION 10: REPL — Interactive Shell and Dot-Commands
+// =========================================================================
+// The REPL reads one line at a time, strips newlines and semicolons, and
+// either handles a dot-command (.tables, .schema, .wal, .quit) or passes
+// the input to exec_sql() as a SQL statement.
+// =========================================================================
 
 fn cmd_tables(d: &DB) {
     let mut i = 0;
@@ -4126,10 +4425,6 @@ fn cmd_schema(d: &DB, tname: String) {
     out = out + ");";
     println!("{}", out);
 }
-
-// =============================================================================
-// REPL
-// =============================================================================
 
 fn run_repl(d: &mut DB) {
     let mut go = true;
@@ -4191,9 +4486,20 @@ fn run_repl(d: &mut DB) {
     }
 }
 
-// =============================================================================
-// MAIN
-// =============================================================================
+// =========================================================================
+// SECTION 11: MAIN — Entry Point
+// =========================================================================
+// Usage: qdb <database> [sql]
+//   With sql argument: execute single statement and exit
+//   Without sql argument: enter interactive REPL
+//
+// Startup sequence:
+//   1. Parse args, handle --help
+//   2. db_new() — create empty DB struct
+//   3. db_load() — load from .db file
+//   4. wal_replay() — recover committed WAL transactions
+//   5. Execute SQL or enter REPL
+// =========================================================================
 
 fn main() {
     let nargs = args_count();
@@ -4203,7 +4509,28 @@ fn main() {
         process_exit(0);
     }
 
-    let db_path = args_get(1);
+    let arg1 = args_get(1);
+    if arg1 == "--help" || arg1 == "-h" {
+        println!("Usage: qdb <database> [sql]");
+        println!("       qdb mydb.db                    — interactive REPL");
+        println!("       qdb mydb.db \"SELECT * FROM t\"  — execute SQL");
+        println!("");
+        println!("SQL support:");
+        println!("  CREATE TABLE, INSERT, SELECT, UPDATE, DELETE, DROP TABLE");
+        println!("  ALTER TABLE ADD COLUMN");
+        println!("  WHERE (AND/OR, LIKE, IN, IS NULL, BETWEEN, subqueries)");
+        println!("  JOIN, GROUP BY, HAVING, DISTINCT, ORDER BY, LIMIT");
+        println!("  CREATE INDEX, BEGIN/COMMIT/ROLLBACK, WAL recovery");
+        println!("");
+        println!("REPL commands:");
+        println!("  .tables    — list all tables");
+        println!("  .schema    — show table schemas");
+        println!("  .wal       — show WAL status");
+        println!("  .quit      — exit REPL");
+        process_exit(0);
+    }
+
+    let db_path = arg1;
     let mut d = db_new(db_path);
     db_load(&mut d);
     // Replay any committed transactions from WAL (crash recovery)
