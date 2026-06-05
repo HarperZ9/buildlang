@@ -1149,6 +1149,25 @@ impl<'ctx> MirLowerer<'ctx> {
                     .as_ref()
                     .map(|t| self.lower_type_from_ast(t))
                     .unwrap_or(MirType::Void);
+                // Resolve Self in the return type to the concrete impl type so
+                // callers outside the impl see the real type (e.g. fn new() -> Self).
+                let ret = match ret {
+                    MirType::Struct(ref name) if name.as_ref() == "Self" => {
+                        MirType::Struct(type_name.clone())
+                    }
+                    MirType::Ptr(ref inner) => {
+                        if let MirType::Struct(ref name) = **inner {
+                            if name.as_ref() == "Self" {
+                                MirType::Ptr(Box::new(MirType::Struct(type_name.clone())))
+                            } else {
+                                ret
+                            }
+                        } else {
+                            ret
+                        }
+                    }
+                    _ => ret,
+                };
                 self.module
                     .declare_function(mangled, MirFnSig::new(params, ret));
             }
