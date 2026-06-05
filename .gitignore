@@ -23,3 +23,6 @@ tests/programs/*.c
 tests/*.c
 tests/programs/*.ll
 stdlib/*.c
+
+# safe_write pre-calibration archive
+**/.warden-safe-cache/
