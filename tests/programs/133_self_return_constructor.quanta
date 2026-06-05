@@ -1,0 +1,15 @@
+struct P { x: i32 }
+
+impl P {
+    fn make() -> Self {
+        P { x: 5 }
+    }
+    fn val(&self) -> i32 {
+        self.x
+    }
+}
+
+fn main() {
+    let p = P::make();
+    println!("{}", p.val());
+}

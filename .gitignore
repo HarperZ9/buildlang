@@ -1,0 +1,28 @@
+# Rust build artifacts
+target/
+
+# Compiled binaries
+*.exe
+*.obj
+*.o
+
+# Windows debug symbols
+*.pdb
+
+# VS Code extension
+node_modules/
+editors/vscode/out/
+editors/vscode/*.vsix
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Generated C output from compiler
+tests/programs/*.c
+tests/*.c
+tests/programs/*.ll
+stdlib/*.c
+
+# safe_write pre-calibration archive
+**/.warden-safe-cache/
