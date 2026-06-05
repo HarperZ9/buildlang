@@ -847,6 +847,13 @@ impl<'ctx> TypeInfer<'ctx> {
         } else {
             // Check if this is a known builtin (math functions, vector constructors, I/O)
             let name = ident.name.as_ref();
+            // `Self` in value position resolves to the enclosing impl's self type,
+            // e.g. a unit-struct constructor: `fn new() -> Self { Self }`.
+            if name == "Self" {
+                if let Some(self_ty) = self.ctx.get_self_ty() {
+                    return self_ty.clone();
+                }
+            }
             let is_builtin = matches!(
                 name,
                 // Math builtins

@@ -1,0 +1,15 @@
+struct Marker;
+
+impl Marker {
+    fn new() -> Self {
+        Self
+    }
+    fn tag(&self) -> i32 {
+        42
+    }
+}
+
+fn main() {
+    let m = Marker::new();
+    println!("{}", m.tag());
+}

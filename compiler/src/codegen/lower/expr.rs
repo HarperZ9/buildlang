@@ -528,10 +528,47 @@ impl<'ctx> MirLowerer<'ctx> {
                 // try the module-prefixed name first so local definitions
                 // shadow parent-scope functions (use super::*).
                 _ => {
+                    // A bare reference to a unit struct (or Self inside a
+                    // unit-struct impl) constructs the unit value, as in
+                    // fn new() -> Self { Self }.
+                    if let Some(name) = self.resolve_unit_struct_name(&ident.name) {
+                        let builder = self.current_fn.as_mut().ok_or_else(|| {
+                            CodegenError::Internal(
+                                "No current function for unit struct value".to_string(),
+                            )
+                        })?;
+                        let result = builder.create_local(MirType::Struct(name.clone()));
+                        builder.aggregate(result, AggregateKind::Struct(name), Vec::new());
+                        return Ok(values::local(result));
+                    }
                     let resolved = self.resolve_fn_name(&ident.name);
                     Ok(values::global(resolved))
                 }
             }
+        }
+    }
+
+    /// If `name` (after resolving `Self` and the module prefix) refers to a
+    /// unit struct (zero fields), return its concrete codegen name. Used so a
+    /// bare value-position reference constructs the unit value.
+    fn resolve_unit_struct_name(&self, name: &Arc<str>) -> Option<Arc<str>> {
+        let mut candidate: Arc<str> = if name.as_ref() == "Self" {
+            self.current_impl_type.clone()?
+        } else {
+            name.clone()
+        };
+        if !self.module_prefix.is_empty() {
+            let prefixed = self.prefixed_name(&candidate);
+            if self.module.find_type(prefixed.as_ref()).is_some() {
+                candidate = prefixed;
+            }
+        }
+        match self.module.find_type(candidate.as_ref()) {
+            Some(td) => match &td.kind {
+                TypeDefKind::Struct { fields, .. } if fields.is_empty() => Some(candidate),
+                _ => None,
+            },
+            None => None,
         }
     }
 

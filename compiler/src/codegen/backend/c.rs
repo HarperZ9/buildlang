@@ -2160,6 +2160,9 @@ impl CBackend {
                                 name.strip_prefix("dyn_").unwrap_or("Unknown"),
                                 vals[1]
                             )
+                        } else if vals.is_empty() {
+                            // Unit struct (no fields): portable zero-init.
+                            format!("({}){{0}}", name)
                         } else {
                             format!("({}){{ {} }}", name, vals.join(", "))
                         }
