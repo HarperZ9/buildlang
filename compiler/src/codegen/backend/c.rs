@@ -214,6 +214,31 @@ impl CBackend {
                             write!(self.output, "}} {};\n\n", name).unwrap();
                         }
                     }
+                    // A tuple field may instead be carried as MirType::Tuple
+                    // (not Struct("Tuple_..")); emit its typedef too, deriving
+                    // field C types from the element types directly.
+                    if let MirType::Tuple(elems) = field_ty {
+                        // Only all-primitive tuples are safe to pre-emit here:
+                        // a tuple of named structs would reference a struct not
+                        // yet defined at this point (emit ordering). Those remain
+                        // a known gap for the topological type emitter.
+                        let all_prim = elems.iter().all(|e| {
+                            matches!(e, MirType::Int(..) | MirType::Float(..) | MirType::Bool)
+                        });
+                        if !elems.is_empty() && all_prim {
+                            let name = MirType::tuple_type_name(elems);
+                            if !emitted_tuples.contains(name.as_ref()) {
+                                emitted_tuples.insert(name.to_string());
+                                let field_ctypes: Vec<String> =
+                                    elems.iter().map(|e| self.type_to_c(e)).collect();
+                                write!(self.output, "typedef struct {} {{\n", name).unwrap();
+                                for (i, ct) in field_ctypes.iter().enumerate() {
+                                    write!(self.output, "    {} field{};\n", ct, i).unwrap();
+                                }
+                                write!(self.output, "}} {};\n\n", name).unwrap();
+                            }
+                        }
+                    }
                 }
             }
         }

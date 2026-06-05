@@ -480,6 +480,28 @@ impl<'ctx> MirLowerer<'ctx> {
     fn collect_inline_mod(&mut self, m: &ast::ModDef) -> CodegenResult<()> {
         if let Some(ref content) = m.content {
             self.module_prefix.push(m.name.name.clone());
+            // Forward-declare every non-generic struct/enum name in this
+            // module (bare -> module-prefixed) BEFORE lowering any item body.
+            // Field types are lowered during collect_struct/collect_enum, so a
+            // field whose type is declared LATER in the same module would
+            // otherwise miss type_module_map and keep its bare name, emitting C
+            // that names an undefined identifier (e.g. a bare ColorPrimaries
+            // field where only hdr_ColorPrimaries is defined).
+            for item in &content.items {
+                let (name, generics) = match &item.kind {
+                    ItemKind::Struct(s) => (&s.name.name, &s.generics),
+                    ItemKind::Enum(e) => (&e.name.name, &e.generics),
+                    _ => continue,
+                };
+                let has_generics = generics
+                    .params
+                    .iter()
+                    .any(|p| matches!(p.kind, ast::GenericParamKind::Type { .. }));
+                if !has_generics {
+                    let prefixed = self.prefixed_name(name);
+                    self.type_module_map.insert(name.clone(), prefixed);
+                }
+            }
             for item in &content.items {
                 // Rewrite item names with the module prefix before collecting.
                 let rewritten = self.rewrite_item_with_prefix(item);
