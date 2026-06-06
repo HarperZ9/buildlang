@@ -4569,6 +4569,7 @@ impl<'ctx> MirLowerer<'ctx> {
         let elem_ty = match self.type_of_value(&arr_val) {
             MirType::Array(elem, _) => *elem,
             MirType::Slice(elem) => *elem,
+            MirType::Vec(elem) => *elem,
             MirType::Ptr(inner) => *inner,
             _ => MirType::i32(),
         };
