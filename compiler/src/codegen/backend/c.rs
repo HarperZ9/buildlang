@@ -188,12 +188,14 @@ impl CBackend {
 
         // Pre-emit typedefs for tuple types used in struct fields.
         // (f32, f32) → typedef struct Tuple_f32_f32 { float field0; float field1; } Tuple_f32_f32;
+        let type_names: std::collections::HashSet<&str> =
+            types.iter().map(|t| t.name.as_ref()).collect();
         let mut emitted_tuples = std::collections::HashSet::new();
         for ty in types {
             if let TypeDefKind::Struct { fields, .. } = &ty.kind {
                 for (_, field_ty) in fields {
                     if let MirType::Struct(name) = field_ty {
-                        if name.starts_with("Tuple_") && !emitted_tuples.contains(name.as_ref()) {
+                        if name.starts_with("Tuple_") && !type_names.contains(name.as_ref()) && !emitted_tuples.contains(name.as_ref()) {
                             emitted_tuples.insert(name.to_string());
                             // Parse the tuple element types from the mangled name
                             let parts: Vec<&str> = name[6..].split('_').collect();
@@ -227,7 +229,7 @@ impl CBackend {
                         });
                         if !elems.is_empty() && all_prim {
                             let name = MirType::tuple_type_name(elems);
-                            if !emitted_tuples.contains(name.as_ref()) {
+                            if !type_names.contains(name.as_ref()) && !emitted_tuples.contains(name.as_ref()) {
                                 emitted_tuples.insert(name.to_string());
                                 let field_ctypes: Vec<String> =
                                     elems.iter().map(|e| self.type_to_c(e)).collect();
@@ -281,23 +283,30 @@ impl CBackend {
 
         // Recursively collect named-type dependencies from a MirType.
         // Only value types (not behind a pointer) require ordering.
-        fn collect_type_deps<'a>(
-            mir_ty: &'a MirType,
+        fn collect_type_deps(
+            mir_ty: &MirType,
             type_names: &std::collections::HashSet<&str>,
-            out: &mut Vec<&'a str>,
+            out: &mut Vec<String>,
         ) {
             match mir_ty {
                 MirType::Struct(name) => {
                     if type_names.contains(name.as_ref()) {
-                        out.push(name.as_ref());
+                        out.push(name.to_string());
                     }
                 }
                 MirType::Array(inner, _) | MirType::Slice(inner) => {
                     collect_type_deps(inner, type_names, out);
                 }
                 MirType::Tuple(elems) => {
-                    for e in elems {
-                        collect_type_deps(e, type_names, out);
+                    // A tuple used by value (e.g. as a struct field) depends on its
+                    // own typedef being emitted first; register that dependency.
+                    let tname = MirType::tuple_type_name(elems);
+                    if type_names.contains(tname.as_ref()) {
+                        out.push(tname.to_string());
+                    } else {
+                        for e in elems {
+                            collect_type_deps(e, type_names, out);
+                        }
                     }
                 }
                 // Vec/Map/Ptr are behind pointers — no ordering needed
@@ -306,7 +315,7 @@ impl CBackend {
         }
 
         // Collect value dependencies for each type
-        let deps: std::collections::HashMap<&str, Vec<&str>> = types
+        let deps: std::collections::HashMap<&str, Vec<String>> = types
             .iter()
             .map(|ty| {
                 let mut d = Vec::new();
@@ -347,7 +356,7 @@ impl CBackend {
             let mut next_remaining = Vec::new();
             for ty in &remaining {
                 let type_deps = deps.get(ty.name.as_ref()).cloned().unwrap_or_default();
-                if type_deps.iter().all(|d| emitted.contains(d)) {
+                if type_deps.iter().all(|d| emitted.contains(d.as_str())) {
                     self.emit_type_def(ty);
                     emitted.insert(ty.name.as_ref());
                 } else {
