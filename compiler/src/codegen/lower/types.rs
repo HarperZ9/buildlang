@@ -734,7 +734,7 @@ impl<'ctx> MirLowerer<'ctx> {
     }
 
     /// Infer the MirType for a single expression (used by subst inference).
-    fn infer_single_arg_type(&self, expr: &ast::Expr) -> MirType {
+    pub(crate) fn infer_single_arg_type(&self, expr: &ast::Expr) -> MirType {
         match &expr.kind {
             ExprKind::Literal(lit) => match lit {
                 Literal::Int { suffix, .. } => suffix
