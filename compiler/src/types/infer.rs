@@ -580,6 +580,23 @@ impl<'ctx> TypeInfer<'ctx> {
         }
     }
 
+    /// Like `unify`, but for an argument-passing position: a `&mut T`
+    /// argument may satisfy a `&T` parameter (mutable-to-shared reborrow).
+    /// The relaxation is outermost-only; inner mutability and every
+    /// non-argument position stay invariant via `unify`.
+    fn coerce_arg(&mut self, param: &Ty, arg: &Ty, span: Span) -> TypeResult<()> {
+        let p = self.apply(param);
+        let a = self.apply(arg);
+        if let (
+            TyKind::Ref(_, Mutability::Immutable, p_inner),
+            TyKind::Ref(_, Mutability::Mutable, a_inner),
+        ) = (&p.kind, &a.kind)
+        {
+            return self.unify(p_inner, a_inner, span);
+        }
+        self.unify(param, arg, span)
+    }
+
     // =========================================================================
     // EXPRESSION INFERENCE
     // =========================================================================
@@ -1546,7 +1563,7 @@ impl<'ctx> TypeInfer<'ctx> {
 
                 for (param, arg) in fn_ty.params.iter().zip(args.iter()) {
                     let arg_ty = self.infer_expr(arg);
-                    let _ = self.unify(param, &arg_ty, span);
+                    let _ = self.coerce_arg(param, &arg_ty, span);
                 }
 
                 // Propagate callee's effects to caller's effect context
@@ -1878,7 +1895,7 @@ impl<'ctx> TypeInfer<'ctx> {
                     }
                     // Unify argument types
                     for (param, arg) in fn_ty.params.iter().zip(arg_tys.iter()) {
-                        let _ = self.unify(param, arg, span);
+                        let _ = self.coerce_arg(param, arg, span);
                     }
                     return (*fn_ty.ret).clone();
                 }
