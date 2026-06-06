@@ -1638,6 +1638,13 @@ impl<'ctx> MirLowerer<'ctx> {
             _ => ret,
         };
 
+        // Register tuple type defs for any tuple types in the signature
+        // (mirrors lower_function; impl methods returning a tuple of named
+        // structs otherwise never register the tuple's MirTypeDef).
+        if let MirType::Tuple(ref elems) = ret {
+            self.ensure_tuple_type_def(elems);
+        }
+
         let sig = MirFnSig::new(params, ret);
         self.module.declare_function(mangled_name, sig);
         Ok(())
@@ -1693,6 +1700,13 @@ impl<'ctx> MirLowerer<'ctx> {
             }
             _ => ret,
         };
+
+        // Register tuple type defs for any tuple types in the signature
+        // (mirrors lower_function; impl methods returning a tuple of named
+        // structs otherwise never register the tuple's MirTypeDef).
+        if let MirType::Tuple(ref elems) = ret {
+            self.ensure_tuple_type_def(elems);
+        }
 
         let sig = MirFnSig::new(params, ret);
 
