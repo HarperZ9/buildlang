@@ -797,6 +797,24 @@ impl<'a> Parser<'a> {
             } else {
                 let path = self.parse_path()?;
                 let span = path.span;
+                // Fn-trait sugar: `Fn(A, B) -> C` (also FnMut/FnOnce). Consume the
+                // parenthesized argument types and optional return type so the bound
+                // parses; without this the unparsed `(...) -> T` derails the generic-
+                // param list and truncates the impl block, leaking later methods.
+                if self.eat(&TokenKind::OpenDelim(Delimiter::Paren)) {
+                    if !self.check(&TokenKind::CloseDelim(Delimiter::Paren)) {
+                        loop {
+                            let _ = self.parse_type()?;
+                            if !self.eat(&TokenKind::Comma) {
+                                break;
+                            }
+                        }
+                    }
+                    self.expect(&TokenKind::CloseDelim(Delimiter::Paren))?;
+                    if self.eat(&TokenKind::Arrow) {
+                        let _ = self.parse_type()?;
+                    }
+                }
                 bounds.push(TypeBound {
                     path,
                     is_maybe,
