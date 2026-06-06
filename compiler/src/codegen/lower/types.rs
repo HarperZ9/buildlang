@@ -170,7 +170,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     }
 
                     // Special-case HashMap<K, V>: resolve to MirType::Map(key, value)
-                    if type_name == "HashMap" {
+                    if type_name == "HashMap" || type_name == "BTreeMap" {
                         let key_ty =
                             if let Some(ast::GenericArg::Type(arg_ty)) = generic_args.first() {
                                 self.lower_type_from_ast(arg_ty)
@@ -184,6 +184,16 @@ impl<'ctx> MirLowerer<'ctx> {
                                 MirType::f64()
                             };
                         return MirType::Map(Box::new(key_ty), Box::new(val_ty));
+                    }
+
+                    // Special-case Box<T>/Rc<T>/Arc<T>: a smart pointer lowers to a
+                    // thin C pointer. Enough to emit valid C; trait-object dispatch
+                    // through Box<dyn Trait> (fat pointer) remains a separate gap.
+                    if matches!(type_name, "Box" | "Rc" | "Arc") {
+                        if let Some(ast::GenericArg::Type(arg_ty)) = generic_args.first() {
+                            let inner = self.lower_type_from_ast(arg_ty);
+                            return MirType::Ptr(Box::new(inner));
+                        }
                     }
 
                     // Check if this is a known generic enum or struct
