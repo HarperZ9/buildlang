@@ -1653,6 +1653,17 @@ impl<'ctx> TypeInfer<'ctx> {
             TyKind::Error => Ty::error(),
             // Unit type — cascading from a failed function lookup; suppress error
             TyKind::Tuple(elems) if elems.is_empty() => Ty::fresh_var(),
+            // A call on a generic type parameter bound by Fn (`f()` where `f: F`,
+            // `F: Fn(...)`) is callable; the bound signature is not tracked here so
+            // check leniently and let monomorphization supply the concrete closure.
+            TyKind::Param(..) => {
+                let _: Vec<_> = args.iter().map(|a| self.infer_expr(a)).collect();
+                Ty::fresh_var()
+            }
+            TyKind::Ref(_, _, ref inner) if matches!(inner.kind, TyKind::Param(..) | TyKind::Var(_) | TyKind::Infer(_)) => {
+                let _: Vec<_> = args.iter().map(|a| self.infer_expr(a)).collect();
+                Ty::fresh_var()
+            }
             _ => {
                 self.error(TypeError::NotCallable { ty: func_ty }, span);
                 Ty::error()
