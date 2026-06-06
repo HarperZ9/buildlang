@@ -1572,6 +1572,95 @@ impl<'ctx> MirLowerer<'ctx> {
         }
     }
 
+    /// Best-effort static type inference for an AST expression, used to drive
+    /// out i32 defaults at result-merge sites (match arms, etc.). Returns
+    /// MirType::i32() as the "could not infer" sentinel, matching the
+    /// surrounding lowering conventions.
+    fn infer_expr_type(&self, expr: &ast::Expr) -> MirType {
+        match &expr.kind {
+            ExprKind::Literal(_) => self.infer_single_arg_type(expr),
+            ExprKind::Paren(inner) => self.infer_expr_type(inner),
+            ExprKind::Ident(ident) => {
+                if let Some(&id) = self.var_map.get(&ident.name) {
+                    if let Some(ref b) = self.current_fn {
+                        if let Some(t) = b.local_type(id) {
+                            return t;
+                        }
+                    }
+                }
+                MirType::i32()
+            }
+            ExprKind::Call { func, .. } => self.resolve_call_return_type(func),
+            ExprKind::MethodCall { receiver, method, .. } => {
+                let recv = self.infer_expr_type(receiver);
+                match method.name.as_ref() {
+                    "len" | "count" | "capacity" => MirType::usize(),
+                    "is_some" | "is_none" | "is_ok" | "is_err" | "is_empty"
+                    | "contains" | "contains_key" | "starts_with" | "ends_with" => MirType::Bool,
+                    "clone" | "to_owned" => recv,
+                    "get" | "get_mut" => match recv {
+                        MirType::Map(_, v) => *v,
+                        MirType::Vec(e) => *e,
+                        _ => MirType::i32(),
+                    },
+                    "pop" | "pop_front" | "pop_back" | "first" | "last" | "front" | "back" => {
+                        match recv {
+                            MirType::Vec(e) => *e,
+                            _ => MirType::i32(),
+                        }
+                    }
+                    _ => MirType::i32(),
+                }
+            }
+            ExprKind::Struct { path, .. } => {
+                let name = path
+                    .last_ident()
+                    .map(|i| i.name.clone())
+                    .unwrap_or_else(|| Arc::from(""));
+                if let Some(q) = self.type_module_map.get(name.as_ref()) {
+                    return MirType::Struct(q.clone());
+                }
+                MirType::Struct(name)
+            }
+            ExprKind::Field { expr: base, field } => {
+                if let MirType::Struct(sname) = self.infer_expr_type(base) {
+                    if let Some(td) = self.module.find_type(sname.as_ref()) {
+                        if let TypeDefKind::Struct { fields, .. } = &td.kind {
+                            for (fname, fty) in fields {
+                                if fname.as_deref().map(|n| n == field.name.as_ref()).unwrap_or(false) {
+                                    return fty.clone();
+                                }
+                            }
+                        }
+                    }
+                }
+                MirType::i32()
+            }
+            ExprKind::If { then_branch, .. } => self.infer_block_type(then_branch),
+            ExprKind::Match { arms, .. } => {
+                for a in arms {
+                    let t = self.infer_expr_type(&a.body);
+                    if t != MirType::i32() && t != MirType::Void {
+                        return t;
+                    }
+                }
+                MirType::i32()
+            }
+            ExprKind::Block(b) => self.infer_block_type(b),
+            _ => MirType::i32(),
+        }
+    }
+
+    /// Type of a block: the type of its trailing expression statement, if any.
+    fn infer_block_type(&self, block: &ast::Block) -> MirType {
+        if let Some(last) = block.stmts.last() {
+            if let StmtKind::Expr(ref e) = last.kind {
+                return self.infer_expr_type(e);
+            }
+        }
+        MirType::i32()
+    }
+
     fn resolve_call_return_type(&self, func: &ast::Expr) -> MirType {
         let name = match &func.kind {
             ExprKind::Ident(ident) => {
@@ -3085,7 +3174,20 @@ impl<'ctx> MirLowerer<'ctx> {
         // Determine the result type.  For enum matches where the arms
         // produce a non-enum value, we use the enclosing function's return
         // type as a best-effort guess.  For simpler matches use the scrutinee type.
-        let result_ty = if is_enum_match {
+        // Prefer the type inferred from the arm bodies (drives out the i32/
+        // scrutinee guesses); fall back to the enclosing return type (enum
+        // matches) or the scrutinee type only when inference yields nothing.
+        let mut inferred_arm_ty = MirType::i32();
+        for arm in arms {
+            let at = self.infer_expr_type(&arm.body);
+            if at != MirType::i32() && at != MirType::Void {
+                inferred_arm_ty = at;
+                break;
+            }
+        }
+        let result_ty = if inferred_arm_ty != MirType::i32() {
+            inferred_arm_ty
+        } else if is_enum_match {
             let builder = self
                 .current_fn
                 .as_ref()
