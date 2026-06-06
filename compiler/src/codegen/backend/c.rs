@@ -510,7 +510,16 @@ impl CBackend {
                             // Unit variant: add empty struct so it can be
                             // referenced in designated initializers
                             self.write_indent();
-                            write!(self.output, "char _{};\n", variant.name).unwrap();
+                            // Placeholder field name must not be a reserved C identifier (e.g. a
+                            // variant named Bool would yield _Bool, the C99 boolean keyword).
+                            // It is pure padding, never referenced.
+                            let placeholder = format!("_{}", variant.name);
+                            let placeholder = if Self::is_c_reserved(&placeholder) {
+                                format!("{}_", placeholder)
+                            } else {
+                                placeholder
+                            };
+                            write!(self.output, "char {};\n", placeholder).unwrap();
                         }
                     }
                     self.indent -= 1;
