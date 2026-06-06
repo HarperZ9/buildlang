@@ -2374,13 +2374,19 @@ impl CBackend {
                     _ => false,
                 };
                 if base_is_vec {
-                    let suffix = match elem_ty {
-                        MirType::Float(_) => "f64",
-                        MirType::Int(IntSize::I64, _) => "i64",
-                        MirType::Struct(n) if n.as_ref() == "QuantaString" => "str",
-                        _ => "i32",
-                    };
-                    format!("quanta_hvec_get_{}({}, {})", suffix, base_str, index_str)
+                    // Scalar/string elements use the typed getters; aggregate elements
+                    // (structs, tuples) use the generic pointer getter + cast/deref so
+                    // Vec<struct> / Vec<tuple> indexing reads the element by value.
+                    match elem_ty {
+                        MirType::Float(_) => format!("quanta_hvec_get_f64({}, {})", base_str, index_str),
+                        MirType::Int(IntSize::I64, _) => format!("quanta_hvec_get_i64({}, {})", base_str, index_str),
+                        MirType::Struct(n) if n.as_ref() == "QuantaString" => format!("quanta_hvec_get_str({}, {})", base_str, index_str),
+                        MirType::Int(..) | MirType::Bool => format!("quanta_hvec_get_i32({}, {})", base_str, index_str),
+                        other => {
+                            let ct = self.type_to_c(other);
+                            format!("(*({}*)quanta_vec_get({}.inner, {}))", ct, base_str, index_str)
+                        }
+                    }
                 } else {
                     // QuantaString indexing: access .ptr[index] for byte access
                     let base_is_string = match base {
