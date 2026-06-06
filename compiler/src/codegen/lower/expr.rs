@@ -1623,7 +1623,11 @@ impl<'ctx> MirLowerer<'ctx> {
                 MirType::Struct(name)
             }
             ExprKind::Field { expr: base, field } => {
-                if let MirType::Struct(sname) = self.infer_expr_type(base) {
+                let mut bt = self.infer_expr_type(base);
+                if let MirType::Ptr(inner) = bt {
+                    bt = *inner;
+                }
+                if let MirType::Struct(sname) = bt {
                     if let Some(td) = self.module.find_type(sname.as_ref()) {
                         if let TypeDefKind::Struct { fields, .. } = &td.kind {
                             for (fname, fty) in fields {
@@ -3310,7 +3314,17 @@ impl<'ctx> MirLowerer<'ctx> {
                         .option_inner_types
                         .get(&scrutinee_local)
                         .cloned()
-                        .unwrap_or_else(|| scrutinee_ty.clone());
+                        .unwrap_or_else(|| {
+                            // Infer the scrutinee's value type statically (e.g.
+                            // self.map.get(k) -> V); fall back to the scrutinee local
+                            // type only when inference yields nothing.
+                            let inferred = self.infer_expr_type(scrutinee);
+                            if inferred != MirType::i32() {
+                                inferred
+                            } else {
+                                scrutinee_ty.clone()
+                            }
+                        });
                     for pat in patterns.iter() {
                         if let ast::PatternKind::Ident { name, .. } = &pat.kind {
                             let builder = self.current_fn.as_mut().unwrap();
