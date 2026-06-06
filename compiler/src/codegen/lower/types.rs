@@ -312,6 +312,10 @@ impl<'ctx> MirLowerer<'ctx> {
                     _ => None,
                 }
             }
+            ExprKind::Ident(id) => self.const_values.get(&id.name).cloned(),
+            ExprKind::Path(p) => p
+                .last_ident()
+                .and_then(|i| self.const_values.get(&i.name).cloned()),
             _ => None,
         }
     }
