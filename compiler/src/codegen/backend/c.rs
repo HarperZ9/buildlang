@@ -116,7 +116,9 @@ impl CBackend {
         self.output.push('\n');
 
         // Type definitions
-        self.generate_type_definitions(&module.types)?;
+        let mut all_types = module.types.clone();
+        all_types.extend(Self::synthesize_tuple_typedefs(module));
+        self.generate_type_definitions(&all_types)?;
 
         // Vtable TYPE declarations (before forward declarations so dyn_* types are available)
         self.generate_vtable_types(module)?;
@@ -181,7 +183,96 @@ impl CBackend {
         Ok(())
     }
 
-    fn generate_type_definitions(&mut self, types: &[MirTypeDef]) -> CodegenResult<()> {
+    /// Synthesize a MirTypeDef for every tuple type referenced anywhere in the
+    /// module (function signatures, locals, and type-def fields/variants) that
+    /// was not already registered. Tuple types appear by value as params, locals,
+    /// and fields, but only literals and return types were registered during
+    /// lowering, so the rest reached the backend with no typedef. The topological
+    /// emitter (collect_type_deps) orders each after its element types.
+    fn synthesize_tuple_typedefs(module: &MirModule) -> Vec<MirTypeDef> {
+        use std::collections::HashSet;
+        fn visit(
+            ty: &MirType,
+            existing: &HashSet<String>,
+            seen: &mut HashSet<String>,
+            out: &mut Vec<MirTypeDef>,
+        ) {
+            match ty {
+                MirType::Tuple(elems) => {
+                    if !elems.is_empty() {
+                        let name = MirType::tuple_type_name(elems);
+                        let key = name.to_string();
+                        if !existing.contains(&key) && seen.insert(key) {
+                            let fields: Vec<(Option<Arc<str>>, MirType)> = elems
+                                .iter()
+                                .enumerate()
+                                .map(|(i, t)| (Some(Arc::from(format!("_{}", i))), t.clone()))
+                                .collect();
+                            out.push(MirTypeDef {
+                                name,
+                                kind: TypeDefKind::Struct { fields, packed: false },
+                            });
+                        }
+                    }
+                    for e in elems {
+                        visit(e, existing, seen, out);
+                    }
+                }
+                MirType::Array(inner, _)
+                | MirType::Slice(inner)
+                | MirType::Ptr(inner)
+                | MirType::Vec(inner) => visit(inner, existing, seen, out),
+                MirType::Map(k, v) => {
+                    visit(k, existing, seen, out);
+                    visit(v, existing, seen, out);
+                }
+                MirType::FnPtr(sig) => {
+                    for prm in &sig.params {
+                        visit(prm, existing, seen, out);
+                    }
+                    visit(&sig.ret, existing, seen, out);
+                }
+                _ => {}
+            }
+        }
+        let existing: HashSet<String> =
+            module.types.iter().map(|t| t.name.to_string()).collect();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut out: Vec<MirTypeDef> = Vec::new();
+        for td in &module.types {
+            match &td.kind {
+                TypeDefKind::Struct { fields, .. } => {
+                    for (_, ft) in fields {
+                        visit(ft, &existing, &mut seen, &mut out);
+                    }
+                }
+                TypeDefKind::Enum { variants, .. } => {
+                    for v in variants {
+                        for (_, ft) in &v.fields {
+                            visit(ft, &existing, &mut seen, &mut out);
+                        }
+                    }
+                }
+                TypeDefKind::Union { variants } => {
+                    for (_, vt) in variants {
+                        visit(vt, &existing, &mut seen, &mut out);
+                    }
+                }
+            }
+        }
+        for f in &module.functions {
+            for prm in &f.sig.params {
+                visit(prm, &existing, &mut seen, &mut out);
+            }
+            visit(&f.sig.ret, &existing, &mut seen, &mut out);
+            for l in &f.locals {
+                visit(&l.ty, &existing, &mut seen, &mut out);
+            }
+        }
+        out
+    }
+
+        fn generate_type_definitions(&mut self, types: &[MirTypeDef]) -> CodegenResult<()> {
         if types.is_empty() {
             return Ok(());
         }
