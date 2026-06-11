@@ -1185,8 +1185,7 @@ fn cmd_build(
     println!("[3/{}] Type checking... OK", total_steps);
 
     // Code generation — pass source for macro string extraction
-    let mut codegen =
-        CodeGenerator::with_source(&ctx, target, Arc::from(source_file.source()));
+    let mut codegen = CodeGenerator::with_source(&ctx, target, Arc::from(source_file.source()));
     let output = codegen.generate(&ast).map_err(|e| {
         eprintln!("Code generation error: {}", e);
         1
@@ -1537,8 +1536,7 @@ fn cmd_run(file: &PathBuf, args: &[String]) -> Result<(), i32> {
     }
 
     // Generate C code — pass source for macro string extraction
-    let mut codegen =
-        CodeGenerator::with_source(&ctx, Target::C, Arc::from(source_file.source()));
+    let mut codegen = CodeGenerator::with_source(&ctx, Target::C, Arc::from(source_file.source()));
     let output = codegen.generate(&ast).map_err(|e| {
         eprintln!("Code generation error: {}", e);
         1
@@ -1634,7 +1632,11 @@ fn cmd_test(
             })
             .collect(),
         Err(e) => {
-            eprintln!("Error reading test directory '{}': {}", directory.display(), e);
+            eprintln!(
+                "Error reading test directory '{}': {}",
+                directory.display(),
+                e
+            );
             return Err(1);
         }
     };
@@ -1668,7 +1670,10 @@ fn cmd_test(
     let total = test_pairs.len();
     let skipped = tests.len() - total;
     if total == 0 {
-        println!("No tests found with .expected files in '{}'", directory.display());
+        println!(
+            "No tests found with .expected files in '{}'",
+            directory.display()
+        );
         return Ok(());
     }
 
@@ -1687,8 +1692,8 @@ fn cmd_test(
 
         // --- Compile and capture output ---
         let result = (|| -> Result<String, String> {
-            let source = std::fs::read_to_string(quanta_file)
-                .map_err(|e| format!("read: {}", e))?;
+            let source =
+                std::fs::read_to_string(quanta_file).map_err(|e| format!("read: {}", e))?;
             let source = resolve_imports(&source, quanta_file).map_err(|_| "import".to_string())?;
             let run_base = quanta_file.parent().unwrap_or(Path::new("."));
             let source =
@@ -1712,12 +1717,11 @@ fn cmd_test(
                 return Err(format!("type: {}", errs.join("; ")));
             }
 
-            let mut codegen = CodeGenerator::with_source(
-                &ctx,
-                Target::C,
-                Arc::from(source_file.source()),
-            );
-            let output = codegen.generate(&ast).map_err(|e| format!("codegen: {}", e))?;
+            let mut codegen =
+                CodeGenerator::with_source(&ctx, Target::C, Arc::from(source_file.source()));
+            let output = codegen
+                .generate(&ast)
+                .map_err(|e| format!("codegen: {}", e))?;
 
             // Use a unique temp directory per test to avoid MSVC bat conflicts
             let test_dir = std::env::temp_dir().join(format!("quantatest_{}", name));
@@ -1748,8 +1752,7 @@ fn cmd_test(
 
             let _ = std::fs::remove_dir_all(&test_dir);
 
-            let stdout =
-                String::from_utf8_lossy(&run_output.stdout).replace("\r\n", "\n");
+            let stdout = String::from_utf8_lossy(&run_output.stdout).replace("\r\n", "\n");
             Ok(stdout)
         })();
 
@@ -1860,7 +1863,10 @@ fn cmd_lint(file: &PathBuf) -> Result<(), i32> {
         let pos = source_file.lookup_position(span.start);
         eprintln!(
             "\x1b[31merror\x1b[0m: {} ({}:{}:{})",
-            err, file.display(), pos.line, pos.column
+            err,
+            file.display(),
+            pos.line,
+            pos.column
         );
         errors += 1;
     }
@@ -2436,7 +2442,10 @@ fn resolve_modules_with_prefix(
             (mod_dir_file, source_dir.join(mod_name))
         } else if let Some(ref sf) = stdlib_file {
             if sf.exists() {
-                (sf.clone(), sf.parent().unwrap_or(Path::new(".")).to_path_buf())
+                (
+                    sf.clone(),
+                    sf.parent().unwrap_or(Path::new(".")).to_path_buf(),
+                )
             } else {
                 continue;
             }

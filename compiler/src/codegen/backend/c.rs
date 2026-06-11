@@ -135,16 +135,15 @@ impl CBackend {
 
         // Build function parameter type index for auto-ref at call sites
         for func in &module.functions {
-            self.fn_params.insert(
-                func.name.to_string(),
-                func.sig.params.clone(),
-            );
+            self.fn_params
+                .insert(func.name.to_string(), func.sig.params.clone());
         }
 
         // Generate monomorphized HashMap wrappers for non-f64 value types.
         // Scan all function locals to discover Map types used in the module.
         {
-            let mut map_val_types: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut map_val_types: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
             for func in &module.functions {
                 for local in &func.locals {
                     if let MirType::Map(_, ref val_ty) = local.ty {
@@ -156,17 +155,30 @@ impl CBackend {
                 }
             }
             if !map_val_types.is_empty() {
-                self.output.push_str("// Monomorphized HashMap wrappers for non-f64 value types\n");
+                self.output
+                    .push_str("// Monomorphized HashMap wrappers for non-f64 value types\n");
                 for val_c in &map_val_types {
                     let safe_name = val_c.replace("*", "ptr").replace(" ", "_");
                     write!(self.output, "static {} quanta_hmap_get_val_{}(QuantaStrF64MapHandle h, const char* key) {{\n", val_c, safe_name).unwrap();
-                    write!(self.output, "    double d = quanta_hmap_get_str_f64(h, key);\n").unwrap();
+                    write!(
+                        self.output,
+                        "    double d = quanta_hmap_get_str_f64(h, key);\n"
+                    )
+                    .unwrap();
                     write!(self.output, "    {} v; memset(&v, 0, sizeof(v));\n", val_c).unwrap();
-                    write!(self.output, "    memcpy(&v, &d, sizeof(d) < sizeof(v) ? sizeof(d) : sizeof(v));\n").unwrap();
+                    write!(
+                        self.output,
+                        "    memcpy(&v, &d, sizeof(d) < sizeof(v) ? sizeof(d) : sizeof(v));\n"
+                    )
+                    .unwrap();
                     write!(self.output, "    return v;\n}}\n").unwrap();
                     write!(self.output, "static void quanta_hmap_insert_val_{}(QuantaStrF64MapHandle h, const char* key, {} value) {{\n", safe_name, val_c).unwrap();
                     write!(self.output, "    double d = 0; memcpy(&d, &value, sizeof(value) < sizeof(d) ? sizeof(value) : sizeof(d));\n").unwrap();
-                    write!(self.output, "    quanta_hmap_insert_str_f64(h, key, d);\n}}\n\n").unwrap();
+                    write!(
+                        self.output,
+                        "    quanta_hmap_insert_str_f64(h, key, d);\n}}\n\n"
+                    )
+                    .unwrap();
                 }
             }
         }
@@ -220,8 +232,14 @@ impl CBackend {
 
         // Runtime-provided types that must not be re-emitted.
         const RUNTIME_TYPES: &[&str] = &[
-            "quanta_vec2", "quanta_vec3", "quanta_vec4", "quanta_mat4",
-            "VecDeque", "HashSet", "Option", "Result",
+            "quanta_vec2",
+            "quanta_vec3",
+            "quanta_vec4",
+            "quanta_mat4",
+            "VecDeque",
+            "HashSet",
+            "Option",
+            "Result",
         ];
 
         // Emit forward declarations for struct/union/enum types.
@@ -309,7 +327,8 @@ impl CBackend {
             .collect();
 
         // Emit types in dependency order (simple iterative approach)
-        self.output.push_str("// Type definitions (dependency-ordered)\n");
+        self.output
+            .push_str("// Type definitions (dependency-ordered)\n");
         let mut remaining: Vec<&MirTypeDef> = types
             .iter()
             .filter(|t| !RUNTIME_TYPES.contains(&t.name.as_ref()))
@@ -345,147 +364,149 @@ impl CBackend {
     fn emit_type_def(&mut self, ty: &MirTypeDef) {
         match &ty.kind {
             TypeDefKind::Struct { fields, packed } => {
-                    if *packed {
-                        self.output.push_str("#pragma pack(push, 1)\n");
-                    }
-                    // Use struct tag only (not typedef) since forward decl already typedef'd
-                    write!(self.output, "struct {} {{\n", ty.name).unwrap();
-                    self.indent += 1;
-                    // C requires at least one member in a struct
-                    if fields.is_empty() {
-                        self.write_indent();
-                        self.output.push_str("char _pad;\n");
-                    }
-                    for (i, (name, field_ty)) in fields.iter().enumerate() {
-                        self.write_indent();
-                        let field_name = name
-                            .as_ref()
-                            .map(|n| n.to_string())
-                            .unwrap_or_else(|| format!("field{}", i));
-                        // Escape C reserved words in field names
-                        let field_name = Self::escape_c_keyword(&field_name);
-                        if matches!(field_ty, MirType::Array(_, _)) {
-                            write!(
-                                self.output,
-                                "{};\n",
-                                self.fmt_array_decl(field_ty, &field_name)
-                            )
-                            .unwrap();
-                        } else if let MirType::FnPtr(ref sig) = field_ty {
-                            // Function pointer fields need special syntax:
-                            // ret_type (*field_name)(param_types)
-                            let ret = self.type_to_c(&sig.ret);
-                            let params: Vec<_> = sig.params.iter().map(|p| self.type_to_c(p)).collect();
-                            write!(
-                                self.output,
-                                "{} (*{})({}){}\n",
-                                ret, field_name, params.join(", "),
-                                ";"
-                            )
-                            .unwrap();
-                        } else {
-                            write!(
-                                self.output,
-                                "{} {};\n",
-                                self.type_to_c(field_ty),
-                                field_name
-                            )
-                            .unwrap();
-                        }
-                    }
-                    self.indent -= 1;
-                    self.output.push_str("};\n\n");
-                    if *packed {
-                        self.output.push_str("#pragma pack(pop)\n");
-                    }
+                if *packed {
+                    self.output.push_str("#pragma pack(push, 1)\n");
                 }
-                TypeDefKind::Union { variants } => {
-                    write!(self.output, "union {} {{\n", ty.name).unwrap();
-                    self.indent += 1;
-                    for (name, var_ty) in variants {
-                        self.write_indent();
-                        write!(self.output, "{} {};\n", self.type_to_c(var_ty), name).unwrap();
-                    }
-                    self.indent -= 1;
-                    self.output.push_str("};\n\n");
+                // Use struct tag only (not typedef) since forward decl already typedef'd
+                write!(self.output, "struct {} {{\n", ty.name).unwrap();
+                self.indent += 1;
+                // C requires at least one member in a struct
+                if fields.is_empty() {
+                    self.write_indent();
+                    self.output.push_str("char _pad;\n");
                 }
-                TypeDefKind::Enum {
-                    discriminant_ty: _,
-                    variants,
-                } => {
-                    // Generate enum discriminants
-                    write!(self.output, "typedef enum {{\n").unwrap();
-                    self.indent += 1;
-                    for variant in variants {
-                        self.write_indent();
+                for (i, (name, field_ty)) in fields.iter().enumerate() {
+                    self.write_indent();
+                    let field_name = name
+                        .as_ref()
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| format!("field{}", i));
+                    // Escape C reserved words in field names
+                    let field_name = Self::escape_c_keyword(&field_name);
+                    if matches!(field_ty, MirType::Array(_, _)) {
                         write!(
                             self.output,
-                            "{}_{} = {},\n",
-                            ty.name, variant.name, variant.discriminant
+                            "{};\n",
+                            self.fmt_array_decl(field_ty, &field_name)
+                        )
+                        .unwrap();
+                    } else if let MirType::FnPtr(ref sig) = field_ty {
+                        // Function pointer fields need special syntax:
+                        // ret_type (*field_name)(param_types)
+                        let ret = self.type_to_c(&sig.ret);
+                        let params: Vec<_> = sig.params.iter().map(|p| self.type_to_c(p)).collect();
+                        write!(
+                            self.output,
+                            "{} (*{})({}){}\n",
+                            ret,
+                            field_name,
+                            params.join(", "),
+                            ";"
+                        )
+                        .unwrap();
+                    } else {
+                        write!(
+                            self.output,
+                            "{} {};\n",
+                            self.type_to_c(field_ty),
+                            field_name
                         )
                         .unwrap();
                     }
-                    self.indent -= 1;
-                    write!(self.output, "}} {}_Tag;\n\n", ty.name).unwrap();
-
-                    // Generate tagged union (forward decl already typedef'd)
-                    write!(self.output, "struct {} {{\n", ty.name).unwrap();
-                    self.indent += 1;
-                    self.write_indent();
-                    write!(self.output, "{}_Tag tag;\n", ty.name).unwrap();
-                    self.write_indent();
-                    self.output.push_str("union {\n");
-                    self.indent += 1;
-                    for variant in variants {
-                        if !variant.fields.is_empty() {
-                            self.write_indent();
-                            self.output.push_str("struct {\n");
-                            self.indent += 1;
-                            for (i, (fname, fty)) in variant.fields.iter().enumerate() {
-                                self.write_indent();
-                                let field_name = fname
-                                    .as_ref()
-                                    .map(|n| n.to_string())
-                                    .unwrap_or_else(|| format!("f{}", i));
-                                let field_name = Self::escape_c_keyword(&field_name);
-                                if matches!(fty, MirType::Array(_, _)) {
-                                    write!(
-                                        self.output,
-                                        "{};\n",
-                                        self.fmt_array_decl(fty, &field_name)
-                                    )
-                                    .unwrap();
-                                } else if let MirType::FnPtr(ref sig) = fty {
-                                    let ret = self.type_to_c(&sig.ret);
-                                    let params: Vec<_> = sig.params.iter().map(|p| self.type_to_c(p)).collect();
-                                    write!(self.output, "{} (*{})({}){}\n", ret, field_name, params.join(", "), ";").unwrap();
-                                } else {
-                                    write!(
-                                        self.output,
-                                        "{} {};\n",
-                                        self.type_to_c(fty),
-                                        field_name
-                                    )
-                                    .unwrap();
-                                }
-                            }
-                            self.indent -= 1;
-                            self.write_indent();
-                            write!(self.output, "}} {};\n", variant.name).unwrap();
-                        } else {
-                            // Unit variant: add empty struct so it can be
-                            // referenced in designated initializers
-                            self.write_indent();
-                            write!(self.output, "char _{};\n", variant.name).unwrap();
-                        }
-                    }
-                    self.indent -= 1;
-                    self.write_indent();
-                    self.output.push_str("} data;\n");
-                    self.indent -= 1;
-                    self.output.push_str("};\n\n");
+                }
+                self.indent -= 1;
+                self.output.push_str("};\n\n");
+                if *packed {
+                    self.output.push_str("#pragma pack(pop)\n");
                 }
             }
+            TypeDefKind::Union { variants } => {
+                write!(self.output, "union {} {{\n", ty.name).unwrap();
+                self.indent += 1;
+                for (name, var_ty) in variants {
+                    self.write_indent();
+                    write!(self.output, "{} {};\n", self.type_to_c(var_ty), name).unwrap();
+                }
+                self.indent -= 1;
+                self.output.push_str("};\n\n");
+            }
+            TypeDefKind::Enum {
+                discriminant_ty: _,
+                variants,
+            } => {
+                // Generate enum discriminants
+                write!(self.output, "typedef enum {{\n").unwrap();
+                self.indent += 1;
+                for variant in variants {
+                    self.write_indent();
+                    write!(
+                        self.output,
+                        "{}_{} = {},\n",
+                        ty.name, variant.name, variant.discriminant
+                    )
+                    .unwrap();
+                }
+                self.indent -= 1;
+                write!(self.output, "}} {}_Tag;\n\n", ty.name).unwrap();
+
+                // Generate tagged union (forward decl already typedef'd)
+                write!(self.output, "struct {} {{\n", ty.name).unwrap();
+                self.indent += 1;
+                self.write_indent();
+                write!(self.output, "{}_Tag tag;\n", ty.name).unwrap();
+                self.write_indent();
+                self.output.push_str("union {\n");
+                self.indent += 1;
+                for variant in variants {
+                    if !variant.fields.is_empty() {
+                        self.write_indent();
+                        self.output.push_str("struct {\n");
+                        self.indent += 1;
+                        for (i, (fname, fty)) in variant.fields.iter().enumerate() {
+                            self.write_indent();
+                            let field_name = fname
+                                .as_ref()
+                                .map(|n| n.to_string())
+                                .unwrap_or_else(|| format!("f{}", i));
+                            let field_name = Self::escape_c_keyword(&field_name);
+                            if matches!(fty, MirType::Array(_, _)) {
+                                write!(self.output, "{};\n", self.fmt_array_decl(fty, &field_name))
+                                    .unwrap();
+                            } else if let MirType::FnPtr(ref sig) = fty {
+                                let ret = self.type_to_c(&sig.ret);
+                                let params: Vec<_> =
+                                    sig.params.iter().map(|p| self.type_to_c(p)).collect();
+                                write!(
+                                    self.output,
+                                    "{} (*{})({}){}\n",
+                                    ret,
+                                    field_name,
+                                    params.join(", "),
+                                    ";"
+                                )
+                                .unwrap();
+                            } else {
+                                write!(self.output, "{} {};\n", self.type_to_c(fty), field_name)
+                                    .unwrap();
+                            }
+                        }
+                        self.indent -= 1;
+                        self.write_indent();
+                        write!(self.output, "}} {};\n", variant.name).unwrap();
+                    } else {
+                        // Unit variant: add empty struct so it can be
+                        // referenced in designated initializers
+                        self.write_indent();
+                        write!(self.output, "char _{};\n", variant.name).unwrap();
+                    }
+                }
+                self.indent -= 1;
+                self.write_indent();
+                self.output.push_str("} data;\n");
+                self.indent -= 1;
+                self.output.push_str("};\n\n");
+            }
+        }
     }
 
     fn generate_vtable_types(&mut self, module: &MirModule) -> CodegenResult<()> {
@@ -936,7 +957,8 @@ impl CBackend {
         use std::collections::HashSet;
         // Find all goto targets in the output to know which labels are multi-referenced
         let mut multi_ref_labels: HashSet<String> = HashSet::new();
-        let mut label_refs: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut label_refs: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         for line in self.output.lines() {
             let trimmed = line.trim();
             if let Some(target) = trimmed.strip_prefix("goto ") {
@@ -1024,10 +1046,7 @@ impl CBackend {
                         || next_trimmed.starts_with(&format!("{} =", temp_name));
                     // Inline if: used exactly once on next line, not as lvalue,
                     // and expr is safe to inline (no side effects when reordered)
-                    if occurrences == 1
-                        && !next_is_reassign
-                        && Self::is_safe_to_inline(&expr)
-                    {
+                    if occurrences == 1 && !next_is_reassign && Self::is_safe_to_inline(&expr) {
                         let inlined = Self::replace_ident(next, &temp_name, &expr);
                         result.push(inlined);
                         skip_next = true;
@@ -1062,7 +1081,12 @@ impl CBackend {
         if !name.starts_with('_') || name.len() < 2 {
             return None;
         }
-        if !name[1..].chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        if !name[1..]
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false)
+        {
             return None;
         }
 
@@ -1083,8 +1107,7 @@ impl CBackend {
             if &line_bytes[pos..pos + ilen] == ident_bytes {
                 // Check word boundary before
                 let before_ok = pos == 0
-                    || !line_bytes[pos - 1].is_ascii_alphanumeric()
-                        && line_bytes[pos - 1] != b'_';
+                    || !line_bytes[pos - 1].is_ascii_alphanumeric() && line_bytes[pos - 1] != b'_';
                 // Check word boundary after
                 let after_ok = pos + ilen >= line_bytes.len()
                     || !line_bytes[pos + ilen].is_ascii_alphanumeric()
@@ -1103,9 +1126,14 @@ impl CBackend {
     fn is_safe_to_inline(expr: &str) -> bool {
         // Only inline: identifiers, __strN, numeric literals, field access (x.y)
         // Reject: function calls, operators, casts, complex expressions
-        if expr.contains('(') || expr.contains('+') || expr.contains('-')
-            || expr.contains('*') || expr.contains('/') || expr.contains('?')
-            || expr.contains('{') || expr.contains('[')
+        if expr.contains('(')
+            || expr.contains('+')
+            || expr.contains('-')
+            || expr.contains('*')
+            || expr.contains('/')
+            || expr.contains('?')
+            || expr.contains('{')
+            || expr.contains('[')
         {
             return false;
         }
@@ -1122,8 +1150,8 @@ impl CBackend {
 
         while pos < bytes.len() {
             if pos + ilen <= bytes.len() && &bytes[pos..pos + ilen] == ident_bytes {
-                let before_ok = pos == 0
-                    || (!bytes[pos - 1].is_ascii_alphanumeric() && bytes[pos - 1] != b'_');
+                let before_ok =
+                    pos == 0 || (!bytes[pos - 1].is_ascii_alphanumeric() && bytes[pos - 1] != b'_');
                 let after_ok = pos + ilen >= bytes.len()
                     || (!bytes[pos + ilen].is_ascii_alphanumeric() && bytes[pos + ilen] != b'_');
                 if before_ok && after_ok {
@@ -1340,10 +1368,20 @@ impl CBackend {
                         _ => None,
                     };
                     let needs_cast = if let (Some(dt), Some(st)) = (dest_ty, src_ty) {
-                        let dt_is_struct = matches!(dt,
-                            MirType::Struct(_) | MirType::Vec(_) | MirType::Map(_, _) | MirType::Tuple(_));
-                        let st_is_struct = matches!(st,
-                            MirType::Struct(_) | MirType::Vec(_) | MirType::Map(_, _) | MirType::Tuple(_));
+                        let dt_is_struct = matches!(
+                            dt,
+                            MirType::Struct(_)
+                                | MirType::Vec(_)
+                                | MirType::Map(_, _)
+                                | MirType::Tuple(_)
+                        );
+                        let st_is_struct = matches!(
+                            st,
+                            MirType::Struct(_)
+                                | MirType::Vec(_)
+                                | MirType::Map(_, _)
+                                | MirType::Tuple(_)
+                        );
                         (dt_is_struct || st_is_struct) && dt != st
                     } else {
                         false
@@ -1578,7 +1616,10 @@ impl CBackend {
                 // argument types. Currently map_get/map_insert default to str→f64.
 
                 // println/print (without !) → printf with QuantaString handling
-                if matches!(func_str.as_str(), "println" | "print" | "eprintln" | "eprint") {
+                if matches!(
+                    func_str.as_str(),
+                    "println" | "print" | "eprintln" | "eprint"
+                ) {
                     let is_err = matches!(func_str.as_str(), "eprintln" | "eprint");
                     let newline = matches!(func_str.as_str(), "println" | "eprintln");
                     let arg_str = if !args.is_empty() {
@@ -1652,12 +1693,7 @@ impl CBackend {
                 if func_str == "None" && args.is_empty() {
                     if let Some(dest_local) = dest {
                         let dest_name = self.local_name(*dest_local, locals);
-                        write!(
-                            self.output,
-                            "{}.has_value = false;\n",
-                            dest_name,
-                        )
-                        .unwrap();
+                        write!(self.output, "{}.has_value = false;\n", dest_name,).unwrap();
                     }
                     if let Some(target) = target {
                         self.write_indent();
@@ -1676,12 +1712,7 @@ impl CBackend {
                     if let Some((_, c_name)) = UNIT_STRUCTS.iter().find(|(ql, _)| func_str == *ql) {
                         if let Some(dest_local) = dest {
                             let dest_name = self.local_name(*dest_local, locals);
-                            write!(
-                                self.output,
-                                "{} = ({}){{ 0 }};\n",
-                                dest_name, c_name,
-                            )
-                            .unwrap();
+                            write!(self.output, "{} = ({}){{ 0 }};\n", dest_name, c_name,).unwrap();
                         }
                         if let Some(target) = target {
                             self.write_indent();
@@ -1810,13 +1841,27 @@ impl CBackend {
                         MirValue::Local(id) => locals.get(id.0 as usize).map(|l| &l.ty),
                         _ => None,
                     };
-                    let ret_is_struct = matches!(&self.current_ret_ty,
-                        MirType::Struct(_) | MirType::Vec(_) | MirType::Map(_, _) | MirType::Tuple(_));
-                    let val_is_struct = val_ty.map(|t| matches!(t,
-                        MirType::Struct(_) | MirType::Vec(_) | MirType::Map(_, _) | MirType::Tuple(_)))
+                    let ret_is_struct = matches!(
+                        &self.current_ret_ty,
+                        MirType::Struct(_)
+                            | MirType::Vec(_)
+                            | MirType::Map(_, _)
+                            | MirType::Tuple(_)
+                    );
+                    let val_is_struct = val_ty
+                        .map(|t| {
+                            matches!(
+                                t,
+                                MirType::Struct(_)
+                                    | MirType::Vec(_)
+                                    | MirType::Map(_, _)
+                                    | MirType::Tuple(_)
+                            )
+                        })
                         .unwrap_or(false);
                     let types_mismatch = val_ty.map(|t| t != &self.current_ret_ty).unwrap_or(false);
-                    if types_mismatch && (ret_is_struct || val_is_struct)
+                    if types_mismatch
+                        && (ret_is_struct || val_is_struct)
                         && self.current_ret_ty != MirType::Void
                     {
                         let ret_c = self.type_to_c(&self.current_ret_ty);
@@ -1976,15 +2021,13 @@ impl CBackend {
         match value {
             MirValue::Local(id) => self.local_name(*id, locals),
             MirValue::Const(c) => self.const_to_c(c),
-            MirValue::Global(name) => {
-                match name.as_ref() {
-                    "None" => return "((Option){ .has_value = false })".to_string(),
-                    "Stdin" => return "((io_Stdin){ 0 })".to_string(),
-                    "Stdout" => return "((io_Stdout){ 0 })".to_string(),
-                    "Stderr" => return "((io_Stderr){ 0 })".to_string(),
-                    _ => name.to_string(),
-                }
-            }
+            MirValue::Global(name) => match name.as_ref() {
+                "None" => return "((Option){ .has_value = false })".to_string(),
+                "Stdin" => return "((io_Stdin){ 0 })".to_string(),
+                "Stdout" => return "((io_Stdout){ 0 })".to_string(),
+                "Stderr" => return "((io_Stderr){ 0 })".to_string(),
+                _ => name.to_string(),
+            },
             MirValue::Function(name) => {
                 // Map well-known value-position names to C struct literals.
                 // These appear when the MIR uses a function name as a value
@@ -2228,7 +2271,11 @@ impl CBackend {
                 let base_str = self.value_to_c(base, locals);
                 format!("{}.data.{}.f{}", base_str, variant_name, field_index)
             }
-            MirRValue::IndexAccess { base, index, elem_ty } => {
+            MirRValue::IndexAccess {
+                base,
+                index,
+                elem_ty,
+            } => {
                 let base_str = self.value_to_c(base, locals);
                 let index_str = self.value_to_c(index, locals);
                 // For Vec types, use typed runtime getter instead of raw subscript.
@@ -2292,8 +2339,12 @@ impl CBackend {
             None
         };
         let needs_cast = if let (Some(dt), Some(st)) = (dest_ty, src_ty) {
-            let is_struct = |t: &MirType| matches!(t,
-                MirType::Struct(_) | MirType::Vec(_) | MirType::Map(_, _) | MirType::Tuple(_));
+            let is_struct = |t: &MirType| {
+                matches!(
+                    t,
+                    MirType::Struct(_) | MirType::Vec(_) | MirType::Map(_, _) | MirType::Tuple(_)
+                )
+            };
             (is_struct(dt) || is_struct(st)) && dt != st
         } else {
             false
@@ -2306,7 +2357,8 @@ impl CBackend {
                     self.output,
                     "memcpy(&{}, &{}, sizeof({}) < sizeof({}) ? sizeof({}) : sizeof({}));\n",
                     dest_name, src_str, dest_name, src_str, dest_name, src_str
-                ).unwrap();
+                )
+                .unwrap();
             } else {
                 // For non-Use rvalues, fall back to direct assignment
                 // (the type mismatch is from FieldAccess or other non-local sources)
@@ -2408,11 +2460,10 @@ impl CBackend {
     /// Escape C reserved keywords used as identifiers by appending an underscore.
     fn escape_c_keyword(name: &str) -> String {
         match name {
-            "default" | "register" | "volatile" | "signed" | "unsigned"
-            | "auto" | "extern" | "static" | "typedef" | "union" | "enum"
-            | "struct" | "switch" | "case" | "break" | "continue" | "goto"
-            | "return" | "if" | "else" | "while" | "do" | "for" | "inline"
-            | "restrict" | "const" => format!("{}_", name),
+            "default" | "register" | "volatile" | "signed" | "unsigned" | "auto" | "extern"
+            | "static" | "typedef" | "union" | "enum" | "struct" | "switch" | "case" | "break"
+            | "continue" | "goto" | "return" | "if" | "else" | "while" | "do" | "for"
+            | "inline" | "restrict" | "const" => format!("{}_", name),
             _ => name.to_string(),
         }
     }
@@ -2444,7 +2495,9 @@ impl CBackend {
                         needed.insert(*then_block);
                         needed.insert(*else_block);
                     }
-                    MirTerminator::Switch { targets, default, .. } => {
+                    MirTerminator::Switch {
+                        targets, default, ..
+                    } => {
                         for (_, target) in targets {
                             needed.insert(*target);
                         }
@@ -2458,9 +2511,7 @@ impl CBackend {
                             }
                         }
                     }
-                    MirTerminator::Assert {
-                        target, unwind, ..
-                    } => {
+                    MirTerminator::Assert { target, unwind, .. } => {
                         needed.insert(*target);
                         if let Some(u) = unwind {
                             needed.insert(*u);
@@ -2507,8 +2558,7 @@ impl CBackend {
                             MirRValue::UnaryOp { operand, .. } => {
                                 collect_val(operand, &mut used);
                             }
-                            MirRValue::Ref { place, .. }
-                            | MirRValue::AddressOf { place, .. } => {
+                            MirRValue::Ref { place, .. } | MirRValue::AddressOf { place, .. } => {
                                 collect_place(place, &mut used);
                             }
                             MirRValue::Cast { value, .. } => collect_val(value, &mut used),

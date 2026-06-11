@@ -484,7 +484,10 @@ mod tests {
             Ty::int(IntTy::I32),
         );
         let result = unify(&t1, &t2);
-        assert!(result.is_err(), "expected LifetimeMismatch error for 'a vs 'b");
+        assert!(
+            result.is_err(),
+            "expected LifetimeMismatch error for 'a vs 'b"
+        );
     }
 
     #[test]
@@ -504,16 +507,15 @@ mod tests {
 
     #[test]
     fn test_ref_elided_lifetime_ok() {
-        let t1 = Ty::reference(
-            None,
-            Mutability::Immutable,
-            Ty::int(IntTy::I32),
-        );
+        let t1 = Ty::reference(None, Mutability::Immutable, Ty::int(IntTy::I32));
         let t2 = Ty::reference(
             Some(Lifetime::new("a")),
             Mutability::Immutable,
             Ty::int(IntTy::I32),
         );
-        assert!(unify(&t1, &t2).is_ok(), "elided lifetime should unify with named");
+        assert!(
+            unify(&t1, &t2).is_ok(),
+            "elided lifetime should unify with named"
+        );
     }
 }
