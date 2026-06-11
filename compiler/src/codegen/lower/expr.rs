@@ -308,15 +308,19 @@ impl<'ctx> MirLowerer<'ctx> {
                 if let ast::PatternKind::TupleStruct { patterns, .. } = &pattern.kind {
                     for pat in patterns.iter() {
                         if let ast::PatternKind::Ident { name, .. } = &pat.kind {
-                            let builder = self.current_fn.as_mut()
-                                .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-                            let local = builder.create_named_local(name.name.clone(), if_let_binding_ty.clone());
+                            let builder = self.current_fn.as_mut().ok_or_else(|| {
+                                CodegenError::Internal("No current function".to_string())
+                            })?;
+                            let local = builder
+                                .create_named_local(name.name.clone(), if_let_binding_ty.clone());
                             builder.assign(local, MirRValue::Use(scrut_val.clone()));
                             self.var_map.insert(name.name.clone(), local);
                         }
                     }
                 } else if let ast::PatternKind::Ident { name, .. } = &pattern.kind {
-                    let builder = self.current_fn.as_mut()
+                    let builder = self
+                        .current_fn
+                        .as_mut()
                         .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
                     let local = builder.create_named_local(name.name.clone(), scrut_ty.clone());
                     builder.assign(local, MirRValue::Use(scrut_val.clone()));
@@ -1962,13 +1966,18 @@ impl<'ctx> MirLowerer<'ctx> {
                 // For Ptr receivers, dereference first.
                 if method_name == "chars" || method_name == "as_bytes" || method_name == "bytes" {
                     if matches!(&receiver_ty, MirType::Ptr(_)) {
-                        let builder = self.current_fn.as_mut()
-                            .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-                        let derefed = builder.create_local(MirType::Struct(Arc::from("QuantaString")));
-                        builder.assign(derefed, MirRValue::Deref {
-                            ptr: receiver_val,
-                            pointee_ty: MirType::Struct(Arc::from("QuantaString")),
-                        });
+                        let builder = self.current_fn.as_mut().ok_or_else(|| {
+                            CodegenError::Internal("No current function".to_string())
+                        })?;
+                        let derefed =
+                            builder.create_local(MirType::Struct(Arc::from("QuantaString")));
+                        builder.assign(
+                            derefed,
+                            MirRValue::Deref {
+                                ptr: receiver_val,
+                                pointee_ty: MirType::Struct(Arc::from("QuantaString")),
+                            },
+                        );
                         return Ok(values::local(derefed));
                     }
                     return Ok(receiver_val);
@@ -2544,16 +2553,24 @@ impl<'ctx> MirLowerer<'ctx> {
             if let MirType::Struct(ref name) = inner.as_ref() {
                 if name.as_ref() == "QuantaString" {
                     let method_name = method.name.as_ref();
-                    if method_name == "chars" || method_name == "as_bytes" || method_name == "bytes"
-                        || method_name == "clone" || method_name == "to_owned"
+                    if method_name == "chars"
+                        || method_name == "as_bytes"
+                        || method_name == "bytes"
+                        || method_name == "clone"
+                        || method_name == "to_owned"
                     {
-                        let builder = self.current_fn.as_mut()
-                            .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-                        let derefed = builder.create_local(MirType::Struct(Arc::from("QuantaString")));
-                        builder.assign(derefed, MirRValue::Deref {
-                            ptr: receiver_val,
-                            pointee_ty: MirType::Struct(Arc::from("QuantaString")),
-                        });
+                        let builder = self.current_fn.as_mut().ok_or_else(|| {
+                            CodegenError::Internal("No current function".to_string())
+                        })?;
+                        let derefed =
+                            builder.create_local(MirType::Struct(Arc::from("QuantaString")));
+                        builder.assign(
+                            derefed,
+                            MirRValue::Deref {
+                                ptr: receiver_val,
+                                pointee_ty: MirType::Struct(Arc::from("QuantaString")),
+                            },
+                        );
                         return Ok(values::local(derefed));
                     }
                 }
@@ -2600,7 +2617,12 @@ impl<'ctx> MirLowerer<'ctx> {
                     let zero = builder.create_local(MirType::usize());
                     builder.assign_const(zero, MirConst::Int(0, MirType::usize()));
                     let result = builder.create_local(MirType::Bool);
-                    builder.binary_op(result, BinOp::Eq, values::local(len_result), values::local(zero));
+                    builder.binary_op(
+                        result,
+                        BinOp::Eq,
+                        values::local(len_result),
+                        values::local(zero),
+                    );
                     return Ok(values::local(result));
                 }
                 "clear" => (Some("quanta_hvec_free".to_string()), MirType::Void),
@@ -2631,30 +2653,56 @@ impl<'ctx> MirLowerer<'ctx> {
             let method_name = method.name.as_ref();
 
             let (runtime_fn, ret_ty): (Option<String>, MirType) = match method_name {
-                "insert" => (Some("quanta_hmap_insert_str_f64".to_string()), MirType::Void),
+                "insert" => (
+                    Some("quanta_hmap_insert_str_f64".to_string()),
+                    MirType::Void,
+                ),
                 "get" => {
                     let val_c = match val_ty.as_ref() {
                         MirType::Float(_) => None,
-                        _ => Some(format!("quanta_hmap_get_val_{}",
-                            Self::type_to_c_name(val_ty))),
+                        _ => Some(format!(
+                            "quanta_hmap_get_val_{}",
+                            Self::type_to_c_name(val_ty)
+                        )),
                     };
                     let fn_name = val_c.unwrap_or_else(|| "quanta_hmap_get_str_f64".to_string());
                     (Some(fn_name), *val_ty.clone())
                 }
-                "contains" | "contains_key" => (Some("quanta_hmap_contains_str_f64".to_string()), MirType::Bool),
-                "len" => (Some("quanta_hmap_len_str_f64".to_string()), MirType::usize()),
-                "remove" => (Some("quanta_hmap_remove_str_f64".to_string()), MirType::Void),
+                "contains" | "contains_key" => (
+                    Some("quanta_hmap_contains_str_f64".to_string()),
+                    MirType::Bool,
+                ),
+                "len" => (
+                    Some("quanta_hmap_len_str_f64".to_string()),
+                    MirType::usize(),
+                ),
+                "remove" => (
+                    Some("quanta_hmap_remove_str_f64".to_string()),
+                    MirType::Void,
+                ),
                 "is_empty" => {
-                    let builder = self.current_fn.as_mut()
+                    let builder = self
+                        .current_fn
+                        .as_mut()
                         .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
                     let len_result = builder.create_local(MirType::usize());
                     let cont = builder.create_block();
-                    builder.call(MirValue::Function(Arc::from("quanta_hmap_len_str_f64")), vec![receiver_val], Some(len_result), cont);
+                    builder.call(
+                        MirValue::Function(Arc::from("quanta_hmap_len_str_f64")),
+                        vec![receiver_val],
+                        Some(len_result),
+                        cont,
+                    );
                     builder.switch_to_block(cont);
                     let zero = builder.create_local(MirType::usize());
                     builder.assign_const(zero, MirConst::Int(0, MirType::usize()));
                     let result = builder.create_local(MirType::Bool);
-                    builder.binary_op(result, BinOp::Eq, values::local(len_result), values::local(zero));
+                    builder.binary_op(
+                        result,
+                        BinOp::Eq,
+                        values::local(len_result),
+                        values::local(zero),
+                    );
                     return Ok(values::local(result));
                 }
                 "clone" => (None, receiver_ty.clone()),
@@ -2662,12 +2710,21 @@ impl<'ctx> MirLowerer<'ctx> {
             };
             if let Some(fn_name) = runtime_fn {
                 let mut arg_vals = vec![receiver_val];
-                for arg in args { arg_vals.push(self.lower_expr(arg)?); }
-                let builder = self.current_fn.as_mut()
+                for arg in args {
+                    arg_vals.push(self.lower_expr(arg)?);
+                }
+                let builder = self
+                    .current_fn
+                    .as_mut()
                     .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
                 let result = builder.create_local(ret_ty);
                 let cont = builder.create_block();
-                builder.call(MirValue::Function(Arc::from(fn_name.as_str())), arg_vals, Some(result), cont);
+                builder.call(
+                    MirValue::Function(Arc::from(fn_name.as_str())),
+                    arg_vals,
+                    Some(result),
+                    cont,
+                );
                 builder.switch_to_block(cont);
                 return Ok(values::local(result));
             }
@@ -2687,12 +2744,21 @@ impl<'ctx> MirLowerer<'ctx> {
                 };
                 if let Some(fn_name) = runtime_fn {
                     let mut arg_vals = vec![receiver_val];
-                    for arg in args { arg_vals.push(self.lower_expr(arg)?); }
-                    let builder = self.current_fn.as_mut()
+                    for arg in args {
+                        arg_vals.push(self.lower_expr(arg)?);
+                    }
+                    let builder = self
+                        .current_fn
+                        .as_mut()
                         .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
                     let result = builder.create_local(ret_ty);
                     let cont = builder.create_block();
-                    builder.call(MirValue::Function(Arc::from(fn_name)), arg_vals, Some(result), cont);
+                    builder.call(
+                        MirValue::Function(Arc::from(fn_name)),
+                        arg_vals,
+                        Some(result),
+                        cont,
+                    );
                     builder.switch_to_block(cont);
                     return Ok(values::local(result));
                 }
@@ -2707,12 +2773,14 @@ impl<'ctx> MirLowerer<'ctx> {
             if method_name == "clone" || method_name == "to_owned" {
                 let is_safe_clone = matches!(&receiver_ty,
                     MirType::Struct(n) if n.as_ref() == "QuantaString"
-                ) || matches!(&receiver_ty,
-                    MirType::Int(..) | MirType::Float(..) | MirType::Bool
-                    | MirType::Ptr(..)
+                ) || matches!(
+                    &receiver_ty,
+                    MirType::Int(..) | MirType::Float(..) | MirType::Bool | MirType::Ptr(..)
                 );
                 if is_safe_clone {
-                    let builder = self.current_fn.as_mut()
+                    let builder = self
+                        .current_fn
+                        .as_mut()
                         .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
                     let result = builder.create_local(receiver_ty.clone());
                     let cont = builder.create_block();
@@ -2737,8 +2805,8 @@ impl<'ctx> MirLowerer<'ctx> {
         let method_name = method.name.as_ref();
         let fallback_ret_ty = match method_name {
             // Boolean-returning methods
-            "is_some" | "is_none" | "is_ok" | "is_err" | "is_empty"
-            | "contains" | "contains_key" | "starts_with" | "ends_with" => MirType::Bool,
+            "is_some" | "is_none" | "is_ok" | "is_err" | "is_empty" | "contains"
+            | "contains_key" | "starts_with" | "ends_with" => MirType::Bool,
             // Size-returning methods
             "len" | "count" | "capacity" => MirType::usize(),
             // Void-returning mutators
@@ -2893,7 +2961,11 @@ impl<'ctx> MirLowerer<'ctx> {
 
         // Determine result type from function return type
         let ret_ty = builder.return_type().clone();
-        let result_ty = if ret_ty == MirType::Void { MirType::i32() } else { ret_ty };
+        let result_ty = if ret_ty == MirType::Void {
+            MirType::i32()
+        } else {
+            ret_ty
+        };
         let result = builder.create_local(result_ty);
 
         builder.branch(values::local(has_value), some_block, none_block);
@@ -2946,10 +3018,8 @@ impl<'ctx> MirLowerer<'ctx> {
                             } else {
                                 scrutinee_ty.clone() // i32 fallback — same type as scrutinee
                             };
-                            let inner_local = builder.create_named_local(
-                                name.name.clone(),
-                                inner_ty.clone(),
-                            );
+                            let inner_local =
+                                builder.create_named_local(name.name.clone(), inner_ty.clone());
                             if is_real_option {
                                 builder.assign(
                                     inner_local,
@@ -3006,7 +3076,8 @@ impl<'ctx> MirLowerer<'ctx> {
 
         // Runtime Option match: `match opt { Some(x) => ..., None => ... }`
         // The runtime Option struct has fields `has_value: bool` and `value: union`.
-        let is_runtime_option = matches!(&scrutinee_ty, MirType::Struct(n) if n.as_ref() == "Option");
+        let is_runtime_option =
+            matches!(&scrutinee_ty, MirType::Struct(n) if n.as_ref() == "Option");
         if is_runtime_option {
             return self.lower_runtime_option_match(scrutinee_val, &scrutinee_ty, arms);
         }
@@ -3212,14 +3283,9 @@ impl<'ctx> MirLowerer<'ctx> {
                     for pat in patterns.iter() {
                         if let ast::PatternKind::Ident { name, .. } = &pat.kind {
                             let builder = self.current_fn.as_mut().unwrap();
-                            let local = builder.create_named_local(
-                                name.name.clone(),
-                                binding_ty.clone(),
-                            );
-                            builder.assign(
-                                local,
-                                MirRValue::Use(values::local(scrutinee_local)),
-                            );
+                            let local =
+                                builder.create_named_local(name.name.clone(), binding_ty.clone());
+                            builder.assign(local, MirRValue::Use(values::local(scrutinee_local)));
                             self.var_map.insert(name.name.clone(), local);
                         }
                     }
@@ -3660,7 +3726,8 @@ impl<'ctx> MirLowerer<'ctx> {
                     } else {
                         scrut_ty.clone()
                     };
-                    let inner_local = builder.create_named_local(name.name.clone(), inner_ty.clone());
+                    let inner_local =
+                        builder.create_named_local(name.name.clone(), inner_ty.clone());
                     if is_real_option {
                         builder.assign(
                             inner_local,
@@ -4180,10 +4247,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     vec![MirType::i32(); patterns.len()]
                 };
                 for (i, sub_pat) in patterns.iter().enumerate() {
-                    let field_ty = elem_types
-                        .get(i)
-                        .cloned()
-                        .unwrap_or(MirType::i32());
+                    let field_ty = elem_types.get(i).cloned().unwrap_or(MirType::i32());
                     let builder = self
                         .current_fn
                         .as_mut()
@@ -4504,11 +4568,14 @@ impl<'ctx> MirLowerer<'ctx> {
         count: &ast::Expr,
     ) -> CodegenResult<MirValue> {
         // Evaluate the count as a constant
-        let count_val = self.try_const_eval(count).and_then(|c| match c {
-            MirConst::Int(v, _) => Some(v as u64),
-            MirConst::Uint(v, _) => Some(v as u64),
-            _ => None,
-        }).unwrap_or(4); // Default to 4 if we can't evaluate
+        let count_val = self
+            .try_const_eval(count)
+            .and_then(|c| match c {
+                MirConst::Int(v, _) => Some(v as u64),
+                MirConst::Uint(v, _) => Some(v as u64),
+                _ => None,
+            })
+            .unwrap_or(4); // Default to 4 if we can't evaluate
 
         // Lower the element expression once to get its type
         let elem_val = self.lower_expr(element)?;
@@ -4525,10 +4592,7 @@ impl<'ctx> MirLowerer<'ctx> {
             .current_fn
             .as_mut()
             .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-        let result = builder.create_local(MirType::Array(
-            Box::new(elem_ty.clone()),
-            count_val,
-        ));
+        let result = builder.create_local(MirType::Array(Box::new(elem_ty.clone()), count_val));
         builder.aggregate(result, AggregateKind::Array(elem_ty), elem_vals);
 
         Ok(values::local(result))

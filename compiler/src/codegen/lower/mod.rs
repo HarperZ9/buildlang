@@ -616,7 +616,9 @@ impl<'ctx> MirLowerer<'ctx> {
         // references can resolve (e.g., bare "Operator" → "tonemap_Operator").
         if !self.module_prefix.is_empty() {
             // Extract the bare name by stripping the prefix
-            let prefix = self.module_prefix.iter()
+            let prefix = self
+                .module_prefix
+                .iter()
                 .map(|s| s.as_ref())
                 .collect::<Vec<_>>()
                 .join("_");
@@ -722,7 +724,9 @@ impl<'ctx> MirLowerer<'ctx> {
 
         // Register bare→prefixed mapping for cross-module resolution
         if !self.module_prefix.is_empty() {
-            let prefix = self.module_prefix.iter()
+            let prefix = self
+                .module_prefix
+                .iter()
                 .map(|s| s.as_ref())
                 .collect::<Vec<_>>()
                 .join("_");

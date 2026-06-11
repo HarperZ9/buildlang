@@ -115,8 +115,14 @@ impl DiagnosticsProvider {
         for err in parser.errors() {
             diagnostics.push(Diagnostic {
                 range: Range {
-                    start: Position { line: 0, character: 0 },
-                    end: Position { line: 0, character: 1 },
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 1,
+                    },
                 },
                 severity: Some(DiagnosticSeverity::Error),
                 code: None,

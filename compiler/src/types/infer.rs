@@ -1022,7 +1022,10 @@ impl<'ctx> TypeInfer<'ctx> {
             }
 
             // Look up as an inherent method/associated function (by type name → DefId)
-            if let Some(method) = self.ctx.lookup_inherent_method_by_name(type_name, func_name) {
+            if let Some(method) = self
+                .ctx
+                .lookup_inherent_method_by_name(type_name, func_name)
+            {
                 // Freshen generic params so the unifier can solve them from context.
                 // e.g., SimpleMap::new() returns SimpleMap<K,V> → SimpleMap<?0,?1>
                 let param_tys: Vec<Ty> = method
@@ -1041,7 +1044,10 @@ impl<'ctx> TypeInfer<'ctx> {
             // 2-param version).  Only fall back to bare-name lookup when the
             // first segment is a known type (Type::method pattern).
             let first_is_type = self.ctx.lookup_type_by_name(type_name).is_some()
-                || self.ctx.lookup_inherent_method_by_name(type_name, "new").is_some();
+                || self
+                    .ctx
+                    .lookup_inherent_method_by_name(type_name, "new")
+                    .is_some();
             if first_is_type {
                 if let Some(scheme) = self.ctx.lookup_var_scheme(func_name) {
                     return scheme.instantiate();
@@ -2775,8 +2781,7 @@ impl<'ctx> TypeInfer<'ctx> {
                     if !fn_ty.lifetime_params.is_empty() {
                         // Lifetime-guided: only borrow from args whose param
                         // lifetime matches the return type's lifetime.
-                        let ret_lt_name = if let TyKind::Ref(Some(ref lt), _, _) = &fn_ty.ret.kind
-                        {
+                        let ret_lt_name = if let TyKind::Ref(Some(ref lt), _, _) = &fn_ty.ret.kind {
                             Some(lt.name.clone())
                         } else {
                             None
@@ -4312,10 +4317,7 @@ mod tests {
     #[test]
     fn fn_ty_default_has_no_lifetime_params() {
         use super::super::ty::{Ty, TyKind};
-        let fn_ty = Ty::function(
-            vec![Ty::int(super::super::ty::IntTy::I32)],
-            Ty::bool(),
-        );
+        let fn_ty = Ty::function(vec![Ty::int(super::super::ty::IntTy::I32)], Ty::bool());
         if let TyKind::Fn(ref ft) = &fn_ty.kind {
             assert!(ft.lifetime_params.is_empty());
         } else {
