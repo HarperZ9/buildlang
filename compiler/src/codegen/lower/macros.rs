@@ -941,17 +941,21 @@ impl<'ctx> MirLowerer<'ctx> {
                 if let ast::TokenTree::Token(tok) = t {
                     let s = tok.span.start.to_usize();
                     let e = tok.span.end.to_usize();
-                    e > s && e <= source.len()
-                        && source.is_char_boundary(s) && source.is_char_boundary(e)
+                    e > s
+                        && e <= source.len()
+                        && source.is_char_boundary(s)
+                        && source.is_char_boundary(e)
                         && {
-                        // Verify the span actually points to code, not a comment
-                        let text = &source[s..e];
-                        // For an Ident token, the text should be alphanumeric
-                        match &tok.kind {
-                            crate::lexer::TokenKind::Ident => text.chars().all(|c| c.is_alphanumeric() || c == '_'),
-                            _ => true,
+                            // Verify the span actually points to code, not a comment
+                            let text = &source[s..e];
+                            // For an Ident token, the text should be alphanumeric
+                            match &tok.kind {
+                                crate::lexer::TokenKind::Ident => {
+                                    text.chars().all(|c| c.is_alphanumeric() || c == '_')
+                                }
+                                _ => true,
+                            }
                         }
-                    }
                 } else {
                     true // Delimited groups are fine
                 }
@@ -1179,12 +1183,18 @@ impl<'ctx> MirLowerer<'ctx> {
     /// commas or semicolons. Returns flattened token lists suitable for
     /// passing directly to the parser, avoiding span-based source text
     /// extraction which breaks when tokens have cross-source spans.
-    fn split_vec_macro_token_groups(&self, tokens: &[ast::TokenTree]) -> Vec<Vec<crate::lexer::Token>> {
+    fn split_vec_macro_token_groups(
+        &self,
+        tokens: &[ast::TokenTree],
+    ) -> Vec<Vec<crate::lexer::Token>> {
         use crate::lexer::{Delimiter, TokenKind};
 
         // Unwrap outermost Delimited group if present
         let inner: &[ast::TokenTree] = if tokens.len() == 1 {
-            if let ast::TokenTree::Delimited { tokens: ref inner, .. } = tokens[0] {
+            if let ast::TokenTree::Delimited {
+                tokens: ref inner, ..
+            } = tokens[0]
+            {
                 inner
             } else {
                 tokens
@@ -1201,15 +1211,21 @@ impl<'ctx> MirLowerer<'ctx> {
         fn flatten_tree(tree: &ast::TokenTree, out: &mut Vec<crate::lexer::Token>) {
             match tree {
                 ast::TokenTree::Token(tok) => out.push(tok.clone()),
-                ast::TokenTree::Delimited { delimiter, tokens: inner, span } => {
+                ast::TokenTree::Delimited {
+                    delimiter,
+                    tokens: inner,
+                    span,
+                } => {
                     out.push(crate::lexer::Token::new(
-                        TokenKind::OpenDelim(*delimiter), *span,
+                        TokenKind::OpenDelim(*delimiter),
+                        *span,
                     ));
                     for t in inner {
                         flatten_tree(t, out);
                     }
                     out.push(crate::lexer::Token::new(
-                        TokenKind::CloseDelim(*delimiter), *span,
+                        TokenKind::CloseDelim(*delimiter),
+                        *span,
                     ));
                 }
             }
@@ -1217,26 +1233,24 @@ impl<'ctx> MirLowerer<'ctx> {
 
         for token in inner {
             match token {
-                ast::TokenTree::Token(tok) => {
-                    match &tok.kind {
-                        TokenKind::OpenDelim(_) => {
-                            depth += 1;
-                            current.push(tok.clone());
-                        }
-                        TokenKind::CloseDelim(_) => {
-                            depth -= 1;
-                            current.push(tok.clone());
-                        }
-                        TokenKind::Comma | TokenKind::Semi if depth == 0 => {
-                            if !current.is_empty() {
-                                groups.push(std::mem::take(&mut current));
-                            }
-                        }
-                        _ => {
-                            current.push(tok.clone());
+                ast::TokenTree::Token(tok) => match &tok.kind {
+                    TokenKind::OpenDelim(_) => {
+                        depth += 1;
+                        current.push(tok.clone());
+                    }
+                    TokenKind::CloseDelim(_) => {
+                        depth -= 1;
+                        current.push(tok.clone());
+                    }
+                    TokenKind::Comma | TokenKind::Semi if depth == 0 => {
+                        if !current.is_empty() {
+                            groups.push(std::mem::take(&mut current));
                         }
                     }
-                }
+                    _ => {
+                        current.push(tok.clone());
+                    }
+                },
                 ast::TokenTree::Delimited { .. } => {
                     // Flatten the delimited group into individual tokens
                     // so the parser can handle it
@@ -1253,7 +1267,10 @@ impl<'ctx> MirLowerer<'ctx> {
     }
 
     /// Parse a token group as an expression and lower it.
-    fn parse_and_lower_token_group(&mut self, tokens: Vec<crate::lexer::Token>) -> CodegenResult<MirValue> {
+    fn parse_and_lower_token_group(
+        &mut self,
+        tokens: Vec<crate::lexer::Token>,
+    ) -> CodegenResult<MirValue> {
         use crate::lexer::SourceFile;
         use crate::parser::Parser;
 
@@ -1288,8 +1305,11 @@ impl<'ctx> MirLowerer<'ctx> {
         if let Some(ref src) = self.source {
             let first_start = tokens.first().map(|t| t.span.start.to_usize()).unwrap_or(0);
             let last_end = tokens.last().map(|t| t.span.end.to_usize()).unwrap_or(0);
-            if last_end > first_start && last_end <= src.len()
-                && src.is_char_boundary(first_start) && src.is_char_boundary(last_end) {
+            if last_end > first_start
+                && last_end <= src.len()
+                && src.is_char_boundary(first_start)
+                && src.is_char_boundary(last_end)
+            {
                 let candidate = src[first_start..last_end].to_string();
                 // Validate: re-tokenize and check it produces a similar token count
                 if let Ok(re_tokens) = crate::lexer::tokenize(candidate.as_str()) {
@@ -1308,7 +1328,7 @@ impl<'ctx> MirLowerer<'ctx> {
 
     /// Reconstruct source text from token kinds when spans are unreliable.
     fn reconstruct_source_from_tokens(&self, tokens: &[crate::lexer::Token]) -> String {
-        use crate::lexer::{Delimiter, TokenKind, LiteralKind};
+        use crate::lexer::{Delimiter, LiteralKind, TokenKind};
 
         let mut parts = Vec::new();
         for tok in tokens {
@@ -1318,7 +1338,11 @@ impl<'ctx> MirLowerer<'ctx> {
                     if let Some(ref src) = self.source {
                         let s = tok.span.start.to_usize();
                         let e = tok.span.end.to_usize();
-                        if e > s && e <= src.len() && src.is_char_boundary(s) && src.is_char_boundary(e) {
+                        if e > s
+                            && e <= src.len()
+                            && src.is_char_boundary(s)
+                            && src.is_char_boundary(e)
+                        {
                             src[s..e].to_string()
                         } else {
                             "_".to_string()
@@ -1390,7 +1414,11 @@ impl<'ctx> MirLowerer<'ctx> {
                     if let Some(ref src) = self.source {
                         let s = tok.span.start.to_usize();
                         let e = tok.span.end.to_usize();
-                        if e > s && e <= src.len() && src.is_char_boundary(s) && src.is_char_boundary(e) {
+                        if e > s
+                            && e <= src.len()
+                            && src.is_char_boundary(s)
+                            && src.is_char_boundary(e)
+                        {
                             src[s..e].to_string()
                         } else {
                             " ".to_string()
@@ -1412,7 +1440,10 @@ impl<'ctx> MirLowerer<'ctx> {
 
         // Unwrap outermost Delimited if present, don't flatten
         let inner: &[ast::TokenTree] = if tokens.len() == 1 {
-            if let ast::TokenTree::Delimited { tokens: ref inner, .. } = tokens[0] {
+            if let ast::TokenTree::Delimited {
+                tokens: ref inner, ..
+            } = tokens[0]
+            {
                 inner
             } else {
                 tokens
@@ -1428,18 +1459,16 @@ impl<'ctx> MirLowerer<'ctx> {
                     // Nested delimited group — skip it entirely (don't
                     // look inside for semicolons).
                 }
-                ast::TokenTree::Token(tok) => {
-                    match &tok.kind {
-                        TokenKind::OpenDelim(Delimiter::Paren)
-                        | TokenKind::OpenDelim(Delimiter::Bracket)
-                        | TokenKind::OpenDelim(Delimiter::Brace) => depth += 1,
-                        TokenKind::CloseDelim(Delimiter::Paren)
-                        | TokenKind::CloseDelim(Delimiter::Bracket)
-                        | TokenKind::CloseDelim(Delimiter::Brace) => depth -= 1,
-                        TokenKind::Semi if depth == 0 => return true,
-                        _ => {}
-                    }
-                }
+                ast::TokenTree::Token(tok) => match &tok.kind {
+                    TokenKind::OpenDelim(Delimiter::Paren)
+                    | TokenKind::OpenDelim(Delimiter::Bracket)
+                    | TokenKind::OpenDelim(Delimiter::Brace) => depth += 1,
+                    TokenKind::CloseDelim(Delimiter::Paren)
+                    | TokenKind::CloseDelim(Delimiter::Bracket)
+                    | TokenKind::CloseDelim(Delimiter::Brace) => depth -= 1,
+                    TokenKind::Semi if depth == 0 => return true,
+                    _ => {}
+                },
             }
         }
         false
@@ -1629,7 +1658,10 @@ impl<'ctx> MirLowerer<'ctx> {
         // Unwrap the outermost Delimited group if present, but do NOT flatten
         // nested groups — their spans must stay intact for correct source extraction.
         let inner: &[ast::TokenTree] = if tokens.len() == 1 {
-            if let ast::TokenTree::Delimited { tokens: ref inner, .. } = tokens[0] {
+            if let ast::TokenTree::Delimited {
+                tokens: ref inner, ..
+            } = tokens[0]
+            {
                 inner
             } else {
                 tokens

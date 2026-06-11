@@ -265,20 +265,17 @@ impl<'ctx> TypeChecker<'ctx> {
 
         let _self_ty = self.lower_type(&impl_.self_ty);
         let type_name = Self::extract_type_name_from_ast(&impl_.self_ty);
-        let type_def_id = type_name.as_ref().and_then(|n| {
-            self.ctx.lookup_type_by_name(n).map(|td| td.def_id)
-        });
+        let type_def_id = type_name
+            .as_ref()
+            .and_then(|n| self.ctx.lookup_type_by_name(n).map(|td| td.def_id));
 
         for item in &impl_.items {
             match &item.kind {
                 ImplItemKind::Function(f) => {
                     if let Some(def_id) = type_def_id {
                         let sig = self.build_fn_sig_from_ast(f);
-                        self.ctx.register_inherent_method(
-                            def_id,
-                            f.name.name.clone(),
-                            sig,
-                        );
+                        self.ctx
+                            .register_inherent_method(def_id, f.name.name.clone(), sig);
                     }
                 }
                 ImplItemKind::Const { name, ty, .. } => {
@@ -883,9 +880,9 @@ impl<'ctx> TypeChecker<'ctx> {
     fn check_inherent_impl(&mut self, impl_: &ast::ImplDef, self_ty: &Ty, _span: Span) {
         // Extract the type DefId for inherent method registration
         let type_name = Self::extract_type_name_from_ast(&impl_.self_ty);
-        let type_def_id = type_name.as_ref().and_then(|n| {
-            self.ctx.lookup_type_by_name(n).map(|td| td.def_id)
-        });
+        let type_def_id = type_name
+            .as_ref()
+            .and_then(|n| self.ctx.lookup_type_by_name(n).map(|td| td.def_id));
 
         // PASS 1: Pre-register ALL method signatures and constants before
         // checking any bodies. This fixes forward references: method A can
@@ -899,11 +896,8 @@ impl<'ctx> TypeChecker<'ctx> {
                 ImplItemKind::Function(f) => {
                     if let Some(def_id) = type_def_id {
                         let sig = self.build_fn_sig_from_ast(f);
-                        self.ctx.register_inherent_method(
-                            def_id,
-                            f.name.name.clone(),
-                            sig,
-                        );
+                        self.ctx
+                            .register_inherent_method(def_id, f.name.name.clone(), sig);
                     }
                 }
                 _ => {}
