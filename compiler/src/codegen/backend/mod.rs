@@ -14,6 +14,7 @@ pub mod c;
 pub mod glsl;
 pub mod hlsl;
 pub mod llvm;
+pub mod rust;
 pub mod spirv;
 pub mod wasm;
 pub mod x86_64;
@@ -44,6 +45,8 @@ pub enum Target {
     Hlsl,
     /// GLSL for OpenGL / Vulkan shader source.
     Glsl,
+    /// Rust source code.
+    Rust,
 }
 
 impl Target {
@@ -57,6 +60,7 @@ impl Target {
             Target::LlvmIr => "ll",
             Target::Hlsl => "hlsl",
             Target::Glsl => "glsl",
+            Target::Rust => "rs",
         }
     }
 
@@ -70,6 +74,7 @@ impl Target {
             Target::SpirV => 64,
             Target::LlvmIr => 64,              // Default to 64-bit
             Target::Hlsl | Target::Glsl => 32, // GPU
+            Target::Rust => 64,
         }
     }
 
@@ -95,6 +100,7 @@ impl fmt::Display for Target {
             Target::LlvmIr => write!(f, "llvm-ir"),
             Target::Hlsl => write!(f, "hlsl"),
             Target::Glsl => write!(f, "glsl"),
+            Target::Rust => write!(f, "rust"),
         }
     }
 }

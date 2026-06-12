@@ -20,6 +20,38 @@ use quantalang::lexer::{Lexer, SourceFile, Span};
 use quantalang::parser::Parser;
 use quantalang::types::{TypeChecker, TypeContext};
 
+fn parse_codegen_target(target: &str) -> Result<Target, String> {
+    match target {
+        "c" => Ok(Target::C),
+        "llvm" | "llvm-ir" | "ll" => Ok(Target::LlvmIr),
+        "x86-64" | "x86_64" | "x64" => Ok(Target::X86_64),
+        "arm64" | "aarch64" => Ok(Target::Arm64),
+        "wasm" | "wasm32" | "wat" => Ok(Target::Wasm),
+        "spirv" | "spir-v" | "spv" => Ok(Target::SpirV),
+        "hlsl" | "dx" | "directx" => Ok(Target::Hlsl),
+        "glsl" | "opengl" | "gl" => Ok(Target::Glsl),
+        "rust" | "rs" => Ok(Target::Rust),
+        other => Err(format!(
+            "Unknown target '{}'. Supported: c, llvm, wasm, spirv, hlsl, glsl, rust, x86-64, arm64",
+            other
+        )),
+    }
+}
+
+fn target_from_extension(ext: &str) -> Option<Target> {
+    match ext {
+        "c" => Some(Target::C),
+        "ll" => Some(Target::LlvmIr),
+        "wasm" | "wat" => Some(Target::Wasm),
+        "spv" => Some(Target::SpirV),
+        "s" | "asm" => Some(Target::X86_64),
+        "hlsl" | "fx" => Some(Target::Hlsl),
+        "glsl" => Some(Target::Glsl),
+        "rs" => Some(Target::Rust),
+        _ => None,
+    }
+}
+
 /// QuantaLang Compiler
 #[derive(ClapParser)]
 #[command(name = "quantac")]
@@ -52,7 +84,7 @@ struct Cli {
     #[arg(short = 'O', long, default_value = "0")]
     opt_level: u8,
 
-    /// Code generation target (c, llvm, wasm, spirv, x86-64, arm64)
+    /// Code generation target (c, llvm, wasm, spirv, rust, x86-64, arm64)
     #[arg(long)]
     target: Option<String>,
 }
@@ -103,7 +135,7 @@ enum Commands {
         #[arg(long)]
         keep_c: bool,
 
-        /// Code generation target: c, llvm, x86-64, arm64, wasm, spirv, hlsl, glsl
+        /// Code generation target: c, llvm, x86-64, arm64, wasm, spirv, hlsl, glsl, rust
         #[arg(long, default_value = "c")]
         target: String,
     },
@@ -1091,25 +1123,16 @@ fn cmd_build(
     let emit_c_only = emit == "c";
 
     // Resolve the code generation target.
-    let target = match target_str {
-        "c" => Target::C,
-        "llvm" | "llvm-ir" => Target::LlvmIr,
-        "x86-64" | "x86_64" | "x64" => Target::X86_64,
-        "arm64" | "aarch64" => Target::Arm64,
-        "wasm" | "wasm32" => Target::Wasm,
-        "spirv" | "spir-v" | "spv" => Target::SpirV,
-        "hlsl" | "dx" | "directx" => Target::Hlsl,
-        "glsl" | "opengl" | "gl" => Target::Glsl,
-        other => {
-            eprintln!("Unknown target '{}'. Supported targets: c, llvm, x86-64, arm64, wasm, spirv, hlsl, glsl", other);
-            return Err(1);
-        }
-    };
+    let target = parse_codegen_target(target_str).map_err(|err| {
+        eprintln!("{}", err);
+        1
+    })?;
     let use_llvm = target == Target::LlvmIr;
     let use_spirv = target == Target::SpirV;
     let use_native = target == Target::X86_64 || target == Target::Arm64;
     let use_wasm = target == Target::Wasm;
     let use_shader = target == Target::Hlsl || target == Target::Glsl;
+    let use_rust = target == Target::Rust;
 
     println!("Building project at '{}'", path.display());
     println!("Entry point: {}", main_path.display());
@@ -1143,7 +1166,8 @@ fn cmd_build(
     })?;
 
     let total_steps =
-        if emit_c_only || use_llvm || use_native || use_wasm || use_spirv || use_shader {
+        if emit_c_only || use_llvm || use_native || use_wasm || use_spirv || use_shader || use_rust
+        {
             4
         } else {
             5
@@ -1419,6 +1443,20 @@ fn cmd_build(
         println!();
         println!("Build successful!");
         println!("Output: {}", ll_output_file.display());
+        return Ok(());
+    } else if use_rust {
+        let rs_output_file = output_dir.join("main.rs");
+        std::fs::write(&rs_output_file, &output.data).map_err(|e| {
+            eprintln!("Failed to write Rust output: {}", e);
+            1
+        })?;
+        println!();
+        println!("Build successful!");
+        println!("Output: {} (Rust source)", rs_output_file.display());
+        println!(
+            "Validate with: rustc --emit=metadata {}",
+            rs_output_file.display()
+        );
         return Ok(());
     }
 
@@ -2785,29 +2823,12 @@ fn cmd_compile(
 
     // Select target: explicit --target flag > output extension > default (C)
     let target = if let Some(t) = target_override {
-        match t {
-            "c" => Target::C,
-            "llvm" | "ll" => Target::LlvmIr,
-            "wasm" | "wat" => Target::Wasm,
-            "spirv" | "spir-v" | "spv" => Target::SpirV,
-            "x86-64" | "x86_64" | "x64" => Target::X86_64,
-            "arm64" | "aarch64" => Target::Arm64,
-            "hlsl" | "dx" | "directx" => Target::Hlsl,
-            "glsl" | "opengl" | "gl" => Target::Glsl,
-            other => {
-                eprintln!("Unknown target '{}'. Supported: c, llvm, wasm, spirv, hlsl, glsl, x86-64, arm64", other);
-                return Err(1);
-            }
-        }
+        parse_codegen_target(t).map_err(|err| {
+            eprintln!("{}", err);
+            1
+        })?
     } else if let Some(ext) = output.and_then(|p| p.extension()).and_then(|e| e.to_str()) {
-        match ext {
-            "ll" => Target::LlvmIr,
-            "spv" => Target::SpirV,
-            "wasm" | "wat" => Target::Wasm,
-            "s" | "asm" => Target::X86_64,
-            "hlsl" | "fx" => Target::Hlsl,
-            _ => Target::C,
-        }
+        target_from_extension(ext).unwrap_or(Target::C)
     } else {
         Target::C
     };
@@ -2997,12 +3018,20 @@ fn cmd_watch(path: &PathBuf, target_str: &str) -> Result<(), i32> {
     use std::collections::HashMap;
     use std::time::{Duration, SystemTime};
 
-    let target_ext = match target_str {
-        "spirv" | "spir-v" | "spv" => "spv",
-        "c" => "c",
-        "llvm" => "ll",
-        other => {
-            eprintln!("Unknown target '{}'. Supported: spirv, c, llvm", other);
+    let target = parse_codegen_target(target_str).map_err(|err| {
+        eprintln!("{}", err);
+        1
+    })?;
+    let target_ext = match target {
+        Target::SpirV => "spv",
+        Target::C => "c",
+        Target::LlvmIr => "ll",
+        Target::Rust => "rs",
+        _ => {
+            eprintln!(
+                "Watch target '{}' is not supported. Supported: spirv, c, llvm, rust",
+                target_str
+            );
             return Err(1);
         }
     };
@@ -3160,11 +3189,11 @@ fn compile_single_file(input: &Path, output: &Path) -> Result<(), String> {
         return Err(format!("type errors:\n  {}", errs.join("\n  ")));
     }
 
-    let target = match output.extension().and_then(|e| e.to_str()) {
-        Some("ll") => Target::LlvmIr,
-        Some("spv") => Target::SpirV,
-        _ => Target::C,
-    };
+    let target = output
+        .extension()
+        .and_then(|e| e.to_str())
+        .and_then(target_from_extension)
+        .unwrap_or(Target::C);
 
     let mut codegen = CodeGenerator::with_source(&ctx, target, source_file.source().into());
     let generated = codegen
@@ -3174,4 +3203,20 @@ fn compile_single_file(input: &Path, output: &Path) -> Result<(), String> {
     std::fs::write(output, &generated.data).map_err(|e| format!("write error: {}", e))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_rust_codegen_target_aliases() {
+        assert_eq!(parse_codegen_target("rust"), Ok(Target::Rust));
+        assert_eq!(parse_codegen_target("rs"), Ok(Target::Rust));
+    }
+
+    #[test]
+    fn infers_rust_target_from_rs_extension() {
+        assert_eq!(target_from_extension("rs"), Some(Target::Rust));
+    }
 }
