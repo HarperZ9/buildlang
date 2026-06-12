@@ -5,7 +5,7 @@
 [![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/HarperZ9.quantalang?label=VS%20Code)](https://marketplace.visualstudio.com/items?itemName=HarperZ9.quantalang)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**The Effects Language** — a compiled language for graphics, shaders, and systems programming.
+**The Effects Language** - a compiled language for graphics, shaders, and systems programming.
 
 QuantaLang compiles `.quanta` source files to **C** (primary target), **HLSL** and **GLSL** (shader output), with experimental backends for SPIR-V, LLVM IR, WebAssembly, Rust source, x86-64, and ARM64.
 
@@ -31,7 +31,7 @@ Add `target/release/quantac` (or `target\release\quantac.exe` on Windows) to you
 
 ## Editor support
 
-Install the **[QuantaLang VS Code extension](https://marketplace.visualstudio.com/items?itemName=HarperZ9.quantalang)** — syntax highlighting, brackets, comment toggles. Grammar source: [HarperZ9/quantalang-tmLanguage](https://github.com/HarperZ9/quantalang-tmLanguage).
+Install the **[QuantaLang VS Code extension](https://marketplace.visualstudio.com/items?itemName=HarperZ9.quantalang)** - syntax highlighting, brackets, comment toggles. Grammar source: [HarperZ9/quantalang-tmLanguage](https://github.com/HarperZ9/quantalang-tmLanguage).
 
 ## Quick Start
 

@@ -20,35 +20,35 @@ User asks to review code, a PR, or recent changes.
 
 ### 2. Review by Priority
 
-#### P0 — Safety & Soundness
+#### P0 - Safety & Soundness
 - [ ] No unjustified `unsafe` blocks
 - [ ] No undefined behavior (UB)
 - [ ] No unsound type coercions in the type checker
 - [ ] Error handling uses `Result`/`?`, not `.unwrap()` in lib code
 - [ ] No panics in code paths reachable by user input
 
-#### P1 — Correctness
+#### P1 - Correctness
 - [ ] Pattern matches are exhaustive (no catch-all `_` hiding bugs)
 - [ ] Lifetime annotations are correct
 - [ ] AST visitors handle all node types
 - [ ] Parser error recovery doesn't skip important tokens
 - [ ] Code generation output matches language semantics
 
-#### P2 — Performance
+#### P2 - Performance
 - [ ] No unnecessary `String` allocations (use `&str` or `Cow`)
 - [ ] No unnecessary `.clone()` calls
 - [ ] Iterator chains preferred over indexed loops
 - [ ] Large enums use `Box` for variant data where appropriate
 - [ ] No O(n^2) algorithms where O(n) or O(n log n) would work
 
-#### P3 — Idiomatic Rust
+#### P3 - Idiomatic Rust
 - [ ] `Result`/`Option` used properly (no sentinel values)
 - [ ] Traits designed for extensibility
 - [ ] Derive macros used where appropriate (Debug, Clone, PartialEq)
 - [ ] `impl Display` for user-facing types
 - [ ] Public APIs have `///` doc comments
 
-#### P4 — Maintainability
+#### P4 - Maintainability
 - [ ] No dead code
 - [ ] Clear naming conventions
 - [ ] Files <= 500 lines
@@ -61,13 +61,13 @@ User asks to review code, a PR, or recent changes.
 ## Code Review: [summary of what was reviewed]
 
 ### Critical (must fix before merge)
-- File:line — Issue — Fix
+- File:line - Issue - Fix
 
 ### Warnings (should fix)
-- File:line — Issue — Fix
+- File:line - Issue - Fix
 
 ### Suggestions (nice to have)
-- File:line — Issue — Fix
+- File:line - Issue - Fix
 
 ### Looks Good
 - [List of things done well]

@@ -1,7 +1,7 @@
 {
   "name": "quantalang",
   "displayName": "QuantaLang",
-  "description": "QuantaLang language support — syntax highlighting, snippets, and bracket matching",
+  "description": "QuantaLang language support - syntax highlighting, snippets, and bracket matching",
   "version": "1.0.0",
   "publisher": "HarperZ9",
   "repository": {

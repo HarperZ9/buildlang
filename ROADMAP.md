@@ -113,7 +113,7 @@ quantac build --target llvm program.quanta
 - Verify output matches C backend for all 108 runtime-tested programs
 
 ### 3.3 Optimization Verification
-- `clang -O2` on generated IR — verify output still correct
+- `clang -O2` on generated IR - verify output still correct
 - Benchmark LLVM -O2 vs gcc -O2 on C backend output
 
 ### Success criterion
