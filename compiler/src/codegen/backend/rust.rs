@@ -68,6 +68,12 @@ impl RustBackend {
     }
 
     fn emit_runtime(&mut self) {
+        self.writeln("fn quanta_string_new<S: AsRef<str>>(s: S) -> String {");
+        self.indent += 1;
+        self.writeln("s.as_ref().to_string()");
+        self.indent -= 1;
+        self.writeln("}");
+        self.writeln("");
         self.writeln("fn quanta_format(fmt: &str, args: &[String]) -> String {");
         self.indent += 1;
         self.writeln("let mut out = String::new();");
@@ -111,9 +117,17 @@ impl RustBackend {
         self.indent -= 1;
         self.writeln("}");
         self.writeln("");
-        self.writeln("fn quanta_printf(fmt: &str, args: &[String]) {");
+        self.writeln("fn quanta_printf<S: AsRef<str>>(fmt: S, args: &[String]) -> i32 {");
         self.indent += 1;
-        self.writeln("print!(\"{}\", quanta_format(fmt, args));");
+        self.writeln("print!(\"{}\", quanta_format(fmt.as_ref(), args));");
+        self.writeln("0");
+        self.indent -= 1;
+        self.writeln("}");
+        self.writeln("");
+        self.writeln("fn quanta_println<S: AsRef<str>>(fmt: S, args: &[String]) -> i32 {");
+        self.indent += 1;
+        self.writeln("println!(\"{}\", quanta_format(fmt.as_ref(), args));");
+        self.writeln("0");
         self.indent -= 1;
         self.writeln("}");
         self.writeln("");
@@ -410,21 +424,32 @@ impl RustBackend {
         locals: &[MirLocal],
     ) -> CodegenResult<()> {
         let func_name = self.value_to_rust(func, locals);
-        if func_name == "printf" {
+        if func_name == "printf" || func_name == "println" {
             if args.is_empty() {
                 return Ok(());
             }
             let fmt = self.value_to_rust(&args[0], locals);
+            let fmt = if self.value_is_string_like(&args[0], locals) {
+                format!("&{}", fmt)
+            } else {
+                fmt
+            };
             let arg_strings = args
                 .iter()
                 .skip(1)
                 .map(|arg| format!("format!(\"{{}}\", {})", self.value_to_rust(arg, locals)))
                 .collect::<Vec<_>>();
-            self.writeln(&format!(
-                "quanta_printf({}, &[{}]);",
-                fmt,
-                arg_strings.join(", ")
-            ));
+            let runtime_call = if func_name == "println" {
+                "quanta_println"
+            } else {
+                "quanta_printf"
+            };
+            let call = format!("{}({}, &[{}])", runtime_call, fmt, arg_strings.join(", "));
+            if let Some(dest) = dest {
+                self.writeln(&format!("{} = {};", self.local_name(dest, locals), call));
+            } else {
+                self.writeln(&format!("{};", call));
+            }
             return Ok(());
         }
 
@@ -754,6 +779,23 @@ impl RustBackend {
         }
     }
 
+    fn value_is_string_like(&self, value: &MirValue, locals: &[MirLocal]) -> bool {
+        match value {
+            MirValue::Local(id) => locals
+                .get(id.0 as usize)
+                .map(|local| Self::is_string_like_type(&local.ty))
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
+    fn is_string_like_type(ty: &MirType) -> bool {
+        matches!(
+            ty,
+            MirType::Struct(name) if name.as_ref() == "String" || name.as_ref() == "QuantaString"
+        )
+    }
+
     fn binop_to_rust(op: BinOp) -> &'static str {
         match op {
             BinOp::Add | BinOp::AddChecked | BinOp::AddWrapping | BinOp::AddSaturating => "+",
@@ -893,10 +935,151 @@ impl Backend for RustBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codegen::CodeGenerator;
+    use crate::lexer::{Lexer, SourceFile};
+    use crate::parser::Parser;
+    use crate::types::{TypeChecker, TypeContext};
+
+    fn compile_quanta_to_rust(source: &str) -> String {
+        let source_file = SourceFile::new("rust_backend_test.quanta", source);
+        let mut lexer = Lexer::new(&source_file);
+        let tokens = lexer.tokenize().expect("lexing should succeed");
+        let mut parser = Parser::new(&source_file, tokens);
+        let ast = parser.parse().expect("parsing should succeed");
+        assert!(
+            parser.errors().is_empty(),
+            "unexpected parser errors: {:?}",
+            parser.errors()
+        );
+
+        let mut ctx = TypeContext::new();
+        let mut checker = TypeChecker::new(&mut ctx);
+        checker.check_module(&ast);
+        assert!(
+            !checker.has_errors(),
+            "unexpected type errors: {:?}",
+            checker.errors()
+        );
+
+        let mut codegen =
+            CodeGenerator::with_source(&ctx, Target::Rust, source_file.source().into());
+        codegen
+            .generate(&ast)
+            .expect("rust codegen should succeed")
+            .as_string()
+            .expect("generated Rust should be UTF-8")
+    }
+
+    fn assert_rustc_metadata_ok(name: &str, rust_source: &str) {
+        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        let dir = std::env::temp_dir().join(format!(
+            "quantalang_rust_backend_{}_{}",
+            name,
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let source_path = dir.join("generated.rs");
+        let metadata_path = dir.join("generated.rmeta");
+        std::fs::write(&source_path, rust_source).expect("write generated Rust");
+
+        let output = std::process::Command::new(rustc)
+            .arg("--emit=metadata")
+            .arg("-o")
+            .arg(&metadata_path)
+            .arg(&source_path)
+            .output()
+            .expect("invoke rustc");
+
+        assert!(
+            output.status.success(),
+            "rustc failed for {name}\nstdout:\n{}\nstderr:\n{}\nsource:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+            rust_source
+        );
+    }
 
     #[test]
     fn backend_target_is_rust() {
         let backend = RustBackend::new();
         assert_eq!(backend.target(), Target::Rust);
+    }
+
+    #[test]
+    fn generated_rust_compiles_for_scalar_branch_subset() {
+        let source = r#"
+fn choose(x: i32) -> i32 {
+    if x > 0 { x } else { 0 }
+}
+
+fn main() {
+    let v: i32 = choose(4);
+    println("{}", v);
+}
+"#;
+        let rust = compile_quanta_to_rust(source);
+        assert_rustc_metadata_ok("scalar_branch", &rust);
+    }
+
+    #[test]
+    fn generated_rust_compiles_for_reference_subset() {
+        let source = r#"
+fn add_to(x: &mut i32, amount: i32) {
+    *x = *x + amount;
+}
+
+fn read_value(x: &i32) -> i32 {
+    *x
+}
+
+fn main() {
+    let mut n: i32 = 10;
+    add_to(&mut n, 5);
+    let val: i32 = read_value(&n);
+    println("{}", val);
+}
+"#;
+        let rust = compile_quanta_to_rust(source);
+        assert_rustc_metadata_ok("references", &rust);
+    }
+
+    #[test]
+    fn generated_rust_compiles_for_structs_and_arrays() {
+        let source = r#"
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+fn sum_array(arr: [i32; 3]) -> i32 {
+    arr[0] + arr[1] + arr[2]
+}
+
+fn main() {
+    let p = Point { x: 3, y: 4 };
+    let values = [p.x, p.y, 5];
+    let total = sum_array(values);
+    println("{}", total);
+}
+"#;
+        let rust = compile_quanta_to_rust(source);
+        assert_rustc_metadata_ok("structs_arrays", &rust);
+    }
+
+    #[test]
+    fn generated_rust_compiles_for_lifetime_smoke_program() {
+        let source = r#"
+fn identity(x: &i32) -> &i32 {
+    x
+}
+
+fn main() {
+    let a: i32 = 42;
+    let r: &i32 = identity(&a);
+    println("{}", *r);
+}
+"#;
+        let rust = compile_quanta_to_rust(source);
+        assert_rustc_metadata_ok("lifetime_smoke", &rust);
     }
 }

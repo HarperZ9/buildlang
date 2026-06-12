@@ -2,6 +2,20 @@
 
 Updated March 2026. Execution order, not wishlist.
 
+## Current Focus: Rust Backend Hardening (June 2026)
+
+Rust is now a first-class experimental source target for Quantac. The immediate
+compiler lane is to make the backend a verification bridge, not just another
+pretty-printer:
+
+- generated Rust for the supported MIR subset must pass `rustc --emit=metadata`
+- ownership, borrow, and lifetime smoke programs must stay covered by backend
+  tests
+- Quanta's own type checker remains the language authority
+- Rust lowering should expose backend mistakes instead of hiding them behind raw
+  pointer shortcuts where a safer projection is available
+- unsupported MIR must keep returning explicit codegen errors
+
 ## Phase 1: Interprocedural Lifetime Analysis (weeks 1-6)
 
 The borrow checker tracks borrows within a single function. It does not
