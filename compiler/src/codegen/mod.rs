@@ -159,6 +159,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     glsl_code.into_bytes(),
                 ))
             }
+            Target::Rust => {
+                let mut backend = backend::rust::RustBackend::new();
+                backend.generate(mir)
+            }
         }
     }
 
@@ -203,7 +207,8 @@ impl GeneratedCode {
             | OutputFormat::Wat
             | OutputFormat::LlvmIr
             | OutputFormat::Hlsl
-            | OutputFormat::Glsl => String::from_utf8(self.data.clone()).ok(),
+            | OutputFormat::Glsl
+            | OutputFormat::RustSource => String::from_utf8(self.data.clone()).ok(),
             _ => None,
         }
     }
@@ -232,6 +237,8 @@ pub enum OutputFormat {
     Hlsl,
     /// GLSL source code.
     Glsl,
+    /// Rust source code.
+    RustSource,
 }
 
 /// Debug information for generated code.
@@ -295,6 +302,12 @@ mod tests {
             code.as_string(),
             Some("(module (func (export \"main\")))".to_string())
         );
+    }
+
+    #[test]
+    fn test_generated_code_as_string_rust_source() {
+        let code = GeneratedCode::new(OutputFormat::RustSource, b"fn main() {}\n".to_vec());
+        assert_eq!(code.as_string(), Some("fn main() {}\n".to_string()));
     }
 
     #[test]
@@ -362,6 +375,7 @@ mod tests {
         assert_eq!(OutputFormat::Wasm, OutputFormat::Wasm);
         assert_eq!(OutputFormat::Wat, OutputFormat::Wat);
         assert_eq!(OutputFormat::SpirV, OutputFormat::SpirV);
+        assert_eq!(OutputFormat::RustSource, OutputFormat::RustSource);
     }
 
     #[test]
@@ -394,6 +408,7 @@ mod tests {
         assert_eq!(format!("{:?}", OutputFormat::Wasm), "Wasm");
         assert_eq!(format!("{:?}", OutputFormat::Wat), "Wat");
         assert_eq!(format!("{:?}", OutputFormat::SpirV), "SpirV");
+        assert_eq!(format!("{:?}", OutputFormat::RustSource), "RustSource");
     }
 
     // =========================================================================
@@ -527,6 +542,9 @@ mod tests {
 
         let cg_spirv = CodeGenerator::new(&ctx, Target::SpirV);
         assert_eq!(cg_spirv.target, Target::SpirV);
+
+        let cg_rust = CodeGenerator::new(&ctx, Target::Rust);
+        assert_eq!(cg_rust.target, Target::Rust);
     }
 
     #[test]
@@ -548,8 +566,9 @@ mod tests {
             Target::Arm64,
             Target::Wasm,
             Target::SpirV,
+            Target::Rust,
         ];
-        assert_eq!(targets.len(), 5);
+        assert_eq!(targets.len(), 6);
     }
 
     #[test]
@@ -558,6 +577,9 @@ mod tests {
         assert_eq!(Target::X86_64, Target::X86_64);
         assert_ne!(Target::C, Target::X86_64);
         assert_ne!(Target::Wasm, Target::SpirV);
+        assert_eq!(Target::Rust.extension(), "rs");
+        assert_eq!(Target::Rust.to_string(), "rust");
+        assert_eq!(Target::Rust.pointer_size(), 64);
     }
 
     // =========================================================================
@@ -604,6 +626,25 @@ mod tests {
         assert_eq!(generated.format, OutputFormat::CSource);
 
         // C output should be valid UTF-8
+        assert!(generated.as_string().is_some());
+    }
+
+    #[test]
+    fn test_full_pipeline_rust_backend() {
+        let ctx = TypeContext::new();
+        let mut codegen = CodeGenerator::new(&ctx, Target::Rust);
+
+        let module = ast::Module {
+            attrs: vec![],
+            items: vec![],
+            span: ast::Span::dummy(),
+        };
+
+        let result = codegen.generate(&module);
+        assert!(result.is_ok());
+
+        let generated = result.unwrap();
+        assert_eq!(generated.format, OutputFormat::RustSource);
         assert!(generated.as_string().is_some());
     }
 

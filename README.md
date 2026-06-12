@@ -7,7 +7,7 @@
 
 **The Effects Language** — a compiled language for graphics, shaders, and systems programming.
 
-QuantaLang compiles `.quanta` source files to **C** (primary target), **HLSL** and **GLSL** (shader output), with experimental backends for SPIR-V, LLVM IR, WebAssembly, x86-64, and ARM64.
+QuantaLang compiles `.quanta` source files to **C** (primary target), **HLSL** and **GLSL** (shader output), with experimental backends for SPIR-V, LLVM IR, WebAssembly, Rust source, x86-64, and ARM64.
 
 **Landing page:** [harperz9.github.io/quantalang](https://harperz9.github.io/quantalang/)
 
@@ -112,8 +112,11 @@ Use `--target` to select a code generation backend:
 | SPIR-V   | `--target spirv`              | `.spv`  | Experimental |
 | LLVM IR  | `--target llvm`               | `.ll`   | Experimental |
 | WASM     | `--target wasm`               | `.wasm` | Experimental |
+| Rust     | `--target rust` / `--target rs` | `.rs`   | Experimental |
 | x86-64   | `--target x86-64`             | `.o`    | Experimental |
 | ARM64    | `--target arm64`              | `.o`    | Experimental |
+
+The Rust target emits source for a subset of MIR and is validated with `rustc --emit=metadata`. It currently covers scalar functions, locals, arithmetic, printing, simple branching, and basic structs/arrays/references; unsupported MIR returns a codegen error rather than silent fallback.
 
 ## Status
 
@@ -121,7 +124,7 @@ Use `--target` to select a code generation backend:
 
 Programs cover: functions, recursion, structs, enums, closures, generics, traits, dynamic dispatch, algebraic effects, pattern matching, iterators, hashmaps, vector math, color science, and self-hosted compiler components.
 
-The C backend is the primary target. HLSL/GLSL produce clean shader output. SPIR-V, LLVM, WASM, x86-64, and ARM64 backends are experimental.
+The C backend is the primary target. HLSL/GLSL produce clean shader output. SPIR-V, LLVM, WASM, Rust, x86-64, and ARM64 backends are experimental.
 
 ## Design
 
@@ -129,18 +132,18 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - Pipeline overview (lexer → parser → types → MIR → backends)
 - Type system rationale: why bidirectional inference, why Pratt parsing, why setjmp/longjmp for effects
 - MIR design: SSA with basic blocks, statement/terminator model
-- Known limitations: no borrow checker, eager monomorphization, one-shot effects
+- Known limitations: borrow/lifetime checking is still early, Rust-target validation is subset-only, eager monomorphization, one-shot effects
 
 ## Code Quality
 
 - **CI**: clippy (correctness) + rustfmt + `cargo test` on Linux and Windows
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 599 passing, 0 failing, 3 ignored (SPIR-V validator dependency)
+- **Tests**: 617 passing, 0 failing, 11 ignored in local `cargo test --manifest-path compiler/Cargo.toml`
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
-  - Codegen: 195 tests across 8 backends (C backend has 24 end-to-end output verification tests)
+  - Codegen: tests across 9 backends, including Rust source emission (C backend has 24 end-to-end output verification tests)
 
 ## License
 
