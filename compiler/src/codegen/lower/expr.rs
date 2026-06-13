@@ -2604,7 +2604,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 "len" => (Some("quanta_hvec_len".to_string()), MirType::usize()),
                 "is_empty" => {
                     // Lower as len() == 0
-                    let mut arg_vals = vec![receiver_val];
+                    let arg_vals = vec![receiver_val];
                     let builder = self
                         .current_fn
                         .as_mut()
