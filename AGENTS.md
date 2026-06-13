@@ -73,5 +73,11 @@ For release-readiness claims or test-count changes:
 cargo test --manifest-path compiler/Cargo.toml --quiet
 ```
 
+For warning-clean release posture:
+
+```powershell
+$env:RUSTFLAGS='-Dwarnings'; cargo test --manifest-path compiler/Cargo.toml --quiet
+```
+
 Before committing or pushing, scan changed files for credential-shaped content
 and confirm `.env` remains ignored.

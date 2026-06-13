@@ -2132,10 +2132,7 @@ impl<'ctx> TypeInfer<'ctx> {
             "len_utf8" | "len_utf16" => {
                 return Ty::int(IntTy::Usize);
             }
-            "to_ascii_lowercase" | "to_ascii_uppercase" | "to_lowercase" | "to_uppercase" => {
-                return Ty::char();
-            }
-            "char_indices" | "chars" | "bytes" => {
+            "char_indices" => {
                 return Ty::fresh_var(); // Iterator — return fresh var for now
             }
             "components" | "to_path_buf" => {
@@ -2144,7 +2141,7 @@ impl<'ctx> TypeInfer<'ctx> {
             "is_dir" | "is_file" | "is_absolute" | "is_relative" | "exists" => {
                 return Ty::bool();
             }
-            "map_or" | "unwrap_or_else" | "and_then" | "or_else" => {
+            "map_or" => {
                 return Ty::fresh_var(); // Combinator methods
             }
 
@@ -4242,7 +4239,7 @@ mod tests {
 
     #[test]
     fn fn_ty_with_lifetimes_constructor() {
-        use super::super::ty::{FnTy, Ty, TyKind};
+        use super::super::ty::{Ty, TyKind};
         let fn_ty = Ty::function_with_lifetimes(
             vec![Ty::reference(
                 Some(super::super::ty::Lifetime::new("a")),
@@ -4266,7 +4263,7 @@ mod tests {
 
     #[test]
     fn fn_ty_lifetime_params_preserved_through_substitute() {
-        use super::super::ty::{FnTy, Substitution, Ty, TyKind};
+        use super::super::ty::{Substitution, Ty, TyKind};
         let fn_ty = Ty::function_with_lifetimes(
             vec![Ty::fresh_var()],
             Ty::int(super::super::ty::IntTy::I32),
@@ -4286,7 +4283,7 @@ mod tests {
 
     #[test]
     fn fn_ty_lifetime_params_preserved_through_freshen() {
-        use super::super::ty::{FnTy, Ty, TyKind};
+        use super::super::ty::{Ty, TyKind};
         let fn_ty = Ty::function_with_lifetimes(
             vec![Ty::param(Arc::from("T"), 0)],
             Ty::param(Arc::from("T"), 0),

@@ -1187,7 +1187,7 @@ impl<'ctx> MirLowerer<'ctx> {
         &self,
         tokens: &[ast::TokenTree],
     ) -> Vec<Vec<crate::lexer::Token>> {
-        use crate::lexer::{Delimiter, TokenKind};
+        use crate::lexer::TokenKind;
 
         // Unwrap outermost Delimited group if present
         let inner: &[ast::TokenTree] = if tokens.len() == 1 {
@@ -1351,7 +1351,7 @@ impl<'ctx> MirLowerer<'ctx> {
                         "_".to_string()
                     }
                 }
-                TokenKind::Literal { kind, suffix } => {
+                TokenKind::Literal { kind, suffix: _ } => {
                     if let Some(ref src) = self.source {
                         let s = tok.span.start.to_usize();
                         let e = tok.span.end.to_usize();
