@@ -1,5 +1,5 @@
 // QuantaLang Screen-Space Ambient Occlusion (SSAO)
-// The Killer Demo — a real post-processing effect written entirely in QuantaLang.
+// The Killer Demo - a real post-processing effect written entirely in QuantaLang.
 //
 // Algorithm: disc-based SSAO with depth comparison and range-weighted occlusion.
 // For each pixel, samples N points in a random disc around it, compares depth,

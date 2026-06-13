@@ -1,4 +1,4 @@
-// QuantaLang — Mutable State as an Effect
+// QuantaLang - Mutable State as an Effect
 // State is explicit, trackable, and pure.
 
 effect State<S> {
@@ -6,7 +6,7 @@ effect State<S> {
     fn set(value: S) -> (),
 }
 
-// A counter that uses state effect — pure function!
+// A counter that uses state effect - pure function!
 fn count_up(n: i32) ~ State<i32> -> i32 {
     let mut i = 0;
     while i < n {
@@ -18,7 +18,7 @@ fn count_up(n: i32) ~ State<i32> -> i32 {
 }
 
 fn main() {
-    // Provide the state handler — YOU choose the implementation
+    // Provide the state handler - YOU choose the implementation
     let mut state: i32 = 0;
 
     handle {

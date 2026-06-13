@@ -17,7 +17,7 @@
 //     - Undefined variable in println! macro args
 //     - Syntax errors that parser recovers from (fn main( { })
 //
-// This file does NOT compile — it's documentation of the negative test results.
+// This file does NOT compile - it's documentation of the negative test results.
 // The actual tests are run via shell commands in CI or manually.
 
 fn main() {}

@@ -1,4 +1,4 @@
-// QuantaLang — Algebraic Effects Introduction
+// QuantaLang - Algebraic Effects Introduction
 // Effects let you separate WHAT happens from HOW it happens.
 
 // Define an effect: what operations can be performed

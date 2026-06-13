@@ -407,7 +407,7 @@ QuantaLang has features that break the Algorithm W assumption:
 
 Bidirectional inference solves this by combining synthesis (bottom-up) with checking (top-down). When a `let x: i32 = 42;` is encountered, the `i32` annotation flows *down* into the literal, constraining it directly. When calling `f(42)` where `f` expects `u64`, the expected parameter type flows down to resolve the literal.
 
-The cost is implementation complexity — `infer_expr` (synthesis) and `check_expr` (checking) are separate code paths that must stay in sync. In practice, `check_expr` delegates to `infer_expr` for most node types and only intervenes where top-down information is useful (literals, closures, struct literals).
+The cost is implementation complexity - `infer_expr` (synthesis) and `check_expr` (checking) are separate code paths that must stay in sync. In practice, `check_expr` delegates to `infer_expr` for most node types and only intervenes where top-down information is useful (literals, closures, struct literals).
 
 ### Why Pratt parsing for expressions?
 
@@ -415,7 +415,7 @@ Recursive descent handles statements and items well, but expression parsing with
 
 Pratt parsing collapses this into a single loop driven by a binding power table. Adding a new operator means adding one entry to `infix_binding_power()`. The code is shorter (the entire expression parser is one function with helpers) and the precedence relationships are explicit in the `bp` module rather than implicit in the call graph.
 
-The tradeoff: Pratt parsing is harder to read for someone unfamiliar with the technique. The `parse_expr_with_bp(min_bp)` function is a tight loop that's not obviously correct on first read. The 42 precedence tests exist partly to compensate for this — they prove the binding powers are correct even though the code is dense.
+The tradeoff: Pratt parsing is harder to read for someone unfamiliar with the technique. The `parse_expr_with_bp(min_bp)` function is a tight loop that's not obviously correct on first read. The 42 precedence tests exist partly to compensate for this - they prove the binding powers are correct even though the code is dense.
 
 ### Why setjmp/longjmp for algebraic effects?
 
@@ -427,7 +427,7 @@ Algebraic effects need non-local control flow: `perform` jumps from the effect s
 
 We chose setjmp/longjmp because it matches the C backend's portability goal. The handler saves state with `setjmp`, the body runs normally, and `perform` calls `longjmp` to jump back to the handler with an operation ID. The handler dispatches on the ID and can `resume` by calling the continuation function directly.
 
-The limitation: `longjmp` destroys stack frames between the handler and the perform site, so `resume` can only be called once (one-shot continuations). Multi-shot continuations (calling `resume` multiple times for the same `perform`) would require stack copying, which setjmp doesn't support. In practice, one-shot is sufficient for error handling, async simulation, and resource management — the primary use cases.
+The limitation: `longjmp` destroys stack frames between the handler and the perform site, so `resume` can only be called once (one-shot continuations). Multi-shot continuations (calling `resume` multiple times for the same `perform`) would require stack copying, which setjmp doesn't support. In practice, one-shot is sufficient for error handling, async simulation, and resource management - the primary use cases.
 
 ### Why color space annotations in the type system?
 
@@ -435,16 +435,16 @@ Color science has a class of bugs that type systems normally can't catch: passin
 
 QuantaLang's type annotations attach metadata strings (like `ColorSpace:Linear` or `ColorSpace:sRGB`) to types. The unifier checks annotation compatibility: if both operands of a binary operation carry annotations in the same category, they must match. This catches `linear_rgb + srgb_rgb` at compile time.
 
-The design is intentionally minimal — annotations are strings, not a full dependent type system. They're checked structurally (category:value matching) rather than requiring a dedicated solver. This keeps the type checker simple while catching the most common class of color space bugs.
+The design is intentionally minimal - annotations are strings, not a full dependent type system. They're checked structurally (category:value matching) rather than requiring a dedicated solver. This keeps the type checker simple while catching the most common class of color space bugs.
 
-The limitation: annotations are per-type, not per-value. If a function takes `Vec3` and you want one `Vec3` to be linear and another to be sRGB, you need different type aliases. This is a pragmatic compromise — full dependent types would be more expressive but dramatically more complex.
+The limitation: annotations are per-type, not per-value. If a function takes `Vec3` and you want one `Vec3` to be linear and another to be sRGB, you need different type aliases. This is a pragmatic compromise - full dependent types would be more expressive but dramatically more complex.
 
 ### Known Limitations
 
 1. **Generics are monomorphized eagerly**: every generic instantiation generates a separate function. No polymorphic compilation. This means compile times scale with the number of instantiations, not the number of generic definitions.
-2. **Partial borrow checking**: The compiler enforces basic borrowing rules: no mutable aliasing (`&mut` while `&` or `&mut` is active), no returning references to local variables, and scope-based borrow expiry. References are properly typed (`&x` → `Ref(T)`, `*non_ref` → error). However, the borrow checker does not yet implement: (a) NLL — borrows expire at scope boundaries, not at last use, (b) interprocedural lifetime analysis — function signatures don't carry lifetime parameters, (c) full region inference with constraint solving. The C backend still emits raw pointers. These are the next items for the borrow checker.
+2. **Partial borrow checking**: The compiler enforces basic borrowing rules: no mutable aliasing (`&mut` while `&` or `&mut` is active), no returning references to local variables, and scope-based borrow expiry. References are properly typed (`&x` → `Ref(T)`, `*non_ref` → error). However, the borrow checker does not yet implement: (a) NLL - borrows expire at scope boundaries, not at last use, (b) interprocedural lifetime analysis - function signatures don't carry lifetime parameters, (c) full region inference with constraint solving. The C backend still emits raw pointers. These are the next items for the borrow checker.
 3. **Module system is partial**: Inline `mod foo { ... }` blocks work with proper scoping, and `use` statements resolve through a module registry. However, external file modules (`mod foo;` loading from `foo.quanta`) and the `include!()` preprocessor are not yet unified into a single module resolver. Separate compilation and incremental builds are not supported.
-4. **Effect system is one-shot only**: `resume` can be called at most once per `perform` due to the setjmp/longjmp implementation. This is a deliberate trade-off for C backend portability — CPS transform would enable multi-shot but doubles code size and makes generated C unreadable.
+4. **Effect system is one-shot only**: `resume` can be called at most once per `perform` due to the setjmp/longjmp implementation. This is a deliberate trade-off for C backend portability - CPS transform would enable multi-shot but doubles code size and makes generated C unreadable.
 
 ### Resolved (Previously Listed as Limitations)
 

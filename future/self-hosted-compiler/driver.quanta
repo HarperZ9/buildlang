@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════════════════════
-// QUANTAC — QuantaLang Compiler Driver
+// QUANTAC - QuantaLang Compiler Driver
 // ═══════════════════════════════════════════════════════════════════════════════
 // Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
 // Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
@@ -593,7 +593,7 @@ pub fn parse_args() -> Result<CompilerOptions, String> {
 }
 
 fn print_help() {
-    println!("quantac {} — QuantaLang Compiler", VERSION);
+    println!("quantac {} - QuantaLang Compiler", VERSION);
     println!("{}", USAGE);
 }
 

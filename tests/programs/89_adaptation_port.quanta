@@ -1,4 +1,4 @@
-// Test 89: quanta-color port — Chromatic adaptation
+// Test 89: quanta-color port - Chromatic adaptation
 // Ported from APPS/quanta-color/quanta_color/adaptation.py
 // Bradford chromatic adaptation transform
 
@@ -57,7 +57,7 @@ fn main() {
     let d65 = XYZ { x: d65_x(), y: d65_y(), z: d65_z() };
     let d50 = XYZ { x: d50_x(), y: d50_y(), z: d50_z() };
 
-    // Adapt D65 white to D50 — should give D50 white
+    // Adapt D65 white to D50 - should give D50 white
     let adapted = adapt_bradford(d65, d65, d50);
     println!("D65→D50 x: {}", adapted.x);
     println!("D65→D50 y: {}", adapted.y);

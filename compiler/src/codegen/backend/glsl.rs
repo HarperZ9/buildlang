@@ -239,7 +239,7 @@ impl GlslBackend {
     }
 
     fn generate_struct(&mut self, ty: &MirTypeDef) -> CodegenResult<()> {
-        // Skip built-in vector types — GLSL has native vec2/3/4
+        // Skip built-in vector types - GLSL has native vec2/3/4
         match ty.name.as_ref() {
             "quanta_vec2" | "quanta_vec3" | "quanta_vec4" | "quanta_mat4" => return Ok(()),
             _ => {}
@@ -330,7 +330,7 @@ impl GlslBackend {
                 Self::compute_inlineable_temps(blocks, &func.locals, &use_counts);
 
             // Identify locals that can have declaration folded into first assignment.
-            // Compute the "entry chain" — blocks reachable from block 0 via linear
+            // Compute the "entry chain" - blocks reachable from block 0 via linear
             // Call/Goto continuations (no branches). Assignments in this chain are top-level.
             let mut entry_chain: std::collections::HashSet<usize> =
                 std::collections::HashSet::new();
@@ -412,7 +412,7 @@ impl GlslBackend {
             }
         }
 
-        // Local variable declarations — only for locals that can't be folded
+        // Local variable declarations - only for locals that can't be folded
         for local in &func.locals {
             if !local.is_param {
                 if matches!(local.ty, MirType::Void) {
@@ -479,7 +479,7 @@ impl GlslBackend {
         for stmt in &block.stmts {
             if let MirStmtKind::Assign { dest, value } = &stmt.kind {
                 if self.single_use_temps.contains(&dest.0) {
-                    // Don't emit — store the expression for inlining at use site
+                    // Don't emit - store the expression for inlining at use site
                     let expr_str = self.rvalue_to_glsl(value, func);
                     self.inlined_exprs.borrow_mut().insert(dest.0, expr_str);
                     continue;
@@ -760,7 +760,7 @@ impl GlslBackend {
                     "quanta_length2" | "quanta_length3" | "quanta_length4" => "length".to_string(),
                     "quanta_cross" => "cross".to_string(),
                     "quanta_reflect3" => "reflect".to_string(),
-                    // Interpolation — GLSL uses mix(), not lerp()
+                    // Interpolation - GLSL uses mix(), not lerp()
                     "quanta_mix" | "lerp" | "quanta_lerp2" | "quanta_lerp3" | "quanta_lerp4" => {
                         "mix".to_string()
                     }
@@ -776,7 +776,7 @@ impl GlslBackend {
                     "quanta_max_f64" | "quanta_max_f32" | "quanta_max_i32" | "quanta_max_i64" => {
                         "max".to_string()
                     }
-                    // Texture sampling — GLSL uses texture(), not tex2D()
+                    // Texture sampling - GLSL uses texture(), not tex2D()
                     "texture_sample" | "quanta_texture_sample" => "texture".to_string(),
                     // Vector constructors
                     "quanta_vec2_new" => "vec2".to_string(),

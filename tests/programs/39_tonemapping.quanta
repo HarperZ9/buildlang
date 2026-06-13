@@ -28,7 +28,7 @@ fn main() {
 
     println!("HDR input: ({}, {}, {})", hdr_color.x, hdr_color.y, hdr_color.z);
 
-    // ACES tone mapping — component-wise
+    // ACES tone mapping - component-wise
     let aces = vec3(
         aces_channel(hdr_color.x),
         aces_channel(hdr_color.y),
@@ -36,7 +36,7 @@ fn main() {
     );
     println!("ACES: ({}, {}, {})", aces.x, aces.y, aces.z);
 
-    // Reinhard tone mapping — component-wise
+    // Reinhard tone mapping - component-wise
     let reinhard = vec3(
         reinhard_channel(hdr_color.x),
         reinhard_channel(hdr_color.y),

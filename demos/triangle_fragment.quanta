@@ -1,4 +1,4 @@
-// QuantaLang Fragment Shader — Triangle Demo
+// QuantaLang Fragment Shader - Triangle Demo
 // Compiles to SPIR-V via: quantac triangle_fragment.quanta --target spirv
 
 #[fragment]

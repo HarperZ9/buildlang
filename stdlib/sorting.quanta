@@ -8,7 +8,7 @@ fn swap(arr: &mut [i32; 100], i: i32, j: i32) {
     arr[j] = temp;
 }
 
-/// Insertion sort — O(n^2) but stable and efficient for small arrays.
+/// Insertion sort - O(n^2) but stable and efficient for small arrays.
 fn insertion_sort(arr: &mut [i32; 100], len: i32) {
     let mut i: i32 = 1;
     while i < len {
@@ -23,7 +23,7 @@ fn insertion_sort(arr: &mut [i32; 100], len: i32) {
     }
 }
 
-/// Selection sort — O(n^2), finds minimum and swaps to front.
+/// Selection sort - O(n^2), finds minimum and swaps to front.
 fn selection_sort(arr: &mut [i32; 100], len: i32) {
     let mut i: i32 = 0;
     while i < len - 1 {
@@ -44,7 +44,7 @@ fn selection_sort(arr: &mut [i32; 100], len: i32) {
     }
 }
 
-/// Bubble sort — O(n^2), repeatedly swaps adjacent elements.
+/// Bubble sort - O(n^2), repeatedly swaps adjacent elements.
 fn bubble_sort(arr: &mut [i32; 100], len: i32) {
     let mut i: i32 = 0;
     while i < len - 1 {
@@ -73,7 +73,7 @@ fn is_sorted(arr: &[i32; 100], len: i32) -> bool {
     true
 }
 
-/// Binary search — returns index of target, or -1 if not found.
+/// Binary search - returns index of target, or -1 if not found.
 /// Array must be sorted.
 fn binary_search(arr: &[i32; 100], len: i32, target: i32) -> i32 {
     let mut low: i32 = 0;

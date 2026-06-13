@@ -4,18 +4,18 @@
 
 ## Why QuantaLang?
 
-Every programming language handles side effects differently — and most do it badly.
+Every programming language handles side effects differently - and most do it badly.
 
 - **Rust** makes you wrap everything in `Result<T, E>` and chain `?` operators. Safe, but verbose.
 - **Go** makes you check `if err != nil` after every function call. Simple, but tedious.
 - **Haskell** uses monads. Powerful, but impenetrable to most programmers.
 - **Java/Python** use exceptions. Easy, but invisible control flow that breaks reasoning.
 
-QuantaLang uses **algebraic effects** — a system that is:
-- **As safe as Rust** — effects are tracked in the type system
-- **As simple as Go** — just call functions, no ceremony
-- **As powerful as Haskell** — full effect composition and abstraction
-- **As practical as Python** — you don't need a PhD to use it
+QuantaLang uses **algebraic effects** - a system that is:
+- **As safe as Rust** - effects are tracked in the type system
+- **As simple as Go** - just call functions, no ceremony
+- **As powerful as Haskell** - full effect composition and abstraction
+- **As practical as Python** - you don't need a PhD to use it
 
 ## How Effects Work
 
@@ -51,7 +51,7 @@ handle { process_config() } with {
 
 ## Why This Matters
 
-**Testing**: Swap the real file system handler for a mock — no dependency injection frameworks needed.
+**Testing**: Swap the real file system handler for a mock - no dependency injection frameworks needed.
 
 **Concurrency**: async/await is just an effect. Swap single-threaded for multi-threaded by changing the handler.
 

@@ -184,7 +184,7 @@ impl<'a> Parser<'a> {
                     ));
                 }
 
-                // Check for macro: Self!(...) — unlikely but handle it
+                // Check for macro: Self!(...) - unlikely but handle it
                 if self.check(&TokenKind::Not) {
                     self.advance();
                     return self.parse_macro_expr(path, start);
@@ -553,7 +553,7 @@ impl<'a> Parser<'a> {
 
                 let field = self.expect_ident()?;
 
-                // Check for method call — either `method(...)` or `method::<T>(...)`
+                // Check for method call - either `method(...)` or `method::<T>(...)`
                 let is_turbofish =
                     self.check(&TokenKind::ColonColon) && self.peek().kind == TokenKind::Lt;
                 if self.check(&TokenKind::OpenDelim(Delimiter::Paren)) || is_turbofish {
@@ -1365,7 +1365,7 @@ impl<'a> Parser<'a> {
             // Comma is optional after block expression bodies (Rust convention)
             if !self.eat(&TokenKind::Comma) {
                 if !self.check(&TokenKind::CloseDelim(Delimiter::Brace)) {
-                    // Check if this looks like the start of another arm — if so, allow missing comma
+                    // Check if this looks like the start of another arm - if so, allow missing comma
                     let looks_like_next_arm = self.check_ident()
                         || self.check(&TokenKind::Underscore)
                         || self.check(&TokenKind::Pound)
@@ -1561,7 +1561,7 @@ impl<'a> Parser<'a> {
         while !self.check(&TokenKind::Or) && !self.is_eof() {
             let param_start = self.current_span();
             // Use parse_pattern_primary (not parse_pattern) to avoid
-            // consuming `|` as an or-pattern — in closures, `|` is the
+            // consuming `|` as an or-pattern - in closures, `|` is the
             // parameter list delimiter, not a pattern combinator.
             let pattern = self.parse_pattern_primary()?;
             let ty = if self.eat(&TokenKind::Colon) {
@@ -1695,7 +1695,7 @@ impl<'a> Parser<'a> {
             self.expect(&TokenKind::FatArrow)?;
 
             // Parse handler body: `|resume_name| { body }` or just an expression.
-            // The `|...|` part is a resume parameter — we parse it specially because
+            // The `|...|` part is a resume parameter - we parse it specially because
             // `resume` is a keyword and the normal closure parser rejects keywords
             // as parameter names.
             let handler_body = if self.check(&TokenKind::Or) {
@@ -1724,7 +1724,7 @@ impl<'a> Parser<'a> {
             // Comma is optional after block expression bodies (Rust convention)
             if !self.eat(&TokenKind::Comma) {
                 if !self.check(&TokenKind::CloseDelim(Delimiter::Brace)) {
-                    // Check if this looks like the start of another arm — if so, allow missing comma
+                    // Check if this looks like the start of another arm - if so, allow missing comma
                     let looks_like_next_arm = self.check_ident()
                         || self.check(&TokenKind::Underscore)
                         || self.check(&TokenKind::Pound)
@@ -2125,9 +2125,9 @@ mod tests {
             ExprKind::Call { func, args } => {
                 assert!(matches!(&func.kind, ExprKind::Ident(_) | ExprKind::Path(_)));
                 assert_eq!(args.len(), 2);
-                // First arg: g(x) — a Call
+                // First arg: g(x) - a Call
                 assert!(matches!(&args[0].kind, ExprKind::Call { .. }));
-                // Second arg: h(y, z) — a Call with 2 args
+                // Second arg: h(y, z) - a Call with 2 args
                 match &args[1].kind {
                     ExprKind::Call {
                         args: inner_args, ..

@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════════════════════
-// QUANTALANG STANDARD LIBRARY — Async Runtime
+// QUANTALANG STANDARD LIBRARY - Async Runtime
 // ═══════════════════════════════════════════════════════════════════════════════
 // Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
 // Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
@@ -875,7 +875,7 @@ pub async fn yield_now() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// CHANNEL — ONE-SHOT
+// CHANNEL - ONE-SHOT
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// A single-value channel
@@ -1023,7 +1023,7 @@ pub mod oneshot {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// CHANNEL — MPSC (Multi-Producer, Single-Consumer)
+// CHANNEL - MPSC (Multi-Producer, Single-Consumer)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Multi-producer, single-consumer channel

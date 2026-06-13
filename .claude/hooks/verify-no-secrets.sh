@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify No Secrets Hook — Stop
+# Verify No Secrets Hook - Stop
 
 if ! git rev-parse --is-inside-work-tree &>/dev/null 2>&1; then exit 0; fi
 

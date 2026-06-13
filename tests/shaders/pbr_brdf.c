@@ -278,7 +278,7 @@ static void quanta_pop_handler(void) {
     }
 }
 
-// Perform an effect operation — jumps to the nearest handler
+// Perform an effect operation - jumps to the nearest handler
 static void quanta_perform(int32_t effect_id, int32_t op_id, void* arg, void* result) {
     QuantaHandler* h = __quanta_handler_stack;
     while (h) {
@@ -288,7 +288,7 @@ static void quanta_perform(int32_t effect_id, int32_t op_id, void* arg, void* re
         }
         h = h->parent;
     }
-    // Unhandled effect — abort
+    // Unhandled effect - abort
     fprintf(stderr, "Unhandled effect %d operation %d\n", effect_id, op_id);
     abort();
 }
@@ -417,7 +417,7 @@ static void quanta_gfx_shutdown(void) {
 
 // Type definitions
 // String table
-static const char* __str0 = "=== Cook-Torrance PBR BRDF — QuantaLang Dual-Target ===\n";
+static const char* __str0 = "=== Cook-Torrance PBR BRDF - QuantaLang Dual-Target ===\n";
 static const char* __str1 = "\n";
 static const char* __str2 = "Fresnel (head-on, F0=0.04): %g (expect ~0.04)\n";
 static const char* __str3 = "Fresnel (grazing, F0=0.04): %g (expect ~1.0)\n";

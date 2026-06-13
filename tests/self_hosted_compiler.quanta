@@ -15,7 +15,7 @@
 // ---- AST Node kinds ----
 // 0 = INT_LIT, 1 = IDENT_REF, 2 = BINARY_OP, 3 = LET_STMT, 4 = PRINT_STMT, 5 = PROGRAM
 
-// ---- AST storage (parallel arrays — no heap needed) ----
+// ---- AST storage (parallel arrays - no heap needed) ----
 struct AST {
     // Node kind for each slot
     kind_0: i32, kind_1: i32, kind_2: i32, kind_3: i32,
@@ -110,7 +110,7 @@ fn ast_set_node(ast: AST, idx: i32, kind: i32, val: i32, left: i32, right: i32) 
 }
 
 // =============================================================================
-// STAGE 1: PARSER (hardcoded — builds AST for the test program)
+// STAGE 1: PARSER (hardcoded - builds AST for the test program)
 // =============================================================================
 // Parses:  let x = 3 + 4;  let y = x * 2;  println(y);
 //
@@ -193,7 +193,7 @@ fn op_char(code: i32) -> str {
 fn codegen_expr(ast: AST, idx: i32) {
     let kind = ast.get_kind(idx);
     if kind == 0 {
-        // Integer literal — just print the value
+        // Integer literal - just print the value
         println!("{}", ast.get_val(idx));
     }
     if kind == 1 {
@@ -201,7 +201,7 @@ fn codegen_expr(ast: AST, idx: i32) {
         println!("{}", var_name(ast.get_val(idx)));
     }
     if kind == 2 {
-        // Binary operation — print "left op right" inline
+        // Binary operation - print "left op right" inline
         let left = ast.get_left(idx);
         let right = ast.get_right(idx);
         let op = op_char(ast.get_val(idx));
@@ -267,7 +267,7 @@ fn codegen(ast: AST) {
         i = i + 1;
     }
 
-    // Emit println(y) — hardcoded for now
+    // Emit println(y) - hardcoded for now
     println!("    printf(\"%d\\n\", y);");
     println!("    return 0;");
     println!("}}");

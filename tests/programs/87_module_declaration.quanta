@@ -1,6 +1,6 @@
 // Test 87: Module declaration syntax
 // Verifies that `module path::to::name` is parsed correctly.
-// This is the ecosystem convention — every .quanta file starts with `module`.
+// This is the ecosystem convention - every .quanta file starts with `module`.
 
 module test::example::math
 

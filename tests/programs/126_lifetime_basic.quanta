@@ -1,4 +1,4 @@
-// Interprocedural Lifetime Analysis — basic lifetime parameters.
+// Interprocedural Lifetime Analysis - basic lifetime parameters.
 // fn first<'a> takes two references with the same lifetime and returns one.
 // This should compile correctly: returning x which has lifetime 'a.
 

@@ -1,4 +1,4 @@
-// Test 94: quanta-finance port — Technical indicators
+// Test 94: quanta-finance port - Technical indicators
 // SMA, EMA, RSI on price data
 
 fn sma5(data: [f64; 10]) -> f64 {
@@ -27,7 +27,7 @@ fn ema5(data: [f64; 10]) -> f64 {
     result
 }
 
-// RSI(5) — Wilder smoothing
+// RSI(5) - Wilder smoothing
 fn rsi5(data: [f64; 10]) -> f64 {
     let mut avg_gain = 0.0;
     let mut avg_loss = 0.0;

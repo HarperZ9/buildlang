@@ -1,4 +1,4 @@
-// Test 106: Color space type annotations — Pillar 2A proof
+// Test 106: Color space type annotations - Pillar 2A proof
 // The `with` keyword annotates types with color space metadata
 // This is the first QuantaLang program using type-level color space annotations
 
@@ -28,7 +28,7 @@ fn linear_to_srgb_channel(c: f64) -> f64 {
     else { 1.055 * pow(c, 0.416667) - 0.055 }
 }
 
-// Convert sRGB to linear — changes the color space annotation
+// Convert sRGB to linear - changes the color space annotation
 fn srgb_to_linear(c: RGB with ColorSpace<sRGB>) -> RGB with ColorSpace<Linear> {
     RGB {
         r: srgb_to_linear_channel(c.r),

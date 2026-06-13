@@ -193,7 +193,7 @@ enum Commands {
         command: CorpusCommands,
     },
 
-    /// Run tests — compile .quanta programs and verify output against .expected files
+    /// Run tests - compile .quanta programs and verify output against .expected files
     Test {
         /// Directory containing test programs [default: tests/programs]
         #[arg(default_value = "tests/programs")]
@@ -965,7 +965,7 @@ fn preprocess_includes_inner(
 ) -> Result<String, i32> {
     if depth > MAX_INCLUDE_DEPTH {
         eprintln!(
-            "Error: include depth exceeds {} — possible circular inclusion",
+            "Error: include depth exceeds {} - possible circular inclusion",
             MAX_INCLUDE_DEPTH
         );
         return Err(1);
@@ -988,7 +988,7 @@ fn preprocess_includes_inner(
 
             // Double-inclusion guard
             if included.contains(&canonical) {
-                // Already included — skip silently
+                // Already included - skip silently
                 result.push_str("// [include already loaded: ");
                 result.push_str(path_str);
                 result.push_str("]\n");
@@ -1079,7 +1079,7 @@ fn resolve_imports(source: &str, input_file: &Path) -> Result<String, i32> {
             let rest = rest.trim();
             if let Some(name) = rest.strip_suffix(';') {
                 let name = name.trim();
-                // Skip complex use paths like `std::collections::HashMap` — we
+                // Skip complex use paths like `std::collections::HashMap` - we
                 // only handle bare package names (no `::` separators).
                 if !name.contains("::") && !name.contains('{') {
                     Some(name.to_string())
@@ -1178,7 +1178,7 @@ fn cmd_check(file: &PathBuf) -> Result<(), i32> {
         );
     }
 
-    // Resolve `mod foo;` declarations — load and merge external module files
+    // Resolve `mod foo;` declarations - load and merge external module files
     resolve_modules(&mut ast, chk_base)?;
 
     // Type check the successfully parsed items
@@ -1623,7 +1623,7 @@ fn cmd_build(
         ast.items.len()
     );
 
-    // Resolve `mod foo;` declarations — load and merge external module files
+    // Resolve `mod foo;` declarations - load and merge external module files
     let source_dir = main_path.parent().unwrap_or(Path::new("."));
     resolve_modules(&mut ast, source_dir)?;
 
@@ -1642,7 +1642,7 @@ fn cmd_build(
     }
     println!("[3/{}] Type checking... OK", total_steps);
 
-    // Code generation — pass source for macro string extraction
+    // Code generation - pass source for macro string extraction
     let mut codegen = CodeGenerator::with_source(&ctx, target, Arc::from(source_file.source()));
     let output = codegen.generate(&ast).map_err(|e| {
         eprintln!("Code generation error: {}", e);
@@ -1733,7 +1733,7 @@ fn cmd_build(
             }
 
             println!();
-            println!("Build successful! (assembly only — no assembler found)");
+            println!("Build successful! (assembly only - no assembler found)");
             println!("Output: {}", asm_output_file.display());
             return Ok(());
         }
@@ -2032,7 +2032,7 @@ fn cmd_run(file: &PathBuf, args: &[String]) -> Result<(), i32> {
         1
     })?;
 
-    // Resolve `mod foo;` declarations — load and merge external module files
+    // Resolve `mod foo;` declarations - load and merge external module files
     let source_dir = file.parent().unwrap_or(Path::new("."));
     resolve_modules(&mut ast, source_dir)?;
 
@@ -2049,7 +2049,7 @@ fn cmd_run(file: &PathBuf, args: &[String]) -> Result<(), i32> {
         return Err(1);
     }
 
-    // Generate C code — pass source for macro string extraction
+    // Generate C code - pass source for macro string extraction
     let mut codegen = CodeGenerator::with_source(&ctx, Target::C, Arc::from(source_file.source()));
     let output = codegen.generate(&ast).map_err(|e| {
         eprintln!("Code generation error: {}", e);
@@ -2099,7 +2099,7 @@ fn cmd_run(file: &PathBuf, args: &[String]) -> Result<(), i32> {
         // Check if MSVC put it somewhere else (current directory)
         let alt_name = temp_dir.join("temp.exe");
         if alt_name.exists() {
-            eprintln!("Found executable in current directory instead — moving it");
+            eprintln!("Found executable in current directory instead - moving it");
             let _ = std::fs::rename(alt_name, &exe_file);
         } else {
             return Err(1);
@@ -3247,7 +3247,7 @@ fn cmd_compile(
         1
     })?;
 
-    // Resolve `mod foo;` declarations — load and merge external module files
+    // Resolve `mod foo;` declarations - load and merge external module files
     let source_dir = input.parent().unwrap_or(Path::new("."));
     resolve_modules(&mut ast, source_dir)?;
 

@@ -1,4 +1,4 @@
-// QuantaCinematic.fx — Complete ReShade Cinematic Post-Processing
+// QuantaCinematic.fx - Complete ReShade Cinematic Post-Processing
 // All math functions compiled from QuantaLang source (cinematic.quanta)
 // ReShade pixel shader integration hand-finished
 //
@@ -7,7 +7,7 @@
 #include "ReShade.fxh"
 
 // ============================================================
-// Uniforms — adjustable in ReShade UI
+// Uniforms - adjustable in ReShade UI
 // ============================================================
 uniform float VignetteStrength <
     ui_type = "slider";

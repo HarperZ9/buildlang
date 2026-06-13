@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════════════════════
-// QUANTALANG CODE GENERATOR — x86_64 / ARM64 / RISC-V
+// QUANTALANG CODE GENERATOR - x86_64 / ARM64 / RISC-V
 // ═══════════════════════════════════════════════════════════════════════════════
 // Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
 // Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
@@ -616,7 +616,7 @@ pub struct AllocationResult {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ASSEMBLY EMITTER — x86_64
+// ASSEMBLY EMITTER - x86_64
 // ═══════════════════════════════════════════════════════════════════════════════
 
 pub struct X86_64Emitter {
@@ -1072,7 +1072,7 @@ impl X86_64Emitter {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ASSEMBLY EMITTER — ARM64
+// ASSEMBLY EMITTER - ARM64
 // ═══════════════════════════════════════════════════════════════════════════════
 
 pub struct Arm64Emitter {

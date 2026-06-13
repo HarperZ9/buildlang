@@ -1,5 +1,5 @@
 // Test 79: 3D LUT generation and interpolation
-// Port of lut_engine.py core — generates a color correction LUT
+// Port of lut_engine.py core - generates a color correction LUT
 
 // Apply a simple color correction: boost contrast + warm shift
 fn correct_channel(c: f64, gamma: f64, gain: f64, offset: f64) -> f64 {

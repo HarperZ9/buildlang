@@ -1,4 +1,4 @@
-// QuantaLang Triangle Demo — Test 41
+// QuantaLang Triangle Demo - Test 41
 // Demonstrates FFI to graphics stub library with a render loop.
 // The stub prints what a real Vulkan backend would do.
 

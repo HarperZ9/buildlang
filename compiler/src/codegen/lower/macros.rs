@@ -658,7 +658,7 @@ impl<'ctx> MirLowerer<'ctx> {
             );
             builder.switch_to_block(cont);
 
-            // setjmp(handler.env) — pass the handler local directly;
+            // setjmp(handler.env) - pass the handler local directly;
             // the C backend will emit `.env` when it sees a setjmp call
             // with a QuantaHandler-typed argument.
             let setjmp_fn = MirValue::Function(Arc::from("setjmp"));
@@ -851,7 +851,7 @@ impl<'ctx> MirLowerer<'ctx> {
             h.abs()
         };
 
-        // Lower the first argument (if any) — it becomes the `arg` pointer.
+        // Lower the first argument (if any) - it becomes the `arg` pointer.
         let arg_val = if let Some(first) = args.first() {
             self.lower_expr(first)?
         } else {
@@ -962,7 +962,7 @@ impl<'ctx> MirLowerer<'ctx> {
             });
 
             if !has_valid_spans && !tokens.is_empty() {
-                // Tokens have synthetic spans — this vec! was already expanded
+                // Tokens have synthetic spans - this vec! was already expanded
                 // by the macro expander. Create an empty vec as placeholder.
                 let new_fn = MirValue::Function(Arc::from("quanta_hvec_new_f64"));
                 let vec_ty = MirType::Vec(Box::new(MirType::f64()));
@@ -1286,14 +1286,14 @@ impl<'ctx> MirLowerer<'ctx> {
                 match parser.parse_expr() {
                     Ok(expr) => self.lower_expr(&expr),
                     Err(_) => {
-                        // Parsing failed — tokens likely have synthetic spans.
+                        // Parsing failed - tokens likely have synthetic spans.
                         // Return a sensible default (0 for numerics).
                         Ok(MirValue::Const(MirConst::Int(0, MirType::i64())))
                     }
                 }
             }
             Err(_) => {
-                // Tokenization failed — return default
+                // Tokenization failed - return default
                 Ok(MirValue::Const(MirConst::Int(0, MirType::i64())))
             }
         }
@@ -1456,7 +1456,7 @@ impl<'ctx> MirLowerer<'ctx> {
         for token in inner {
             match token {
                 ast::TokenTree::Delimited { .. } => {
-                    // Nested delimited group — skip it entirely (don't
+                    // Nested delimited group - skip it entirely (don't
                     // look inside for semicolons).
                 }
                 ast::TokenTree::Token(tok) => match &tok.kind {
@@ -1656,7 +1656,7 @@ impl<'ctx> MirLowerer<'ctx> {
         };
 
         // Unwrap the outermost Delimited group if present, but do NOT flatten
-        // nested groups — their spans must stay intact for correct source extraction.
+        // nested groups - their spans must stay intact for correct source extraction.
         let inner: &[ast::TokenTree] = if tokens.len() == 1 {
             if let ast::TokenTree::Delimited {
                 tokens: ref inner, ..
@@ -1995,7 +1995,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     let name = method.name.as_ref();
                     match name {
                         "iter" => {
-                            // Found the base — `receiver` is the source vec.
+                            // Found the base - `receiver` is the source vec.
                             steps.reverse();
                             return Some(IterChain {
                                 source: receiver,
@@ -2086,7 +2086,7 @@ impl<'ctx> MirLowerer<'ctx> {
             len
         };
 
-        // 3. Check for enumerate step — affects how many closure params we
+        // 3. Check for enumerate step - affects how many closure params we
         //    bind (index + element vs just element).
         let has_enumerate = chain.steps.iter().any(|s| matches!(s, IterStep::Enumerate));
 
@@ -2328,7 +2328,7 @@ impl<'ctx> MirLowerer<'ctx> {
 
             Ok(result)
         } else {
-            // Not a closure — shouldn't happen, but fall back to lowering as-is.
+            // Not a closure - shouldn't happen, but fall back to lowering as-is.
             self.lower_expr(closure_expr)
         }
     }

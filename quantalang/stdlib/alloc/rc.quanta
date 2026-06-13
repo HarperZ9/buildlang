@@ -1,12 +1,12 @@
 // ═══════════════════════════════════════════════════════════════════════════════
-// QUANTALANG ALLOC — Reference Counting Smart Pointers
+// QUANTALANG ALLOC - Reference Counting Smart Pointers
 // ═══════════════════════════════════════════════════════════════════════════════
 // Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
 // Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
 // ═══════════════════════════════════════════════════════════════════════════════
 //
-// Rc<T>  — Single-threaded reference counting (NOT Send or Sync)
-// Arc<T> — Atomic reference counting (Send + Sync)
+// Rc<T>  - Single-threaded reference counting (NOT Send or Sync)
+// Arc<T> - Atomic reference counting (Send + Sync)
 //
 // Both provide shared ownership of heap-allocated data.
 // When the last reference is dropped, the data is deallocated.
@@ -34,7 +34,7 @@ use crate::alloc::{Layout, Allocator, Global, AllocError, handle_alloc_error};
 use crate::boxed::Box;
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// RC<T> — Single-Threaded Reference Counting
+// RC<T> - Single-Threaded Reference Counting
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// A single-threaded reference-counting pointer.
@@ -461,7 +461,7 @@ impl<T> From<T> for Rc<T> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// WEAK<T> — Weak Reference
+// WEAK<T> - Weak Reference
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// A weak reference to an `Rc`-managed allocation.
@@ -586,7 +586,7 @@ impl<T: ?Sized, A: Allocator + Default> Default for Weak<T, A> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ARC<T> — Atomic Reference Counting (Thread-Safe)
+// ARC<T> - Atomic Reference Counting (Thread-Safe)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// An atomically reference-counted pointer.
@@ -937,7 +937,7 @@ impl<T> From<T> for Arc<T> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// AWEAK<T> — Weak Reference for Arc
+// AWEAK<T> - Weak Reference for Arc
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// A weak reference to an `Arc`-managed allocation.

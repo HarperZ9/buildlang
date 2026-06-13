@@ -1,4 +1,4 @@
-// Test 88: quanta-color port — Tone mapping operators
+// Test 88: quanta-color port - Tone mapping operators
 // Ported from APPS/quanta-color/quanta_color/tonemap.py
 
 fn clamp01(x: f64) -> f64 {

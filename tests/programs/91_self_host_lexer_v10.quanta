@@ -1,4 +1,4 @@
-// Self-Hosted Lexer v10 — Tokenizes "fn add(a, b) { a + b }"
+// Self-Hosted Lexer v10 - Tokenizes "fn add(a, b) { a + b }"
 // Uses integer array for source, &self/&mut self, range patterns.
 
 const TK_EOF: i32 = 0;

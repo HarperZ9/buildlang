@@ -1,4 +1,4 @@
-// Test 86: quanta-color port — Color space conversions
+// Test 86: quanta-color port - Color space conversions
 // Ported from APPS/quanta-color/quanta_color/spaces.py
 // sRGB ↔ XYZ ↔ Lab with matrix multiplication
 

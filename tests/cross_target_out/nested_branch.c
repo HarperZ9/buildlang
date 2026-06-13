@@ -101,14 +101,14 @@ static QuantaVec quanta_vec_new_i32(void) { return quanta_vec_new(sizeof(int32_t
 static QuantaVec quanta_vec_new_i64(void) { return quanta_vec_new(sizeof(int64_t)); }
 static QuantaVec quanta_vec_new_f64(void) { return quanta_vec_new(sizeof(double)); }
 
-// Note: These wrappers use a global QuantaVec pointer trick — the first
+// Note: These wrappers use a global QuantaVec pointer trick - the first
 // argument is a QuantaVec passed by value, but since QuantaLang passes
 // struct locals, the C compiler will place them on the stack where we
 // can take their address. We use a thin wrapper to bridge the gap.
 static QuantaVec* __quanta_vec_ref = NULL;
 static void quanta_vec_push_i32(QuantaVec v, int32_t val) {
     // Find the original local via the stored pointer (set by codegen)
-    // Fallback: push into a copy — but mutations won't be visible.
+    // Fallback: push into a copy - but mutations won't be visible.
     // The real solution: codegen passes &v. For now we use a global registry.
     (void)v; (void)val;
 }
@@ -457,7 +457,7 @@ static void quanta_pop_handler(void) {
     }
 }
 
-// Perform an effect operation — jumps to the nearest handler
+// Perform an effect operation - jumps to the nearest handler
 static void quanta_perform(int32_t effect_id, int32_t op_id, void* arg, void* result) {
     QuantaHandler* h = __quanta_handler_stack;
     while (h) {
@@ -467,7 +467,7 @@ static void quanta_perform(int32_t effect_id, int32_t op_id, void* arg, void* re
         }
         h = h->parent;
     }
-    // Unhandled effect — abort
+    // Unhandled effect - abort
     fprintf(stderr, "Unhandled effect %d operation %d\n", effect_id, op_id);
     abort();
 }

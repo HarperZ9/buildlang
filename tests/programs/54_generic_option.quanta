@@ -1,4 +1,4 @@
-// Test 54: Option<T> as a generic enum — end-to-end
+// Test 54: Option<T> as a generic enum - end-to-end
 // Construct, match, use with different types
 
 enum Option<T> {
@@ -15,7 +15,7 @@ fn find_positive(n: i32) -> i32 {
 }
 
 fn main() {
-    // Construct Option::Some with i32 — triggers monomorphization
+    // Construct Option::Some with i32 - triggers monomorphization
     let a = Option::Some(42);
     let b = Option::None;
 

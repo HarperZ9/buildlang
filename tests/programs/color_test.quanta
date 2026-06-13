@@ -1,4 +1,4 @@
-// QuantaLang Color Science — Self-Verifying Test Suite
+// QuantaLang Color Science - Self-Verifying Test Suite
 //
 // Compiles to a native binary that checks all color conversions against
 // known CIE 1976 and OKLab reference values. Returns nonzero if any fail.
@@ -96,7 +96,7 @@ fn main() {
     println!("=== QuantaLang Color Science Test Suite ===");
     let mut pass = 0;
 
-    // CIE L*a*b* (D65) — reference values from CIE 1976 standard formulas
+    // CIE L*a*b* (D65) - reference values from CIE 1976 standard formulas
     pass = pass + check_lab(1.0, 0.0, 0.0,  53.2408,  80.0925,  67.2032);
     pass = pass + check_lab(0.0, 1.0, 0.0,  87.7347, -86.1827,  83.1793);
     pass = pass + check_lab(0.0, 0.0, 1.0,  32.2970,  79.1875, -107.8602);
@@ -104,7 +104,7 @@ fn main() {
     pass = pass + check_lab(0.5, 0.5, 0.5,  53.3890,   0.0000,   0.0000);
     pass = pass + check_lab(1.0, 0.5, 0.0,  66.9566,  43.0719,  73.9594);
 
-    // OKLab — reference values from Ottosson 2020 formulas
+    // OKLab - reference values from Ottosson 2020 formulas
     pass = pass + check_oklab(1.0, 0.0, 0.0,  0.627955,  0.224863,  0.125846);
     pass = pass + check_oklab(0.0, 1.0, 0.0,  0.866440, -0.233888,  0.179498);
     pass = pass + check_oklab(0.0, 0.0, 1.0,  0.452014, -0.032457, -0.311528);

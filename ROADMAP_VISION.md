@@ -1,11 +1,11 @@
 # QuantaLang: The Graphics Programming Language
-# Vision Roadmap — Making QuantaLang World-Changing
+# Vision Roadmap - Making QuantaLang World-Changing
 
 ## Context
 
 QuantaLang has proven itself: 70K-line Rust compiler, 101 end-to-end tests, 5 Python apps ported, all 8 milestones from the original roadmap delivered. The language works.
 
-Now it needs to become **the language elite graphics programmers demand** — the tool Pascal Gilcher, Boris Vorontsov, and every AAA shader programmer would choose over HLSL/GLSL/C++.
+Now it needs to become **the language elite graphics programmers demand** - the tool Pascal Gilcher, Boris Vorontsov, and every AAA shader programmer would choose over HLSL/GLSL/C++.
 
 **The core thesis:** No language lets you write math once and have it run identically on CPU and GPU, catches color space errors at compile time, and tracks floating-point precision through a rendering pipeline. QuantaLang will be the first.
 
@@ -32,7 +32,7 @@ Now it needs to become **the language elite graphics programmers demand** — th
 ## Three Pillars (Sequential, Each Builds on Previous)
 
 ### Pillar 1: True Dual-Target Compilation (IMMEDIATE)
-*Write once, run on CPU AND GPU — identical results*
+*Write once, run on CPU AND GPU - identical results*
 
 ### Pillar 2: Color Space & Precision Type System (NEXT)
 *The compiler catches the bugs that take days to find*
@@ -70,10 +70,10 @@ Now it needs to become **the language elite graphics programmers demand** — th
 3. Wire into the QuantaLang C runtime so a compiled program can create a window and render
 
 **Key files:**
-- New: `quantalang/runtime/vulkan_host.c` — minimal Vulkan host
-- Modify: `quantalang/compiler/src/codegen/runtime.rs` — add vulkan FFI declarations
+- New: `quantalang/runtime/vulkan_host.c` - minimal Vulkan host
+- Modify: `quantalang/compiler/src/codegen/runtime.rs` - add vulkan FFI declarations
 
-### Phase 1C: The Proof — render pixels from QuantaLang
+### Phase 1C: The Proof - render pixels from QuantaLang
 
 **Deliverables:**
 1. Write a complete QuantaLang program: vertex shader + fragment shader + host code
@@ -81,14 +81,14 @@ Now it needs to become **the language elite graphics programmers demand** — th
 3. Program opens a window, renders a colored triangle, outputs a screenshot
 4. Same BRDF math compiled to C produces identical output values
 
-**Test:** `102_vulkan_triangle.quanta` — first QuantaLang program rendering real pixels via Vulkan
+**Test:** `102_vulkan_triangle.quanta` - first QuantaLang program rendering real pixels via Vulkan
 **Proof point:** C and SPIR-V backends produce bit-identical results for PBR functions
 
 ---
 
 ## Pillar 2: Color Space & Precision Types (Q3-Q4 2027)
 
-**Goal:** `fn tonemap(c: LinearRGB) -> sRGB` — the compiler catches color space mixing errors.
+**Goal:** `fn tonemap(c: LinearRGB) -> sRGB` - the compiler catches color space mixing errors.
 
 ### Phase 2A: Parse and lower WithEffect on value types
 
@@ -100,9 +100,9 @@ Now it needs to become **the language elite graphics programmers demand** — th
 3. Propagate through function signatures: if input is `with ColorSpace<Linear>`, output is too
 
 **Key files:**
-- `quantalang/compiler/src/parser/ty.rs` — parse `with` after type
-- `quantalang/compiler/src/types/ty.rs` — add TyKind::Annotated { base, annotations }
-- `quantalang/compiler/src/types/infer.rs` — propagate annotations through unification
+- `quantalang/compiler/src/parser/ty.rs` - parse `with` after type
+- `quantalang/compiler/src/types/ty.rs` - add TyKind::Annotated { base, annotations }
+- `quantalang/compiler/src/types/infer.rs` - propagate annotations through unification
 
 ### Phase 2B: Color space effect definitions
 
@@ -131,7 +131,7 @@ let result = pbr_shade(my_srgb_color);
 2. Compiler tracks precision loss through arithmetic chains
 3. Warning when precision drops below a threshold
 
-**This is a research-level feature** — start simple with annotations, work toward full tracking.
+**This is a research-level feature** - start simple with annotations, work toward full tracking.
 
 ---
 
@@ -139,7 +139,7 @@ let result = pbr_shade(my_srgb_color);
 
 **Goal:** Render passes are first-class compiler-verified constructs.
 
-This pillar depends on Pillars 1+2 being complete. Design only — no implementation yet.
+This pillar depends on Pillars 1+2 being complete. Design only - no implementation yet.
 
 **Vision:**
 ```quanta
@@ -176,7 +176,7 @@ The compiler verifies:
 **Do first (Pillar 1A):** Fix MIR→SPIR-V operation coverage
 - This is the single most impactful change
 - Currently ~50% of MIR operations are handled
-- Most gaps are mechanical — implement the same pattern for each missing op
+- Most gaps are mechanical - implement the same pattern for each missing op
 - Estimated: 200-300 lines of Rust additions to spirv.rs
 
 **Do second (Pillar 1B):** Minimal Vulkan host
@@ -209,16 +209,16 @@ The compiler verifies:
 ## Files to Modify
 
 **Pillar 1:**
-- `compiler/src/codegen/backend/spirv.rs` — MIR op coverage (primary work)
-- `compiler/src/codegen/runtime.rs` — Vulkan FFI declarations
-- `compiler/src/main.rs` — ensure --target=spirv works end-to-end
-- New: `runtime/vulkan_host.c` — minimal Vulkan host
+- `compiler/src/codegen/backend/spirv.rs` - MIR op coverage (primary work)
+- `compiler/src/codegen/runtime.rs` - Vulkan FFI declarations
+- `compiler/src/main.rs` - ensure --target=spirv works end-to-end
+- New: `runtime/vulkan_host.c` - minimal Vulkan host
 
 **Pillar 2:**
-- `compiler/src/parser/ty.rs` — parse `with` annotations
-- `compiler/src/types/ty.rs` — TyKind::Annotated
-- `compiler/src/types/infer.rs` — annotation propagation
-- `compiler/src/types/effects.rs` — color space effect definitions
+- `compiler/src/parser/ty.rs` - parse `with` annotations
+- `compiler/src/types/ty.rs` - TyKind::Annotated
+- `compiler/src/types/infer.rs` - annotation propagation
+- `compiler/src/types/effects.rs` - color space effect definitions
 
 ## Risk Mitigation
 
@@ -226,5 +226,5 @@ The compiler verifies:
 |------|------------|
 | SPIR-V MIR coverage too complex | Focus on shader-relevant ops only (no closures, no HashMap in shaders) |
 | Vulkan host code is large | Use minimal triangle-only subset, expand later |
-| Color space types affect all type inference | Make annotations optional — existing code unaffected |
+| Color space types affect all type inference | Make annotations optional - existing code unaffected |
 | Precision tracking is research-level | Start with simple annotations, defer full tracking |
