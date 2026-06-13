@@ -116,7 +116,7 @@ Use `--target` to select a code generation backend:
 | x86-64   | `--target x86-64`             | `.o`    | Experimental |
 | ARM64    | `--target arm64`              | `.o`    | Experimental |
 
-The Rust target emits source for a subset of MIR and is validated with `rustc --emit=metadata` plus a small executable stdout smoke corpus. The semantic corpus manifest now drives a Rust execution test, so corpus paths, expected stdout, generated Rust, `rustc`, and executable behavior are checked together; a receipt consistency test keeps the manifest and Rust execution receipt aligned. It currently covers scalar functions, locals, arithmetic, printing, simple branching, basic structs/arrays/references, and tuple ownership reuse; unsupported MIR returns a codegen error rather than silent fallback.
+The Rust target emits source for a subset of MIR and is validated with `rustc --emit=metadata` plus a small executable stdout smoke corpus. The semantic corpus manifest now drives a Rust execution test, so corpus paths, expected stdout, generated Rust, `rustc`, and executable behavior are checked together; receipt consistency and metadata tests keep the manifest and Rust execution receipt aligned. It currently covers scalar functions, locals, arithmetic, printing, simple branching, basic structs/arrays/references, and tuple ownership reuse; unsupported MIR returns a codegen error rather than silent fallback.
 
 ## Status
 
@@ -143,7 +143,7 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
-  - Codegen: tests across 9 backends, including Rust source emission, Rust executable smoke checks over the semantic corpus, and semantic-corpus receipt consistency (C backend has 24 end-to-end output verification tests)
+  - Codegen: tests across 9 backends, including Rust source emission, Rust executable smoke checks over the semantic corpus, and semantic-corpus receipt consistency/metadata guards (C backend has 24 end-to-end output verification tests)
 
 ## License
 
