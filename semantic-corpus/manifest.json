@@ -31,6 +31,13 @@
       "surfaces": ["tuple-aggregate", "by-value-call", "ownership-reuse", "stdout"],
       "expected_stdout": "14\n",
       "rust_execution_test": "generated_rust_runs_for_tuple_after_by_value_call"
+    },
+    {
+      "id": "struct_aggregate_reuse",
+      "path": "programs/struct_aggregate_reuse.quanta",
+      "surfaces": ["struct-aggregate", "struct-fields", "ownership-reuse", "stdout"],
+      "expected_stdout": "7\n",
+      "rust_execution_test": "generated_rust_runs_for_struct_aggregate_reuse"
     }
   ]
 }
