@@ -146,6 +146,7 @@ quantac watch <path>         Watch and recompile on change
 quantac lsp                  Start Language Server Protocol server
 quantac repl                 Interactive REPL
 quantac doctor               Diagnose compiler/toolchain/backend readiness
+quantac corpus verify        Verify semantic corpus receipts and C stdout
 quantac version              Print version
 ```
 
