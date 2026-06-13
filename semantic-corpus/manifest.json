@@ -38,6 +38,13 @@
       "surfaces": ["struct-aggregate", "struct-fields", "ownership-reuse", "stdout"],
       "expected_stdout": "7\n",
       "rust_execution_test": "generated_rust_runs_for_struct_aggregate_reuse"
+    },
+    {
+      "id": "field_assignment_reuse",
+      "path": "programs/field_assignment_reuse.quanta",
+      "surfaces": ["field-assignment", "mutable-struct", "ownership-reuse", "stdout"],
+      "expected_stdout": "7\n",
+      "rust_execution_test": "generated_rust_runs_for_field_assignment_reuse"
     }
   ]
 }

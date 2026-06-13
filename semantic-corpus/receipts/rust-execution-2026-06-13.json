@@ -6,7 +6,7 @@
   "evidence_class": "generated-artifact-execution",
   "command": "cargo test --manifest-path public/pubscan/quantalang/compiler/Cargo.toml generated_rust_runs --quiet && cargo test --manifest-path public/pubscan/quantalang/compiler/Cargo.toml semantic_corpus_manifest --quiet",
   "result": {
-    "passed": 6,
+    "passed": 7,
     "failed": 0,
     "ignored": 0
   },
@@ -44,6 +44,11 @@
     {
       "id": "struct_aggregate_reuse",
       "path": "../programs/struct_aggregate_reuse.quanta",
+      "expected_stdout": "7\n"
+    },
+    {
+      "id": "field_assignment_reuse",
+      "path": "../programs/field_assignment_reuse.quanta",
       "expected_stdout": "7\n"
     }
   ]
