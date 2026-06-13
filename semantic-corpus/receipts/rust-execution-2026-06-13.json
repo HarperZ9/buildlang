@@ -1,0 +1,43 @@
+{
+  "receipt_id": "rust-execution-2026-06-13",
+  "created_at": "2026-06-13",
+  "compiler": "quantac",
+  "backend": "rust",
+  "evidence_class": "generated-artifact-execution",
+  "command": "cargo test --manifest-path public/pubscan/quantalang/compiler/Cargo.toml generated_rust_runs --quiet",
+  "result": {
+    "passed": 4,
+    "failed": 0,
+    "ignored": 0
+  },
+  "validator_chain": [
+    "QuantaLang parser",
+    "QuantaLang type checker",
+    "MIR lowerer",
+    "Rust backend",
+    "rustc executable build",
+    "stdout assertion"
+  ],
+  "programs": [
+    {
+      "id": "scalar_branch",
+      "path": "../programs/scalar_branch.quanta",
+      "expected_stdout": "4\n"
+    },
+    {
+      "id": "references_mutation",
+      "path": "../programs/references_mutation.quanta",
+      "expected_stdout": "15\n"
+    },
+    {
+      "id": "structs_arrays",
+      "path": "../programs/structs_arrays.quanta",
+      "expected_stdout": "12\n"
+    },
+    {
+      "id": "tuple_ownership_reuse",
+      "path": "../programs/tuple_ownership_reuse.quanta",
+      "expected_stdout": "14\n"
+    }
+  ]
+}

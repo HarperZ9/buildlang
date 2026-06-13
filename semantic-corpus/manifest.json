@@ -1,0 +1,35 @@
+{
+  "schema": "quantalang-semantic-corpus/v1",
+  "generated_at": "2026-06-13",
+  "purpose": "Stable semantic vectors for backend capability and behavior receipts.",
+  "programs": [
+    {
+      "id": "scalar_branch",
+      "path": "programs/scalar_branch.quanta",
+      "surfaces": ["function-call", "branch", "stdout"],
+      "expected_stdout": "4\n",
+      "rust_execution_test": "generated_rust_runs_for_scalar_branch_subset"
+    },
+    {
+      "id": "references_mutation",
+      "path": "programs/references_mutation.quanta",
+      "surfaces": ["mutable-reference", "immutable-reference", "stdout"],
+      "expected_stdout": "15\n",
+      "rust_execution_test": "generated_rust_runs_for_reference_subset"
+    },
+    {
+      "id": "structs_arrays",
+      "path": "programs/structs_arrays.quanta",
+      "surfaces": ["struct-fields", "fixed-array", "function-call", "stdout"],
+      "expected_stdout": "12\n",
+      "rust_execution_test": "generated_rust_runs_for_structs_and_arrays"
+    },
+    {
+      "id": "tuple_ownership_reuse",
+      "path": "programs/tuple_ownership_reuse.quanta",
+      "surfaces": ["tuple-aggregate", "by-value-call", "ownership-reuse", "stdout"],
+      "expected_stdout": "14\n",
+      "rust_execution_test": "generated_rust_runs_for_tuple_after_by_value_call"
+    }
+  ]
+}
