@@ -45,6 +45,13 @@
       "surfaces": ["field-assignment", "mutable-struct", "ownership-reuse", "stdout"],
       "expected_stdout": "7\n",
       "rust_execution_test": "generated_rust_runs_for_field_assignment_reuse"
+    },
+    {
+      "id": "nested_field_reuse",
+      "path": "programs/nested_field_reuse.quanta",
+      "surfaces": ["nested-field-access", "struct-fields", "ownership-reuse", "stdout"],
+      "expected_stdout": "7\n",
+      "rust_execution_test": "generated_rust_runs_for_nested_field_reuse"
     }
   ]
 }
