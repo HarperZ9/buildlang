@@ -468,7 +468,7 @@ The `quantac` compiler exposes these commands:
 | `quantac fmt <file>` | Format a `.quanta` source file |
 | `quantac pkg <cmd>` | Package manager (init, add, resolve, search) |
 | `quantac doctor` | Diagnose compiler/toolchain/backend readiness |
-| `quantac corpus verify` | Verify semantic corpus receipts and C stdout |
+| `quantac corpus verify [--root DIR] [--write]` | Verify semantic corpus receipts and C stdout; optionally refresh the C receipt |
 
 Supported `--target` values: `c`, `hlsl`, `glsl`, `spirv`, `llvm`, `wasm`, `rust`, `x86-64`, `arm64`.
 

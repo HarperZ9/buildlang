@@ -147,6 +147,8 @@ quantac lsp                  Start Language Server Protocol server
 quantac repl                 Interactive REPL
 quantac doctor               Diagnose compiler/toolchain/backend readiness
 quantac corpus verify        Verify semantic corpus receipts and C stdout
+quantac corpus verify --root <dir> --write
+                             Verify a corpus copy and refresh its C receipt
 quantac version              Print version
 ```
 

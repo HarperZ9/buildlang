@@ -119,7 +119,7 @@ quantac vignette.quanta --target glsl -o vignette.glsl
 | `quantac build` | Build a project                      |
 | `quantac run`   | Compile and run a `.quanta` file     |
 | `quantac doctor` | Diagnose local toolchain readiness  |
-| `quantac corpus verify` | Verify semantic corpus receipts and C stdout |
+| `quantac corpus verify [--root DIR] [--write]` | Verify semantic corpus receipts and C stdout; optionally refresh the C receipt |
 
 ### Backend Selection
 
@@ -137,7 +137,7 @@ Use `--target` to select a code generation backend:
 | x86-64   | `--target x86-64`             | `.o`    | Experimental |
 | ARM64    | `--target arm64`              | `.o`    | Experimental |
 
-The Rust target emits source for a subset of MIR and is validated with `rustc --emit=metadata` plus a small executable stdout smoke corpus. The semantic corpus manifest now drives a Rust execution test, so corpus paths, expected stdout, generated Rust, `rustc`, and executable behavior are checked together; manifest contract, receipt consistency, and metadata tests keep the corpus and Rust execution receipt aligned. The C backend now has a matching semantic-corpus execution receipt for the same 8 programs, and `quantac corpus verify` checks the manifest, C/Rust receipts, and real C-backend stdout from `quantac run`. It currently covers scalar functions, locals, arithmetic, printing, simple branching, basic structs/arrays/references, tuple ownership reuse, struct aggregate reuse, field assignment reuse, nested field reuse, and dereference reuse; unsupported MIR returns a codegen error rather than silent fallback.
+The Rust target emits source for a subset of MIR and is validated with `rustc --emit=metadata` plus a small executable stdout smoke corpus. The semantic corpus manifest now drives a Rust execution test, so corpus paths, expected stdout, generated Rust, `rustc`, and executable behavior are checked together; manifest contract, receipt consistency, and metadata tests keep the corpus and Rust execution receipt aligned. The C backend now has a matching semantic-corpus execution receipt for the same 8 programs, and `quantac corpus verify` checks the manifest, C/Rust receipts, and real C-backend stdout from `quantac run`. `quantac corpus verify --root <DIR>` points verification at a copied corpus, while `--write` rewrites the C execution receipt after C stdout passes and Rust receipt alignment is still clean. It currently covers scalar functions, locals, arithmetic, printing, simple branching, basic structs/arrays/references, tuple ownership reuse, struct aggregate reuse, field assignment reuse, nested field reuse, and dereference reuse; unsupported MIR returns a codegen error rather than silent fallback.
 
 ## Status
 
@@ -161,11 +161,11 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-13
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 653 passing, 0 failing, 11 ignored in local `cargo test --manifest-path compiler/Cargo.toml --quiet` on 2026-06-13
+- **Tests**: 655 passing, 0 failing, 11 ignored in local `cargo test --manifest-path compiler/Cargo.toml --quiet` on 2026-06-13
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
-  - CLI: binary-level smoke tests cover help output, `quantac doctor`, `quantac corpus verify`, and the runnable quickstart examples
+  - CLI: binary-level smoke tests cover help output, `quantac doctor`, `quantac corpus verify`, explicit corpus roots, C receipt writes against copied corpus fixtures, and the runnable quickstart examples
   - Codegen: tests across 9 backends, including C formatted-print lowering, Rust source emission, Rust executable smoke checks over the semantic corpus, and semantic-corpus manifest contract/receipt consistency/metadata guards (C backend has 24 end-to-end output verification tests)
 
 ## License
