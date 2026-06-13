@@ -2,6 +2,7 @@
   "schema": "quantalang-semantic-corpus/v1",
   "generated_at": "2026-06-13",
   "purpose": "Stable semantic vectors for backend capability and behavior receipts.",
+  "rust_manifest_execution_test": "semantic_corpus_manifest_programs_run_on_rust_backend",
   "programs": [
     {
       "id": "scalar_branch",

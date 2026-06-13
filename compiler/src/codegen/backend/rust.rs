@@ -1103,6 +1103,33 @@ mod tests {
     const CORPUS_TUPLE_OWNERSHIP_REUSE: &str =
         include_str!("../../../../semantic-corpus/programs/tuple_ownership_reuse.quanta");
 
+    #[derive(serde::Deserialize)]
+    struct SemanticCorpusManifest {
+        programs: Vec<SemanticCorpusProgram>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct SemanticCorpusProgram {
+        id: String,
+        path: String,
+        expected_stdout: String,
+    }
+
+    fn semantic_corpus_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("compiler crate should live below repo root")
+            .join("semantic-corpus")
+    }
+
+    fn load_semantic_corpus_manifest() -> SemanticCorpusManifest {
+        let manifest_path = semantic_corpus_root().join("manifest.json");
+        let manifest = std::fs::read_to_string(&manifest_path)
+            .unwrap_or_else(|err| panic!("read {}: {}", manifest_path.display(), err));
+        serde_json::from_str(&manifest)
+            .unwrap_or_else(|err| panic!("parse {}: {}", manifest_path.display(), err))
+    }
+
     fn compile_quanta_to_rust(source: &str) -> String {
         let source_file = SourceFile::new("rust_backend_test.quanta", source);
         let mut lexer = Lexer::new(&source_file);
@@ -1451,6 +1478,21 @@ fn main() {
     fn generated_rust_runs_for_tuple_after_by_value_call() {
         let rust = compile_quanta_to_rust(CORPUS_TUPLE_OWNERSHIP_REUSE);
         assert_rustc_run_stdout("run_tuple_after_by_value_call", &rust, "14\n");
+    }
+
+    #[test]
+    fn semantic_corpus_manifest_programs_run_on_rust_backend() {
+        let corpus = load_semantic_corpus_manifest();
+        for program in corpus.programs {
+            let source = std::fs::read_to_string(semantic_corpus_root().join(&program.path))
+                .unwrap_or_else(|err| panic!("read corpus program {}: {}", program.id, err));
+            let rust = compile_quanta_to_rust(&source);
+            assert_rustc_run_stdout(
+                &format!("semantic_corpus_{}", program.id),
+                &rust,
+                &program.expected_stdout,
+            );
+        }
     }
 
     #[test]
