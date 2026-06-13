@@ -59,6 +59,15 @@ Compile and run:
 quantac run hello.quanta
 ```
 
+The repository also carries tested quickstart examples:
+
+```bash
+quantac run examples/quickstart/hello.quanta
+quantac run examples/quickstart/ledger.quanta
+quantac run examples/quickstart/effects_greeting.quanta
+quantac examples/quickstart/vignette_shader.quanta --target hlsl -o vignette_shader.hlsl
+```
+
 Or compile to C and build manually:
 
 ```bash
@@ -151,11 +160,11 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-13
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 648 passing, 0 failing, 11 ignored in local `cargo test --manifest-path compiler/Cargo.toml --quiet` on 2026-06-13
+- **Tests**: 651 passing, 0 failing, 11 ignored in local `cargo test --manifest-path compiler/Cargo.toml --quiet` on 2026-06-13
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
-  - CLI: binary-level smoke tests cover help output and `quantac doctor`
+  - CLI: binary-level smoke tests cover help output, `quantac doctor`, and the runnable quickstart examples
   - Codegen: tests across 9 backends, including C formatted-print lowering, Rust source emission, Rust executable smoke checks over the semantic corpus, and semantic-corpus manifest contract/receipt consistency/metadata guards (C backend has 24 end-to-end output verification tests)
 
 ## License
