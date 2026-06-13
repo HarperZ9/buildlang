@@ -116,7 +116,7 @@ Use `--target` to select a code generation backend:
 | x86-64   | `--target x86-64`             | `.o`    | Experimental |
 | ARM64    | `--target arm64`              | `.o`    | Experimental |
 
-The Rust target emits source for a subset of MIR and is validated with `rustc --emit=metadata` plus a small executable stdout smoke corpus. The semantic corpus manifest now drives a Rust execution test, so corpus paths, expected stdout, generated Rust, `rustc`, and executable behavior are checked together; manifest contract, receipt consistency, and metadata tests keep the corpus and Rust execution receipt aligned. It currently covers scalar functions, locals, arithmetic, printing, simple branching, basic structs/arrays/references, tuple ownership reuse, struct aggregate reuse, field assignment reuse, nested field reuse, and dereference reuse; unsupported MIR returns a codegen error rather than silent fallback.
+The Rust target emits source for a subset of MIR and is validated with `rustc --emit=metadata` plus a small executable stdout smoke corpus. The semantic corpus manifest now drives a Rust execution test, so corpus paths, expected stdout, generated Rust, `rustc`, and executable behavior are checked together; manifest contract, receipt consistency, and metadata tests keep the corpus and Rust execution receipt aligned. The C backend now has a matching semantic-corpus execution receipt for the same 8 programs. It currently covers scalar functions, locals, arithmetic, printing, simple branching, basic structs/arrays/references, tuple ownership reuse, struct aggregate reuse, field assignment reuse, nested field reuse, and dereference reuse; unsupported MIR returns a codegen error rather than silent fallback.
 
 ## Status
 
@@ -139,11 +139,11 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **CI**: clippy (correctness) + rustfmt + `cargo test` on Linux and Windows
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 643 passing, 0 failing, 11 ignored in local `cargo test --manifest-path compiler/Cargo.toml --quiet` on 2026-06-13
+- **Tests**: 644 passing, 0 failing, 11 ignored in local `cargo test --manifest-path compiler/Cargo.toml --quiet` on 2026-06-13
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
-  - Codegen: tests across 9 backends, including Rust source emission, Rust executable smoke checks over the semantic corpus, and semantic-corpus manifest contract/receipt consistency/metadata guards (C backend has 24 end-to-end output verification tests)
+  - Codegen: tests across 9 backends, including C formatted-print lowering, Rust source emission, Rust executable smoke checks over the semantic corpus, and semantic-corpus manifest contract/receipt consistency/metadata guards (C backend has 24 end-to-end output verification tests)
 
 ## License
 

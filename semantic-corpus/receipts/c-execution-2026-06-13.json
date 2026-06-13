@@ -1,0 +1,68 @@
+{
+  "receipt_id": "c-execution-2026-06-13",
+  "created_at": "2026-06-13",
+  "compiler": "quantac",
+  "backend": "c",
+  "evidence_class": "generated-artifact-execution",
+  "command": "public/pubscan/quantalang/compiler/target/debug/quantac.exe run <semantic-corpus-program>",
+  "execution_mode": "sequential",
+  "result": {
+    "passed": 8,
+    "failed": 0,
+    "ignored": 0
+  },
+  "validator_chain": [
+    "QuantaLang parser",
+    "QuantaLang type checker",
+    "MIR lowerer",
+    "C backend",
+    "MSVC cl.exe executable build",
+    "stdout assertion"
+  ],
+  "notes": [
+    "Sequential quantac run checks matched manifest stdout for all 8 programs.",
+    "Parallel quantac run invocations currently contend on the shared temp C/PDB paths under the user temp directory; use sequential execution until the CLI temp path is isolated per run."
+  ],
+  "programs": [
+    {
+      "id": "scalar_branch",
+      "path": "../programs/scalar_branch.quanta",
+      "expected_stdout": "4\n"
+    },
+    {
+      "id": "references_mutation",
+      "path": "../programs/references_mutation.quanta",
+      "expected_stdout": "15\n"
+    },
+    {
+      "id": "structs_arrays",
+      "path": "../programs/structs_arrays.quanta",
+      "expected_stdout": "12\n"
+    },
+    {
+      "id": "tuple_ownership_reuse",
+      "path": "../programs/tuple_ownership_reuse.quanta",
+      "expected_stdout": "14\n"
+    },
+    {
+      "id": "struct_aggregate_reuse",
+      "path": "../programs/struct_aggregate_reuse.quanta",
+      "expected_stdout": "7\n"
+    },
+    {
+      "id": "field_assignment_reuse",
+      "path": "../programs/field_assignment_reuse.quanta",
+      "expected_stdout": "7\n"
+    },
+    {
+      "id": "nested_field_reuse",
+      "path": "../programs/nested_field_reuse.quanta",
+      "expected_stdout": "7\n"
+    },
+    {
+      "id": "deref_reuse",
+      "path": "../programs/deref_reuse.quanta",
+      "expected_stdout": "7\n"
+    }
+  ]
+}
