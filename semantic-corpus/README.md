@@ -22,3 +22,4 @@ extension into C/Rust/LLVM/WASM cross-backend receipts.
 - `field_assignment_reuse.quanta`: struct field assignment and post-assignment
   reuse, stdout.
 - `nested_field_reuse.quanta`: nested struct field access and reuse, stdout.
+- `deref_reuse.quanta`: reference dereference and post-deref reuse, stdout.

@@ -52,6 +52,13 @@
       "surfaces": ["nested-field-access", "struct-fields", "ownership-reuse", "stdout"],
       "expected_stdout": "7\n",
       "rust_execution_test": "generated_rust_runs_for_nested_field_reuse"
+    },
+    {
+      "id": "deref_reuse",
+      "path": "programs/deref_reuse.quanta",
+      "surfaces": ["dereference", "struct-fields", "ownership-reuse", "stdout"],
+      "expected_stdout": "7\n",
+      "rust_execution_test": "generated_rust_runs_for_deref_reuse"
     }
   ]
 }
