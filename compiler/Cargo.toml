@@ -11,7 +11,7 @@ version = "1.0.0"
 edition = "2021"
 rust-version = "1.70"
 authors = ["Zain Dana Harper"]
-description = "The QuantaLang compiler — an effects-oriented systems language with multi-backend codegen (C, HLSL, GLSL, SPIR-V, LLVM IR, WebAssembly, x86-64, ARM64)"
+description = "Effects-oriented compiler with a verified C path, shader output, and experimental backend research"
 license = "MIT"
 repository = "https://github.com/HarperZ9/quantalang"
 homepage = "https://github.com/HarperZ9/quantalang"
@@ -72,6 +72,6 @@ opt-level = 1
 debug = true
 
 [lints.clippy]
-# Allow in compiler code — these are noisy without safety benefit
+# Allow in compiler code; these are noisy without safety benefit.
 too_many_arguments = "allow"
 module_inception = "allow"
