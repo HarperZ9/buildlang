@@ -187,6 +187,12 @@ enum Commands {
         command: PkgCommands,
     },
 
+    /// Semantic corpus verification and receipt checks
+    Corpus {
+        #[command(subcommand)]
+        command: CorpusCommands,
+    },
+
     /// Run tests — compile .quanta programs and verify output against .expected files
     Test {
         /// Directory containing test programs [default: tests/programs]
@@ -248,6 +254,12 @@ enum PkgCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum CorpusCommands {
+    /// Verify manifest, receipts, and C backend stdout against the semantic corpus
+    Verify,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -268,6 +280,7 @@ fn main() -> ExitCode {
         Some(Commands::Watch { path, target }) => cmd_watch(&path, &target),
         Some(Commands::Fmt { file, check, write }) => cmd_fmt(&file, check, write),
         Some(Commands::Pkg { command }) => cmd_pkg(command),
+        Some(Commands::Corpus { command }) => cmd_corpus(command),
         Some(Commands::Lint { file }) => cmd_lint(&file),
         Some(Commands::Doctor) => cmd_doctor(),
         Some(Commands::Test {
@@ -402,6 +415,226 @@ fn cmd_doctor() -> Result<(), i32> {
     }
 
     Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct SemanticCorpusManifest {
+    schema: String,
+    programs: Vec<SemanticCorpusProgram>,
+}
+
+#[derive(serde::Deserialize)]
+struct SemanticCorpusProgram {
+    id: String,
+    path: String,
+    expected_stdout: String,
+}
+
+#[derive(serde::Deserialize)]
+struct CorpusExecutionReceipt {
+    backend: String,
+    result: CorpusExecutionResult,
+    programs: Vec<CorpusExecutionProgram>,
+}
+
+#[derive(serde::Deserialize)]
+struct CorpusExecutionResult {
+    passed: usize,
+    failed: usize,
+    ignored: usize,
+}
+
+#[derive(serde::Deserialize)]
+struct CorpusExecutionProgram {
+    id: String,
+    path: String,
+    expected_stdout: String,
+}
+
+fn cmd_corpus(command: CorpusCommands) -> Result<(), i32> {
+    match command {
+        CorpusCommands::Verify => cmd_corpus_verify(),
+    }
+}
+
+fn cmd_corpus_verify() -> Result<(), i32> {
+    let corpus_root = find_semantic_corpus_root().ok_or_else(|| {
+        eprintln!("semantic corpus not found; run from the repository or install semantic-corpus/");
+        1
+    })?;
+
+    let manifest_path = corpus_root.join("manifest.json");
+    let manifest: SemanticCorpusManifest = read_json(&manifest_path)?;
+    if manifest.schema != "quantalang-semantic-corpus/v1" {
+        eprintln!(
+            "semantic corpus manifest has unsupported schema '{}'",
+            manifest.schema
+        );
+        return Err(1);
+    }
+
+    let receipts_dir = corpus_root.join("receipts");
+    let c_receipt: CorpusExecutionReceipt =
+        read_json(&receipts_dir.join("c-execution-2026-06-13.json"))?;
+    let rust_receipt: CorpusExecutionReceipt =
+        read_json(&receipts_dir.join("rust-execution-2026-06-13.json"))?;
+
+    verify_receipt("c", &c_receipt, &manifest, manifest.programs.len())?;
+    verify_receipt(
+        "rust",
+        &rust_receipt,
+        &manifest,
+        manifest.programs.len() + 1,
+    )?;
+    let c_passed = verify_c_corpus_stdout(&corpus_root, &manifest)?;
+
+    println!("Semantic Corpus Verify");
+    println!("manifest: {} program(s)", manifest.programs.len());
+    println!("c receipt: ok");
+    println!("rust receipt: ok");
+    println!("c execution: {} passed", c_passed);
+    Ok(())
+}
+
+fn find_semantic_corpus_root() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(cwd) = std::env::current_dir() {
+        for ancestor in cwd.ancestors() {
+            candidates.push(ancestor.join("semantic-corpus"));
+        }
+    }
+
+    candidates.push(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")))
+            .join("semantic-corpus"),
+    );
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            for ancestor in parent.ancestors() {
+                candidates.push(ancestor.join("semantic-corpus"));
+            }
+        }
+    }
+
+    candidates
+        .into_iter()
+        .find(|path| path.join("manifest.json").is_file())
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, i32> {
+    let content = std::fs::read_to_string(path).map_err(|err| {
+        eprintln!("failed to read {}: {}", path.display(), err);
+        1
+    })?;
+    serde_json::from_str(&content).map_err(|err| {
+        eprintln!("failed to parse {}: {}", path.display(), err);
+        1
+    })
+}
+
+fn verify_receipt(
+    label: &str,
+    receipt: &CorpusExecutionReceipt,
+    manifest: &SemanticCorpusManifest,
+    expected_passed: usize,
+) -> Result<(), i32> {
+    if receipt.backend != label {
+        eprintln!(
+            "{} receipt backend mismatch: expected '{}', found '{}'",
+            label, label, receipt.backend
+        );
+        return Err(1);
+    }
+    if receipt.result.failed != 0 || receipt.result.ignored != 0 {
+        eprintln!(
+            "{} receipt is not clean: {} failed, {} ignored",
+            label, receipt.result.failed, receipt.result.ignored
+        );
+        return Err(1);
+    }
+    if receipt.result.passed != expected_passed {
+        eprintln!(
+            "{} receipt pass count mismatch: expected {}, found {}",
+            label, expected_passed, receipt.result.passed
+        );
+        return Err(1);
+    }
+    if receipt.programs.len() != manifest.programs.len() {
+        eprintln!(
+            "{} receipt program count mismatch: expected {}, found {}",
+            label,
+            manifest.programs.len(),
+            receipt.programs.len()
+        );
+        return Err(1);
+    }
+
+    for (manifest_program, receipt_program) in manifest.programs.iter().zip(receipt.programs.iter())
+    {
+        let receipt_path = receipt_program.path.trim_start_matches("../");
+        if receipt_program.id != manifest_program.id
+            || receipt_path != manifest_program.path
+            || receipt_program.expected_stdout != manifest_program.expected_stdout
+        {
+            eprintln!(
+                "{} receipt drift for program '{}'",
+                label, manifest_program.id
+            );
+            return Err(1);
+        }
+    }
+
+    Ok(())
+}
+
+fn verify_c_corpus_stdout(
+    corpus_root: &Path,
+    manifest: &SemanticCorpusManifest,
+) -> Result<usize, i32> {
+    let quantac = std::env::current_exe().map_err(|err| {
+        eprintln!("failed to locate current quantac executable: {}", err);
+        1
+    })?;
+
+    for program in &manifest.programs {
+        let program_path = corpus_root.join(&program.path);
+        let output = std::process::Command::new(&quantac)
+            .arg("run")
+            .arg(&program_path)
+            .output()
+            .map_err(|err| {
+                eprintln!(
+                    "failed to run semantic corpus program {}: {}",
+                    program.id, err
+                );
+                1
+            })?;
+
+        if !output.status.success() {
+            eprintln!(
+                "semantic corpus program {} failed\nstdout:\n{}\nstderr:\n{}",
+                program.id,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return Err(1);
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+        if stdout != program.expected_stdout {
+            eprintln!(
+                "semantic corpus stdout drift for {}\nexpected:\n{:?}\nactual:\n{:?}",
+                program.id, program.expected_stdout, stdout
+            );
+            return Err(1);
+        }
+    }
+
+    Ok(manifest.programs.len())
 }
 
 fn cmd_lex(file: &PathBuf, verbose: bool) -> Result<(), i32> {

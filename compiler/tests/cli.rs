@@ -81,6 +81,61 @@ fn doctor_reports_adoption_readiness_summary() {
 }
 
 #[test]
+fn help_lists_corpus_command() {
+    let output = quantac()
+        .arg("--help")
+        .output()
+        .expect("run quantac --help");
+
+    assert!(
+        output.status.success(),
+        "quantac --help should exit successfully"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("corpus"),
+        "help should list corpus command:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn corpus_verify_checks_manifest_receipts_and_c_execution() {
+    if !c_backend_ready() {
+        eprintln!("skipping semantic corpus verification because no C backend is available");
+        return;
+    }
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .output()
+        .expect("run quantac corpus verify");
+
+    assert!(
+        output.status.success(),
+        "corpus verify should exit successfully\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    for expected in [
+        "Semantic Corpus Verify",
+        "manifest: 8 program(s)",
+        "c receipt: ok",
+        "rust receipt: ok",
+        "c execution: 8 passed",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "corpus verify output should contain {expected:?}:\n{}",
+            stdout
+        );
+    }
+}
+
+#[test]
 fn quickstart_examples_are_typechecked() {
     for name in [
         "hello.quanta",
