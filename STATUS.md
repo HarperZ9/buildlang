@@ -1,6 +1,6 @@
 # QuantaLang Project Status
 
-Last audited: 2026-04-04
+Last audited: 2026-06-13
 
 ## Identity
 The Effects Language -- algebraic effects as a first-class feature.
@@ -9,7 +9,7 @@ The Effects Language -- algebraic effects as a first-class feature.
 - **Lexer**: Complete Unicode-aware tokenizer with comprehensive token types, spans, error recovery. 59 unit tests + 51 integration tests.
 - **Parser**: Full recursive descent with Pratt parsing for expressions. Handles functions, structs, enums, match, if/else, loops, effects, generics, patterns. 4 unit tests + 85 integration tests.
 - **Type Checker**: Hindley-Milner inference, effect tracking, unification, trait resolution, const generics, higher-kinded types. **Interprocedural lifetime analysis**: lifetime parameters in function types (`FnTy`), lifetime-aware call-site borrow tracking, return lifetime validation via unification. Unit tests across multiple files.
-- **C Backend**: Generates valid C99 from QuantaLang source. Handles structs, unions, globals, string tables, branching, all binary/unary ops. 11 unit tests. This is the only backend wired into the CLI.
+- **C Backend**: Generates valid C99 from QuantaLang source. Handles structs, unions, globals, string tables, branching, all binary/unary ops. 11 unit tests. This is the only backend with end-to-end native execution verified by the compiler test suite.
 - **Effects**: Parse -> type check -> codegen pipeline (setjmp/longjmp C runtime).
 - **Programs that compile**: Variables, functions, if/else, loops, match, recursion, arithmetic, effects -- all compile to C and execute via `quantac build`.
 - **Auto-compile**: `quantac build` discovers and invokes system C compiler (gcc/clang/MSVC).
@@ -17,9 +17,10 @@ The Effects Language -- algebraic effects as a first-class feature.
 - **MIR pipeline**: Full MIR builder (codegen/builder.rs, 29 tests), MIR IR (codegen/ir.rs, 31 tests), debug info (codegen/debug.rs, 24 tests), embedded C runtime (codegen/runtime.rs, 7 tests).
 - **Macro expansion**: Builtin macros, pattern matching, hygiene. Unit tests present.
 - **Interprocedural Lifetime Analysis** (Phase 1): Lifetime parameters flow through `FnTy` (function types), enabling precise borrow tracking at call sites. Functions like `fn pick<'a, 'b>(x: &'a i32, y: &'b i32) -> &'a i32` correctly propagate only the `'a`-linked borrow. Return lifetime mismatches (returning `'b` where `'a` expected) are rejected with clear errors. 8 new unit tests, 3 integration test programs.
-- **612 total `#[test]` annotations** (476 in compiler/src/, 136 in compiler/tests/).
+- **Current cargo baseline (2026-06-13)**: 626 passed, 0 failed, 11 ignored across the compiler test binaries via `cargo test --manifest-path compiler/Cargo.toml --quiet`.
 
 ## What's Partial (has real code, wired into CLI but not end-to-end verified)
+- **Rust Backend** (subset-based): Emits Rust source from MIR and is wired into the CLI via `quantac build --target rust` / `--target rs`. Generated Rust is validated with `rustc --emit=metadata` for scalar branching, references, structs/arrays, struct-field references, repeated non-`Copy` struct arrays, reused structs after assignment and by-value calls, reused non-`Copy` nested field access, and a lifetime smoke program. Unsupported MIR returns a codegen error rather than silent fallback.
 - **x86-64 Backend** (1615 lines, 22 tests): Generates assembly from MIR. Wired into CLI via `quantac build --target x86-64`. No linker integration yet — outputs .s assembly.
 - **ARM64 Backend** (1629 lines, 21 tests): Generates assembly from MIR. Wired into CLI via `quantac build --target arm64`. No linker integration yet — outputs .s assembly.
 - **WASM Backend** (1866 lines, 11 tests): Generates WebAssembly binary from MIR with WASI support. Wired into CLI via `quantac build --target wasm`. No end-to-end .wasm execution test.
@@ -82,4 +83,4 @@ Not yet wired: `doc` subcommand. All other subcommands are functional. `quantac 
 Automatic stdlib resolution from any directory via `find_stdlib_path()`. 13 modules (842 lines) in `stdlib/`: core, math, string_utils, algorithms, bitwise, effects, graphics, io, iter, option, result, sorting, strings. Module import call rewriting maps bare function names to prefixed versions.
 
 ## Summary
-QuantaLang has a **working compiler core** (lexer -> parser -> type checker -> MIR -> C backend -> executable) with 612 tests. It can compile and run real programs with variables, functions, control flow, pattern matching, recursion, and algebraic effects. All 8 backends (C, LLVM, x86-64, ARM64, WASM, SPIR-V, HLSL, GLSL) are accessible from the CLI via `quantac build --target <target>`. The C backend is production-verified; LLVM can optionally link with clang; native/WASM backends output assembly/binary for external toolchain linking. The LSP (`quantac lsp`), formatter (`quantac fmt`), and package manager (`quantac pkg`) are wired into the CLI. The self-hosted compiler and standard library (268,567 lines of `.quanta` code) represent an ambitious long-term vision but cannot be compiled or executed today.
+QuantaLang has a **working compiler core** (lexer -> parser -> type checker -> MIR -> C backend -> executable) with 626 passing cargo tests and 11 ignored tests as of 2026-06-13. It can compile and run real programs with variables, functions, control flow, pattern matching, recursion, and algebraic effects. C, LLVM, x86-64, ARM64, WASM, SPIR-V, HLSL, GLSL, and Rust are accessible from the CLI via `quantac build --target <target>`, but with different maturity levels. The C backend is production-verified; the Rust backend is subset-validated with `rustc --emit=metadata`; LLVM can optionally link with clang; native/WASM backends output assembly/binary for external toolchain linking. The LSP (`quantac lsp`), formatter (`quantac fmt`), and package manager (`quantac pkg`) are wired into the CLI. The self-hosted compiler and standard library (268,567 lines of `.quanta` code) represent an ambitious long-term vision but cannot be compiled or executed today.
