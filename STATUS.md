@@ -17,7 +17,7 @@ The Effects Language -- algebraic effects as a first-class feature.
 - **MIR pipeline**: Full MIR builder (codegen/builder.rs, 29 tests), MIR IR (codegen/ir.rs, 31 tests), debug info (codegen/debug.rs, 24 tests), embedded C runtime (codegen/runtime.rs, 7 tests).
 - **Macro expansion**: Builtin macros, pattern matching, hygiene. Unit tests present.
 - **Interprocedural Lifetime Analysis** (Phase 1): Lifetime parameters flow through `FnTy` (function types), enabling precise borrow tracking at call sites. Functions like `fn pick<'a, 'b>(x: &'a i32, y: &'b i32) -> &'a i32` correctly propagate only the `'a`-linked borrow. Return lifetime mismatches (returning `'b` where `'a` expected) are rejected with clear errors. 8 new unit tests, 3 integration test programs.
-- **Current cargo baseline (2026-06-13)**: 653 passed, 0 failed, 11 ignored across the compiler test binaries via `cargo test --manifest-path compiler/Cargo.toml --quiet`.
+- **Current cargo baseline (2026-06-13)**: 655 passed, 0 failed, 11 ignored across the compiler test binaries via `cargo test --manifest-path compiler/Cargo.toml --quiet`.
 - **Warning-clean baseline (2026-06-13)**: the same test suite passes with `RUSTFLAGS=-Dwarnings`, so release builds are not carrying compiler-warning debt.
 
 ## What's Partial (has real code, wired into CLI but not end-to-end verified)
@@ -37,16 +37,16 @@ The Effects Language -- algebraic effects as a first-class feature.
 - **Runtime: Async** (1216 lines, 6 tests): Work-stealing scheduler design. Not linked into compiled programs. No async/await syntax support.
 
 ## What's Aspirational (architecture exists, doesn't function)
-- **Self-hosted compiler** (quantalang/src/, 231,688 lines): Complete compiler written in QuantaLang (lexer, parser, AST, types, HIR, MIR, codegen for x86_64/AArch64/WASM, driver, LSP, package manager, formatter, linter, test framework, build system, doc generator). **Cannot be compiled or executed.** The Rust compiler does not support the `.quanta` module system, import syntax, or standard library used by this code.
-- **Self-hosted stdlib** (quantalang/stdlib/, 28,649 lines): Core library (Option, Result, Iterator, primitives, memory, pointers), Alloc library (Box, Vec, String, Rc), Std library (fs, thread, sync, net, time, process). Modeled after Rust's standard library. **Cannot be compiled or executed.**
-- **Self-hosted test suite** (quantalang/tests/, 8,230 lines): Test framework and test cases for the self-hosted compiler. **Cannot be executed.**
+- **Self-hosted compiler** (quantalang/src/, 217,961 lines): Complete compiler written in QuantaLang (lexer, parser, AST, types, HIR, MIR, codegen for x86_64/AArch64/WASM, driver, LSP, package manager, formatter, linter, test framework, build system, doc generator). **Cannot be compiled or executed.** The Rust compiler does not support the `.quanta` module system, import syntax, or standard library used by this code.
+- **Self-hosted stdlib** (quantalang/stdlib/, 26,124 lines): Core library (Option, Result, Iterator, primitives, memory, pointers), Alloc library (Box, Vec, String, Rc), Std library (fs, thread, sync, net, time, process). Modeled after Rust's standard library. **Cannot be compiled or executed.**
+- **Self-hosted test suite** (quantalang/tests/, 7,505 lines): Test framework and test cases for the self-hosted compiler. **Cannot be executed.**
 
 ## Honest Line Counts
-- Compiler (Rust, `compiler/src/`): 61,695 lines -- STATUS: working core (lexer, parser, types, C backend), partial other backends/tools
-- Integration Tests (Rust, `compiler/tests/`): 1,522 lines -- STATUS: working
-- Self-hosted compiler (QuantaLang, `quantalang/src/`): 231,688 lines -- STATUS: aspirational, cannot compile
-- Self-hosted stdlib (QuantaLang, `quantalang/stdlib/`): 28,649 lines -- STATUS: aspirational, cannot compile
-- Self-hosted tests (QuantaLang, `quantalang/tests/`): 8,230 lines -- STATUS: aspirational, cannot execute
+- Compiler (Rust, `compiler/src/`): 83,812 lines -- STATUS: working core (lexer, parser, types, C backend), partial other backends/tools
+- Integration Tests (Rust, `compiler/tests/`): 1,640 lines -- STATUS: working
+- Self-hosted compiler (QuantaLang, `quantalang/src/`): 217,961 lines -- STATUS: aspirational, cannot compile
+- Self-hosted stdlib (QuantaLang, `quantalang/stdlib/`): 26,124 lines -- STATUS: aspirational, cannot compile
+- Self-hosted tests (QuantaLang, `quantalang/tests/`): 7,505 lines -- STATUS: aspirational, cannot execute
 
 ## What the CLI Actually Does Today
 ```
@@ -72,6 +72,7 @@ quantac pkg search <query>  # Search the package registry
 quantac watch [path]        # Watch files and recompile on change
 quantac doctor              # Diagnose compiler/toolchain/backend readiness
 quantac corpus verify       # Verify semantic corpus receipts and C stdout
+quantac corpus verify --root <dir> --write  # Verify a corpus copy and refresh its C receipt
 quantac version             # Print version
 ```
 
@@ -86,4 +87,4 @@ Not yet wired: `doc` subcommand. All other subcommands are functional. `quantac 
 Automatic stdlib resolution from any directory via `find_stdlib_path()`. 13 modules (842 lines) in `stdlib/`: core, math, string_utils, algorithms, bitwise, effects, graphics, io, iter, option, result, sorting, strings. Module import call rewriting maps bare function names to prefixed versions.
 
 ## Summary
-QuantaLang has a **working compiler core** (lexer -> parser -> type checker -> MIR -> C backend -> executable) with 653 passing cargo tests and 11 ignored tests as of 2026-06-13. It can compile and run real programs with variables, functions, control flow, pattern matching, recursion, and algebraic effects. C, LLVM, x86-64, ARM64, WASM, SPIR-V, HLSL, GLSL, and Rust are accessible from the CLI via `quantac build --target <target>`, but with different maturity levels. The C backend is production-verified and now has a semantic-corpus C execution receipt matching the current 8-program corpus; `quantac run` uses per-run temp build directories so concurrent C receipt probes avoid shared temp C/PDB collisions; `quantac corpus verify` validates the semantic corpus manifest, C/Rust receipts, and real C-backend stdout; `quantac doctor` reports local toolchain, stdlib, registry, optional backend tools, and backend maturity for adoption diagnostics; tested quickstart examples cover first-run CPU execution, mutable control flow, algebraic effects, and HLSL shader output; the Rust backend is subset-validated with `rustc --emit=metadata` and has a narrower generated-executable stdout smoke layer over the same semantic corpus plus manifest contract/receipt consistency/metadata guards; LLVM can optionally link with clang; native/WASM backends output assembly/binary for external toolchain linking. The LSP (`quantac lsp`), formatter (`quantac fmt`), and package manager (`quantac pkg`) are wired into the CLI. The self-hosted compiler and standard library (268,567 lines of `.quanta` code) represent an ambitious long-term vision but cannot be compiled or executed today.
+QuantaLang has a **working compiler core** (lexer -> parser -> type checker -> MIR -> C backend -> executable) with 655 passing cargo tests and 11 ignored tests as of 2026-06-13. It can compile and run real programs with variables, functions, control flow, pattern matching, recursion, and algebraic effects. C, LLVM, x86-64, ARM64, WASM, SPIR-V, HLSL, GLSL, and Rust are accessible from the CLI via `quantac build --target <target>`, but with different maturity levels. The C backend is production-verified and now has a semantic-corpus C execution receipt matching the current 8-program corpus; `quantac run` uses per-run temp build directories so concurrent C receipt probes avoid shared temp C/PDB collisions; `quantac corpus verify` validates the semantic corpus manifest, C/Rust receipts, and real C-backend stdout, accepts explicit corpus roots, and can refresh the C receipt for copied corpus fixtures after C stdout passes; `quantac doctor` reports local toolchain, stdlib, registry, optional backend tools, and backend maturity for adoption diagnostics; tested quickstart examples cover first-run CPU execution, mutable control flow, algebraic effects, and HLSL shader output; the Rust backend is subset-validated with `rustc --emit=metadata` and has a narrower generated-executable stdout smoke layer over the same semantic corpus plus manifest contract/receipt consistency/metadata guards; LLVM can optionally link with clang; native/WASM backends output assembly/binary for external toolchain linking. The LSP (`quantac lsp`), formatter (`quantac fmt`), and package manager (`quantac pkg`) are wired into the CLI. The self-hosted compiler and standard library (244,085 lines of `.quanta` code) represent an ambitious long-term vision but cannot be compiled or executed today.

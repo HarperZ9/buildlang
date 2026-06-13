@@ -16,7 +16,10 @@ The current receipt set includes Rust executable tests and a C execution
 receipt for all 8 programs. `quantac run` uses per-run temp build directories,
 so C receipt generation can be parallel-probed without shared C/PDB collisions.
 Run `quantac corpus verify` from the repository to validate `manifest.json`,
-the C/Rust receipts, and real C-backend stdout against the manifest.
+the C/Rust receipts, and real C-backend stdout against the manifest. Use
+`quantac corpus verify --root <DIR>` for copied corpus fixtures. Add `--write`
+only after C stdout validation should refresh that copy's C execution receipt;
+Rust receipt changes remain covered by the Rust backend test suite.
 
 ## Current Programs
 

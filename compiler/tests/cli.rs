@@ -1,4 +1,8 @@
-use std::{fs, path::PathBuf, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 fn quantac() -> Command {
     Command::new(env!("CARGO_BIN_EXE_quantac"))
@@ -22,6 +26,51 @@ fn c_backend_ready() -> bool {
         .expect("run quantac doctor");
     let stdout = String::from_utf8_lossy(&output.stdout);
     stdout.contains("Ready for practical C-backend examples: yes")
+}
+
+fn copy_dir_recursive(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).unwrap_or_else(|err| {
+        panic!(
+            "create destination directory {}: {}",
+            destination.display(),
+            err
+        )
+    });
+
+    for entry in fs::read_dir(source)
+        .unwrap_or_else(|err| panic!("read source directory {}: {}", source.display(), err))
+    {
+        let entry = entry.expect("read directory entry");
+        let entry_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry
+            .file_type()
+            .unwrap_or_else(|err| panic!("read file type for {}: {}", entry_path.display(), err))
+            .is_dir()
+        {
+            copy_dir_recursive(&entry_path, &destination_path);
+        } else {
+            fs::copy(&entry_path, &destination_path).unwrap_or_else(|err| {
+                panic!(
+                    "copy {} to {}: {}",
+                    entry_path.display(),
+                    destination_path.display(),
+                    err
+                )
+            });
+        }
+    }
+}
+
+fn temp_semantic_corpus(label: &str) -> PathBuf {
+    let destination = std::env::temp_dir().join(format!(
+        "quantalang_semantic_corpus_{}_{}",
+        label,
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&destination);
+    copy_dir_recursive(&repo_root().join("semantic-corpus"), &destination);
+    destination
 }
 
 #[test]
@@ -97,6 +146,95 @@ fn help_lists_corpus_command() {
         "help should list corpus command:\n{}",
         stdout
     );
+}
+
+#[test]
+fn corpus_verify_accepts_explicit_root() {
+    if !c_backend_ready() {
+        eprintln!("skipping semantic corpus root verification because no C backend is available");
+        return;
+    }
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(repo_root().join("semantic-corpus"))
+        .output()
+        .expect("run quantac corpus verify with explicit root");
+
+    assert!(
+        output.status.success(),
+        "corpus verify --root should exit successfully\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    assert!(
+        stdout.contains("c execution: 8 passed"),
+        "corpus verify --root should run the manifest programs:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn corpus_verify_write_repairs_receipt_program_drift_in_copy() {
+    if !c_backend_ready() {
+        eprintln!("skipping semantic corpus write verification because no C backend is available");
+        return;
+    }
+
+    let corpus_root = temp_semantic_corpus("write");
+    let c_receipt_path = corpus_root
+        .join("receipts")
+        .join("c-execution-2026-06-13.json");
+    let original_receipt = fs::read_to_string(&c_receipt_path).expect("read copied C receipt");
+    let drifted_receipt = original_receipt.replacen(
+        r#""expected_stdout": "4\n""#,
+        r#""expected_stdout": "999\n""#,
+        1,
+    );
+    assert_ne!(
+        original_receipt, drifted_receipt,
+        "copied C receipt should contain the scalar stdout fixture"
+    );
+    fs::write(&c_receipt_path, drifted_receipt).expect("write drifted copied C receipt");
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(&corpus_root)
+        .arg("--write")
+        .output()
+        .expect("run quantac corpus verify --write");
+
+    assert!(
+        output.status.success(),
+        "corpus verify --write should repair copied receipt drift\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    assert!(
+        stdout.contains("c receipt: written"),
+        "corpus verify --write should report the C receipt write:\n{}",
+        stdout
+    );
+
+    let repaired_receipt = fs::read_to_string(&c_receipt_path).expect("read repaired C receipt");
+    assert!(
+        repaired_receipt.contains(r#""expected_stdout": "4\n""#),
+        "repaired C receipt should restore manifest stdout:\n{}",
+        repaired_receipt
+    );
+    assert!(
+        !repaired_receipt.contains(r#""expected_stdout": "999\n""#),
+        "repaired C receipt should remove drifted stdout:\n{}",
+        repaired_receipt
+    );
+
+    let _ = fs::remove_dir_all(&corpus_root);
 }
 
 #[test]
