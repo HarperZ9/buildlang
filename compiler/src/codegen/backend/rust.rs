@@ -1102,6 +1102,8 @@ mod tests {
         include_str!("../../../../semantic-corpus/programs/structs_arrays.quanta");
     const CORPUS_TUPLE_OWNERSHIP_REUSE: &str =
         include_str!("../../../../semantic-corpus/programs/tuple_ownership_reuse.quanta");
+    const CORPUS_STRUCT_AGGREGATE_REUSE: &str =
+        include_str!("../../../../semantic-corpus/programs/struct_aggregate_reuse.quanta");
 
     #[derive(serde::Deserialize)]
     struct SemanticCorpusManifest {
@@ -1448,6 +1450,12 @@ fn main() {
 "#;
         let rust = compile_quanta_to_rust(source);
         assert_rustc_metadata_ok("reused_non_copy_struct_aggregate_field", &rust);
+    }
+
+    #[test]
+    fn generated_rust_runs_for_struct_aggregate_reuse() {
+        let rust = compile_quanta_to_rust(CORPUS_STRUCT_AGGREGATE_REUSE);
+        assert_rustc_run_stdout("run_struct_aggregate_reuse", &rust, "7\n");
     }
 
     #[test]

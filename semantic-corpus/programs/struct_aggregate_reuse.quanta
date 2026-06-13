@@ -1,0 +1,15 @@
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+struct Pair {
+    left: Point,
+    right: Point,
+}
+
+fn main() {
+    let p = Point { x: 3, y: 4 };
+    let pair = Pair { left: p, right: p };
+    println("{}", pair.left.x + pair.right.y);
+}
