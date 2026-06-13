@@ -14,6 +14,10 @@ node_modules/
 editors/vscode/out/
 editors/vscode/*.vsix
 
+# Python test caches
+__pycache__/
+.pytest_cache/
+
 # OS files
 .DS_Store
 Thumbs.db
