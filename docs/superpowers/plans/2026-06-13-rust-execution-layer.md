@@ -8,6 +8,12 @@
 
 **Tech Stack:** Rust compiler crate, QuantaLang parser/type checker/MIR lowerer, `rustc`, Cargo unit tests, repository status docs.
 
+**Implementation result (2026-06-13):** Completed using checked-in semantic
+corpus programs instead of duplicating inline source in every runtime smoke
+test. The planned `project-docs/...` status paths do not exist in this repo;
+the implemented status updates are in `README.md`, `STATUS.md`,
+`compiler/src/codegen/backend/STATUS.md`, and this plan/design pair.
+
 ---
 
 ### Task 1: Add Executable Rust Test Harness

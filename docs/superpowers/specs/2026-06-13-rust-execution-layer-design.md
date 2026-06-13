@@ -1,7 +1,7 @@
 # Rust Execution Layer Design
 
 Date: 2026-06-13
-Status: Accepted for implementation slice
+Status: Implemented for first smoke slice
 
 ## Purpose
 
@@ -20,6 +20,8 @@ The executable layer is intentionally small:
 - Add executable smoke tests only for deterministic subset programs:
   scalar branching, references and mutation, structs/arrays, and tuple
   ownership reuse.
+- Store those programs under `semantic-corpus/programs/` and include them from
+  the Rust backend tests so backend receipts and tests share one source vector.
 - Report rustc failures and runtime failures with stdout, stderr, and generated
   source to preserve diagnosability.
 

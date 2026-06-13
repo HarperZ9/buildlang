@@ -1,0 +1,15 @@
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+fn sum_array(arr: [i32; 3]) -> i32 {
+    arr[0] + arr[1] + arr[2]
+}
+
+fn main() {
+    let p = Point { x: 3, y: 4 };
+    let values = [p.x, p.y, 5];
+    let total = sum_array(values);
+    println("{}", total);
+}
