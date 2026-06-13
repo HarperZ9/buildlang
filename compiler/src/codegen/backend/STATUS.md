@@ -2,6 +2,11 @@
 
 Last audited: 2026-03-21
 
+2026-06-13 update: the Rust backend now has a narrow executable stdout smoke
+slice in addition to compile-only metadata validation. Four semantic corpus
+programs are lowered to Rust, compiled with `rustc`, executed, and checked for
+deterministic stdout.
+
 ## Hello-World Viability Assessment
 
 Each backend was evaluated against a simple hello-world-equivalent program:
@@ -160,4 +165,5 @@ return values, and basic type mapping.
 - All handle the core MIR operation set (Use, BinaryOp, UnaryOp, basic terminators)
 - None handle FieldAccess or VariantField (struct/enum member access)
 - None are wired into the CLI (`quantac build` only uses CBackend)
-- None have end-to-end tests that produce and run an executable/module
+- Rust now has a narrow executable stdout smoke slice; other non-C backends do
+  not yet have end-to-end tests that produce and run an executable/module

@@ -81,6 +81,27 @@ impl RustBackend {
         self.writeln("let mut chars = fmt.chars().peekable();");
         self.writeln("while let Some(ch) = chars.next() {");
         self.indent += 1;
+        self.writeln("if ch == '{' {");
+        self.indent += 1;
+        self.writeln("match chars.peek().copied() {");
+        self.indent += 1;
+        self.writeln(
+            "Some('}') => { chars.next(); out.push_str(args_iter.next().map(String::as_str).unwrap_or(\"\")); }",
+        );
+        self.writeln("Some('{') => { chars.next(); out.push('{'); }");
+        self.writeln("_ => out.push(ch),");
+        self.indent -= 1;
+        self.writeln("}");
+        self.writeln("continue;");
+        self.indent -= 1;
+        self.writeln("}");
+        self.writeln("if ch == '}' {");
+        self.indent += 1;
+        self.writeln("if chars.peek() == Some(&'}') { chars.next(); }");
+        self.writeln("out.push('}');");
+        self.writeln("continue;");
+        self.indent -= 1;
+        self.writeln("}");
         self.writeln("if ch != '%' {");
         self.indent += 1;
         self.writeln("out.push(ch);");
@@ -1073,6 +1094,15 @@ mod tests {
     use crate::parser::Parser;
     use crate::types::{TypeChecker, TypeContext};
 
+    const CORPUS_SCALAR_BRANCH: &str =
+        include_str!("../../../../semantic-corpus/programs/scalar_branch.quanta");
+    const CORPUS_REFERENCES_MUTATION: &str =
+        include_str!("../../../../semantic-corpus/programs/references_mutation.quanta");
+    const CORPUS_STRUCTS_ARRAYS: &str =
+        include_str!("../../../../semantic-corpus/programs/structs_arrays.quanta");
+    const CORPUS_TUPLE_OWNERSHIP_REUSE: &str =
+        include_str!("../../../../semantic-corpus/programs/tuple_ownership_reuse.quanta");
+
     fn compile_quanta_to_rust(source: &str) -> String {
         let source_file = SourceFile::new("rust_backend_test.quanta", source);
         let mut lexer = Lexer::new(&source_file);
@@ -1132,6 +1162,45 @@ mod tests {
         );
     }
 
+    fn assert_rustc_run_stdout(name: &str, rust_source: &str, expected_stdout: &str) {
+        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        let dir = std::env::temp_dir().join(format!(
+            "quantalang_rust_backend_run_{}_{}",
+            name,
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let source_path = dir.join("generated.rs");
+        let exe_path = dir.join(format!("generated{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&source_path, rust_source).expect("write generated Rust");
+
+        let compile = std::process::Command::new(&rustc)
+            .arg(&source_path)
+            .arg("-o")
+            .arg(&exe_path)
+            .output()
+            .expect("invoke rustc");
+        assert!(
+            compile.status.success(),
+            "rustc failed for {name}\nstdout:\n{}\nstderr:\n{}\nsource:\n{}",
+            String::from_utf8_lossy(&compile.stdout),
+            String::from_utf8_lossy(&compile.stderr),
+            rust_source
+        );
+
+        let run = std::process::Command::new(&exe_path)
+            .output()
+            .expect("run generated Rust executable");
+        assert!(
+            run.status.success(),
+            "generated executable failed for {name}\nstdout:\n{}\nstderr:\n{}\nsource:\n{}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr),
+            rust_source
+        );
+        assert_eq!(String::from_utf8_lossy(&run.stdout), expected_stdout);
+    }
+
     #[test]
     fn backend_target_is_rust() {
         let backend = RustBackend::new();
@@ -1152,6 +1221,12 @@ fn main() {
 "#;
         let rust = compile_quanta_to_rust(source);
         assert_rustc_metadata_ok("scalar_branch", &rust);
+    }
+
+    #[test]
+    fn generated_rust_runs_for_scalar_branch_subset() {
+        let rust = compile_quanta_to_rust(CORPUS_SCALAR_BRANCH);
+        assert_rustc_run_stdout("run_scalar_branch", &rust, "4\n");
     }
 
     #[test]
@@ -1177,6 +1252,12 @@ fn main() {
     }
 
     #[test]
+    fn generated_rust_runs_for_reference_subset() {
+        let rust = compile_quanta_to_rust(CORPUS_REFERENCES_MUTATION);
+        assert_rustc_run_stdout("run_references", &rust, "15\n");
+    }
+
+    #[test]
     fn generated_rust_compiles_for_structs_and_arrays() {
         let source = r#"
 struct Point {
@@ -1197,6 +1278,12 @@ fn main() {
 "#;
         let rust = compile_quanta_to_rust(source);
         assert_rustc_metadata_ok("structs_arrays", &rust);
+    }
+
+    #[test]
+    fn generated_rust_runs_for_structs_and_arrays() {
+        let rust = compile_quanta_to_rust(CORPUS_STRUCTS_ARRAYS);
+        assert_rustc_run_stdout("run_structs_arrays", &rust, "12\n");
     }
 
     #[test]
@@ -1358,6 +1445,12 @@ fn main() {
 "#;
         let rust = compile_quanta_to_rust(source);
         assert_rustc_metadata_ok("reused_tuple_after_by_value_call", &rust);
+    }
+
+    #[test]
+    fn generated_rust_runs_for_tuple_after_by_value_call() {
+        let rust = compile_quanta_to_rust(CORPUS_TUPLE_OWNERSHIP_REUSE);
+        assert_rustc_run_stdout("run_tuple_after_by_value_call", &rust, "14\n");
     }
 
     #[test]
