@@ -459,7 +459,7 @@ impl RustBackend {
 
         let args_str = args
             .iter()
-            .map(|arg| self.value_to_rust(arg, locals))
+            .map(|arg| self.value_to_owned_rust(arg, locals))
             .collect::<Vec<_>>()
             .join(", ");
         let call = format!("{}({})", func_name, args_str);
@@ -473,7 +473,7 @@ impl RustBackend {
 
     fn rvalue_to_rust(&self, rvalue: &MirRValue, locals: &[MirLocal]) -> CodegenResult<String> {
         Ok(match rvalue {
-            MirRValue::Use(value) => self.value_to_rust(value, locals),
+            MirRValue::Use(value) => self.value_to_owned_rust(value, locals),
             MirRValue::BinaryOp { op, left, right } => {
                 let l = self.value_to_rust(left, locals);
                 let r = self.value_to_rust(right, locals);
@@ -506,52 +506,67 @@ impl RustBackend {
                     self.type_to_rust(ty)
                 )
             }
-            MirRValue::Aggregate { kind, operands } => {
-                let vals = operands
-                    .iter()
-                    .map(|op| self.value_to_rust(op, locals))
-                    .collect::<Vec<_>>();
-                match kind {
-                    AggregateKind::Array(_) => format!("[{}]", vals.join(", ")),
-                    AggregateKind::Tuple => match vals.len() {
+            MirRValue::Aggregate { kind, operands } => match kind {
+                AggregateKind::Array(_) => {
+                    let vals = operands
+                        .iter()
+                        .map(|op| self.value_to_owned_rust(op, locals))
+                        .collect::<Vec<_>>();
+                    format!("[{}]", vals.join(", "))
+                }
+                AggregateKind::Tuple => {
+                    let vals = operands
+                        .iter()
+                        .map(|op| self.value_to_rust(op, locals))
+                        .collect::<Vec<_>>();
+                    match vals.len() {
                         0 => "()".to_string(),
                         1 => format!("({},)", vals[0]),
                         _ => format!("({})", vals.join(", ")),
-                    },
-                    AggregateKind::Struct(name) => {
-                        let type_name = Self::rust_type_name(name);
-                        let fields = self.struct_fields.get(name.as_ref());
-                        if let Some(fields) = fields {
-                            let pairs = vals
-                                .iter()
-                                .enumerate()
-                                .map(|(i, val)| {
-                                    let field = fields
-                                        .get(i)
-                                        .cloned()
-                                        .unwrap_or_else(|| format!("field{}", i));
-                                    format!("{}: {}", field, val)
-                                })
-                                .collect::<Vec<_>>();
-                            format!("{} {{ {} }}", type_name, pairs.join(", "))
-                        } else if vals.is_empty() {
-                            format!("{} {{}}", type_name)
-                        } else {
-                            return Err(CodegenError::Unsupported(format!(
+                    }
+                }
+                AggregateKind::Struct(name) => {
+                    let vals = operands
+                        .iter()
+                        .map(|op| self.value_to_rust(op, locals))
+                        .collect::<Vec<_>>();
+                    let type_name = Self::rust_type_name(name);
+                    let fields = self.struct_fields.get(name.as_ref());
+                    if let Some(fields) = fields {
+                        let pairs = vals
+                            .iter()
+                            .enumerate()
+                            .map(|(i, val)| {
+                                let field = fields
+                                    .get(i)
+                                    .cloned()
+                                    .unwrap_or_else(|| format!("field{}", i));
+                                format!("{}: {}", field, val)
+                            })
+                            .collect::<Vec<_>>();
+                        format!("{} {{ {} }}", type_name, pairs.join(", "))
+                    } else if vals.is_empty() {
+                        format!("{} {{}}", type_name)
+                    } else {
+                        return Err(CodegenError::Unsupported(format!(
                                 "Rust backend cannot lower struct aggregate '{}' without field metadata",
                                 name
                             )));
-                        }
-                    }
-                    AggregateKind::Variant(_, _, _) | AggregateKind::Closure(_) => {
-                        return Err(CodegenError::Unsupported(
-                            "Rust backend does not yet lower enum variants or closures".to_string(),
-                        ));
                     }
                 }
-            }
+                AggregateKind::Variant(_, _, _) | AggregateKind::Closure(_) => {
+                    return Err(CodegenError::Unsupported(
+                        "Rust backend does not yet lower enum variants or closures".to_string(),
+                    ));
+                }
+            },
             MirRValue::Repeat { value, count } => {
-                format!("[{}; {}]", self.value_to_rust(value, locals), count)
+                let value_str = self.value_to_rust(value, locals);
+                if self.value_is_copy_like(value, locals) {
+                    format!("[{}; {}]", value_str, count)
+                } else {
+                    format!("std::array::from_fn(|_| ({}).clone())", value_str)
+                }
             }
             MirRValue::Discriminant(_)
             | MirRValue::VariantField { .. }
@@ -567,22 +582,38 @@ impl RustBackend {
                 NullaryOp::AlignOf => format!("std::mem::align_of::<{}>()", self.type_to_rust(ty)),
             },
             MirRValue::FieldAccess {
-                base, field_name, ..
+                base,
+                field_name,
+                field_ty,
             } => {
                 let base_str = self.value_to_rust(base, locals);
                 let field = Self::rust_ident(field_name);
-                if self.value_is_raw_pointer(base, locals) {
+                let access = if self.value_is_raw_pointer(base, locals) {
                     format!("unsafe {{ (*{}).{} }}", base_str, field)
                 } else {
                     format!("{}.{}", base_str, field)
+                };
+                if Self::is_copy_like_type(field_ty) {
+                    access
+                } else {
+                    format!("({}).clone()", access)
                 }
             }
-            MirRValue::IndexAccess { base, index, .. } => {
-                format!(
+            MirRValue::IndexAccess {
+                base,
+                index,
+                elem_ty,
+            } => {
+                let access = format!(
                     "{}[{} as usize]",
                     self.value_to_rust(base, locals),
                     self.value_to_rust(index, locals)
-                )
+                );
+                if Self::is_copy_like_type(elem_ty) {
+                    access
+                } else {
+                    format!("({}).clone()", access)
+                }
             }
             MirRValue::Deref { ptr, .. } => {
                 format!("unsafe {{ *{} }}", self.value_to_rust(ptr, locals))
@@ -740,7 +771,12 @@ impl RustBackend {
             MirType::Ptr(inner) if Self::is_i8_type(inner) => "\"\"".to_string(),
             MirType::Ptr(_) => "std::ptr::null_mut()".to_string(),
             MirType::Array(elem, len) => {
-                format!("[{}; {}]", self.default_value(elem), len)
+                let elem_default = self.default_value(elem);
+                if Self::is_copy_like_type(elem) {
+                    format!("[{}; {}]", elem_default, len)
+                } else {
+                    format!("std::array::from_fn(|_| {})", elem_default)
+                }
             }
             MirType::Slice(_) => "&[]".to_string(),
             MirType::Struct(name) if name.as_ref() == "String" => "String::new()".to_string(),
@@ -789,11 +825,70 @@ impl RustBackend {
         }
     }
 
+    fn value_to_owned_rust(&self, value: &MirValue, locals: &[MirLocal]) -> String {
+        let value_str = self.value_to_rust(value, locals);
+        if self.value_is_copy_like(value, locals) {
+            value_str
+        } else {
+            format!("({}).clone()", value_str)
+        }
+    }
+
+    fn value_is_copy_like(&self, value: &MirValue, locals: &[MirLocal]) -> bool {
+        match value {
+            MirValue::Local(id) => locals
+                .get(id.0 as usize)
+                .map(|local| Self::is_copy_like_type(&local.ty))
+                .unwrap_or(true),
+            MirValue::Const(c) => Self::const_is_copy_like(c),
+            MirValue::Global(_) | MirValue::Function(_) => true,
+        }
+    }
+
     fn is_string_like_type(ty: &MirType) -> bool {
         matches!(
             ty,
             MirType::Struct(name) if name.as_ref() == "String" || name.as_ref() == "QuantaString"
         )
+    }
+
+    fn const_is_copy_like(c: &MirConst) -> bool {
+        match c {
+            MirConst::Bool(_)
+            | MirConst::Int(_, _)
+            | MirConst::Uint(_, _)
+            | MirConst::Float(_, _)
+            | MirConst::Str(_)
+            | MirConst::ByteStr(_)
+            | MirConst::Null(_)
+            | MirConst::Unit => true,
+            MirConst::Zeroed(ty) | MirConst::Undef(ty) => Self::is_copy_like_type(ty),
+            MirConst::Struct(_, _) => false,
+        }
+    }
+
+    fn is_copy_like_type(ty: &MirType) -> bool {
+        match ty {
+            MirType::Void
+            | MirType::Never
+            | MirType::Bool
+            | MirType::Int(_, _)
+            | MirType::Float(_)
+            | MirType::Ptr(_)
+            | MirType::FnPtr(_)
+            | MirType::Texture2D(_)
+            | MirType::Sampler
+            | MirType::SampledImage(_)
+            | MirType::TraitObject(_) => true,
+            MirType::Array(elem, _) | MirType::Vector(elem, _) => Self::is_copy_like_type(elem),
+            MirType::Tuple(elems) => elems.iter().all(Self::is_copy_like_type),
+            MirType::Struct(name)
+                if name.as_ref() == "String" || name.as_ref() == "QuantaString" =>
+            {
+                false
+            }
+            MirType::Struct(_) | MirType::Slice(_) | MirType::Vec(_) | MirType::Map(_, _) => false,
+        }
     }
 
     fn binop_to_rust(op: BinOp) -> &'static str {
@@ -1064,6 +1159,108 @@ fn main() {
 "#;
         let rust = compile_quanta_to_rust(source);
         assert_rustc_metadata_ok("structs_arrays", &rust);
+    }
+
+    #[test]
+    fn generated_rust_compiles_for_struct_field_references() {
+        let source = r#"
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+fn main() {
+    let p = Point { x: 3, y: 4 };
+    let rx: &i32 = &p.x;
+    println("{}", *rx);
+}
+"#;
+        let rust = compile_quanta_to_rust(source);
+        assert_rustc_metadata_ok("struct_field_references", &rust);
+    }
+
+    #[test]
+    fn generated_rust_compiles_for_repeated_non_copy_struct_arrays() {
+        let source = r#"
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+fn main() {
+    let p = Point { x: 3, y: 4 };
+    let points = [p; 2];
+    println("{}", points[0].x);
+}
+"#;
+        let rust = compile_quanta_to_rust(source);
+        assert_rustc_metadata_ok("repeated_non_copy_struct_arrays", &rust);
+    }
+
+    #[test]
+    fn generated_rust_compiles_for_reused_struct_after_by_value_call() {
+        let source = r#"
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+fn sum(p: Point) -> i32 {
+    p.x + p.y
+}
+
+fn main() {
+    let p = Point { x: 3, y: 4 };
+    let first = sum(p);
+    let second = sum(p);
+    println("{}", first + second);
+}
+"#;
+        let rust = compile_quanta_to_rust(source);
+        assert_rustc_metadata_ok("reused_struct_after_by_value_call", &rust);
+    }
+
+    #[test]
+    fn generated_rust_compiles_for_reused_struct_after_assignment() {
+        let source = r#"
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+fn main() {
+    let p = Point { x: 3, y: 4 };
+    let q = p;
+    let r = p;
+    println("{}", q.x + r.y);
+}
+"#;
+        let rust = compile_quanta_to_rust(source);
+        assert_rustc_metadata_ok("reused_struct_after_assignment", &rust);
+    }
+
+    #[test]
+    fn generated_rust_compiles_for_reused_non_copy_struct_field_access() {
+        let source = r#"
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+struct Wrapper {
+    inner: Point,
+}
+
+fn main() {
+    let p = Point { x: 3, y: 4 };
+    let w = Wrapper { inner: p };
+    let a = w.inner;
+    let b = w.inner;
+    println("{}", a.x + b.y);
+}
+"#;
+        let rust = compile_quanta_to_rust(source);
+        assert_rustc_metadata_ok("reused_non_copy_struct_field_access", &rust);
     }
 
     #[test]
