@@ -919,7 +919,7 @@ impl RustBackend {
             | MirType::SampledImage(_)
             | MirType::TraitObject(_) => true,
             MirType::Array(elem, _) | MirType::Vector(elem, _) => Self::is_copy_like_type(elem),
-            MirType::Tuple(elems) => elems.iter().all(Self::is_copy_like_type),
+            MirType::Tuple(_) => false,
             MirType::Struct(name)
                 if name.as_ref() == "String" || name.as_ref() == "QuantaString" =>
             {
@@ -1316,6 +1316,48 @@ fn main() {
 "#;
         let rust = compile_quanta_to_rust(source);
         assert_rustc_metadata_ok("reused_non_copy_tuple_aggregate_field", &rust);
+    }
+
+    #[test]
+    fn generated_rust_compiles_for_reused_non_copy_after_field_assignment() {
+        let source = r#"
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+struct Holder {
+    item: Point,
+}
+
+fn main() {
+    let p = Point { x: 3, y: 4 };
+    let mut holder = Holder { item: p };
+    holder.item = p;
+    let again = p;
+    println("{}", holder.item.x + again.y);
+}
+"#;
+        let rust = compile_quanta_to_rust(source);
+        assert_rustc_metadata_ok("reused_non_copy_after_field_assignment", &rust);
+    }
+
+    #[test]
+    fn generated_rust_compiles_for_reused_tuple_after_by_value_call() {
+        let source = r#"
+fn sum(pair: (i32, i32)) -> i32 {
+    pair.0 + pair.1
+}
+
+fn main() {
+    let pair = (3, 4);
+    let first = sum(pair);
+    let second = sum(pair);
+    println("{}", first + second);
+}
+"#;
+        let rust = compile_quanta_to_rust(source);
+        assert_rustc_metadata_ok("reused_tuple_after_by_value_call", &rust);
     }
 
     #[test]
