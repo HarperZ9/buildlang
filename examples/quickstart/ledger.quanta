@@ -1,0 +1,15 @@
+fn add_month(balance: i32, interest: i32) -> i32 {
+    balance + interest
+}
+
+fn main() {
+    let mut balance: i32 = 100;
+    let mut month: i32 = 0;
+
+    while month < 3 {
+        balance = add_month(balance, 5);
+        month = month + 1;
+    }
+
+    println!("balance: {}", balance);
+}

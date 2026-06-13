@@ -13,7 +13,7 @@ cargo build --release
 export PATH="$PWD/target/release:$PATH"
 
 # Verify
-quantac version
+quantac doctor
 ```
 
 ## Hello Shader (5 minutes)
@@ -42,6 +42,12 @@ quantac hello.quanta --target hlsl -o hello.fx
 ```
 
 Drop `hello.fx` into `reshade-shaders/Shaders/`. Open ReShade. Enable "Quanta_PS_Hello". Adjust the brightness slider.
+
+The repository also includes a tested shader quickstart:
+
+```bash
+quantac examples/quickstart/vignette_shader.quanta --target hlsl -o vignette_shader.hlsl
+```
 
 ## What Just Happened
 
