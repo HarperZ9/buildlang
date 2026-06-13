@@ -17,3 +17,7 @@ extension into C/Rust/LLVM/WASM cross-backend receipts.
 - `structs_arrays.quanta`: struct fields, fixed arrays, function call, stdout.
 - `tuple_ownership_reuse.quanta`: tuple aggregate lowering and by-value reuse,
   stdout.
+- `struct_aggregate_reuse.quanta`: struct aggregate reuse through multiple
+  fields, stdout.
+- `field_assignment_reuse.quanta`: struct field assignment and post-assignment
+  reuse, stdout.
