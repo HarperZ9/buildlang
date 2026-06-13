@@ -148,6 +148,7 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 ## Code Quality
 
 - **CI**: clippy (correctness) + rustfmt + `cargo test` on Linux and Windows
+- **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-13
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
 - **Tests**: 648 passing, 0 failing, 11 ignored in local `cargo test --manifest-path compiler/Cargo.toml --quiet` on 2026-06-13

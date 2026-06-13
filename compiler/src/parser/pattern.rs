@@ -95,27 +95,6 @@ impl<'a> Parser<'a> {
                 ))
             }
 
-            TokenKind::AndAnd => {
-                // &&pat is &&pat (double reference)
-                self.advance();
-                let inner = self.parse_pattern()?;
-                let inner_span = start.merge(&inner.span);
-                let inner_ref = Pattern::new(
-                    PatternKind::Ref {
-                        mutability: Mutability::Immutable,
-                        pattern: Box::new(inner),
-                    },
-                    inner_span,
-                );
-                Ok(Pattern::new(
-                    PatternKind::Ref {
-                        mutability: Mutability::Immutable,
-                        pattern: Box::new(inner_ref),
-                    },
-                    inner_span,
-                ))
-            }
-
             // =================================================================
             // BOX PATTERN: box pat
             // =================================================================

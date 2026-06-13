@@ -274,7 +274,7 @@ mod tests {
         let ident1 = HygienicIdent::root("x");
         let ident2 = HygienicIdent::root("x");
         let ident3 = HygienicIdent::root("y");
-        let ident4 = HygienicIdent::new("x", SyntaxContext::fresh());
+        let _ident4 = HygienicIdent::new("x", SyntaxContext::fresh());
 
         // Same name and context can resolve
         assert!(ident1.can_resolve_to(&ident2, &hygiene));
