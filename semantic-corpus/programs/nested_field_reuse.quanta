@@ -1,0 +1,16 @@
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+struct Wrapper {
+    inner: Point,
+}
+
+fn main() {
+    let p = Point { x: 3, y: 4 };
+    let w = Wrapper { inner: p };
+    let a = w.inner;
+    let b = w.inner;
+    println("{}", a.x + b.y);
+}

@@ -1106,6 +1106,8 @@ mod tests {
         include_str!("../../../../semantic-corpus/programs/struct_aggregate_reuse.quanta");
     const CORPUS_FIELD_ASSIGNMENT_REUSE: &str =
         include_str!("../../../../semantic-corpus/programs/field_assignment_reuse.quanta");
+    const CORPUS_NESTED_FIELD_REUSE: &str =
+        include_str!("../../../../semantic-corpus/programs/nested_field_reuse.quanta");
 
     #[derive(serde::Deserialize)]
     struct SemanticCorpusManifest {
@@ -1621,6 +1623,12 @@ fn main() {
 "#;
         let rust = compile_quanta_to_rust(source);
         assert_rustc_metadata_ok("reused_non_copy_struct_field_access", &rust);
+    }
+
+    #[test]
+    fn generated_rust_runs_for_nested_field_reuse() {
+        let rust = compile_quanta_to_rust(CORPUS_NESTED_FIELD_REUSE);
+        assert_rustc_run_stdout("run_nested_field_reuse", &rust, "7\n");
     }
 
     #[test]

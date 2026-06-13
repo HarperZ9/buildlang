@@ -3,7 +3,7 @@
 Last audited: 2026-03-21
 
 2026-06-13 update: the Rust backend now has a narrow executable stdout smoke
-slice in addition to compile-only metadata validation. Six semantic corpus
+slice in addition to compile-only metadata validation. Seven semantic corpus
 programs are lowered to Rust, compiled with `rustc`, executed, and checked for
 deterministic stdout. The semantic corpus manifest also drives a Rust execution
 test so corpus path and expected-output drift is caught by `cargo test`;
