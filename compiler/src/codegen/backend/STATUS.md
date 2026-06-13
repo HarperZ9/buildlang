@@ -6,8 +6,9 @@ Last audited: 2026-03-21
 slice in addition to compile-only metadata validation. Four semantic corpus
 programs are lowered to Rust, compiled with `rustc`, executed, and checked for
 deterministic stdout. The semantic corpus manifest also drives a Rust execution
-test so corpus path and expected-output drift is caught by `cargo test`; a
-receipt consistency test keeps the execution receipt aligned with the manifest.
+test so corpus path and expected-output drift is caught by `cargo test`;
+receipt consistency and metadata tests keep the execution receipt aligned with
+the manifest.
 
 ## Hello-World Viability Assessment
 
