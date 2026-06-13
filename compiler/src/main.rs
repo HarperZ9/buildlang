@@ -9,7 +9,7 @@
 //! This is the main entry point for the QuantaLang compiler command-line tool.
 
 use clap::{Parser as ClapParser, Subcommand};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -257,7 +257,14 @@ enum PkgCommands {
 #[derive(Subcommand)]
 enum CorpusCommands {
     /// Verify manifest, receipts, and C backend stdout against the semantic corpus
-    Verify,
+    Verify {
+        /// Semantic corpus root directory
+        #[arg(long, value_name = "DIR")]
+        root: Option<PathBuf>,
+        /// Rewrite the C execution receipt after C stdout verification passes
+        #[arg(long)]
+        write: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -430,21 +437,38 @@ struct SemanticCorpusProgram {
     expected_stdout: String,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
 struct CorpusExecutionReceipt {
+    receipt_id: String,
+    created_at: String,
+    compiler: String,
     backend: String,
+    evidence_class: String,
+    command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    execution_mode: Option<String>,
     result: CorpusExecutionResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    manifest_execution_test: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    receipt_consistency_test: Option<String>,
+    #[serde(default)]
+    validator_chain: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    notes: Vec<String>,
     programs: Vec<CorpusExecutionProgram>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, serde_json::Value>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
 struct CorpusExecutionResult {
     passed: usize,
     failed: usize,
     ignored: usize,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
 struct CorpusExecutionProgram {
     id: String,
     path: String,
@@ -453,15 +477,29 @@ struct CorpusExecutionProgram {
 
 fn cmd_corpus(command: CorpusCommands) -> Result<(), i32> {
     match command {
-        CorpusCommands::Verify => cmd_corpus_verify(),
+        CorpusCommands::Verify { root, write } => cmd_corpus_verify(root.as_deref(), write),
     }
 }
 
-fn cmd_corpus_verify() -> Result<(), i32> {
-    let corpus_root = find_semantic_corpus_root().ok_or_else(|| {
-        eprintln!("semantic corpus not found; run from the repository or install semantic-corpus/");
-        1
-    })?;
+fn cmd_corpus_verify(root: Option<&Path>, write: bool) -> Result<(), i32> {
+    let corpus_root = match root {
+        Some(path) => {
+            if !path.join("manifest.json").is_file() {
+                eprintln!(
+                    "semantic corpus manifest not found at {}",
+                    path.join("manifest.json").display()
+                );
+                return Err(1);
+            }
+            path.to_path_buf()
+        }
+        None => find_semantic_corpus_root().ok_or_else(|| {
+            eprintln!(
+                "semantic corpus not found; run from the repository or install semantic-corpus/"
+            );
+            1
+        })?,
+    };
 
     let manifest_path = corpus_root.join("manifest.json");
     let manifest: SemanticCorpusManifest = read_json(&manifest_path)?;
@@ -474,25 +512,47 @@ fn cmd_corpus_verify() -> Result<(), i32> {
     }
 
     let receipts_dir = corpus_root.join("receipts");
-    let c_receipt: CorpusExecutionReceipt =
-        read_json(&receipts_dir.join("c-execution-2026-06-13.json"))?;
-    let rust_receipt: CorpusExecutionReceipt =
-        read_json(&receipts_dir.join("rust-execution-2026-06-13.json"))?;
+    let c_receipt_path = receipts_dir.join("c-execution-2026-06-13.json");
+    let rust_receipt_path = receipts_dir.join("rust-execution-2026-06-13.json");
+    let c_passed = if write {
+        let rust_receipt: CorpusExecutionReceipt = read_json(&rust_receipt_path)?;
+        verify_receipt(
+            "rust",
+            &rust_receipt,
+            &manifest,
+            manifest.programs.len() + 1,
+        )?;
 
-    verify_receipt("c", &c_receipt, &manifest, manifest.programs.len())?;
-    verify_receipt(
-        "rust",
-        &rust_receipt,
-        &manifest,
-        manifest.programs.len() + 1,
-    )?;
-    let c_passed = verify_c_corpus_stdout(&corpus_root, &manifest)?;
+        let c_passed = verify_c_corpus_stdout(&corpus_root, &manifest)?;
+        let c_receipt: CorpusExecutionReceipt = read_json(&c_receipt_path)?;
+        let c_receipt = refresh_c_receipt_from_manifest(c_receipt, &manifest, c_passed);
+        write_json(&c_receipt_path, &c_receipt)?;
+
+        let c_receipt: CorpusExecutionReceipt = read_json(&c_receipt_path)?;
+        verify_receipt("c", &c_receipt, &manifest, c_passed)?;
+        c_passed
+    } else {
+        let c_receipt: CorpusExecutionReceipt = read_json(&c_receipt_path)?;
+        let rust_receipt: CorpusExecutionReceipt = read_json(&rust_receipt_path)?;
+
+        verify_receipt("c", &c_receipt, &manifest, manifest.programs.len())?;
+        verify_receipt(
+            "rust",
+            &rust_receipt,
+            &manifest,
+            manifest.programs.len() + 1,
+        )?;
+        verify_c_corpus_stdout(&corpus_root, &manifest)?
+    };
 
     println!("Semantic Corpus Verify");
     println!("manifest: {} program(s)", manifest.programs.len());
     println!("c receipt: ok");
     println!("rust receipt: ok");
     println!("c execution: {} passed", c_passed);
+    if write {
+        println!("c receipt: written");
+    }
     Ok(())
 }
 
@@ -534,6 +594,37 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, i32> {
         eprintln!("failed to parse {}: {}", path.display(), err);
         1
     })
+}
+
+fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), i32> {
+    let json = serde_json::to_string_pretty(value).map_err(|err| {
+        eprintln!("failed to serialize {}: {}", path.display(), err);
+        1
+    })?;
+    std::fs::write(path, format!("{}\n", json)).map_err(|err| {
+        eprintln!("failed to write {}: {}", path.display(), err);
+        1
+    })
+}
+
+fn refresh_c_receipt_from_manifest(
+    mut receipt: CorpusExecutionReceipt,
+    manifest: &SemanticCorpusManifest,
+    passed: usize,
+) -> CorpusExecutionReceipt {
+    receipt.result.passed = passed;
+    receipt.result.failed = 0;
+    receipt.result.ignored = 0;
+    receipt.programs = manifest
+        .programs
+        .iter()
+        .map(|program| CorpusExecutionProgram {
+            id: program.id.clone(),
+            path: format!("../{}", program.path),
+            expected_stdout: program.expected_stdout.clone(),
+        })
+        .collect();
+    receipt
 }
 
 fn verify_receipt(
