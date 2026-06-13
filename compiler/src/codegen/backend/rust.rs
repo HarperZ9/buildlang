@@ -1115,6 +1115,26 @@ mod tests {
         expected_stdout: String,
     }
 
+    #[derive(serde::Deserialize)]
+    struct RustExecutionReceipt {
+        result: RustExecutionReceiptResult,
+        programs: Vec<RustExecutionReceiptProgram>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct RustExecutionReceiptResult {
+        passed: usize,
+        failed: usize,
+        ignored: usize,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct RustExecutionReceiptProgram {
+        id: String,
+        path: String,
+        expected_stdout: String,
+    }
+
     fn semantic_corpus_root() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -1128,6 +1148,16 @@ mod tests {
             .unwrap_or_else(|err| panic!("read {}: {}", manifest_path.display(), err));
         serde_json::from_str(&manifest)
             .unwrap_or_else(|err| panic!("parse {}: {}", manifest_path.display(), err))
+    }
+
+    fn load_rust_execution_receipt() -> RustExecutionReceipt {
+        let receipt_path = semantic_corpus_root()
+            .join("receipts")
+            .join("rust-execution-2026-06-13.json");
+        let receipt = std::fs::read_to_string(&receipt_path)
+            .unwrap_or_else(|err| panic!("read {}: {}", receipt_path.display(), err));
+        serde_json::from_str(&receipt)
+            .unwrap_or_else(|err| panic!("parse {}: {}", receipt_path.display(), err))
     }
 
     fn compile_quanta_to_rust(source: &str) -> String {
@@ -1493,6 +1523,30 @@ fn main() {
                 &program.expected_stdout,
             );
         }
+    }
+
+    #[test]
+    fn semantic_corpus_receipt_matches_manifest() {
+        let manifest = load_semantic_corpus_manifest();
+        let receipt = load_rust_execution_receipt();
+
+        assert_eq!(receipt.programs.len(), manifest.programs.len());
+        for (manifest_program, receipt_program) in
+            manifest.programs.iter().zip(receipt.programs.iter())
+        {
+            assert_eq!(receipt_program.id, manifest_program.id);
+            assert_eq!(
+                receipt_program.path.trim_start_matches("../"),
+                manifest_program.path
+            );
+            assert_eq!(
+                receipt_program.expected_stdout,
+                manifest_program.expected_stdout
+            );
+        }
+        assert_eq!(receipt.result.failed, 0);
+        assert_eq!(receipt.result.ignored, 0);
+        assert_eq!(receipt.result.passed, manifest.programs.len() + 1);
     }
 
     #[test]
