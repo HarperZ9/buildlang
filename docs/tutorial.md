@@ -463,12 +463,13 @@ The `quantac` compiler exposes these commands:
 | `quantac lex <file>` | Show the token stream |
 | `quantac parse <file>` | Show the AST |
 | `quantac check <file>` | Run the type checker only |
-| `quantac compile <file> --target <t>` | Compile to a specific backend |
+| `quantac <file> --target <t>` | Compile to a specific backend |
 | `quantac lsp` | Start the language server |
 | `quantac fmt <file>` | Format a `.quanta` source file |
 | `quantac pkg <cmd>` | Package manager (init, add, resolve, search) |
+| `quantac doctor` | Diagnose compiler/toolchain/backend readiness |
 
-Supported `--target` values: `c`, `hlsl`, `glsl`, `spirv`, `llvm`, `wasm`, `x86-64`, `arm64`.
+Supported `--target` values: `c`, `hlsl`, `glsl`, `spirv`, `llvm`, `wasm`, `rust`, `x86-64`, `arm64`.
 
 ### Cross-Target Compilation
 

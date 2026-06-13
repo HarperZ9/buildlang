@@ -212,6 +212,9 @@ enum Commands {
         file: PathBuf,
     },
 
+    /// Diagnose local compiler, toolchain, backend, and package readiness
+    Doctor,
+
     /// Print version information
     Version,
 }
@@ -266,6 +269,7 @@ fn main() -> ExitCode {
         Some(Commands::Fmt { file, check, write }) => cmd_fmt(&file, check, write),
         Some(Commands::Pkg { command }) => cmd_pkg(command),
         Some(Commands::Lint { file }) => cmd_lint(&file),
+        Some(Commands::Doctor) => cmd_doctor(),
         Some(Commands::Test {
             directory,
             filter,
@@ -307,6 +311,97 @@ fn print_version() {
         quantalang::LANGUAGE_VERSION.2
     );
     println!("{}", quantalang::COPYRIGHT);
+}
+
+fn command_version(command: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new(command)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let text = if output.stdout.is_empty() {
+        String::from_utf8_lossy(&output.stderr)
+    } else {
+        String::from_utf8_lossy(&output.stdout)
+    };
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+}
+
+fn print_tool_probe(label: &str, command: &str, args: &[&str]) {
+    match command_version(command, args) {
+        Some(version) => println!("  {:<10} found    {}", label, version),
+        None => println!("  {:<10} missing  install or add to PATH", label),
+    }
+}
+
+fn cmd_doctor() -> Result<(), i32> {
+    println!("QuantaLang Doctor");
+    println!("=================");
+    println!();
+    println!(
+        "quantac: {} ({})",
+        quantalang::VERSION,
+        std::env::consts::OS
+    );
+
+    let c_compiler = find_c_compiler();
+    match &c_compiler {
+        Some(compiler) => println!("C backend: ready via {}", compiler),
+        None => println!("C backend: missing C compiler; install MSVC, gcc, clang, or cc"),
+    }
+
+    match find_stdlib_path() {
+        Some(path) => println!("stdlib: {}", path.display()),
+        None => {
+            println!("stdlib: not found; set QUANTALANG_STDLIB or install stdlib/ beside quantac")
+        }
+    }
+
+    let registry = load_local_registry_index();
+    if registry.is_empty() {
+        println!("registry: no local packages found");
+    } else {
+        println!("registry: {} local package(s)", registry.len());
+    }
+
+    println!();
+    println!("Optional tools:");
+    print_tool_probe("rustc", "rustc", &["--version"]);
+    print_tool_probe("clang", "clang", &["--version"]);
+    if cfg!(windows) {
+        print_tool_probe("nasm", "nasm", &["--version"]);
+    } else {
+        print_tool_probe("as", "as", &["--version"]);
+    }
+    print_tool_probe("wasmtime", "wasmtime", &["--version"]);
+    print_tool_probe("spirv-val", "spirv-val", &["--version"]);
+
+    println!();
+    println!("Backend maturity:");
+    println!("  c        primary       executable C99 path used by quantac run");
+    println!("  hlsl     supported     shader source output");
+    println!("  glsl     supported     shader source output");
+    println!("  rust     experimental  source output with semantic-corpus subset checks");
+    println!("  llvm     experimental  LLVM IR; executable path depends on clang");
+    println!("  wasm     experimental  WASM/WAT output; runtime depends on wasmtime");
+    println!("  spirv    experimental  SPIR-V output; validate with spirv-val");
+    println!("  x86-64   experimental  assembly/object output; linker integration is partial");
+    println!("  arm64    experimental  assembly/object output; linker integration is partial");
+
+    println!();
+    if c_compiler.is_some() {
+        println!("Ready for practical C-backend examples: yes");
+    } else {
+        println!("Ready for practical C-backend examples: no");
+    }
+
+    Ok(())
 }
 
 fn cmd_lex(file: &PathBuf, verbose: bool) -> Result<(), i32> {
@@ -969,8 +1064,6 @@ fn find_msvc_cl() -> Option<String> {
         std::env::set_var("QUANTALANG_MSVC_INCLUDE", &include_path);
         std::env::set_var("QUANTALANG_MSVC_LIB", &lib_path);
         std::env::set_var("QUANTALANG_MSVC_BIN", bin_dir.to_string_lossy().as_ref());
-
-        eprintln!("Auto-detected MSVC: {}", cl_exe.display());
 
         return Some(cl_exe.to_string_lossy().to_string());
     }

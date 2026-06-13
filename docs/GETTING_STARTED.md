@@ -139,6 +139,7 @@ quantac pkg <subcommand>     Package manager
 quantac watch <path>         Watch and recompile on change
 quantac lsp                  Start Language Server Protocol server
 quantac repl                 Interactive REPL
+quantac doctor               Diagnose compiler/toolchain/backend readiness
 quantac version              Print version
 ```
 
