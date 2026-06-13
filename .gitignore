@@ -18,6 +18,10 @@ editors/vscode/*.vsix
 .DS_Store
 Thumbs.db
 
+# Environment / local runtime
+.env
+.env.*
+
 # Generated C output from compiler
 tests/programs/*.c
 tests/*.c
