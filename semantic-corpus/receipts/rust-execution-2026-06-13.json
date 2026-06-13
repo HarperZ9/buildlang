@@ -4,12 +4,13 @@
   "compiler": "quantac",
   "backend": "rust",
   "evidence_class": "generated-artifact-execution",
-  "command": "cargo test --manifest-path public/pubscan/quantalang/compiler/Cargo.toml generated_rust_runs --quiet",
+  "command": "cargo test --manifest-path public/pubscan/quantalang/compiler/Cargo.toml generated_rust_runs --quiet && cargo test --manifest-path public/pubscan/quantalang/compiler/Cargo.toml semantic_corpus_manifest --quiet",
   "result": {
-    "passed": 4,
+    "passed": 5,
     "failed": 0,
     "ignored": 0
   },
+  "manifest_execution_test": "semantic_corpus_manifest_programs_run_on_rust_backend",
   "validator_chain": [
     "QuantaLang parser",
     "QuantaLang type checker",
