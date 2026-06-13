@@ -1523,6 +1523,48 @@ fn cmd_build(
 // RUN COMMAND
 // =============================================================================
 
+static RUN_TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn sanitize_temp_component(component: &str) -> String {
+    let sanitized: String = component
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    if sanitized.is_empty() {
+        "program".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn run_temp_build_dir(file: &Path) -> PathBuf {
+    let stem = file
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(sanitize_temp_component)
+        .unwrap_or_else(|| "program".to_string());
+    let counter = RUN_TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+
+    std::env::temp_dir().join(format!(
+        "quantalang_run_{}_{}_{}_{}",
+        stem,
+        std::process::id(),
+        nanos,
+        counter
+    ))
+}
+
 fn cmd_run(file: &PathBuf, args: &[String]) -> Result<(), i32> {
     // Read source file
     let source = std::fs::read_to_string(file).map_err(|e| {
@@ -1581,17 +1623,17 @@ fn cmd_run(file: &PathBuf, args: &[String]) -> Result<(), i32> {
     })?;
 
     // Write to temp file
-    let temp_dir = std::env::temp_dir().join("quantalang");
+    let temp_dir = run_temp_build_dir(file);
     std::fs::create_dir_all(&temp_dir).map_err(|e| {
         eprintln!("Failed to create temp directory: {}", e);
         1
     })?;
 
-    let c_file = temp_dir.join("temp.c");
+    let c_file = temp_dir.join("main.c");
     let exe_file = if cfg!(windows) {
-        temp_dir.join("temp.exe")
+        temp_dir.join("main.exe")
     } else {
-        temp_dir.join("temp")
+        temp_dir.join("main")
     };
 
     std::fs::write(&c_file, &output.data).map_err(|e| {
@@ -1621,7 +1663,7 @@ fn cmd_run(file: &PathBuf, args: &[String]) -> Result<(), i32> {
             exe_file.display()
         );
         // Check if MSVC put it somewhere else (current directory)
-        let alt_name = std::path::Path::new("temp.exe");
+        let alt_name = temp_dir.join("temp.exe");
         if alt_name.exists() {
             eprintln!("Found executable in current directory instead — moving it");
             let _ = std::fs::rename(alt_name, &exe_file);
@@ -1642,8 +1684,7 @@ fn cmd_run(file: &PathBuf, args: &[String]) -> Result<(), i32> {
     };
 
     // Clean up temp files
-    let _ = std::fs::remove_file(&c_file);
-    let _ = std::fs::remove_file(&exe_file);
+    let _ = std::fs::remove_dir_all(&temp_dir);
 
     if status.success() {
         Ok(())
@@ -3218,5 +3259,34 @@ mod tests {
     #[test]
     fn infers_rust_target_from_rs_extension() {
         assert_eq!(target_from_extension("rs"), Some(Target::Rust));
+    }
+
+    #[test]
+    fn run_temp_build_dirs_are_unique_for_same_source() {
+        let source = PathBuf::from("semantic-corpus/programs/scalar_branch.quanta");
+
+        let first = run_temp_build_dir(&source);
+        let second = run_temp_build_dir(&source);
+
+        assert_ne!(first, second);
+        assert!(first
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .starts_with("quantalang_run_scalar_branch_"));
+    }
+
+    #[test]
+    fn run_temp_build_dirs_sanitize_source_stems() {
+        let source = PathBuf::from("semantic-corpus/programs/weird file!.quanta");
+        let dir = run_temp_build_dir(&source);
+        let name = dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+
+        assert!(name.starts_with("quantalang_run_weird_file__"));
+        assert!(!name.contains(' '));
+        assert!(!name.contains('!'));
     }
 }

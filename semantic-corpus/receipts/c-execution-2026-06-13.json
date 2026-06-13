@@ -5,7 +5,7 @@
   "backend": "c",
   "evidence_class": "generated-artifact-execution",
   "command": "public/pubscan/quantalang/compiler/target/debug/quantac.exe run <semantic-corpus-program>",
-  "execution_mode": "sequential",
+  "execution_mode": "sequential-and-parallel-probed",
   "result": {
     "passed": 8,
     "failed": 0,
@@ -21,7 +21,7 @@
   ],
   "notes": [
     "Sequential quantac run checks matched manifest stdout for all 8 programs.",
-    "Parallel quantac run invocations currently contend on the shared temp C/PDB paths under the user temp directory; use sequential execution until the CLI temp path is isolated per run."
+    "Parallel quantac run checks over the same 8 programs passed after the CLI moved C build artifacts into per-run temp directories."
   ],
   "programs": [
     {

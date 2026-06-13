@@ -12,8 +12,9 @@ receipt aligned with the manifest.
 
 2026-06-13 C update: function-style `println("{}", value)` now lowers to C
 `printf` format specifiers instead of printing the literal format string. The
-current 8-program semantic corpus was run sequentially through `quantac run`
-and recorded in `semantic-corpus/receipts/c-execution-2026-06-13.json`.
+current 8-program semantic corpus was run through `quantac run`, parallel-probed
+with per-run temp build directories, and recorded in
+`semantic-corpus/receipts/c-execution-2026-06-13.json`.
 
 ## Hello-World Viability Assessment
 
