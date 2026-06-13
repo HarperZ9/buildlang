@@ -1113,6 +1113,8 @@ mod tests {
 
     #[derive(serde::Deserialize)]
     struct SemanticCorpusManifest {
+        schema: String,
+        rust_manifest_execution_test: String,
         programs: Vec<SemanticCorpusProgram>,
     }
 
@@ -1120,7 +1122,9 @@ mod tests {
     struct SemanticCorpusProgram {
         id: String,
         path: String,
+        surfaces: Vec<String>,
         expected_stdout: String,
+        rust_execution_test: String,
     }
 
     #[derive(serde::Deserialize)]
@@ -1547,6 +1551,69 @@ fn main() {
                 &format!("semantic_corpus_{}", program.id),
                 &rust,
                 &program.expected_stdout,
+            );
+        }
+    }
+
+    #[test]
+    fn semantic_corpus_manifest_records_executable_contract() {
+        let manifest = load_semantic_corpus_manifest();
+        let receipt = load_rust_execution_receipt();
+        let mut ids = std::collections::HashSet::new();
+
+        assert_eq!(manifest.schema, "quantalang-semantic-corpus/v1");
+        assert_eq!(
+            manifest.rust_manifest_execution_test,
+            "semantic_corpus_manifest_programs_run_on_rust_backend"
+        );
+        assert_eq!(manifest.programs.len(), receipt.programs.len());
+
+        for program in &manifest.programs {
+            assert!(
+                !program.id.trim().is_empty(),
+                "semantic corpus program id must be non-empty"
+            );
+            assert!(
+                ids.insert(program.id.as_str()),
+                "duplicate semantic corpus program id {}",
+                program.id
+            );
+            assert!(
+                program.path.starts_with("programs/"),
+                "semantic corpus path {} should live under programs/",
+                program.path
+            );
+            assert!(
+                semantic_corpus_root().join(&program.path).is_file(),
+                "semantic corpus program {} should exist",
+                program.path
+            );
+            assert!(
+                !program.expected_stdout.is_empty(),
+                "semantic corpus program {} should declare expected stdout",
+                program.id
+            );
+            assert!(
+                program.expected_stdout.ends_with('\n'),
+                "semantic corpus expected stdout for {} should end with a newline",
+                program.id
+            );
+            assert!(
+                !program.surfaces.is_empty(),
+                "semantic corpus program {} should declare covered surfaces",
+                program.id
+            );
+            assert!(
+                program.surfaces.iter().any(|surface| surface == "stdout"),
+                "semantic corpus program {} should declare stdout surface",
+                program.id
+            );
+            assert!(
+                program
+                    .rust_execution_test
+                    .starts_with("generated_rust_runs_for_"),
+                "semantic corpus program {} should name a Rust execution test",
+                program.id
             );
         }
     }
