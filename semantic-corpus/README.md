@@ -9,6 +9,10 @@ The first slice is intentionally narrow. The Rust backend includes these
 programs directly in executable smoke tests, and the corpus is suitable for
 extension into C/Rust/LLVM/WASM cross-backend receipts.
 
+`manifest.json` is part of the executable contract. Compiler tests validate
+its schema, unique program IDs, source paths, expected stdout, declared
+surfaces, and named Rust execution tests before trusting receipt metadata.
+
 ## Current Programs
 
 - `scalar_branch.quanta`: function call, branch selection, stdout.
