@@ -1108,6 +1108,8 @@ mod tests {
         include_str!("../../../../semantic-corpus/programs/field_assignment_reuse.quanta");
     const CORPUS_NESTED_FIELD_REUSE: &str =
         include_str!("../../../../semantic-corpus/programs/nested_field_reuse.quanta");
+    const CORPUS_DEREF_REUSE: &str =
+        include_str!("../../../../semantic-corpus/programs/deref_reuse.quanta");
 
     #[derive(serde::Deserialize)]
     struct SemanticCorpusManifest {
@@ -1649,6 +1651,12 @@ fn main() {
 "#;
         let rust = compile_quanta_to_rust(source);
         assert_rustc_metadata_ok("reused_non_copy_deref", &rust);
+    }
+
+    #[test]
+    fn generated_rust_runs_for_deref_reuse() {
+        let rust = compile_quanta_to_rust(CORPUS_DEREF_REUSE);
+        assert_rustc_run_stdout("run_deref_reuse", &rust, "7\n");
     }
 
     #[test]
