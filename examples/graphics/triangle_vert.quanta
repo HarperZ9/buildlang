@@ -1,5 +1,5 @@
 // ============================================================================
-// QUANTALANG VERTEX SHADER — Full triangle from source
+// QUANTALANG VERTEX SHADER - Full triangle from source
 // ============================================================================
 // Uses gl_VertexIndex to select vertex position and color.
 // Each vertex has a unique position and color for a colored triangle.

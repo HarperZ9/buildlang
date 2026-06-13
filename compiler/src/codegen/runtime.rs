@@ -73,11 +73,11 @@ static HashSet quanta_hset_new(void) {
     return h;
 }
 static void quanta_hset_insert(HashSet h, QuantaString val) {
-    (void)h; (void)val; // stub — full impl needs hash table
+    (void)h; (void)val; // stub - full impl needs hash table
 }
 static bool quanta_hset_contains(HashSet h, QuantaString val) {
     (void)h; (void)val;
-    return false; // stub — full impl needs hash table
+    return false; // stub - full impl needs hash table
 }
 
 // --- VecDeque stub ---
@@ -171,14 +171,14 @@ static QuantaVec quanta_vec_new_i32(void) { return quanta_vec_new(sizeof(int32_t
 static QuantaVec quanta_vec_new_i64(void) { return quanta_vec_new(sizeof(int64_t)); }
 static QuantaVec quanta_vec_new_f64(void) { return quanta_vec_new(sizeof(double)); }
 
-// Note: These wrappers use a global QuantaVec pointer trick — the first
+// Note: These wrappers use a global QuantaVec pointer trick - the first
 // argument is a QuantaVec passed by value, but since QuantaLang passes
 // struct locals, the C compiler will place them on the stack where we
 // can take their address. We use a thin wrapper to bridge the gap.
 static QuantaVec* __quanta_vec_ref = NULL;
 static void quanta_vec_push_i32(QuantaVec v, int32_t val) {
     // Find the original local via the stored pointer (set by codegen)
-    // Fallback: push into a copy — but mutations won't be visible.
+    // Fallback: push into a copy - but mutations won't be visible.
     // The real solution: codegen passes &v. For now we use a global registry.
     (void)v; (void)val;
 }
@@ -840,7 +840,7 @@ static void quanta_pop_handler(void) {
     }
 }
 
-// Perform an effect operation — jumps to the nearest handler
+// Perform an effect operation - jumps to the nearest handler
 static void quanta_perform(int32_t effect_id, int32_t op_id, void* arg, void* result) {
     QuantaHandler* h = __quanta_handler_stack;
     while (h) {
@@ -850,7 +850,7 @@ static void quanta_perform(int32_t effect_id, int32_t op_id, void* arg, void* re
         }
         h = h->parent;
     }
-    // Unhandled effect — abort
+    // Unhandled effect - abort
     fprintf(stderr, "Unhandled effect %d operation %d\n", effect_id, op_id);
     abort();
 }
@@ -1666,7 +1666,7 @@ pub fn math_builtin_to_c(name: &str) -> Option<&'static str> {
         "map_contains_i32" => Some("quanta_map_contains"),
         "map_len_i32" => Some("quanta_map_len"),
         "map_remove_i32" => Some("quanta_map_remove"),
-        // HashMap builtins — default to str->f64 (most common use case)
+        // HashMap builtins - default to str->f64 (most common use case)
         "map_new" => Some("quanta_hmap_new_str_f64"),
         "map_insert" => Some("quanta_hmap_insert_str_f64"),
         "map_get" => Some("quanta_hmap_get_str_f64"),
@@ -1691,7 +1691,7 @@ pub fn math_builtin_to_c(name: &str) -> Option<&'static str> {
         "quanta_vk_should_close" => Some("quanta_vk_should_close"),
         "quanta_vk_request_close" => Some("quanta_vk_request_close"),
         "quanta_vk_device_name" => Some("quanta_vk_device_name"),
-        // Vector math builtins — default to vec3 variants; the lowerer
+        // Vector math builtins - default to vec3 variants; the lowerer
         // dispatches to the correct size variant based on argument type.
         "dot" => Some("quanta_dot3"),
         "cross" => Some("quanta_cross"),

@@ -27,7 +27,7 @@ allowed-tools: Read, Write, Edit, Bash(cargo:*, git:*), Grep, Glob
 8. Verify `use` statements are organized (std, external crates, local)
 
 ## Post-flight
-1. Run `cargo check` — must compile
-2. Run `cargo test` — no regressions
-3. Run `cargo clippy` — zero warnings
+1. Run `cargo check` - must compile
+2. Run `cargo test` - no regressions
+3. Run `cargo clippy` - zero warnings
 4. Run `git diff --stat` to summarize changes

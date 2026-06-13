@@ -1,5 +1,5 @@
 // Test 83: VCGT gamma ramp and .cube LUT generation
-// Port of vcgt.py — Video Card Gamma Table
+// Port of vcgt.py - Video Card Gamma Table
 
 // Generate a gamma correction ramp value
 fn vcgt_ramp(input: f64, gamma: f64, min_val: f64, max_val: f64) -> f64 {

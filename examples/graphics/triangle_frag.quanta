@@ -1,5 +1,5 @@
 // ============================================================================
-// QUANTALANG FRAGMENT SHADER — Compiled from source to SPIR-V
+// QUANTALANG FRAGMENT SHADER - Compiled from source to SPIR-V
 // ============================================================================
 // This shader is compiled with: quantac triangle_frag.quanta -o quanta_frag.spv
 // It receives interpolated color from the vertex shader and outputs it.

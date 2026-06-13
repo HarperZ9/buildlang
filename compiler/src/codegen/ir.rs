@@ -840,7 +840,7 @@ pub enum MirType {
     Never,
     /// SIMD Vector type (element type, lane count).
     Vector(Box<MirType>, u32),
-    /// 2D Texture (sampled image) — element type is the texel format (e.g. f32 for RGBA float).
+    /// 2D Texture (sampled image) - element type is the texel format (e.g. f32 for RGBA float).
     Texture2D(Box<MirType>),
     /// Opaque sampler type (for texture sampling).
     Sampler,
@@ -1027,7 +1027,7 @@ impl MirType {
             MirType::Never => Some(0),
             MirType::Vector(elem, lanes) => elem.bit_size(ptr_size).map(|s| s * lanes),
             MirType::Texture2D(_) | MirType::Sampler | MirType::SampledImage(_) => {
-                None // Opaque GPU types — no CPU bit size
+                None // Opaque GPU types - no CPU bit size
             }
             MirType::TraitObject(_) => Some(ptr_size * 2), // Fat pointer: data + vtable
             MirType::Vec(_) => Some(ptr_size),             // QuantaVecHandle is a pointer

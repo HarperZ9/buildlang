@@ -1,4 +1,4 @@
-// Test 98: calibrate-pro port — Full color math pipeline
+// Test 98: calibrate-pro port - Full color math pipeline
 // sRGB → linear → XYZ → Lab → CIEDE2000
 
 struct XYZ { x: f64, y: f64, z: f64, }

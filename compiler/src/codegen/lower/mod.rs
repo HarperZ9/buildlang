@@ -108,19 +108,19 @@ pub struct MirLowerer<'ctx> {
 
 /// An intermediate transform operation in an iterator chain.
 pub(crate) enum IterStep<'a> {
-    /// `.map(|params| body)` — transform each element.
+    /// `.map(|params| body)` - transform each element.
     Map { closure: &'a ast::Expr },
-    /// `.enumerate()` — prepend an index to each element.
+    /// `.enumerate()` - prepend an index to each element.
     Enumerate,
-    /// `.cloned()` — identity (no-op for Copy types).
+    /// `.cloned()` - identity (no-op for Copy types).
     Cloned,
 }
 
 /// Terminal operation of an iterator chain.
 pub(crate) enum IterTerminal<'a> {
-    /// `.collect()` — gather results into a new Vec.
+    /// `.collect()` - gather results into a new Vec.
     Collect,
-    /// `.fold(init, |acc, x| body)` — accumulate a single value.
+    /// `.fold(init, |acc, x| body)` - accumulate a single value.
     Fold {
         init: &'a ast::Expr,
         closure: &'a ast::Expr,
@@ -321,7 +321,7 @@ impl<'ctx> MirLowerer<'ctx> {
             // recursively collect all contained items.
             ItemKind::Mod(m) => self.collect_inline_mod(m),
             // Use declarations (e.g. `use super::*`) are handled implicitly
-            // by the flattened naming scheme — no collection needed.
+            // by the flattened naming scheme - no collection needed.
             ItemKind::Use(_) => Ok(()),
             _ => Ok(()),
         }
@@ -382,7 +382,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     .map(|t| self.lower_type_from_ast(t))
                     .unwrap_or(MirType::Void);
 
-                // First param is self — replace with void* for vtable fn ptr
+                // First param is self - replace with void* for vtable fn ptr
                 let mut vtable_params = vec![MirType::Ptr(Box::new(MirType::Void))];
                 vtable_params.extend(params.into_iter().skip(1));
 
@@ -546,7 +546,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 };
                 ItemKind::Trait(Box::new(t2))
             }
-            // Impl, Use, Mod, etc. — pass through unchanged
+            // Impl, Use, Mod, etc. - pass through unchanged
             _ => item.kind.clone(),
         };
         ast::Item {
@@ -646,7 +646,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     let has_clone = self.attr_has_derive_name(attr, "Clone");
                     if has_clone {
                         // Register a clone method: TypeName_clone(self) -> TypeName
-                        // The actual body is trivial for value types — just return self.
+                        // The actual body is trivial for value types - just return self.
                         let type_name = name.name.clone();
                         let method_name: Arc<str> = Arc::from(format!("{}_clone", type_name));
                         self.impl_methods
@@ -1254,7 +1254,7 @@ impl<'ctx> MirLowerer<'ctx> {
             // Inline module: push module name onto prefix stack and
             // recursively lower all contained items.
             ItemKind::Mod(m) => self.lower_inline_mod(m, &item.attrs),
-            // Use declarations — no-op in lowering (name resolution is
+            // Use declarations - no-op in lowering (name resolution is
             // handled by the prefix + join scheme).
             ItemKind::Use(_) => Ok(()),
             _ => Ok(()),
@@ -1408,7 +1408,7 @@ impl<'ctx> MirLowerer<'ctx> {
     }
 
     fn lower_function(&mut self, f: &ast::FnDef, attrs: &[ast::Attribute]) -> CodegenResult<()> {
-        // Skip generic functions — they are monomorphized on demand at call sites.
+        // Skip generic functions - they are monomorphized on demand at call sites.
         if self.fn_has_type_generics(f) {
             return Ok(());
         }
@@ -1475,7 +1475,7 @@ impl<'ctx> MirLowerer<'ctx> {
             // Add return if needed
             let mut builder = self.current_fn.take().unwrap();
             if is_main && !has_shader_stage {
-                // main returns 0 (success) in C — but not for shader entry points
+                // main returns 0 (success) in C - but not for shader entry points
                 let zero = MirValue::Const(MirConst::Int(0, MirType::i32()));
                 builder.ret(Some(zero));
             } else if f.sig.return_ty.is_some() {
@@ -1534,7 +1534,7 @@ impl<'ctx> MirLowerer<'ctx> {
     fn lower_impl(&mut self, impl_def: &ast::ImplDef) -> CodegenResult<()> {
         let type_name = self.resolve_type_name(&impl_def.self_ty);
 
-        // Skip generic impls — they are lowered when the type is monomorphized
+        // Skip generic impls - they are lowered when the type is monomorphized
         let has_impl_generics = impl_def
             .generics
             .params

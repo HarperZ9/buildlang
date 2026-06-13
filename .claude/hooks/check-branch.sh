@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Branch Protection Hook — PreToolUse (Bash)
+# Branch Protection Hook - PreToolUse (Bash)
 # Blocks committing directly to main/master.
 
 INPUT=$(cat)

@@ -1,4 +1,4 @@
-// QuantaLang Vertex Shader — Triangle Demo
+// QuantaLang Vertex Shader - Triangle Demo
 // Compiles to SPIR-V via: quantac triangle_vertex.quanta --target spirv
 
 #[vertex]

@@ -1,5 +1,5 @@
 ---
-description: Show project stats — file counts, test counts, build status
+description: Show project stats - file counts, test counts, build status
 allowed-tools: Bash(find:*, cargo:*, wc:*, git:*), Grep, Glob
 ---
 
@@ -19,8 +19,8 @@ Generate a progress report by running these checks:
 7. Count `#[cfg(test)]` modules: `grep -r "#\[cfg(test)\]" --include="*.rs" | wc -l`
 
 ## Build Status
-8. Run `cargo check 2>&1 | tail -3` — does it compile?
-9. Run `cargo clippy 2>&1 | tail -5` — any warnings?
+8. Run `cargo check 2>&1 | tail -3` - does it compile?
+9. Run `cargo clippy 2>&1 | tail -5` - any warnings?
 
 ## TODOs & FIXMEs
 10. Count TODOs: `grep -r "TODO" --include="*.rs" | wc -l`

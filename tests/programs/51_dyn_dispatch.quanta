@@ -1,4 +1,4 @@
-// Test 51: Full dynamic dispatch — trait object construction + vtable calls
+// Test 51: Full dynamic dispatch - trait object construction + vtable calls
 // This is what makes polymorphic rendering architectures possible
 
 trait Material {
@@ -27,7 +27,7 @@ impl Material for Metal {
     }
 }
 
-// This function takes a trait object — it doesn't know the concrete type
+// This function takes a trait object - it doesn't know the concrete type
 fn render_material(mat: dyn Material) -> f64 {
     mat.shade()
 }

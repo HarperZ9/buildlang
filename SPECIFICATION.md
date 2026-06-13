@@ -1,6 +1,6 @@
 # QuantaLang Language Specification
 
-Version 1.0 — March 2026
+Version 1.0 - March 2026
 
 ## 1. Lexical Structure
 
@@ -44,7 +44,7 @@ effect handle perform resume
 
 Integer types: `i8`, `i16`, `i32`, `i64`, `i128`, `isize`, `u8`, `u16`, `u32`, `u64`, `u128`, `usize`.
 
-Unsuffixed integer literals have type `{integer}` — a type variable constrained to resolve to a concrete integer type through inference.
+Unsuffixed integer literals have type `{integer}` - a type variable constrained to resolve to a concrete integer type through inference.
 
 **Float literals:**
 ```
@@ -103,23 +103,23 @@ From lowest to highest binding power:
 ## 2. Type System
 
 ### 2.1 Primitive Types
-- `bool` — boolean (true/false)
-- `char` — Unicode scalar value
-- `i8`, `i16`, `i32`, `i64`, `i128`, `isize` — signed integers
-- `u8`, `u16`, `u32`, `u64`, `u128`, `usize` — unsigned integers
-- `f32`, `f64` — IEEE 754 floating point
-- `str` — owned string
-- `()` — unit type (zero-size)
-- `!` — never type (no values)
+- `bool` - boolean (true/false)
+- `char` - Unicode scalar value
+- `i8`, `i16`, `i32`, `i64`, `i128`, `isize` - signed integers
+- `u8`, `u16`, `u32`, `u64`, `u128`, `usize` - unsigned integers
+- `f32`, `f64` - IEEE 754 floating point
+- `str` - owned string
+- `()` - unit type (zero-size)
+- `!` - never type (no values)
 
 ### 2.2 Compound Types
-- `(T, U, V)` — tuple
-- `[T; N]` — fixed-size array
-- `[T]` — slice
-- `&T` — shared reference
-- `&mut T` — mutable reference
-- `*const T`, `*mut T` — raw pointers
-- `fn(T) -> U` — function pointer
+- `(T, U, V)` - tuple
+- `[T; N]` - fixed-size array
+- `[T]` - slice
+- `&T` - shared reference
+- `&mut T` - mutable reference
+- `*const T`, `*mut T` - raw pointers
+- `fn(T) -> U` - function pointer
 
 ### 2.3 User-Defined Types
 

@@ -1,4 +1,4 @@
-// Test 99: calibrate-pro port — 3D LUT generation
+// Test 99: calibrate-pro port - 3D LUT generation
 // Generate a small 5-point LUT and verify interpolation + .cube write
 
 fn gamma_correct(c: f64, gamma: f64) -> f64 {

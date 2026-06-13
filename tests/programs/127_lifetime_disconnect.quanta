@@ -1,4 +1,4 @@
-// Interprocedural Lifetime Analysis — disconnected lifetimes.
+// Interprocedural Lifetime Analysis - disconnected lifetimes.
 // fn pick_first<'a, 'b> returns &'a, so 'b arg does NOT contribute to
 // the returned borrow. With the old heuristic (all ref args are sources),
 // this would incorrectly flag y as escaping scope. With lifetime-aware

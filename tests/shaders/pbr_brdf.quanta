@@ -5,8 +5,8 @@
 // Used in Unreal Engine, Unity, Frostbite, and every modern game engine.
 //
 // This SINGLE FILE compiles to BOTH:
-//   quantac pbr_brdf.quanta -o pbr_brdf.c     # CPU — test with asserts
-//   quantac pbr_brdf.quanta -o pbr_brdf.spv   # GPU — Vulkan fragment shader
+//   quantac pbr_brdf.quanta -o pbr_brdf.c     # CPU - test with asserts
+//   quantac pbr_brdf.quanta -o pbr_brdf.spv   # GPU - Vulkan fragment shader
 //
 // No other language can do this.
 // ============================================================================
@@ -98,7 +98,7 @@ fn linear_to_srgb(x: f64) -> f64 {
 }
 
 // ============================================================================
-// GPU ENTRY POINT — Fragment Shader
+// GPU ENTRY POINT - Fragment Shader
 // ============================================================================
 #[fragment]
 fn fs_pbr(inputs: vec3) -> vec4 {
@@ -124,10 +124,10 @@ fn fs_pbr(inputs: vec3) -> vec4 {
 }
 
 // ============================================================================
-// CPU ENTRY POINT — For Testing and Verification
+// CPU ENTRY POINT - For Testing and Verification
 // ============================================================================
 fn main() {
-    println!("=== Cook-Torrance PBR BRDF — QuantaLang Dual-Target ===");
+    println!("=== Cook-Torrance PBR BRDF - QuantaLang Dual-Target ===");
     println!("");
 
     // Test individual components
@@ -146,11 +146,11 @@ fn main() {
     let g = geometry_smith(0.8, 0.8, 0.5);
     println!("Smith G (n·v=0.8, n·l=0.8, rough=0.5): {}", g);
 
-    // Full PBR evaluation — dielectric
+    // Full PBR evaluation - dielectric
     let dielectric = pbr_lighting(0.9, 0.8, 0.7, 0.85, 0.8, 0.4, 0.0);
     println!("PBR dielectric (rough=0.4): {}", dielectric);
 
-    // Full PBR evaluation — metal
+    // Full PBR evaluation - metal
     let metal = pbr_lighting(0.9, 0.8, 0.7, 0.85, 0.8, 0.3, 1.0);
     println!("PBR metal (rough=0.3): {}", metal);
 

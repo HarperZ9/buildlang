@@ -528,7 +528,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     std::f64::consts::TAU,
                     MirType::f64(),
                 ))),
-                // Might be a global or function — inside inline modules,
+                // Might be a global or function - inside inline modules,
                 // try the module-prefixed name first so local definitions
                 // shadow parent-scope functions (use super::*).
                 _ => {
@@ -1197,7 +1197,7 @@ impl<'ctx> MirLowerer<'ctx> {
             }
         }
 
-        // Check for generic function call — monomorphize if needed.
+        // Check for generic function call - monomorphize if needed.
         // Inside inline modules, also check the prefixed name.
         if let Some(fn_name) = self.extract_call_name(func) {
             let resolved = self.resolve_fn_name(fn_name);
@@ -1218,7 +1218,7 @@ impl<'ctx> MirLowerer<'ctx> {
         }
 
         // Check for math built-in functions and rewrite the call target to the
-        // corresponding C / runtime function name — but only if there is no
+        // corresponding C / runtime function name - but only if there is no
         // user-defined function with the same name in the module.
         let func_val = if let Some(builtin_name) = self.try_resolve_math_builtin(func) {
             // Don't shadow a user-defined function with the same name.
@@ -1358,7 +1358,7 @@ impl<'ctx> MirLowerer<'ctx> {
         let cont = builder.create_block();
 
         // If the function returns void, don't create a result local or
-        // assign the call result — just emit a void call.
+        // assign the call result - just emit a void call.
         if matches!(ret_ty, MirType::Void) {
             builder.call(func_val, arg_vals, None, cont);
             builder.switch_to_block(cont);
@@ -1624,7 +1624,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 }
             }
         }
-        // Check if it's a math/graphics builtin — these return f64
+        // Check if it's a math/graphics builtin - these return f64
         if let Some(ref fn_name) = name {
             let is_f64_builtin = matches!(
                 fn_name.as_str(),
@@ -1659,7 +1659,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 "normalize" | "cross" | "reflect" => {
                     return MirType::Struct(Arc::from("quanta_vec3"))
                 }
-                // Texture sampling — returns vec4 (tex2d_depth returns f64 for single channel)
+                // Texture sampling - returns vec4 (tex2d_depth returns f64 for single channel)
                 "tex2d" | "texture_sample" => return MirType::Struct(Arc::from("quanta_vec4")),
                 "tex2d_depth" => return MirType::f64(),
                 "mat4_identity" | "mat4_translate" | "mat4_scale" | "mat4_perspective" => {
@@ -2311,7 +2311,7 @@ impl<'ctx> MirLowerer<'ctx> {
             let two_arg_c_fn: Option<&str> = match method_name {
                 "powi" => Some("pow"),
                 "powf" => Some("pow"),
-                "log" => Some("log"), // Rust log(base) — but C log is ln; handle specially
+                "log" => Some("log"), // Rust log(base) - but C log is ln; handle specially
                 "atan2" => Some("atan2"),
                 "hypot" => Some("hypot"),
                 "copysign" => Some("copysign"),
@@ -2466,7 +2466,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 return Ok(values::local(result));
             }
 
-            // is_nan, is_infinite, is_finite, is_normal — fall through to default
+            // is_nan, is_infinite, is_finite, is_normal - fall through to default
             // (these would need special C codegen; not critical for now)
         }
 
@@ -2765,7 +2765,7 @@ impl<'ctx> MirLowerer<'ctx> {
             }
         }
 
-        // clone()/to_owned() — return receiver type for safe (non-cascading) types.
+        // clone()/to_owned() - return receiver type for safe (non-cascading) types.
         // String, primitives, Ptr, Option are safe. Collections (Vec/Map/HashSet)
         // are NOT safe because their typed return cascades through i32-typed consumers.
         {
@@ -2852,7 +2852,7 @@ impl<'ctx> MirLowerer<'ctx> {
             (then_block, else_block, merge_block)
         };
 
-        // Then branch — scope `let` bindings to the branch.
+        // Then branch - scope `let` bindings to the branch.
         {
             let builder = self.current_fn.as_mut().unwrap();
             builder.switch_to_block(then_block);
@@ -2877,7 +2877,7 @@ impl<'ctx> MirLowerer<'ctx> {
             result
         };
 
-        // Else branch — scope `let` bindings to the branch.
+        // Else branch - scope `let` bindings to the branch.
         {
             let builder = self.current_fn.as_mut().unwrap();
             builder.switch_to_block(else_block);
@@ -3016,7 +3016,7 @@ impl<'ctx> MirLowerer<'ctx> {
                                     .cloned()
                                     .unwrap_or_else(MirType::i32)
                             } else {
-                                scrutinee_ty.clone() // i32 fallback — same type as scrutinee
+                                scrutinee_ty.clone() // i32 fallback - same type as scrutinee
                             };
                             let inner_local =
                                 builder.create_named_local(name.name.clone(), inner_ty.clone());
@@ -3048,7 +3048,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 }
                 builder.goto(merge_block);
             } else {
-                // Wildcard / other — treat as default arm going to merge
+                // Wildcard / other - treat as default arm going to merge
                 let builder = self.current_fn.as_mut().unwrap();
                 builder.switch_to_block(none_block);
                 let body_val = self.lower_expr(&arm.body)?;
@@ -3443,7 +3443,7 @@ impl<'ctx> MirLowerer<'ctx> {
 
                 for (idx, pat) in patterns.iter().enumerate() {
                     if let ast::PatternKind::Ident { name, .. } = &pat.kind {
-                        // Skip wildcard `_` patterns — don't create a local
+                        // Skip wildcard `_` patterns - don't create a local
                         if name.name.as_ref() == "_" {
                             continue;
                         }
@@ -3840,7 +3840,7 @@ impl<'ctx> MirLowerer<'ctx> {
         let (elem_ty, arr_len) = match &iter_ty {
             MirType::Array(elem, len) => (elem.as_ref().clone(), *len),
             _ => {
-                // Not an array — try iterator protocol: call .next() in a loop.
+                // Not an array - try iterator protocol: call .next() in a loop.
                 // Requires the type to have a `next` method registered in impl_methods
                 // that returns an enum with variant 0 = Some(T) and variant 1 = None.
                 if let MirType::Struct(ref type_name) = iter_ty {
@@ -3851,7 +3851,7 @@ impl<'ctx> MirLowerer<'ctx> {
                         return self.lower_for_iterator(pattern, iter_val, &iter_ty, body);
                     }
                 }
-                // No iterator protocol — emit a no-op loop
+                // No iterator protocol - emit a no-op loop
                 let builder = self
                     .current_fn
                     .as_mut()
@@ -4096,7 +4096,7 @@ impl<'ctx> MirLowerer<'ctx> {
             None => return Ok(values::unit()),
         };
 
-        // Get return type of next() — should be an enum (Option-like)
+        // Get return type of next() - should be an enum (Option-like)
         let next_ret_ty = self
             .module
             .find_function(next_fn_name.as_ref())
@@ -4265,12 +4265,12 @@ impl<'ctx> MirLowerer<'ctx> {
                 }
             }
             ast::PatternKind::Ref { pattern: inner, .. } => {
-                // &x pattern — bind the inner pattern to the same local
+                // &x pattern - bind the inner pattern to the same local
                 // (we don't dereference in MIR for loop bindings)
                 self.bind_for_pattern(inner, value_local, value_ty)?;
             }
             ast::PatternKind::Wildcard => {
-                // _ — ignore the value
+                // _ - ignore the value
             }
             _ => {
                 // Fallback: try to extract an ident name from the pattern
@@ -4561,7 +4561,7 @@ impl<'ctx> MirLowerer<'ctx> {
         }
     }
 
-    /// Lower `[expr; count]` — array repeat expression.
+    /// Lower `[expr; count]` - array repeat expression.
     fn lower_array_repeat(
         &mut self,
         element: &ast::Expr,
@@ -4900,7 +4900,7 @@ impl<'ctx> MirLowerer<'ctx> {
             let data_ptr = builder.create_local(MirType::Ptr(Box::new(MirType::Void)));
             builder.make_ref(data_ptr, false, MirPlace::local(data_local));
 
-            // Store vtable reference — the C backend generates &vtable_instance
+            // Store vtable reference - the C backend generates &vtable_instance
             let vtable_name: Arc<str> =
                 Arc::from(format!("{}_{}_vtable_instance", type_name, trait_name));
             let vtable_struct_ty = MirType::Struct(Arc::from(format!("{}_vtable", trait_name)));

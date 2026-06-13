@@ -1,4 +1,4 @@
-// Test 105: GPU compute dispatch — execute QuantaLang shader on NVIDIA RTX 4090
+// Test 105: GPU compute dispatch - execute QuantaLang shader on NVIDIA RTX 4090
 // Full pipeline: QuantaLang source → SPIR-V → Vulkan → GPU execution
 
 fn fresnel(cos_theta: f64, f0: f64) -> f64 {

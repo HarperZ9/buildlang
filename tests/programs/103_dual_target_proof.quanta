@@ -1,4 +1,4 @@
-// Test 103: Dual-target proof — same PBR math runs on CPU AND compiles to GPU shader
+// Test 103: Dual-target proof - same PBR math runs on CPU AND compiles to GPU shader
 // This test verifies that QuantaLang can:
 // 1. Execute shader math on CPU (via C backend)
 // 2. Compile the same functions to SPIR-V (verified by spirv-val)

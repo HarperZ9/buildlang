@@ -1,4 +1,4 @@
-// Test 104: Vulkan GPU proof — load QuantaLang-compiled SPIR-V on real GPU
+// Test 104: Vulkan GPU proof - load QuantaLang-compiled SPIR-V on real GPU
 // This test:
 // 1. Initializes Vulkan (creates instance, picks GPU, creates device)
 // 2. Loads a SPIR-V shader compiled from QuantaLang
@@ -13,7 +13,7 @@ fn fresnel(cos_theta: f64, f0: f64) -> f64 {
 }
 
 fn main() {
-    // CPU math — same functions that compile to SPIR-V
+    // CPU math - same functions that compile to SPIR-V
     println!("=== CPU Results ===");
     println!("fresnel(0.5): {}", fresnel(0.5, 0.04));
     println!("fresnel(0.0): {}", fresnel(0.0, 0.04));

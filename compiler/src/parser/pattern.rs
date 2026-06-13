@@ -70,7 +70,7 @@ impl<'a> Parser<'a> {
                     Mutability::Immutable
                 };
                 // Use parse_pattern_primary (not parse_pattern) so that `|`
-                // isn't consumed as an or-pattern separator — critical for
+                // isn't consumed as an or-pattern separator - critical for
                 // closure params like `|&x|` where `|` delimits the param list.
                 let inner = self.parse_pattern_primary()?;
                 // For `&&x` (tokenized as AndAnd), wrap in double Ref

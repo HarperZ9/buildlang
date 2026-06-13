@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════════════════════
-// QUANTALANG DOCUMENTATION GENERATOR — HTML Renderer
+// QUANTALANG DOCUMENTATION GENERATOR - HTML Renderer
 // ═══════════════════════════════════════════════════════════════════════════════
 // Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
 // Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
@@ -167,7 +167,7 @@ impl HtmlRenderer {
                         module.name, module.name
                     ));
                     if let Some(brief) = module.doc.brief() {
-                        html.push_str(&format!(" — {}", self.escape_html(brief)));
+                        html.push_str(&format!(" - {}", self.escape_html(brief)));
                     }
                     html.push_str("</li>\n");
                 }
@@ -226,7 +226,7 @@ impl HtmlRenderer {
                         href, submodule.name
                     ));
                     if let Some(brief) = submodule.doc.brief() {
-                        html.push_str(&format!(" — {}", self.escape_html(brief)));
+                        html.push_str(&format!(" - {}", self.escape_html(brief)));
                     }
                     html.push_str("</li>\n");
                 }
@@ -293,7 +293,7 @@ impl HtmlRenderer {
                         struc.name, struc.name
                     ));
                     if let Some(brief) = struc.doc.brief() {
-                        html.push_str(&format!(" — {}", self.escape_html(brief)));
+                        html.push_str(&format!(" - {}", self.escape_html(brief)));
                     }
                     html.push_str("</li>\n");
                 }
@@ -312,7 +312,7 @@ impl HtmlRenderer {
                         enm.name, enm.name
                     ));
                     if let Some(brief) = enm.doc.brief() {
-                        html.push_str(&format!(" — {}", self.escape_html(brief)));
+                        html.push_str(&format!(" - {}", self.escape_html(brief)));
                     }
                     html.push_str("</li>\n");
                 }
@@ -331,7 +331,7 @@ impl HtmlRenderer {
                         trt.name, trt.name
                     ));
                     if let Some(brief) = trt.doc.brief() {
-                        html.push_str(&format!(" — {}", self.escape_html(brief)));
+                        html.push_str(&format!(" - {}", self.escape_html(brief)));
                     }
                     html.push_str("</li>\n");
                 }
@@ -350,7 +350,7 @@ impl HtmlRenderer {
                         func.name, func.name
                     ));
                     if let Some(brief) = func.doc.brief() {
-                        html.push_str(&format!(" — {}", self.escape_html(brief)));
+                        html.push_str(&format!(" - {}", self.escape_html(brief)));
                     }
                     html.push_str("</li>\n");
                 }
@@ -369,7 +369,7 @@ impl HtmlRenderer {
                         alias.name, alias.ty.to_string()
                     ));
                     if let Some(brief) = alias.doc.brief() {
-                        html.push_str(&format!(" — {}", self.escape_html(brief)));
+                        html.push_str(&format!(" - {}", self.escape_html(brief)));
                     }
                     html.push_str("</li>\n");
                 }
@@ -391,7 +391,7 @@ impl HtmlRenderer {
                         html.push_str(&format!(" = <code>{}</code>", self.escape_html(val)));
                     }
                     if let Some(brief) = cnst.doc.brief() {
-                        html.push_str(&format!(" — {}", self.escape_html(brief)));
+                        html.push_str(&format!(" - {}", self.escape_html(brief)));
                     }
                     html.push_str("</li>\n");
                 }

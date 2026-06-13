@@ -1,4 +1,4 @@
-// Option<T> — represents a value that may or may not exist
+// Option<T> - represents a value that may or may not exist
 enum Option {
     Some(i32),
     None,

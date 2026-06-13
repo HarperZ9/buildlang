@@ -1,4 +1,4 @@
-// Test 100: calibrate-pro port — Panel database lookup
+// Test 100: calibrate-pro port - Panel database lookup
 // Simulates the 58-panel characterization database from panels/database.py
 
 struct PanelProfile {

@@ -21,7 +21,7 @@
 //!
 //! Code generation operates on ASTs that have already been parsed, resolved,
 //! and type-checked. `.unwrap()` calls in codegen are assertions that the
-//! type checker's guarantees hold — an unwrap failure here indicates a
+//! type checker's guarantees hold - an unwrap failure here indicates a
 //! compiler bug in an earlier phase, not malformed user input.
 //!
 //! This is consistent with how `rustc`, `cranelift`, and other production

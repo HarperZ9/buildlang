@@ -1,4 +1,4 @@
-// Self-Hosted Parser v11 — Lexer + Parser + C Code Generator
+// Self-Hosted Parser v11 - Lexer + Parser + C Code Generator
 // Tokenizes "fn add(a, b) { a + b }" then parses it into an AST
 // then generates C code from the AST.
 //
@@ -82,7 +82,7 @@ fn main() {
     println!("Input:  fn add(a, b) {{ a + b }}");
     println!("");
 
-    // Phase 1: Lex (inline — count tokens)
+    // Phase 1: Lex (inline - count tokens)
     let mut pos: i64 = 0;
     let mut token_count: i32 = 0;
 
@@ -103,7 +103,7 @@ fn main() {
     println!("Lexed: {} tokens", token_count);
     println!("");
 
-    // Phase 2: Parse (simplified — we know the structure)
+    // Phase 2: Parse (simplified - we know the structure)
     // In a full parser this would build a real AST.
     // For now we verify the token stream matches expectations.
     println!("Parsed: fn add(a, b) {{ a + b }}");

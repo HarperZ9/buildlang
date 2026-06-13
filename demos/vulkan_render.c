@@ -1,5 +1,5 @@
 // ============================================================================
-// QuantaLang Visual Demo — Triangle on RTX 4090
+// QuantaLang Visual Demo - Triangle on RTX 4090
 // Copyright (c) 2024-2026 Zain Dana Harper. All Rights Reserved.
 // ============================================================================
 // Opens a Win32 window, creates a Vulkan swapchain, loads QuantaLang-compiled
@@ -310,7 +310,7 @@ int main(int argc, char** argv) {
         printf("Pipeline creation: %s (code %d)\n",
                pipe_result == VK_SUCCESS ? "OK" : "FAILED", pipe_result);
         printf("Note: QuantaLang-compiled shaders may need entry point adjustment.\n");
-        printf("The shaders loaded and validated — the pipeline requires matching I/O.\n");
+        printf("The shaders loaded and validated - the pipeline requires matching I/O.\n");
     } else {
         printf("Graphics pipeline: CREATED\n");
     }

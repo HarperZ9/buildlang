@@ -2,11 +2,11 @@
 
 **Goal: The language elite graphics programmers choose over C++ and HLSL.**
 
-**Identity: Mathematically precise systems programming with algebraic effects — write your engine and your shaders in one language.**
+**Identity: Mathematically precise systems programming with algebraic effects - write your engine and your shaders in one language.**
 
 ---
 
-## Current State (v0.1.1 — March 2026)
+## Current State (v0.1.1 - March 2026)
 
 ### Proven Working (48/48 end-to-end tests)
 - vec2/vec3/vec4 with constructors, arithmetic (+, -, *), field access (.x, .y, .z, .w)
@@ -23,9 +23,9 @@
 ### GPU Pipeline (A1-A5 Progress)
 - **A1 DONE:** SPIR-V produces valid vertex + fragment shaders (pass spirv-val)
 - **A2 DONE:** Vulkan FFI bindings, window creation
-- **A3 DONE:** Triangle on screen — QuantaLang-generated SPIR-V shaders on GPU
-- **A5 IN PROGRESS:** Uniform buffer vertex shader (MVP matrix from UBO) — SPIR-V validates
-- **A5 IN PROGRESS:** Textured fragment shader (texture sampling) — SPIR-V validates
+- **A3 DONE:** Triangle on screen - QuantaLang-generated SPIR-V shaders on GPU
+- **A5 IN PROGRESS:** Uniform buffer vertex shader (MVP matrix from UBO) - SPIR-V validates
+- **A5 IN PROGRESS:** Textured fragment shader (texture sampling) - SPIR-V validates
 - MIR types: Texture2D, Sampler, SampledImage, ShaderBinding, BindingKind
 - Shader stage attributes: #[vertex], #[fragment], #[compute] in lowerer
 - SPIR-V: OpTypeImage, OpTypeSampler, OpTypeSampledImage, OpImageSampleImplicitLod
@@ -39,7 +39,7 @@
 
 ---
 
-## Option A: Depth — GPU Execution
+## Option A: Depth - GPU Execution
 
 ### A1: SPIR-V Backend Produces Valid Shaders (Weeks 1-3)
 
@@ -87,7 +87,7 @@ Compile to two .spv files. Validate with spirv-val. This is the milestone.
 **Step A2.1: extern "C" block parsing**
 - Parse `extern "C" { fn vkCreateInstance(...) -> VkResult; }` syntax
 - The parser already handles the `extern` keyword (ast/item.rs has ExternBlock)
-- Wire it through to the lowerer — extern functions skip body lowering and emit as C `extern` declarations
+- Wire it through to the lowerer - extern functions skip body lowering and emit as C `extern` declarations
 
 **Step A2.2: Vulkan type definitions**
 ```quanta
@@ -117,7 +117,7 @@ Write the minimum Vulkan setup code in QuantaLang:
 - Create command buffers
 - Main render loop
 
-This is ~500-800 lines of QuantaLang code. It's boilerplate, but it's QuantaLang boilerplate — proving the language can express Vulkan API patterns.
+This is ~500-800 lines of QuantaLang code. It's boilerplate, but it's QuantaLang boilerplate - proving the language can express Vulkan API patterns.
 
 **Step A2.4: Window creation via GLFW FFI**
 ```quanta
@@ -136,7 +136,7 @@ extern "C" {
 
 ### A3: Render a Triangle (Weeks 5-7)
 
-**Goal:** The "Hello World" of graphics — a colored triangle on screen, with shader and engine code both in QuantaLang.
+**Goal:** The "Hello World" of graphics - a colored triangle on screen, with shader and engine code both in QuantaLang.
 
 **Step A3.1: Combine A1 + A2**
 - Compile vertex + fragment shaders to SPIR-V using `quantac --target=spirv`
@@ -145,7 +145,7 @@ extern "C" {
 
 **Step A3.2: The demo program**
 ```quanta
-// triangle.quanta — THE demo that proves QuantaLang is real
+// triangle.quanta - THE demo that proves QuantaLang is real
 
 #[vertex]
 fn vertex_shader(position: vec3, color: vec3) -> VertexOutput {
@@ -242,7 +242,7 @@ fn tonemap_pass(uv: vec2) -> vec4 {
 }
 ```
 
-The same `aces_tonemap` function from test 39 — now running on the GPU.
+The same `aces_tonemap` function from test 39 - now running on the GPU.
 
 **Step A4.3: Multi-pass rendering**
 - Pass 1: Render scene to HDR render target
@@ -286,7 +286,7 @@ fn vs_main(position: vec3, camera: CameraData) -> vec4 {
 
 ---
 
-## Option B: Breadth — Language Completeness
+## Option B: Breadth - Language Completeness
 
 ### B1: Type System Improvements (Weeks 11-13)
 
@@ -347,9 +347,9 @@ fn map<A, B, E>(items: Vec<A>, f: fn(A) ~ E -> B) ~ E -> Vec<B>
 ### B4: Package Ecosystem (Weeks 18-20)
 
 **Step B4.1: Wire package manager to CLI**
-- `quantac pkg init` — create Quanta.toml
-- `quantac pkg add json` — add dependency
-- `quantac pkg build` — build with dependencies
+- `quantac pkg init` - create Quanta.toml
+- `quantac pkg add json` - add dependency
+- `quantac pkg build` - build with dependencies
 
 **Step B4.2: Module system improvements**
 - Nested modules: `mod rendering::pipeline`
@@ -377,14 +377,14 @@ fn map<A, B, E>(items: Vec<A>, f: fn(A) ~ E -> B) ~ E -> Vec<B>
 
 ---
 
-## Option C: The Demo — Showcase Application
+## Option C: The Demo - Showcase Application
 
 ### C1: Spinning Cube Demo (Weeks 22-24)
 
 **Goal:** One program. One file. Opens a window. Renders a spinning, lit, textured cube. Shader and engine code both in QuantaLang. Effects control the rendering pipeline.
 
 ```quanta
-// cube_demo.quanta — The QuantaLang Graphics Showcase
+// cube_demo.quanta - The QuantaLang Graphics Showcase
 //
 // This single file contains:
 // - Vertex and fragment shaders (compile to SPIR-V for GPU)
@@ -448,7 +448,7 @@ This is the demo that changes minds. One file. Shader + engine. CPU-testable lig
 
 ### C2: ReShade-Style Post-Processing Framework (Weeks 24-28)
 
-**Goal:** Build a QuantaLang version of ReShade's post-processing framework — the kind of tool Pascal Gilcher works with daily.
+**Goal:** Build a QuantaLang version of ReShade's post-processing framework - the kind of tool Pascal Gilcher works with daily.
 
 - Multiple configurable post-processing effects
 - Each effect is a QuantaLang module with a fragment shader
@@ -485,7 +485,7 @@ Swap handlers for testing. Record effects for replay. Profile by timing handlers
 |-------|-------|-----------|
 | **A1** | 1-3 | SPIR-V backend produces valid shader pairs |
 | **A2** | 3-5 | Vulkan FFI bindings, window creation |
-| **A3** | 5-7 | **Triangle on screen** — both shader and engine in QuantaLang |
+| **A3** | 5-7 | **Triangle on screen** - both shader and engine in QuantaLang |
 | **A4** | 7-9 | Post-processing (ACES tone mapping on GPU) |
 | **A5** | 9-11 | Textures, uniform buffers, MVP transforms |
 | **B1** | 11-13 | Type system fixes, generic types |
@@ -493,7 +493,7 @@ Swap handlers for testing. Record effects for replay. Profile by timing handlers
 | **B3** | 15-18 | Multi-shot continuations, async/await |
 | **B4** | 18-20 | Package manager, module improvements, LSP |
 | **B5** | 20-22 | Error messages, warnings, diagnostics |
-| **C1** | 22-24 | **Spinning cube demo** — the showcase |
+| **C1** | 22-24 | **Spinning cube demo** - the showcase |
 | **C2** | 24-28 | ReShade-style post-processing framework |
 | **C3** | 28-36 | Minimal game engine |
 
@@ -505,7 +505,7 @@ Swap handlers for testing. Record effects for replay. Profile by timing handlers
 
 **For Boris Vorontsov:** "I can build ENB-level post-processing in QuantaLang with zero-overhead abstractions. The memory layout control is precise. The SPIR-V output is optimal. I can inject effects into any game's rendering pipeline."
 
-**For every game programmer:** "I write my engine and my shaders in the same language. I test rendering on CPU. I debug shader math with printf. The effect system replaces my dependency injection framework, my event system, and my command pattern — all at once."
+**For every game programmer:** "I write my engine and my shaders in the same language. I test rendering on CPU. I debug shader math with printf. The effect system replaces my dependency injection framework, my event system, and my command pattern - all at once."
 
 ---
 

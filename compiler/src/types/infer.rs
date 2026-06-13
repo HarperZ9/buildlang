@@ -98,7 +98,7 @@ fn stmt_mentions_var(stmt: &ast::Stmt, var_name: &str) -> bool {
         }
         ast::StmtKind::Item(_) => false,
         ast::StmtKind::Empty => false,
-        // Macros may reference any variable — conservatively assume they do.
+        // Macros may reference any variable - conservatively assume they do.
         // This prevents NLL from releasing borrows too early when a macro
         // like println!("{}", *r) uses a borrowed variable.
         ast::StmtKind::Macro { .. } => true,
@@ -148,7 +148,7 @@ fn expr_mentions_var(expr: &ast::Expr, var_name: &str) -> bool {
         ExprKind::Tuple(elems) | ExprKind::Array(elems) => {
             elems.iter().any(|e| expr_mentions_var(e, var_name))
         }
-        // Macro calls may reference any variable — conservatively assume yes
+        // Macro calls may reference any variable - conservatively assume yes
         ExprKind::Macro { .. } => true,
         _ => false,
     }
@@ -562,7 +562,7 @@ impl<'ctx> TypeInfer<'ctx> {
                         let name1 = self.ctx.lookup_type(*d1).map(|t| t.name.clone());
                         let name2 = self.ctx.lookup_type(*d2).map(|t| t.name.clone());
                         if name1.is_some() && name1 == name2 {
-                            return Ok(()); // Same type by name — allow it
+                            return Ok(()); // Same type by name - allow it
                         }
                     }
                 }
@@ -902,7 +902,7 @@ impl<'ctx> TypeInfer<'ctx> {
                 "PI" | "E" | "TAU"
             );
             if is_builtin {
-                // Return a generic function type — the lowerer handles the actual dispatch
+                // Return a generic function type - the lowerer handles the actual dispatch
                 Ty::error() // Silently accept; codegen resolves these
             } else {
                 self.error(
@@ -972,7 +972,7 @@ impl<'ctx> TypeInfer<'ctx> {
                     return Ty::fresh_var();
                 }
                 _ => {
-                    // Unknown std:: path — return fresh var
+                    // Unknown std:: path - return fresh var
                     return Ty::fresh_var();
                 }
             }
@@ -1347,9 +1347,9 @@ impl<'ctx> TypeInfer<'ctx> {
                 // Auto-deref for field access on references
                 self.infer_field_on_type(inner, field, span)
             }
-            // Inference variables — allow field access, return fresh var
+            // Inference variables - allow field access, return fresh var
             TyKind::Var(_) | TyKind::Infer(_) => Ty::fresh_var(),
-            // Never type — suppress cascading errors
+            // Never type - suppress cascading errors
             TyKind::Never => Ty::never(),
             TyKind::Error => Ty::error(),
             _ => {
@@ -1518,9 +1518,9 @@ impl<'ctx> TypeInfer<'ctx> {
                     Ty::fresh_var()
                 }
             }
-            // Inference variables — allow indexing, return fresh var
+            // Inference variables - allow indexing, return fresh var
             TyKind::Var(_) | TyKind::Infer(_) => Ty::fresh_var(),
-            // Never type — suppress cascading
+            // Never type - suppress cascading
             TyKind::Never => Ty::never(),
             TyKind::Error => Ty::error(),
             _ => {
@@ -1640,7 +1640,7 @@ impl<'ctx> TypeInfer<'ctx> {
                 ret_ty
             }
             TyKind::Error => Ty::error(),
-            // Unit type — cascading from a failed function lookup; suppress error
+            // Unit type - cascading from a failed function lookup; suppress error
             TyKind::Tuple(elems) if elems.is_empty() => Ty::fresh_var(),
             _ => {
                 self.error(TypeError::NotCallable { ty: func_ty }, span);
@@ -1848,7 +1848,7 @@ impl<'ctx> TypeInfer<'ctx> {
             return Ty::error();
         }
 
-        // Error type — silently accept any method call to prevent cascading errors
+        // Error type - silently accept any method call to prevent cascading errors
         if matches!(&receiver_ty.kind, TyKind::Error) {
             return Ty::error();
         }
@@ -1938,7 +1938,7 @@ impl<'ctx> TypeInfer<'ctx> {
             "parse_int" => return Ty::int(IntTy::I64),
             "parse_float" => return Ty::float(FloatTy::F64),
 
-            // Collection mutators — return unit
+            // Collection mutators - return unit
             "push" | "push_str" | "push_back" | "push_front" | "insert" | "extend"
             | "extend_from_slice" | "copy_from_slice" | "clear" | "truncate" | "sort"
             | "sort_by" | "sort_unstable" | "reverse" | "reserve" | "shrink_to_fit" | "retain"
@@ -1946,7 +1946,7 @@ impl<'ctx> TypeInfer<'ctx> {
                 return Ty::unit();
             }
 
-            // Collection accessors — return element or fresh var
+            // Collection accessors - return element or fresh var
             "pop" | "pop_front" | "pop_back" => return Ty::fresh_var(),
             "remove" | "swap_remove" => return Ty::fresh_var(),
             "get" | "get_mut" | "entry" | "first" | "last" | "front" | "back" => {
@@ -2133,7 +2133,7 @@ impl<'ctx> TypeInfer<'ctx> {
                 return Ty::int(IntTy::Usize);
             }
             "char_indices" => {
-                return Ty::fresh_var(); // Iterator — return fresh var for now
+                return Ty::fresh_var(); // Iterator - return fresh var for now
             }
             "components" | "to_path_buf" => {
                 return Ty::fresh_var(); // Path methods
@@ -2490,7 +2490,7 @@ impl<'ctx> TypeInfer<'ctx> {
                 Ty::unit()
             }
             ast::StmtKind::Item(item) => {
-                // Nested items (functions, structs, etc.) — register in local scope
+                // Nested items (functions, structs, etc.) - register in local scope
                 match &item.kind {
                     ast::ItemKind::Function(f) => {
                         // Register nested function as a local variable
@@ -2628,7 +2628,7 @@ impl<'ctx> TypeInfer<'ctx> {
     fn check_return_reference(&mut self, expr: &ast::Expr, ty: &Ty, span: Span) {
         let resolved = self.apply(ty);
         if !matches!(&resolved.kind, TyKind::Ref(_, _, _)) {
-            return; // Not returning a reference — nothing to check
+            return; // Not returning a reference - nothing to check
         }
 
         // If the expression is &local_var, that's always a bug
@@ -2760,8 +2760,8 @@ impl<'ctx> TypeInfer<'ctx> {
         let is_mut = matches!(&resolved.kind, TyKind::Ref(_, Mutability::Mutable, _));
 
         // Extract borrowed variable names from the initializer.
-        // Case 1: Direct reference — let r = &x;
-        // Case 2: Function call returning reference — let r = pick(&x, &y);
+        // Case 1: Direct reference - let r = &x;
+        // Case 2: Function call returning reference - let r = pick(&x, &y);
         let borrowed_vars: Vec<String> = match &init_expr.kind {
             ExprKind::Ref { expr: inner, .. } => {
                 if let ExprKind::Ident(ident) = &inner.kind {
@@ -2907,7 +2907,7 @@ impl<'ctx> TypeInfer<'ctx> {
 
         match &expr_ty.kind {
             TyKind::Ref(_, _, inner) | TyKind::Ptr(_, inner) => (**inner).clone(),
-            // Inference variables — allow deref, return fresh var
+            // Inference variables - allow deref, return fresh var
             TyKind::Var(_) | TyKind::Infer(_) => Ty::fresh_var(),
             TyKind::Error => Ty::error(),
             // Primitives: deref is an error (not a reference type).
@@ -3185,7 +3185,7 @@ impl<'ctx> TypeInfer<'ctx> {
                 } else {
                     // When a `&x` pattern is used but the type isn't Ref
                     // (e.g. iterators yielding owned values), bind the inner
-                    // pattern to the type directly — the `&` just dereferences.
+                    // pattern to the type directly - the `&` just dereferences.
                     self.bind_pattern(pattern, ty);
                 }
             }
@@ -3682,7 +3682,7 @@ mod tests {
     #[test]
     fn infer_var_unifies_like_regular_var() {
         // InferKind::Int variables bind to concrete types through unification,
-        // just like plain Var — they just carry fallback info.
+        // just like plain Var - they just carry fallback info.
         let infer_ty = Ty::new(TyKind::Infer(InferTy {
             var: TyVarId::fresh(),
             kind: InferKind::Int,
@@ -3735,7 +3735,7 @@ mod tests {
     fn if_else_branches_unify() {
         // if-else is a classic bidirectional case: both branches must
         // have the same type. We test this by building an if-else where
-        // both branches are bool literals — the result should be bool.
+        // both branches are bool literals - the result should be bool.
         let mut ctx = TypeContext::new();
         let mut infer = TypeInfer::new(&mut ctx);
 
@@ -4269,7 +4269,7 @@ mod tests {
             Ty::int(super::super::ty::IntTy::I32),
             vec![Arc::from("a"), Arc::from("b")],
         );
-        // Substitute with an empty substitution — lifetime params must survive
+        // Substitute with an empty substitution - lifetime params must survive
         let subst = Substitution::new();
         let result = fn_ty.substitute(&subst);
         if let TyKind::Fn(ref ft) = &result.kind {

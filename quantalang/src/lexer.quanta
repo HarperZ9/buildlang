@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════════════════════
-// QUANTALANG v2.0.0 — SYSTEMS PROGRAMMING EDITION
+// QUANTALANG v2.0.0 - SYSTEMS PROGRAMMING EDITION
 // "The Language That Speaks Directly to Silicon"
 // ═══════════════════════════════════════════════════════════════════════════════
 // Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
@@ -44,7 +44,7 @@ pub enum TokenKind {
     Lifetime(String),  // 'a, 'static
     
     // ─────────────────────────────────────────────────────────────────────────
-    // KEYWORDS — STANDARD
+    // KEYWORDS - STANDARD
     // ─────────────────────────────────────────────────────────────────────────
     // Declarations
     Let, Mut, Const, Static, Fn, Struct, Enum, Union, Trait, Impl, Type, Mod, Use, Pub,
@@ -60,7 +60,7 @@ pub enum TokenKind {
     True, False,
     
     // ─────────────────────────────────────────────────────────────────────────
-    // KEYWORDS — QUANTALANG SYSTEMS EXTENSIONS
+    // KEYWORDS - QUANTALANG SYSTEMS EXTENSIONS
     // ─────────────────────────────────────────────────────────────────────────
     // Linear types (resource tracking)
     Linear,         // linear struct DmaBuffer { ... }
@@ -117,7 +117,7 @@ pub enum TokenKind {
     Hertz,          // Frequency
     
     // ─────────────────────────────────────────────────────────────────────────
-    // OPERATORS — ARITHMETIC
+    // OPERATORS - ARITHMETIC
     // ─────────────────────────────────────────────────────────────────────────
     Plus,           // +
     Minus,          // -
@@ -127,7 +127,7 @@ pub enum TokenKind {
     Caret,          // ^
     
     // ─────────────────────────────────────────────────────────────────────────
-    // OPERATORS — BITWISE
+    // OPERATORS - BITWISE
     // ─────────────────────────────────────────────────────────────────────────
     Ampersand,      // &
     Pipe,           // |
@@ -136,14 +136,14 @@ pub enum TokenKind {
     Shr,            // >>
     
     // ─────────────────────────────────────────────────────────────────────────
-    // OPERATORS — LOGICAL
+    // OPERATORS - LOGICAL
     // ─────────────────────────────────────────────────────────────────────────
     AndAnd,         // &&
     PipePipe,       // ||
     Bang,           // !
     
     // ─────────────────────────────────────────────────────────────────────────
-    // OPERATORS — COMPARISON
+    // OPERATORS - COMPARISON
     // ─────────────────────────────────────────────────────────────────────────
     EqEq,           // ==
     Ne,             // !=
@@ -153,7 +153,7 @@ pub enum TokenKind {
     Ge,             // >=
     
     // ─────────────────────────────────────────────────────────────────────────
-    // OPERATORS — ASSIGNMENT
+    // OPERATORS - ASSIGNMENT
     // ─────────────────────────────────────────────────────────────────────────
     Eq,             // =
     PlusEq,         // +=
@@ -168,7 +168,7 @@ pub enum TokenKind {
     ShrEq,          // >>=
     
     // ─────────────────────────────────────────────────────────────────────────
-    // OPERATORS — SPECIAL
+    // OPERATORS - SPECIAL
     // ─────────────────────────────────────────────────────────────────────────
     Arrow,          // ->
     FatArrow,       // =>

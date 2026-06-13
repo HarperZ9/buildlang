@@ -1,4 +1,4 @@
-// QuantaLang Vulkan Graphics Demo — Textured Quad
+// QuantaLang Vulkan Graphics Demo - Textured Quad
 // Demonstrates the graphics pipeline API with vertex + fragment shaders
 // and push constants for animation.
 //
@@ -48,7 +48,7 @@ fn main() -> i32 {
         }
     }
 
-    // Clean shutdown — destroys pipeline, device, instance
+    // Clean shutdown - destroys pipeline, device, instance
     quanta_vk_shutdown();
     return 0;
 }

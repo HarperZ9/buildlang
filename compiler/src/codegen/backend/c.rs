@@ -28,7 +28,7 @@ pub struct CBackend {
     indent: usize,
     /// Temp variable counter.
     temp_counter: u32,
-    /// Function parameter types — indexed by function name, stores param types.
+    /// Function parameter types - indexed by function name, stores param types.
     fn_params: std::collections::HashMap<String, Vec<MirType>>,
     /// Return type of the current function being generated.
     current_ret_ty: MirType,
@@ -312,7 +312,7 @@ impl CBackend {
                         collect_type_deps(e, type_names, out);
                     }
                 }
-                // Vec/Map/Ptr are behind pointers — no ordering needed
+                // Vec/Map/Ptr are behind pointers - no ordering needed
                 _ => {}
             }
         }
@@ -368,7 +368,7 @@ impl CBackend {
                 }
             }
             if next_remaining.len() == remaining.len() {
-                // Circular dependency — emit remaining in original order
+                // Circular dependency - emit remaining in original order
                 for ty in &next_remaining {
                     self.emit_type_def(ty);
                 }
@@ -832,7 +832,7 @@ impl CBackend {
         }
 
         // Regular forward declarations for QuantaLang-defined functions.
-        // Skip declaration-only functions (no body) — they have no param info
+        // Skip declaration-only functions (no body) - they have no param info
         // and would generate incorrect `func(void)` forward declarations.
         self.output.push_str("// Forward declarations\n");
         for func in regular_fns {
@@ -1351,7 +1351,7 @@ impl CBackend {
                     operands,
                 } = value
                 {
-                    // Check if any operand is an array — if so, use memcpy
+                    // Check if any operand is an array - if so, use memcpy
                     // because C compound literals can't initialize array fields
                     // from array variables.
                     let has_array_operand = operands.iter().any(|op| {
@@ -1564,7 +1564,7 @@ impl CBackend {
                         let args_str: Vec<_> =
                             args.iter().map(|a| self.value_to_c(a, locals)).collect();
 
-                        // Find the vtable local — it's the local right after the data pointer
+                        // Find the vtable local - it's the local right after the data pointer
                         // that was assigned from a FieldAccess with field_name "vtable"
                         // For now, look for a local with void* type near the data pointer
                         let vtable_local_name = if args.len() > 0 {
@@ -1640,7 +1640,7 @@ impl CBackend {
                     "HashMap_new" => "quanta_hmap_new_str_f64".to_string(),
                     "HashSet_new" => "quanta_hset_new".to_string(),
                     "VecDeque_new" => "quanta_vdeque_new".to_string(),
-                    // println/print without ! — keep name, handle below
+                    // println/print without ! - keep name, handle below
                     _ => func_str,
                 };
 
@@ -1696,7 +1696,7 @@ impl CBackend {
                     return Ok(());
                 }
 
-                // Unit struct constructors: Stdin, Stdout, Stderr — emit zero-init.
+                // Unit struct constructors: Stdin, Stdout, Stderr - emit zero-init.
                 const UNIT_STRUCTS: &[(&str, &str)] = &[
                     ("Stdin", "io_Stdin"),
                     ("Stdout", "io_Stdout"),
@@ -2034,7 +2034,7 @@ impl CBackend {
                     _ => {}
                 }
                 // Escape user-defined function names that conflict with C
-                // reserved words or macros — but never escape runtime helpers
+                // reserved words or macros - but never escape runtime helpers
                 // (quanta_*), standard C math/stdlib functions, or other
                 // known builtins.  These are already correct as-is.
                 if Self::is_runtime_or_builtin_fn(name) {
@@ -2206,7 +2206,7 @@ impl CBackend {
                     }
                     AggregateKind::Variant(name, disc, variant_name) => {
                         if vals.is_empty() {
-                            // Unit variant — no data fields
+                            // Unit variant - no data fields
                             format!("({}){{ .tag = {} }}", name, disc)
                         } else {
                             format!(
@@ -2701,7 +2701,7 @@ impl CBackend {
     }
 
     /// Collect all LocalId values that are referenced in the function body.
-    /// Used for dead local elimination — locals not in this set can be skipped.
+    /// Used for dead local elimination - locals not in this set can be skipped.
     fn collect_used_locals(func: &MirFunction) -> std::collections::HashSet<LocalId> {
         use crate::codegen::ir::*;
         let mut used = std::collections::HashSet::new();

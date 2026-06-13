@@ -579,7 +579,7 @@ impl Arena {
             return self.alloc(size, align);
         }
 
-        // Safe: chunks is never empty — constructor and alloc both guarantee at least one chunk
+        // Safe: chunks is never empty - constructor and alloc both guarantee at least one chunk
         let ptr = self.chunks.last_mut().unwrap().as_mut_ptr();
         let result = unsafe { ptr.add(aligned_pos) };
         self.pos = aligned_pos + size;

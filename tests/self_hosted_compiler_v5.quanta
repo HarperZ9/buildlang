@@ -1,5 +1,5 @@
 // =============================================================================
-// Self-Hosted Compiler v5 — Parses and Compiles Functions
+// Self-Hosted Compiler v5 - Parses and Compiles Functions
 // =============================================================================
 // The parser now handles function definitions from tokens.
 // Source: "fn double(n){n+n} fn main(){let r=double(3);}"
@@ -96,7 +96,7 @@ fn tset(t:Toks,i:i32,k:i32,v:i32)->Toks{
 }
 
 // =============================================================================
-// LEXER — tokenizes "fn double(n){n+n}fn main(){let r=double(3);}"
+// LEXER - tokenizes "fn double(n){n+n}fn main(){let r=double(3);}"
 // =============================================================================
 fn is_d(c:i32)->bool{c>=48&&c<=57}
 fn is_a(c:i32)->bool{
@@ -183,7 +183,7 @@ fn lex_src()->Toks{
 }
 
 // =============================================================================
-// PARSER — reads tokens and emits C directly (1-pass compilation)
+// PARSER - reads tokens and emits C directly (1-pass compilation)
 // =============================================================================
 // For v5, we do single-pass: parse + emit simultaneously.
 // This avoids building a large AST and is how early C compilers worked.
@@ -205,7 +205,7 @@ fn parse_and_emit(toks:Toks){
         let kind=tk(toks,pos);
 
         if kind==20{
-            // FN keyword — parse function definition
+            // FN keyword - parse function definition
             // FN IDENT LPAREN params RPAREN LBRACE body RBRACE
             let fn_id=tv(toks,pos+1);
             let fn_nm=id_name(fn_id);
@@ -237,7 +237,7 @@ fn parse_and_emit(toks:Toks){
                 let bk=tk(toks,pos);
 
                 if bk==9{
-                    // RBRACE — end of function
+                    // RBRACE - end of function
                     println!("}}");
                     println!("");
                     pos=pos+1;
@@ -253,7 +253,7 @@ fn parse_and_emit(toks:Toks){
                         let expr_v=tv(toks,pos+3);
 
                         if expr_k==1{
-                            // Identifier — could be function call
+                            // Identifier - could be function call
                             let next=tk(toks,pos+4);
                             if next==6{
                                 // Function call: IDENT LPAREN arg RPAREN

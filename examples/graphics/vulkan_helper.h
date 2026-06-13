@@ -1,4 +1,4 @@
-// vulkan_helper.h — Minimal Vulkan setup for QuantaLang demos
+// vulkan_helper.h - Minimal Vulkan setup for QuantaLang demos
 // Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
 //
 // This handles the Vulkan boilerplate so QuantaLang code focuses on

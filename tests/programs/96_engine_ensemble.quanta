@@ -1,4 +1,4 @@
-// Test 96: quanta-engine port — Prediction ensemble with weighted voting
+// Test 96: quanta-engine port - Prediction ensemble with weighted voting
 // Ported from APPS/quanta-engine/quanta_engine/prediction_strategy.py
 
 struct Prediction {

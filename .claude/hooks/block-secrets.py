@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Block Secrets Hook — PreToolUse
+Block Secrets Hook - PreToolUse
 Prevents Claude from reading or editing sensitive files.
 Exit code 2 = block operation and tell Claude why.
 
@@ -10,7 +10,7 @@ import json
 import sys
 from pathlib import Path
 
-# Files that should NEVER be read or edited by Claude (basename match — anchored)
+# Files that should NEVER be read or edited by Claude (basename match - anchored)
 SENSITIVE_FILENAMES = {
     '.env',
     '.env.local',
@@ -30,7 +30,7 @@ SENSITIVE_FILENAMES = {
 }
 
 # Path components (between separators) that mark sensitive directories.
-# Anchored to path parts — NOT substring — so workspace Python modules whose
+# Anchored to path parts - NOT substring - so workspace Python modules whose
 # names happen to contain "private_key" / "secret_key" / "ssh" are not blocked,
 # while real OS credential dirs (~/.ssh, ~/.aws, ~/.gnupg, ~/.docker) still are.
 SENSITIVE_PATH_COMPONENTS = {
@@ -60,7 +60,7 @@ try:
         print(f"BLOCKED: Access to '{file_path}' denied. This is a sensitive file.", file=sys.stderr)
         sys.exit(2)
 
-    # Check path component matches (anchored, not substring — see SENSITIVE_PATH_COMPONENTS comment).
+    # Check path component matches (anchored, not substring - see SENSITIVE_PATH_COMPONENTS comment).
     for component in SENSITIVE_PATH_COMPONENTS:
         if component in path.parts:
             print(f"BLOCKED: Access to '{file_path}' denied. Path contains sensitive component '{component}'.", file=sys.stderr)

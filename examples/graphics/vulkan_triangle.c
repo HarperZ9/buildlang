@@ -1040,7 +1040,7 @@ static int check_shader_reload(void) {
 }
 
 static void reload_pipeline(void) {
-    printf("[HOT RELOAD] Shader change detected — rebuilding pipeline...\n");
+    printf("[HOT RELOAD] Shader change detected - rebuilding pipeline...\n");
     vkDeviceWaitIdle(g_device);
 
     vkDestroyPipeline(g_device, g_pipeline, NULL);
@@ -1069,7 +1069,7 @@ int main(void) {
     create_sync_objects();
 
     printf("\n[main] Entering render loop (press ESC or close window to exit)\n");
-    printf("[main] Shader hot reload ENABLED — edit .quanta files and recompile!\n");
+    printf("[main] Shader hot reload ENABLED - edit .quanta files and recompile!\n");
     printf("[main] Run: quantac watch . --target=spirv   (in another terminal)\n\n");
 
     /* Main message + render loop */

@@ -1,4 +1,4 @@
-// QuantaLang — Async as an Effect
+// QuantaLang - Async as an Effect
 // async/await is just syntax sugar for the Async effect.
 
 effect Async {

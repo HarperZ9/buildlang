@@ -1,4 +1,4 @@
-// Test 101: calibrate-pro port — Full sensorless calibration pipeline
+// Test 101: calibrate-pro port - Full sensorless calibration pipeline
 // Ties together: panel detection → color math → LUT generation → verification
 
 struct Lab { l: f64, a: f64, b: f64, }

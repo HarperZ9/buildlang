@@ -314,7 +314,7 @@ impl WasmBackend {
             MirType::Struct(_) => "i32",     // Structs are memory pointers
             MirType::Never => "i32",         // Never returns, but needs a type
             MirType::Vector(_, _) => "v128", // WASM SIMD 128-bit vector
-            // Opaque GPU types — represent as i32 pointer handles in WASM
+            // Opaque GPU types - represent as i32 pointer handles in WASM
             MirType::Texture2D(_) | MirType::Sampler | MirType::SampledImage(_) => "i32",
             MirType::TraitObject(_) => "i32", // wasm pointer
             MirType::Vec(_) => "i32",         // QuantaVecHandle is a pointer in wasm32
@@ -345,7 +345,7 @@ impl WasmBackend {
             MirType::Struct(_) => 4, // Placeholder
             MirType::Never => 0,
             MirType::Vector(elem, lanes) => self.type_size(elem) * lanes,
-            // Opaque GPU types — pointer-sized handles in wasm32
+            // Opaque GPU types - pointer-sized handles in wasm32
             MirType::Texture2D(_) | MirType::Sampler | MirType::SampledImage(_) => 4,
             MirType::TraitObject(_) => 8, // two i32 pointers: data ptr + vtable ptr
             MirType::Vec(_) => 4,         // wasm32 pointer

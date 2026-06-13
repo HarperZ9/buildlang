@@ -32,7 +32,7 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     client.start().catch((err) => {
-        // The language server isn't available yet — syntax highlighting
+        // The language server isn't available yet - syntax highlighting
         // still works without it. Log silently so users aren't alarmed.
         console.log(
             'QuantaLang language server not found. ' +

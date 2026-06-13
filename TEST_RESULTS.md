@@ -17,36 +17,36 @@ All programs at `tests/programs/01_hello.quanta` through `tests/programs/99_cali
 
 ## Sample Outputs
 
-### 01_hello — Basic output
+### 01_hello - Basic output
 ```
 Hello, World!
 ```
 
-### 06_recursion — Function recursion
+### 06_recursion - Function recursion
 ```
 5! = 120
 fib(10) = 55
 ```
 
-### 16_closures — First-class functions
+### 16_closures - First-class functions
 ```
 Result: 42
 Negated: -7
 Add ten: 15
 ```
 
-### 20_traits — Trait dispatch
+### 20_traits - Trait dispatch
 ```
 Circle area: 78.5397
 Rectangle area: 24
 ```
 
-### 27_effects — Algebraic effects
+### 27_effects - Algebraic effects
 ```
 Hello, Alice!
 ```
 
-### 35_vectors — Vector math
+### 35_vectors - Vector math
 ```
 sum: (5, 7, 9)
 dot: 32
@@ -54,14 +54,14 @@ cross: (-3, 6, -3)
 length of normalized: 1
 ```
 
-### 49_dynamic_dispatch — Vtable dispatch
+### 49_dynamic_dispatch - Vtable dispatch
 ```
 Circle area: 78.5397
 Rectangle area: 24
 Dynamic dispatch test complete
 ```
 
-### 68_hashmap — Hash map operations
+### 68_hashmap - Hash map operations
 ```
 len: 3
 get(1): 100
@@ -69,14 +69,14 @@ get(2): 200
 get(3): 300
 ```
 
-### 71_color_spaces — Domain-specific color science
+### 71_color_spaces - Domain-specific color science
 ```
 yellow: (1, 1, 0)
 white lum: 1
 linear(0.5): 0.214041
 ```
 
-### 78_delta_e — Color difference computation
+### 78_delta_e - Color difference computation
 ```
 identical: 0
 JND: 1
@@ -122,7 +122,7 @@ Programs test the full language feature set:
 | Version | Lines | What It Does | Output |
 |---------|-------|-------------|--------|
 | v1 | 310 | 3-pass pipeline (parse→typecheck→codegen) | Generates `int x = 3 + 4; int y = x * 2; printf("%d\n", y);` |
-| v2 | 340 | Functions + if/else + while | Generates `square()`, `abs_val()`, `sum_to()` — 3 complete C functions |
+| v2 | 340 | Functions + if/else + while | Generates `square()`, `abs_val()`, `sum_to()` - 3 complete C functions |
 | v3 | 370 | Character-by-character lexer | Tokenizes `fn add(a, b)` into 28 tokens (FN, IDENT, LPAREN...) |
 | v4 | 482 | Token-driven parser → AST | Parses `let x = 3 + 4;` into 8 AST nodes with BINOP/INT/LET |
 | v5 | 361 | Function definition parsing | Parses `fn double(n){n+n}` from token stream, emits C |
@@ -134,7 +134,7 @@ Programs test the full language feature set:
 |---------|-------|-------------|--------|
 | v7 | 382 | End-to-end source→C: raw text lexing + parsing + codegen | Generates `int add(int a, int b) { return (a + b); }` from source text |
 | v8 | 411 | Multi-char identifiers + multi-digit numbers | Generates `int area(int w, int h) { return (w * h); }` with `area(12, 25)` |
-| v9 | 371 | Dynamic string table — no hardcoded name lookup | Generates `int multiply(int left, int right) { return (left * right); }` with names from source buffer |
+| v9 | 371 | Dynamic string table - no hardcoded name lookup | Generates `int multiply(int left, int right) { return (left * right); }` with names from source buffer |
 
 v7-v9 originally had a systemic bug: while-loop exit tricks (`pos = slen + 1`) destroyed position state. Fixed by replacing with `break` statements. v9 additionally requires 64-bit compilation (x86-64 ABI) for correct large-struct passing.
 

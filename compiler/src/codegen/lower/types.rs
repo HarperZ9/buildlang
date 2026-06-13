@@ -121,7 +121,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 ty: inner,
                 effects: _,
             } => {
-                // `with` annotations are compile-time metadata — the runtime
+                // `with` annotations are compile-time metadata - the runtime
                 // type is the base type. Lower through to the inner type.
                 // Effects are preserved via extract_type_annotations() for shader output.
                 self.lower_type_from_ast(inner)
@@ -428,7 +428,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 }
                 _ => {
                     // For complex expressions, lower the argument and infer
-                    // from the result — but since we can't lower here without
+                    // from the result - but since we can't lower here without
                     // side effects, fall back to i32.
                     MirType::i32()
                 }
@@ -641,7 +641,7 @@ impl<'ctx> MirLowerer<'ctx> {
             let specialized =
                 Self::monomorphize_fndef_multi(&generic_fndef, &subst, mangled_name.clone());
 
-            // Save the current function context — lower_function will
+            // Save the current function context - lower_function will
             // overwrite current_fn / var_map for the specialization.
             let saved_fn = self.current_fn.take();
             let saved_vars = std::mem::take(&mut self.var_map);

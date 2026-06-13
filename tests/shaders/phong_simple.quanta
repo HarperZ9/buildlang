@@ -1,4 +1,4 @@
-// Simple Phong lighting shader — no branching, tests function calls in SPIR-V
+// Simple Phong lighting shader - no branching, tests function calls in SPIR-V
 
 fn compute_diffuse(normal_x: f64, normal_y: f64, normal_z: f64,
                    light_x: f64, light_y: f64, light_z: f64) -> f64 {

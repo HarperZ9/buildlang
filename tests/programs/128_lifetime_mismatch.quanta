@@ -1,4 +1,4 @@
-// Interprocedural Lifetime Analysis — lifetime mismatch detection.
+// Interprocedural Lifetime Analysis - lifetime mismatch detection.
 // fn bad<'a, 'b> declares return type &'a but returns y which has lifetime 'b.
 // The type checker should reject this with a LifetimeMismatch error.
 

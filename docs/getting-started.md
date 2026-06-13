@@ -192,7 +192,7 @@ Install the QuantaLang extension for:
 
 ## Example: Complete SSAO Shader
 
-See `demos/ssao.quanta` — 85 lines of QuantaLang that compile to a production ReShade SSAO effect with depth sampling, random kernel loop, occlusion computation, and adjustable uniforms.
+See `demos/ssao.quanta` - 85 lines of QuantaLang that compile to a production ReShade SSAO effect with depth sampling, random kernel loop, occlusion computation, and adjustable uniforms.
 
 ```bash
 quantac demos/ssao.quanta --target hlsl -o ssao.fx

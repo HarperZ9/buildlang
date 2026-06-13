@@ -1,5 +1,5 @@
 // Test 80: ICC profile generation basics
-// Port of icc_profile.py — generates ICC profile header data
+// Port of icc_profile.py - generates ICC profile header data
 
 // ICC profile header is 128 bytes
 // Key fields: size (4 bytes), signature 'acsp' (4 bytes), version, etc.

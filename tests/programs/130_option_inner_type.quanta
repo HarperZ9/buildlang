@@ -1,4 +1,4 @@
-// Option<T> inner type tracking — pattern bindings get correct types.
+// Option<T> inner type tracking - pattern bindings get correct types.
 // When matching Some(val) on an Option<T>, val should have type T,
 // not the fallback i32.
 

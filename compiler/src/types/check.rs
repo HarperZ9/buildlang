@@ -168,7 +168,7 @@ impl<'ctx> TypeChecker<'ctx> {
             }),
         });
 
-        // mat4 — registered as opaque (no user-accessible fields)
+        // mat4 - registered as opaque (no user-accessible fields)
         let def_id = self.ctx.fresh_def_id();
         self.ctx.register_type(TypeDef {
             def_id,
@@ -476,7 +476,7 @@ impl<'ctx> TypeChecker<'ctx> {
         let sig = self.lower_fn_sig(&f.generics, &f.sig);
         self.ctx.register_function(def_id, sig.clone());
 
-        // Add function to current scope — carry lifetime params for interprocedural analysis
+        // Add function to current scope - carry lifetime params for interprocedural analysis
         let param_tys: Vec<_> = sig.params.iter().map(|(_, ty)| ty.clone()).collect();
         let fn_ty = Ty::function_with_lifetimes(param_tys, sig.ret, sig.lifetime_params.clone());
         self.ctx.define_var(f.name.name.clone(), fn_ty);
@@ -930,7 +930,7 @@ impl<'ctx> TypeChecker<'ctx> {
                     _ => Arc::from("_"),
                 };
                 let ty = if name.as_ref() == "self" {
-                    // self parameter — use a fresh var since we don't need the exact type
+                    // self parameter - use a fresh var since we don't need the exact type
                     Ty::fresh_var()
                 } else {
                     self.lower_type(&p.ty)
@@ -1172,7 +1172,7 @@ impl<'ctx> TypeChecker<'ctx> {
             self.ctx.pop_scope();
 
             // Re-export pub items to parent scope (implicit `use mod::*`).
-            // This is the QuantaLang ecosystem convention — module contents
+            // This is the QuantaLang ecosystem convention - module contents
             // are accessible by bare name from the parent scope.
             //
             // IMPORTANT: For structs and enums, reuse the existing DefId from

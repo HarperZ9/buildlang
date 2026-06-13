@@ -1,6 +1,6 @@
 // Test 86: Trait method calls on type parameters
 // Verifies that fn foo<T: Trait>(x: T) can call x.method()
-// This was the REAL A1 blocker — method resolution through trait bounds.
+// This was the REAL A1 blocker - method resolution through trait bounds.
 
 trait Measurable {
     fn measure(self) -> f64;
@@ -31,17 +31,17 @@ impl Scalable for Circle {
     }
 }
 
-// Single trait bound — method with no extra args
+// Single trait bound - method with no extra args
 fn get_measurement<T: Measurable>(shape: T) -> f64 {
     shape.measure()
 }
 
-// Single trait bound — method WITH extra args (previously broken)
+// Single trait bound - method WITH extra args (previously broken)
 fn get_description<T: Measurable>(shape: T, prefix: i64) -> f64 {
     shape.describe(prefix)
 }
 
-// Multiple trait bounds — call methods from different traits on same T
+// Multiple trait bounds - call methods from different traits on same T
 fn measure_then_scale<T: Measurable + Scalable>(shape: T, factor: f64) -> f64 {
     let m = shape.measure();
     m * factor

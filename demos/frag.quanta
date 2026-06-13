@@ -1,4 +1,4 @@
-// QuantaLang Fragment Shader — compiled through AST→MIR→SPIR-V pipeline
+// QuantaLang Fragment Shader - compiled through AST→MIR→SPIR-V pipeline
 // Outputs a solid orange color
 
 #[fragment]

@@ -1,4 +1,4 @@
-// Test 87: quanta-color port — Delta-E metrics
+// Test 87: quanta-color port - Delta-E metrics
 // Ported from APPS/quanta-color/quanta_color/difference.py
 // CIE76, CIE94, and CIEDE2000
 

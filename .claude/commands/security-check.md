@@ -1,5 +1,5 @@
 ---
-description: Run security audit — cargo audit, unsafe blocks, secrets scan
+description: Run security audit - cargo audit, unsafe blocks, secrets scan
 allowed-tools: Bash(cargo:*, grep:*, find:*, git:*), Read, Grep, Glob
 ---
 
@@ -10,7 +10,7 @@ Run a comprehensive security audit of the QuantaLang project.
 ## 1. Dependency Audit
 ```bash
 # Check for known vulnerabilities in dependencies
-cargo audit 2>&1 || echo "cargo-audit not installed — run: cargo install cargo-audit"
+cargo audit 2>&1 || echo "cargo-audit not installed - run: cargo install cargo-audit"
 ```
 
 ## 2. Unsafe Code Audit

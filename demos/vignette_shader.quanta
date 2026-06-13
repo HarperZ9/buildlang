@@ -1,4 +1,4 @@
-// QuantaLang Complete ReShade Shader — Vignette Effect
+// QuantaLang Complete ReShade Shader - Vignette Effect
 // This is the FIRST complete pixel shader written entirely in QuantaLang.
 // No hand-editing needed. quantac → .fx → drop into ReShade.
 //

@@ -1,4 +1,4 @@
-// QuantaToneMap.fx — Complete ReShade Effect
+// QuantaToneMap.fx - Complete ReShade Effect
 // Generated helper functions by QuantaLang Compiler
 // ReShade integration by hand (until texture sampling intrinsics ship)
 //
@@ -12,7 +12,7 @@
 #include "ReShade.fxh"
 
 // ============================================================
-// Uniforms — adjustable in ReShade UI
+// Uniforms - adjustable in ReShade UI
 // ============================================================
 uniform float Exposure <
     ui_type = "slider";
@@ -91,7 +91,7 @@ float4 PS_ToneMap(float4 pos : SV_Position, float2 texcoord : TEXCOORD) : SV_Tar
 // ============================================================
 technique QuantaToneMap <
     ui_label = "Quanta Tone Map";
-    ui_tooltip = "ACES filmic tone mapping — compiled from QuantaLang";
+    ui_tooltip = "ACES filmic tone mapping - compiled from QuantaLang";
 > {
     pass {
         VertexShader = PostProcessVS;

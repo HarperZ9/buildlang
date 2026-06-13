@@ -1,4 +1,4 @@
-// Test 92: quanta-oracle port — AR(1) forecasting
+// Test 92: quanta-oracle port - AR(1) forecasting
 // Simplified ARIMA: estimate AR coefficient, then forecast
 // Ported from APPS/quanta-oracle/quanta_oracle/arima.py
 

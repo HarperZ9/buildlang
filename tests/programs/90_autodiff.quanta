@@ -1,4 +1,4 @@
-// Test 90: quanta-oracle port — Automatic Differentiation
+// Test 90: quanta-oracle port - Automatic Differentiation
 // Dual numbers with operator overloading for forward-mode AD
 // Ported from APPS/quanta-oracle/quanta_oracle/autodiff.py
 

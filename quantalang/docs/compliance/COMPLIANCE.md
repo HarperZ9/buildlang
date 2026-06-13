@@ -218,7 +218,7 @@ enum SafetyResult<T> {
 |----------|-----------|--------|-------|
 | ISO 26262 ASIL-D | 100% | 100% | Required |
 | DO-178C DAL-A | 100% | 100% | Required |
-| IEC 62304 Class C | 100% | Required | — |
+| IEC 62304 Class C | 100% | Required | - |
 | IEC 61508 SIL-4 | 100% | 100% | Recommended |
 
 ### 5.2 Static Analysis
