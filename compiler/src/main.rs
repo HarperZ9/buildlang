@@ -1431,8 +1431,14 @@ fn invoke_c_compiler(
             let exe_path = exe_file.to_string_lossy().replace('/', "\\");
             // Write bat file with MSVC env setup and compilation
             let bat_content = format!(
-                "set \"INCLUDE={}\"\r\nset \"LIB={}\"\r\nset \"PATH={};%PATH%\"\r\ncl.exe /nologo /W0 /std:c11 {} \"{}\" /Fe\"{}\" 1>&2\r\n",
-                inc, lib, bin, opt_flag, c_path, exe_path
+                "set \"INCLUDE={}\"\r\nset \"LIB={}\"\r\nset \"PATH={};%PATH%\"\r\ncl.exe /nologo /W0 /std:c11 {} \"{}\" /Fe\"{}\" {} 1>&2\r\n",
+                inc,
+                lib,
+                bin,
+                opt_flag,
+                c_path,
+                exe_path,
+                host_c_link_libraries(true).join(" ")
             );
             std::fs::write(&bat_path, &bat_content).map_err(|e| {
                 eprintln!("Failed to write build script: {}", e);
@@ -1456,6 +1462,7 @@ fn invoke_c_compiler(
             }
             cmd.arg("/nologo");
             cmd.arg("/W0");
+            cmd.args(host_c_link_libraries(true));
         }
     } else {
         // GCC / Clang / cc - POSIX-style flags
@@ -1468,10 +1475,7 @@ fn invoke_c_compiler(
         } else {
             cmd.arg("-g");
         }
-        // Link math library on non-Windows
-        if !cfg!(windows) {
-            cmd.arg("-lm");
-        }
+        cmd.args(host_c_link_libraries(false));
     }
 
     let output = cmd.output().map_err(|e| {
@@ -1501,6 +1505,19 @@ fn invoke_c_compiler(
             eprintln!("{}", stdout);
         }
         Err(1)
+    }
+}
+
+fn host_c_link_libraries(is_msvc: bool) -> &'static [&'static str] {
+    c_link_libraries(std::env::consts::OS, is_msvc)
+}
+
+fn c_link_libraries(target_os: &str, is_msvc: bool) -> &'static [&'static str] {
+    match (target_os, is_msvc) {
+        ("windows", true) => &["ws2_32.lib"],
+        ("windows", false) => &["-lws2_32"],
+        (_, false) => &["-lm"],
+        _ => &[],
     }
 }
 
@@ -3676,6 +3693,14 @@ mod tests {
     #[test]
     fn infers_rust_target_from_rs_extension() {
         assert_eq!(target_from_extension("rs"), Some(Target::Rust));
+    }
+
+    #[test]
+    fn c_link_libraries_cover_host_runtime_dependencies() {
+        assert_eq!(c_link_libraries("windows", false), &["-lws2_32"]);
+        assert_eq!(c_link_libraries("windows", true), &["ws2_32.lib"]);
+        assert_eq!(c_link_libraries("linux", false), &["-lm"]);
+        assert_eq!(c_link_libraries("macos", true), &[] as &[&str]);
     }
 
     #[test]
