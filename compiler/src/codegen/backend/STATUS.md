@@ -10,6 +10,11 @@ test so corpus path and expected-output drift is caught by `cargo test`;
 manifest contract, receipt consistency, and metadata tests keep the execution
 receipt aligned with the manifest.
 
+2026-06-13 C update: function-style `println("{}", value)` now lowers to C
+`printf` format specifiers instead of printing the literal format string. The
+current 8-program semantic corpus was run sequentially through `quantac run`
+and recorded in `semantic-corpus/receipts/c-execution-2026-06-13.json`.
+
 ## Hello-World Viability Assessment
 
 Each backend was evaluated against a simple hello-world-equivalent program:

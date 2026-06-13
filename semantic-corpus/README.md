@@ -12,6 +12,8 @@ extension into C/Rust/LLVM/WASM cross-backend receipts.
 `manifest.json` is part of the executable contract. Compiler tests validate
 its schema, unique program IDs, source paths, expected stdout, declared
 surfaces, and named Rust execution tests before trusting receipt metadata.
+The current receipt set includes Rust executable tests and a sequential C
+execution receipt for all 8 programs.
 
 ## Current Programs
 
