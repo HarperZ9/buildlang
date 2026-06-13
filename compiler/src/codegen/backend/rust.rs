@@ -517,18 +517,30 @@ impl RustBackend {
                 AggregateKind::Tuple => {
                     let vals = operands
                         .iter()
-                        .map(|op| self.value_to_rust(op, locals))
+                        .map(|op| self.value_to_owned_rust(op, locals))
                         .collect::<Vec<_>>();
                     match vals.len() {
                         0 => "()".to_string(),
-                        1 => format!("({},)", vals[0]),
-                        _ => format!("({})", vals.join(", ")),
+                        _ => {
+                            let tuple_name = Self::rust_type_name(&MirType::tuple_type_name(
+                                &operands
+                                    .iter()
+                                    .map(|op| self.type_of_value(op, locals))
+                                    .collect::<Vec<_>>(),
+                            ));
+                            let fields = vals
+                                .iter()
+                                .enumerate()
+                                .map(|(i, val)| format!("_{}: {}", i, val))
+                                .collect::<Vec<_>>();
+                            format!("{} {{ {} }}", tuple_name, fields.join(", "))
+                        }
                     }
                 }
                 AggregateKind::Struct(name) => {
                     let vals = operands
                         .iter()
-                        .map(|op| self.value_to_rust(op, locals))
+                        .map(|op| self.value_to_owned_rust(op, locals))
                         .collect::<Vec<_>>();
                     let type_name = Self::rust_type_name(name);
                     let fields = self.struct_fields.get(name.as_ref());
@@ -615,8 +627,13 @@ impl RustBackend {
                     format!("({}).clone()", access)
                 }
             }
-            MirRValue::Deref { ptr, .. } => {
-                format!("unsafe {{ *{} }}", self.value_to_rust(ptr, locals))
+            MirRValue::Deref { ptr, pointee_ty } => {
+                let ptr = self.value_to_rust(ptr, locals);
+                if Self::is_copy_like_type(pointee_ty) {
+                    format!("unsafe {{ *{} }}", ptr)
+                } else {
+                    format!("unsafe {{ (*{}).clone() }}", ptr)
+                }
             }
         })
     }
@@ -748,14 +765,8 @@ impl RustBackend {
             MirType::Tuple(elems) => {
                 if elems.is_empty() {
                     "()".to_string()
-                } else if elems.len() == 1 {
-                    format!("({},)", self.type_to_rust(&elems[0]))
                 } else {
-                    let elems = elems
-                        .iter()
-                        .map(|e| self.type_to_rust(e))
-                        .collect::<Vec<_>>();
-                    format!("({})", elems.join(", "))
+                    Self::rust_type_name(&MirType::tuple_type_name(elems))
                 }
             }
         }
@@ -787,9 +798,12 @@ impl RustBackend {
         }
     }
 
+    fn local_by_id(id: LocalId, locals: &[MirLocal]) -> Option<&MirLocal> {
+        locals.iter().find(|local| local.id == id)
+    }
+
     fn local_name(&self, id: LocalId, locals: &[MirLocal]) -> String {
-        locals
-            .get(id.0 as usize)
+        Self::local_by_id(id, locals)
             .and_then(|local| local.name.as_ref())
             .map(|name| {
                 let base = Self::rust_ident(name);
@@ -807,8 +821,7 @@ impl RustBackend {
 
     fn value_is_raw_pointer(&self, value: &MirValue, locals: &[MirLocal]) -> bool {
         match value {
-            MirValue::Local(id) => locals
-                .get(id.0 as usize)
+            MirValue::Local(id) => Self::local_by_id(*id, locals)
                 .map(|local| matches!(local.ty, MirType::Ptr(_)))
                 .unwrap_or(false),
             _ => false,
@@ -817,8 +830,7 @@ impl RustBackend {
 
     fn value_is_string_like(&self, value: &MirValue, locals: &[MirLocal]) -> bool {
         match value {
-            MirValue::Local(id) => locals
-                .get(id.0 as usize)
+            MirValue::Local(id) => Self::local_by_id(*id, locals)
                 .map(|local| Self::is_string_like_type(&local.ty))
                 .unwrap_or(false),
             _ => false,
@@ -834,10 +846,19 @@ impl RustBackend {
         }
     }
 
+    fn type_of_value(&self, value: &MirValue, locals: &[MirLocal]) -> MirType {
+        match value {
+            MirValue::Local(id) => Self::local_by_id(*id, locals)
+                .map(|local| local.ty.clone())
+                .unwrap_or(MirType::Void),
+            MirValue::Const(c) => Self::type_of_const(c),
+            MirValue::Global(_) | MirValue::Function(_) => MirType::Void,
+        }
+    }
+
     fn value_is_copy_like(&self, value: &MirValue, locals: &[MirLocal]) -> bool {
         match value {
-            MirValue::Local(id) => locals
-                .get(id.0 as usize)
+            MirValue::Local(id) => Self::local_by_id(*id, locals)
                 .map(|local| Self::is_copy_like_type(&local.ty))
                 .unwrap_or(true),
             MirValue::Const(c) => Self::const_is_copy_like(c),
@@ -864,6 +885,23 @@ impl RustBackend {
             | MirConst::Unit => true,
             MirConst::Zeroed(ty) | MirConst::Undef(ty) => Self::is_copy_like_type(ty),
             MirConst::Struct(_, _) => false,
+        }
+    }
+
+    fn type_of_const(c: &MirConst) -> MirType {
+        match c {
+            MirConst::Bool(_) => MirType::Bool,
+            MirConst::Int(_, ty)
+            | MirConst::Uint(_, ty)
+            | MirConst::Float(_, ty)
+            | MirConst::Null(ty)
+            | MirConst::Zeroed(ty)
+            | MirConst::Undef(ty) => ty.clone(),
+            MirConst::Str(_) | MirConst::ByteStr(_) => {
+                MirType::Ptr(Box::new(MirType::Int(IntSize::I8, true)))
+            }
+            MirConst::Unit => MirType::Void,
+            MirConst::Struct(name, _) => MirType::Struct(name.clone()),
         }
     }
 
@@ -1240,6 +1278,47 @@ fn main() {
     }
 
     #[test]
+    fn generated_rust_compiles_for_reused_non_copy_struct_aggregate_field() {
+        let source = r#"
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+struct Pair {
+    left: Point,
+    right: Point,
+}
+
+fn main() {
+    let p = Point { x: 3, y: 4 };
+    let pair = Pair { left: p, right: p };
+    println("{}", pair.left.x + pair.right.y);
+}
+"#;
+        let rust = compile_quanta_to_rust(source);
+        assert_rustc_metadata_ok("reused_non_copy_struct_aggregate_field", &rust);
+    }
+
+    #[test]
+    fn generated_rust_compiles_for_reused_non_copy_tuple_aggregate_field() {
+        let source = r#"
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+fn main() {
+    let p = Point { x: 3, y: 4 };
+    let pair = (p, p);
+    println("{}", pair.0.x + pair.1.y);
+}
+"#;
+        let rust = compile_quanta_to_rust(source);
+        assert_rustc_metadata_ok("reused_non_copy_tuple_aggregate_field", &rust);
+    }
+
+    #[test]
     fn generated_rust_compiles_for_reused_non_copy_struct_field_access() {
         let source = r#"
 struct Point {
@@ -1261,6 +1340,26 @@ fn main() {
 "#;
         let rust = compile_quanta_to_rust(source);
         assert_rustc_metadata_ok("reused_non_copy_struct_field_access", &rust);
+    }
+
+    #[test]
+    fn generated_rust_compiles_for_reused_non_copy_deref() {
+        let source = r#"
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+fn main() {
+    let p = Point { x: 3, y: 4 };
+    let rp: &Point = &p;
+    let a = *rp;
+    let b = *rp;
+    println("{}", a.x + b.y);
+}
+"#;
+        let rust = compile_quanta_to_rust(source);
+        assert_rustc_metadata_ok("reused_non_copy_deref", &rust);
     }
 
     #[test]
