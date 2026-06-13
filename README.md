@@ -5,9 +5,13 @@
 [![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/HarperZ9.quantalang?label=VS%20Code)](https://marketplace.visualstudio.com/items?itemName=HarperZ9.quantalang)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**The Effects Language** - a compiled language for graphics, shaders, and systems programming.
+**The Effects Language** - a Rust-built compiler for typed effects, systems
+experiments, and shader-oriented code generation.
 
-QuantaLang compiles `.quanta` source files to **C** (primary target), **HLSL** and **GLSL** (shader output), with experimental backends for SPIR-V, LLVM IR, WebAssembly, Rust source, x86-64, and ARM64.
+QuantaLang compiles `.quanta` source files to **C** as the primary verified
+execution path, emits **HLSL** and **GLSL** for shader work, and keeps SPIR-V,
+LLVM IR, WebAssembly, Rust source, x86-64, and ARM64 backends labeled as
+experimental research surfaces.
 
 **Landing page:** [harperz9.github.io/quantalang](https://harperz9.github.io/quantalang/)
 
@@ -137,11 +141,26 @@ Use `--target` to select a code generation backend:
 | x86-64   | `--target x86-64`             | `.o`    | Experimental |
 | ARM64    | `--target arm64`              | `.o`    | Experimental |
 
-The Rust target emits source for a subset of MIR and is validated with `rustc --emit=metadata` plus a small executable stdout smoke corpus. The semantic corpus manifest now drives a Rust execution test, so corpus paths, expected stdout, generated Rust, `rustc`, and executable behavior are checked together; manifest contract, receipt consistency, and metadata tests keep the corpus and Rust execution receipt aligned. The C backend now has a matching semantic-corpus execution receipt for the same 8 programs, and `quantac corpus verify` checks the manifest, C/Rust receipts, and real C-backend stdout from `quantac run`. `quantac corpus verify --root <DIR>` points verification at a copied corpus, while `--write` rewrites the C execution receipt after C stdout passes and Rust receipt alignment is still clean. It currently covers scalar functions, locals, arithmetic, printing, simple branching, basic structs/arrays/references, tuple ownership reuse, struct aggregate reuse, field assignment reuse, nested field reuse, and dereference reuse; unsupported MIR returns a codegen error rather than silent fallback.
+The Rust target emits source for a subset of MIR and is validated with
+`rustc --emit=metadata` plus a small executable stdout smoke corpus. The
+semantic corpus manifest now drives a Rust execution test, so corpus paths,
+expected stdout, generated Rust, `rustc`, and executable behavior are checked
+together; manifest contract, receipt consistency, and metadata tests keep the
+corpus and Rust execution receipt aligned. The C backend now has a matching
+semantic-corpus execution receipt for the same 8 programs, and
+`quantac corpus verify` checks the manifest, C/Rust receipts, and real
+C-backend stdout from `quantac run`. `quantac corpus verify --root <DIR>`
+points verification at a copied corpus, while `--write` rewrites the C
+execution receipt after C stdout passes and Rust receipt alignment is still
+clean. It currently covers scalar functions, locals, arithmetic, printing,
+simple branching, basic structs/arrays/references, tuple ownership reuse,
+struct aggregate reuse, field assignment reuse, nested field reuse, and
+dereference reuse; unsupported MIR returns a codegen error rather than silent
+fallback.
 
 ## Status
 
-**132/132 test programs compile.** Full pipeline: `.quanta` → C99 → MSVC → native x86-64 executable. See [TEST_RESULTS.md](TEST_RESULTS.md) for outputs.
+**132/132 test programs compile.** Full pipeline: `.quanta` -> C99 -> MSVC -> native x86-64 executable. See [TEST_RESULTS.md](TEST_RESULTS.md) for outputs.
 
 Programs cover: functions, recursion, structs, enums, closures, generics, traits, dynamic dispatch, algebraic effects, pattern matching, iterators, hashmaps, vector math, color science, and self-hosted compiler components.
 
@@ -150,7 +169,7 @@ The C backend is the primary target. HLSL/GLSL produce clean shader output. SPIR
 ## Design
 
 See [DESIGN.md](DESIGN.md) for full architectural documentation including:
-- Pipeline overview (lexer → parser → types → MIR → backends)
+- Pipeline overview (lexer -> parser -> types -> MIR -> backends)
 - Type system rationale: why bidirectional inference, why Pratt parsing, why setjmp/longjmp for effects
 - MIR design: SSA with basic blocks, statement/terminator model
 - Known limitations: borrow/lifetime checking is still early, Rust-target validation is subset-only, eager monomorphization, one-shot effects
