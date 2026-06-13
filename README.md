@@ -29,6 +29,16 @@ cargo build --release
 
 Add `target/release/quantac` (or `target\release\quantac.exe` on Windows) to your PATH.
 
+Verify your local toolchain:
+
+```bash
+quantac doctor
+```
+
+`doctor` reports the installed compiler version, C-backend readiness, stdlib and
+local registry discovery, optional backend tools, and the current backend
+maturity table.
+
 ## Editor support
 
 Install the **[QuantaLang VS Code extension](https://marketplace.visualstudio.com/items?itemName=HarperZ9.quantalang)** - syntax highlighting, brackets, comment toggles. Grammar source: [HarperZ9/quantalang-tmLanguage](https://github.com/HarperZ9/quantalang-tmLanguage).
@@ -99,6 +109,7 @@ quantac vignette.quanta --target glsl -o vignette.glsl
 | `quantac check` | Type-check a file                    |
 | `quantac build` | Build a project                      |
 | `quantac run`   | Compile and run a `.quanta` file     |
+| `quantac doctor` | Diagnose local toolchain readiness  |
 
 ### Backend Selection
 
@@ -139,10 +150,11 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **CI**: clippy (correctness) + rustfmt + `cargo test` on Linux and Windows
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 646 passing, 0 failing, 11 ignored in local `cargo test --manifest-path compiler/Cargo.toml --quiet` on 2026-06-13
+- **Tests**: 648 passing, 0 failing, 11 ignored in local `cargo test --manifest-path compiler/Cargo.toml --quiet` on 2026-06-13
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
+  - CLI: binary-level smoke tests cover help output and `quantac doctor`
   - Codegen: tests across 9 backends, including C formatted-print lowering, Rust source emission, Rust executable smoke checks over the semantic corpus, and semantic-corpus manifest contract/receipt consistency/metadata guards (C backend has 24 end-to-end output verification tests)
 
 ## License
