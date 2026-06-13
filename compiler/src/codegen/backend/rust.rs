@@ -1117,7 +1117,13 @@ mod tests {
 
     #[derive(serde::Deserialize)]
     struct RustExecutionReceipt {
+        receipt_id: String,
+        backend: String,
+        evidence_class: String,
         result: RustExecutionReceiptResult,
+        manifest_execution_test: String,
+        receipt_consistency_test: String,
+        validator_chain: Vec<String>,
         programs: Vec<RustExecutionReceiptProgram>,
     }
 
@@ -1547,6 +1553,34 @@ fn main() {
         assert_eq!(receipt.result.failed, 0);
         assert_eq!(receipt.result.ignored, 0);
         assert_eq!(receipt.result.passed, manifest.programs.len() + 1);
+    }
+
+    #[test]
+    fn semantic_corpus_receipt_records_validator_metadata() {
+        let receipt = load_rust_execution_receipt();
+
+        assert_eq!(receipt.receipt_id, "rust-execution-2026-06-13");
+        assert_eq!(receipt.backend, "rust");
+        assert_eq!(receipt.evidence_class, "generated-artifact-execution");
+        assert_eq!(
+            receipt.manifest_execution_test,
+            "semantic_corpus_manifest_programs_run_on_rust_backend"
+        );
+        assert_eq!(
+            receipt.receipt_consistency_test,
+            "semantic_corpus_receipt_matches_manifest"
+        );
+        assert_eq!(
+            receipt.validator_chain,
+            vec![
+                "QuantaLang parser",
+                "QuantaLang type checker",
+                "MIR lowerer",
+                "Rust backend",
+                "rustc executable build",
+                "stdout assertion",
+            ]
+        );
     }
 
     #[test]
