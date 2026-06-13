@@ -21,6 +21,12 @@ cargo build --release
 
 The binary is at `compiler/target/release/quantac` (or `quantac.exe` on Windows). Add it to your PATH.
 
+Check the local compiler and backend readiness:
+
+```bash
+quantac doctor
+```
+
 ---
 
 ## Your First Program
@@ -36,21 +42,15 @@ fn main() {
 Compile and run:
 
 ```bash
-# Compile to C, then to native executable
-quantac build hello.quanta
-
-# Or compile to C source only
-quantac hello.quanta -o hello.c
-gcc hello.c -o hello -lm
-./hello
+quantac run hello.quanta
 ```
 
-On Windows with MSVC:
+The repository includes the same flow as tested examples:
 
 ```bash
-quantac hello.quanta -o hello.c
-cl.exe hello.c
-hello.exe
+quantac run examples/quickstart/hello.quanta
+quantac run examples/quickstart/ledger.quanta
+quantac run examples/quickstart/effects_greeting.quanta
 ```
 
 ---
@@ -78,7 +78,7 @@ fn main(color: vec3) -> vec4 {
 Compile to GPU (Vulkan SPIR-V):
 
 ```bash
-quantac shader.quanta -o shader.spv
+quantac shader.quanta --target spirv -o shader.spv
 ```
 
 Compile to CPU (C source for testing):
@@ -88,6 +88,12 @@ quantac shader.quanta -o shader.c
 ```
 
 Same file. Both targets. The `aces_tonemap` function is identical on CPU and GPU -- test on CPU, deploy to GPU.
+
+For a tested HLSL shader quickstart:
+
+```bash
+quantac examples/quickstart/vignette_shader.quanta --target hlsl -o vignette_shader.hlsl
+```
 
 ---
 
