@@ -608,10 +608,10 @@ impl<'a> Parser<'a> {
 
             // Check for explicit type annotation: `self: &Self`, `self: Self`, etc.
             let ty = if self.eat(&TokenKind::Colon) {
-                // Explicit self type — parse the type
+                // Explicit self type - parse the type
                 self.parse_type()?
             } else {
-                // Implicit self type — default to Self
+                // Implicit self type - default to Self
                 let self_type_path = Path {
                     segments: vec![PathSegment {
                         ident: Ident::new("Self", self_span),
@@ -1190,7 +1190,7 @@ impl<'a> Parser<'a> {
     ///
     /// This is a file-level module declaration used by .quanta ecosystem files.
     /// It declares the module path for the current file. Unlike `mod`, it does
-    /// not have a body or require a semicolon — the rest of the file IS the body.
+    /// not have a body or require a semicolon - the rest of the file IS the body.
     fn parse_module_decl(&mut self, is_unsafe: bool) -> ParseResult<ModDef> {
         self.expect_keyword(Keyword::Module)?;
 

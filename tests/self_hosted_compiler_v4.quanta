@@ -1,5 +1,5 @@
 // =============================================================================
-// Self-Hosted Compiler v4 — Token-Driven Parser
+// Self-Hosted Compiler v4 - Token-Driven Parser
 // =============================================================================
 // The first version where the parser READS tokens from the lexer output
 // and builds the AST dynamically. Previous versions hardcoded the AST.
@@ -159,7 +159,7 @@ fn as_n(a:AST,i:i32,k:i32,v:i32,l:i32,r:i32)->AST{
 }
 
 // =============================================================================
-// LEXER — tokenizes "let x = 3 + 4; let y = x * 2;"
+// LEXER - tokenizes "let x = 3 + 4; let y = x * 2;"
 // =============================================================================
 fn is_d(c:i32)->bool{c>=48&&c<=57}
 fn is_a(c:i32)->bool{if c>=97&&c<=122{true}else{if c>=65&&c<=90{true}else{c==95}}}
@@ -241,7 +241,7 @@ fn lex() -> Toks {
 }
 
 // =============================================================================
-// PARSER — reads tokens and builds AST
+// PARSER - reads tokens and builds AST
 // =============================================================================
 // Parser state: current token position
 struct Parser {
@@ -337,7 +337,7 @@ fn parse_program(toks: Toks) -> AST {
             }
         } else {
             if kind == 13 {
-                pos = toks.count; // EOF — stop
+                pos = toks.count; // EOF - stop
             } else {
                 pos = pos + 1; // skip unknown
             }
@@ -347,7 +347,7 @@ fn parse_program(toks: Toks) -> AST {
 }
 
 // =============================================================================
-// C CODE GENERATOR — reads AST and emits C
+// C CODE GENERATOR - reads AST and emits C
 // =============================================================================
 fn var_nm(i:i32)->str{if i==0{"x"}else{if i==1{"y"}else{"z"}}}
 fn op_ch(c:i32)->str{if c==43{"+"}else{if c==45{"-"}else{if c==42{"*"}else{"/"}}}}

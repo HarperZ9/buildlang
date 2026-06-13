@@ -1,4 +1,4 @@
-// Test 97: quanta-engine port — Adaptive feedback loop
+// Test 97: quanta-engine port - Adaptive feedback loop
 // Ported from APPS/quanta-engine/quanta_engine/performance_tracker.py
 
 struct PredictionRecord {

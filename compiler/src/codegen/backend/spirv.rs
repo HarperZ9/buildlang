@@ -602,7 +602,7 @@ pub struct SpirvBackend {
     /// Shader input variable IDs indexed by parameter position.
     /// Used to map parameter locals to Input OpVariable IDs.
     shader_input_vars: Vec<u32>,
-    /// Locals that are direct values (not pointers) — don't OpLoad from them.
+    /// Locals that are direct values (not pointers) - don't OpLoad from them.
     /// This includes non-entry-point function parameters (OpFunctionParameter results).
     value_locals: std::collections::HashSet<LocalId>,
 
@@ -1851,7 +1851,7 @@ impl SpirvBackend {
         };
         let ret_ty_id = self.get_type_id(&effective_ret);
 
-        // Generate function type — cache to avoid SPIR-V duplicate type errors
+        // Generate function type - cache to avoid SPIR-V duplicate type errors
         let func_type_key = if is_shader_entry {
             format!("fn_type:void()")
         } else {
@@ -2211,7 +2211,7 @@ impl SpirvBackend {
                 field_index,
                 field_ty,
             } => {
-                // Extract a field from an enum variant — treat as composite extract
+                // Extract a field from an enum variant - treat as composite extract
                 let base_id = self.gen_value(base, func)?;
                 let field_ty_id = self.get_type_id(field_ty);
                 // Skip tag (index 0), data starts at index 1, then field_index within data
@@ -2248,7 +2248,7 @@ impl SpirvBackend {
                 Ok(result_id)
             }
             MirRValue::Ref { place, .. } | MirRValue::AddressOf { place, .. } => {
-                // In SPIR-V, references are pointers — for function-local values,
+                // In SPIR-V, references are pointers - for function-local values,
                 // the variable already has a pointer. Return its ID directly.
                 if let Some(&ptr_id) = self.local_ids.get(&place.local) {
                     return Ok(ptr_id);
@@ -2267,7 +2267,7 @@ impl SpirvBackend {
                 Ok(self.emit_composite_construct(arr_ty_id, &ids))
             }
             MirRValue::NullaryOp(_op, ty) => {
-                // Operations without operands — typically sizeof or alignof
+                // Operations without operands - typically sizeof or alignof
                 let _ty_id = self.get_type_id(ty);
                 let _result_id = self.alloc_id();
                 // Return zero constant of the appropriate type
@@ -2282,7 +2282,7 @@ impl SpirvBackend {
                 Ok(result_id)
             }
             _ => {
-                // Truly unknown operations — return zero as safe fallback
+                // Truly unknown operations - return zero as safe fallback
                 let zero = self.get_const_id(&MirConst::Int(0, MirType::i32()));
                 Ok(zero)
             }
@@ -2312,7 +2312,7 @@ impl SpirvBackend {
                     .get(id)
                     .ok_or_else(|| CodegenError::Internal(format!("Unknown local: {:?}", id)))?;
 
-                // Value locals (function parameters) are direct values — no OpLoad needed.
+                // Value locals (function parameters) are direct values - no OpLoad needed.
                 if self.value_locals.contains(id) {
                     return Ok(val_id);
                 }
@@ -2335,11 +2335,11 @@ impl SpirvBackend {
                 Ok(zero)
             }
             MirValue::Function(name) => {
-                // Function reference — look up in pre-allocated func_ids
+                // Function reference - look up in pre-allocated func_ids
                 if let Some(&id) = self.func_ids.get(name) {
                     Ok(id)
                 } else {
-                    // Function not found — might be a mangled or runtime name
+                    // Function not found - might be a mangled or runtime name
                     Err(CodegenError::Internal(format!(
                         "SPIR-V: function '{}' not found in func_ids. Available: {:?}",
                         name,
@@ -2392,7 +2392,7 @@ impl SpirvBackend {
                                     target: Some(target),
                                     ..
                                 }) => {
-                                    // Function call with continuation — follow to target
+                                    // Function call with continuation - follow to target
                                     if *target == block.id {
                                         found_loop = true;
                                         break;
@@ -2441,7 +2441,7 @@ impl SpirvBackend {
                                 match block.terminator.as_ref() {
                                     Some(MirTerminator::Goto(target)) => return Some(*target),
                                     Some(MirTerminator::If { else_block: eb, .. }) => {
-                                        // Nested if — follow to else branch's successor
+                                        // Nested if - follow to else branch's successor
                                         current = *eb;
                                     }
                                     Some(MirTerminator::Return(_)) => return None,
@@ -2546,7 +2546,7 @@ impl SpirvBackend {
                 };
                 let ret_ty_id = self.get_type_id(&ret_ty);
 
-                // Check if callee is a GLSL.std.450 builtin — emit OpExtInst instead of OpFunctionCall
+                // Check if callee is a GLSL.std.450 builtin - emit OpExtInst instead of OpFunctionCall
                 let callee_name = match callee {
                     MirValue::Function(name) | MirValue::Global(name) => Some(name.as_ref()),
                     _ => None,
@@ -2610,7 +2610,7 @@ impl SpirvBackend {
                                 }
                             }
                         } else if num_inputs < self.io_var_ids.len() {
-                            // Single output variable — store directly
+                            // Single output variable - store directly
                             let output_var = self.io_var_ids[num_inputs];
                             self.emit(SpvOp::OpStore, &[output_var, val_id]);
                         }
@@ -3889,8 +3889,8 @@ impl SpirvBackend {
         let main_fn = self.alloc_id(); // 6
 
         // Image/sampler types
-        let image_ty = self.alloc_id(); // 7 — OpTypeImage (float, 2D)
-        let sampled_img_ty = self.alloc_id(); // 8 — OpTypeSampledImage
+        let image_ty = self.alloc_id(); // 7 - OpTypeImage (float, 2D)
+        let sampled_img_ty = self.alloc_id(); // 8 - OpTypeSampledImage
         let sampler_ptr_ty = self.alloc_id(); // 9
 
         // Input/output variables
@@ -4331,7 +4331,7 @@ impl SpirvBackend {
             }
             MirType::Texture2D(elem) => MirType::Texture2D(Box::new(Self::coerce_type(elem))),
             MirType::SampledImage(elem) => MirType::SampledImage(Box::new(Self::coerce_type(elem))),
-            _ => ty.clone(), // Bool, Int, Void, Struct, Never, Sampler — unchanged
+            _ => ty.clone(), // Bool, Int, Void, Struct, Never, Sampler - unchanged
         }
     }
 
@@ -4598,7 +4598,7 @@ impl Backend for SpirvBackend {
         // These go directly into self.output as a preamble.
         if has_shaders {
             self.emit_header_version(SPIRV_VERSION_1_0);
-            // Remove Float64 capability — GPU shaders use f32 after coercion
+            // Remove Float64 capability - GPU shaders use f32 after coercion
             self.capabilities
                 .retain(|c| !matches!(c, SpvCapability::Float64));
         } else {
@@ -4653,7 +4653,7 @@ impl Backend for SpirvBackend {
             }
             reachable
         } else {
-            // No shader filtering — all functions are reachable
+            // No shader filtering - all functions are reachable
             mir.functions.iter().map(|f| f.name.clone()).collect()
         };
 

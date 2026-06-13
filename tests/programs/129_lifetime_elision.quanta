@@ -1,4 +1,4 @@
-// Lifetime Elision — single ref param rule.
+// Lifetime Elision - single ref param rule.
 // fn identity(x: &i32) -> &i32 has no explicit lifetimes.
 // Elision rule: single ref param → return borrows from it.
 // This should compile correctly without explicit 'a annotations.

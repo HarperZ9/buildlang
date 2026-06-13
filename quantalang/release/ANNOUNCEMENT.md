@@ -2,7 +2,7 @@
 
 **The first public release of QuantaLang is here!**
 
-After extensive development and testing, we're thrilled to announce the public release of QuantaLang v1.0.0 — a modern systems programming language designed for safety, performance, and expressiveness.
+After extensive development and testing, we're thrilled to announce the public release of QuantaLang v1.0.0 - a modern systems programming language designed for safety, performance, and expressiveness.
 
 ## What is QuantaLang?
 

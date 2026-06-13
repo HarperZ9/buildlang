@@ -1,5 +1,5 @@
 // Test 82: ACES Reference Rendering Transform
-// Port of aces.py — Academy Color Encoding System tone mapping
+// Port of aces.py - Academy Color Encoding System tone mapping
 
 // ACES RRT simplified (Narkowicz 2015 fit)
 fn aces_rrt(x: f64) -> f64 {

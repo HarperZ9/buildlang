@@ -2266,7 +2266,7 @@ impl LlvmBackend {
                 let elem_ty = self.llvm_type(elem)?;
                 Ok(format!("<{} x {}>", lanes, elem_ty))
             }
-            // Opaque GPU types — represent as opaque pointers in LLVM
+            // Opaque GPU types - represent as opaque pointers in LLVM
             MirType::Texture2D(_) | MirType::Sampler | MirType::SampledImage(_) => Ok("ptr".into()),
             MirType::TraitObject(_) => Ok("{ ptr, ptr }".to_string()), // data ptr + vtable ptr
             MirType::Vec(_) => Ok("ptr".to_string()), // QuantaVecHandle is a pointer
@@ -2307,7 +2307,7 @@ impl LlvmBackend {
             MirType::Struct(_) => 8, // Placeholder
             MirType::Never => 0,
             MirType::Vector(elem, lanes) => self.type_size(elem) * (*lanes as u64),
-            // Opaque GPU types — pointer-sized
+            // Opaque GPU types - pointer-sized
             MirType::Texture2D(_) | MirType::Sampler | MirType::SampledImage(_) => 8,
             MirType::TraitObject(_) => 16, // fat pointer: data ptr + vtable ptr
             MirType::Vec(_) => 8,          // QuantaVecHandle is a pointer
@@ -2339,7 +2339,7 @@ impl LlvmBackend {
                 let size = self.type_size(elem) * (*lanes as u64);
                 (size as u32).min(32)
             }
-            // Opaque GPU types — pointer-aligned
+            // Opaque GPU types - pointer-aligned
             MirType::Texture2D(_) | MirType::Sampler | MirType::SampledImage(_) => 8,
             MirType::TraitObject(_) => 8, // pointer-aligned
             MirType::Vec(_) => 8,         // pointer-aligned
@@ -2683,7 +2683,7 @@ impl LlvmBackend {
                 }
             }
         }
-        // Type not found — return field 0 as fallback for opaque types.
+        // Type not found - return field 0 as fallback for opaque types.
         // This handles runtime types like QuantaString that may be
         // referenced through field access patterns in the MIR.
         Ok(0)

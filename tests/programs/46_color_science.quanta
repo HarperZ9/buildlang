@@ -1,4 +1,4 @@
-// Color Science — the math behind every display and camera
+// Color Science - the math behind every display and camera
 
 fn linear_to_srgb(c: f64) -> f64 {
     if c <= 0.0031308 { c * 12.92 }
@@ -43,7 +43,7 @@ fn main() {
     println!("BT.709 luminance: {}", luma_709);
     println!("BT.601 luminance: {}", luma_601);
 
-    // HSV — standard n values: R=5, G=3, B=1
+    // HSV - standard n values: R=5, G=3, B=1
     let r = hsv_to_rgb_channel(0.0, 1.0, 1.0, 5.0);
     let g = hsv_to_rgb_channel(0.0, 1.0, 1.0, 3.0);
     let b = hsv_to_rgb_channel(0.0, 1.0, 1.0, 1.0);

@@ -1,11 +1,11 @@
 // ═══════════════════════════════════════════════════════════════════════════════
-// QUANTALANG — AArch64 Code Generation Backend
+// QUANTALANG - AArch64 Code Generation Backend
 // ═══════════════════════════════════════════════════════════════════════════════
 // Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
 // Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
 // ═══════════════════════════════════════════════════════════════════════════════
 //
-// Target: AArch64 (ARM64) — ARMv8-A and later
+// Target: AArch64 (ARM64) - ARMv8-A and later
 // ABI: AAPCS64 (ARM Architecture Procedure Call Standard for 64-bit)
 // 
 // Supported targets:
@@ -125,14 +125,14 @@ pub mod abi {
     /// Frame pointer (X29)
     pub const FP: Reg = Reg::X29;
     
-    /// Link register (X30) — return address
+    /// Link register (X30) - return address
     pub const LR: Reg = Reg::X30;
     
     /// Intra-procedure scratch registers (X16, X17)
     pub const IP0: Reg = Reg::X16;
     pub const IP1: Reg = Reg::X17;
     
-    /// Platform register (X18) — reserved on some platforms
+    /// Platform register (X18) - reserved on some platforms
     pub const PR: Reg = Reg::X18;
     
     /// Indirect result location register (X8)

@@ -1,5 +1,5 @@
 // QuantaLang Sobel Edge Detection Shader
-// Detects edges using depth differences — a core building block for outlines.
+// Detects edges using depth differences - a core building block for outlines.
 //
 // Compile: quantac edge_detect.quanta --target hlsl -o edge_detect.fx
 

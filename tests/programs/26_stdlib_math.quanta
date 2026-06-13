@@ -1,4 +1,4 @@
-// Test stdlib math functions — inlined to avoid module cross-reference issues
+// Test stdlib math functions - inlined to avoid module cross-reference issues
 
 fn i32_abs(n: i32) -> i32 {
     if n < 0 { -n } else { n }

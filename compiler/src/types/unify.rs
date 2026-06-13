@@ -67,7 +67,7 @@ impl Unifier {
         // If only one has annotations, the unannotated type is compatible
         // (allows mixing annotated APIs with unannotated code).
         if !t1.annotations.is_empty() && !t2.annotations.is_empty() {
-            // Both have annotations — check for conflicts
+            // Both have annotations - check for conflicts
             // Extract the category (e.g., "ColorSpace") and value (e.g., "Linear")
             for ann1 in &t1.annotations {
                 for ann2 in &t2.annotations {
@@ -75,7 +75,7 @@ impl Unifier {
                         (ann1.split(':').next(), ann2.split(':').next())
                     {
                         if cat1 == cat2 && ann1 != ann2 {
-                            // Same category, different value — color space mismatch!
+                            // Same category, different value - color space mismatch!
                             return Err(TypeError::TypeMismatch {
                                 expected: t1.clone(),
                                 found: t2.clone(),

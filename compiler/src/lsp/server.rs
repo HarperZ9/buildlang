@@ -814,7 +814,7 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
     }
 
     // =========================================================================
-    // LANGUAGE FEATURES (requests — require id)
+    // LANGUAGE FEATURES (requests - require id)
     // =========================================================================
 
     if content.contains("\"method\":\"textDocument/completion\"") {

@@ -1,4 +1,4 @@
-// Signed Distance Functions — the foundation of modern procedural rendering
+// Signed Distance Functions - the foundation of modern procedural rendering
 // Used by: Shadertoy, Dreams (Media Molecule), raymarched effects in AAA games
 
 fn my_abs(x: f64) -> f64 {

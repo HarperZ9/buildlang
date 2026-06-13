@@ -1,4 +1,4 @@
-// Test 95: quanta-finance port — Risk metrics
+// Test 95: quanta-finance port - Risk metrics
 // Ported from APPS/quanta-finance/quanta_finance/risk.py
 // Sharpe Ratio, Sortino Ratio, Max Drawdown
 

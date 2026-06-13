@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════════════════════
-// QUANTALANG DOCUMENTATION GENERATOR — Markdown Renderer
+// QUANTALANG DOCUMENTATION GENERATOR - Markdown Renderer
 // ═══════════════════════════════════════════════════════════════════════════════
 // Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
 // Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
@@ -313,7 +313,7 @@ impl MarkdownRenderer {
                 if module.visibility.is_public() || self.config.document_private {
                     md.push_str(&format!("- [{}]({}/README.md)", module.name, module.name));
                     if let Some(brief) = module.doc.brief() {
-                        md.push_str(&format!(" — {}", brief));
+                        md.push_str(&format!(" - {}", brief));
                     }
                     md.push('\n');
                 }
@@ -350,7 +350,7 @@ impl MarkdownRenderer {
                 if submod.visibility.is_public() || self.config.document_private {
                     md.push_str(&format!("- [{}]({}/README.md)", submod.name, submod.name));
                     if let Some(brief) = submod.doc.brief() {
-                        md.push_str(&format!(" — {}", brief));
+                        md.push_str(&format!(" - {}", brief));
                     }
                     md.push('\n');
                 }
@@ -415,7 +415,7 @@ impl MarkdownRenderer {
                 if struc.visibility.is_public() || self.config.document_private {
                     md.push_str(&format!("- [`{}`](struct.{}.md)", struc.name, struc.name));
                     if let Some(brief) = struc.doc.brief() {
-                        md.push_str(&format!(" — {}", brief));
+                        md.push_str(&format!(" - {}", brief));
                     }
                     md.push('\n');
                 }
@@ -431,7 +431,7 @@ impl MarkdownRenderer {
                 if enm.visibility.is_public() || self.config.document_private {
                     md.push_str(&format!("- [`{}`](enum.{}.md)", enm.name, enm.name));
                     if let Some(brief) = enm.doc.brief() {
-                        md.push_str(&format!(" — {}", brief));
+                        md.push_str(&format!(" - {}", brief));
                     }
                     md.push('\n');
                 }
@@ -447,7 +447,7 @@ impl MarkdownRenderer {
                 if trt.visibility.is_public() || self.config.document_private {
                     md.push_str(&format!("- [`{}`](trait.{}.md)", trt.name, trt.name));
                     if let Some(brief) = trt.doc.brief() {
-                        md.push_str(&format!(" — {}", brief));
+                        md.push_str(&format!(" - {}", brief));
                     }
                     md.push('\n');
                 }
@@ -463,7 +463,7 @@ impl MarkdownRenderer {
                 if func.visibility.is_public() || self.config.document_private {
                     md.push_str(&format!("- [`{}`](fn.{}.md)", func.name, func.name));
                     if let Some(brief) = func.doc.brief() {
-                        md.push_str(&format!(" — {}", brief));
+                        md.push_str(&format!(" - {}", brief));
                     }
                     md.push('\n');
                 }

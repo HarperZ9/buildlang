@@ -1,4 +1,4 @@
-// Shader math builtins — all compile to GLSL.std.450 extended instructions
+// Shader math builtins - all compile to GLSL.std.450 extended instructions
 // Tests: sqrt, sin, cos, pow, abs, floor, ceil, clamp, smoothstep, mix
 
 fn fresnel_schlick(cos_theta: f64, f0: f64) -> f64 {

@@ -1,5 +1,5 @@
 // =============================================================================
-// Self-Hosted Compiler v2 — Functions, If/Else, While, Calls
+// Self-Hosted Compiler v2 - Functions, If/Else, While, Calls
 // =============================================================================
 // Extends v1 with: function definitions, if/else, while loops, comparisons,
 // function calls, and a richer AST.
@@ -115,7 +115,7 @@ fn ast_set(a: AST, i: i32, k: i32, v: i32, l: i32, r: i32) -> AST {
 }
 
 // =============================================================================
-// C CODE GENERATOR — emits C for the test program
+// C CODE GENERATOR - emits C for the test program
 // =============================================================================
 fn var_name(i: i32) -> str {
     if i==0{"n"}else{if i==1{"x"}else{if i==2{"total"}else{if i==3{"i"}
@@ -238,7 +238,7 @@ fn codegen_v2() {
 }
 
 // =============================================================================
-// TYPE CHECKER v2 — verify the AST has valid structure
+// TYPE CHECKER v2 - verify the AST has valid structure
 // =============================================================================
 fn type_check_v2(ast: AST) -> i32 {
     let mut errors: i32 = 0;
@@ -263,7 +263,7 @@ fn type_check_v2(ast: AST) -> i32 {
 }
 
 // =============================================================================
-// PARSER v2 — build AST for the expanded test program
+// PARSER v2 - build AST for the expanded test program
 // =============================================================================
 fn parse_v2() -> AST {
     let a = ast_new();

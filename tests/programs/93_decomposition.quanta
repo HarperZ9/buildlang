@@ -1,4 +1,4 @@
-// Test 93: quanta-oracle port — Classical time series decomposition
+// Test 93: quanta-oracle port - Classical time series decomposition
 // Additive: data = trend + seasonal + residual
 // Ported from APPS/quanta-oracle/quanta_oracle/decompose.py
 

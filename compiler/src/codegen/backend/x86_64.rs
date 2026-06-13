@@ -606,7 +606,7 @@ impl X86_64Backend {
             MirType::FnPtr(_) => 8,
             MirType::Never => 0,
             MirType::Vector(elem, lanes) => self.type_size(elem) * (*lanes as usize),
-            // Opaque GPU types — treat as pointer-sized handles
+            // Opaque GPU types - treat as pointer-sized handles
             MirType::Texture2D(_) | MirType::Sampler | MirType::SampledImage(_) => 8,
             MirType::TraitObject(_) => 16, // fat pointer: data ptr + vtable ptr
             MirType::Vec(_) => 8,          // QuantaVecHandle is a pointer

@@ -104,7 +104,7 @@ impl<'a> Parser<'a> {
 
         // Always return successfully parsed items, even when there are errors.
         // This allows the type checker to process valid items from files that
-        // contain some unsupported syntax — critical for ecosystem compilation.
+        // contain some unsupported syntax - critical for ecosystem compilation.
         if !self.errors.is_empty() {
             // Still report the first error for the caller to print
             // but DON'T discard parsed items
@@ -383,7 +383,7 @@ impl<'a> Parser<'a> {
     fn parse_at_attribute(&mut self) -> ParseResult<Attribute> {
         let start = self.expect(&TokenKind::At)?.span;
 
-        // @[...] form — same as #[...]
+        // @[...] form - same as #[...]
         if self.check(&TokenKind::OpenDelim(Delimiter::Bracket)) {
             self.advance(); // consume [
             let path = self.parse_path()?;
@@ -641,7 +641,7 @@ impl<'a> Parser<'a> {
         if self.check(&TokenKind::Gt) {
             Ok(self.advance().span)
         } else if self.check(&TokenKind::Shr) {
-            // `>>` — consume as one `>` and replace the remaining `>` by
+            // `>>` - consume as one `>` and replace the remaining `>` by
             // adjusting the token to Gt. We do this by advancing and then
             // inserting a virtual Gt token. Simpler: just replace the current
             // Shr token with Gt and consume it (the second > is "free").
@@ -889,12 +889,12 @@ impl<'a> Parser<'a> {
                         self.advance();
                         continue;
                     } else {
-                        // At top level — consume the } and stop
+                        // At top level - consume the } and stop
                         self.advance();
                         break;
                     }
                 }
-                // Item-starting tokens — only stop if at top brace level
+                // Item-starting tokens - only stop if at top brace level
                 TokenKind::Keyword(
                     Keyword::Fn
                     | Keyword::Struct

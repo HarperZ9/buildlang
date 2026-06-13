@@ -1,4 +1,4 @@
-// Test 89: ACES tone mapping — the first real-world QuantaLang program
+// Test 89: ACES tone mapping - the first real-world QuantaLang program
 // Verifies that the ACES filmic tone curve produces correct output.
 
 const RRT_A: f64 = 2.51;

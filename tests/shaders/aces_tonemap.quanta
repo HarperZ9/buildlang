@@ -1,4 +1,4 @@
-// ACES Filmic Tone Mapping — compiled to SPIR-V for GPU post-processing
+// ACES Filmic Tone Mapping - compiled to SPIR-V for GPU post-processing
 // The SAME aces_channel function compiles to BOTH C (CPU) and SPIR-V (GPU)
 
 fn aces_channel(x: f64) -> f64 {

@@ -41,7 +41,7 @@ allowed-tools: Read, Grep, Glob, Bash(git:*, cargo:*)
 ## Test Plan for [files]
 
 ### [module_name]
-- [ ] test_function_happy_path — description
-- [ ] test_function_error_case — description
-- [ ] test_function_edge_case — description
+- [ ] test_function_happy_path - description
+- [ ] test_function_error_case - description
+- [ ] test_function_edge_case - description
 ```

@@ -549,7 +549,7 @@ impl Executor {
             .unwrap()
             .insert(task_id, task.clone());
 
-        // Add to global queue — Mutex poisoning only occurs on thread panic
+        // Add to global queue - Mutex poisoning only occurs on thread panic
         self.inner.global_queue.lock().unwrap().push_back(task);
 
         // Wake a worker if parked

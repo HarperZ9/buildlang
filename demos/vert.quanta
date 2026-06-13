@@ -1,4 +1,4 @@
-// QuantaLang Vertex Shader — compiled through AST→MIR→SPIR-V pipeline
+// QuantaLang Vertex Shader - compiled through AST→MIR→SPIR-V pipeline
 // Returns vec4 which maps to gl_Position
 
 #[vertex]

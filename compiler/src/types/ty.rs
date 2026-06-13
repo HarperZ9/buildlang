@@ -52,7 +52,7 @@ pub enum LifetimeKind {
     Named(Arc<str>),
     /// An inference variable assigned during borrow checking
     Var(LifetimeVarId),
-    /// The 'static lifetime — lives for the entire program
+    /// The 'static lifetime - lives for the entire program
     Static,
 }
 
@@ -117,7 +117,7 @@ impl BorrowState {
         self.scope_depth += 1;
     }
 
-    /// Leave a scope — returns borrows that are dying (created in this scope)
+    /// Leave a scope - returns borrows that are dying (created in this scope)
     /// so the caller can check for dangling references.
     pub fn pop_scope(&mut self) -> Vec<BorrowEntry> {
         let dying: Vec<BorrowEntry> = self
@@ -350,7 +350,7 @@ impl Ty {
     /// Create a String type (as a well-known type placeholder).
     /// In a full implementation, this would use a real DefId for String.
     pub fn string() -> Self {
-        // Owned string type — maps to QuantaString in the C backend.
+        // Owned string type - maps to QuantaString in the C backend.
         Self::str()
     }
 

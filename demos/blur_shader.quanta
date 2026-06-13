@@ -1,4 +1,4 @@
-// QuantaLang Gaussian Blur Shader — demonstrates while loops in HLSL/GLSL
+// QuantaLang Gaussian Blur Shader - demonstrates while loops in HLSL/GLSL
 // Compile: quantac blur_shader.quanta --target hlsl -o blur_shader.fx
 
 #[uniform]

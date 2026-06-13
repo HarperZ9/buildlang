@@ -1,4 +1,4 @@
-// ACES Filmic Tone Mapping with clamp — uses GLSL.std.450 builtins in SPIR-V
+// ACES Filmic Tone Mapping with clamp - uses GLSL.std.450 builtins in SPIR-V
 // This same function works on CPU (C backend) AND GPU (SPIR-V backend)
 
 fn aces_channel(x: f64) -> f64 {
