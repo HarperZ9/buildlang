@@ -195,9 +195,9 @@ effectful function value record every possible branch target, for example
 it records both the binding and the possible selected targets. Tuple, struct,
 and slice destructuring keep that source evidence too, so `let (loader,) = (...)`,
 `let Ops { loader } = ops`, and `let [loader] = loaders` continue to record the
-selected callees as well as `loader`. Later assignment to a callback variable
-refreshes that evidence, so stale sources do not survive `loader = load_secret`
-or `loader = read_file`.
+selected callees as well as `loader`. Later assignment to a callback variable or
+aggregate member refreshes that evidence, so stale sources do not survive
+`loader = load_secret`, `ops.loader = load_secret`, or `loaders[0] = load_secret`.
 Async blocks follow the same delayed-effect model for type checking: creating
 `let task = async { read_file("ops.toml") };` is pure, while `task.await`
 inherits `FileSystem` and records both the awaited source (`task`) and the
@@ -324,8 +324,9 @@ plus the possible selected targets. The same source binding is preserved through
 tuple, struct, and slice destructuring, so `let (loader,) = (...)`,
 `let Ops { loader } = ops`, and `let [loader] = loaders` do not collapse a
 selected effectful function down to only the local alias. Plain assignment to an
-identifier rebinds that call-source evidence, so policy receipts follow mutable
-callback slots instead of preserving stale earlier sources.
+identifier, struct field, tuple slot, or indexed entry rebinds that call-source
+evidence, so policy receipts follow mutable callback slots instead of preserving
+stale earlier sources.
 
 Policy profiles can enforce that split:
 
@@ -429,7 +430,7 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-14
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 806 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
+- **Tests**: 809 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
