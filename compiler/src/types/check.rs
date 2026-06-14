@@ -527,6 +527,7 @@ impl<'ctx> TypeChecker<'ctx> {
                     sig.lifetime_params.clone(),
                 );
                 self.ctx.define_var(f.name.name.clone(), fn_ty);
+                self.ctx.register_foreign_function(f.name.name.clone());
             }
         }
     }
@@ -1690,6 +1691,42 @@ mod tests {
                 .iter()
                 .any(|err| err.notes.iter().any(|note| note.contains("touch"))),
             "expected diagnostic note naming touch, got {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn check_summary_records_foreign_calls_as_direct_capabilities() {
+        let source = r#"
+            extern "C" { fn touch(); }
+            fn main() ~ Foreign { touch(); }
+        "#;
+        let source_file = crate::lexer::SourceFile::new("foreign_summary_test.quanta", source);
+        let mut lexer = crate::lexer::Lexer::new(&source_file);
+        let tokens = lexer.tokenize().expect("tokenize foreign summary fixture");
+        let mut parser = crate::parser::Parser::new(&source_file, tokens);
+        let module = parser.parse().expect("parse foreign summary fixture");
+
+        let mut ctx = TypeContext::new();
+        let mut checker = TypeChecker::new(&mut ctx);
+        checker.check_module(&module);
+
+        let summaries = checker.function_effect_summaries();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].function, "main");
+        assert_eq!(summaries[0].declared_effects, vec!["Foreign"]);
+        assert_eq!(
+            summaries[0]
+                .observed_capabilities
+                .get("Foreign")
+                .expect("Foreign capability should be observed")
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["touch"]
+        );
+        assert!(
+            summaries[0].propagated_effects.is_empty(),
+            "direct extern call should not be recorded as propagated: {summaries:#?}"
         );
     }
 
