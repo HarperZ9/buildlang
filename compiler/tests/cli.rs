@@ -309,12 +309,10 @@ fn check_receipt_file_records_failing_capability_diagnostic() {
 #[test]
 fn check_receipt_source_digest_ignores_path_for_identical_content() {
     let id = std::process::id();
-    let left = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_digest_left_{id}.quanta"
-    ));
-    let right = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_digest_right_{id}.quanta"
-    ));
+    let left =
+        std::env::temp_dir().join(format!("quantalang_check_receipt_digest_left_{id}.quanta"));
+    let right =
+        std::env::temp_dir().join(format!("quantalang_check_receipt_digest_right_{id}.quanta"));
     let source = r#"fn main() ~ Console { println!("same"); }"#;
     fs::write(&left, source).expect("write left digest fixture");
     fs::write(&right, source).expect("write right digest fixture");
@@ -359,9 +357,8 @@ fn check_receipt_source_digest_ignores_path_for_identical_content() {
 #[test]
 fn check_receipt_source_digest_changes_when_source_changes() {
     let id = std::process::id();
-    let first = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_digest_first_{id}.quanta"
-    ));
+    let first =
+        std::env::temp_dir().join(format!("quantalang_check_receipt_digest_first_{id}.quanta"));
     let second = std::env::temp_dir().join(format!(
         "quantalang_check_receipt_digest_second_{id}.quanta"
     ));
