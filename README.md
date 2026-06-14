@@ -188,8 +188,8 @@ instead of silently weakening CI.
 digests, and
 `quantac policy print <name> --output policy.json` writes one as normal policy
 JSON. The initial profiles are `pure`, `console-only`, `offline`, and
-`ci-review`, which gives CI a practical starting point before a team adds
-function-specific direct and propagated allowlists.
+`ci-review`, plus `strict-accountability` for gates that require exact
+boundary/source allowlists before ambient IO is accepted.
 
 For the common case, `quantac check app.quanta --profile ci-review --receipt -`
 evaluates a built-in profile directly without first writing a policy file.
@@ -197,6 +197,9 @@ Receipts identify these gates with a `policy.source` such as `builtin:ci-review`
 Built-in profile receipts also include `policy.profile` and
 `policy.profile_digest`, so CI can distinguish official profile identity from
 an equivalent file-backed policy document.
+Use `--profile strict-accountability` when CI should reject every ambient
+capability boundary until a printed policy adds exact direct, propagated, and
+source-level allowlists.
 Use `--expect-profile-digest <hex>` with `--profile` to pin check-time CI to the
 digest reported by `quantac policy list --json` or by a prior trusted receipt.
 Use `quantac receipt verify --expect-profile <name>` to pin verification-time CI

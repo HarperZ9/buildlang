@@ -3286,6 +3286,10 @@ fn policy_list_includes_builtin_security_profiles() {
         stdout.contains("ci-review"),
         "missing ci-review profile:\n{stdout}"
     );
+    assert!(
+        stdout.contains("strict-accountability"),
+        "missing strict-accountability profile:\n{stdout}"
+    );
 }
 
 #[test]
@@ -3311,7 +3315,16 @@ fn policy_list_json_emits_catalog_with_profile_digests() {
         .iter()
         .map(|profile| profile["name"].as_str().unwrap_or(""))
         .collect::<Vec<_>>();
-    assert_eq!(names, vec!["pure", "console-only", "offline", "ci-review"]);
+    assert_eq!(
+        names,
+        vec![
+            "pure",
+            "console-only",
+            "offline",
+            "ci-review",
+            "strict-accountability"
+        ]
+    );
     for profile in profiles {
         assert_eq!(
             profile["policy_schema"], "quantalang-check-policy/v1",
@@ -3417,6 +3430,38 @@ fn policy_print_emits_valid_pure_profile() {
 }
 
 #[test]
+fn policy_print_emits_strict_accountability_profile_with_source_gates() {
+    let output = quantac()
+        .args(["policy", "print", "strict-accountability"])
+        .output()
+        .expect("run quantac policy print strict-accountability");
+
+    assert!(
+        output.status.success(),
+        "policy print should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let profile: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("policy profile should be JSON");
+    assert_eq!(profile["schema"], "quantalang-check-policy/v1");
+    assert_eq!(profile["require_source_digest"], true);
+    assert_eq!(profile["require_input_graph_digest"], true);
+    assert_eq!(profile["require_provenance_allowlists"], true);
+    assert_eq!(profile["require_source_allowlists"], true);
+    assert_eq!(profile["require_allowlist_coverage"], true);
+    let denied = profile["denied_effects"]
+        .as_array()
+        .expect("denied_effects should be an array");
+    for effect in ["Network", "Process", "Foreign", "Gpu"] {
+        assert!(
+            denied.iter().any(|denied| denied == effect),
+            "strict-accountability profile should deny {effect}: {denied:#?}"
+        );
+    }
+}
+
+#[test]
 fn printed_pure_policy_rejects_console_program() {
     let dir = std::env::temp_dir().join(format!(
         "quantalang_printed_pure_policy_{}",
@@ -3471,6 +3516,51 @@ fn printed_pure_policy_rejects_console_program() {
         "expected Console denial in {violations:#?}"
     );
     let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn check_profile_strict_accountability_rejects_ambient_console_without_allowlists() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_profile_strict_accountability_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(&fixture, r#"fn main() ~ Console { println!("blocked"); }"#)
+        .expect("write console fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--profile")
+        .arg("strict-accountability")
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check with strict-accountability profile");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "strict-accountability profile should reject console without allowlists\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(receipt["policy"]["source"], "builtin:strict-accountability");
+    assert_eq!(receipt["policy"]["profile"], "strict-accountability");
+    assert_eq!(receipt["policy"]["status"], "failed");
+    let violations = receipt["policy"]["violations"]
+        .as_array()
+        .expect("policy violations");
+    assert!(
+        violations.iter().any(|violation| {
+            violation["kind"] == "DirectEffectNotAllowed"
+                && violation["effect"] == "Console"
+                && violation["function"] == "main"
+                && violation["source"] == "println!"
+        }),
+        "expected strict direct Console provenance denial in {violations:#?}"
+    );
 }
 
 #[test]

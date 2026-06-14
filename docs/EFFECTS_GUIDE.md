@@ -230,8 +230,12 @@ for CI bootstrapping: `pure` denies every built-in ambient capability,
 `console-only` permits only console access, `offline` permits local file,
 environment, clock, and console work while denying network/process/FFI/GPU, and
 `ci-review` requires source/input graph digests while denying the highest-risk
-capabilities. Receipts from direct profile checks record `policy.source` as
-`builtin:<name>`, `policy.profile` as the profile name, and
+capabilities. `strict-accountability` also requires source/input graph digests,
+direct and propagated provenance allowlists, exact source allowlists, and
+coverage for every allowlist entry; run it directly to reject ambient capability
+use by default, or print it and fill project-specific allowlists. Receipts from
+direct profile checks record `policy.source` as `builtin:<name>`,
+`policy.profile` as the profile name, and
 `policy.profile_digest` as the SHA-256 digest of the emitted built-in policy
 JSON.
 For locked CI gates, add `--expect-profile-digest <hex>` alongside `--profile`

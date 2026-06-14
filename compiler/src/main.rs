@@ -810,6 +810,10 @@ const BUILTIN_POLICY_TEMPLATES: &[BuiltinPolicyTemplate] = &[
         name: "ci-review",
         summary: "require digests and deny Network, Process, Foreign, and Gpu",
     },
+    BuiltinPolicyTemplate {
+        name: "strict-accountability",
+        summary: "require digests, exact allowlists, and deny Network/Process/FFI/GPU",
+    },
 ];
 
 fn builtin_policy_profile(name: &str) -> Option<serde_json::Value> {
@@ -871,6 +875,20 @@ fn builtin_policy_profile(name: &str) -> Option<serde_json::Value> {
             ],
             "require_source_digest": true,
             "require_input_graph_digest": true
+        })),
+        "strict-accountability" => Some(serde_json::json!({
+            "schema": "quantalang-check-policy/v1",
+            "denied_effects": [
+                "Network",
+                "Process",
+                "Foreign",
+                "Gpu"
+            ],
+            "require_source_digest": true,
+            "require_input_graph_digest": true,
+            "require_provenance_allowlists": true,
+            "require_source_allowlists": true,
+            "require_allowlist_coverage": true
         })),
         _ => None,
     }
