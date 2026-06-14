@@ -619,6 +619,8 @@ struct CheckPolicyProfile {
     #[serde(default)]
     require_input_graph_digest: bool,
     #[serde(default)]
+    require_effect_allowlist: bool,
+    #[serde(default)]
     require_provenance_allowlists: bool,
     #[serde(default)]
     require_source_allowlists: bool,
@@ -894,6 +896,7 @@ fn builtin_policy_profile(name: &str) -> Option<serde_json::Value> {
             ],
             "require_source_digest": true,
             "require_input_graph_digest": true,
+            "require_effect_allowlist": true,
             "require_provenance_allowlists": true,
             "require_source_allowlists": true,
             "require_allowlist_coverage": true
@@ -1061,6 +1064,7 @@ fn scaffold_policy_from_receipt(receipt: &serde_json::Value) -> Result<CheckPoli
         propagated_effect_source_allowlist: propagated_sources,
         require_source_digest: true,
         require_input_graph_digest: true,
+        require_effect_allowlist: true,
         require_provenance_allowlists: true,
         require_source_allowlists: true,
         require_allowlist_coverage: true,
@@ -2934,7 +2938,9 @@ fn evaluate_check_policy(
                 source: item.source.clone(),
                 message: format!("policy denies effect `{}`", item.effect),
             });
-        } else if !allowed.is_empty() && !allowed.contains(item.effect.as_str()) {
+        } else if (policy.profile.require_effect_allowlist || !allowed.is_empty())
+            && !allowed.contains(item.effect.as_str())
+        {
             violations.insert(CheckPolicyViolation {
                 kind: "DisallowedEffect",
                 effect: item.effect.clone(),
@@ -5871,6 +5877,7 @@ mod tests {
                 propagated_effect_source_allowlist: BTreeMap::new(),
                 require_source_digest: true,
                 require_input_graph_digest: false,
+                require_effect_allowlist: false,
                 require_provenance_allowlists: false,
                 require_source_allowlists: false,
                 require_allowlist_coverage: false,
@@ -5953,6 +5960,7 @@ mod tests {
                 propagated_effect_source_allowlist: BTreeMap::new(),
                 require_source_digest: false,
                 require_input_graph_digest: true,
+                require_effect_allowlist: false,
                 require_provenance_allowlists: false,
                 require_source_allowlists: false,
                 require_allowlist_coverage: false,
@@ -6011,6 +6019,7 @@ mod tests {
         assert!(loaded.profile.propagated_effect_allowlist.is_empty());
         assert!(loaded.profile.propagated_effect_source_allowlist.is_empty());
         assert!(!loaded.profile.require_input_graph_digest);
+        assert!(!loaded.profile.require_effect_allowlist);
         assert!(!loaded.profile.require_provenance_allowlists);
         assert!(!loaded.profile.require_source_allowlists);
         assert!(!loaded.profile.require_allowlist_coverage);
