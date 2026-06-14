@@ -156,7 +156,10 @@ effect, observed capability, or propagated effect outside the allow-list also
 fails. `direct_effect_allowlist` applies only to `observed_capabilities`;
 `propagated_effect_allowlist` applies only to `propagated_effects`.
 
-Use `quantac policy list` to see built-in starting profiles, then emit one with:
+Use `quantac policy list` to see built-in starting profiles, or
+`quantac policy list --json` to emit a machine-readable
+`quantalang-policy-catalog/v1` catalog with profile names, summaries, policy
+schemas, and SHA-256 digests. Then emit one profile with:
 
 ```bash
 quantac policy print pure --output policy.json
