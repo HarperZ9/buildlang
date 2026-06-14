@@ -193,8 +193,10 @@ sources such as `loaders.0`, `slot.0`, and `loaders[0]`; repeated ops tables
 such as `[load_config; 2]` retain `load_config` origins alongside indexed
 access paths such as `loaders[1]`; struct updates such as
 `Ops { ..defaults }` preserve inherited field origins such as `load_config`
-alongside new access paths such as `ops.loader`; whole-struct assignment such
-as `ops = defaults` refreshes member origins without leaking stale intermediate
+alongside new access paths such as `ops.loader`; nested updates such as
+`Outer { ..defaults }` carry descendant origins such as `load_config` to
+access paths such as `outer.ops.loader`; whole-struct assignment such as
+`ops = defaults` refreshes member origins without leaking stale intermediate
 paths such as `defaults.loader`; enum-variant payloads preserve their stored
 callback sources when matched; immediate calls through
 returned function values record sources such as `make_loader()`. `if` and
@@ -339,7 +341,9 @@ tables record paths such as `ops.loader`, `loaders.0`, `slot.0`, and
 `loaders[0]`, and repeated tables retain callback origins such as
 `load_config` next to access paths such as `loaders[1]`; struct updates retain
 inherited field origins next to new access paths such as `ops.loader`, so
-source allowlists can constrain capability-bearing registries and ops tables.
+source allowlists can constrain capability-bearing registries and ops tables;
+nested updates retain descendant callback origins next to paths such as
+`outer.ops.loader`.
 Whole-aggregate assignments refresh member origins too, so `ops = defaults`
 does not leave stale `defaults.loader` evidence in later `ops.loader` calls.
 Enum-variant payloads keep their stored callback sources when a
@@ -484,7 +488,7 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-14
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 826 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
+- **Tests**: 827 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
