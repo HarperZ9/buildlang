@@ -692,6 +692,96 @@ fn run(loader: (fn() -> str) with FileSystem) -> str ~ FileSystem {
 }
 
 #[test]
+fn check_reports_effect_for_ambient_function_alias_call() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_ambient_alias_gate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn main() {
+    let loader = read_file;
+    loader("ops.txt");
+}
+"#,
+    )
+    .expect("write ambient alias fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "ambient helper alias call should fail without FileSystem effect"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FileSystem"),
+        "diagnostic should name FileSystem effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("loader"),
+        "diagnostic should name alias call source:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn check_receipt_records_ambient_function_alias_as_propagated_source() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_ambient_alias_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn main() ~ FileSystem {
+    let loader = read_file;
+    loader("ops.txt");
+}
+"#,
+    )
+    .expect("write ambient alias receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "ambient alias receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["loader"])
+    );
+}
+
+#[test]
 fn check_receipt_file_records_failing_capability_diagnostic() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_check_receipt_fail_{}.quanta",

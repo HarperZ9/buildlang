@@ -304,6 +304,58 @@ impl<'ctx> TypeInfer<'ctx> {
         }
     }
 
+    fn ambient_capability_function_type(name: &str) -> Option<Ty> {
+        let effect_name = super::capabilities::capability_effect_for_call(name)?;
+        if effect_name == super::capabilities::CONSOLE {
+            return None;
+        }
+
+        let str_ty = Ty::str();
+        let bool_ty = Ty::bool();
+        let i64_ty = Ty::int(IntTy::I64);
+        let unit_ty = Ty::unit();
+        let row = super::effects::EffectRow::closed([super::effects::Effect::new(effect_name)]);
+
+        let (params, ret) = match name {
+            "read_file" | "read_bytes" => (vec![str_ty.clone()], str_ty.clone()),
+            "write_file" | "append_file" => (vec![str_ty.clone(), str_ty.clone()], bool_ty.clone()),
+            "write_bytes" => (
+                vec![str_ty.clone(), str_ty.clone(), i64_ty.clone()],
+                bool_ty,
+            ),
+            "file_exists" | "is_dir" => (vec![str_ty.clone()], bool_ty),
+            "list_dir" => (vec![str_ty.clone()], Ty::vec(str_ty.clone())),
+            "file_size" => (vec![str_ty.clone()], i64_ty.clone()),
+            "tcp_connect" => (vec![str_ty.clone(), i64_ty.clone()], i64_ty.clone()),
+            "tcp_send" => (vec![i64_ty.clone(), str_ty.clone()], i64_ty.clone()),
+            "tcp_recv" => (vec![i64_ty.clone()], str_ty.clone()),
+            "tcp_close" => (vec![i64_ty.clone()], unit_ty.clone()),
+            "exit" | "process_exit" => (vec![i64_ty.clone()], Ty::never()),
+            "getenv" => (vec![str_ty.clone()], str_ty.clone()),
+            "args_count" => (vec![], i64_ty.clone()),
+            "args_get" => (vec![i64_ty.clone()], str_ty.clone()),
+            "clock_ms" | "time_unix" => (vec![], i64_ty.clone()),
+            "quanta_vk_init" => (vec![], bool_ty.clone()),
+            "quanta_vk_load_shader_file" | "quanta_vk_run_compute" => {
+                (vec![str_ty.clone()], bool_ty.clone())
+            }
+            "quanta_vk_shutdown" => (vec![], unit_ty.clone()),
+            "quanta_vk_create_graphics_pipeline" => {
+                (vec![str_ty.clone(), str_ty.clone()], bool_ty.clone())
+            }
+            "quanta_vk_set_push_constant_f32" => (
+                vec![i64_ty.clone(), Ty::float(FloatTy::F64)],
+                unit_ty.clone(),
+            ),
+            "quanta_vk_draw_frame" | "quanta_vk_request_close" => (vec![], unit_ty.clone()),
+            "quanta_vk_should_close" => (vec![], i64_ty.clone()),
+            "quanta_vk_device_name" => (vec![], str_ty),
+            _ => return None,
+        };
+
+        Some(Ty::function_with_effects(params, ret, row))
+    }
+
     fn effect_row_from_paths(effects: &[ast::Path]) -> super::effects::EffectRow {
         let mut row = super::effects::EffectRow::empty();
         for effect in effects {
@@ -932,6 +984,9 @@ impl<'ctx> TypeInfer<'ctx> {
                     return self_ty.clone();
                 }
             }
+            if let Some(ty) = Self::ambient_capability_function_type(name) {
+                return ty;
+            }
             let is_builtin = matches!(
                 name,
                 // Math builtins
@@ -1053,6 +1108,12 @@ impl<'ctx> TypeInfer<'ctx> {
                     // Unknown std:: path - return fresh var
                     return Ty::fresh_var();
                 }
+            }
+        }
+
+        if let Some(last) = segments.last() {
+            if let Some(ty) = Self::ambient_capability_function_type(last) {
+                return ty;
             }
         }
 
@@ -1639,10 +1700,14 @@ impl<'ctx> TypeInfer<'ctx> {
                     self.current_effects = self.current_effects.merge(&fn_ty.effects);
                     if let Some(source) = call_source.as_deref() {
                         let lookup_name = source.rsplit("::").next().unwrap_or(source);
+                        let direct_ambient_effect =
+                            super::capabilities::capability_effect_for_call(lookup_name);
                         let is_direct_foreign_call = self.ctx.is_foreign_function(lookup_name);
                         for effect in &fn_ty.effects.effects {
                             if super::capabilities::is_capability_effect(effect.name.as_ref()) {
-                                if is_direct_foreign_call
+                                if direct_ambient_effect == Some(effect.name.as_ref()) {
+                                    self.record_capability_source(effect.name.as_ref(), source);
+                                } else if is_direct_foreign_call
                                     && effect.name.as_ref() == super::capabilities::FOREIGN
                                 {
                                     self.record_capability_source(effect.name.as_ref(), source);

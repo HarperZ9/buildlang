@@ -158,7 +158,9 @@ First-class function types can carry capability effects as well: a parameter
 written as `loader: fn() with FileSystem` forces callers of `loader()` to
 declare or handle `FileSystem`, and `(fn() -> str) with FileSystem` supports
 effectful callbacks that return data while keeping callback provenance in
-receipts.
+receipts. Ambient helpers used as values keep those effects too:
+`let loader = read_file; loader("ops.toml");` requires `FileSystem` and records
+`loader` as the propagated source.
 
 `quantac check --receipt` also binds each receipt to the checked source inputs
 with SHA-256 digests plus compiler and language version metadata. The top-level
@@ -237,7 +239,9 @@ from different modules. This lets teams permit a small audited boundary
 function while still proving which higher-level workflows depend on it.
 Effectful callback parameters are also propagated sources, so a wrapper that
 calls `loader: fn() with FileSystem` records `loader` as the inherited
-`FileSystem` source.
+`FileSystem` source. The same rule covers aliases of ambient helpers, such as
+`let loader = read_file`; calling the alias inherits the helper's capability
+effect instead of falling back to an untyped function value.
 
 Policy profiles can enforce that split:
 
