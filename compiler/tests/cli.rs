@@ -692,6 +692,119 @@ fn run(loader: (fn() -> str) with FileSystem) -> str ~ FileSystem {
 }
 
 #[test]
+fn check_receipt_records_effectful_callback_argument_source() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_effectful_callback_arg_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn run(loader: fn() with FileSystem) ~ FileSystem {
+    loader();
+}
+
+fn load_config() ~ FileSystem {
+    read_file("config.toml");
+}
+
+fn main() ~ FileSystem {
+    run(load_config);
+}
+"#,
+    )
+    .expect("write effectful callback argument receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "effectful callback argument receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["run"]["FileSystem"],
+        serde_json::json!(["loader"])
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["load_config", "run"])
+    );
+}
+
+#[test]
+fn check_reports_effect_for_effectful_callback_argument_source() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_effectful_callback_arg_gate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn run(loader: fn() with FileSystem) ~ FileSystem {
+    loader();
+}
+
+fn load_config() ~ FileSystem {
+    read_file("config.toml");
+}
+
+fn main() {
+    run(load_config);
+}
+"#,
+    )
+    .expect("write effectful callback argument gate fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "effectful callback argument should fail without FileSystem effect"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FileSystem"),
+        "diagnostic should name FileSystem effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("run"),
+        "diagnostic should name wrapper source:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("load_config"),
+        "diagnostic should name callback argument source:\n{}",
+        stderr
+    );
+}
+
+#[test]
 fn check_reports_effect_for_ambient_function_alias_call() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_ambient_alias_gate_{}.quanta",

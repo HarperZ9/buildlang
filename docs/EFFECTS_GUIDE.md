@@ -116,7 +116,10 @@ such as `loader: fn() with FileSystem` makes `loader()` an effectful call, and a
 returning callback can be written as `(fn() -> str) with FileSystem`. Receipts
 record the callback name under `propagated_effects`, which lets policy gates
 distinguish a wrapper that inherited file access through `loader` from a
-function that directly called `read_file`. Ambient helpers used as values keep
+function that directly called `read_file`. Callers that pass effectful callbacks
+into wrappers keep that source evidence too, so `run(load_config)` records both
+`run` and `load_config` as propagated `FileSystem` evidence. Ambient helpers
+used as values keep
 their capability effects as well, so `let loader = read_file; loader("ops.toml")`
 requires `FileSystem` and records `loader` as propagated evidence. Effectful
 function values stored in structs, tuples, and indexed ops tables retain access
@@ -166,7 +169,9 @@ typed effect. This lets policy allow a small number of audited boundary
 functions while still proving which higher-level workflows depend on them.
 Effectful callback parameters appear here as named sources too, so higher-order
 ops code keeps capability provenance instead of losing it behind `fn(...)`
-values. Aliases of ambient helpers follow the same rule: calling `loader` after
+values. Effectful callback arguments supplied to wrappers also appear here, so
+`run(load_config)` keeps both the wrapper and supplied callback visible to
+policy review. Aliases of ambient helpers follow the same rule: calling `loader` after
 `let loader = read_file` inherits `FileSystem` through the alias instead of
 silently becoming an untyped helper call. Calls through effectful struct fields,
 tuple slots, and indexed ops tables record paths such as `ops.loader`,

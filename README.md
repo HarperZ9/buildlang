@@ -158,7 +158,10 @@ First-class function types can carry capability effects as well: a parameter
 written as `loader: fn() with FileSystem` forces callers of `loader()` to
 declare or handle `FileSystem`, and `(fn() -> str) with FileSystem` supports
 effectful callbacks that return data while keeping callback provenance in
-receipts. Ambient helpers used as values keep those effects too:
+receipts. Wrappers that receive an effectful callback argument keep caller-side
+evidence as well, so `run(load_config)` records both `run` and `load_config` as
+propagated `FileSystem` sources. Ambient helpers used as values keep those
+effects too:
 `let loader = read_file; loader("ops.toml");` requires `FileSystem` and records
 `loader` as the propagated source. Effectful function values stored in structs
 also keep source evidence: `(ops.loader)("ops.toml")` records `ops.loader`;
@@ -246,7 +249,10 @@ from different modules. This lets teams permit a small audited boundary
 function while still proving which higher-level workflows depend on it.
 Effectful callback parameters are also propagated sources, so a wrapper that
 calls `loader: fn() with FileSystem` records `loader` as the inherited
-`FileSystem` source. The same rule covers aliases of ambient helpers, such as
+`FileSystem` source. When a caller supplies an effectful callback to that
+wrapper, receipts record the supplied callback source too, so `run(load_config)`
+can be reviewed or allowlisted by both `run` and `load_config`. The same rule
+covers aliases of ambient helpers, such as
 `let loader = read_file`; calling the alias inherits the helper's capability
 effect instead of falling back to an untyped function value. Calls through
 effectful struct fields, tuple slots, and indexed ops tables record paths such
