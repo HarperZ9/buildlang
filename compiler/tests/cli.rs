@@ -28,6 +28,16 @@ fn c_backend_ready() -> bool {
     stdout.contains("Ready for practical C-backend examples: yes")
 }
 
+fn receipt_from_stdout(output: &std::process::Output) -> serde_json::Value {
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
+        panic!(
+            "stdout should be JSON receipt: {err}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
+}
+
 fn copy_dir_recursive(source: &Path, destination: &Path) {
     fs::create_dir_all(destination).unwrap_or_else(|err| {
         panic!(
@@ -211,6 +221,20 @@ fn check_receipt_stdout_records_passing_capabilities() {
         serde_json::from_slice(&output.stdout).expect("stdout should be JSON receipt");
     assert_eq!(receipt["schema"], "quantalang-check-receipt/v1");
     assert_eq!(receipt["status"], "passed");
+    assert_eq!(receipt["compiler"], "quantac");
+    assert_eq!(receipt["compiler_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(receipt["language_version"], "1.0.0");
+    assert_eq!(receipt["source_digest"]["algorithm"], "sha256");
+    let digest = receipt["source_digest"]["hex"]
+        .as_str()
+        .expect("source digest hex string");
+    assert_eq!(digest.len(), 64);
+    assert!(
+        digest
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()),
+        "digest should be lowercase hex: {digest}"
+    );
     assert_eq!(
         receipt["declared_effects"]["main"],
         serde_json::json!(["Console"])
@@ -252,6 +276,16 @@ fn check_receipt_file_records_failing_capability_diagnostic() {
         serde_json::from_str(&receipt_text).expect("receipt file should be JSON");
     assert_eq!(receipt["schema"], "quantalang-check-receipt/v1");
     assert_eq!(receipt["status"], "failed");
+    assert_eq!(receipt["compiler_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(receipt["language_version"], "1.0.0");
+    assert_eq!(receipt["source_digest"]["algorithm"], "sha256");
+    assert_eq!(
+        receipt["source_digest"]["hex"]
+            .as_str()
+            .expect("failing receipt digest")
+            .len(),
+        64
+    );
     assert_eq!(
         receipt["observed_capabilities"]["main"]["FileSystem"],
         serde_json::json!(["read_file"])
@@ -269,6 +303,98 @@ fn check_receipt_file_records_failing_capability_diagnostic() {
                     .contains("FileSystem")
         }),
         "expected FileSystem UnhandledEffect diagnostic in {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn check_receipt_source_digest_ignores_path_for_identical_content() {
+    let id = std::process::id();
+    let left = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_digest_left_{id}.quanta"
+    ));
+    let right = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_digest_right_{id}.quanta"
+    ));
+    let source = r#"fn main() ~ Console { println!("same"); }"#;
+    fs::write(&left, source).expect("write left digest fixture");
+    fs::write(&right, source).expect("write right digest fixture");
+
+    let left_output = quantac()
+        .arg("check")
+        .arg(&left)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run left digest receipt");
+    let right_output = quantac()
+        .arg("check")
+        .arg(&right)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run right digest receipt");
+
+    let _ = fs::remove_file(&left);
+    let _ = fs::remove_file(&right);
+
+    assert!(left_output.status.success(), "left check should pass");
+    assert!(right_output.status.success(), "right check should pass");
+    let left_receipt = receipt_from_stdout(&left_output);
+    let right_receipt = receipt_from_stdout(&right_output);
+    assert_ne!(left_receipt["source"], right_receipt["source"]);
+    let left_digest = left_receipt["source_digest"]["hex"]
+        .as_str()
+        .expect("left source digest hex string");
+    let right_digest = right_receipt["source_digest"]["hex"]
+        .as_str()
+        .expect("right source digest hex string");
+    assert_eq!(left_digest.len(), 64);
+    assert_eq!(right_digest.len(), 64);
+    assert_eq!(
+        left_receipt["source_digest"]["hex"],
+        right_receipt["source_digest"]["hex"]
+    );
+}
+
+#[test]
+fn check_receipt_source_digest_changes_when_source_changes() {
+    let id = std::process::id();
+    let first = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_digest_first_{id}.quanta"
+    ));
+    let second = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_digest_second_{id}.quanta"
+    ));
+    fs::write(&first, r#"fn main() ~ Console { println!("first"); }"#)
+        .expect("write first digest fixture");
+    fs::write(&second, r#"fn main() ~ Console { println!("second"); }"#)
+        .expect("write second digest fixture");
+
+    let first_output = quantac()
+        .arg("check")
+        .arg(&first)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run first digest receipt");
+    let second_output = quantac()
+        .arg("check")
+        .arg(&second)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run second digest receipt");
+
+    let _ = fs::remove_file(&first);
+    let _ = fs::remove_file(&second);
+
+    assert!(first_output.status.success(), "first check should pass");
+    assert!(second_output.status.success(), "second check should pass");
+    let first_receipt = receipt_from_stdout(&first_output);
+    let second_receipt = receipt_from_stdout(&second_output);
+    assert_ne!(
+        first_receipt["source_digest"]["hex"],
+        second_receipt["source_digest"]["hex"]
     );
 }
 
