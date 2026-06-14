@@ -1235,7 +1235,7 @@ impl<'ctx> TypeInfer<'ctx> {
     }
 
     /// Resolve the Future::Output associated type.
-    fn resolve_future_output(&self, future_ty: &Ty) -> Ty {
+    fn resolve_future_output(&self, future_ty: &Ty) -> Option<Ty> {
         if let TyKind::Projection {
             trait_ref,
             item,
@@ -1245,7 +1245,7 @@ impl<'ctx> TypeInfer<'ctx> {
         {
             if trait_ref.as_ref() == "Future" && item.as_ref() == "Output" {
                 if let Some(output_ty) = substs.first() {
-                    return output_ty.clone();
+                    return Some(output_ty.clone());
                 }
             }
         }
@@ -1254,11 +1254,16 @@ impl<'ctx> TypeInfer<'ctx> {
             let mut resolver = TraitResolver::new(env);
             if let Ok(output_ty) = resolver.resolve_assoc_type(future_ty, builtins.future, "Output")
             {
-                return output_ty;
+                return Some(output_ty);
             }
         }
-        // Fallback: return fresh variable
-        Ty::fresh_var()
+
+        match &future_ty.kind {
+            TyKind::Var(_) | TyKind::Infer(_) => Some(Ty::fresh_var()),
+            TyKind::Never => Some(Ty::never()),
+            TyKind::Error => Some(Ty::error()),
+            _ => None,
+        }
     }
 
     /// Look up a method on a type.
@@ -4036,7 +4041,12 @@ impl<'ctx> TypeInfer<'ctx> {
         }
 
         // Resolve Future trait to get Output type
-        self.resolve_future_output(&expr_ty)
+        if let Some(output_ty) = self.resolve_future_output(&expr_ty) {
+            output_ty
+        } else {
+            self.error(TypeError::NotAwaitable { ty: expr_ty }, expr.span);
+            Ty::error()
+        }
     }
 
     fn infer_struct(
