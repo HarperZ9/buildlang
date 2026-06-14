@@ -131,6 +131,8 @@ verification check.
 Add `--expect-profile ci-review` when a verification job must prove the receipt
 was accepted under a specific built-in profile, not merely under whatever policy
 metadata the receipt currently contains.
+Add `--expect-policy-digest sha256:<hex>` when a verification job must prove the
+receipt was accepted under an exact file-backed or built-in policy digest.
 
 `observed_capabilities` records direct ambient capability use inside a function,
 such as `read_file`, `tcp_connect`, `println!`, process helpers, or FFI helpers.
@@ -188,6 +190,12 @@ For stored receipts, pin verification to that same built-in profile:
 
 ```bash
 quantac receipt verify receipt.json --expect-profile ci-review --json
+```
+
+For file-backed policies, pin the policy document digest instead:
+
+```bash
+quantac receipt verify receipt.json --expect-policy-digest sha256:<hex> --json
 ```
 
 The built-in profiles are valid `quantalang-check-policy/v1` JSON and are meant
