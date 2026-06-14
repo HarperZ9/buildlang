@@ -204,6 +204,12 @@ enum Commands {
         command: CorpusCommands,
     },
 
+    /// Built-in check policy profiles for CI and release gates
+    Policy {
+        #[command(subcommand)]
+        command: PolicyCommands,
+    },
+
     /// Run tests - compile .quanta programs and verify output against .expected files
     Test {
         /// Directory containing test programs [default: tests/programs]
@@ -278,6 +284,20 @@ enum CorpusCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum PolicyCommands {
+    /// List built-in check policy profiles
+    List,
+    /// Print a built-in check policy profile as JSON
+    Print {
+        /// Built-in profile name
+        name: String,
+        /// Write the profile to a file instead of stdout
+        #[arg(short, long, value_name = "PATH")]
+        output: Option<PathBuf>,
+    },
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -303,6 +323,7 @@ fn main() -> ExitCode {
         Some(Commands::Fmt { file, check, write }) => cmd_fmt(&file, check, write),
         Some(Commands::Pkg { command }) => cmd_pkg(command),
         Some(Commands::Corpus { command }) => cmd_corpus(command),
+        Some(Commands::Policy { command }) => cmd_policy(command),
         Some(Commands::Lint { file }) => cmd_lint(&file),
         Some(Commands::Doctor) => cmd_doctor(),
         Some(Commands::Test {
@@ -675,6 +696,132 @@ struct CorpusExecutionProgram {
     id: String,
     path: String,
     expected_stdout: String,
+}
+
+struct BuiltinPolicyTemplate {
+    name: &'static str,
+    summary: &'static str,
+}
+
+const BUILTIN_POLICY_TEMPLATES: &[BuiltinPolicyTemplate] = &[
+    BuiltinPolicyTemplate {
+        name: "pure",
+        summary: "deny all built-in ambient capability effects",
+    },
+    BuiltinPolicyTemplate {
+        name: "console-only",
+        summary: "allow Console only; deny other ambient capability effects",
+    },
+    BuiltinPolicyTemplate {
+        name: "offline",
+        summary: "allow local file/env/clock/console work; deny network/process/FFI/GPU",
+    },
+    BuiltinPolicyTemplate {
+        name: "ci-review",
+        summary: "require digests and deny Network, Process, Foreign, and Gpu",
+    },
+];
+
+fn builtin_policy_profile(name: &str) -> Option<serde_json::Value> {
+    match name {
+        "pure" => Some(serde_json::json!({
+            "schema": "quantalang-check-policy/v1",
+            "denied_effects": [
+                "FileSystem",
+                "Network",
+                "Process",
+                "Environment",
+                "Clock",
+                "Console",
+                "Foreign",
+                "Gpu"
+            ],
+            "require_source_digest": true,
+            "require_input_graph_digest": true
+        })),
+        "console-only" => Some(serde_json::json!({
+            "schema": "quantalang-check-policy/v1",
+            "allowed_effects": ["Console"],
+            "denied_effects": [
+                "FileSystem",
+                "Network",
+                "Process",
+                "Environment",
+                "Clock",
+                "Foreign",
+                "Gpu"
+            ],
+            "require_source_digest": true,
+            "require_input_graph_digest": true
+        })),
+        "offline" => Some(serde_json::json!({
+            "schema": "quantalang-check-policy/v1",
+            "allowed_effects": [
+                "FileSystem",
+                "Environment",
+                "Clock",
+                "Console"
+            ],
+            "denied_effects": [
+                "Network",
+                "Process",
+                "Foreign",
+                "Gpu"
+            ],
+            "require_source_digest": true,
+            "require_input_graph_digest": true
+        })),
+        "ci-review" => Some(serde_json::json!({
+            "schema": "quantalang-check-policy/v1",
+            "denied_effects": [
+                "Network",
+                "Process",
+                "Foreign",
+                "Gpu"
+            ],
+            "require_source_digest": true,
+            "require_input_graph_digest": true
+        })),
+        _ => None,
+    }
+}
+
+fn cmd_policy(command: PolicyCommands) -> Result<(), i32> {
+    match command {
+        PolicyCommands::List => {
+            println!("Built-in check policy profiles:");
+            for template in BUILTIN_POLICY_TEMPLATES {
+                println!("  {:<14} {}", template.name, template.summary);
+            }
+            Ok(())
+        }
+        PolicyCommands::Print { name, output } => {
+            let profile = builtin_policy_profile(&name).ok_or_else(|| {
+                let names = BUILTIN_POLICY_TEMPLATES
+                    .iter()
+                    .map(|template| template.name)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                eprintln!(
+                    "Unknown built-in policy profile '{}'. Available: {}",
+                    name, names
+                );
+                1
+            })?;
+            let mut json =
+                serde_json::to_string_pretty(&profile).expect("built-in policy profile is JSON");
+            json.push('\n');
+            if let Some(path) = output {
+                std::fs::write(&path, json).map_err(|err| {
+                    eprintln!("Error writing policy profile '{}': {}", path.display(), err);
+                    1
+                })?;
+            } else {
+                print!("{json}");
+            }
+            Ok(())
+        }
+    }
 }
 
 fn cmd_corpus(command: CorpusCommands) -> Result<(), i32> {
