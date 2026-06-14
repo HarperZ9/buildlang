@@ -583,6 +583,13 @@ impl EffectContext {
             ))
             .with_operation(EffectOperation::new("fail", vec![], Ty::never()));
         self.register_effect(nondet);
+
+        for (idx, name) in super::capabilities::capability_effect_names()
+            .iter()
+            .enumerate()
+        {
+            self.register_effect(EffectDef::new(DefId::new(0, 100 + idx as u32), *name));
+        }
     }
 
     /// Register an effect definition.
