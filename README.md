@@ -145,12 +145,11 @@ fn call_foreign() ~ Foreign {
 ```
 
 If the effect is missing, the checker reports the required capability and a
-diagnostic note naming the ambient call that triggered it. This is the first
-security gate for practical ops/accountability use: file, network, process,
-environment, clock, GPU, console helper, and FFI surfaces are represented in
-the language's effect vocabulary instead of remaining invisible compiler
-side channels. Macro-style console attribution, including `println!`, is a
-follow-up hardening step.
+diagnostic note naming the ambient call or macro that triggered it. This is the
+first security gate for practical ops/accountability use: file, network,
+process, environment, clock, GPU, console helper/macro, and FFI surfaces are
+represented in the language's effect vocabulary instead of remaining invisible
+compiler side channels.
 
 ### Backend Selection
 
@@ -207,7 +206,7 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-14
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 663 passing, 0 failing, 11 ignored in local `cargo test --manifest-path compiler/Cargo.toml --quiet` on 2026-06-14
+- **Tests**: 669 passing, 0 failing, 11 ignored in local `cargo test --manifest-path compiler/Cargo.toml --quiet` on 2026-06-14
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
