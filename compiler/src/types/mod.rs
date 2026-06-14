@@ -39,6 +39,7 @@
 //! ```
 
 mod builtins;
+mod capabilities;
 mod check;
 mod const_generics;
 mod context;
@@ -51,6 +52,7 @@ mod ty;
 mod unify;
 
 pub use builtins::*;
+pub use capabilities::*;
 pub use check::*;
 pub use const_generics::*;
 pub use context::*;
