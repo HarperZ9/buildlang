@@ -3242,6 +3242,73 @@ fn main() ~ FileSystem {
 }
 
 #[test]
+fn check_receipt_records_enum_variant_destructured_selected_effectful_function_sources() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_enum_variant_destructured_selected_effectful_function_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+enum Slot {
+    Ready((fn() -> str) with FileSystem),
+}
+
+fn load_config() -> str ~ FileSystem {
+    read_file("config.toml")
+}
+
+fn load_secret() -> str ~ FileSystem {
+    read_file("secret.toml")
+}
+
+fn main() ~ FileSystem {
+    let use_secret = true;
+    let slot = if use_secret {
+        Slot::Ready(load_secret)
+    } else {
+        Slot::Ready(load_config)
+    };
+    match slot {
+        Slot::Ready(loader) => loader(),
+    };
+}
+"#,
+    )
+    .expect("write enum-variant destructured selected effectful function receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "enum-variant destructured selected effectful function receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["load_config", "load_secret", "loader"])
+    );
+}
+
+#[test]
 fn check_receipt_file_records_failing_capability_diagnostic() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_check_receipt_fail_{}.quanta",

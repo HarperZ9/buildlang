@@ -366,6 +366,15 @@ impl<'ctx> TypeInfer<'ctx> {
         }
     }
 
+    fn merge_call_sources(&mut self, name: &str, sources: Vec<String>) {
+        let mut merged = self
+            .lookup_call_source_binding(name)
+            .cloned()
+            .unwrap_or_default();
+        merged.extend(sources);
+        self.bind_call_sources(name, merged);
+    }
+
     fn clear_call_source_tree(&mut self, name: &str) {
         let dot_prefix = format!("{name}.");
         let bracket_prefix = format!("{name}[");
@@ -438,6 +447,66 @@ impl<'ctx> TypeInfer<'ctx> {
     fn is_tuple_struct_constructor_call(&self, func: &ast::Expr, arg_count: usize) -> bool {
         self.tuple_struct_constructor_field_count(func)
             .is_some_and(|field_count| field_count == arg_count)
+    }
+
+    fn enum_variant_constructor_field_count(&self, func: &ast::Expr) -> Option<usize> {
+        let path = match &func.kind {
+            ExprKind::Path(path) => path,
+            ExprKind::Paren(inner) => return self.enum_variant_constructor_field_count(inner),
+            _ => return None,
+        };
+
+        if path.segments.len() < 2 {
+            return None;
+        }
+
+        let enum_name = path.segments[path.segments.len() - 2].ident.name.as_ref();
+        let variant_name = path.last_ident()?.name.as_ref();
+        let type_def = self.ctx.lookup_type_by_name(enum_name)?;
+        if let TypeDefKind::Enum(enum_def) = &type_def.kind {
+            return enum_def
+                .variants
+                .iter()
+                .find(|variant| variant.name.as_ref() == variant_name)
+                .map(|variant| variant.fields.len());
+        }
+        None
+    }
+
+    fn enum_variant_constructor_type(&self, path: &ast::Path) -> Option<Ty> {
+        if path.segments.len() < 2 {
+            return None;
+        }
+
+        let enum_name = path.segments[path.segments.len() - 2].ident.name.as_ref();
+        let variant_name = path.last_ident()?.name.as_ref();
+        let type_def = self.ctx.lookup_type_by_name(enum_name)?;
+        let TypeDefKind::Enum(enum_def) = &type_def.kind else {
+            return None;
+        };
+        let variant = enum_def
+            .variants
+            .iter()
+            .find(|variant| variant.name.as_ref() == variant_name)?;
+        let substs: Vec<Ty> = type_def.generics.iter().map(|_| Ty::fresh_var()).collect();
+        let ret = Ty::adt(type_def.def_id, substs.clone());
+        if variant.fields.is_empty() {
+            return Some(ret);
+        }
+
+        let params = variant
+            .fields
+            .iter()
+            .map(|(_, ty)| ty.substitute_params(&substs))
+            .collect();
+        Some(Ty::function(params, ret))
+    }
+
+    fn is_positional_constructor_call(&self, func: &ast::Expr, arg_count: usize) -> bool {
+        self.is_tuple_struct_constructor_call(func, arg_count)
+            || self
+                .enum_variant_constructor_field_count(func)
+                .is_some_and(|field_count| field_count == arg_count)
     }
 
     fn call_access_sources(&self, expr: &ast::Expr) -> Vec<String> {
@@ -513,19 +582,31 @@ impl<'ctx> TypeInfer<'ctx> {
     }
 
     fn bind_aggregate_call_sources(&mut self, name: &str, expr: &ast::Expr) {
+        self.bind_aggregate_call_sources_inner(name, expr, false);
+    }
+
+    fn bind_member_call_sources(&mut self, member_name: &str, sources: Vec<String>, merge: bool) {
+        if merge {
+            self.merge_call_sources(member_name, sources);
+        } else {
+            self.bind_call_sources(member_name, sources);
+        }
+    }
+
+    fn bind_aggregate_call_sources_inner(&mut self, name: &str, expr: &ast::Expr, merge: bool) {
         match &expr.kind {
             ExprKind::Tuple(elems) => {
                 for (index, elem) in elems.iter().enumerate() {
                     let member_name = format!("{}.{}", name, index);
-                    self.bind_call_sources(&member_name, self.call_sources(elem));
-                    self.bind_aggregate_call_sources(&member_name, elem);
+                    self.bind_member_call_sources(&member_name, self.call_sources(elem), merge);
+                    self.bind_aggregate_call_sources_inner(&member_name, elem, merge);
                 }
             }
             ExprKind::Array(elems) => {
                 for (index, elem) in elems.iter().enumerate() {
                     let member_name = format!("{}[{}]", name, index);
-                    self.bind_call_sources(&member_name, self.call_sources(elem));
-                    self.bind_aggregate_call_sources(&member_name, elem);
+                    self.bind_member_call_sources(&member_name, self.call_sources(elem), merge);
+                    self.bind_aggregate_call_sources_inner(&member_name, elem, merge);
                 }
             }
             ExprKind::Struct { fields, .. } => {
@@ -535,22 +616,44 @@ impl<'ctx> TypeInfer<'ctx> {
                         || self.call_sources_for_name(field.name.as_ref()),
                         |value| self.call_sources(value),
                     );
-                    self.bind_call_sources(&member_name, sources);
+                    self.bind_member_call_sources(&member_name, sources, merge);
                     if let Some(value) = field.value.as_deref() {
-                        self.bind_aggregate_call_sources(&member_name, value);
+                        self.bind_aggregate_call_sources_inner(&member_name, value, merge);
                     }
                 }
             }
             ExprKind::Call { func, args }
-                if self.is_tuple_struct_constructor_call(func, args.len()) =>
+                if self.is_positional_constructor_call(func, args.len()) =>
             {
                 for (index, arg) in args.iter().enumerate() {
                     let member_name = format!("{}.{}", name, index);
-                    self.bind_call_sources(&member_name, self.call_sources(arg));
-                    self.bind_aggregate_call_sources(&member_name, arg);
+                    self.bind_member_call_sources(&member_name, self.call_sources(arg), merge);
+                    self.bind_aggregate_call_sources_inner(&member_name, arg, merge);
                 }
             }
-            ExprKind::Paren(inner) => self.bind_aggregate_call_sources(name, inner),
+            ExprKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                if let Some(expr) = then_branch.tail_expr() {
+                    self.bind_aggregate_call_sources_inner(name, expr, true);
+                }
+                if let Some(expr) = else_branch.as_deref() {
+                    self.bind_aggregate_call_sources_inner(name, expr, true);
+                }
+            }
+            ExprKind::Match { arms, .. } => {
+                for arm in arms {
+                    self.bind_aggregate_call_sources_inner(name, &arm.body, true);
+                }
+            }
+            ExprKind::Block(block) | ExprKind::Unsafe(block) => {
+                if let Some(expr) = block.tail_expr() {
+                    self.bind_aggregate_call_sources_inner(name, expr, merge);
+                }
+            }
+            ExprKind::Paren(inner) => self.bind_aggregate_call_sources_inner(name, inner, merge),
             _ => {}
         }
     }
@@ -581,7 +684,7 @@ impl<'ctx> TypeInfer<'ctx> {
             }
             ast::PatternKind::TupleStruct { patterns, .. } => {
                 if let ExprKind::Call { func, args } = &expr.kind {
-                    if self.is_tuple_struct_constructor_call(func, args.len()) {
+                    if self.is_positional_constructor_call(func, args.len()) {
                         for (pattern, arg) in patterns.iter().zip(args.iter()) {
                             self.bind_pattern_call_sources(pattern, arg);
                         }
@@ -1785,6 +1888,10 @@ impl<'ctx> TypeInfer<'ctx> {
             if let Some(ty) = Self::ambient_capability_function_type(last) {
                 return ty;
             }
+        }
+
+        if let Some(ty) = self.enum_variant_constructor_type(path) {
+            return ty;
         }
 
         // Check for associated function: Type::func (2-segment path)
@@ -3119,6 +3226,8 @@ impl<'ctx> TypeInfer<'ctx> {
         for arm in arms {
             // Type check pattern against scrutinee
             self.check_pattern(&arm.pattern, &scrutinee_ty);
+            self.source_bindings.push(BTreeMap::new());
+            self.bind_pattern_call_sources(&arm.pattern, scrutinee);
 
             // Type check guard if present
             if let Some(guard) = &arm.guard {
@@ -3130,6 +3239,8 @@ impl<'ctx> TypeInfer<'ctx> {
             let body_ty = self.infer_expr(&arm.body);
             let _ = self.unify(&result_ty, &body_ty, span);
             result_ty = self.merge_future_effect_annotations(&result_ty, &body_ty);
+
+            self.source_bindings.pop();
         }
 
         // Exhaustiveness checking: determine the enum type from either
@@ -4030,24 +4141,41 @@ impl<'ctx> TypeInfer<'ctx> {
                     self.bind_pattern(&field.pattern, field_ty);
                 }
             }
-            ast::PatternKind::TupleStruct {
-                path: _, patterns, ..
-            } => {
+            ast::PatternKind::TupleStruct { path, patterns, .. } => {
                 // Extract field types before recursive calls to avoid borrow conflicts
+                let resolved_ty = self.apply(ty);
                 let field_types: Vec<_> = patterns
                     .iter()
                     .enumerate()
                     .map(|(i, _)| {
-                        if let TyKind::Adt(def_id, _) = &ty.kind {
+                        if let TyKind::Adt(def_id, _) = &resolved_ty.kind {
                             if let Some(type_def) = self.ctx.lookup_type(*def_id) {
-                                if let TypeDefKind::Struct(struct_def) = &type_def.kind {
-                                    if struct_def.is_tuple {
+                                match &type_def.kind {
+                                    TypeDefKind::Struct(struct_def) if struct_def.is_tuple => {
                                         return struct_def
                                             .fields
                                             .get(i)
-                                            .map(|(_, t)| t.clone())
+                                            .map(|(_, ty)| ty.clone())
                                             .unwrap_or_else(Ty::fresh_var);
                                     }
+                                    TypeDefKind::Enum(enum_def) => {
+                                        let variant_name =
+                                            path.last_ident().map(|ident| ident.name.as_ref());
+                                        if let Some(variant_name) = variant_name {
+                                            if let Some(variant) =
+                                                enum_def.variants.iter().find(|variant| {
+                                                    variant.name.as_ref() == variant_name
+                                                })
+                                            {
+                                                return variant
+                                                    .fields
+                                                    .get(i)
+                                                    .map(|(_, ty)| ty.clone())
+                                                    .unwrap_or_else(Ty::fresh_var);
+                                            }
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
