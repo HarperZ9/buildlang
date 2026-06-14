@@ -115,17 +115,33 @@ the exact capability source.
 metadata, a SHA-256 digest of the entry source bytes, an `input_digests` ledger
 for every entry, import, include, and module file read by the check pipeline, an
 `input_graph_digest` fingerprint for the whole checked source graph, declared
-effects, observed capability sources, pass/fail status, and compact diagnostics.
-Use `--receipt -` when a CI step or wrapper wants the receipt on stdout.
+effects, observed capability sources, propagated effect callees, pass/fail
+status, and compact diagnostics. Use `--receipt -` when a CI step or wrapper
+wants the receipt on stdout.
+
+`observed_capabilities` records direct ambient capability use inside a function,
+such as `read_file`, `tcp_connect`, `println!`, process helpers, or FFI helpers.
+These entries are the accountability boundary for code that actually touches the
+outside world.
+
+`propagated_effects` records effectful callees that make a caller inherit a
+typed effect. This lets policy allow a small number of audited boundary
+functions while still proving which higher-level workflows depend on them.
 
 Policy profiles turn receipt evidence into an enforceable CI gate:
 
 ```json
 {
   "schema": "quantalang-check-policy/v1",
-  "allowed_effects": ["Console"],
-  "denied_effects": ["FileSystem", "Network", "Process", "Foreign"],
-  "require_source_digest": true
+  "allowed_effects": ["FileSystem", "Console"],
+  "direct_effect_allowlist": {
+    "FileSystem": ["load_config"]
+  },
+  "propagated_effect_allowlist": {
+    "FileSystem": ["main"]
+  },
+  "require_source_digest": true,
+  "require_input_graph_digest": true
 }
 ```
 
@@ -136,7 +152,9 @@ quantac check app.quanta --policy console-only.json --receipt receipt.json
 ```
 
 Denied effects always fail. If `allowed_effects` is non-empty, any declared
-effect or observed capability outside the allow-list also fails.
+effect, observed capability, or propagated effect outside the allow-list also
+fails. `direct_effect_allowlist` applies only to `observed_capabilities`;
+`propagated_effect_allowlist` applies only to `propagated_effects`.
 
 ---
 
