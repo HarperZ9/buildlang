@@ -168,6 +168,7 @@ Policy profiles turn receipt evidence into an enforceable CI gate:
   "require_source_digest": true,
   "require_input_graph_digest": true,
   "require_provenance_allowlists": true,
+  "require_source_allowlists": true,
   "require_allowlist_coverage": true
 }
 ```
@@ -191,6 +192,8 @@ names are reported as `UnknownPolicyEffect` violations, which catches policy
 typos such as `Netwrok` before they can weaken a CI gate.
 Set `require_provenance_allowlists` to require every direct capability boundary
 and propagated capability caller to be explicitly named.
+Set `require_source_allowlists` to require every approved direct capability
+boundary and propagated caller to also name its exact source entries.
 Set `require_allowlist_coverage` to reject stale direct or propagated allowlist
 entries, including source-level direct capability and propagated-effect
 entries, that are not matched by the current receipt evidence.
