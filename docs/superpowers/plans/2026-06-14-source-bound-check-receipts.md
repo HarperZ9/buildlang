@@ -283,7 +283,7 @@ mod check_receipt_tests {
 Run:
 
 ```powershell
-cargo test --manifest-path compiler/Cargo.toml source_digest --quiet
+cargo test --manifest-path compiler/Cargo.toml --bin quantac source_digest --quiet
 ```
 
 Expected: PASS after implementation.
