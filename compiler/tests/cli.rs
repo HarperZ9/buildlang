@@ -936,6 +936,152 @@ fn main() ~ Console { println!("{}", value()); }
 }
 
 #[test]
+fn receipt_verify_rejects_changed_policy_file_digest() {
+    let dir = std::env::temp_dir().join(format!(
+        "quantalang_receipt_verify_policy_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create receipt policy fixture dir");
+    let entry = dir.join("entry.quanta");
+    let policy = dir.join("policy.json");
+    let receipt = dir.join("receipt.json");
+    fs::write(&entry, r#"fn main() ~ Console { println!("ok"); }"#)
+        .expect("write policy receipt entry");
+    fs::write(
+        &policy,
+        r#"{
+  "schema": "quantalang-check-policy/v1",
+  "allowed_effects": ["Console"],
+  "require_source_digest": true
+}
+"#,
+    )
+    .expect("write initial policy");
+
+    let check_output = quantac()
+        .arg("check")
+        .arg(&entry)
+        .arg("--policy")
+        .arg(&policy)
+        .arg("--receipt")
+        .arg(&receipt)
+        .output()
+        .expect("write file-backed policy receipt");
+    assert!(
+        check_output.status.success(),
+        "check should pass before policy mutation\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&check_output.stdout),
+        String::from_utf8_lossy(&check_output.stderr)
+    );
+
+    fs::write(
+        &policy,
+        r#"{
+  "schema": "quantalang-check-policy/v1",
+  "allowed_effects": ["FileSystem"],
+  "require_source_digest": true
+}
+"#,
+    )
+    .expect("mutate policy file");
+    let verify_output = quantac()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .output()
+        .expect("verify stale policy receipt");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        !verify_output.status.success(),
+        "stale policy digest receipt should fail"
+    );
+    assert!(
+        String::from_utf8_lossy(&verify_output.stderr).contains("policy source digest mismatch"),
+        "stderr should report policy digest mismatch:\n{}",
+        String::from_utf8_lossy(&verify_output.stderr)
+    );
+}
+
+#[test]
+fn receipt_verify_json_reports_failed_policy_file_digest() {
+    let dir = std::env::temp_dir().join(format!(
+        "quantalang_receipt_verify_policy_json_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create receipt policy json fixture dir");
+    let entry = dir.join("entry.quanta");
+    let policy = dir.join("policy.json");
+    let receipt = dir.join("receipt.json");
+    fs::write(&entry, r#"fn main() ~ Console { println!("ok"); }"#)
+        .expect("write policy json receipt entry");
+    fs::write(
+        &policy,
+        r#"{
+  "schema": "quantalang-check-policy/v1",
+  "allowed_effects": ["Console"],
+  "require_source_digest": true
+}
+"#,
+    )
+    .expect("write initial json policy");
+
+    let check_output = quantac()
+        .arg("check")
+        .arg(&entry)
+        .arg("--policy")
+        .arg(&policy)
+        .arg("--receipt")
+        .arg(&receipt)
+        .output()
+        .expect("write file-backed policy receipt for json verify");
+    assert!(
+        check_output.status.success(),
+        "check should pass before json policy mutation\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&check_output.stdout),
+        String::from_utf8_lossy(&check_output.stderr)
+    );
+
+    fs::write(
+        &policy,
+        r#"{
+  "schema": "quantalang-check-policy/v1",
+  "allowed_effects": ["FileSystem"],
+  "require_source_digest": true
+}
+"#,
+    )
+    .expect("mutate json policy file");
+    let verify_output = quantac()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .arg("--json")
+        .output()
+        .expect("verify stale policy receipt as json");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        !verify_output.status.success(),
+        "stale policy json receipt should fail"
+    );
+    let report: serde_json::Value = serde_json::from_slice(&verify_output.stdout)
+        .expect("policy failure report should be JSON");
+    assert_eq!(report["status"], "failed");
+    let policy_check = verification_check(&report, "policy_source_digest");
+    assert_eq!(policy_check["status"], "failed");
+    assert!(
+        policy_check["message"]
+            .as_str()
+            .expect("policy failure message")
+            .contains("policy source digest mismatch"),
+        "policy failure should explain mismatch: {policy_check:#?}"
+    );
+}
+
+#[test]
 fn receipt_verify_rejects_changed_input_graph() {
     let dir = std::env::temp_dir().join(format!(
         "quantalang_receipt_verify_graph_{}",

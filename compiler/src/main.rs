@@ -1001,6 +1001,25 @@ fn verify_receipt_digest(
     Ok(())
 }
 
+fn current_policy_source_digest(policy_source: &str) -> Result<CheckReceiptSourceDigest, i32> {
+    if let Some(profile) = policy_source.strip_prefix("builtin:") {
+        return builtin_policy_digest(profile).ok_or_else(|| {
+            eprintln!("Error: unknown built-in policy profile `{}`", profile);
+            1
+        });
+    }
+
+    let path = Path::new(policy_source);
+    let bytes = std::fs::read(path).map_err(|err| {
+        eprintln!("Error reading policy '{}': {}", path.display(), err);
+        1
+    })?;
+    Ok(CheckReceiptSourceDigest {
+        algorithm: "sha256",
+        hex: source_digest_hex(&bytes),
+    })
+}
+
 fn cmd_receipt(command: ReceiptCommands) -> Result<(), i32> {
     match command {
         ReceiptCommands::Verify {
@@ -1097,6 +1116,22 @@ fn cmd_receipt_verify(
         "input graph digest",
         &current.input_graph_digest,
     )?;
+
+    if let Some(policy_source) = receipt
+        .pointer("/policy/source")
+        .and_then(serde_json::Value::as_str)
+    {
+        let expected_hex =
+            receipt_digest_hex(&receipt, "/policy/source_digest", "policy source digest")?;
+        let actual = current_policy_source_digest(policy_source)?;
+        if !actual.hex.eq_ignore_ascii_case(expected_hex) {
+            eprintln!(
+                "Error: policy source digest mismatch for '{}': expected sha256:{}, actual sha256:{}",
+                policy_source, expected_hex, actual.hex
+            );
+            return Err(1);
+        }
+    }
 
     if let Some(profile) = receipt
         .pointer("/policy/profile")
@@ -1207,6 +1242,26 @@ fn cmd_receipt_verify_json(receipt_path: &Path, source_override: Option<&Path>) 
             .eq_ignore_ascii_case(expected_graph_digest))
         .then(|| "input graph digest mismatch".to_string()),
     );
+
+    if let Some(policy_source) = receipt
+        .pointer("/policy/source")
+        .and_then(serde_json::Value::as_str)
+    {
+        let expected_policy_digest =
+            receipt_digest_hex(&receipt, "/policy/source_digest", "policy source digest")?;
+        let actual_policy_digest = current_policy_source_digest(policy_source)?;
+        push_receipt_verification_check(
+            &mut checks,
+            "policy_source_digest",
+            Some(format!("sha256:{expected_policy_digest}")),
+            Some(digest_label(&actual_policy_digest)),
+            None,
+            (!actual_policy_digest
+                .hex
+                .eq_ignore_ascii_case(expected_policy_digest))
+            .then(|| "policy source digest mismatch".to_string()),
+        );
+    }
 
     if let Some(profile) = receipt
         .pointer("/policy/profile")
