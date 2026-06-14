@@ -169,8 +169,10 @@ declare or handle `FileSystem`, and `(fn() -> str) with FileSystem` supports
 effectful callbacks that return data while keeping callback provenance in
 receipts. Wrappers that receive an effectful callback argument keep caller-side
 evidence as well, so `run(load_config)` records both `run` and `load_config` as
-propagated `FileSystem` sources. Ambient helpers used as values keep those
-effects too:
+propagated `FileSystem` sources. Effectful inherent methods carry the same
+declared effects through method-call syntax, so `config.load()` can require
+`FileSystem` and record `Config.load` as propagated evidence. Ambient helpers
+used as values keep those effects too:
 `let loader = read_file; loader("ops.toml");` requires `FileSystem` and records
 `loader` as the propagated source. Closure literals capture their body effects
 without performing them at definition time, so `let loader = |path: str|
@@ -274,6 +276,9 @@ their full source path, such as
 `io::read_file`, so source allowlists can distinguish equivalent helper names
 from different modules. This lets teams permit a small audited boundary
 function while still proving which higher-level workflows depend on it.
+Effectful inherent methods are propagated dependencies as well: calling
+`config.load()` where `Config.load` declares `~ FileSystem` records
+`Config.load` under the caller's `propagated_effects`.
 Effectful callback parameters are also propagated sources, so a wrapper that
 calls `loader: fn() with FileSystem` records `loader` as the inherited
 `FileSystem` source. When a caller supplies an effectful callback to that
@@ -407,7 +412,7 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-14
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 795 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
+- **Tests**: 798 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)

@@ -663,6 +663,108 @@ fn main() ~ FileSystem {
 }
 
 #[test]
+fn check_reports_effect_for_effectful_method_call() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_effectful_method_gate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+struct Config;
+
+impl Config {
+    fn load(self) ~ FileSystem {
+        read_file("ops.txt");
+    }
+}
+
+fn main() {
+    let config = Config;
+    config.load();
+}
+"#,
+    )
+    .expect("write effectful method fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "effectful method call should fail without FileSystem effect"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FileSystem"),
+        "diagnostic should name FileSystem effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("load"),
+        "diagnostic should name triggering method:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn check_receipt_records_effectful_method_call_source() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_effectful_method_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+struct Config;
+
+impl Config {
+    fn load(self) ~ FileSystem {
+        read_file("ops.txt");
+    }
+}
+
+fn main() ~ FileSystem {
+    let config = Config;
+    config.load();
+}
+"#,
+    )
+    .expect("write effectful method receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "effectful method receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["load"]["FileSystem"],
+        serde_json::json!(["read_file"])
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["Config.load"])
+    );
+}
+
+#[test]
 fn check_reports_effect_for_effectful_callback_parameter() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_effectful_callback_gate_{}.quanta",
@@ -4961,6 +5063,80 @@ fn main() ~ FileSystem {
         String::from_utf8_lossy(&output.stderr)
     );
     let receipt = receipt_from_stdout(&output);
+    assert_eq!(receipt["policy"]["status"], "passed");
+    assert!(receipt["policy"]["violations"]
+        .as_array()
+        .expect("policy violations")
+        .is_empty());
+}
+
+#[test]
+fn check_policy_propagated_effect_source_allowlist_accepts_approved_method() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_policy_propagated_method_source_accept_{}.quanta",
+        std::process::id()
+    ));
+    let policy = write_temp_policy(
+        "propagated_method_source_accept",
+        r#"{
+          "schema": "quantalang-check-policy/v1",
+          "allowed_effects": ["FileSystem"],
+          "direct_effect_allowlist": {
+            "FileSystem": ["load"]
+          },
+          "propagated_effect_allowlist": {
+            "FileSystem": ["main"]
+          },
+          "propagated_effect_source_allowlist": {
+            "FileSystem": {
+              "main": ["Config.load"]
+            }
+          }
+        }"#,
+    );
+    fs::write(
+        &fixture,
+        r#"
+struct Config;
+
+impl Config {
+    fn load(self) ~ FileSystem {
+        read_file("ops.txt");
+    }
+}
+
+fn main() ~ FileSystem {
+    let config = Config;
+    config.load();
+}
+"#,
+    )
+    .expect("write propagated method source allowlist acceptance fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--policy")
+        .arg(&policy)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check with approved propagated method source allowlist");
+
+    let _ = fs::remove_file(&fixture);
+    let _ = fs::remove_file(&policy);
+
+    assert!(
+        output.status.success(),
+        "policy should accept approved propagated method source\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["Config.load"])
+    );
     assert_eq!(receipt["policy"]["status"], "passed");
     assert!(receipt["policy"]["violations"]
         .as_array()
