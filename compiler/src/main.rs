@@ -451,6 +451,44 @@ struct CheckReceiptSourceDigest {
     hex: String,
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+struct CheckReceiptInputDigest {
+    role: String,
+    source: String,
+    digest: CheckReceiptSourceDigest,
+}
+
+#[derive(Default)]
+struct InputDigestLedger {
+    records: BTreeMap<String, CheckReceiptInputDigest>,
+}
+
+impl InputDigestLedger {
+    fn record(&mut self, role: &str, path: &Path, bytes: &[u8]) {
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let source = canonical.to_string_lossy().to_string();
+        self.records
+            .entry(source.clone())
+            .or_insert_with(|| CheckReceiptInputDigest {
+                role: role.to_string(),
+                source,
+                digest: CheckReceiptSourceDigest {
+                    algorithm: "sha256",
+                    hex: source_digest_hex(bytes),
+                },
+            });
+    }
+
+    fn into_sorted_records(self) -> Vec<CheckReceiptInputDigest> {
+        let mut records = self.records.into_values().collect::<Vec<_>>();
+        records.sort_by(|left, right| {
+            (left.role.as_str(), left.source.as_str())
+                .cmp(&(right.role.as_str(), right.source.as_str()))
+        });
+        records
+    }
+}
+
 #[derive(serde::Serialize)]
 struct CheckReceipt {
     schema: &'static str,
@@ -459,6 +497,7 @@ struct CheckReceipt {
     language_version: String,
     source: String,
     source_digest: CheckReceiptSourceDigest,
+    input_digests: Vec<CheckReceiptInputDigest>,
     status: &'static str,
     items: usize,
     tokens: usize,
@@ -561,6 +600,7 @@ struct CheckOutcome {
     compiler_version: &'static str,
     language_version: String,
     source_digest: CheckReceiptSourceDigest,
+    input_digests: Vec<CheckReceiptInputDigest>,
     items: usize,
     tokens: usize,
     parse_errors: Vec<String>,
@@ -1138,7 +1178,18 @@ const MAX_INCLUDE_DEPTH: usize = 10;
 /// - Graceful error reporting on missing files or depth overflow
 fn preprocess_includes(source: &str, base_dir: &Path) -> Result<String, i32> {
     let mut included: HashSet<PathBuf> = HashSet::new();
-    preprocess_includes_inner(source, base_dir, 0, &mut included)
+    let mut ledger = None;
+    preprocess_includes_inner(source, base_dir, 0, &mut included, &mut ledger)
+}
+
+fn preprocess_includes_recording_inputs(
+    source: &str,
+    base_dir: &Path,
+    ledger: &mut InputDigestLedger,
+) -> Result<String, i32> {
+    let mut included: HashSet<PathBuf> = HashSet::new();
+    let mut ledger = Some(ledger);
+    preprocess_includes_inner(source, base_dir, 0, &mut included, &mut ledger)
 }
 
 fn preprocess_includes_inner(
@@ -1146,6 +1197,7 @@ fn preprocess_includes_inner(
     base_dir: &Path,
     depth: usize,
     included: &mut HashSet<PathBuf>,
+    ledger: &mut Option<&mut InputDigestLedger>,
 ) -> Result<String, i32> {
     if depth > MAX_INCLUDE_DEPTH {
         eprintln!(
@@ -1180,7 +1232,14 @@ fn preprocess_includes_inner(
             }
 
             if full_path.exists() {
-                let contents = std::fs::read_to_string(&full_path).map_err(|e| {
+                let bytes = std::fs::read(&full_path).map_err(|e| {
+                    eprintln!("Error reading include '{}': {}", full_path.display(), e);
+                    1
+                })?;
+                if let Some(ledger) = ledger.as_deref_mut() {
+                    ledger.record("include", &full_path, &bytes);
+                }
+                let contents = String::from_utf8(bytes).map_err(|e| {
                     eprintln!("Error reading include '{}': {}", full_path.display(), e);
                     1
                 })?;
@@ -1189,7 +1248,8 @@ fn preprocess_includes_inner(
 
                 // Recursively expand includes in the included file
                 let inc_dir = full_path.parent().unwrap_or(base_dir);
-                let expanded = preprocess_includes_inner(&contents, inc_dir, depth + 1, included)?;
+                let expanded =
+                    preprocess_includes_inner(&contents, inc_dir, depth + 1, included, ledger)?;
 
                 result.push_str("// === include: ");
                 result.push_str(path_str);
@@ -1231,6 +1291,24 @@ fn preprocess_includes_inner(
 /// when looking up the package directory (e.g. `use std_math;` maps to
 /// `registry/packages/std-math/src/lib.quanta`).
 fn resolve_imports(source: &str, input_file: &Path) -> Result<String, i32> {
+    let mut ledger = None;
+    resolve_imports_inner(source, input_file, &mut ledger)
+}
+
+fn resolve_imports_recording_inputs(
+    source: &str,
+    input_file: &Path,
+    ledger: &mut InputDigestLedger,
+) -> Result<String, i32> {
+    let mut ledger = Some(ledger);
+    resolve_imports_inner(source, input_file, &mut ledger)
+}
+
+fn resolve_imports_inner(
+    source: &str,
+    input_file: &Path,
+    ledger: &mut Option<&mut InputDigestLedger>,
+) -> Result<String, i32> {
     // Try to locate the registry directory.
     // Walk up from the input file looking for a directory that contains
     // `registry/packages`.
@@ -1283,7 +1361,19 @@ fn resolve_imports(source: &str, input_file: &Path) -> Result<String, i32> {
                 let pkg_dir_name = name.replace('_', "-");
                 let lib_path = reg.join(&pkg_dir_name).join("src").join("lib.quanta");
                 if lib_path.exists() {
-                    let contents = std::fs::read_to_string(&lib_path).map_err(|e| {
+                    let bytes = std::fs::read(&lib_path).map_err(|e| {
+                        eprintln!(
+                            "Error reading import '{}' from '{}': {}",
+                            name,
+                            lib_path.display(),
+                            e
+                        );
+                        1
+                    })?;
+                    if let Some(ledger) = ledger.as_deref_mut() {
+                        ledger.record("import", &lib_path, &bytes);
+                    }
+                    let contents = String::from_utf8(bytes).map_err(|e| {
                         eprintln!(
                             "Error reading import '{}' from '{}': {}",
                             name,
@@ -1527,6 +1617,7 @@ fn build_check_receipt(
         language_version: outcome.language_version.clone(),
         source: outcome.source.clone(),
         source_digest: outcome.source_digest.clone(),
+        input_digests: outcome.input_digests.clone(),
         status: if diagnostics.is_empty() && !policy_failed {
             "passed"
         } else {
@@ -1542,10 +1633,12 @@ fn build_check_receipt(
 }
 
 fn run_check(file: &Path) -> Result<CheckOutcome, i32> {
+    let mut input_digest_ledger = InputDigestLedger::default();
     let source_bytes = std::fs::read(file).map_err(|e| {
         eprintln!("Error reading file '{}': {}", file.display(), e);
         1
     })?;
+    input_digest_ledger.record("entry", file, &source_bytes);
     let source_digest = CheckReceiptSourceDigest {
         algorithm: "sha256",
         hex: source_digest_hex(&source_bytes),
@@ -1555,9 +1648,9 @@ fn run_check(file: &Path) -> Result<CheckOutcome, i32> {
         1
     })?;
 
-    let source = resolve_imports(&source, file)?;
+    let source = resolve_imports_recording_inputs(&source, file, &mut input_digest_ledger)?;
     let chk_base = file.parent().unwrap_or(Path::new("."));
-    let source = preprocess_includes(&source, chk_base)?;
+    let source = preprocess_includes_recording_inputs(&source, chk_base, &mut input_digest_ledger)?;
     let source_file = SourceFile::new(file.to_string_lossy(), source);
 
     let mut lexer = Lexer::new(&source_file);
@@ -1576,7 +1669,7 @@ fn run_check(file: &Path) -> Result<CheckOutcome, i32> {
         .collect::<Vec<_>>();
     let item_count = ast.items.len();
 
-    resolve_modules(&mut ast, chk_base)?;
+    resolve_modules_recording_inputs(&mut ast, chk_base, &mut input_digest_ledger)?;
 
     let mut ctx = TypeContext::new();
     let mut checker = TypeChecker::new(&mut ctx);
@@ -1588,6 +1681,7 @@ fn run_check(file: &Path) -> Result<CheckOutcome, i32> {
         compiler_version: quantalang::VERSION,
         language_version: language_version_string(),
         source_digest,
+        input_digests: input_digest_ledger.into_sorted_records(),
         items: item_count,
         tokens: token_count,
         parse_errors,
@@ -3403,7 +3497,17 @@ fn find_stdlib_path() -> Option<PathBuf> {
 }
 
 fn resolve_modules(ast: &mut Module, source_dir: &Path) -> Result<(), i32> {
-    resolve_modules_with_prefix(ast, source_dir, "")
+    let mut ledger = None;
+    resolve_modules_with_prefix(ast, source_dir, "", &mut ledger)
+}
+
+fn resolve_modules_recording_inputs(
+    ast: &mut Module,
+    source_dir: &Path,
+    ledger: &mut InputDigestLedger,
+) -> Result<(), i32> {
+    let mut ledger = Some(ledger);
+    resolve_modules_with_prefix(ast, source_dir, "", &mut ledger)
 }
 
 /// Resolve modules with a prefix for nested module support.
@@ -3412,6 +3516,7 @@ fn resolve_modules_with_prefix(
     ast: &mut Module,
     source_dir: &Path,
     prefix: &str,
+    ledger: &mut Option<&mut InputDigestLedger>,
 ) -> Result<(), i32> {
     // Collect module names from `mod foo;` declarations (content == None).
     let mod_names: Vec<String> = ast
@@ -3459,7 +3564,18 @@ fn resolve_modules_with_prefix(
         };
 
         // Read and parse the module file
-        let mod_source = std::fs::read_to_string(&actual_file).map_err(|e| {
+        let mod_bytes = std::fs::read(&actual_file).map_err(|e| {
+            eprintln!(
+                "Error reading module file '{}': {}",
+                actual_file.display(),
+                e
+            );
+            1
+        })?;
+        if let Some(ledger) = ledger.as_deref_mut() {
+            ledger.record("module", &actual_file, &mod_bytes);
+        }
+        let mod_source = String::from_utf8(mod_bytes).map_err(|e| {
             eprintln!(
                 "Error reading module file '{}': {}",
                 actual_file.display(),
@@ -3492,7 +3608,7 @@ fn resolve_modules_with_prefix(
         };
 
         // Recursively resolve sub-modules within this module
-        resolve_modules_with_prefix(&mut mod_ast, &sub_source_dir, &full_prefix)?;
+        resolve_modules_with_prefix(&mut mod_ast, &sub_source_dir, &full_prefix, ledger)?;
 
         // Collect names defined in this module (for intra-module rewriting)
         let mod_defined: std::collections::HashSet<String> = mod_ast
@@ -4231,6 +4347,7 @@ mod tests {
                 algorithm: "sha256",
                 hex: source_digest_hex(b"source"),
             },
+            input_digests: Vec::new(),
             items: 1,
             tokens: 1,
             parse_errors: Vec::new(),
