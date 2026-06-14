@@ -51,6 +51,14 @@ pub fn capability_effect_for_call(name: &str) -> Option<&'static str> {
     }
 }
 
+pub fn capability_effect_for_macro(name: &str) -> Option<&'static str> {
+    match name {
+        "println" | "print" | "eprintln" | "eprint" | "dbg" | "debug" | "log" | "trace"
+        | "warn" | "error" => Some(CONSOLE),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,5 +86,13 @@ mod tests {
         assert!(capability_effect_names().contains(&"Clock"));
         assert!(capability_effect_names().contains(&"Foreign"));
         assert!(capability_effect_names().contains(&"Gpu"));
+    }
+
+    #[test]
+    fn maps_console_macros_to_console_capability() {
+        assert_eq!(capability_effect_for_macro("println"), Some("Console"));
+        assert_eq!(capability_effect_for_macro("eprintln"), Some("Console"));
+        assert_eq!(capability_effect_for_macro("dbg"), Some("Console"));
+        assert_eq!(capability_effect_for_macro("format"), None);
     }
 }
