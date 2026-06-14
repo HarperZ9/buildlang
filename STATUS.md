@@ -1,6 +1,6 @@
 # QuantaLang Project Status
 
-Last audited: 2026-06-13
+Last audited: 2026-06-14
 
 ## Identity
 The Effects Language -- algebraic effects as a first-class feature.
@@ -13,11 +13,11 @@ The Effects Language -- algebraic effects as a first-class feature.
 - **Effects**: Parse -> type check -> codegen pipeline (setjmp/longjmp C runtime).
 - **Programs that compile**: Variables, functions, if/else, loops, match, recursion, arithmetic, effects -- all compile to C and execute via `quantac build`.
 - **Auto-compile**: `quantac build` discovers and invokes system C compiler (gcc/clang/MSVC).
-- **CLI subcommands**: `lex`, `parse`, `check`, `build`, `run`, `test`, `repl`, `version`, `doctor`, `corpus`, `lsp`, `fmt`, `pkg`, `watch`.
+- **CLI subcommands**: `lex`, `parse`, `check`, `build`, `run`, `test`, `repl`, `version`, `doctor`, `corpus`, `policy`, `receipt`, `lsp`, `fmt`, `pkg`, `watch`.
 - **MIR pipeline**: Full MIR builder (codegen/builder.rs, 29 tests), MIR IR (codegen/ir.rs, 31 tests), debug info (codegen/debug.rs, 24 tests), embedded C runtime (codegen/runtime.rs, 7 tests).
 - **Macro expansion**: Builtin macros, pattern matching, hygiene. Unit tests present.
 - **Interprocedural Lifetime Analysis** (Phase 1): Lifetime parameters flow through `FnTy` (function types), enabling precise borrow tracking at call sites. Functions like `fn pick<'a, 'b>(x: &'a i32, y: &'b i32) -> &'a i32` correctly propagate only the `'a`-linked borrow. Return lifetime mismatches (returning `'b` where `'a` expected) are rejected with clear errors. 8 new unit tests, 3 integration test programs.
-- **Current cargo baseline (2026-06-13)**: 655 passed, 0 failed, 11 ignored across the compiler test binaries via `cargo test --manifest-path compiler/Cargo.toml --quiet`.
+- **Current CI-shaped cargo baseline (2026-06-14)**: 711 passed, 0 failed, 10 ignored, 4 filtered across the compiler test binaries via `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/`.
 - **Warning-clean baseline (2026-06-13)**: the same test suite passes with `RUSTFLAGS=-Dwarnings`, so release builds are not carrying compiler-warning debt.
 
 ## What's Partial (has real code, wired into CLI but not end-to-end verified)
@@ -42,8 +42,8 @@ The Effects Language -- algebraic effects as a first-class feature.
 - **Self-hosted test suite** (quantalang/tests/, 7,505 lines): Test framework and test cases for the self-hosted compiler. **Cannot be executed.**
 
 ## Honest Line Counts
-- Compiler (Rust, `compiler/src/`): 83,812 lines -- STATUS: working core (lexer, parser, types, C backend), partial other backends/tools
-- Integration Tests (Rust, `compiler/tests/`): 1,640 lines -- STATUS: working
+- Compiler (Rust, `compiler/src/`): 92,631 lines -- STATUS: working core (lexer, parser, types, C backend), partial other backends/tools
+- Integration Tests (Rust, `compiler/tests/`): 3,217 lines -- STATUS: working
 - Self-hosted compiler (QuantaLang, `quantalang/src/`): 217,961 lines -- STATUS: aspirational, cannot compile
 - Self-hosted stdlib (QuantaLang, `quantalang/stdlib/`): 26,124 lines -- STATUS: aspirational, cannot compile
 - Self-hosted tests (QuantaLang, `quantalang/tests/`): 7,505 lines -- STATUS: aspirational, cannot execute
@@ -71,6 +71,9 @@ quantac pkg resolve         # Resolve dependencies and generate lockfile
 quantac pkg search <query>  # Search the package registry
 quantac watch [path]        # Watch files and recompile on change
 quantac doctor              # Diagnose compiler/toolchain/backend readiness
+quantac policy list         # List built-in check policy profiles
+quantac policy print <name> # Emit a built-in check policy profile as JSON
+quantac receipt verify <receipt.json>  # Verify a saved check receipt against current source inputs
 quantac corpus verify       # Verify semantic corpus receipts and C stdout
 quantac corpus verify --root <dir> --write  # Verify a corpus copy and refresh its C receipt
 quantac version             # Print version
@@ -87,4 +90,4 @@ Not yet wired: `doc` subcommand. All other subcommands are functional. `quantac 
 Automatic stdlib resolution from any directory via `find_stdlib_path()`. 13 modules (842 lines) in `stdlib/`: core, math, string_utils, algorithms, bitwise, effects, graphics, io, iter, option, result, sorting, strings. Module import call rewriting maps bare function names to prefixed versions.
 
 ## Summary
-QuantaLang has a **working compiler core** (lexer -> parser -> type checker -> MIR -> C backend -> executable) with 655 passing cargo tests and 11 ignored tests as of 2026-06-13. It can compile and run real programs with variables, functions, control flow, pattern matching, recursion, and algebraic effects. C, LLVM, x86-64, ARM64, WASM, SPIR-V, HLSL, GLSL, and Rust are accessible from the CLI via `quantac build --target <target>`, but with different maturity levels. The C backend is production-verified and now has a semantic-corpus C execution receipt matching the current 8-program corpus; `quantac run` uses per-run temp build directories so concurrent C receipt probes avoid shared temp C/PDB collisions; `quantac corpus verify` validates the semantic corpus manifest, C/Rust receipts, and real C-backend stdout, accepts explicit corpus roots, and can refresh the C receipt for copied corpus fixtures after C stdout passes; `quantac doctor` reports local toolchain, stdlib, registry, optional backend tools, and backend maturity for adoption diagnostics; tested quickstart examples cover first-run CPU execution, mutable control flow, algebraic effects, and HLSL shader output; the Rust backend is subset-validated with `rustc --emit=metadata` and has a narrower generated-executable stdout smoke layer over the same semantic corpus plus manifest contract/receipt consistency/metadata guards; LLVM can optionally link with clang; native/WASM backends output assembly/binary for external toolchain linking. The LSP (`quantac lsp`), formatter (`quantac fmt`), and package manager (`quantac pkg`) are wired into the CLI. The self-hosted compiler and standard library (244,085 lines of `.quanta` code) represent an ambitious long-term vision but cannot be compiled or executed today.
+QuantaLang has a **working compiler core** (lexer -> parser -> type checker -> MIR -> C backend -> executable) with a 711-passing-test CI-shaped local baseline as of 2026-06-14. It can compile and run real programs with variables, functions, control flow, pattern matching, recursion, and algebraic effects. C, LLVM, x86-64, ARM64, WASM, SPIR-V, HLSL, GLSL, and Rust are accessible from the CLI via `quantac build --target <target>`, but with different maturity levels. The C backend is production-verified and now has a semantic-corpus C execution receipt matching the current 8-program corpus; `quantac run` uses per-run temp build directories so concurrent C receipt probes avoid shared temp C/PDB collisions; `quantac corpus verify` validates the semantic corpus manifest, C/Rust receipts, and real C-backend stdout, accepts explicit corpus roots, and can refresh the C receipt for copied corpus fixtures after C stdout passes; `quantac receipt verify` re-checks saved source-bound check receipts against current source inputs and built-in profile digests; `quantac doctor` reports local toolchain, stdlib, registry, optional backend tools, and backend maturity for adoption diagnostics; tested quickstart examples cover first-run CPU execution, mutable control flow, algebraic effects, and HLSL shader output; the Rust backend is subset-validated with `rustc --emit=metadata` and has a narrower generated-executable stdout smoke layer over the same semantic corpus plus manifest contract/receipt consistency/metadata guards; LLVM can optionally link with clang; native/WASM backends output assembly/binary for external toolchain linking. The LSP (`quantac lsp`), formatter (`quantac fmt`), and package manager (`quantac pkg`) are wired into the CLI. The self-hosted compiler and standard library (244,085 lines of `.quanta` code) represent an ambitious long-term vision but cannot be compiled or executed today.

@@ -124,6 +124,7 @@ quantac vignette.quanta --target glsl -o vignette.glsl
 | `quantac run`   | Compile and run a `.quanta` file     |
 | `quantac doctor` | Diagnose local toolchain readiness  |
 | `quantac policy list [--json]` / `quantac policy print <name>` | List or emit built-in check policy profiles |
+| `quantac receipt verify <receipt.json> [--source PATH]` | Re-check a saved accountability receipt against current source inputs |
 | `quantac corpus verify [--root DIR] [--write]` | Verify semantic corpus receipts and C stdout; optionally refresh the C receipt |
 
 ## Capability Effects
@@ -158,6 +159,9 @@ with SHA-256 digests plus compiler and language version metadata. The top-level
 import, include, and module file that feeds the check pipeline, and
 `input_graph_digest` gives CI a portable fingerprint for the exact source graph
 that passed or failed the capability gate.
+`quantac receipt verify receipt.json` re-runs the check input graph and confirms
+the saved receipt still matches the current source bytes, compiler/language
+identity, graph digest, and any recorded built-in profile digest.
 
 `quantac check --policy <policy.json>` evaluates a portable
 `quantalang-check-policy/v1` profile against declared effects and observed
@@ -261,11 +265,11 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-14
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 669 passing, 0 failing, 11 ignored in local `cargo test --manifest-path compiler/Cargo.toml --quiet` on 2026-06-14
+- **Tests**: 711 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
-  - CLI: binary-level smoke tests cover help output, `quantac doctor`, `quantac corpus verify`, explicit corpus roots, C receipt writes against copied corpus fixtures, capability diagnostics, and the runnable quickstart examples
+  - CLI: binary-level smoke tests cover help output, `quantac doctor`, `quantac corpus verify`, `quantac receipt verify`, explicit corpus roots, C receipt writes against copied corpus fixtures, capability diagnostics, and the runnable quickstart examples
   - Codegen: tests across 9 backends, including C formatted-print lowering, Rust source emission, Rust executable smoke checks over the semantic corpus, and semantic-corpus manifest contract/receipt consistency/metadata guards (C backend has 24 end-to-end output verification tests)
 
 ## License

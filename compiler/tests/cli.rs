@@ -754,6 +754,170 @@ fn main() ~ Console { println!("{}", value()); }
 }
 
 #[test]
+fn receipt_verify_accepts_fresh_check_receipt() {
+    let dir = std::env::temp_dir().join(format!(
+        "quantalang_receipt_verify_fresh_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create receipt verify fixture dir");
+    let entry = dir.join("entry.quanta");
+    let receipt = dir.join("receipt.json");
+    fs::write(&entry, r#"fn main() {}"#).expect("write receipt verify entry");
+
+    let check_output = quantac()
+        .arg("check")
+        .arg(&entry)
+        .arg("--profile")
+        .arg("pure")
+        .arg("--receipt")
+        .arg(&receipt)
+        .output()
+        .expect("write fresh check receipt");
+    assert!(
+        check_output.status.success(),
+        "check should pass before receipt verify\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&check_output.stdout),
+        String::from_utf8_lossy(&check_output.stderr)
+    );
+
+    let verify_output = quantac()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .output()
+        .expect("verify fresh check receipt");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        verify_output.status.success(),
+        "fresh receipt should verify\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_output.stdout),
+        String::from_utf8_lossy(&verify_output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&verify_output.stdout).contains("Receipt verified"),
+        "stdout should confirm verification:\n{}",
+        String::from_utf8_lossy(&verify_output.stdout)
+    );
+}
+
+#[test]
+fn receipt_verify_rejects_changed_input_graph() {
+    let dir = std::env::temp_dir().join(format!(
+        "quantalang_receipt_verify_graph_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create receipt graph fixture dir");
+    let entry = dir.join("entry.quanta");
+    let shared = dir.join("shared.quanta");
+    let receipt = dir.join("receipt.json");
+    fs::write(
+        &entry,
+        r#"include!("shared.quanta");
+fn main() ~ Console { println!("{}", value()); }
+"#,
+    )
+    .expect("write receipt graph entry");
+    fs::write(&shared, "fn value() -> i32 { 7 }\n").expect("write first shared source");
+
+    let check_output = quantac()
+        .arg("check")
+        .arg(&entry)
+        .arg("--receipt")
+        .arg(&receipt)
+        .output()
+        .expect("write graph receipt");
+    assert!(
+        check_output.status.success(),
+        "check should pass before graph mutation\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&check_output.stdout),
+        String::from_utf8_lossy(&check_output.stderr)
+    );
+
+    fs::write(&shared, "fn value() -> i32 { 8 }\n").expect("mutate shared source");
+    let verify_output = quantac()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .output()
+        .expect("verify stale graph receipt");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        !verify_output.status.success(),
+        "stale input graph receipt should fail"
+    );
+    assert!(
+        String::from_utf8_lossy(&verify_output.stderr).contains("input graph digest mismatch"),
+        "stderr should report graph mismatch:\n{}",
+        String::from_utf8_lossy(&verify_output.stderr)
+    );
+}
+
+#[test]
+fn receipt_verify_rejects_tampered_builtin_profile_digest() {
+    let dir = std::env::temp_dir().join(format!(
+        "quantalang_receipt_verify_profile_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create receipt profile fixture dir");
+    let entry = dir.join("entry.quanta");
+    let receipt_path = dir.join("receipt.json");
+    fs::write(&entry, r#"fn main() {}"#).expect("write pure entry");
+
+    let check_output = quantac()
+        .arg("check")
+        .arg(&entry)
+        .arg("--profile")
+        .arg("pure")
+        .arg("--receipt")
+        .arg(&receipt_path)
+        .output()
+        .expect("write built-in profile receipt");
+    assert!(
+        check_output.status.success(),
+        "check should pass before profile digest tamper\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&check_output.stdout),
+        String::from_utf8_lossy(&check_output.stderr)
+    );
+
+    let receipt_text = fs::read_to_string(&receipt_path).expect("read receipt json");
+    let mut receipt_json: serde_json::Value =
+        serde_json::from_str(&receipt_text).expect("receipt should be JSON");
+    receipt_json["policy"]["profile_digest"]["hex"] = serde_json::Value::String("0".repeat(64));
+    fs::write(
+        &receipt_path,
+        serde_json::to_string_pretty(&receipt_json).expect("serialize tampered receipt"),
+    )
+    .expect("write tampered receipt");
+
+    let verify_output = quantac()
+        .args(["receipt", "verify"])
+        .arg(&receipt_path)
+        .output()
+        .expect("verify tampered profile receipt");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        !verify_output.status.success(),
+        "tampered profile digest receipt should fail"
+    );
+    let stderr = String::from_utf8_lossy(&verify_output.stderr);
+    assert!(
+        stderr.contains("built-in policy profile digest mismatch"),
+        "stderr should report profile digest mismatch:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("pure"),
+        "stderr should name the profile:\n{stderr}"
+    );
+}
+
+#[test]
 fn check_policy_allows_console_receipt() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_check_policy_console_{}.quanta",
