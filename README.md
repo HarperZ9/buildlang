@@ -185,19 +185,21 @@ without performing them at definition time, so `let loader = |path: str|
 read_file(path);` remains pure until `loader("ops.toml")` is called, and then
 records `loader` as propagated `FileSystem` evidence; immediately invoked
 anonymous closures record the synthetic source `<closure>`. Effectful function
-values stored in structs also keep source evidence: `(ops.loader)("ops.toml")`
-records `ops.loader`;
-tuple slots and indexed ops tables record sources such as `loaders.0` and
-`loaders[0]`; immediate calls through returned function values record sources
-such as `make_loader()`. `if` and `match` expressions that select an
+values stored in structs and tuple structs stay pure until called and keep
+source evidence: `(ops.loader)("ops.toml")` records `ops.loader`;
+tuple slots, tuple-struct fields, and indexed ops tables record sources such as
+`loaders.0`, `slot.0`, and `loaders[0]`; immediate calls through returned
+function values record sources such as `make_loader()`. `if` and `match`
+expressions that select an
 effectful function value record every possible branch target, for example
 `load_config` and `load_secret`; binding that selected function before calling
-it records both the binding and the possible selected targets. Tuple, struct,
-and slice destructuring keep that source evidence too, so `let (loader,) = (...)`,
-`let Ops { loader } = ops`, and `let [loader] = loaders` continue to record the
-selected callees as well as `loader`. Later assignment to a callback variable or
-aggregate member refreshes that evidence, so stale sources do not survive
-`loader = load_secret`, `ops.loader = load_secret`, or `loaders[0] = load_secret`.
+it records both the binding and the possible selected targets. Tuple,
+tuple-struct, struct, and slice destructuring keep that source evidence too, so
+`let (loader,) = (...)`, `let Slot(loader) = slot`, `let Ops { loader } = ops`,
+and `let [loader] = loaders` continue to record the selected callees as well as
+`loader`. Later assignment to a callback variable or aggregate member refreshes
+that evidence, so stale sources do not survive `loader = load_secret`,
+`ops.loader = load_secret`, or `loaders[0] = load_secret`.
 Async blocks follow the same delayed-effect model for type checking: creating
 `let task = async { read_file("ops.toml") };` is pure, while `task.await`
 inherits `FileSystem` and records both the awaited source (`task`) and the
@@ -304,11 +306,13 @@ effect instead of falling back to an untyped function value. Effectful closures
 use the same function-value path: creating `|path: str| read_file(path)` does
 not trigger `FileSystem`, but calling a bound closure records the alias as a
 propagated source. Calling an anonymous closure immediately records `<closure>`
-as the propagated source. Calls through effectful struct fields, tuple slots,
-and indexed ops tables record paths such as `ops.loader`, `loaders.0`, and
-`loaders[0]`, so source allowlists can constrain capability-bearing registries
-and ops tables. Immediate invocation of a returned effectful function records
-the factory call, such as `make_loader()`.
+as the propagated source. Tuple-struct construction can store an effectful
+callback without adding propagated receipt evidence until that callback is
+called. Calls through effectful struct fields, tuple slots, tuple-struct fields,
+and indexed ops tables record paths such as `ops.loader`, `loaders.0`, `slot.0`,
+and `loaders[0]`, so source allowlists can constrain capability-bearing
+registries and ops tables. Immediate invocation of a returned effectful function
+records the factory call, such as `make_loader()`.
 Async blocks also delay capability effects at construction time: `async {
 read_file("ops.toml") }` stores the effect and its ambient source on the future
 value, and `task.await` records both the awaited source (`task`) and latent
@@ -321,12 +325,12 @@ Control-flow selectors keep reviewable evidence too: calling the result of an
 as `load_config` and `load_secret`. If the selected function is bound first,
 for example `let loader = if ...`, a later `loader()` call records `loader`
 plus the possible selected targets. The same source binding is preserved through
-tuple, struct, and slice destructuring, so `let (loader,) = (...)`,
-`let Ops { loader } = ops`, and `let [loader] = loaders` do not collapse a
-selected effectful function down to only the local alias. Plain assignment to an
-identifier, struct field, tuple slot, or indexed entry rebinds that call-source
-evidence, so policy receipts follow mutable callback slots instead of preserving
-stale earlier sources.
+tuple, tuple-struct, struct, and slice destructuring, so `let (loader,) = (...)`,
+`let Slot(loader) = slot`, `let Ops { loader } = ops`, and
+`let [loader] = loaders` do not collapse a selected effectful function down to
+only the local alias. Plain assignment to an identifier, struct field, tuple
+slot, or indexed entry rebinds that call-source evidence, so policy receipts
+follow mutable callback slots instead of preserving stale earlier sources.
 
 Policy profiles can enforce that split:
 
@@ -430,7 +434,7 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-14
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 809 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
+- **Tests**: 811 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
