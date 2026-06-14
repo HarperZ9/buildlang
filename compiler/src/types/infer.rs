@@ -359,6 +359,18 @@ impl<'ctx> TypeInfer<'ctx> {
         }
     }
 
+    fn clear_call_source_tree(&mut self, name: &str) {
+        let dot_prefix = format!("{name}.");
+        let bracket_prefix = format!("{name}[");
+        if let Some(scope) = self.source_bindings.last_mut() {
+            scope.retain(|source, _| {
+                source != name
+                    && !source.starts_with(&dot_prefix)
+                    && !source.starts_with(&bracket_prefix)
+            });
+        }
+    }
+
     fn call_sources_for_name(&self, name: &str) -> Vec<String> {
         let mut sources = vec![name.to_string()];
         if let Some(bound_sources) = self.lookup_call_source_binding(name) {
@@ -397,6 +409,54 @@ impl<'ctx> TypeInfer<'ctx> {
             }
         }
         Self::dedupe_call_sources(sources)
+    }
+
+    fn call_access_sources(&self, expr: &ast::Expr) -> Vec<String> {
+        match &expr.kind {
+            ExprKind::Ident(ident) => vec![ident.name.to_string()],
+            ExprKind::Path(path) => vec![path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.name.as_ref())
+                .collect::<Vec<_>>()
+                .join("::")],
+            ExprKind::Field { expr, field } => self
+                .call_access_sources(expr)
+                .into_iter()
+                .map(|base| format!("{}.{}", base, field.name))
+                .collect(),
+            ExprKind::TupleField { expr, index, .. } => self
+                .call_access_sources(expr)
+                .into_iter()
+                .map(|base| format!("{}.{}", base, index))
+                .collect(),
+            ExprKind::Index { expr, index } => self
+                .call_access_sources(expr)
+                .into_iter()
+                .map(|base| {
+                    if let Some(index_source) = self.index_source(index) {
+                        format!("{}[{}]", base, index_source)
+                    } else {
+                        format!("{}[]", base)
+                    }
+                })
+                .collect(),
+            ExprKind::Paren(inner) => self.call_access_sources(inner),
+            _ => Vec::new(),
+        }
+    }
+
+    fn bind_assigned_call_sources(
+        &mut self,
+        target: &ast::Expr,
+        value: &ast::Expr,
+        value_sources: Vec<String>,
+    ) {
+        for target_source in self.call_access_sources(target) {
+            self.clear_call_source_tree(&target_source);
+            self.bind_call_sources(&target_source, value_sources.clone());
+            self.bind_aggregate_call_sources(&target_source, value);
+        }
     }
 
     fn bind_pattern_to_call_sources(&mut self, pattern: &ast::Pattern, sources: Vec<String>) {
@@ -1980,9 +2040,10 @@ impl<'ctx> TypeInfer<'ctx> {
         // track the borrow (same as check_borrow_at_binding for let).
         if let ExprKind::Ident(ident) = &target.kind {
             self.check_borrow_at_binding(ident.name.as_ref(), value, &value_ty, span);
-            if op == AssignOp::Assign {
-                self.bind_call_sources(ident.name.as_ref(), value_sources);
-            }
+        }
+
+        if op == AssignOp::Assign {
+            self.bind_assigned_call_sources(target, value, value_sources);
         }
 
         Ty::unit()
