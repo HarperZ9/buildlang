@@ -28,7 +28,7 @@ fn hsv_to_rgb_channel(h: f64, s: f64, v: f64, n: f64) -> f64 {
     v - v * s * t3
 }
 
-fn main() {
+fn main() ~ Console {
     // sRGB roundtrip
     let linear = 0.5;
     let srgb = linear_to_srgb(linear);

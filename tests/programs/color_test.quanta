@@ -68,7 +68,7 @@ fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     abs_diff < tol
 }
 
-fn check_lab(r: f64, g: f64, b: f64, exp_l: f64, exp_a: f64, exp_b: f64) -> i32 {
+fn check_lab(r: f64, g: f64, b: f64, exp_l: f64, exp_a: f64, exp_b: f64) -> i32 ~ Console {
     let lin = RGB::new(r, g, b).to_linear();
     let lab = Lab::from_xyz(&XYZ::from_linear_rgb(&lin));
     let tol = 0.01;
@@ -80,7 +80,7 @@ fn check_lab(r: f64, g: f64, b: f64, exp_l: f64, exp_a: f64, exp_b: f64) -> i32 
     }
 }
 
-fn check_oklab(r: f64, g: f64, b: f64, exp_l: f64, exp_a: f64, exp_b: f64) -> i32 {
+fn check_oklab(r: f64, g: f64, b: f64, exp_l: f64, exp_a: f64, exp_b: f64) -> i32 ~ Console {
     let lin = RGB::new(r, g, b).to_linear();
     let ok = OKLab::from_linear_rgb(&lin);
     let tol = 0.001;
@@ -92,7 +92,7 @@ fn check_oklab(r: f64, g: f64, b: f64, exp_l: f64, exp_a: f64, exp_b: f64) -> i3
     }
 }
 
-fn main() {
+fn main() ~ Console {
     println!("=== QuantaLang Color Science Test Suite ===");
     let mut pass = 0;
 

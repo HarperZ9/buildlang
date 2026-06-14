@@ -7,7 +7,7 @@ struct Wrapper {
     inner: Point,
 }
 
-fn main() {
+fn main() ~ Console {
     let p = Point { x: 3, y: 4 };
     let w = Wrapper { inner: p };
     let a = w.inner;

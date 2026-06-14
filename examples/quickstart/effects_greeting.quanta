@@ -6,7 +6,7 @@ fn welcome() ~ Greeting {
     perform Greeting.greet("teammate");
 }
 
-fn main() {
+fn main() ~ Console {
     handle {
         welcome()
     } with {

@@ -7,7 +7,7 @@ struct Holder {
     item: Point,
 }
 
-fn main() {
+fn main() ~ Console {
     let p = Point { x: 3, y: 4 };
     let mut holder = Holder { item: p };
     holder.item = p;
