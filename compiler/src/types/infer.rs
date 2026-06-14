@@ -379,8 +379,26 @@ impl<'ctx> TypeInfer<'ctx> {
             ExprKind::Field { expr, field } => {
                 Self::call_source(expr).map(|base| format!("{}.{}", base, field.name))
             }
+            ExprKind::TupleField { expr, index, .. } => {
+                Self::call_source(expr).map(|base| format!("{}.{}", base, index))
+            }
+            ExprKind::Index { expr, index } => Self::call_source(expr).map(|base| {
+                if let Some(index_source) = Self::index_source(index) {
+                    format!("{}[{}]", base, index_source)
+                } else {
+                    format!("{}[]", base)
+                }
+            }),
             ExprKind::Paren(inner) => Self::call_source(inner),
             _ => None,
+        }
+    }
+
+    fn index_source(index: &ast::Expr) -> Option<String> {
+        match &index.kind {
+            ExprKind::Literal(AstLiteral::Int { value, .. }) => Some(value.to_string()),
+            ExprKind::Paren(inner) => Self::index_source(inner),
+            _ => Self::call_source(index),
         }
     }
 
