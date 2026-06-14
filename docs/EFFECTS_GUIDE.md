@@ -118,7 +118,9 @@ record the callback name under `propagated_effects`, which lets policy gates
 distinguish a wrapper that inherited file access through `loader` from a
 function that directly called `read_file`. Ambient helpers used as values keep
 their capability effects as well, so `let loader = read_file; loader("ops.toml")`
-requires `FileSystem` and records `loader` as propagated evidence.
+requires `FileSystem` and records `loader` as propagated evidence. Effectful
+function values stored in structs retain field evidence too:
+`(ops.loader)("ops.toml")` records `ops.loader`.
 
 `quantac check <file> --receipt <path>` writes a deterministic
 `quantalang-check-receipt/v1` JSON artifact with compiler/language version
@@ -160,7 +162,9 @@ Effectful callback parameters appear here as named sources too, so higher-order
 ops code keeps capability provenance instead of losing it behind `fn(...)`
 values. Aliases of ambient helpers follow the same rule: calling `loader` after
 `let loader = read_file` inherits `FileSystem` through the alias instead of
-silently becoming an untyped helper call.
+silently becoming an untyped helper call. Calls through effectful struct fields
+record the field path, for example `ops.loader`, so policy allowlists can pin
+capability-bearing registries to exact fields.
 
 Policy profiles turn receipt evidence into an enforceable CI gate:
 
