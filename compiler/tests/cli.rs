@@ -1177,6 +1177,123 @@ fn check_policy_rejects_unsupported_schema() {
 }
 
 #[test]
+fn policy_list_includes_builtin_security_profiles() {
+    let output = quantac()
+        .args(["policy", "list"])
+        .output()
+        .expect("run quantac policy list");
+
+    assert!(
+        output.status.success(),
+        "policy list should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("pure"), "missing pure profile:\n{stdout}");
+    assert!(
+        stdout.contains("console-only"),
+        "missing console-only profile:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("offline"),
+        "missing offline profile:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("ci-review"),
+        "missing ci-review profile:\n{stdout}"
+    );
+}
+
+#[test]
+fn policy_print_emits_valid_pure_profile() {
+    let output = quantac()
+        .args(["policy", "print", "pure"])
+        .output()
+        .expect("run quantac policy print pure");
+
+    assert!(
+        output.status.success(),
+        "policy print should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let profile: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("policy profile should be JSON");
+    assert_eq!(profile["schema"], "quantalang-check-policy/v1");
+    assert_eq!(profile["require_source_digest"], true);
+    assert_eq!(profile["require_input_graph_digest"], true);
+    let denied = profile["denied_effects"]
+        .as_array()
+        .expect("denied_effects should be an array");
+    assert!(
+        denied.iter().any(|effect| effect == "Network"),
+        "pure profile should deny Network: {denied:#?}"
+    );
+    assert!(
+        denied.iter().any(|effect| effect == "Foreign"),
+        "pure profile should deny Foreign: {denied:#?}"
+    );
+}
+
+#[test]
+fn printed_pure_policy_rejects_console_program() {
+    let dir = std::env::temp_dir().join(format!(
+        "quantalang_printed_pure_policy_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create pure policy fixture directory");
+    let policy_path = dir.join("pure-policy.json");
+    let fixture = dir.join("console.quanta");
+
+    let print = quantac()
+        .args(["policy", "print", "pure", "--output"])
+        .arg(&policy_path)
+        .output()
+        .expect("write pure policy");
+    assert!(
+        print.status.success(),
+        "policy print --output should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&print.stdout),
+        String::from_utf8_lossy(&print.stderr)
+    );
+
+    fs::write(&fixture, r#"fn main() ~ Console { println!("blocked"); }"#)
+        .expect("write console fixture");
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--policy")
+        .arg(&policy_path)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check with pure policy");
+
+    assert!(
+        !output.status.success(),
+        "pure policy should reject console program\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(receipt["policy"]["status"], "failed");
+    let violations = receipt["policy"]["violations"]
+        .as_array()
+        .expect("policy violations");
+    assert!(
+        violations.iter().any(|violation| {
+            violation["kind"] == "DeniedEffect"
+                && violation["effect"] == "Console"
+                && violation["function"] == "main"
+        }),
+        "expected Console denial in {violations:#?}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn corpus_verify_accepts_explicit_root() {
     if !c_backend_ready() {
         eprintln!("skipping semantic corpus root verification because no C backend is available");
