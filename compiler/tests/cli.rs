@@ -381,6 +381,58 @@ fn check_receipt_records_gpu_capability_source() {
 }
 
 #[test]
+fn check_receipt_records_foreign_call_as_direct_capability_source() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_foreign_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+extern "C" { fn touch(); }
+
+fn main() ~ Foreign {
+    touch();
+}
+"#,
+    )
+    .expect("write foreign receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "foreign receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["declared_effects"]["main"],
+        serde_json::json!(["Foreign"])
+    );
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]["Foreign"],
+        serde_json::json!(["touch"])
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]
+            .as_object()
+            .expect("main propagated effects")
+            .len(),
+        0
+    );
+}
+
+#[test]
 fn check_receipt_records_propagated_effects_separately() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_check_receipt_propagated_{}.quanta",
@@ -3715,6 +3767,79 @@ fn main() ~ Audit {}
                 && violation["function"] == "main"
         }),
         "expected declared effect drift violation in {violations:#?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn policy_scaffold_from_foreign_receipt_preserves_direct_ffi_boundary() {
+    let dir = std::env::temp_dir().join(format!(
+        "quantalang_policy_scaffold_foreign_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create foreign scaffold fixture directory");
+    let input = dir.join("app.quanta");
+    let receipt = dir.join("receipt.json");
+    fs::write(
+        &input,
+        r#"
+extern "C" { fn touch(); }
+
+fn main() ~ Foreign {
+    touch();
+}
+"#,
+    )
+    .expect("write foreign policy scaffold input");
+
+    let check = quantac()
+        .arg("check")
+        .arg(&input)
+        .arg("--receipt")
+        .arg(&receipt)
+        .output()
+        .expect("write foreign policy scaffold receipt");
+    assert!(
+        check.status.success(),
+        "foreign check should produce a receipt\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
+
+    let scaffold = quantac()
+        .arg("policy")
+        .arg("scaffold")
+        .arg(&receipt)
+        .output()
+        .expect("scaffold policy from foreign receipt");
+    assert!(
+        scaffold.status.success(),
+        "foreign policy scaffold should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&scaffold.stdout),
+        String::from_utf8_lossy(&scaffold.stderr)
+    );
+    let scaffolded: serde_json::Value =
+        serde_json::from_slice(&scaffold.stdout).expect("foreign scaffold should be JSON");
+    assert_eq!(
+        scaffolded["allowed_effects"],
+        serde_json::json!(["Foreign"])
+    );
+    assert_eq!(
+        scaffolded["direct_effect_allowlist"]["Foreign"],
+        serde_json::json!(["main"])
+    );
+    assert_eq!(
+        scaffolded["direct_capability_source_allowlist"]["Foreign"]["main"],
+        serde_json::json!(["touch"])
+    );
+    assert!(
+        scaffolded["propagated_effect_allowlist"]
+            .as_object()
+            .expect("propagated effect allowlist")
+            .is_empty(),
+        "direct FFI boundary should not be scaffolded as propagated: {scaffolded:#?}"
     );
 
     let _ = fs::remove_dir_all(&dir);

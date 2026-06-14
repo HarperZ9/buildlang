@@ -136,7 +136,9 @@ receipt was accepted under an exact file-backed or built-in policy digest.
 
 `observed_capabilities` records direct ambient capability use inside a function,
 such as `read_file`, `tcp_connect`, `println!`, process helpers, or FFI helpers.
-These entries are the accountability boundary for code that actually touches the
+Raw extern-block calls are direct `Foreign` entries; calls to local wrappers
+around those extern functions are propagated `Foreign` dependencies. These
+entries are the accountability boundary for code that actually touches the
 outside world.
 
 `propagated_effects` records effectful callees that make a caller inherit a

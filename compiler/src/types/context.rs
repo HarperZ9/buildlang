@@ -12,7 +12,7 @@
 //! - Trait definitions and implementations
 //! - Generic instantiations
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::ty::*;
@@ -57,6 +57,9 @@ pub struct TypeContext {
     /// Module registry: module_name -> (variable bindings, type definitions).
     /// Populated by check_mod so that `use` statements can import names.
     module_bindings: HashMap<Arc<str>, HashMap<Arc<str>, TypeScheme>>,
+
+    /// Foreign function names declared by extern blocks.
+    foreign_functions: HashSet<Arc<str>>,
 }
 
 /// A scope containing variable bindings.
@@ -289,6 +292,7 @@ impl TypeContext {
             inherent_methods: HashMap::new(),
             param_trait_bounds: HashMap::new(),
             module_bindings: HashMap::new(),
+            foreign_functions: HashSet::new(),
         };
         ctx.init_builtins();
         ctx
@@ -447,6 +451,16 @@ impl TypeContext {
             }
         }
         None
+    }
+
+    /// Mark a function name as originating from an extern block.
+    pub fn register_foreign_function(&mut self, name: impl Into<Arc<str>>) {
+        self.foreign_functions.insert(name.into());
+    }
+
+    /// Return true when a function name was declared in an extern block.
+    pub fn is_foreign_function(&self, name: &str) -> bool {
+        self.foreign_functions.contains(name)
     }
 
     // =========================================================================
