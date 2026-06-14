@@ -125,6 +125,33 @@ quantac vignette.quanta --target glsl -o vignette.glsl
 | `quantac doctor` | Diagnose local toolchain readiness  |
 | `quantac corpus verify [--root DIR] [--write]` | Verify semantic corpus receipts and C stdout; optionally refresh the C receipt |
 
+## Capability Effects
+
+`quantac check` now treats direct ambient runtime access as typed effects. A
+function that calls helpers such as `read_file`, `write_file`, `tcp_connect`,
+`process_exit`, `getenv`, `clock_ms`, Vulkan runtime helpers, or an `extern`
+function must declare the matching capability effect in its signature:
+
+```quanta
+fn load_config() ~ FileSystem {
+    read_file("ops.toml");
+}
+
+extern "C" { fn touch(); }
+
+fn call_foreign() ~ Foreign {
+    touch();
+}
+```
+
+If the effect is missing, the checker reports the required capability and a
+diagnostic note naming the ambient call that triggered it. This is the first
+security gate for practical ops/accountability use: file, network, process,
+environment, clock, GPU, console helper, and FFI surfaces are represented in
+the language's effect vocabulary instead of remaining invisible compiler
+side channels. Macro-style console attribution, including `println!`, is a
+follow-up hardening step.
+
 ### Backend Selection
 
 Use `--target` to select a code generation backend:
@@ -177,14 +204,14 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 ## Code Quality
 
 - **CI**: clippy (correctness) + rustfmt + `cargo test` on Linux and Windows
-- **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-13
+- **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-14
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 656 passing, 0 failing, 11 ignored in local `cargo test --manifest-path compiler/Cargo.toml --quiet` on 2026-06-13
+- **Tests**: 663 passing, 0 failing, 11 ignored in local `cargo test --manifest-path compiler/Cargo.toml --quiet` on 2026-06-14
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
-  - CLI: binary-level smoke tests cover help output, `quantac doctor`, `quantac corpus verify`, explicit corpus roots, C receipt writes against copied corpus fixtures, and the runnable quickstart examples
+  - CLI: binary-level smoke tests cover help output, `quantac doctor`, `quantac corpus verify`, explicit corpus roots, C receipt writes against copied corpus fixtures, capability diagnostics, and the runnable quickstart examples
   - Codegen: tests across 9 backends, including C formatted-print lowering, Rust source emission, Rust executable smoke checks over the semantic corpus, and semantic-corpus manifest contract/receipt consistency/metadata guards (C backend has 24 end-to-end output verification tests)
 
 ## License
