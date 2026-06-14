@@ -76,6 +76,8 @@ pub struct TypeInfer<'ctx> {
     current_effects: super::effects::EffectRow,
     /// Capability effects mapped to the ambient call names that triggered them.
     capability_sources: BTreeMap<String, BTreeSet<String>>,
+    /// Capability effects mapped to effectful callees that propagated them.
+    propagated_effect_sources: BTreeMap<String, BTreeSet<String>>,
     /// Whether any explicit `return` statement was found.
     has_return: bool,
     /// Borrow tracking state for the current function body.
@@ -227,6 +229,7 @@ impl<'ctx> TypeInfer<'ctx> {
             effect_ctx: super::effects::EffectContext::new(),
             current_effects: super::effects::EffectRow::empty(),
             capability_sources: BTreeMap::new(),
+            propagated_effect_sources: BTreeMap::new(),
             has_return: false,
             borrow_state: super::ty::BorrowState::new(),
         }
@@ -249,6 +252,7 @@ impl<'ctx> TypeInfer<'ctx> {
             effect_ctx: super::effects::EffectContext::new(),
             current_effects: super::effects::EffectRow::empty(),
             capability_sources: BTreeMap::new(),
+            propagated_effect_sources: BTreeMap::new(),
             has_return: false,
             borrow_state: super::ty::BorrowState::new(),
         }
@@ -264,11 +268,23 @@ impl<'ctx> TypeInfer<'ctx> {
         &self.capability_sources
     }
 
+    /// Get effectful callees that contributed capability effects to the row.
+    pub fn propagated_effect_sources(&self) -> &BTreeMap<String, BTreeSet<String>> {
+        &self.propagated_effect_sources
+    }
+
     fn record_capability_source(&mut self, effect_name: &str, source_name: &str) {
         self.capability_sources
             .entry(effect_name.to_string())
             .or_default()
             .insert(source_name.to_string());
+    }
+
+    fn record_propagated_effect_source(&mut self, effect_name: &str, callee_name: &str) {
+        self.propagated_effect_sources
+            .entry(effect_name.to_string())
+            .or_default()
+            .insert(callee_name.to_string());
     }
 
     fn record_macro_capability(&mut self, macro_name: &str) {
@@ -1609,7 +1625,7 @@ impl<'ctx> TypeInfer<'ctx> {
                     if let Some(name) = call_name.as_deref() {
                         for effect in &fn_ty.effects.effects {
                             if super::capabilities::is_capability_effect(effect.name.as_ref()) {
-                                self.record_capability_source(effect.name.as_ref(), name);
+                                self.record_propagated_effect_source(effect.name.as_ref(), name);
                             }
                         }
                     }
