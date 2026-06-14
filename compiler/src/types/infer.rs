@@ -359,6 +359,93 @@ impl<'ctx> TypeInfer<'ctx> {
         }
     }
 
+    fn call_sources_for_name(&self, name: &str) -> Vec<String> {
+        let mut sources = vec![name.to_string()];
+        if let Some(bound_sources) = self.lookup_call_source_binding(name) {
+            sources.extend(bound_sources.iter().cloned());
+        }
+        Self::dedupe_call_sources(sources)
+    }
+
+    fn expand_call_sources_with_bindings(&self, access_sources: Vec<String>) -> Vec<String> {
+        let mut sources = access_sources.clone();
+        for source in access_sources {
+            if let Some(bound_sources) = self.lookup_call_source_binding(&source) {
+                sources.extend(bound_sources.iter().cloned());
+            }
+        }
+        Self::dedupe_call_sources(sources)
+    }
+
+    fn bound_call_sources_for_member(&self, expr: &ast::Expr, member: &str) -> Vec<String> {
+        let mut sources = Vec::new();
+        for base in self.call_sources(expr) {
+            let access_source = format!("{}.{}", base, member);
+            if let Some(bound_sources) = self.lookup_call_source_binding(&access_source) {
+                sources.extend(bound_sources.iter().cloned());
+            }
+        }
+        Self::dedupe_call_sources(sources)
+    }
+
+    fn bind_pattern_to_call_sources(&mut self, pattern: &ast::Pattern, sources: Vec<String>) {
+        match &pattern.kind {
+            ast::PatternKind::Ident {
+                name, subpattern, ..
+            } => {
+                self.bind_call_sources(name.name.as_ref(), sources.clone());
+                if let Some(subpattern) = subpattern {
+                    self.bind_pattern_to_call_sources(subpattern, sources);
+                }
+            }
+            ast::PatternKind::Paren(inner)
+            | ast::PatternKind::Ref { pattern: inner, .. }
+            | ast::PatternKind::Box(inner) => {
+                self.bind_pattern_to_call_sources(inner, sources);
+            }
+            ast::PatternKind::Or(patterns) => {
+                for pattern in patterns {
+                    self.bind_pattern_to_call_sources(pattern, sources.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn bind_aggregate_call_sources(&mut self, name: &str, expr: &ast::Expr) {
+        match &expr.kind {
+            ExprKind::Tuple(elems) => {
+                for (index, elem) in elems.iter().enumerate() {
+                    let member_name = format!("{}.{}", name, index);
+                    self.bind_call_sources(&member_name, self.call_sources(elem));
+                    self.bind_aggregate_call_sources(&member_name, elem);
+                }
+            }
+            ExprKind::Array(elems) => {
+                for (index, elem) in elems.iter().enumerate() {
+                    let member_name = format!("{}[{}]", name, index);
+                    self.bind_call_sources(&member_name, self.call_sources(elem));
+                    self.bind_aggregate_call_sources(&member_name, elem);
+                }
+            }
+            ExprKind::Struct { fields, .. } => {
+                for field in fields {
+                    let member_name = format!("{}.{}", name, field.name.as_ref());
+                    let sources = field.value.as_deref().map_or_else(
+                        || self.call_sources_for_name(field.name.as_ref()),
+                        |value| self.call_sources(value),
+                    );
+                    self.bind_call_sources(&member_name, sources);
+                    if let Some(value) = field.value.as_deref() {
+                        self.bind_aggregate_call_sources(&member_name, value);
+                    }
+                }
+            }
+            ExprKind::Paren(inner) => self.bind_aggregate_call_sources(name, inner),
+            _ => {}
+        }
+    }
+
     fn bind_pattern_call_sources(&mut self, pattern: &ast::Pattern, expr: &ast::Expr) {
         match &pattern.kind {
             ast::PatternKind::Ident {
@@ -366,6 +453,7 @@ impl<'ctx> TypeInfer<'ctx> {
             } => {
                 let sources = self.call_sources(expr);
                 self.bind_call_sources(name.name.as_ref(), sources);
+                self.bind_aggregate_call_sources(name.name.as_ref(), expr);
                 if let Some(subpattern) = subpattern {
                     self.bind_pattern_call_sources(subpattern, expr);
                 }
@@ -374,6 +462,37 @@ impl<'ctx> TypeInfer<'ctx> {
                 if let ExprKind::Tuple(elems) = &expr.kind {
                     for (pattern, elem) in patterns.iter().zip(elems.iter()) {
                         self.bind_pattern_call_sources(pattern, elem);
+                    }
+                } else {
+                    for (index, pattern) in patterns.iter().enumerate() {
+                        let sources = self.bound_call_sources_for_member(expr, &index.to_string());
+                        self.bind_pattern_to_call_sources(pattern, sources);
+                    }
+                }
+            }
+            ast::PatternKind::Struct { fields, .. } => {
+                if let ExprKind::Struct {
+                    fields: expr_fields,
+                    ..
+                } = &expr.kind
+                {
+                    for field in fields {
+                        if let Some(expr_field) = expr_fields
+                            .iter()
+                            .find(|expr_field| expr_field.name.name == field.name.name)
+                        {
+                            if let Some(value) = expr_field.value.as_deref() {
+                                self.bind_pattern_call_sources(&field.pattern, value);
+                            } else {
+                                let sources = self.call_sources_for_name(field.name.as_ref());
+                                self.bind_pattern_to_call_sources(&field.pattern, sources);
+                            }
+                        }
+                    }
+                } else {
+                    for field in fields {
+                        let sources = self.bound_call_sources_for_member(expr, field.name.as_ref());
+                        self.bind_pattern_to_call_sources(&field.pattern, sources);
                     }
                 }
             }
@@ -511,27 +630,36 @@ impl<'ctx> TypeInfer<'ctx> {
                 .map(|segment| segment.ident.name.as_ref())
                 .collect::<Vec<_>>()
                 .join("::")],
-            ExprKind::Field { expr, field } => self
-                .call_sources(expr)
-                .into_iter()
-                .map(|base| format!("{}.{}", base, field.name))
-                .collect(),
-            ExprKind::TupleField { expr, index, .. } => self
-                .call_sources(expr)
-                .into_iter()
-                .map(|base| format!("{}.{}", base, index))
-                .collect(),
-            ExprKind::Index { expr, index } => self
-                .call_sources(expr)
-                .into_iter()
-                .map(|base| {
-                    if let Some(index_source) = self.index_source(index) {
-                        format!("{}[{}]", base, index_source)
-                    } else {
-                        format!("{}[]", base)
-                    }
-                })
-                .collect(),
+            ExprKind::Field { expr, field } => {
+                let access_sources = self
+                    .call_sources(expr)
+                    .into_iter()
+                    .map(|base| format!("{}.{}", base, field.name))
+                    .collect();
+                self.expand_call_sources_with_bindings(access_sources)
+            }
+            ExprKind::TupleField { expr, index, .. } => {
+                let access_sources = self
+                    .call_sources(expr)
+                    .into_iter()
+                    .map(|base| format!("{}.{}", base, index))
+                    .collect();
+                self.expand_call_sources_with_bindings(access_sources)
+            }
+            ExprKind::Index { expr, index } => {
+                let access_sources = self
+                    .call_sources(expr)
+                    .into_iter()
+                    .map(|base| {
+                        if let Some(index_source) = self.index_source(index) {
+                            format!("{}[{}]", base, index_source)
+                        } else {
+                            format!("{}[]", base)
+                        }
+                    })
+                    .collect();
+                self.expand_call_sources_with_bindings(access_sources)
+            }
             ExprKind::Closure { .. } => vec!["<closure>".to_string()],
             ExprKind::Async { .. } => vec!["<async>".to_string()],
             ExprKind::Call { func, .. } => self
