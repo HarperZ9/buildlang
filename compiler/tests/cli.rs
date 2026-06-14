@@ -2523,6 +2523,212 @@ fn main() ~ FileSystem {
 }
 
 #[test]
+fn check_policy_direct_capability_source_allowlist_rejects_unapproved_source() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_policy_direct_source_reject_{}.quanta",
+        std::process::id()
+    ));
+    let policy = write_temp_policy(
+        "direct_source_reject",
+        r#"{
+          "schema": "quantalang-check-policy/v1",
+          "allowed_effects": ["FileSystem"],
+          "direct_effect_allowlist": {
+            "FileSystem": ["load_config"]
+          },
+          "direct_capability_source_allowlist": {
+            "FileSystem": {
+              "load_config": ["read_file"]
+            }
+          }
+        }"#,
+    );
+    fs::write(
+        &fixture,
+        r#"
+fn load_config() ~ FileSystem {
+    write_file("ops.txt", "x");
+}
+
+fn main() ~ FileSystem {
+    load_config();
+}
+"#,
+    )
+    .expect("write direct source allowlist rejection fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--policy")
+        .arg(&policy)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check with direct source allowlist");
+
+    let _ = fs::remove_file(&fixture);
+    let _ = fs::remove_file(&policy);
+
+    assert!(
+        !output.status.success(),
+        "policy should reject unapproved direct capability source\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = receipt_from_stdout(&output);
+    let violations = receipt["policy"]["violations"]
+        .as_array()
+        .expect("policy violations");
+    assert!(
+        violations.iter().any(|violation| {
+            violation["kind"] == "DirectCapabilitySourceNotAllowed"
+                && violation["effect"] == "FileSystem"
+                && violation["function"] == "load_config"
+                && violation["surface"] == "observed_capabilities"
+                && violation["source"] == "write_file"
+        }),
+        "expected direct capability source allowlist violation in {violations:#?}"
+    );
+}
+
+#[test]
+fn check_policy_direct_capability_source_allowlist_accepts_approved_source() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_policy_direct_source_accept_{}.quanta",
+        std::process::id()
+    ));
+    let policy = write_temp_policy(
+        "direct_source_accept",
+        r#"{
+          "schema": "quantalang-check-policy/v1",
+          "allowed_effects": ["FileSystem"],
+          "direct_effect_allowlist": {
+            "FileSystem": ["load_config"]
+          },
+          "direct_capability_source_allowlist": {
+            "FileSystem": {
+              "load_config": ["read_file"]
+            }
+          }
+        }"#,
+    );
+    fs::write(
+        &fixture,
+        r#"
+fn load_config() ~ FileSystem {
+    read_file("ops.txt");
+}
+
+fn main() ~ FileSystem {
+    load_config();
+}
+"#,
+    )
+    .expect("write direct source allowlist acceptance fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--policy")
+        .arg(&policy)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check with approved direct source allowlist");
+
+    let _ = fs::remove_file(&fixture);
+    let _ = fs::remove_file(&policy);
+
+    assert!(
+        output.status.success(),
+        "policy should accept approved direct capability source\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(receipt["policy"]["status"], "passed");
+    assert!(receipt["policy"]["violations"]
+        .as_array()
+        .expect("policy violations")
+        .is_empty());
+}
+
+#[test]
+fn check_policy_strict_allowlist_coverage_rejects_unused_direct_capability_source_entry() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_policy_unused_direct_source_allowlist_{}.quanta",
+        std::process::id()
+    ));
+    let policy = write_temp_policy(
+        "unused_direct_source_allowlist",
+        r#"{
+          "schema": "quantalang-check-policy/v1",
+          "allowed_effects": ["FileSystem"],
+          "direct_effect_allowlist": {
+            "FileSystem": ["load_config"]
+          },
+          "propagated_effect_allowlist": {
+            "FileSystem": ["main"]
+          },
+          "direct_capability_source_allowlist": {
+            "FileSystem": {
+              "load_config": ["read_file", "legacy_reader"]
+            }
+          },
+          "require_allowlist_coverage": true
+        }"#,
+    );
+    fs::write(
+        &fixture,
+        r#"
+fn load_config() ~ FileSystem {
+    read_file("ops.txt");
+}
+
+fn main() ~ FileSystem {
+    load_config();
+}
+"#,
+    )
+    .expect("write unused direct source allowlist fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--policy")
+        .arg(&policy)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check with strict direct source coverage");
+
+    let _ = fs::remove_file(&fixture);
+    let _ = fs::remove_file(&policy);
+
+    assert!(
+        !output.status.success(),
+        "strict policy should reject unused direct capability source entry\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = receipt_from_stdout(&output);
+    let violations = receipt["policy"]["violations"]
+        .as_array()
+        .expect("policy violations");
+    assert!(
+        violations.iter().any(|violation| {
+            violation["kind"] == "UnusedDirectCapabilitySourceAllowlist"
+                && violation["effect"] == "FileSystem"
+                && violation["function"] == "load_config"
+                && violation["surface"] == "direct_capability_source_allowlist"
+                && violation["source"] == "legacy_reader"
+        }),
+        "expected unused direct capability source allowlist violation in {violations:#?}"
+    );
+}
+
+#[test]
 fn check_policy_propagated_allowlist_rejects_unlisted_caller() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_check_policy_propagated_reject_{}.quanta",

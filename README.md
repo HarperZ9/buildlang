@@ -220,6 +220,11 @@ Policy profiles can enforce that split:
   "direct_effect_allowlist": {
     "FileSystem": ["load_config"]
   },
+  "direct_capability_source_allowlist": {
+    "FileSystem": {
+      "load_config": ["read_file"]
+    }
+  },
   "propagated_effect_allowlist": {
     "FileSystem": ["main"]
   },
@@ -232,9 +237,12 @@ Policy profiles can enforce that split:
 
 Set `require_provenance_allowlists` when CI should require every direct
 capability boundary and propagated capability caller to be explicitly named.
+Use `direct_capability_source_allowlist` when an approved direct boundary must
+also name the exact ambient helper, macro, or FFI source allowed inside that
+function.
 Set `require_allowlist_coverage` when CI should also reject stale direct or
-propagated allowlist entries that are not matched by the current receipt
-evidence.
+propagated allowlist entries, including source-level direct capability entries,
+that are not matched by the current receipt evidence.
 
 ### Backend Selection
 

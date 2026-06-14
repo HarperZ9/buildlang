@@ -601,6 +601,8 @@ struct CheckPolicyProfile {
     #[serde(default)]
     direct_effect_allowlist: BTreeMap<String, Vec<String>>,
     #[serde(default)]
+    direct_capability_source_allowlist: BTreeMap<String, BTreeMap<String, Vec<String>>>,
+    #[serde(default)]
     propagated_effect_allowlist: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     require_source_digest: bool,
@@ -2471,6 +2473,20 @@ fn allowlist_allows(
     }
 }
 
+fn direct_capability_source_allowlist_allows(
+    allowlist: &BTreeMap<String, BTreeMap<String, Vec<String>>>,
+    effect: &str,
+    function: &str,
+    source: &str,
+) -> bool {
+    allowlist
+        .get(effect)
+        .and_then(|functions| functions.get(function))
+        .map_or(true, |sources| {
+            sources.iter().any(|allowed| allowed == source)
+        })
+}
+
 fn digest_is_sha256_hex(digest: &CheckReceiptSourceDigest) -> bool {
     digest.algorithm == "sha256"
         && digest.hex.len() == 64
@@ -2556,6 +2572,21 @@ fn evidence_contains_policy_pair(
         .any(|item| item.surface == surface && item.effect == effect && item.function == function)
 }
 
+fn evidence_contains_policy_source(
+    evidence: &BTreeSet<CheckPolicyEvidence>,
+    surface: &'static str,
+    effect: &str,
+    function: &str,
+    source: &str,
+) -> bool {
+    evidence.iter().any(|item| {
+        item.surface == surface
+            && item.effect == effect
+            && item.function == function
+            && item.source == source
+    })
+}
+
 fn insert_unused_allowlist_violations(
     violations: &mut BTreeSet<CheckPolicyViolation>,
     evidence: &BTreeSet<CheckPolicyEvidence>,
@@ -2577,6 +2608,40 @@ fn insert_unused_allowlist_violations(
                         "{allowlist_surface} entry `{effect}`/`{function}` was not matched by current receipt evidence"
                     ),
                 });
+            }
+        }
+    }
+}
+
+fn insert_unused_source_allowlist_violations(
+    violations: &mut BTreeSet<CheckPolicyViolation>,
+    evidence: &BTreeSet<CheckPolicyEvidence>,
+    allowlist: &BTreeMap<String, BTreeMap<String, Vec<String>>>,
+    allowlist_surface: &'static str,
+    evidence_surface: &'static str,
+    kind: &'static str,
+) {
+    for (effect, functions) in allowlist {
+        for (function, sources) in functions {
+            for source in sources {
+                if !evidence_contains_policy_source(
+                    evidence,
+                    evidence_surface,
+                    effect,
+                    function,
+                    source,
+                ) {
+                    violations.insert(CheckPolicyViolation {
+                        kind,
+                        effect: effect.clone(),
+                        function: function.clone(),
+                        surface: allowlist_surface,
+                        source: source.clone(),
+                        message: format!(
+                            "{allowlist_surface} entry `{effect}`/`{function}`/`{source}` was not matched by current receipt evidence"
+                        ),
+                    });
+                }
             }
         }
     }
@@ -2623,6 +2688,12 @@ fn evaluate_check_policy(
     insert_unknown_policy_effect_violations(
         &mut violations,
         &known_effects,
+        "direct_capability_source_allowlist",
+        policy.profile.direct_capability_source_allowlist.keys(),
+    );
+    insert_unknown_policy_effect_violations(
+        &mut violations,
+        &known_effects,
         "propagated_effect_allowlist",
         policy.profile.propagated_effect_allowlist.keys(),
     );
@@ -2642,6 +2713,14 @@ fn evaluate_check_policy(
             "propagated_effect_allowlist",
             "propagated_effects",
             "UnusedPropagatedEffectAllowlist",
+        );
+        insert_unused_source_allowlist_violations(
+            &mut violations,
+            &evidence,
+            &policy.profile.direct_capability_source_allowlist,
+            "direct_capability_source_allowlist",
+            "observed_capabilities",
+            "UnusedDirectCapabilitySourceAllowlist",
         );
     }
 
@@ -2704,6 +2783,25 @@ fn evaluate_check_policy(
                 source: item.source.clone(),
                 message: format!(
                     "effect `{}` is directly used by `{}` via `{}` but policy does not allow that boundary",
+                    item.effect, item.function, item.source
+                ),
+            });
+        } else if item.surface == "observed_capabilities"
+            && !direct_capability_source_allowlist_allows(
+                &policy.profile.direct_capability_source_allowlist,
+                &item.effect,
+                &item.function,
+                &item.source,
+            )
+        {
+            violations.insert(CheckPolicyViolation {
+                kind: "DirectCapabilitySourceNotAllowed",
+                effect: item.effect.clone(),
+                function: item.function.clone(),
+                surface: item.surface,
+                source: item.source.clone(),
+                message: format!(
+                    "effect `{}` is directly used by `{}` via `{}` but policy does not allow that capability source",
                     item.effect, item.function, item.source
                 ),
             });
@@ -5571,6 +5669,7 @@ mod tests {
                 allowed_effects: vec!["Console".to_string()],
                 denied_effects: vec!["Network".to_string()],
                 direct_effect_allowlist: BTreeMap::new(),
+                direct_capability_source_allowlist: BTreeMap::new(),
                 propagated_effect_allowlist: BTreeMap::new(),
                 require_source_digest: true,
                 require_input_graph_digest: false,
@@ -5650,6 +5749,7 @@ mod tests {
                 allowed_effects: Vec::new(),
                 denied_effects: Vec::new(),
                 direct_effect_allowlist: BTreeMap::new(),
+                direct_capability_source_allowlist: BTreeMap::new(),
                 propagated_effect_allowlist: BTreeMap::new(),
                 require_source_digest: false,
                 require_input_graph_digest: true,
@@ -5706,6 +5806,7 @@ mod tests {
         assert_eq!(loaded.profile.schema, "quantalang-check-policy/v1");
         assert_eq!(loaded.profile.allowed_effects, vec!["Console"]);
         assert!(loaded.profile.direct_effect_allowlist.is_empty());
+        assert!(loaded.profile.direct_capability_source_allowlist.is_empty());
         assert!(loaded.profile.propagated_effect_allowlist.is_empty());
         assert!(!loaded.profile.require_input_graph_digest);
         assert!(!loaded.profile.require_provenance_allowlists);

@@ -152,6 +152,11 @@ Policy profiles turn receipt evidence into an enforceable CI gate:
   "direct_effect_allowlist": {
     "FileSystem": ["load_config"]
   },
+  "direct_capability_source_allowlist": {
+    "FileSystem": {
+      "load_config": ["read_file"]
+    }
+  },
   "propagated_effect_allowlist": {
     "FileSystem": ["main"]
   },
@@ -171,7 +176,9 @@ quantac check app.quanta --policy console-only.json --receipt receipt.json
 Denied effects always fail. If `allowed_effects` is non-empty, any declared
 effect, observed capability, or propagated effect outside the allow-list also
 fails. `direct_effect_allowlist` applies only to `observed_capabilities`;
-`propagated_effect_allowlist` applies only to `propagated_effects`.
+`direct_capability_source_allowlist` narrows approved direct boundaries to
+specific ambient helper, macro, or FFI sources; `propagated_effect_allowlist`
+applies only to `propagated_effects`.
 Effect names in those policy fields must resolve to either a built-in
 capability effect or an effect present in the checked source graph. Unknown
 names are reported as `UnknownPolicyEffect` violations, which catches policy
@@ -179,7 +186,8 @@ typos such as `Netwrok` before they can weaken a CI gate.
 Set `require_provenance_allowlists` to require every direct capability boundary
 and propagated capability caller to be explicitly named.
 Set `require_allowlist_coverage` to reject stale direct or propagated allowlist
-entries that are not matched by the current receipt evidence.
+entries, including source-level direct capability entries, that are not matched
+by the current receipt evidence.
 
 Use `quantac policy list` to see built-in starting profiles, or
 `quantac policy list --json` to emit a machine-readable
