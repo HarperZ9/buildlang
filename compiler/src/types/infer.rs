@@ -1545,12 +1545,13 @@ impl<'ctx> TypeInfer<'ctx> {
 
     fn infer_assign(
         &mut self,
-        _op: AssignOp,
+        op: AssignOp,
         target: &ast::Expr,
         value: &ast::Expr,
         span: Span,
     ) -> Ty {
         let target_ty = self.infer_expr(target);
+        let value_sources = self.call_sources(value);
         let value_ty = self.infer_expr(value);
         let _ = self.unify(&target_ty, &value_ty, span);
 
@@ -1558,6 +1559,9 @@ impl<'ctx> TypeInfer<'ctx> {
         // track the borrow (same as check_borrow_at_binding for let).
         if let ExprKind::Ident(ident) = &target.kind {
             self.check_borrow_at_binding(ident.name.as_ref(), value, &value_ty, span);
+            if op == AssignOp::Assign {
+                self.bind_call_sources(ident.name.as_ref(), value_sources);
+            }
         }
 
         Ty::unit()

@@ -170,7 +170,9 @@ tuple slots and indexed ops tables record sources such as `loaders.0` and
 such as `make_loader()`. `if` and `match` expressions that select an
 effectful function value record every possible branch target, for example
 `load_config` and `load_secret`; binding that selected function before calling
-it records both the binding and the possible selected targets.
+it records both the binding and the possible selected targets. Later assignment
+to a callback variable refreshes that evidence, so stale sources do not survive
+`loader = load_secret` or `loader = read_file`.
 
 `quantac check --receipt` also binds each receipt to the checked source inputs
 with SHA-256 digests plus compiler and language version metadata. The top-level
@@ -263,7 +265,9 @@ Control-flow selectors keep reviewable evidence too: calling the result of an
 `if` or `match` expression records the possible effectful branch targets, such
 as `load_config` and `load_secret`. If the selected function is bound first,
 for example `let loader = if ...`, a later `loader()` call records `loader`
-plus the possible selected targets.
+plus the possible selected targets. Plain assignment to an identifier rebinds
+that call-source evidence, so policy receipts follow mutable callback slots
+instead of preserving stale earlier sources.
 
 Policy profiles can enforce that split:
 
