@@ -1151,6 +1151,51 @@ fn main() {
 }
 
 #[test]
+fn check_rejects_effectful_callback_erasure_into_pure_signature() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_effectful_callback_erasure_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn run(loader: fn(str) -> str) {
+    loader("ops.txt");
+}
+
+fn main() {
+    run(read_file);
+}
+"#,
+    )
+    .expect("write effectful callback erasure fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "effectful callback should not be accepted by a pure callback signature"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FileSystem"),
+        "diagnostic should name erased FileSystem effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("fn(str) -> str"),
+        "diagnostic should show the pure callback boundary:\n{}",
+        stderr
+    );
+}
+
+#[test]
 fn check_reports_effect_for_ambient_function_alias_call() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_ambient_alias_gate_{}.quanta",
