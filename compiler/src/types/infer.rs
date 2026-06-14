@@ -9,6 +9,7 @@
 //! This module implements bidirectional type inference for expressions.
 //! It combines inference (synthesizing types) with checking (verifying against expected types).
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::ast::{self, AssignOp, BinOp, ExprKind, Literal as AstLiteral, UnaryOp};
@@ -73,6 +74,8 @@ pub struct TypeInfer<'ctx> {
     effect_ctx: super::effects::EffectContext,
     /// The current function's accumulated effect row.
     current_effects: super::effects::EffectRow,
+    /// Capability effects mapped to the ambient call names that triggered them.
+    capability_sources: BTreeMap<String, BTreeSet<String>>,
     /// Whether any explicit `return` statement was found.
     has_return: bool,
     /// Borrow tracking state for the current function body.
@@ -223,6 +226,7 @@ impl<'ctx> TypeInfer<'ctx> {
             well_known_types: WellKnownTypes::default(),
             effect_ctx: super::effects::EffectContext::new(),
             current_effects: super::effects::EffectRow::empty(),
+            capability_sources: BTreeMap::new(),
             has_return: false,
             borrow_state: super::ty::BorrowState::new(),
         }
@@ -244,6 +248,7 @@ impl<'ctx> TypeInfer<'ctx> {
             well_known_types: WellKnownTypes::default(),
             effect_ctx: super::effects::EffectContext::new(),
             current_effects: super::effects::EffectRow::empty(),
+            capability_sources: BTreeMap::new(),
             has_return: false,
             borrow_state: super::ty::BorrowState::new(),
         }
@@ -252,6 +257,28 @@ impl<'ctx> TypeInfer<'ctx> {
     /// Get the current accumulated effect row.
     pub fn current_effect_row(&self) -> &super::effects::EffectRow {
         &self.current_effects
+    }
+
+    /// Get the ambient capability calls that contributed to the effect row.
+    pub fn capability_sources(&self) -> &BTreeMap<String, BTreeSet<String>> {
+        &self.capability_sources
+    }
+
+    fn record_capability_source(&mut self, effect_name: &str, source_name: &str) {
+        self.capability_sources
+            .entry(effect_name.to_string())
+            .or_default()
+            .insert(source_name.to_string());
+    }
+
+    fn call_name(func: &ast::Expr) -> Option<&str> {
+        match &func.kind {
+            ExprKind::Ident(ident) => Some(ident.name.as_ref()),
+            ExprKind::Path(path) if path.is_simple() => {
+                path.last_ident().map(|ident| ident.name.as_ref())
+            }
+            _ => None,
+        }
     }
 
     /// Get a mutable reference to the effect context.
@@ -1535,6 +1562,7 @@ impl<'ctx> TypeInfer<'ctx> {
     // =========================================================================
 
     fn infer_call(&mut self, func: &ast::Expr, args: &[ast::Expr], span: Span) -> Ty {
+        let call_name = Self::call_name(func).map(str::to_string);
         let func_ty = self.infer_expr(func);
         let func_ty = self.apply(&func_ty);
 
@@ -1558,6 +1586,13 @@ impl<'ctx> TypeInfer<'ctx> {
                 // Propagate callee's effects to caller's effect context
                 if !fn_ty.effects.is_empty() {
                     self.current_effects = self.current_effects.merge(&fn_ty.effects);
+                    if let Some(name) = call_name.as_deref() {
+                        for effect in &fn_ty.effects.effects {
+                            if super::capabilities::is_capability_effect(effect.name.as_ref()) {
+                                self.record_capability_source(effect.name.as_ref(), name);
+                            }
+                        }
+                    }
                 }
 
                 // Interprocedural lifetime: if the function returns a reference,
@@ -1639,7 +1674,20 @@ impl<'ctx> TypeInfer<'ctx> {
                 let _ = self.unify(&func_ty, &fn_ty, span);
                 ret_ty
             }
-            TyKind::Error => Ty::error(),
+            TyKind::Error => {
+                if let Some(name) = call_name.as_deref() {
+                    if let Some(effect_name) = super::capabilities::capability_effect_for_call(name)
+                    {
+                        self.current_effects
+                            .add(super::effects::Effect::new(effect_name));
+                        self.record_capability_source(effect_name, name);
+                    }
+                }
+                for arg in args {
+                    let _ = self.infer_expr(arg);
+                }
+                Ty::fresh_var()
+            }
             // Unit type - cascading from a failed function lookup; suppress error
             TyKind::Tuple(elems) if elems.is_empty() => Ty::fresh_var(),
             _ => {

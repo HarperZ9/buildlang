@@ -332,6 +332,23 @@ impl Ty {
         }))
     }
 
+    /// Create a function type with both an effect row and lifetime parameters.
+    pub fn function_with_effects_and_lifetimes(
+        params: Vec<Ty>,
+        ret: Ty,
+        effects: super::effects::EffectRow,
+        lifetime_params: Vec<Arc<str>>,
+    ) -> Self {
+        Self::new(TyKind::Fn(FnTy {
+            params,
+            ret: Box::new(ret),
+            is_unsafe: false,
+            abi: None,
+            effects,
+            lifetime_params,
+        }))
+    }
+
     /// Create an ADT (struct/enum) type.
     pub fn adt(def_id: DefId, substs: Vec<Ty>) -> Self {
         Self::new(TyKind::Adt(def_id, substs))

@@ -478,7 +478,13 @@ impl<'ctx> TypeChecker<'ctx> {
 
         // Add function to current scope - carry lifetime params for interprocedural analysis
         let param_tys: Vec<_> = sig.params.iter().map(|(_, ty)| ty.clone()).collect();
-        let fn_ty = Ty::function_with_lifetimes(param_tys, sig.ret, sig.lifetime_params.clone());
+        let effects = self.lower_effect_annotations(&f.sig.effects);
+        let fn_ty = Ty::function_with_effects_and_lifetimes(
+            param_tys,
+            sig.ret.clone(),
+            effects,
+            sig.lifetime_params.clone(),
+        );
         self.ctx.define_var(f.name.name.clone(), fn_ty);
     }
 
@@ -487,7 +493,21 @@ impl<'ctx> TypeChecker<'ctx> {
     fn collect_extern_block(&mut self, eb: &ast::ExternBlockDef, _span: Span) {
         for foreign_item in &eb.items {
             if let ast::ForeignItemKind::Fn(f) = &foreign_item.kind {
-                self.collect_function(f, foreign_item.span);
+                let def_id = self.ctx.fresh_def_id();
+                let sig = self.lower_fn_sig(&f.generics, &f.sig);
+                self.ctx.register_function(def_id, sig.clone());
+
+                let param_tys: Vec<_> = sig.params.iter().map(|(_, ty)| ty.clone()).collect();
+                let effects = super::effects::EffectRow::closed([super::effects::Effect::new(
+                    super::capabilities::FOREIGN,
+                )]);
+                let fn_ty = Ty::function_with_effects_and_lifetimes(
+                    param_tys,
+                    sig.ret.clone(),
+                    effects,
+                    sig.lifetime_params.clone(),
+                );
+                self.ctx.define_var(f.name.name.clone(), fn_ty);
             }
         }
     }
@@ -637,7 +657,7 @@ impl<'ctx> TypeChecker<'ctx> {
             let user_effects: Vec<_> = self.effect_ctx.all_effects().into_iter().cloned().collect();
 
             // Check function body - use block to limit TypeInfer borrow scope
-            let (body_ty, body_effects, infer_errors, has_return) = {
+            let (body_ty, body_effects, capability_sources, infer_errors, has_return) = {
                 let mut infer = TypeInfer::new(self.ctx);
                 // Pass the expected return type so that `return` statements
                 // inside nested control flow (while/if/match) are properly
@@ -649,8 +669,15 @@ impl<'ctx> TypeChecker<'ctx> {
                 }
                 let body_ty = infer.infer_block(body);
                 let body_effects = infer.current_effect_row().clone();
+                let capability_sources = infer.capability_sources().clone();
                 let has_return = infer.has_explicit_return();
-                (body_ty, body_effects, infer.take_errors(), has_return)
+                (
+                    body_ty,
+                    body_effects,
+                    capability_sources,
+                    infer.take_errors(),
+                    has_return,
+                )
             };
 
             // Unify body type with return type.
@@ -703,6 +730,13 @@ impl<'ctx> TypeChecker<'ctx> {
                         "either add `~ {}` to the function signature:\n  fn {}() ~ {} {{ ... }}\n\nor handle the effect with a handler:\n  handle {{ ... }} with {{\n      {}.operation(args) => |resume| {{\n          // handle the operation\n          resume(())\n      }},\n  }}",
                         body_eff.name, func_name, body_eff.name, body_eff.name
                     ));
+                    if let Some(sources) = capability_sources.get(body_eff.name.as_ref()) {
+                        err_with_span.notes.push(format!(
+                            "capability `{}` was triggered by ambient call(s): {}",
+                            body_eff.name,
+                            sources.iter().cloned().collect::<Vec<_>>().join(", ")
+                        ));
+                    }
                     self.errors.push(err_with_span);
                 }
             } else if !expected_effects.is_empty() && !body_effects.is_empty() {
@@ -722,6 +756,13 @@ impl<'ctx> TypeChecker<'ctx> {
                         let mut err_with_span = TypeErrorWithSpan::new(err, span);
                         err_with_span.help =
                             Some(format!("add `{}` to the effect annotations", body_eff.name));
+                        if let Some(sources) = capability_sources.get(body_eff.name.as_ref()) {
+                            err_with_span.notes.push(format!(
+                                "capability `{}` was triggered by ambient call(s): {}",
+                                body_eff.name,
+                                sources.iter().cloned().collect::<Vec<_>>().join(", ")
+                            ));
+                        }
                         self.errors.push(err_with_span);
                     }
                 }
@@ -1415,6 +1456,82 @@ impl Default for TypeChecker<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn check_source(source: &str) -> Vec<TypeErrorWithSpan> {
+        let source_file = crate::lexer::SourceFile::new("capability_test.quanta", source);
+        let mut lexer = crate::lexer::Lexer::new(&source_file);
+        let tokens = lexer.tokenize().expect("tokenize capability fixture");
+        let mut parser = crate::parser::Parser::new(&source_file, tokens);
+        let module = parser.parse().expect("parse capability fixture");
+
+        let mut ctx = TypeContext::new();
+        let mut checker = TypeChecker::new(&mut ctx);
+        checker.check_module(&module);
+        checker.take_errors()
+    }
+
+    #[test]
+    fn capability_ambient_file_call_requires_filesystem_effect() {
+        let errors = check_source(r#"fn main() { read_file("ops.txt"); }"#);
+
+        assert!(
+            errors.iter().any(|err| matches!(
+                &err.error,
+                TypeError::UnhandledEffect { effect_name, .. } if effect_name == "FileSystem"
+            )),
+            "expected FileSystem effect error, got {errors:#?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|err| err.notes.iter().any(|note| note.contains("read_file"))),
+            "expected diagnostic note naming read_file, got {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn capability_declared_filesystem_effect_allows_file_call() {
+        let errors = check_source(r#"fn main() ~ FileSystem { read_file("ops.txt"); }"#);
+
+        assert!(errors.is_empty(), "expected no errors, got {errors:#?}");
+    }
+
+    #[test]
+    fn capability_wrong_declared_effect_does_not_allow_file_call() {
+        let errors = check_source(r#"fn main() ~ Network { read_file("ops.txt"); }"#);
+
+        assert!(
+            errors.iter().any(|err| matches!(
+                &err.error,
+                TypeError::UndeclaredEffect { effect_name, .. } if effect_name == "FileSystem"
+            )),
+            "expected undeclared FileSystem error, got {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn capability_foreign_call_requires_foreign_effect() {
+        let errors = check_source(
+            r#"
+            extern "C" { fn touch(); }
+            fn main() { touch(); }
+            "#,
+        );
+
+        assert!(
+            errors.iter().any(|err| matches!(
+                &err.error,
+                TypeError::UnhandledEffect { effect_name, .. } if effect_name == "Foreign"
+            )),
+            "expected Foreign effect error, got {errors:#?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|err| err.notes.iter().any(|note| note.contains("touch"))),
+            "expected diagnostic note naming touch, got {errors:#?}"
+        );
+    }
 
     #[test]
     fn test_type_checker_creation() {
