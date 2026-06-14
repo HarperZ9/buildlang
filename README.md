@@ -179,6 +179,8 @@ Receipts identify these gates with a `policy.source` such as `builtin:ci-review`
 Built-in profile receipts also include `policy.profile` and
 `policy.profile_digest`, so CI can distinguish official profile identity from
 an equivalent file-backed policy document.
+Use `--expect-profile-digest <hex>` with `--profile` to pin CI to the digest
+reported by `quantac policy list --json` or by a prior trusted receipt.
 
 Receipts separate direct capability boundaries from callers that inherit those
 effects. `observed_capabilities` records ambient helper, macro, and FFI access
