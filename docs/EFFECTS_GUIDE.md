@@ -77,7 +77,7 @@ function type instead of hiding behind a runtime helper.
 | `Process` | `exit`, `process_exit` |
 | `Environment` | `getenv`, `args_count`, `args_get` |
 | `Clock` | `clock_ms`, `time_unix` |
-| `Console` | `read_line`, `read_all`, `stdin_is_pipe`, direct print helpers where parsed as calls |
+| `Console` | `read_line`, `read_all`, `stdin_is_pipe`, direct print helpers, console macros such as `println!`, `print!`, `eprintln!`, `eprint!`, and diagnostic logging macros |
 | `Foreign` | calls to functions declared in `extern` blocks |
 | `Gpu` | direct `quanta_vk_*` runtime helpers |
 
@@ -106,11 +106,9 @@ fn call_foreign() ~ Foreign {
 }
 ```
 
-Diagnostics include a note naming the ambient call, for example `read_file` or
-`touch`, so receipts and review tooling can point to the exact capability
-source. Macro-style console attribution, including `println!`, is still being
-folded into this gate as macro expansion gains source-level capability
-metadata.
+Diagnostics include a note naming the ambient call or macro, for example
+`read_file`, `touch`, or `println`, so receipts and review tooling can point to
+the exact capability source.
 
 ---
 
