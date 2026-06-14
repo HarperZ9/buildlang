@@ -257,6 +257,40 @@ fn check_reports_capability_effect_for_ambient_file_call() {
 }
 
 #[test]
+fn check_reports_capability_effect_for_qualified_ambient_call() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_qualified_capability_gate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(&fixture, r#"fn main() { io::read_file("ops.txt"); }"#)
+        .expect("write qualified capability fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "qualified ambient file call should fail without FileSystem effect"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FileSystem"),
+        "diagnostic should name FileSystem effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("io::read_file"),
+        "diagnostic should name qualified ambient call:\n{}",
+        stderr
+    );
+}
+
+#[test]
 fn check_reports_capability_effect_for_gpu_runtime_call() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_gpu_capability_gate_{}.quanta",
@@ -377,6 +411,41 @@ fn check_receipt_records_gpu_capability_source() {
     assert_eq!(
         receipt["observed_capabilities"]["main"]["Gpu"],
         serde_json::json!(["quanta_vk_init"])
+    );
+}
+
+#[test]
+fn check_receipt_records_qualified_capability_source() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_qualified_capability_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"fn main() ~ FileSystem { io::read_file("ops.txt"); }"#,
+    )
+    .expect("write qualified capability receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "qualified capability receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]["FileSystem"],
+        serde_json::json!(["io::read_file"])
     );
 }
 
@@ -3840,6 +3909,62 @@ fn main() ~ Foreign {
             .expect("propagated effect allowlist")
             .is_empty(),
         "direct FFI boundary should not be scaffolded as propagated: {scaffolded:#?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn policy_scaffold_from_qualified_capability_receipt_preserves_source_path() {
+    let dir = std::env::temp_dir().join(format!(
+        "quantalang_policy_scaffold_qualified_capability_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create qualified scaffold fixture directory");
+    let input = dir.join("app.quanta");
+    let receipt = dir.join("receipt.json");
+    fs::write(
+        &input,
+        r#"fn main() ~ FileSystem { io::read_file("ops.txt"); }"#,
+    )
+    .expect("write qualified policy scaffold input");
+
+    let check = quantac()
+        .arg("check")
+        .arg(&input)
+        .arg("--receipt")
+        .arg(&receipt)
+        .output()
+        .expect("write qualified policy scaffold receipt");
+    assert!(
+        check.status.success(),
+        "qualified check should produce a receipt\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
+
+    let scaffold = quantac()
+        .arg("policy")
+        .arg("scaffold")
+        .arg(&receipt)
+        .output()
+        .expect("scaffold policy from qualified receipt");
+    assert!(
+        scaffold.status.success(),
+        "qualified policy scaffold should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&scaffold.stdout),
+        String::from_utf8_lossy(&scaffold.stderr)
+    );
+    let scaffolded: serde_json::Value =
+        serde_json::from_slice(&scaffold.stdout).expect("qualified scaffold should be JSON");
+    assert_eq!(
+        scaffolded["direct_effect_allowlist"]["FileSystem"],
+        serde_json::json!(["main"])
+    );
+    assert_eq!(
+        scaffolded["direct_capability_source_allowlist"]["FileSystem"]["main"],
+        serde_json::json!(["io::read_file"])
     );
 
     let _ = fs::remove_dir_all(&dir);
