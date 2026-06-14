@@ -388,6 +388,17 @@ impl<'ctx> TypeInfer<'ctx> {
         Self::dedupe_call_sources(sources)
     }
 
+    fn bound_call_sources_for_index(&self, expr: &ast::Expr, index: usize) -> Vec<String> {
+        let mut sources = Vec::new();
+        for base in self.call_sources(expr) {
+            let access_source = format!("{}[{}]", base, index);
+            if let Some(bound_sources) = self.lookup_call_source_binding(&access_source) {
+                sources.extend(bound_sources.iter().cloned());
+            }
+        }
+        Self::dedupe_call_sources(sources)
+    }
+
     fn bind_pattern_to_call_sources(&mut self, pattern: &ast::Pattern, sources: Vec<String>) {
         match &pattern.kind {
             ast::PatternKind::Ident {
@@ -466,6 +477,18 @@ impl<'ctx> TypeInfer<'ctx> {
                 } else {
                     for (index, pattern) in patterns.iter().enumerate() {
                         let sources = self.bound_call_sources_for_member(expr, &index.to_string());
+                        self.bind_pattern_to_call_sources(pattern, sources);
+                    }
+                }
+            }
+            ast::PatternKind::Slice(patterns) => {
+                if let ExprKind::Array(elems) = &expr.kind {
+                    for (pattern, elem) in patterns.iter().zip(elems.iter()) {
+                        self.bind_pattern_call_sources(pattern, elem);
+                    }
+                } else {
+                    for (index, pattern) in patterns.iter().enumerate() {
+                        let sources = self.bound_call_sources_for_index(expr, index);
                         self.bind_pattern_to_call_sources(pattern, sources);
                     }
                 }

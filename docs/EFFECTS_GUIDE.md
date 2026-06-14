@@ -149,13 +149,13 @@ retain access evidence too: `(ops.loader)("ops.toml")` records `ops.loader`,
 factory call, such as `make_loader()`. `if` and `match` expressions that select an effectful function
 value record every possible branch target, for example `load_config` and
 `load_secret`; binding that selected function before calling it records both
-the binding and the possible selected targets. Tuple and struct destructuring
-preserve those sources as well, so `let (loader,) = (...)` and
-`let Ops { loader } = ops` still record the selected callees as well as
-`loader`. Assignment to that callback variable refreshes the evidence, so
-`loader = load_secret` replaces the earlier source and `loader = read_file`
-clears stale local-function provenance while keeping the call as propagated
-through `loader`.
+the binding and the possible selected targets. Tuple, struct, and slice
+destructuring preserve those sources as well, so `let (loader,) = (...)`,
+`let Ops { loader } = ops`, and `let [loader] = loaders` still record the
+selected callees as well as `loader`. Assignment to that callback variable
+refreshes the evidence, so `loader = load_secret` replaces the earlier source
+and `loader = read_file` clears stale local-function provenance while keeping
+the call as propagated through `loader`.
 Async blocks are delayed effect values too. `let task = async {
 read_file("ops.toml") };` does not perform `FileSystem` at construction time;
 `task.await` inherits the stored capability effect and records both `task` and
@@ -234,11 +234,11 @@ Control-flow selectors keep reviewable evidence too: calling the result of an
 `if` or `match` expression records the possible effectful branch targets, such
 as `load_config` and `load_secret`. If the selected function is bound first,
 for example `let loader = if ...`, a later `loader()` call records `loader`
-plus the possible selected targets. Tuple and struct destructuring keep the same
-evidence, so destructured aliases do not hide which selected callee introduced
-the effect. Reassigning that identifier updates the source set, which lets
-receipts describe mutable callback slots without carrying stale provenance from
-the old value.
+plus the possible selected targets. Tuple, struct, and slice destructuring keep
+the same evidence, so destructured aliases do not hide which selected callee
+introduced the effect. Reassigning that identifier updates the source set, which
+lets receipts describe mutable callback slots without carrying stale provenance
+from the old value.
 
 Policy profiles turn receipt evidence into an enforceable CI gate:
 
