@@ -199,9 +199,11 @@ tuple-struct, struct, enum-variant, and slice destructuring keep that source
 evidence too, so `let (loader,) = (...)`, `let Slot(loader) = slot`,
 `let Ops { loader } = ops`, `let Slot::Ready(loader) = slot`, and
 `let [loader] = loaders` continue to record the selected callees as well as
-`loader`. Later assignment to a callback variable or aggregate member refreshes
-that evidence, so stale sources do not survive `loader = load_secret`,
-`ops.loader = load_secret`, or `loaders[0] = load_secret`.
+`loader`; branch-local `if let` and `while let` destructuring enforce the same
+declared effect gate. Later assignment to a callback variable or aggregate
+member refreshes that evidence, so stale sources do not survive
+`loader = load_secret`, `ops.loader = load_secret`, or
+`loaders[0] = load_secret`.
 Async blocks follow the same delayed-effect model for type checking: creating
 `let task = async { read_file("ops.toml") };` is pure, while `task.await`
 inherits `FileSystem` and records both the awaited source (`task`) and the
@@ -314,7 +316,8 @@ callback is called. Calls through effectful struct fields, tuple slots,
 tuple-struct fields, and indexed ops tables record paths such as `ops.loader`,
 `loaders.0`, `slot.0`, and `loaders[0]`, so source allowlists can constrain
 capability-bearing registries and ops tables. Enum-variant payloads keep their
-stored callback sources when a match arm destructures them. Immediate invocation
+stored callback sources when a match, `if let`, or `while let` branch
+destructures them. Immediate invocation
 of a returned effectful function records the factory call, such as
 `make_loader()`.
 Async blocks also delay capability effects at construction time: `async {
@@ -329,7 +332,8 @@ Control-flow selectors keep reviewable evidence too: calling the result of an
 as `load_config` and `load_secret`. If the selected function is bound first,
 for example `let loader = if ...`, a later `loader()` call records `loader`
 plus the possible selected targets. The same source binding is preserved through
-tuple, tuple-struct, struct, enum-variant, and slice destructuring, so
+tuple, tuple-struct, struct, enum-variant, and slice destructuring, including
+branch-local `if let` and `while let` patterns, so
 `let (loader,) = (...)`, `let Slot(loader) = slot`, `let Ops { loader } = ops`,
 `let Slot::Ready(loader) = slot`, and `let [loader] = loaders` do not collapse a
 selected effectful function down to only the local alias. Plain assignment to an

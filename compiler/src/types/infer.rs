@@ -1505,7 +1505,10 @@ impl<'ctx> TypeInfer<'ctx> {
                 // if let Pattern = expr { then } else { else }
                 let scrutinee_ty = self.infer_expr(scrutinee);
                 self.check_pattern(pattern, &scrutinee_ty);
+                self.source_bindings.push(BTreeMap::new());
+                self.bind_pattern_call_sources(pattern, scrutinee);
                 let then_ty = self.infer_block(then_branch);
+                self.source_bindings.pop();
                 if let Some(else_expr) = else_branch.as_deref() {
                     let else_ty = self.infer_expr(else_expr);
                     let _ = self.unify(&then_ty, &else_ty, expr.span);
@@ -1599,6 +1602,7 @@ impl<'ctx> TypeInfer<'ctx> {
                 let expr_ty = self.infer_expr(expr);
                 self.push_scope(ScopeKind::Loop);
                 self.check_pattern(pattern, &expr_ty);
+                self.bind_pattern_call_sources(pattern, expr);
                 let _ = self.infer_block(body);
                 self.pop_scope();
                 Ty::unit()
