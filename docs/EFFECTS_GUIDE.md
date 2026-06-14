@@ -167,6 +167,7 @@ Policy profiles turn receipt evidence into an enforceable CI gate:
   },
   "require_source_digest": true,
   "require_input_graph_digest": true,
+  "require_effect_allowlist": true,
   "require_provenance_allowlists": true,
   "require_source_allowlists": true,
   "require_allowlist_coverage": true
@@ -181,7 +182,10 @@ quantac check app.quanta --policy console-only.json --receipt receipt.json
 
 Denied effects always fail. If `allowed_effects` is non-empty, any declared
 effect, observed capability, or propagated effect outside the allow-list also
-fails. `direct_effect_allowlist` applies only to `observed_capabilities`;
+fails. Set `require_effect_allowlist` to make `allowed_effects` authoritative
+even when the list is empty; this is how a pure receipt can remain pure in CI
+instead of silently accepting later effect drift. `direct_effect_allowlist`
+applies only to `observed_capabilities`;
 `direct_capability_source_allowlist` narrows approved direct boundaries to
 specific ambient helper, macro, or FFI sources; `propagated_effect_allowlist`
 applies only to `propagated_effects`; `propagated_effect_source_allowlist`
@@ -206,9 +210,9 @@ quantac check app.quanta --receipt receipt.json
 quantac policy scaffold receipt.json --output policy.json
 ```
 
-The scaffolded policy keeps digest, provenance, source, and coverage
-requirements enabled, fills exact direct and propagated allowlists from the
-receipt, and should be reviewed before it becomes a CI gate.
+The scaffolded policy keeps digest, effect-inventory, provenance, source, and
+coverage requirements enabled, fills exact direct and propagated allowlists
+from the receipt, and should be reviewed before it becomes a CI gate.
 
 Use `quantac policy list` to see built-in starting profiles, or
 `quantac policy list --json` to emit a machine-readable
@@ -243,9 +247,10 @@ for CI bootstrapping: `pure` denies every built-in ambient capability,
 environment, clock, and console work while denying network/process/FFI/GPU, and
 `ci-review` requires source/input graph digests while denying the highest-risk
 capabilities. `strict-accountability` also requires source/input graph digests,
-direct and propagated provenance allowlists, exact source allowlists, and
-coverage for every allowlist entry; run it directly to reject ambient capability
-use by default, or print it and fill project-specific allowlists. Receipts from
+an authoritative effect allow-list, direct and propagated provenance allowlists,
+exact source allowlists, and coverage for every allowlist entry; run it
+directly to reject ambient capability use by default, or print it and fill
+project-specific allowlists. Receipts from
 direct profile checks record `policy.source` as `builtin:<name>`,
 `policy.profile` as the profile name, and
 `policy.profile_digest` as the SHA-256 digest of the emitted built-in policy

@@ -2016,6 +2016,65 @@ fn check_policy_allow_list_rejects_unlisted_effect() {
 }
 
 #[test]
+fn check_policy_required_effect_allowlist_rejects_unlisted_declared_effect() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_policy_require_effect_allowlist_{}.quanta",
+        std::process::id()
+    ));
+    let policy = write_temp_policy(
+        "require_effect_allowlist",
+        r#"{
+          "schema": "quantalang-check-policy/v1",
+          "allowed_effects": [],
+          "require_effect_allowlist": true
+        }"#,
+    );
+    fs::write(
+        &fixture,
+        r#"
+effect Audit {
+    fn record();
+}
+
+fn main() ~ Audit {}
+"#,
+    )
+    .expect("write required effect allowlist fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--policy")
+        .arg(&policy)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check with required effect allowlist");
+
+    let _ = fs::remove_file(&fixture);
+    let _ = fs::remove_file(&policy);
+
+    assert!(
+        !output.status.success(),
+        "required empty effect allowlist should reject declared effect\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = receipt_from_stdout(&output);
+    let violations = receipt["policy"]["violations"]
+        .as_array()
+        .expect("policy violations");
+    assert!(
+        violations.iter().any(|violation| {
+            violation["kind"] == "DisallowedEffect"
+                && violation["effect"] == "Audit"
+                && violation["function"] == "main"
+        }),
+        "expected Audit disallowed violation in {violations:#?}"
+    );
+}
+
+#[test]
 fn check_policy_direct_allowlist_rejects_unapproved_direct_effect() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_check_policy_direct_allowlist_{}.quanta",
@@ -3447,6 +3506,7 @@ fn policy_print_emits_strict_accountability_profile_with_source_gates() {
     assert_eq!(profile["schema"], "quantalang-check-policy/v1");
     assert_eq!(profile["require_source_digest"], true);
     assert_eq!(profile["require_input_graph_digest"], true);
+    assert_eq!(profile["require_effect_allowlist"], true);
     assert_eq!(profile["require_provenance_allowlists"], true);
     assert_eq!(profile["require_source_allowlists"], true);
     assert_eq!(profile["require_allowlist_coverage"], true);
@@ -3541,6 +3601,7 @@ fn main() ~ FileSystem {
     );
     assert_eq!(scaffolded["require_source_digest"], true);
     assert_eq!(scaffolded["require_input_graph_digest"], true);
+    assert_eq!(scaffolded["require_effect_allowlist"], true);
     assert_eq!(scaffolded["require_provenance_allowlists"], true);
     assert_eq!(scaffolded["require_source_allowlists"], true);
     assert_eq!(scaffolded["require_allowlist_coverage"], true);
@@ -3566,6 +3627,95 @@ fn main() ~ FileSystem {
         .as_array()
         .expect("policy violations")
         .is_empty());
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn policy_scaffold_from_pure_receipt_rejects_later_effect_drift() {
+    let dir = std::env::temp_dir().join(format!(
+        "quantalang_policy_scaffold_pure_drift_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create pure scaffold drift fixture directory");
+    let input = dir.join("app.quanta");
+    let receipt = dir.join("receipt.json");
+    let policy = dir.join("policy.json");
+    fs::write(&input, "fn main() {}\n").expect("write pure policy scaffold input");
+
+    let check = quantac()
+        .arg("check")
+        .arg(&input)
+        .arg("--receipt")
+        .arg(&receipt)
+        .output()
+        .expect("write pure policy scaffold receipt");
+    assert!(
+        check.status.success(),
+        "pure check should produce a receipt\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
+
+    let scaffold = quantac()
+        .arg("policy")
+        .arg("scaffold")
+        .arg(&receipt)
+        .arg("--output")
+        .arg(&policy)
+        .output()
+        .expect("scaffold policy from pure receipt");
+    assert!(
+        scaffold.status.success(),
+        "pure policy scaffold should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&scaffold.stdout),
+        String::from_utf8_lossy(&scaffold.stderr)
+    );
+    let scaffolded: serde_json::Value =
+        serde_json::from_slice(&fs::read(&policy).expect("read pure scaffolded policy"))
+            .expect("pure scaffolded policy should be JSON");
+    assert_eq!(scaffolded["allowed_effects"], serde_json::json!([]));
+    assert_eq!(scaffolded["require_effect_allowlist"], true);
+
+    fs::write(
+        &input,
+        r#"
+effect Audit {
+    fn record();
+}
+
+fn main() ~ Audit {}
+"#,
+    )
+    .expect("write drifted effect input");
+    let drift = quantac()
+        .arg("check")
+        .arg(&input)
+        .arg("--policy")
+        .arg(&policy)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("check drifted source with pure scaffolded policy");
+    assert!(
+        !drift.status.success(),
+        "pure scaffolded policy should reject later declared effect drift\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&drift.stdout),
+        String::from_utf8_lossy(&drift.stderr)
+    );
+    let receipt = receipt_from_stdout(&drift);
+    let violations = receipt["policy"]["violations"]
+        .as_array()
+        .expect("policy violations");
+    assert!(
+        violations.iter().any(|violation| {
+            violation["kind"] == "DisallowedEffect"
+                && violation["effect"] == "Audit"
+                && violation["function"] == "main"
+        }),
+        "expected declared effect drift violation in {violations:#?}"
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }
@@ -3663,12 +3813,11 @@ fn check_profile_strict_accountability_rejects_ambient_console_without_allowlist
         .expect("policy violations");
     assert!(
         violations.iter().any(|violation| {
-            violation["kind"] == "DirectEffectNotAllowed"
+            violation["kind"] == "DisallowedEffect"
                 && violation["effect"] == "Console"
                 && violation["function"] == "main"
-                && violation["source"] == "println!"
         }),
-        "expected strict direct Console provenance denial in {violations:#?}"
+        "expected strict Console effect allowlist denial in {violations:#?}"
     );
 }
 
