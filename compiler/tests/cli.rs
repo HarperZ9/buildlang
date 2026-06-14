@@ -1385,7 +1385,7 @@ fn main() ~ FileSystem {
     );
     assert_eq!(
         receipt["propagated_effects"]["main"]["FileSystem"],
-        serde_json::json!(["task"])
+        serde_json::json!(["task", "task <- read_file"])
     );
 }
 
@@ -1476,6 +1476,16 @@ fn main() {
         "diagnostic should name awaited selected async source:\n{}",
         stderr
     );
+    assert!(
+        stderr.contains("read_file"),
+        "diagnostic should name selected async FileSystem origin:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("getenv"),
+        "diagnostic should name selected async Environment origin:\n{}",
+        stderr
+    );
 }
 
 #[test]
@@ -1527,11 +1537,128 @@ fn main() ~ FileSystem + Environment {
     );
     assert_eq!(
         receipt["propagated_effects"]["main"]["FileSystem"],
-        serde_json::json!(["task"])
+        serde_json::json!(["task", "task <- read_file"])
     );
     assert_eq!(
         receipt["propagated_effects"]["main"]["Environment"],
-        serde_json::json!(["task"])
+        serde_json::json!(["task", "task <- getenv"])
+    );
+}
+
+#[test]
+fn check_reports_effects_for_awaited_match_selected_async_block() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_awaited_match_selected_async_block_gate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn main() {
+    let mode = 1;
+    let task = match mode {
+        0 => async { read_file("ops.txt") },
+        _ => async { getenv("TOKEN") },
+    };
+    task.await;
+}
+"#,
+    )
+    .expect("write awaited match selected async block fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "awaited match selected async block should fail without declared effects"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FileSystem"),
+        "diagnostic should name FileSystem effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("Environment"),
+        "diagnostic should name Environment effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("task"),
+        "diagnostic should name awaited match selected async source:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("read_file"),
+        "diagnostic should name match-selected async FileSystem origin:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("getenv"),
+        "diagnostic should name match-selected async Environment origin:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn check_receipt_records_awaited_match_selected_async_block_sources() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_awaited_match_selected_async_block_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn main() ~ FileSystem + Environment {
+    let mode = 1;
+    let task = match mode {
+        0 => async { read_file("ops.txt") },
+        _ => async { getenv("TOKEN") },
+    };
+    task.await;
+}
+"#,
+    )
+    .expect("write awaited match selected async block receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "awaited match selected async block receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["task", "task <- read_file"])
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["Environment"],
+        serde_json::json!(["task", "task <- getenv"])
     );
 }
 
