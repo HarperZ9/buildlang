@@ -185,8 +185,9 @@ without performing them at definition time, so `let loader = |path: str|
 read_file(path);` remains pure until `loader("ops.toml")` is called, and then
 records `loader` as propagated `FileSystem` evidence; immediately invoked
 anonymous closures record the synthetic source `<closure>`. Effectful function
-values stored in structs, tuple structs, and enum variants stay pure until
-called and keep source evidence: `(ops.loader)("ops.toml")` records
+values stored in structs, tuple structs, and enum variants, including
+struct-like variants such as `Slot::Ready { loader: load_config }`, stay pure
+until called and keep source evidence: `(ops.loader)("ops.toml")` records
 `ops.loader`; tuple slots, tuple-struct fields, and indexed ops tables record
 sources such as `loaders.0`, `slot.0`, and `loaders[0]`; enum-variant payloads
 preserve their stored callback sources when matched; immediate calls through
@@ -198,12 +199,12 @@ it records both the binding and the possible selected targets. Tuple,
 tuple-struct, struct, enum-variant, and slice destructuring keep that source
 evidence too, so `let (loader,) = (...)`, `let Slot(loader) = slot`,
 `let Ops { loader } = ops`, `let Slot::Ready(loader) = slot`, and
-`let [loader] = loaders` continue to record the selected callees as well as
-`loader`; branch-local `if let` and `while let` destructuring enforce the same
-declared effect gate. Later assignment to a callback variable or aggregate
-member refreshes that evidence, so stale sources do not survive
-`loader = load_secret`, `ops.loader = load_secret`, or
-`loaders[0] = load_secret`.
+`let Slot::Ready { loader } = slot`, and `let [loader] = loaders` continue to
+record the selected callees as well as `loader`; branch-local `if let` and
+`while let` destructuring enforce the same declared effect gate. Later
+assignment to a callback variable or aggregate member refreshes that evidence,
+so stale sources do not survive `loader = load_secret`,
+`ops.loader = load_secret`, or `loaders[0] = load_secret`.
 Async blocks follow the same delayed-effect model for type checking: creating
 `let task = async { read_file("ops.toml") };` is pure, while `task.await`
 inherits `FileSystem` and records both the awaited source (`task`) and the
@@ -310,13 +311,14 @@ effect instead of falling back to an untyped function value. Effectful closures
 use the same function-value path: creating `|path: str| read_file(path)` does
 not trigger `FileSystem`, but calling a bound closure records the alias as a
 propagated source. Calling an anonymous closure immediately records `<closure>`
-as the propagated source. Tuple-struct and enum-variant construction can store
-an effectful callback without adding propagated receipt evidence until that
-callback is called. Calls through effectful struct fields, tuple slots,
-tuple-struct fields, and indexed ops tables record paths such as `ops.loader`,
-`loaders.0`, `slot.0`, and `loaders[0]`, so source allowlists can constrain
-capability-bearing registries and ops tables. Enum-variant payloads keep their
-stored callback sources when a match, `if let`, or `while let` branch
+as the propagated source. Tuple-struct and enum-variant construction, including
+struct-like enum variants, can store an effectful callback without adding
+propagated receipt evidence until that callback is called. Calls through
+effectful struct fields, tuple slots, tuple-struct fields, and indexed ops
+tables record paths such as `ops.loader`, `loaders.0`, `slot.0`, and
+`loaders[0]`, so source allowlists can constrain capability-bearing registries
+and ops tables. Enum-variant payloads keep their stored callback sources when a
+match, `if let`, or `while let` branch
 destructures them. Immediate invocation
 of a returned effectful function records the factory call, such as
 `make_loader()`.
@@ -335,11 +337,11 @@ plus the possible selected targets. The same source binding is preserved through
 tuple, tuple-struct, struct, enum-variant, and slice destructuring, including
 branch-local `if let` and `while let` patterns, so
 `let (loader,) = (...)`, `let Slot(loader) = slot`, `let Ops { loader } = ops`,
-`let Slot::Ready(loader) = slot`, and `let [loader] = loaders` do not collapse a
-selected effectful function down to only the local alias. Plain assignment to an
-identifier, struct field, tuple slot, or indexed entry rebinds that call-source
-evidence, so policy receipts follow mutable callback slots instead of
-preserving stale earlier sources.
+`let Slot::Ready(loader) = slot`, `let Slot::Ready { loader } = slot`, and
+`let [loader] = loaders` do not collapse a selected effectful function down to
+only the local alias. Plain assignment to an identifier, struct field, tuple
+slot, or indexed entry rebinds that call-source evidence, so policy receipts
+follow mutable callback slots instead of preserving stale earlier sources.
 
 Policy profiles can enforce that split:
 
