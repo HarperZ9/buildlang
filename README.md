@@ -222,7 +222,9 @@ Receipts separate direct capability boundaries from callers that inherit those
 effects. `observed_capabilities` records ambient helper, macro, and FFI access
 inside a function, such as `read_file`, `tcp_connect`, `println!`, or `touch`.
 `propagated_effects` records effectful callees that made a caller inherit a
-typed effect. This lets teams permit a small audited boundary function while
+typed effect. Raw extern-block calls are direct `Foreign` boundaries; calls to
+local wrappers around those extern functions are propagated `Foreign`
+dependencies. This lets teams permit a small audited boundary function while
 still proving which higher-level workflows depend on it.
 
 Policy profiles can enforce that split:

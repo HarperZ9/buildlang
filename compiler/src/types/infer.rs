@@ -1623,9 +1623,19 @@ impl<'ctx> TypeInfer<'ctx> {
                 if !fn_ty.effects.is_empty() {
                     self.current_effects = self.current_effects.merge(&fn_ty.effects);
                     if let Some(name) = call_name.as_deref() {
+                        let is_direct_foreign_call = self.ctx.is_foreign_function(name);
                         for effect in &fn_ty.effects.effects {
                             if super::capabilities::is_capability_effect(effect.name.as_ref()) {
-                                self.record_propagated_effect_source(effect.name.as_ref(), name);
+                                if is_direct_foreign_call
+                                    && effect.name.as_ref() == super::capabilities::FOREIGN
+                                {
+                                    self.record_capability_source(effect.name.as_ref(), name);
+                                } else {
+                                    self.record_propagated_effect_source(
+                                        effect.name.as_ref(),
+                                        name,
+                                    );
+                                }
                             }
                         }
                     }
