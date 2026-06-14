@@ -295,6 +295,34 @@ impl Unifier {
                 }
             }
 
+            // Associated type projections: same trait item and unified inputs.
+            (
+                TyKind::Projection {
+                    trait_ref: trait_ref1,
+                    item: item1,
+                    self_ty: self_ty1,
+                    substs: substs1,
+                },
+                TyKind::Projection {
+                    trait_ref: trait_ref2,
+                    item: item2,
+                    self_ty: self_ty2,
+                    substs: substs2,
+                },
+            ) => {
+                if trait_ref1 != trait_ref2 || item1 != item2 || substs1.len() != substs2.len() {
+                    return Err(TypeError::TypeMismatch {
+                        expected: t1.clone(),
+                        found: t2.clone(),
+                    });
+                }
+                self.unify(self_ty1, self_ty2)?;
+                for (subst1, subst2) in substs1.iter().zip(substs2.iter()) {
+                    self.unify(subst1, subst2)?;
+                }
+                Ok(())
+            }
+
             // All other combinations are mismatches
             _ => Err(TypeError::TypeMismatch {
                 expected: t1.clone(),
