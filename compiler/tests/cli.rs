@@ -1396,6 +1396,181 @@ fn main() ~ FileSystem {
 }
 
 #[test]
+fn check_receipt_rebinds_assigned_effectful_struct_field_source() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_assigned_effectful_field_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+struct Ops {
+    loader: (fn(str) -> str) with FileSystem
+}
+
+fn load_config(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn load_secret(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn main() ~ FileSystem {
+    let mut ops = Ops { loader: load_config };
+    ops.loader = load_secret;
+    (ops.loader)("ops.txt");
+}
+"#,
+    )
+    .expect("write assigned effectful field receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "assigned effectful field receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["load_secret", "ops.loader"])
+    );
+}
+
+#[test]
+fn check_receipt_rebinds_assigned_effectful_tuple_field_source() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_assigned_effectful_tuple_field_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn load_config(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn load_secret(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn main() ~ FileSystem {
+    let mut loaders = (load_config,);
+    loaders.0 = load_secret;
+    (loaders.0)("ops.txt");
+}
+"#,
+    )
+    .expect("write assigned effectful tuple field receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "assigned effectful tuple field receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["load_secret", "loaders.0"])
+    );
+}
+
+#[test]
+fn check_receipt_rebinds_assigned_effectful_index_source() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_assigned_effectful_index_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn load_config(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn load_secret(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn main() ~ FileSystem {
+    let mut loaders = [load_config];
+    loaders[0] = load_secret;
+    (loaders[0])("ops.txt");
+}
+"#,
+    )
+    .expect("write assigned effectful index receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "assigned effectful index receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["load_secret", "loaders[0]"])
+    );
+}
+
+#[test]
 fn check_receipt_clears_stale_sources_for_assigned_ambient_alias() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_check_receipt_assigned_ambient_alias_{}.quanta",

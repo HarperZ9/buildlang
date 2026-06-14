@@ -236,9 +236,9 @@ as `load_config` and `load_secret`. If the selected function is bound first,
 for example `let loader = if ...`, a later `loader()` call records `loader`
 plus the possible selected targets. Tuple, struct, and slice destructuring keep
 the same evidence, so destructured aliases do not hide which selected callee
-introduced the effect. Reassigning that identifier updates the source set, which
-lets receipts describe mutable callback slots without carrying stale provenance
-from the old value.
+introduced the effect. Reassigning that identifier, a struct field, a tuple
+slot, or an indexed entry updates the source set, which lets receipts describe
+mutable callback slots without carrying stale provenance from the old value.
 
 Policy profiles turn receipt evidence into an enforceable CI gate:
 
