@@ -1208,11 +1208,11 @@ impl<'ctx> TypeInfer<'ctx> {
     }
 
     /// Resolve the Try::Output associated type.
-    fn resolve_try_output(&self, try_ty: &Ty) -> Ty {
+    fn resolve_try_output(&self, try_ty: &Ty) -> Option<Ty> {
         if let (Some(ref env), Some(ref builtins)) = (&self.trait_env, &self.builtin_traits) {
             let mut resolver = TraitResolver::new(env);
             if let Ok(output_ty) = resolver.resolve_assoc_type(try_ty, builtins.try_, "Output") {
-                return output_ty;
+                return Some(output_ty);
             }
         }
         // Fallback: infer from common patterns (Result<T, E>, Option<T>)
@@ -1220,14 +1220,17 @@ impl<'ctx> TypeInfer<'ctx> {
             TyKind::Adt(def_id, substs) => {
                 // Check if this is Option<T> or Result<T, E>
                 if Some(*def_id) == self.well_known_types.option && !substs.is_empty() {
-                    return substs[0].clone();
+                    return Some(substs[0].clone());
                 }
                 if Some(*def_id) == self.well_known_types.result && !substs.is_empty() {
-                    return substs[0].clone();
+                    return Some(substs[0].clone());
                 }
-                Ty::fresh_var()
+                None
             }
-            _ => Ty::fresh_var(),
+            TyKind::Var(_) | TyKind::Infer(_) => Some(Ty::fresh_var()),
+            TyKind::Never => Some(Ty::never()),
+            TyKind::Error => Some(Ty::error()),
+            _ => None,
         }
     }
 
@@ -3998,7 +4001,12 @@ impl<'ctx> TypeInfer<'ctx> {
         let expr_ty = self.apply(&expr_ty);
 
         // Resolve Try trait to get the Output type (e.g., T from Result<T, E> or Option<T>)
-        self.resolve_try_output(&expr_ty)
+        if let Some(output_ty) = self.resolve_try_output(&expr_ty) {
+            output_ty
+        } else {
+            self.error(TypeError::NotTryable { ty: expr_ty }, expr.span);
+            Ty::error()
+        }
     }
 
     fn infer_await(&mut self, expr: &ast::Expr, _span: Span) -> Ty {
