@@ -110,6 +110,11 @@ Diagnostics include a note naming the ambient call or macro, for example
 `read_file`, `touch`, or `println`, so receipts and review tooling can point to
 the exact capability source.
 
+`quantac check <file> --receipt <path>` writes a deterministic
+`quantalang-check-receipt/v1` JSON artifact with declared effects, observed
+capability sources, pass/fail status, and compact diagnostics. Use `--receipt -`
+when a CI step or wrapper wants the receipt on stdout.
+
 ---
 
 ## Handling an Effect

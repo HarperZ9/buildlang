@@ -119,7 +119,7 @@ quantac vignette.quanta --target glsl -o vignette.glsl
 |-----------------|--------------------------------------|
 | `quantac lex`   | Tokenize a file and print tokens     |
 | `quantac parse` | Parse a file and print the AST       |
-| `quantac check` | Type-check a file                    |
+| `quantac check <file> [--receipt PATH|-]` | Type-check and optionally emit a JSON accountability receipt |
 | `quantac build` | Build a project                      |
 | `quantac run`   | Compile and run a `.quanta` file     |
 | `quantac doctor` | Diagnose local toolchain readiness  |
