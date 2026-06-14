@@ -125,11 +125,12 @@ used as values keep their capability effects as well, so
 their function type without performing them at definition time, so
 `let loader = |path: str| read_file(path);` stays pure until
 `loader("ops.toml")` is called and then records `loader` as propagated evidence.
-Effectful function values stored in structs, tuples, and indexed ops tables retain access
-evidence too: `(ops.loader)("ops.toml")` records `ops.loader`, `(loaders.0)("x")`
-records `loaders.0`, and `(loaders[0])("x")` records `loaders[0]`. Immediate
-invocation of a returned effectful function records the factory call, such as
-`make_loader()`. `if` and `match` expressions that select an effectful function
+Immediately invoked anonymous closures record the synthetic source `<closure>`.
+Effectful function values stored in structs, tuples, and indexed ops tables
+retain access evidence too: `(ops.loader)("ops.toml")` records `ops.loader`,
+`(loaders.0)("x")` records `loaders.0`, and `(loaders[0])("x")` records
+`loaders[0]`. Immediate invocation of a returned effectful function records the
+factory call, such as `make_loader()`. `if` and `match` expressions that select an effectful function
 value record every possible branch target, for example `load_config` and
 `load_secret`; binding that selected function before calling it records both
 the binding and the possible selected targets. Assignment to that callback
@@ -181,9 +182,10 @@ policy review. Aliases of ambient helpers follow the same rule: calling `loader`
 `let loader = read_file` inherits `FileSystem` through the alias instead of
 silently becoming an untyped helper call. Effectful closures are also delayed
 function values: the closure literal is pure to define, and the call site
-inherits the closure body's capability effects through the alias. Calls through
-effectful struct fields, tuple slots, and indexed ops tables record paths such as `ops.loader`,
-`loaders.0`, and `loaders[0]`, so policy allowlists can pin
+inherits the closure body's capability effects through the alias, or through
+`<closure>` when the anonymous closure is invoked immediately. Calls through
+effectful struct fields, tuple slots, and indexed ops tables record paths such
+as `ops.loader`, `loaders.0`, and `loaders[0]`, so policy allowlists can pin
 capability-bearing registries to exact entries. Returned effectful function
 values invoked immediately record factory calls such as `make_loader()`.
 Control-flow selectors keep reviewable evidence too: calling the result of an
