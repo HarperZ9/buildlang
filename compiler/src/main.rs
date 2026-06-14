@@ -328,6 +328,9 @@ enum ReceiptCommands {
         /// Require the receipt to have been checked under a built-in policy profile
         #[arg(long, value_name = "NAME")]
         expect_profile: Option<String>,
+        /// Require the receipt policy source digest to match a SHA-256 digest
+        #[arg(long, value_name = "HEX")]
+        expect_policy_digest: Option<String>,
         /// Emit a machine-readable verification report
         #[arg(long)]
         json: bool,
@@ -885,7 +888,7 @@ fn builtin_policy_digest(name: &str) -> Option<CheckReceiptSourceDigest> {
     })
 }
 
-fn normalize_profile_digest_pin(pin: &str) -> &str {
+fn normalize_digest_pin(pin: &str) -> &str {
     pin.strip_prefix("sha256:")
         .or_else(|| pin.strip_prefix("SHA256:"))
         .unwrap_or(pin)
@@ -1029,8 +1032,15 @@ fn cmd_receipt(command: ReceiptCommands) -> Result<(), i32> {
             receipt,
             source,
             expect_profile,
+            expect_policy_digest,
             json,
-        } => cmd_receipt_verify(&receipt, source.as_deref(), expect_profile.as_deref(), json),
+        } => cmd_receipt_verify(
+            &receipt,
+            source.as_deref(),
+            expect_profile.as_deref(),
+            expect_policy_digest.as_deref(),
+            json,
+        ),
     }
 }
 
@@ -1075,6 +1085,72 @@ fn receipt_builtin_profile(receipt: &serde_json::Value) -> Option<&str> {
 
 fn builtin_profile_label(profile: Option<&str>) -> Option<String> {
     profile.map(|profile| format!("builtin:{profile}"))
+}
+
+fn receipt_policy_digest_hex(receipt: &serde_json::Value) -> Option<&str> {
+    receipt
+        .pointer("/policy/source_digest/hex")
+        .and_then(serde_json::Value::as_str)
+}
+
+fn receipt_policy_digest_is_sha256(receipt: &serde_json::Value) -> bool {
+    receipt
+        .pointer("/policy/source_digest/algorithm")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|algorithm| algorithm.eq_ignore_ascii_case("sha256"))
+}
+
+fn receipt_policy_digest_matches(receipt: &serde_json::Value, expected_hex: &str) -> bool {
+    receipt_policy_digest_is_sha256(receipt)
+        && receipt_policy_digest_hex(receipt)
+            .is_some_and(|actual| actual.eq_ignore_ascii_case(expected_hex))
+}
+
+fn receipt_policy_digest_label(receipt: &serde_json::Value) -> Option<String> {
+    let digest = receipt.pointer("/policy/source_digest")?;
+    let algorithm = digest.get("algorithm")?.as_str()?;
+    let hex = digest.get("hex")?.as_str()?;
+    Some(format!("{algorithm}:{hex}"))
+}
+
+fn verify_receipt_expected_policy_digest(
+    receipt: &serde_json::Value,
+    expected_policy_digest: Option<&str>,
+) -> Result<(), i32> {
+    let Some(expected_policy_digest) = expected_policy_digest else {
+        return Ok(());
+    };
+    let expected_hex = normalize_digest_pin(expected_policy_digest);
+    if !receipt_policy_digest_matches(receipt, expected_hex) {
+        let actual = receipt_policy_digest_label(receipt).unwrap_or_else(|| "none".to_string());
+        eprintln!(
+            "Error: receipt policy digest mismatch: expected sha256:{}, actual {}",
+            expected_hex, actual
+        );
+        return Err(1);
+    }
+
+    Ok(())
+}
+
+fn push_receipt_expected_policy_digest_check(
+    checks: &mut Vec<ReceiptVerificationCheck>,
+    receipt: &serde_json::Value,
+    expected_policy_digest: Option<&str>,
+) {
+    let Some(expected_policy_digest) = expected_policy_digest else {
+        return;
+    };
+    let expected_hex = normalize_digest_pin(expected_policy_digest);
+    let mismatch = !receipt_policy_digest_matches(receipt, expected_hex);
+    push_receipt_verification_check(
+        checks,
+        "expected_policy_digest",
+        Some(format!("sha256:{expected_hex}")),
+        receipt_policy_digest_label(receipt),
+        None,
+        mismatch.then(|| "receipt policy digest mismatch".to_string()),
+    );
 }
 
 fn verify_receipt_expected_profile(
@@ -1234,10 +1310,16 @@ fn cmd_receipt_verify(
     receipt_path: &Path,
     source_override: Option<&Path>,
     expected_profile: Option<&str>,
+    expected_policy_digest: Option<&str>,
     json: bool,
 ) -> Result<(), i32> {
     if json {
-        return cmd_receipt_verify_json(receipt_path, source_override, expected_profile);
+        return cmd_receipt_verify_json(
+            receipt_path,
+            source_override,
+            expected_profile,
+            expected_policy_digest,
+        );
     }
 
     let receipt: serde_json::Value = read_json(receipt_path)?;
@@ -1273,6 +1355,7 @@ fn cmd_receipt_verify(
         return Err(1);
     }
     verify_receipt_expected_profile(&receipt, expected_profile)?;
+    verify_receipt_expected_policy_digest(&receipt, expected_policy_digest)?;
 
     let source_path = if let Some(source_override) = source_override {
         source_override.to_path_buf()
@@ -1339,6 +1422,7 @@ fn cmd_receipt_verify_json(
     receipt_path: &Path,
     source_override: Option<&Path>,
     expected_profile: Option<&str>,
+    expected_policy_digest: Option<&str>,
 ) -> Result<(), i32> {
     let receipt: serde_json::Value = read_json(receipt_path)?;
     let mut checks = Vec::new();
@@ -1388,6 +1472,7 @@ fn cmd_receipt_verify_json(
             .then(|| "language version mismatch".to_string()),
     );
     push_receipt_expected_profile_check(&mut checks, &receipt, expected_profile)?;
+    push_receipt_expected_policy_digest_check(&mut checks, &receipt, expected_policy_digest);
 
     let source_path = if let Some(source_override) = source_override {
         source_override.to_path_buf()
@@ -2790,7 +2875,7 @@ fn cmd_check(
             .as_ref()
             .and_then(|policy| policy.builtin_profile_digest.as_ref())
             .expect("built-in profile digest is present");
-        let expected_hex = normalize_profile_digest_pin(expected_digest);
+        let expected_hex = normalize_digest_pin(expected_digest);
         if !actual_digest.hex.eq_ignore_ascii_case(expected_hex) {
             eprintln!(
                 "Error: Built-in policy profile digest mismatch for '{}': expected sha256:{}, actual sha256:{}",

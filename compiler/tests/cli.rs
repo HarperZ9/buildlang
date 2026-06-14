@@ -1204,6 +1204,247 @@ fn receipt_verify_json_reports_failed_policy_file_digest() {
 }
 
 #[test]
+fn receipt_verify_expect_policy_digest_rejects_stripped_policy() {
+    let dir = std::env::temp_dir().join(format!(
+        "quantalang_receipt_verify_expect_policy_stripped_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create expect policy digest fixture dir");
+    let entry = dir.join("entry.quanta");
+    let policy = dir.join("policy.json");
+    let receipt = dir.join("receipt.json");
+    fs::write(&entry, r#"fn main() ~ Console { println!("ok"); }"#)
+        .expect("write expect policy digest entry");
+    fs::write(
+        &policy,
+        r#"{
+  "schema": "quantalang-check-policy/v1",
+  "allowed_effects": ["Console"],
+  "require_source_digest": true
+}
+"#,
+    )
+    .expect("write expected policy");
+
+    let check_output = quantac()
+        .arg("check")
+        .arg(&entry)
+        .arg("--policy")
+        .arg(&policy)
+        .arg("--receipt")
+        .arg(&receipt)
+        .output()
+        .expect("write policy-backed receipt");
+    assert!(
+        check_output.status.success(),
+        "check should pass before stripping policy\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&check_output.stdout),
+        String::from_utf8_lossy(&check_output.stderr)
+    );
+
+    let mut saved: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt).expect("read policy receipt"))
+            .expect("policy receipt should parse");
+    let expected_digest = saved["policy"]["source_digest"]["hex"]
+        .as_str()
+        .expect("policy digest")
+        .to_string();
+    saved
+        .as_object_mut()
+        .expect("receipt should be an object")
+        .remove("policy");
+    fs::write(
+        &receipt,
+        serde_json::to_string_pretty(&saved).expect("serialize stripped policy receipt"),
+    )
+    .expect("write stripped policy receipt");
+
+    let verify_output = quantac()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .arg("--expect-policy-digest")
+        .arg(format!("sha256:{expected_digest}"))
+        .output()
+        .expect("verify stripped policy with expected digest");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        !verify_output.status.success(),
+        "stripped policy receipt should fail policy digest expectation"
+    );
+    assert!(
+        String::from_utf8_lossy(&verify_output.stderr).contains("receipt policy digest mismatch"),
+        "stderr should report expected policy digest mismatch:\n{}",
+        String::from_utf8_lossy(&verify_output.stderr)
+    );
+}
+
+#[test]
+fn receipt_verify_expect_policy_digest_rejects_algorithm_tamper() {
+    let dir = std::env::temp_dir().join(format!(
+        "quantalang_receipt_verify_expect_policy_algorithm_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create expect policy digest algorithm fixture dir");
+    let entry = dir.join("entry.quanta");
+    let policy = dir.join("policy.json");
+    let receipt = dir.join("receipt.json");
+    fs::write(&entry, r#"fn main() ~ Console { println!("ok"); }"#)
+        .expect("write expect policy digest algorithm entry");
+    fs::write(
+        &policy,
+        r#"{
+  "schema": "quantalang-check-policy/v1",
+  "allowed_effects": ["Console"],
+  "require_source_digest": true
+}
+"#,
+    )
+    .expect("write expected algorithm policy");
+
+    let check_output = quantac()
+        .arg("check")
+        .arg(&entry)
+        .arg("--policy")
+        .arg(&policy)
+        .arg("--receipt")
+        .arg(&receipt)
+        .output()
+        .expect("write policy-backed receipt for algorithm tamper");
+    assert!(
+        check_output.status.success(),
+        "check should pass before tampering policy digest algorithm\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&check_output.stdout),
+        String::from_utf8_lossy(&check_output.stderr)
+    );
+
+    let mut saved: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt).expect("read policy algorithm receipt"))
+            .expect("policy algorithm receipt should parse");
+    let expected_digest = saved["policy"]["source_digest"]["hex"]
+        .as_str()
+        .expect("policy digest")
+        .to_string();
+    saved["policy"]
+        .as_object_mut()
+        .expect("policy should be an object")
+        .remove("source");
+    saved["policy"]["source_digest"]["algorithm"] = serde_json::Value::String("sha512".into());
+    fs::write(
+        &receipt,
+        serde_json::to_string_pretty(&saved).expect("serialize algorithm-tampered receipt"),
+    )
+    .expect("write algorithm-tampered policy receipt");
+
+    let verify_output = quantac()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .arg("--expect-policy-digest")
+        .arg(format!("sha256:{expected_digest}"))
+        .arg("--json")
+        .output()
+        .expect("verify algorithm-tampered policy digest");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        !verify_output.status.success(),
+        "algorithm-tampered policy digest receipt should fail policy digest expectation"
+    );
+    let report: serde_json::Value = serde_json::from_slice(&verify_output.stdout)
+        .expect("algorithm-tampered policy digest report should be JSON");
+    let policy_check = verification_check(&report, "expected_policy_digest");
+    assert_eq!(policy_check["status"], "failed");
+    assert_eq!(
+        policy_check["expected"],
+        format!("sha256:{expected_digest}")
+    );
+    assert_eq!(policy_check["actual"], format!("sha512:{expected_digest}"));
+}
+
+#[test]
+fn receipt_verify_json_reports_expected_policy_digest_mismatch() {
+    let dir = std::env::temp_dir().join(format!(
+        "quantalang_receipt_verify_expect_policy_json_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create expect policy digest json fixture dir");
+    let entry = dir.join("entry.quanta");
+    let policy = dir.join("policy.json");
+    let receipt = dir.join("receipt.json");
+    fs::write(&entry, r#"fn main() ~ Console { println!("ok"); }"#)
+        .expect("write expect policy digest json entry");
+    fs::write(
+        &policy,
+        r#"{
+  "schema": "quantalang-check-policy/v1",
+  "allowed_effects": ["Console"],
+  "require_source_digest": true
+}
+"#,
+    )
+    .expect("write expected json policy");
+
+    let check_output = quantac()
+        .arg("check")
+        .arg(&entry)
+        .arg("--policy")
+        .arg(&policy)
+        .arg("--receipt")
+        .arg(&receipt)
+        .output()
+        .expect("write policy-backed receipt for json expectation");
+    assert!(
+        check_output.status.success(),
+        "check should pass before policy digest mismatch\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&check_output.stdout),
+        String::from_utf8_lossy(&check_output.stderr)
+    );
+    let saved: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt).expect("read policy digest receipt"))
+            .expect("policy digest receipt should parse");
+    let actual_digest = saved["policy"]["source_digest"]["hex"]
+        .as_str()
+        .expect("policy digest")
+        .to_string();
+    let wrong_digest = "0".repeat(64);
+
+    let verify_output = quantac()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .arg("--expect-policy-digest")
+        .arg(format!("sha256:{wrong_digest}"))
+        .arg("--json")
+        .output()
+        .expect("verify policy digest mismatch as json");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        !verify_output.status.success(),
+        "mismatched policy digest receipt should fail json verification"
+    );
+    let report: serde_json::Value = serde_json::from_slice(&verify_output.stdout)
+        .expect("policy digest mismatch report should be JSON");
+    assert_eq!(report["status"], "failed");
+    let policy_check = verification_check(&report, "expected_policy_digest");
+    assert_eq!(policy_check["status"], "failed");
+    assert_eq!(policy_check["expected"], format!("sha256:{wrong_digest}"));
+    assert_eq!(policy_check["actual"], format!("sha256:{actual_digest}"));
+    assert!(
+        policy_check["message"]
+            .as_str()
+            .expect("expected policy digest failure message")
+            .contains("receipt policy digest mismatch"),
+        "policy digest failure should explain mismatch: {policy_check:#?}"
+    );
+}
+
+#[test]
 fn receipt_verify_rejects_tampered_observed_capabilities() {
     let dir = std::env::temp_dir().join(format!(
         "quantalang_receipt_verify_tampered_capabilities_{}",
