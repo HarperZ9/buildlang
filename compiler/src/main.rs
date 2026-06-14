@@ -504,6 +504,7 @@ struct CheckReceipt {
     tokens: usize,
     declared_effects: BTreeMap<String, Vec<String>>,
     observed_capabilities: BTreeMap<String, BTreeMap<String, Vec<String>>>,
+    propagated_effects: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     diagnostics: Vec<CheckReceiptDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     policy: Option<CheckReceiptPolicy>,
@@ -1587,6 +1588,7 @@ fn build_check_receipt(
 ) -> CheckReceipt {
     let mut declared_effects = BTreeMap::new();
     let mut observed_capabilities = BTreeMap::new();
+    let mut propagated_effects = BTreeMap::new();
 
     for summary in &outcome.function_summaries {
         declared_effects.insert(summary.function.clone(), summary.declared_effects.clone());
@@ -1595,6 +1597,12 @@ fn build_check_receipt(
             capabilities.insert(effect.clone(), sources.iter().cloned().collect::<Vec<_>>());
         }
         observed_capabilities.insert(summary.function.clone(), capabilities);
+
+        let mut propagated = BTreeMap::new();
+        for (effect, sources) in &summary.propagated_effects {
+            propagated.insert(effect.clone(), sources.iter().cloned().collect::<Vec<_>>());
+        }
+        propagated_effects.insert(summary.function.clone(), propagated);
     }
 
     let mut diagnostics = Vec::new();
@@ -1652,6 +1660,7 @@ fn build_check_receipt(
         tokens: outcome.tokens,
         declared_effects,
         observed_capabilities,
+        propagated_effects,
         diagnostics,
         policy: receipt_policy,
     }

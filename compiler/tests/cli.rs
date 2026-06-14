@@ -290,6 +290,68 @@ fn check_receipt_stdout_records_passing_capabilities() {
 }
 
 #[test]
+fn check_receipt_records_propagated_effects_separately() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_propagated_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn load_config() ~ FileSystem {
+    read_file("ops.txt");
+}
+
+fn main() ~ FileSystem {
+    load_config();
+}
+"#,
+    )
+    .expect("write propagated receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["load_config"]["FileSystem"],
+        serde_json::json!(["read_file"])
+    );
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["load_config"]
+            .as_object()
+            .expect("load_config propagated effects")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["load_config"])
+    );
+}
+
+#[test]
 fn check_receipt_file_records_failing_capability_diagnostic() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_check_receipt_fail_{}.quanta",
