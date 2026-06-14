@@ -161,8 +161,10 @@ import, include, and module file that feeds the check pipeline, and
 that passed or failed the capability gate.
 `quantac receipt verify receipt.json` re-runs the check input graph and confirms
 the saved receipt still matches the current source bytes, compiler/language
-identity, graph digest, file-backed policy digest, and any recorded built-in
-profile digest. Add `--json` to emit a
+identity, graph digest, file-backed policy digest, any recorded built-in profile
+digest, and the replayed accountability surfaces (`declared_effects`,
+`observed_capabilities`, `propagated_effects`, diagnostics, and policy
+violations). Add `--json` to emit a
 `quantalang-receipt-verification/v1` report for CI systems that need
 machine-readable pass/fail checks instead of human text.
 
@@ -268,7 +270,7 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-14
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 715 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
+- **Tests**: 717 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
