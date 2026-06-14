@@ -448,6 +448,46 @@ impl<'ctx> TypeInfer<'ctx> {
         Vec::new()
     }
 
+    fn bound_call_source_tree_for_access(
+        &self,
+        source_prefix: &str,
+        target_prefix: &str,
+    ) -> BTreeMap<String, Vec<String>> {
+        let dot_prefix = format!("{source_prefix}.");
+        let bracket_prefix = format!("{source_prefix}[");
+        let mut copied = BTreeMap::new();
+
+        for scope in self.source_bindings.iter().rev() {
+            for (source, sources) in scope {
+                if source == source_prefix
+                    || source.starts_with(&dot_prefix)
+                    || source.starts_with(&bracket_prefix)
+                {
+                    let suffix = &source[source_prefix.len()..];
+                    copied
+                        .entry(format!("{target_prefix}{suffix}"))
+                        .or_insert_with(|| sources.clone());
+                }
+            }
+        }
+
+        copied
+    }
+
+    fn bind_bound_call_source_tree(
+        &mut self,
+        source_prefix: &str,
+        target_prefix: &str,
+        merge: bool,
+    ) -> bool {
+        let copied = self.bound_call_source_tree_for_access(source_prefix, target_prefix);
+        let has_copied_sources = !copied.is_empty();
+        for (target, sources) in copied {
+            self.bind_member_call_sources(&target, sources, merge);
+        }
+        has_copied_sources
+    }
+
     fn wildcard_index_access_source(access_source: &str) -> Option<String> {
         let mut wildcard = String::with_capacity(access_source.len());
         let mut chars = access_source.chars();
@@ -727,6 +767,12 @@ impl<'ctx> TypeInfer<'ctx> {
                 copied = true;
             }
             self.bind_member_call_sources(&target_member, inherited_sources, false);
+            for source in self.call_sources(value) {
+                let source_member = format!("{source}{member}");
+                if self.bind_bound_call_source_tree(&source_member, &target_member, false) {
+                    copied = true;
+                }
+            }
         }
         copied
     }
@@ -891,6 +937,10 @@ impl<'ctx> TypeInfer<'ctx> {
                             })
                             .collect();
                         self.bind_member_call_sources(&member_name, inherited_sources, merge);
+                        for source in &rest_sources {
+                            let source_member = format!("{}.{}", source, field_name);
+                            self.bind_bound_call_source_tree(&source_member, &member_name, merge);
+                        }
                     }
                 }
 

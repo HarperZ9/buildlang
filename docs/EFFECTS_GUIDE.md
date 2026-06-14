@@ -259,7 +259,9 @@ slots, tuple-struct fields, and indexed ops tables record paths such as
 also preserve origins such as `load_config` next to indexed paths such as
 `loaders[1]`; struct updates preserve inherited field origins next to new
 access paths such as `ops.loader`, so policy allowlists can
-pin capability-bearing registries to exact entries. Enum-variant payloads keep
+pin capability-bearing registries to exact entries, and nested struct updates
+carry descendant origins next to paths such as `outer.ops.loader`.
+Enum-variant payloads keep
 their stored callback sources when a match, `if let`, or `while let` branch
 destructures them. Returned effectful function values invoked immediately
 record factory calls such as `make_loader()`.
