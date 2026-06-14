@@ -271,6 +271,14 @@ impl<'ctx> TypeInfer<'ctx> {
             .insert(source_name.to_string());
     }
 
+    fn record_macro_capability(&mut self, macro_name: &str) {
+        if let Some(effect_name) = super::capabilities::capability_effect_for_macro(macro_name) {
+            self.current_effects
+                .add(super::effects::Effect::new(effect_name));
+            self.record_capability_source(effect_name, &format!("{}!", macro_name));
+        }
+    }
+
     fn call_name(func: &ast::Expr) -> Option<&str> {
         match &func.kind {
             ExprKind::Ident(ident) => Some(ident.name.as_ref()),
@@ -746,7 +754,11 @@ impl<'ctx> TypeInfer<'ctx> {
             }
 
             // Macro invocations - return fresh var (macro expansion happens earlier)
-            ExprKind::Macro { .. } => Ty::fresh_var(),
+            ExprKind::Macro { path, .. } => {
+                let macro_name = path.segments.last().map(|s| s.ident.as_str()).unwrap_or("");
+                self.record_macro_capability(macro_name);
+                Ty::fresh_var()
+            }
 
             // QuantaLang AI extensions
             ExprKind::AIQuery { prompt, options } => {
@@ -2581,6 +2593,7 @@ impl<'ctx> TypeInfer<'ctx> {
                 // otherwise a fresh type variable
 
                 let macro_name = path.segments.last().map(|s| s.ident.as_str()).unwrap_or("");
+                self.record_macro_capability(macro_name);
 
                 match macro_name {
                     // Diagnostic macros always return unit
