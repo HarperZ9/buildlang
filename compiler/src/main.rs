@@ -607,6 +607,8 @@ struct CheckPolicyProfile {
     #[serde(default)]
     require_input_graph_digest: bool,
     #[serde(default)]
+    require_provenance_allowlists: bool,
+    #[serde(default)]
     require_allowlist_coverage: bool,
 }
 
@@ -2461,11 +2463,12 @@ fn allowlist_allows(
     allowlist: &BTreeMap<String, Vec<String>>,
     effect: &str,
     function: &str,
+    require_entry: bool,
 ) -> bool {
-    allowlist
-        .get(effect)
-        .map(|functions| functions.iter().any(|allowed| allowed == function))
-        .unwrap_or(true)
+    match allowlist.get(effect) {
+        Some(functions) => functions.iter().any(|allowed| allowed == function),
+        None => !require_entry,
+    }
 }
 
 fn digest_is_sha256_hex(digest: &CheckReceiptSourceDigest) -> bool {
@@ -2690,6 +2693,7 @@ fn evaluate_check_policy(
                 &policy.profile.direct_effect_allowlist,
                 &item.effect,
                 &item.function,
+                policy.profile.require_provenance_allowlists,
             )
         {
             violations.insert(CheckPolicyViolation {
@@ -2708,6 +2712,7 @@ fn evaluate_check_policy(
                 &policy.profile.propagated_effect_allowlist,
                 &item.effect,
                 &item.function,
+                policy.profile.require_provenance_allowlists,
             )
         {
             violations.insert(CheckPolicyViolation {
@@ -5569,6 +5574,7 @@ mod tests {
                 propagated_effect_allowlist: BTreeMap::new(),
                 require_source_digest: true,
                 require_input_graph_digest: false,
+                require_provenance_allowlists: false,
                 require_allowlist_coverage: false,
             },
         };
@@ -5647,6 +5653,7 @@ mod tests {
                 propagated_effect_allowlist: BTreeMap::new(),
                 require_source_digest: false,
                 require_input_graph_digest: true,
+                require_provenance_allowlists: false,
                 require_allowlist_coverage: false,
             },
         };
@@ -5701,6 +5708,7 @@ mod tests {
         assert!(loaded.profile.direct_effect_allowlist.is_empty());
         assert!(loaded.profile.propagated_effect_allowlist.is_empty());
         assert!(!loaded.profile.require_input_graph_digest);
+        assert!(!loaded.profile.require_provenance_allowlists);
         assert!(!loaded.profile.require_allowlist_coverage);
         assert_eq!(loaded.source_digest.algorithm, "sha256");
         assert_eq!(loaded.source_digest.hex.len(), 64);
