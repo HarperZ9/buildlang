@@ -606,6 +606,8 @@ struct CheckPolicyProfile {
     require_source_digest: bool,
     #[serde(default)]
     require_input_graph_digest: bool,
+    #[serde(default)]
+    require_allowlist_coverage: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -2540,6 +2542,43 @@ fn insert_unknown_policy_effect_violations<'a>(
     }
 }
 
+fn evidence_contains_policy_pair(
+    evidence: &BTreeSet<CheckPolicyEvidence>,
+    surface: &'static str,
+    effect: &str,
+    function: &str,
+) -> bool {
+    evidence
+        .iter()
+        .any(|item| item.surface == surface && item.effect == effect && item.function == function)
+}
+
+fn insert_unused_allowlist_violations(
+    violations: &mut BTreeSet<CheckPolicyViolation>,
+    evidence: &BTreeSet<CheckPolicyEvidence>,
+    allowlist: &BTreeMap<String, Vec<String>>,
+    allowlist_surface: &'static str,
+    evidence_surface: &'static str,
+    kind: &'static str,
+) {
+    for (effect, functions) in allowlist {
+        for function in functions {
+            if !evidence_contains_policy_pair(evidence, evidence_surface, effect, function) {
+                violations.insert(CheckPolicyViolation {
+                    kind,
+                    effect: effect.clone(),
+                    function: function.clone(),
+                    surface: allowlist_surface,
+                    source: String::new(),
+                    message: format!(
+                        "{allowlist_surface} entry `{effect}`/`{function}` was not matched by current receipt evidence"
+                    ),
+                });
+            }
+        }
+    }
+}
+
 fn evaluate_check_policy(
     policy: &LoadedCheckPolicy,
     outcome: &CheckOutcome,
@@ -2558,6 +2597,7 @@ fn evaluate_check_policy(
         .collect();
     let mut violations = BTreeSet::new();
     let known_effects = known_policy_effect_names(outcome);
+    let evidence = collect_check_policy_evidence(outcome);
 
     insert_unknown_policy_effect_violations(
         &mut violations,
@@ -2583,6 +2623,24 @@ fn evaluate_check_policy(
         "propagated_effect_allowlist",
         policy.profile.propagated_effect_allowlist.keys(),
     );
+    if policy.profile.require_allowlist_coverage {
+        insert_unused_allowlist_violations(
+            &mut violations,
+            &evidence,
+            &policy.profile.direct_effect_allowlist,
+            "direct_effect_allowlist",
+            "observed_capabilities",
+            "UnusedDirectEffectAllowlist",
+        );
+        insert_unused_allowlist_violations(
+            &mut violations,
+            &evidence,
+            &policy.profile.propagated_effect_allowlist,
+            "propagated_effect_allowlist",
+            "propagated_effects",
+            "UnusedPropagatedEffectAllowlist",
+        );
+    }
 
     if policy.profile.require_source_digest && outcome.source_digest.algorithm != "sha256" {
         violations.insert(CheckPolicyViolation {
@@ -2608,7 +2666,7 @@ fn evaluate_check_policy(
         });
     }
 
-    for item in collect_check_policy_evidence(outcome) {
+    for item in evidence {
         if denied.contains(item.effect.as_str()) {
             violations.insert(CheckPolicyViolation {
                 kind: "DeniedEffect",
@@ -5511,6 +5569,7 @@ mod tests {
                 propagated_effect_allowlist: BTreeMap::new(),
                 require_source_digest: true,
                 require_input_graph_digest: false,
+                require_allowlist_coverage: false,
             },
         };
         let outcome = CheckOutcome {
@@ -5588,6 +5647,7 @@ mod tests {
                 propagated_effect_allowlist: BTreeMap::new(),
                 require_source_digest: false,
                 require_input_graph_digest: true,
+                require_allowlist_coverage: false,
             },
         };
         let outcome = CheckOutcome {
@@ -5641,6 +5701,7 @@ mod tests {
         assert!(loaded.profile.direct_effect_allowlist.is_empty());
         assert!(loaded.profile.propagated_effect_allowlist.is_empty());
         assert!(!loaded.profile.require_input_graph_digest);
+        assert!(!loaded.profile.require_allowlist_coverage);
         assert_eq!(loaded.source_digest.algorithm, "sha256");
         assert_eq!(loaded.source_digest.hex.len(), 64);
     }
