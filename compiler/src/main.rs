@@ -9,6 +9,7 @@
 //! This is the main entry point for the QuantaLang compiler command-line tool.
 
 use clap::{Parser as ClapParser, Subcommand};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -1235,6 +1236,27 @@ fn type_error_kind(error: &TypeError) -> &'static str {
         TypeError::MissingHandlerClause { .. } => "MissingHandlerClause",
         _ => "TypeError",
     }
+}
+
+fn language_version_string() -> String {
+    format!(
+        "{}.{}.{}",
+        quantalang::LANGUAGE_VERSION.0,
+        quantalang::LANGUAGE_VERSION.1,
+        quantalang::LANGUAGE_VERSION.2
+    )
+}
+
+fn source_digest_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut hex, "{byte:02x}").expect("write to string");
+    }
+    hex
 }
 
 fn build_check_receipt(outcome: &CheckOutcome) -> CheckReceipt {
@@ -3911,6 +3933,19 @@ mod tests {
         assert_eq!(c_link_libraries("windows", true), &["ws2_32.lib"]);
         assert_eq!(c_link_libraries("linux", false), &["-lm"]);
         assert_eq!(c_link_libraries("macos", true), &[] as &[&str]);
+    }
+
+    #[test]
+    fn source_digest_hex_returns_known_sha256() {
+        assert_eq!(
+            source_digest_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn language_version_string_matches_public_tuple() {
+        assert_eq!(language_version_string(), "1.0.0");
     }
 
     #[test]
