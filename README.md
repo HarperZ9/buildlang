@@ -154,6 +154,11 @@ represented in the language's effect vocabulary instead of remaining invisible
 compiler side channels.
 Qualified helper paths are covered too: `io::read_file()` is classified from
 its `read_file` leaf and recorded as the exact source `io::read_file`.
+First-class function types can carry capability effects as well: a parameter
+written as `loader: fn() with FileSystem` forces callers of `loader()` to
+declare or handle `FileSystem`, and `(fn() -> str) with FileSystem` supports
+effectful callbacks that return data while keeping callback provenance in
+receipts.
 
 `quantac check --receipt` also binds each receipt to the checked source inputs
 with SHA-256 digests plus compiler and language version metadata. The top-level
@@ -230,6 +235,9 @@ dependencies. Qualified ambient helpers keep their full source path, such as
 `io::read_file`, so source allowlists can distinguish equivalent helper names
 from different modules. This lets teams permit a small audited boundary
 function while still proving which higher-level workflows depend on it.
+Effectful callback parameters are also propagated sources, so a wrapper that
+calls `loader: fn() with FileSystem` records `loader` as the inherited
+`FileSystem` source.
 
 Policy profiles can enforce that split:
 

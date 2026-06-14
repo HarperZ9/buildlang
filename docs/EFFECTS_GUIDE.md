@@ -111,6 +111,12 @@ Diagnostics include a note naming the ambient call or macro, for example
 the exact capability source. Qualified helper paths are classified by their
 capability leaf and recorded with their full path, so `io::read_file()` requires
 `FileSystem` and appears in receipts as `io::read_file`.
+Capability effects can also live on first-class function types. A parameter
+such as `loader: fn() with FileSystem` makes `loader()` an effectful call, and a
+returning callback can be written as `(fn() -> str) with FileSystem`. Receipts
+record the callback name under `propagated_effects`, which lets policy gates
+distinguish a wrapper that inherited file access through `loader` from a
+function that directly called `read_file`.
 
 `quantac check <file> --receipt <path>` writes a deterministic
 `quantalang-check-receipt/v1` JSON artifact with compiler/language version
@@ -148,6 +154,9 @@ actually touches the outside world.
 `propagated_effects` records effectful callees that make a caller inherit a
 typed effect. This lets policy allow a small number of audited boundary
 functions while still proving which higher-level workflows depend on them.
+Effectful callback parameters appear here as named sources too, so higher-order
+ops code keeps capability provenance instead of losing it behind `fn(...)`
+values.
 
 Policy profiles turn receipt evidence into an enforceable CI gate:
 

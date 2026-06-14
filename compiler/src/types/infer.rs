@@ -304,6 +304,16 @@ impl<'ctx> TypeInfer<'ctx> {
         }
     }
 
+    fn effect_row_from_paths(effects: &[ast::Path]) -> super::effects::EffectRow {
+        let mut row = super::effects::EffectRow::empty();
+        for effect in effects {
+            if let Some(ident) = effect.last_ident() {
+                row.add(super::effects::Effect::new(ident.name.as_ref()));
+            }
+        }
+        row
+    }
+
     fn call_source(func: &ast::Expr) -> Option<String> {
         match &func.kind {
             ExprKind::Ident(ident) => Some(ident.name.to_string()),
@@ -3369,9 +3379,16 @@ impl<'ctx> TypeInfer<'ctx> {
                 Ty::new(TyKind::TraitObject(trait_names))
             }
             ast::TypeKind::WithEffect { ty: inner, effects } => {
-                // Lower the base type with color space annotations stored on the Ty.
-                // During unification, annotated types must match their annotations.
                 let mut base_ty = self.lower_type(inner);
+
+                if let TyKind::Fn(mut fn_ty) = base_ty.kind.clone() {
+                    fn_ty.effects = Self::effect_row_from_paths(effects);
+                    base_ty.kind = TyKind::Fn(fn_ty);
+                    return base_ty;
+                }
+
+                // Lower non-function annotations as compile-time type metadata.
+                // During unification, annotated data types must match annotations.
                 // Extract annotation strings from effect paths
                 for effect in effects {
                     if let Some(ident) = effect.last_ident() {
