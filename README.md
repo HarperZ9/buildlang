@@ -164,7 +164,9 @@ receipts. Ambient helpers used as values keep those effects too:
 also keep source evidence: `(ops.loader)("ops.toml")` records `ops.loader`;
 tuple slots and indexed ops tables record sources such as `loaders.0` and
 `loaders[0]`; immediate calls through returned function values record sources
-such as `make_loader()`.
+such as `make_loader()`. `if` and `match` expressions that select an
+effectful function value record every possible branch target, for example
+`load_config` and `load_secret`.
 
 `quantac check --receipt` also binds each receipt to the checked source inputs
 with SHA-256 digests plus compiler and language version metadata. The top-level
@@ -250,6 +252,9 @@ effectful struct fields, tuple slots, and indexed ops tables record paths such
 as `ops.loader`, `loaders.0`, and `loaders[0]`, so source allowlists can
 constrain capability-bearing registries and ops tables. Immediate invocation of
 a returned effectful function records the factory call, such as `make_loader()`.
+Control-flow selectors keep reviewable evidence too: calling the result of an
+`if` or `match` expression records the possible effectful branch targets, such
+as `load_config` and `load_secret`.
 
 Policy profiles can enforce that split:
 

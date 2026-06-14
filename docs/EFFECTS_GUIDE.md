@@ -123,7 +123,9 @@ function values stored in structs, tuples, and indexed ops tables retain access
 evidence too: `(ops.loader)("ops.toml")` records `ops.loader`, `(loaders.0)("x")`
 records `loaders.0`, and `(loaders[0])("x")` records `loaders[0]`. Immediate
 invocation of a returned effectful function records the factory call, such as
-`make_loader()`.
+`make_loader()`. `if` and `match` expressions that select an effectful function
+value record every possible branch target, for example `load_config` and
+`load_secret`.
 
 `quantac check <file> --receipt <path>` writes a deterministic
 `quantalang-check-receipt/v1` JSON artifact with compiler/language version
@@ -170,6 +172,9 @@ tuple slots, and indexed ops tables record paths such as `ops.loader`,
 `loaders.0`, and `loaders[0]`, so policy allowlists can pin
 capability-bearing registries to exact entries. Returned effectful function
 values invoked immediately record factory calls such as `make_loader()`.
+Control-flow selectors keep reviewable evidence too: calling the result of an
+`if` or `match` expression records the possible effectful branch targets, such
+as `load_config` and `load_secret`.
 
 Policy profiles turn receipt evidence into an enforceable CI gate:
 

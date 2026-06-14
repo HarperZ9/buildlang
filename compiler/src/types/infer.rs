@@ -367,8 +367,78 @@ impl<'ctx> TypeInfer<'ctx> {
     }
 
     fn call_source(func: &ast::Expr) -> Option<String> {
+        Self::call_sources(func).into_iter().next()
+    }
+
+    fn call_sources(func: &ast::Expr) -> Vec<String> {
         match &func.kind {
-            ExprKind::Ident(ident) => Some(ident.name.to_string()),
+            ExprKind::Ident(ident) => vec![ident.name.to_string()],
+            ExprKind::Path(path) => vec![path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.name.as_ref())
+                .collect::<Vec<_>>()
+                .join("::")],
+            ExprKind::Field { expr, field } => Self::call_sources(expr)
+                .into_iter()
+                .map(|base| format!("{}.{}", base, field.name))
+                .collect(),
+            ExprKind::TupleField { expr, index, .. } => Self::call_sources(expr)
+                .into_iter()
+                .map(|base| format!("{}.{}", base, index))
+                .collect(),
+            ExprKind::Index { expr, index } => Self::call_sources(expr)
+                .into_iter()
+                .map(|base| {
+                    if let Some(index_source) = Self::index_source(index) {
+                        format!("{}[{}]", base, index_source)
+                    } else {
+                        format!("{}[]", base)
+                    }
+                })
+                .collect(),
+            ExprKind::Call { func, .. } => Self::call_sources(func)
+                .into_iter()
+                .map(|base| format!("{}()", base))
+                .collect(),
+            ExprKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let then_sources = then_branch
+                    .tail_expr()
+                    .map_or_else(Vec::new, Self::call_sources);
+                let else_sources = else_branch
+                    .as_deref()
+                    .map_or_else(Vec::new, Self::call_sources);
+                Self::dedupe_call_sources(then_sources.into_iter().chain(else_sources).collect())
+            }
+            ExprKind::Match { arms, .. } => Self::dedupe_call_sources(
+                arms.iter()
+                    .flat_map(|arm| Self::call_sources(&arm.body))
+                    .collect(),
+            ),
+            ExprKind::Block(block) | ExprKind::Unsafe(block) => {
+                block.tail_expr().map_or_else(Vec::new, Self::call_sources)
+            }
+            ExprKind::Paren(inner) => Self::call_sources(inner),
+            _ => Vec::new(),
+        }
+    }
+
+    fn dedupe_call_sources(sources: Vec<String>) -> Vec<String> {
+        let mut seen = BTreeSet::new();
+        sources
+            .into_iter()
+            .filter(|source| seen.insert(source.clone()))
+            .collect()
+    }
+
+    fn index_source(index: &ast::Expr) -> Option<String> {
+        match &index.kind {
+            ExprKind::Literal(AstLiteral::Int { value, .. }) => Some(value.to_string()),
+            ExprKind::Paren(inner) => Self::index_source(inner),
             ExprKind::Path(path) => Some(
                 path.segments
                     .iter()
@@ -376,31 +446,6 @@ impl<'ctx> TypeInfer<'ctx> {
                     .collect::<Vec<_>>()
                     .join("::"),
             ),
-            ExprKind::Field { expr, field } => {
-                Self::call_source(expr).map(|base| format!("{}.{}", base, field.name))
-            }
-            ExprKind::TupleField { expr, index, .. } => {
-                Self::call_source(expr).map(|base| format!("{}.{}", base, index))
-            }
-            ExprKind::Index { expr, index } => Self::call_source(expr).map(|base| {
-                if let Some(index_source) = Self::index_source(index) {
-                    format!("{}[{}]", base, index_source)
-                } else {
-                    format!("{}[]", base)
-                }
-            }),
-            ExprKind::Call { func, .. } => {
-                Self::call_source(func).map(|base| format!("{}()", base))
-            }
-            ExprKind::Paren(inner) => Self::call_source(inner),
-            _ => None,
-        }
-    }
-
-    fn index_source(index: &ast::Expr) -> Option<String> {
-        match &index.kind {
-            ExprKind::Literal(AstLiteral::Int { value, .. }) => Some(value.to_string()),
-            ExprKind::Paren(inner) => Self::index_source(inner),
             _ => Self::call_source(index),
         }
     }
@@ -1699,7 +1744,7 @@ impl<'ctx> TypeInfer<'ctx> {
     // =========================================================================
 
     fn infer_call(&mut self, func: &ast::Expr, args: &[ast::Expr], span: Span) -> Ty {
-        let call_source = Self::call_source(func);
+        let call_sources = Self::call_sources(func);
         let func_ty = self.infer_expr(func);
         let func_ty = self.apply(&func_ty);
 
@@ -1723,7 +1768,7 @@ impl<'ctx> TypeInfer<'ctx> {
                 // Propagate callee's effects to caller's effect context
                 if !fn_ty.effects.is_empty() {
                     self.current_effects = self.current_effects.merge(&fn_ty.effects);
-                    if let Some(source) = call_source.as_deref() {
+                    for source in &call_sources {
                         let lookup_name = source.rsplit("::").next().unwrap_or(source);
                         let direct_ambient_effect =
                             super::capabilities::capability_effect_for_call(lookup_name);
@@ -1819,7 +1864,7 @@ impl<'ctx> TypeInfer<'ctx> {
                 ret
             }
             TyKind::Var(_) | TyKind::Infer(_) => {
-                if let Some(source) = call_source.as_deref() {
+                for source in &call_sources {
                     self.record_call_capability(source);
                 }
                 // Unknown function type - create fresh types for params and return
@@ -1830,7 +1875,7 @@ impl<'ctx> TypeInfer<'ctx> {
                 ret_ty
             }
             TyKind::Error => {
-                if let Some(source) = call_source.as_deref() {
+                for source in &call_sources {
                     self.record_call_capability(source);
                 }
                 for arg in args {
