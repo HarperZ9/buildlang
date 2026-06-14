@@ -198,6 +198,18 @@ Set `require_allowlist_coverage` to reject stale direct or propagated allowlist
 entries, including source-level direct capability and propagated-effect
 entries, that are not matched by the current receipt evidence.
 
+For adoption, start from observed evidence instead of hand-copying receipt
+fields:
+
+```bash
+quantac check app.quanta --receipt receipt.json
+quantac policy scaffold receipt.json --output policy.json
+```
+
+The scaffolded policy keeps digest, provenance, source, and coverage
+requirements enabled, fills exact direct and propagated allowlists from the
+receipt, and should be reviewed before it becomes a CI gate.
+
 Use `quantac policy list` to see built-in starting profiles, or
 `quantac policy list --json` to emit a machine-readable
 `quantalang-policy-catalog/v1` catalog with profile names, summaries, policy

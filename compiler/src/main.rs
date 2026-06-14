@@ -315,6 +315,14 @@ enum PolicyCommands {
         #[arg(short, long, value_name = "PATH")]
         output: Option<PathBuf>,
     },
+    /// Scaffold an exact strict policy from a check receipt
+    Scaffold {
+        /// Check receipt JSON written by `quantac check --receipt`
+        receipt: PathBuf,
+        /// Write the scaffolded policy to a file instead of stdout
+        #[arg(short, long, value_name = "PATH")]
+        output: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -591,7 +599,7 @@ struct CheckReceiptDiagnostic {
     notes: Vec<String>,
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 struct CheckPolicyProfile {
     schema: String,
     #[serde(default)]
@@ -946,6 +954,132 @@ fn builtin_policy_catalog_json() -> String {
     json
 }
 
+fn receipt_effect_sources_by_effect(
+    receipt: &serde_json::Value,
+    field: &'static str,
+) -> Result<BTreeMap<String, BTreeMap<String, Vec<String>>>, i32> {
+    let functions = receipt
+        .get(field)
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            eprintln!("Error: receipt is missing object field `{field}`");
+            1
+        })?;
+    let mut effects = BTreeMap::<String, BTreeMap<String, Vec<String>>>::new();
+    for (function, effect_value) in functions {
+        let effect_map = effect_value.as_object().ok_or_else(|| {
+            eprintln!("Error: receipt field `{field}.{function}` must be an object");
+            1
+        })?;
+        for (effect, sources_value) in effect_map {
+            let sources = sources_value.as_array().ok_or_else(|| {
+                eprintln!("Error: receipt field `{field}.{function}.{effect}` must be an array");
+                1
+            })?;
+            let mut sorted_sources = BTreeSet::new();
+            for source in sources {
+                let source = source.as_str().ok_or_else(|| {
+                    eprintln!(
+                        "Error: receipt field `{field}.{function}.{effect}` must contain only strings"
+                    );
+                    1
+                })?;
+                sorted_sources.insert(source.to_string());
+            }
+            if !sorted_sources.is_empty() {
+                effects
+                    .entry(effect.clone())
+                    .or_default()
+                    .insert(function.clone(), sorted_sources.into_iter().collect());
+            }
+        }
+    }
+    Ok(effects)
+}
+
+fn receipt_declared_effects(receipt: &serde_json::Value) -> Result<BTreeSet<String>, i32> {
+    let functions = receipt
+        .get("declared_effects")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            eprintln!("Error: receipt is missing object field `declared_effects`");
+            1
+        })?;
+    let mut effects = BTreeSet::new();
+    for (function, effect_value) in functions {
+        let declared = effect_value.as_array().ok_or_else(|| {
+            eprintln!("Error: receipt field `declared_effects.{function}` must be an array");
+            1
+        })?;
+        for effect in declared {
+            let effect = effect.as_str().ok_or_else(|| {
+                eprintln!(
+                    "Error: receipt field `declared_effects.{function}` must contain only strings"
+                );
+                1
+            })?;
+            effects.insert(effect.to_string());
+        }
+    }
+    Ok(effects)
+}
+
+fn effect_function_allowlist(
+    sources_by_effect: &BTreeMap<String, BTreeMap<String, Vec<String>>>,
+) -> BTreeMap<String, Vec<String>> {
+    sources_by_effect
+        .iter()
+        .map(|(effect, functions)| {
+            (
+                effect.clone(),
+                functions.keys().cloned().collect::<Vec<String>>(),
+            )
+        })
+        .collect()
+}
+
+fn scaffold_policy_from_receipt(receipt: &serde_json::Value) -> Result<CheckPolicyProfile, i32> {
+    let schema = receipt_field_str(receipt, "/schema", "schema")?;
+    if schema != "quantalang-check-receipt/v1" {
+        eprintln!("Error: unsupported check receipt schema `{}`", schema);
+        return Err(1);
+    }
+
+    let direct_sources = receipt_effect_sources_by_effect(receipt, "observed_capabilities")?;
+    let propagated_sources = receipt_effect_sources_by_effect(receipt, "propagated_effects")?;
+    let mut allowed_effects = receipt_declared_effects(receipt)?;
+    allowed_effects.extend(direct_sources.keys().cloned());
+    allowed_effects.extend(propagated_sources.keys().cloned());
+
+    Ok(CheckPolicyProfile {
+        schema: "quantalang-check-policy/v1".to_string(),
+        allowed_effects: allowed_effects.into_iter().collect(),
+        denied_effects: Vec::new(),
+        direct_effect_allowlist: effect_function_allowlist(&direct_sources),
+        direct_capability_source_allowlist: direct_sources,
+        propagated_effect_allowlist: effect_function_allowlist(&propagated_sources),
+        propagated_effect_source_allowlist: propagated_sources,
+        require_source_digest: true,
+        require_input_graph_digest: true,
+        require_provenance_allowlists: true,
+        require_source_allowlists: true,
+        require_allowlist_coverage: true,
+    })
+}
+
+fn write_policy_json(output: Option<&Path>, profile: &CheckPolicyProfile) -> Result<(), i32> {
+    if let Some(path) = output {
+        write_json(path, profile)
+    } else {
+        let json = serde_json::to_string_pretty(profile).map_err(|err| {
+            eprintln!("Error serializing scaffolded policy: {}", err);
+            1
+        })?;
+        println!("{json}");
+        Ok(())
+    }
+}
+
 fn cmd_policy(command: PolicyCommands) -> Result<(), i32> {
     match command {
         PolicyCommands::List { json } => {
@@ -977,6 +1111,11 @@ fn cmd_policy(command: PolicyCommands) -> Result<(), i32> {
                 print!("{json}");
             }
             Ok(())
+        }
+        PolicyCommands::Scaffold { receipt, output } => {
+            let receipt: serde_json::Value = read_json(&receipt)?;
+            let profile = scaffold_policy_from_receipt(&receipt)?;
+            write_policy_json(output.as_deref(), &profile)
         }
     }
 }
