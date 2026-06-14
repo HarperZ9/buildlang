@@ -1133,6 +1133,10 @@ mod tests {
         backend: String,
         evidence_class: String,
         result: RustExecutionReceiptResult,
+        declared_effects: Vec<String>,
+        observed_capabilities: Vec<String>,
+        capability_gate: String,
+        capability_gate_test: String,
         manifest_execution_test: String,
         receipt_consistency_test: String,
         validator_chain: Vec<String>,
@@ -1649,6 +1653,13 @@ fn main() {
         assert_eq!(receipt.receipt_id, "rust-execution-2026-06-13");
         assert_eq!(receipt.backend, "rust");
         assert_eq!(receipt.evidence_class, "generated-artifact-execution");
+        assert_eq!(receipt.declared_effects, vec!["Console"]);
+        assert_eq!(receipt.observed_capabilities, vec!["Console"]);
+        assert_eq!(receipt.capability_gate, "passed");
+        assert_eq!(
+            receipt.capability_gate_test,
+            "cargo test --manifest-path compiler/Cargo.toml capability --quiet"
+        );
         assert_eq!(
             receipt.manifest_execution_test,
             "semantic_corpus_manifest_programs_run_on_rust_backend"

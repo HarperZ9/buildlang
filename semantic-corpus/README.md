@@ -21,6 +21,21 @@ the C/Rust receipts, and real C-backend stdout against the manifest. Use
 only after C stdout validation should refresh that copy's C execution receipt;
 Rust receipt changes remain covered by the Rust backend test suite.
 
+## Capability Metadata
+
+Execution receipts record the capability gate posture for the corpus:
+
+- `declared_effects`: built-in effects that corpus programs declare in source.
+- `observed_capabilities`: capabilities expected from manifest surfaces.
+- `capability_gate`: `passed` when receipt verification includes capability
+  metadata.
+- `capability_gate_test`: the compiler test proving capability enforcement.
+
+The current corpus declares and observes `Console` because every program owns a
+stdout contract. `quantac corpus verify` derives the expected capability list
+from `manifest.json` surfaces and rejects receipt drift if the metadata is
+missing or inconsistent.
+
 ## Current Programs
 
 - `scalar_branch.quanta`: function call, branch selection, stdout.

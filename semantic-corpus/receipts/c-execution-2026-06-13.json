@@ -11,6 +11,14 @@
     "failed": 0,
     "ignored": 0
   },
+  "declared_effects": [
+    "Console"
+  ],
+  "observed_capabilities": [
+    "Console"
+  ],
+  "capability_gate": "passed",
+  "capability_gate_test": "cargo test --manifest-path compiler/Cargo.toml capability --quiet",
   "validator_chain": [
     "QuantaLang parser",
     "QuantaLang type checker",
