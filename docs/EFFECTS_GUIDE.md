@@ -113,10 +113,10 @@ the exact capability source.
 `quantac check <file> --receipt <path>` writes a deterministic
 `quantalang-check-receipt/v1` JSON artifact with compiler/language version
 metadata, a SHA-256 digest of the entry source bytes, an `input_digests` ledger
-for every entry, import, include, and module file read by the check pipeline,
-declared effects, observed capability sources, pass/fail status, and compact
-diagnostics. Use `--receipt -` when a CI step or wrapper wants the receipt on
-stdout.
+for every entry, import, include, and module file read by the check pipeline, an
+`input_graph_digest` fingerprint for the whole checked source graph, declared
+effects, observed capability sources, pass/fail status, and compact diagnostics.
+Use `--receipt -` when a CI step or wrapper wants the receipt on stdout.
 
 Policy profiles turn receipt evidence into an enforceable CI gate:
 

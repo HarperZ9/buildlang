@@ -153,10 +153,10 @@ compiler side channels.
 
 `quantac check --receipt` also binds each receipt to the checked source inputs
 with SHA-256 digests plus compiler and language version metadata. The top-level
-`source_digest` records the entry file, and `input_digests` records every entry,
-import, include, and module file that feeds the check pipeline, giving CI and
-review tooling a stable evidence record for the exact source graph that passed
-or failed the capability gate.
+`source_digest` records the entry file, `input_digests` records every entry,
+import, include, and module file that feeds the check pipeline, and
+`input_graph_digest` gives CI a portable fingerprint for the exact source graph
+that passed or failed the capability gate.
 
 `quantac check --policy <policy.json>` evaluates a portable
 `quantalang-check-policy/v1` profile against declared effects and observed
