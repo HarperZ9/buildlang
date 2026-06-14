@@ -163,8 +163,12 @@ evidence as well, so `run(load_config)` records both `run` and `load_config` as
 propagated `FileSystem` sources. Ambient helpers used as values keep those
 effects too:
 `let loader = read_file; loader("ops.toml");` requires `FileSystem` and records
-`loader` as the propagated source. Effectful function values stored in structs
-also keep source evidence: `(ops.loader)("ops.toml")` records `ops.loader`;
+`loader` as the propagated source. Closure literals capture their body effects
+without performing them at definition time, so `let loader = |path: str|
+read_file(path);` remains pure until `loader("ops.toml")` is called, and then
+records `loader` as propagated `FileSystem` evidence. Effectful function values
+stored in structs also keep source evidence: `(ops.loader)("ops.toml")` records
+`ops.loader`;
 tuple slots and indexed ops tables record sources such as `loaders.0` and
 `loaders[0]`; immediate calls through returned function values record sources
 such as `make_loader()`. `if` and `match` expressions that select an
@@ -256,11 +260,14 @@ wrapper, receipts record the supplied callback source too, so `run(load_config)`
 can be reviewed or allowlisted by both `run` and `load_config`. The same rule
 covers aliases of ambient helpers, such as
 `let loader = read_file`; calling the alias inherits the helper's capability
-effect instead of falling back to an untyped function value. Calls through
-effectful struct fields, tuple slots, and indexed ops tables record paths such
-as `ops.loader`, `loaders.0`, and `loaders[0]`, so source allowlists can
-constrain capability-bearing registries and ops tables. Immediate invocation of
-a returned effectful function records the factory call, such as `make_loader()`.
+effect instead of falling back to an untyped function value. Effectful closures
+use the same function-value path: creating `|path: str| read_file(path)` does
+not trigger `FileSystem`, but calling a bound closure records the alias as a
+propagated source. Calls through effectful struct fields, tuple slots, and
+indexed ops tables record paths such as `ops.loader`, `loaders.0`, and
+`loaders[0]`, so source allowlists can constrain capability-bearing registries
+and ops tables. Immediate invocation of a returned effectful function records
+the factory call, such as `make_loader()`.
 Control-flow selectors keep reviewable evidence too: calling the result of an
 `if` or `match` expression records the possible effectful branch targets, such
 as `load_config` and `load_secret`. If the selected function is bound first,

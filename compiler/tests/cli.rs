@@ -1058,6 +1058,128 @@ fn main() ~ FileSystem {
 }
 
 #[test]
+fn check_effectful_closure_literal_is_pure_until_called() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_effectful_closure_literal_pure_until_called_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn main() {
+    let loader = |path: str| read_file(path);
+}
+"#,
+    )
+    .expect("write effectful closure literal fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "defining an effectful closure should not perform its effect\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn check_reports_effect_for_effectful_closure_alias_call() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_effectful_closure_alias_gate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn main() {
+    let loader = |path: str| read_file(path);
+    loader("ops.txt");
+}
+"#,
+    )
+    .expect("write effectful closure alias fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "calling an effectful closure should fail without FileSystem effect"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FileSystem"),
+        "diagnostic should name FileSystem effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("loader"),
+        "diagnostic should name closure alias source:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn check_receipt_records_effectful_closure_alias_as_propagated_source() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_effectful_closure_alias_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn main() ~ FileSystem {
+    let loader = |path: str| read_file(path);
+    loader("ops.txt");
+}
+"#,
+    )
+    .expect("write effectful closure alias receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "effectful closure alias receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["loader"])
+    );
+}
+
+#[test]
 fn check_reports_effect_for_effectful_struct_field_call() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_struct_field_effect_gate_{}.quanta",

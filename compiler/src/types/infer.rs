@@ -3031,16 +3031,27 @@ impl<'ctx> TypeInfer<'ctx> {
         let old_return_ty = self.return_ty.take();
         self.return_ty = expected_ret.clone();
 
+        let outer_effects = self.current_effects.clone();
+        let outer_capability_sources = self.capability_sources.clone();
+        let outer_propagated_effect_sources = self.propagated_effect_sources.clone();
+        self.current_effects = super::effects::EffectRow::empty();
+        self.capability_sources = BTreeMap::new();
+        self.propagated_effect_sources = BTreeMap::new();
+
         let body_ty = self.infer_expr(body);
+        let closure_effects = self.current_effects.clone();
 
         if let Some(expected) = &expected_ret {
             let _ = self.unify(&body_ty, expected, body.span);
         }
 
+        self.current_effects = outer_effects;
+        self.capability_sources = outer_capability_sources;
+        self.propagated_effect_sources = outer_propagated_effect_sources;
         self.return_ty = old_return_ty;
         self.pop_scope();
 
-        Ty::function(param_tys, self.apply(&body_ty))
+        Ty::function_with_effects(param_tys, self.apply(&body_ty), closure_effects)
     }
 
     // =========================================================================
