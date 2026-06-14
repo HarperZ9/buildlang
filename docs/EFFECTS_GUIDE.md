@@ -162,12 +162,19 @@ Use `quantac policy list` to see built-in starting profiles, then emit one with:
 quantac policy print pure --output policy.json
 ```
 
+Or run a built-in profile directly during a check:
+
+```bash
+quantac check app.quanta --profile ci-review --receipt -
+```
+
 The built-in profiles are valid `quantalang-check-policy/v1` JSON and are meant
 for CI bootstrapping: `pure` denies every built-in ambient capability,
 `console-only` permits only console access, `offline` permits local file,
 environment, clock, and console work while denying network/process/FFI/GPU, and
 `ci-review` requires source/input graph digests while denying the highest-risk
-capabilities.
+capabilities. Receipts from direct profile checks record `policy.source` as
+`builtin:<name>`.
 
 ---
 

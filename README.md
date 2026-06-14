@@ -119,7 +119,7 @@ quantac vignette.quanta --target glsl -o vignette.glsl
 |-----------------|--------------------------------------|
 | `quantac lex`   | Tokenize a file and print tokens     |
 | `quantac parse` | Parse a file and print the AST       |
-| `quantac check <file> [--receipt PATH|-] [--policy policy.json]` | Type-check, optionally evaluate policy, and optionally emit a JSON accountability receipt |
+| `quantac check <file> [--receipt PATH|-] [--policy policy.json|--profile NAME]` | Type-check, optionally evaluate policy, and optionally emit a JSON accountability receipt |
 | `quantac build` | Build a project                      |
 | `quantac run`   | Compile and run a `.quanta` file     |
 | `quantac doctor` | Diagnose local toolchain readiness  |
@@ -170,6 +170,10 @@ structured violations.
 JSON. The initial profiles are `pure`, `console-only`, `offline`, and
 `ci-review`, which gives CI a practical starting point before a team adds
 function-specific direct and propagated allowlists.
+
+For the common case, `quantac check app.quanta --profile ci-review --receipt -`
+evaluates a built-in profile directly without first writing a policy file.
+Receipts identify these gates with a `policy.source` such as `builtin:ci-review`.
 
 Receipts separate direct capability boundaries from callers that inherit those
 effects. `observed_capabilities` records ambient helper, macro, and FFI access

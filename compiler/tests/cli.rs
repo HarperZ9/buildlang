@@ -1294,6 +1294,116 @@ fn printed_pure_policy_rejects_console_program() {
 }
 
 #[test]
+fn check_profile_pure_rejects_console_program_without_policy_file() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_profile_pure_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(&fixture, r#"fn main() ~ Console { println!("blocked"); }"#)
+        .expect("write console fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--profile")
+        .arg("pure")
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check with pure profile");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "pure profile should reject console program\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(receipt["policy"]["source"], "builtin:pure");
+    assert_eq!(receipt["policy"]["status"], "failed");
+    let violations = receipt["policy"]["violations"]
+        .as_array()
+        .expect("policy violations");
+    assert!(
+        violations.iter().any(|violation| {
+            violation["kind"] == "DeniedEffect"
+                && violation["effect"] == "Console"
+                && violation["function"] == "main"
+        }),
+        "expected Console denial in {violations:#?}"
+    );
+}
+
+#[test]
+fn check_profile_rejects_unknown_builtin_profile() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_profile_unknown_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(&fixture, r#"fn main() {}"#).expect("write pure fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--profile")
+        .arg("missing")
+        .output()
+        .expect("run quantac check with missing profile");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(!output.status.success(), "unknown profile should fail");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("Unknown built-in policy profile 'missing'"),
+        "stderr should name the unknown profile:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn check_rejects_policy_file_and_builtin_profile_together() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_profile_conflict_{}.quanta",
+        std::process::id()
+    ));
+    let policy = write_temp_policy(
+        "profile_conflict",
+        r#"{
+          "schema": "quantalang-check-policy/v1",
+          "allowed_effects": ["Console"]
+        }"#,
+    );
+    fs::write(&fixture, r#"fn main() ~ Console { println!("ok"); }"#)
+        .expect("write conflict fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--policy")
+        .arg(&policy)
+        .arg("--profile")
+        .arg("pure")
+        .output()
+        .expect("run quantac check with conflicting policy inputs");
+
+    let _ = fs::remove_file(&fixture);
+    let _ = fs::remove_file(&policy);
+
+    assert!(
+        !output.status.success(),
+        "policy file and profile should conflict"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("cannot be used with"),
+        "stderr should report the argument conflict:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn corpus_verify_accepts_explicit_root() {
     if !c_backend_ready() {
         eprintln!("skipping semantic corpus root verification because no C backend is available");
