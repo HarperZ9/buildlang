@@ -332,6 +332,37 @@ impl<'ctx> TypeInfer<'ctx> {
         }
     }
 
+    fn record_effectful_callee_sources(
+        &mut self,
+        call_sources: &[String],
+        effects: &super::effects::EffectRow,
+    ) {
+        if effects.is_empty() {
+            return;
+        }
+
+        self.current_effects = self.current_effects.merge(effects);
+        for source in call_sources {
+            let lookup_name = source.rsplit("::").next().unwrap_or(source);
+            let direct_ambient_effect =
+                super::capabilities::capability_effect_for_call(lookup_name);
+            let is_direct_foreign_call = self.ctx.is_foreign_function(lookup_name);
+            for effect in &effects.effects {
+                if super::capabilities::is_capability_effect(effect.name.as_ref()) {
+                    if direct_ambient_effect == Some(effect.name.as_ref()) {
+                        self.record_capability_source(effect.name.as_ref(), source);
+                    } else if is_direct_foreign_call
+                        && effect.name.as_ref() == super::capabilities::FOREIGN
+                    {
+                        self.record_capability_source(effect.name.as_ref(), source);
+                    } else {
+                        self.record_propagated_effect_source(effect.name.as_ref(), source);
+                    }
+                }
+            }
+        }
+    }
+
     fn push_scope(&mut self, kind: ScopeKind) {
         self.ctx.push_scope(kind);
         self.source_bindings.push(BTreeMap::new());
@@ -2219,11 +2250,41 @@ impl<'ctx> TypeInfer<'ctx> {
             // Pipe operator (function application)
             BinOp::Pipe => {
                 // x |> f is equivalent to f(x)
-                // The right side should be a function that takes the left side as argument
-                let ret_ty = Ty::fresh_var();
-                let expected_fn = Ty::function(vec![left_ty.clone()], ret_ty.clone());
-                let _ = self.unify(&right_ty, &expected_fn, span);
-                self.apply(&ret_ty)
+                let right_ty = self.apply(&right_ty);
+                match &right_ty.kind {
+                    TyKind::Fn(fn_ty) => {
+                        let fn_ty = fn_ty.clone();
+                        if fn_ty.params.len() != 1 {
+                            self.error(
+                                TypeError::ArityMismatch {
+                                    expected: fn_ty.params.len(),
+                                    found: 1,
+                                },
+                                span,
+                            );
+                        }
+
+                        if let Some(param) = fn_ty.params.first() {
+                            let left_sources = self.call_sources(left);
+                            let _ = self.unify(param, &left_ty, span);
+                            self.record_effectful_argument_sources(
+                                param,
+                                &left_sources,
+                                &fn_ty.effects,
+                            );
+                        }
+
+                        let call_sources = self.call_sources(right);
+                        self.record_effectful_callee_sources(&call_sources, &fn_ty.effects);
+                        self.apply(&fn_ty.ret)
+                    }
+                    _ => {
+                        let ret_ty = Ty::fresh_var();
+                        let expected_fn = Ty::function(vec![left_ty.clone()], ret_ty.clone());
+                        let _ = self.unify(&right_ty, &expected_fn, span);
+                        self.apply(&ret_ty)
+                    }
+                }
             }
 
             // Power operator
@@ -2547,32 +2608,7 @@ impl<'ctx> TypeInfer<'ctx> {
                     self.record_effectful_argument_sources(param, &arg_sources, &fn_ty.effects);
                 }
 
-                // Propagate callee's effects to caller's effect context
-                if !fn_ty.effects.is_empty() {
-                    self.current_effects = self.current_effects.merge(&fn_ty.effects);
-                    for source in &call_sources {
-                        let lookup_name = source.rsplit("::").next().unwrap_or(source);
-                        let direct_ambient_effect =
-                            super::capabilities::capability_effect_for_call(lookup_name);
-                        let is_direct_foreign_call = self.ctx.is_foreign_function(lookup_name);
-                        for effect in &fn_ty.effects.effects {
-                            if super::capabilities::is_capability_effect(effect.name.as_ref()) {
-                                if direct_ambient_effect == Some(effect.name.as_ref()) {
-                                    self.record_capability_source(effect.name.as_ref(), source);
-                                } else if is_direct_foreign_call
-                                    && effect.name.as_ref() == super::capabilities::FOREIGN
-                                {
-                                    self.record_capability_source(effect.name.as_ref(), source);
-                                } else {
-                                    self.record_propagated_effect_source(
-                                        effect.name.as_ref(),
-                                        source,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
+                self.record_effectful_callee_sources(&call_sources, &fn_ty.effects);
 
                 // Interprocedural lifetime: if the function returns a reference,
                 // track which argument variables the return borrows from.

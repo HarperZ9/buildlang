@@ -160,7 +160,9 @@ selected value is explicitly cast to a typed effectful callback such as
 `(fn() -> str) with FileSystem` or called through a reference/dereference pair
 such as `let loader_ref = &loader; (*loader_ref)()`. A cast to a pure callback
 type such as `as fn() -> str` is rejected when the source carries effects, so an
-explicit cast cannot erase the capability row. Tuple, tuple-struct,
+explicit cast cannot erase the capability row. Pipe application is checked as
+real function application too, so `"ops.toml" |> load_config` requires
+`FileSystem` and records `load_config` as propagated evidence. Tuple, tuple-struct,
 struct, enum-variant, and slice destructuring preserve those sources as well,
 so `let (loader,) = (...)`, `let Slot(loader) = slot`,
 `let Ops { loader } = ops`, `let Slot::Ready(loader) = slot`, and
@@ -266,7 +268,10 @@ rejected on plain callback values, so `loader?()` cannot erase the selected
 callback's effect row. `.await` is limited to futures and is rejected on plain
 callback values, so `loader.await` cannot erase the selected callback's latent
 effect row. Pure function casts are checked against function effect rows, so
-`as fn() -> str` cannot launder an effectful selected callback. Tuple,
+`as fn() -> str` cannot launder an effectful selected callback. Pipe expressions
+such as `"ops.toml" |> load_config` use the same effect gate as
+`load_config("ops.toml")`, so operator syntax cannot bypass propagated
+capability evidence. Tuple,
 tuple-struct, struct, enum-variant, and slice destructuring, including
 `Slot::Ready { loader }` and branch-local `if let`/`while let` patterns, keep
 the same evidence, so destructured aliases do not hide which selected callee
