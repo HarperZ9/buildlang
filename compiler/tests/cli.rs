@@ -1060,6 +1060,102 @@ fn main() ~ FileSystem {
 }
 
 #[test]
+fn check_reports_effect_for_immediate_returned_effectful_function_call() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_returned_effectful_function_gate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn make_loader() -> (fn(str) -> str) with FileSystem {
+    read_file
+}
+
+fn main() {
+    make_loader()("ops.txt");
+}
+"#,
+    )
+    .expect("write returned effectful function fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "immediate returned effectful function call should fail without FileSystem effect"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FileSystem"),
+        "diagnostic should name FileSystem effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("make_loader()"),
+        "diagnostic should name returned function call source:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn check_receipt_records_immediate_returned_effectful_function_call_source() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_returned_effectful_function_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn make_loader() -> (fn(str) -> str) with FileSystem {
+    read_file
+}
+
+fn main() ~ FileSystem {
+    make_loader()("ops.txt");
+}
+"#,
+    )
+    .expect("write returned effectful function receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "returned effectful function receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["make_loader()"])
+    );
+}
+
+#[test]
 fn check_receipt_file_records_failing_capability_diagnostic() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_check_receipt_fail_{}.quanta",

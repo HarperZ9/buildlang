@@ -389,6 +389,9 @@ impl<'ctx> TypeInfer<'ctx> {
                     format!("{}[]", base)
                 }
             }),
+            ExprKind::Call { func, .. } => {
+                Self::call_source(func).map(|base| format!("{}()", base))
+            }
             ExprKind::Paren(inner) => Self::call_source(inner),
             _ => None,
         }
