@@ -9,7 +9,7 @@
 //! This is the main entry point for the QuantaLang compiler command-line tool.
 
 use clap::{Parser as ClapParser, Subcommand};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -434,6 +434,8 @@ struct SemanticCorpusManifest {
 struct SemanticCorpusProgram {
     id: String,
     path: String,
+    #[serde(default)]
+    surfaces: Vec<String>,
     expected_stdout: String,
 }
 
@@ -448,6 +450,14 @@ struct CorpusExecutionReceipt {
     #[serde(skip_serializing_if = "Option::is_none")]
     execution_mode: Option<String>,
     result: CorpusExecutionResult,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    declared_effects: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    observed_capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capability_gate: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capability_gate_test: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     manifest_execution_test: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -607,6 +617,30 @@ fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), i32> {
     })
 }
 
+fn expected_receipt_capabilities(manifest: &SemanticCorpusManifest) -> Vec<String> {
+    let mut capabilities = BTreeSet::new();
+    for program in &manifest.programs {
+        for surface in &program.surfaces {
+            if surface == "stdout" {
+                capabilities.insert("Console".to_string());
+            }
+        }
+    }
+    capabilities.into_iter().collect()
+}
+
+fn apply_capability_receipt_metadata(
+    receipt: &mut CorpusExecutionReceipt,
+    manifest: &SemanticCorpusManifest,
+) {
+    let capabilities = expected_receipt_capabilities(manifest);
+    receipt.declared_effects = capabilities.clone();
+    receipt.observed_capabilities = capabilities;
+    receipt.capability_gate = Some("passed".to_string());
+    receipt.capability_gate_test =
+        Some("cargo test --manifest-path compiler/Cargo.toml capability --quiet".to_string());
+}
+
 fn refresh_c_receipt_from_manifest(
     mut receipt: CorpusExecutionReceipt,
     manifest: &SemanticCorpusManifest,
@@ -624,6 +658,7 @@ fn refresh_c_receipt_from_manifest(
             expected_stdout: program.expected_stdout.clone(),
         })
         .collect();
+    apply_capability_receipt_metadata(&mut receipt, manifest);
     receipt
 }
 
@@ -677,6 +712,17 @@ fn verify_receipt(
             );
             return Err(1);
         }
+    }
+
+    let expected_capabilities = expected_receipt_capabilities(manifest);
+    if receipt.declared_effects != expected_capabilities
+        || receipt.observed_capabilities != expected_capabilities
+        || receipt.capability_gate.as_deref() != Some("passed")
+        || receipt.capability_gate_test.as_deref()
+            != Some("cargo test --manifest-path compiler/Cargo.toml capability --quiet")
+    {
+        eprintln!("{} receipt capability metadata drift", label);
+        return Err(1);
     }
 
     Ok(())
