@@ -116,6 +116,26 @@ metadata, a SHA-256 digest of the checked source bytes, declared effects,
 observed capability sources, pass/fail status, and compact diagnostics. Use
 `--receipt -` when a CI step or wrapper wants the receipt on stdout.
 
+Policy profiles turn receipt evidence into an enforceable CI gate:
+
+```json
+{
+  "schema": "quantalang-check-policy/v1",
+  "allowed_effects": ["Console"],
+  "denied_effects": ["FileSystem", "Network", "Process", "Foreign"],
+  "require_source_digest": true
+}
+```
+
+Run it with:
+
+```bash
+quantac check app.quanta --policy console-only.json --receipt receipt.json
+```
+
+Denied effects always fail. If `allowed_effects` is non-empty, any declared
+effect or observed capability outside the allow-list also fails.
+
 ---
 
 ## Handling an Effect
