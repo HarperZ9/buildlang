@@ -325,6 +325,9 @@ enum ReceiptCommands {
         /// Source file to verify instead of the source path embedded in the receipt
         #[arg(long, value_name = "PATH")]
         source: Option<PathBuf>,
+        /// Emit a machine-readable verification report
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -676,6 +679,29 @@ struct CheckReceiptPolicy {
     violations: Vec<CheckPolicyViolation>,
 }
 
+#[derive(serde::Serialize)]
+struct ReceiptVerificationReport {
+    schema: &'static str,
+    receipt: String,
+    source: String,
+    status: &'static str,
+    checks: Vec<ReceiptVerificationCheck>,
+}
+
+#[derive(serde::Serialize)]
+struct ReceiptVerificationCheck {
+    name: String,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actual: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
 struct CheckOutcome {
     source: String,
     compiler_version: &'static str,
@@ -977,13 +1003,49 @@ fn verify_receipt_digest(
 
 fn cmd_receipt(command: ReceiptCommands) -> Result<(), i32> {
     match command {
-        ReceiptCommands::Verify { receipt, source } => {
-            cmd_receipt_verify(&receipt, source.as_deref())
-        }
+        ReceiptCommands::Verify {
+            receipt,
+            source,
+            json,
+        } => cmd_receipt_verify(&receipt, source.as_deref(), json),
     }
 }
 
-fn cmd_receipt_verify(receipt_path: &Path, source_override: Option<&Path>) -> Result<(), i32> {
+fn digest_label(digest: &CheckReceiptSourceDigest) -> String {
+    format!("{}:{}", digest.algorithm, digest.hex)
+}
+
+fn push_receipt_verification_check(
+    checks: &mut Vec<ReceiptVerificationCheck>,
+    name: &str,
+    expected: Option<String>,
+    actual: Option<String>,
+    profile: Option<String>,
+    message: Option<String>,
+) {
+    checks.push(ReceiptVerificationCheck {
+        name: name.to_string(),
+        status: if message.is_none() {
+            "passed"
+        } else {
+            "failed"
+        },
+        expected,
+        actual,
+        profile,
+        message,
+    });
+}
+
+fn cmd_receipt_verify(
+    receipt_path: &Path,
+    source_override: Option<&Path>,
+    json: bool,
+) -> Result<(), i32> {
+    if json {
+        return cmd_receipt_verify_json(receipt_path, source_override);
+    }
+
     let receipt: serde_json::Value = read_json(receipt_path)?;
     let schema = receipt_field_str(&receipt, "/schema", "schema")?;
     if schema != "quantalang-check-receipt/v1" {
@@ -1057,6 +1119,140 @@ fn cmd_receipt_verify(receipt_path: &Path, source_override: Option<&Path>) -> Re
 
     println!("Receipt verified: {}", receipt_path.display());
     Ok(())
+}
+
+fn cmd_receipt_verify_json(receipt_path: &Path, source_override: Option<&Path>) -> Result<(), i32> {
+    let receipt: serde_json::Value = read_json(receipt_path)?;
+    let mut checks = Vec::new();
+
+    let schema = receipt_field_str(&receipt, "/schema", "schema")?;
+    let expected_schema = "quantalang-check-receipt/v1".to_string();
+    push_receipt_verification_check(
+        &mut checks,
+        "schema",
+        Some(expected_schema.clone()),
+        Some(schema.to_string()),
+        None,
+        (schema != expected_schema).then(|| "unsupported check receipt schema".to_string()),
+    );
+
+    let compiler = receipt_field_str(&receipt, "/compiler", "compiler")?;
+    push_receipt_verification_check(
+        &mut checks,
+        "compiler",
+        Some("quantac".to_string()),
+        Some(compiler.to_string()),
+        None,
+        (compiler != "quantac").then(|| "receipt compiler mismatch".to_string()),
+    );
+
+    let compiler_version = receipt_field_str(&receipt, "/compiler_version", "compiler_version")?;
+    let current_compiler_version = env!("CARGO_PKG_VERSION");
+    push_receipt_verification_check(
+        &mut checks,
+        "compiler_version",
+        Some(compiler_version.to_string()),
+        Some(current_compiler_version.to_string()),
+        None,
+        (compiler_version != current_compiler_version)
+            .then(|| "compiler version mismatch".to_string()),
+    );
+
+    let language_version = receipt_field_str(&receipt, "/language_version", "language_version")?;
+    let current_language_version = language_version_string();
+    push_receipt_verification_check(
+        &mut checks,
+        "language_version",
+        Some(language_version.to_string()),
+        Some(current_language_version.clone()),
+        None,
+        (language_version != current_language_version)
+            .then(|| "language version mismatch".to_string()),
+    );
+
+    let source_path = if let Some(source_override) = source_override {
+        source_override.to_path_buf()
+    } else {
+        PathBuf::from(receipt_field_str(&receipt, "/source", "source")?)
+    };
+    let current = run_check(&source_path)?;
+
+    let expected_source_digest = receipt_digest_hex(&receipt, "/source_digest", "source digest")?;
+    let actual_source_digest = digest_label(&current.source_digest);
+    push_receipt_verification_check(
+        &mut checks,
+        "source_digest",
+        Some(format!("sha256:{expected_source_digest}")),
+        Some(actual_source_digest),
+        None,
+        (!current
+            .source_digest
+            .hex
+            .eq_ignore_ascii_case(expected_source_digest))
+        .then(|| "source digest mismatch".to_string()),
+    );
+
+    let expected_graph_digest =
+        receipt_digest_hex(&receipt, "/input_graph_digest", "input graph digest")?;
+    let actual_graph_digest = digest_label(&current.input_graph_digest);
+    push_receipt_verification_check(
+        &mut checks,
+        "input_graph_digest",
+        Some(format!("sha256:{expected_graph_digest}")),
+        Some(actual_graph_digest),
+        None,
+        (!current
+            .input_graph_digest
+            .hex
+            .eq_ignore_ascii_case(expected_graph_digest))
+        .then(|| "input graph digest mismatch".to_string()),
+    );
+
+    if let Some(profile) = receipt
+        .pointer("/policy/profile")
+        .and_then(serde_json::Value::as_str)
+    {
+        let expected_profile_digest =
+            receipt_digest_hex(&receipt, "/policy/profile_digest", "policy profile digest")?;
+        let actual_profile_digest = builtin_policy_digest(profile).ok_or_else(|| {
+            eprintln!("Error: unknown built-in policy profile `{}`", profile);
+            1
+        })?;
+        push_receipt_verification_check(
+            &mut checks,
+            "policy_profile_digest",
+            Some(format!("sha256:{expected_profile_digest}")),
+            Some(digest_label(&actual_profile_digest)),
+            Some(profile.to_string()),
+            (!actual_profile_digest
+                .hex
+                .eq_ignore_ascii_case(expected_profile_digest))
+            .then(|| "built-in policy profile digest mismatch".to_string()),
+        );
+    }
+
+    let passed = checks.iter().all(|check| check.status == "passed");
+    let report = ReceiptVerificationReport {
+        schema: "quantalang-receipt-verification/v1",
+        receipt: receipt_path.to_string_lossy().to_string(),
+        source: source_path.to_string_lossy().to_string(),
+        status: if passed { "passed" } else { "failed" },
+        checks,
+    };
+    let json = serde_json::to_string_pretty(&report).map_err(|err| {
+        eprintln!(
+            "Error serializing receipt verification report '{}': {}",
+            receipt_path.display(),
+            err
+        );
+        1
+    })?;
+    println!("{}", json);
+    if passed {
+        Ok(())
+    } else {
+        Err(1)
+    }
 }
 
 fn cmd_corpus(command: CorpusCommands) -> Result<(), i32> {
