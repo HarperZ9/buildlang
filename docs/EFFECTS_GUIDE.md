@@ -118,6 +118,11 @@ for every entry, import, include, and module file read by the check pipeline, an
 effects, observed capability sources, propagated effect callees, pass/fail
 status, and compact diagnostics. Use `--receipt -` when a CI step or wrapper
 wants the receipt on stdout.
+Use `quantac receipt verify receipt.json` to re-check a saved receipt against
+the current source graph. Add `--source path/to/app.quanta` when the source has
+moved and the receipt's embedded source path should be overridden. Verification
+checks the receipt schema, compiler/language identity, entry source digest,
+input graph digest, and any recorded built-in profile digest.
 
 `observed_capabilities` records direct ambient capability use inside a function,
 such as `read_file`, `tcp_connect`, `println!`, process helpers, or FFI helpers.
