@@ -236,6 +236,40 @@ fn check_reports_capability_effect_for_ambient_file_call() {
 }
 
 #[test]
+fn check_reports_capability_effect_for_gpu_runtime_call() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_gpu_capability_gate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(&fixture, r#"fn main() { quanta_vk_init(); }"#)
+        .expect("write gpu capability fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "GPU runtime call should fail without Gpu effect"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Gpu"),
+        "diagnostic should name Gpu effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("quanta_vk_init"),
+        "diagnostic should name triggering GPU helper:\n{}",
+        stderr
+    );
+}
+
+#[test]
 fn check_receipt_stdout_records_passing_capabilities() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_check_receipt_pass_{}.quanta",
@@ -287,6 +321,42 @@ fn check_receipt_stdout_records_passing_capabilities() {
         serde_json::json!(["println!"])
     );
     assert!(receipt["diagnostics"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn check_receipt_records_gpu_capability_source() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_gpu_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(&fixture, r#"fn main() ~ Gpu { quanta_vk_init(); }"#)
+        .expect("write gpu receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "GPU receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["declared_effects"]["main"],
+        serde_json::json!(["Gpu"])
+    );
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]["Gpu"],
+        serde_json::json!(["quanta_vk_init"])
+    );
 }
 
 #[test]
@@ -780,6 +850,53 @@ fn check_policy_denies_filesystem_even_when_typecheck_passes() {
         String::from_utf8_lossy(&output.stderr).contains("Policy violation"),
         "stderr should include policy diagnostic:\n{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn check_policy_denies_gpu_even_when_typecheck_passes() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_policy_deny_gpu_{}.quanta",
+        std::process::id()
+    ));
+    let policy = write_temp_policy(
+        "deny_gpu",
+        r#"{
+          "schema": "quantalang-check-policy/v1",
+          "denied_effects": ["Gpu"]
+        }"#,
+    );
+    fs::write(&fixture, r#"fn main() ~ Gpu { quanta_vk_init(); }"#)
+        .expect("write denied gpu fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--policy")
+        .arg(&policy)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check with denied gpu policy");
+
+    let _ = fs::remove_file(&fixture);
+    let _ = fs::remove_file(&policy);
+
+    assert!(!output.status.success(), "policy denial should fail check");
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(receipt["status"], "failed");
+    assert_eq!(receipt["policy"]["status"], "failed");
+    let violations = receipt["policy"]["violations"]
+        .as_array()
+        .expect("policy violations");
+    assert!(
+        violations.iter().any(|violation| {
+            violation["kind"] == "DeniedEffect"
+                && violation["effect"] == "Gpu"
+                && violation["function"] == "main"
+                && violation["source"] == "quanta_vk_init"
+        }),
+        "expected Gpu denied violation in {violations:#?}"
     );
 }
 

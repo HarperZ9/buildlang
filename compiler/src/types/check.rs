@@ -1631,6 +1631,45 @@ mod tests {
     }
 
     #[test]
+    fn capability_gpu_runtime_call_requires_gpu_effect() {
+        let errors = check_source(r#"fn main() { quanta_vk_init(); }"#);
+
+        assert!(
+            errors.iter().any(|err| matches!(
+                &err.error,
+                TypeError::UnhandledEffect { effect_name, .. } if effect_name == "Gpu"
+            )),
+            "expected Gpu effect error, got {errors:#?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|err| err.notes.iter().any(|note| note.contains("quanta_vk_init"))),
+            "expected diagnostic note naming quanta_vk_init, got {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn capability_declared_gpu_effect_allows_gpu_runtime_call() {
+        let errors = check_source(r#"fn main() ~ Gpu { quanta_vk_init(); }"#);
+
+        assert!(errors.is_empty(), "expected no errors, got {errors:#?}");
+    }
+
+    #[test]
+    fn capability_wrong_declared_effect_does_not_allow_gpu_runtime_call() {
+        let errors = check_source(r#"fn main() ~ FileSystem { quanta_vk_init(); }"#);
+
+        assert!(
+            errors.iter().any(|err| matches!(
+                &err.error,
+                TypeError::UndeclaredEffect { effect_name, .. } if effect_name == "Gpu"
+            )),
+            "expected undeclared Gpu error, got {errors:#?}"
+        );
+    }
+
+    #[test]
     fn capability_foreign_call_requires_foreign_effect() {
         let errors = check_source(
             r#"
