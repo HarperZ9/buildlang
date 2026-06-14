@@ -880,6 +880,186 @@ fn main() ~ FileSystem {
 }
 
 #[test]
+fn check_reports_effect_for_effectful_tuple_field_call() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_tuple_field_effect_gate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn main() {
+    let loaders = (read_file,);
+    (loaders.0)("ops.txt");
+}
+"#,
+    )
+    .expect("write tuple field effect fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "effectful tuple field call should fail without FileSystem effect"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FileSystem"),
+        "diagnostic should name FileSystem effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("loaders.0"),
+        "diagnostic should name tuple field call source:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn check_receipt_records_effectful_tuple_field_call_source() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_tuple_field_effect_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn main() ~ FileSystem {
+    let loaders = (read_file,);
+    (loaders.0)("ops.txt");
+}
+"#,
+    )
+    .expect("write tuple field effect receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "tuple field effect receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["loaders.0"])
+    );
+}
+
+#[test]
+fn check_reports_effect_for_effectful_index_call() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_index_effect_gate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn main() {
+    let loaders = [read_file];
+    (loaders[0])("ops.txt");
+}
+"#,
+    )
+    .expect("write index effect fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "effectful index call should fail without FileSystem effect"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FileSystem"),
+        "diagnostic should name FileSystem effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("loaders[0]"),
+        "diagnostic should name indexed call source:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn check_receipt_records_effectful_index_call_source() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_index_effect_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn main() ~ FileSystem {
+    let loaders = [read_file];
+    (loaders[0])("ops.txt");
+}
+"#,
+    )
+    .expect("write index effect receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "indexed effect receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["loaders[0]"])
+    );
+}
+
+#[test]
 fn check_receipt_file_records_failing_capability_diagnostic() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_check_receipt_fail_{}.quanta",
