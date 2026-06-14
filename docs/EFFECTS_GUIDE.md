@@ -180,6 +180,10 @@ capabilities. Receipts from direct profile checks record `policy.source` as
 `builtin:<name>`, `policy.profile` as the profile name, and
 `policy.profile_digest` as the SHA-256 digest of the emitted built-in policy
 JSON.
+For locked CI gates, add `--expect-profile-digest <hex>` alongside `--profile`
+using the digest from `quantac policy list --json` or a prior trusted receipt;
+the check fails before source analysis if the selected built-in profile has
+changed.
 
 ---
 
