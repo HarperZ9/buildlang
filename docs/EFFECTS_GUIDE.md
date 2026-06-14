@@ -134,6 +134,9 @@ their function type without performing them at definition time, so
 `let loader = |path: str| read_file(path);` stays pure until
 `loader("ops.toml")` is called and then records `loader` as propagated evidence.
 Immediately invoked anonymous closures record the synthetic source `<closure>`.
+Inherent methods carry declared effects too: if `Config.load` declares
+`~ FileSystem`, then `config.load()` requires `FileSystem` in the caller and
+records `Config.load` as propagated evidence.
 Effectful function values stored in structs, tuples, and indexed ops tables
 retain access evidence too: `(ops.loader)("ops.toml")` records `ops.loader`,
 `(loaders.0)("x")` records `loaders.0`, and `(loaders[0])("x")` records
@@ -191,6 +194,8 @@ actually touches the outside world.
 `propagated_effects` records effectful callees that make a caller inherit a
 typed effect. This lets policy allow a small number of audited boundary
 functions while still proving which higher-level workflows depend on them.
+Effectful inherent methods appear here with typed method sources such as
+`Config.load`, so method-call syntax does not bypass capability policy.
 Effectful callback parameters appear here as named sources too, so higher-order
 ops code keeps capability provenance instead of losing it behind `fn(...)`
 values. Effectful callback arguments supplied to wrappers also appear here, so
