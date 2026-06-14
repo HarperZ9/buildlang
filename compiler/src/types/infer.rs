@@ -429,20 +429,53 @@ impl<'ctx> TypeInfer<'ctx> {
     fn expand_call_sources_with_bindings(&self, access_sources: Vec<String>) -> Vec<String> {
         let mut sources = access_sources.clone();
         for source in access_sources {
-            if let Some(bound_sources) = self.lookup_call_source_binding(&source) {
-                sources.extend(bound_sources.iter().cloned());
-            }
+            sources.extend(self.bound_call_sources_for_access(&source));
         }
         Self::dedupe_call_sources(sources)
+    }
+
+    fn bound_call_sources_for_access(&self, access_source: &str) -> Vec<String> {
+        if let Some(bound_sources) = self.lookup_call_source_binding(access_source) {
+            return bound_sources.clone();
+        }
+
+        if let Some(wildcard_source) = Self::wildcard_index_access_source(access_source) {
+            if let Some(bound_sources) = self.lookup_call_source_binding(&wildcard_source) {
+                return bound_sources.clone();
+            }
+        }
+
+        Vec::new()
+    }
+
+    fn wildcard_index_access_source(access_source: &str) -> Option<String> {
+        let mut wildcard = String::with_capacity(access_source.len());
+        let mut chars = access_source.chars();
+        let mut changed = false;
+
+        while let Some(ch) = chars.next() {
+            if ch == '[' {
+                wildcard.push('[');
+                for inner in chars.by_ref() {
+                    if inner == ']' {
+                        wildcard.push(']');
+                        changed = true;
+                        break;
+                    }
+                }
+            } else {
+                wildcard.push(ch);
+            }
+        }
+
+        changed.then_some(wildcard)
     }
 
     fn bound_call_sources_for_member(&self, expr: &ast::Expr, member: &str) -> Vec<String> {
         let mut sources = Vec::new();
         for base in self.call_sources(expr) {
             let access_source = format!("{}.{}", base, member);
-            if let Some(bound_sources) = self.lookup_call_source_binding(&access_source) {
-                sources.extend(bound_sources.iter().cloned());
-            }
+            sources.extend(self.bound_call_sources_for_access(&access_source));
         }
         Self::dedupe_call_sources(sources)
     }
@@ -451,9 +484,7 @@ impl<'ctx> TypeInfer<'ctx> {
         let mut sources = Vec::new();
         for base in self.call_sources(expr) {
             let access_source = format!("{}[{}]", base, index);
-            if let Some(bound_sources) = self.lookup_call_source_binding(&access_source) {
-                sources.extend(bound_sources.iter().cloned());
-            }
+            sources.extend(self.bound_call_sources_for_access(&access_source));
         }
         Self::dedupe_call_sources(sources)
     }
@@ -678,11 +709,24 @@ impl<'ctx> TypeInfer<'ctx> {
                 }
             }
             ExprKind::Array(elems) => {
+                let wildcard_name = format!("{}[]", name);
+                let wildcard_sources = elems
+                    .iter()
+                    .flat_map(|elem| self.call_sources(elem))
+                    .collect();
+                self.bind_member_call_sources(&wildcard_name, wildcard_sources, merge);
+
                 for (index, elem) in elems.iter().enumerate() {
                     let member_name = format!("{}[{}]", name, index);
                     self.bind_member_call_sources(&member_name, self.call_sources(elem), merge);
                     self.bind_aggregate_call_sources_inner(&member_name, elem, merge);
+                    self.bind_aggregate_call_sources_inner(&wildcard_name, elem, true);
                 }
+            }
+            ExprKind::ArrayRepeat { element, .. } => {
+                let member_name = format!("{}[]", name);
+                self.bind_member_call_sources(&member_name, self.call_sources(element), merge);
+                self.bind_aggregate_call_sources_inner(&member_name, element, merge);
             }
             ExprKind::Struct { fields, .. } => {
                 for field in fields {
