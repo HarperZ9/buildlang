@@ -1536,6 +1536,32 @@ mod tests {
     }
 
     #[test]
+    fn capability_direct_console_call_requires_console_effect() {
+        let errors = check_source(r#"fn main() { println("ops"); }"#);
+
+        assert!(
+            errors.iter().any(|err| matches!(
+                &err.error,
+                TypeError::UnhandledEffect { effect_name, .. } if effect_name == "Console"
+            )),
+            "expected Console effect error, got {errors:#?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|err| err.notes.iter().any(|note| note.contains("println"))),
+            "expected diagnostic note naming println, got {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn capability_declared_console_effect_allows_direct_console_call() {
+        let errors = check_source(r#"fn main() ~ Console { println("ops"); }"#);
+
+        assert!(errors.is_empty(), "expected no errors, got {errors:#?}");
+    }
+
+    #[test]
     fn capability_wrong_declared_effect_does_not_allow_console_macro() {
         let errors = check_source(r#"fn main() ~ Network { println!("ops"); }"#);
 
