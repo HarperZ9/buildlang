@@ -151,10 +151,12 @@ process, environment, clock, GPU, console helper/macro, and FFI surfaces are
 represented in the language's effect vocabulary instead of remaining invisible
 compiler side channels.
 
-`quantac check --receipt` also binds each receipt to the checked source bytes
-with a SHA-256 digest plus compiler and language version metadata, giving CI and
-review tooling a stable evidence record for the exact source that passed or
-failed the capability gate.
+`quantac check --receipt` also binds each receipt to the checked source inputs
+with SHA-256 digests plus compiler and language version metadata. The top-level
+`source_digest` records the entry file, and `input_digests` records every entry,
+import, include, and module file that feeds the check pipeline, giving CI and
+review tooling a stable evidence record for the exact source graph that passed
+or failed the capability gate.
 
 `quantac check --policy <policy.json>` evaluates a portable
 `quantalang-check-policy/v1` profile against declared effects and observed

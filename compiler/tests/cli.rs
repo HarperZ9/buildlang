@@ -62,9 +62,7 @@ fn input_digest_hex(receipt: &serde_json::Value, role: &str, source_suffix: &str
                     .is_some_and(|source| source.ends_with(source_suffix))
         })
         .unwrap_or_else(|| {
-            panic!(
-                "missing input digest role={role:?} suffix={source_suffix:?} in {records:#?}"
-            )
+            panic!("missing input digest role={role:?} suffix={source_suffix:?} in {records:#?}")
         });
     assert_eq!(record["digest"]["algorithm"], "sha256");
     let hex = record["digest"]["hex"]
@@ -499,6 +497,55 @@ fn main() ~ Console { println!("{}", value()); }
         input_digest_hex(&second_receipt, "include", "shared.quanta"),
         first_input_include
     );
+}
+
+#[test]
+fn check_receipt_input_digests_record_imports_and_modules() {
+    let dir = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_graph_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    let package_dir = dir.join("registry/packages/std-math/src");
+    fs::create_dir_all(&package_dir).expect("create import package dir");
+    fs::create_dir_all(dir.join("helpers")).expect("create helper module dir");
+    let entry = dir.join("entry.quanta");
+    let imported = package_dir.join("lib.quanta");
+    let module = dir.join("helpers/mod.quanta");
+
+    fs::write(&imported, "fn imported_value() -> i32 { 2 }\n").expect("write import fixture");
+    fs::write(&module, "fn module_value() -> i32 { 5 }\n").expect("write module fixture");
+    fs::write(
+        &entry,
+        r#"use std_math;
+mod helpers;
+fn main() ~ Console {
+    println!("{}", imported_value() + helpers::module_value());
+}
+"#,
+    )
+    .expect("write graph entry fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&entry)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run graph input digest receipt");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        output.status.success(),
+        "graph check should pass\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = receipt_from_stdout(&output);
+    input_digest_hex(&receipt, "entry", "entry.quanta");
+    input_digest_hex(&receipt, "import", "lib.quanta");
+    input_digest_hex(&receipt, "module", "mod.quanta");
 }
 
 #[test]
