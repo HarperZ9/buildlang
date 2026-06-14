@@ -218,6 +218,12 @@ enum Commands {
         command: PolicyCommands,
     },
 
+    /// Verify saved accountability receipts against current source inputs
+    Receipt {
+        #[command(subcommand)]
+        command: ReceiptCommands,
+    },
+
     /// Run tests - compile .quanta programs and verify output against .expected files
     Test {
         /// Directory containing test programs [default: tests/programs]
@@ -310,6 +316,18 @@ enum PolicyCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum ReceiptCommands {
+    /// Verify a quantac check receipt against current source inputs
+    Verify {
+        /// Check receipt JSON written by `quantac check --receipt`
+        receipt: PathBuf,
+        /// Source file to verify instead of the source path embedded in the receipt
+        #[arg(long, value_name = "PATH")]
+        source: Option<PathBuf>,
+    },
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -344,6 +362,7 @@ fn main() -> ExitCode {
         Some(Commands::Pkg { command }) => cmd_pkg(command),
         Some(Commands::Corpus { command }) => cmd_corpus(command),
         Some(Commands::Policy { command }) => cmd_policy(command),
+        Some(Commands::Receipt { command }) => cmd_receipt(command),
         Some(Commands::Lint { file }) => cmd_lint(&file),
         Some(Commands::Doctor) => cmd_doctor(),
         Some(Commands::Test {
@@ -899,6 +918,145 @@ fn cmd_policy(command: PolicyCommands) -> Result<(), i32> {
             Ok(())
         }
     }
+}
+
+fn receipt_field_str<'a>(
+    receipt: &'a serde_json::Value,
+    pointer: &str,
+    label: &str,
+) -> Result<&'a str, i32> {
+    receipt
+        .pointer(pointer)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            eprintln!("Error: receipt is missing string field `{}`", label);
+            1
+        })
+}
+
+fn receipt_digest_hex<'a>(
+    receipt: &'a serde_json::Value,
+    pointer: &str,
+    label: &str,
+) -> Result<&'a str, i32> {
+    let algorithm = receipt_field_str(receipt, &format!("{pointer}/algorithm"), label)?;
+    if algorithm != "sha256" {
+        eprintln!(
+            "Error: receipt field `{}` uses unsupported digest algorithm `{}`",
+            label, algorithm
+        );
+        return Err(1);
+    }
+    let hex = receipt_field_str(receipt, &format!("{pointer}/hex"), label)?;
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        eprintln!(
+            "Error: receipt field `{}` is not a sha256 hex digest",
+            label
+        );
+        return Err(1);
+    }
+    Ok(hex)
+}
+
+fn verify_receipt_digest(
+    receipt: &serde_json::Value,
+    pointer: &str,
+    label: &str,
+    actual: &CheckReceiptSourceDigest,
+) -> Result<(), i32> {
+    let expected_hex = receipt_digest_hex(receipt, pointer, label)?;
+    if actual.algorithm != "sha256" || !actual.hex.eq_ignore_ascii_case(expected_hex) {
+        eprintln!(
+            "Error: {} mismatch: expected sha256:{}, actual sha256:{}",
+            label, expected_hex, actual.hex
+        );
+        return Err(1);
+    }
+    Ok(())
+}
+
+fn cmd_receipt(command: ReceiptCommands) -> Result<(), i32> {
+    match command {
+        ReceiptCommands::Verify { receipt, source } => {
+            cmd_receipt_verify(&receipt, source.as_deref())
+        }
+    }
+}
+
+fn cmd_receipt_verify(receipt_path: &Path, source_override: Option<&Path>) -> Result<(), i32> {
+    let receipt: serde_json::Value = read_json(receipt_path)?;
+    let schema = receipt_field_str(&receipt, "/schema", "schema")?;
+    if schema != "quantalang-check-receipt/v1" {
+        eprintln!("Error: unsupported check receipt schema `{}`", schema);
+        return Err(1);
+    }
+    let compiler = receipt_field_str(&receipt, "/compiler", "compiler")?;
+    if compiler != "quantac" {
+        eprintln!(
+            "Error: receipt compiler mismatch: expected quantac, got {}",
+            compiler
+        );
+        return Err(1);
+    }
+    let compiler_version = receipt_field_str(&receipt, "/compiler_version", "compiler_version")?;
+    if compiler_version != env!("CARGO_PKG_VERSION") {
+        eprintln!(
+            "Error: compiler version mismatch: expected {}, actual {}",
+            compiler_version,
+            env!("CARGO_PKG_VERSION")
+        );
+        return Err(1);
+    }
+    let language_version = receipt_field_str(&receipt, "/language_version", "language_version")?;
+    let current_language_version = language_version_string();
+    if language_version != current_language_version {
+        eprintln!(
+            "Error: language version mismatch: expected {}, actual {}",
+            language_version, current_language_version
+        );
+        return Err(1);
+    }
+
+    let source_path = if let Some(source_override) = source_override {
+        source_override.to_path_buf()
+    } else {
+        PathBuf::from(receipt_field_str(&receipt, "/source", "source")?)
+    };
+    let current = run_check(&source_path)?;
+    verify_receipt_digest(
+        &receipt,
+        "/source_digest",
+        "source digest",
+        &current.source_digest,
+    )?;
+    verify_receipt_digest(
+        &receipt,
+        "/input_graph_digest",
+        "input graph digest",
+        &current.input_graph_digest,
+    )?;
+
+    if let Some(profile) = receipt
+        .pointer("/policy/profile")
+        .and_then(serde_json::Value::as_str)
+    {
+        let expected_hex =
+            receipt_digest_hex(&receipt, "/policy/profile_digest", "policy profile digest")?;
+        let actual = builtin_policy_digest(profile).ok_or_else(|| {
+            eprintln!("Error: unknown built-in policy profile `{}`", profile);
+            1
+        })?;
+        if !actual.hex.eq_ignore_ascii_case(expected_hex) {
+            eprintln!(
+                "Error: built-in policy profile digest mismatch for '{}': expected sha256:{}, actual sha256:{}",
+                profile, expected_hex, actual.hex
+            );
+            return Err(1);
+        }
+    }
+
+    println!("Receipt verified: {}", receipt_path.display());
+    Ok(())
 }
 
 fn cmd_corpus(command: CorpusCommands) -> Result<(), i32> {
