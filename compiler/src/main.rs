@@ -122,6 +122,10 @@ enum Commands {
         /// Write a machine-readable check receipt to a path, or '-' for stdout
         #[arg(long, value_name = "PATH")]
         receipt: Option<PathBuf>,
+
+        /// Evaluate a machine-readable check policy profile
+        #[arg(long, value_name = "PATH")]
+        policy: Option<PathBuf>,
     },
 
     /// Build a project
@@ -280,7 +284,11 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Some(Commands::Lex { file, verbose }) => cmd_lex(&file, verbose),
         Some(Commands::Parse { file, json }) => cmd_parse(&file, json),
-        Some(Commands::Check { file, receipt }) => cmd_check(&file, receipt.as_deref()),
+        Some(Commands::Check {
+            file,
+            receipt,
+            policy,
+        }) => cmd_check(&file, receipt.as_deref(), policy.as_deref()),
         Some(Commands::Build {
             path,
             release,
@@ -457,6 +465,8 @@ struct CheckReceipt {
     declared_effects: BTreeMap<String, Vec<String>>,
     observed_capabilities: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     diagnostics: Vec<CheckReceiptDiagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy: Option<CheckReceiptPolicy>,
 }
 
 #[derive(serde::Serialize)]
@@ -534,6 +544,15 @@ struct CheckPolicyDecision {
     schema: String,
     source: String,
     source_digest: CheckReceiptSourceDigest,
+    violations: Vec<CheckPolicyViolation>,
+}
+
+#[derive(serde::Serialize)]
+struct CheckReceiptPolicy {
+    schema: String,
+    source: String,
+    source_digest: CheckReceiptSourceDigest,
+    status: &'static str,
     violations: Vec<CheckPolicyViolation>,
 }
 
@@ -1392,7 +1411,10 @@ fn collect_check_policy_evidence(outcome: &CheckOutcome) -> BTreeSet<CheckPolicy
     evidence
 }
 
-fn evaluate_check_policy(policy: &LoadedCheckPolicy, outcome: &CheckOutcome) -> CheckPolicyDecision {
+fn evaluate_check_policy(
+    policy: &LoadedCheckPolicy,
+    outcome: &CheckOutcome,
+) -> CheckPolicyDecision {
     let allowed: BTreeSet<&str> = policy
         .profile
         .allowed_effects
@@ -1445,7 +1467,10 @@ fn evaluate_check_policy(policy: &LoadedCheckPolicy, outcome: &CheckOutcome) -> 
     }
 }
 
-fn build_check_receipt(outcome: &CheckOutcome) -> CheckReceipt {
+fn build_check_receipt(
+    outcome: &CheckOutcome,
+    policy: Option<&CheckPolicyDecision>,
+) -> CheckReceipt {
     let mut declared_effects = BTreeMap::new();
     let mut observed_capabilities = BTreeMap::new();
 
@@ -1484,6 +1509,17 @@ fn build_check_receipt(outcome: &CheckOutcome) -> CheckReceipt {
             }),
     );
 
+    let policy_failed = policy
+        .map(|decision| !decision.violations.is_empty())
+        .unwrap_or(false);
+    let receipt_policy = policy.map(|decision| CheckReceiptPolicy {
+        schema: decision.schema.clone(),
+        source: decision.source.clone(),
+        source_digest: decision.source_digest.clone(),
+        status: check_policy_status(decision),
+        violations: decision.violations.clone(),
+    });
+
     CheckReceipt {
         schema: "quantalang-check-receipt/v1",
         compiler: "quantac",
@@ -1491,7 +1527,7 @@ fn build_check_receipt(outcome: &CheckOutcome) -> CheckReceipt {
         language_version: outcome.language_version.clone(),
         source: outcome.source.clone(),
         source_digest: outcome.source_digest.clone(),
-        status: if diagnostics.is_empty() {
+        status: if diagnostics.is_empty() && !policy_failed {
             "passed"
         } else {
             "failed"
@@ -1501,6 +1537,7 @@ fn build_check_receipt(outcome: &CheckOutcome) -> CheckReceipt {
         declared_effects,
         observed_capabilities,
         diagnostics,
+        policy: receipt_policy,
     }
 }
 
@@ -1627,17 +1664,40 @@ fn write_check_receipt(path: &Path, receipt: &CheckReceipt) -> Result<(), i32> {
     }
 }
 
-fn cmd_check(file: &Path, receipt: Option<&Path>) -> Result<(), i32> {
+fn render_check_policy_output(policy: Option<&CheckPolicyDecision>) {
+    let Some(policy) = policy else {
+        return;
+    };
+    for violation in &policy.violations {
+        let target = if violation.function.is_empty() {
+            violation.surface.to_string()
+        } else {
+            format!("{} in {}", violation.surface, violation.function)
+        };
+        eprintln!("Policy violation: {} ({})", violation.message, target);
+    }
+}
+
+fn cmd_check(file: &Path, receipt: Option<&Path>, policy: Option<&Path>) -> Result<(), i32> {
     let receipt_to_stdout = receipt == Some(Path::new("-"));
+    let loaded_policy = policy.map(load_check_policy).transpose()?;
     let outcome = run_check(file)?;
-    let receipt_value = receipt.map(|_| build_check_receipt(&outcome));
+    let policy_decision = loaded_policy
+        .as_ref()
+        .map(|policy| evaluate_check_policy(policy, &outcome));
+    let receipt_value = receipt.map(|_| build_check_receipt(&outcome, policy_decision.as_ref()));
 
     render_check_human_output(&outcome, receipt_to_stdout);
+    render_check_policy_output(policy_decision.as_ref());
     if let Some(receipt_value) = receipt_value {
         write_check_receipt(receipt.expect("receipt path is present"), &receipt_value)?;
     }
 
-    if outcome.parse_errors.is_empty() && outcome.type_errors.is_empty() {
+    let policy_passed = policy_decision
+        .as_ref()
+        .map(|decision| decision.violations.is_empty())
+        .unwrap_or(true);
+    if outcome.parse_errors.is_empty() && outcome.type_errors.is_empty() && policy_passed {
         Ok(())
     } else {
         Err(1)
