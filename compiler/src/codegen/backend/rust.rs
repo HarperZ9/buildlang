@@ -1293,7 +1293,7 @@ fn choose(x: i32) -> i32 {
     if x > 0 { x } else { 0 }
 }
 
-fn main() {
+fn main() ~ Console {
     let v: i32 = choose(4);
     println("{}", v);
 }
@@ -1319,7 +1319,7 @@ fn read_value(x: &i32) -> i32 {
     *x
 }
 
-fn main() {
+fn main() ~ Console {
     let mut n: i32 = 10;
     add_to(&mut n, 5);
     let val: i32 = read_value(&n);
@@ -1348,7 +1348,7 @@ fn sum_array(arr: [i32; 3]) -> i32 {
     arr[0] + arr[1] + arr[2]
 }
 
-fn main() {
+fn main() ~ Console {
     let p = Point { x: 3, y: 4 };
     let values = [p.x, p.y, 5];
     let total = sum_array(values);
@@ -1373,7 +1373,7 @@ struct Point {
     y: i32,
 }
 
-fn main() {
+fn main() ~ Console {
     let p = Point { x: 3, y: 4 };
     let rx: &i32 = &p.x;
     println("{}", *rx);
@@ -1391,7 +1391,7 @@ struct Point {
     y: i32,
 }
 
-fn main() {
+fn main() ~ Console {
     let p = Point { x: 3, y: 4 };
     let points = [p; 2];
     println("{}", points[0].x);
@@ -1413,7 +1413,7 @@ fn sum(p: Point) -> i32 {
     p.x + p.y
 }
 
-fn main() {
+fn main() ~ Console {
     let p = Point { x: 3, y: 4 };
     let first = sum(p);
     let second = sum(p);
@@ -1432,7 +1432,7 @@ struct Point {
     y: i32,
 }
 
-fn main() {
+fn main() ~ Console {
     let p = Point { x: 3, y: 4 };
     let q = p;
     let r = p;
@@ -1456,7 +1456,7 @@ struct Pair {
     right: Point,
 }
 
-fn main() {
+fn main() ~ Console {
     let p = Point { x: 3, y: 4 };
     let pair = Pair { left: p, right: p };
     println("{}", pair.left.x + pair.right.y);
@@ -1480,7 +1480,7 @@ struct Point {
     y: i32,
 }
 
-fn main() {
+fn main() ~ Console {
     let p = Point { x: 3, y: 4 };
     let pair = (p, p);
     println("{}", pair.0.x + pair.1.y);
@@ -1502,7 +1502,7 @@ struct Holder {
     item: Point,
 }
 
-fn main() {
+fn main() ~ Console {
     let p = Point { x: 3, y: 4 };
     let mut holder = Holder { item: p };
     holder.item = p;
@@ -1527,7 +1527,7 @@ fn sum(pair: (i32, i32)) -> i32 {
     pair.0 + pair.1
 }
 
-fn main() {
+fn main() ~ Console {
     let pair = (3, 4);
     let first = sum(pair);
     let second = sum(pair);
@@ -1693,7 +1693,7 @@ struct Wrapper {
     inner: Point,
 }
 
-fn main() {
+fn main() ~ Console {
     let p = Point { x: 3, y: 4 };
     let w = Wrapper { inner: p };
     let a = w.inner;
@@ -1719,7 +1719,7 @@ struct Point {
     y: i32,
 }
 
-fn main() {
+fn main() ~ Console {
     let p = Point { x: 3, y: 4 };
     let rp: &Point = &p;
     let a = *rp;
@@ -1744,7 +1744,7 @@ fn identity(x: &i32) -> &i32 {
     x
 }
 
-fn main() {
+fn main() ~ Console {
     let a: i32 = 42;
     let r: &i32 = identity(&a);
     println("{}", *r);
