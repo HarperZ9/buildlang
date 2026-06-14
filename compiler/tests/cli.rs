@@ -550,7 +550,10 @@ fn check_policy_allow_list_rejects_unlisted_effect() {
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
 
-    assert!(!output.status.success(), "unlisted effect should fail policy");
+    assert!(
+        !output.status.success(),
+        "unlisted effect should fail policy"
+    );
     let receipt = receipt_from_stdout(&output);
     let violations = receipt["policy"]["violations"]
         .as_array()
@@ -592,7 +595,10 @@ fn check_policy_rejects_unsupported_schema() {
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
 
-    assert!(!output.status.success(), "unsupported policy schema should fail");
+    assert!(
+        !output.status.success(),
+        "unsupported policy schema should fail"
+    );
     assert!(
         String::from_utf8_lossy(&output.stderr)
             .contains("Unsupported check policy schema 'quantalang-check-policy/v0'"),
