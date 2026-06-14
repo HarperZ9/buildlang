@@ -3309,6 +3309,151 @@ fn main() ~ FileSystem {
 }
 
 #[test]
+fn check_if_let_destructured_enum_variant_callback_requires_declared_effect() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_if_let_enum_variant_callback_requires_effect_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+enum Slot {
+    Ready((fn() -> str) with FileSystem),
+}
+
+fn load_config() -> str ~ FileSystem {
+    read_file("config.toml")
+}
+
+fn load_secret() -> str ~ FileSystem {
+    read_file("secret.toml")
+}
+
+fn main() {
+    let use_secret = true;
+    let slot = if use_secret {
+        Slot::Ready(load_secret)
+    } else {
+        Slot::Ready(load_config)
+    };
+    if let Slot::Ready(loader) = slot {
+        loader();
+    };
+}
+"#,
+    )
+    .expect("write if-let enum variant callback effect fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "if-let destructured callback without declared effect should fail\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(receipt["status"], "failed");
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["load_config", "load_secret", "loader"])
+    );
+    let diagnostics = receipt["diagnostics"]
+        .as_array()
+        .expect("diagnostics array");
+    assert!(
+        diagnostics.iter().any(|diag| {
+            let message = diag["message"].as_str().unwrap_or_default();
+            message.contains("FileSystem") && message.contains("main")
+        }),
+        "missing FileSystem diagnostic for if-let callback\nreceipt:\n{}",
+        serde_json::to_string_pretty(&receipt).expect("receipt should serialize")
+    );
+}
+
+#[test]
+fn check_while_let_destructured_enum_variant_callback_requires_declared_effect() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_while_let_enum_variant_callback_requires_effect_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+enum Slot {
+    Ready((fn() -> str) with FileSystem),
+}
+
+fn load_config() -> str ~ FileSystem {
+    read_file("config.toml")
+}
+
+fn load_secret() -> str ~ FileSystem {
+    read_file("secret.toml")
+}
+
+fn main() {
+    let use_secret = true;
+    let slot = if use_secret {
+        Slot::Ready(load_secret)
+    } else {
+        Slot::Ready(load_config)
+    };
+    while let Slot::Ready(loader) = slot {
+        loader();
+        break;
+    };
+}
+"#,
+    )
+    .expect("write while-let enum variant callback effect fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "while-let destructured callback without declared effect should fail\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(receipt["status"], "failed");
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["load_config", "load_secret", "loader"])
+    );
+    let diagnostics = receipt["diagnostics"]
+        .as_array()
+        .expect("diagnostics array");
+    assert!(
+        diagnostics.iter().any(|diag| {
+            let message = diag["message"].as_str().unwrap_or_default();
+            message.contains("FileSystem") && message.contains("main")
+        }),
+        "missing FileSystem diagnostic for while-let callback\nreceipt:\n{}",
+        serde_json::to_string_pretty(&receipt).expect("receipt should serialize")
+    );
+}
+
+#[test]
 fn check_receipt_file_records_failing_capability_diagnostic() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_check_receipt_fail_{}.quanta",
