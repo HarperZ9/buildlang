@@ -131,8 +131,9 @@ quantac vignette.quanta --target glsl -o vignette.glsl
 
 `quantac check` now treats direct ambient runtime access as typed effects. A
 function that calls helpers such as `read_file`, `write_file`, `tcp_connect`,
-`process_exit`, `getenv`, `clock_ms`, Vulkan runtime helpers, or an `extern`
-function must declare the matching capability effect in its signature:
+`process_exit`, `getenv`, `clock_ms`, Vulkan runtime helpers, known `quanta_*`
+C runtime helper aliases, or an `extern` function must declare the matching
+capability effect in its signature:
 
 ```quanta
 fn load_config() ~ FileSystem {
@@ -145,6 +146,12 @@ fn call_foreign() ~ Foreign {
     touch();
 }
 ```
+
+Known runtime C helper aliases declared through `extern` blocks are classified
+by their actual capability instead of being flattened into generic FFI. For
+example, `quanta_gfx_init` requires `Gpu`, `quanta_read_file` requires
+`FileSystem`, and `quanta_tcp_connect` requires `Network`. Unknown extern
+functions remain `Foreign`.
 
 If the effect is missing, the checker reports the required capability and a
 diagnostic note naming the ambient call or macro that triggered it. This is the
@@ -256,9 +263,11 @@ Receipts separate direct capability boundaries from callers that inherit those
 effects. `observed_capabilities` records ambient helper, macro, and FFI access
 inside a function, such as `read_file`, `tcp_connect`, `println!`, or `touch`.
 `propagated_effects` records effectful callees that made a caller inherit a
-typed effect. Raw extern-block calls are direct `Foreign` boundaries; calls to
-local wrappers around those extern functions are propagated `Foreign`
-dependencies. Qualified ambient helpers keep their full source path, such as
+typed effect. Raw unknown extern-block calls are direct `Foreign` boundaries;
+known runtime helper aliases declared in extern blocks are direct entries under
+their domain capability such as `Gpu` or `FileSystem`; calls to local wrappers
+around those extern functions are propagated dependencies. Qualified ambient
+helpers keep their full source path, such as
 `io::read_file`, so source allowlists can distinguish equivalent helper names
 from different modules. This lets teams permit a small audited boundary
 function while still proving which higher-level workflows depend on it.
@@ -395,7 +404,7 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-14
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 730 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
+- **Tests**: 792 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
