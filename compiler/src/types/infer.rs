@@ -1081,11 +1081,7 @@ impl<'ctx> TypeInfer<'ctx> {
         }
     }
 
-    fn bind_explicit_struct_field_pattern_call_sources(
-        &mut self,
-        pattern: &ast::Pattern,
-        value: &ast::Expr,
-    ) {
+    fn bind_direct_expr_pattern_call_sources(&mut self, pattern: &ast::Pattern, value: &ast::Expr) {
         if matches!(pattern.kind, ast::PatternKind::Ident { .. })
             && self.expr_has_bound_call_source_descendants(value)
         {
@@ -1113,7 +1109,7 @@ impl<'ctx> TypeInfer<'ctx> {
             ast::PatternKind::Tuple(patterns) => {
                 if let ExprKind::Tuple(elems) = &expr.kind {
                     for (pattern, elem) in patterns.iter().zip(elems.iter()) {
-                        self.bind_pattern_call_sources(pattern, elem);
+                        self.bind_direct_expr_pattern_call_sources(pattern, elem);
                     }
                 } else {
                     for (index, pattern) in patterns.iter().enumerate() {
@@ -1127,7 +1123,7 @@ impl<'ctx> TypeInfer<'ctx> {
                 if let ExprKind::Call { func, args } = &expr.kind {
                     if self.is_positional_constructor_call(func, args.len()) {
                         for (pattern, arg) in patterns.iter().zip(args.iter()) {
-                            self.bind_pattern_call_sources(pattern, arg);
+                            self.bind_direct_expr_pattern_call_sources(pattern, arg);
                         }
                         return;
                     }
@@ -1142,7 +1138,7 @@ impl<'ctx> TypeInfer<'ctx> {
             ast::PatternKind::Slice(patterns) => {
                 if let ExprKind::Array(elems) = &expr.kind {
                     for (pattern, elem) in patterns.iter().zip(elems.iter()) {
-                        self.bind_pattern_call_sources(pattern, elem);
+                        self.bind_direct_expr_pattern_call_sources(pattern, elem);
                     }
                 } else {
                     for (index, pattern) in patterns.iter().enumerate() {
@@ -1165,10 +1161,7 @@ impl<'ctx> TypeInfer<'ctx> {
                             .find(|expr_field| expr_field.name.name == field.name.name)
                         {
                             if let Some(value) = expr_field.value.as_deref() {
-                                self.bind_explicit_struct_field_pattern_call_sources(
-                                    &field.pattern,
-                                    value,
-                                );
+                                self.bind_direct_expr_pattern_call_sources(&field.pattern, value);
                             } else {
                                 let sources = self.call_sources_for_name(field.name.as_ref());
                                 self.bind_pattern_to_call_sources(&field.pattern, sources);
