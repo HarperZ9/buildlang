@@ -1082,6 +1082,138 @@ fn receipt_verify_json_reports_failed_policy_file_digest() {
 }
 
 #[test]
+fn receipt_verify_rejects_tampered_observed_capabilities() {
+    let dir = std::env::temp_dir().join(format!(
+        "quantalang_receipt_verify_tampered_capabilities_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create tampered receipt fixture dir");
+    let entry = dir.join("entry.quanta");
+    let receipt = dir.join("receipt.json");
+    fs::write(&entry, r#"fn main() ~ Console { println!("ok"); }"#)
+        .expect("write tampered receipt entry");
+
+    let check_output = quantac()
+        .arg("check")
+        .arg(&entry)
+        .arg("--receipt")
+        .arg(&receipt)
+        .output()
+        .expect("write receipt before capability tamper");
+    assert!(
+        check_output.status.success(),
+        "check should pass before receipt tamper\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&check_output.stdout),
+        String::from_utf8_lossy(&check_output.stderr)
+    );
+
+    let mut saved: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt).expect("read saved receipt"))
+            .expect("saved receipt should parse");
+    saved["observed_capabilities"]["main"]["Console"] = serde_json::json!(["forged_console"]);
+    fs::write(
+        &receipt,
+        serde_json::to_string_pretty(&saved).expect("serialize tampered receipt"),
+    )
+    .expect("write tampered receipt");
+
+    let verify_output = quantac()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .output()
+        .expect("verify tampered receipt");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        !verify_output.status.success(),
+        "tampered capability receipt should fail verification"
+    );
+    assert!(
+        String::from_utf8_lossy(&verify_output.stderr)
+            .contains("receipt observed_capabilities mismatch"),
+        "stderr should report observed capability mismatch:\n{}",
+        String::from_utf8_lossy(&verify_output.stderr)
+    );
+}
+
+#[test]
+fn receipt_verify_json_reports_tampered_propagated_effects() {
+    let dir = std::env::temp_dir().join(format!(
+        "quantalang_receipt_verify_tampered_propagated_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create tampered propagated receipt fixture dir");
+    let entry = dir.join("entry.quanta");
+    let receipt = dir.join("receipt.json");
+    fs::write(
+        &entry,
+        r#"
+fn load_config() ~ FileSystem {
+    read_file("ops.txt");
+}
+
+fn main() ~ FileSystem {
+    load_config();
+}
+"#,
+    )
+    .expect("write propagated receipt entry");
+
+    let check_output = quantac()
+        .arg("check")
+        .arg(&entry)
+        .arg("--receipt")
+        .arg(&receipt)
+        .output()
+        .expect("write receipt before propagated tamper");
+    assert!(
+        check_output.status.success(),
+        "check should pass before propagated tamper\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&check_output.stdout),
+        String::from_utf8_lossy(&check_output.stderr)
+    );
+
+    let mut saved: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt).expect("read saved propagated receipt"))
+            .expect("saved propagated receipt should parse");
+    saved["propagated_effects"]["main"]["FileSystem"] = serde_json::json!(["forged_boundary"]);
+    fs::write(
+        &receipt,
+        serde_json::to_string_pretty(&saved).expect("serialize tampered propagated receipt"),
+    )
+    .expect("write tampered propagated receipt");
+
+    let verify_output = quantac()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .arg("--json")
+        .output()
+        .expect("verify tampered propagated receipt as json");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        !verify_output.status.success(),
+        "tampered propagated receipt should fail verification"
+    );
+    let report: serde_json::Value = serde_json::from_slice(&verify_output.stdout)
+        .expect("tampered propagated failure report should be JSON");
+    assert_eq!(report["status"], "failed");
+    let replay_check = verification_check(&report, "propagated_effects");
+    assert_eq!(replay_check["status"], "failed");
+    assert!(
+        replay_check["message"]
+            .as_str()
+            .expect("propagated replay failure message")
+            .contains("receipt propagated_effects mismatch"),
+        "propagated failure should explain mismatch: {replay_check:#?}"
+    );
+}
+
+#[test]
 fn receipt_verify_rejects_changed_input_graph() {
     let dir = std::env::temp_dir().join(format!(
         "quantalang_receipt_verify_graph_{}",

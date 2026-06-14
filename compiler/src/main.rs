@@ -1056,6 +1056,102 @@ fn push_receipt_verification_check(
     });
 }
 
+fn compact_receipt_value(value: Option<&serde_json::Value>) -> Option<String> {
+    value.map(|value| {
+        serde_json::to_string(value).unwrap_or_else(|err| format!("<unserializable: {err}>"))
+    })
+}
+
+fn receipt_replay_fields(
+    receipt: &serde_json::Value,
+    current_receipt: &serde_json::Value,
+) -> Vec<(&'static str, &'static str)> {
+    let mut fields = vec![
+        ("/status", "status"),
+        ("/items", "items"),
+        ("/tokens", "tokens"),
+        ("/declared_effects", "declared_effects"),
+        ("/observed_capabilities", "observed_capabilities"),
+        ("/propagated_effects", "propagated_effects"),
+        ("/diagnostics", "diagnostics"),
+    ];
+    if receipt.pointer("/policy").is_some() || current_receipt.pointer("/policy").is_some() {
+        fields.push(("/policy/status", "policy_status"));
+        fields.push(("/policy/violations", "policy_violations"));
+    }
+    fields
+}
+
+fn load_receipt_policy(receipt: &serde_json::Value) -> Result<Option<LoadedCheckPolicy>, i32> {
+    if let Some(profile) = receipt
+        .pointer("/policy/profile")
+        .and_then(serde_json::Value::as_str)
+    {
+        return load_builtin_check_policy(profile).map(Some);
+    }
+
+    let Some(policy_source) = receipt
+        .pointer("/policy/source")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(None);
+    };
+
+    if let Some(profile) = policy_source.strip_prefix("builtin:") {
+        load_builtin_check_policy(profile).map(Some)
+    } else {
+        load_check_policy(Path::new(policy_source)).map(Some)
+    }
+}
+
+fn current_replayed_receipt_value(
+    receipt: &serde_json::Value,
+    current: &CheckOutcome,
+) -> Result<serde_json::Value, i32> {
+    let loaded_policy = load_receipt_policy(receipt)?;
+    let policy_decision = loaded_policy
+        .as_ref()
+        .map(|policy| evaluate_check_policy(policy, current));
+    let current_receipt = build_check_receipt(current, policy_decision.as_ref());
+    serde_json::to_value(current_receipt).map_err(|err| {
+        eprintln!("Error rebuilding receipt for verification: {}", err);
+        1
+    })
+}
+
+fn verify_receipt_replay_fields(
+    receipt: &serde_json::Value,
+    current_receipt: &serde_json::Value,
+) -> Result<(), i32> {
+    for (pointer, name) in receipt_replay_fields(receipt, current_receipt) {
+        if receipt.pointer(pointer) != current_receipt.pointer(pointer) {
+            eprintln!("Error: receipt {} mismatch", name);
+            return Err(1);
+        }
+    }
+    Ok(())
+}
+
+fn push_receipt_replay_checks(
+    checks: &mut Vec<ReceiptVerificationCheck>,
+    receipt: &serde_json::Value,
+    current_receipt: &serde_json::Value,
+) {
+    for (pointer, name) in receipt_replay_fields(receipt, current_receipt) {
+        let expected = compact_receipt_value(receipt.pointer(pointer));
+        let actual = compact_receipt_value(current_receipt.pointer(pointer));
+        let mismatch = receipt.pointer(pointer) != current_receipt.pointer(pointer);
+        push_receipt_verification_check(
+            checks,
+            name,
+            expected,
+            actual,
+            None,
+            mismatch.then(|| format!("receipt {} mismatch", name)),
+        );
+    }
+}
+
 fn cmd_receipt_verify(
     receipt_path: &Path,
     source_override: Option<&Path>,
@@ -1151,6 +1247,9 @@ fn cmd_receipt_verify(
             return Err(1);
         }
     }
+
+    let current_receipt = current_replayed_receipt_value(&receipt, &current)?;
+    verify_receipt_replay_fields(&receipt, &current_receipt)?;
 
     println!("Receipt verified: {}", receipt_path.display());
     Ok(())
@@ -1285,6 +1384,9 @@ fn cmd_receipt_verify_json(receipt_path: &Path, source_override: Option<&Path>) 
             .then(|| "built-in policy profile digest mismatch".to_string()),
         );
     }
+
+    let current_receipt = current_replayed_receipt_value(&receipt, &current)?;
+    push_receipt_replay_checks(&mut checks, &receipt, &current_receipt);
 
     let passed = checks.iter().all(|check| check.status == "passed");
     let report = ReceiptVerificationReport {
