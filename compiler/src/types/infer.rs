@@ -615,6 +615,51 @@ impl<'ctx> TypeInfer<'ctx> {
                 .is_some_and(|field_count| field_count == arg_count)
     }
 
+    fn named_aggregate_field_names(&self, path: &ast::Path) -> Vec<String> {
+        if let Some(name) = path.last_ident().map(|ident| ident.name.as_ref()) {
+            if let Some(type_def) = self.ctx.lookup_type_by_name(name) {
+                if let TypeDefKind::Struct(struct_def) = &type_def.kind {
+                    if !struct_def.is_tuple {
+                        return struct_def
+                            .fields
+                            .iter()
+                            .map(|(field, _)| field.to_string())
+                            .collect();
+                    }
+                }
+            }
+        }
+
+        if path.segments.len() < 2 {
+            return Vec::new();
+        }
+
+        let enum_name = path.segments[path.segments.len() - 2].ident.name.as_ref();
+        let variant_name = path
+            .last_ident()
+            .map(|ident| ident.name.as_ref())
+            .unwrap_or("");
+        let Some(type_def) = self.ctx.lookup_type_by_name(enum_name) else {
+            return Vec::new();
+        };
+        let TypeDefKind::Enum(enum_def) = &type_def.kind else {
+            return Vec::new();
+        };
+
+        enum_def
+            .variants
+            .iter()
+            .find(|variant| variant.name.as_ref() == variant_name)
+            .map(|variant| {
+                variant
+                    .fields
+                    .iter()
+                    .filter_map(|(field, _)| field.as_ref().map(|field| field.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn call_access_sources(&self, expr: &ast::Expr) -> Vec<String> {
         match &expr.kind {
             ExprKind::Ident(ident) => vec![ident.name.to_string()],
@@ -728,7 +773,31 @@ impl<'ctx> TypeInfer<'ctx> {
                 self.bind_member_call_sources(&member_name, self.call_sources(element), merge);
                 self.bind_aggregate_call_sources_inner(&member_name, element, merge);
             }
-            ExprKind::Struct { fields, .. } => {
+            ExprKind::Struct { path, fields, rest } => {
+                let explicit_fields: BTreeSet<_> = fields
+                    .iter()
+                    .map(|field| field.name.as_ref().to_string())
+                    .collect();
+
+                if let Some(rest_expr) = rest.as_deref() {
+                    let rest_sources = self.call_sources(rest_expr);
+                    for field_name in self.named_aggregate_field_names(path) {
+                        if explicit_fields.contains(&field_name) {
+                            continue;
+                        }
+
+                        let member_name = format!("{}.{}", name, field_name);
+                        let inherited_sources = rest_sources
+                            .iter()
+                            .flat_map(|source| {
+                                let access_source = format!("{}.{}", source, field_name);
+                                self.bound_call_sources_for_access(&access_source)
+                            })
+                            .collect();
+                        self.bind_member_call_sources(&member_name, inherited_sources, merge);
+                    }
+                }
+
                 for field in fields {
                     let member_name = format!("{}.{}", name, field.name.as_ref());
                     let sources = field.value.as_deref().map_or_else(
