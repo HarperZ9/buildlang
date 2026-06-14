@@ -359,6 +359,33 @@ impl<'ctx> TypeInfer<'ctx> {
         }
     }
 
+    fn bind_pattern_call_sources(&mut self, pattern: &ast::Pattern, expr: &ast::Expr) {
+        match &pattern.kind {
+            ast::PatternKind::Ident {
+                name, subpattern, ..
+            } => {
+                let sources = self.call_sources(expr);
+                self.bind_call_sources(name.name.as_ref(), sources);
+                if let Some(subpattern) = subpattern {
+                    self.bind_pattern_call_sources(subpattern, expr);
+                }
+            }
+            ast::PatternKind::Tuple(patterns) => {
+                if let ExprKind::Tuple(elems) = &expr.kind {
+                    for (pattern, elem) in patterns.iter().zip(elems.iter()) {
+                        self.bind_pattern_call_sources(pattern, elem);
+                    }
+                }
+            }
+            ast::PatternKind::Paren(inner)
+            | ast::PatternKind::Ref { pattern: inner, .. }
+            | ast::PatternKind::Box(inner) => {
+                self.bind_pattern_call_sources(inner, expr);
+            }
+            _ => {}
+        }
+    }
+
     fn lookup_call_source_binding(&self, name: &str) -> Option<&Vec<String>> {
         self.source_bindings
             .iter()
@@ -3145,7 +3172,6 @@ impl<'ctx> TypeInfer<'ctx> {
         };
 
         if let Some(init) = &local.init {
-            let init_sources = self.call_sources(&init.expr);
             let init_ty = self.infer_expr(&init.expr);
             let _ = self.unify(&ty, &init_ty, local.span);
 
@@ -3156,8 +3182,8 @@ impl<'ctx> TypeInfer<'ctx> {
             };
             if let Some(ref name) = var_name {
                 self.check_borrow_at_binding(name, &init.expr, &ty, local.span);
-                self.bind_call_sources(name, init_sources);
             }
+            self.bind_pattern_call_sources(&local.pattern, &init.expr);
         }
 
         // Bind pattern variables

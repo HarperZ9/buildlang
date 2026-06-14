@@ -192,7 +192,9 @@ tuple slots and indexed ops tables record sources such as `loaders.0` and
 such as `make_loader()`. `if` and `match` expressions that select an
 effectful function value record every possible branch target, for example
 `load_config` and `load_secret`; binding that selected function before calling
-it records both the binding and the possible selected targets. Later assignment
+it records both the binding and the possible selected targets. Tuple
+destructuring keeps that source evidence too, so `let (loader,) = (...)`
+continues to record the selected callees as well as `loader`. Later assignment
 to a callback variable refreshes that evidence, so stale sources do not survive
 `loader = load_secret` or `loader = read_file`.
 Async blocks follow the same delayed-effect model for type checking: creating
@@ -317,9 +319,11 @@ Control-flow selectors keep reviewable evidence too: calling the result of an
 `if` or `match` expression records the possible effectful branch targets, such
 as `load_config` and `load_secret`. If the selected function is bound first,
 for example `let loader = if ...`, a later `loader()` call records `loader`
-plus the possible selected targets. Plain assignment to an identifier rebinds
-that call-source evidence, so policy receipts follow mutable callback slots
-instead of preserving stale earlier sources.
+plus the possible selected targets. The same source binding is preserved through
+tuple destructuring, so `let (loader,) = (...)` does not collapse a selected
+effectful function down to only the local alias. Plain assignment to an
+identifier rebinds that call-source evidence, so policy receipts follow mutable
+callback slots instead of preserving stale earlier sources.
 
 Policy profiles can enforce that split:
 
@@ -423,7 +427,7 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-14
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 803 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
+- **Tests**: 804 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
