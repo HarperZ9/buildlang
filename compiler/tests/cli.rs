@@ -1656,6 +1656,62 @@ fn main() {
 }
 
 #[test]
+fn check_effectful_tuple_struct_constructor_is_pure_until_called() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_effectful_tuple_struct_constructor_pure_until_called_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+struct Slot((fn() -> str) with FileSystem);
+
+fn load_config() -> str ~ FileSystem {
+    read_file("config.toml")
+}
+
+fn main() {
+    let slot = Slot(load_config);
+}
+"#,
+    )
+    .expect("write effectful tuple struct constructor fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "storing an effectful callback in a tuple struct should stay pure until call\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]
+            .as_object()
+            .expect("main propagated effects")
+            .len(),
+        0
+    );
+}
+
+#[test]
 fn check_reports_effect_for_effectful_closure_alias_call() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_effectful_closure_alias_gate_{}.quanta",
@@ -3107,6 +3163,66 @@ fn main() ~ FileSystem {
     assert!(
         output.status.success(),
         "slice-destructured effectful function receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["load_config", "load_secret", "loader"])
+    );
+}
+
+#[test]
+fn check_receipt_records_tuple_struct_destructured_selected_effectful_function_sources() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_tuple_struct_destructured_selected_effectful_function_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+struct Slot((fn() -> str) with FileSystem);
+
+fn load_config() -> str ~ FileSystem {
+    read_file("config.toml")
+}
+
+fn load_secret() -> str ~ FileSystem {
+    read_file("secret.toml")
+}
+
+fn main() ~ FileSystem {
+    let use_secret = true;
+    let slot = Slot(if use_secret { load_secret } else { load_config });
+    let Slot(loader) = slot;
+    loader();
+}
+"#,
+    )
+    .expect("write tuple-struct destructured selected effectful function receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "tuple-struct destructured selected effectful function receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
