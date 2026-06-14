@@ -279,6 +279,14 @@ impl<'ctx> TypeInfer<'ctx> {
         }
     }
 
+    fn record_call_capability(&mut self, call_name: &str) {
+        if let Some(effect_name) = super::capabilities::capability_effect_for_call(call_name) {
+            self.current_effects
+                .add(super::effects::Effect::new(effect_name));
+            self.record_capability_source(effect_name, call_name);
+        }
+    }
+
     fn call_name(func: &ast::Expr) -> Option<&str> {
         match &func.kind {
             ExprKind::Ident(ident) => Some(ident.name.as_ref()),
@@ -1679,6 +1687,9 @@ impl<'ctx> TypeInfer<'ctx> {
                 ret
             }
             TyKind::Var(_) | TyKind::Infer(_) => {
+                if let Some(name) = call_name.as_deref() {
+                    self.record_call_capability(name);
+                }
                 // Unknown function type - create fresh types for params and return
                 let param_tys: Vec<_> = args.iter().map(|a| self.infer_expr(a)).collect();
                 let ret_ty = Ty::fresh_var();
@@ -1688,12 +1699,7 @@ impl<'ctx> TypeInfer<'ctx> {
             }
             TyKind::Error => {
                 if let Some(name) = call_name.as_deref() {
-                    if let Some(effect_name) = super::capabilities::capability_effect_for_call(name)
-                    {
-                        self.current_effects
-                            .add(super::effects::Effect::new(effect_name));
-                        self.record_capability_source(effect_name, name);
-                    }
+                    self.record_call_capability(name);
                 }
                 for arg in args {
                     let _ = self.infer_expr(arg);
