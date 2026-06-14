@@ -130,6 +130,10 @@ enum Commands {
         /// Evaluate a built-in check policy profile
         #[arg(long, value_name = "NAME", conflicts_with = "policy")]
         profile: Option<String>,
+
+        /// Require the selected built-in profile to match a SHA-256 digest
+        #[arg(long, value_name = "HEX")]
+        expect_profile_digest: Option<String>,
     },
 
     /// Build a project
@@ -317,11 +321,13 @@ fn main() -> ExitCode {
             receipt,
             policy,
             profile,
+            expect_profile_digest,
         }) => cmd_check(
             &file,
             receipt.as_deref(),
             policy.as_deref(),
             profile.as_deref(),
+            expect_profile_digest.as_deref(),
         ),
         Some(Commands::Build {
             path,
@@ -829,6 +835,12 @@ fn builtin_policy_digest(name: &str) -> Option<CheckReceiptSourceDigest> {
         algorithm: "sha256",
         hex: source_digest_hex(json.as_bytes()),
     })
+}
+
+fn normalize_profile_digest_pin(pin: &str) -> &str {
+    pin.strip_prefix("sha256:")
+        .or_else(|| pin.strip_prefix("SHA256:"))
+        .unwrap_or(pin)
 }
 
 fn builtin_policy_catalog_json() -> String {
@@ -2158,10 +2170,15 @@ fn cmd_check(
     receipt: Option<&Path>,
     policy: Option<&Path>,
     profile: Option<&str>,
+    expect_profile_digest: Option<&str>,
 ) -> Result<(), i32> {
     let receipt_to_stdout = receipt == Some(Path::new("-"));
     if policy.is_some() && profile.is_some() {
         eprintln!("Error: --policy and --profile cannot be used together");
+        return Err(1);
+    }
+    if expect_profile_digest.is_some() && profile.is_none() {
+        eprintln!("Error: --expect-profile-digest requires --profile");
         return Err(1);
     }
     let loaded_policy = if let Some(policy) = policy {
@@ -2171,6 +2188,21 @@ fn cmd_check(
     } else {
         None
     };
+    if let Some(expected_digest) = expect_profile_digest {
+        let profile_name = profile.expect("profile is required for digest pinning");
+        let actual_digest = loaded_policy
+            .as_ref()
+            .and_then(|policy| policy.builtin_profile_digest.as_ref())
+            .expect("built-in profile digest is present");
+        let expected_hex = normalize_profile_digest_pin(expected_digest);
+        if !actual_digest.hex.eq_ignore_ascii_case(expected_hex) {
+            eprintln!(
+                "Error: Built-in policy profile digest mismatch for '{}': expected sha256:{}, actual sha256:{}",
+                profile_name, expected_hex, actual_digest.hex
+            );
+            return Err(1);
+        }
+    }
     let outcome = run_check(file)?;
     let policy_decision = loaded_policy
         .as_ref()

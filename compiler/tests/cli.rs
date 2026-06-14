@@ -1525,6 +1525,129 @@ fn check_profile_receipt_digest_matches_printed_builtin_profile() {
 }
 
 #[test]
+fn check_profile_expect_digest_accepts_matching_builtin_digest() {
+    let dir = std::env::temp_dir().join(format!(
+        "quantalang_profile_expect_digest_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create profile digest fixture directory");
+    let input = dir.join("pure.quanta");
+    fs::write(&input, r#"fn main() {}"#).expect("write pure input");
+
+    let catalog_output = quantac()
+        .args(["policy", "list", "--json"])
+        .output()
+        .expect("run quantac policy list --json");
+    assert!(
+        catalog_output.status.success(),
+        "policy catalog should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&catalog_output.stdout),
+        String::from_utf8_lossy(&catalog_output.stderr)
+    );
+    let catalog: serde_json::Value =
+        serde_json::from_slice(&catalog_output.stdout).expect("catalog should be JSON");
+    let pure_digest = catalog["profiles"]
+        .as_array()
+        .expect("profiles should be an array")
+        .iter()
+        .find(|profile| profile["name"] == "pure")
+        .expect("pure profile")["digest"]["hex"]
+        .as_str()
+        .expect("pure digest")
+        .to_string();
+
+    let output = quantac()
+        .arg("check")
+        .arg(&input)
+        .arg("--profile")
+        .arg("pure")
+        .arg("--expect-profile-digest")
+        .arg(&pure_digest)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run check with matching profile digest");
+
+    assert!(
+        output.status.success(),
+        "matching profile digest should pass\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(receipt["policy"]["profile"], "pure");
+    assert_eq!(receipt["policy"]["profile_digest"]["hex"], pure_digest);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn check_profile_expect_digest_rejects_mismatch() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_profile_digest_mismatch_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(&fixture, r#"fn main() {}"#).expect("write pure fixture");
+    let wrong_digest = "0".repeat(64);
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--profile")
+        .arg("pure")
+        .arg("--expect-profile-digest")
+        .arg(&wrong_digest)
+        .output()
+        .expect("run check with mismatched profile digest");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "mismatched profile digest should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Built-in policy profile digest mismatch"),
+        "stderr should report digest mismatch:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("pure"),
+        "stderr should name the profile:\n{stderr}"
+    );
+}
+
+#[test]
+fn check_expect_profile_digest_requires_builtin_profile() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_profile_digest_without_profile_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(&fixture, r#"fn main() {}"#).expect("write pure fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--expect-profile-digest")
+        .arg("0".repeat(64))
+        .output()
+        .expect("run check with profile digest but no profile");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "profile digest pin without profile should fail"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("requires --profile"),
+        "stderr should report missing --profile:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn check_profile_rejects_unknown_builtin_profile() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_check_profile_unknown_{}.quanta",
