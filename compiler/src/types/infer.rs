@@ -78,6 +78,8 @@ pub struct TypeInfer<'ctx> {
     capability_sources: BTreeMap<String, BTreeSet<String>>,
     /// Capability effects mapped to effectful callees that propagated them.
     propagated_effect_sources: BTreeMap<String, BTreeSet<String>>,
+    /// Scoped local aliases for call-source evidence.
+    source_bindings: Vec<BTreeMap<String, Vec<String>>>,
     /// Whether any explicit `return` statement was found.
     has_return: bool,
     /// Borrow tracking state for the current function body.
@@ -230,6 +232,7 @@ impl<'ctx> TypeInfer<'ctx> {
             current_effects: super::effects::EffectRow::empty(),
             capability_sources: BTreeMap::new(),
             propagated_effect_sources: BTreeMap::new(),
+            source_bindings: vec![BTreeMap::new()],
             has_return: false,
             borrow_state: super::ty::BorrowState::new(),
         }
@@ -253,6 +256,7 @@ impl<'ctx> TypeInfer<'ctx> {
             current_effects: super::effects::EffectRow::empty(),
             capability_sources: BTreeMap::new(),
             propagated_effect_sources: BTreeMap::new(),
+            source_bindings: vec![BTreeMap::new()],
             has_return: false,
             borrow_state: super::ty::BorrowState::new(),
         }
@@ -302,6 +306,45 @@ impl<'ctx> TypeInfer<'ctx> {
                 .add(super::effects::Effect::new(effect_name));
             self.record_capability_source(effect_name, call_source);
         }
+    }
+
+    fn push_scope(&mut self, kind: ScopeKind) {
+        self.ctx.push_scope(kind);
+        self.source_bindings.push(BTreeMap::new());
+    }
+
+    fn pop_scope(&mut self) {
+        self.ctx.pop_scope();
+        if self.source_bindings.len() > 1 {
+            self.source_bindings.pop();
+        }
+    }
+
+    fn bind_call_sources(&mut self, name: &str, sources: Vec<String>) {
+        let sources = Self::dedupe_call_sources(
+            sources
+                .into_iter()
+                .filter(|source| source != name)
+                .filter(|source| {
+                    let lookup_name = source.rsplit("::").next().unwrap_or(source);
+                    super::capabilities::capability_effect_for_call(lookup_name).is_none()
+                })
+                .collect(),
+        );
+
+        if let Some(scope) = self.source_bindings.last_mut() {
+            scope.remove(name);
+            if !sources.is_empty() {
+                scope.insert(name.to_string(), sources);
+            }
+        }
+    }
+
+    fn lookup_call_source_binding(&self, name: &str) -> Option<&Vec<String>> {
+        self.source_bindings
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name))
     }
 
     fn ambient_capability_function_type(name: &str) -> Option<Ty> {
@@ -366,38 +409,48 @@ impl<'ctx> TypeInfer<'ctx> {
         row
     }
 
-    fn call_source(func: &ast::Expr) -> Option<String> {
-        Self::call_sources(func).into_iter().next()
+    fn call_source(&self, func: &ast::Expr) -> Option<String> {
+        self.call_sources(func).into_iter().next()
     }
 
-    fn call_sources(func: &ast::Expr) -> Vec<String> {
+    fn call_sources(&self, func: &ast::Expr) -> Vec<String> {
         match &func.kind {
-            ExprKind::Ident(ident) => vec![ident.name.to_string()],
+            ExprKind::Ident(ident) => {
+                let mut sources = vec![ident.name.to_string()];
+                if let Some(bound_sources) = self.lookup_call_source_binding(ident.name.as_ref()) {
+                    sources.extend(bound_sources.iter().cloned());
+                }
+                Self::dedupe_call_sources(sources)
+            }
             ExprKind::Path(path) => vec![path
                 .segments
                 .iter()
                 .map(|segment| segment.ident.name.as_ref())
                 .collect::<Vec<_>>()
                 .join("::")],
-            ExprKind::Field { expr, field } => Self::call_sources(expr)
+            ExprKind::Field { expr, field } => self
+                .call_sources(expr)
                 .into_iter()
                 .map(|base| format!("{}.{}", base, field.name))
                 .collect(),
-            ExprKind::TupleField { expr, index, .. } => Self::call_sources(expr)
+            ExprKind::TupleField { expr, index, .. } => self
+                .call_sources(expr)
                 .into_iter()
                 .map(|base| format!("{}.{}", base, index))
                 .collect(),
-            ExprKind::Index { expr, index } => Self::call_sources(expr)
+            ExprKind::Index { expr, index } => self
+                .call_sources(expr)
                 .into_iter()
                 .map(|base| {
-                    if let Some(index_source) = Self::index_source(index) {
+                    if let Some(index_source) = self.index_source(index) {
                         format!("{}[{}]", base, index_source)
                     } else {
                         format!("{}[]", base)
                     }
                 })
                 .collect(),
-            ExprKind::Call { func, .. } => Self::call_sources(func)
+            ExprKind::Call { func, .. } => self
+                .call_sources(func)
                 .into_iter()
                 .map(|base| format!("{}()", base))
                 .collect(),
@@ -408,21 +461,21 @@ impl<'ctx> TypeInfer<'ctx> {
             } => {
                 let then_sources = then_branch
                     .tail_expr()
-                    .map_or_else(Vec::new, Self::call_sources);
+                    .map_or_else(Vec::new, |expr| self.call_sources(expr));
                 let else_sources = else_branch
                     .as_deref()
-                    .map_or_else(Vec::new, Self::call_sources);
+                    .map_or_else(Vec::new, |expr| self.call_sources(expr));
                 Self::dedupe_call_sources(then_sources.into_iter().chain(else_sources).collect())
             }
             ExprKind::Match { arms, .. } => Self::dedupe_call_sources(
                 arms.iter()
-                    .flat_map(|arm| Self::call_sources(&arm.body))
+                    .flat_map(|arm| self.call_sources(&arm.body))
                     .collect(),
             ),
-            ExprKind::Block(block) | ExprKind::Unsafe(block) => {
-                block.tail_expr().map_or_else(Vec::new, Self::call_sources)
-            }
-            ExprKind::Paren(inner) => Self::call_sources(inner),
+            ExprKind::Block(block) | ExprKind::Unsafe(block) => block
+                .tail_expr()
+                .map_or_else(Vec::new, |expr| self.call_sources(expr)),
+            ExprKind::Paren(inner) => self.call_sources(inner),
             _ => Vec::new(),
         }
     }
@@ -435,10 +488,10 @@ impl<'ctx> TypeInfer<'ctx> {
             .collect()
     }
 
-    fn index_source(index: &ast::Expr) -> Option<String> {
+    fn index_source(&self, index: &ast::Expr) -> Option<String> {
         match &index.kind {
             ExprKind::Literal(AstLiteral::Int { value, .. }) => Some(value.to_string()),
-            ExprKind::Paren(inner) => Self::index_source(inner),
+            ExprKind::Paren(inner) => self.index_source(inner),
             ExprKind::Path(path) => Some(
                 path.segments
                     .iter()
@@ -446,7 +499,7 @@ impl<'ctx> TypeInfer<'ctx> {
                     .collect::<Vec<_>>()
                     .join("::"),
             ),
-            _ => Self::call_source(index),
+            _ => self.call_source(index),
         }
     }
 
@@ -899,10 +952,10 @@ impl<'ctx> TypeInfer<'ctx> {
                 ..
             } => {
                 let expr_ty = self.infer_expr(expr);
-                self.ctx.push_scope(ScopeKind::Loop);
+                self.push_scope(ScopeKind::Loop);
                 self.check_pattern(pattern, &expr_ty);
                 let _ = self.infer_block(body);
-                self.ctx.pop_scope();
+                self.pop_scope();
                 Ty::unit()
             }
 
@@ -1744,7 +1797,7 @@ impl<'ctx> TypeInfer<'ctx> {
     // =========================================================================
 
     fn infer_call(&mut self, func: &ast::Expr, args: &[ast::Expr], span: Span) -> Ty {
-        let call_sources = Self::call_sources(func);
+        let call_sources = self.call_sources(func);
         let func_ty = self.infer_expr(func);
         let func_ty = self.apply(&func_ty);
 
@@ -2600,9 +2653,9 @@ impl<'ctx> TypeInfer<'ctx> {
     }
 
     fn infer_loop(&mut self, body: &ast::Block) -> Ty {
-        self.ctx.push_scope(ScopeKind::Loop);
+        self.push_scope(ScopeKind::Loop);
         let _ = self.infer_block(body);
-        self.ctx.pop_scope();
+        self.pop_scope();
 
         // Loop returns never (unless break with value)
         Ty::never()
@@ -2612,9 +2665,9 @@ impl<'ctx> TypeInfer<'ctx> {
         let cond_ty = self.infer_expr(condition);
         let _ = self.unify(&cond_ty, &Ty::bool(), condition.span);
 
-        self.ctx.push_scope(ScopeKind::Loop);
+        self.push_scope(ScopeKind::Loop);
         let _ = self.infer_block(body);
-        self.ctx.pop_scope();
+        self.pop_scope();
 
         Ty::unit()
     }
@@ -2632,10 +2685,10 @@ impl<'ctx> TypeInfer<'ctx> {
         // Resolve Iterator trait to get Item type
         let item_ty = self.resolve_iterator_item(&iter_ty);
 
-        self.ctx.push_scope(ScopeKind::Loop);
+        self.push_scope(ScopeKind::Loop);
         self.check_pattern(pattern, &item_ty);
         let _ = self.infer_block(body);
-        self.ctx.pop_scope();
+        self.pop_scope();
 
         Ty::unit()
     }
@@ -2645,7 +2698,7 @@ impl<'ctx> TypeInfer<'ctx> {
     // =========================================================================
 
     pub fn infer_block(&mut self, block: &ast::Block) -> Ty {
-        self.ctx.push_scope(ScopeKind::Block);
+        self.push_scope(ScopeKind::Block);
         self.borrow_state.push_scope();
 
         let mut result_ty = Ty::unit();
@@ -2680,7 +2733,7 @@ impl<'ctx> TypeInfer<'ctx> {
             }
         }
 
-        self.ctx.pop_scope();
+        self.pop_scope();
         result_ty
     }
 
@@ -2819,6 +2872,7 @@ impl<'ctx> TypeInfer<'ctx> {
         };
 
         if let Some(init) = &local.init {
+            let init_sources = self.call_sources(&init.expr);
             let init_ty = self.infer_expr(&init.expr);
             let _ = self.unify(&ty, &init_ty, local.span);
 
@@ -2829,6 +2883,7 @@ impl<'ctx> TypeInfer<'ctx> {
             };
             if let Some(ref name) = var_name {
                 self.check_borrow_at_binding(name, &init.expr, &ty, local.span);
+                self.bind_call_sources(name, init_sources);
             }
         }
 
@@ -2934,7 +2989,7 @@ impl<'ctx> TypeInfer<'ctx> {
         body: &ast::Expr,
         _span: Span,
     ) -> Ty {
-        self.ctx.push_scope(ScopeKind::Function);
+        self.push_scope(ScopeKind::Function);
 
         let param_tys: Vec<Ty> = params
             .iter()
@@ -2960,7 +3015,7 @@ impl<'ctx> TypeInfer<'ctx> {
         }
 
         self.return_ty = old_return_ty;
-        self.ctx.pop_scope();
+        self.pop_scope();
 
         Ty::function(param_tys, self.apply(&body_ty))
     }

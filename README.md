@@ -166,7 +166,8 @@ tuple slots and indexed ops tables record sources such as `loaders.0` and
 `loaders[0]`; immediate calls through returned function values record sources
 such as `make_loader()`. `if` and `match` expressions that select an
 effectful function value record every possible branch target, for example
-`load_config` and `load_secret`.
+`load_config` and `load_secret`; binding that selected function before calling
+it records both the binding and the possible selected targets.
 
 `quantac check --receipt` also binds each receipt to the checked source inputs
 with SHA-256 digests plus compiler and language version metadata. The top-level
@@ -254,7 +255,9 @@ constrain capability-bearing registries and ops tables. Immediate invocation of
 a returned effectful function records the factory call, such as `make_loader()`.
 Control-flow selectors keep reviewable evidence too: calling the result of an
 `if` or `match` expression records the possible effectful branch targets, such
-as `load_config` and `load_secret`.
+as `load_config` and `load_secret`. If the selected function is bound first,
+for example `let loader = if ...`, a later `loader()` call records `loader`
+plus the possible selected targets.
 
 Policy profiles can enforce that split:
 

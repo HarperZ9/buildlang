@@ -782,6 +782,59 @@ fn main() ~ FileSystem {
 }
 
 #[test]
+fn check_receipt_clears_stale_sources_for_shadowed_ambient_alias() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_shadowed_ambient_alias_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn load_config() -> str ~ FileSystem {
+    read_file("config.toml")
+}
+
+fn main() ~ FileSystem {
+    let loader = load_config;
+    let loader = read_file;
+    loader("ops.txt");
+}
+"#,
+    )
+    .expect("write shadowed ambient alias receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "shadowed ambient alias receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["loader"])
+    );
+}
+
+#[test]
 fn check_reports_effect_for_effectful_struct_field_call() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_struct_field_effect_gate_{}.quanta",
@@ -1380,6 +1433,124 @@ fn main() ~ FileSystem {
     assert_eq!(
         receipt["propagated_effects"]["main"]["FileSystem"],
         serde_json::json!(["load_config", "load_secret"])
+    );
+}
+
+#[test]
+fn check_reports_effect_for_let_bound_selected_effectful_function_call() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_let_bound_selected_effectful_function_gate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn load_config() -> str ~ FileSystem {
+    read_file("config.toml")
+}
+
+fn load_secret() -> str ~ FileSystem {
+    read_file("secret.toml")
+}
+
+fn main() {
+    let use_secret = true;
+    let loader = if use_secret { load_secret } else { load_config };
+    loader();
+}
+"#,
+    )
+    .expect("write let-bound selected effectful function fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "let-bound selected effectful function call should fail without FileSystem effect"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FileSystem"),
+        "diagnostic should name FileSystem effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("loader"),
+        "diagnostic should name selected binding source:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("load_config"),
+        "diagnostic should name one possible selected source:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("load_secret"),
+        "diagnostic should name the other possible selected source:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn check_receipt_records_let_bound_selected_effectful_function_sources() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_let_bound_selected_effectful_function_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn load_config() -> str ~ FileSystem {
+    read_file("config.toml")
+}
+
+fn load_secret() -> str ~ FileSystem {
+    read_file("secret.toml")
+}
+
+fn main() ~ FileSystem {
+    let use_secret = true;
+    let loader = if use_secret { load_secret } else { load_config };
+    loader();
+}
+"#,
+    )
+    .expect("write let-bound selected effectful function receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "let-bound selected effectful function receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["load_config", "load_secret", "loader"])
     );
 }
 
