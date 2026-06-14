@@ -197,9 +197,10 @@ effectful function value record every possible branch target, for example
 `load_config` and `load_secret`; binding that selected function before calling
 it records both the binding and the possible selected targets, even when the
 selected value is explicitly cast to a typed effectful callback such as
-`(fn() -> str) with FileSystem`. Tuple, tuple-struct, struct, enum-variant, and
-slice destructuring keep that source evidence too, so `let (loader,) = (...)`,
-`let Slot(loader) = slot`,
+`(fn() -> str) with FileSystem` or called through a reference/dereference pair
+such as `let loader_ref = &loader; (*loader_ref)()`. Tuple, tuple-struct,
+struct, enum-variant, and slice destructuring keep that source evidence too, so
+`let (loader,) = (...)`, `let Slot(loader) = slot`,
 `let Ops { loader } = ops`, `let Slot::Ready(loader) = slot`, and
 `let Slot::Ready { loader } = slot`, and `let [loader] = loaders` continue to
 record the selected callees as well as `loader`; branch-local `if let` and
@@ -337,7 +338,8 @@ as `load_config` and `load_secret`. If the selected function is bound first,
 for example `let loader = if ...`, a later `loader()` call records `loader`
 plus the possible selected targets; an explicit cast to a typed effectful
 callback keeps that same source set instead of collapsing it to the local alias.
-The same source binding is preserved through
+References keep it too, so `(*loader_ref)()` records the selected branch targets,
+`loader`, and `loader_ref`. The same source binding is preserved through
 tuple, tuple-struct, struct, enum-variant, and slice destructuring, including
 branch-local `if let` and `while let` patterns, so
 `let (loader,) = (...)`, `let Slot(loader) = slot`, `let Ops { loader } = ops`,
