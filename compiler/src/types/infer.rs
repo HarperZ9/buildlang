@@ -376,6 +376,10 @@ impl<'ctx> TypeInfer<'ctx> {
                     .collect::<Vec<_>>()
                     .join("::"),
             ),
+            ExprKind::Field { expr, field } => {
+                Self::call_source(expr).map(|base| format!("{}.{}", base, field.name))
+            }
+            ExprKind::Paren(inner) => Self::call_source(inner),
             _ => None,
         }
     }
