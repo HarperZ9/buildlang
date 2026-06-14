@@ -874,6 +874,74 @@ impl<'ctx> TypeInfer<'ctx> {
         }
     }
 
+    fn bind_pattern_to_call_source_tree(&mut self, pattern: &ast::Pattern, source_prefix: &str) {
+        match &pattern.kind {
+            ast::PatternKind::Ident {
+                name, subpattern, ..
+            } => {
+                self.bind_bound_call_source_tree(source_prefix, name.name.as_ref(), false);
+                if let Some(subpattern) = subpattern {
+                    self.bind_pattern_to_call_source_tree(subpattern, source_prefix);
+                }
+            }
+            ast::PatternKind::Tuple(patterns) | ast::PatternKind::TupleStruct { patterns, .. } => {
+                for (index, pattern) in patterns.iter().enumerate() {
+                    let member_source = format!("{source_prefix}.{index}");
+                    self.bind_pattern_to_call_source_tree(pattern, &member_source);
+                }
+            }
+            ast::PatternKind::Slice(patterns) => {
+                for (index, pattern) in patterns.iter().enumerate() {
+                    let member_source = format!("{source_prefix}[{index}]");
+                    self.bind_pattern_to_call_source_tree(pattern, &member_source);
+                }
+            }
+            ast::PatternKind::Struct { fields, .. } => {
+                for field in fields {
+                    let member_source = format!("{}.{}", source_prefix, field.name.name);
+                    self.bind_pattern_to_call_source_tree(&field.pattern, &member_source);
+                }
+            }
+            ast::PatternKind::Paren(inner)
+            | ast::PatternKind::Ref { pattern: inner, .. }
+            | ast::PatternKind::Box(inner) => {
+                self.bind_pattern_to_call_source_tree(inner, source_prefix);
+            }
+            ast::PatternKind::Or(patterns) => {
+                for pattern in patterns {
+                    self.bind_pattern_to_call_source_tree(pattern, source_prefix);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn bind_pattern_to_member_source_tree(
+        &mut self,
+        pattern: &ast::Pattern,
+        expr: &ast::Expr,
+        member: &str,
+    ) {
+        for base in self.call_sources(expr) {
+            let source_prefix = format!("{base}.{member}");
+            self.bind_pattern_to_call_source_tree(pattern, &source_prefix);
+        }
+    }
+
+    fn bind_pattern_to_index_source_tree(
+        &mut self,
+        pattern: &ast::Pattern,
+        expr: &ast::Expr,
+        index: usize,
+    ) {
+        for base in self.call_sources(expr) {
+            let source_prefix = format!("{base}[{index}]");
+            self.bind_pattern_to_call_source_tree(pattern, &source_prefix);
+            let wildcard_prefix = format!("{base}[]");
+            self.bind_pattern_to_call_source_tree(pattern, &wildcard_prefix);
+        }
+    }
+
     fn bind_aggregate_call_sources(&mut self, name: &str, expr: &ast::Expr) {
         self.bind_aggregate_call_sources_inner(name, expr, false);
     }
@@ -1018,6 +1086,7 @@ impl<'ctx> TypeInfer<'ctx> {
                     for (index, pattern) in patterns.iter().enumerate() {
                         let sources = self.bound_call_sources_for_member(expr, &index.to_string());
                         self.bind_pattern_to_call_sources(pattern, sources);
+                        self.bind_pattern_to_member_source_tree(pattern, expr, &index.to_string());
                     }
                 }
             }
@@ -1034,6 +1103,7 @@ impl<'ctx> TypeInfer<'ctx> {
                 for (index, pattern) in patterns.iter().enumerate() {
                     let sources = self.bound_call_sources_for_member(expr, &index.to_string());
                     self.bind_pattern_to_call_sources(pattern, sources);
+                    self.bind_pattern_to_member_source_tree(pattern, expr, &index.to_string());
                 }
             }
             ast::PatternKind::Slice(patterns) => {
@@ -1045,6 +1115,7 @@ impl<'ctx> TypeInfer<'ctx> {
                     for (index, pattern) in patterns.iter().enumerate() {
                         let sources = self.bound_call_sources_for_index(expr, index);
                         self.bind_pattern_to_call_sources(pattern, sources);
+                        self.bind_pattern_to_index_source_tree(pattern, expr, index);
                     }
                 }
             }
@@ -1071,6 +1142,11 @@ impl<'ctx> TypeInfer<'ctx> {
                     for field in fields {
                         let sources = self.bound_call_sources_for_member(expr, field.name.as_ref());
                         self.bind_pattern_to_call_sources(&field.pattern, sources);
+                        self.bind_pattern_to_member_source_tree(
+                            &field.pattern,
+                            expr,
+                            field.name.as_ref(),
+                        );
                     }
                 }
             }
