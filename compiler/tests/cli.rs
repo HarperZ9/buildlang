@@ -1180,6 +1180,94 @@ fn main() ~ FileSystem {
 }
 
 #[test]
+fn check_reports_effect_for_immediate_effectful_closure_call() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_immediate_effectful_closure_gate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn main() {
+    (|path: str| read_file(path))("ops.txt");
+}
+"#,
+    )
+    .expect("write immediate effectful closure fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "immediate effectful closure call should fail without FileSystem effect"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FileSystem"),
+        "diagnostic should name FileSystem effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("<closure>"),
+        "diagnostic should name anonymous closure source:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn check_receipt_records_immediate_effectful_closure_call_source() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_immediate_effectful_closure_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn main() ~ FileSystem {
+    (|path: str| read_file(path))("ops.txt");
+}
+"#,
+    )
+    .expect("write immediate effectful closure receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "immediate effectful closure receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["<closure>"])
+    );
+}
+
+#[test]
 fn check_reports_effect_for_effectful_struct_field_call() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_struct_field_effect_gate_{}.quanta",

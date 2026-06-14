@@ -342,6 +342,7 @@ impl<'ctx> TypeInfer<'ctx> {
             sources
                 .into_iter()
                 .filter(|source| source != name)
+                .filter(|source| source != "<closure>")
                 .filter(|source| {
                     let lookup_name = source.rsplit("::").next().unwrap_or(source);
                     super::capabilities::capability_effect_for_call(lookup_name).is_none()
@@ -466,6 +467,7 @@ impl<'ctx> TypeInfer<'ctx> {
                     }
                 })
                 .collect(),
+            ExprKind::Closure { .. } => vec!["<closure>".to_string()],
             ExprKind::Call { func, .. } => self
                 .call_sources(func)
                 .into_iter()

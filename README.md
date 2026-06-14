@@ -166,9 +166,10 @@ effects too:
 `loader` as the propagated source. Closure literals capture their body effects
 without performing them at definition time, so `let loader = |path: str|
 read_file(path);` remains pure until `loader("ops.toml")` is called, and then
-records `loader` as propagated `FileSystem` evidence. Effectful function values
-stored in structs also keep source evidence: `(ops.loader)("ops.toml")` records
-`ops.loader`;
+records `loader` as propagated `FileSystem` evidence; immediately invoked
+anonymous closures record the synthetic source `<closure>`. Effectful function
+values stored in structs also keep source evidence: `(ops.loader)("ops.toml")`
+records `ops.loader`;
 tuple slots and indexed ops tables record sources such as `loaders.0` and
 `loaders[0]`; immediate calls through returned function values record sources
 such as `make_loader()`. `if` and `match` expressions that select an
@@ -263,8 +264,9 @@ covers aliases of ambient helpers, such as
 effect instead of falling back to an untyped function value. Effectful closures
 use the same function-value path: creating `|path: str| read_file(path)` does
 not trigger `FileSystem`, but calling a bound closure records the alias as a
-propagated source. Calls through effectful struct fields, tuple slots, and
-indexed ops tables record paths such as `ops.loader`, `loaders.0`, and
+propagated source. Calling an anonymous closure immediately records `<closure>`
+as the propagated source. Calls through effectful struct fields, tuple slots,
+and indexed ops tables record paths such as `ops.loader`, `loaders.0`, and
 `loaders[0]`, so source allowlists can constrain capability-bearing registries
 and ops tables. Immediate invocation of a returned effectful function records
 the factory call, such as `make_loader()`.
