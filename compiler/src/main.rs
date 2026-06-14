@@ -529,7 +529,13 @@ struct CheckPolicyProfile {
     #[serde(default)]
     denied_effects: Vec<String>,
     #[serde(default)]
+    direct_effect_allowlist: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    propagated_effect_allowlist: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
     require_source_digest: bool,
+    #[serde(default)]
+    require_input_graph_digest: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -544,6 +550,7 @@ struct CheckPolicyEvidence {
     function: String,
     effect: String,
     surface: &'static str,
+    source: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
@@ -552,6 +559,8 @@ struct CheckPolicyViolation {
     effect: String,
     function: String,
     surface: &'static str,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    source: String,
     message: String,
 }
 
@@ -561,6 +570,7 @@ impl Ord for CheckPolicyViolation {
             self.function.as_str(),
             self.effect.as_str(),
             self.surface,
+            self.source.as_str(),
             self.kind,
             self.message.as_str(),
         )
@@ -568,6 +578,7 @@ impl Ord for CheckPolicyViolation {
                 other.function.as_str(),
                 other.effect.as_str(),
                 other.surface,
+                other.source.as_str(),
                 other.kind,
                 other.message.as_str(),
             ))
@@ -1505,6 +1516,23 @@ fn check_policy_status(decision: &CheckPolicyDecision) -> &'static str {
     }
 }
 
+fn allowlist_allows(
+    allowlist: &BTreeMap<String, Vec<String>>,
+    effect: &str,
+    function: &str,
+) -> bool {
+    allowlist
+        .get(effect)
+        .map(|functions| functions.iter().any(|allowed| allowed == function))
+        .unwrap_or(true)
+}
+
+fn digest_is_sha256_hex(digest: &CheckReceiptSourceDigest) -> bool {
+    digest.algorithm == "sha256"
+        && digest.hex.len() == 64
+        && digest.hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn collect_check_policy_evidence(outcome: &CheckOutcome) -> BTreeSet<CheckPolicyEvidence> {
     let mut evidence = BTreeSet::new();
     for summary in &outcome.function_summaries {
@@ -1513,14 +1541,28 @@ fn collect_check_policy_evidence(outcome: &CheckOutcome) -> BTreeSet<CheckPolicy
                 function: summary.function.clone(),
                 effect: effect.clone(),
                 surface: "declared_effects",
+                source: String::new(),
             });
         }
-        for effect in summary.observed_capabilities.keys() {
-            evidence.insert(CheckPolicyEvidence {
-                function: summary.function.clone(),
-                effect: effect.clone(),
-                surface: "observed_capabilities",
-            });
+        for (effect, sources) in &summary.observed_capabilities {
+            for source in sources {
+                evidence.insert(CheckPolicyEvidence {
+                    function: summary.function.clone(),
+                    effect: effect.clone(),
+                    surface: "observed_capabilities",
+                    source: source.clone(),
+                });
+            }
+        }
+        for (effect, sources) in &summary.propagated_effects {
+            for source in sources {
+                evidence.insert(CheckPolicyEvidence {
+                    function: summary.function.clone(),
+                    effect: effect.clone(),
+                    surface: "propagated_effects",
+                    source: source.clone(),
+                });
+            }
         }
     }
     evidence
@@ -1550,7 +1592,21 @@ fn evaluate_check_policy(
             effect: String::new(),
             function: String::new(),
             surface: "source_digest",
+            source: String::new(),
             message: "policy requires sha256 source digest".to_string(),
+        });
+    }
+
+    if policy.profile.require_input_graph_digest
+        && !digest_is_sha256_hex(&outcome.input_graph_digest)
+    {
+        violations.insert(CheckPolicyViolation {
+            kind: "MissingInputGraphDigest",
+            effect: String::new(),
+            function: outcome.source.clone(),
+            surface: "input_graph_digest",
+            source: String::new(),
+            message: "policy requires a valid sha256 input graph digest".to_string(),
         });
     }
 
@@ -1561,6 +1617,7 @@ fn evaluate_check_policy(
                 effect: item.effect.clone(),
                 function: item.function.clone(),
                 surface: item.surface,
+                source: item.source.clone(),
                 message: format!("policy denies effect `{}`", item.effect),
             });
         } else if !allowed.is_empty() && !allowed.contains(item.effect.as_str()) {
@@ -1569,7 +1626,44 @@ fn evaluate_check_policy(
                 effect: item.effect.clone(),
                 function: item.function.clone(),
                 surface: item.surface,
+                source: item.source.clone(),
                 message: format!("policy does not allow effect `{}`", item.effect),
+            });
+        } else if item.surface == "observed_capabilities"
+            && !allowlist_allows(
+                &policy.profile.direct_effect_allowlist,
+                &item.effect,
+                &item.function,
+            )
+        {
+            violations.insert(CheckPolicyViolation {
+                kind: "DirectEffectNotAllowed",
+                effect: item.effect.clone(),
+                function: item.function.clone(),
+                surface: item.surface,
+                source: item.source.clone(),
+                message: format!(
+                    "effect `{}` is directly used by `{}` via `{}` but policy does not allow that boundary",
+                    item.effect, item.function, item.source
+                ),
+            });
+        } else if item.surface == "propagated_effects"
+            && !allowlist_allows(
+                &policy.profile.propagated_effect_allowlist,
+                &item.effect,
+                &item.function,
+            )
+        {
+            violations.insert(CheckPolicyViolation {
+                kind: "PropagatedEffectNotAllowed",
+                effect: item.effect.clone(),
+                function: item.function.clone(),
+                surface: item.surface,
+                source: item.source.clone(),
+                message: format!(
+                    "effect `{}` is propagated into `{}` via `{}` but policy does not allow that caller",
+                    item.effect, item.function, item.source
+                ),
             });
         }
     }
@@ -4374,7 +4468,10 @@ mod tests {
                 schema: "quantalang-check-policy/v1".to_string(),
                 allowed_effects: vec!["Console".to_string()],
                 denied_effects: vec!["Network".to_string()],
+                direct_effect_allowlist: BTreeMap::new(),
+                propagated_effect_allowlist: BTreeMap::new(),
                 require_source_digest: true,
+                require_input_graph_digest: false,
             },
         };
         let outcome = CheckOutcome {
@@ -4435,6 +4532,51 @@ mod tests {
     }
 
     #[test]
+    fn check_policy_requires_valid_input_graph_digest() {
+        let policy = LoadedCheckPolicy {
+            source: "policy.json".to_string(),
+            source_digest: CheckReceiptSourceDigest {
+                algorithm: "sha256",
+                hex: source_digest_hex(b"policy"),
+            },
+            profile: CheckPolicyProfile {
+                schema: "quantalang-check-policy/v1".to_string(),
+                allowed_effects: Vec::new(),
+                denied_effects: Vec::new(),
+                direct_effect_allowlist: BTreeMap::new(),
+                propagated_effect_allowlist: BTreeMap::new(),
+                require_source_digest: false,
+                require_input_graph_digest: true,
+            },
+        };
+        let outcome = CheckOutcome {
+            source: "source.quanta".to_string(),
+            compiler_version: quantalang::VERSION,
+            language_version: language_version_string(),
+            source_digest: CheckReceiptSourceDigest {
+                algorithm: "sha256",
+                hex: source_digest_hex(b"source"),
+            },
+            input_graph_digest: CheckReceiptSourceDigest {
+                algorithm: "sha1",
+                hex: "abc".to_string(),
+            },
+            input_digests: Vec::new(),
+            items: 1,
+            tokens: 1,
+            parse_errors: Vec::new(),
+            type_errors: Vec::new(),
+            function_summaries: Vec::new(),
+        };
+
+        let decision = evaluate_check_policy(&policy, &outcome);
+        assert_eq!(check_policy_status(&decision), "failed");
+        assert_eq!(decision.violations.len(), 1);
+        assert_eq!(decision.violations[0].kind, "MissingInputGraphDigest");
+        assert_eq!(decision.violations[0].surface, "input_graph_digest");
+    }
+
+    #[test]
     fn check_policy_loads_profile_and_digest() {
         let path = std::env::temp_dir().join(format!(
             "quantalang_check_policy_load_{}.json",
@@ -4455,6 +4597,9 @@ mod tests {
 
         assert_eq!(loaded.profile.schema, "quantalang-check-policy/v1");
         assert_eq!(loaded.profile.allowed_effects, vec!["Console"]);
+        assert!(loaded.profile.direct_effect_allowlist.is_empty());
+        assert!(loaded.profile.propagated_effect_allowlist.is_empty());
+        assert!(!loaded.profile.require_input_graph_digest);
         assert_eq!(loaded.source_digest.algorithm, "sha256");
         assert_eq!(loaded.source_digest.hex.len(), 64);
     }
