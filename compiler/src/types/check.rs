@@ -811,8 +811,7 @@ impl<'ctx> TypeChecker<'ctx> {
                                 sources.iter().cloned().collect::<Vec<_>>().join(", ")
                             ));
                         }
-                        if let Some(sources) =
-                            propagated_effect_sources.get(body_eff.name.as_ref())
+                        if let Some(sources) = propagated_effect_sources.get(body_eff.name.as_ref())
                         {
                             err_with_span.notes.push(format!(
                                 "capability `{}` was propagated by effectful call(s): {}",
