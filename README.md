@@ -123,6 +123,7 @@ quantac vignette.quanta --target glsl -o vignette.glsl
 | `quantac build` | Build a project                      |
 | `quantac run`   | Compile and run a `.quanta` file     |
 | `quantac doctor` | Diagnose local toolchain readiness  |
+| `quantac policy list` / `quantac policy print <name>` | List or emit built-in check policy profiles |
 | `quantac corpus verify [--root DIR] [--write]` | Verify semantic corpus receipts and C stdout; optionally refresh the C receipt |
 
 ## Capability Effects
@@ -163,6 +164,12 @@ that passed or failed the capability gate.
 capabilities. Policy failures make the check fail even when type checking
 passes, and receipts record the policy path, policy digest, status, and
 structured violations.
+
+`quantac policy list` shows built-in baseline profiles, and
+`quantac policy print <name> --output policy.json` writes one as normal policy
+JSON. The initial profiles are `pure`, `console-only`, `offline`, and
+`ci-review`, which gives CI a practical starting point before a team adds
+function-specific direct and propagated allowlists.
 
 Receipts separate direct capability boundaries from callers that inherit those
 effects. `observed_capabilities` records ambient helper, macro, and FFI access

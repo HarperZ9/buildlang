@@ -156,6 +156,19 @@ effect, observed capability, or propagated effect outside the allow-list also
 fails. `direct_effect_allowlist` applies only to `observed_capabilities`;
 `propagated_effect_allowlist` applies only to `propagated_effects`.
 
+Use `quantac policy list` to see built-in starting profiles, then emit one with:
+
+```bash
+quantac policy print pure --output policy.json
+```
+
+The built-in profiles are valid `quantalang-check-policy/v1` JSON and are meant
+for CI bootstrapping: `pure` denies every built-in ambient capability,
+`console-only` permits only console access, `offline` permits local file,
+environment, clock, and console work while denying network/process/FFI/GPU, and
+`ci-review` requires source/input graph digests while denying the highest-risk
+capabilities.
+
 ---
 
 ## Handling an Effect
