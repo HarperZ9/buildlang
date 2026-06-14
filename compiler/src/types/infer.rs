@@ -432,6 +432,25 @@ impl<'ctx> TypeInfer<'ctx> {
         self.call_sources(func).into_iter().next()
     }
 
+    fn trait_object_method_source(&self, bounds: &[Arc<str>], method_name: &str) -> String {
+        for trait_name in bounds {
+            if let Some(trait_def) = self.ctx.lookup_trait_by_name(trait_name) {
+                if trait_def
+                    .methods
+                    .iter()
+                    .any(|method| method.name.as_ref() == method_name)
+                {
+                    return format!("{}.{}", trait_name, method_name);
+                }
+            }
+        }
+
+        bounds
+            .first()
+            .map(|trait_name| format!("{}.{}", trait_name, method_name))
+            .unwrap_or_else(|| method_name.to_string())
+    }
+
     fn method_call_source(&self, receiver_ty: &Ty, method_name: &str) -> String {
         let base_ty = match &receiver_ty.kind {
             TyKind::Ref(_, _, inner) | TyKind::Ptr(_, inner) => inner.as_ref(),
@@ -445,6 +464,7 @@ impl<'ctx> TypeInfer<'ctx> {
                 .map(|ty| format!("{}.{}", ty.name, method_name))
                 .unwrap_or_else(|| method_name.to_string()),
             TyKind::Param(name, _) => format!("{}.{}", name, method_name),
+            TyKind::TraitObject(bounds) => self.trait_object_method_source(bounds, method_name),
             _ => method_name.to_string(),
         }
     }
@@ -794,6 +814,43 @@ impl<'ctx> TypeInfer<'ctx> {
 
     /// Look up a method on a type.
     fn lookup_method(&self, ty: &Ty, method_name: &str) -> Option<Ty> {
+        if let TyKind::TraitObject(bounds) = &ty.kind {
+            for trait_name in bounds {
+                if let Some(trait_def) = self.ctx.lookup_trait_by_name(trait_name) {
+                    if let Some(method) = trait_def
+                        .methods
+                        .iter()
+                        .find(|method| method.name.as_ref() == method_name)
+                    {
+                        let receiver_ty = ty.clone();
+                        let params: Vec<Ty> = method
+                            .sig
+                            .params
+                            .iter()
+                            .skip_while(|(name, _)| name.as_ref() == "self")
+                            .map(|(_, pty)| {
+                                if matches!(&pty.kind, TyKind::Var(_)) {
+                                    receiver_ty.clone()
+                                } else {
+                                    pty.clone()
+                                }
+                            })
+                            .collect();
+                        let ret = if matches!(&method.sig.ret.kind, TyKind::Var(_)) {
+                            receiver_ty
+                        } else {
+                            method.sig.ret.clone()
+                        };
+                        return Some(Ty::function_with_effects(
+                            params,
+                            ret,
+                            method.sig.effects.clone(),
+                        ));
+                    }
+                }
+            }
+        }
+
         if let Some(ref env) = self.trait_env {
             let mut resolver = TraitResolver::new(env);
             if let Some((_, method_def)) = resolver.resolve_method(ty, method_name) {
@@ -2344,11 +2401,6 @@ impl<'ctx> TypeInfer<'ctx> {
 
         // Infer argument types
         let arg_tys: Vec<_> = args.iter().map(|a| self.infer_expr(a)).collect();
-
-        // Check for trait object method calls: dyn Trait has all trait methods
-        if let TyKind::TraitObject(_bounds) = receiver_ty.kind {
-            return Ty::error();
-        }
 
         // Error type - silently accept any method call to prevent cascading errors
         if matches!(&receiver_ty.kind, TyKind::Error) {

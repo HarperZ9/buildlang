@@ -136,7 +136,9 @@ their function type without performing them at definition time, so
 Immediately invoked anonymous closures record the synthetic source `<closure>`.
 Inherent methods carry declared effects too: if `Config.load` declares
 `~ FileSystem`, then `config.load()` requires `FileSystem` in the caller and
-records `Config.load` as propagated evidence.
+records `Config.load` as propagated evidence. Trait-object method calls are
+checked from the trait method signature as well, so `loader.load()` through
+`dyn Loader` records `Loader.load` instead of hiding behind dynamic dispatch.
 Effectful function values stored in structs, tuples, and indexed ops tables
 retain access evidence too: `(ops.loader)("ops.toml")` records `ops.loader`,
 `(loaders.0)("x")` records `loaders.0`, and `(loaders[0])("x")` records
@@ -195,7 +197,9 @@ actually touches the outside world.
 typed effect. This lets policy allow a small number of audited boundary
 functions while still proving which higher-level workflows depend on them.
 Effectful inherent methods appear here with typed method sources such as
-`Config.load`, so method-call syntax does not bypass capability policy.
+`Config.load`, and effectful trait-object methods appear with sources such as
+`Loader.load`, so method-call syntax and dynamic dispatch do not bypass
+capability policy.
 Effectful callback parameters appear here as named sources too, so higher-order
 ops code keeps capability provenance instead of losing it behind `fn(...)`
 values. Effectful callback arguments supplied to wrappers also appear here, so

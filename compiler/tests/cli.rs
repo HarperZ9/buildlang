@@ -765,6 +765,51 @@ fn main() ~ FileSystem {
 }
 
 #[test]
+fn check_reports_effect_for_effectful_trait_object_method_call() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_effectful_trait_object_method_gate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+trait Loader {
+    fn load(self) ~ FileSystem;
+}
+
+fn run(loader: dyn Loader) {
+    loader.load();
+}
+"#,
+    )
+    .expect("write effectful trait object method fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "effectful dyn trait method call should fail without FileSystem effect"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FileSystem"),
+        "diagnostic should name FileSystem effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("Loader.load"),
+        "diagnostic should name triggering trait object method:\n{}",
+        stderr
+    );
+}
+
+#[test]
 fn check_reports_effect_for_effectful_callback_parameter() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_effectful_callback_gate_{}.quanta",
