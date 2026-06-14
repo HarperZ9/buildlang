@@ -564,6 +564,134 @@ fn main() ~ FileSystem {
 }
 
 #[test]
+fn check_reports_effect_for_effectful_callback_parameter() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_effectful_callback_gate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn run(loader: fn() with FileSystem) {
+    loader();
+}
+"#,
+    )
+    .expect("write effectful callback fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "effectful callback should fail without FileSystem effect"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FileSystem"),
+        "diagnostic should name FileSystem effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("loader"),
+        "diagnostic should name callback source:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn check_receipt_records_effectful_callback_parameter_source() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_effectful_callback_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn run(loader: fn() with FileSystem) ~ FileSystem {
+    loader();
+}
+"#,
+    )
+    .expect("write effectful callback receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "effectful callback receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["run"]
+            .as_object()
+            .expect("run observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["run"]["FileSystem"],
+        serde_json::json!(["loader"])
+    );
+}
+
+#[test]
+fn check_receipt_records_effectful_returning_callback_source() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_effectful_returning_callback_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn run(loader: (fn() -> str) with FileSystem) -> str ~ FileSystem {
+    loader()
+}
+"#,
+    )
+    .expect("write returning effectful callback receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "returning effectful callback receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["propagated_effects"]["run"]["FileSystem"],
+        serde_json::json!(["loader"])
+    );
+}
+
+#[test]
 fn check_receipt_file_records_failing_capability_diagnostic() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_check_receipt_fail_{}.quanta",
