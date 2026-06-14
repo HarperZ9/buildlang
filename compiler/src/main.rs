@@ -497,6 +497,7 @@ struct CheckReceipt {
     language_version: String,
     source: String,
     source_digest: CheckReceiptSourceDigest,
+    input_graph_digest: CheckReceiptSourceDigest,
     input_digests: Vec<CheckReceiptInputDigest>,
     status: &'static str,
     items: usize,
@@ -600,6 +601,7 @@ struct CheckOutcome {
     compiler_version: &'static str,
     language_version: String,
     source_digest: CheckReceiptSourceDigest,
+    input_graph_digest: CheckReceiptSourceDigest,
     input_digests: Vec<CheckReceiptInputDigest>,
     items: usize,
     tokens: usize,
@@ -1447,6 +1449,28 @@ fn source_digest_hex(bytes: &[u8]) -> String {
     hex
 }
 
+fn input_graph_digest(records: &[CheckReceiptInputDigest]) -> CheckReceiptSourceDigest {
+    let mut hasher = Sha256::new();
+    for record in records {
+        hasher.update(record.role.as_bytes());
+        hasher.update([0]);
+        hasher.update(record.digest.algorithm.as_bytes());
+        hasher.update([0]);
+        hasher.update(record.digest.hex.as_bytes());
+        hasher.update([10]);
+    }
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut hex, "{byte:02x}").expect("write to string");
+    }
+    CheckReceiptSourceDigest {
+        algorithm: "sha256",
+        hex,
+    }
+}
+
 fn load_check_policy(path: &Path) -> Result<LoadedCheckPolicy, i32> {
     let bytes = std::fs::read(path).map_err(|err| {
         eprintln!("Error reading policy '{}': {}", path.display(), err);
@@ -1617,6 +1641,7 @@ fn build_check_receipt(
         language_version: outcome.language_version.clone(),
         source: outcome.source.clone(),
         source_digest: outcome.source_digest.clone(),
+        input_graph_digest: outcome.input_graph_digest.clone(),
         input_digests: outcome.input_digests.clone(),
         status: if diagnostics.is_empty() && !policy_failed {
             "passed"
@@ -1676,12 +1701,16 @@ fn run_check(file: &Path) -> Result<CheckOutcome, i32> {
     checker.set_source_dir(chk_base.to_path_buf());
     checker.check_module(&ast);
 
+    let input_digests = input_digest_ledger.into_sorted_records();
+    let input_graph_digest = input_graph_digest(&input_digests);
+
     Ok(CheckOutcome {
         source: file.to_string_lossy().to_string(),
         compiler_version: quantalang::VERSION,
         language_version: language_version_string(),
         source_digest,
-        input_digests: input_digest_ledger.into_sorted_records(),
+        input_graph_digest,
+        input_digests,
         items: item_count,
         tokens: token_count,
         parse_errors,
@@ -4347,6 +4376,7 @@ mod tests {
                 algorithm: "sha256",
                 hex: source_digest_hex(b"source"),
             },
+            input_graph_digest: input_graph_digest(&[]),
             input_digests: Vec::new(),
             items: 1,
             tokens: 1,
