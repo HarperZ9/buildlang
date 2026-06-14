@@ -49,6 +49,31 @@ fn write_temp_policy(label: &str, json: &str) -> PathBuf {
     policy
 }
 
+fn input_digest_hex(receipt: &serde_json::Value, role: &str, source_suffix: &str) -> String {
+    let records = receipt["input_digests"]
+        .as_array()
+        .expect("input_digests should be an array");
+    let record = records
+        .iter()
+        .find(|record| {
+            record["role"] == role
+                && record["source"]
+                    .as_str()
+                    .is_some_and(|source| source.ends_with(source_suffix))
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "missing input digest role={role:?} suffix={source_suffix:?} in {records:#?}"
+            )
+        });
+    assert_eq!(record["digest"]["algorithm"], "sha256");
+    let hex = record["digest"]["hex"]
+        .as_str()
+        .expect("input digest hex should be a string");
+    assert_eq!(hex.len(), 64);
+    hex.to_string()
+}
+
 fn copy_dir_recursive(source: &Path, destination: &Path) {
     fs::create_dir_all(destination).unwrap_or_else(|err| {
         panic!(
@@ -403,6 +428,76 @@ fn check_receipt_source_digest_changes_when_source_changes() {
     assert_ne!(
         first_receipt["source_digest"]["hex"],
         second_receipt["source_digest"]["hex"]
+    );
+}
+
+#[test]
+fn check_receipt_input_digests_track_included_source_changes() {
+    let dir = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_inputs_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create input digest fixture dir");
+    let entry = dir.join("entry.quanta");
+    let shared = dir.join("shared.quanta");
+    fs::write(
+        &entry,
+        r#"include!("shared.quanta");
+fn main() ~ Console { println!("{}", value()); }
+"#,
+    )
+    .expect("write entry fixture");
+    fs::write(&shared, "fn value() -> i32 { 7 }\n").expect("write first include fixture");
+
+    let first_output = quantac()
+        .arg("check")
+        .arg(&entry)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run first input digest receipt");
+    assert!(
+        first_output.status.success(),
+        "first check should pass\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&first_output.stdout),
+        String::from_utf8_lossy(&first_output.stderr)
+    );
+    let first_receipt = receipt_from_stdout(&first_output);
+    let first_entry_digest = first_receipt["source_digest"]["hex"]
+        .as_str()
+        .expect("entry source digest")
+        .to_string();
+    let first_input_entry = input_digest_hex(&first_receipt, "entry", "entry.quanta");
+    let first_input_include = input_digest_hex(&first_receipt, "include", "shared.quanta");
+    assert_eq!(first_entry_digest, first_input_entry);
+
+    fs::write(&shared, "fn value() -> i32 { 8 }\n").expect("write changed include fixture");
+    let second_output = quantac()
+        .arg("check")
+        .arg(&entry)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run second input digest receipt");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        second_output.status.success(),
+        "second check should pass\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&second_output.stdout),
+        String::from_utf8_lossy(&second_output.stderr)
+    );
+    let second_receipt = receipt_from_stdout(&second_output);
+    assert_eq!(second_receipt["source_digest"]["hex"], first_entry_digest);
+    assert_eq!(
+        input_digest_hex(&second_receipt, "entry", "entry.quanta"),
+        first_input_entry
+    );
+    assert_ne!(
+        input_digest_hex(&second_receipt, "include", "shared.quanta"),
+        first_input_include
     );
 }
 
