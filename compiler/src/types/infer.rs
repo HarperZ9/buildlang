@@ -291,7 +291,12 @@ impl<'ctx> TypeInfer<'ctx> {
             .insert(callee_name.to_string());
     }
 
-    fn record_effectful_argument_sources(&mut self, param: &Ty, arg_sources: &[String]) {
+    fn record_effectful_argument_sources(
+        &mut self,
+        param: &Ty,
+        arg_sources: &[String],
+        callee_effects: &super::effects::EffectRow,
+    ) {
         if arg_sources.is_empty() {
             return;
         }
@@ -299,7 +304,9 @@ impl<'ctx> TypeInfer<'ctx> {
         let param_ty = self.apply(param);
         if let TyKind::Fn(param_fn) = &param_ty.kind {
             for effect in &param_fn.effects.effects {
-                if super::capabilities::is_capability_effect(effect.name.as_ref()) {
+                if callee_effects.contains(effect)
+                    && super::capabilities::is_capability_effect(effect.name.as_ref())
+                {
                     for source in arg_sources {
                         self.record_propagated_effect_source(effect.name.as_ref(), source);
                     }
@@ -411,6 +418,28 @@ impl<'ctx> TypeInfer<'ctx> {
         Self::dedupe_call_sources(sources)
     }
 
+    fn tuple_struct_constructor_field_count(&self, func: &ast::Expr) -> Option<usize> {
+        let name = match &func.kind {
+            ExprKind::Ident(ident) => ident.name.as_ref(),
+            ExprKind::Path(path) => path.last_ident()?.name.as_ref(),
+            ExprKind::Paren(inner) => return self.tuple_struct_constructor_field_count(inner),
+            _ => return None,
+        };
+
+        let type_def = self.ctx.lookup_type_by_name(name)?;
+        if let TypeDefKind::Struct(struct_def) = &type_def.kind {
+            if struct_def.is_tuple {
+                return Some(struct_def.fields.len());
+            }
+        }
+        None
+    }
+
+    fn is_tuple_struct_constructor_call(&self, func: &ast::Expr, arg_count: usize) -> bool {
+        self.tuple_struct_constructor_field_count(func)
+            .is_some_and(|field_count| field_count == arg_count)
+    }
+
     fn call_access_sources(&self, expr: &ast::Expr) -> Vec<String> {
         match &expr.kind {
             ExprKind::Ident(ident) => vec![ident.name.to_string()],
@@ -512,6 +541,15 @@ impl<'ctx> TypeInfer<'ctx> {
                     }
                 }
             }
+            ExprKind::Call { func, args }
+                if self.is_tuple_struct_constructor_call(func, args.len()) =>
+            {
+                for (index, arg) in args.iter().enumerate() {
+                    let member_name = format!("{}.{}", name, index);
+                    self.bind_call_sources(&member_name, self.call_sources(arg));
+                    self.bind_aggregate_call_sources(&member_name, arg);
+                }
+            }
             ExprKind::Paren(inner) => self.bind_aggregate_call_sources(name, inner),
             _ => {}
         }
@@ -539,6 +577,21 @@ impl<'ctx> TypeInfer<'ctx> {
                         let sources = self.bound_call_sources_for_member(expr, &index.to_string());
                         self.bind_pattern_to_call_sources(pattern, sources);
                     }
+                }
+            }
+            ast::PatternKind::TupleStruct { patterns, .. } => {
+                if let ExprKind::Call { func, args } = &expr.kind {
+                    if self.is_tuple_struct_constructor_call(func, args.len()) {
+                        for (pattern, arg) in patterns.iter().zip(args.iter()) {
+                            self.bind_pattern_call_sources(pattern, arg);
+                        }
+                        return;
+                    }
+                }
+
+                for (index, pattern) in patterns.iter().enumerate() {
+                    let sources = self.bound_call_sources_for_member(expr, &index.to_string());
+                    self.bind_pattern_to_call_sources(pattern, sources);
                 }
             }
             ast::PatternKind::Slice(patterns) => {
@@ -2320,7 +2373,7 @@ impl<'ctx> TypeInfer<'ctx> {
                     let arg_sources = self.call_sources(arg);
                     let arg_ty = self.infer_expr(arg);
                     let _ = self.unify(param, &arg_ty, span);
-                    self.record_effectful_argument_sources(param, &arg_sources);
+                    self.record_effectful_argument_sources(param, &arg_sources, &fn_ty.effects);
                 }
 
                 // Propagate callee's effects to caller's effect context

@@ -136,6 +136,8 @@ their function type without performing them at definition time, so
 `let loader = |path: str| read_file(path);` stays pure until
 `loader("ops.toml")` is called and then records `loader` as propagated evidence.
 Immediately invoked anonymous closures record the synthetic source `<closure>`.
+Tuple-struct construction can store an effectful callback without adding
+propagated receipt evidence until the stored callback is invoked.
 Inherent methods and associated functions carry declared effects too: if
 `Config.load` declares `~ FileSystem`, then `config.load()` requires
 `FileSystem` in the caller and records `Config.load` as propagated evidence,
@@ -217,13 +219,15 @@ erase the helper's `FileSystem` effect row. Aliases of ambient helpers follow
 the same rule: calling `loader` after
 `let loader = read_file` inherits `FileSystem` through the alias instead of
 silently becoming an untyped helper call. Effectful closures are also delayed
-function values: the closure literal is pure to define, and the call site
-inherits the closure body's capability effects through the alias, or through
+function values: the closure literal is pure to define, tuple-struct
+construction is pure when it only stores the callback, and the call site
+inherits the callback body's capability effects through the alias, or through
 `<closure>` when the anonymous closure is invoked immediately. Calls through
-effectful struct fields, tuple slots, and indexed ops tables record paths such
-as `ops.loader`, `loaders.0`, and `loaders[0]`, so policy allowlists can pin
-capability-bearing registries to exact entries. Returned effectful function
-values invoked immediately record factory calls such as `make_loader()`.
+effectful struct fields, tuple slots, tuple-struct fields, and indexed ops
+tables record paths such as `ops.loader`, `loaders.0`, `slot.0`, and
+`loaders[0]`, so policy allowlists can pin capability-bearing registries to
+exact entries. Returned effectful function values invoked immediately record
+factory calls such as `make_loader()`.
 Async blocks keep the same boundary: construction is pure for type checking,
 and awaiting the future records the awaited expression, such as `task`, plus
 latent origins such as `task <- read_file`, as propagated sources of the future
@@ -234,11 +238,12 @@ Control-flow selectors keep reviewable evidence too: calling the result of an
 `if` or `match` expression records the possible effectful branch targets, such
 as `load_config` and `load_secret`. If the selected function is bound first,
 for example `let loader = if ...`, a later `loader()` call records `loader`
-plus the possible selected targets. Tuple, struct, and slice destructuring keep
-the same evidence, so destructured aliases do not hide which selected callee
-introduced the effect. Reassigning that identifier, a struct field, a tuple
-slot, or an indexed entry updates the source set, which lets receipts describe
-mutable callback slots without carrying stale provenance from the old value.
+plus the possible selected targets. Tuple, tuple-struct, struct, and slice
+destructuring keep the same evidence, so destructured aliases do not hide which
+selected callee introduced the effect. Reassigning that identifier, a struct
+field, a tuple slot, or an indexed entry updates the source set, which lets
+receipts describe mutable callback slots without carrying stale provenance from
+the old value.
 
 Policy profiles turn receipt evidence into an enforceable CI gate:
 
