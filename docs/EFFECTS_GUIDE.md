@@ -145,7 +145,9 @@ while `Config::load()` records `Config::load`. Trait-object method calls are
 checked from the trait method signature as well, so `loader.load()` through
 `dyn Loader` records `Loader.load` instead of hiding behind dynamic dispatch.
 Effectful function values stored in structs, tuple structs, tuples, enum
-variants, and indexed ops tables retain access evidence too:
+variants, including struct-like variants such as
+`Slot::Ready { loader: load_config }`, and indexed ops tables retain access
+evidence too:
 `(ops.loader)("ops.toml")` records `ops.loader`, `(loaders.0)("x")` records
 `loaders.0`, and `(loaders[0])("x")` records `loaders[0]`. Enum-variant
 construction and tuple-struct construction stay pure when they only store the
@@ -157,9 +159,9 @@ it records both the binding and the possible selected targets. Tuple,
 tuple-struct, struct, enum-variant, and slice destructuring preserve those
 sources as well, so `let (loader,) = (...)`, `let Slot(loader) = slot`,
 `let Ops { loader } = ops`, `let Slot::Ready(loader) = slot`, and
-`let [loader] = loaders` still record the selected callees as well as `loader`;
-branch-local `if let` and `while let` destructuring enforce the same declared
-effect gate.
+`let Slot::Ready { loader } = slot`, and `let [loader] = loaders` still record
+the selected callees as well as `loader`; branch-local `if let` and `while let`
+destructuring enforce the same declared effect gate.
 Assignment to that callback variable refreshes the evidence, so
 `loader = load_secret` replaces the earlier source and `loader = read_file`
 clears stale local-function provenance while keeping the call as propagated
@@ -226,16 +228,16 @@ the same rule: calling `loader` after
 `let loader = read_file` inherits `FileSystem` through the alias instead of
 silently becoming an untyped helper call. Effectful closures are also delayed
 function values: the closure literal is pure to define, tuple-struct and
-enum-variant construction are pure when they only store the callback, and the
-call site inherits the callback body's capability effects through the alias, or
-through `<closure>` when the anonymous closure is invoked immediately. Calls
-through effectful struct fields, tuple slots, tuple-struct fields, and indexed
-ops tables record paths such as `ops.loader`, `loaders.0`, `slot.0`, and
-`loaders[0]`, so policy allowlists can pin capability-bearing registries to
-exact entries. Enum-variant payloads keep their stored callback sources when a
-match, `if let`, or `while let` branch destructures them. Returned effectful
-function values invoked immediately record factory calls such as
-`make_loader()`.
+enum-variant construction, including struct-like enum variants, are pure when
+they only store the callback, and the call site inherits the callback body's
+capability effects through the alias, or through `<closure>` when the anonymous
+closure is invoked immediately. Calls through effectful struct fields, tuple
+slots, tuple-struct fields, and indexed ops tables record paths such as
+`ops.loader`, `loaders.0`, `slot.0`, and `loaders[0]`, so policy allowlists can
+pin capability-bearing registries to exact entries. Enum-variant payloads keep
+their stored callback sources when a match, `if let`, or `while let` branch
+destructures them. Returned effectful function values invoked immediately
+record factory calls such as `make_loader()`.
 Async blocks keep the same boundary: construction is pure for type checking,
 and awaiting the future records the awaited expression, such as `task`, plus
 latent origins such as `task <- read_file`, as propagated sources of the future
@@ -247,9 +249,9 @@ Control-flow selectors keep reviewable evidence too: calling the result of an
 as `load_config` and `load_secret`. If the selected function is bound first,
 for example `let loader = if ...`, a later `loader()` call records `loader`
 plus the possible selected targets. Tuple, tuple-struct, struct, enum-variant,
-and slice destructuring, including branch-local `if let` and `while let`
-patterns, keep the same evidence, so destructured aliases do not hide which
-selected callee introduced the effect. Reassigning that identifier,
+and slice destructuring, including `Slot::Ready { loader }` and branch-local
+`if let`/`while let` patterns, keep the same evidence, so destructured aliases
+do not hide which selected callee introduced the effect. Reassigning that identifier,
 a struct field, a tuple slot, or an indexed entry updates the source set, which
 lets receipts describe mutable callback slots without carrying stale provenance
 from the old value.

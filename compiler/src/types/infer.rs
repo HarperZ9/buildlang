@@ -502,6 +502,50 @@ impl<'ctx> TypeInfer<'ctx> {
         Some(Ty::function(params, ret))
     }
 
+    fn enum_variant_named_field_types(
+        &self,
+        path: &ast::Path,
+        substs: &[Ty],
+    ) -> Option<Vec<(Arc<str>, Ty)>> {
+        if path.segments.len() < 2 {
+            return None;
+        }
+
+        let enum_name = path.segments[path.segments.len() - 2].ident.name.as_ref();
+        let variant_name = path.last_ident()?.name.as_ref();
+        let type_def = self.ctx.lookup_type_by_name(enum_name)?;
+        let TypeDefKind::Enum(enum_def) = &type_def.kind else {
+            return None;
+        };
+        let variant = enum_def
+            .variants
+            .iter()
+            .find(|variant| variant.name.as_ref() == variant_name)?;
+        variant
+            .fields
+            .iter()
+            .map(|(name, ty)| {
+                name.as_ref()
+                    .map(|name| (name.clone(), ty.substitute_params(substs)))
+            })
+            .collect()
+    }
+
+    fn enum_variant_named_constructor_info(
+        &self,
+        path: &ast::Path,
+    ) -> Option<(DefId, Vec<Ty>, Vec<(Arc<str>, Ty)>)> {
+        if path.segments.len() < 2 {
+            return None;
+        }
+
+        let enum_name = path.segments[path.segments.len() - 2].ident.name.as_ref();
+        let type_def = self.ctx.lookup_type_by_name(enum_name)?;
+        let substs: Vec<Ty> = type_def.generics.iter().map(|_| Ty::fresh_var()).collect();
+        let field_types = self.enum_variant_named_field_types(path, &substs)?;
+        Some((type_def.def_id, substs, field_types))
+    }
+
     fn is_positional_constructor_call(&self, func: &ast::Expr, arg_count: usize) -> bool {
         self.is_tuple_struct_constructor_call(func, arg_count)
             || self
@@ -4055,6 +4099,50 @@ impl<'ctx> TypeInfer<'ctx> {
             return Ty::adt(def_id, substs);
         }
 
+        if let Some((def_id, substs, variant_fields)) =
+            self.enum_variant_named_constructor_info(path)
+        {
+            for field in fields {
+                let field_name = field.name.as_ref();
+                let value_ty = if let Some(value) = &field.value {
+                    self.infer_expr(value)
+                } else if let Some(var_ty) = self.ctx.lookup_var(field_name) {
+                    var_ty
+                } else {
+                    self.error(
+                        TypeError::UndefinedVariable {
+                            name: field_name.to_string(),
+                        },
+                        span,
+                    );
+                    Ty::error()
+                };
+
+                if let Some((_, expected_ty)) = variant_fields
+                    .iter()
+                    .find(|(name, _)| name.as_ref() == field_name)
+                {
+                    let _ = self.unify(expected_ty, &value_ty, span);
+                } else {
+                    self.error(
+                        TypeError::UndefinedField {
+                            ty: Ty::adt(def_id, substs.clone()),
+                            field: field_name.to_string(),
+                        },
+                        span,
+                    );
+                }
+            }
+
+            if let Some(rest_expr) = rest {
+                let rest_ty = self.infer_expr(rest_expr);
+                let enum_ty = Ty::adt(def_id, substs.clone());
+                let _ = self.unify(&rest_ty, &enum_ty, span);
+            }
+
+            return Ty::adt(def_id, substs);
+        }
+
         // Fallback: infer field types but return fresh variable
         for field in fields {
             if let Some(value) = &field.value {
@@ -4101,6 +4189,7 @@ impl<'ctx> TypeInfer<'ctx> {
             ast::PatternKind::Struct { path, fields, .. } => {
                 // Look up struct definition to get field types
                 let struct_name = path.last_ident().map(|i| &*i.name);
+                let resolved_ty = self.apply(ty);
 
                 // Extract field types before recursive calls to avoid borrow conflicts
                 let field_types: Vec<_> = fields
@@ -4109,15 +4198,38 @@ impl<'ctx> TypeInfer<'ctx> {
                         let field_name = field.name.as_ref();
 
                         // Try to get field type from ADT type
-                        if let TyKind::Adt(def_id, _substs) = &ty.kind {
+                        if let TyKind::Adt(def_id, substs) = &resolved_ty.kind {
                             if let Some(type_def) = self.ctx.lookup_type(*def_id) {
-                                if let TypeDefKind::Struct(struct_def) = &type_def.kind {
-                                    if let Some((_, t)) = struct_def
-                                        .fields
-                                        .iter()
-                                        .find(|(n, _)| n.as_ref() == field_name)
-                                    {
-                                        return t.clone();
+                                match &type_def.kind {
+                                    TypeDefKind::Struct(struct_def) => {
+                                        if let Some((_, t)) = struct_def
+                                            .fields
+                                            .iter()
+                                            .find(|(n, _)| n.as_ref() == field_name)
+                                        {
+                                            return t.substitute_params(substs);
+                                        }
+                                    }
+                                    TypeDefKind::Enum(enum_def) => {
+                                        let variant_name =
+                                            path.last_ident().map(|ident| ident.name.as_ref());
+                                        if let Some(variant_name) = variant_name {
+                                            if let Some(variant) =
+                                                enum_def.variants.iter().find(|variant| {
+                                                    variant.name.as_ref() == variant_name
+                                                })
+                                            {
+                                                if let Some((_, t)) =
+                                                    variant.fields.iter().find(|(name, _)| {
+                                                        name.as_ref().is_some_and(|name| {
+                                                            name.as_ref() == field_name
+                                                        })
+                                                    })
+                                                {
+                                                    return t.substitute_params(substs);
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -4134,6 +4246,16 @@ impl<'ctx> TypeInfer<'ctx> {
                                         return t.clone();
                                     }
                                 }
+                            }
+                        }
+                        if let Some((_, _, variant_fields)) =
+                            self.enum_variant_named_constructor_info(path)
+                        {
+                            if let Some((_, t)) = variant_fields
+                                .iter()
+                                .find(|(name, _)| name.as_ref() == field_name)
+                            {
+                                return t.clone();
                             }
                         }
                         Ty::fresh_var()
