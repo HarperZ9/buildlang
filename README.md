@@ -174,6 +174,9 @@ function-specific direct and propagated allowlists.
 For the common case, `quantac check app.quanta --profile ci-review --receipt -`
 evaluates a built-in profile directly without first writing a policy file.
 Receipts identify these gates with a `policy.source` such as `builtin:ci-review`.
+Built-in profile receipts also include `policy.profile` and
+`policy.profile_digest`, so CI can distinguish official profile identity from
+an equivalent file-backed policy document.
 
 Receipts separate direct capability boundaries from callers that inherit those
 effects. `observed_capabilities` records ambient helper, macro, and FFI access
