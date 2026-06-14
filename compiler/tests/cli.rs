@@ -2948,6 +2948,57 @@ fn main() {
 }
 
 #[test]
+fn check_rejects_try_operator_on_selected_effectful_function_value() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_try_selected_effectful_function_gate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn load_config() -> str ~ FileSystem {
+    read_file("config.toml")
+}
+
+fn load_secret() -> str ~ FileSystem {
+    read_file("secret.toml")
+}
+
+fn main() {
+    let use_secret = true;
+    let loader = if use_secret { load_secret } else { load_config };
+    loader?();
+}
+"#,
+    )
+    .expect("write try selected effectful function fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "try operator on selected effectful function value should be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("`?`"),
+        "diagnostic should name the try operator:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("fn()"),
+        "diagnostic should name the invalid function operand:\n{}",
+        stderr
+    );
+}
+
+#[test]
 fn check_receipt_records_let_bound_selected_effectful_function_sources() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_check_receipt_let_bound_selected_effectful_function_{}.quanta",
