@@ -149,6 +149,40 @@ fn help_lists_corpus_command() {
 }
 
 #[test]
+fn check_reports_capability_effect_for_ambient_file_call() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_capability_gate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(&fixture, r#"fn main() { read_file("ops.txt"); }"#)
+        .expect("write capability fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "ambient file call should fail without FileSystem effect"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FileSystem"),
+        "diagnostic should name FileSystem effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("read_file"),
+        "diagnostic should name triggering ambient call:\n{}",
+        stderr
+    );
+}
+
+#[test]
 fn corpus_verify_accepts_explicit_root() {
     if !c_backend_ready() {
         eprintln!("skipping semantic corpus root verification because no C backend is available");
