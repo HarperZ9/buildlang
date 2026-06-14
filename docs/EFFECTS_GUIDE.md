@@ -124,10 +124,12 @@ such as `loader: fn() with FileSystem` makes `loader()` an effectful call, and a
 returning callback can be written as `(fn() -> str) with FileSystem`. Receipts
 record the callback name under `propagated_effects`, which lets policy gates
 distinguish a wrapper that inherited file access through `loader` from a
-function that directly called `read_file`. Callers that pass effectful callbacks
-into wrappers keep that source evidence too, so `run(load_config)` records both
-`run` and `load_config` as propagated `FileSystem` evidence. Ambient helpers
-used as values keep their capability effects as well, so
+function that directly called `read_file`. Function type unification preserves
+effect rows too, so an effectful value cannot be accepted by a pure `fn(...)`
+parameter and lose its declared capability. Callers that pass effectful
+callbacks into wrappers keep that source evidence too, so `run(load_config)`
+records both `run` and `load_config` as propagated `FileSystem` evidence.
+Ambient helpers used as values keep their capability effects as well, so
 `let loader = read_file; loader("ops.toml")` requires `FileSystem` and records
 `loader` as propagated evidence. Closure literals capture body effects into
 their function type without performing them at definition time, so
@@ -206,7 +208,10 @@ Effectful callback parameters appear here as named sources too, so higher-order
 ops code keeps capability provenance instead of losing it behind `fn(...)`
 values. Effectful callback arguments supplied to wrappers also appear here, so
 `run(load_config)` keeps both the wrapper and supplied callback visible to
-policy review. Aliases of ambient helpers follow the same rule: calling `loader` after
+policy review. Pure callback signatures remain pure boundaries:
+`fn run(loader: fn(str) -> str)` cannot accept `read_file` because that would
+erase the helper's `FileSystem` effect row. Aliases of ambient helpers follow
+the same rule: calling `loader` after
 `let loader = read_file` inherits `FileSystem` through the alias instead of
 silently becoming an untyped helper call. Effectful closures are also delayed
 function values: the closure literal is pure to define, and the call site

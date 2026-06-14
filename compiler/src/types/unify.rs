@@ -256,10 +256,15 @@ impl Unifier {
                     self.unify(p1, p2)?;
                 }
                 self.unify(&fn1.ret, &fn2.ret)?;
-                // Effect rows: pure is compatible with any; otherwise must match
-                // For now, skip strict effect unification to avoid breaking existing code.
-                // Both pure => ok. One effectful, one pure => ok (subsumption).
-                // Both effectful => must be structurally equal (checked later).
+                // Effect rows are part of the callable contract. Allowing an
+                // effectful function to unify with a pure function type erases
+                // the capability gate at callback and assignment boundaries.
+                if fn1.effects != fn2.effects {
+                    return Err(TypeError::TypeMismatch {
+                        expected: t1.clone(),
+                        found: t2.clone(),
+                    });
+                }
                 Ok(())
             }
 
@@ -475,6 +480,23 @@ mod tests {
         let subst = unify(&t1, &t2).unwrap();
         assert_eq!(subst.get(v1), Some(&Ty::int(IntTy::I32)));
         assert_eq!(subst.get(v2), Some(&Ty::bool()));
+    }
+
+    #[test]
+    fn test_unify_rejects_erased_function_effects() {
+        let pure = Ty::function(vec![Ty::str()], Ty::str());
+        let file_effect =
+            super::super::effects::EffectRow::closed([super::super::effects::Effect::new(
+                "FileSystem",
+            )]);
+        let effectful = Ty::function_with_effects(vec![Ty::str()], Ty::str(), file_effect);
+
+        let result = unify(&pure, &effectful);
+
+        assert!(
+            result.is_err(),
+            "effectful functions must not unify with pure function types"
+        );
     }
 
     #[test]

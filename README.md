@@ -167,10 +167,13 @@ First-class function types can carry capability effects as well: a parameter
 written as `loader: fn() with FileSystem` forces callers of `loader()` to
 declare or handle `FileSystem`, and `(fn() -> str) with FileSystem` supports
 effectful callbacks that return data while keeping callback provenance in
-receipts. Wrappers that receive an effectful callback argument keep caller-side
-evidence as well, so `run(load_config)` records both `run` and `load_config` as
-propagated `FileSystem` sources. Effectful inherent methods and associated
-functions carry the same declared effects through call syntax, so
+receipts. Function effect rows are enforced during type unification, so an
+effectful callback cannot be passed into a pure `fn(...)` slot and silently
+erase `FileSystem`, `Network`, `Process`, `Foreign`, or any other declared
+capability. Wrappers that receive an effectful callback argument keep
+caller-side evidence as well, so `run(load_config)` records both `run` and
+`load_config` as propagated `FileSystem` sources. Effectful inherent methods
+and associated functions carry the same declared effects through call syntax, so
 `config.load()` can require `FileSystem` and record `Config.load` as propagated
 evidence, while `Config::load()` records `Config::load`. Dynamic dispatch
 through `dyn Loader` also checks the trait method signature, so
@@ -290,7 +293,9 @@ calls `loader: fn() with FileSystem` records `loader` as the inherited
 `FileSystem` source. When a caller supplies an effectful callback to that
 wrapper, receipts record the supplied callback source too, so `run(load_config)`
 can be reviewed or allowlisted by both `run` and `load_config`. The same rule
-covers aliases of ambient helpers, such as
+covers effect-row compatibility itself: `fn run(loader: fn(str) -> str)` cannot
+accept `read_file` because the pure callback boundary does not declare
+`FileSystem`. Aliases of ambient helpers, such as
 `let loader = read_file`; calling the alias inherits the helper's capability
 effect instead of falling back to an untyped function value. Effectful closures
 use the same function-value path: creating `|path: str| read_file(path)` does
@@ -418,7 +423,7 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-14
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 801 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
+- **Tests**: 803 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
