@@ -178,6 +178,10 @@ not accepted under a specific file-backed or built-in policy digest.
 capabilities. Policy failures make the check fail even when type checking
 passes, and receipts record the policy path, policy digest, status, and
 structured violations.
+Effect names in `allowed_effects`, `denied_effects`, and allowlist keys are
+validated against built-in capability effects and the effects present in the
+checked source graph, so misspelled policy gates fail as `UnknownPolicyEffect`
+instead of silently weakening CI.
 
 `quantac policy list` shows built-in baseline profiles,
 `quantac policy list --json` emits a machine-readable catalog with profile
@@ -279,7 +283,7 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-14
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 722 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
+- **Tests**: 724 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
