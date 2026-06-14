@@ -605,6 +605,8 @@ struct CheckPolicyProfile {
     #[serde(default)]
     propagated_effect_allowlist: BTreeMap<String, Vec<String>>,
     #[serde(default)]
+    propagated_effect_source_allowlist: BTreeMap<String, BTreeMap<String, Vec<String>>>,
+    #[serde(default)]
     require_source_digest: bool,
     #[serde(default)]
     require_input_graph_digest: bool,
@@ -2473,7 +2475,7 @@ fn allowlist_allows(
     }
 }
 
-fn direct_capability_source_allowlist_allows(
+fn source_allowlist_allows(
     allowlist: &BTreeMap<String, BTreeMap<String, Vec<String>>>,
     effect: &str,
     function: &str,
@@ -2697,6 +2699,12 @@ fn evaluate_check_policy(
         "propagated_effect_allowlist",
         policy.profile.propagated_effect_allowlist.keys(),
     );
+    insert_unknown_policy_effect_violations(
+        &mut violations,
+        &known_effects,
+        "propagated_effect_source_allowlist",
+        policy.profile.propagated_effect_source_allowlist.keys(),
+    );
     if policy.profile.require_allowlist_coverage {
         insert_unused_allowlist_violations(
             &mut violations,
@@ -2721,6 +2729,14 @@ fn evaluate_check_policy(
             "direct_capability_source_allowlist",
             "observed_capabilities",
             "UnusedDirectCapabilitySourceAllowlist",
+        );
+        insert_unused_source_allowlist_violations(
+            &mut violations,
+            &evidence,
+            &policy.profile.propagated_effect_source_allowlist,
+            "propagated_effect_source_allowlist",
+            "propagated_effects",
+            "UnusedPropagatedEffectSourceAllowlist",
         );
     }
 
@@ -2787,7 +2803,7 @@ fn evaluate_check_policy(
                 ),
             });
         } else if item.surface == "observed_capabilities"
-            && !direct_capability_source_allowlist_allows(
+            && !source_allowlist_allows(
                 &policy.profile.direct_capability_source_allowlist,
                 &item.effect,
                 &item.function,
@@ -2821,6 +2837,25 @@ fn evaluate_check_policy(
                 source: item.source.clone(),
                 message: format!(
                     "effect `{}` is propagated into `{}` via `{}` but policy does not allow that caller",
+                    item.effect, item.function, item.source
+                ),
+            });
+        } else if item.surface == "propagated_effects"
+            && !source_allowlist_allows(
+                &policy.profile.propagated_effect_source_allowlist,
+                &item.effect,
+                &item.function,
+                &item.source,
+            )
+        {
+            violations.insert(CheckPolicyViolation {
+                kind: "PropagatedEffectSourceNotAllowed",
+                effect: item.effect.clone(),
+                function: item.function.clone(),
+                surface: item.surface,
+                source: item.source.clone(),
+                message: format!(
+                    "effect `{}` is propagated into `{}` via `{}` but policy does not allow that callee source",
                     item.effect, item.function, item.source
                 ),
             });
@@ -5671,6 +5706,7 @@ mod tests {
                 direct_effect_allowlist: BTreeMap::new(),
                 direct_capability_source_allowlist: BTreeMap::new(),
                 propagated_effect_allowlist: BTreeMap::new(),
+                propagated_effect_source_allowlist: BTreeMap::new(),
                 require_source_digest: true,
                 require_input_graph_digest: false,
                 require_provenance_allowlists: false,
@@ -5751,6 +5787,7 @@ mod tests {
                 direct_effect_allowlist: BTreeMap::new(),
                 direct_capability_source_allowlist: BTreeMap::new(),
                 propagated_effect_allowlist: BTreeMap::new(),
+                propagated_effect_source_allowlist: BTreeMap::new(),
                 require_source_digest: false,
                 require_input_graph_digest: true,
                 require_provenance_allowlists: false,
@@ -5808,6 +5845,7 @@ mod tests {
         assert!(loaded.profile.direct_effect_allowlist.is_empty());
         assert!(loaded.profile.direct_capability_source_allowlist.is_empty());
         assert!(loaded.profile.propagated_effect_allowlist.is_empty());
+        assert!(loaded.profile.propagated_effect_source_allowlist.is_empty());
         assert!(!loaded.profile.require_input_graph_digest);
         assert!(!loaded.profile.require_provenance_allowlists);
         assert!(!loaded.profile.require_allowlist_coverage);
