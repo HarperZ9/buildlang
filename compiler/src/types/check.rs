@@ -517,9 +517,11 @@ impl<'ctx> TypeChecker<'ctx> {
                 self.ctx.register_function(def_id, sig.clone());
 
                 let param_tys: Vec<_> = sig.params.iter().map(|(_, ty)| ty.clone()).collect();
-                let effects = super::effects::EffectRow::closed([super::effects::Effect::new(
-                    super::capabilities::FOREIGN,
-                )]);
+                let effect_name =
+                    super::capabilities::capability_effect_for_call(f.name.name.as_ref())
+                        .unwrap_or(super::capabilities::FOREIGN);
+                let effects =
+                    super::effects::EffectRow::closed([super::effects::Effect::new(effect_name)]);
                 let fn_ty = Ty::function_with_effects_and_lifetimes(
                     param_tys,
                     sig.ret.clone(),
@@ -1554,6 +1556,53 @@ mod tests {
     }
 
     #[test]
+    fn capability_c_runtime_filesystem_call_requires_filesystem_effect() {
+        let errors = check_source(
+            r#"
+            extern "C" {
+                fn quanta_file_exists(path: &str) -> bool;
+            }
+
+            fn main() {
+                quanta_file_exists("ops.txt");
+            }
+            "#,
+        );
+
+        assert!(
+            errors.iter().any(|err| matches!(
+                &err.error,
+                TypeError::UnhandledEffect { effect_name, .. } if effect_name == "FileSystem"
+            )),
+            "expected FileSystem effect error, got {errors:#?}"
+        );
+        assert!(
+            errors.iter().any(|err| err
+                .notes
+                .iter()
+                .any(|note| note.contains("quanta_file_exists"))),
+            "expected diagnostic note naming quanta_file_exists, got {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn capability_declared_filesystem_effect_allows_c_runtime_file_call() {
+        let errors = check_source(
+            r#"
+            extern "C" {
+                fn quanta_file_exists(path: &str) -> bool;
+            }
+
+            fn main() ~ FileSystem {
+                quanta_file_exists("ops.txt");
+            }
+            "#,
+        );
+
+        assert!(errors.is_empty(), "expected no errors, got {errors:#?}");
+    }
+
+    #[test]
     fn capability_wrong_declared_effect_does_not_allow_file_call() {
         let errors = check_source(r#"fn main() ~ Network { read_file("ops.txt"); }"#);
 
@@ -1653,6 +1702,53 @@ mod tests {
     #[test]
     fn capability_declared_gpu_effect_allows_gpu_runtime_call() {
         let errors = check_source(r#"fn main() ~ Gpu { quanta_vk_init(); }"#);
+
+        assert!(errors.is_empty(), "expected no errors, got {errors:#?}");
+    }
+
+    #[test]
+    fn capability_c_runtime_graphics_call_requires_gpu_effect() {
+        let errors = check_source(
+            r#"
+            extern "C" {
+                fn quanta_gfx_init(width: i32, height: i32, title: &str) -> i32;
+            }
+
+            fn main() {
+                quanta_gfx_init(800, 600, "QuantaLang Triangle");
+            }
+            "#,
+        );
+
+        assert!(
+            errors.iter().any(|err| matches!(
+                &err.error,
+                TypeError::UnhandledEffect { effect_name, .. } if effect_name == "Gpu"
+            )),
+            "expected Gpu effect error, got {errors:#?}"
+        );
+        assert!(
+            errors.iter().any(|err| err
+                .notes
+                .iter()
+                .any(|note| note.contains("quanta_gfx_init"))),
+            "expected diagnostic note naming quanta_gfx_init, got {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn capability_declared_gpu_effect_allows_c_runtime_graphics_call() {
+        let errors = check_source(
+            r#"
+            extern "C" {
+                fn quanta_gfx_init(width: i32, height: i32, title: &str) -> i32;
+            }
+
+            fn main() ~ Gpu {
+                quanta_gfx_init(800, 600, "QuantaLang Triangle");
+            }
+            "#,
+        );
 
         assert!(errors.is_empty(), "expected no errors, got {errors:#?}");
     }

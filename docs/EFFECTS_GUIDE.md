@@ -78,8 +78,13 @@ function type instead of hiding behind a runtime helper.
 | `Environment` | `getenv`, `args_count`, `args_get` |
 | `Clock` | `clock_ms`, `time_unix` |
 | `Console` | `read_line`, `read_all`, `stdin_is_pipe`, direct print helpers, console macros such as `println!`, `print!`, `eprintln!`, `eprint!`, and diagnostic logging macros |
-| `Foreign` | calls to functions declared in `extern` blocks |
-| `Gpu` | direct `quanta_vk_*` runtime helpers |
+| `Foreign` | calls to unknown functions declared in `extern` blocks |
+| `Gpu` | direct `quanta_vk_*` and `quanta_gfx_*` runtime helpers |
+
+Known `quanta_*` C runtime helper aliases declared through `extern` blocks are
+classified by their specific domain capability instead of generic `Foreign`.
+For example, `quanta_read_file` is `FileSystem`, `quanta_tcp_connect` is
+`Network`, and `quanta_gfx_init` is `Gpu`.
 
 ```quanta
 fn load_config() {
@@ -170,9 +175,12 @@ receipt was accepted under an exact file-backed or built-in policy digest.
 
 `observed_capabilities` records direct ambient capability use inside a function,
 such as `read_file`, `tcp_connect`, `println!`, process helpers, or FFI helpers.
-Raw extern-block calls are direct `Foreign` entries; calls to local wrappers
-around those extern functions are propagated `Foreign` dependencies. Qualified
-ambient helpers keep their full source path, which lets
+Raw unknown extern-block calls are direct `Foreign` entries. Known runtime
+helper aliases declared in extern blocks are recorded under their specific
+capability, such as `Gpu` for `quanta_gfx_init` or `FileSystem` for
+`quanta_read_file`; calls to local wrappers around those extern functions are
+propagated dependencies. Qualified ambient helpers keep their full source path,
+which lets
 `direct_capability_source_allowlist` distinguish `io::read_file` from any other
 `read_file` source. These entries are the accountability boundary for code that
 actually touches the outside world.

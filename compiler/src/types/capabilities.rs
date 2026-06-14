@@ -30,13 +30,35 @@ pub fn is_capability_effect(name: &str) -> bool {
 
 pub fn capability_effect_for_call(name: &str) -> Option<&'static str> {
     match name {
-        "println" | "print" | "read_line" | "read_all" | "stdin_is_pipe" => Some(CONSOLE),
+        "println"
+        | "print"
+        | "read_line"
+        | "read_all"
+        | "stdin_is_pipe"
+        | "quanta_print_i32"
+        | "quanta_print_i64"
+        | "quanta_print_f32"
+        | "quanta_print_f64"
+        | "quanta_print_bool"
+        | "quanta_print_str"
+        | "quanta_print_string"
+        | "quanta_print_char"
+        | "quanta_eprint_str"
+        | "quanta_eprint_string"
+        | "quanta_read_line"
+        | "quanta_read_all"
+        | "quanta_stdin_is_pipe" => Some(CONSOLE),
         "read_file" | "write_file" | "file_exists" | "read_bytes" | "write_bytes"
-        | "append_file" | "list_dir" | "is_dir" | "file_size" => Some(FILE_SYSTEM),
-        "tcp_connect" | "tcp_send" | "tcp_recv" | "tcp_close" => Some(NETWORK),
-        "exit" | "process_exit" => Some(PROCESS),
-        "getenv" | "args_count" | "args_get" => Some(ENVIRONMENT),
-        "clock_ms" | "time_unix" => Some(CLOCK),
+        | "append_file" | "list_dir" | "is_dir" | "file_size" | "quanta_read_file"
+        | "quanta_write_file" | "quanta_file_exists" | "quanta_read_bytes"
+        | "quanta_write_bytes" | "quanta_append_file" | "quanta_list_dir" | "quanta_is_dir"
+        | "quanta_file_size" => Some(FILE_SYSTEM),
+        "tcp_connect" | "tcp_send" | "tcp_recv" | "tcp_close" | "quanta_tcp_connect"
+        | "quanta_tcp_send" | "quanta_tcp_recv" | "quanta_tcp_close" => Some(NETWORK),
+        "exit" | "process_exit" | "quanta_exit" | "quanta_process_exit" => Some(PROCESS),
+        "getenv" | "args_count" | "args_get" | "quanta_getenv" | "quanta_args_init"
+        | "quanta_args_count" | "quanta_args_get" => Some(ENVIRONMENT),
+        "clock_ms" | "time_unix" | "quanta_clock_ms" | "quanta_time_unix" => Some(CLOCK),
         "quanta_vk_init"
         | "quanta_vk_load_shader_file"
         | "quanta_vk_run_compute"
@@ -46,7 +68,16 @@ pub fn capability_effect_for_call(name: &str) -> Option<&'static str> {
         | "quanta_vk_draw_frame"
         | "quanta_vk_should_close"
         | "quanta_vk_request_close"
-        | "quanta_vk_device_name" => Some(GPU),
+        | "quanta_vk_device_name"
+        | "quanta_gfx_init"
+        | "quanta_gfx_load_shader"
+        | "quanta_gfx_create_pipeline"
+        | "quanta_gfx_begin_frame"
+        | "quanta_gfx_clear"
+        | "quanta_gfx_draw"
+        | "quanta_gfx_end_frame"
+        | "quanta_gfx_should_close"
+        | "quanta_gfx_shutdown" => Some(GPU),
         _ => None,
     }
 }
@@ -73,6 +104,25 @@ mod tests {
         assert_eq!(capability_effect_for_call("getenv"), Some("Environment"));
         assert_eq!(capability_effect_for_call("clock_ms"), Some("Clock"));
         assert_eq!(capability_effect_for_call("quanta_vk_init"), Some("Gpu"));
+        assert_eq!(
+            capability_effect_for_call("quanta_read_file"),
+            Some("FileSystem")
+        );
+        assert_eq!(
+            capability_effect_for_call("quanta_tcp_connect"),
+            Some("Network")
+        );
+        assert_eq!(
+            capability_effect_for_call("quanta_process_exit"),
+            Some("Process")
+        );
+        assert_eq!(
+            capability_effect_for_call("quanta_getenv"),
+            Some("Environment")
+        );
+        assert_eq!(capability_effect_for_call("quanta_clock_ms"), Some("Clock"));
+        assert_eq!(capability_effect_for_call("quanta_gfx_init"), Some("Gpu"));
+        assert_eq!(capability_effect_for_call("quanta_gfx_draw"), Some("Gpu"));
         assert_eq!(capability_effect_for_call("sqrt"), None);
     }
 

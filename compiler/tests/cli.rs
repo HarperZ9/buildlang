@@ -415,6 +415,53 @@ fn check_receipt_records_gpu_capability_source() {
 }
 
 #[test]
+fn check_receipt_records_graphics_runtime_capability_source() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_graphics_runtime_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+extern "C" {
+    fn quanta_gfx_init(width: i32, height: i32, title: &str) -> i32;
+}
+
+fn main() ~ Gpu {
+    quanta_gfx_init(800, 600, "QuantaLang Triangle");
+}
+"#,
+    )
+    .expect("write graphics runtime receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "graphics runtime receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["declared_effects"]["main"],
+        serde_json::json!(["Gpu"])
+    );
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]["Gpu"],
+        serde_json::json!(["quanta_gfx_init"])
+    );
+}
+
+#[test]
 fn check_receipt_records_qualified_capability_source() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_check_receipt_qualified_capability_{}.quanta",
