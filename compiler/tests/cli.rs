@@ -4,6 +4,8 @@ use std::{
     process::Command,
 };
 
+use sha2::{Digest, Sha256};
+
 fn quantac() -> Command {
     Command::new(env!("CARGO_BIN_EXE_quantac"))
 }
@@ -36,6 +38,16 @@ fn receipt_from_stdout(output: &std::process::Output) -> serde_json::Value {
             String::from_utf8_lossy(&output.stderr)
         )
     })
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut hex, "{byte:02x}").expect("write digest hex");
+    }
+    hex
 }
 
 fn write_temp_policy(label: &str, json: &str) -> PathBuf {
@@ -1203,6 +1215,103 @@ fn policy_list_includes_builtin_security_profiles() {
         stdout.contains("ci-review"),
         "missing ci-review profile:\n{stdout}"
     );
+}
+
+#[test]
+fn policy_list_json_emits_catalog_with_profile_digests() {
+    let output = quantac()
+        .args(["policy", "list", "--json"])
+        .output()
+        .expect("run quantac policy list --json");
+
+    assert!(
+        output.status.success(),
+        "policy list --json should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let catalog: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("catalog should be JSON");
+    assert_eq!(catalog["schema"], "quantalang-policy-catalog/v1");
+    let profiles = catalog["profiles"]
+        .as_array()
+        .expect("profiles should be an array");
+    let names = profiles
+        .iter()
+        .map(|profile| profile["name"].as_str().unwrap_or(""))
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["pure", "console-only", "offline", "ci-review"]);
+    for profile in profiles {
+        assert_eq!(
+            profile["policy_schema"], "quantalang-check-policy/v1",
+            "profile should name the policy schema: {profile:#?}"
+        );
+        assert!(
+            profile["summary"]
+                .as_str()
+                .is_some_and(|summary| !summary.is_empty()),
+            "profile should include a summary: {profile:#?}"
+        );
+        assert_eq!(profile["digest"]["algorithm"], "sha256");
+        assert_eq!(
+            profile["digest"]["hex"]
+                .as_str()
+                .expect("profile digest hex")
+                .len(),
+            64
+        );
+    }
+}
+
+#[test]
+fn policy_list_json_digest_matches_printed_profile() {
+    let dir = std::env::temp_dir().join(format!(
+        "quantalang_policy_catalog_digest_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create policy catalog digest directory");
+    let profile_path = dir.join("ci-review.json");
+
+    let catalog_output = quantac()
+        .args(["policy", "list", "--json"])
+        .output()
+        .expect("run quantac policy list --json");
+    let print_output = quantac()
+        .args(["policy", "print", "ci-review", "--output"])
+        .arg(&profile_path)
+        .output()
+        .expect("write ci-review policy");
+
+    assert!(
+        catalog_output.status.success(),
+        "policy catalog should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&catalog_output.stdout),
+        String::from_utf8_lossy(&catalog_output.stderr)
+    );
+    assert!(
+        print_output.status.success(),
+        "policy print should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&print_output.stdout),
+        String::from_utf8_lossy(&print_output.stderr)
+    );
+
+    let catalog: serde_json::Value =
+        serde_json::from_slice(&catalog_output.stdout).expect("catalog should be JSON");
+    let ci_review_digest = catalog["profiles"]
+        .as_array()
+        .expect("profiles should be an array")
+        .iter()
+        .find(|profile| profile["name"] == "ci-review")
+        .expect("ci-review profile")["digest"]
+        .clone();
+    let printed_text = fs::read(&profile_path).expect("read printed policy");
+    let expected_hex = sha256_hex(&printed_text);
+
+    assert_eq!(ci_review_digest["algorithm"], "sha256");
+    assert_eq!(ci_review_digest["hex"], expected_hex);
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
