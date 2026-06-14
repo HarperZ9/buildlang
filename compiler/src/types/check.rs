@@ -9,6 +9,7 @@
 //! This module handles type checking at the item level, while `infer.rs`
 //! handles expression-level type inference.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::ast::{self, ImplItemKind, ItemKind, StructFields, TraitItemKind};
@@ -18,6 +19,13 @@ use super::context::*;
 use super::error::*;
 use super::infer::TypeInfer;
 use super::ty::*;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FunctionEffectSummary {
+    pub function: String,
+    pub declared_effects: Vec<String>,
+    pub observed_capabilities: BTreeMap<String, BTreeSet<String>>,
+}
 
 /// The type checker for items and declarations.
 pub struct TypeChecker<'ctx> {
@@ -29,6 +37,8 @@ pub struct TypeChecker<'ctx> {
     effect_ctx: super::effects::EffectContext,
     /// Source directory for resolving external module files.
     source_dir: Option<std::path::PathBuf>,
+    /// Per-function declared/observed effect evidence for receipts.
+    function_effect_summaries: Vec<FunctionEffectSummary>,
 }
 
 impl<'ctx> TypeChecker<'ctx> {
@@ -39,6 +49,7 @@ impl<'ctx> TypeChecker<'ctx> {
             errors: Vec::new(),
             effect_ctx: super::effects::EffectContext::new(),
             source_dir: None,
+            function_effect_summaries: Vec::new(),
         }
     }
 
@@ -55,6 +66,11 @@ impl<'ctx> TypeChecker<'ctx> {
     /// Get collected errors.
     pub fn errors(&self) -> &[TypeErrorWithSpan] {
         &self.errors
+    }
+
+    /// Get per-function effect summaries collected during the latest module check.
+    pub fn function_effect_summaries(&self) -> &[FunctionEffectSummary] {
+        &self.function_effect_summaries
     }
 
     /// Take collected errors.
@@ -78,6 +94,8 @@ impl<'ctx> TypeChecker<'ctx> {
 
     /// Check a module.
     pub fn check_module(&mut self, module: &ast::Module) {
+        self.function_effect_summaries.clear();
+
         // Register built-in vector/matrix struct types so that type annotations
         // like `vec3` resolve to known struct types with accessible fields.
         self.register_builtin_vec_types();
@@ -719,6 +737,18 @@ impl<'ctx> TypeChecker<'ctx> {
             // Check effects: if the function is declared pure (no effect annotations)
             // but the body performs effects, report an error.
             let func_name = f.name.name.to_string();
+            let mut declared_effects: Vec<String> = expected_effects
+                .effects
+                .iter()
+                .map(|effect| effect.name.to_string())
+                .collect();
+            declared_effects.sort();
+            self.function_effect_summaries.push(FunctionEffectSummary {
+                function: func_name.clone(),
+                declared_effects,
+                observed_capabilities: capability_sources.clone(),
+            });
+
             if expected_effects.is_empty() && !body_effects.is_empty() {
                 for body_eff in &body_effects.effects {
                     let err = TypeError::UnhandledEffect {
@@ -1596,6 +1626,61 @@ mod tests {
                 .any(|err| err.notes.iter().any(|note| note.contains("touch"))),
             "expected diagnostic note naming touch, got {errors:#?}"
         );
+    }
+
+    #[test]
+    fn check_summary_records_declared_effects_and_capability_sources() {
+        let source = r#"fn main() ~ Console { println!("ops"); }"#;
+        let source_file = crate::lexer::SourceFile::new("summary_test.quanta", source);
+        let mut lexer = crate::lexer::Lexer::new(&source_file);
+        let tokens = lexer.tokenize().expect("tokenize summary fixture");
+        let mut parser = crate::parser::Parser::new(&source_file, tokens);
+        let module = parser.parse().expect("parse summary fixture");
+
+        let mut ctx = TypeContext::new();
+        let mut checker = TypeChecker::new(&mut ctx);
+        checker.check_module(&module);
+
+        let summaries = checker.function_effect_summaries();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].function, "main");
+        assert_eq!(summaries[0].declared_effects, vec!["Console"]);
+        assert_eq!(
+            summaries[0]
+                .observed_capabilities
+                .get("Console")
+                .expect("Console capability should be observed")
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["println!"]
+        );
+    }
+
+    #[test]
+    fn check_summaries_reset_between_modules() {
+        let first = r#"fn main() ~ Console { println!("ops"); }"#;
+        let second = r#"fn helper() {}"#;
+
+        let parse_module = |name: &str, source: &str| {
+            let source_file = crate::lexer::SourceFile::new(name, source);
+            let mut lexer = crate::lexer::Lexer::new(&source_file);
+            let tokens = lexer.tokenize().expect("tokenize summary fixture");
+            let mut parser = crate::parser::Parser::new(&source_file, tokens);
+            parser.parse().expect("parse summary fixture")
+        };
+
+        let mut ctx = TypeContext::new();
+        let mut checker = TypeChecker::new(&mut ctx);
+        checker.check_module(&parse_module("first.quanta", first));
+        assert_eq!(checker.function_effect_summaries().len(), 1);
+
+        checker.check_module(&parse_module("second.quanta", second));
+        let summaries = checker.function_effect_summaries();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].function, "helper");
+        assert!(summaries[0].declared_effects.is_empty());
+        assert!(summaries[0].observed_capabilities.is_empty());
     }
 
     #[test]
