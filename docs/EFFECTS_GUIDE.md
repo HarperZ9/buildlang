@@ -108,7 +108,9 @@ fn call_foreign() ~ Foreign {
 
 Diagnostics include a note naming the ambient call or macro, for example
 `read_file`, `touch`, or `println`, so receipts and review tooling can point to
-the exact capability source.
+the exact capability source. Qualified helper paths are classified by their
+capability leaf and recorded with their full path, so `io::read_file()` requires
+`FileSystem` and appears in receipts as `io::read_file`.
 
 `quantac check <file> --receipt <path>` writes a deterministic
 `quantalang-check-receipt/v1` JSON artifact with compiler/language version
@@ -137,9 +139,11 @@ receipt was accepted under an exact file-backed or built-in policy digest.
 `observed_capabilities` records direct ambient capability use inside a function,
 such as `read_file`, `tcp_connect`, `println!`, process helpers, or FFI helpers.
 Raw extern-block calls are direct `Foreign` entries; calls to local wrappers
-around those extern functions are propagated `Foreign` dependencies. These
-entries are the accountability boundary for code that actually touches the
-outside world.
+around those extern functions are propagated `Foreign` dependencies. Qualified
+ambient helpers keep their full source path, which lets
+`direct_capability_source_allowlist` distinguish `io::read_file` from any other
+`read_file` source. These entries are the accountability boundary for code that
+actually touches the outside world.
 
 `propagated_effects` records effectful callees that make a caller inherit a
 typed effect. This lets policy allow a small number of audited boundary

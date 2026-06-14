@@ -295,20 +295,25 @@ impl<'ctx> TypeInfer<'ctx> {
         }
     }
 
-    fn record_call_capability(&mut self, call_name: &str) {
-        if let Some(effect_name) = super::capabilities::capability_effect_for_call(call_name) {
+    fn record_call_capability(&mut self, call_source: &str) {
+        let lookup_name = call_source.rsplit("::").next().unwrap_or(call_source);
+        if let Some(effect_name) = super::capabilities::capability_effect_for_call(lookup_name) {
             self.current_effects
                 .add(super::effects::Effect::new(effect_name));
-            self.record_capability_source(effect_name, call_name);
+            self.record_capability_source(effect_name, call_source);
         }
     }
 
-    fn call_name(func: &ast::Expr) -> Option<&str> {
+    fn call_source(func: &ast::Expr) -> Option<String> {
         match &func.kind {
-            ExprKind::Ident(ident) => Some(ident.name.as_ref()),
-            ExprKind::Path(path) if path.is_simple() => {
-                path.last_ident().map(|ident| ident.name.as_ref())
-            }
+            ExprKind::Ident(ident) => Some(ident.name.to_string()),
+            ExprKind::Path(path) => Some(
+                path.segments
+                    .iter()
+                    .map(|segment| segment.ident.name.as_ref())
+                    .collect::<Vec<_>>()
+                    .join("::"),
+            ),
             _ => None,
         }
     }
@@ -1598,7 +1603,7 @@ impl<'ctx> TypeInfer<'ctx> {
     // =========================================================================
 
     fn infer_call(&mut self, func: &ast::Expr, args: &[ast::Expr], span: Span) -> Ty {
-        let call_name = Self::call_name(func).map(str::to_string);
+        let call_source = Self::call_source(func);
         let func_ty = self.infer_expr(func);
         let func_ty = self.apply(&func_ty);
 
@@ -1622,18 +1627,19 @@ impl<'ctx> TypeInfer<'ctx> {
                 // Propagate callee's effects to caller's effect context
                 if !fn_ty.effects.is_empty() {
                     self.current_effects = self.current_effects.merge(&fn_ty.effects);
-                    if let Some(name) = call_name.as_deref() {
-                        let is_direct_foreign_call = self.ctx.is_foreign_function(name);
+                    if let Some(source) = call_source.as_deref() {
+                        let lookup_name = source.rsplit("::").next().unwrap_or(source);
+                        let is_direct_foreign_call = self.ctx.is_foreign_function(lookup_name);
                         for effect in &fn_ty.effects.effects {
                             if super::capabilities::is_capability_effect(effect.name.as_ref()) {
                                 if is_direct_foreign_call
                                     && effect.name.as_ref() == super::capabilities::FOREIGN
                                 {
-                                    self.record_capability_source(effect.name.as_ref(), name);
+                                    self.record_capability_source(effect.name.as_ref(), source);
                                 } else {
                                     self.record_propagated_effect_source(
                                         effect.name.as_ref(),
-                                        name,
+                                        source,
                                     );
                                 }
                             }
@@ -1713,8 +1719,8 @@ impl<'ctx> TypeInfer<'ctx> {
                 ret
             }
             TyKind::Var(_) | TyKind::Infer(_) => {
-                if let Some(name) = call_name.as_deref() {
-                    self.record_call_capability(name);
+                if let Some(source) = call_source.as_deref() {
+                    self.record_call_capability(source);
                 }
                 // Unknown function type - create fresh types for params and return
                 let param_tys: Vec<_> = args.iter().map(|a| self.infer_expr(a)).collect();
@@ -1724,8 +1730,8 @@ impl<'ctx> TypeInfer<'ctx> {
                 ret_ty
             }
             TyKind::Error => {
-                if let Some(name) = call_name.as_deref() {
-                    self.record_call_capability(name);
+                if let Some(source) = call_source.as_deref() {
+                    self.record_call_capability(source);
                 }
                 for arg in args {
                     let _ = self.infer_expr(arg);
