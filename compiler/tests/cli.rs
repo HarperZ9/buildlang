@@ -1571,6 +1571,58 @@ fn main() ~ FileSystem {
 }
 
 #[test]
+fn check_receipt_records_repeated_effectful_index_source_origin() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_repeated_effectful_index_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn load_config(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn main() ~ FileSystem {
+    let loaders = [load_config; 2];
+    (loaders[1])("ops.txt");
+}
+"#,
+    )
+    .expect("write repeated effectful index receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "repeated indexed effect receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["load_config", "loaders[1]"])
+    );
+}
+
+#[test]
 fn check_receipt_clears_stale_sources_for_assigned_ambient_alias() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_check_receipt_assigned_ambient_alias_{}.quanta",
