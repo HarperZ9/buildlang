@@ -1322,6 +1322,15 @@ fn check_profile_pure_rejects_console_program_without_policy_file() {
     );
     let receipt = receipt_from_stdout(&output);
     assert_eq!(receipt["policy"]["source"], "builtin:pure");
+    assert_eq!(receipt["policy"]["profile"], "pure");
+    assert_eq!(receipt["policy"]["profile_digest"]["algorithm"], "sha256");
+    assert_eq!(
+        receipt["policy"]["profile_digest"]["hex"]
+            .as_str()
+            .expect("profile digest")
+            .len(),
+        64
+    );
     assert_eq!(receipt["policy"]["status"], "failed");
     let violations = receipt["policy"]["violations"]
         .as_array()
@@ -1334,6 +1343,76 @@ fn check_profile_pure_rejects_console_program_without_policy_file() {
         }),
         "expected Console denial in {violations:#?}"
     );
+}
+
+#[test]
+fn check_profile_receipt_digest_matches_printed_builtin_profile() {
+    let dir =
+        std::env::temp_dir().join(format!("quantalang_profile_digest_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create profile digest fixture directory");
+    let profile_path = dir.join("pure.json");
+    let input = dir.join("pure.quanta");
+
+    let print = quantac()
+        .args(["policy", "print", "pure", "--output"])
+        .arg(&profile_path)
+        .output()
+        .expect("write pure profile");
+    assert!(
+        print.status.success(),
+        "policy print should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&print.stdout),
+        String::from_utf8_lossy(&print.stderr)
+    );
+    fs::write(&input, r#"fn main() {}"#).expect("write pure input");
+
+    let via_profile = quantac()
+        .arg("check")
+        .arg(&input)
+        .arg("--profile")
+        .arg("pure")
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run check with built-in profile");
+    let via_policy = quantac()
+        .arg("check")
+        .arg(&input)
+        .arg("--policy")
+        .arg(&profile_path)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run check with printed profile");
+
+    assert!(
+        via_profile.status.success(),
+        "built-in profile check should pass\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&via_profile.stdout),
+        String::from_utf8_lossy(&via_profile.stderr)
+    );
+    assert!(
+        via_policy.status.success(),
+        "printed policy check should pass\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&via_policy.stdout),
+        String::from_utf8_lossy(&via_policy.stderr)
+    );
+
+    let profile_receipt = receipt_from_stdout(&via_profile);
+    let policy_receipt = receipt_from_stdout(&via_policy);
+    assert_eq!(profile_receipt["policy"]["profile"], "pure");
+    assert_eq!(
+        profile_receipt["policy"]["profile_digest"],
+        policy_receipt["policy"]["source_digest"]
+    );
+    assert_eq!(policy_receipt["policy"]["profile"], serde_json::Value::Null);
+    assert_eq!(
+        policy_receipt["policy"]["profile_digest"],
+        serde_json::Value::Null
+    );
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]

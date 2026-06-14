@@ -573,6 +573,8 @@ struct CheckPolicyProfile {
 struct LoadedCheckPolicy {
     source: String,
     source_digest: CheckReceiptSourceDigest,
+    builtin_profile: Option<String>,
+    builtin_profile_digest: Option<CheckReceiptSourceDigest>,
     profile: CheckPolicyProfile,
 }
 
@@ -627,6 +629,8 @@ struct CheckPolicyDecision {
     schema: String,
     source: String,
     source_digest: CheckReceiptSourceDigest,
+    builtin_profile: Option<String>,
+    builtin_profile_digest: Option<CheckReceiptSourceDigest>,
     violations: Vec<CheckPolicyViolation>,
 }
 
@@ -635,6 +639,10 @@ struct CheckReceiptPolicy {
     schema: String,
     source: String,
     source_digest: CheckReceiptSourceDigest,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile_digest: Option<CheckReceiptSourceDigest>,
     status: &'static str,
     violations: Vec<CheckPolicyViolation>,
 }
@@ -1669,6 +1677,8 @@ fn load_check_policy(path: &Path) -> Result<LoadedCheckPolicy, i32> {
     Ok(LoadedCheckPolicy {
         source: path.to_string_lossy().to_string(),
         source_digest,
+        builtin_profile: None,
+        builtin_profile_digest: None,
         profile,
     })
 }
@@ -1697,7 +1707,9 @@ fn load_builtin_check_policy(name: &str) -> Result<LoadedCheckPolicy, i32> {
 
     Ok(LoadedCheckPolicy {
         source: format!("builtin:{name}"),
-        source_digest,
+        source_digest: source_digest.clone(),
+        builtin_profile: Some(name.to_string()),
+        builtin_profile_digest: Some(source_digest),
         profile,
     })
 }
@@ -1866,6 +1878,8 @@ fn evaluate_check_policy(
         schema: policy.profile.schema.clone(),
         source: policy.source.clone(),
         source_digest: policy.source_digest.clone(),
+        builtin_profile: policy.builtin_profile.clone(),
+        builtin_profile_digest: policy.builtin_profile_digest.clone(),
         violations: violations.into_iter().collect(),
     }
 }
@@ -1926,6 +1940,8 @@ fn build_check_receipt(
         schema: decision.schema.clone(),
         source: decision.source.clone(),
         source_digest: decision.source_digest.clone(),
+        profile: decision.builtin_profile.clone(),
+        profile_digest: decision.builtin_profile_digest.clone(),
         status: check_policy_status(decision),
         violations: decision.violations.clone(),
     });
@@ -4673,6 +4689,8 @@ mod tests {
                 algorithm: "sha256",
                 hex: source_digest_hex(b"policy"),
             },
+            builtin_profile: None,
+            builtin_profile_digest: None,
             profile: CheckPolicyProfile {
                 schema: "quantalang-check-policy/v1".to_string(),
                 allowed_effects: vec!["Console".to_string()],
@@ -4748,6 +4766,8 @@ mod tests {
                 algorithm: "sha256",
                 hex: source_digest_hex(b"policy"),
             },
+            builtin_profile: None,
+            builtin_profile_digest: None,
             profile: CheckPolicyProfile {
                 schema: "quantalang-check-policy/v1".to_string(),
                 allowed_effects: Vec::new(),
