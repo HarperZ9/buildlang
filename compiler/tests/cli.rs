@@ -1156,6 +1156,234 @@ fn main() ~ FileSystem {
 }
 
 #[test]
+fn check_reports_effect_for_control_flow_selected_effectful_function_call() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_control_flow_selected_effectful_function_gate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn load_config() -> str ~ FileSystem {
+    read_file("config.toml")
+}
+
+fn load_secret() -> str ~ FileSystem {
+    read_file("secret.toml")
+}
+
+fn main() {
+    let use_secret = true;
+    (if use_secret { load_secret } else { load_config })();
+}
+"#,
+    )
+    .expect("write control-flow selected effectful function fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "control-flow selected effectful function call should fail without FileSystem effect"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FileSystem"),
+        "diagnostic should name FileSystem effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("load_config"),
+        "diagnostic should name one possible branch source:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("load_secret"),
+        "diagnostic should name the other possible branch source:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn check_receipt_records_control_flow_selected_effectful_function_sources() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_control_flow_effectful_function_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn load_config() -> str ~ FileSystem {
+    read_file("config.toml")
+}
+
+fn load_secret() -> str ~ FileSystem {
+    read_file("secret.toml")
+}
+
+fn main() ~ FileSystem {
+    let use_secret = true;
+    (if use_secret { load_secret } else { load_config })();
+}
+"#,
+    )
+    .expect("write control-flow selected effectful function receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "control-flow selected effectful function receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["load_config", "load_secret"])
+    );
+}
+
+#[test]
+fn check_reports_effect_for_match_selected_effectful_function_call() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_match_selected_effectful_function_gate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn load_config() -> str ~ FileSystem {
+    read_file("config.toml")
+}
+
+fn load_secret() -> str ~ FileSystem {
+    read_file("secret.toml")
+}
+
+fn main() {
+    let use_secret = true;
+    (match use_secret {
+        true => load_secret,
+        false => load_config,
+    })();
+}
+"#,
+    )
+    .expect("write match selected effectful function fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "match selected effectful function call should fail without FileSystem effect"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FileSystem"),
+        "diagnostic should name FileSystem effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("load_config"),
+        "diagnostic should name one possible match source:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("load_secret"),
+        "diagnostic should name the other possible match source:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn check_receipt_records_match_selected_effectful_function_sources() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_match_effectful_function_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn load_config() -> str ~ FileSystem {
+    read_file("config.toml")
+}
+
+fn load_secret() -> str ~ FileSystem {
+    read_file("secret.toml")
+}
+
+fn main() ~ FileSystem {
+    let use_secret = true;
+    (match use_secret {
+        true => load_secret,
+        false => load_config,
+    })();
+}
+"#,
+    )
+    .expect("write match selected effectful function receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "match selected effectful function receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["load_config", "load_secret"])
+    );
+}
+
+#[test]
 fn check_receipt_file_records_failing_capability_diagnostic() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_check_receipt_fail_{}.quanta",
