@@ -432,6 +432,23 @@ impl<'ctx> TypeInfer<'ctx> {
         self.call_sources(func).into_iter().next()
     }
 
+    fn method_call_source(&self, receiver_ty: &Ty, method_name: &str) -> String {
+        let base_ty = match &receiver_ty.kind {
+            TyKind::Ref(_, _, inner) | TyKind::Ptr(_, inner) => inner.as_ref(),
+            _ => receiver_ty,
+        };
+
+        match &base_ty.kind {
+            TyKind::Adt(def_id, _) => self
+                .ctx
+                .lookup_type(*def_id)
+                .map(|ty| format!("{}.{}", ty.name, method_name))
+                .unwrap_or_else(|| method_name.to_string()),
+            TyKind::Param(name, _) => format!("{}.{}", name, method_name),
+            _ => method_name.to_string(),
+        }
+    }
+
     fn call_sources(&self, func: &ast::Expr) -> Vec<String> {
         match &func.kind {
             ExprKind::Ident(ident) => {
@@ -800,7 +817,11 @@ impl<'ctx> TypeInfer<'ctx> {
                 .map(|(_, ty)| ty.clone())
                 .collect();
             let ret = method.sig.ret.clone();
-            return Some(Ty::function(params, ret));
+            return Some(Ty::function_with_effects(
+                params,
+                ret,
+                method.sig.effects.clone(),
+            ));
         }
 
         // Look up inherent methods (impl Type { fn method(...) } without a trait).
@@ -835,7 +856,11 @@ impl<'ctx> TypeInfer<'ctx> {
                     .map(|(_, ty)| apply(ty))
                     .collect();
                 let ret = apply(&method.sig.ret);
-                return Some(Ty::function(params, ret));
+                return Some(Ty::function_with_effects(
+                    params,
+                    ret,
+                    method.sig.effects.clone(),
+                ));
             }
         }
 
@@ -868,7 +893,11 @@ impl<'ctx> TypeInfer<'ctx> {
                 } else {
                     method.sig.ret.clone()
                 };
-                return Some(Ty::function(params, ret));
+                return Some(Ty::function_with_effects(
+                    params,
+                    ret,
+                    method.sig.effects.clone(),
+                ));
             }
         }
 
@@ -2311,6 +2340,7 @@ impl<'ctx> TypeInfer<'ctx> {
     ) -> Ty {
         let receiver_ty = self.infer_expr(receiver);
         let receiver_ty = self.apply(&receiver_ty);
+        let method_source = self.method_call_source(&receiver_ty, method.name.as_ref());
 
         // Infer argument types
         let arg_tys: Vec<_> = args.iter().map(|a| self.infer_expr(a)).collect();
@@ -2357,6 +2387,17 @@ impl<'ctx> TypeInfer<'ctx> {
                     // Unify argument types
                     for (param, arg) in fn_ty.params.iter().zip(arg_tys.iter()) {
                         let _ = self.unify(param, arg, span);
+                    }
+                    if !fn_ty.effects.is_empty() {
+                        self.current_effects = self.current_effects.merge(&fn_ty.effects);
+                        for effect in &fn_ty.effects.effects {
+                            if super::capabilities::is_capability_effect(effect.name.as_ref()) {
+                                self.record_propagated_effect_source(
+                                    effect.name.as_ref(),
+                                    &method_source,
+                                );
+                            }
+                        }
                     }
                     return (*fn_ty.ret).clone();
                 }

@@ -270,6 +270,8 @@ pub struct FnSig {
     pub params: Vec<(Arc<str>, Ty)>,
     /// Return type.
     pub ret: Ty,
+    /// Declared effects in the callable signature.
+    pub effects: super::effects::EffectRow,
     /// Is unsafe?
     pub is_unsafe: bool,
     /// Is async?
