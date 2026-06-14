@@ -2816,6 +2816,60 @@ fn main() ~ FileSystem {
 }
 
 #[test]
+fn check_rejects_function_values_with_shift_operator() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_function_shift_gate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn load_config(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn load_secret(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn main() {
+    let pipeline = load_config >> load_secret;
+}
+"#,
+    )
+    .expect("write function shift fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "function values used with >> should be rejected\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = receipt_from_stdout(&output);
+    let diagnostics = receipt["diagnostics"]
+        .as_array()
+        .expect("diagnostics array");
+    assert!(
+        diagnostics.iter().any(|diag| {
+            let message = diag["message"].as_str().unwrap_or_default();
+            message.contains("binary operator `>>`") && message.contains("FileSystem")
+        }),
+        "missing invalid function shift diagnostic\nreceipt:\n{}",
+        serde_json::to_string_pretty(&receipt).expect("receipt should serialize")
+    );
+}
+
+#[test]
 fn check_reports_effect_for_control_flow_selected_effectful_function_call() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_control_flow_selected_effectful_function_gate_{}.quanta",

@@ -2221,6 +2221,24 @@ impl<'ctx> TypeInfer<'ctx> {
         let left_ty = self.infer_expr(left);
         let right_ty = self.infer_expr(right);
 
+        if op != BinOp::Pipe {
+            let left_applied = self.apply(&left_ty);
+            let right_applied = self.apply(&right_ty);
+            if matches!(left_applied.kind, TyKind::Fn(_))
+                || matches!(right_applied.kind, TyKind::Fn(_))
+            {
+                self.error(
+                    TypeError::InvalidBinaryOp {
+                        op: op.as_str().to_string(),
+                        left: left_applied,
+                        right: right_applied,
+                    },
+                    span,
+                );
+                return Ty::error();
+            }
+        }
+
         match op {
             // Arithmetic operators
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
