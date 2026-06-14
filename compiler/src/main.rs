@@ -291,7 +291,11 @@ enum CorpusCommands {
 #[derive(Subcommand)]
 enum PolicyCommands {
     /// List built-in check policy profiles
-    List,
+    List {
+        /// Emit the built-in policy catalog as machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Print a built-in check policy profile as JSON
     Print {
         /// Built-in profile name
@@ -819,12 +823,47 @@ fn builtin_policy_json(name: &str) -> Option<String> {
     Some(json)
 }
 
+fn builtin_policy_digest(name: &str) -> Option<CheckReceiptSourceDigest> {
+    let json = builtin_policy_json(name)?;
+    Some(CheckReceiptSourceDigest {
+        algorithm: "sha256",
+        hex: source_digest_hex(json.as_bytes()),
+    })
+}
+
+fn builtin_policy_catalog_json() -> String {
+    let profiles = BUILTIN_POLICY_TEMPLATES
+        .iter()
+        .map(|template| {
+            let digest =
+                builtin_policy_digest(template.name).expect("built-in policy has a digest");
+            serde_json::json!({
+                "name": template.name,
+                "summary": template.summary,
+                "policy_schema": "quantalang-check-policy/v1",
+                "digest": digest
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut json = serde_json::to_string_pretty(&serde_json::json!({
+        "schema": "quantalang-policy-catalog/v1",
+        "profiles": profiles
+    }))
+    .expect("built-in policy catalog is JSON");
+    json.push('\n');
+    json
+}
+
 fn cmd_policy(command: PolicyCommands) -> Result<(), i32> {
     match command {
-        PolicyCommands::List => {
-            println!("Built-in check policy profiles:");
-            for template in BUILTIN_POLICY_TEMPLATES {
-                println!("  {:<14} {}", template.name, template.summary);
+        PolicyCommands::List { json } => {
+            if json {
+                print!("{}", builtin_policy_catalog_json());
+            } else {
+                println!("Built-in check policy profiles:");
+                for template in BUILTIN_POLICY_TEMPLATES {
+                    println!("  {:<14} {}", template.name, template.summary);
+                }
             }
             Ok(())
         }
