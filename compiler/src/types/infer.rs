@@ -1552,7 +1552,11 @@ impl<'ctx> TypeInfer<'ctx> {
                     .iter()
                     .map(|(_, ty)| ty.freshen_params())
                     .collect();
-                return Ty::function(param_tys, method.sig.ret.freshen_params());
+                return Ty::function_with_effects(
+                    param_tys,
+                    method.sig.ret.freshen_params(),
+                    method.sig.effects.clone(),
+                );
             }
 
             // For module-qualified paths (e.g., convert::xyz_to_lab), the first
