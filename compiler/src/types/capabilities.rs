@@ -37,12 +37,16 @@ pub fn capability_effect_for_call(name: &str) -> Option<&'static str> {
         "exit" | "process_exit" => Some(PROCESS),
         "getenv" | "args_count" | "args_get" => Some(ENVIRONMENT),
         "clock_ms" | "time_unix" => Some(CLOCK),
-        "quanta_vk_init" | "quanta_vk_load_shader_file" | "quanta_vk_run_compute"
-        | "quanta_vk_shutdown" | "quanta_vk_create_graphics_pipeline"
-        | "quanta_vk_set_push_constant_f32" | "quanta_vk_draw_frame"
-        | "quanta_vk_should_close" | "quanta_vk_request_close" | "quanta_vk_device_name" => {
-            Some(GPU)
-        }
+        "quanta_vk_init"
+        | "quanta_vk_load_shader_file"
+        | "quanta_vk_run_compute"
+        | "quanta_vk_shutdown"
+        | "quanta_vk_create_graphics_pipeline"
+        | "quanta_vk_set_push_constant_f32"
+        | "quanta_vk_draw_frame"
+        | "quanta_vk_should_close"
+        | "quanta_vk_request_close"
+        | "quanta_vk_device_name" => Some(GPU),
         _ => None,
     }
 }
