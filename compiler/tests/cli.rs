@@ -3462,6 +3462,115 @@ fn policy_print_emits_strict_accountability_profile_with_source_gates() {
 }
 
 #[test]
+fn policy_scaffold_from_receipt_emits_exact_source_allowlists() {
+    let dir = std::env::temp_dir().join(format!(
+        "quantalang_policy_scaffold_receipt_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create policy scaffold fixture directory");
+    let input = dir.join("app.quanta");
+    let receipt = dir.join("receipt.json");
+    let policy = dir.join("policy.json");
+    fs::write(
+        &input,
+        r#"
+fn load_config() ~ FileSystem {
+    read_file("ops.txt");
+}
+
+fn main() ~ FileSystem {
+    load_config();
+}
+"#,
+    )
+    .expect("write policy scaffold input");
+
+    let check = quantac()
+        .arg("check")
+        .arg(&input)
+        .arg("--receipt")
+        .arg(&receipt)
+        .output()
+        .expect("write policy scaffold receipt");
+    assert!(
+        check.status.success(),
+        "check should produce a receipt\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
+
+    let scaffold = quantac()
+        .arg("policy")
+        .arg("scaffold")
+        .arg(&receipt)
+        .arg("--output")
+        .arg(&policy)
+        .output()
+        .expect("scaffold policy from receipt");
+    assert!(
+        scaffold.status.success(),
+        "policy scaffold should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&scaffold.stdout),
+        String::from_utf8_lossy(&scaffold.stderr)
+    );
+
+    let scaffolded: serde_json::Value =
+        serde_json::from_slice(&fs::read(&policy).expect("read scaffolded policy"))
+            .expect("scaffolded policy should be JSON");
+    assert_eq!(scaffolded["schema"], "quantalang-check-policy/v1");
+    assert_eq!(
+        scaffolded["allowed_effects"],
+        serde_json::json!(["FileSystem"])
+    );
+    assert_eq!(
+        scaffolded["direct_effect_allowlist"]["FileSystem"],
+        serde_json::json!(["load_config"])
+    );
+    assert_eq!(
+        scaffolded["direct_capability_source_allowlist"]["FileSystem"]["load_config"],
+        serde_json::json!(["read_file"])
+    );
+    assert_eq!(
+        scaffolded["propagated_effect_allowlist"]["FileSystem"],
+        serde_json::json!(["main"])
+    );
+    assert_eq!(
+        scaffolded["propagated_effect_source_allowlist"]["FileSystem"]["main"],
+        serde_json::json!(["load_config"])
+    );
+    assert_eq!(scaffolded["require_source_digest"], true);
+    assert_eq!(scaffolded["require_input_graph_digest"], true);
+    assert_eq!(scaffolded["require_provenance_allowlists"], true);
+    assert_eq!(scaffolded["require_source_allowlists"], true);
+    assert_eq!(scaffolded["require_allowlist_coverage"], true);
+
+    let verify_scaffold = quantac()
+        .arg("check")
+        .arg(&input)
+        .arg("--policy")
+        .arg(&policy)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("check source with scaffolded policy");
+    assert!(
+        verify_scaffold.status.success(),
+        "scaffolded policy should accept the exact receipt evidence\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_scaffold.stdout),
+        String::from_utf8_lossy(&verify_scaffold.stderr)
+    );
+    let verified_receipt = receipt_from_stdout(&verify_scaffold);
+    assert_eq!(verified_receipt["policy"]["status"], "passed");
+    assert!(verified_receipt["policy"]["violations"]
+        .as_array()
+        .expect("policy violations")
+        .is_empty());
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn printed_pure_policy_rejects_console_program() {
     let dir = std::env::temp_dir().join(format!(
         "quantalang_printed_pure_policy_{}",

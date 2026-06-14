@@ -123,7 +123,7 @@ quantac vignette.quanta --target glsl -o vignette.glsl
 | `quantac build` | Build a project                      |
 | `quantac run`   | Compile and run a `.quanta` file     |
 | `quantac doctor` | Diagnose local toolchain readiness  |
-| `quantac policy list [--json]` / `quantac policy print <name>` | List or emit built-in check policy profiles |
+| `quantac policy list [--json]` / `quantac policy print <name>` / `quantac policy scaffold <receipt.json>` | List, emit, or scaffold check policy profiles |
 | `quantac receipt verify <receipt.json> [--source PATH] [--expect-profile NAME] [--expect-policy-digest HEX] [--json]` | Re-check a saved accountability receipt against current source inputs and optional policy expectations |
 | `quantac corpus verify [--root DIR] [--write]` | Verify semantic corpus receipts and C stdout; optionally refresh the C receipt |
 
@@ -200,6 +200,10 @@ an equivalent file-backed policy document.
 Use `--profile strict-accountability` when CI should reject every ambient
 capability boundary until a printed policy adds exact direct, propagated, and
 source-level allowlists.
+Use `quantac policy scaffold receipt.json --output policy.json` to turn an
+accountability receipt into a strict, reviewable policy skeleton with observed
+direct boundaries, ambient helper/macro/FFI sources, propagated callers, and
+callee sources already filled in.
 Use `--expect-profile-digest <hex>` with `--profile` to pin check-time CI to the
 digest reported by `quantac policy list --json` or by a prior trusted receipt.
 Use `quantac receipt verify --expect-profile <name>` to pin verification-time CI
