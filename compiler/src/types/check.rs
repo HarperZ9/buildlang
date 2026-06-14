@@ -25,6 +25,7 @@ pub struct FunctionEffectSummary {
     pub function: String,
     pub declared_effects: Vec<String>,
     pub observed_capabilities: BTreeMap<String, BTreeSet<String>>,
+    pub propagated_effects: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// The type checker for items and declarations.
@@ -675,7 +676,14 @@ impl<'ctx> TypeChecker<'ctx> {
             let user_effects: Vec<_> = self.effect_ctx.all_effects().into_iter().cloned().collect();
 
             // Check function body - use block to limit TypeInfer borrow scope
-            let (body_ty, body_effects, capability_sources, infer_errors, has_return) = {
+            let (
+                body_ty,
+                body_effects,
+                capability_sources,
+                propagated_effect_sources,
+                infer_errors,
+                has_return,
+            ) = {
                 let mut infer = TypeInfer::new(self.ctx);
                 // Pass the expected return type so that `return` statements
                 // inside nested control flow (while/if/match) are properly
@@ -688,11 +696,13 @@ impl<'ctx> TypeChecker<'ctx> {
                 let body_ty = infer.infer_block(body);
                 let body_effects = infer.current_effect_row().clone();
                 let capability_sources = infer.capability_sources().clone();
+                let propagated_effect_sources = infer.propagated_effect_sources().clone();
                 let has_return = infer.has_explicit_return();
                 (
                     body_ty,
                     body_effects,
                     capability_sources,
+                    propagated_effect_sources,
                     infer.take_errors(),
                     has_return,
                 )
@@ -747,6 +757,7 @@ impl<'ctx> TypeChecker<'ctx> {
                 function: func_name.clone(),
                 declared_effects,
                 observed_capabilities: capability_sources.clone(),
+                propagated_effects: propagated_effect_sources.clone(),
             });
 
             if expected_effects.is_empty() && !body_effects.is_empty() {
@@ -763,6 +774,13 @@ impl<'ctx> TypeChecker<'ctx> {
                     if let Some(sources) = capability_sources.get(body_eff.name.as_ref()) {
                         err_with_span.notes.push(format!(
                             "capability `{}` was triggered by ambient call(s): {}",
+                            body_eff.name,
+                            sources.iter().cloned().collect::<Vec<_>>().join(", ")
+                        ));
+                    }
+                    if let Some(sources) = propagated_effect_sources.get(body_eff.name.as_ref()) {
+                        err_with_span.notes.push(format!(
+                            "capability `{}` was propagated by effectful call(s): {}",
                             body_eff.name,
                             sources.iter().cloned().collect::<Vec<_>>().join(", ")
                         ));
@@ -789,6 +807,15 @@ impl<'ctx> TypeChecker<'ctx> {
                         if let Some(sources) = capability_sources.get(body_eff.name.as_ref()) {
                             err_with_span.notes.push(format!(
                                 "capability `{}` was triggered by ambient call(s): {}",
+                                body_eff.name,
+                                sources.iter().cloned().collect::<Vec<_>>().join(", ")
+                            ));
+                        }
+                        if let Some(sources) =
+                            propagated_effect_sources.get(body_eff.name.as_ref())
+                        {
+                            err_with_span.notes.push(format!(
+                                "capability `{}` was propagated by effectful call(s): {}",
                                 body_eff.name,
                                 sources.iter().cloned().collect::<Vec<_>>().join(", ")
                             ));
@@ -1658,6 +1685,109 @@ mod tests {
     }
 
     #[test]
+    fn check_summary_separates_direct_and_propagated_capabilities() {
+        let source = r#"
+            fn load_config() ~ FileSystem {
+                read_file("ops.txt");
+            }
+
+            fn main() ~ FileSystem {
+                load_config();
+            }
+        "#;
+        let source_file = crate::lexer::SourceFile::new("summary_test.quanta", source);
+        let mut lexer = crate::lexer::Lexer::new(&source_file);
+        let tokens = lexer.tokenize().expect("tokenize summary fixture");
+        let mut parser = crate::parser::Parser::new(&source_file, tokens);
+        let module = parser.parse().expect("parse summary fixture");
+
+        let mut ctx = TypeContext::new();
+        let mut checker = TypeChecker::new(&mut ctx);
+        checker.check_module(&module);
+        assert!(
+            checker.errors().is_empty(),
+            "expected clean type check, got {:#?}",
+            checker.errors()
+        );
+
+        let summaries = checker.function_effect_summaries();
+        let load_config = summaries
+            .iter()
+            .find(|summary| summary.function == "load_config")
+            .expect("load_config summary");
+        assert_eq!(
+            load_config
+                .observed_capabilities
+                .get("FileSystem")
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec!["read_file".to_string()]
+        );
+        assert!(
+            load_config.propagated_effects.is_empty(),
+            "direct boundary should not report propagated callees"
+        );
+
+        let main = summaries
+            .iter()
+            .find(|summary| summary.function == "main")
+            .expect("main summary");
+        assert!(
+            main.observed_capabilities.is_empty(),
+            "caller should not report callee helper as direct IO"
+        );
+        assert_eq!(
+            main.propagated_effects
+                .get("FileSystem")
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec!["load_config".to_string()]
+        );
+    }
+
+    #[test]
+    fn check_summary_records_console_macro_as_direct_not_propagated() {
+        let source = r#"fn main() ~ Console { println!("ops"); }"#;
+        let source_file = crate::lexer::SourceFile::new("summary_test.quanta", source);
+        let mut lexer = crate::lexer::Lexer::new(&source_file);
+        let tokens = lexer.tokenize().expect("tokenize summary fixture");
+        let mut parser = crate::parser::Parser::new(&source_file, tokens);
+        let module = parser.parse().expect("parse summary fixture");
+
+        let mut ctx = TypeContext::new();
+        let mut checker = TypeChecker::new(&mut ctx);
+        checker.check_module(&module);
+        assert!(
+            checker.errors().is_empty(),
+            "expected clean type check, got {:#?}",
+            checker.errors()
+        );
+
+        let main = checker
+            .function_effect_summaries()
+            .iter()
+            .find(|summary| summary.function == "main")
+            .expect("main summary");
+        assert_eq!(
+            main.observed_capabilities
+                .get("Console")
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec!["println!".to_string()]
+        );
+        assert!(
+            main.propagated_effects.is_empty(),
+            "macro capability should remain direct provenance"
+        );
+    }
+
+    #[test]
     fn check_summaries_reset_between_modules() {
         let first = r#"fn main() ~ Console { println!("ops"); }"#;
         let second = r#"fn helper() {}"#;
@@ -1681,6 +1811,7 @@ mod tests {
         assert_eq!(summaries[0].function, "helper");
         assert!(summaries[0].declared_effects.is_empty());
         assert!(summaries[0].observed_capabilities.is_empty());
+        assert!(summaries[0].propagated_effects.is_empty());
     }
 
     #[test]

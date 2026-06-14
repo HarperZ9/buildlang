@@ -4387,11 +4387,13 @@ mod tests {
                     function: "b".to_string(),
                     declared_effects: vec!["Network".to_string(), "Network".to_string()],
                     observed_capabilities: BTreeMap::new(),
+                    propagated_effects: BTreeMap::new(),
                 },
                 FunctionEffectSummary {
                     function: "a".to_string(),
                     declared_effects: vec!["FileSystem".to_string()],
                     observed_capabilities: BTreeMap::new(),
+                    propagated_effects: BTreeMap::new(),
                 },
             ],
         };
