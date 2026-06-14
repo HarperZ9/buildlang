@@ -60,6 +60,9 @@ pub struct TypeContext {
 
     /// Foreign function names declared by extern blocks.
     foreign_functions: HashSet<Arc<str>>,
+
+    /// Foreign static names declared by extern blocks.
+    foreign_statics: HashSet<Arc<str>>,
 }
 
 /// A scope containing variable bindings.
@@ -293,6 +296,7 @@ impl TypeContext {
             param_trait_bounds: HashMap::new(),
             module_bindings: HashMap::new(),
             foreign_functions: HashSet::new(),
+            foreign_statics: HashSet::new(),
         };
         ctx.init_builtins();
         ctx
@@ -461,6 +465,16 @@ impl TypeContext {
     /// Return true when a function name was declared in an extern block.
     pub fn is_foreign_function(&self, name: &str) -> bool {
         self.foreign_functions.contains(name)
+    }
+
+    /// Mark a static name as originating from an extern block.
+    pub fn register_foreign_static(&mut self, name: impl Into<Arc<str>>) {
+        self.foreign_statics.insert(name.into());
+    }
+
+    /// Return true when a static name was declared in an extern block.
+    pub fn is_foreign_static(&self, name: &str) -> bool {
+        self.foreign_statics.contains(name)
     }
 
     // =========================================================================

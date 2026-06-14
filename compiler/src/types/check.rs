@@ -507,29 +507,38 @@ impl<'ctx> TypeChecker<'ctx> {
         self.ctx.define_var(f.name.name.clone(), fn_ty);
     }
 
-    /// Collect extern block declarations.  Each foreign function is registered
-    /// in the type context so that calls to it can be type-checked.
+    /// Collect extern block declarations. Foreign functions and statics are
+    /// registered in the type context so access can be type-checked.
     fn collect_extern_block(&mut self, eb: &ast::ExternBlockDef, _span: Span) {
         for foreign_item in &eb.items {
-            if let ast::ForeignItemKind::Fn(f) = &foreign_item.kind {
-                let def_id = self.ctx.fresh_def_id();
-                let sig = self.lower_fn_sig(&f.generics, &f.sig);
-                self.ctx.register_function(def_id, sig.clone());
+            match &foreign_item.kind {
+                ast::ForeignItemKind::Fn(f) => {
+                    let def_id = self.ctx.fresh_def_id();
+                    let sig = self.lower_fn_sig(&f.generics, &f.sig);
+                    self.ctx.register_function(def_id, sig.clone());
 
-                let param_tys: Vec<_> = sig.params.iter().map(|(_, ty)| ty.clone()).collect();
-                let effect_name =
-                    super::capabilities::capability_effect_for_call(f.name.name.as_ref())
-                        .unwrap_or(super::capabilities::FOREIGN);
-                let effects =
-                    super::effects::EffectRow::closed([super::effects::Effect::new(effect_name)]);
-                let fn_ty = Ty::function_with_effects_and_lifetimes(
-                    param_tys,
-                    sig.ret.clone(),
-                    effects,
-                    sig.lifetime_params.clone(),
-                );
-                self.ctx.define_var(f.name.name.clone(), fn_ty);
-                self.ctx.register_foreign_function(f.name.name.clone());
+                    let param_tys: Vec<_> = sig.params.iter().map(|(_, ty)| ty.clone()).collect();
+                    let effect_name =
+                        super::capabilities::capability_effect_for_call(f.name.name.as_ref())
+                            .unwrap_or(super::capabilities::FOREIGN);
+                    let effects = super::effects::EffectRow::closed([super::effects::Effect::new(
+                        effect_name,
+                    )]);
+                    let fn_ty = Ty::function_with_effects_and_lifetimes(
+                        param_tys,
+                        sig.ret.clone(),
+                        effects,
+                        sig.lifetime_params.clone(),
+                    );
+                    self.ctx.define_var(f.name.name.clone(), fn_ty);
+                    self.ctx.register_foreign_function(f.name.name.clone());
+                }
+                ast::ForeignItemKind::Static { name, ty, .. } => {
+                    let static_ty = self.lower_type(ty);
+                    self.ctx.define_var(name.name.clone(), static_ty);
+                    self.ctx.register_foreign_static(name.name.clone());
+                }
+                _ => {}
             }
         }
     }
@@ -1788,6 +1797,42 @@ mod tests {
                 .any(|err| err.notes.iter().any(|note| note.contains("touch"))),
             "expected diagnostic note naming touch, got {errors:#?}"
         );
+    }
+
+    #[test]
+    fn capability_foreign_static_requires_foreign_effect() {
+        let errors = check_source(
+            r#"
+            extern "C" { static QUANTA_ERRNO: i32; }
+            fn main() { let code = QUANTA_ERRNO; }
+            "#,
+        );
+
+        assert!(
+            errors.iter().any(|err| matches!(
+                &err.error,
+                TypeError::UnhandledEffect { effect_name, .. } if effect_name == "Foreign"
+            )),
+            "expected Foreign effect error, got {errors:#?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|err| err.notes.iter().any(|note| note.contains("QUANTA_ERRNO"))),
+            "expected diagnostic note naming QUANTA_ERRNO, got {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn capability_declared_foreign_effect_allows_foreign_static() {
+        let errors = check_source(
+            r#"
+            extern "C" { static QUANTA_ERRNO: i32; }
+            fn main() ~ Foreign { let code = QUANTA_ERRNO; }
+            "#,
+        );
+
+        assert!(errors.is_empty(), "expected no errors, got {errors:#?}");
     }
 
     #[test]

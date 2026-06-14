@@ -549,6 +549,58 @@ fn main() ~ Foreign {
 }
 
 #[test]
+fn check_receipt_records_foreign_static_as_direct_capability_source() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_foreign_static_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+extern "C" { static QUANTA_ERRNO: i32; }
+
+fn main() ~ Foreign {
+    let code = QUANTA_ERRNO;
+}
+"#,
+    )
+    .expect("write foreign static receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "foreign static receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["declared_effects"]["main"],
+        serde_json::json!(["Foreign"])
+    );
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]["Foreign"],
+        serde_json::json!(["QUANTA_ERRNO"])
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]
+            .as_object()
+            .expect("main propagated effects")
+            .len(),
+        0
+    );
+}
+
+#[test]
 fn check_receipt_records_propagated_effects_separately() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_check_receipt_propagated_{}.quanta",
