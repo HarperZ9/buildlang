@@ -195,7 +195,9 @@ access paths such as `loaders[1]`; struct updates such as
 `Ops { ..defaults }` preserve inherited field origins such as `load_config`
 alongside new access paths such as `ops.loader`; nested updates such as
 `Outer { ..defaults }` carry descendant origins such as `load_config` to
-access paths such as `outer.ops.loader`; whole-struct assignment such as
+access paths such as `outer.ops.loader`; destructuring that nested bundle with
+`let Outer { ops } = outer` carries the same origin to `ops.loader`;
+whole-struct assignment such as
 `ops = defaults` refreshes member origins without leaking stale intermediate
 paths such as `defaults.loader`; enum-variant payloads preserve their stored
 callback sources when matched; immediate calls through
@@ -215,9 +217,11 @@ operators reject function values, so `load_config >> load_secret` cannot pretend
 to compose callbacks while skipping the call-effect gate. Tuple, tuple-struct,
 struct, enum-variant, and slice destructuring keep that source evidence too, so
 `let (loader,) = (...)`, `let Slot(loader) = slot`,
-`let Ops { loader } = ops`, `let Slot::Ready(loader) = slot`, and
-`let Slot::Ready { loader } = slot`, and `let [loader] = loaders` continue to
-record the selected callees as well as `loader`; branch-local `if let` and
+`let Ops { loader } = ops`, `let Outer { ops } = outer`,
+`let Slot::Ready(loader) = slot`, and `let Slot::Ready { loader } = slot`, and
+`let [loader] = loaders` continue to record the selected callees as well as
+`loader`, and nested destructuring keeps descendant origins such as
+`load_config` for `ops.loader`; branch-local `if let` and
 `while let` destructuring enforce the same declared effect gate. The `?`
 operator is rejected on plain callback values, so `loader?()` cannot turn an
 effectful callback into an untracked unknown call. The `.await` operator is
@@ -342,8 +346,8 @@ tables record paths such as `ops.loader`, `loaders.0`, `slot.0`, and
 `load_config` next to access paths such as `loaders[1]`; struct updates retain
 inherited field origins next to new access paths such as `ops.loader`, so
 source allowlists can constrain capability-bearing registries and ops tables;
-nested updates retain descendant callback origins next to paths such as
-`outer.ops.loader`.
+nested updates and later destructuring retain descendant callback origins next
+to paths such as `outer.ops.loader` and `ops.loader`.
 Whole-aggregate assignments refresh member origins too, so `ops = defaults`
 does not leave stale `defaults.loader` evidence in later `ops.loader` calls.
 Enum-variant payloads keep their stored callback sources when a
@@ -488,7 +492,7 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-14
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 827 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
+- **Tests**: 828 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
