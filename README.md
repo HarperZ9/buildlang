@@ -225,10 +225,13 @@ Policy profiles can enforce that split:
   },
   "require_source_digest": true,
   "require_input_graph_digest": true,
+  "require_provenance_allowlists": true,
   "require_allowlist_coverage": true
 }
 ```
 
+Set `require_provenance_allowlists` when CI should require every direct
+capability boundary and propagated capability caller to be explicitly named.
 Set `require_allowlist_coverage` when CI should also reject stale direct or
 propagated allowlist entries that are not matched by the current receipt
 evidence.
@@ -288,7 +291,7 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-14
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 727 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
+- **Tests**: 730 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
