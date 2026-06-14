@@ -182,6 +182,10 @@ Effect names in `allowed_effects`, `denied_effects`, and allowlist keys are
 validated against built-in capability effects and the effects present in the
 checked source graph, so misspelled policy gates fail as `UnknownPolicyEffect`
 instead of silently weakening CI.
+Set `require_effect_allowlist` when `allowed_effects` should be authoritative
+even when it is empty. Strict profiles and scaffolded policies enable it so a
+pure receipt stays pure: later declared, observed, or propagated effect drift
+must be added to the policy deliberately.
 
 `quantac policy list` shows built-in baseline profiles,
 `quantac policy list --json` emits a machine-readable catalog with profile
@@ -199,11 +203,14 @@ Built-in profile receipts also include `policy.profile` and
 an equivalent file-backed policy document.
 Use `--profile strict-accountability` when CI should reject every ambient
 capability boundary until a printed policy adds exact direct, propagated, and
-source-level allowlists.
+source-level allowlists, with `allowed_effects` enforced as an explicit effect
+inventory.
 Use `quantac policy scaffold receipt.json --output policy.json` to turn an
 accountability receipt into a strict, reviewable policy skeleton with observed
 direct boundaries, ambient helper/macro/FFI sources, propagated callers, and
-callee sources already filled in.
+callee sources already filled in. Scaffolded policies also enable
+`require_effect_allowlist`, including for receipts that currently have no
+effects.
 Use `--expect-profile-digest <hex>` with `--profile` to pin check-time CI to the
 digest reported by `quantac policy list --json` or by a prior trusted receipt.
 Use `quantac receipt verify --expect-profile <name>` to pin verification-time CI
@@ -242,12 +249,16 @@ Policy profiles can enforce that split:
   },
   "require_source_digest": true,
   "require_input_graph_digest": true,
+  "require_effect_allowlist": true,
   "require_provenance_allowlists": true,
   "require_source_allowlists": true,
   "require_allowlist_coverage": true
 }
 ```
 
+Set `require_effect_allowlist` when CI should reject any declared, observed, or
+propagated effect not named in `allowed_effects`, including the case where that
+list is intentionally empty.
 Set `require_provenance_allowlists` when CI should require every direct
 capability boundary and propagated capability caller to be explicitly named.
 Use `direct_capability_source_allowlist` when an approved direct boundary must
