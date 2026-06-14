@@ -160,7 +160,8 @@ declare or handle `FileSystem`, and `(fn() -> str) with FileSystem` supports
 effectful callbacks that return data while keeping callback provenance in
 receipts. Ambient helpers used as values keep those effects too:
 `let loader = read_file; loader("ops.toml");` requires `FileSystem` and records
-`loader` as the propagated source.
+`loader` as the propagated source. Effectful function values stored in structs
+also keep source evidence: `(ops.loader)("ops.toml")` records `ops.loader`.
 
 `quantac check --receipt` also binds each receipt to the checked source inputs
 with SHA-256 digests plus compiler and language version metadata. The top-level
@@ -241,7 +242,9 @@ Effectful callback parameters are also propagated sources, so a wrapper that
 calls `loader: fn() with FileSystem` records `loader` as the inherited
 `FileSystem` source. The same rule covers aliases of ambient helpers, such as
 `let loader = read_file`; calling the alias inherits the helper's capability
-effect instead of falling back to an untyped function value.
+effect instead of falling back to an untyped function value. Calls through
+effectful struct fields record the field path, for example `ops.loader`, so
+source allowlists can constrain capability-bearing registries and ops tables.
 
 Policy profiles can enforce that split:
 
