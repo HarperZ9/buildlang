@@ -765,6 +765,106 @@ fn main() ~ FileSystem {
 }
 
 #[test]
+fn check_reports_effect_for_effectful_associated_function_call() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_effectful_associated_function_gate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+struct Config;
+
+impl Config {
+    fn load() ~ FileSystem {
+        read_file("ops.txt");
+    }
+}
+
+fn main() {
+    Config::load();
+}
+"#,
+    )
+    .expect("write effectful associated function fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "effectful associated function call should fail without FileSystem effect"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FileSystem"),
+        "diagnostic should name FileSystem effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("Config::load"),
+        "diagnostic should name triggering associated function:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn check_receipt_records_effectful_associated_function_call_source() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_effectful_associated_function_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+struct Config;
+
+impl Config {
+    fn load() ~ FileSystem {
+        read_file("ops.txt");
+    }
+}
+
+fn main() ~ FileSystem {
+    Config::load();
+}
+"#,
+    )
+    .expect("write effectful associated function receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "effectful associated function receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["load"]["FileSystem"],
+        serde_json::json!(["read_file"])
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["Config::load"])
+    );
+}
+
+#[test]
 fn check_reports_effect_for_effectful_trait_object_method_call() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_effectful_trait_object_method_gate_{}.quanta",

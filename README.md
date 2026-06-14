@@ -169,9 +169,10 @@ declare or handle `FileSystem`, and `(fn() -> str) with FileSystem` supports
 effectful callbacks that return data while keeping callback provenance in
 receipts. Wrappers that receive an effectful callback argument keep caller-side
 evidence as well, so `run(load_config)` records both `run` and `load_config` as
-propagated `FileSystem` sources. Effectful inherent methods carry the same
-declared effects through method-call syntax, so `config.load()` can require
-`FileSystem` and record `Config.load` as propagated evidence; dynamic dispatch
+propagated `FileSystem` sources. Effectful inherent methods and associated
+functions carry the same declared effects through call syntax, so
+`config.load()` can require `FileSystem` and record `Config.load` as propagated
+evidence, while `Config::load()` records `Config::load`. Dynamic dispatch
 through `dyn Loader` also checks the trait method signature, so
 `loader.load()` records `Loader.load` instead of bypassing the capability gate.
 Ambient helpers used as values keep those effects too:
@@ -278,12 +279,12 @@ their full source path, such as
 `io::read_file`, so source allowlists can distinguish equivalent helper names
 from different modules. This lets teams permit a small audited boundary
 function while still proving which higher-level workflows depend on it.
-Effectful inherent methods are propagated dependencies as well: calling
-`config.load()` where `Config.load` declares `~ FileSystem` records
-`Config.load` under the caller's `propagated_effects`. Effectful trait-object
-method calls behave the same way: calling `loader.load()` through `dyn Loader`
-records `Loader.load`, so dynamic dispatch remains visible to source
-allowlists.
+Effectful inherent methods and associated functions are propagated dependencies
+as well: calling `config.load()` where `Config.load` declares `~ FileSystem`
+records `Config.load` under the caller's `propagated_effects`, and
+`Config::load()` records `Config::load`. Effectful trait-object method calls
+behave the same way: calling `loader.load()` through `dyn Loader` records
+`Loader.load`, so dynamic dispatch remains visible to source allowlists.
 Effectful callback parameters are also propagated sources, so a wrapper that
 calls `loader: fn() with FileSystem` records `loader` as the inherited
 `FileSystem` source. When a caller supplies an effectful callback to that
@@ -417,7 +418,7 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-14
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 799 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
+- **Tests**: 801 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)

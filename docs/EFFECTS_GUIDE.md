@@ -134,9 +134,10 @@ their function type without performing them at definition time, so
 `let loader = |path: str| read_file(path);` stays pure until
 `loader("ops.toml")` is called and then records `loader` as propagated evidence.
 Immediately invoked anonymous closures record the synthetic source `<closure>`.
-Inherent methods carry declared effects too: if `Config.load` declares
-`~ FileSystem`, then `config.load()` requires `FileSystem` in the caller and
-records `Config.load` as propagated evidence. Trait-object method calls are
+Inherent methods and associated functions carry declared effects too: if
+`Config.load` declares `~ FileSystem`, then `config.load()` requires
+`FileSystem` in the caller and records `Config.load` as propagated evidence,
+while `Config::load()` records `Config::load`. Trait-object method calls are
 checked from the trait method signature as well, so `loader.load()` through
 `dyn Loader` records `Loader.load` instead of hiding behind dynamic dispatch.
 Effectful function values stored in structs, tuples, and indexed ops tables
@@ -196,10 +197,11 @@ actually touches the outside world.
 `propagated_effects` records effectful callees that make a caller inherit a
 typed effect. This lets policy allow a small number of audited boundary
 functions while still proving which higher-level workflows depend on them.
-Effectful inherent methods appear here with typed method sources such as
-`Config.load`, and effectful trait-object methods appear with sources such as
-`Loader.load`, so method-call syntax and dynamic dispatch do not bypass
-capability policy.
+Effectful inherent methods and associated functions appear here with typed
+sources such as `Config.load` and `Config::load`, and effectful trait-object
+methods appear with sources such as `Loader.load`, so static method syntax,
+associated-function syntax, and dynamic dispatch do not bypass capability
+policy.
 Effectful callback parameters appear here as named sources too, so higher-order
 ops code keeps capability provenance instead of losing it behind `fn(...)`
 values. Effectful callback arguments supplied to wrappers also appear here, so
