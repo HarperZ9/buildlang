@@ -206,7 +206,9 @@ struct, enum-variant, and slice destructuring keep that source evidence too, so
 record the selected callees as well as `loader`; branch-local `if let` and
 `while let` destructuring enforce the same declared effect gate. The `?`
 operator is rejected on plain callback values, so `loader?()` cannot turn an
-effectful callback into an untracked unknown call. Later
+effectful callback into an untracked unknown call. The `.await` operator is
+rejected on plain callback values too, so `loader.await` cannot launder a
+selected effectful callback into a future output. Later
 assignment to a callback variable or aggregate member refreshes that evidence,
 so stale sources do not survive `loader = load_secret`,
 `ops.loader = load_secret`, or `loaders[0] = load_secret`.
@@ -343,7 +345,9 @@ callback keeps that same source set instead of collapsing it to the local alias.
 References keep it too, so `(*loader_ref)()` records the selected branch targets,
 `loader`, and `loader_ref`. `?` is limited to fallible values and is rejected on
 plain callback values, so `loader?()` cannot erase the selected callback's effect
-row. The same source binding is preserved through
+row. `.await` is limited to futures and is rejected on plain callback values, so
+`loader.await` cannot erase the selected callback's latent effect row. The same
+source binding is preserved through
 tuple, tuple-struct, struct, enum-variant, and slice destructuring, including
 branch-local `if let` and `while let` patterns, so
 `let (loader,) = (...)`, `let Slot(loader) = slot`, `let Ops { loader } = ops`,

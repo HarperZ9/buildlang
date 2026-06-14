@@ -2514,6 +2514,7 @@ fn type_error_kind(error: &TypeError) -> &'static str {
         TypeError::UnknownEffectOperation { .. } => "UnknownEffectOperation",
         TypeError::MissingHandlerClause { .. } => "MissingHandlerClause",
         TypeError::NotTryable { .. } => "NotTryable",
+        TypeError::NotAwaitable { .. } => "NotAwaitable",
         _ => "TypeError",
     }
 }

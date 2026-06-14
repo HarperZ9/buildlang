@@ -166,7 +166,9 @@ so `let (loader,) = (...)`, `let Slot(loader) = slot`,
 the selected callees as well as `loader`; branch-local `if let` and `while let`
 destructuring enforce the same declared effect gate. The `?` operator is rejected
 on plain callback values, so `loader?()` cannot turn an effectful callback into
-an untracked unknown call.
+an untracked unknown call. The `.await` operator is rejected on plain callback
+values too, so `loader.await` cannot launder a selected effectful callback into
+a future output.
 Assignment to that callback variable refreshes the evidence, so
 `loader = load_secret` replaces the earlier source and `loader = read_file`
 clears stale local-function provenance while keeping the call as propagated
@@ -259,10 +261,12 @@ with FileSystem` does not launder the selected origins. References and
 dereferences preserve it too, so `(*loader_ref)()` records the selected branch
 targets, `loader`, and `loader_ref`. `?` is limited to fallible values and is
 rejected on plain callback values, so `loader?()` cannot erase the selected
-callback's effect row. Tuple, tuple-struct, struct, enum-variant, and slice
-destructuring, including `Slot::Ready { loader }` and branch-local `if let`/
-`while let` patterns, keep the same evidence, so destructured aliases do not
-hide which selected callee introduced the effect.
+callback's effect row. `.await` is limited to futures and is rejected on plain
+callback values, so `loader.await` cannot erase the selected callback's latent
+effect row. Tuple, tuple-struct, struct, enum-variant, and slice destructuring,
+including `Slot::Ready { loader }` and branch-local `if let`/`while let`
+patterns, keep the same evidence, so destructured aliases do not hide which
+selected callee introduced the effect.
 Reassigning that identifier, a struct field, a tuple slot, or an indexed entry
 updates the source set, which
 lets receipts describe mutable callback slots without carrying stale provenance
