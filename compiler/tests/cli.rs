@@ -948,6 +948,116 @@ fn main() ~ FileSystem {
 }
 
 #[test]
+fn check_receipt_rebinds_assigned_effectful_function_alias_source() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_assigned_effectful_alias_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn load_config() ~ FileSystem {
+    read_file("config.toml");
+}
+
+fn load_secret() ~ FileSystem {
+    read_file("secret.toml");
+}
+
+fn main() ~ FileSystem {
+    let mut loader = load_config;
+    loader = load_secret;
+    loader();
+}
+"#,
+    )
+    .expect("write assigned effectful alias receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "assigned effectful alias receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["load_secret", "loader"])
+    );
+}
+
+#[test]
+fn check_receipt_clears_stale_sources_for_assigned_ambient_alias() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_assigned_ambient_alias_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn load_config(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn main() ~ FileSystem {
+    let mut loader = load_config;
+    loader = read_file;
+    loader("ops.txt");
+}
+"#,
+    )
+    .expect("write assigned ambient alias receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "assigned ambient alias receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["loader"])
+    );
+}
+
+#[test]
 fn check_reports_effect_for_effectful_struct_field_call() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_struct_field_effect_gate_{}.quanta",

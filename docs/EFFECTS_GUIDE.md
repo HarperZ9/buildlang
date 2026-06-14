@@ -129,7 +129,10 @@ invocation of a returned effectful function records the factory call, such as
 `make_loader()`. `if` and `match` expressions that select an effectful function
 value record every possible branch target, for example `load_config` and
 `load_secret`; binding that selected function before calling it records both
-the binding and the possible selected targets.
+the binding and the possible selected targets. Assignment to that callback
+variable refreshes the evidence, so `loader = load_secret` replaces the earlier
+source and `loader = read_file` clears stale local-function provenance while
+keeping the call as propagated through `loader`.
 
 `quantac check <file> --receipt <path>` writes a deterministic
 `quantalang-check-receipt/v1` JSON artifact with compiler/language version
@@ -182,7 +185,9 @@ Control-flow selectors keep reviewable evidence too: calling the result of an
 `if` or `match` expression records the possible effectful branch targets, such
 as `load_config` and `load_secret`. If the selected function is bound first,
 for example `let loader = if ...`, a later `loader()` call records `loader`
-plus the possible selected targets.
+plus the possible selected targets. Reassigning that identifier updates the
+source set, which lets receipts describe mutable callback slots without
+carrying stale provenance from the old value.
 
 Policy profiles turn receipt evidence into an enforceable CI gate:
 
