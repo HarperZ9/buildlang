@@ -163,7 +163,8 @@ receipts. Ambient helpers used as values keep those effects too:
 `loader` as the propagated source. Effectful function values stored in structs
 also keep source evidence: `(ops.loader)("ops.toml")` records `ops.loader`;
 tuple slots and indexed ops tables record sources such as `loaders.0` and
-`loaders[0]`.
+`loaders[0]`; immediate calls through returned function values record sources
+such as `make_loader()`.
 
 `quantac check --receipt` also binds each receipt to the checked source inputs
 with SHA-256 digests plus compiler and language version metadata. The top-level
@@ -247,7 +248,8 @@ calls `loader: fn() with FileSystem` records `loader` as the inherited
 effect instead of falling back to an untyped function value. Calls through
 effectful struct fields, tuple slots, and indexed ops tables record paths such
 as `ops.loader`, `loaders.0`, and `loaders[0]`, so source allowlists can
-constrain capability-bearing registries and ops tables.
+constrain capability-bearing registries and ops tables. Immediate invocation of
+a returned effectful function records the factory call, such as `make_loader()`.
 
 Policy profiles can enforce that split:
 
