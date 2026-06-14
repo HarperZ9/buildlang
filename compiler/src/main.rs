@@ -613,6 +613,8 @@ struct CheckPolicyProfile {
     #[serde(default)]
     require_provenance_allowlists: bool,
     #[serde(default)]
+    require_source_allowlists: bool,
+    #[serde(default)]
     require_allowlist_coverage: bool,
 }
 
@@ -2480,11 +2482,12 @@ fn source_allowlist_allows(
     effect: &str,
     function: &str,
     source: &str,
+    require_entry: bool,
 ) -> bool {
     allowlist
         .get(effect)
         .and_then(|functions| functions.get(function))
-        .map_or(true, |sources| {
+        .map_or(!require_entry, |sources| {
             sources.iter().any(|allowed| allowed == source)
         })
 }
@@ -2808,6 +2811,7 @@ fn evaluate_check_policy(
                 &item.effect,
                 &item.function,
                 &item.source,
+                policy.profile.require_source_allowlists,
             )
         {
             violations.insert(CheckPolicyViolation {
@@ -2846,6 +2850,7 @@ fn evaluate_check_policy(
                 &item.effect,
                 &item.function,
                 &item.source,
+                policy.profile.require_source_allowlists,
             )
         {
             violations.insert(CheckPolicyViolation {
@@ -5710,6 +5715,7 @@ mod tests {
                 require_source_digest: true,
                 require_input_graph_digest: false,
                 require_provenance_allowlists: false,
+                require_source_allowlists: false,
                 require_allowlist_coverage: false,
             },
         };
@@ -5791,6 +5797,7 @@ mod tests {
                 require_source_digest: false,
                 require_input_graph_digest: true,
                 require_provenance_allowlists: false,
+                require_source_allowlists: false,
                 require_allowlist_coverage: false,
             },
         };
@@ -5848,6 +5855,7 @@ mod tests {
         assert!(loaded.profile.propagated_effect_source_allowlist.is_empty());
         assert!(!loaded.profile.require_input_graph_digest);
         assert!(!loaded.profile.require_provenance_allowlists);
+        assert!(!loaded.profile.require_source_allowlists);
         assert!(!loaded.profile.require_allowlist_coverage);
         assert_eq!(loaded.source_digest.algorithm, "sha256");
         assert_eq!(loaded.source_digest.hex.len(), 64);

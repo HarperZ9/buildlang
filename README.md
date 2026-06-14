@@ -236,6 +236,7 @@ Policy profiles can enforce that split:
   "require_source_digest": true,
   "require_input_graph_digest": true,
   "require_provenance_allowlists": true,
+  "require_source_allowlists": true,
   "require_allowlist_coverage": true
 }
 ```
@@ -247,6 +248,8 @@ also name the exact ambient helper, macro, or FFI source allowed inside that
 function.
 Use `propagated_effect_source_allowlist` when an approved caller may inherit an
 effect only through specific effectful callees.
+Set `require_source_allowlists` when CI should require exact source entries for
+every approved direct capability boundary and propagated caller.
 Set `require_allowlist_coverage` when CI should also reject stale direct or
 propagated allowlist entries, including source-level direct capability and
 propagated-effect entries, that are not matched by the current receipt evidence.
