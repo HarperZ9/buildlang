@@ -93,6 +93,15 @@ fn input_graph_digest_hex(receipt: &serde_json::Value) -> String {
     hex.to_string()
 }
 
+fn verification_check<'a>(report: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    report["checks"]
+        .as_array()
+        .expect("verification checks should be an array")
+        .iter()
+        .find(|check| check["name"] == name)
+        .unwrap_or_else(|| panic!("missing verification check {name:?} in {report:#?}"))
+}
+
 fn copy_dir_recursive(source: &Path, destination: &Path) {
     fs::create_dir_all(destination).unwrap_or_else(|err| {
         panic!(
@@ -799,6 +808,130 @@ fn receipt_verify_accepts_fresh_check_receipt() {
         String::from_utf8_lossy(&verify_output.stdout).contains("Receipt verified"),
         "stdout should confirm verification:\n{}",
         String::from_utf8_lossy(&verify_output.stdout)
+    );
+}
+
+#[test]
+fn receipt_verify_json_reports_passed_checks() {
+    let dir = std::env::temp_dir().join(format!(
+        "quantalang_receipt_verify_json_pass_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create receipt json fixture dir");
+    let entry = dir.join("entry.quanta");
+    let receipt = dir.join("receipt.json");
+    fs::write(&entry, r#"fn main() {}"#).expect("write receipt json entry");
+
+    let check_output = quantac()
+        .arg("check")
+        .arg(&entry)
+        .arg("--profile")
+        .arg("pure")
+        .arg("--receipt")
+        .arg(&receipt)
+        .output()
+        .expect("write check receipt for json verify");
+    assert!(
+        check_output.status.success(),
+        "check should pass before json receipt verify\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&check_output.stdout),
+        String::from_utf8_lossy(&check_output.stderr)
+    );
+
+    let verify_output = quantac()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .arg("--json")
+        .output()
+        .expect("verify receipt as json");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        verify_output.status.success(),
+        "json receipt verification should pass\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_output.stdout),
+        String::from_utf8_lossy(&verify_output.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&verify_output.stdout).expect("verification report should be JSON");
+    assert_eq!(report["schema"], "quantalang-receipt-verification/v1");
+    assert_eq!(report["status"], "passed");
+    assert_eq!(
+        verification_check(&report, "source_digest")["status"],
+        "passed"
+    );
+    assert_eq!(
+        verification_check(&report, "input_graph_digest")["status"],
+        "passed"
+    );
+    assert_eq!(
+        verification_check(&report, "policy_profile_digest")["status"],
+        "passed"
+    );
+}
+
+#[test]
+fn receipt_verify_json_reports_failed_input_graph() {
+    let dir = std::env::temp_dir().join(format!(
+        "quantalang_receipt_verify_json_fail_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create receipt json failure fixture dir");
+    let entry = dir.join("entry.quanta");
+    let shared = dir.join("shared.quanta");
+    let receipt = dir.join("receipt.json");
+    fs::write(
+        &entry,
+        r#"include!("shared.quanta");
+fn main() ~ Console { println!("{}", value()); }
+"#,
+    )
+    .expect("write receipt json failure entry");
+    fs::write(&shared, "fn value() -> i32 { 7 }\n").expect("write first shared source");
+
+    let check_output = quantac()
+        .arg("check")
+        .arg(&entry)
+        .arg("--receipt")
+        .arg(&receipt)
+        .output()
+        .expect("write staleable check receipt for json verify");
+    assert!(
+        check_output.status.success(),
+        "check should pass before json graph mutation\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&check_output.stdout),
+        String::from_utf8_lossy(&check_output.stderr)
+    );
+
+    fs::write(&shared, "fn value() -> i32 { 8 }\n").expect("mutate shared source for json verify");
+    let verify_output = quantac()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .arg("--json")
+        .output()
+        .expect("verify stale receipt as json");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        !verify_output.status.success(),
+        "stale json receipt verification should fail"
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&verify_output.stdout).expect("failure report should be JSON");
+    assert_eq!(report["schema"], "quantalang-receipt-verification/v1");
+    assert_eq!(report["status"], "failed");
+    let graph_check = verification_check(&report, "input_graph_digest");
+    assert_eq!(graph_check["status"], "failed");
+    assert!(
+        graph_check["message"]
+            .as_str()
+            .expect("failure check message")
+            .contains("input graph digest mismatch"),
+        "graph failure should explain mismatch: {graph_check:#?}"
     );
 }
 

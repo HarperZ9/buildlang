@@ -122,7 +122,9 @@ Use `quantac receipt verify receipt.json` to re-check a saved receipt against
 the current source graph. Add `--source path/to/app.quanta` when the source has
 moved and the receipt's embedded source path should be overridden. Verification
 checks the receipt schema, compiler/language identity, entry source digest,
-input graph digest, and any recorded built-in profile digest.
+input graph digest, and any recorded built-in profile digest. Add `--json` to
+emit a `quantalang-receipt-verification/v1` report with one pass/fail record per
+verification check.
 
 `observed_capabilities` records direct ambient capability use inside a function,
 such as `read_file`, `tcp_connect`, `println!`, process helpers, or FFI helpers.
