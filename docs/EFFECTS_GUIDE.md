@@ -149,7 +149,9 @@ variants, including struct-like variants such as
 `Slot::Ready { loader: load_config }`, and indexed ops tables retain access
 evidence too:
 `(ops.loader)("ops.toml")` records `ops.loader`, `(loaders.0)("x")` records
-`loaders.0`, and `(loaders[0])("x")` records `loaders[0]`. Enum-variant
+`loaders.0`, `(loaders[0])("x")` records `loaders[0]`, and repeated callback
+arrays such as `[load_config; 2]` preserve `load_config` alongside indexed
+access paths such as `loaders[1]`. Enum-variant
 construction and tuple-struct construction stay pure when they only store the
 callback. Immediate invocation of a returned effectful function records the
 factory call, such as `make_loader()`. `if` and `match` expressions that select
@@ -246,7 +248,9 @@ they only store the callback, and the call site inherits the callback body's
 capability effects through the alias, or through `<closure>` when the anonymous
 closure is invoked immediately. Calls through effectful struct fields, tuple
 slots, tuple-struct fields, and indexed ops tables record paths such as
-`ops.loader`, `loaders.0`, `slot.0`, and `loaders[0]`, so policy allowlists can
+`ops.loader`, `loaders.0`, `slot.0`, and `loaders[0]`; repeated callback arrays
+also preserve origins such as `load_config` next to indexed paths such as
+`loaders[1]`, so policy allowlists can
 pin capability-bearing registries to exact entries. Enum-variant payloads keep
 their stored callback sources when a match, `if let`, or `while let` branch
 destructures them. Returned effectful function values invoked immediately
