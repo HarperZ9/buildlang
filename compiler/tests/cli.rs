@@ -183,6 +183,96 @@ fn check_reports_capability_effect_for_ambient_file_call() {
 }
 
 #[test]
+fn check_receipt_stdout_records_passing_capabilities() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_pass_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(&fixture, r#"fn main() ~ Console { println!("ok"); }"#)
+        .expect("write passing receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "passing receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be JSON receipt");
+    assert_eq!(receipt["schema"], "quantalang-check-receipt/v1");
+    assert_eq!(receipt["status"], "passed");
+    assert_eq!(
+        receipt["declared_effects"]["main"],
+        serde_json::json!(["Console"])
+    );
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]["Console"],
+        serde_json::json!(["println!"])
+    );
+    assert!(receipt["diagnostics"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn check_receipt_file_records_failing_capability_diagnostic() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_fail_{}.quanta",
+        std::process::id()
+    ));
+    let receipt_path = fixture.with_extension("receipt.json");
+    fs::write(&fixture, r#"fn main() { read_file("ops.txt"); }"#)
+        .expect("write failing receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg(&receipt_path)
+        .output()
+        .expect("run quantac check --receipt file");
+
+    let receipt_text = fs::read_to_string(&receipt_path).expect("read receipt file");
+    let _ = fs::remove_file(&fixture);
+    let _ = fs::remove_file(&receipt_path);
+
+    assert!(
+        !output.status.success(),
+        "failing capability check should return nonzero"
+    );
+    let receipt: serde_json::Value =
+        serde_json::from_str(&receipt_text).expect("receipt file should be JSON");
+    assert_eq!(receipt["schema"], "quantalang-check-receipt/v1");
+    assert_eq!(receipt["status"], "failed");
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]["FileSystem"],
+        serde_json::json!(["read_file"])
+    );
+    let diagnostics = receipt["diagnostics"]
+        .as_array()
+        .expect("diagnostics array");
+    assert!(
+        diagnostics.iter().any(|diag| {
+            diag["stage"] == "type"
+                && diag["kind"] == "UnhandledEffect"
+                && diag["message"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("FileSystem")
+        }),
+        "expected FileSystem UnhandledEffect diagnostic in {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn corpus_verify_accepts_explicit_root() {
     if !c_backend_ready() {
         eprintln!("skipping semantic corpus root verification because no C backend is available");

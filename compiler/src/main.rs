@@ -18,7 +18,9 @@ use quantalang::ast::{self, ItemKind, Module, Visibility};
 use quantalang::codegen::{CodeGenerator, Target};
 use quantalang::lexer::{Lexer, SourceFile, Span};
 use quantalang::parser::Parser;
-use quantalang::types::{TypeChecker, TypeContext};
+use quantalang::types::{
+    FunctionEffectSummary, TypeChecker, TypeContext, TypeError, TypeErrorWithSpan,
+};
 
 fn parse_codegen_target(target: &str) -> Result<Target, String> {
     match target {
@@ -115,6 +117,10 @@ enum Commands {
     Check {
         /// Input file
         file: PathBuf,
+
+        /// Write a machine-readable check receipt to a path, or '-' for stdout
+        #[arg(long, value_name = "PATH")]
+        receipt: Option<PathBuf>,
     },
 
     /// Build a project
@@ -273,7 +279,7 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Some(Commands::Lex { file, verbose }) => cmd_lex(&file, verbose),
         Some(Commands::Parse { file, json }) => cmd_parse(&file, json),
-        Some(Commands::Check { file }) => cmd_check(&file),
+        Some(Commands::Check { file, receipt }) => cmd_check(&file, receipt.as_deref()),
         Some(Commands::Build {
             path,
             release,
@@ -428,6 +434,39 @@ fn cmd_doctor() -> Result<(), i32> {
 struct SemanticCorpusManifest {
     schema: String,
     programs: Vec<SemanticCorpusProgram>,
+}
+
+#[derive(serde::Serialize)]
+struct CheckReceipt {
+    schema: &'static str,
+    compiler: &'static str,
+    source: String,
+    status: &'static str,
+    items: usize,
+    tokens: usize,
+    declared_effects: BTreeMap<String, Vec<String>>,
+    observed_capabilities: BTreeMap<String, BTreeMap<String, Vec<String>>>,
+    diagnostics: Vec<CheckReceiptDiagnostic>,
+}
+
+#[derive(serde::Serialize)]
+struct CheckReceiptDiagnostic {
+    stage: &'static str,
+    kind: String,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    help: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    notes: Vec<String>,
+}
+
+struct CheckOutcome {
+    source: String,
+    items: usize,
+    tokens: usize,
+    parse_errors: Vec<String>,
+    type_errors: Vec<TypeErrorWithSpan>,
+    function_summaries: Vec<FunctionEffectSummary>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1184,77 +1223,202 @@ fn resolve_imports(source: &str, input_file: &Path) -> Result<String, i32> {
     }
 }
 
-fn cmd_check(file: &PathBuf) -> Result<(), i32> {
-    // Read source file
+fn type_error_kind(error: &TypeError) -> &'static str {
+    match error {
+        TypeError::TypeMismatch { .. } => "TypeMismatch",
+        TypeError::InfiniteType { .. } => "InfiniteType",
+        TypeError::MutabilityMismatch { .. } => "MutabilityMismatch",
+        TypeError::UnknownEffect { .. } => "UnknownEffect",
+        TypeError::UnhandledEffect { .. } => "UnhandledEffect",
+        TypeError::UndeclaredEffect { .. } => "UndeclaredEffect",
+        TypeError::UnknownEffectOperation { .. } => "UnknownEffectOperation",
+        TypeError::MissingHandlerClause { .. } => "MissingHandlerClause",
+        _ => "TypeError",
+    }
+}
+
+fn build_check_receipt(outcome: &CheckOutcome) -> CheckReceipt {
+    let mut declared_effects = BTreeMap::new();
+    let mut observed_capabilities = BTreeMap::new();
+
+    for summary in &outcome.function_summaries {
+        declared_effects.insert(summary.function.clone(), summary.declared_effects.clone());
+        let mut capabilities = BTreeMap::new();
+        for (effect, sources) in &summary.observed_capabilities {
+            capabilities.insert(effect.clone(), sources.iter().cloned().collect::<Vec<_>>());
+        }
+        observed_capabilities.insert(summary.function.clone(), capabilities);
+    }
+
+    let mut diagnostics = Vec::new();
+    diagnostics.extend(
+        outcome
+            .parse_errors
+            .iter()
+            .map(|message| CheckReceiptDiagnostic {
+                stage: "parse",
+                kind: "ParseError".to_string(),
+                message: message.clone(),
+                help: None,
+                notes: Vec::new(),
+            }),
+    );
+    diagnostics.extend(
+        outcome
+            .type_errors
+            .iter()
+            .map(|err| CheckReceiptDiagnostic {
+                stage: "type",
+                kind: type_error_kind(&err.error).to_string(),
+                message: err.error.to_string(),
+                help: err.help.clone(),
+                notes: err.notes.clone(),
+            }),
+    );
+
+    CheckReceipt {
+        schema: "quantalang-check-receipt/v1",
+        compiler: "quantac",
+        source: outcome.source.clone(),
+        status: if diagnostics.is_empty() {
+            "passed"
+        } else {
+            "failed"
+        },
+        items: outcome.items,
+        tokens: outcome.tokens,
+        declared_effects,
+        observed_capabilities,
+        diagnostics,
+    }
+}
+
+fn run_check(file: &Path) -> Result<CheckOutcome, i32> {
     let source = std::fs::read_to_string(file).map_err(|e| {
         eprintln!("Error reading file '{}': {}", file.display(), e);
         1
     })?;
 
-    // Resolve `// import <pkg>` and `use <pkg>;` directives
     let source = resolve_imports(&source, file)?;
-
-    // Expand `include!("path")` directives
     let chk_base = file.parent().unwrap_or(Path::new("."));
     let source = preprocess_includes(&source, chk_base)?;
-
     let source_file = SourceFile::new(file.to_string_lossy(), source);
 
-    // Tokenize
     let mut lexer = Lexer::new(&source_file);
     let tokens = lexer.tokenize().map_err(|e| {
         eprintln!("Lexer error: {}", e);
         1
     })?;
+    let token_count = tokens.len();
 
-    println!("Lexing... OK ({} tokens)", tokens.len());
-
-    // Parse (continues past errors, collecting valid items)
     let mut parser = Parser::new(&source_file, tokens);
-    let mut ast = parser.parse().unwrap(); // Always Ok now (errors stored in parser)
-    let parse_errors = parser.errors().to_vec();
+    let mut ast = parser.parse().unwrap();
+    let parse_errors = parser
+        .errors()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let item_count = ast.items.len();
 
-    if parse_errors.is_empty() {
-        println!("Parsing... OK ({} items)", ast.items.len());
-    } else {
-        println!(
-            "Parsing... {} items ({} parse errors)",
-            ast.items.len(),
-            parse_errors.len()
-        );
-    }
-
-    // Resolve `mod foo;` declarations - load and merge external module files
     resolve_modules(&mut ast, chk_base)?;
 
-    // Type check the successfully parsed items
     let mut ctx = TypeContext::new();
     let mut checker = TypeChecker::new(&mut ctx);
     checker.set_source_dir(chk_base.to_path_buf());
     checker.check_module(&ast);
 
-    let has_parse_errors = !parse_errors.is_empty();
-    let has_type_errors = checker.has_errors();
+    Ok(CheckOutcome {
+        source: file.to_string_lossy().to_string(),
+        items: item_count,
+        tokens: token_count,
+        parse_errors,
+        type_errors: checker.errors().to_vec(),
+        function_summaries: checker.function_effect_summaries().to_vec(),
+    })
+}
 
-    if has_parse_errors || has_type_errors {
-        if has_parse_errors {
-            eprintln!("Parse errors:");
-            for err in &parse_errors {
-                eprintln!("  {}", err);
-            }
-        }
-        if has_type_errors {
-            eprintln!("Type errors found:");
-            for err in checker.errors() {
-                eprintln!("  {}", err);
-            }
-        }
-        Err(1)
+fn render_check_line(receipt_to_stdout: bool, message: impl AsRef<str>) {
+    if receipt_to_stdout {
+        eprintln!("{}", message.as_ref());
     } else {
-        println!("Type checking... OK");
-        println!();
-        println!("No errors found in '{}'", file.display());
+        println!("{}", message.as_ref());
+    }
+}
+
+fn render_check_human_output(outcome: &CheckOutcome, receipt_to_stdout: bool) {
+    render_check_line(
+        receipt_to_stdout,
+        format!("Lexing... OK ({} tokens)", outcome.tokens),
+    );
+    if outcome.parse_errors.is_empty() {
+        render_check_line(
+            receipt_to_stdout,
+            format!("Parsing... OK ({} items)", outcome.items),
+        );
+    } else {
+        render_check_line(
+            receipt_to_stdout,
+            format!(
+                "Parsing... {} items ({} parse errors)",
+                outcome.items,
+                outcome.parse_errors.len()
+            ),
+        );
+    }
+
+    if !outcome.parse_errors.is_empty() {
+        eprintln!("Parse errors:");
+        for err in &outcome.parse_errors {
+            eprintln!("  {}", err);
+        }
+    }
+    if !outcome.type_errors.is_empty() {
+        eprintln!("Type errors found:");
+        for err in &outcome.type_errors {
+            eprintln!("  {}", err);
+        }
+    }
+
+    if outcome.parse_errors.is_empty() && outcome.type_errors.is_empty() {
+        render_check_line(receipt_to_stdout, "Type checking... OK");
+        render_check_line(receipt_to_stdout, "");
+        render_check_line(
+            receipt_to_stdout,
+            format!("No errors found in '{}'", outcome.source),
+        );
+    }
+}
+
+fn write_check_receipt(path: &Path, receipt: &CheckReceipt) -> Result<(), i32> {
+    let json = serde_json::to_string_pretty(receipt).map_err(|err| {
+        eprintln!("Error serializing check receipt: {}", err);
+        1
+    })?;
+    if path == Path::new("-") {
+        println!("{}", json);
         Ok(())
+    } else {
+        std::fs::write(path, format!("{}\n", json)).map_err(|err| {
+            eprintln!("Error writing check receipt '{}': {}", path.display(), err);
+            1
+        })
+    }
+}
+
+fn cmd_check(file: &Path, receipt: Option<&Path>) -> Result<(), i32> {
+    let receipt_to_stdout = receipt == Some(Path::new("-"));
+    let outcome = run_check(file)?;
+    let receipt_value = receipt.map(|_| build_check_receipt(&outcome));
+
+    render_check_human_output(&outcome, receipt_to_stdout);
+    if let Some(receipt_value) = receipt_value {
+        write_check_receipt(receipt.expect("receipt path is present"), &receipt_value)?;
+    }
+
+    if outcome.parse_errors.is_empty() && outcome.type_errors.is_empty() {
+        Ok(())
+    } else {
+        Err(1)
     }
 }
 
