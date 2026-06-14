@@ -63,6 +63,57 @@ fn welcome_everyone() ~ Greeting {
 
 ---
 
+## Capability Effects
+
+Some effects are built into the compiler because they describe ambient runtime
+capabilities rather than user-defined operations. `quantac check` surfaces these
+as ordinary effect requirements, so operational access has to appear in the
+function type instead of hiding behind a runtime helper.
+
+| Capability | Direct ambient surfaces |
+|------------|-------------------------|
+| `FileSystem` | `read_file`, `write_file`, `file_exists`, `read_bytes`, `write_bytes`, `append_file`, `list_dir`, `is_dir`, `file_size` |
+| `Network` | `tcp_connect`, `tcp_send`, `tcp_recv`, `tcp_close` |
+| `Process` | `exit`, `process_exit` |
+| `Environment` | `getenv`, `args_count`, `args_get` |
+| `Clock` | `clock_ms`, `time_unix` |
+| `Console` | `read_line`, `read_all`, `stdin_is_pipe`, direct print helpers where parsed as calls |
+| `Foreign` | calls to functions declared in `extern` blocks |
+| `Gpu` | direct `quanta_vk_*` runtime helpers |
+
+```quanta
+fn load_config() {
+    read_file("ops.toml");
+}
+```
+
+`quantac check` rejects that function because it performs `FileSystem` without
+declaring it. The fixed version makes the capability part of the signature:
+
+```quanta
+fn load_config() ~ FileSystem {
+    read_file("ops.toml");
+}
+```
+
+The same rule applies to FFI:
+
+```quanta
+extern "C" { fn touch(); }
+
+fn call_foreign() ~ Foreign {
+    touch();
+}
+```
+
+Diagnostics include a note naming the ambient call, for example `read_file` or
+`touch`, so receipts and review tooling can point to the exact capability
+source. Macro-style console attribution, including `println!`, is still being
+folded into this gate as macro expansion gains source-level capability
+metadata.
+
+---
+
 ## Handling an Effect
 
 The caller wraps the effectful code in a `handle/with` block and provides implementations for each operation:
