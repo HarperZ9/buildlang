@@ -1268,6 +1268,128 @@ fn main() ~ FileSystem {
 }
 
 #[test]
+fn check_effectful_async_block_is_pure_until_awaited() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_effectful_async_block_pure_until_awaited_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn main() {
+    let task = async { read_file("ops.txt") };
+}
+"#,
+    )
+    .expect("write effectful async block fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "constructing an effectful async block should not perform its effect\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn check_reports_effect_for_awaited_effectful_async_block() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_awaited_effectful_async_block_gate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn main() {
+    let task = async { read_file("ops.txt") };
+    task.await;
+}
+"#,
+    )
+    .expect("write awaited effectful async block fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "awaited effectful async block should fail without FileSystem effect"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FileSystem"),
+        "diagnostic should name FileSystem effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("task"),
+        "diagnostic should name awaited async source:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn check_receipt_records_awaited_async_block_source() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_awaited_async_block_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn main() ~ FileSystem {
+    let task = async { read_file("ops.txt") };
+    task.await;
+}
+"#,
+    )
+    .expect("write awaited async block receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "awaited async block receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["task"])
+    );
+}
+
+#[test]
 fn check_reports_effect_for_effectful_struct_field_call() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_struct_field_effect_gate_{}.quanta",
