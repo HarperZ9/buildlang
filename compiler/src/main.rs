@@ -437,7 +437,7 @@ struct SemanticCorpusManifest {
     programs: Vec<SemanticCorpusProgram>,
 }
 
-#[derive(Clone, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize)]
 struct CheckReceiptSourceDigest {
     algorithm: &'static str,
     hex: String,
@@ -468,6 +468,73 @@ struct CheckReceiptDiagnostic {
     help: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+struct CheckPolicyProfile {
+    schema: String,
+    #[serde(default)]
+    allowed_effects: Vec<String>,
+    #[serde(default)]
+    denied_effects: Vec<String>,
+    #[serde(default)]
+    require_source_digest: bool,
+}
+
+#[derive(Clone, Debug)]
+struct LoadedCheckPolicy {
+    source: String,
+    source_digest: CheckReceiptSourceDigest,
+    profile: CheckPolicyProfile,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct CheckPolicyEvidence {
+    function: String,
+    effect: String,
+    surface: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+struct CheckPolicyViolation {
+    kind: &'static str,
+    effect: String,
+    function: String,
+    surface: &'static str,
+    message: String,
+}
+
+impl Ord for CheckPolicyViolation {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (
+            self.function.as_str(),
+            self.effect.as_str(),
+            self.surface,
+            self.kind,
+            self.message.as_str(),
+        )
+            .cmp(&(
+                other.function.as_str(),
+                other.effect.as_str(),
+                other.surface,
+                other.kind,
+                other.message.as_str(),
+            ))
+    }
+}
+
+impl PartialOrd for CheckPolicyViolation {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CheckPolicyDecision {
+    schema: String,
+    source: String,
+    source_digest: CheckReceiptSourceDigest,
+    violations: Vec<CheckPolicyViolation>,
 }
 
 struct CheckOutcome {
@@ -1269,6 +1336,113 @@ fn source_digest_hex(bytes: &[u8]) -> String {
         write!(&mut hex, "{byte:02x}").expect("write to string");
     }
     hex
+}
+
+fn load_check_policy(path: &Path) -> Result<LoadedCheckPolicy, i32> {
+    let bytes = std::fs::read(path).map_err(|err| {
+        eprintln!("Error reading policy '{}': {}", path.display(), err);
+        1
+    })?;
+    let source_digest = CheckReceiptSourceDigest {
+        algorithm: "sha256",
+        hex: source_digest_hex(&bytes),
+    };
+    let profile: CheckPolicyProfile = serde_json::from_slice(&bytes).map_err(|err| {
+        eprintln!("Error parsing policy '{}': {}", path.display(), err);
+        1
+    })?;
+    if profile.schema != "quantalang-check-policy/v1" {
+        eprintln!("Unsupported check policy schema '{}'", profile.schema);
+        return Err(1);
+    }
+
+    Ok(LoadedCheckPolicy {
+        source: path.to_string_lossy().to_string(),
+        source_digest,
+        profile,
+    })
+}
+
+fn check_policy_status(decision: &CheckPolicyDecision) -> &'static str {
+    if decision.violations.is_empty() {
+        "passed"
+    } else {
+        "failed"
+    }
+}
+
+fn collect_check_policy_evidence(outcome: &CheckOutcome) -> BTreeSet<CheckPolicyEvidence> {
+    let mut evidence = BTreeSet::new();
+    for summary in &outcome.function_summaries {
+        for effect in &summary.declared_effects {
+            evidence.insert(CheckPolicyEvidence {
+                function: summary.function.clone(),
+                effect: effect.clone(),
+                surface: "declared_effects",
+            });
+        }
+        for effect in summary.observed_capabilities.keys() {
+            evidence.insert(CheckPolicyEvidence {
+                function: summary.function.clone(),
+                effect: effect.clone(),
+                surface: "observed_capabilities",
+            });
+        }
+    }
+    evidence
+}
+
+fn evaluate_check_policy(policy: &LoadedCheckPolicy, outcome: &CheckOutcome) -> CheckPolicyDecision {
+    let allowed: BTreeSet<&str> = policy
+        .profile
+        .allowed_effects
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let denied: BTreeSet<&str> = policy
+        .profile
+        .denied_effects
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let mut violations = BTreeSet::new();
+
+    if policy.profile.require_source_digest && outcome.source_digest.algorithm != "sha256" {
+        violations.insert(CheckPolicyViolation {
+            kind: "MissingSourceDigest",
+            effect: String::new(),
+            function: String::new(),
+            surface: "source_digest",
+            message: "policy requires sha256 source digest".to_string(),
+        });
+    }
+
+    for item in collect_check_policy_evidence(outcome) {
+        if denied.contains(item.effect.as_str()) {
+            violations.insert(CheckPolicyViolation {
+                kind: "DeniedEffect",
+                effect: item.effect.clone(),
+                function: item.function.clone(),
+                surface: item.surface,
+                message: format!("policy denies effect `{}`", item.effect),
+            });
+        } else if !allowed.is_empty() && !allowed.contains(item.effect.as_str()) {
+            violations.insert(CheckPolicyViolation {
+                kind: "DisallowedEffect",
+                effect: item.effect.clone(),
+                function: item.function.clone(),
+                surface: item.surface,
+                message: format!("policy does not allow effect `{}`", item.effect),
+            });
+        }
+    }
+
+    CheckPolicyDecision {
+        schema: policy.profile.schema.clone(),
+        source: policy.source.clone(),
+        source_digest: policy.source_digest.clone(),
+        violations: violations.into_iter().collect(),
+    }
 }
 
 fn build_check_receipt(outcome: &CheckOutcome) -> CheckReceipt {
@@ -3972,6 +4146,99 @@ mod tests {
     #[test]
     fn language_version_string_matches_public_tuple() {
         assert_eq!(language_version_string(), "1.0.0");
+    }
+
+    #[test]
+    fn check_policy_evaluation_sorts_and_deduplicates_violations() {
+        let policy = LoadedCheckPolicy {
+            source: "policy.json".to_string(),
+            source_digest: CheckReceiptSourceDigest {
+                algorithm: "sha256",
+                hex: source_digest_hex(b"policy"),
+            },
+            profile: CheckPolicyProfile {
+                schema: "quantalang-check-policy/v1".to_string(),
+                allowed_effects: vec!["Console".to_string()],
+                denied_effects: vec!["Network".to_string()],
+                require_source_digest: true,
+            },
+        };
+        let outcome = CheckOutcome {
+            source: "source.quanta".to_string(),
+            compiler_version: quantalang::VERSION,
+            language_version: language_version_string(),
+            source_digest: CheckReceiptSourceDigest {
+                algorithm: "sha256",
+                hex: source_digest_hex(b"source"),
+            },
+            items: 1,
+            tokens: 1,
+            parse_errors: Vec::new(),
+            type_errors: Vec::new(),
+            function_summaries: vec![
+                FunctionEffectSummary {
+                    function: "b".to_string(),
+                    declared_effects: vec!["Network".to_string(), "Network".to_string()],
+                    observed_capabilities: BTreeMap::new(),
+                },
+                FunctionEffectSummary {
+                    function: "a".to_string(),
+                    declared_effects: vec!["FileSystem".to_string()],
+                    observed_capabilities: BTreeMap::new(),
+                },
+            ],
+        };
+
+        let decision = evaluate_check_policy(&policy, &outcome);
+        assert_eq!(decision.schema, "quantalang-check-policy/v1");
+        assert_eq!(decision.source, "policy.json");
+        assert_eq!(decision.source_digest.algorithm, "sha256");
+        assert_eq!(check_policy_status(&decision), "failed");
+        let keys = decision
+            .violations
+            .iter()
+            .map(|violation| {
+                (
+                    violation.function.as_str(),
+                    violation.effect.as_str(),
+                    violation.surface,
+                    violation.kind,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            keys,
+            vec![
+                ("a", "FileSystem", "declared_effects", "DisallowedEffect"),
+                ("b", "Network", "declared_effects", "DeniedEffect"),
+            ]
+        );
+    }
+
+    #[test]
+    fn check_policy_loads_profile_and_digest() {
+        let path = std::env::temp_dir().join(format!(
+            "quantalang_check_policy_load_{}.json",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"{
+              "schema": "quantalang-check-policy/v1",
+              "allowed_effects": ["Console"],
+              "unknown_future_field": true
+            }"#,
+        )
+        .expect("write policy load fixture");
+
+        let loaded = load_check_policy(&path).expect("policy should load");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(loaded.profile.schema, "quantalang-check-policy/v1");
+        assert_eq!(loaded.profile.allowed_effects, vec!["Console"]);
+        assert_eq!(loaded.source_digest.algorithm, "sha256");
+        assert_eq!(loaded.source_digest.hex.len(), 64);
     }
 
     #[test]
