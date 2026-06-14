@@ -193,8 +193,10 @@ sources such as `loaders.0`, `slot.0`, and `loaders[0]`; repeated ops tables
 such as `[load_config; 2]` retain `load_config` origins alongside indexed
 access paths such as `loaders[1]`; struct updates such as
 `Ops { ..defaults }` preserve inherited field origins such as `load_config`
-alongside new access paths such as `ops.loader`; enum-variant payloads
-preserve their stored callback sources when matched; immediate calls through
+alongside new access paths such as `ops.loader`; whole-struct assignment such
+as `ops = defaults` refreshes member origins without leaking stale intermediate
+paths such as `defaults.loader`; enum-variant payloads preserve their stored
+callback sources when matched; immediate calls through
 returned function values record sources such as `make_loader()`. `if` and
 `match` expressions that select an
 effectful function value record every possible branch target, for example
@@ -221,7 +223,8 @@ rejected on plain callback values too, so `loader.await` cannot launder a
 selected effectful callback into a future output. Later
 assignment to a callback variable or aggregate member refreshes that evidence,
 so stale sources do not survive `loader = load_secret`,
-`ops.loader = load_secret`, or `loaders[0] = load_secret`.
+`ops.loader = load_secret`, `ops = defaults`, or
+`loaders[0] = load_secret`.
 Async blocks follow the same delayed-effect model for type checking: creating
 `let task = async { read_file("ops.toml") };` is pure, while `task.await`
 inherits `FileSystem` and records both the awaited source (`task`) and the
@@ -336,8 +339,10 @@ tables record paths such as `ops.loader`, `loaders.0`, `slot.0`, and
 `loaders[0]`, and repeated tables retain callback origins such as
 `load_config` next to access paths such as `loaders[1]`; struct updates retain
 inherited field origins next to new access paths such as `ops.loader`, so
-source allowlists can constrain capability-bearing registries
-and ops tables. Enum-variant payloads keep their stored callback sources when a
+source allowlists can constrain capability-bearing registries and ops tables.
+Whole-aggregate assignments refresh member origins too, so `ops = defaults`
+does not leave stale `defaults.loader` evidence in later `ops.loader` calls.
+Enum-variant payloads keep their stored callback sources when a
 match, `if let`, or `while let` branch
 destructures them. Immediate invocation
 of a returned effectful function records the factory call, such as
@@ -373,8 +378,9 @@ branch-local `if let` and `while let` patterns, so
 `let Slot::Ready(loader) = slot`, `let Slot::Ready { loader } = slot`, and
 `let [loader] = loaders` do not collapse a selected effectful function down to
 only the local alias. Plain assignment to an identifier, struct field, tuple
-slot, or indexed entry rebinds that call-source evidence, so policy receipts
-follow mutable callback slots instead of preserving stale earlier sources.
+slot, indexed entry, or whole aggregate rebinds that call-source evidence, so
+policy receipts follow mutable callback slots instead of preserving stale
+earlier sources.
 
 Policy profiles can enforce that split:
 
@@ -478,7 +484,7 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-14
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 825 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
+- **Tests**: 826 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)

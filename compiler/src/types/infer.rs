@@ -700,11 +700,107 @@ impl<'ctx> TypeInfer<'ctx> {
         target: &ast::Expr,
         value: &ast::Expr,
         value_sources: Vec<String>,
+        target_ty: &Ty,
     ) {
         for target_source in self.call_access_sources(target) {
             self.clear_call_source_tree(&target_source);
-            self.bind_call_sources(&target_source, value_sources.clone());
+            let copied_members =
+                self.bind_assigned_aggregate_member_sources(&target_source, value, target_ty);
             self.bind_aggregate_call_sources(&target_source, value);
+            if !copied_members && !self.expr_binds_aggregate_members(value) {
+                self.bind_call_sources(&target_source, value_sources.clone());
+            }
+        }
+    }
+
+    fn bind_assigned_aggregate_member_sources(
+        &mut self,
+        target_name: &str,
+        value: &ast::Expr,
+        target_ty: &Ty,
+    ) -> bool {
+        let mut copied = false;
+        for member in self.aggregate_member_accesses(target_ty) {
+            let target_member = format!("{target_name}{member}");
+            let inherited_sources = self.inherited_member_sources(value, &member);
+            if !inherited_sources.is_empty() {
+                copied = true;
+            }
+            self.bind_member_call_sources(&target_member, inherited_sources, false);
+        }
+        copied
+    }
+
+    fn aggregate_member_accesses(&self, target_ty: &Ty) -> Vec<String> {
+        let resolved = self.apply(target_ty);
+        match &resolved.kind {
+            TyKind::Tuple(elems) => (0..elems.len()).map(|index| format!(".{index}")).collect(),
+            TyKind::Array(_, _) | TyKind::Slice(_) => vec!["[]".to_string()],
+            TyKind::Adt(def_id, _) => self
+                .ctx
+                .lookup_type(*def_id)
+                .and_then(|type_def| match &type_def.kind {
+                    TypeDefKind::Struct(struct_def) if struct_def.is_tuple => Some(
+                        (0..struct_def.fields.len())
+                            .map(|index| format!(".{index}"))
+                            .collect(),
+                    ),
+                    TypeDefKind::Struct(struct_def) => Some(
+                        struct_def
+                            .fields
+                            .iter()
+                            .map(|(field, _)| format!(".{field}"))
+                            .collect(),
+                    ),
+                    TypeDefKind::Enum(_) => None,
+                })
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn inherited_member_sources(&self, value: &ast::Expr, member_access: &str) -> Vec<String> {
+        Self::dedupe_call_sources(
+            self.call_sources(value)
+                .into_iter()
+                .flat_map(|source| {
+                    let access_source = format!("{source}{member_access}");
+                    self.bound_call_sources_for_access(&access_source)
+                })
+                .collect(),
+        )
+    }
+
+    fn expr_binds_aggregate_members(&self, expr: &ast::Expr) -> bool {
+        match &expr.kind {
+            ExprKind::Tuple(_)
+            | ExprKind::Array(_)
+            | ExprKind::ArrayRepeat { .. }
+            | ExprKind::Struct { .. } => true,
+            ExprKind::Call { func, args } => self.is_positional_constructor_call(func, args.len()),
+            ExprKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                then_branch
+                    .tail_expr()
+                    .is_some_and(|expr| self.expr_binds_aggregate_members(expr))
+                    || else_branch
+                        .as_deref()
+                        .is_some_and(|expr| self.expr_binds_aggregate_members(expr))
+            }
+            ExprKind::Match { arms, .. } => arms
+                .iter()
+                .any(|arm| self.expr_binds_aggregate_members(&arm.body)),
+            ExprKind::Block(block) | ExprKind::Unsafe(block) => block
+                .tail_expr()
+                .is_some_and(|expr| self.expr_binds_aggregate_members(expr)),
+            ExprKind::Paren(inner)
+            | ExprKind::Deref(inner)
+            | ExprKind::Cast { expr: inner, .. }
+            | ExprKind::Ref { expr: inner, .. } => self.expr_binds_aggregate_members(inner),
+            _ => false,
         }
     }
 
@@ -2459,7 +2555,7 @@ impl<'ctx> TypeInfer<'ctx> {
         }
 
         if op == AssignOp::Assign {
-            self.bind_assigned_call_sources(target, value, value_sources);
+            self.bind_assigned_call_sources(target, value, value_sources, &target_ty);
         }
 
         Ty::unit()

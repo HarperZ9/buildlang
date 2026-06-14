@@ -153,9 +153,11 @@ evidence too:
 arrays such as `[load_config; 2]` preserve `load_config` alongside indexed
 access paths such as `loaders[1]`. Struct updates such as
 `Ops { ..defaults }` preserve inherited field origins such as `load_config`
-alongside new access paths such as `ops.loader`. Enum-variant
-construction and tuple-struct construction stay pure when they only store the
-callback. Immediate invocation of a returned effectful function records the
+alongside new access paths such as `ops.loader`. Whole-struct assignment such
+as `ops = defaults` refreshes member origins without keeping stale intermediate
+paths such as `defaults.loader`. Enum-variant construction and tuple-struct
+construction stay pure when they only store the callback. Immediate invocation
+of a returned effectful function records the
 factory call, such as `make_loader()`. `if` and `match` expressions that select
 an effectful function value record every possible branch target, for example
 `load_config` and `load_secret`; binding that selected function before calling
@@ -182,7 +184,10 @@ a future output.
 Assignment to that callback variable refreshes the evidence, so
 `loader = load_secret` replaces the earlier source and `loader = read_file`
 clears stale local-function provenance while keeping the call as propagated
-through `loader`.
+through `loader`. Assignment to an aggregate member or whole aggregate follows
+the same rule, so `ops.loader = load_secret`, `ops = defaults`, and
+`loaders[0] = load_secret` update later receipt evidence instead of preserving
+stale callback sources.
 Async blocks are delayed effect values too. `let task = async {
 read_file("ops.toml") };` does not perform `FileSystem` at construction time;
 `task.await` inherits the stored capability effect and records both `task` and
