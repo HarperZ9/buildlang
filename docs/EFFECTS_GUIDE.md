@@ -140,7 +140,9 @@ keeping the call as propagated through `loader`.
 Async blocks are delayed effect values too. `let task = async {
 read_file("ops.toml") };` does not perform `FileSystem` at construction time;
 `task.await` inherits the stored capability effect and records `task` as
-propagated evidence.
+propagated evidence. When `if` or `match` selects between async blocks with
+different capability effects, the selected future carries the union until
+await.
 
 `quantac check <file> --receipt <path>` writes a deterministic
 `quantalang-check-receipt/v1` JSON artifact with compiler/language version
@@ -194,7 +196,9 @@ capability-bearing registries to exact entries. Returned effectful function
 values invoked immediately record factory calls such as `make_loader()`.
 Async blocks keep the same boundary: construction is pure for type checking,
 and awaiting the future records the awaited expression, such as `task`, as the
-propagated source of the future body's capability effects.
+propagated source of the future body's capability effects. Selected futures
+merge branch effects, so `task.await` must declare every capability that any
+possible async branch can perform.
 Control-flow selectors keep reviewable evidence too: calling the result of an
 `if` or `match` expression records the possible effectful branch targets, such
 as `load_config` and `load_secret`. If the selected function is bound first,

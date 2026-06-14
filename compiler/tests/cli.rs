@@ -1390,6 +1390,152 @@ fn main() ~ FileSystem {
 }
 
 #[test]
+fn check_selected_async_block_is_pure_until_awaited() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_selected_async_block_pure_until_awaited_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn main() {
+    let use_secret = true;
+    let task = if use_secret {
+        async { read_file("ops.txt") }
+    } else {
+        async { getenv("TOKEN") }
+    };
+}
+"#,
+    )
+    .expect("write selected async block fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "selecting an effectful async block should not perform its effect\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn check_reports_effects_for_awaited_selected_async_block() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_awaited_selected_async_block_gate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn main() {
+    let use_secret = true;
+    let task = if use_secret {
+        async { read_file("ops.txt") }
+    } else {
+        async { getenv("TOKEN") }
+    };
+    task.await;
+}
+"#,
+    )
+    .expect("write awaited selected async block fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "awaited selected async block should fail without declared effects"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FileSystem"),
+        "diagnostic should name FileSystem effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("Environment"),
+        "diagnostic should name Environment effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("task"),
+        "diagnostic should name awaited selected async source:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn check_receipt_records_awaited_selected_async_block_sources() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_awaited_selected_async_block_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn main() ~ FileSystem + Environment {
+    let use_secret = true;
+    let task = if use_secret {
+        async { read_file("ops.txt") }
+    } else {
+        async { getenv("TOKEN") }
+    };
+    task.await;
+}
+"#,
+    )
+    .expect("write awaited selected async block receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "awaited selected async block receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["task"])
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["Environment"],
+        serde_json::json!(["task"])
+    );
+}
+
+#[test]
 fn check_reports_effect_for_effectful_struct_field_call() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_struct_field_effect_gate_{}.quanta",
