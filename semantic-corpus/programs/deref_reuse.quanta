@@ -3,7 +3,7 @@ struct Point {
     y: i32,
 }
 
-fn main() {
+fn main() ~ Console {
     let p = Point { x: 3, y: 4 };
     let rp: &Point = &p;
     let a = *rp;

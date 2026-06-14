@@ -6,7 +6,7 @@ fn multiply(a: i32, b: i32) -> i32 {
     a * b
 }
 
-fn main() {
+fn main() ~ Console {
     let result: i32 = add(3, 4);
     println!("3 + 4 = {}", result);
     let product: i32 = multiply(6, 7);

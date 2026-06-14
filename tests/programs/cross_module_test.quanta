@@ -7,7 +7,7 @@ fn approx(a: f64, b: f64, tol: f64) -> bool {
     abs < tol
 }
 
-fn main() {
+fn main() ~ Console {
     let a = geometry::make_point(0.0, 0.0);
     let b = geometry::make_point(3.0, 4.0);
     let d = geometry::distance(&a, &b);

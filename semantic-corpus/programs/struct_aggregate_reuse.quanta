@@ -8,7 +8,7 @@ struct Pair {
     right: Point,
 }
 
-fn main() {
+fn main() ~ Console {
     let p = Point { x: 3, y: 4 };
     let pair = Pair { left: p, right: p };
     println("{}", pair.left.x + pair.right.y);

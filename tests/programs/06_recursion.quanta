@@ -14,7 +14,7 @@ fn fibonacci(n: i32) -> i32 {
     }
 }
 
-fn main() {
+fn main() ~ Console {
     println!("5! = {}", factorial(5));
     println!("fib(10) = {}", fibonacci(10));
 }

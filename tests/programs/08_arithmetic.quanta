@@ -1,4 +1,4 @@
-fn main() {
+fn main() ~ Console {
     let a: i32 = 100;
     let b: i32 = 37;
 

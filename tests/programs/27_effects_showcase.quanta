@@ -13,7 +13,7 @@ fn welcome() ~ Greeting {
     perform Greeting.greet("Alice");
 }
 
-fn main() {
+fn main() ~ Console {
     handle {
         welcome()
     } with {
