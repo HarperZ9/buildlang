@@ -128,6 +128,9 @@ digest. It also replays the compiler check and compares the saved
 and policy violations against the current compiler result. Add `--json` to emit
 a `quantalang-receipt-verification/v1` report with one pass/fail record per
 verification check.
+Add `--expect-profile ci-review` when a verification job must prove the receipt
+was accepted under a specific built-in profile, not merely under whatever policy
+metadata the receipt currently contains.
 
 `observed_capabilities` records direct ambient capability use inside a function,
 such as `read_file`, `tcp_connect`, `println!`, process helpers, or FFI helpers.
@@ -179,6 +182,12 @@ Or run a built-in profile directly during a check:
 
 ```bash
 quantac check app.quanta --profile ci-review --receipt -
+```
+
+For stored receipts, pin verification to that same built-in profile:
+
+```bash
+quantac receipt verify receipt.json --expect-profile ci-review --json
 ```
 
 The built-in profiles are valid `quantalang-check-policy/v1` JSON and are meant
