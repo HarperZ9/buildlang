@@ -72,6 +72,15 @@ fn input_digest_hex(receipt: &serde_json::Value, role: &str, source_suffix: &str
     hex.to_string()
 }
 
+fn input_graph_digest_hex(receipt: &serde_json::Value) -> String {
+    assert_eq!(receipt["input_graph_digest"]["algorithm"], "sha256");
+    let hex = receipt["input_graph_digest"]["hex"]
+        .as_str()
+        .expect("input graph digest hex should be a string");
+    assert_eq!(hex.len(), 64);
+    hex.to_string()
+}
+
 fn copy_dir_recursive(source: &Path, destination: &Path) {
     fs::create_dir_all(destination).unwrap_or_else(|err| {
         panic!(
@@ -468,6 +477,7 @@ fn main() ~ Console { println!("{}", value()); }
         .to_string();
     let first_input_entry = input_digest_hex(&first_receipt, "entry", "entry.quanta");
     let first_input_include = input_digest_hex(&first_receipt, "include", "shared.quanta");
+    let first_graph_digest = input_graph_digest_hex(&first_receipt);
     assert_eq!(first_entry_digest, first_input_entry);
 
     fs::write(&shared, "fn value() -> i32 { 8 }\n").expect("write changed include fixture");
@@ -493,6 +503,7 @@ fn main() ~ Console { println!("{}", value()); }
         input_digest_hex(&second_receipt, "entry", "entry.quanta"),
         first_input_entry
     );
+    assert_ne!(input_graph_digest_hex(&second_receipt), first_graph_digest);
     assert_ne!(
         input_digest_hex(&second_receipt, "include", "shared.quanta"),
         first_input_include
@@ -546,6 +557,56 @@ fn main() ~ Console {
     input_digest_hex(&receipt, "entry", "entry.quanta");
     input_digest_hex(&receipt, "import", "lib.quanta");
     input_digest_hex(&receipt, "module", "mod.quanta");
+}
+
+#[test]
+fn check_receipt_input_graph_digest_is_path_portable() {
+    let mut graph_digests = Vec::new();
+    let mut entry_sources = Vec::new();
+
+    for label in ["left", "right"] {
+        let dir = std::env::temp_dir().join(format!(
+            "quantalang_check_receipt_graph_digest_{}_{}",
+            label,
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create graph digest fixture dir");
+        let entry = dir.join("entry.quanta");
+        let shared = dir.join("shared.quanta");
+        fs::write(
+            &entry,
+            r#"include!("shared.quanta");
+fn main() ~ Console { println!("{}", value()); }
+"#,
+        )
+        .expect("write graph digest entry fixture");
+        fs::write(&shared, "fn value() -> i32 { 11 }\n")
+            .expect("write graph digest include fixture");
+
+        let output = quantac()
+            .arg("check")
+            .arg(&entry)
+            .arg("--receipt")
+            .arg("-")
+            .output()
+            .expect("run graph digest receipt");
+
+        let _ = fs::remove_dir_all(&dir);
+
+        assert!(
+            output.status.success(),
+            "graph digest check should pass for {label}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let receipt = receipt_from_stdout(&output);
+        entry_sources.push(receipt["source"].as_str().unwrap_or("").to_string());
+        graph_digests.push(input_graph_digest_hex(&receipt));
+    }
+
+    assert_ne!(entry_sources[0], entry_sources[1]);
+    assert_eq!(graph_digests[0], graph_digests[1]);
 }
 
 #[test]
