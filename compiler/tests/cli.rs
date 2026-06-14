@@ -873,6 +873,128 @@ fn receipt_verify_json_reports_passed_checks() {
 }
 
 #[test]
+fn receipt_verify_expect_profile_rejects_stripped_policy() {
+    let dir = std::env::temp_dir().join(format!(
+        "quantalang_receipt_verify_expect_profile_stripped_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create expect profile fixture dir");
+    let entry = dir.join("entry.quanta");
+    let receipt = dir.join("receipt.json");
+    fs::write(&entry, r#"fn main() {}"#).expect("write expect profile entry");
+
+    let check_output = quantac()
+        .arg("check")
+        .arg(&entry)
+        .arg("--profile")
+        .arg("ci-review")
+        .arg("--receipt")
+        .arg(&receipt)
+        .output()
+        .expect("write profile-backed receipt");
+    assert!(
+        check_output.status.success(),
+        "check should pass before stripping policy\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&check_output.stdout),
+        String::from_utf8_lossy(&check_output.stderr)
+    );
+
+    let mut saved: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt).expect("read profile receipt"))
+            .expect("profile receipt should parse");
+    saved
+        .as_object_mut()
+        .expect("receipt should be an object")
+        .remove("policy");
+    fs::write(
+        &receipt,
+        serde_json::to_string_pretty(&saved).expect("serialize stripped receipt"),
+    )
+    .expect("write stripped profile receipt");
+
+    let verify_output = quantac()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .arg("--expect-profile")
+        .arg("ci-review")
+        .output()
+        .expect("verify stripped receipt with expected profile");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        !verify_output.status.success(),
+        "stripped policy receipt should fail expected-profile verification"
+    );
+    assert!(
+        String::from_utf8_lossy(&verify_output.stderr)
+            .contains("receipt built-in profile mismatch"),
+        "stderr should report expected profile mismatch:\n{}",
+        String::from_utf8_lossy(&verify_output.stderr)
+    );
+}
+
+#[test]
+fn receipt_verify_json_reports_expected_profile_mismatch() {
+    let dir = std::env::temp_dir().join(format!(
+        "quantalang_receipt_verify_expect_profile_json_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create expect profile json fixture dir");
+    let entry = dir.join("entry.quanta");
+    let receipt = dir.join("receipt.json");
+    fs::write(&entry, r#"fn main() {}"#).expect("write expect profile json entry");
+
+    let check_output = quantac()
+        .arg("check")
+        .arg(&entry)
+        .arg("--profile")
+        .arg("pure")
+        .arg("--receipt")
+        .arg(&receipt)
+        .output()
+        .expect("write pure profile receipt");
+    assert!(
+        check_output.status.success(),
+        "check should pass before expected-profile mismatch\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&check_output.stdout),
+        String::from_utf8_lossy(&check_output.stderr)
+    );
+
+    let verify_output = quantac()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .arg("--expect-profile")
+        .arg("ci-review")
+        .arg("--json")
+        .output()
+        .expect("verify mismatched profile receipt as json");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        !verify_output.status.success(),
+        "mismatched profile receipt should fail json verification"
+    );
+    let report: serde_json::Value = serde_json::from_slice(&verify_output.stdout)
+        .expect("profile mismatch report should be JSON");
+    assert_eq!(report["status"], "failed");
+    let profile_check = verification_check(&report, "expected_profile");
+    assert_eq!(profile_check["status"], "failed");
+    assert_eq!(profile_check["expected"], "builtin:ci-review");
+    assert_eq!(profile_check["actual"], "builtin:pure");
+    assert!(
+        profile_check["message"]
+            .as_str()
+            .expect("expected profile failure message")
+            .contains("receipt built-in profile mismatch"),
+        "profile failure should explain mismatch: {profile_check:#?}"
+    );
+}
+
+#[test]
 fn receipt_verify_json_reports_failed_input_graph() {
     let dir = std::env::temp_dir().join(format!(
         "quantalang_receipt_verify_json_fail_{}",

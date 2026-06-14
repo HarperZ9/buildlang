@@ -325,6 +325,9 @@ enum ReceiptCommands {
         /// Source file to verify instead of the source path embedded in the receipt
         #[arg(long, value_name = "PATH")]
         source: Option<PathBuf>,
+        /// Require the receipt to have been checked under a built-in policy profile
+        #[arg(long, value_name = "NAME")]
+        expect_profile: Option<String>,
         /// Emit a machine-readable verification report
         #[arg(long)]
         json: bool,
@@ -1025,8 +1028,9 @@ fn cmd_receipt(command: ReceiptCommands) -> Result<(), i32> {
         ReceiptCommands::Verify {
             receipt,
             source,
+            expect_profile,
             json,
-        } => cmd_receipt_verify(&receipt, source.as_deref(), json),
+        } => cmd_receipt_verify(&receipt, source.as_deref(), expect_profile.as_deref(), json),
     }
 }
 
@@ -1054,6 +1058,80 @@ fn push_receipt_verification_check(
         profile,
         message,
     });
+}
+
+fn receipt_builtin_profile(receipt: &serde_json::Value) -> Option<&str> {
+    if let Some(profile) = receipt
+        .pointer("/policy/profile")
+        .and_then(serde_json::Value::as_str)
+    {
+        return Some(profile);
+    }
+    receipt
+        .pointer("/policy/source")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|source| source.strip_prefix("builtin:"))
+}
+
+fn builtin_profile_label(profile: Option<&str>) -> Option<String> {
+    profile.map(|profile| format!("builtin:{profile}"))
+}
+
+fn verify_receipt_expected_profile(
+    receipt: &serde_json::Value,
+    expected_profile: Option<&str>,
+) -> Result<(), i32> {
+    let Some(expected_profile) = expected_profile else {
+        return Ok(());
+    };
+    if builtin_policy_profile(expected_profile).is_none() {
+        eprintln!(
+            "Error: unknown built-in policy profile `{}`",
+            expected_profile
+        );
+        return Err(1);
+    }
+
+    let actual_profile = receipt_builtin_profile(receipt);
+    if actual_profile != Some(expected_profile) {
+        let actual = builtin_profile_label(actual_profile).unwrap_or_else(|| "none".to_string());
+        eprintln!(
+            "Error: receipt built-in profile mismatch: expected builtin:{}, actual {}",
+            expected_profile, actual
+        );
+        return Err(1);
+    }
+
+    Ok(())
+}
+
+fn push_receipt_expected_profile_check(
+    checks: &mut Vec<ReceiptVerificationCheck>,
+    receipt: &serde_json::Value,
+    expected_profile: Option<&str>,
+) -> Result<(), i32> {
+    let Some(expected_profile) = expected_profile else {
+        return Ok(());
+    };
+    if builtin_policy_profile(expected_profile).is_none() {
+        eprintln!(
+            "Error: unknown built-in policy profile `{}`",
+            expected_profile
+        );
+        return Err(1);
+    }
+
+    let actual_profile = receipt_builtin_profile(receipt);
+    let mismatch = actual_profile != Some(expected_profile);
+    push_receipt_verification_check(
+        checks,
+        "expected_profile",
+        Some(format!("builtin:{expected_profile}")),
+        builtin_profile_label(actual_profile),
+        Some(expected_profile.to_string()),
+        mismatch.then(|| "receipt built-in profile mismatch".to_string()),
+    );
+    Ok(())
 }
 
 fn compact_receipt_value(value: Option<&serde_json::Value>) -> Option<String> {
@@ -1155,10 +1233,11 @@ fn push_receipt_replay_checks(
 fn cmd_receipt_verify(
     receipt_path: &Path,
     source_override: Option<&Path>,
+    expected_profile: Option<&str>,
     json: bool,
 ) -> Result<(), i32> {
     if json {
-        return cmd_receipt_verify_json(receipt_path, source_override);
+        return cmd_receipt_verify_json(receipt_path, source_override, expected_profile);
     }
 
     let receipt: serde_json::Value = read_json(receipt_path)?;
@@ -1193,6 +1272,7 @@ fn cmd_receipt_verify(
         );
         return Err(1);
     }
+    verify_receipt_expected_profile(&receipt, expected_profile)?;
 
     let source_path = if let Some(source_override) = source_override {
         source_override.to_path_buf()
@@ -1255,7 +1335,11 @@ fn cmd_receipt_verify(
     Ok(())
 }
 
-fn cmd_receipt_verify_json(receipt_path: &Path, source_override: Option<&Path>) -> Result<(), i32> {
+fn cmd_receipt_verify_json(
+    receipt_path: &Path,
+    source_override: Option<&Path>,
+    expected_profile: Option<&str>,
+) -> Result<(), i32> {
     let receipt: serde_json::Value = read_json(receipt_path)?;
     let mut checks = Vec::new();
 
@@ -1303,6 +1387,7 @@ fn cmd_receipt_verify_json(receipt_path: &Path, source_override: Option<&Path>) 
         (language_version != current_language_version)
             .then(|| "language version mismatch".to_string()),
     );
+    push_receipt_expected_profile_check(&mut checks, &receipt, expected_profile)?;
 
     let source_path = if let Some(source_override) = source_override {
         source_override.to_path_buf()

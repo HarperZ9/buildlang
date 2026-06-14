@@ -124,7 +124,7 @@ quantac vignette.quanta --target glsl -o vignette.glsl
 | `quantac run`   | Compile and run a `.quanta` file     |
 | `quantac doctor` | Diagnose local toolchain readiness  |
 | `quantac policy list [--json]` / `quantac policy print <name>` | List or emit built-in check policy profiles |
-| `quantac receipt verify <receipt.json> [--source PATH] [--json]` | Re-check a saved accountability receipt against current source inputs |
+| `quantac receipt verify <receipt.json> [--source PATH] [--expect-profile NAME] [--json]` | Re-check a saved accountability receipt against current source inputs and optional profile expectations |
 | `quantac corpus verify [--root DIR] [--write]` | Verify semantic corpus receipts and C stdout; optionally refresh the C receipt |
 
 ## Capability Effects
@@ -167,6 +167,9 @@ digest, and the replayed accountability surfaces (`declared_effects`,
 violations). Add `--json` to emit a
 `quantalang-receipt-verification/v1` report for CI systems that need
 machine-readable pass/fail checks instead of human text.
+Use `--expect-profile ci-review` when CI must reject receipts that were not
+accepted under the required built-in policy profile, including receipts whose
+policy object was stripped after creation.
 
 `quantac check --policy <policy.json>` evaluates a portable
 `quantalang-check-policy/v1` profile against declared effects and observed
@@ -188,8 +191,10 @@ Receipts identify these gates with a `policy.source` such as `builtin:ci-review`
 Built-in profile receipts also include `policy.profile` and
 `policy.profile_digest`, so CI can distinguish official profile identity from
 an equivalent file-backed policy document.
-Use `--expect-profile-digest <hex>` with `--profile` to pin CI to the digest
-reported by `quantac policy list --json` or by a prior trusted receipt.
+Use `--expect-profile-digest <hex>` with `--profile` to pin check-time CI to the
+digest reported by `quantac policy list --json` or by a prior trusted receipt.
+Use `quantac receipt verify --expect-profile <name>` to pin verification-time CI
+to the required built-in profile identity.
 
 Receipts separate direct capability boundaries from callers that inherit those
 effects. `observed_capabilities` records ambient helper, macro, and FFI access
@@ -270,7 +275,7 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-14
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 717 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
+- **Tests**: 719 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
