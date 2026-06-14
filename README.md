@@ -164,6 +164,30 @@ capabilities. Policy failures make the check fail even when type checking
 passes, and receipts record the policy path, policy digest, status, and
 structured violations.
 
+Receipts separate direct capability boundaries from callers that inherit those
+effects. `observed_capabilities` records ambient helper, macro, and FFI access
+inside a function, such as `read_file`, `tcp_connect`, `println!`, or `touch`.
+`propagated_effects` records effectful callees that made a caller inherit a
+typed effect. This lets teams permit a small audited boundary function while
+still proving which higher-level workflows depend on it.
+
+Policy profiles can enforce that split:
+
+```json
+{
+  "schema": "quantalang-check-policy/v1",
+  "allowed_effects": ["FileSystem", "Network"],
+  "direct_effect_allowlist": {
+    "FileSystem": ["load_config"]
+  },
+  "propagated_effect_allowlist": {
+    "FileSystem": ["main"]
+  },
+  "require_source_digest": true,
+  "require_input_graph_digest": true
+}
+```
+
 ### Backend Selection
 
 Use `--target` to select a code generation backend:
