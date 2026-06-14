@@ -2,7 +2,7 @@ fn add_month(balance: i32, interest: i32) -> i32 {
     balance + interest
 }
 
-fn main() {
+fn main() ~ Console {
     let mut balance: i32 = 100;
     let mut month: i32 = 0;
 

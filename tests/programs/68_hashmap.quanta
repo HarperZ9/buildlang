@@ -1,7 +1,7 @@
 // Test 68: HashMap via runtime builtins
 // map_new, map_insert, map_get, map_contains, map_len, map_remove
 
-fn main() {
+fn main() ~ Console {
     let m = map_new();
 
     // Insert key-value pairs

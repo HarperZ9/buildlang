@@ -7,7 +7,7 @@ fn add_points(a: Point, b: Point) -> Point {
     Point { x: a.x + b.x, y: a.y + b.y }
 }
 
-fn main() {
+fn main() ~ Console {
     let p1 = Point { x: 3, y: 4 };
     let p2 = Point { x: 10, y: 20 };
     let sum = add_points(p1, p2);
