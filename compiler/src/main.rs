@@ -437,11 +437,20 @@ struct SemanticCorpusManifest {
     programs: Vec<SemanticCorpusProgram>,
 }
 
+#[derive(Clone, serde::Serialize)]
+struct CheckReceiptSourceDigest {
+    algorithm: &'static str,
+    hex: String,
+}
+
 #[derive(serde::Serialize)]
 struct CheckReceipt {
     schema: &'static str,
     compiler: &'static str,
+    compiler_version: &'static str,
+    language_version: String,
     source: String,
+    source_digest: CheckReceiptSourceDigest,
     status: &'static str,
     items: usize,
     tokens: usize,
@@ -463,6 +472,9 @@ struct CheckReceiptDiagnostic {
 
 struct CheckOutcome {
     source: String,
+    compiler_version: &'static str,
+    language_version: String,
+    source_digest: CheckReceiptSourceDigest,
     items: usize,
     tokens: usize,
     parse_errors: Vec<String>,
@@ -1301,7 +1313,10 @@ fn build_check_receipt(outcome: &CheckOutcome) -> CheckReceipt {
     CheckReceipt {
         schema: "quantalang-check-receipt/v1",
         compiler: "quantac",
+        compiler_version: outcome.compiler_version,
+        language_version: outcome.language_version.clone(),
         source: outcome.source.clone(),
+        source_digest: outcome.source_digest.clone(),
         status: if diagnostics.is_empty() {
             "passed"
         } else {
@@ -1316,7 +1331,15 @@ fn build_check_receipt(outcome: &CheckOutcome) -> CheckReceipt {
 }
 
 fn run_check(file: &Path) -> Result<CheckOutcome, i32> {
-    let source = std::fs::read_to_string(file).map_err(|e| {
+    let source_bytes = std::fs::read(file).map_err(|e| {
+        eprintln!("Error reading file '{}': {}", file.display(), e);
+        1
+    })?;
+    let source_digest = CheckReceiptSourceDigest {
+        algorithm: "sha256",
+        hex: source_digest_hex(&source_bytes),
+    };
+    let source = String::from_utf8(source_bytes).map_err(|e| {
         eprintln!("Error reading file '{}': {}", file.display(), e);
         1
     })?;
@@ -1351,6 +1374,9 @@ fn run_check(file: &Path) -> Result<CheckOutcome, i32> {
 
     Ok(CheckOutcome {
         source: file.to_string_lossy().to_string(),
+        compiler_version: quantalang::VERSION,
+        language_version: language_version_string(),
+        source_digest,
         items: item_count,
         tokens: token_count,
         parse_errors,
