@@ -202,7 +202,9 @@ such as `let loader_ref = &loader; (*loader_ref)()`. A cast to a pure callback
 type such as `as fn() -> str` is rejected when the source carries effects, so an
 explicit cast cannot erase the capability row. Pipe application is checked as
 real function application too, so `"ops.toml" |> load_config` requires
-`FileSystem` and records `load_config` as propagated evidence. Tuple, tuple-struct,
+`FileSystem` and records `load_config` as propagated evidence. Ordinary binary
+operators reject function values, so `load_config >> load_secret` cannot pretend
+to compose callbacks while skipping the call-effect gate. Tuple, tuple-struct,
 struct, enum-variant, and slice destructuring keep that source evidence too, so
 `let (loader,) = (...)`, `let Slot(loader) = slot`,
 `let Ops { loader } = ops`, `let Slot::Ready(loader) = slot`, and
@@ -355,7 +357,9 @@ function casts are checked against function effect rows, so
 `as fn() -> str` cannot launder an effectful selected callback. Pipe expressions
 such as `"ops.toml" |> load_config` use the same effect gate as
 `load_config("ops.toml")`, so operator syntax cannot bypass propagated
-capability evidence. The same source binding is preserved through
+capability evidence. Ordinary binary operators reject function values, so
+`load_config >> load_secret` is a type error rather than fake composition. The
+same source binding is preserved through
 tuple, tuple-struct, struct, enum-variant, and slice destructuring, including
 branch-local `if let` and `while let` patterns, so
 `let (loader,) = (...)`, `let Slot(loader) = slot`, `let Ops { loader } = ops`,
@@ -467,7 +471,7 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-14
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 822 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
+- **Tests**: 823 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
