@@ -291,6 +291,23 @@ impl<'ctx> TypeInfer<'ctx> {
             .insert(callee_name.to_string());
     }
 
+    fn record_effectful_argument_sources(&mut self, param: &Ty, arg_sources: &[String]) {
+        if arg_sources.is_empty() {
+            return;
+        }
+
+        let param_ty = self.apply(param);
+        if let TyKind::Fn(param_fn) = &param_ty.kind {
+            for effect in &param_fn.effects.effects {
+                if super::capabilities::is_capability_effect(effect.name.as_ref()) {
+                    for source in arg_sources {
+                        self.record_propagated_effect_source(effect.name.as_ref(), source);
+                    }
+                }
+            }
+        }
+    }
+
     fn record_macro_capability(&mut self, macro_name: &str) {
         if let Some(effect_name) = super::capabilities::capability_effect_for_macro(macro_name) {
             self.current_effects
@@ -1814,8 +1831,10 @@ impl<'ctx> TypeInfer<'ctx> {
                 }
 
                 for (param, arg) in fn_ty.params.iter().zip(args.iter()) {
+                    let arg_sources = self.call_sources(arg);
                     let arg_ty = self.infer_expr(arg);
                     let _ = self.unify(param, &arg_ty, span);
+                    self.record_effectful_argument_sources(param, &arg_sources);
                 }
 
                 // Propagate callee's effects to caller's effect context
