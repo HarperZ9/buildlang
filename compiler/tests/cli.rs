@@ -38,6 +38,17 @@ fn receipt_from_stdout(output: &std::process::Output) -> serde_json::Value {
     })
 }
 
+fn write_temp_policy(label: &str, json: &str) -> PathBuf {
+    let policy = std::env::temp_dir().join(format!(
+        "quantalang_check_policy_{}_{}.json",
+        label,
+        std::process::id()
+    ));
+    fs::write(&policy, json)
+        .unwrap_or_else(|err| panic!("write policy fixture {}: {}", policy.display(), err));
+    policy
+}
+
 fn copy_dir_recursive(source: &Path, destination: &Path) {
     fs::create_dir_all(destination).unwrap_or_else(|err| {
         panic!(
@@ -392,6 +403,201 @@ fn check_receipt_source_digest_changes_when_source_changes() {
     assert_ne!(
         first_receipt["source_digest"]["hex"],
         second_receipt["source_digest"]["hex"]
+    );
+}
+
+#[test]
+fn check_policy_allows_console_receipt() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_policy_console_{}.quanta",
+        std::process::id()
+    ));
+    let policy = write_temp_policy(
+        "console_allow",
+        r#"{
+          "schema": "quantalang-check-policy/v1",
+          "allowed_effects": ["Console"],
+          "require_source_digest": true
+        }"#,
+    );
+    fs::write(&fixture, r#"fn main() ~ Console { println!("ok"); }"#)
+        .expect("write policy console fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--policy")
+        .arg(&policy)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check with passing policy");
+
+    let _ = fs::remove_file(&fixture);
+    let _ = fs::remove_file(&policy);
+
+    assert!(
+        output.status.success(),
+        "console policy check should pass\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(receipt["status"], "passed");
+    assert_eq!(receipt["policy"]["schema"], "quantalang-check-policy/v1");
+    assert_eq!(receipt["policy"]["status"], "passed");
+    assert_eq!(receipt["policy"]["source_digest"]["algorithm"], "sha256");
+    assert_eq!(
+        receipt["policy"]["source_digest"]["hex"]
+            .as_str()
+            .expect("policy digest")
+            .len(),
+        64
+    );
+    assert!(receipt["policy"]["violations"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn check_policy_denies_filesystem_even_when_typecheck_passes() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_policy_deny_fs_{}.quanta",
+        std::process::id()
+    ));
+    let policy = write_temp_policy(
+        "deny_fs",
+        r#"{
+          "schema": "quantalang-check-policy/v1",
+          "denied_effects": ["FileSystem"]
+        }"#,
+    );
+    fs::write(
+        &fixture,
+        r#"fn main() ~ FileSystem { read_file("ops.txt"); }"#,
+    )
+    .expect("write denied filesystem fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--policy")
+        .arg(&policy)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check with denied filesystem policy");
+
+    let _ = fs::remove_file(&fixture);
+    let _ = fs::remove_file(&policy);
+
+    assert!(!output.status.success(), "policy denial should fail check");
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(receipt["status"], "failed");
+    assert_eq!(receipt["policy"]["status"], "failed");
+    let violations = receipt["policy"]["violations"]
+        .as_array()
+        .expect("policy violations");
+    assert!(
+        violations.iter().any(|violation| {
+            violation["kind"] == "DeniedEffect"
+                && violation["effect"] == "FileSystem"
+                && violation["function"] == "main"
+                && violation["message"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("policy denies effect `FileSystem`")
+        }),
+        "expected FileSystem denied violation in {violations:#?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Policy violation"),
+        "stderr should include policy diagnostic:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn check_policy_allow_list_rejects_unlisted_effect() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_policy_allow_list_{}.quanta",
+        std::process::id()
+    ));
+    let policy = write_temp_policy(
+        "allow_console_only",
+        r#"{
+          "schema": "quantalang-check-policy/v1",
+          "allowed_effects": ["Console"]
+        }"#,
+    );
+    fs::write(
+        &fixture,
+        r#"fn main() ~ FileSystem { read_file("ops.txt"); }"#,
+    )
+    .expect("write allow-list filesystem fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--policy")
+        .arg(&policy)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check with allow-list policy");
+
+    let _ = fs::remove_file(&fixture);
+    let _ = fs::remove_file(&policy);
+
+    assert!(!output.status.success(), "unlisted effect should fail policy");
+    let receipt = receipt_from_stdout(&output);
+    let violations = receipt["policy"]["violations"]
+        .as_array()
+        .expect("policy violations");
+    assert!(
+        violations.iter().any(|violation| {
+            violation["kind"] == "DisallowedEffect"
+                && violation["effect"] == "FileSystem"
+                && violation["function"] == "main"
+        }),
+        "expected FileSystem disallowed violation in {violations:#?}"
+    );
+}
+
+#[test]
+fn check_policy_rejects_unsupported_schema() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_policy_bad_schema_{}.quanta",
+        std::process::id()
+    ));
+    let policy = write_temp_policy(
+        "bad_schema",
+        r#"{
+          "schema": "quantalang-check-policy/v0",
+          "allowed_effects": ["Console"]
+        }"#,
+    );
+    fs::write(&fixture, r#"fn main() ~ Console { println!("ok"); }"#)
+        .expect("write bad schema fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--policy")
+        .arg(&policy)
+        .output()
+        .expect("run quantac check with bad policy schema");
+
+    let _ = fs::remove_file(&fixture);
+    let _ = fs::remove_file(&policy);
+
+    assert!(!output.status.success(), "unsupported policy schema should fail");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("Unsupported check policy schema 'quantalang-check-policy/v0'"),
+        "stderr should report unsupported schema:\n{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
