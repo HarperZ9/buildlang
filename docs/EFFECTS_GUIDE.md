@@ -155,9 +155,11 @@ callback. Immediate invocation of a returned effectful function records the
 factory call, such as `make_loader()`. `if` and `match` expressions that select
 an effectful function value record every possible branch target, for example
 `load_config` and `load_secret`; binding that selected function before calling
-it records both the binding and the possible selected targets. Tuple,
-tuple-struct, struct, enum-variant, and slice destructuring preserve those
-sources as well, so `let (loader,) = (...)`, `let Slot(loader) = slot`,
+it records both the binding and the possible selected targets, even when the
+selected value is explicitly cast to a typed effectful callback such as
+`(fn() -> str) with FileSystem`. Tuple, tuple-struct, struct, enum-variant, and
+slice destructuring preserve those sources as well, so `let (loader,) = (...)`,
+`let Slot(loader) = slot`,
 `let Ops { loader } = ops`, `let Slot::Ready(loader) = slot`, and
 `let Slot::Ready { loader } = slot`, and `let [loader] = loaders` still record
 the selected callees as well as `loader`; branch-local `if let` and `while let`
@@ -248,11 +250,14 @@ Control-flow selectors keep reviewable evidence too: calling the result of an
 `if` or `match` expression records the possible effectful branch targets, such
 as `load_config` and `load_secret`. If the selected function is bound first,
 for example `let loader = if ...`, a later `loader()` call records `loader`
-plus the possible selected targets. Tuple, tuple-struct, struct, enum-variant,
-and slice destructuring, including `Slot::Ready { loader }` and branch-local
-`if let`/`while let` patterns, keep the same evidence, so destructured aliases
-do not hide which selected callee introduced the effect. Reassigning that identifier,
-a struct field, a tuple slot, or an indexed entry updates the source set, which
+plus the possible selected targets. Explicit casts to typed effectful callback
+values preserve that same evidence, so a coercion such as `as (fn() -> str)
+with FileSystem` does not launder the selected origins. Tuple, tuple-struct,
+struct, enum-variant, and slice destructuring, including `Slot::Ready { loader }`
+and branch-local `if let`/`while let` patterns, keep the same evidence, so
+destructured aliases do not hide which selected callee introduced the effect.
+Reassigning that identifier, a struct field, a tuple slot, or an indexed entry
+updates the source set, which
 lets receipts describe mutable callback slots without carrying stale provenance
 from the old value.
 

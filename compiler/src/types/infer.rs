@@ -697,7 +697,9 @@ impl<'ctx> TypeInfer<'ctx> {
                     self.bind_aggregate_call_sources_inner(name, expr, merge);
                 }
             }
-            ExprKind::Paren(inner) => self.bind_aggregate_call_sources_inner(name, inner, merge),
+            ExprKind::Paren(inner) | ExprKind::Cast { expr: inner, .. } => {
+                self.bind_aggregate_call_sources_inner(name, inner, merge)
+            }
             _ => {}
         }
     }
@@ -971,7 +973,7 @@ impl<'ctx> TypeInfer<'ctx> {
             ExprKind::Block(block) | ExprKind::Unsafe(block) => block
                 .tail_expr()
                 .map_or_else(Vec::new, |expr| self.call_sources(expr)),
-            ExprKind::Paren(inner) => self.call_sources(inner),
+            ExprKind::Paren(inner) | ExprKind::Cast { expr: inner, .. } => self.call_sources(inner),
             _ => Vec::new(),
         }
     }
