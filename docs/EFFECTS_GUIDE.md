@@ -170,6 +170,10 @@ Denied effects always fail. If `allowed_effects` is non-empty, any declared
 effect, observed capability, or propagated effect outside the allow-list also
 fails. `direct_effect_allowlist` applies only to `observed_capabilities`;
 `propagated_effect_allowlist` applies only to `propagated_effects`.
+Effect names in those policy fields must resolve to either a built-in
+capability effect or an effect present in the checked source graph. Unknown
+names are reported as `UnknownPolicyEffect` violations, which catches policy
+typos such as `Netwrok` before they can weaken a CI gate.
 
 Use `quantac policy list` to see built-in starting profiles, or
 `quantac policy list --json` to emit a machine-readable

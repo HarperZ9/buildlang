@@ -20,7 +20,8 @@ use quantalang::codegen::{CodeGenerator, Target};
 use quantalang::lexer::{Lexer, SourceFile, Span};
 use quantalang::parser::Parser;
 use quantalang::types::{
-    FunctionEffectSummary, TypeChecker, TypeContext, TypeError, TypeErrorWithSpan,
+    capability_effect_names, FunctionEffectSummary, TypeChecker, TypeContext, TypeError,
+    TypeErrorWithSpan,
 };
 
 fn parse_codegen_target(target: &str) -> Result<Target, String> {
@@ -2506,6 +2507,39 @@ fn collect_check_policy_evidence(outcome: &CheckOutcome) -> BTreeSet<CheckPolicy
     evidence
 }
 
+fn known_policy_effect_names(outcome: &CheckOutcome) -> BTreeSet<String> {
+    let mut names = capability_effect_names()
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect::<BTreeSet<_>>();
+    for summary in &outcome.function_summaries {
+        names.extend(summary.declared_effects.iter().cloned());
+        names.extend(summary.observed_capabilities.keys().cloned());
+        names.extend(summary.propagated_effects.keys().cloned());
+    }
+    names
+}
+
+fn insert_unknown_policy_effect_violations<'a>(
+    violations: &mut BTreeSet<CheckPolicyViolation>,
+    known_effects: &BTreeSet<String>,
+    surface: &'static str,
+    effects: impl Iterator<Item = &'a String>,
+) {
+    for effect in effects {
+        if !known_effects.contains(effect) {
+            violations.insert(CheckPolicyViolation {
+                kind: "UnknownPolicyEffect",
+                effect: effect.clone(),
+                function: String::new(),
+                surface,
+                source: String::new(),
+                message: format!("policy references unknown effect `{effect}` in {surface}"),
+            });
+        }
+    }
+}
+
 fn evaluate_check_policy(
     policy: &LoadedCheckPolicy,
     outcome: &CheckOutcome,
@@ -2523,6 +2557,32 @@ fn evaluate_check_policy(
         .map(String::as_str)
         .collect();
     let mut violations = BTreeSet::new();
+    let known_effects = known_policy_effect_names(outcome);
+
+    insert_unknown_policy_effect_violations(
+        &mut violations,
+        &known_effects,
+        "allowed_effects",
+        policy.profile.allowed_effects.iter(),
+    );
+    insert_unknown_policy_effect_violations(
+        &mut violations,
+        &known_effects,
+        "denied_effects",
+        policy.profile.denied_effects.iter(),
+    );
+    insert_unknown_policy_effect_violations(
+        &mut violations,
+        &known_effects,
+        "direct_effect_allowlist",
+        policy.profile.direct_effect_allowlist.keys(),
+    );
+    insert_unknown_policy_effect_violations(
+        &mut violations,
+        &known_effects,
+        "propagated_effect_allowlist",
+        policy.profile.propagated_effect_allowlist.keys(),
+    );
 
     if policy.profile.require_source_digest && outcome.source_digest.algorithm != "sha256" {
         violations.insert(CheckPolicyViolation {

@@ -1851,6 +1851,121 @@ fn check_policy_denies_gpu_even_when_typecheck_passes() {
 }
 
 #[test]
+fn check_policy_rejects_unknown_effect_name() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_policy_unknown_effect_{}.quanta",
+        std::process::id()
+    ));
+    let policy = write_temp_policy(
+        "unknown_effect",
+        r#"{
+          "schema": "quantalang-check-policy/v1",
+          "denied_effects": ["Netwrok"]
+        }"#,
+    );
+    fs::write(&fixture, r#"fn main() {}"#).expect("write unknown policy effect fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--policy")
+        .arg(&policy)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check with unknown policy effect");
+
+    let _ = fs::remove_file(&fixture);
+    let _ = fs::remove_file(&policy);
+
+    assert!(
+        !output.status.success(),
+        "unknown policy effect should fail check\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(receipt["status"], "failed");
+    assert_eq!(receipt["policy"]["status"], "failed");
+    let violations = receipt["policy"]["violations"]
+        .as_array()
+        .expect("policy violations");
+    assert!(
+        violations.iter().any(|violation| {
+            violation["kind"] == "UnknownPolicyEffect"
+                && violation["effect"] == "Netwrok"
+                && violation["surface"] == "denied_effects"
+                && violation["message"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("unknown effect")
+        }),
+        "expected unknown policy effect violation in {violations:#?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("unknown effect"),
+        "stderr should report unknown policy effect:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn check_policy_allows_source_defined_effect_name() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_policy_user_effect_{}.quanta",
+        std::process::id()
+    ));
+    let policy = write_temp_policy(
+        "user_effect",
+        r#"{
+          "schema": "quantalang-check-policy/v1",
+          "allowed_effects": ["Audit"]
+        }"#,
+    );
+    fs::write(
+        &fixture,
+        r#"
+effect Audit {
+    fn record();
+}
+
+fn main() ~ Audit {}
+"#,
+    )
+    .expect("write source-defined effect fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--policy")
+        .arg(&policy)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check with source-defined effect policy");
+
+    let _ = fs::remove_file(&fixture);
+    let _ = fs::remove_file(&policy);
+
+    assert!(
+        output.status.success(),
+        "source-defined effect should be accepted by policy validator\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(receipt["policy"]["status"], "passed");
+    assert_eq!(
+        receipt["declared_effects"]["main"],
+        serde_json::json!(["Audit"])
+    );
+    assert!(receipt["policy"]["violations"]
+        .as_array()
+        .expect("policy violations")
+        .is_empty());
+}
+
+#[test]
 fn check_policy_allow_list_rejects_unlisted_effect() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_check_policy_allow_list_{}.quanta",
