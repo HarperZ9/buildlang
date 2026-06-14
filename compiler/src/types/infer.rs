@@ -474,6 +474,22 @@ impl<'ctx> TypeInfer<'ctx> {
         copied
     }
 
+    fn has_bound_call_source_descendants(&self, source_prefix: &str) -> bool {
+        let dot_prefix = format!("{source_prefix}.");
+        let bracket_prefix = format!("{source_prefix}[");
+        self.source_bindings.iter().rev().any(|scope| {
+            scope.keys().any(|source| {
+                source.starts_with(&dot_prefix) || source.starts_with(&bracket_prefix)
+            })
+        })
+    }
+
+    fn expr_has_bound_call_source_descendants(&self, expr: &ast::Expr) -> bool {
+        self.call_sources(expr)
+            .iter()
+            .any(|source| self.has_bound_call_source_descendants(source))
+    }
+
     fn bind_bound_call_source_tree(
         &mut self,
         source_prefix: &str,
@@ -1065,6 +1081,23 @@ impl<'ctx> TypeInfer<'ctx> {
         }
     }
 
+    fn bind_explicit_struct_field_pattern_call_sources(
+        &mut self,
+        pattern: &ast::Pattern,
+        value: &ast::Expr,
+    ) {
+        if matches!(pattern.kind, ast::PatternKind::Ident { .. })
+            && self.expr_has_bound_call_source_descendants(value)
+        {
+            self.bind_pattern_to_call_sources(pattern, Vec::new());
+            for source in self.call_sources(value) {
+                self.bind_pattern_to_call_source_tree(pattern, &source);
+            }
+        } else {
+            self.bind_pattern_call_sources(pattern, value);
+        }
+    }
+
     fn bind_pattern_call_sources(&mut self, pattern: &ast::Pattern, expr: &ast::Expr) {
         match &pattern.kind {
             ast::PatternKind::Ident {
@@ -1132,7 +1165,10 @@ impl<'ctx> TypeInfer<'ctx> {
                             .find(|expr_field| expr_field.name.name == field.name.name)
                         {
                             if let Some(value) = expr_field.value.as_deref() {
-                                self.bind_pattern_call_sources(&field.pattern, value);
+                                self.bind_explicit_struct_field_pattern_call_sources(
+                                    &field.pattern,
+                                    value,
+                                );
                             } else {
                                 let sources = self.call_sources_for_name(field.name.as_ref());
                                 self.bind_pattern_to_call_sources(&field.pattern, sources);

@@ -262,7 +262,10 @@ access paths such as `ops.loader`, so policy allowlists can
 pin capability-bearing registries to exact entries, and nested struct updates
 carry descendant origins next to paths such as `outer.ops.loader`; destructuring
 the nested bundle, or the update expression itself, keeps those origins next to
-paths such as `ops.loader`.
+paths such as `ops.loader`. Explicit update-field replacements such as
+`Outer { ops: replacement, ..defaults }` refresh the destructured access path
+without forcing policies to allow stale construction aliases such as
+`replacement.loader`.
 Enum-variant payloads keep
 their stored callback sources when a match, `if let`, or `while let` branch
 destructures them. Returned effectful function values invoked immediately
