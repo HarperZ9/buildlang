@@ -156,6 +156,10 @@ pub enum TypeError {
     #[error("type `{ty}` cannot be dereferenced")]
     NotDereferenceable { ty: Ty },
 
+    /// Cannot apply the try operator to this type.
+    #[error("type `{ty}` cannot be used with `?`")]
+    NotTryable { ty: Ty },
+
     /// Cannot borrow variable as mutable while it is already borrowed.
     #[error("cannot borrow `{variable}` as mutable because it is already borrowed")]
     AlreadyBorrowed { variable: String },

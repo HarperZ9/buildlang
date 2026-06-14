@@ -2513,6 +2513,7 @@ fn type_error_kind(error: &TypeError) -> &'static str {
         TypeError::UndeclaredEffect { .. } => "UndeclaredEffect",
         TypeError::UnknownEffectOperation { .. } => "UnknownEffectOperation",
         TypeError::MissingHandlerClause { .. } => "MissingHandlerClause",
+        TypeError::NotTryable { .. } => "NotTryable",
         _ => "TypeError",
     }
 }
