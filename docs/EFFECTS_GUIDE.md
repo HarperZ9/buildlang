@@ -137,6 +137,10 @@ the binding and the possible selected targets. Assignment to that callback
 variable refreshes the evidence, so `loader = load_secret` replaces the earlier
 source and `loader = read_file` clears stale local-function provenance while
 keeping the call as propagated through `loader`.
+Async blocks are delayed effect values too. `let task = async {
+read_file("ops.toml") };` does not perform `FileSystem` at construction time;
+`task.await` inherits the stored capability effect and records `task` as
+propagated evidence.
 
 `quantac check <file> --receipt <path>` writes a deterministic
 `quantalang-check-receipt/v1` JSON artifact with compiler/language version
@@ -188,6 +192,9 @@ effectful struct fields, tuple slots, and indexed ops tables record paths such
 as `ops.loader`, `loaders.0`, and `loaders[0]`, so policy allowlists can pin
 capability-bearing registries to exact entries. Returned effectful function
 values invoked immediately record factory calls such as `make_loader()`.
+Async blocks keep the same boundary: construction is pure for type checking,
+and awaiting the future records the awaited expression, such as `task`, as the
+propagated source of the future body's capability effects.
 Control-flow selectors keep reviewable evidence too: calling the result of an
 `if` or `match` expression records the possible effectful branch targets, such
 as `load_config` and `load_secret`. If the selected function is bound first,
