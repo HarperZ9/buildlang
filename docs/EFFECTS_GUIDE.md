@@ -153,7 +153,10 @@ evidence too:
 arrays such as `[load_config; 2]` preserve `load_config` alongside indexed
 access paths such as `loaders[1]`. Struct updates such as
 `Ops { ..defaults }` preserve inherited field origins such as `load_config`
-alongside new access paths such as `ops.loader`. Whole-struct assignment such
+alongside new access paths such as `ops.loader`; explicit update-field
+replacements and aggregate-literal destructuring such as
+`let (ops,) = (replacement,)` refresh access paths without keeping stale
+intermediate paths such as `replacement.loader`. Whole-struct assignment such
 as `ops = defaults` refreshes member origins without keeping stale intermediate
 paths such as `defaults.loader`. Enum-variant construction and tuple-struct
 construction stay pure when they only store the callback. Immediate invocation
