@@ -2710,6 +2710,112 @@ fn main() ~ FileSystem {
 }
 
 #[test]
+fn check_reports_effect_for_pipe_effectful_function_call() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_pipe_effectful_function_gate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn load_config(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn main() {
+    "ops.toml" |> load_config;
+}
+"#,
+    )
+    .expect("write pipe effectful function fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "pipe effectful function call should fail without FileSystem effect\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(receipt["status"], "failed");
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["load_config"])
+    );
+    let diagnostics = receipt["diagnostics"]
+        .as_array()
+        .expect("diagnostics array");
+    assert!(
+        diagnostics.iter().any(|diag| {
+            let message = diag["message"].as_str().unwrap_or_default();
+            message.contains("FileSystem") && message.contains("main")
+        }),
+        "missing FileSystem diagnostic for pipe effectful function call\nreceipt:\n{}",
+        serde_json::to_string_pretty(&receipt).expect("receipt should serialize")
+    );
+}
+
+#[test]
+fn check_receipt_records_pipe_effectful_function_call_source() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_pipe_effectful_function_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn load_config(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn main() ~ FileSystem {
+    "ops.toml" |> load_config;
+}
+"#,
+    )
+    .expect("write pipe effectful function receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "pipe effectful function receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["load_config"])
+    );
+}
+
+#[test]
 fn check_reports_effect_for_control_flow_selected_effectful_function_call() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_control_flow_selected_effectful_function_gate_{}.quanta",
