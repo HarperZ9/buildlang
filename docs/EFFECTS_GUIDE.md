@@ -261,7 +261,8 @@ also preserve origins such as `load_config` next to indexed paths such as
 access paths such as `ops.loader`, so policy allowlists can
 pin capability-bearing registries to exact entries, and nested struct updates
 carry descendant origins next to paths such as `outer.ops.loader`; destructuring
-the nested bundle keeps those origins next to paths such as `ops.loader`.
+the nested bundle, or the update expression itself, keeps those origins next to
+paths such as `ops.loader`.
 Enum-variant payloads keep
 their stored callback sources when a match, `if let`, or `while let` branch
 destructures them. Returned effectful function values invoked immediately

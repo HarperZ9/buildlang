@@ -1122,6 +1122,7 @@ impl<'ctx> TypeInfer<'ctx> {
             ast::PatternKind::Struct { fields, .. } => {
                 if let ExprKind::Struct {
                     fields: expr_fields,
+                    rest,
                     ..
                 } = &expr.kind
                 {
@@ -1136,6 +1137,15 @@ impl<'ctx> TypeInfer<'ctx> {
                                 let sources = self.call_sources_for_name(field.name.as_ref());
                                 self.bind_pattern_to_call_sources(&field.pattern, sources);
                             }
+                        } else if let Some(rest_expr) = rest.as_deref() {
+                            let sources =
+                                self.bound_call_sources_for_member(rest_expr, field.name.as_ref());
+                            self.bind_pattern_to_call_sources(&field.pattern, sources);
+                            self.bind_pattern_to_member_source_tree(
+                                &field.pattern,
+                                rest_expr,
+                                field.name.as_ref(),
+                            );
                         }
                     }
                 } else {
