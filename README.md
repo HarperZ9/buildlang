@@ -151,6 +151,11 @@ process, environment, clock, GPU, console helper/macro, and FFI surfaces are
 represented in the language's effect vocabulary instead of remaining invisible
 compiler side channels.
 
+`quantac check --receipt` also binds each receipt to the checked source bytes
+with a SHA-256 digest plus compiler and language version metadata, giving CI and
+review tooling a stable evidence record for the exact source that passed or
+failed the capability gate.
+
 ### Backend Selection
 
 Use `--target` to select a code generation backend:
