@@ -3774,9 +3774,20 @@ impl<'ctx> TypeInfer<'ctx> {
     // TYPE OPERATIONS
     // =========================================================================
 
-    fn infer_cast(&mut self, expr: &ast::Expr, ty: &ast::Type, _span: Span) -> Ty {
-        let _ = self.infer_expr(expr);
-        self.lower_type(ty)
+    fn infer_cast(&mut self, expr: &ast::Expr, ty: &ast::Type, span: Span) -> Ty {
+        let expr_ty = self.infer_expr(expr);
+        let target_ty = self.lower_type(ty);
+        let expr_ty = self.apply(&expr_ty);
+        let target_ty = self.apply(&target_ty);
+
+        if matches!(
+            (&target_ty.kind, &expr_ty.kind),
+            (TyKind::Fn(_), TyKind::Fn(_))
+        ) {
+            let _ = self.unify(&target_ty, &expr_ty, span);
+        }
+
+        target_ty
     }
 
     fn infer_ref(&mut self, mutability: ast::Mutability, expr: &ast::Expr) -> Ty {

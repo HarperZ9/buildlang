@@ -3164,6 +3164,52 @@ fn main() ~ FileSystem {
 }
 
 #[test]
+fn check_rejects_cast_laundering_selected_effectful_function_to_pure_callback() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_cast_selected_effectful_function_to_pure_gate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn load_config() -> str ~ FileSystem {
+    read_file("config.toml")
+}
+
+fn load_secret() -> str ~ FileSystem {
+    read_file("secret.toml")
+}
+
+fn main() {
+    let use_secret = true;
+    let loader = (if use_secret { load_secret } else { load_config }) as fn() -> str;
+    loader();
+}
+"#,
+    )
+    .expect("write pure cast selected effectful function fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "casting selected effectful function to pure callback should be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FileSystem"),
+        "diagnostic should retain the erased effect row:\n{}",
+        stderr
+    );
+}
+
+#[test]
 fn check_receipt_records_ref_deref_selected_effectful_function_sources() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_check_receipt_ref_deref_selected_effectful_function_{}.quanta",
