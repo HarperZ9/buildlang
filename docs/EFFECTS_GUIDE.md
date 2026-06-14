@@ -156,7 +156,8 @@ Policy profiles turn receipt evidence into an enforceable CI gate:
     "FileSystem": ["main"]
   },
   "require_source_digest": true,
-  "require_input_graph_digest": true
+  "require_input_graph_digest": true,
+  "require_allowlist_coverage": true
 }
 ```
 
@@ -174,6 +175,8 @@ Effect names in those policy fields must resolve to either a built-in
 capability effect or an effect present in the checked source graph. Unknown
 names are reported as `UnknownPolicyEffect` violations, which catches policy
 typos such as `Netwrok` before they can weaken a CI gate.
+Set `require_allowlist_coverage` to reject stale direct or propagated allowlist
+entries that are not matched by the current receipt evidence.
 
 Use `quantac policy list` to see built-in starting profiles, or
 `quantac policy list --json` to emit a machine-readable

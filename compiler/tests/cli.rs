@@ -2134,6 +2134,213 @@ fn main() ~ FileSystem {
 }
 
 #[test]
+fn check_policy_strict_allowlist_coverage_rejects_unused_direct_entry() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_policy_unused_direct_allowlist_{}.quanta",
+        std::process::id()
+    ));
+    let policy = write_temp_policy(
+        "unused_direct_allowlist",
+        r#"{
+          "schema": "quantalang-check-policy/v1",
+          "allowed_effects": ["FileSystem"],
+          "direct_effect_allowlist": {
+            "FileSystem": ["load_config", "legacy_loader"]
+          },
+          "propagated_effect_allowlist": {
+            "FileSystem": ["main"]
+          },
+          "require_allowlist_coverage": true
+        }"#,
+    );
+    fs::write(
+        &fixture,
+        r#"
+fn load_config() ~ FileSystem {
+    read_file("ops.txt");
+}
+
+fn main() ~ FileSystem {
+    load_config();
+}
+"#,
+    )
+    .expect("write unused direct allowlist fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--policy")
+        .arg(&policy)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check with strict allowlist coverage");
+
+    let _ = fs::remove_file(&fixture);
+    let _ = fs::remove_file(&policy);
+
+    assert!(
+        !output.status.success(),
+        "strict policy should reject unused direct allowlist entry\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(receipt["policy"]["status"], "failed");
+    let violations = receipt["policy"]["violations"]
+        .as_array()
+        .expect("policy violations");
+    assert!(
+        violations.iter().any(|violation| {
+            violation["kind"] == "UnusedDirectEffectAllowlist"
+                && violation["effect"] == "FileSystem"
+                && violation["function"] == "legacy_loader"
+                && violation["surface"] == "direct_effect_allowlist"
+                && violation["message"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("not matched")
+        }),
+        "expected unused direct allowlist violation in {violations:#?}"
+    );
+}
+
+#[test]
+fn check_policy_strict_allowlist_coverage_rejects_unused_propagated_entry() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_policy_unused_propagated_allowlist_{}.quanta",
+        std::process::id()
+    ));
+    let policy = write_temp_policy(
+        "unused_propagated_allowlist",
+        r#"{
+          "schema": "quantalang-check-policy/v1",
+          "allowed_effects": ["FileSystem"],
+          "direct_effect_allowlist": {
+            "FileSystem": ["load_config"]
+          },
+          "propagated_effect_allowlist": {
+            "FileSystem": ["main", "legacy_workflow"]
+          },
+          "require_allowlist_coverage": true
+        }"#,
+    );
+    fs::write(
+        &fixture,
+        r#"
+fn load_config() ~ FileSystem {
+    read_file("ops.txt");
+}
+
+fn main() ~ FileSystem {
+    load_config();
+}
+"#,
+    )
+    .expect("write unused propagated allowlist fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--policy")
+        .arg(&policy)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check with strict propagated allowlist coverage");
+
+    let _ = fs::remove_file(&fixture);
+    let _ = fs::remove_file(&policy);
+
+    assert!(
+        !output.status.success(),
+        "strict policy should reject unused propagated allowlist entry\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(receipt["policy"]["status"], "failed");
+    let violations = receipt["policy"]["violations"]
+        .as_array()
+        .expect("policy violations");
+    assert!(
+        violations.iter().any(|violation| {
+            violation["kind"] == "UnusedPropagatedEffectAllowlist"
+                && violation["effect"] == "FileSystem"
+                && violation["function"] == "legacy_workflow"
+                && violation["surface"] == "propagated_effect_allowlist"
+                && violation["message"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("not matched")
+        }),
+        "expected unused propagated allowlist violation in {violations:#?}"
+    );
+}
+
+#[test]
+fn check_policy_strict_allowlist_coverage_accepts_used_entries() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_policy_used_allowlist_{}.quanta",
+        std::process::id()
+    ));
+    let policy = write_temp_policy(
+        "used_allowlist",
+        r#"{
+          "schema": "quantalang-check-policy/v1",
+          "allowed_effects": ["FileSystem"],
+          "direct_effect_allowlist": {
+            "FileSystem": ["load_config"]
+          },
+          "propagated_effect_allowlist": {
+            "FileSystem": ["main"]
+          },
+          "require_allowlist_coverage": true
+        }"#,
+    );
+    fs::write(
+        &fixture,
+        r#"
+fn load_config() ~ FileSystem {
+    read_file("ops.txt");
+}
+
+fn main() ~ FileSystem {
+    load_config();
+}
+"#,
+    )
+    .expect("write used allowlist fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--policy")
+        .arg(&policy)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check with used strict allowlists");
+
+    let _ = fs::remove_file(&fixture);
+    let _ = fs::remove_file(&policy);
+
+    assert!(
+        output.status.success(),
+        "strict policy should accept fully-used allowlist entries\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(receipt["policy"]["status"], "passed");
+    assert!(receipt["policy"]["violations"]
+        .as_array()
+        .expect("policy violations")
+        .is_empty());
+}
+
+#[test]
 fn check_policy_propagated_allowlist_rejects_unlisted_caller() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_check_policy_propagated_reject_{}.quanta",
