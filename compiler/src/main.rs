@@ -124,8 +124,12 @@ enum Commands {
         receipt: Option<PathBuf>,
 
         /// Evaluate a machine-readable check policy profile
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", conflicts_with = "profile")]
         policy: Option<PathBuf>,
+
+        /// Evaluate a built-in check policy profile
+        #[arg(long, value_name = "NAME", conflicts_with = "policy")]
+        profile: Option<String>,
     },
 
     /// Build a project
@@ -308,7 +312,13 @@ fn main() -> ExitCode {
             file,
             receipt,
             policy,
-        }) => cmd_check(&file, receipt.as_deref(), policy.as_deref()),
+            profile,
+        }) => cmd_check(
+            &file,
+            receipt.as_deref(),
+            policy.as_deref(),
+            profile.as_deref(),
+        ),
         Some(Commands::Build {
             path,
             release,
@@ -786,6 +796,21 @@ fn builtin_policy_profile(name: &str) -> Option<serde_json::Value> {
     }
 }
 
+fn builtin_policy_names() -> String {
+    BUILTIN_POLICY_TEMPLATES
+        .iter()
+        .map(|template| template.name)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn builtin_policy_json(name: &str) -> Option<String> {
+    let profile = builtin_policy_profile(name)?;
+    let mut json = serde_json::to_string_pretty(&profile).expect("built-in policy profile is JSON");
+    json.push('\n');
+    Some(json)
+}
+
 fn cmd_policy(command: PolicyCommands) -> Result<(), i32> {
     match command {
         PolicyCommands::List => {
@@ -796,21 +821,14 @@ fn cmd_policy(command: PolicyCommands) -> Result<(), i32> {
             Ok(())
         }
         PolicyCommands::Print { name, output } => {
-            let profile = builtin_policy_profile(&name).ok_or_else(|| {
-                let names = BUILTIN_POLICY_TEMPLATES
-                    .iter()
-                    .map(|template| template.name)
-                    .collect::<Vec<_>>()
-                    .join(", ");
+            let json = builtin_policy_json(&name).ok_or_else(|| {
                 eprintln!(
                     "Unknown built-in policy profile '{}'. Available: {}",
-                    name, names
+                    name,
+                    builtin_policy_names()
                 );
                 1
             })?;
-            let mut json =
-                serde_json::to_string_pretty(&profile).expect("built-in policy profile is JSON");
-            json.push('\n');
             if let Some(path) = output {
                 std::fs::write(&path, json).map_err(|err| {
                     eprintln!("Error writing policy profile '{}': {}", path.display(), err);
@@ -1655,6 +1673,35 @@ fn load_check_policy(path: &Path) -> Result<LoadedCheckPolicy, i32> {
     })
 }
 
+fn load_builtin_check_policy(name: &str) -> Result<LoadedCheckPolicy, i32> {
+    let json = builtin_policy_json(name).ok_or_else(|| {
+        eprintln!(
+            "Unknown built-in policy profile '{}'. Available: {}",
+            name,
+            builtin_policy_names()
+        );
+        1
+    })?;
+    let source_digest = CheckReceiptSourceDigest {
+        algorithm: "sha256",
+        hex: source_digest_hex(json.as_bytes()),
+    };
+    let profile: CheckPolicyProfile = serde_json::from_str(&json).map_err(|err| {
+        eprintln!("Error parsing built-in policy profile '{}': {}", name, err);
+        1
+    })?;
+    if profile.schema != "quantalang-check-policy/v1" {
+        eprintln!("Unsupported check policy schema '{}'", profile.schema);
+        return Err(1);
+    }
+
+    Ok(LoadedCheckPolicy {
+        source: format!("builtin:{name}"),
+        source_digest,
+        profile,
+    })
+}
+
 fn check_policy_status(decision: &CheckPolicyDecision) -> &'static str {
     if decision.violations.is_empty() {
         "passed"
@@ -2051,9 +2098,24 @@ fn render_check_policy_output(policy: Option<&CheckPolicyDecision>) {
     }
 }
 
-fn cmd_check(file: &Path, receipt: Option<&Path>, policy: Option<&Path>) -> Result<(), i32> {
+fn cmd_check(
+    file: &Path,
+    receipt: Option<&Path>,
+    policy: Option<&Path>,
+    profile: Option<&str>,
+) -> Result<(), i32> {
     let receipt_to_stdout = receipt == Some(Path::new("-"));
-    let loaded_policy = policy.map(load_check_policy).transpose()?;
+    if policy.is_some() && profile.is_some() {
+        eprintln!("Error: --policy and --profile cannot be used together");
+        return Err(1);
+    }
+    let loaded_policy = if let Some(policy) = policy {
+        Some(load_check_policy(policy)?)
+    } else if let Some(profile) = profile {
+        Some(load_builtin_check_policy(profile)?)
+    } else {
+        None
+    };
     let outcome = run_check(file)?;
     let policy_decision = loaded_policy
         .as_ref()
