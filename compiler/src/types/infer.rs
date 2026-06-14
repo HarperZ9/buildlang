@@ -587,6 +587,49 @@ impl<'ctx> TypeInfer<'ctx> {
         super::effects::EffectRow::closed(effects)
     }
 
+    fn merge_future_effect_annotations(&self, base: &Ty, other: &Ty) -> Ty {
+        let mut result = self.apply(base);
+        let other = self.apply(other);
+
+        if !Self::same_projection_item(&result, &other, "Future", "Output") {
+            return result;
+        }
+
+        let mut annotations: BTreeSet<Arc<str>> = result.annotations.iter().cloned().collect();
+        annotations.extend(
+            other
+                .annotations
+                .iter()
+                .filter(|annotation| annotation.starts_with("FutureEffect<"))
+                .cloned(),
+        );
+        result.annotations = annotations.into_iter().collect();
+        result
+    }
+
+    fn same_projection_item(left: &Ty, right: &Ty, trait_name: &str, item_name: &str) -> bool {
+        match (&left.kind, &right.kind) {
+            (
+                TyKind::Projection {
+                    trait_ref: left_trait,
+                    item: left_item,
+                    ..
+                },
+                TyKind::Projection {
+                    trait_ref: right_trait,
+                    item: right_item,
+                    ..
+                },
+            ) => {
+                left_trait.as_ref() == trait_name
+                    && right_trait.as_ref() == trait_name
+                    && left_item.as_ref() == item_name
+                    && right_item.as_ref() == item_name
+            }
+            _ => false,
+        }
+    }
+
     /// Create a Range<T> type.
     fn make_range_type(&self, elem_ty: Ty, inclusive: bool) -> Ty {
         let def_id = if inclusive {
@@ -2614,7 +2657,7 @@ impl<'ctx> TypeInfer<'ctx> {
         if let Some(else_expr) = else_branch {
             let else_ty = self.infer_expr(else_expr);
             let _ = self.unify(&then_ty, &else_ty, span);
-            self.apply(&then_ty)
+            self.merge_future_effect_annotations(&then_ty, &else_ty)
         } else {
             // if without else returns unit
             let _ = self.unify(&then_ty, &Ty::unit(), span);
@@ -2640,7 +2683,7 @@ impl<'ctx> TypeInfer<'ctx> {
             // Infer body type
             let body_ty = self.infer_expr(&arm.body);
             let _ = self.unify(&result_ty, &body_ty, span);
-            result_ty = self.apply(&result_ty);
+            result_ty = self.merge_future_effect_annotations(&result_ty, &body_ty);
         }
 
         // Exhaustiveness checking: determine the enum type from either
