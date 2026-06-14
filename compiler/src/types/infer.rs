@@ -555,7 +555,13 @@ impl<'ctx> TypeInfer<'ctx> {
     }
 
     /// Create a Future<Output = T> type.
-    fn make_future_type(&self, output: Ty, effects: &super::effects::EffectRow) -> Ty {
+    fn make_future_type(
+        &self,
+        output: Ty,
+        effects: &super::effects::EffectRow,
+        capability_sources: &BTreeMap<String, BTreeSet<String>>,
+        propagated_effect_sources: &BTreeMap<String, BTreeSet<String>>,
+    ) -> Ty {
         // Future is represented as a projection type: impl Future<Output = T>
         let mut future = Ty::new(TyKind::Projection {
             trait_ref: Arc::from("Future"),
@@ -563,17 +569,33 @@ impl<'ctx> TypeInfer<'ctx> {
             self_ty: Box::new(Ty::fresh_var()),
             substs: vec![output],
         });
-        future.annotations = Self::future_effect_annotations(effects);
+        future.annotations =
+            Self::future_effect_annotations(effects, capability_sources, propagated_effect_sources);
         future
     }
 
-    fn future_effect_annotations(effects: &super::effects::EffectRow) -> Vec<Arc<str>> {
+    fn future_effect_annotations(
+        effects: &super::effects::EffectRow,
+        capability_sources: &BTreeMap<String, BTreeSet<String>>,
+        propagated_effect_sources: &BTreeMap<String, BTreeSet<String>>,
+    ) -> Vec<Arc<str>> {
         let mut names: Vec<_> = effects
             .effects
             .iter()
             .map(|effect| format!("FutureEffect<{}>", effect.name))
             .collect();
+        for (effect, sources) in capability_sources {
+            for source in sources {
+                names.push(Self::future_effect_source_annotation(effect, source));
+            }
+        }
+        for (effect, sources) in propagated_effect_sources {
+            for source in sources {
+                names.push(Self::future_effect_source_annotation(effect, source));
+            }
+        }
         names.sort();
+        names.dedup();
         names.into_iter().map(Arc::from).collect()
     }
 
@@ -585,6 +607,26 @@ impl<'ctx> TypeInfer<'ctx> {
                 .map(super::effects::Effect::new)
         });
         super::effects::EffectRow::closed(effects)
+    }
+
+    fn future_effect_source_annotation(effect: &str, source: &str) -> String {
+        format!("FutureEffectSource|{}|{}", effect, source)
+    }
+
+    fn future_effect_source_annotations(future_ty: &Ty) -> BTreeMap<String, BTreeSet<String>> {
+        let mut sources = BTreeMap::new();
+        for annotation in &future_ty.annotations {
+            if let Some(rest) = annotation.strip_prefix("FutureEffectSource|") {
+                let mut parts = rest.splitn(2, '|');
+                if let (Some(effect), Some(source)) = (parts.next(), parts.next()) {
+                    sources
+                        .entry(effect.to_string())
+                        .or_insert_with(BTreeSet::new)
+                        .insert(source.to_string());
+                }
+            }
+        }
+        sources
     }
 
     fn merge_future_effect_annotations(&self, base: &Ty, other: &Ty) -> Ty {
@@ -600,7 +642,10 @@ impl<'ctx> TypeInfer<'ctx> {
             other
                 .annotations
                 .iter()
-                .filter(|annotation| annotation.starts_with("FutureEffect<"))
+                .filter(|annotation| {
+                    annotation.starts_with("FutureEffect<")
+                        || annotation.starts_with("FutureEffectSource|")
+                })
                 .cloned(),
         );
         result.annotations = annotations.into_iter().collect();
@@ -1014,13 +1059,20 @@ impl<'ctx> TypeInfer<'ctx> {
 
                 let body_ty = self.infer_block(body);
                 let async_effects = self.current_effects.clone();
+                let async_capability_sources = self.capability_sources.clone();
+                let async_propagated_effect_sources = self.propagated_effect_sources.clone();
 
                 self.current_effects = outer_effects;
                 self.capability_sources = outer_capability_sources;
                 self.propagated_effect_sources = outer_propagated_effect_sources;
 
                 // Wrap the body type in a Future projection
-                self.make_future_type(body_ty, &async_effects)
+                self.make_future_type(
+                    body_ty,
+                    &async_effects,
+                    &async_capability_sources,
+                    &async_propagated_effect_sources,
+                )
             }
 
             ExprKind::Return(value) => self.infer_return(value.as_deref(), expr.span),
@@ -3394,6 +3446,7 @@ impl<'ctx> TypeInfer<'ctx> {
         let expr_ty = self.infer_expr(expr);
         let expr_ty = self.apply(&expr_ty);
         let future_effects = Self::future_effect_row(&expr_ty);
+        let future_sources = Self::future_effect_source_annotations(&expr_ty);
 
         if !future_effects.is_empty() {
             self.current_effects = self.current_effects.merge(&future_effects);
@@ -3401,6 +3454,14 @@ impl<'ctx> TypeInfer<'ctx> {
                 for effect in &future_effects.effects {
                     if super::capabilities::is_capability_effect(effect.name.as_ref()) {
                         self.record_propagated_effect_source(effect.name.as_ref(), source);
+                        if let Some(latent_sources) = future_sources.get(effect.name.as_ref()) {
+                            for latent_source in latent_sources {
+                                self.record_propagated_effect_source(
+                                    effect.name.as_ref(),
+                                    &format!("{source} <- {latent_source}"),
+                                );
+                            }
+                        }
                     }
                 }
             }

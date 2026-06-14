@@ -180,9 +180,12 @@ to a callback variable refreshes that evidence, so stale sources do not survive
 `loader = load_secret` or `loader = read_file`.
 Async blocks follow the same delayed-effect model for type checking: creating
 `let task = async { read_file("ops.toml") };` is pure, while `task.await`
-inherits `FileSystem` and records `task` as propagated evidence. If control
+inherits `FileSystem` and records both the awaited source (`task`) and the
+latent ambient origin (`task <- read_file`) as propagated evidence. If control
 flow selects between async blocks with different capability effects, the
-selected future keeps the union of those effects until it is awaited.
+selected future keeps the union of those effects and their origins until it is
+awaited, so an `if` or `match` selected task can record branch origins such as
+`task <- read_file` and `task <- getenv`.
 
 `quantac check --receipt` also binds each receipt to the checked source inputs
 with SHA-256 digests plus compiler and language version metadata. The top-level
@@ -276,10 +279,12 @@ and indexed ops tables record paths such as `ops.loader`, `loaders.0`, and
 and ops tables. Immediate invocation of a returned effectful function records
 the factory call, such as `make_loader()`.
 Async blocks also delay capability effects at construction time: `async {
-read_file("ops.toml") }` stores the effect on the future value, and `task.await`
-records the awaited source, such as `task`, under `propagated_effects`. Futures
-selected by `if` or `match` merge their stored capability effects, so awaiting a
-selected task requires every possible branch capability.
+read_file("ops.toml") }` stores the effect and its ambient source on the future
+value, and `task.await` records both the awaited source (`task`) and latent
+origin (`task <- read_file`) under `propagated_effects`. Futures selected by
+`if` or `match` merge their stored capability effects and source origins, so
+awaiting a selected task requires every possible branch capability and leaves
+receipt evidence for each possible origin.
 Control-flow selectors keep reviewable evidence too: calling the result of an
 `if` or `match` expression records the possible effectful branch targets, such
 as `load_config` and `load_secret`. If the selected function is bound first,
