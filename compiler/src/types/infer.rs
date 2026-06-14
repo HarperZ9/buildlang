@@ -1260,11 +1260,16 @@ impl<'ctx> TypeInfer<'ctx> {
     // =========================================================================
 
     fn infer_ident(&mut self, ident: &ast::Ident, span: Span) -> Ty {
-        if let Some(ty) = self.ctx.lookup_var(ident.name.as_ref()) {
+        let name = ident.name.as_ref();
+        if let Some(ty) = self.ctx.lookup_var(name) {
+            if self.ctx.is_foreign_static(name) {
+                self.current_effects
+                    .add(super::effects::Effect::new(super::capabilities::FOREIGN));
+                self.record_capability_source(super::capabilities::FOREIGN, name);
+            }
             ty
         } else {
             // Check if this is a known builtin (math functions, vector constructors, I/O)
-            let name = ident.name.as_ref();
             // `Self` in value position resolves to the enclosing impl's self type,
             // e.g. a unit-struct constructor: `fn new() -> Self { Self }`.
             if name == "Self" {
