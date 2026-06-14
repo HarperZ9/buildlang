@@ -119,7 +119,7 @@ quantac vignette.quanta --target glsl -o vignette.glsl
 |-----------------|--------------------------------------|
 | `quantac lex`   | Tokenize a file and print tokens     |
 | `quantac parse` | Parse a file and print the AST       |
-| `quantac check <file> [--receipt PATH|-]` | Type-check and optionally emit a JSON accountability receipt |
+| `quantac check <file> [--receipt PATH|-] [--policy policy.json]` | Type-check, optionally evaluate policy, and optionally emit a JSON accountability receipt |
 | `quantac build` | Build a project                      |
 | `quantac run`   | Compile and run a `.quanta` file     |
 | `quantac doctor` | Diagnose local toolchain readiness  |
@@ -155,6 +155,12 @@ compiler side channels.
 with a SHA-256 digest plus compiler and language version metadata, giving CI and
 review tooling a stable evidence record for the exact source that passed or
 failed the capability gate.
+
+`quantac check --policy <policy.json>` evaluates a portable
+`quantalang-check-policy/v1` profile against declared effects and observed
+capabilities. Policy failures make the check fail even when type checking
+passes, and receipts record the policy path, policy digest, status, and
+structured violations.
 
 ### Backend Selection
 
