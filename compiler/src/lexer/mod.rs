@@ -45,7 +45,7 @@ mod token;
 
 pub use error::{LexerError, LexerErrorKind, LexerResult};
 pub use scanner::Lexer;
-pub use span::{BytePos, Position, SourceFile, SourceId, Span};
+pub use span::{source_text_for_id, BytePos, Position, SourceFile, SourceId, Span};
 pub use token::{
     is_integer_only_suffix, is_valid_float_suffix, is_valid_int_suffix, validate_numeric_suffix,
     Delimiter, DocComment, DocCommentKind, DocComments, IntBase, InterpolatedPart, Keyword,

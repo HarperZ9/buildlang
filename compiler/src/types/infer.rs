@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::ast::{self, AssignOp, BinOp, ExprKind, Literal as AstLiteral, UnaryOp};
-use crate::lexer::{Delimiter, SourceId, Span, Token, TokenKind};
+use crate::lexer::{source_text_for_id, Delimiter, SourceId, Span, Token, TokenKind};
 
 use super::context::{ScopeKind, TypeContext, TypeDefKind};
 use super::error::*;
@@ -371,10 +371,6 @@ impl<'ctx> TypeInfer<'ctx> {
     }
 
     fn record_macro_token_capabilities(&mut self, tokens: &[ast::TokenTree]) {
-        let Some(_) = self.source_text.as_ref() else {
-            return;
-        };
-
         let flat_tokens = tokens
             .iter()
             .filter_map(|tree| match tree {
@@ -443,13 +439,17 @@ impl<'ctx> TypeInfer<'ctx> {
     }
 
     fn macro_token_ident_text(&self, token: &Token) -> Option<String> {
+        let range = token.span.to_range();
+        if let Some(source) = source_text_for_id(token.span.source_id) {
+            return source.get(range).map(str::to_string);
+        }
+
         if let Some(source_id) = self.source_id {
             if token.span.source_id != source_id {
                 return None;
             }
         }
         let source = self.source_text.as_ref()?;
-        let range = token.span.to_range();
         source.get(range).map(str::to_string)
     }
 

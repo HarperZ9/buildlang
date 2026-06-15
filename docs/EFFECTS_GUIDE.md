@@ -95,7 +95,9 @@ under `observed_capabilities`.
 Macro argument token trees are scanned for ambient capability surfaces as well:
 `println!(read_file("ops.toml"))` requires both `Console` and `FileSystem`, and
 the receipt records `println!` under `Console` plus `read_file` under
-`FileSystem`.
+`FileSystem`. The scan follows `SourceId` provenance, so external module files
+loaded through `mod foo;` receive the same macro-argument capability gate as
+the entry source.
 
 ```quanta
 fn load_config() {
