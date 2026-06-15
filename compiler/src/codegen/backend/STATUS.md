@@ -2,6 +2,13 @@
 
 Last audited: 2026-03-21
 
+2026-06-15 wind-down assessment: see
+`docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md` for the current product
+posture. This backend-local file is retained as an implementation inventory.
+Several CLI wiring notes below have since changed: non-C targets are selectable
+through `quantac build --target`, but C remains the only production-backed
+end-to-end target.
+
 2026-06-13 update: the Rust backend now has a narrow executable stdout smoke
 slice in addition to compile-only metadata validation. Eight semantic corpus
 programs are lowered to Rust, compiled with `rustc`, executed, and checked for
@@ -49,12 +56,14 @@ return values, and basic type mapping.
   - Terminators: Goto, If, Return, Call (System V ABI with 6 register args), Unreachable, Abort: handled
   - Switch, Drop, Assert: fallthrough to `# TODO` comment
 - **Could produce a working hello-world:** Yes, for assembly mode. The generated assembly for an add function would be correct: load args, `add rax, rcx`, store result, `ret` with proper prologue/epilogue. Would need `as` (GNU assembler) and `ld` (linker) to produce an executable. Machine code mode also works but produces raw bytes without ELF headers.
-- **Work needed to get it working:**
-  1. Wire into CLI with `--target x86-64` flag
-  2. Invoke system assembler (as/nasm) on generated .s file
-  3. Invoke linker (ld/gcc) to produce executable
-  4. No proper register allocator (uses rax as single accumulator with push/pop spilling) -- correct but slow
-  5. Struct/enum field access and array indexing not implemented (emits TODO comments)
+- **Work needed to get it production-ready:**
+  1. Promote assembler/linker integration from best-effort guidance to a
+     verified cross-platform build path
+  2. Add an x86/x64 semantic execution corpus
+  3. Add proper register allocation (currently uses rax as a single accumulator
+     with push/pop spilling) -- correct for covered cases but slow
+  4. Complete struct/enum field access and array indexing (currently emits TODO
+     comments for unsupported MIR)
 - **Tests:** 22 unit tests.
 
 ## 3. ARM64 Backend (`arm64.rs`) -- LIKELY WORKING (assembly mode)
@@ -69,7 +78,7 @@ return values, and basic type mapping.
   - Switch, Drop, Assert: fallthrough to `// TODO` comment
 - **Could produce a working hello-world:** Yes, for assembly mode on ARM64 hardware. The generated assembly uses correct AAPCS64 calling convention: `stp x29, x30, [sp, #-16]!` / `mov x29, sp` prologue, proper argument register mapping, correct epilogue. Would need cross-assembler and linker on ARM64 Linux.
 - **Work needed to get it working:**
-  1. Wire into CLI with `--target arm64` flag
+  1. Promote CLI-selected ARM64 output to a verified assembler/linker path
   2. Invoke assembler and linker (or cross-compiler toolchain)
   3. Callee-saved register save/restore is stubbed (`// TODO: Save X19-X28`)
   4. No register allocator (uses x0 as accumulator with x9 temp)
@@ -94,7 +103,7 @@ return values, and basic type mapping.
   - WASI mode generates full module structure with memory, imports, `_start` export.
   - Goto terminator only emits a comment -- breaks any multi-block control flow. Single-block functions would work.
 - **Work needed to get it working:**
-  1. Wire into CLI with `--target wasm` flag
+  1. Promote CLI-selected WAT/WASM output to a verified binary/run path
   2. Either emit binary .wasm directly or invoke `wat2wasm`
   3. Fix Goto terminator to use WASM structured control flow (`block`/`loop`/`br`)
   4. Fix Switch terminator to use `br_table`
@@ -120,7 +129,7 @@ return values, and basic type mapping.
 - **Could produce a working hello-world:** Yes. The LLVM IR for an add function would be fully correct and valid. Module header with target triple and data layout, proper function definition with `define` keyword, SSA-form `alloca`/`store`/`load`/`add`/`ret`. Can be compiled via `clang output.ll -o program` or `llc output.ll && gcc output.s`.
 - **This is the closest to working after the C backend.**
 - **Work needed to get it working:**
-  1. Wire into CLI with `--target llvm` flag
+  1. Promote CLI-selected LLVM output to a verified clang/llc path
   2. Invoke `clang` or `llc` on generated .ll file to produce executable
   3. Implement FieldAccess and IndexAccess (currently emit TODO comments)
   4. The `target()` method returns `Target::X86_64` instead of `Target::LlvmIr` (line 1735) -- should be fixed
@@ -139,7 +148,7 @@ return values, and basic type mapping.
   - Terminators: Goto (OpBranch), If (OpSelectionMerge + OpBranchConditional), Switch (OpSwitch), Return (OpReturn/OpReturnValue), Call (OpFunctionCall), Unreachable (OpUnreachable): handled
 - **Could produce a working hello-world:** No, not in the traditional sense. SPIR-V is a GPU shader/compute format, not a CPU program format. There is no concept of `printf` or stdout. An add function would compile to a valid SPIR-V compute shader entry point, but "running" it requires a Vulkan or OpenCL host program to dispatch it. The binary header (magic number, version, generator ID) is correct, and the module structure follows the SPIR-V spec.
 - **Work needed to get it working (as a compute shader):**
-  1. Wire into CLI with `--target spirv` flag
+  1. Promote CLI-selected SPIR-V output to a validated shader path
   2. Validate output with `spirv-val` from the Vulkan SDK
   3. Global variables emit zero (not wired to storage buffers)
   4. No descriptor set/binding decorations for buffer I/O
@@ -162,7 +171,7 @@ return values, and basic type mapping.
 
 ## Priority Order for Getting Backends Working
 
-1. **LLVM** -- Lowest effort. Output is already valid LLVM IR. Wire into CLI + invoke clang.
+1. **LLVM** -- Lowest effort. Output is already valid LLVM IR. Harden clang/llc invocation.
 2. **x86-64** -- Medium effort. Assembly output is reasonable. Need assembler + linker.
 3. **WASM** -- Medium effort. Fix structured control flow, add wat2wasm or binary emission.
 4. **ARM64** -- Medium effort but hardware-dependent. Same as x86-64 but for ARM.
@@ -173,6 +182,7 @@ return values, and basic type mapping.
 - All implement `Backend` trait with `generate()` returning `CodegenResult<GeneratedCode>`
 - All handle the core MIR operation set (Use, BinaryOp, UnaryOp, basic terminators)
 - None handle FieldAccess or VariantField (struct/enum member access)
-- None are wired into the CLI (`quantac build` only uses CBackend)
+- Non-C backends are selectable through `quantac build --target`, but they do
+  not carry the C backend's production claim
 - Rust now has a narrow executable stdout smoke slice; other non-C backends do
   not yet have end-to-end tests that produce and run an executable/module

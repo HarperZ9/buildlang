@@ -867,6 +867,98 @@ fn main() ~ Foreign {
 }
 
 #[test]
+fn check_reports_foreign_call_inside_macro_argument() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_macro_arg_foreign_call_gate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+extern "C" { fn touch(); }
+
+fn main() ~ Console {
+    println!(touch());
+}
+"#,
+    )
+    .expect("write macro argument foreign call fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "macro argument foreign call should fail without Foreign effect"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Foreign"),
+        "diagnostic should name Foreign effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("touch"),
+        "diagnostic should name triggering foreign call:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn check_receipt_records_foreign_static_inside_macro_argument() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_macro_arg_foreign_static_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+extern "C" { static QUANTA_ERRNO: i32; }
+
+fn main() ~ Console + Foreign {
+    println!("{}", QUANTA_ERRNO);
+}
+"#,
+    )
+    .expect("write macro argument foreign static receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "macro argument foreign static receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["declared_effects"]["main"],
+        serde_json::json!(["Console", "Foreign"])
+    );
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]["Console"],
+        serde_json::json!(["println!"])
+    );
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]["Foreign"],
+        serde_json::json!(["QUANTA_ERRNO"])
+    );
+}
+
+#[test]
 fn check_receipt_records_propagated_effects_separately() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_check_receipt_propagated_{}.quanta",

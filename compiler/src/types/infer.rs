@@ -367,6 +367,19 @@ impl<'ctx> TypeInfer<'ctx> {
             self.current_effects
                 .add(super::effects::Effect::new(effect_name));
             self.record_capability_source(effect_name, call_source);
+        } else if self.ctx.is_foreign_function(lookup_name) {
+            self.current_effects
+                .add(super::effects::Effect::new(super::capabilities::FOREIGN));
+            self.record_capability_source(super::capabilities::FOREIGN, call_source);
+        }
+    }
+
+    fn record_path_capability(&mut self, path_source: &str) {
+        let lookup_name = path_source.rsplit("::").next().unwrap_or(path_source);
+        if self.ctx.is_foreign_static(lookup_name) {
+            self.current_effects
+                .add(super::effects::Effect::new(super::capabilities::FOREIGN));
+            self.record_capability_source(super::capabilities::FOREIGN, path_source);
         }
     }
 
@@ -409,7 +422,8 @@ impl<'ctx> TypeInfer<'ctx> {
                 self.record_call_capability(&source);
                 index = next_index;
             } else {
-                index += 1;
+                self.record_path_capability(&source);
+                index = next_index;
             }
         }
     }
@@ -5680,7 +5694,7 @@ mod tests {
     fn unsuffixed_float_gets_infer_float() {
         let mut ctx = TypeContext::new();
         let mut infer = TypeInfer::new(&mut ctx);
-        let ty = infer.infer_literal(&float_lit(3.14, None));
+        let ty = infer.infer_literal(&float_lit(2.5, None));
 
         match &ty.kind {
             TyKind::Infer(it) => assert_eq!(it.kind, InferKind::Float),

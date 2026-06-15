@@ -918,7 +918,7 @@ mod tests {
 
     #[test]
     fn test_values_f32() {
-        let val = values::f32(3.14f32);
+        let val = values::f32(2.5f32);
         match val {
             MirValue::Const(MirConst::Float(_, ty)) => {
                 assert_eq!(ty, MirType::f32());
@@ -929,10 +929,10 @@ mod tests {
 
     #[test]
     fn test_values_f64() {
-        let val = values::f64(3.14159265358979);
+        let val = values::f64(2.5);
         match val {
             MirValue::Const(MirConst::Float(v, ty)) => {
-                assert!((v - 3.14159265358979).abs() < 1e-10);
+                assert!((v - 2.5).abs() < 1e-10);
                 assert_eq!(ty, MirType::f64());
             }
             _ => panic!("Expected f64 const"),
