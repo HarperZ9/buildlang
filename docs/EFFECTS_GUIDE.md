@@ -156,11 +156,13 @@ access paths such as `loaders[1]`. Struct updates such as
 alongside new access paths such as `ops.loader`; explicit update-field
 replacements and aggregate-literal destructuring such as
 `let (ops,) = (replacement,)` refresh access paths without keeping stale
-intermediate paths such as `replacement.loader`. Whole-struct assignment such
-as `ops = defaults` refreshes member origins without keeping stale intermediate
-paths such as `defaults.loader`. Enum-variant construction and tuple-struct
-construction stay pure when they only store the callback. Immediate invocation
-of a returned effectful function records the
+intermediate paths such as `replacement.loader`. Stored enum-variant aggregate
+payloads such as `let slot = Slot::Ready(replacement); match slot { ... }`
+apply the same refresh rule to branch-local access paths. Whole-struct
+assignment such as `ops = defaults` refreshes member origins without keeping
+stale intermediate paths such as `defaults.loader`. Enum-variant construction
+and tuple-struct construction stay pure when they only store the callback.
+Immediate invocation of a returned effectful function records the
 factory call, such as `make_loader()`. `if` and `match` expressions that select
 an effectful function value record every possible branch target, for example
 `load_config` and `load_secret`; binding that selected function before calling
@@ -269,9 +271,10 @@ paths such as `ops.loader`. Explicit update-field replacements such as
 `Outer { ops: replacement, ..defaults }` refresh the destructured access path
 without forcing policies to allow stale construction aliases such as
 `replacement.loader`.
-Enum-variant payloads keep
-their stored callback sources when a match, `if let`, or `while let` branch
-destructures them. Returned effectful function values invoked immediately
+Enum-variant payloads keep their stored callback sources when a match, `if let`,
+or `while let` branch destructures them, and aggregate payloads refresh
+branch-local paths without forcing policies to allow stale construction aliases.
+Returned effectful function values invoked immediately
 record factory calls such as `make_loader()`.
 Async blocks keep the same boundary: construction is pure for type checking,
 and awaiting the future records the awaited expression, such as `task`, plus

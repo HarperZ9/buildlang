@@ -2908,6 +2908,71 @@ fn main() ~ FileSystem {
 }
 
 #[test]
+fn check_receipt_records_stored_variant_aggregate_origin_without_stale_alias() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_stored_variant_aggregate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+struct Ops {
+    loader: (fn(str) -> str) with FileSystem
+}
+
+enum Slot {
+    Ready(Ops),
+    Empty
+}
+
+fn load_config(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn main() ~ FileSystem {
+    let replacement = Ops { loader: load_config };
+    let slot = Slot::Ready(replacement);
+    match slot {
+        Slot::Ready(ops) => { (ops.loader)("ops.txt"); }
+        Slot::Empty => { }
+    }
+}
+"#,
+    )
+    .expect("write stored variant aggregate receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "stored variant aggregate receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["load_config", "ops.loader"])
+    );
+}
+
+#[test]
 fn check_reports_effect_for_effectful_tuple_field_call() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_tuple_field_effect_gate_{}.quanta",

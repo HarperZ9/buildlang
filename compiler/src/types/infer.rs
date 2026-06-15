@@ -970,33 +970,48 @@ impl<'ctx> TypeInfer<'ctx> {
         }
     }
 
+    fn bind_direct_expr_member_call_sources(
+        &mut self,
+        member_name: &str,
+        value: &ast::Expr,
+        merge: bool,
+    ) {
+        if self.expr_has_bound_call_source_descendants(value) {
+            self.bind_member_call_sources(member_name, Vec::new(), merge);
+            for source in self.call_sources(value) {
+                self.bind_bound_call_source_tree(&source, member_name, merge);
+            }
+        } else {
+            self.bind_member_call_sources(member_name, self.call_sources(value), merge);
+        }
+    }
+
     fn bind_aggregate_call_sources_inner(&mut self, name: &str, expr: &ast::Expr, merge: bool) {
         match &expr.kind {
             ExprKind::Tuple(elems) => {
                 for (index, elem) in elems.iter().enumerate() {
                     let member_name = format!("{}.{}", name, index);
-                    self.bind_member_call_sources(&member_name, self.call_sources(elem), merge);
+                    self.bind_direct_expr_member_call_sources(&member_name, elem, merge);
                     self.bind_aggregate_call_sources_inner(&member_name, elem, merge);
                 }
             }
             ExprKind::Array(elems) => {
                 let wildcard_name = format!("{}[]", name);
-                let wildcard_sources = elems
-                    .iter()
-                    .flat_map(|elem| self.call_sources(elem))
-                    .collect();
-                self.bind_member_call_sources(&wildcard_name, wildcard_sources, merge);
+                if !merge {
+                    self.bind_member_call_sources(&wildcard_name, Vec::new(), false);
+                }
 
                 for (index, elem) in elems.iter().enumerate() {
+                    self.bind_direct_expr_member_call_sources(&wildcard_name, elem, true);
                     let member_name = format!("{}[{}]", name, index);
-                    self.bind_member_call_sources(&member_name, self.call_sources(elem), merge);
+                    self.bind_direct_expr_member_call_sources(&member_name, elem, merge);
                     self.bind_aggregate_call_sources_inner(&member_name, elem, merge);
                     self.bind_aggregate_call_sources_inner(&wildcard_name, elem, true);
                 }
             }
             ExprKind::ArrayRepeat { element, .. } => {
                 let member_name = format!("{}[]", name);
-                self.bind_member_call_sources(&member_name, self.call_sources(element), merge);
+                self.bind_direct_expr_member_call_sources(&member_name, element, merge);
                 self.bind_aggregate_call_sources_inner(&member_name, element, merge);
             }
             ExprKind::Struct { path, fields, rest } => {
@@ -1030,13 +1045,12 @@ impl<'ctx> TypeInfer<'ctx> {
 
                 for field in fields {
                     let member_name = format!("{}.{}", name, field.name.as_ref());
-                    let sources = field.value.as_deref().map_or_else(
-                        || self.call_sources_for_name(field.name.as_ref()),
-                        |value| self.call_sources(value),
-                    );
-                    self.bind_member_call_sources(&member_name, sources, merge);
                     if let Some(value) = field.value.as_deref() {
+                        self.bind_direct_expr_member_call_sources(&member_name, value, merge);
                         self.bind_aggregate_call_sources_inner(&member_name, value, merge);
+                    } else {
+                        let sources = self.call_sources_for_name(field.name.as_ref());
+                        self.bind_member_call_sources(&member_name, sources, merge);
                     }
                 }
             }
@@ -1045,7 +1059,7 @@ impl<'ctx> TypeInfer<'ctx> {
             {
                 for (index, arg) in args.iter().enumerate() {
                     let member_name = format!("{}.{}", name, index);
-                    self.bind_member_call_sources(&member_name, self.call_sources(arg), merge);
+                    self.bind_direct_expr_member_call_sources(&member_name, arg, merge);
                     self.bind_aggregate_call_sources_inner(&member_name, arg, merge);
                 }
             }
