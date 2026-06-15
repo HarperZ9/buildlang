@@ -3169,6 +3169,7 @@ fn run_check(file: &Path) -> Result<CheckOutcome, i32> {
 
     let mut ctx = TypeContext::new();
     let mut checker = TypeChecker::new(&mut ctx);
+    checker.set_source_file(&source_file);
     checker.set_source_dir(chk_base.to_path_buf());
     checker.check_module(&ast);
 
@@ -3751,6 +3752,7 @@ fn cmd_build(
     // Type check
     let mut ctx = TypeContext::new();
     let mut checker = TypeChecker::new(&mut ctx);
+    checker.set_source_file(&source_file);
     checker.set_source_dir(source_dir.to_path_buf());
     checker.check_module(&ast);
 
@@ -4160,6 +4162,7 @@ fn cmd_run(file: &PathBuf, args: &[String]) -> Result<(), i32> {
     // Type check
     let mut ctx = TypeContext::new();
     let mut checker = TypeChecker::new(&mut ctx);
+    checker.set_source_file(&source_file);
     checker.set_source_dir(source_dir.to_path_buf());
     checker.check_module(&ast);
 
@@ -4344,6 +4347,7 @@ fn cmd_test(
 
             let mut ctx = TypeContext::new();
             let mut checker = TypeChecker::new(&mut ctx);
+            checker.set_source_file(&source_file);
             checker.set_source_dir(source_dir.to_path_buf());
             checker.check_module(&ast);
             if checker.has_errors() {
@@ -4485,6 +4489,7 @@ fn cmd_lint(file: &PathBuf) -> Result<(), i32> {
     // Type check
     let mut ctx = TypeContext::new();
     let mut checker = TypeChecker::new(&mut ctx);
+    checker.set_source_file(&source_file);
     checker.set_source_dir(base.to_path_buf());
     checker.check_module(&ast);
 
@@ -4680,6 +4685,7 @@ fn cmd_repl() -> Result<(), i32> {
                             match parser.parse() {
                                 Ok(ast) => {
                                     let mut checker = TypeChecker::new(&mut ctx);
+                                    checker.set_source_file(&file);
                                     checker.check_module(&ast);
                                     if checker.has_errors() {
                                         for err in checker.errors() {
@@ -4726,6 +4732,7 @@ fn cmd_repl() -> Result<(), i32> {
 
                         // Type check
                         let mut checker = TypeChecker::new(&mut ctx);
+                        checker.set_source_file(&file);
                         checker.check_module(&ast);
                         if checker.has_errors() {
                             println!("Type errors:");
@@ -5397,6 +5404,7 @@ fn cmd_compile(
     // Type check
     let mut ctx = TypeContext::new();
     let mut checker = TypeChecker::new(&mut ctx);
+    checker.set_source_file(&source_file);
     checker.set_source_dir(source_dir.to_path_buf());
     checker.check_module(&ast);
 
@@ -5800,6 +5808,7 @@ fn compile_single_file(input: &Path, output: &Path) -> Result<(), String> {
 
     let mut ctx = TypeContext::new();
     let mut checker = TypeChecker::new(&mut ctx);
+    checker.set_source_file(&source_file);
     checker.check_module(&ast);
 
     if checker.has_errors() {

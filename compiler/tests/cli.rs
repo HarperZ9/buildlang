@@ -416,6 +416,43 @@ fn check_reports_capability_effect_for_include_str_macro() {
 }
 
 #[test]
+fn check_reports_capability_effect_for_ambient_call_inside_macro_argument() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_macro_arg_capability_gate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"fn main() ~ Console { println!(read_file("ops.txt")); }"#,
+    )
+    .expect("write macro argument capability fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "macro argument ambient file call should fail without FileSystem effect"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FileSystem"),
+        "diagnostic should name FileSystem effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("read_file"),
+        "diagnostic should name triggering macro argument ambient call:\n{}",
+        stderr
+    );
+}
+
+#[test]
 fn check_receipt_records_env_macro_capability_source() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_check_receipt_env_macro_{}.quanta",
@@ -451,6 +488,49 @@ fn check_receipt_records_env_macro_capability_source() {
     assert_eq!(
         receipt["observed_capabilities"]["main"]["Environment"],
         serde_json::json!(["env!"])
+    );
+}
+
+#[test]
+fn check_receipt_records_macro_argument_capability_source() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_macro_arg_capability_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"fn main() ~ Console + FileSystem { println!(read_file("ops.txt")); }"#,
+    )
+    .expect("write macro argument capability receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "macro argument capability receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["declared_effects"]["main"],
+        serde_json::json!(["Console", "FileSystem"])
+    );
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]["Console"],
+        serde_json::json!(["println!"])
+    );
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]["FileSystem"],
+        serde_json::json!(["read_file"])
     );
 }
 

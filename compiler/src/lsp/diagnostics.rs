@@ -136,6 +136,7 @@ impl DiagnosticsProvider {
         // Type check
         let mut ctx = TypeContext::new();
         let mut checker = TypeChecker::new(&mut ctx);
+        checker.set_source_file(&source_file);
         checker.check_module(&ast);
 
         // Convert type errors to diagnostics with source positions
