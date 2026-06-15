@@ -274,6 +274,11 @@ without forcing policies to allow stale construction aliases such as
 Enum-variant payloads keep their stored callback sources when a match, `if let`,
 or `while let` branch destructures them, and aggregate payloads refresh
 branch-local paths without forcing policies to allow stale construction aliases.
+Control-flow-selected aggregate bindings and tuple destructuring of selected
+aggregates merge every branch origin into the receiving access path, so
+`let ops = if use_secret { secret } else { config }` records origins such as
+`load_config`, `load_secret`, and `ops.loader` without forcing policies to
+allow stale branch-local paths such as `config.loader` or `secret.loader`.
 Returned effectful function values invoked immediately
 record factory calls such as `make_loader()`.
 Async blocks keep the same boundary: construction is pure for type checking,
