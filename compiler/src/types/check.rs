@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::ast::{self, ImplItemKind, ItemKind, StructFields, TraitItemKind};
-use crate::lexer::Span;
+use crate::lexer::{SourceId, Span};
 
 use super::context::*;
 use super::error::*;
@@ -38,6 +38,10 @@ pub struct TypeChecker<'ctx> {
     effect_ctx: super::effects::EffectContext,
     /// Source directory for resolving external module files.
     source_dir: Option<std::path::PathBuf>,
+    /// Source text for span-backed token evidence during inference.
+    source_text: Option<Arc<str>>,
+    /// Source ID associated with `source_text`.
+    source_id: Option<SourceId>,
     /// Per-function declared/observed effect evidence for receipts.
     function_effect_summaries: Vec<FunctionEffectSummary>,
 }
@@ -50,6 +54,8 @@ impl<'ctx> TypeChecker<'ctx> {
             errors: Vec::new(),
             effect_ctx: super::effects::EffectContext::new(),
             source_dir: None,
+            source_text: None,
+            source_id: None,
             function_effect_summaries: Vec::new(),
         }
     }
@@ -57,6 +63,18 @@ impl<'ctx> TypeChecker<'ctx> {
     /// Set the source directory for resolving `mod foo;` declarations.
     pub fn set_source_dir(&mut self, dir: std::path::PathBuf) {
         self.source_dir = Some(dir);
+    }
+
+    /// Set source text for span-backed token evidence.
+    pub fn set_source_text(&mut self, source_text: impl Into<Arc<str>>) {
+        self.source_text = Some(source_text.into());
+        self.source_id = None;
+    }
+
+    /// Set source file data for span-backed token evidence.
+    pub fn set_source_file(&mut self, source_file: &crate::lexer::SourceFile) {
+        self.source_text = Some(source_file.source.clone());
+        self.source_id = Some(source_file.id);
     }
 
     /// Get a reference to the effect context.
@@ -696,7 +714,11 @@ impl<'ctx> TypeChecker<'ctx> {
                 infer_errors,
                 has_return,
             ) = {
-                let mut infer = TypeInfer::new(self.ctx);
+                let mut infer = if let Some(source_text) = &self.source_text {
+                    TypeInfer::with_source_text(self.ctx, source_text.clone(), self.source_id)
+                } else {
+                    TypeInfer::new(self.ctx)
+                };
                 // Pass the expected return type so that `return` statements
                 // inside nested control flow (while/if/match) are properly
                 // type-checked against the function signature.
@@ -1536,6 +1558,7 @@ mod tests {
 
         let mut ctx = TypeContext::new();
         let mut checker = TypeChecker::new(&mut ctx);
+        checker.set_source_file(&source_file);
         checker.check_module(&module);
         checker.take_errors()
     }
