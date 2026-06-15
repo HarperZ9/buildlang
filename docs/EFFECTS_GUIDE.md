@@ -194,13 +194,15 @@ the same rule, so `ops.loader = load_secret`, `ops = defaults`, and
 `loaders[0] = load_secret` update later receipt evidence instead of preserving
 stale callback sources. The refresh applies when a nested block mutates an
 outer callback alias or aggregate slot, so lexical block structure does not
-roll receipt provenance back to the pre-assignment source. Conditional,
-`match`, and zero-or-more loop assignment are conservative: after
+roll receipt provenance back to the pre-assignment source. Conditional `if`,
+`if let`, `match`, and zero-or-more loop assignment are conservative: after
 `if use_secret { loader = load_secret }`, a later `loader("x")` receipt keeps
 both the original and reassigned callback origins because either value can
-reach the call site. After a `match` assigns different callbacks in different
-arms, later receipts keep each arm-assigned origin; guarded arms also retain the
-pre-match source because the guard can fail. After `while reload { loader =
+reach the call site. After `if let Slot::Ready(v) = slot { loader =
+load_secret }`, a later receipt keeps the pre-branch source because the pattern
+can fail. After a `match` assigns different callbacks in different arms, later
+receipts keep each arm-assigned origin; guarded arms also retain the pre-match
+source because the guard can fail. After `while reload { loader =
 load_secret }`, `while let Slot::Ready(v) = slot { loader = load_secret }`, or
 `for item in items { loader = load_secret }`, later receipts keep the pre-loop
 source as well as the body-assigned source because the loop body can execute
