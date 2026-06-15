@@ -871,6 +871,7 @@ impl<'ctx> TypeInfer<'ctx> {
             ast::PatternKind::Ident {
                 name, subpattern, ..
             } => {
+                self.clear_call_source_tree(name.name.as_ref());
                 self.bind_call_sources(name.name.as_ref(), sources.clone());
                 if let Some(subpattern) = subpattern {
                     self.bind_pattern_to_call_sources(subpattern, sources);
@@ -891,41 +892,54 @@ impl<'ctx> TypeInfer<'ctx> {
     }
 
     fn bind_pattern_to_call_source_tree(&mut self, pattern: &ast::Pattern, source_prefix: &str) {
+        self.bind_pattern_to_call_source_tree_inner(pattern, source_prefix, false);
+    }
+
+    fn bind_pattern_to_call_source_tree_inner(
+        &mut self,
+        pattern: &ast::Pattern,
+        source_prefix: &str,
+        merge: bool,
+    ) {
         match &pattern.kind {
             ast::PatternKind::Ident {
                 name, subpattern, ..
             } => {
-                self.bind_bound_call_source_tree(source_prefix, name.name.as_ref(), false);
+                self.bind_bound_call_source_tree(source_prefix, name.name.as_ref(), merge);
                 if let Some(subpattern) = subpattern {
-                    self.bind_pattern_to_call_source_tree(subpattern, source_prefix);
+                    self.bind_pattern_to_call_source_tree_inner(subpattern, source_prefix, merge);
                 }
             }
             ast::PatternKind::Tuple(patterns) | ast::PatternKind::TupleStruct { patterns, .. } => {
                 for (index, pattern) in patterns.iter().enumerate() {
                     let member_source = format!("{source_prefix}.{index}");
-                    self.bind_pattern_to_call_source_tree(pattern, &member_source);
+                    self.bind_pattern_to_call_source_tree_inner(pattern, &member_source, merge);
                 }
             }
             ast::PatternKind::Slice(patterns) => {
                 for (index, pattern) in patterns.iter().enumerate() {
                     let member_source = format!("{source_prefix}[{index}]");
-                    self.bind_pattern_to_call_source_tree(pattern, &member_source);
+                    self.bind_pattern_to_call_source_tree_inner(pattern, &member_source, merge);
                 }
             }
             ast::PatternKind::Struct { fields, .. } => {
                 for field in fields {
                     let member_source = format!("{}.{}", source_prefix, field.name.name);
-                    self.bind_pattern_to_call_source_tree(&field.pattern, &member_source);
+                    self.bind_pattern_to_call_source_tree_inner(
+                        &field.pattern,
+                        &member_source,
+                        merge,
+                    );
                 }
             }
             ast::PatternKind::Paren(inner)
             | ast::PatternKind::Ref { pattern: inner, .. }
             | ast::PatternKind::Box(inner) => {
-                self.bind_pattern_to_call_source_tree(inner, source_prefix);
+                self.bind_pattern_to_call_source_tree_inner(inner, source_prefix, merge);
             }
             ast::PatternKind::Or(patterns) => {
                 for pattern in patterns {
-                    self.bind_pattern_to_call_source_tree(pattern, source_prefix);
+                    self.bind_pattern_to_call_source_tree_inner(pattern, source_prefix, merge);
                 }
             }
             _ => {}
@@ -1101,7 +1115,7 @@ impl<'ctx> TypeInfer<'ctx> {
         {
             self.bind_pattern_to_call_sources(pattern, Vec::new());
             for source in self.call_sources(value) {
-                self.bind_pattern_to_call_source_tree(pattern, &source);
+                self.bind_pattern_to_call_source_tree_inner(pattern, &source, true);
             }
         } else {
             self.bind_pattern_call_sources(pattern, value);
@@ -1114,7 +1128,18 @@ impl<'ctx> TypeInfer<'ctx> {
                 name, subpattern, ..
             } => {
                 let sources = self.call_sources(expr);
-                self.bind_call_sources(name.name.as_ref(), sources);
+                if sources
+                    .iter()
+                    .any(|source| self.has_bound_call_source_descendants(source))
+                {
+                    self.clear_call_source_tree(name.name.as_ref());
+                    self.bind_call_sources(name.name.as_ref(), Vec::new());
+                    for source in &sources {
+                        self.bind_bound_call_source_tree(source, name.name.as_ref(), true);
+                    }
+                } else {
+                    self.bind_call_sources(name.name.as_ref(), sources);
+                }
                 self.bind_aggregate_call_sources(name.name.as_ref(), expr);
                 if let Some(subpattern) = subpattern {
                     self.bind_pattern_call_sources(subpattern, expr);
