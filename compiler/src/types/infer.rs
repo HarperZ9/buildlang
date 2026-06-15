@@ -1212,7 +1212,7 @@ impl<'ctx> TypeInfer<'ctx> {
         if self.expr_has_bound_call_source_descendants(value) {
             self.bind_member_call_sources_in_scope(scope_index, member_name, Vec::new(), merge);
             for source in self.call_sources(value) {
-                self.bind_bound_call_source_tree_in_scope(scope_index, &source, member_name, merge);
+                self.bind_bound_call_source_tree_in_scope(scope_index, &source, member_name, true);
             }
         } else {
             self.bind_member_call_sources_in_scope(
@@ -1393,6 +1393,18 @@ impl<'ctx> TypeInfer<'ctx> {
                 }
             }
             ExprKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                if let Some(expr) = then_branch.tail_expr() {
+                    self.bind_aggregate_call_sources_inner(scope_index, name, expr, true);
+                }
+                if let Some(expr) = else_branch.as_deref() {
+                    self.bind_aggregate_call_sources_inner(scope_index, name, expr, true);
+                }
+            }
+            ExprKind::IfLet {
                 then_branch,
                 else_branch,
                 ..
