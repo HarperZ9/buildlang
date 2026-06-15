@@ -285,7 +285,9 @@ without forcing policies to allow stale `ops.loader` evidence.
 Shadowing an aggregate with an opaque producer, such as replacing
 `Ops { loader: load_config }` with `let ops = make_ops()`, clears the old
 descendant source tree before binding the new producer, so policies do not have
-to allow stale helper origins from the previous binding.
+to allow stale helper origins from the previous binding. The same barrier
+applies across nested blocks and later local copies, so an inner `ops` does not
+inherit outer `ops.loader` evidence.
 Returned effectful function values invoked immediately
 record factory calls such as `make_loader()`.
 Async blocks keep the same boundary: construction is pure for type checking,
