@@ -164,7 +164,8 @@ Macro argument token trees are scanned for ambient capability use as well, so
 `println!(read_file("ops.toml"))` requires both `Console` and `FileSystem` and
 records `println!` plus `read_file` in the receipt. The scan is backed by
 `SourceId` provenance, so the same gate applies when a macro invocation lives
-inside an external `mod` file.
+inside an external `mod` file. Unknown extern calls and foreign static reads
+inside macro arguments are also surfaced as direct `Foreign` boundaries.
 
 If the effect is missing, the checker reports the required capability and a
 diagnostic note naming the ambient call or macro that triggered it. This is the
@@ -531,7 +532,11 @@ fallback.
 
 ## Status
 
-**132/132 test programs compile.** Full pipeline: `.quanta` -> C99 -> MSVC -> native x86-64 executable. See [TEST_RESULTS.md](TEST_RESULTS.md) for outputs.
+The current release-shaped proof is the Cargo baseline above: 868 passing tests,
+including 192 CLI tests. [TEST_RESULTS.md](TEST_RESULTS.md) is retained as a
+historical C-backend output record, not the current release gate; the legacy
+`quantac test` fixture runner now needs a Console-capability annotation pass
+before it can be used as a public green-corpus claim again.
 
 Programs cover: functions, recursion, structs, enums, closures, generics, traits, dynamic dispatch, algebraic effects, pattern matching, iterators, hashmaps, vector math, color science, and self-hosted compiler components.
 
@@ -544,6 +549,7 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - Type system rationale: why bidirectional inference, why Pratt parsing, why setjmp/longjmp for effects
 - MIR design: SSA with basic blocks, statement/terminator model
 - Known limitations: borrow/lifetime checking is still early, Rust-target validation is subset-only, eager monomorphization, one-shot effects
+- Wind-down/backend assessment: [COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md](docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md)
 
 ## Code Quality
 
@@ -551,11 +557,11 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-15
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 866 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-15
+- **Tests**: 868 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-15
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
-  - CLI: 190 binary-level smoke tests cover help output, `quantac doctor`, `quantac corpus verify`, `quantac receipt verify`, explicit corpus roots, C receipt writes against copied corpus fixtures, capability diagnostics, and the runnable quickstart examples
+  - CLI: 192 binary-level smoke tests cover help output, `quantac doctor`, `quantac corpus verify`, `quantac receipt verify`, explicit corpus roots, C receipt writes against copied corpus fixtures, capability diagnostics, and the runnable quickstart examples
   - Codegen: tests across 9 backends, including C formatted-print lowering, Rust source emission, Rust executable smoke checks over the semantic corpus, and semantic-corpus manifest contract/receipt consistency/metadata guards (C backend has 24 end-to-end output verification tests)
 
 ## License

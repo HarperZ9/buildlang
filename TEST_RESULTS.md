@@ -1,10 +1,17 @@
-# QuantaLang End-to-End Test Results
+# QuantaLang Historical End-to-End Test Results
 
-**132/132 test programs compile successfully.**
+**Current status (2026-06-15): this page is a historical C-backend test
+record, not the current release gate.** The current release-shaped proof is the
+Cargo baseline documented in `README.md` and `STATUS.md`: 868 passing tests, 0
+failing tests, 10 ignored tests, and 4 filtered tests. A live `quantac test`
+run on 2026-06-15 starts 137 legacy fixture tests and stops at
+`tests/programs/04_if_else.quanta` because older fixtures predate explicit
+`Console` capability annotations, reporting 3 passed, 1 error, and 16 skipped
+before aborting.
 
-Pipeline: `.quanta` → `quantac` (Rust compiler) → `.c` (C99) → `cl.exe` (MSVC) → `.exe` → run
+Historical pipeline: `.quanta` -> `quantac` (Rust compiler) -> `.c` (C99) -> `cl.exe` (MSVC) -> `.exe` -> run
 
-## Test Execution
+## Historical Test Execution
 
 ```
 Total: 108
@@ -13,7 +20,10 @@ Fail:  0
 Timeout: 0
 ```
 
-All programs at `tests/programs/01_hello.quanta` through `tests/programs/99_calibrate_lut.quanta` plus advanced test programs compile to native Windows x86-64 executables via the C backend and produce correct output.
+At the time this historical record was captured, programs at
+`tests/programs/01_hello.quanta` through `tests/programs/99_calibrate_lut.quanta`
+plus advanced test programs compiled to native Windows x86-64 executables via
+the C backend and produced the outputs below.
 
 ## Sample Outputs
 
