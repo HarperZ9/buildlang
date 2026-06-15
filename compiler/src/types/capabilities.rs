@@ -86,6 +86,8 @@ pub fn capability_effect_for_macro(name: &str) -> Option<&'static str> {
     match name {
         "println" | "print" | "eprintln" | "eprint" | "dbg" | "debug" | "log" | "trace"
         | "warn" | "error" => Some(CONSOLE),
+        "include" | "include_str" | "include_bytes" => Some(FILE_SYSTEM),
+        "env" | "option_env" => Some(ENVIRONMENT),
         _ => None,
     }
 }
@@ -143,6 +145,21 @@ mod tests {
         assert_eq!(capability_effect_for_macro("println"), Some("Console"));
         assert_eq!(capability_effect_for_macro("eprintln"), Some("Console"));
         assert_eq!(capability_effect_for_macro("dbg"), Some("Console"));
+        assert_eq!(capability_effect_for_macro("include"), Some("FileSystem"));
+        assert_eq!(
+            capability_effect_for_macro("include_str"),
+            Some("FileSystem")
+        );
+        assert_eq!(
+            capability_effect_for_macro("include_bytes"),
+            Some("FileSystem")
+        );
+        assert_eq!(capability_effect_for_macro("env"), Some("Environment"));
+        assert_eq!(
+            capability_effect_for_macro("option_env"),
+            Some("Environment")
+        );
         assert_eq!(capability_effect_for_macro("format"), None);
+        assert_eq!(capability_effect_for_macro("file"), None);
     }
 }
