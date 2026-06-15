@@ -215,6 +215,9 @@ without requiring stale `ops.loader` evidence;
 stored enum-variant aggregate payloads such as `let slot =
 Slot::Ready(replacement); match slot { Slot::Ready(ops) => ... }` refresh the
 branch-local path the same way;
+shadowing an aggregate with an opaque producer such as
+`let ops = make_ops()` also clears the previous binding's descendant origins,
+so old helpers do not survive under the reused name;
 whole-struct assignment such as
 `ops = defaults` refreshes member origins without leaking stale intermediate
 paths such as `defaults.loader`; enum-variant payloads preserve their stored
@@ -514,7 +517,7 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-14
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 836 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
+- **Tests**: 837 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)

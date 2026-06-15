@@ -1156,11 +1156,11 @@ impl<'ctx> TypeInfer<'ctx> {
                 name, subpattern, ..
             } => {
                 let sources = self.call_sources(expr);
+                self.clear_call_source_tree(name.name.as_ref());
                 if sources
                     .iter()
                     .any(|source| self.has_bound_call_source_descendants(source))
                 {
-                    self.clear_call_source_tree(name.name.as_ref());
                     self.bind_call_sources(name.name.as_ref(), Vec::new());
                     for source in &sources {
                         self.bind_bound_call_source_tree(source, name.name.as_ref(), true);
