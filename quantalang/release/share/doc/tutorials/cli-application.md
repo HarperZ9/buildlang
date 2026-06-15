@@ -1,5 +1,9 @@
 # Tutorial: Building a Command-Line Application
 
+> Current status (2026-06-15): historical/aspirational release-bundle tutorial.
+> It is preserved as design material, not current compiler adoption guidance.
+> Use the repository root `README.md` and `STATUS.md` for verified commands.
+
 This tutorial walks you through building a complete command-line application in QuantaLang. We'll create `minigrep`, a simplified version of the `grep` text search tool.
 
 ## What We'll Build

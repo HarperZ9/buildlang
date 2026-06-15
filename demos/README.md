@@ -1,13 +1,20 @@
 # QuantaLang Visual Demo
 
-**Renders a colored triangle on the GPU using QuantaLang-compiled SPIR-V shaders.**
+Current status (2026-06-15): historical/experimental local demo artifact. This
+directory preserves a Vulkan/SPIR-V proof path from the graphics work, including
+hardcoded shader-generation helpers and machine-specific host code. It is not
+the current release gate; current public proof lives in the C backend,
+HLSL/GLSL quickstart, semantic corpus receipts, and Cargo test baseline.
+
+**Experimental goal:** render a colored triangle on the GPU using
+QuantaLang-generated SPIR-V shader artifacts.
 
 ## What This Proves
 
-1. QuantaLang's SPIR-V backend generates valid GPU shaders
-2. The shaders load on a real GPU (NVIDIA RTX 4090)
-3. A complete Vulkan graphics pipeline renders frames
-4. The same math functions compile to both CPU (C) and GPU (SPIR-V)
+1. The historical SPIR-V helpers can generate shader artifacts for inspection
+2. The checked-in host code documents one local Vulkan execution path
+3. The demo is useful for backend preservation and future validation work
+4. It does not prove a portable, current, source-to-SPIR-V release guarantee
 
 ## Building
 
@@ -54,15 +61,16 @@ Rendered 180 frames
 === QuantaLang Demo Complete ===
 ```
 
-A 1280x720 window opens displaying a colored triangle (red/green/blue vertex colors)
-rendered by QuantaLang-compiled SPIR-V shaders on the GPU.
+In the historical local run, a 1280x720 window opened displaying a colored
+triangle. Re-run and validate the demo locally before treating it as current
+GPU evidence.
 
 ## Architecture
 
 ```
 QuantaLang Compiler (Rust)
     │
-    ├── SPIR-V Backend (spirv.rs, 4274+ lines)
+    ├── SPIR-V Backend (spirv.rs; see STATUS.md for current line count)
     │   ├── generate_triangle_vertex_shader() → hardcoded_vert.spv
     │   └── generate_triangle_fragment_shader() → hardcoded_frag.spv
     │
@@ -81,7 +89,7 @@ QuantaLang Compiler (Rust)
 
 ## QuantaLang Features Demonstrated
 
-- **Dual-target compilation**: Same function → CPU native + GPU SPIR-V
-- **Color space type safety**: `fn shade(c: Color with ColorSpace<Linear>)` enforced
-- **SPIR-V validation**: All shaders pass spirv-val
-- **Real GPU execution**: Pipeline created and frames rendered on RTX 4090
+- **Backend preservation**: SPIR-V shader-generation artifacts and Vulkan host code
+- **C/shader contrast**: examples for comparing CPU-oriented and shader-oriented paths
+- **SPIR-V validation target**: validate generated artifacts with `spirv-val` before use
+- **Local GPU execution record**: not a portable release claim

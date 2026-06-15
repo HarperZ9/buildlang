@@ -1,7 +1,8 @@
-# Self-Hosted QuantaLang - Compilation Target
+# Self-Hosted QuantaLang - Aspirational Compilation Target
 
-This directory contains a complete self-hosted compiler, standard library, and toolchain
-written in QuantaLang itself. **Most of this code cannot yet be compiled by the current
+Current status (2026-06-15): this directory is aspirational architecture and
+historical release scaffolding. **None of this self-hosted compiler, standard
+library, or toolchain tree can be compiled or executed by the current
 Rust-based compiler.**
 
 It serves as the **compilation target** - as the Rust compiler gains features (trait dispatch,
@@ -10,14 +11,13 @@ self-hosting: a QuantaLang compiler that compiles itself.
 
 ## Current Compilability
 
-The Rust compiler (in `../compiler/`) currently supports:
-- Variables, functions, if/else, loops, match, recursion
-- Structs, enums, strings, arrays, methods, closures, generics
-- Algebraic effects (handle/perform/resume)
-- 18/18 end-to-end test programs verified
+The current Rust compiler status lives in the repository root `README.md` and
+`STATUS.md`. It has a working C-backed compiler core and semantic corpus
+receipts, but it does not support the module system, import syntax, or standard
+library assumptions used by this self-hosted tree.
 
-Files in this directory that use only those features could potentially be compiled now.
-Files that use trait dispatch, module imports, or standard library functions cannot yet.
+Files in this directory should be treated as design targets until an explicit
+bootstrap/compilation receipt proves otherwise.
 
 ## Contents
 - `src/` - Self-hosted compiler (lexer, parser, AST, type checker, codegen)

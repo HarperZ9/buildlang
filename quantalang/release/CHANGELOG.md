@@ -1,5 +1,10 @@
 # Changelog
 
+> Current status (2026-06-15): historical/aspirational changelog from the
+> self-hosted release-material tree. The entries below are not the current
+> release gate. Current verified compiler status lives in the repository root
+> `README.md` and `STATUS.md`.
+
 All notable changes to QuantaLang will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
@@ -7,10 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.0.0] - 2025-01-15
 
-### 🎉 Initial Public Release
+### Historical Planned Public Release Entry
 
-This is the first stable release of QuantaLang, a modern systems programming language
-designed for safety, performance, and expressiveness.
+This entry was drafted as release-planning copy. It is not current evidence of
+a stable public release, complete standard library, or hosted release channel.
 
 ### Language Features
 

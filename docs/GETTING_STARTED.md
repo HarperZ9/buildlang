@@ -1,6 +1,14 @@
 # Getting Started with QuantaLang
 
-QuantaLang is "The Effects Language" -- a systems programming language with algebraic effects, designed for game engines and GPU shaders. One language for your engine code and your shaders: write a function once, compile it to CPU for testing and GPU for rendering.
+Current status (2026-06-15): the verified adoption path is source build,
+`quantac run` through the C backend, HLSL/GLSL shader-source output, and the
+semantic corpus receipt checks. SPIR-V, LLVM, WASM, Rust, x86-64, and ARM64 are
+experimental research targets; examples below label those paths accordingly.
+
+QuantaLang is "The Effects Language" -- a systems programming language with
+algebraic effects, designed for systems experiments and shader-oriented code
+generation. Today, C is the verified native execution path and HLSL/GLSL are the
+practical shader-output path.
 
 ---
 
@@ -57,7 +65,7 @@ quantac run examples/quickstart/effects_greeting.quanta
 
 ## Your First Shader
 
-QuantaLang's defining feature: the same function compiles to both CPU and GPU. Create `shader.quanta`:
+Create `shader.quanta`:
 
 ```quanta
 fn aces_tonemap(x: f64) -> f64 {
@@ -75,19 +83,24 @@ fn main(color: vec3) -> vec4 {
 }
 ```
 
-Compile to GPU (Vulkan SPIR-V):
+Compile to HLSL shader source:
 
 ```bash
-quantac shader.quanta --target spirv -o shader.spv
+quantac shader.quanta --target hlsl -o shader.hlsl
 ```
 
 Compile to CPU (C source for testing):
 
 ```bash
-quantac shader.quanta -o shader.c
+quantac shader.quanta --target c -o shader.c
 ```
 
-Same file. Both targets. The `aces_tonemap` function is identical on CPU and GPU -- test on CPU, deploy to GPU.
+The SPIR-V backend is still an experimental research target. Use it for backend
+experiments, not as the current release promise:
+
+```bash
+quantac shader.quanta --target spirv -o shader.spv
+```
 
 For a tested HLSL shader quickstart:
 
@@ -99,21 +112,24 @@ quantac examples/quickstart/vignette_shader.quanta --target hlsl -o vignette_sha
 
 ## Multi-Target Compilation
 
-QuantaLang has six code generation backends:
+QuantaLang exposes several code generation backends with different maturity:
 
 ```bash
-quantac file.quanta --target=c        # C99 source (default)
-quantac file.quanta --target=llvm     # LLVM IR
-quantac file.quanta --target=wasm     # WebAssembly
-quantac file.quanta --target=spirv    # Vulkan SPIR-V
-quantac file.quanta --target=x86-64   # x86-64 assembly
-quantac file.quanta --target=arm64    # ARM64 assembly
+quantac file.quanta --target=c        # C99 source, verified adoption path
+quantac file.quanta --target=hlsl     # HLSL shader source
+quantac file.quanta --target=glsl     # GLSL shader source
+quantac file.quanta --target=llvm     # Experimental LLVM IR
+quantac file.quanta --target=wasm     # Experimental WebAssembly/WAT path
+quantac file.quanta --target=spirv    # Experimental Vulkan SPIR-V
+quantac file.quanta --target=rust     # Experimental Rust source subset
+quantac file.quanta --target=x86-64   # Experimental x86-64 assembly
+quantac file.quanta --target=arm64    # Experimental ARM64 assembly
 ```
 
 The output format is also inferred from the `-o` extension:
 
 ```bash
-quantac shader.quanta -o shader.spv   # infers --target=spirv
+quantac shader.quanta -o shader.spv   # infers --target=spirv, experimental
 quantac shader.quanta -o shader.c     # infers --target=c
 quantac shader.quanta -o shader.ll    # infers --target=llvm
 ```
@@ -122,13 +138,14 @@ quantac shader.quanta -o shader.ll    # infers --target=llvm
 
 ## Shader Hot Reload
 
-Watch a directory and recompile shaders on every save:
+Watch a directory and recompile shader source on every save:
 
 ```bash
-quantac watch shaders/ --target=spirv
+quantac watch shaders/ --target=hlsl
 ```
 
-Your Vulkan renderer can detect `.spv` file changes and reload without restarting.
+For SPIR-V experiments, use `--target=spirv` and validate the output with the
+Vulkan SDK before loading it into a renderer.
 
 ---
 
@@ -170,7 +187,7 @@ fn render_scene() ~ Render {
 }
 
 fn main() {
-    // Production: real Vulkan rendering
+    // Application-specific rendering handler
     handle {
         render_scene()
     } with {
@@ -273,7 +290,9 @@ length  distance  dot  cross  normalize  reflect
 min  max
 ```
 
-These functions work on both CPU and GPU targets. On CPU they compile to C `<math.h>` calls; on GPU they compile to SPIR-V GLSL.std.450 extended instructions.
+These functions are available to the compiler's shader-oriented paths. On the
+verified C route they lower to C math helpers; SPIR-V lowering is still treated
+as experimental backend work.
 
 ---
 
@@ -295,6 +314,7 @@ Then open VS Code, go to Extensions > Install from VSIX, or use the debug launch
 
 - [SHADER_GUIDE.md](SHADER_GUIDE.md) -- Write vertex, fragment, and compute shaders
 - [EFFECTS_GUIDE.md](EFFECTS_GUIDE.md) -- Master algebraic effects for rendering pipelines
-- `tests/programs/` -- 50 working example programs, from hello world to PBR shaders
-- `tests/shaders/` -- 14 validated SPIR-V shaders
-- `examples/graphics/` -- Full Vulkan triangle rendered with QuantaLang shaders
+- `examples/quickstart/` -- tested source examples for CPU execution and HLSL output
+- `semantic-corpus/` -- 8-program C/Rust receipt corpus
+- `tests/programs/` -- mixed legacy/current fixture corpus, not the release gate
+- `examples/graphics/` and `demos/` -- historical/experimental Vulkan and SPIR-V artifacts

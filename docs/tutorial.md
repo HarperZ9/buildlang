@@ -1,6 +1,10 @@
 # Getting Started with QuantaLang
 
-QuantaLang is "The Effects Language" -- a single language that compiles to C, HLSL, GLSL, and SPIR-V. Write your logic once, deploy it as a native executable or a GPU shader for DirectX, OpenGL, or Vulkan.
+QuantaLang is "The Effects Language" -- a systems language experiment with a
+verified C execution path, HLSL/GLSL shader-source output, and experimental
+research backends for SPIR-V, LLVM, WASM, Rust, x86-64, and ARM64. Use C for
+the current native execution promise and treat SPIR-V/native backends as
+backend research unless a specific receipt says otherwise.
 
 This tutorial walks you through installation, your first program, the language fundamentals, and your first shader.
 
@@ -19,10 +23,13 @@ This tutorial walks you through installation, your first program, the language f
 ```bash
 git clone https://github.com/HarperZ9/quantalang.git
 cd quantalang
+cd compiler
 cargo build --release
 ```
 
-The compiler binary is produced at `target/release/quantac` (or `quantac.exe` on Windows).
+The compiler binary is produced at `compiler/target/release/quantac` (or
+`compiler\target\release\quantac.exe` on Windows, relative to the repository
+root).
 
 ### Add to PATH
 

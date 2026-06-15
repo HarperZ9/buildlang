@@ -1,5 +1,10 @@
 # QuantaLang Standard Library Reference
 
+> Current status (2026-06-15): historical/aspirational release-bundle API
+> reference. The self-hosted standard library is not currently compiled or
+> executed by the Rust compiler. Use the repository root `STATUS.md` for current
+> verified compiler status.
+
 The QuantaLang standard library provides essential functionality for building applications. This document provides a comprehensive reference for all modules.
 
 ## Module Overview
