@@ -435,13 +435,22 @@ impl<'ctx> TypeInfer<'ctx> {
     }
 
     fn bound_call_sources_for_access(&self, access_source: &str) -> Vec<String> {
-        if let Some(bound_sources) = self.lookup_call_source_binding(access_source) {
-            return bound_sources.clone();
-        }
+        let root = Self::call_source_root(access_source);
+        let wildcard_source = Self::wildcard_index_access_source(access_source);
 
-        if let Some(wildcard_source) = Self::wildcard_index_access_source(access_source) {
-            if let Some(bound_sources) = self.lookup_call_source_binding(&wildcard_source) {
+        for scope in self.source_bindings.iter().rev() {
+            if let Some(bound_sources) = scope.get(access_source) {
                 return bound_sources.clone();
+            }
+
+            if let Some(wildcard_source) = wildcard_source.as_deref() {
+                if let Some(bound_sources) = scope.get(wildcard_source) {
+                    return bound_sources.clone();
+                }
+            }
+
+            if root != access_source && scope.contains_key(root) {
+                return Vec::new();
             }
         }
 
@@ -456,6 +465,7 @@ impl<'ctx> TypeInfer<'ctx> {
         let dot_prefix = format!("{source_prefix}.");
         let bracket_prefix = format!("{source_prefix}[");
         let mut copied = BTreeMap::new();
+        let root = Self::call_source_root(source_prefix);
 
         for scope in self.source_bindings.iter().rev() {
             for (source, sources) in scope {
@@ -469,6 +479,12 @@ impl<'ctx> TypeInfer<'ctx> {
                         .or_insert_with(|| sources.clone());
                 }
             }
+
+            if scope.contains_key(source_prefix)
+                || (root != source_prefix && scope.contains_key(root))
+            {
+                break;
+            }
         }
 
         copied
@@ -477,11 +493,22 @@ impl<'ctx> TypeInfer<'ctx> {
     fn has_bound_call_source_descendants(&self, source_prefix: &str) -> bool {
         let dot_prefix = format!("{source_prefix}.");
         let bracket_prefix = format!("{source_prefix}[");
-        self.source_bindings.iter().rev().any(|scope| {
-            scope.keys().any(|source| {
+        let root = Self::call_source_root(source_prefix);
+        for scope in self.source_bindings.iter().rev() {
+            if scope.keys().any(|source| {
                 source.starts_with(&dot_prefix) || source.starts_with(&bracket_prefix)
-            })
-        })
+            }) {
+                return true;
+            }
+
+            if scope.contains_key(source_prefix)
+                || (root != source_prefix && scope.contains_key(root))
+            {
+                return false;
+            }
+        }
+
+        false
     }
 
     fn expr_has_bound_call_source_descendants(&self, expr: &ast::Expr) -> bool {
@@ -525,6 +552,18 @@ impl<'ctx> TypeInfer<'ctx> {
         }
 
         changed.then_some(wildcard)
+    }
+
+    fn call_source_root(source: &str) -> &str {
+        let dot_index = source.find('.');
+        let bracket_index = source.find('[');
+        let split_index = match (dot_index, bracket_index) {
+            (Some(dot), Some(bracket)) => dot.min(bracket),
+            (Some(dot), None) => dot,
+            (None, Some(bracket)) => bracket,
+            (None, None) => return source,
+        };
+        &source[..split_index]
     }
 
     fn bound_call_sources_for_member(&self, expr: &ast::Expr, member: &str) -> Vec<String> {
