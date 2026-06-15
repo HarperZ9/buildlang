@@ -205,10 +205,11 @@ tuple-literal destructuring such as `let (ops,) = (replacement,)` applies the
 same refresh rule, keeping `load_config` and `ops.loader` without requiring
 stale `replacement.loader` evidence;
 control-flow-selected aggregate bindings such as
-`let ops = if use_secret { secret } else { config }`, and tuple destructuring
-of the same shape, merge branch origins such as `load_config` and `load_secret`
-into `ops.loader` without requiring stale branch-local paths such as
-`config.loader` or `secret.loader`;
+`let ops = if use_secret { secret } else { config }`, `if let` selected
+aggregate fields such as `Outer { ops: if let ... }`, and tuple destructuring
+of the same shapes, merge branch origins such as `load_config` and
+`load_secret` into `ops.loader` or `outer.ops.loader` without requiring stale
+branch-local paths such as `config.loader` or `secret.loader`;
 struct-field shorthand with aggregate values such as `Outer { ops }`, including
 direct destructuring of `Outer { ops }`, refreshes descendant paths the same way
 without requiring stale `ops.loader` evidence;
@@ -391,7 +392,9 @@ does not leave stale `defaults.loader` evidence in later `ops.loader` calls.
 Enum-variant payloads keep their stored callback sources when a match, `if let`,
 or `while let` branch destructures them, and stored aggregate payloads refresh
 branch-local paths such as `ops.loader` without requiring stale construction
-aliases such as `replacement.loader`. Immediate invocation
+aliases such as `replacement.loader`. Nested `if let` selected aggregate fields
+also merge each possible field origin into paths such as `outer.ops.loader`.
+Immediate invocation
 of a returned effectful function records the factory call, such as
 `make_loader()`.
 Async blocks also delay capability effects at construction time: `async {
@@ -535,11 +538,11 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-15
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 858 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-15
+- **Tests**: 860 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-15
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
-  - CLI: 182 binary-level smoke tests cover help output, `quantac doctor`, `quantac corpus verify`, `quantac receipt verify`, explicit corpus roots, C receipt writes against copied corpus fixtures, capability diagnostics, and the runnable quickstart examples
+  - CLI: 184 binary-level smoke tests cover help output, `quantac doctor`, `quantac corpus verify`, `quantac receipt verify`, explicit corpus roots, C receipt writes against copied corpus fixtures, capability diagnostics, and the runnable quickstart examples
   - Codegen: tests across 9 backends, including C formatted-print lowering, Rust source emission, Rust executable smoke checks over the semantic corpus, and semantic-corpus manifest contract/receipt consistency/metadata guards (C backend has 24 end-to-end output verification tests)
 
 ## License
