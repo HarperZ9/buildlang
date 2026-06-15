@@ -1,7 +1,7 @@
 # QuantaLang Compiler Design
 
 > Architectural documentation for the QuantaLang compiler (`quantac`).
-> ~80K lines of Rust across 85 source files.
+> 99,214 lines of Rust across 87 source files.
 
 ## Pipeline Overview
 
@@ -44,7 +44,7 @@ Backend (src/codegen/backend/)
 
 ## Lexer (`src/lexer/`)
 
-**~4,910 lines** across 6 files: `scanner.rs` (2,302), `token.rs` (1,385), `span.rs` (409), `cursor.rs` (347), `error.rs` (467), `mod.rs` (80+).
+**5,040 lines** across 6 files: `scanner.rs` (2,342), `token.rs` (1,366), `span.rs` (445), `cursor.rs` (344), `error.rs` (447), `mod.rs` (96).
 
 The `Lexer` struct in `scanner.rs` consumes a `SourceFile` via a character `Cursor` and produces a `Vec<Token>`. Each `Token` carries a `TokenKind` and a `Span` (byte offset range + source ID) for error reporting.
 
@@ -63,7 +63,7 @@ The `Keyword` enum covers the full language keyword set including `fn`, `let`, `
 
 ## Parser (`src/parser/`)
 
-**~4,940 lines** across 7 files: `expr.rs` (1,764), `item.rs` (1,523), `pattern.rs` (631), `ty.rs` (473), `stmt.rs` (277), `error.rs` (272), `mod.rs` (100+).
+**6,766 lines** across 7 files: `expr.rs` (2,212), `item.rs` (1,751), `pattern.rs` (810), `ty.rs` (481), `stmt.rs` (291), `error.rs` (254), `mod.rs` (967).
 
 A **recursive descent parser** with **Pratt parsing** (top-down operator precedence) for expressions.
 
@@ -83,11 +83,11 @@ A **recursive descent parser** with **Pratt parsing** (top-down operator precede
 
 ### Produced AST (`src/ast/`)
 
-**~1,730 lines** across 7 files. The AST is an untyped tree of `Item`, `Stmt`, `Expr`, `Pattern`, and `Type` nodes. Each node carries a `Span`. Item kinds include: `Function`, `Struct`, `Enum`, `Trait`, `Impl`, `TypeAlias`, `Const`, `Static`, `Mod`, `Use`, `ExternCrate`, `ExternBlock`, `Macro`, `MacroRules`, `Effect`.
+**2,692 lines** across 7 files. The AST is an untyped tree of `Item`, `Stmt`, `Expr`, `Pattern`, and `Type` nodes. Each node carries a `Span`. Item kinds include: `Function`, `Struct`, `Enum`, `Trait`, `Impl`, `TypeAlias`, `Const`, `Static`, `Mod`, `Use`, `ExternCrate`, `ExternBlock`, `Macro`, `MacroRules`, `Effect`.
 
 ## Type System (`src/types/`)
 
-**~7,635 lines** across 11 files: `infer.rs` (2,445), `check.rs` (1,132), `ty.rs` (835), `effects.rs` (876), `hkt.rs` (699), `traits.rs` (648), `context.rs` (500+), `unify.rs` (400+), `const_generics.rs`, `builtins.rs`, `error.rs`.
+**15,559 lines** across 11 files: `infer.rs` (6,547), `check.rs` (2,064), `ty.rs` (1,160), `effects.rs` (867), `hkt.rs` (683), `traits.rs` (665), `context.rs` (811), `unify.rs` (571), `const_generics.rs` (1,074), `builtins.rs` (496), `error.rs` (391).
 
 ### Two-Pass Approach
 
@@ -130,14 +130,14 @@ The `Unifier` maintains a `Substitution` (mapping from type variables to types) 
 
 ### Additional Type System Features
 
-- **Traits** (`traits.rs`, 648 lines): `TraitEnv`, `TraitResolver`, `BuiltinTraits` for trait resolution and method lookup
-- **Higher-kinded types** (`hkt.rs`, 699 lines): kind system for type constructors
-- **Algebraic effects** (`effects.rs`, 876 lines): `EffectContext`, `EffectRow` for tracking and checking effect annotations
+- **Traits** (`traits.rs`, 665 lines): `TraitEnv`, `TraitResolver`, `BuiltinTraits` for trait resolution and method lookup
+- **Higher-kinded types** (`hkt.rs`, 683 lines): kind system for type constructors
+- **Algebraic effects** (`effects.rs`, 867 lines): `EffectContext`, `EffectRow` for tracking and checking effect annotations
 - **Const generics** (`const_generics.rs`): compile-time constant values as type parameters
 
 ## MIR (Mid-level IR) (`src/codegen/ir.rs`)
 
-**1,631 lines.** An SSA-style intermediate representation organized as a control-flow graph.
+**1,694 lines.** An SSA-style intermediate representation organized as a control-flow graph.
 
 ### Module Structure
 
@@ -183,9 +183,9 @@ Integer sizes: I8, I16, I32, I64, I128, ISize. Float sizes: F32, F64. SIMD vecto
 
 ## Lowering (`src/codegen/lower/`)
 
-**8,048 lines** split into 4 modules. The `MirLowerer` struct walks the validated AST and builds MIR via `MirBuilder` and `MirModuleBuilder`.
+**10,253 lines** split into 4 modules. The `MirLowerer` struct walks the validated AST and builds MIR via `MirBuilder` and `MirModuleBuilder`.
 
-### `mod.rs` (1,609 lines) -- Item and Function Lowering
+### `mod.rs` (1,973 lines) -- Item and Function Lowering
 
 `MirLowerer` holds:
 - **`ctx`**: read-only reference to the `TypeContext` from type checking
@@ -202,7 +202,7 @@ Integer sizes: I8, I16, I32, I64, I128, ISize. Float sizes: F32, F64. SIMD vecto
 
 Entry point: `lower_module()` iterates all AST items, lowering functions, structs, enums, traits, impls, consts, statics, and effect declarations. Generic items are stored for later monomorphization when a concrete instantiation is encountered.
 
-### `expr.rs` (3,634 lines) -- Expression and Statement Lowering
+### `expr.rs` (4,944 lines) -- Expression and Statement Lowering
 
 The largest module. Handles:
 - **Block/statement lowering**: `lower_block()`, `lower_stmt()`, `lower_local()` (let bindings with destructuring)
@@ -211,13 +211,13 @@ The largest module. Handles:
 - **Pattern matching**: `match` arms with guard expressions, destructuring, wildcards, `or` patterns
 - **Loop desugaring**: `for` loops desugar to iterator protocol (`.iter()` + `while` with `.next()`)
 
-### `types.rs` (777 lines) -- Type Lowering and Const Evaluation
+### `types.rs` (868 lines) -- Type Lowering and Const Evaluation
 
 - **`lower_type_from_ast()`**: converts AST types to `MirType`. Handles `Never`, `Infer` (defaults to i32), `Tuple`, `Array` (with const eval for length), `Slice`, `Ptr`, `Ref`, named types (resolves structs, enums, builtins like `Vec<T>`, `HashMap<K,V>`, `String`)
 - **`try_const_eval()`**: evaluates constant expressions at compile time for array lengths and const generics
 - **Generic monomorphization**: `monomorphize_function()`, `monomorphize_struct()`, `monomorphize_enum()` -- clones the generic AST, substitutes type parameters, and lowers the specialized version with a mangled name
 
-### `macros.rs` (2,028 lines) -- Closures, Builtins, Iterator Desugaring
+### `macros.rs` (2,468 lines) -- Closures, Builtins, Iterator Desugaring
 
 - **Closure lowering**: `collect_free_vars()` finds captured variables by walking the closure body and comparing against the enclosing scope's `var_map`. Captures are appended as extra parameters to the generated closure function. `closure_captures` and `local_closure_name` registries enable the caller to pass captured values at call sites.
 - **Builtin macro expansion**: `println!`, `format!`, `vec!`, `assert!`, `dbg!`, `todo!`, `unimplemented!`, `env!`, etc.
@@ -226,9 +226,9 @@ The largest module. Handles:
 
 ## Backends (`src/codegen/backend/`)
 
-**~14,368 lines** across 10 files. All backends implement the `Backend` trait, consuming a `MirModule` and producing `GeneratedCode`.
+**26,924 lines** across backend modules. All backends implement the `Backend` trait, consuming a `MirModule` and producing `GeneratedCode`.
 
-### C Backend (Primary) -- `c.rs` (2,530 lines)
+### C Backend (Primary) -- `c.rs` (4,573 lines)
 
 The production backend. `CBackend` emits C99-compliant code:
 
@@ -242,15 +242,15 @@ The production backend. `CBackend` emits C99-compliant code:
 
 The generated C is compiled to native executables via `gcc` (Linux/MSYS2) or MSVC (`cl.exe` on Windows). The `quantac build` command handles this automatically, with `--emit c` to stop at the C source stage and `--keep-c` to preserve intermediates.
 
-### LLVM Backend -- `llvm.rs` (2,255 lines)
+### LLVM Backend -- `llvm.rs` (3,041 lines)
 
 Emits LLVM IR in textual format (`.ll` files). Maps MIR types to LLVM types (`i32`, `double`, `%struct.Name`, etc.), emits SSA instructions, and generates correct `phi` nodes at block joins.
 
-### WebAssembly Backend -- `wasm.rs` (2,095 lines)
+### WebAssembly Backend -- `wasm.rs` (2,215 lines)
 
 Emits WebAssembly text format (`.wat`). Maps MIR types to Wasm value types (`i32`, `i64`, `f32`, `f64`), uses linear memory for structs and arrays, and generates Wasm function imports for runtime support.
 
-### SPIR-V Backend -- `spirv.rs` (4,403 lines)
+### SPIR-V Backend -- `spirv.rs` (5,417 lines)
 
 The largest backend. Emits SPIR-V binary words for GPU compute and graphics shaders. Handles:
 - Descriptor set / binding decorations for uniform buffers, textures, samplers
@@ -259,25 +259,25 @@ The largest backend. Emits SPIR-V binary words for GPU compute and graphics shad
 - Shader entry point generation with execution model annotations
 - Built-in variable access (`gl_Position`, `gl_FragCoord`, etc.)
 
-### HLSL Backend -- `hlsl.rs` (988 lines)
+### HLSL Backend -- `hlsl.rs` (1,182 lines)
 
 Emits High-Level Shading Language for DirectX and ReShade. Supports optional ReShade `.fx` boilerplate wrapping.
 
-### GLSL Backend -- `glsl.rs` (799 lines)
+### GLSL Backend -- `glsl.rs` (963 lines)
 
 Emits GLSL for OpenGL and Vulkan shader source.
 
-### x86-64 Backend -- `x86_64.rs` (1,642 lines) + `x86_64_enc.rs`
+### x86-64 Backend -- `x86_64.rs` (1,716 lines) + `x86_64_enc.rs` (2,123 lines)
 
 Experimental direct native code generation. Emits x86-64 machine code with instruction encoding in `x86_64_enc.rs`. System V AMD64 ABI calling convention.
 
-### ARM64 Backend -- `arm64.rs` (1,656 lines) + `arm64_enc.rs`
+### ARM64 Backend -- `arm64.rs` (1,718 lines) + `arm64_enc.rs` (2,073 lines)
 
 Experimental direct native code generation for AArch64. Instruction encoding in `arm64_enc.rs`. AAPCS64 calling convention.
 
 ## Runtime (`src/codegen/runtime.rs`)
 
-**1,890 lines** of Rust that generates ~187 C static functions embedded in every compiled program's output. The runtime provides:
+**2,125 lines** of Rust that generates ~187 C static functions embedded in every compiled program's output. The runtime provides:
 
 - **QuantaString**: ptr/len/cap representation. Concat, length, equality, substring, split, trim, contains, starts_with, ends_with, replace, to_uppercase/lowercase, char_at, free
 - **QuantaVec**: generic dynamic array (void* + len + cap + elem_size). Push, get, pop, free. Type-specialized handle variants for i32, i64, f64 with heap-allocated backing
@@ -304,13 +304,13 @@ This is a pragmatic text-level preprocessor rather than a proper module system. 
 
 ## Macro System (`src/macro_expand/`)
 
-**~2,389 lines** across 5 files: `builtins.rs` (734), `pattern.rs` (563), `mod.rs` (462), `expand.rs` (341), `hygiene.rs` (289).
+**2,557 lines** across 5 files: `builtins.rs` (842), `pattern.rs` (586), `mod.rs` (465), `expand.rs` (366), `hygiene.rs` (298).
 
 Supports `macro_rules!` definitions with pattern matching and template expansion. `builtins.rs` provides built-in macros (`println!`, `vec!`, `assert!`, etc.). `hygiene.rs` implements macro hygiene to prevent name collisions.
 
 ## Language Server Protocol (`src/lsp/`)
 
-**~5,794 lines** across 12 files. A full LSP server implementation providing:
+**7,087 lines** across 12 files. A full LSP server implementation providing:
 - **Diagnostics** (`diagnostics.rs`): real-time error reporting
 - **Completion** (`completion.rs`): context-aware code completion
 - **Go to Definition** (`definition.rs`): jump to symbol definition
@@ -321,11 +321,11 @@ Supports `macro_rules!` definitions with pattern matching and template expansion
 
 ## Formatter (`src/fmt/`)
 
-**~1,626 lines** across 4 files. Accessed via `quantac fmt`. `formatter.rs` implements a pretty-printer that reformats QuantaLang source with configurable options (`config.rs`): indent width, max line width, trailing commas, etc.
+**1,657 lines** across 4 files. Accessed via `quantac fmt`. `formatter.rs` implements a pretty-printer that reformats QuantaLang source with configurable options (`config.rs`): indent width, max line width, trailing commas, etc.
 
 ## Package Manager (`src/pkg/`)
 
-**~3,347 lines** across 6 files. Accessed via `quantac pkg`. Implements:
+**3,503 lines** across 6 files. Accessed via `quantac pkg`. Implements:
 - `manifest.rs`: `Quanta.toml` parsing
 - `lockfile.rs`: lockfile generation and reading
 - `resolver.rs`: dependency resolution
@@ -334,7 +334,7 @@ Supports `macro_rules!` definitions with pattern matching and template expansion
 
 ## CLI Commands (`src/main.rs`)
 
-**2,651 lines.** The `quantac` binary supports these subcommands via `clap`:
+**6,069 lines.** The `quantac` binary supports these subcommands via `clap`:
 
 | Command | Description |
 |---------|-------------|
@@ -455,38 +455,40 @@ The limitation: annotations are per-type, not per-value. If a function takes `Ve
 ### Core Pipeline
 | File | Lines | Purpose |
 |------|-------|---------|
-| `src/lexer/scanner.rs` | 2,302 | Main tokenizer implementation |
-| `src/lexer/token.rs` | 1,385 | Token and keyword definitions |
-| `src/parser/expr.rs` | 1,764 | Pratt expression parser |
-| `src/parser/item.rs` | 1,523 | Item (function, struct, trait) parsing |
-| `src/types/infer.rs` | 2,445 | Type inference engine |
-| `src/types/check.rs` | 1,132 | Type checker coordinator |
-| `src/codegen/ir.rs` | 1,631 | MIR definition |
-| `src/codegen/lower/mod.rs` | 1,609 | Item/function lowering |
-| `src/codegen/lower/expr.rs` | 3,634 | Expression/statement lowering |
-| `src/codegen/lower/types.rs` | 777 | Type lowering, monomorphization |
-| `src/codegen/lower/macros.rs` | 2,028 | Closures, builtins, iterators |
-| `src/codegen/backend/c.rs` | 2,530 | C99 backend (primary) |
-| `src/codegen/runtime.rs` | 1,890 | Embedded C runtime library |
-| `src/main.rs` | 2,651 | CLI, preprocessor, compile pipeline |
+| `src/lexer/scanner.rs` | 2,342 | Main tokenizer implementation |
+| `src/lexer/token.rs` | 1,366 | Token and keyword definitions |
+| `src/parser/expr.rs` | 2,212 | Pratt expression parser |
+| `src/parser/item.rs` | 1,751 | Item (function, struct, trait) parsing |
+| `src/types/infer.rs` | 6,547 | Type inference engine |
+| `src/types/check.rs` | 2,064 | Type checker coordinator |
+| `src/codegen/ir.rs` | 1,694 | MIR definition |
+| `src/codegen/lower/mod.rs` | 1,973 | Item/function lowering |
+| `src/codegen/lower/expr.rs` | 4,944 | Expression/statement lowering |
+| `src/codegen/lower/types.rs` | 868 | Type lowering, monomorphization |
+| `src/codegen/lower/macros.rs` | 2,468 | Closures, builtins, iterators |
+| `src/codegen/backend/c.rs` | 4,573 | C99 backend (primary) |
+| `src/codegen/runtime.rs` | 2,125 | Embedded C runtime library |
+| `src/main.rs` | 6,069 | CLI, preprocessor, compile pipeline |
 
 ### Backends
 | File | Lines | Purpose |
 |------|-------|---------|
-| `src/codegen/backend/spirv.rs` | 4,403 | SPIR-V GPU shader backend |
-| `src/codegen/backend/llvm.rs` | 2,255 | LLVM IR backend |
-| `src/codegen/backend/wasm.rs` | 2,095 | WebAssembly backend |
-| `src/codegen/backend/arm64.rs` | 1,656 | ARM64 native (experimental) |
-| `src/codegen/backend/x86_64.rs` | 1,642 | x86-64 native (experimental) |
-| `src/codegen/backend/hlsl.rs` | 988 | HLSL shader backend |
-| `src/codegen/backend/glsl.rs` | 799 | GLSL shader backend |
+| `src/codegen/backend/spirv.rs` | 5,417 | SPIR-V GPU shader backend |
+| `src/codegen/backend/llvm.rs` | 3,041 | LLVM IR backend |
+| `src/codegen/backend/wasm.rs` | 2,215 | WebAssembly backend |
+| `src/codegen/backend/arm64.rs` | 1,718 | ARM64 native (experimental) |
+| `src/codegen/backend/arm64_enc.rs` | 2,073 | ARM64 instruction encoder |
+| `src/codegen/backend/x86_64.rs` | 1,716 | x86-64 native (experimental) |
+| `src/codegen/backend/x86_64_enc.rs` | 2,123 | x86-64 instruction encoder |
+| `src/codegen/backend/hlsl.rs` | 1,182 | HLSL shader backend |
+| `src/codegen/backend/glsl.rs` | 963 | GLSL shader backend |
 
 ### Type System
 | File | Lines | Purpose |
 |------|-------|---------|
-| `src/types/effects.rs` | 876 | Algebraic effect system |
-| `src/types/ty.rs` | 835 | Core type representation |
-| `src/types/hkt.rs` | 699 | Higher-kinded types |
-| `src/types/traits.rs` | 648 | Trait resolution |
-| `src/types/context.rs` | ~500 | Type environment and scopes |
-| `src/types/unify.rs` | ~400 | Unification algorithm |
+| `src/types/effects.rs` | 867 | Algebraic effect system |
+| `src/types/ty.rs` | 1,160 | Core type representation |
+| `src/types/hkt.rs` | 683 | Higher-kinded types |
+| `src/types/traits.rs` | 665 | Trait resolution |
+| `src/types/context.rs` | 811 | Type environment and scopes |
+| `src/types/unify.rs` | 571 | Unification algorithm |

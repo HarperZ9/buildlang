@@ -97,7 +97,8 @@ Macro argument token trees are scanned for ambient capability surfaces as well:
 the receipt records `println!` under `Console` plus `read_file` under
 `FileSystem`. The scan follows `SourceId` provenance, so external module files
 loaded through `mod foo;` receive the same macro-argument capability gate as
-the entry source.
+the entry source. Unknown extern calls and foreign static reads inside macro
+arguments are surfaced as direct `Foreign` boundaries too.
 
 ```quanta
 fn load_config() {

@@ -168,7 +168,7 @@ fn bench_lexer_small(c: &mut Criterion) {
 
 fn bench_lexer_medium(c: &mut Criterion) {
     let code = generate_large_source(10);
-    let source = SourceFile::anonymous(&code);
+    let source = SourceFile::anonymous(code.as_str());
 
     let mut group = c.benchmark_group("lexer_medium");
     group.throughput(Throughput::Bytes(code.len() as u64));
@@ -185,7 +185,7 @@ fn bench_lexer_medium(c: &mut Criterion) {
 
 fn bench_lexer_large(c: &mut Criterion) {
     let code = generate_large_source(100);
-    let source = SourceFile::anonymous(&code);
+    let source = SourceFile::anonymous(code.as_str());
 
     let mut group = c.benchmark_group("lexer_large");
     group.throughput(Throughput::Bytes(code.len() as u64));
@@ -262,7 +262,7 @@ fn bench_comments(c: &mut Criterion) {
     "#
     .repeat(100);
 
-    let source = SourceFile::anonymous(&commented);
+    let source = SourceFile::anonymous(commented.as_str());
     group.throughput(Throughput::Bytes(commented.len() as u64));
 
     group.bench_function("skip_comments", |b| {
