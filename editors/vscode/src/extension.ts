@@ -37,7 +37,7 @@ export function activate(context: vscode.ExtensionContext) {
         console.log(
             'QuantaLang language server not found. ' +
             'Syntax highlighting is active. ' +
-            'Install quantac and set quantalang.serverPath for full LSP support.'
+            'Install quantac and set quantalang.serverPath to exercise the partial LSP server.'
         );
     });
 }

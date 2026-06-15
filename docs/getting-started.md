@@ -1,6 +1,8 @@
 # Getting Started with QuantaLang
 
-Write shaders in QuantaLang. Compile to HLSL, GLSL, SPIR-V, or C. Drop into ReShade.
+Write shader-oriented QuantaLang examples, emit HLSL/GLSL shader source, and
+run CPU examples through the verified C backend. SPIR-V remains experimental;
+inspect generated `.fx` files before trying them in ReShade.
 
 ## Install
 
@@ -41,7 +43,8 @@ Compile to ReShade:
 quantac hello.quanta --target hlsl -o hello.fx
 ```
 
-Drop `hello.fx` into `reshade-shaders/Shaders/`. Open ReShade. Enable "Quanta_PS_Hello". Adjust the brightness slider.
+Inspect `hello.fx` before use. If it matches the ReShade conventions you need,
+copy it into `reshade-shaders/Shaders/` and test it in a local ReShade runtime.
 
 The repository also includes a tested shader quickstart:
 

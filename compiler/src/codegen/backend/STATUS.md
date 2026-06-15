@@ -1,13 +1,14 @@
 # Status: codegen/backend/
 
-Last audited: 2026-03-21
+Last audited: 2026-06-15
 
 2026-06-15 wind-down assessment: see
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md` for the current product
 posture. This backend-local file is retained as an implementation inventory.
-Several CLI wiring notes below have since changed: non-C targets are selectable
-through `quantac build --target`, but C remains the only production-backed
-end-to-end target.
+Non-C targets are selectable through `quantac build --target`, but C remains
+the only production-backed end-to-end target. This inventory describes apparent
+backend coverage from source and unit tests; it is not a substitute for
+end-to-end executable/module receipts.
 
 2026-06-13 update: the Rust backend now has a narrow executable stdout smoke
 slice in addition to compile-only metadata validation. Eight semantic corpus
@@ -41,11 +42,11 @@ return values, and basic type mapping.
   - Ref, AddressOf, Cast, Aggregate, Repeat, Discriminant, Len, NullaryOp: fully handled
   - FieldAccess, VariantField, IndexAccess: fully handled
   - All terminators (Goto, If, Switch, Call, Return, Unreachable, Abort, Drop, Assert): fully handled
-- **Could produce a working hello-world:** Yes, verified. This is the only backend wired into `quantac build`.
+- **Could produce a working hello-world:** Yes, verified through the current C execution path. This is the only backend with the current product execution claim.
 - **Work needed:** None for basic programs. Already end-to-end functional.
 - **Tests:** 11 unit tests.
 
-## 2. x86-64 Backend (`x86_64.rs`) -- LIKELY WORKING (assembly mode)
+## 2. x86-64 Backend (`x86_64.rs`) -- EXPERIMENTAL (assembly/object mode)
 
 - **Implements Backend trait:** Yes (line 578)
 - **Output format:** GNU-syntax x86-64 assembly (OutputFormat::Assembly) or raw machine code (OutputFormat::Object)
@@ -55,8 +56,8 @@ return values, and basic type mapping.
   - Other rvalues (Ref, Aggregate, FieldAccess, etc.): fallthrough to `# TODO` comment in output
   - Terminators: Goto, If, Return, Call (System V ABI with 6 register args), Unreachable, Abort: handled
   - Switch, Drop, Assert: fallthrough to `# TODO` comment
-- **Could produce a working hello-world:** Yes, for assembly mode. The generated assembly for an add function would be correct: load args, `add rax, rcx`, store result, `ret` with proper prologue/epilogue. Would need `as` (GNU assembler) and `ld` (linker) to produce an executable. Machine code mode also works but produces raw bytes without ELF headers.
-- **Work needed to get it production-ready:**
+- **Could produce a working hello-world:** Plausible for a constrained assembly subset from source inspection and unit tests, but not a current release claim. It still needs assembler/linker execution proof. Machine code mode produces raw bytes without ELF headers.
+- **Work needed before promotion:**
   1. Promote assembler/linker integration from best-effort guidance to a
      verified cross-platform build path
   2. Add an x86/x64 semantic execution corpus
@@ -66,7 +67,7 @@ return values, and basic type mapping.
      comments for unsupported MIR)
 - **Tests:** 22 unit tests.
 
-## 3. ARM64 Backend (`arm64.rs`) -- LIKELY WORKING (assembly mode)
+## 3. ARM64 Backend (`arm64.rs`) -- EXPERIMENTAL (assembly/object mode)
 
 - **Implements Backend trait:** Yes (line 619)
 - **Output format:** ARM64 assembly (OutputFormat::Assembly) or raw machine code (OutputFormat::Object)
@@ -76,8 +77,8 @@ return values, and basic type mapping.
   - Other rvalues: fallthrough to `// TODO` comment
   - Terminators: Goto (`b`), If (`cmp`/`b.ne`/`b`), Return (with stack restore + `ldp`/`ret`), Call (AAPCS64 with x0-x7), Unreachable (`brk #0`), Abort (`bl abort`): handled
   - Switch, Drop, Assert: fallthrough to `// TODO` comment
-- **Could produce a working hello-world:** Yes, for assembly mode on ARM64 hardware. The generated assembly uses correct AAPCS64 calling convention: `stp x29, x30, [sp, #-16]!` / `mov x29, sp` prologue, proper argument register mapping, correct epilogue. Would need cross-assembler and linker on ARM64 Linux.
-- **Work needed to get it working:**
+- **Could produce a working hello-world:** Plausible for a constrained assembly subset on ARM64 hardware or emulation, but not a current release claim. It still needs assembler/linker execution proof and platform coverage.
+- **Work needed before promotion:**
   1. Promote CLI-selected ARM64 output to a verified assembler/linker path
   2. Invoke assembler and linker (or cross-compiler toolchain)
   3. Callee-saved register save/restore is stubbed (`// TODO: Save X19-X28`)
@@ -86,7 +87,7 @@ return values, and basic type mapping.
   6. Only testable on ARM64 hardware or via QEMU emulation
 - **Tests:** 21 unit tests plus machine code tests.
 
-## 4. WASM Backend (`wasm.rs`) -- LIKELY WORKING (WAT text mode)
+## 4. WASM Backend (`wasm.rs`) -- EXPERIMENTAL (WAT text mode)
 
 - **Implements Backend trait:** Yes (line 1630)
 - **Output format:** WAT text format (OutputFormat::Wat), not binary .wasm
@@ -98,11 +99,11 @@ return values, and basic type mapping.
   - IndexAccess: partial (assumes 4-byte elements)
   - Terminators: Goto (comment only -- WASM structured control flow), If (generates `if/then/else`), Call (proper `call $name`), Return, Unreachable, Drop, Assert: handled
   - Switch: emits comments only (no `br_table` generation)
-- **Could produce a working hello-world:** Partially. The WAT output for an add function would be structurally correct (`local.get`, `i32.add`, `return`). However:
+- **Could produce a working hello-world:** Partially for single-block WAT inspection. It is not a current `.wasm` execution claim:
   - Output is WAT text, not binary .wasm. Would need `wat2wasm` (from WABT toolkit) to convert.
   - WASI mode generates full module structure with memory, imports, `_start` export.
   - Goto terminator only emits a comment -- breaks any multi-block control flow. Single-block functions would work.
-- **Work needed to get it working:**
+- **Work needed before promotion:**
   1. Promote CLI-selected WAT/WASM output to a verified binary/run path
   2. Either emit binary .wasm directly or invoke `wat2wasm`
   3. Fix Goto terminator to use WASM structured control flow (`block`/`loop`/`br`)
@@ -111,7 +112,7 @@ return values, and basic type mapping.
   6. Test with `wasmtime` or browser runtime
 - **Tests:** 11 unit tests.
 
-## 5. LLVM Backend (`llvm.rs`) -- LIKELY WORKING
+## 5. LLVM Backend (`llvm.rs`) -- EXPERIMENTAL (nearest non-C candidate)
 
 - **Implements Backend trait:** Yes (line 1705)
 - **Output format:** LLVM IR text (OutputFormat::LlvmIr)
@@ -126,9 +127,8 @@ return values, and basic type mapping.
   - FieldAccess, VariantField: emits `; TODO` comment (not implemented)
   - IndexAccess: emits `; TODO` comment (not implemented)
   - Terminators: Goto (`br label`), If (`br i1`), Switch (`switch`), Call (with proper signatures), Return (`ret`), Unreachable, Drop, Assert: all handled
-- **Could produce a working hello-world:** Yes. The LLVM IR for an add function would be fully correct and valid. Module header with target triple and data layout, proper function definition with `define` keyword, SSA-form `alloca`/`store`/`load`/`add`/`ret`. Can be compiled via `clang output.ll -o program` or `llc output.ll && gcc output.s`.
-- **This is the closest to working after the C backend.**
-- **Work needed to get it working:**
+- **Could produce a working hello-world:** Plausible for constrained LLVM IR inspection and external `clang`/`llc` use, but not a current release claim. This is the closest non-C candidate after the C backend.
+- **Work needed before promotion:**
   1. Promote CLI-selected LLVM output to a verified clang/llc path
   2. Invoke `clang` or `llc` on generated .ll file to produce executable
   3. Implement FieldAccess and IndexAccess (currently emit TODO comments)
@@ -146,8 +146,8 @@ return values, and basic type mapping.
   - Cast: maps to OpConvertFToS/OpConvertSToF/OpUConvert/OpSConvert/etc.
   - Aggregate, Repeat, Ref, AddressOf, FieldAccess, IndexAccess, etc.: returns zero constant (default fallback)
   - Terminators: Goto (OpBranch), If (OpSelectionMerge + OpBranchConditional), Switch (OpSwitch), Return (OpReturn/OpReturnValue), Call (OpFunctionCall), Unreachable (OpUnreachable): handled
-- **Could produce a working hello-world:** No, not in the traditional sense. SPIR-V is a GPU shader/compute format, not a CPU program format. There is no concept of `printf` or stdout. An add function would compile to a valid SPIR-V compute shader entry point, but "running" it requires a Vulkan or OpenCL host program to dispatch it. The binary header (magic number, version, generator ID) is correct, and the module structure follows the SPIR-V spec.
-- **Work needed to get it working (as a compute shader):**
+- **Could produce a working hello-world:** No, not in the traditional stdout sense. SPIR-V is a GPU shader/compute format, not a CPU program format. Any execution claim requires a Vulkan/OpenCL host program and validation for the specific module.
+- **Work needed before promotion:**
   1. Promote CLI-selected SPIR-V output to a validated shader path
   2. Validate output with `spirv-val` from the Vulkan SDK
   3. Global variables emit zero (not wired to storage buffers)
@@ -163,13 +163,17 @@ return values, and basic type mapping.
 | Backend | Backend Trait | Output Format | Hello-World Viable | Biggest Blocker |
 |---------|-------------|---------------|-------------------|-----------------|
 | C | Yes | C99 source | **Yes (working)** | None |
-| x86-64 | Yes | Assembly / machine code | Likely (asm) | No assembler/linker integration |
-| ARM64 | Yes | Assembly / machine code | Likely (asm) | No assembler/linker integration, needs ARM hardware |
-| WASM | Yes | WAT text | Partial | Goto terminator is comment-only, no binary output |
-| LLVM | Yes | LLVM IR text | **Likely (nearest to working)** | No clang/llc invocation, wrong target() return |
+| x86-64 | Yes | Assembly / machine code | Experimental subset only | No assembler/linker integration |
+| ARM64 | Yes | Assembly / machine code | Experimental subset only | No assembler/linker integration, needs ARM hardware/emulation |
+| WASM | Yes | WAT text | Experimental partial | Goto terminator is comment-only, no binary output |
+| LLVM | Yes | LLVM IR text | Experimental, nearest non-C candidate | No clang/llc invocation, wrong target() return |
 | SPIR-V | Yes | SPIR-V binary | No (GPU-only format) | Needs Vulkan host, no buffer I/O |
 
-## Priority Order for Getting Backends Working
+## Historical Priority Order for Promotion Work
+
+Current wind-down posture is preservation and receipt accuracy, not broad
+productionization. If backend promotion resumes, this older order remains a
+reasonable technical sequence:
 
 1. **LLVM** -- Lowest effort. Output is already valid LLVM IR. Harden clang/llc invocation.
 2. **x86-64** -- Medium effort. Assembly output is reasonable. Need assembler + linker.

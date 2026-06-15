@@ -1,5 +1,10 @@
 # Getting Started with QuantaLang
 
+> Current status (2026-06-15): historical/aspirational release-bundle guide.
+> It does not describe an available binary release, install script, package
+> manager, or hosted documentation site. Use the repository root `README.md` and
+> `STATUS.md` for current verified compiler status.
+
 Welcome to QuantaLang! This guide will help you get up and running with the language quickly.
 
 ## Table of Contents

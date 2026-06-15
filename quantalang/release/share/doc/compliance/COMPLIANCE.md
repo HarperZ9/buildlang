@@ -1,6 +1,11 @@
 # QuantaLang Compliance Framework
 ## Safety-Critical Systems & Industry Standards
 
+> Current status (2026-06-15): historical/aspirational compliance framework
+> draft from the release-material tree. It is not evidence of safety
+> certification, regulatory approval, complete verification coverage, or a
+> released compliance package.
+
 **Version:** 1.0.0  
 **Classification:** CONFIDENTIAL  
 **Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.**

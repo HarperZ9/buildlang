@@ -310,14 +310,17 @@ Supports `macro_rules!` definitions with pattern matching and template expansion
 
 ## Language Server Protocol (`src/lsp/`)
 
-**7,087 lines** across 12 files. A full LSP server implementation providing:
+**7,087 lines** across 12 files. Provider implementations exist for the major
+LSP features, but the current `quantac lsp` server loop only dispatches
+lifecycle messages for real clients:
 - **Diagnostics** (`diagnostics.rs`): real-time error reporting
 - **Completion** (`completion.rs`): context-aware code completion
 - **Go to Definition** (`definition.rs`): jump to symbol definition
 - **Hover** (`hover.rs`): type and documentation display
 - **Document Symbols** (`symbols.rs`): outline view
 - **Code Actions** (`actions.rs`): quick fixes and refactorings
-- **Transport** (`transport.rs`): JSON-RPC over stdin/stdout
+- **Transport** (`transport.rs`): JSON-RPC over stdin/stdout, not yet wired into
+  full request dispatch
 
 ## Formatter (`src/fmt/`)
 

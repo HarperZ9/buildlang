@@ -5,7 +5,10 @@ Language support for [QuantaLang](https://github.com/HarperZ9/quantalang) -- syn
 ## Features
 
 - **Syntax highlighting** -- keywords, types, effects, attributes, strings, numbers, comments, macros, operators, and more
-- **Language Server Protocol (LSP)** support via `quantac lsp` -- diagnostics, go-to-definition, hover info, and completions when the compiler is installed
+- **Optional LSP process launch** via `quantac lsp` -- the current server loop
+  starts, but real client request dispatch is still partial; diagnostics,
+  go-to-definition, hover, and completion providers are not yet working VS Code
+  features
 - **Bracket matching**, auto-closing pairs, and code folding
 - **19 snippets** for common constructs (functions, structs, enums, traits, loops, tests, shaders, effects)
 - **Shader attribute highlighting** for `#[vertex]`, `#[fragment]`, and `#[compute]`
@@ -40,7 +43,11 @@ code --install-extension quantalang-1.0.0.vsix
 
 ## Language Server
 
-The extension connects to the QuantaLang language server (`quantac lsp`). If the compiler is not installed, syntax highlighting still works -- the LSP features are optional.
+The extension can start the QuantaLang language server process (`quantac lsp`).
+The current compiler-side server loop is lifecycle-only for real clients, so
+syntax highlighting, snippets, brackets, comments, and file icons are the
+reliable editor features today. LSP providers exist in the compiler tree but are
+not yet exposed as working VS Code requests.
 
 Install the compiler:
 

@@ -1,15 +1,24 @@
 # QuantaLang Shader Programming Guide
 
-This guide covers writing GPU shaders in QuantaLang. If you know HLSL or GLSL, you already know 90% of the syntax -- QuantaLang just removes the ceremony and lets you test shaders on CPU before deploying to GPU.
+Current status (2026-06-15): HLSL and GLSL shader-source output are the
+practical shader path. SPIR-V material in this guide is retained as
+experimental backend documentation and historical graphics-roadmap context, not
+as the current release promise.
+
+This guide covers shader-oriented QuantaLang examples. If you know HLSL or
+GLSL, much of the syntax will look familiar; the verified path today is to run
+CPU examples through C and inspect generated HLSL/GLSL shader source.
 
 ---
 
 ## The Dual-Target Story
 
-Every QuantaLang shader function is a normal function. There is no separate shading language. You write math, annotate an entry point, and the compiler handles the rest:
+Shader functions use normal QuantaLang syntax. The compiler can emit C for CPU
+tests and shader source for HLSL/GLSL; SPIR-V emission remains experimental:
 
 ```quanta
-// This function is just math. It compiles to C, LLVM, WASM, or SPIR-V.
+// This function is just math. The verified route is C; shader-source routes
+// can emit HLSL/GLSL, while SPIR-V is experimental.
 fn aces_tonemap(x: f64) -> f64 {
     let num = x * (2.51 * x + 0.03);
     let den = x * (2.43 * x + 0.59) + 0.14;
@@ -33,11 +42,15 @@ fn main() {
 ```
 
 ```bash
-quantac shader.quanta -o shader.spv   # GPU: Vulkan SPIR-V
+quantac shader.quanta -o shader.hlsl  # Shader source: HLSL
+quantac shader.quanta -o shader.glsl  # Shader source: GLSL
 quantac shader.quanta -o shader.c     # CPU: testable C code
+quantac shader.quanta -o shader.spv   # Experimental: Vulkan SPIR-V
 ```
 
-No other language can do this. Your shader math is unit-testable with `println!` and assertions, then deployed to the GPU without modification.
+Use the C route for executable checks and HLSL/GLSL output for current shader
+experiments. Validate any SPIR-V output with external tooling before using it in
+a renderer.
 
 ---
 
@@ -62,7 +75,9 @@ fn fs_main(inputs: vec3) -> vec4 { ... }
 fn cs_main() { ... }
 ```
 
-Only the annotated function becomes the SPIR-V entry point. All other functions it calls are inlined or emitted as SPIR-V helper functions.
+On the experimental SPIR-V path, the annotated function is intended to become
+the shader entry point. Treat that path as backend research until validated for
+the specific fixture you are using.
 
 ---
 
@@ -140,7 +155,9 @@ let world_pos = model * vec4(0.0, 0.0, 0.0, 1.0);
 
 ## f64 to f32 Coercion
 
-Write your shader math with `f64` for readability and CPU precision. The SPIR-V backend automatically coerces all `f64` values to `f32` for the GPU -- Vulkan 1.0 requires 32-bit floats for standard shader operations.
+Write shader math with the precision required by the target you are testing.
+The experimental SPIR-V backend lowers standard shader floats toward 32-bit GPU
+operations, but this is not a blanket runtime guarantee for arbitrary programs.
 
 ```quanta
 // You write f64:
@@ -152,13 +169,16 @@ fn fresnel(cos_theta: f64, f0: f64) -> f64 {
 // GPU target: SPIR-V backend converts all floats to 32-bit OpTypeFloat
 ```
 
-You never have to think about `f32` vs `f64` for shaders. The compiler does the right thing.
+For release-shaped work, check the generated shader source or SPIR-V validation
+result for the specific fixture.
 
 ---
 
 ## Built-in Functions (GLSL.std.450)
 
-All standard shader math functions are available. On CPU they map to `<math.h>`; on GPU they map to SPIR-V extended instructions.
+Standard shader math helpers are available to the shader-oriented examples. On
+the C path they lower to C math helpers; SPIR-V extended-instruction lowering is
+part of the experimental backend path.
 
 **Trigonometric:**
 ```
@@ -238,13 +258,14 @@ fn main(vertex_id: i32) -> VertexOutput {
 }
 ```
 
-The compiler:
+On the experimental SPIR-V path, the compiler attempts to:
 - Maps `vertex_id` to SPIR-V `BuiltIn VertexIndex`
 - Maps `position` in the return struct to `BuiltIn Position`
 - Outputs `color` as `Location 0` for the fragment shader
 - Decomposes the struct return into separate output variables
 
-Compile: `quantac triangle_vert.quanta -o vert.spv`
+Compile for HLSL/GLSL inspection first, or for SPIR-V research with validation:
+`quantac triangle_vert.quanta -o vert.spv`
 
 ---
 
@@ -268,18 +289,20 @@ fn main(frag_color: vec3) -> vec4 {
 }
 ```
 
-The compiler:
+On the experimental SPIR-V path, the compiler attempts to:
 - Maps `frag_color` to `Location 0` input
 - Maps the return `vec4` to `Location 0` output (framebuffer color)
 - Sets `OpExecutionMode OriginUpperLeft`
 
-Compile: `quantac triangle_frag.quanta -o frag.spv`
+Compile for HLSL/GLSL inspection first, or for SPIR-V research with validation:
+`quantac triangle_frag.quanta -o frag.spv`
 
 ---
 
 ## Struct Return Types for Vertex Outputs
 
-When a vertex shader returns a struct, the compiler decomposes it into separate SPIR-V output variables:
+When a vertex shader returns a struct, the experimental SPIR-V path attempts to
+decompose it into separate output variables:
 
 ```quanta
 struct VertexOutput {
@@ -295,17 +318,18 @@ The `position` field is special -- it maps to `gl_Position` (BuiltIn Position). 
 
 ## Shader Hot Reload Workflow
 
-During development, use the watch command to recompile shaders on save:
+During development, use the watch command to recompile shader source on save:
 
 ```bash
 # Terminal 1: watch and recompile
-quantac watch shaders/ --target=spirv
+quantac watch shaders/ --target=hlsl
 
 # Terminal 2: your Vulkan app
 ./my_engine
 ```
 
-Your engine detects `.spv` timestamp changes and reloads pipeline state. Typical workflow:
+For SPIR-V experiments, switch the target to `spirv` and validate the generated
+`.spv` before reloading it. Typical source-output workflow:
 
 1. Edit `shaders/postprocess.quanta` in your editor
 2. `quantac watch` detects the change, recompiles to `postprocess.spv`

@@ -1,8 +1,15 @@
 # 🎉 Announcing QuantaLang v1.0.0
 
-**The first public release of QuantaLang is here!**
+> Current status (2026-06-15): historical/aspirational announcement draft from
+> the self-hosted release-material tree. It is not evidence of an available
+> v1.0.0 binary release, hosted package registry, install script, or complete
+> standard library. Current verified compiler status lives in the repository
+> root `README.md` and `STATUS.md`.
 
-After extensive development and testing, we're thrilled to announce the public release of QuantaLang v1.0.0 - a modern systems programming language designed for safety, performance, and expressiveness.
+**Historical announcement draft for a planned QuantaLang v1.0.0 release.**
+
+This file is preserved as aspirational release copy. It should not be read as a
+current publication, package, or binary availability statement.
 
 ## What is QuantaLang?
 
@@ -48,7 +55,7 @@ Compile to efficient native code with 36 optimization passes:
 - Loop optimization
 - SIMD vectorization
 
-### 📦 Complete Standard Library
+### 📦 Planned Complete Standard Library
 
 23,000+ lines of standard library code:
 
@@ -73,9 +80,10 @@ quanta repl     # Interactive shell
 
 ## Getting Started
 
-Install with one command:
+Historical planned install command, not current installation guidance:
 
 ```bash
+# Historical draft only. Current path: build compiler/ from source.
 curl -sSL https://quantalang.org/install.sh | sh
 ```
 
@@ -122,7 +130,7 @@ We can't wait to see what you build with QuantaLang!
 
 ---
 
-**Download**: https://releases.quantalang.org/v1.0.0/
+**Historical planned download**: https://releases.quantalang.org/v1.0.0/
 **Documentation**: https://docs.quantalang.org
 **License**: MIT OR Apache-2.0
 
