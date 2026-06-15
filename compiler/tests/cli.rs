@@ -453,6 +453,58 @@ fn check_reports_capability_effect_for_ambient_call_inside_macro_argument() {
 }
 
 #[test]
+fn check_reports_capability_effect_for_macro_argument_call_in_external_module() {
+    let dir = std::env::temp_dir().join(format!(
+        "quantalang_module_macro_arg_capability_gate_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create module macro argument fixture dir");
+    let entry = dir.join("main.quanta");
+    let module = dir.join("ops.quanta");
+
+    fs::write(
+        &entry,
+        r#"mod ops;
+fn main() {}
+"#,
+    )
+    .expect("write module macro argument entry fixture");
+    fs::write(
+        &module,
+        r#"fn leak() ~ Console {
+    println!(read_file("ops.txt"));
+}
+"#,
+    )
+    .expect("write module macro argument module fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&entry)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        !output.status.success(),
+        "external module macro argument ambient file call should fail without FileSystem effect"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FileSystem"),
+        "diagnostic should name FileSystem effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("read_file"),
+        "diagnostic should name triggering module macro argument ambient call:\n{}",
+        stderr
+    );
+}
+
+#[test]
 fn check_receipt_records_env_macro_capability_source() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_check_receipt_env_macro_{}.quanta",
@@ -530,6 +582,64 @@ fn check_receipt_records_macro_argument_capability_source() {
     );
     assert_eq!(
         receipt["observed_capabilities"]["main"]["FileSystem"],
+        serde_json::json!(["read_file"])
+    );
+}
+
+#[test]
+fn check_receipt_records_macro_argument_capability_source_in_external_module() {
+    let dir = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_module_macro_arg_capability_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create module macro argument receipt fixture dir");
+    let entry = dir.join("main.quanta");
+    let module = dir.join("ops.quanta");
+
+    fs::write(
+        &entry,
+        r#"mod ops;
+fn main() {}
+"#,
+    )
+    .expect("write module macro argument receipt entry fixture");
+    fs::write(
+        &module,
+        r#"fn leak() ~ Console + FileSystem {
+    println!(read_file("ops.txt"));
+}
+"#,
+    )
+    .expect("write module macro argument receipt module fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&entry)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        output.status.success(),
+        "external module macro argument capability receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["declared_effects"]["ops_leak"],
+        serde_json::json!(["Console", "FileSystem"])
+    );
+    assert_eq!(
+        receipt["observed_capabilities"]["ops_leak"]["Console"],
+        serde_json::json!(["println!"])
+    );
+    assert_eq!(
+        receipt["observed_capabilities"]["ops_leak"]["FileSystem"],
         serde_json::json!(["read_file"])
     );
 }
