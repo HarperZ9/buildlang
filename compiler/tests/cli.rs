@@ -379,6 +379,82 @@ fn check_receipt_stdout_records_passing_capabilities() {
 }
 
 #[test]
+fn check_reports_capability_effect_for_include_str_macro() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_include_str_capability_gate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"fn main() { let embedded = include_str!("ops.txt"); }"#,
+    )
+    .expect("write include_str macro capability fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "include_str! should fail without FileSystem effect"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FileSystem"),
+        "diagnostic should name FileSystem effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("include_str!"),
+        "diagnostic should name triggering include_str macro:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn check_receipt_records_env_macro_capability_source() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_env_macro_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"fn main() ~ Environment { let token_name = env!("TOKEN"); }"#,
+    )
+    .expect("write env macro receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "env macro receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["declared_effects"]["main"],
+        serde_json::json!(["Environment"])
+    );
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]["Environment"],
+        serde_json::json!(["env!"])
+    );
+}
+
+#[test]
 fn check_receipt_records_gpu_capability_source() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_check_receipt_gpu_{}.quanta",

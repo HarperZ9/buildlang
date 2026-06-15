@@ -129,11 +129,12 @@ quantac vignette.quanta --target glsl -o vignette.glsl
 
 ## Capability Effects
 
-`quantac check` now treats direct ambient runtime access as typed effects. A
-function that calls helpers such as `read_file`, `write_file`, `tcp_connect`,
-`process_exit`, `getenv`, `clock_ms`, Vulkan runtime helpers, known `quanta_*`
-C runtime helper aliases, or an `extern` function/static must declare the
-matching capability effect in its signature:
+`quantac check` now treats direct ambient runtime and compile-time access as
+typed effects. A function that calls helpers such as `read_file`, `write_file`,
+`tcp_connect`, `process_exit`, `getenv`, `clock_ms`, Vulkan runtime helpers,
+known `quanta_*` C runtime helper aliases, compile-time include/environment
+macros, or an `extern` function/static must declare the matching capability
+effect in its signature:
 
 ```quanta
 fn load_config() ~ FileSystem {
@@ -154,6 +155,11 @@ by their actual capability instead of being flattened into generic FFI. For
 example, `quanta_gfx_init` requires `Gpu`, `quanta_read_file` requires
 `FileSystem`, and `quanta_tcp_connect` requires `Network`. Unknown extern
 functions and foreign statics remain `Foreign`.
+
+Compile-time ambient macros are gated as capability access too:
+`include!`, `include_str!`, and `include_bytes!` require `FileSystem`, while
+`env!` and `option_env!` require `Environment`. Receipts record the exact macro
+source, such as `include_str!` or `env!`, under `observed_capabilities`.
 
 If the effect is missing, the checker reports the required capability and a
 diagnostic note naming the ambient call or macro that triggered it. This is the
@@ -331,7 +337,8 @@ inventory.
 Use `quantac policy scaffold receipt.json --output policy.json` to turn an
 accountability receipt into a strict, reviewable policy skeleton with observed
 direct boundaries, ambient helper/macro/FFI sources, propagated callers, and
-callee sources already filled in. Scaffolded policies also enable
+callee sources already filled in, including compile-time file/environment
+macros such as `include_str!` and `env!`. Scaffolded policies also enable
 `require_effect_allowlist`, including for receipts that currently have no
 effects.
 Use `--expect-profile-digest <hex>` with `--profile` to pin check-time CI to the
@@ -343,7 +350,8 @@ document digest.
 
 Receipts separate direct capability boundaries from callers that inherit those
 effects. `observed_capabilities` records ambient helper, macro, and FFI access
-inside a function, such as `read_file`, `tcp_connect`, `println!`, or `touch`.
+inside a function, such as `read_file`, `tcp_connect`, `include_str!`, `env!`,
+`println!`, or `touch`.
 `propagated_effects` records effectful callees that made a caller inherit a
 typed effect. Raw unknown extern-block calls are direct `Foreign` boundaries;
 foreign static reads are direct `Foreign` boundaries; known runtime helper
@@ -538,11 +546,11 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-15
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 860 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-15
+- **Tests**: 862 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-15
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
-  - CLI: 184 binary-level smoke tests cover help output, `quantac doctor`, `quantac corpus verify`, `quantac receipt verify`, explicit corpus roots, C receipt writes against copied corpus fixtures, capability diagnostics, and the runnable quickstart examples
+  - CLI: 186 binary-level smoke tests cover help output, `quantac doctor`, `quantac corpus verify`, `quantac receipt verify`, explicit corpus roots, C receipt writes against copied corpus fixtures, capability diagnostics, and the runnable quickstart examples
   - Codegen: tests across 9 backends, including C formatted-print lowering, Rust source emission, Rust executable smoke checks over the semantic corpus, and semantic-corpus manifest contract/receipt consistency/metadata guards (C backend has 24 end-to-end output verification tests)
 
 ## License

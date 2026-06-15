@@ -66,16 +66,17 @@ fn welcome_everyone() ~ Greeting {
 ## Capability Effects
 
 Some effects are built into the compiler because they describe ambient runtime
-capabilities rather than user-defined operations. `quantac check` surfaces these
-as ordinary effect requirements, so operational access has to appear in the
-function type instead of hiding behind a runtime helper.
+or compile-time capabilities rather than user-defined operations. `quantac
+check` surfaces these as ordinary effect requirements, so operational access has
+to appear in the function type instead of hiding behind a runtime helper or
+macro expansion.
 
 | Capability | Direct ambient surfaces |
 |------------|-------------------------|
-| `FileSystem` | `read_file`, `write_file`, `file_exists`, `read_bytes`, `write_bytes`, `append_file`, `list_dir`, `is_dir`, `file_size` |
+| `FileSystem` | `read_file`, `write_file`, `file_exists`, `read_bytes`, `write_bytes`, `append_file`, `list_dir`, `is_dir`, `file_size`, compile-time include macros such as `include!`, `include_str!`, and `include_bytes!` |
 | `Network` | `tcp_connect`, `tcp_send`, `tcp_recv`, `tcp_close` |
 | `Process` | `exit`, `process_exit` |
-| `Environment` | `getenv`, `args_count`, `args_get` |
+| `Environment` | `getenv`, `args_count`, `args_get`, compile-time environment macros such as `env!` and `option_env!` |
 | `Clock` | `clock_ms`, `time_unix` |
 | `Console` | `read_line`, `read_all`, `stdin_is_pipe`, direct print helpers, console macros such as `println!`, `print!`, `eprintln!`, `eprint!`, and diagnostic logging macros |
 | `Foreign` | calls to unknown functions declared in `extern` blocks and reads from foreign statics |
@@ -86,6 +87,11 @@ classified by their specific domain capability instead of generic `Foreign`.
 For example, `quanta_read_file` is `FileSystem`, `quanta_tcp_connect` is
 `Network`, and `quanta_gfx_init` is `Gpu`. Unknown extern functions and
 foreign statics remain `Foreign`.
+
+Compile-time ambient macros are direct capability surfaces too. `include!`,
+`include_str!`, and `include_bytes!` require `FileSystem`; `env!` and
+`option_env!` require `Environment`; receipts record the exact macro source
+under `observed_capabilities`.
 
 ```quanta
 fn load_config() {
@@ -115,10 +121,11 @@ fn call_foreign() ~ Foreign {
 ```
 
 Diagnostics include a note naming the ambient call or macro, for example
-`read_file`, `touch`, or `println`, so receipts and review tooling can point to
-the exact capability source. Qualified helper paths are classified by their
-capability leaf and recorded with their full path, so `io::read_file()` requires
-`FileSystem` and appears in receipts as `io::read_file`.
+`read_file`, `include_str!`, `env!`, `touch`, or `println`, so receipts and
+review tooling can point to the exact capability source. Qualified helper paths
+are classified by their capability leaf and recorded with their full path, so
+`io::read_file()` requires `FileSystem` and appears in receipts as
+`io::read_file`.
 Capability effects can also live on first-class function types. A parameter
 such as `loader: fn() with FileSystem` makes `loader()` an effectful call, and a
 returning callback can be written as `(fn() -> str) with FileSystem`. Receipts
@@ -243,16 +250,18 @@ Add `--expect-policy-digest sha256:<hex>` when a verification job must prove the
 receipt was accepted under an exact file-backed or built-in policy digest.
 
 `observed_capabilities` records direct ambient capability use inside a function,
-such as `read_file`, `tcp_connect`, `println!`, process helpers, or FFI helpers.
+such as `read_file`, `tcp_connect`, `include_str!`, `env!`, `println!`,
+process helpers, or FFI helpers.
 Raw unknown extern-block calls are direct `Foreign` entries. Known runtime
 helper aliases declared in extern blocks are recorded under their specific
 capability, such as `Gpu` for `quanta_gfx_init` or `FileSystem` for
 `quanta_read_file`; foreign static reads are direct `Foreign` entries; calls to
 local wrappers around those extern functions are propagated dependencies.
-Qualified ambient helpers keep their full source path, which lets
-`direct_capability_source_allowlist` distinguish `io::read_file` from any other
-`read_file` source. These entries are the accountability boundary for code that
-actually touches the outside world.
+Qualified ambient helpers keep their full source path, and ambient macros keep
+their `!` suffix, which lets `direct_capability_source_allowlist` distinguish
+`io::read_file`, `include_str!`, and `env!` from any other source. These entries
+are the accountability boundary for code that actually touches the outside
+world.
 
 `propagated_effects` records effectful callees that make a caller inherit a
 typed effect. This lets policy allow a small number of audited boundary
