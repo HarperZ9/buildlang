@@ -6,7 +6,7 @@
 <title>QuantaLang - quantac compiler</title>
 <meta name="description" content="QuantaLang is an effects-oriented systems language with algebraic effects, a working C backend, HLSL/GLSL shader output, semantic-corpus receipts, and experimental research backends.">
 <meta property="og:title" content="QuantaLang - quantac compiler">
-<meta property="og:description" content="A working effects-language compiler with an honest backend map: C for native execution, HLSL/GLSL for shader output, and experimental research targets.">
+<meta property="og:description" content="A working effects-language compiler with a practical backend map: C for native execution, HLSL/GLSL for shader output, and experimental research targets.">
 <meta property="og:type" content="website">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -35,8 +35,8 @@
   <p class="kicker">effects language - C backend - shader output - semantic receipts</p>
   <div class="hero-grid">
     <div>
-      <h1>A compiler with receipts, not just a language pitch.</h1>
-      <p class="lead">QuantaLang is an effects-oriented systems language built around <code>quantac</code>. The current adoption path is practical: compile and run real programs through the C backend, emit HLSL/GLSL shader source, and verify a small semantic corpus across backend work.</p>
+      <h1>A compiler you can run, with the receipts close by.</h1>
+      <p class="lead">QuantaLang is an effects-oriented systems language built around <code>quantac</code>. The strongest path today is concrete: compile and run real programs through the C backend, emit HLSL/GLSL shader source, and keep the semantic corpus close enough to check as the backend work grows.</p>
       <div class="cta">
         <a class="btn solid" href="#quickstart">Run the quickstart</a>
         <a class="btn" href="https://github.com/HarperZ9/quantalang">Source</a>
@@ -70,12 +70,12 @@ compiler/target/release/quantac corpus verify</code></pre>
 <section id="proof" class="shell section-grid">
   <div class="section-head">
     <p class="kicker">Current state</p>
-    <h2>What is actually true now.</h2>
+    <h2>What you can trust today.</h2>
   </div>
   <div class="stack">
     <article class="glass proof-card">
       <h3>C backend is the adoption path</h3>
-      <p>The working compiler core lowers source through lexer, parser, type checker, MIR, and C99 generation. The C backend is the only backend with end-to-end native execution verified by the compiler test suite.</p>
+      <p>The working compiler core lowers source through lexer, parser, type checker, MIR, and C99 generation. The C backend is the only backend with end-to-end native execution verified by the compiler test suite, including the 868-test Cargo baseline documented in the repo.</p>
     </article>
     <article class="glass proof-card">
       <h3>HLSL and GLSL shader output are working</h3>
@@ -92,7 +92,7 @@ compiler/target/release/quantac corpus verify</code></pre>
   <div class="section-head wide">
     <p class="kicker">Showcase</p>
     <h2>What it can demonstrate.</h2>
-    <p>QuantaLang is already useful as a compiler research surface: effects, typed systems syntax, shader math, a C execution route, corpus receipts, and editor/tooling integration.</p>
+    <p>QuantaLang is already useful as a compiler research surface: effects, typed systems syntax, shader math, a C execution route, corpus receipts, and editor/tooling integration. It is not pretending to be finished; it is showing the working path and the research edges side by side.</p>
   </div>
   <div class="cap-grid">
     <article class="glass cap">
@@ -122,7 +122,7 @@ compiler/target/release/quantac corpus verify</code></pre>
   <div>
     <p class="kicker">One source shape</p>
     <h2>CPU code and shader code live in the same language family.</h2>
-    <p class="lead">The page now showcases the supported path: CPU examples run through C; shader examples emit HLSL/GLSL. The more speculative targets are visible, but plainly labelled as research-grade.</p>
+    <p class="lead">The supported path is straightforward: CPU examples run through C; shader examples emit HLSL/GLSL. The more speculative targets are still visible, but plainly labelled as research-grade.</p>
   </div>
   <div class="glass code-card">
     <div class="terminal-title"><span></span><span></span><span></span><b>effects_greeting.quanta</b></div>
