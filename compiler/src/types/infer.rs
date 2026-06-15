@@ -80,10 +80,26 @@ pub struct TypeInfer<'ctx> {
     propagated_effect_sources: BTreeMap<String, BTreeSet<String>>,
     /// Scoped local aliases for call-source evidence.
     source_bindings: Vec<BTreeMap<String, Vec<String>>>,
+    /// Source evidence visible at each explicit `break` from the current loop.
+    loop_break_source_frames: Vec<BreakSourceFrame>,
     /// Whether any explicit `return` statement was found.
     has_return: bool,
     /// Borrow tracking state for the current function body.
     borrow_state: super::ty::BorrowState,
+}
+
+struct BreakSourceFrame {
+    visible_scope_count: usize,
+    snapshots: Vec<Vec<BTreeMap<String, Vec<String>>>>,
+}
+
+impl BreakSourceFrame {
+    fn new(visible_scope_count: usize) -> Self {
+        Self {
+            visible_scope_count,
+            snapshots: Vec::new(),
+        }
+    }
 }
 
 /// Extract variant names covered by a single pattern.
@@ -233,6 +249,7 @@ impl<'ctx> TypeInfer<'ctx> {
             capability_sources: BTreeMap::new(),
             propagated_effect_sources: BTreeMap::new(),
             source_bindings: vec![BTreeMap::new()],
+            loop_break_source_frames: Vec::new(),
             has_return: false,
             borrow_state: super::ty::BorrowState::new(),
         }
@@ -257,6 +274,7 @@ impl<'ctx> TypeInfer<'ctx> {
             capability_sources: BTreeMap::new(),
             propagated_effect_sources: BTreeMap::new(),
             source_bindings: vec![BTreeMap::new()],
+            loop_break_source_frames: Vec::new(),
             has_return: false,
             borrow_state: super::ty::BorrowState::new(),
         }
@@ -503,6 +521,22 @@ impl<'ctx> TypeInfer<'ctx> {
         }
 
         merged
+    }
+
+    fn record_loop_break_source_snapshot(&mut self) {
+        let Some(visible_scope_count) = self
+            .loop_break_source_frames
+            .last()
+            .map(|frame| frame.visible_scope_count)
+        else {
+            return;
+        };
+
+        let mut snapshot = self.source_bindings.clone();
+        snapshot.truncate(visible_scope_count);
+        if let Some(frame) = self.loop_break_source_frames.last_mut() {
+            frame.snapshots.push(snapshot);
+        }
     }
 
     fn call_sources_for_name(&self, name: &str) -> Vec<String> {
@@ -4191,9 +4225,26 @@ impl<'ctx> TypeInfer<'ctx> {
     }
 
     fn infer_loop(&mut self, body: &ast::Block) -> Ty {
+        let pre_loop_scope_count = self.source_bindings.len();
+        self.loop_break_source_frames
+            .push(BreakSourceFrame::new(pre_loop_scope_count));
+
         self.push_scope(ScopeKind::Loop);
         let _ = self.infer_block(body);
         self.pop_scope();
+        let body_exit_sources = self.source_bindings.clone();
+
+        let break_source_snapshots = self
+            .loop_break_source_frames
+            .pop()
+            .map(|frame| frame.snapshots)
+            .unwrap_or_default();
+
+        if break_source_snapshots.is_empty() {
+            self.source_bindings = body_exit_sources;
+        } else {
+            self.source_bindings = Self::merge_source_binding_snapshots(&break_source_snapshots);
+        }
 
         // Loop returns never (unless break with value)
         Ty::never()
@@ -4535,6 +4586,10 @@ impl<'ctx> TypeInfer<'ctx> {
 
         if let Some(expr) = value {
             let _ = self.infer_expr(expr);
+        }
+
+        if self.ctx.in_loop() {
+            self.record_loop_break_source_snapshot();
         }
 
         Ty::never()
