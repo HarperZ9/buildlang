@@ -190,9 +190,12 @@ Install the QuantaLang extension for:
 - Code snippets (`fn`, `fragment`, `uniform`, `vignette`, `hash`)
 - LSP diagnostics (when `quantac` is in PATH)
 
-## Example: Complete SSAO Shader
+## Example: SSAO Shader Fixture
 
-See `demos/ssao.quanta` - 85 lines of QuantaLang that compile to a production ReShade SSAO effect with depth sampling, random kernel loop, occlusion computation, and adjustable uniforms.
+See `demos/ssao.quanta` for a QuantaLang SSAO source fixture with depth
+sampling, random kernel loop, occlusion computation, and adjustable uniforms.
+It is useful for HLSL output inspection, but current release verification does
+not claim ReShade runtime validation for this demo.
 
 ```bash
 quantac demos/ssao.quanta --target hlsl -o ssao.fx

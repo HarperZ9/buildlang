@@ -1,20 +1,25 @@
 # QuantaLang Development Roadmap
 
-Updated March 2026. Execution order, not wishlist.
+Updated 2026-06-15. This roadmap is now a historical planning record, not the
+active execution plan. The current posture is wind-down and preservation: keep
+the C-backed compiler core, capability/security gate, receipts, and public docs
+accurate; keep Rust and x86/x64 as experimental validation/research lanes; do
+not reopen broad language or backend expansion without a new product decision.
+See `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`.
 
-## Current Focus: Rust Backend Hardening (June 2026)
+## Current Focus: Wind-Down and Preservation (June 2026)
 
-Rust is now a first-class experimental source target for Quantac. The immediate
-compiler lane is to make the backend a verification bridge, not just another
-pretty-printer:
+The active compiler lane is no longer broad expansion. Practical work should
+stay inside:
 
-- generated Rust for the supported MIR subset must pass `rustc --emit=metadata`
-- ownership, borrow, and lifetime smoke programs must stay covered by backend
-  tests
-- Quanta's own type checker remains the language authority
-- Rust lowering should expose backend mistakes instead of hiding them behind raw
-  pointer shortcuts where a safer projection is available
-- unsupported MIR must keep returning explicit codegen errors
+- regression fixes for verified C/compiler-core surfaces;
+- capability/effect security gate and receipt/policy maintenance;
+- documentation and public-claim accuracy;
+- Rust backend receipt/test preservation for the supported subset;
+- x86/x64 backend preservation tests, without productionization work.
+
+The older phased roadmap below remains useful background, but it is not the
+current execution order.
 
 ## Phase 1: Interprocedural Lifetime Analysis (weeks 1-6)
 
