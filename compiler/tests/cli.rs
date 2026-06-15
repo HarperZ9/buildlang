@@ -3099,6 +3099,148 @@ fn main() ~ FileSystem {
 }
 
 #[test]
+fn check_receipt_records_nested_if_let_selected_aggregate_origins() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_nested_if_let_selected_aggregate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+struct Ops {
+    loader: (fn(str) -> str) with FileSystem
+}
+
+struct Outer {
+    ops: Ops
+}
+
+enum Slot {
+    Ready(i32),
+}
+
+fn load_config(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn load_secret(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn main() ~ FileSystem {
+    let slot = Slot::Ready(0);
+    let config = Ops { loader: load_config };
+    let secret = Ops { loader: load_secret };
+    let outer = Outer { ops: if let Slot::Ready(version) = slot { secret } else { config } };
+    (outer.ops.loader)("ops.txt");
+}
+"#,
+    )
+    .expect("write nested if-let selected aggregate receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "nested if-let selected aggregate receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["load_config", "load_secret", "outer.ops.loader"])
+    );
+}
+
+#[test]
+fn check_receipt_records_tuple_destructured_nested_if_let_selected_aggregate_origins() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_tuple_nested_if_let_selected_aggregate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+struct Ops {
+    loader: (fn(str) -> str) with FileSystem
+}
+
+struct Outer {
+    ops: Ops
+}
+
+enum Slot {
+    Ready(i32),
+}
+
+fn load_config(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn load_secret(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn main() ~ FileSystem {
+    let slot = Slot::Ready(0);
+    let config = Ops { loader: load_config };
+    let secret = Ops { loader: load_secret };
+    let Outer { ops } = Outer { ops: if let Slot::Ready(version) = slot { secret } else { config } };
+    (ops.loader)("ops.txt");
+}
+"#,
+    )
+    .expect("write destructured nested if-let selected aggregate receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "destructured nested if-let selected aggregate receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["load_config", "load_secret", "ops.loader"])
+    );
+}
+
+#[test]
 fn check_receipt_records_shorthand_aggregate_field_origin_without_stale_alias() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_check_receipt_shorthand_aggregate_field_{}.quanta",

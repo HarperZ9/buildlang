@@ -292,11 +292,13 @@ without forcing policies to allow stale construction aliases such as
 Enum-variant payloads keep their stored callback sources when a match, `if let`,
 or `while let` branch destructures them, and aggregate payloads refresh
 branch-local paths without forcing policies to allow stale construction aliases.
-Control-flow-selected aggregate bindings and tuple destructuring of selected
-aggregates merge every branch origin into the receiving access path, so
-`let ops = if use_secret { secret } else { config }` records origins such as
-`load_config`, `load_secret`, and `ops.loader` without forcing policies to
-allow stale branch-local paths such as `config.loader` or `secret.loader`.
+Control-flow-selected aggregate bindings, `if let` selected aggregate fields,
+and tuple/destructuring of selected aggregates merge every branch origin into
+the receiving access path, so
+`let ops = if use_secret { secret } else { config }` and
+`Outer { ops: if let ... }` record origins such as `load_config`,
+`load_secret`, `ops.loader`, and `outer.ops.loader` without forcing policies
+to allow stale branch-local paths such as `config.loader` or `secret.loader`.
 Struct-field shorthand with aggregate values follows the same refresh rule:
 `Outer { ops }` records `outer.ops.loader` with the original callable origin
 without forcing policies to allow stale `ops.loader` evidence.
