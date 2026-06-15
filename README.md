@@ -253,11 +253,13 @@ assignment to a callback variable or aggregate member refreshes that evidence,
 including when a nested block mutates an outer callback alias or ops slot, so
 stale sources do not survive `loader = load_secret`,
 `ops.loader = load_secret`, `ops = defaults`, or
-`loaders[0] = load_secret`. Conditional and `match` branch assignments merge
-possible post-branch sources, so `if use_secret { loader = load_secret }` keeps
-both the original and assigned callback origins in later receipts, while
+`loaders[0] = load_secret`. Conditional, `match`, and zero-or-more loop
+assignments merge possible post-control-flow sources, so
+`if use_secret { loader = load_secret }` keeps both the original and assigned
+callback origins in later receipts,
 `match mode { 0 => { loader = load_secret } _ => { loader = load_backup } }`
-keeps both arm-assigned origins.
+keeps both arm-assigned origins, and `while reload { loader = load_secret }`
+keeps the pre-loop source too.
 Async blocks follow the same delayed-effect model for type checking: creating
 `let task = async { read_file("ops.toml") };` is pure, while `task.await`
 inherits `FileSystem` and records both the awaited source (`task`) and the
@@ -420,7 +422,7 @@ only the local alias. Plain assignment to an identifier, struct field, tuple
 slot, indexed entry, or whole aggregate rebinds that call-source evidence,
 including across nested blocks that mutate an outer binding, so policy receipts
 follow mutable callback slots instead of preserving stale earlier sources.
-Assignments inside `if`, `if/else`, and `match` branches are merged
+Assignments inside `if`, `if/else`, `match`, `while`, and `for` are merged
 conservatively so receipts show every callback source that can reach the later
 call.
 
@@ -526,11 +528,11 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-15
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 847 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-15
+- **Tests**: 850 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-15
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
-  - CLI: 171 binary-level smoke tests cover help output, `quantac doctor`, `quantac corpus verify`, `quantac receipt verify`, explicit corpus roots, C receipt writes against copied corpus fixtures, capability diagnostics, and the runnable quickstart examples
+  - CLI: 174 binary-level smoke tests cover help output, `quantac doctor`, `quantac corpus verify`, `quantac receipt verify`, explicit corpus roots, C receipt writes against copied corpus fixtures, capability diagnostics, and the runnable quickstart examples
   - Codegen: tests across 9 backends, including C formatted-print lowering, Rust source emission, Rust executable smoke checks over the semantic corpus, and semantic-corpus manifest contract/receipt consistency/metadata guards (C backend has 24 end-to-end output verification tests)
 
 ## License
