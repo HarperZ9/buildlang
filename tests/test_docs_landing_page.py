@@ -35,8 +35,8 @@ def test_backend_maturity_claims_are_precise() -> None:
 def test_current_progress_evidence_is_visible() -> None:
     source = page_source()
 
-    assert "656 passing compiler tests" in source
-    assert "132/132 public test programs compile" in source
+    assert "868 passing compiler tests" in source
+    assert "192 CLI tests" in source
     assert "8-program semantic corpus" in source
     assert "quantac corpus verify" in source
     assert "quantac doctor" in source
