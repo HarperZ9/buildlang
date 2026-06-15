@@ -204,6 +204,9 @@ without leaking stale intermediate sources such as `replacement.loader`;
 tuple-literal destructuring such as `let (ops,) = (replacement,)` applies the
 same refresh rule, keeping `load_config` and `ops.loader` without requiring
 stale `replacement.loader` evidence;
+stored enum-variant aggregate payloads such as `let slot =
+Slot::Ready(replacement); match slot { Slot::Ready(ops) => ... }` refresh the
+branch-local path the same way;
 whole-struct assignment such as
 `ops = defaults` refreshes member origins without leaking stale intermediate
 paths such as `defaults.loader`; enum-variant payloads preserve their stored
@@ -360,9 +363,10 @@ replacements or aggregate-literal destructuring refresh those paths without
 requiring stale replacement aliases in source allowlists.
 Whole-aggregate assignments refresh member origins too, so `ops = defaults`
 does not leave stale `defaults.loader` evidence in later `ops.loader` calls.
-Enum-variant payloads keep their stored callback sources when a
-match, `if let`, or `while let` branch
-destructures them. Immediate invocation
+Enum-variant payloads keep their stored callback sources when a match, `if let`,
+or `while let` branch destructures them, and stored aggregate payloads refresh
+branch-local paths such as `ops.loader` without requiring stale construction
+aliases such as `replacement.loader`. Immediate invocation
 of a returned effectful function records the factory call, such as
 `make_loader()`.
 Async blocks also delay capability effects at construction time: `async {
@@ -502,7 +506,7 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-14
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 831 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
+- **Tests**: 832 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
