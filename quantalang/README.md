@@ -1,5 +1,12 @@
 # QuantaLang
 
+> Current status (2026-06-15): this file belongs to the aspirational
+> self-hosted/release-material tree under `quantalang/`. It is not the current
+> public compiler status page. Package-manager, hosted-domain, performance,
+> full-standard-library, and release-install claims below are historical
+> product scaffolding unless separately verified in the root `README.md` and
+> `STATUS.md`.
+
 <p align="center">
   <img src="docs/assets/logo.svg" alt="QuantaLang Logo" width="200"/>
 </p>

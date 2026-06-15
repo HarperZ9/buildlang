@@ -1,6 +1,6 @@
 # Status: lsp/
 
-Last audited: 2026-03-21
+Last audited: 2026-06-15
 
 ## Working
 - **Transport** (`transport.rs`, 468 lines): Stdio-based LSP transport with Content-Length header parsing, raw message send/receive. 5 unit tests.
@@ -19,14 +19,14 @@ Last audited: 2026-03-21
 - **Server runner** (`run_server()` in `server.rs`): The `run_server()` function exists and creates a stdio transport loop. However, the JSON parsing is manual string matching (`content.contains("\"method\":\"initialize\"")`), not real JSON parsing (no serde_json). Only `initialize`, `initialized`, `shutdown`, and `exit` methods are dispatched in the runner -- all other capabilities (completion, hover, diagnostics, definition, symbols, actions) have provider implementations but **are not wired into the message dispatch loop**. The server can technically start but cannot handle real VS Code requests beyond lifecycle events.
 
 ## Aspirational
-- Full VS Code extension integration: no `--lsp` CLI subcommand exists in `quantac`. The `run_server()` function is exported from the library but never called from `main.rs`.
+- Full VS Code extension integration: `quantac lsp` starts the current server loop, but the loop still does not dispatch completion, hover, definition, diagnostics, symbols, or actions to their provider implementations.
 - Real JSON parsing: the server uses manual string matching, not proper JSON deserialization.
 - Semantic analysis integration: diagnostics are text-pattern-based (bracket matching, unused variables by regex), not driven by the actual lexer/parser/type-checker pipeline.
 
 ## Not Started
 - No VS Code extension package.
 - No integration with the compiler's type checker for semantic diagnostics.
-- No `quantac lsp` CLI subcommand.
+- Full request dispatch for the `quantac lsp` CLI entry point.
 
 ## Honest Assessment
-Total: 6,448 lines across 12 files, 24 unit tests. The LSP module has real, substantial implementations for all major language server capabilities (completion, hover, definition, diagnostics, symbols, actions). However, it is **not connected to the CLI**, uses **manual string matching instead of JSON parsing**, and only dispatches lifecycle messages in the actual server loop. The provider implementations work in isolation (unit-tested) but cannot be reached by a real LSP client. You cannot connect VS Code to this server and get working completions or diagnostics.
+Total: 7,087 lines across 12 files, 24 unit tests. The LSP module has real, substantial implementations for all major language server capabilities (completion, hover, definition, diagnostics, symbols, actions). It is now reachable through `quantac lsp`, but the server loop still uses manual string matching instead of JSON parsing and only dispatches lifecycle messages. The provider implementations work in isolation (unit-tested) but are not yet reachable from a real LSP client request. You cannot connect VS Code to this server and get working completions or diagnostics yet.

@@ -397,11 +397,10 @@ code --install-extension editors/quantalang-0.1.0.vsix
 
 - **Syntax highlighting** for `.quanta` files -- keywords, types, attributes, shader builtins
 - **Snippets** -- type `fn`, `struct`, `match`, `#[fragment]` to expand common patterns
-- **LSP integration** -- powered by `quantac lsp`, providing:
-  - Go to definition
-  - Hover type information
-  - Diagnostics (errors and warnings inline)
-  - Completion suggestions
+- **LSP launch support** -- `quantac lsp` starts the current server loop. The
+  provider implementations for definition, hover, diagnostics, and completion
+  exist in the compiler tree, but request dispatch is still partial and should
+  not be treated as a full VS Code language-server experience yet.
 
 ### Start the LSP Manually
 
@@ -419,7 +418,9 @@ The LSP communicates over stdin/stdout using the Language Server Protocol.
 
 ### Explore the Shader Demos
 
-The `demos/` directory contains 19 complete shader effects you can study and modify:
+The `demos/` directory contains shader source fixtures and generated artifacts
+you can study and modify. They are useful examples, but they are not all part
+of the current release gate.
 
 | Demo | Description |
 |------|-------------|
@@ -443,7 +444,10 @@ quantac ssao.quanta --target glsl -o ssao.glsl
 
 ### Run the Test Suite
 
-The `tests/programs/` directory contains 117 integration tests with `.expected` output files:
+The `tests/programs/` directory contains legacy and current fixtures with
+`.expected` output files. The current release-shaped proof is the Cargo
+baseline documented in `STATUS.md`; the historical `quantac test` sweep is not
+currently a green release gate.
 
 ```bash
 quantac run tests/programs/01_hello.quanta

@@ -1,7 +1,7 @@
 # QuantaLang Compiler Design
 
 > Architectural documentation for the QuantaLang compiler (`quantac`).
-> 99,214 lines of Rust across 87 source files.
+> 88,946 lines of Rust across 87 source files in `compiler/src/`.
 
 ## Pipeline Overview
 
