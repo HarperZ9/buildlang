@@ -282,6 +282,10 @@ allow stale branch-local paths such as `config.loader` or `secret.loader`.
 Struct-field shorthand with aggregate values follows the same refresh rule:
 `Outer { ops }` records `outer.ops.loader` with the original callable origin
 without forcing policies to allow stale `ops.loader` evidence.
+Shadowing an aggregate with an opaque producer, such as replacing
+`Ops { loader: load_config }` with `let ops = make_ops()`, clears the old
+descendant source tree before binding the new producer, so policies do not have
+to allow stale helper origins from the previous binding.
 Returned effectful function values invoked immediately
 record factory calls such as `make_loader()`.
 Async blocks keep the same boundary: construction is pure for type checking,

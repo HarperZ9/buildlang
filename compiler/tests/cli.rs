@@ -3221,6 +3221,67 @@ fn main() ~ FileSystem {
 }
 
 #[test]
+fn check_receipt_clears_stale_aggregate_sources_for_shadowed_opaque_binding() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_shadowed_opaque_aggregate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+struct Ops {
+    loader: (fn(str) -> str) with FileSystem
+}
+
+fn load_config(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn make_ops() -> Ops {
+    Ops { loader: read_file }
+}
+
+fn main() ~ FileSystem {
+    let ops = Ops { loader: load_config };
+    let ops = make_ops();
+    (ops.loader)("ops.txt");
+}
+"#,
+    )
+    .expect("write shadowed opaque aggregate receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "shadowed opaque aggregate receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["make_ops().loader", "ops.loader"])
+    );
+}
+
+#[test]
 fn check_reports_effect_for_effectful_tuple_field_call() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_tuple_field_effect_gate_{}.quanta",
