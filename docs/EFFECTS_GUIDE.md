@@ -163,7 +163,7 @@ assignment such as `ops = defaults` refreshes member origins without keeping
 stale intermediate paths such as `defaults.loader`. Enum-variant construction
 and tuple-struct construction stay pure when they only store the callback.
 Immediate invocation of a returned effectful function records the
-factory call, such as `make_loader()`. `if` and `match` expressions that select
+factory call, such as `make_loader()`. `if`, `if let`, and `match` expressions that select
 an effectful function value record every possible branch target, for example
 `load_config` and `load_secret`; binding that selected function before calling
 it records both the binding and the possible selected targets, even when the
@@ -315,12 +315,13 @@ body's capability effects. Selected futures merge branch effects and origins,
 so `task.await` must declare every capability that any possible async branch
 can perform and receipts can still show which branch helper introduced it.
 Control-flow selectors keep reviewable evidence too: calling the result of an
-`if` or `match` expression records the possible effectful branch targets, such
-as `load_config` and `load_secret`. If the selected function is bound first,
-for example `let loader = if ...`, a later `loader()` call records `loader`
-plus the possible selected targets. Explicit casts to typed effectful callback
-values preserve that same evidence, so a coercion such as `as (fn() -> str)
-with FileSystem` does not launder the selected origins. References and
+`if`, `if let`, or `match` expression records the possible effectful branch
+targets, such as `load_config` and `load_secret`. If the selected function is
+bound first, for example `let loader = if ...` or `let loader = if let ...`,
+a later `loader()` call records `loader` plus the possible selected targets.
+Explicit casts to typed effectful callback values preserve that same evidence,
+so a coercion such as `as (fn() -> str) with FileSystem` does not launder the
+selected origins. References and
 dereferences preserve it too, so `(*loader_ref)()` records the selected branch
 targets, `loader`, and `loader_ref`. `?` is limited to fallible values and is
 rejected on plain callback values, so `loader?()` cannot erase the selected

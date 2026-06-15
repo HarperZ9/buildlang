@@ -5229,6 +5229,71 @@ fn main() {
 }
 
 #[test]
+fn check_reports_effect_for_if_let_bound_selected_effectful_function_call() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_if_let_bound_selected_effectful_function_gate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+enum Slot {
+    Ready(i32),
+}
+
+fn load_config() -> str ~ FileSystem {
+    read_file("config.toml")
+}
+
+fn load_secret() -> str ~ FileSystem {
+    read_file("secret.toml")
+}
+
+fn main() {
+    let slot = Slot::Ready(0);
+    let loader = if let Slot::Ready(version) = slot { load_secret } else { load_config };
+    loader();
+}
+"#,
+    )
+    .expect("write if-let-bound selected effectful function fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run quantac check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "if-let-bound selected effectful function call should fail without FileSystem effect"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FileSystem"),
+        "diagnostic should name FileSystem effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("loader"),
+        "diagnostic should name selected binding source:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("load_config"),
+        "diagnostic should name if-let fallback source:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("load_secret"),
+        "diagnostic should name if-let matched source:\n{}",
+        stderr
+    );
+}
+
+#[test]
 fn check_rejects_try_operator_on_selected_effectful_function_value() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_try_selected_effectful_function_gate_{}.quanta",
@@ -5318,6 +5383,67 @@ fn main() ~ FileSystem {
     assert!(
         output.status.success(),
         "let-bound selected effectful function receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["load_config", "load_secret", "loader"])
+    );
+}
+
+#[test]
+fn check_receipt_records_if_let_bound_selected_effectful_function_sources() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_if_let_bound_selected_effectful_function_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+enum Slot {
+    Ready(i32),
+}
+
+fn load_config() -> str ~ FileSystem {
+    read_file("config.toml")
+}
+
+fn load_secret() -> str ~ FileSystem {
+    read_file("secret.toml")
+}
+
+fn main() ~ FileSystem {
+    let slot = Slot::Ready(0);
+    let loader = if let Slot::Ready(version) = slot { load_secret } else { load_config };
+    loader();
+}
+"#,
+    )
+    .expect("write if-let-bound selected effectful function receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "if-let-bound selected effectful function receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
