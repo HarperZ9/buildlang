@@ -201,9 +201,10 @@ both the original and reassigned callback origins because either value can
 reach the call site. After a `match` assigns different callbacks in different
 arms, later receipts keep each arm-assigned origin; guarded arms also retain the
 pre-match source because the guard can fail. After `while reload { loader =
-load_secret }` or `for item in items { loader = load_secret }`, later receipts
-keep the pre-loop source as well as the body-assigned source because the loop
-body can execute zero times.
+load_secret }`, `while let Slot::Ready(v) = slot { loader = load_secret }`, or
+`for item in items { loader = load_secret }`, later receipts keep the pre-loop
+source as well as the body-assigned source because the loop body can execute
+zero times.
 Async blocks are delayed effect values too. `let task = async {
 read_file("ops.toml") };` does not perform `FileSystem` at construction time;
 `task.await` inherits the stored capability effect and records both `task` and
