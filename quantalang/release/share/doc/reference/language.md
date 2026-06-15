@@ -1,5 +1,10 @@
 # QuantaLang Language Reference
 
+> Current status (2026-06-15): historical/aspirational release-bundle reference.
+> It is not the current language implementation contract. Use the repository
+> root `README.md`, `STATUS.md`, and `SPECIFICATION.md` for current verified
+> compiler behavior.
+
 This document provides a complete reference for the QuantaLang programming language.
 
 ## Table of Contents

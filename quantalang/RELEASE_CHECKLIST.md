@@ -1,4 +1,9 @@
-# QuantaLang v1.0.0 Release Checklist
+# QuantaLang v1.0.0 Release Checklist Draft
+
+> Current status (2026-06-15): historical/aspirational checklist from the
+> self-hosted release-material tree. Checked boxes below are preserved planning
+> content, not current evidence of a completed v1.0.0 release. Current verified
+> compiler status lives in the repository root `README.md` and `STATUS.md`.
 
 ## Pre-Release Verification
 
@@ -98,7 +103,7 @@
 7. [x] Update website ✅
 8. [x] Announce release ✅
 
-## Post-Release
+## Historical Post-Release Plan
 
 - Monitor issue tracker for bug reports
 - Prepare hotfix process
@@ -107,14 +112,11 @@
 
 ---
 
-**Status: ✅ RELEASED** 
+**Historical draft status: not current release evidence**
 
-Release Date: December 19, 2024
+Draft release date: December 19, 2024
 
-All critical components are complete. The language has been publicly released with:
-- Full compiler implementation
-- Comprehensive standard library
-- Complete tooling ecosystem
-- Professional documentation
-- CI/CD infrastructure
-- Website and announcement published
+This checklist is preserved as release-planning scaffolding. It does not prove
+that critical components were completed, a package registry was published, or a
+public v1.0.0 release is available. Use the repository root `README.md` and
+`STATUS.md` for current verified state.

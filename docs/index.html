@@ -39,21 +39,23 @@
       <p class="lead">QuantaLang is an effects-oriented systems language built around <code>quantac</code>. The current adoption path is practical: compile and run real programs through the C backend, emit HLSL/GLSL shader source, and verify a small semantic corpus across backend work.</p>
       <div class="cta">
         <a class="btn solid" href="#quickstart">Run the quickstart</a>
-        <a class="btn" href="https://crates.io/crates/quantalang">crates.io</a>
         <a class="btn" href="https://github.com/HarperZ9/quantalang">Source</a>
       </div>
     </div>
     <aside class="glass hero-card">
       <div class="terminal-title"><span></span><span></span><span></span><b>quantac today</b></div>
-      <pre><code>cargo install quantalang
+      <pre><code>git clone https://github.com/HarperZ9/quantalang.git
+cd quantalang/compiler
+cargo build --release
+cd ..
 
-quantac doctor
-quantac run examples/quickstart/hello.quanta
-quantac run examples/quickstart/ledger.quanta
-quantac run examples/quickstart/effects_greeting.quanta
-quantac examples/quickstart/vignette_shader.quanta \
+compiler/target/release/quantac doctor
+compiler/target/release/quantac run examples/quickstart/hello.quanta
+compiler/target/release/quantac run examples/quickstart/ledger.quanta
+compiler/target/release/quantac run examples/quickstart/effects_greeting.quanta
+compiler/target/release/quantac examples/quickstart/vignette_shader.quanta \
   --target hlsl -o vignette_shader.hlsl
-quantac corpus verify</code></pre>
+compiler/target/release/quantac corpus verify</code></pre>
     </aside>
   </div>
   <div class="stats">
@@ -168,10 +170,13 @@ fn PS_Vignette(uv: vec2) -> vec4 {
   <div class="glass install-card">
     <p class="kicker">Install</p>
     <h2>Try the actual compiler path.</h2>
-    <pre><code>cargo install quantalang
-quantac doctor
-quantac run examples/quickstart/hello.quanta
-quantac corpus verify</code></pre>
+    <pre><code>git clone https://github.com/HarperZ9/quantalang.git
+cd quantalang/compiler
+cargo build --release
+cd ..
+compiler/target/release/quantac doctor
+compiler/target/release/quantac run examples/quickstart/hello.quanta
+compiler/target/release/quantac corpus verify</code></pre>
   </div>
   <div class="side-list">
     <article class="glass"><h3>Editor support</h3><p>The VS Code extension provides syntax highlighting, brackets, comment toggles, and file icons. The CLI also exposes <code>quantac lsp</code>, <code>quantac fmt</code>, and <code>quantac pkg</code>, with LSP/package-manager maturity still documented as partial.</p></article>

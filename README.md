@@ -1,8 +1,5 @@
 # QuantaLang
 
-[![crates.io](https://img.shields.io/crates/v/quantalang.svg)](https://crates.io/crates/quantalang)
-[![docs.rs](https://img.shields.io/docsrs/quantalang)](https://docs.rs/quantalang)
-[![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/HarperZ9.quantalang?label=VS%20Code)](https://marketplace.visualstudio.com/items?itemName=HarperZ9.quantalang)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **The Effects Language** - a Rust-built compiler for typed effects, systems
@@ -17,21 +14,15 @@ experimental research surfaces.
 
 ## Install
 
-From crates.io (recommended):
-
-```bash
-cargo install quantalang
-# binary: quantac
-```
-
-Or build from source:
+Build from the repository source:
 
 ```bash
 cd compiler
 cargo build --release
 ```
 
-Add `target/release/quantac` (or `target\release\quantac.exe` on Windows) to your PATH.
+Add `compiler/target/release/quantac` (or
+`compiler\target\release\quantac.exe` on Windows) to your PATH.
 
 Verify your local toolchain:
 
@@ -45,7 +36,10 @@ maturity table.
 
 ## Editor support
 
-Install the **[QuantaLang VS Code extension](https://marketplace.visualstudio.com/items?itemName=HarperZ9.quantalang)** - syntax highlighting, brackets, comment toggles. Grammar source: [HarperZ9/quantalang-tmLanguage](https://github.com/HarperZ9/quantalang-tmLanguage).
+VS Code extension sources live in `editors/vscode`: syntax highlighting,
+brackets, comment toggles, file icons, and optional `quantac lsp` process
+startup. LSP request dispatch is still partial; see
+`compiler/src/lsp/STATUS.md`.
 
 ## Quick Start
 
@@ -538,7 +532,12 @@ historical C-backend output record, not the current release gate; the legacy
 `quantac test` fixture runner now needs a Console-capability annotation pass
 before it can be used as a public green-corpus claim again.
 
-Programs cover: functions, recursion, structs, enums, closures, generics, traits, dynamic dispatch, algebraic effects, pattern matching, iterators, hashmaps, vector math, color science, and self-hosted compiler components.
+The broader fixture corpus covers functions, recursion, structs, enums,
+closures, generics, traits, dynamic dispatch, algebraic effects, pattern
+matching, iterators, hashmaps, vector math, color science, and historical
+self-hosted compiler components. Treat that as a mixed regression/design corpus;
+the current release-shaped proof is the Cargo baseline and 8-program semantic
+corpus receipt path above.
 
 The C backend is the primary target. HLSL/GLSL produce clean shader output. SPIR-V, LLVM, WASM, Rust, x86-64, and ARM64 backends are experimental.
 

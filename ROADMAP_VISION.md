@@ -1,9 +1,18 @@
 # QuantaLang: The Graphics Programming Language
 # Vision Roadmap - Making QuantaLang World-Changing
 
+> Current status (2026-06-15): historical/superseded graphics vision record.
+> Use `STATUS.md`, `ARCHITECTURE.md`, and
+> `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md` for current compiler
+> maturity. The current wind-down posture keeps C as the verified execution
+> anchor, HLSL/GLSL as shader-source output, and SPIR-V/native backends as
+> experimental research lanes.
+
 ## Context
 
-QuantaLang has proven itself: 70K-line Rust compiler, 101 end-to-end tests, 5 Python apps ported, all 8 milestones from the original roadmap delivered. The language works.
+Historical context from an earlier graphics push: QuantaLang had accumulated a
+large Rust compiler and multiple graphics proof artifacts. Those counts and
+milestones are not the current release gate.
 
 Now it needs to become **the language elite graphics programmers demand** - the tool Pascal Gilcher, Boris Vorontsov, and every AAA shader programmer would choose over HLSL/GLSL/C++.
 

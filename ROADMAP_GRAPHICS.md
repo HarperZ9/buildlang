@@ -1,14 +1,24 @@
 # QuantaLang Graphics Roadmap
 
+> Current status (2026-06-15): historical planning record, superseded by
+> `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`. Do not treat the March
+> 2026 counts, GPU-demo claims, or SPIR-V validation bullets below as the
+> current release gate. The current product anchor is C backend execution,
+> HLSL/GLSL shader-source output, semantic receipts, and experimental backend
+> preservation.
+
 **Goal: The language elite graphics programmers choose over C++ and HLSL.**
 
 **Identity: Mathematically precise systems programming with algebraic effects - write your engine and your shaders in one language.**
 
 ---
 
-## Current State (v0.1.1 - March 2026)
+## Historical Snapshot (v0.1.1 - March 2026)
 
-### Proven Working (48/48 end-to-end tests)
+This section is preserved for roadmap context. Current backend maturity and test
+counts live in `STATUS.md`, `ARCHITECTURE.md`, and the wind-down assessment.
+
+### Historical Claims from the Graphics Sprint
 - vec2/vec3/vec4 with constructors, arithmetic (+, -, *), field access (.x, .y, .z, .w)
 - Swizzling (color.xyz, color.zyx, color.rg)
 - mat4 with identity, translate, scale, perspective, multiply (mat4*mat4, mat4*vec4)
@@ -31,7 +41,7 @@
 - SPIR-V: OpTypeImage, OpTypeSampler, OpTypeSampledImage, OpImageSampleImplicitLod
 - SPIR-V: Uniform buffer blocks with OpDecorate Block/Binding/DescriptorSet/ColMajor/MatrixStride
 
-### Compiler Stats
+### Historical Compiler Stats
 - 66K+ lines Rust compiler, 477+ unit tests
 - 48 end-to-end test programs verified
 - 4 validated SPIR-V shader files (triangle vert/frag + uniform vert + textured frag)
