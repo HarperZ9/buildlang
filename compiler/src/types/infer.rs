@@ -2395,15 +2395,7 @@ impl<'ctx> TypeInfer<'ctx> {
                 expr,
                 body,
                 ..
-            } => {
-                let expr_ty = self.infer_expr(expr);
-                self.push_scope(ScopeKind::Loop);
-                self.check_pattern(pattern, &expr_ty);
-                self.bind_pattern_call_sources(pattern, expr);
-                let _ = self.infer_block(body);
-                self.pop_scope();
-                Ty::unit()
-            }
+            } => self.infer_while_let(pattern, expr, body),
 
             // Type ascription: `expr: Type`
             ExprKind::TypeAscription { expr: inner, ty } => {
@@ -4215,6 +4207,28 @@ impl<'ctx> TypeInfer<'ctx> {
 
         self.push_scope(ScopeKind::Loop);
         self.check_pattern(pattern, &item_ty);
+        let _ = self.infer_block(body);
+        self.pop_scope();
+        let body_exit_sources = self.source_bindings.clone();
+
+        self.source_bindings =
+            Self::merge_source_binding_snapshots(&[pre_loop_sources, body_exit_sources]);
+
+        Ty::unit()
+    }
+
+    fn infer_while_let(
+        &mut self,
+        pattern: &ast::Pattern,
+        expr: &ast::Expr,
+        body: &ast::Block,
+    ) -> Ty {
+        let expr_ty = self.infer_expr(expr);
+        let pre_loop_sources = self.source_bindings.clone();
+
+        self.push_scope(ScopeKind::Loop);
+        self.check_pattern(pattern, &expr_ty);
+        self.bind_pattern_call_sources(pattern, expr);
         let _ = self.infer_block(body);
         self.pop_scope();
         let body_exit_sources = self.source_bindings.clone();
