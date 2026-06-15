@@ -279,6 +279,9 @@ aggregates merge every branch origin into the receiving access path, so
 `let ops = if use_secret { secret } else { config }` records origins such as
 `load_config`, `load_secret`, and `ops.loader` without forcing policies to
 allow stale branch-local paths such as `config.loader` or `secret.loader`.
+Struct-field shorthand with aggregate values follows the same refresh rule:
+`Outer { ops }` records `outer.ops.loader` with the original callable origin
+without forcing policies to allow stale `ops.loader` evidence.
 Returned effectful function values invoked immediately
 record factory calls such as `make_loader()`.
 Async blocks keep the same boundary: construction is pure for type checking,
