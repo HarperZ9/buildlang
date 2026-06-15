@@ -192,7 +192,9 @@ clears stale local-function provenance while keeping the call as propagated
 through `loader`. Assignment to an aggregate member or whole aggregate follows
 the same rule, so `ops.loader = load_secret`, `ops = defaults`, and
 `loaders[0] = load_secret` update later receipt evidence instead of preserving
-stale callback sources.
+stale callback sources. The refresh applies when a nested block mutates an
+outer callback alias or aggregate slot, so lexical block structure does not
+roll receipt provenance back to the pre-assignment source.
 Async blocks are delayed effect values too. `let task = async {
 read_file("ops.toml") };` does not perform `FileSystem` at construction time;
 `task.await` inherits the stored capability effect and records both `task` and
@@ -319,9 +321,9 @@ tuple-struct, struct, enum-variant, and slice destructuring, including
 the same evidence, so destructured aliases do not hide which selected callee
 introduced the effect.
 Reassigning that identifier, a struct field, a tuple slot, or an indexed entry
-updates the source set, which
-lets receipts describe mutable callback slots without carrying stale provenance
-from the old value.
+updates the source set, including when the assignment occurs in a nested block
+that mutates an outer binding, which lets receipts describe mutable callback
+slots without carrying stale provenance from the old value.
 
 Policy profiles turn receipt evidence into an enforceable CI gate:
 

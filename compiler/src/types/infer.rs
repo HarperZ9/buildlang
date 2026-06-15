@@ -376,6 +376,11 @@ impl<'ctx> TypeInfer<'ctx> {
     }
 
     fn bind_call_sources(&mut self, name: &str, sources: Vec<String>) {
+        let scope_index = self.current_source_binding_scope_index();
+        self.bind_call_sources_in_scope(scope_index, name, sources);
+    }
+
+    fn bind_call_sources_in_scope(&mut self, scope_index: usize, name: &str, sources: Vec<String>) {
         let sources = Self::dedupe_call_sources(
             sources
                 .into_iter()
@@ -389,7 +394,7 @@ impl<'ctx> TypeInfer<'ctx> {
                 .collect(),
         );
 
-        if let Some(scope) = self.source_bindings.last_mut() {
+        if let Some(scope) = self.source_bindings.get_mut(scope_index) {
             scope.remove(name);
             if !sources.is_empty() {
                 scope.insert(name.to_string(), sources);
@@ -406,16 +411,60 @@ impl<'ctx> TypeInfer<'ctx> {
         self.bind_call_sources(name, merged);
     }
 
+    fn merge_call_sources_in_scope(
+        &mut self,
+        scope_index: usize,
+        name: &str,
+        sources: Vec<String>,
+    ) {
+        let mut merged = self
+            .source_bindings
+            .get(scope_index)
+            .and_then(|scope| scope.get(name))
+            .cloned()
+            .unwrap_or_default();
+        merged.extend(sources);
+        self.bind_call_sources_in_scope(scope_index, name, merged);
+    }
+
     fn clear_call_source_tree(&mut self, name: &str) {
+        let scope_index = self.current_source_binding_scope_index();
+        self.clear_call_source_tree_in_scope(scope_index, name);
+    }
+
+    fn clear_call_source_tree_in_scope(&mut self, scope_index: usize, name: &str) {
         let dot_prefix = format!("{name}.");
         let bracket_prefix = format!("{name}[");
-        if let Some(scope) = self.source_bindings.last_mut() {
+        if let Some(scope) = self.source_bindings.get_mut(scope_index) {
             scope.retain(|source, _| {
                 source != name
                     && !source.starts_with(&dot_prefix)
                     && !source.starts_with(&bracket_prefix)
             });
         }
+    }
+
+    fn current_source_binding_scope_index(&self) -> usize {
+        self.source_bindings.len().saturating_sub(1)
+    }
+
+    fn source_binding_scope_index_for_mutation(&self, access_source: &str) -> usize {
+        let dot_prefix = format!("{access_source}.");
+        let bracket_prefix = format!("{access_source}[");
+        let root = Self::call_source_root(access_source);
+
+        for (scope_index, scope) in self.source_bindings.iter().enumerate().rev() {
+            if scope.contains_key(access_source)
+                || scope.keys().any(|source| {
+                    source.starts_with(&dot_prefix) || source.starts_with(&bracket_prefix)
+                })
+                || (root != access_source && scope.contains_key(root))
+            {
+                return scope_index;
+            }
+        }
+
+        self.current_source_binding_scope_index()
     }
 
     fn call_sources_for_name(&self, name: &str) -> Vec<String> {
@@ -523,10 +572,21 @@ impl<'ctx> TypeInfer<'ctx> {
         target_prefix: &str,
         merge: bool,
     ) -> bool {
+        let scope_index = self.current_source_binding_scope_index();
+        self.bind_bound_call_source_tree_in_scope(scope_index, source_prefix, target_prefix, merge)
+    }
+
+    fn bind_bound_call_source_tree_in_scope(
+        &mut self,
+        scope_index: usize,
+        source_prefix: &str,
+        target_prefix: &str,
+        merge: bool,
+    ) -> bool {
         let copied = self.bound_call_source_tree_for_access(source_prefix, target_prefix);
         let has_copied_sources = !copied.is_empty();
         for (target, sources) in copied {
-            self.bind_member_call_sources(&target, sources, merge);
+            self.bind_member_call_sources_in_scope(scope_index, &target, sources, merge);
         }
         has_copied_sources
     }
@@ -798,18 +858,24 @@ impl<'ctx> TypeInfer<'ctx> {
         target_ty: &Ty,
     ) {
         for target_source in self.call_access_sources(target) {
-            self.clear_call_source_tree(&target_source);
-            let copied_members =
-                self.bind_assigned_aggregate_member_sources(&target_source, value, target_ty);
-            self.bind_aggregate_call_sources(&target_source, value);
+            let scope_index = self.source_binding_scope_index_for_mutation(&target_source);
+            self.clear_call_source_tree_in_scope(scope_index, &target_source);
+            let copied_members = self.bind_assigned_aggregate_member_sources(
+                scope_index,
+                &target_source,
+                value,
+                target_ty,
+            );
+            self.bind_aggregate_call_sources_in_scope(scope_index, &target_source, value);
             if !copied_members && !self.expr_binds_aggregate_members(value) {
-                self.bind_call_sources(&target_source, value_sources.clone());
+                self.bind_call_sources_in_scope(scope_index, &target_source, value_sources.clone());
             }
         }
     }
 
     fn bind_assigned_aggregate_member_sources(
         &mut self,
+        scope_index: usize,
         target_name: &str,
         value: &ast::Expr,
         target_ty: &Ty,
@@ -821,10 +887,20 @@ impl<'ctx> TypeInfer<'ctx> {
             if !inherited_sources.is_empty() {
                 copied = true;
             }
-            self.bind_member_call_sources(&target_member, inherited_sources, false);
+            self.bind_member_call_sources_in_scope(
+                scope_index,
+                &target_member,
+                inherited_sources,
+                false,
+            );
             for source in self.call_sources(value) {
                 let source_member = format!("{source}{member}");
-                if self.bind_bound_call_source_tree(&source_member, &target_member, false) {
+                if self.bind_bound_call_source_tree_in_scope(
+                    scope_index,
+                    &source_member,
+                    &target_member,
+                    false,
+                ) {
                     copied = true;
                 }
             }
@@ -1012,14 +1088,35 @@ impl<'ctx> TypeInfer<'ctx> {
     }
 
     fn bind_aggregate_call_sources(&mut self, name: &str, expr: &ast::Expr) {
-        self.bind_aggregate_call_sources_inner(name, expr, false);
+        let scope_index = self.current_source_binding_scope_index();
+        self.bind_aggregate_call_sources_inner(scope_index, name, expr, false);
+    }
+
+    fn bind_aggregate_call_sources_in_scope(
+        &mut self,
+        scope_index: usize,
+        name: &str,
+        expr: &ast::Expr,
+    ) {
+        self.bind_aggregate_call_sources_inner(scope_index, name, expr, false);
     }
 
     fn bind_member_call_sources(&mut self, member_name: &str, sources: Vec<String>, merge: bool) {
+        let scope_index = self.current_source_binding_scope_index();
+        self.bind_member_call_sources_in_scope(scope_index, member_name, sources, merge);
+    }
+
+    fn bind_member_call_sources_in_scope(
+        &mut self,
+        scope_index: usize,
+        member_name: &str,
+        sources: Vec<String>,
+        merge: bool,
+    ) {
         if merge {
-            self.merge_call_sources(member_name, sources);
+            self.merge_call_sources_in_scope(scope_index, member_name, sources);
         } else {
-            self.bind_call_sources(member_name, sources);
+            self.bind_call_sources_in_scope(scope_index, member_name, sources);
         }
     }
 
@@ -1029,13 +1126,29 @@ impl<'ctx> TypeInfer<'ctx> {
         value: &ast::Expr,
         merge: bool,
     ) {
+        let scope_index = self.current_source_binding_scope_index();
+        self.bind_direct_expr_member_call_sources_in_scope(scope_index, member_name, value, merge);
+    }
+
+    fn bind_direct_expr_member_call_sources_in_scope(
+        &mut self,
+        scope_index: usize,
+        member_name: &str,
+        value: &ast::Expr,
+        merge: bool,
+    ) {
         if self.expr_has_bound_call_source_descendants(value) {
-            self.bind_member_call_sources(member_name, Vec::new(), merge);
+            self.bind_member_call_sources_in_scope(scope_index, member_name, Vec::new(), merge);
             for source in self.call_sources(value) {
-                self.bind_bound_call_source_tree(&source, member_name, merge);
+                self.bind_bound_call_source_tree_in_scope(scope_index, &source, member_name, merge);
             }
         } else {
-            self.bind_member_call_sources(member_name, self.call_sources(value), merge);
+            self.bind_member_call_sources_in_scope(
+                scope_index,
+                member_name,
+                self.call_sources(value),
+                merge,
+            );
         }
     }
 
@@ -1045,42 +1158,89 @@ impl<'ctx> TypeInfer<'ctx> {
         source_name: &str,
         merge: bool,
     ) {
+        let scope_index = self.current_source_binding_scope_index();
+        self.bind_shorthand_member_call_sources_in_scope(
+            scope_index,
+            member_name,
+            source_name,
+            merge,
+        );
+    }
+
+    fn bind_shorthand_member_call_sources_in_scope(
+        &mut self,
+        scope_index: usize,
+        member_name: &str,
+        source_name: &str,
+        merge: bool,
+    ) {
         if self.has_bound_call_source_descendants(source_name) {
-            self.bind_member_call_sources(member_name, Vec::new(), merge);
-            self.bind_bound_call_source_tree(source_name, member_name, merge);
+            self.bind_member_call_sources_in_scope(scope_index, member_name, Vec::new(), merge);
+            self.bind_bound_call_source_tree_in_scope(scope_index, source_name, member_name, merge);
         } else {
             let sources = self.call_sources_for_name(source_name);
-            self.bind_member_call_sources(member_name, sources, merge);
+            self.bind_member_call_sources_in_scope(scope_index, member_name, sources, merge);
         }
     }
 
-    fn bind_aggregate_call_sources_inner(&mut self, name: &str, expr: &ast::Expr, merge: bool) {
+    fn bind_aggregate_call_sources_inner(
+        &mut self,
+        scope_index: usize,
+        name: &str,
+        expr: &ast::Expr,
+        merge: bool,
+    ) {
         match &expr.kind {
             ExprKind::Tuple(elems) => {
                 for (index, elem) in elems.iter().enumerate() {
                     let member_name = format!("{}.{}", name, index);
-                    self.bind_direct_expr_member_call_sources(&member_name, elem, merge);
-                    self.bind_aggregate_call_sources_inner(&member_name, elem, merge);
+                    self.bind_direct_expr_member_call_sources_in_scope(
+                        scope_index,
+                        &member_name,
+                        elem,
+                        merge,
+                    );
+                    self.bind_aggregate_call_sources_inner(scope_index, &member_name, elem, merge);
                 }
             }
             ExprKind::Array(elems) => {
                 let wildcard_name = format!("{}[]", name);
                 if !merge {
-                    self.bind_member_call_sources(&wildcard_name, Vec::new(), false);
+                    self.bind_member_call_sources_in_scope(
+                        scope_index,
+                        &wildcard_name,
+                        Vec::new(),
+                        false,
+                    );
                 }
 
                 for (index, elem) in elems.iter().enumerate() {
-                    self.bind_direct_expr_member_call_sources(&wildcard_name, elem, true);
+                    self.bind_direct_expr_member_call_sources_in_scope(
+                        scope_index,
+                        &wildcard_name,
+                        elem,
+                        true,
+                    );
                     let member_name = format!("{}[{}]", name, index);
-                    self.bind_direct_expr_member_call_sources(&member_name, elem, merge);
-                    self.bind_aggregate_call_sources_inner(&member_name, elem, merge);
-                    self.bind_aggregate_call_sources_inner(&wildcard_name, elem, true);
+                    self.bind_direct_expr_member_call_sources_in_scope(
+                        scope_index,
+                        &member_name,
+                        elem,
+                        merge,
+                    );
+                    self.bind_aggregate_call_sources_inner(scope_index, &member_name, elem, merge);
+                    self.bind_aggregate_call_sources_inner(scope_index, &wildcard_name, elem, true);
                 }
             }
             ExprKind::ArrayRepeat { element, .. } => {
                 let member_name = format!("{}[]", name);
-                self.bind_direct_expr_member_call_sources(&member_name, element, merge);
-                self.bind_aggregate_call_sources_inner(&member_name, element, merge);
+                self.bind_direct_expr_member_call_sources_in_scope(
+                    scope_index,
+                    &member_name,
+                    element,
+                    merge,
+                );
+                self.bind_aggregate_call_sources_inner(scope_index, &member_name, element, merge);
             }
             ExprKind::Struct { path, fields, rest } => {
                 let explicit_fields: BTreeSet<_> = fields
@@ -1103,10 +1263,20 @@ impl<'ctx> TypeInfer<'ctx> {
                                 self.bound_call_sources_for_access(&access_source)
                             })
                             .collect();
-                        self.bind_member_call_sources(&member_name, inherited_sources, merge);
+                        self.bind_member_call_sources_in_scope(
+                            scope_index,
+                            &member_name,
+                            inherited_sources,
+                            merge,
+                        );
                         for source in &rest_sources {
                             let source_member = format!("{}.{}", source, field_name);
-                            self.bind_bound_call_source_tree(&source_member, &member_name, merge);
+                            self.bind_bound_call_source_tree_in_scope(
+                                scope_index,
+                                &source_member,
+                                &member_name,
+                                merge,
+                            );
                         }
                     }
                 }
@@ -1114,10 +1284,21 @@ impl<'ctx> TypeInfer<'ctx> {
                 for field in fields {
                     let member_name = format!("{}.{}", name, field.name.as_ref());
                     if let Some(value) = field.value.as_deref() {
-                        self.bind_direct_expr_member_call_sources(&member_name, value, merge);
-                        self.bind_aggregate_call_sources_inner(&member_name, value, merge);
+                        self.bind_direct_expr_member_call_sources_in_scope(
+                            scope_index,
+                            &member_name,
+                            value,
+                            merge,
+                        );
+                        self.bind_aggregate_call_sources_inner(
+                            scope_index,
+                            &member_name,
+                            value,
+                            merge,
+                        );
                     } else {
-                        self.bind_shorthand_member_call_sources(
+                        self.bind_shorthand_member_call_sources_in_scope(
+                            scope_index,
                             &member_name,
                             field.name.as_ref(),
                             merge,
@@ -1130,8 +1311,13 @@ impl<'ctx> TypeInfer<'ctx> {
             {
                 for (index, arg) in args.iter().enumerate() {
                     let member_name = format!("{}.{}", name, index);
-                    self.bind_direct_expr_member_call_sources(&member_name, arg, merge);
-                    self.bind_aggregate_call_sources_inner(&member_name, arg, merge);
+                    self.bind_direct_expr_member_call_sources_in_scope(
+                        scope_index,
+                        &member_name,
+                        arg,
+                        merge,
+                    );
+                    self.bind_aggregate_call_sources_inner(scope_index, &member_name, arg, merge);
                 }
             }
             ExprKind::If {
@@ -1140,27 +1326,27 @@ impl<'ctx> TypeInfer<'ctx> {
                 ..
             } => {
                 if let Some(expr) = then_branch.tail_expr() {
-                    self.bind_aggregate_call_sources_inner(name, expr, true);
+                    self.bind_aggregate_call_sources_inner(scope_index, name, expr, true);
                 }
                 if let Some(expr) = else_branch.as_deref() {
-                    self.bind_aggregate_call_sources_inner(name, expr, true);
+                    self.bind_aggregate_call_sources_inner(scope_index, name, expr, true);
                 }
             }
             ExprKind::Match { arms, .. } => {
                 for arm in arms {
-                    self.bind_aggregate_call_sources_inner(name, &arm.body, true);
+                    self.bind_aggregate_call_sources_inner(scope_index, name, &arm.body, true);
                 }
             }
             ExprKind::Block(block) | ExprKind::Unsafe(block) => {
                 if let Some(expr) = block.tail_expr() {
-                    self.bind_aggregate_call_sources_inner(name, expr, merge);
+                    self.bind_aggregate_call_sources_inner(scope_index, name, expr, merge);
                 }
             }
             ExprKind::Paren(inner)
             | ExprKind::Deref(inner)
             | ExprKind::Cast { expr: inner, .. }
             | ExprKind::Ref { expr: inner, .. } => {
-                self.bind_aggregate_call_sources_inner(name, inner, merge)
+                self.bind_aggregate_call_sources_inner(scope_index, name, inner, merge)
             }
             _ => {}
         }
