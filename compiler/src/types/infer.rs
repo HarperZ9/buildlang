@@ -4052,10 +4052,14 @@ impl<'ctx> TypeInfer<'ctx> {
 
     fn infer_match(&mut self, scrutinee: &ast::Expr, arms: &[ast::MatchArm], span: Span) -> Ty {
         let scrutinee_ty = self.infer_expr(scrutinee);
+        let pre_match_sources = self.source_bindings.clone();
+        let mut arm_source_snapshots = Vec::new();
 
         let mut result_ty = Ty::fresh_var();
 
         for arm in arms {
+            self.source_bindings = pre_match_sources.clone();
+
             // Type check pattern against scrutinee
             self.check_pattern(&arm.pattern, &scrutinee_ty);
             self.source_bindings.push(BTreeMap::new());
@@ -4073,6 +4077,16 @@ impl<'ctx> TypeInfer<'ctx> {
             result_ty = self.merge_future_effect_annotations(&result_ty, &body_ty);
 
             self.source_bindings.pop();
+            arm_source_snapshots.push(self.source_bindings.clone());
+        }
+
+        if arm_source_snapshots.is_empty() {
+            self.source_bindings = pre_match_sources;
+        } else {
+            if arms.iter().any(|arm| arm.guard.is_some()) {
+                arm_source_snapshots.push(pre_match_sources);
+            }
+            self.source_bindings = Self::merge_source_binding_snapshots(&arm_source_snapshots);
         }
 
         // Exhaustiveness checking: determine the enum type from either

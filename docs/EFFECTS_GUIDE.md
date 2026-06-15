@@ -194,10 +194,13 @@ the same rule, so `ops.loader = load_secret`, `ops = defaults`, and
 `loaders[0] = load_secret` update later receipt evidence instead of preserving
 stale callback sources. The refresh applies when a nested block mutates an
 outer callback alias or aggregate slot, so lexical block structure does not
-roll receipt provenance back to the pre-assignment source. Conditional
-assignment is conservative: after `if use_secret { loader = load_secret }`, a
-later `loader("x")` receipt keeps both the original and reassigned callback
-origins because either value can reach the call site.
+roll receipt provenance back to the pre-assignment source. Conditional and
+`match` assignment are conservative: after
+`if use_secret { loader = load_secret }`, a later `loader("x")` receipt keeps
+both the original and reassigned callback origins because either value can
+reach the call site. After a `match` assigns different callbacks in different
+arms, later receipts keep each arm-assigned origin; guarded arms also retain the
+pre-match source because the guard can fail.
 Async blocks are delayed effect values too. `let task = async {
 read_file("ops.toml") };` does not perform `FileSystem` at construction time;
 `task.await` inherits the stored capability effect and records both `task` and
@@ -327,8 +330,8 @@ Reassigning that identifier, a struct field, a tuple slot, or an indexed entry
 updates the source set, including when the assignment occurs in a nested block
 that mutates an outer binding, which lets receipts describe mutable callback
 slots without carrying stale provenance from the old value. When an assignment
-is branch-local, receipts merge the branch exits rather than keeping only the
-last branch the type checker visited.
+is branch-local in `if`, `if/else`, or `match`, receipts merge the branch exits
+rather than keeping only the last branch the type checker visited.
 
 Policy profiles turn receipt evidence into an enforceable CI gate:
 

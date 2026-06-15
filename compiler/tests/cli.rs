@@ -3763,6 +3763,206 @@ fn main() ~ FileSystem {
 }
 
 #[test]
+fn check_receipt_merges_outer_alias_sources_after_match_assignment() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_match_assignment_alias_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn load_config(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn load_secret(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn load_backup(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn main() ~ FileSystem {
+    let mode = 0;
+    let mut loader = load_config;
+    match mode {
+        0 => { loader = load_secret; }
+        _ => { loader = load_backup; }
+    };
+    loader("ops.txt");
+}
+"#,
+    )
+    .expect("write match assignment alias receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "match assignment alias receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["load_backup", "load_secret", "loader"])
+    );
+}
+
+#[test]
+fn check_receipt_keeps_pre_match_alias_source_after_guarded_match_assignment() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_guarded_match_assignment_alias_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn load_config(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn load_secret(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn load_backup(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn main() ~ FileSystem {
+    let mode = true;
+    let allow_secret = false;
+    let mut loader = load_config;
+    match mode {
+        true if allow_secret => { loader = load_secret; },
+        false => { loader = load_backup; }
+    };
+    loader("ops.txt");
+}
+"#,
+    )
+    .expect("write guarded match assignment alias receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "guarded match assignment alias receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["load_backup", "load_config", "load_secret", "loader"])
+    );
+}
+
+#[test]
+fn check_receipt_merges_outer_aggregate_sources_after_match_assignment() {
+    let fixture = std::env::temp_dir().join(format!(
+        "quantalang_check_receipt_match_assignment_aggregate_{}.quanta",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+struct Ops {
+    loader: (fn(str) -> str) with FileSystem
+}
+
+fn load_config(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn load_secret(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn load_backup(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn main() ~ FileSystem {
+    let mode = 0;
+    let mut ops = Ops { loader: load_config };
+    match mode {
+        0 => { ops.loader = load_secret; }
+        _ => { ops.loader = load_backup; }
+    };
+    (ops.loader)("ops.txt");
+}
+"#,
+    )
+    .expect("write match assignment aggregate receipt fixture");
+
+    let output = quantac()
+        .arg("check")
+        .arg(&fixture)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run quantac check --receipt -");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "match assignment aggregate receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(
+        receipt["observed_capabilities"]["main"]
+            .as_object()
+            .expect("main observed capabilities")
+            .len(),
+        0
+    );
+    assert_eq!(
+        receipt["propagated_effects"]["main"]["FileSystem"],
+        serde_json::json!(["load_backup", "load_secret", "ops.loader"])
+    );
+}
+
+#[test]
 fn check_receipt_records_effectful_tuple_field_call_source() {
     let fixture = std::env::temp_dir().join(format!(
         "quantalang_check_receipt_tuple_field_effect_{}.quanta",
