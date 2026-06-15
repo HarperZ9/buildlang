@@ -1739,6 +1739,19 @@ impl<'ctx> TypeInfer<'ctx> {
                     .map_or_else(Vec::new, |expr| self.call_sources(expr));
                 Self::dedupe_call_sources(then_sources.into_iter().chain(else_sources).collect())
             }
+            ExprKind::IfLet {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let then_sources = then_branch
+                    .tail_expr()
+                    .map_or_else(Vec::new, |expr| self.call_sources(expr));
+                let else_sources = else_branch
+                    .as_deref()
+                    .map_or_else(Vec::new, |expr| self.call_sources(expr));
+                Self::dedupe_call_sources(then_sources.into_iter().chain(else_sources).collect())
+            }
             ExprKind::Match { arms, .. } => Self::dedupe_call_sources(
                 arms.iter()
                     .flat_map(|arm| self.call_sources(&arm.body))

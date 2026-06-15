@@ -223,8 +223,8 @@ whole-struct assignment such as
 `ops = defaults` refreshes member origins without leaking stale intermediate
 paths such as `defaults.loader`; enum-variant payloads preserve their stored
 callback sources when matched; immediate calls through
-returned function values record sources such as `make_loader()`. `if` and
-`match` expressions that select an
+returned function values record sources such as `make_loader()`. `if`,
+`if let`, and `match` expressions that select an
 effectful function value record every possible branch target, for example
 `load_config` and `load_secret`; binding that selected function before calling
 it records both the binding and the possible selected targets, even when the
@@ -402,11 +402,12 @@ origin (`task <- read_file`) under `propagated_effects`. Futures selected by
 awaiting a selected task requires every possible branch capability and leaves
 receipt evidence for each possible origin.
 Control-flow selectors keep reviewable evidence too: calling the result of an
-`if` or `match` expression records the possible effectful branch targets, such
-as `load_config` and `load_secret`. If the selected function is bound first,
-for example `let loader = if ...`, a later `loader()` call records `loader`
-plus the possible selected targets; an explicit cast to a typed effectful
-callback keeps that same source set instead of collapsing it to the local alias.
+`if`, `if let`, or `match` expression records the possible effectful branch
+targets, such as `load_config` and `load_secret`. If the selected function is
+bound first, for example `let loader = if ...` or `let loader = if let ...`,
+a later `loader()` call records `loader` plus the possible selected targets; an
+explicit cast to a typed effectful callback keeps that same source set instead
+of collapsing it to the local alias.
 References keep it too, so `(*loader_ref)()` records the selected branch targets,
 `loader`, and `loader_ref`. `?` is limited to fallible values and is rejected on
 plain callback values, so `loader?()` cannot erase the selected callback's effect
@@ -534,11 +535,11 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-15
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 856 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-15
+- **Tests**: 858 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-15
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
-  - CLI: 180 binary-level smoke tests cover help output, `quantac doctor`, `quantac corpus verify`, `quantac receipt verify`, explicit corpus roots, C receipt writes against copied corpus fixtures, capability diagnostics, and the runnable quickstart examples
+  - CLI: 182 binary-level smoke tests cover help output, `quantac doctor`, `quantac corpus verify`, `quantac receipt verify`, explicit corpus roots, C receipt writes against copied corpus fixtures, capability diagnostics, and the runnable quickstart examples
   - Codegen: tests across 9 backends, including C formatted-print lowering, Rust source emission, Rust executable smoke checks over the semantic corpus, and semantic-corpus manifest contract/receipt consistency/metadata guards (C backend has 24 end-to-end output verification tests)
 
 ## License
