@@ -2298,22 +2298,13 @@ impl<'ctx> TypeInfer<'ctx> {
                 expr: scrutinee,
                 then_branch,
                 else_branch,
-            } => {
-                // if let Pattern = expr { then } else { else }
-                let scrutinee_ty = self.infer_expr(scrutinee);
-                self.check_pattern(pattern, &scrutinee_ty);
-                self.source_bindings.push(BTreeMap::new());
-                self.bind_pattern_call_sources(pattern, scrutinee);
-                let then_ty = self.infer_block(then_branch);
-                self.source_bindings.pop();
-                if let Some(else_expr) = else_branch.as_deref() {
-                    let else_ty = self.infer_expr(else_expr);
-                    let _ = self.unify(&then_ty, &else_ty, expr.span);
-                    self.apply(&then_ty)
-                } else {
-                    Ty::unit()
-                }
-            }
+            } => self.infer_if_let(
+                pattern,
+                scrutinee,
+                then_branch,
+                else_branch.as_deref(),
+                expr.span,
+            ),
             ExprKind::Match { scrutinee, arms } => self.infer_match(scrutinee, arms, expr.span),
             ExprKind::Loop { body, .. } => self.infer_loop(body),
             ExprKind::While {
@@ -4038,6 +4029,39 @@ impl<'ctx> TypeInfer<'ctx> {
                 Self::merge_source_binding_snapshots(&[pre_branch_sources, then_sources]);
             // if without else returns unit
             let _ = self.unify(&then_ty, &Ty::unit(), span);
+            Ty::unit()
+        }
+    }
+
+    fn infer_if_let(
+        &mut self,
+        pattern: &ast::Pattern,
+        scrutinee: &ast::Expr,
+        then_branch: &ast::Block,
+        else_branch: Option<&ast::Expr>,
+        span: Span,
+    ) -> Ty {
+        let scrutinee_ty = self.infer_expr(scrutinee);
+        let pre_branch_sources = self.source_bindings.clone();
+
+        self.check_pattern(pattern, &scrutinee_ty);
+        self.source_bindings.push(BTreeMap::new());
+        self.bind_pattern_call_sources(pattern, scrutinee);
+        let then_ty = self.infer_block(then_branch);
+        self.source_bindings.pop();
+        let then_sources = self.source_bindings.clone();
+
+        if let Some(else_expr) = else_branch {
+            self.source_bindings = pre_branch_sources.clone();
+            let else_ty = self.infer_expr(else_expr);
+            let else_sources = self.source_bindings.clone();
+            let _ = self.unify(&then_ty, &else_ty, span);
+            self.source_bindings =
+                Self::merge_source_binding_snapshots(&[then_sources, else_sources]);
+            self.merge_future_effect_annotations(&then_ty, &else_ty)
+        } else {
+            self.source_bindings =
+                Self::merge_source_binding_snapshots(&[pre_branch_sources, then_sources]);
             Ty::unit()
         }
     }
