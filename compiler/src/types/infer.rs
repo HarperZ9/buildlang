@@ -1000,6 +1000,21 @@ impl<'ctx> TypeInfer<'ctx> {
         }
     }
 
+    fn bind_shorthand_member_call_sources(
+        &mut self,
+        member_name: &str,
+        source_name: &str,
+        merge: bool,
+    ) {
+        if self.has_bound_call_source_descendants(source_name) {
+            self.bind_member_call_sources(member_name, Vec::new(), merge);
+            self.bind_bound_call_source_tree(source_name, member_name, merge);
+        } else {
+            let sources = self.call_sources_for_name(source_name);
+            self.bind_member_call_sources(member_name, sources, merge);
+        }
+    }
+
     fn bind_aggregate_call_sources_inner(&mut self, name: &str, expr: &ast::Expr, merge: bool) {
         match &expr.kind {
             ExprKind::Tuple(elems) => {
@@ -1063,8 +1078,11 @@ impl<'ctx> TypeInfer<'ctx> {
                         self.bind_direct_expr_member_call_sources(&member_name, value, merge);
                         self.bind_aggregate_call_sources_inner(&member_name, value, merge);
                     } else {
-                        let sources = self.call_sources_for_name(field.name.as_ref());
-                        self.bind_member_call_sources(&member_name, sources, merge);
+                        self.bind_shorthand_member_call_sources(
+                            &member_name,
+                            field.name.as_ref(),
+                            merge,
+                        );
                     }
                 }
             }
@@ -1119,6 +1137,16 @@ impl<'ctx> TypeInfer<'ctx> {
             }
         } else {
             self.bind_pattern_call_sources(pattern, value);
+        }
+    }
+
+    fn bind_shorthand_pattern_call_sources(&mut self, pattern: &ast::Pattern, source_name: &str) {
+        if self.has_bound_call_source_descendants(source_name) {
+            self.bind_pattern_to_call_sources(pattern, Vec::new());
+            self.bind_pattern_to_call_source_tree_inner(pattern, source_name, true);
+        } else {
+            let sources = self.call_sources_for_name(source_name);
+            self.bind_pattern_to_call_sources(pattern, sources);
         }
     }
 
@@ -1202,8 +1230,10 @@ impl<'ctx> TypeInfer<'ctx> {
                             if let Some(value) = expr_field.value.as_deref() {
                                 self.bind_direct_expr_pattern_call_sources(&field.pattern, value);
                             } else {
-                                let sources = self.call_sources_for_name(field.name.as_ref());
-                                self.bind_pattern_to_call_sources(&field.pattern, sources);
+                                self.bind_shorthand_pattern_call_sources(
+                                    &field.pattern,
+                                    field.name.as_ref(),
+                                );
                             }
                         } else if let Some(rest_expr) = rest.as_deref() {
                             let sources =
