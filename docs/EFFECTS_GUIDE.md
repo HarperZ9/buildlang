@@ -92,6 +92,10 @@ Compile-time ambient macros are direct capability surfaces too. `include!`,
 `include_str!`, and `include_bytes!` require `FileSystem`; `env!` and
 `option_env!` require `Environment`; receipts record the exact macro source
 under `observed_capabilities`.
+Macro argument token trees are scanned for ambient capability surfaces as well:
+`println!(read_file("ops.toml"))` requires both `Console` and `FileSystem`, and
+the receipt records `println!` under `Console` plus `read_file` under
+`FileSystem`.
 
 ```quanta
 fn load_config() {
@@ -250,8 +254,8 @@ Add `--expect-policy-digest sha256:<hex>` when a verification job must prove the
 receipt was accepted under an exact file-backed or built-in policy digest.
 
 `observed_capabilities` records direct ambient capability use inside a function,
-such as `read_file`, `tcp_connect`, `include_str!`, `env!`, `println!`,
-process helpers, or FFI helpers.
+including direct calls and macro-argument uses such as `read_file`, `tcp_connect`,
+`include_str!`, `env!`, `println!`, process helpers, or FFI helpers.
 Raw unknown extern-block calls are direct `Foreign` entries. Known runtime
 helper aliases declared in extern blocks are recorded under their specific
 capability, such as `Gpu` for `quanta_gfx_init` or `FileSystem` for

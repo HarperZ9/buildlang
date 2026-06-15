@@ -15,7 +15,12 @@
 
 use std::fmt;
 use std::ops::{Add, Range};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU32, Ordering},
+    Arc,
+};
+
+static NEXT_SOURCE_ID: AtomicU32 = AtomicU32::new(1);
 
 /// Unique identifier for a source file in a compilation session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -253,7 +258,7 @@ impl SourceFile {
         let source: Arc<str> = source.into();
         let line_starts = Self::compute_line_starts(&source);
         Self {
-            id: SourceId(1), // Will be assigned properly by SourceMap
+            id: SourceId::new(NEXT_SOURCE_ID.fetch_add(1, Ordering::Relaxed)),
             name: name.into(),
             source,
             line_starts,

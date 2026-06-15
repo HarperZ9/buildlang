@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::ast::{self, AssignOp, BinOp, ExprKind, Literal as AstLiteral, UnaryOp};
-use crate::lexer::Span;
+use crate::lexer::{Delimiter, SourceId, Span, Token, TokenKind};
 
 use super::context::{ScopeKind, TypeContext, TypeDefKind};
 use super::error::*;
@@ -86,6 +86,10 @@ pub struct TypeInfer<'ctx> {
     has_return: bool,
     /// Borrow tracking state for the current function body.
     borrow_state: super::ty::BorrowState,
+    /// Source text used to recover identifier names from macro token spans.
+    source_text: Option<Arc<str>>,
+    /// Source ID associated with `source_text`.
+    source_id: Option<SourceId>,
 }
 
 struct BreakSourceFrame {
@@ -252,7 +256,21 @@ impl<'ctx> TypeInfer<'ctx> {
             loop_break_source_frames: Vec::new(),
             has_return: false,
             borrow_state: super::ty::BorrowState::new(),
+            source_text: None,
+            source_id: None,
         }
+    }
+
+    /// Create a new type inference engine with source text for token evidence.
+    pub fn with_source_text(
+        ctx: &'ctx mut TypeContext,
+        source_text: Arc<str>,
+        source_id: Option<SourceId>,
+    ) -> Self {
+        let mut infer = Self::new(ctx);
+        infer.source_text = Some(source_text);
+        infer.source_id = source_id;
+        infer
     }
 
     /// Create a new type inference engine with trait resolution support.
@@ -277,6 +295,8 @@ impl<'ctx> TypeInfer<'ctx> {
             loop_break_source_frames: Vec::new(),
             has_return: false,
             borrow_state: super::ty::BorrowState::new(),
+            source_text: None,
+            source_id: None,
         }
     }
 
@@ -348,6 +368,89 @@ impl<'ctx> TypeInfer<'ctx> {
                 .add(super::effects::Effect::new(effect_name));
             self.record_capability_source(effect_name, call_source);
         }
+    }
+
+    fn record_macro_token_capabilities(&mut self, tokens: &[ast::TokenTree]) {
+        let Some(_) = self.source_text.as_ref() else {
+            return;
+        };
+
+        let flat_tokens = tokens
+            .iter()
+            .filter_map(|tree| match tree {
+                ast::TokenTree::Token(token) => Some(token),
+                ast::TokenTree::Delimited { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        self.record_flat_macro_token_capabilities(&flat_tokens);
+
+        for tree in tokens {
+            if let ast::TokenTree::Delimited { tokens: inner, .. } = tree {
+                self.record_macro_token_capabilities(inner);
+            }
+        }
+    }
+
+    fn record_flat_macro_token_capabilities(&mut self, tokens: &[&Token]) {
+        let mut index = 0usize;
+        while index < tokens.len() {
+            let Some((source, next_index)) = self.macro_token_path_at(tokens, index) else {
+                index += 1;
+                continue;
+            };
+
+            if matches!(
+                tokens.get(next_index).map(|token| &token.kind),
+                Some(TokenKind::Not)
+            ) {
+                let macro_name = source.rsplit("::").next().unwrap_or(source.as_str());
+                self.record_macro_capability(macro_name);
+                index = next_index + 1;
+            } else if matches!(
+                tokens.get(next_index).map(|token| &token.kind),
+                Some(TokenKind::OpenDelim(Delimiter::Paren))
+            ) {
+                self.record_call_capability(&source);
+                index = next_index;
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    fn macro_token_path_at(&self, tokens: &[&Token], start: usize) -> Option<(String, usize)> {
+        let mut segments = Vec::new();
+        let mut index = start;
+
+        loop {
+            let token = tokens.get(index)?;
+            if !matches!(token.kind, TokenKind::Ident | TokenKind::RawIdent) {
+                return None;
+            }
+            segments.push(self.macro_token_ident_text(token)?);
+            index += 1;
+
+            if !matches!(
+                tokens.get(index).map(|token| &token.kind),
+                Some(TokenKind::ColonColon)
+            ) {
+                break;
+            }
+            index += 1;
+        }
+
+        Some((segments.join("::"), index))
+    }
+
+    fn macro_token_ident_text(&self, token: &Token) -> Option<String> {
+        if let Some(source_id) = self.source_id {
+            if token.span.source_id != source_id {
+                return None;
+            }
+        }
+        let source = self.source_text.as_ref()?;
+        let range = token.span.to_range();
+        source.get(range).map(str::to_string)
     }
 
     fn record_effectful_callee_sources(
@@ -2456,9 +2559,10 @@ impl<'ctx> TypeInfer<'ctx> {
             }
 
             // Macro invocations - return fresh var (macro expansion happens earlier)
-            ExprKind::Macro { path, .. } => {
+            ExprKind::Macro { path, tokens, .. } => {
                 let macro_name = path.segments.last().map(|s| s.ident.as_str()).unwrap_or("");
                 self.record_macro_capability(macro_name);
+                self.record_macro_token_capabilities(tokens);
                 Ty::fresh_var()
             }
 
@@ -4466,7 +4570,7 @@ impl<'ctx> TypeInfer<'ctx> {
             ast::StmtKind::Empty => Ty::unit(),
             ast::StmtKind::Macro {
                 path,
-                tokens: _,
+                tokens,
                 is_semi,
             } => {
                 // Macro invocations as statements
@@ -4476,6 +4580,7 @@ impl<'ctx> TypeInfer<'ctx> {
 
                 let macro_name = path.segments.last().map(|s| s.ident.as_str()).unwrap_or("");
                 self.record_macro_capability(macro_name);
+                self.record_macro_token_capabilities(tokens);
 
                 match macro_name {
                     // Diagnostic macros always return unit
