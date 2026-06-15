@@ -250,7 +250,8 @@ effectful callback into an untracked unknown call. The `.await` operator is
 rejected on plain callback values too, so `loader.await` cannot launder a
 selected effectful callback into a future output. Later
 assignment to a callback variable or aggregate member refreshes that evidence,
-so stale sources do not survive `loader = load_secret`,
+including when a nested block mutates an outer callback alias or ops slot, so
+stale sources do not survive `loader = load_secret`,
 `ops.loader = load_secret`, `ops = defaults`, or
 `loaders[0] = load_secret`.
 Async blocks follow the same delayed-effect model for type checking: creating
@@ -412,9 +413,9 @@ branch-local `if let` and `while let` patterns, so
 `let Slot::Ready(loader) = slot`, `let Slot::Ready { loader } = slot`, and
 `let [loader] = loaders` do not collapse a selected effectful function down to
 only the local alias. Plain assignment to an identifier, struct field, tuple
-slot, indexed entry, or whole aggregate rebinds that call-source evidence, so
-policy receipts follow mutable callback slots instead of preserving stale
-earlier sources.
+slot, indexed entry, or whole aggregate rebinds that call-source evidence,
+including across nested blocks that mutate an outer binding, so policy receipts
+follow mutable callback slots instead of preserving stale earlier sources.
 
 Policy profiles can enforce that split:
 
@@ -518,11 +519,11 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-14
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 839 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
+- **Tests**: 841 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-14
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
-  - CLI: binary-level smoke tests cover help output, `quantac doctor`, `quantac corpus verify`, `quantac receipt verify`, explicit corpus roots, C receipt writes against copied corpus fixtures, capability diagnostics, and the runnable quickstart examples
+  - CLI: 165 binary-level smoke tests cover help output, `quantac doctor`, `quantac corpus verify`, `quantac receipt verify`, explicit corpus roots, C receipt writes against copied corpus fixtures, capability diagnostics, and the runnable quickstart examples
   - Codegen: tests across 9 backends, including C formatted-print lowering, Rust source emission, Rust executable smoke checks over the semantic corpus, and semantic-corpus manifest contract/receipt consistency/metadata guards (C backend has 24 end-to-end output verification tests)
 
 ## License
