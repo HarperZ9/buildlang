@@ -2,6 +2,12 @@
 
 All notable changes to QuantaLang will be documented in this file.
 
+Current status note (2026-06-15): entries below preserve historical release
+claims as they were recorded at the time. Current release-shaped evidence is
+tracked in `STATUS.md`, `README.md`, and
+`docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
+`108/108` or `132/132` are not the current release gate.
+
 ## [1.0.5] - 2026-03-28 - Self-Hosted Compiler Verification
 
 ### Proven - Self-Hosting: Complete Audit of All 9 Versions

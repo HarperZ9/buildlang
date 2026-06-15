@@ -159,9 +159,12 @@ The ReShade target adds:
 
 ---
 
-## 81 Out of 81: Zero Cross-Target Failures
+## Historical Cross-Target Snapshot
 
-QuantaLang does not just work for one vignette demo. The cross-target test harness compiles every shader in the project to all three targets and verifies that each one produces valid output.
+The original version of this post recorded a cross-target snapshot from the
+shader demo phase. It is preserved here as historical context, not as the
+current release gate. Current release evidence lives in `STATUS.md`, the
+semantic corpus receipts, and the CI-shaped Cargo baseline.
 
 ```
 === QuantaLang Cross-Target Compilation Test ===
@@ -175,12 +178,11 @@ chromatic_aberration.quanta -> C: OK  HLSL: OK  GLSL: OK
 film_grain.quanta        -> C: OK  HLSL: OK  GLSL: OK
 ...
 
-Results: 81/81 passed, 0 failed
+Historical result: 81/81 passed, 0 failed
 ```
 
-The test harness is at `tests/cross_target.sh`. Every shader demo, every test shader, every integration test that targets the GPU -- all of them compile to all three targets without failure.
-
-This is not a best-case demo. This is the actual state of the compiler across the full test suite.
+The test harness remains at `tests/cross_target.sh`, but this blog post should
+not be read as current proof that every shader fixture compiles to every target.
 
 ---
 

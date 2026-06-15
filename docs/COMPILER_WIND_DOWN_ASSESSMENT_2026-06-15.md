@@ -137,8 +137,9 @@ As of this assessment, docs and status claim the CI-shaped baseline as:
 - 10 ignored tests;
 - 4 filtered tests;
 - 192 CLI tests;
-- 99,214 Rust compiler source lines;
-- 12,273 Rust integration-test lines.
+- 88,946 Rust compiler source lines in `compiler/src/`;
+- 10,976 Rust compiler test-source lines in `compiler/tests/`;
+- 100,171 tracked Rust lines under `compiler/` excluding build output.
 
 The final release-shaped verification for the commit that includes this note
 should rerun the full CI-shaped cargo baseline, warning gate, clippy

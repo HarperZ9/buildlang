@@ -1,5 +1,11 @@
 # QuantaLang
 
+> Current status (2026-06-15): this release README is a historical/aspirational
+> packaging artifact. It does not describe an available 1.0.0 binary release or
+> current package-manager distribution. Treat commands, benchmarks, hosted
+> domains, and plugin marketplace links below as release scaffolding unless
+> root `README.md` and `STATUS.md` independently verify them.
+
 <p align="center">
   <img src="docs/assets/logo.svg" alt="QuantaLang Logo" width="200"/>
 </p>

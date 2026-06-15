@@ -221,7 +221,10 @@ Copy `ssao.fx` into your ReShade `Shaders` folder, enable it in the overlay, and
 
 ## The Five Shader Demos
 
-The QuantaLang `demos/` directory ships with five fully working ReShade effects, each demonstrating different shader techniques:
+The QuantaLang `demos/` directory includes ReShade-oriented source fixtures and
+generated artifacts demonstrating different shader techniques. They are useful
+examples, but current release verification does not claim all five as
+runtime-validated ReShade effects.
 
 ### 1. SSAO (`ssao.quanta`)
 
@@ -361,7 +364,9 @@ for f in demos/ssao.quanta demos/bloom.quanta demos/depth_of_field.quanta \
 done
 ```
 
-Drop the `.fx` files into your ReShade shader folder and start tweaking.
+Inspect the generated `.fx` files before using them in ReShade; current release
+verification focuses on compiler output and semantic-corpus behavior rather than
+runtime validation inside ReShade.
 
 ---
 
