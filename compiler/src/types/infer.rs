@@ -4186,10 +4186,15 @@ impl<'ctx> TypeInfer<'ctx> {
     fn infer_while(&mut self, condition: &ast::Expr, body: &ast::Block) -> Ty {
         let cond_ty = self.infer_expr(condition);
         let _ = self.unify(&cond_ty, &Ty::bool(), condition.span);
+        let pre_loop_sources = self.source_bindings.clone();
 
         self.push_scope(ScopeKind::Loop);
         let _ = self.infer_block(body);
         self.pop_scope();
+        let body_exit_sources = self.source_bindings.clone();
+
+        self.source_bindings =
+            Self::merge_source_binding_snapshots(&[pre_loop_sources, body_exit_sources]);
 
         Ty::unit()
     }
@@ -4206,11 +4211,16 @@ impl<'ctx> TypeInfer<'ctx> {
 
         // Resolve Iterator trait to get Item type
         let item_ty = self.resolve_iterator_item(&iter_ty);
+        let pre_loop_sources = self.source_bindings.clone();
 
         self.push_scope(ScopeKind::Loop);
         self.check_pattern(pattern, &item_ty);
         let _ = self.infer_block(body);
         self.pop_scope();
+        let body_exit_sources = self.source_bindings.clone();
+
+        self.source_bindings =
+            Self::merge_source_binding_snapshots(&[pre_loop_sources, body_exit_sources]);
 
         Ty::unit()
     }
