@@ -46,6 +46,8 @@ def test_current_progress_evidence_is_visible() -> None:
     assert "A compiler with receipts" in source
     assert "What works today" in source
     assert "Run the compiler path" in source
+    assert "while new backends mature" in source
+    assert "same verified promise as C today" in source
     assert "A compiler you can run, with the receipts close by" not in source
     assert "The strongest path today is concrete" not in source
     assert "What you can trust today" not in source
