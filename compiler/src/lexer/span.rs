@@ -13,11 +13,12 @@
 //! - `SourceFile`: A source file with its content
 //! - `SourceId`: A unique identifier for a source file
 
+use std::collections::HashMap;
 use std::fmt;
 use std::ops::{Add, Range};
 use std::sync::{
     atomic::{AtomicU32, Ordering},
-    Arc,
+    Arc, Mutex, OnceLock,
 };
 
 static NEXT_SOURCE_ID: AtomicU32 = AtomicU32::new(1);
@@ -35,6 +36,23 @@ impl SourceId {
 
     /// The anonymous source ID (for code not from a file).
     pub const ANONYMOUS: Self = Self(0);
+}
+
+static SOURCE_REGISTRY: OnceLock<Mutex<HashMap<SourceId, Arc<str>>>> = OnceLock::new();
+
+fn source_registry() -> &'static Mutex<HashMap<SourceId, Arc<str>>> {
+    SOURCE_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn register_source_text(source_id: SourceId, source: Arc<str>) {
+    if let Ok(mut registry) = source_registry().lock() {
+        registry.insert(source_id, source);
+    }
+}
+
+/// Look up source text by source ID.
+pub fn source_text_for_id(source_id: SourceId) -> Option<Arc<str>> {
+    SOURCE_REGISTRY.get()?.lock().ok()?.get(&source_id).cloned()
 }
 
 /// An absolute byte position in source code.
@@ -257,8 +275,10 @@ impl SourceFile {
     pub fn new(name: impl Into<Arc<str>>, source: impl Into<Arc<str>>) -> Self {
         let source: Arc<str> = source.into();
         let line_starts = Self::compute_line_starts(&source);
+        let id = SourceId::new(NEXT_SOURCE_ID.fetch_add(1, Ordering::Relaxed));
+        register_source_text(id, source.clone());
         Self {
-            id: SourceId::new(NEXT_SOURCE_ID.fetch_add(1, Ordering::Relaxed)),
+            id,
             name: name.into(),
             source,
             line_starts,
