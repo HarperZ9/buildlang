@@ -467,6 +467,44 @@ impl<'ctx> TypeInfer<'ctx> {
         self.current_source_binding_scope_index()
     }
 
+    fn merge_source_binding_snapshots(
+        snapshots: &[Vec<BTreeMap<String, Vec<String>>>],
+    ) -> Vec<BTreeMap<String, Vec<String>>> {
+        let max_scope_count = snapshots
+            .iter()
+            .map(std::vec::Vec::len)
+            .max()
+            .unwrap_or_default();
+        let mut merged = vec![BTreeMap::new(); max_scope_count];
+
+        for scope_index in 0..max_scope_count {
+            let mut keys = BTreeSet::new();
+            for snapshot in snapshots {
+                if let Some(scope) = snapshot.get(scope_index) {
+                    keys.extend(scope.keys().cloned());
+                }
+            }
+
+            for key in keys {
+                let mut sources = Vec::new();
+                for snapshot in snapshots {
+                    if let Some(bound_sources) =
+                        snapshot.get(scope_index).and_then(|scope| scope.get(&key))
+                    {
+                        sources.extend(bound_sources.iter().cloned());
+                    }
+                }
+
+                let sources = Self::dedupe_call_sources(sources);
+                if !sources.is_empty() {
+                    merged[scope_index].insert(key, sources);
+                }
+            }
+        }
+
+        merged
+    }
+
     fn call_sources_for_name(&self, name: &str) -> Vec<String> {
         let mut sources = vec![name.to_string()];
         if let Some(bound_sources) = self.lookup_call_source_binding(name) {
@@ -3990,14 +4028,22 @@ impl<'ctx> TypeInfer<'ctx> {
     ) -> Ty {
         let cond_ty = self.infer_expr(condition);
         let _ = self.unify(&cond_ty, &Ty::bool(), span);
+        let pre_branch_sources = self.source_bindings.clone();
 
         let then_ty = self.infer_block(then_branch);
+        let then_sources = self.source_bindings.clone();
 
         if let Some(else_expr) = else_branch {
+            self.source_bindings = pre_branch_sources.clone();
             let else_ty = self.infer_expr(else_expr);
+            let else_sources = self.source_bindings.clone();
             let _ = self.unify(&then_ty, &else_ty, span);
+            self.source_bindings =
+                Self::merge_source_binding_snapshots(&[then_sources, else_sources]);
             self.merge_future_effect_annotations(&then_ty, &else_ty)
         } else {
+            self.source_bindings =
+                Self::merge_source_binding_snapshots(&[pre_branch_sources, then_sources]);
             // if without else returns unit
             let _ = self.unify(&then_ty, &Ty::unit(), span);
             Ty::unit()
