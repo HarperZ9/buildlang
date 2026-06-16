@@ -63,6 +63,17 @@ def test_current_progress_evidence_is_visible() -> None:
     assert "What you can trust today" not in source
 
 
+def test_immediate_user_value_is_explicit() -> None:
+    source = index_source()
+
+    assert "Immediate value as of June 15, 2026" in source
+    assert "Use it today to run compiler examples, inspect source-to-C lowering, emit shader code, and see exactly which backend claims are backed by tests." in source
+    assert "Who uses it" in source
+    assert "language designers, compiler engineers, graphics programmers, and technical reviewers" in source
+    assert "What it does not claim" in source
+    assert "It is not presented as a production language ecosystem or as eight equally mature backends." in source
+
+
 def test_compiler_workflow_and_capabilities_are_plainly_explained() -> None:
     source = index_source()
 
