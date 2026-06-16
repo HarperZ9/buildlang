@@ -15,7 +15,7 @@ def page_source() -> str:
 def test_docs_page_uses_portfolio_glass_language() -> None:
     source = page_source()
 
-    assert '<link rel="stylesheet" href="styles.css">' in source
+    assert '<link rel="stylesheet" href="styles.css?v=20260615">' in source
     assert "--olive-wash:#c9d6a3" in source
     assert "--glass-blur:saturate(170%) blur(30px)" in source
     assert ".grain{display:block" in source
@@ -56,7 +56,7 @@ def test_current_progress_evidence_is_visible() -> None:
 def test_capability_showcase_includes_real_surfaces() -> None:
     source = page_source()
 
-    assert "algebraic effects" in source
+    assert "Algebraic effects" in source
     assert "vignette_shader.quanta" in source
     assert "C99" in source
     assert "VS Code extension" in source
