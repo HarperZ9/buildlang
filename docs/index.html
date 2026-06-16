@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>QuantaLang - quantac compiler</title>
-<meta name="description" content="QuantaLang is an effects-oriented systems language with a verified C path, HLSL/GLSL shader output, corpus receipts, and labeled research backends.">
-<meta property="og:title" content="QuantaLang - quantac compiler">
-<meta property="og:description" content="Effects-language compiler with C execution, HLSL/GLSL shader output, and clearly labeled research targets.">
+<title>QuantaLang - compiler project</title>
+<meta name="description" content="QuantaLang is a compiler project with a test-backed .quanta to C path, HLSL/GLSL shader output, and clearly labeled research backends.">
+<meta property="og:title" content="QuantaLang - compiler project">
+<meta property="og:description" content="Compiler project with C execution verified by corpus and tests, HLSL/GLSL shader output, and clearly labeled research targets.">
 <meta property="og:type" content="website">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='8' fill='%2317181c'/%3E%3Cpath d='M18 19h28v8H28v10h16v8H18z' fill='%23c9d6a3'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -33,18 +33,18 @@
 </nav>
 
 <header id="top" class="hero shell">
-  <p class="kicker">effects language - C backend - shader output - semantic receipts</p>
+  <p class="kicker">compiler project - test-backed C path - shader output - labeled research backends</p>
   <div class="hero-grid">
     <div>
-      <h1>A compiler with receipts.</h1>
-      <p class="lead">QuantaLang is an effects-oriented systems language around <code>quantac</code>: run through C, emit HLSL/GLSL, and verify the corpus while new backends mature.</p>
+      <h1>QuantaLang is a compiler project.</h1>
+      <p class="lead">Today, the C path verified by corpus and tests compiles .quanta programs to C, runs them through a native compiler, and also emits HLSL/GLSL shader code. Other backends exist as research surfaces.</p>
       <div class="cta">
         <a class="btn solid" href="#quickstart">Run the quickstart</a>
         <a class="btn" href="https://github.com/HarperZ9/quantalang">Source</a>
       </div>
     </div>
     <aside class="glass hero-card">
-      <div class="terminal-title"><span></span><span></span><span></span><b>quantac today</b></div>
+      <div class="terminal-title"><span></span><span></span><span></span><b>how to run it</b></div>
       <pre><code>git clone https://github.com/HarperZ9/quantalang.git
 cd quantalang/compiler
 cargo build --release
@@ -63,7 +63,7 @@ compiler/target/release/quantac corpus verify</code></pre>
     <div class="stat glass" aria-label="868 passing compiler tests"><b>868</b> <span>passing compiler tests</span></div>
     <div class="stat glass" aria-label="192 CLI tests"><b>192</b> <span>CLI tests</span></div>
     <div class="stat glass"><b>8</b> <span>semantic-corpus programs</span></div>
-    <div class="stat glass"><b>C</b> <span>only native execution backend fully verified</span></div>
+    <div class="stat glass"><b>C</b> <span>execution path verified by corpus and tests</span></div>
   </div>
 </header>
 
@@ -75,25 +75,25 @@ compiler/target/release/quantac corpus verify</code></pre>
   </div>
   <div class="stack">
     <article class="glass proof-card">
-      <h3>C is the adoption path</h3>
-      <p>Source lowers through lexer, parser, type checker, MIR, and C99. C is the only backend covered by the 868-test native execution baseline.</p>
+      <h3>C is the test-backed execution path</h3>
+      <p>Source lowers through lexer, parser, type checker, MIR, and C99 output before a native C compiler produces the executable. C is the only backend covered by the 868-test native execution baseline.</p>
     </article>
     <article class="glass proof-card">
       <h3>HLSL and GLSL shader output are working</h3>
       <p>Shader examples emit readable HLSL/GLSL from the same QuantaLang source.</p>
     </article>
     <article class="glass proof-card">
-      <h3>Research targets are labeled</h3>
-      <p>Rust, LLVM IR, WebAssembly, SPIR-V, x86-64, and ARM64 are wired into <code>quantac build --target</code>, without the same verified promise as C today.</p>
+      <h3>Other backends are research surfaces</h3>
+      <p>Rust, LLVM IR, WebAssembly, SPIR-V, x86-64, and ARM64 are wired into <code>quantac build --target</code>, but they are not presented as equal in maturity to the C path.</p>
     </article>
   </div>
 </section>
 
 <section id="capabilities" class="shell">
   <div class="section-head wide">
-    <p class="kicker">Showcase</p>
-    <h2>What it demonstrates.</h2>
-    <p>Effects, typed systems syntax, shader math, C execution, corpus receipts, and editor/tooling integration. Working paths and research edges are labeled side by side.</p>
+    <p class="kicker">Compiler workflow</p>
+    <h2>How the compiler works.</h2>
+    <p>A .quanta source moves through lexer, parser, type checker, MIR, and backends. C is the test-backed execution path; shader output is working; the remaining backends are labeled by maturity.</p>
   </div>
   <div class="cap-grid">
     <article class="glass cap">
@@ -113,8 +113,8 @@ compiler/target/release/quantac corpus verify</code></pre>
     </article>
     <article class="glass cap">
       <span>04</span>
-      <h3>Receipts and diagnostics</h3>
-      <p><code>quantac corpus verify</code> checks the 8-program semantic corpus and C/Rust receipts. <code>quantac doctor</code> reports backend readiness.</p>
+      <h3>Status checks and diagnostics</h3>
+      <p><code>quantac corpus verify</code> checks the 8-program semantic corpus and C baseline. Experimental Rust smoke slices stay separate. <code>quantac doctor</code> reports backend readiness.</p>
     </article>
   </div>
 </section>
@@ -158,7 +158,7 @@ fn PS_Vignette(uv: vec2) -> vec4 {
     <h2>Target maturity.</h2>
   </div>
   <div class="backend-grid">
-    <article class="glass backend live"><b>C</b><span>Working adoption target</span><p>C99 output, native execution, corpus receipt, quickstart path.</p></article>
+    <article class="glass backend live"><b>C</b><span>Best-supported path today</span><p>C99 output, native execution, corpus checks, quickstart path.</p></article>
     <article class="glass backend live"><b>HLSL</b><span>Working shader output</span><p>Readable DirectX/ReShade-style shader source.</p></article>
     <article class="glass backend live"><b>GLSL</b><span>Working shader output</span><p>OpenGL/Vulkan-style shader source for experiments.</p></article>
     <article class="glass backend exp"><b>Rust</b><span>Experimental subset</span><p>Smoke slices over the semantic corpus; unsupported MIR errors loudly.</p></article>
@@ -171,6 +171,7 @@ fn PS_Vignette(uv: vec2) -> vec4 {
   <div class="glass install-card">
     <p class="kicker">Install</p>
     <h2>Run the compiler path.</h2>
+    <p>The root README, STATUS, and TEST_RESULTS files are the factual anchors for current compiler status.</p>
     <pre><code>git clone https://github.com/HarperZ9/quantalang.git
 cd quantalang/compiler
 cargo build --release

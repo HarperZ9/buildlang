@@ -12,6 +12,10 @@ def page_source() -> str:
     return INDEX.read_text(encoding="utf-8") + "\n" + STYLES.read_text(encoding="utf-8")
 
 
+def index_source() -> str:
+    return INDEX.read_text(encoding="utf-8")
+
+
 def test_docs_page_uses_portfolio_glass_language() -> None:
     source = page_source()
 
@@ -24,18 +28,20 @@ def test_docs_page_uses_portfolio_glass_language() -> None:
 
 
 def test_backend_maturity_claims_are_precise() -> None:
-    source = page_source()
+    source = index_source()
 
-    assert "C is the adoption path" in source
+    assert "C is the test-backed execution path" in source
     assert "HLSL and GLSL shader output are working" in source
-    assert "Research targets are labeled" in source
+    assert "Other backends are research surfaces" in source
     assert "Rust, LLVM IR, WebAssembly, SPIR-V, x86-64, and ARM64 are wired" in source
+    assert "verified by corpus and tests" in source
     assert "eight production targets" not in source.lower()
     assert "one source, eight compile targets" not in source.lower()
+    assert "same verified promise as C today" not in source
 
 
 def test_current_progress_evidence_is_visible() -> None:
-    source = page_source()
+    source = index_source()
 
     assert "868 passing compiler tests" in source
     assert "192 CLI tests" in source
@@ -43,19 +49,25 @@ def test_current_progress_evidence_is_visible() -> None:
     assert "quantac corpus verify" in source
     assert "quantac doctor" in source
     assert "quantac run examples/quickstart/effects_greeting.quanta" in source
-    assert "A compiler with receipts" in source
+    assert "QuantaLang is a compiler project" in source
+    assert "Today, the C path verified by corpus and tests compiles .quanta programs to C" in source
+    assert "runs them through a native compiler" in source
+    assert "also emits HLSL/GLSL shader code" in source
+    assert "Other backends exist as research surfaces" in source
     assert "What works today" in source
     assert "Run the compiler path" in source
-    assert "while new backends mature" in source
-    assert "same verified promise as C today" in source
+    assert "The root README, STATUS, and TEST_RESULTS files are the factual anchors" in source
     assert "A compiler you can run, with the receipts close by" not in source
+    assert "A compiler with receipts" not in source
     assert "The strongest path today is concrete" not in source
     assert "What you can trust today" not in source
 
 
-def test_capability_showcase_includes_real_surfaces() -> None:
-    source = page_source()
+def test_compiler_workflow_and_capabilities_are_plainly_explained() -> None:
+    source = index_source()
 
+    assert "How the compiler works" in source
+    assert "source moves through lexer, parser, type checker, MIR, and backends" in source
     assert "Algebraic effects" in source
     assert "vignette_shader.quanta" in source
     assert "C99" in source
