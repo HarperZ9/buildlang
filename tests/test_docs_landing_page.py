@@ -50,10 +50,10 @@ def test_current_progress_evidence_is_visible() -> None:
     assert "quantac doctor" in source
     assert "quantac run examples/quickstart/effects_greeting.quanta" in source
     assert "QuantaLang is a compiler project" in source
-    assert "Today, the C path verified by corpus and tests compiles .quanta programs to C" in source
-    assert "runs them through a native compiler" in source
-    assert "also emits HLSL/GLSL shader code" in source
-    assert "Other backends exist as research surfaces" in source
+    assert "runnable C path" in source
+    assert "working HLSL/GLSL shader output" in source
+    assert "research backends labeled by maturity" in source
+    assert "commands, examples, corpus checks, and tests" in source
     assert "What works today" in source
     assert "Run the compiler path" in source
     assert "The root README, STATUS, and TEST_RESULTS files are the factual anchors" in source
@@ -66,12 +66,17 @@ def test_current_progress_evidence_is_visible() -> None:
 def test_immediate_user_value_is_explicit() -> None:
     source = index_source()
 
-    assert "Immediate value as of June 15, 2026" in source
-    assert "Use it today to run compiler examples, inspect source-to-C lowering, emit shader code, and see exactly which backend claims are backed by tests." in source
-    assert "Who uses it" in source
-    assert "language designers, compiler engineers, graphics programmers, and technical reviewers" in source
-    assert "What it does not claim" in source
-    assert "It is not presented as a production language ecosystem or as eight equally mature backends." in source
+    assert "Public signal" in source
+    assert "Why it matters now" in source
+    assert "Build quantac, run examples through C, emit HLSL/GLSL, and verify corpus status from the repo." in source
+    assert (
+        "C is the supported execution path today; shader output works; Rust, LLVM, WebAssembly, SPIR-V, x86-64, and ARM64 stay labeled as research surfaces."
+        in source
+    )
+    assert "QuantaLang is a working compiler artifact, not a slide deck." in source
+    assert "Immediate value as of June 15, 2026" not in source
+    assert "Who uses it" not in source
+    assert "What it does not claim" not in source
 
 
 def test_compiler_workflow_and_capabilities_are_plainly_explained() -> None:
