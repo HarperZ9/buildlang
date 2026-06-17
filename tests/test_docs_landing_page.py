@@ -19,7 +19,7 @@ def index_source() -> str:
 def test_docs_page_uses_portfolio_glass_language() -> None:
     source = page_source()
 
-    assert '<link rel="stylesheet" href="styles.css?v=20260615">' in source
+    assert '<link rel="stylesheet" href="styles.css?v=20260617c">' in source
     assert "--olive-wash:#c9d6a3" in source
     assert "--glass-blur:saturate(170%) blur(30px)" in source
     assert ".grain{display:block" in source
@@ -49,14 +49,16 @@ def test_current_progress_evidence_is_visible() -> None:
     assert "quantac corpus verify" in source
     assert "quantac doctor" in source
     assert "quantac run examples/quickstart/effects_greeting.quanta" in source
-    assert "QuantaLang is a compiler project" in source
+    assert "Compiler research you can run" in source
+    assert "QuantaLang is where my language, graphics, and evidence instincts meet" in source
     assert "Open the repo and run <code>quantac</code>" in source
-    assert "The supported path is <code>.quanta</code> to C99 to a native executable" in source
-    assert "HLSL and GLSL emit shader source" in source
-    assert "wired research targets, not equal production backends" in source
-    assert "What works today" in source
+    assert "<code>.quanta</code> to C99 is the supported native path" in source
+    assert "HLSL/GLSL emit shader source" in source
+    assert "the other backends are explicitly research targets" in source
+    assert "What you can run today" in source
     assert "Run the compiler path" in source
     assert "The root README, STATUS, and TEST_RESULTS files are the factual anchors" in source
+    assert "Start there, then decide for yourself what the evidence supports." in source
     assert "A compiler you can run, with the receipts close by" not in source
     assert "A compiler with receipts" not in source
     assert "The strongest path today is concrete" not in source
@@ -67,8 +69,8 @@ def test_immediate_user_value_is_explicit() -> None:
     source = index_source()
 
     assert "Evidence" in source
-    assert "What the repo proves" in source
-    assert "Build <code>quantac</code>, run <code>hello.quanta</code>, <code>ledger.quanta</code>, and <code>effects_greeting.quanta</code>, then verify the 8-program semantic corpus." in source
+    assert "How to judge it" in source
+    assert "Build <code>quantac</code>, run <code>hello.quanta</code>, <code>ledger.quanta</code>, and <code>effects_greeting.quanta</code>, then verify the 8-program semantic corpus. The point is not a perfect language ecosystem; it is a real compiler path with receipts nearby." in source
     assert "Compile <code>vignette_shader.quanta</code> to HLSL or GLSL when you want readable shader output from Quanta source." in source
     assert "<code>STATUS.md</code> says the self-hosted compiler and standard library exist as <code>.quanta</code> source, but cannot be compiled or executed today." in source
     assert "Immediate value as of June 15, 2026" not in source
@@ -83,8 +85,10 @@ def test_compiler_workflow_and_capabilities_are_plainly_explained() -> None:
 
     assert "How the compiler works" in source
     assert "source moves through lexer, parser, type checker, MIR, and backends" in source
+    assert "ambition, but with the current state kept visible" in source
     assert "Algebraic effects" in source
     assert "vignette_shader.quanta" in source
     assert "C99" in source
     assert "VS Code extension" in source
     assert "Quanta Universe" in source
+    assert "part sketchbook, part research map" in source
