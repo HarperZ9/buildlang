@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>QuantaLang - Compiler Research You Can Run</title>
-<meta name="description" content="QuantaLang is Zain Dana Harper's Rust compiler for .quanta files: a C99 execution path, shader output, and explicitly labeled research backends.">
+<meta name="description" content="QuantaLang is Zain Dana Harper's Rust-built effects compiler for .quanta files: a verified C99 path, HLSL/GLSL shader output, typed receipts, policy gates, and a long-term live-state provenance substrate vision.">
 <meta property="og:title" content="QuantaLang - compiler research you can run">
 <meta property="og:description" content="A Rust compiler with .quanta to C99 execution, HLSL/GLSL output, and research backends labeled by maturity.">
 <meta property="og:type" content="website">
@@ -12,7 +12,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=Manrope:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=20260617c">
+<link rel="stylesheet" href="styles.css?v=20260617d">
 </head>
 <body>
 <div class="bg"></div>
@@ -38,7 +38,7 @@
   <div class="hero-grid">
     <div>
       <h1>Compiler research you can run.</h1>
-      <p class="lead">QuantaLang is where my language, graphics, and evidence instincts meet. Open the repo and run <code>quantac</code>: <code>.quanta</code> to C99 is the supported native path, HLSL/GLSL emit shader source, and the other backends are explicitly research targets.</p>
+      <p class="lead">QuantaLang is where my language, graphics, and evidence instincts meet. Open the repo and run <code>quantac</code>: <code>.quanta</code> to C99 is the supported native path, HLSL/GLSL emit shader source, and the other backends are explicitly research targets. The larger direction is an effects language that can give models, machines, and reviewers a live-state receipt instead of a remembered story.</p>
       <div class="cta">
         <a class="btn solid" href="#quickstart">Run the quickstart</a>
         <a class="btn" href="https://github.com/HarperZ9/quantalang">Source</a>
@@ -111,6 +111,23 @@ compiler/target/release/quantac corpus verify</code></pre>
   </div>
 </section>
 
+<section id="trajectory" class="shell">
+  <div class="section-head wide">
+    <p class="kicker">Progress and aspiration</p>
+    <h2>Make room for both.</h2>
+  </div>
+  <div class="trajectory-grid">
+    <article class="glass proof-card">
+      <h3>Where it is now</h3>
+      <p>Today, QuantaLang is a Rust-built effects compiler with a verified C execution path, working HLSL/GLSL shader-source output, typed effect receipts, policy gates, SourceId provenance, and semantic-corpus checks.</p>
+    </article>
+    <article class="glass proof-card">
+      <h3>Where it is trying to go</h3>
+      <p>Long term, QuantaLang is meant to become a live-state-aware language substrate: one source shape that can coordinate CPU and GPU outputs, declare machine and model boundaries, and emit receipts that WARDEN-style membrane tooling can inspect.</p>
+    </article>
+  </div>
+</section>
+
 <section id="capabilities" class="shell">
   <div class="section-head wide">
     <p class="kicker">Compiler workflow</p>
@@ -171,6 +188,27 @@ fn PS_Vignette(uv: vec2) -> vec4 {
   let vig = vignette(color.x, color.y, 0.5, 0.6);
   vec4(color.x * vig, color.y * vig, color.z * vig, 1.0)
 }</code></pre>
+  </div>
+</section>
+
+<section id="live-state-substrate" class="shell section-grid">
+  <div class="section-head">
+    <p class="kicker">Live-state provenance substrate</p>
+    <h2>Effects are a boundary language.</h2>
+  </div>
+  <div class="stack">
+    <article class="glass proof-card">
+      <h3>Why this matters</h3>
+      <p>LLMs can hallucinate the state they describe; compilers and machines can report the state they actually touched. QuantaLang points toward code that declares effects, records ambient capability use, emits CPU and shader artifacts with maturity labels, and hands those receipts to WARDEN-style live-state tooling.</p>
+    </article>
+    <article class="glass proof-card">
+      <h3>Where it could apply</h3>
+      <p>The same pattern belongs in creative tools, research pipelines, and security workflows: code should say whether it touched files, network, GPU, process, environment, foreign functions, or model-facing boundaries before a human or model trusts the output.</p>
+    </article>
+    <article class="glass proof-card">
+      <h3>Current boundary</h3>
+      <p>This is an aspiration, not a finished platform claim. C remains the verified execution path today; HLSL/GLSL are working shader-source outputs; simultaneous CPU/GPU orchestration with WARDEN is the direction, not the current release promise.</p>
+    </article>
   </div>
 </section>
 
