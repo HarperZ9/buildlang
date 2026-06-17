@@ -3,16 +3,16 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>QuantaLang - compiler project</title>
-<meta name="description" content="QuantaLang is a Rust compiler for .quanta files with a C99 execution path, shader output, and explicitly labeled research backends.">
-<meta property="og:title" content="QuantaLang - compiler project">
-<meta property="og:description" content="Rust compiler with .quanta to C99 execution, HLSL/GLSL output, and research backends labeled by maturity.">
+<title>QuantaLang - Compiler Research You Can Run</title>
+<meta name="description" content="QuantaLang is Zain Dana Harper's Rust compiler for .quanta files: a C99 execution path, shader output, and explicitly labeled research backends.">
+<meta property="og:title" content="QuantaLang - compiler research you can run">
+<meta property="og:description" content="A Rust compiler with .quanta to C99 execution, HLSL/GLSL output, and research backends labeled by maturity.">
 <meta property="og:type" content="website">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='8' fill='%2317181c'/%3E%3Cpath d='M18 19h28v8H28v10h16v8H18z' fill='%23c9d6a3'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=Manrope:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=20260615">
+<link rel="stylesheet" href="styles.css?v=20260617c">
 </head>
 <body>
 <div class="bg"></div>
@@ -34,11 +34,11 @@
 </nav>
 
 <header id="top" class="hero shell">
-  <p class="kicker">compiler project - test-backed C path - shader output - labeled research backends</p>
+  <p class="kicker">compiler research &middot; test-backed C path &middot; shader output &middot; labeled research backends</p>
   <div class="hero-grid">
     <div>
-      <h1>QuantaLang is a compiler project.</h1>
-      <p class="lead">Open the repo and run <code>quantac</code>. The supported path is <code>.quanta</code> to C99 to a native executable. HLSL and GLSL emit shader source. Rust, LLVM, WebAssembly, SPIR-V, x86-64, and ARM64 are wired research targets, not equal production backends.</p>
+      <h1>Compiler research you can run.</h1>
+      <p class="lead">QuantaLang is where my language, graphics, and evidence instincts meet. Open the repo and run <code>quantac</code>: <code>.quanta</code> to C99 is the supported native path, HLSL/GLSL emit shader source, and the other backends are explicitly research targets.</p>
       <div class="cta">
         <a class="btn solid" href="#quickstart">Run the quickstart</a>
         <a class="btn" href="https://github.com/HarperZ9/quantalang">Source</a>
@@ -72,7 +72,7 @@ compiler/target/release/quantac corpus verify</code></pre>
 <section id="proof" class="shell section-grid">
   <div class="section-head">
     <p class="kicker">Current state</p>
-    <h2>What works today.</h2>
+    <h2>What you can run today.</h2>
   </div>
   <div class="stack">
     <article class="glass proof-card">
@@ -93,12 +93,12 @@ compiler/target/release/quantac corpus verify</code></pre>
 <section id="value" class="shell section-grid">
   <div class="section-head">
     <p class="kicker">Evidence</p>
-    <h2>What the repo proves.</h2>
+    <h2>How to judge it.</h2>
   </div>
   <div class="stack">
     <article class="glass proof-card">
       <h3>Run a program</h3>
-      <p>Build <code>quantac</code>, run <code>hello.quanta</code>, <code>ledger.quanta</code>, and <code>effects_greeting.quanta</code>, then verify the 8-program semantic corpus.</p>
+      <p>Build <code>quantac</code>, run <code>hello.quanta</code>, <code>ledger.quanta</code>, and <code>effects_greeting.quanta</code>, then verify the 8-program semantic corpus. The point is not a perfect language ecosystem; it is a real compiler path with receipts nearby.</p>
     </article>
     <article class="glass proof-card">
       <h3>Use the shader path</h3>
@@ -115,7 +115,7 @@ compiler/target/release/quantac corpus verify</code></pre>
   <div class="section-head wide">
     <p class="kicker">Compiler workflow</p>
     <h2>How the compiler works.</h2>
-    <p>A .quanta source moves through lexer, parser, type checker, MIR, and backends. C is the test-backed execution path; shader output writes source; the remaining backends are labeled by maturity.</p>
+    <p>A .quanta source moves through lexer, parser, type checker, MIR, and backends. C is the test-backed execution path; shader output writes source; the remaining backends are labeled by maturity. That boundary is part of the project: ambition, but with the current state kept visible.</p>
   </div>
   <div class="cap-grid">
     <article class="glass cap">
@@ -145,7 +145,7 @@ compiler/target/release/quantac corpus verify</code></pre>
   <div>
     <p class="kicker">One source shape</p>
     <h2>One language family for CPU and shader code.</h2>
-    <p class="lead">CPU examples run through C. Shader examples emit HLSL/GLSL. Speculative targets stay labeled research-grade.</p>
+    <p class="lead">CPU examples run through C. Shader examples emit HLSL/GLSL. Speculative targets stay labeled research-grade. This is the same instinct as the rest of my work: build the artifact, then name exactly what it can and cannot do.</p>
   </div>
   <div class="glass code-card">
     <div class="terminal-title"><span></span><span></span><span></span><b>effects_greeting.quanta</b></div>
@@ -193,7 +193,7 @@ fn PS_Vignette(uv: vec2) -> vec4 {
   <div class="glass install-card">
     <p class="kicker">Install</p>
     <h2>Run the compiler path.</h2>
-    <p>The root README, STATUS, and TEST_RESULTS files are the factual anchors for current compiler status.</p>
+    <p>The root README, STATUS, and TEST_RESULTS files are the factual anchors for current compiler status. Start there, then decide for yourself what the evidence supports.</p>
     <pre><code>git clone https://github.com/HarperZ9/quantalang.git
 cd quantalang/compiler
 cargo build --release
@@ -204,7 +204,7 @@ compiler/target/release/quantac corpus verify</code></pre>
   </div>
   <div class="side-list">
     <article class="glass"><h3>Editor support</h3><p>The VS Code extension covers highlighting, brackets, comments, and icons. <code>quantac lsp</code>, <code>fmt</code>, and <code>pkg</code> exist, with partial maturity.</p></article>
-    <article class="glass"><h3>Quanta Universe</h3><p><a href="https://github.com/HarperZ9/quanta-universe">Quanta Universe</a> is the broader alpha corpus for rendering, color, finance, systems, and tooling modules.</p></article>
+    <article class="glass"><h3>Quanta Universe</h3><p><a href="https://github.com/HarperZ9/quanta-universe">Quanta Universe</a> is the broader alpha corpus for rendering, color, finance, systems, and tooling modules. It is part sketchbook, part research map, and it is labeled accordingly.</p></article>
   </div>
 </section>
 </main>
