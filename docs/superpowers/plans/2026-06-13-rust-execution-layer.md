@@ -48,7 +48,7 @@ fn main() {
 Run:
 
 ```powershell
-python C:\Users\Zain\AGENTS\warden_shell\tools\safe_exec.py --timeout 60 -- cargo test --manifest-path public/pubscan/quantalang/compiler/Cargo.toml generated_rust_runs_for_scalar_branch_subset --quiet
+cargo test --manifest-path public/pubscan/quantalang/compiler/Cargo.toml generated_rust_runs_for_scalar_branch_subset --quiet
 ```
 
 Expected: compile failure because `assert_rustc_run_stdout` is not defined.
@@ -192,7 +192,7 @@ fn main() {
 Run:
 
 ```powershell
-python C:\Users\Zain\AGENTS\warden_shell\tools\safe_exec.py --timeout 90 -- cargo test --manifest-path public/pubscan/quantalang/compiler/Cargo.toml generated_rust_runs --quiet
+cargo test --manifest-path public/pubscan/quantalang/compiler/Cargo.toml generated_rust_runs --quiet
 ```
 
 Expected: 4 tests passed.
@@ -227,7 +227,7 @@ Update the Rust backend notes to include the generated Rust executable smoke tes
 Run:
 
 ```powershell
-python C:\Users\Zain\AGENTS\warden_shell\tools\safe_exec.py --timeout 60 -- cargo fmt --manifest-path public/pubscan/quantalang/compiler/Cargo.toml -- --check
+cargo fmt --manifest-path public/pubscan/quantalang/compiler/Cargo.toml -- --check
 ```
 
 Expected: exit 0.
@@ -237,7 +237,7 @@ Expected: exit 0.
 Run:
 
 ```powershell
-python C:\Users\Zain\AGENTS\warden_shell\tools\safe_exec.py --timeout 90 -- cargo test --manifest-path public/pubscan/quantalang/compiler/Cargo.toml generated_rust_compiles --quiet
+cargo test --manifest-path public/pubscan/quantalang/compiler/Cargo.toml generated_rust_compiles --quiet
 ```
 
 Expected: all generated Rust metadata tests pass.
@@ -247,7 +247,7 @@ Expected: all generated Rust metadata tests pass.
 Run:
 
 ```powershell
-python C:\Users\Zain\AGENTS\warden_shell\tools\safe_exec.py --timeout 90 -- cargo test --manifest-path public/pubscan/quantalang/compiler/Cargo.toml generated_rust_runs --quiet
+cargo test --manifest-path public/pubscan/quantalang/compiler/Cargo.toml generated_rust_runs --quiet
 ```
 
 Expected: all generated Rust execution tests pass.
@@ -257,7 +257,7 @@ Expected: all generated Rust execution tests pass.
 Run:
 
 ```powershell
-python C:\Users\Zain\AGENTS\warden_shell\tools\safe_exec.py --timeout 90 -- cargo test --manifest-path public/pubscan/quantalang/compiler/Cargo.toml rust_target --quiet
+cargo test --manifest-path public/pubscan/quantalang/compiler/Cargo.toml rust_target --quiet
 ```
 
 Expected: CLI Rust target/alias test passes.
@@ -267,7 +267,7 @@ Expected: CLI Rust target/alias test passes.
 Run:
 
 ```powershell
-python C:\Users\Zain\AGENTS\warden_shell\tools\safe_exec.py --timeout 180 -- cargo test --manifest-path public/pubscan/quantalang/compiler/Cargo.toml --quiet
+cargo test --manifest-path public/pubscan/quantalang/compiler/Cargo.toml --quiet
 ```
 
 Expected: full suite passes with the verified count and 11 ignored tests.
@@ -277,8 +277,8 @@ Expected: full suite passes with the verified count and 11 ignored tests.
 Run:
 
 ```powershell
-python C:\Users\Zain\AGENTS\warden_shell\tools\safe_exec.py -- python -m json.tool project-docs/roadmaps/contracts/backend-capability-descriptor-quantalang-2026-06-12.json
-python C:\Users\Zain\AGENTS\warden_shell\tools\safe_exec.py -- git -C public/pubscan/quantalang diff --check -- README.md STATUS.md compiler/src/codegen/backend/rust.rs docs/superpowers/plans/2026-06-13-rust-execution-layer.md
+python -m json.tool project-docs/roadmaps/contracts/backend-capability-descriptor-quantalang-2026-06-12.json
+git -C public/pubscan/quantalang diff --check -- README.md STATUS.md compiler/src/codegen/backend/rust.rs docs/superpowers/plans/2026-06-13-rust-execution-layer.md
 ```
 
 Expected: both commands exit 0.
