@@ -19,7 +19,7 @@ def index_source() -> str:
 def test_docs_page_uses_portfolio_glass_language() -> None:
     source = page_source()
 
-    assert '<link rel="stylesheet" href="styles.css?v=20260617d">' in source
+    assert '<link rel="stylesheet" href="styles.css?v=20260617e">' in source
     assert "--olive-wash:#c9d6a3" in source
     assert "--glass-blur:saturate(170%) blur(30px)" in source
     assert ".grain{display:block" in source
@@ -102,6 +102,15 @@ def test_live_state_provenance_aspiration_is_explicit_without_overclaiming() -> 
     source = index_source()
 
     assert "Live-state provenance substrate" in source
+    assert "Machines need senses before they need more freedom." in source
+    assert "Safety, transparency, and creativity can evolve on the same surface." in source
+    assert "AI does not become more creative by escaping accountability." in source
+    assert "Many creatives are hesitant to use AI tools" in source
+    assert "That resistance is not irrational" in source
+    assert "The deeper technical problem is state" in source
+    assert "The same gap that makes AI dangerous also makes it limited" in source
+    assert "programmatic sensory organs" in source
+    assert "Accountability is not the cage around capability" in source
     assert "LLMs can hallucinate the state they describe; compilers and machines can report the state they actually touched." in source
     assert "QuantaLang points toward code that declares effects, records ambient capability use, emits CPU and shader artifacts with maturity labels, and hands those receipts to WARDEN-style live-state tooling." in source
     assert "creative tools, research pipelines, and security workflows" in source
@@ -112,5 +121,7 @@ def test_live_state_provenance_aspiration_is_explicit_without_overclaiming() -> 
         "one source shape already coordinates CPU and GPU outputs under WARDEN",
         "WARDEN-integrated CPU/GPU emission is complete",
         "models always have live-state ground truth",
+        "AI tools are ethically neutral",
+        "machines now sense the world natively",
     ]:
         assert overclaim not in source
