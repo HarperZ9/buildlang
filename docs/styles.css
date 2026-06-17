@@ -39,6 +39,12 @@ h2{font-size:3.6rem; max-width:11ch; margin-bottom:1.2rem}
 h3{font-size:1.25rem; margin-bottom:.65rem}.lead{font-size:1.2rem; color:var(--ink-muted); max-width:58ch}
 .cta{display:flex; flex-wrap:wrap; gap:.7rem; margin-top:1.6rem}.btn{font-family:var(--mono); font-size:.84rem; padding:.72rem 1.15rem; border-radius:100px; background:rgba(255,255,255,.62); border:1px solid rgba(23,24,28,.13); box-shadow:0 1px 0 rgba(255,255,255,.8) inset,0 12px 28px -22px rgba(35,42,62,.45); -webkit-backdrop-filter:saturate(150%) blur(16px); backdrop-filter:saturate(150%) blur(16px); transition:transform .25s var(--ease), box-shadow .25s var(--ease)}
 .btn:hover{transform:translateY(-2px); box-shadow:var(--glass-shadow)}.btn.solid{background:rgba(255,255,255,.82)}
+.orientation{padding:clamp(1.1rem,2vw,1.55rem)}
+.orientation-label{font-family:var(--mono); font-size:.76rem; font-weight:700; color:var(--amber); text-transform:uppercase; margin:0 0 .8rem}
+.orientation ul{list-style:none; display:grid; gap:.65rem; margin:0; padding:0}
+.orientation li{padding:.85rem; border-radius:8px; background:rgba(255,255,255,.6); border:1px solid rgba(23,24,28,.09)}
+.orientation strong{display:block; font-family:var(--display); line-height:1.1; color:var(--ink); margin-bottom:.35rem}
+.orientation span{display:block; color:var(--ink-muted); font-size:.94rem; line-height:1.45}
 .hero-card,.code-card,.install-card{padding:clamp(1.1rem,2vw,1.55rem)}.terminal-title{display:flex; align-items:center; gap:.38rem; margin-bottom:1rem; color:var(--ink-soft); font-family:var(--mono); font-size:.72rem}.terminal-title span{width:.55rem; height:.55rem; border-radius:50%; background:rgba(23,24,28,.2)}.terminal-title b{margin-left:.4rem; color:var(--ink-muted); font-weight:700}
 pre code{display:block; color:#22262f; font-size:.82rem; line-height:1.6}
 .stats{display:grid; grid-template-columns:repeat(4,1fr); gap:.85rem; margin-top:1.25rem}.stat{padding:1.05rem 1.15rem}.stat b{display:block; font-family:var(--display); font-size:1.7rem; margin-bottom:.22rem}.stat span{display:block; color:var(--ink-muted); font-family:var(--mono); font-size:.68rem; text-transform:uppercase; letter-spacing:0}

@@ -19,7 +19,7 @@ def index_source() -> str:
 def test_docs_page_uses_portfolio_glass_language() -> None:
     source = page_source()
 
-    assert '<link rel="stylesheet" href="styles.css?v=20260617e">' in source
+    assert '<link rel="stylesheet" href="styles.css?v=20260617f">' in source
     assert "--olive-wash:#c9d6a3" in source
     assert "--glass-blur:saturate(170%) blur(30px)" in source
     assert ".grain{display:block" in source
@@ -49,12 +49,20 @@ def test_current_progress_evidence_is_visible() -> None:
     assert "quantac corpus verify" in source
     assert "quantac doctor" in source
     assert "quantac run examples/quickstart/effects_greeting.quanta" in source
-    assert "Compiler research you can run" in source
-    assert "QuantaLang is where my language, graphics, and evidence instincts meet" in source
-    assert "Open the repo and run <code>quantac</code>" in source
+    assert "QuantaLang overview" in source
+    assert "Rust compiler research you can run." in source
+    assert "QuantaLang is a language research project and compiler prototype." in source
+    assert "The supported execution path lowers <code>.quanta</code> files to C99; HLSL/GLSL emit shader source; the remaining backends are labeled research targets." in source
+    assert "At a glance" in source
+    assert "What this is" in source
+    assert "A Rust-built compiler for <code>.quanta</code> files, effects experiments, C output, shader-source output, and provenance-oriented language research." in source
+    assert "What works now" in source
+    assert "C execution is the verified path; HLSL/GLSL shader-source output works; other targets are research-grade." in source
+    assert "Where to start" in source
+    assert "Run the quickstart, inspect STATUS and TEST_RESULTS, then read the roadmap for the live-state direction." in source
     assert "<code>.quanta</code> to C99 is the supported native path" in source
     assert "HLSL/GLSL emit shader source" in source
-    assert "the other backends are explicitly research targets" in source
+    assert "the remaining backends are labeled research targets" in source
     assert "What you can run today" in source
     assert "Run the compiler path" in source
     assert "The root README, STATUS, and TEST_RESULTS files are the factual anchors" in source
