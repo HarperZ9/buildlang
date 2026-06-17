@@ -12,7 +12,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=Manrope:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=20260617e">
+<link rel="stylesheet" href="styles.css?v=20260617f">
 </head>
 <body>
 <div class="bg"></div>
@@ -23,41 +23,35 @@
   <div class="nav-in">
     <a class="brand" href="#top">QuantaLang <span>quantac</span></a>
     <div class="nav-links">
-      <a href="#proof">Proof</a>
-      <a href="#value">Evidence</a>
-      <a href="#capabilities">Capabilities</a>
+      <a href="#summary">Start here</a>
+      <a href="#proof">Current state</a>
+      <a href="#quickstart">Run it</a>
+      <a href="#trajectory">Roadmap</a>
       <a href="#backends">Backends</a>
-      <a href="#quickstart">Quickstart</a>
       <a href="https://github.com/HarperZ9/quantalang">GitHub</a>
     </div>
   </div>
 </nav>
 
 <header id="top" class="hero shell">
-  <p class="kicker">compiler research &middot; test-backed C path &middot; shader output &middot; labeled research backends</p>
+  <p class="kicker">QuantaLang overview</p>
   <div class="hero-grid">
     <div>
-      <h1>Compiler research you can run.</h1>
-      <p class="lead">QuantaLang is where my language, graphics, and evidence instincts meet. Open the repo and run <code>quantac</code>: <code>.quanta</code> to C99 is the supported native path, HLSL/GLSL emit shader source, and the other backends are explicitly research targets. The larger direction is an effects language that can give models, machines, and reviewers a live-state receipt instead of a remembered story.</p>
+      <h1>Rust compiler research you can run.</h1>
+      <p class="lead">QuantaLang is a language research project and compiler prototype. The supported execution path lowers <code>.quanta</code> files to C99; HLSL/GLSL emit shader source; the remaining backends are labeled research targets. In repo terms, <code>.quanta</code> to C99 is the supported native path today.</p>
       <div class="cta">
         <a class="btn solid" href="#quickstart">Run the quickstart</a>
+        <a class="btn" href="#proof">Read current state</a>
         <a class="btn" href="https://github.com/HarperZ9/quantalang">Source</a>
       </div>
     </div>
-    <aside class="glass hero-card">
-      <div class="terminal-title"><span></span><span></span><span></span><b>how to run it</b></div>
-      <pre><code>git clone https://github.com/HarperZ9/quantalang.git
-cd quantalang/compiler
-cargo build --release
-cd ..
-
-compiler/target/release/quantac doctor
-compiler/target/release/quantac run examples/quickstart/hello.quanta
-compiler/target/release/quantac run examples/quickstart/ledger.quanta
-compiler/target/release/quantac run examples/quickstart/effects_greeting.quanta
-compiler/target/release/quantac examples/quickstart/vignette_shader.quanta \
-  --target hlsl -o vignette_shader.hlsl
-compiler/target/release/quantac corpus verify</code></pre>
+    <aside id="summary" class="glass orientation">
+      <p class="orientation-label">At a glance</p>
+      <ul>
+        <li><strong>What this is</strong><span>A Rust-built compiler for <code>.quanta</code> files, effects experiments, C output, shader-source output, and provenance-oriented language research.</span></li>
+        <li><strong>What works now</strong><span>C execution is the verified path; HLSL/GLSL shader-source output works; other targets are research-grade.</span></li>
+        <li><strong>Where to start</strong><span>Run the quickstart, inspect STATUS and TEST_RESULTS, then read the roadmap for the live-state direction.</span></li>
+      </ul>
     </aside>
   </div>
   <div class="stats">
@@ -243,6 +237,10 @@ cargo build --release
 cd ..
 compiler/target/release/quantac doctor
 compiler/target/release/quantac run examples/quickstart/hello.quanta
+compiler/target/release/quantac run examples/quickstart/ledger.quanta
+compiler/target/release/quantac run examples/quickstart/effects_greeting.quanta
+compiler/target/release/quantac examples/quickstart/vignette_shader.quanta \
+  --target hlsl -o vignette_shader.hlsl
 compiler/target/release/quantac corpus verify</code></pre>
   </div>
   <div class="side-list">
