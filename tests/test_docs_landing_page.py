@@ -19,7 +19,7 @@ def index_source() -> str:
 def test_docs_page_uses_portfolio_glass_language() -> None:
     source = page_source()
 
-    assert '<link rel="stylesheet" href="styles.css?v=20260617f">' in source
+    assert '<link rel="stylesheet" href="styles.css?v=20260617g">' in source
     assert "--olive-wash:#c9d6a3" in source
     assert "--glass-blur:saturate(170%) blur(30px)" in source
     assert ".grain{display:block" in source
@@ -98,6 +98,8 @@ def test_compiler_workflow_and_capabilities_are_plainly_explained() -> None:
     assert "How the compiler works" in source
     assert "source moves through lexer, parser, type checker, MIR, and backends" in source
     assert "ambition, but with the current state kept visible" in source
+    assert "The pattern matches the surrounding body of work: build the artifact, then name exactly what it can and cannot do." in source
+    assert "This is the same instinct as the rest of my work" not in source
     assert "Algebraic effects" in source
     assert "vignette_shader.quanta" in source
     assert "C99" in source
