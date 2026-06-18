@@ -135,7 +135,9 @@ impl CBackend {
         self.output.push('\n');
 
         // Type definitions
-        self.generate_type_definitions(&module.types)?;
+        let mut all_types = module.types.clone();
+        all_types.extend(Self::synthesize_tuple_typedefs(module));
+        self.generate_type_definitions(&all_types)?;
 
         // Vtable TYPE declarations (before forward declarations so dyn_* types are available)
         self.generate_vtable_types(module)?;
@@ -212,19 +214,110 @@ impl CBackend {
         Ok(())
     }
 
-    fn generate_type_definitions(&mut self, types: &[MirTypeDef]) -> CodegenResult<()> {
+    /// Synthesize a MirTypeDef for every tuple type referenced anywhere in the
+    /// module (function signatures, locals, and type-def fields/variants) that
+    /// was not already registered. Tuple types appear by value as params, locals,
+    /// and fields, but only literals and return types were registered during
+    /// lowering, so the rest reached the backend with no typedef. The topological
+    /// emitter (collect_type_deps) orders each after its element types.
+    fn synthesize_tuple_typedefs(module: &MirModule) -> Vec<MirTypeDef> {
+        use std::collections::HashSet;
+        fn visit(
+            ty: &MirType,
+            existing: &HashSet<String>,
+            seen: &mut HashSet<String>,
+            out: &mut Vec<MirTypeDef>,
+        ) {
+            match ty {
+                MirType::Tuple(elems) => {
+                    if !elems.is_empty() {
+                        let name = MirType::tuple_type_name(elems);
+                        let key = name.to_string();
+                        if !existing.contains(&key) && seen.insert(key) {
+                            let fields: Vec<(Option<Arc<str>>, MirType)> = elems
+                                .iter()
+                                .enumerate()
+                                .map(|(i, t)| (Some(Arc::from(format!("_{}", i))), t.clone()))
+                                .collect();
+                            out.push(MirTypeDef {
+                                name,
+                                kind: TypeDefKind::Struct { fields, packed: false },
+                            });
+                        }
+                    }
+                    for e in elems {
+                        visit(e, existing, seen, out);
+                    }
+                }
+                MirType::Array(inner, _)
+                | MirType::Slice(inner)
+                | MirType::Ptr(inner)
+                | MirType::Vec(inner) => visit(inner, existing, seen, out),
+                MirType::Map(k, v) => {
+                    visit(k, existing, seen, out);
+                    visit(v, existing, seen, out);
+                }
+                MirType::FnPtr(sig) => {
+                    for prm in &sig.params {
+                        visit(prm, existing, seen, out);
+                    }
+                    visit(&sig.ret, existing, seen, out);
+                }
+                _ => {}
+            }
+        }
+        let existing: HashSet<String> =
+            module.types.iter().map(|t| t.name.to_string()).collect();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut out: Vec<MirTypeDef> = Vec::new();
+        for td in &module.types {
+            match &td.kind {
+                TypeDefKind::Struct { fields, .. } => {
+                    for (_, ft) in fields {
+                        visit(ft, &existing, &mut seen, &mut out);
+                    }
+                }
+                TypeDefKind::Enum { variants, .. } => {
+                    for v in variants {
+                        for (_, ft) in &v.fields {
+                            visit(ft, &existing, &mut seen, &mut out);
+                        }
+                    }
+                }
+                TypeDefKind::Union { variants } => {
+                    for (_, vt) in variants {
+                        visit(vt, &existing, &mut seen, &mut out);
+                    }
+                }
+            }
+        }
+        for f in &module.functions {
+            for prm in &f.sig.params {
+                visit(prm, &existing, &mut seen, &mut out);
+            }
+            visit(&f.sig.ret, &existing, &mut seen, &mut out);
+            for l in &f.locals {
+                visit(&l.ty, &existing, &mut seen, &mut out);
+            }
+        }
+        out
+    }
+
+        fn generate_type_definitions(&mut self, types: &[MirTypeDef]) -> CodegenResult<()> {
         if types.is_empty() {
             return Ok(());
         }
 
         // Pre-emit typedefs for tuple types used in struct fields.
         // (f32, f32) → typedef struct Tuple_f32_f32 { float field0; float field1; } Tuple_f32_f32;
+        let type_names: std::collections::HashSet<&str> =
+            types.iter().map(|t| t.name.as_ref()).collect();
         let mut emitted_tuples = std::collections::HashSet::new();
         for ty in types {
             if let TypeDefKind::Struct { fields, .. } = &ty.kind {
                 for (_, field_ty) in fields {
                     if let MirType::Struct(name) = field_ty {
-                        if name.starts_with("Tuple_") && !emitted_tuples.contains(name.as_ref()) {
+                        if name.starts_with("Tuple_") && !type_names.contains(name.as_ref()) && !emitted_tuples.contains(name.as_ref()) {
                             emitted_tuples.insert(name.to_string());
                             // Parse the tuple element types from the mangled name
                             let parts: Vec<&str> = name[6..].split('_').collect();
@@ -243,6 +336,31 @@ impl CBackend {
                                 write!(self.output, "    {} field{};\n", c_type, i).unwrap();
                             }
                             write!(self.output, "}} {};\n\n", name).unwrap();
+                        }
+                    }
+                    // A tuple field may instead be carried as MirType::Tuple
+                    // (not Struct("Tuple_..")); emit its typedef too, deriving
+                    // field C types from the element types directly.
+                    if let MirType::Tuple(elems) = field_ty {
+                        // Only all-primitive tuples are safe to pre-emit here:
+                        // a tuple of named structs would reference a struct not
+                        // yet defined at this point (emit ordering). Those remain
+                        // a known gap for the topological type emitter.
+                        let all_prim = elems.iter().all(|e| {
+                            matches!(e, MirType::Int(..) | MirType::Float(..) | MirType::Bool)
+                        });
+                        if !elems.is_empty() && all_prim {
+                            let name = MirType::tuple_type_name(elems);
+                            if !type_names.contains(name.as_ref()) && !emitted_tuples.contains(name.as_ref()) {
+                                emitted_tuples.insert(name.to_string());
+                                let field_ctypes: Vec<String> =
+                                    elems.iter().map(|e| self.type_to_c(e)).collect();
+                                write!(self.output, "typedef struct {} {{\n", name).unwrap();
+                                for (i, ct) in field_ctypes.iter().enumerate() {
+                                    write!(self.output, "    {} field{};\n", ct, i).unwrap();
+                                }
+                                write!(self.output, "}} {};\n\n", name).unwrap();
+                            }
                         }
                     }
                 }
@@ -293,23 +411,30 @@ impl CBackend {
 
         // Recursively collect named-type dependencies from a MirType.
         // Only value types (not behind a pointer) require ordering.
-        fn collect_type_deps<'a>(
-            mir_ty: &'a MirType,
+        fn collect_type_deps(
+            mir_ty: &MirType,
             type_names: &std::collections::HashSet<&str>,
-            out: &mut Vec<&'a str>,
+            out: &mut Vec<String>,
         ) {
             match mir_ty {
                 MirType::Struct(name) => {
                     if type_names.contains(name.as_ref()) {
-                        out.push(name.as_ref());
+                        out.push(name.to_string());
                     }
                 }
                 MirType::Array(inner, _) | MirType::Slice(inner) => {
                     collect_type_deps(inner, type_names, out);
                 }
                 MirType::Tuple(elems) => {
-                    for e in elems {
-                        collect_type_deps(e, type_names, out);
+                    // A tuple used by value (e.g. as a struct field) depends on its
+                    // own typedef being emitted first; register that dependency.
+                    let tname = MirType::tuple_type_name(elems);
+                    if type_names.contains(tname.as_ref()) {
+                        out.push(tname.to_string());
+                    } else {
+                        for e in elems {
+                            collect_type_deps(e, type_names, out);
+                        }
                     }
                 }
                 // Vec/Map/Ptr are behind pointers - no ordering needed
@@ -318,7 +443,7 @@ impl CBackend {
         }
 
         // Collect value dependencies for each type
-        let deps: std::collections::HashMap<&str, Vec<&str>> = types
+        let deps: std::collections::HashMap<&str, Vec<String>> = types
             .iter()
             .map(|ty| {
                 let mut d = Vec::new();
@@ -360,7 +485,7 @@ impl CBackend {
             let mut next_remaining = Vec::new();
             for ty in &remaining {
                 let type_deps = deps.get(ty.name.as_ref()).cloned().unwrap_or_default();
-                if type_deps.iter().all(|d| emitted.contains(d)) {
+                if type_deps.iter().all(|d| emitted.contains(d.as_str())) {
                     self.emit_type_def(ty);
                     emitted.insert(ty.name.as_ref());
                 } else {
@@ -516,7 +641,16 @@ impl CBackend {
                         // Unit variant: add empty struct so it can be
                         // referenced in designated initializers
                         self.write_indent();
-                        write!(self.output, "char _{};\n", variant.name).unwrap();
+                        // Placeholder field name must not be a reserved C identifier (e.g. a
+                        // variant named Bool would yield _Bool, the C99 boolean keyword).
+                        // It is pure padding, never referenced.
+                        let placeholder = format!("_{}", variant.name);
+                        let placeholder = if Self::is_c_reserved(&placeholder) {
+                            format!("{}_", placeholder)
+                        } else {
+                            placeholder
+                        };
+                        write!(self.output, "char {};\n", placeholder).unwrap();
                     }
                 }
                 self.indent -= 1;
@@ -2281,13 +2415,19 @@ impl CBackend {
                     _ => false,
                 };
                 if base_is_vec {
-                    let suffix = match elem_ty {
-                        MirType::Float(_) => "f64",
-                        MirType::Int(IntSize::I64, _) => "i64",
-                        MirType::Struct(n) if n.as_ref() == "QuantaString" => "str",
-                        _ => "i32",
-                    };
-                    format!("quanta_hvec_get_{}({}, {})", suffix, base_str, index_str)
+                    // Scalar/string elements use the typed getters; aggregate elements
+                    // (structs, tuples) use the generic pointer getter + cast/deref so
+                    // Vec<struct> / Vec<tuple> indexing reads the element by value.
+                    match elem_ty {
+                        MirType::Float(_) => format!("quanta_hvec_get_f64({}, {})", base_str, index_str),
+                        MirType::Int(IntSize::I64, _) => format!("quanta_hvec_get_i64({}, {})", base_str, index_str),
+                        MirType::Struct(n) if n.as_ref() == "QuantaString" => format!("quanta_hvec_get_str({}, {})", base_str, index_str),
+                        MirType::Int(..) | MirType::Bool => format!("quanta_hvec_get_i32({}, {})", base_str, index_str),
+                        other => {
+                            let ct = self.type_to_c(other);
+                            format!("(*({}*)quanta_vec_get({}.inner, {}))", ct, base_str, index_str)
+                        }
+                    }
                 } else {
                     // QuantaString indexing: access .ptr[index] for byte access
                     let base_is_string = match base {

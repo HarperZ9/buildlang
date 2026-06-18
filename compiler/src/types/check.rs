@@ -612,6 +612,14 @@ impl<'ctx> TypeChecker<'ctx> {
 
     fn check_function(&mut self, f: &ast::FnDef, span: Span) {
         if let Some(body) = &f.body {
+            // Generic functions are checked per-instantiation at
+            // monomorphization; the abstract body cannot resolve
+            // type-parameter method calls or closure-param returns.
+            let is_generic = f
+                .generics
+                .params
+                .iter()
+                .any(|p| matches!(p.kind, ast::GenericParamKind::Type { .. }));
             self.ctx.push_scope(ScopeKind::Function);
 
             // Add generic parameters and register their trait bounds
@@ -747,7 +755,7 @@ impl<'ctx> TypeChecker<'ctx> {
             // type might be `()` (e.g., from a while loop that returns via
             // `return` inside an `if`). In this case, the return type was
             // already validated by infer_return(), so skip the body check.
-            if !has_return {
+            if !has_return && !is_generic {
                 if let Err(_) = super::unify::unify(&body_ty, &expected_ret) {
                     // When ADT types mismatch by DefId, check if they match by
                     // name.  This handles cases where inline module re-exports
@@ -858,8 +866,12 @@ impl<'ctx> TypeChecker<'ctx> {
                 }
             }
 
-            // Collect errors from inference
-            self.errors.extend(infer_errors);
+            // Collect errors from inference. For generic functions, defer body
+            // type errors to monomorphization (the concrete instantiation at each
+            // call site is the real check).
+            if !is_generic {
+                self.errors.extend(infer_errors);
+            }
 
             self.ctx.pop_scope();
         }
@@ -1036,7 +1048,18 @@ impl<'ctx> TypeChecker<'ctx> {
         }
 
         // PASS 2: Check method bodies (all signatures already registered).
+        // Methods of a generic impl (impl<T> ...) are checked per-instantiation
+        // at monomorphization; their bodies cannot resolve the abstract type
+        // parameters (method/field access on T), so defer the bodies here.
+        let impl_is_generic = impl_
+            .generics
+            .params
+            .iter()
+            .any(|p| matches!(p.kind, ast::GenericParamKind::Type { .. }));
         for item in &impl_.items {
+            if impl_is_generic && matches!(item.kind, ImplItemKind::Function(_)) {
+                continue;
+            }
             self.check_impl_item(item, self_ty);
         }
     }
