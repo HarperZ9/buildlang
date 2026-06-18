@@ -10951,6 +10951,67 @@ fn corpus_verify_rejects_mir_representation_operation_drift() {
 }
 
 #[test]
+fn corpus_verify_rejects_mir_representation_input_graph_digest_drift() {
+    let corpus_root = temp_semantic_corpus("mir_repr_input_graph_digest");
+    write_mir_representation_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["programs"][0]["input_graph_digest"]["hex"] =
+            serde_json::Value::String("f".repeat(64));
+        receipt
+    });
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(&corpus_root)
+        .output()
+        .expect("run quantac corpus verify against MIR representation input graph digest drift");
+
+    let _ = fs::remove_dir_all(&corpus_root);
+
+    assert!(
+        !output.status.success(),
+        "corpus verify should reject MIR representation input graph digest drift"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("mir representation program scalar_branch input_graph_digest mismatch"),
+        "stderr should name MIR representation input graph digest drift:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_mir_representation_mir_digest_drift() {
+    let corpus_root = temp_semantic_corpus("mir_repr_mir_digest");
+    write_mir_representation_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["programs"][0]["mir_digest"]["hex"] = serde_json::Value::String("e".repeat(64));
+        receipt
+    });
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(&corpus_root)
+        .output()
+        .expect("run quantac corpus verify against MIR representation MIR digest drift");
+
+    let _ = fs::remove_dir_all(&corpus_root);
+
+    assert!(
+        !output.status.success(),
+        "corpus verify should reject MIR representation MIR digest drift"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("mir representation program scalar_branch mir_digest mismatch"),
+        "stderr should name MIR representation MIR digest drift:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn corpus_verify_rejects_substrate_receipt_schema_drift() {
     let corpus_root = temp_semantic_corpus("substrate_schema");
     write_substrate_receipt_copy(&corpus_root, |mut receipt| {
@@ -11159,6 +11220,74 @@ fn corpus_verify_rejects_substrate_representation_receipt_path_escape() {
     assert!(
         !output.status.success(),
         "corpus verify should reject substrate representation receipt path escape"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("must stay within corpus root"),
+        "stderr should name substrate representation receipt path containment failure:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_substrate_representation_receipt_root_qualified_path() {
+    let corpus_root = temp_semantic_corpus("substrate_repr_path_root");
+    let rooted = if cfg!(windows) {
+        "\\receipts\\mir-representation-2026-06-18.json"
+    } else {
+        "/receipts/mir-representation-2026-06-18.json"
+    };
+    write_substrate_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["representation_surface"]["representation_receipt"] =
+            serde_json::Value::String(rooted.into());
+        receipt
+    });
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(&corpus_root)
+        .output()
+        .expect(
+            "run quantac corpus verify against substrate representation receipt root-qualified path",
+        );
+
+    let _ = fs::remove_dir_all(&corpus_root);
+
+    assert!(
+        !output.status.success(),
+        "corpus verify should reject substrate representation receipt root-qualified path"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("must stay within corpus root"),
+        "stderr should name substrate representation receipt path containment failure:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_substrate_representation_receipt_absolute_path() {
+    let corpus_root = temp_semantic_corpus("substrate_repr_path_absolute");
+    let absolute_path = std::env::temp_dir().join("outside.json");
+    write_substrate_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["representation_surface"]["representation_receipt"] =
+            serde_json::Value::String(absolute_path.to_string_lossy().into_owned());
+        receipt
+    });
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(&corpus_root)
+        .output()
+        .expect("run quantac corpus verify against substrate representation receipt absolute path");
+
+    let _ = fs::remove_dir_all(&corpus_root);
+
+    assert!(
+        !output.status.success(),
+        "corpus verify should reject substrate representation receipt absolute path"
     );
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("must stay within corpus root"),
