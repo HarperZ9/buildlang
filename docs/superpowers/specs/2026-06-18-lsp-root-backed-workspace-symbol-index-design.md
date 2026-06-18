@@ -157,15 +157,18 @@ The raw `workspace/symbol` param contract stays unchanged: missing or non-string
 
 ## Receipt Coverage
 
-Extend the LSP dispatch fixture to create a temporary workspace root with two
-files:
+Extend the LSP dispatch fixture with a checked deterministic workspace root at
+`semantic-corpus/lsp-workspace/` containing two files:
 
 - `main.quanta`, opened through `didOpen`
 - `library.quanta`, left unopened on disk
 
-The `workspace/symbol` fixture should query a symbol that exists only in
+The fixture should use the stable LSP root URI `file:///workspace` while the
+receipt builder maps that URI to the checked fixture directory. The
+`workspace/symbol` fixture should query a symbol that exists only in
 `library.quanta`. The receipt should record a nonzero `workspace_symbols` count
-for an unopened file-backed result.
+for an unopened file-backed result without embedding machine-specific absolute
+paths in the checked JSON.
 
 The existing opened-document workspace-symbol test should remain. This proves
 both paths:
