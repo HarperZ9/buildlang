@@ -100,6 +100,9 @@ pub struct MirLowerer<'ctx> {
     /// and from Some(value) construction. Used by lower_runtime_option_match
     /// to bind pattern variables with the correct type instead of i32.
     pub(crate) option_inner_types: HashMap<LocalId, MirType>,
+    /// Const name -> evaluated literal value, collected in a pre-pass so
+    /// that const identifiers used as array lengths (`[T; MAX_DIMS]`) resolve.
+    pub(crate) const_values: HashMap<Arc<str>, MirConst>,
 }
 
 // =============================================================================
@@ -167,6 +170,7 @@ impl<'ctx> MirLowerer<'ctx> {
             tuple_type_defs: HashSet::new(),
             expected_type: None,
             option_inner_types: HashMap::new(),
+            const_values: HashMap::new(),
         }
     }
 
@@ -199,6 +203,7 @@ impl<'ctx> MirLowerer<'ctx> {
             tuple_type_defs: HashSet::new(),
             expected_type: None,
             option_inner_types: HashMap::new(),
+            const_values: HashMap::new(),
         }
     }
 
@@ -278,6 +283,12 @@ impl<'ctx> MirLowerer<'ctx> {
         // Register built-in vector math types before user code
         self.register_vector_types();
 
+        // Pre-pass: evaluate consts so const identifiers used as array
+        // lengths (e.g. `[T; MAX_DIMS]`) resolve during type lowering below.
+        for item in &module.items {
+            self.collect_const_values(item);
+        }
+
         // First pass: collect type definitions and function signatures
         for item in &module.items {
             self.collect_item(item)?;
@@ -297,6 +308,26 @@ impl<'ctx> MirLowerer<'ctx> {
     // =========================================================================
     // COLLECTION PASS
     // =========================================================================
+
+    /// Evaluate top-level and inline-module const definitions into
+    /// const_values so they can resolve as array lengths during lowering.
+    fn collect_const_values(&mut self, item: &ast::Item) {
+        match &item.kind {
+            ItemKind::Const(c) => {
+                if let Some(v) = c.value.as_ref().and_then(|e| self.try_const_eval(e)) {
+                    self.const_values.insert(c.name.name.clone(), v);
+                }
+            }
+            ItemKind::Mod(m) => {
+                if let Some(content) = &m.content {
+                    for it in &content.items {
+                        self.collect_const_values(it);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 
     fn collect_item(&mut self, item: &ast::Item) -> CodegenResult<()> {
         match &item.kind {
@@ -480,6 +511,28 @@ impl<'ctx> MirLowerer<'ctx> {
     fn collect_inline_mod(&mut self, m: &ast::ModDef) -> CodegenResult<()> {
         if let Some(ref content) = m.content {
             self.module_prefix.push(m.name.name.clone());
+            // Forward-declare every non-generic struct/enum name in this
+            // module (bare -> module-prefixed) BEFORE lowering any item body.
+            // Field types are lowered during collect_struct/collect_enum, so a
+            // field whose type is declared LATER in the same module would
+            // otherwise miss type_module_map and keep its bare name, emitting C
+            // that names an undefined identifier (e.g. a bare ColorPrimaries
+            // field where only hdr_ColorPrimaries is defined).
+            for item in &content.items {
+                let (name, generics) = match &item.kind {
+                    ItemKind::Struct(s) => (&s.name.name, &s.generics),
+                    ItemKind::Enum(e) => (&e.name.name, &e.generics),
+                    _ => continue,
+                };
+                let has_generics = generics
+                    .params
+                    .iter()
+                    .any(|p| matches!(p.kind, ast::GenericParamKind::Type { .. }));
+                if !has_generics {
+                    let prefixed = self.prefixed_name(name);
+                    self.type_module_map.insert(name.clone(), prefixed);
+                }
+            }
             for item in &content.items {
                 // Rewrite item names with the module prefix before collecting.
                 let rewritten = self.rewrite_item_with_prefix(item);
@@ -1620,6 +1673,13 @@ impl<'ctx> MirLowerer<'ctx> {
             _ => ret,
         };
 
+        // Register tuple type defs for any tuple types in the signature
+        // (mirrors lower_function; impl methods returning a tuple of named
+        // structs otherwise never register the tuple's MirTypeDef).
+        if let MirType::Tuple(ref elems) = ret {
+            self.ensure_tuple_type_def(elems);
+        }
+
         let sig = MirFnSig::new(params, ret);
         self.module.declare_function(mangled_name, sig);
         Ok(())
@@ -1675,6 +1735,13 @@ impl<'ctx> MirLowerer<'ctx> {
             }
             _ => ret,
         };
+
+        // Register tuple type defs for any tuple types in the signature
+        // (mirrors lower_function; impl methods returning a tuple of named
+        // structs otherwise never register the tuple's MirTypeDef).
+        if let MirType::Tuple(ref elems) = ret {
+            self.ensure_tuple_type_def(elems);
+        }
 
         let sig = MirFnSig::new(params, ret);
 
