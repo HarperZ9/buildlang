@@ -10740,7 +10740,9 @@ fn corpus_verify_checks_substrate_receipt() {
 #[test]
 fn corpus_verify_checks_mir_representation_receipt() {
     if !c_backend_ready() {
-        eprintln!("skipping MIR representation receipt verification because no C backend is available");
+        eprintln!(
+            "skipping MIR representation receipt verification because no C backend is available"
+        );
         return;
     }
 
@@ -10862,9 +10864,8 @@ fn corpus_verify_rejects_mir_representation_path_escape_absolute() {
     let corpus_root = temp_semantic_corpus("mir_repr_path_escape_absolute");
     let absolute_path = std::env::temp_dir().join("outside.quanta");
     write_mir_representation_receipt_copy(&corpus_root, |mut receipt| {
-        receipt["programs"][0]["path"] = serde_json::Value::String(
-            absolute_path.to_string_lossy().into_owned(),
-        );
+        receipt["programs"][0]["path"] =
+            serde_json::Value::String(absolute_path.to_string_lossy().into_owned());
         receipt
     });
 
@@ -10893,8 +10894,7 @@ fn corpus_verify_rejects_mir_representation_path_escape_absolute() {
 fn corpus_verify_rejects_mir_representation_source_digest_drift() {
     let corpus_root = temp_semantic_corpus("mir_repr_source_digest");
     write_mir_representation_receipt_copy(&corpus_root, |mut receipt| {
-        receipt["programs"][0]["source_digest"]["hex"] =
-            serde_json::Value::String("0".repeat(64));
+        receipt["programs"][0]["source_digest"]["hex"] = serde_json::Value::String("0".repeat(64));
         receipt
     });
 
@@ -10924,8 +10924,7 @@ fn corpus_verify_rejects_mir_representation_source_digest_drift() {
 fn corpus_verify_rejects_mir_representation_operation_drift() {
     let corpus_root = temp_semantic_corpus("mir_repr_operation_drift");
     write_mir_representation_receipt_copy(&corpus_root, |mut receipt| {
-        receipt["programs"][0]["operations"]["rvalues"] =
-            serde_json::json!(["ForgedRValue"]);
+        receipt["programs"][0]["operations"]["rvalues"] = serde_json::json!(["ForgedRValue"]);
         receipt
     });
 
