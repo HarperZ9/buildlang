@@ -163,6 +163,23 @@ fn write_substrate_receipt_copy(
     fs::write(&receipt_path, format!("{rendered}\n")).expect("write modified substrate receipt");
 }
 
+fn write_mir_representation_receipt_copy(
+    corpus_root: &Path,
+    transform: impl FnOnce(serde_json::Value) -> serde_json::Value,
+) {
+    let receipt_path = corpus_root
+        .join("receipts")
+        .join("mir-representation-2026-06-18.json");
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt_path).expect("read MIR representation receipt"))
+            .expect("parse MIR representation receipt");
+    let receipt = transform(receipt);
+    let rendered =
+        serde_json::to_string_pretty(&receipt).expect("render modified MIR representation receipt");
+    fs::write(&receipt_path, format!("{rendered}\n"))
+        .expect("write modified MIR representation receipt");
+}
+
 #[test]
 fn help_lists_doctor_command() {
     let output = quantac()
@@ -10717,6 +10734,188 @@ fn corpus_verify_checks_substrate_receipt() {
         stdout.contains("substrate receipt: ok"),
         "corpus verify should report substrate receipt status:\n{}",
         stdout
+    );
+}
+
+#[test]
+fn corpus_verify_checks_mir_representation_receipt() {
+    if !c_backend_ready() {
+        eprintln!("skipping MIR representation receipt verification because no C backend is available");
+        return;
+    }
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(repo_root().join("semantic-corpus"))
+        .output()
+        .expect("run quantac corpus verify with MIR representation receipt");
+
+    assert!(
+        output.status.success(),
+        "corpus verify should accept MIR representation receipt\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    assert!(
+        stdout.contains("mir representation receipt: ok"),
+        "corpus verify should report MIR representation receipt status:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_mir_representation_receipt_schema_drift() {
+    let corpus_root = temp_semantic_corpus("mir_repr_schema");
+    write_mir_representation_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["schema"] =
+            serde_json::Value::String("quantalang-mir-representation-receipt/v9".into());
+        receipt
+    });
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(&corpus_root)
+        .output()
+        .expect("run quantac corpus verify against bad MIR representation schema");
+
+    let _ = fs::remove_dir_all(&corpus_root);
+
+    assert!(
+        !output.status.success(),
+        "corpus verify should reject MIR representation schema drift"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("mir representation receipt has unsupported schema"),
+        "stderr should name MIR representation schema drift:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_mir_representation_program_count_drift() {
+    let corpus_root = temp_semantic_corpus("mir_repr_program_count");
+    write_mir_representation_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["source_set"]["program_count"] = serde_json::Value::from(7);
+        receipt
+    });
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(&corpus_root)
+        .output()
+        .expect("run quantac corpus verify against MIR representation program count drift");
+
+    let _ = fs::remove_dir_all(&corpus_root);
+
+    assert!(
+        !output.status.success(),
+        "corpus verify should reject MIR representation program count drift"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("mir representation source_set.program_count mismatch"),
+        "stderr should name MIR representation program count drift:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_mir_representation_path_escape() {
+    let corpus_root = temp_semantic_corpus("mir_repr_path_escape");
+    write_mir_representation_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["programs"][0]["path"] = serde_json::Value::String("../outside.quanta".into());
+        receipt
+    });
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(&corpus_root)
+        .output()
+        .expect("run quantac corpus verify against MIR representation path escape");
+
+    let _ = fs::remove_dir_all(&corpus_root);
+
+    assert!(
+        !output.status.success(),
+        "corpus verify should reject MIR representation path escape"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("must stay within corpus root"),
+        "stderr should name MIR representation path containment failure:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_mir_representation_source_digest_drift() {
+    let corpus_root = temp_semantic_corpus("mir_repr_source_digest");
+    write_mir_representation_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["programs"][0]["source_digest"]["hex"] =
+            serde_json::Value::String("0".repeat(64));
+        receipt
+    });
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(&corpus_root)
+        .output()
+        .expect("run quantac corpus verify against MIR representation source digest drift");
+
+    let _ = fs::remove_dir_all(&corpus_root);
+
+    assert!(
+        !output.status.success(),
+        "corpus verify should reject MIR representation source digest drift"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("mir representation program scalar_branch source_digest mismatch"),
+        "stderr should name MIR representation source digest drift:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_mir_representation_operation_drift() {
+    let corpus_root = temp_semantic_corpus("mir_repr_operation_drift");
+    write_mir_representation_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["programs"][0]["operations"]["rvalues"] =
+            serde_json::json!(["ForgedRValue"]);
+        receipt
+    });
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(&corpus_root)
+        .output()
+        .expect("run quantac corpus verify against MIR representation operation drift");
+
+    let _ = fs::remove_dir_all(&corpus_root);
+
+    assert!(
+        !output.status.success(),
+        "corpus verify should reject MIR representation operation drift"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("mir representation program scalar_branch operations.rvalues drift"),
+        "stderr should name MIR representation operation drift:\n{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
