@@ -32,6 +32,12 @@ pub(super) fn fixture_sequence() -> Vec<RawFixture> {
             "textDocument/didOpen",
             serde_json::json!({"textDocument": {"uri": uri, "languageId": "quanta", "version": 1, "text": source}}),
         ),
+        text_document_fixture(
+            12,
+            "semantic-tokens",
+            "textDocument/semanticTokens/full",
+            &document,
+        ),
         raw_fixture(
             "document-symbol",
             "textDocument/documentSymbol",

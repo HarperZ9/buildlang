@@ -19,6 +19,7 @@ pub(super) fn observe_response(method: &str, response: Option<&Value>) -> LspDis
         folding_ranges: 0,
         code_actions: 0,
         workspace_edits: 0,
+        semantic_tokens: 0,
     };
     let Some(value) = response else {
         return observed;
@@ -60,6 +61,12 @@ pub(super) fn observe_response(method: &str, response: Option<&Value>) -> LspDis
         "textDocument/foldingRange" => observed.folding_ranges = result_array_len(value),
         "textDocument/codeAction" => observed.code_actions = result_array_len(value),
         "textDocument/rename" => observed.workspace_edits = workspace_edit_count(value),
+        "textDocument/semanticTokens/full" => {
+            observed.semantic_tokens = value
+                .pointer("/result/data")
+                .and_then(Value::as_array)
+                .map_or(0, |data| data.len() / 5);
+        }
         _ => {}
     }
     observed
