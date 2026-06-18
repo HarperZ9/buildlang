@@ -227,6 +227,21 @@ fn write_module_graph_receipt_copy(
     fs::write(&receipt_path, format!("{rendered}\n")).expect("write modified module graph receipt");
 }
 
+fn write_lsp_dispatch_receipt_copy(
+    corpus_root: &Path,
+    transform: impl FnOnce(serde_json::Value) -> serde_json::Value,
+) {
+    let receipt_path = corpus_root
+        .join("receipts")
+        .join("lsp-dispatch-2026-06-18.json");
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt_path).expect("read LSP dispatch receipt"))
+            .expect("parse LSP dispatch receipt");
+    let rendered = serde_json::to_string_pretty(&transform(receipt))
+        .expect("render modified LSP dispatch receipt");
+    fs::write(&receipt_path, format!("{rendered}\n")).expect("write modified LSP receipt");
+}
+
 fn assert_corpus_verify_rejects(corpus_root: &Path, expected_stderr: &str) {
     let output = quantac()
         .arg("corpus")
@@ -10925,6 +10940,36 @@ fn corpus_verify_checks_module_graph_receipt() {
 }
 
 #[test]
+fn corpus_verify_checks_lsp_dispatch_receipt() {
+    if !c_backend_ready() {
+        eprintln!("skipping LSP dispatch receipt verification because no C backend is available");
+        return;
+    }
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(repo_root().join("semantic-corpus"))
+        .output()
+        .expect("run quantac corpus verify with LSP dispatch receipt");
+
+    assert!(
+        output.status.success(),
+        "corpus verify should accept LSP dispatch receipt\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    assert!(
+        stdout.contains("lsp dispatch receipt: ok"),
+        "corpus verify should report LSP dispatch receipt status:\n{}",
+        stdout
+    );
+}
+
+#[test]
 fn corpus_verify_rejects_module_graph_schema_drift() {
     let corpus_root = temp_semantic_corpus("module_graph_schema");
     write_module_graph_receipt_copy(&corpus_root, |mut receipt| {
@@ -11030,6 +11075,59 @@ fn corpus_verify_rejects_module_graph_summary_drift() {
     });
 
     assert_corpus_verify_rejects(&corpus_root, "module graph summary drift");
+}
+
+#[test]
+fn corpus_verify_rejects_lsp_dispatch_schema_drift() {
+    let corpus_root = temp_semantic_corpus("lsp_dispatch_schema");
+    write_lsp_dispatch_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["schema"] = serde_json::Value::String("quantalang-lsp-dispatch-receipt/v9".into());
+        receipt
+    });
+
+    assert_corpus_verify_rejects(&corpus_root, "lsp dispatch receipt has unsupported schema");
+}
+
+#[test]
+fn corpus_verify_rejects_lsp_dispatch_fixture_digest_drift() {
+    let corpus_root = temp_semantic_corpus("lsp_dispatch_digest");
+    write_lsp_dispatch_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["fixtures"][3]["result_digest"]["hex"] = serde_json::Value::String("0".repeat(64));
+        receipt
+    });
+
+    assert_corpus_verify_rejects(
+        &corpus_root,
+        "lsp dispatch fixture document-symbol result_digest mismatch",
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_lsp_dispatch_observed_drift() {
+    let corpus_root = temp_semantic_corpus("lsp_dispatch_observed");
+    write_lsp_dispatch_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["fixtures"][3]["observed"]["document_symbols"] = serde_json::Value::from(0);
+        receipt
+    });
+
+    assert_corpus_verify_rejects(
+        &corpus_root,
+        "lsp dispatch fixture document-symbol observed drift",
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_lsp_dispatch_summary_drift() {
+    let corpus_root = temp_semantic_corpus("lsp_dispatch_summary");
+    write_lsp_dispatch_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["summary"]["known_gaps"]
+            .as_array_mut()
+            .expect("known_gaps should be an array")
+            .push(serde_json::Value::String("untracked gap".into()));
+        receipt
+    });
+
+    assert_corpus_verify_rejects(&corpus_root, "lsp dispatch summary drift");
 }
 
 #[test]
@@ -11902,6 +12000,66 @@ fn corpus_verify_rejects_substrate_symbol_receipt_path_escape() {
         String::from_utf8_lossy(&output.stderr)
             .contains("substrate symbol_surface.symbol_receipt must stay within corpus root"),
         "stderr should name substrate symbol receipt path containment:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_substrate_lsp_receipt_missing_path() {
+    let corpus_root = temp_semantic_corpus("substrate_lsp_path_missing");
+    write_substrate_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["lsp_surface"]["lsp_receipt"] =
+            serde_json::Value::String("receipts/missing-lsp-dispatch.json".into());
+        receipt
+    });
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(&corpus_root)
+        .output()
+        .expect("run quantac corpus verify against substrate LSP receipt missing path");
+    let _ = fs::remove_dir_all(&corpus_root);
+
+    assert!(
+        !output.status.success(),
+        "substrate LSP receipt missing path should fail"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("substrate lsp_surface.lsp_receipt path not found"),
+        "stderr should name substrate LSP receipt missing path:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_substrate_lsp_receipt_path_escape() {
+    let corpus_root = temp_semantic_corpus("substrate_lsp_path_escape");
+    write_substrate_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["lsp_surface"]["lsp_receipt"] =
+            serde_json::Value::String("../lsp-dispatch-2026-06-18.json".into());
+        receipt
+    });
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(&corpus_root)
+        .output()
+        .expect("run quantac corpus verify against substrate LSP receipt path escape");
+    let _ = fs::remove_dir_all(&corpus_root);
+
+    assert!(
+        !output.status.success(),
+        "substrate LSP receipt path escape should fail"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("substrate lsp_surface.lsp_receipt must stay within corpus root"),
+        "stderr should name substrate LSP receipt path containment:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
 }

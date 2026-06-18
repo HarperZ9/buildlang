@@ -8,6 +8,7 @@
 //!
 //! This is the main entry point for the QuantaLang compiler command-line tool.
 
+mod lsp_dispatch;
 mod memory_layout;
 mod mir_representation;
 mod module_graph;
@@ -20,6 +21,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use lsp_dispatch::{verify_lsp_dispatch_receipt, LspDispatchReceipt, LSP_DISPATCH_RECEIPT};
 use memory_layout::{verify_memory_layout_receipt, MemoryLayoutReceipt, MEMORY_LAYOUT_RECEIPT};
 #[allow(unused_imports)]
 use mir_representation::{
@@ -848,6 +850,7 @@ struct SubstrateReceipt {
     representation_surface: SubstrateRepresentationSurface,
     module_surface: SubstrateModuleSurface,
     symbol_surface: SubstrateSymbolSurface,
+    lsp_surface: SubstrateLspSurface,
     evidence_surface: SubstrateEvidenceSurface,
 }
 
@@ -913,6 +916,16 @@ struct SubstrateSymbolSurface {
     representation: String,
     effect_anchor: String,
     symbol_receipt: String,
+    #[serde(default)]
+    known_gaps: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct SubstrateLspSurface {
+    protocol: String,
+    dispatch: String,
+    request_parser: String,
+    lsp_receipt: String,
     #[serde(default)]
     known_gaps: Vec<String>,
 }
@@ -1923,16 +1936,19 @@ fn cmd_corpus_verify(root: Option<&Path>, write: bool) -> Result<(), i32> {
     let memory_receipt_path = receipts_dir.join(MEMORY_LAYOUT_RECEIPT);
     let module_receipt_path = receipts_dir.join(MODULE_GRAPH_RECEIPT);
     let symbol_receipt_path = receipts_dir.join(SYMBOL_GRAPH_RECEIPT);
+    let lsp_receipt_path = receipts_dir.join(LSP_DISPATCH_RECEIPT);
     let substrate_receipt: SubstrateReceipt = read_json(&substrate_receipt_path)?;
     let mir_receipt: MirRepresentationReceipt = read_json(&mir_receipt_path)?;
     let memory_receipt: MemoryLayoutReceipt = read_json(&memory_receipt_path)?;
     let module_receipt: ModuleGraphReceipt = read_json(&module_receipt_path)?;
     let symbol_receipt: SymbolGraphReceipt = read_json(&symbol_receipt_path)?;
+    let lsp_receipt: LspDispatchReceipt = read_json(&lsp_receipt_path)?;
     verify_substrate_receipt(&corpus_root, &substrate_receipt, &manifest)?;
     verify_mir_representation_receipt(&corpus_root, &mir_receipt, &manifest)?;
     verify_memory_layout_receipt(&corpus_root, &memory_receipt, &manifest)?;
     verify_module_graph_receipt(&corpus_root, &module_receipt, &manifest)?;
     verify_symbol_graph_receipt(&corpus_root, &symbol_receipt, &manifest)?;
+    verify_lsp_dispatch_receipt(&corpus_root, &lsp_receipt, &manifest)?;
     let c_passed = if write {
         let rust_receipt: CorpusExecutionReceipt = read_json(&rust_receipt_path)?;
         verify_receipt(
@@ -1973,6 +1989,7 @@ fn cmd_corpus_verify(root: Option<&Path>, write: bool) -> Result<(), i32> {
     println!("memory layout receipt: ok");
     println!("module graph receipt: ok");
     println!("symbol graph receipt: ok");
+    println!("lsp dispatch receipt: ok");
     println!("c execution: {} passed", c_passed);
     if write {
         println!("c receipt: written");
@@ -2671,6 +2688,53 @@ fn validate_substrate_receipt(
         return Err(format!(
             "substrate symbol_surface.symbol_receipt must point at receipts/{}, found {}",
             SYMBOL_GRAPH_RECEIPT, receipt.symbol_surface.symbol_receipt
+        ));
+    }
+
+    if receipt.lsp_surface.protocol != "LSP JSON-RPC over stdio" {
+        return Err(format!(
+            "substrate lsp_surface.protocol mismatch: expected 'LSP JSON-RPC over stdio', found '{}'",
+            receipt.lsp_surface.protocol
+        ));
+    }
+    if receipt.lsp_surface.dispatch != "quantac lsp raw message dispatch" {
+        return Err(format!(
+            "substrate lsp_surface.dispatch mismatch: expected 'quantac lsp raw message dispatch', found '{}'",
+            receipt.lsp_surface.dispatch
+        ));
+    }
+    if receipt.lsp_surface.request_parser != "simplified string extraction" {
+        return Err(format!(
+            "substrate lsp_surface.request_parser mismatch: expected 'simplified string extraction', found '{}'",
+            receipt.lsp_surface.request_parser
+        ));
+    }
+    if receipt.lsp_surface.known_gaps.is_empty() {
+        return Err("substrate lsp_surface.known_gaps must not be empty".to_string());
+    }
+    let lsp_receipt_path = validate_substrate_path(
+        corpus_root,
+        &receipt.lsp_surface.lsp_receipt,
+        "lsp_surface.lsp_receipt",
+    )?;
+    if lsp_receipt_path
+        != corpus_root
+            .join("receipts")
+            .join(LSP_DISPATCH_RECEIPT)
+            .canonicalize()
+            .map_err(|err| {
+                format!(
+                    "substrate lsp_surface.lsp_receipt failed to canonicalize expected receipt {}: {err}",
+                    corpus_root
+                        .join("receipts")
+                        .join(LSP_DISPATCH_RECEIPT)
+                        .display()
+                )
+            })?
+    {
+        return Err(format!(
+            "substrate lsp_surface.lsp_receipt must point at receipts/{}, found {}",
+            LSP_DISPATCH_RECEIPT, receipt.lsp_surface.lsp_receipt
         ));
     }
 
