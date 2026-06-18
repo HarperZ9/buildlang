@@ -18,6 +18,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use memory_layout::{verify_memory_layout_receipt, MemoryLayoutReceipt, MEMORY_LAYOUT_RECEIPT};
 #[allow(unused_imports)]
 use mir_representation::{
     verify_mir_representation_receipt, MirRepresentationReceipt, MIR_REPRESENTATION_RECEIPT,
@@ -880,6 +881,7 @@ struct SubstrateMemorySurface {
     verified_surfaces: Vec<String>,
     #[serde(default)]
     known_gaps: Vec<String>,
+    memory_receipt: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -1893,10 +1895,13 @@ fn cmd_corpus_verify(root: Option<&Path>, write: bool) -> Result<(), i32> {
     let rust_receipt_path = receipts_dir.join("rust-execution-2026-06-13.json");
     let substrate_receipt_path = receipts_dir.join("substrate-semantic-corpus-2026-06-18.json");
     let mir_receipt_path = receipts_dir.join(MIR_REPRESENTATION_RECEIPT);
+    let memory_receipt_path = receipts_dir.join(MEMORY_LAYOUT_RECEIPT);
     let substrate_receipt: SubstrateReceipt = read_json(&substrate_receipt_path)?;
     let mir_receipt: MirRepresentationReceipt = read_json(&mir_receipt_path)?;
+    let memory_receipt: MemoryLayoutReceipt = read_json(&memory_receipt_path)?;
     verify_substrate_receipt(&corpus_root, &substrate_receipt, &manifest)?;
     verify_mir_representation_receipt(&corpus_root, &mir_receipt, &manifest)?;
+    verify_memory_layout_receipt(&corpus_root, &memory_receipt, &manifest)?;
     let c_passed = if write {
         let rust_receipt: CorpusExecutionReceipt = read_json(&rust_receipt_path)?;
         verify_receipt(
@@ -1934,6 +1939,7 @@ fn cmd_corpus_verify(root: Option<&Path>, write: bool) -> Result<(), i32> {
     println!("rust receipt: ok");
     println!("substrate receipt: ok");
     println!("mir representation receipt: ok");
+    println!("memory layout receipt: ok");
     println!("c execution: {} passed", c_passed);
     if write {
         println!("c receipt: written");
@@ -2479,6 +2485,31 @@ fn validate_substrate_receipt(
     }
     if receipt.memory_surface.verified_surfaces.is_empty() {
         return Err("substrate memory_surface.verified_surfaces must not be empty".to_string());
+    }
+    let memory_receipt_path = validate_substrate_path(
+        corpus_root,
+        &receipt.memory_surface.memory_receipt,
+        "memory_surface.memory_receipt",
+    )?;
+    if memory_receipt_path
+        != corpus_root
+            .join("receipts")
+            .join(MEMORY_LAYOUT_RECEIPT)
+            .canonicalize()
+            .map_err(|err| {
+                format!(
+                    "substrate memory_surface.memory_receipt failed to canonicalize expected receipt {}: {err}",
+                    corpus_root
+                        .join("receipts")
+                        .join(MEMORY_LAYOUT_RECEIPT)
+                        .display()
+                )
+            })?
+    {
+        return Err(format!(
+            "substrate memory_surface.memory_receipt must point at receipts/{}, found {}",
+            MEMORY_LAYOUT_RECEIPT, receipt.memory_surface.memory_receipt
+        ));
     }
 
     if receipt.representation_surface.ir != "MIR" {
