@@ -45,6 +45,7 @@ pub mod document;
 pub mod hover;
 pub mod jsonrpc;
 pub mod message;
+pub mod raw_params;
 pub mod response_json;
 pub mod server;
 pub mod symbols;

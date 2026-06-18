@@ -33,6 +33,10 @@ impl JsonRpcMessage {
         self.method.as_deref()
     }
 
+    pub(crate) fn value_at(&self, path: &[&str]) -> Option<&Value> {
+        self.at(path)
+    }
+
     pub fn string_at(&self, path: &[&str]) -> Option<String> {
         self.at(path)?.as_str().map(str::to_string)
     }
