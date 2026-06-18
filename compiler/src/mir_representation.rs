@@ -72,10 +72,10 @@ pub(crate) struct MirRepresentationProgram {
     pub control_flow: MirRepresentationControlFlow,
 }
 
-struct LoweredMirProgram {
-    source_digest: MirRepresentationDigest,
-    input_graph_digest: MirRepresentationDigest,
-    module: MirModule,
+pub(crate) struct LoweredMirProgram {
+    pub(crate) source_digest: MirRepresentationDigest,
+    pub(crate) input_graph_digest: MirRepresentationDigest,
+    pub(crate) module: MirModule,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -301,9 +301,36 @@ fn summarize_mir_program(
         module: module_counts,
         symbols,
         operations: sets.operations(),
-        memory_surfaces,
+        memory_surfaces: collect_mir_memory_surfaces(module),
         control_flow,
     }
+}
+
+pub(crate) fn collect_mir_memory_surfaces(module: &MirModule) -> MirRepresentationMemorySurfaces {
+    let mut sets = InventorySets::default();
+    let mut memory_surfaces = MirRepresentationMemorySurfaces::default();
+    let mut control_flow = MirRepresentationControlFlow::default();
+
+    for function in &module.functions {
+        let Some(blocks) = &function.blocks else {
+            continue;
+        };
+        for block in blocks {
+            for stmt in &block.stmts {
+                collect_stmt(&stmt.kind, &mut sets, &mut memory_surfaces);
+            }
+            if let Some(terminator) = &block.terminator {
+                collect_terminator(
+                    terminator,
+                    &mut sets,
+                    &mut memory_surfaces,
+                    &mut control_flow,
+                );
+            }
+        }
+    }
+
+    memory_surfaces
 }
 
 fn collect_stmt(
@@ -1543,7 +1570,7 @@ fn write_mir_module(module: &MirModule) -> String {
     output
 }
 
-fn digest_mir_module(module: &MirModule) -> MirRepresentationDigest {
+pub(crate) fn digest_mir_module(module: &MirModule) -> MirRepresentationDigest {
     sha256_digest(source_digest_hex(write_mir_module(module).as_bytes()))
 }
 
@@ -1713,7 +1740,7 @@ fn validate_corpus_relative_path(
     Ok(canonical_path)
 }
 
-fn lower_program_to_mir(program_path: &Path) -> Result<LoweredMirProgram, String> {
+pub(crate) fn lower_program_to_mir(program_path: &Path) -> Result<LoweredMirProgram, String> {
     let mut input_digest_ledger = InputDigestLedger::text_normalized();
     let source_bytes = std::fs::read(program_path).map_err(|err| {
         format!(

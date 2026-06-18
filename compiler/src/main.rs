@@ -8,6 +8,7 @@
 //!
 //! This is the main entry point for the QuantaLang compiler command-line tool.
 
+mod memory_layout;
 mod mir_representation;
 
 use clap::{Parser as ClapParser, Subcommand};
