@@ -1,6 +1,12 @@
 # QuantaLang
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+> The Effects Language: a Rust-built compiler for typed effects, systems experiments, and shader-oriented code generation.
+
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![rust](https://img.shields.io/badge/rust-edition_2021-orange.svg)
+![version](https://img.shields.io/badge/version-1.0.0-informational.svg)
+[![CI](https://github.com/HarperZ9/quantalang/actions/workflows/ci.yml/badge.svg)](https://github.com/HarperZ9/quantalang/actions/workflows/ci.yml)
+[![part of: Quanta ecosystem](https://img.shields.io/badge/part_of-Quanta_ecosystem-00b3a4.svg)](https://github.com/HarperZ9/quanta-universe)
 
 **The Effects Language** - a Rust-built compiler for typed effects, systems
 experiments, and shader-oriented code generation.
