@@ -6194,6 +6194,52 @@ mod tests {
     }
 
     #[test]
+    fn doctor_substrate_rows_report_missing_when_root_is_absent() {
+        assert_eq!(
+            substrate_evidence_rows(None),
+            vec![
+                "  receipt   missing  run quantac corpus verify from a repository checkout"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn doctor_substrate_rows_report_invalid_when_receipt_is_malformed() {
+        let root = std::env::temp_dir().join(format!(
+            "quantalang_doctor_substrate_invalid_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("receipts")).expect("create substrate fixture");
+        std::fs::write(
+            root.join("manifest.json"),
+            r#"{
+  "schema": "quantalang-semantic-corpus/v1",
+  "programs": []
+}
+"#,
+        )
+        .expect("write malformed-doctor manifest");
+        std::fs::write(
+            root.join("receipts")
+                .join("substrate-semantic-corpus-2026-06-18.json"),
+            r#"{
+  "schema": "quantalang-substrate-receipt/v9"
+}
+"#,
+        )
+        .expect("write malformed-doctor substrate receipt");
+
+        assert_eq!(
+            substrate_evidence_rows(Some(&root)),
+            vec!["  receipt   invalid  run quantac corpus verify for details".to_string()]
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn check_policy_evaluation_sorts_and_deduplicates_violations() {
         let policy = LoadedCheckPolicy {
             source: "policy.json".to_string(),
