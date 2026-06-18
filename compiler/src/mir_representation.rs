@@ -717,9 +717,15 @@ fn validate_corpus_relative_path(
     }
     let relative_path = Path::new(relative);
     if relative_path.is_absolute()
+        || relative_path.has_root()
         || relative_path
             .components()
-            .any(|component| matches!(component, Component::ParentDir))
+            .any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
     {
         return Err(format!(
             "mir representation {field} must stay within corpus root: {relative}"
@@ -990,6 +996,24 @@ mod tests {
         assert_eq!(receipt.programs[0].path, manifest.programs[0].path);
         assert_eq!(receipt.programs[0].source_digest.algorithm, "sha256");
         assert_eq!(receipt.programs[0].source_digest.hex.len(), 64);
+    }
+
+    #[test]
+    fn validate_corpus_relative_path_rejects_root_qualified_paths() {
+        let corpus_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("compiler manifest has repository parent")
+            .join("semantic-corpus");
+        let rooted = if cfg!(windows) {
+            "\\manifest.json"
+        } else {
+            "/manifest.json"
+        };
+
+        let err = validate_corpus_relative_path(&corpus_root, rooted, "program.path")
+            .expect_err("root-qualified path should be rejected");
+
+        assert!(err.contains("must stay within corpus root"), "{err}");
     }
 
     #[test]
