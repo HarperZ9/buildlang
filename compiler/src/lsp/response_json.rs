@@ -1,5 +1,6 @@
 use serde_json::{json, Map, Value};
 
+use super::semantic_tokens::{SemanticTokenLegendSpec, SemanticTokens};
 use super::types::{CodeAction, Position, Range, TextEdit, WorkspaceEdit};
 
 pub fn build_code_actions_json(actions: &[CodeAction]) -> String {
@@ -9,6 +10,22 @@ pub fn build_code_actions_json(actions: &[CodeAction]) -> String {
 
 pub fn build_workspace_edit_json(edit: &WorkspaceEdit) -> String {
     serde_json::to_string(&workspace_edit_json(edit)).expect("serialize workspace edit")
+}
+
+pub fn build_semantic_tokens_json(tokens: &SemanticTokens) -> String {
+    serde_json::to_string(&json!({ "data": tokens.data })).expect("serialize semantic tokens")
+}
+
+pub fn build_semantic_tokens_options_json(legend: &SemanticTokenLegendSpec) -> String {
+    serde_json::to_string(&json!({
+        "legend": {
+            "tokenTypes": legend.token_types,
+            "tokenModifiers": legend.token_modifiers,
+        },
+        "range": false,
+        "full": true,
+    }))
+    .expect("serialize semantic token options")
 }
 
 fn code_action_json(action: &CodeAction) -> Value {
