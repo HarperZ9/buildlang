@@ -11,9 +11,10 @@ use quantalang::codegen::{
     MirPlace, MirRValue, MirStmtKind, MirTerminator, MirType, MirTypeDef, MirUniform, MirValue,
     NullaryOp, PlaceProjection, ShaderBinding, ShaderStage, TypeDefKind, UnaryOp,
 };
+use quantalang::ast::Module;
 use quantalang::lexer::{Lexer, SourceFile};
 use quantalang::parser::Parser;
-use quantalang::types::{TypeChecker, TypeContext};
+use quantalang::types::{FunctionEffectSummary, TypeChecker, TypeContext};
 
 use super::{
     input_graph_digest, preprocess_includes_recording_inputs, resolve_imports_recording_inputs,
@@ -75,6 +76,8 @@ pub(crate) struct MirRepresentationProgram {
 pub(crate) struct LoweredMirProgram {
     pub(crate) source_digest: MirRepresentationDigest,
     pub(crate) input_graph_digest: MirRepresentationDigest,
+    pub(crate) ast: Module,
+    pub(crate) function_effect_summaries: Vec<FunctionEffectSummary>,
     pub(crate) module: MirModule,
 }
 
@@ -242,30 +245,7 @@ fn summarize_mir_program(
         vtable_count: module.vtables.len(),
         uniform_count: module.uniforms.len(),
     };
-    let symbols = MirRepresentationSymbols {
-        functions: sorted(
-            module
-                .functions
-                .iter()
-                .map(|function| function.name.to_string())
-                .collect(),
-        ),
-        types: sorted(module.types.iter().map(|ty| ty.name.to_string()).collect()),
-        globals: sorted(
-            module
-                .globals
-                .iter()
-                .map(|global| global.name.to_string())
-                .collect(),
-        ),
-        externals: sorted(
-            module
-                .externals
-                .iter()
-                .map(|external| external.name.to_string())
-                .collect(),
-        ),
-    };
+    let symbols = collect_mir_symbols(module);
 
     let mut sets = InventorySets::default();
     let mut memory_surfaces = MirRepresentationMemorySurfaces::default();
@@ -303,6 +283,33 @@ fn summarize_mir_program(
         operations: sets.operations(),
         memory_surfaces: collect_mir_memory_surfaces(module),
         control_flow,
+    }
+}
+
+pub(crate) fn collect_mir_symbols(module: &MirModule) -> MirRepresentationSymbols {
+    MirRepresentationSymbols {
+        functions: sorted(
+            module
+                .functions
+                .iter()
+                .map(|function| function.name.to_string())
+                .collect(),
+        ),
+        types: sorted(module.types.iter().map(|ty| ty.name.to_string()).collect()),
+        globals: sorted(
+            module
+                .globals
+                .iter()
+                .map(|global| global.name.to_string())
+                .collect(),
+        ),
+        externals: sorted(
+            module
+                .externals
+                .iter()
+                .map(|external| external.name.to_string())
+                .collect(),
+        ),
     }
 }
 
@@ -1824,6 +1831,7 @@ pub(crate) fn lower_program_to_mir(program_path: &Path) -> Result<LoweredMirProg
             program_path.display()
         ));
     }
+    let function_effect_summaries = checker.function_effect_summaries().to_vec();
 
     let input_graph_digest = input_graph_digest(&input_digest_ledger.into_sorted_records());
     let module = MirLowerer::with_source(&ctx, Arc::from(source_file.source()))
@@ -1841,6 +1849,8 @@ pub(crate) fn lower_program_to_mir(program_path: &Path) -> Result<LoweredMirProg
             input_graph_digest.algorithm,
             input_graph_digest.hex,
         ),
+        ast,
+        function_effect_summaries,
         module,
     })
 }
