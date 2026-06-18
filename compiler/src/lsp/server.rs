@@ -18,6 +18,8 @@ use super::semantic_tokens::{SemanticTokens, SemanticTokensProvider};
 use super::symbols::SymbolProvider;
 use super::transport::*;
 use super::types::*;
+use super::workspace_index::{WorkspaceSymbolIndex, WorkspaceSymbolIndexStats};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -64,6 +66,8 @@ pub struct LanguageServer {
     diagnostics: DiagnosticsProvider,
     /// Symbol provider.
     symbols: SymbolProvider,
+    /// Root-backed workspace symbol index.
+    workspace_index: WorkspaceSymbolIndex,
     /// Semantic tokens provider.
     semantic_tokens: SemanticTokensProvider,
 }
@@ -82,6 +86,7 @@ impl LanguageServer {
             hover: HoverProvider::new(documents.clone()),
             diagnostics: DiagnosticsProvider::new(documents.clone()),
             symbols: SymbolProvider::new(documents.clone()),
+            workspace_index: WorkspaceSymbolIndex::new(),
             semantic_tokens: SemanticTokensProvider::new(),
         }
     }
@@ -109,7 +114,9 @@ impl LanguageServer {
     pub fn initialize(&mut self, params: InitializeParams) -> InitializeResult {
         self.state = ServerState::Initializing;
         self.client_capabilities = Some(params.capabilities);
-        self.root_uri = params.root_uri;
+        self.root_uri = params.root_uri.clone();
+        self.workspace_index
+            .rebuild_from_uri(params.root_uri.as_deref(), &self.symbols);
 
         InitializeResult {
             capabilities: ServerCapabilities::full(),
@@ -318,7 +325,44 @@ impl LanguageServer {
 
     /// Handle workspace symbol request for currently opened documents.
     pub fn workspace_symbol(&self, query: &str) -> Vec<SymbolInformation> {
-        self.symbols.workspace_symbols(query)
+        let query_lower = query.to_lowercase();
+        let mut symbols = Vec::new();
+        let mut opened_uris = self.documents.uris();
+        opened_uris.sort();
+
+        for uri in &opened_uris {
+            if let Some(doc) = self.documents.get(uri) {
+                let doc_symbols = self.symbols.document_symbols(&doc);
+                symbols.extend(self.symbols.matching_symbol_information(
+                    &doc_symbols,
+                    uri,
+                    &query_lower,
+                ));
+            }
+        }
+
+        for (uri, indexed_symbols) in self.workspace_index.symbols() {
+            if opened_uris.binary_search(uri).is_ok() {
+                continue;
+            }
+            symbols.extend(self.symbols.matching_symbol_information(
+                indexed_symbols,
+                uri,
+                &query_lower,
+            ));
+        }
+
+        symbols
+    }
+
+    /// Rebuild workspace symbols from a deterministic root mapping.
+    pub(crate) fn rebuild_workspace_symbol_index_for_root(
+        &mut self,
+        root_uri: &str,
+        root_path: &Path,
+    ) -> WorkspaceSymbolIndexStats {
+        self.workspace_index
+            .rebuild_from_path(root_uri, root_path, &self.symbols)
     }
 
     /// Handle semantic tokens request.
@@ -1101,6 +1145,29 @@ fn build_initialize_result(result: &InitializeResult) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
+
+    fn temp_workspace_root(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "quantalang_lsp_workspace_{label}_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create temp workspace root");
+        root
+    }
+
+    fn path_file_uri(path: &Path) -> String {
+        let mut path = path
+            .canonicalize()
+            .unwrap_or_else(|_| path.to_path_buf())
+            .to_string_lossy()
+            .replace('\\', "/");
+        if let Some(stripped) = path.strip_prefix("//?/") {
+            path = stripped.to_string();
+        }
+        format!("file:///{}", path.trim_start_matches('/'))
+    }
 
     #[test]
     fn test_server_lifecycle() {
@@ -1299,6 +1366,90 @@ mod tests {
             symbol["name"] == "helper"
                 && symbol["location"]["uri"] == "file:///workspace/main.quanta"
         }));
+    }
+
+    #[test]
+    fn raw_dispatch_workspace_symbol_returns_unopened_root_file_symbol() {
+        let root = temp_workspace_root("unopened");
+        std::fs::write(
+            root.join("library.quanta"),
+            "fn library_helper() -> i32 { 7 }\n",
+        )
+        .expect("write library");
+        let root_uri = path_file_uri(&root);
+        let mut server = LanguageServer::new();
+        dispatch_raw_message(
+            &mut server,
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"rootUri":"{root_uri}"}}}}"#
+            ),
+        )
+        .expect("initialize response");
+
+        let response = dispatch_raw_message(
+            &mut server,
+            r#"{"jsonrpc":"2.0","id":40,"method":"workspace/symbol","params":{"query":"library_helper"}}"#,
+        )
+        .expect("workspace response");
+        let json: serde_json::Value = serde_json::from_str(&response).expect("parse response");
+
+        assert!(json["result"]
+            .as_array()
+            .expect("result array")
+            .iter()
+            .any(|symbol| symbol["name"] == "library_helper"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn raw_dispatch_open_document_overrides_indexed_file_symbol() {
+        let root = temp_workspace_root("override");
+        let file = root.join("main.quanta");
+        std::fs::write(&file, "fn disk_only() -> i32 { 1 }\n").expect("write disk file");
+        let root_uri = path_file_uri(&root);
+        let file_uri = path_file_uri(&file);
+        let mut server = LanguageServer::new();
+        dispatch_raw_message(
+            &mut server,
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"rootUri":"{root_uri}"}}}}"#
+            ),
+        )
+        .expect("initialize response");
+        dispatch_raw_message(
+            &mut server,
+            &format!(
+                r#"{{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{{"textDocument":{{"uri":"{file_uri}","languageId":"quanta","version":1,"text":"fn editor_only() -> i32 {{ 2 }}\n"}}}}}}"#
+            ),
+        )
+        .expect("didOpen response");
+
+        let disk = dispatch_raw_message(
+            &mut server,
+            r#"{"jsonrpc":"2.0","id":41,"method":"workspace/symbol","params":{"query":"disk_only"}}"#,
+        )
+        .expect("disk response");
+        let editor = dispatch_raw_message(
+            &mut server,
+            r#"{"jsonrpc":"2.0","id":42,"method":"workspace/symbol","params":{"query":"editor_only"}}"#,
+        )
+        .expect("editor response");
+
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&disk).unwrap()["result"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&editor).unwrap()["result"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
