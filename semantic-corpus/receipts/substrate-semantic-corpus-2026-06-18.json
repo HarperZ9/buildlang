@@ -55,7 +55,8 @@
       "full interprocedural borrow proof",
       "self-hosted stdlib execution",
       "runtime-linked async execution"
-    ]
+    ],
+    "memory_receipt": "receipts/memory-layout-2026-06-18.json"
   },
   "representation_surface": {
     "ir": "MIR",
