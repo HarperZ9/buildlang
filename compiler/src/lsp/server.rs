@@ -1191,6 +1191,30 @@ mod tests {
     }
 
     #[test]
+    fn raw_dispatch_did_open_returns_type_checker_diagnostic_source() {
+        let mut server = LanguageServer::new();
+        let response = dispatch_raw_message(
+            &mut server,
+            r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/type_error.quanta","languageId":"quanta","version":1,"text":"const BAD: i32 = \"oops\";\nfn main() {}\n"}}}"#,
+        )
+        .expect("didOpen should publish diagnostics");
+        let json: serde_json::Value = serde_json::from_str(&response).expect("parse diagnostics");
+        let diagnostics = json["params"]["diagnostics"]
+            .as_array()
+            .expect("diagnostics array");
+
+        assert!(
+            diagnostics.iter().any(|d| {
+                d["source"] == "quantalang/type-checker"
+                    && d["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("type mismatch"))
+            }),
+            "expected type-checker diagnostic in {diagnostics:#?}"
+        );
+    }
+
+    #[test]
     fn raw_dispatch_document_symbol_returns_opened_function() {
         let mut server = LanguageServer::new();
         dispatch_raw_message(
