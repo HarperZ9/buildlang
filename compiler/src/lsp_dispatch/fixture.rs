@@ -1,7 +1,8 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::model::{LspDispatchDigest, LspDispatchFixture, LspDispatchObserved};
+use super::model::{LspDispatchDigest, LspDispatchFixture};
+use super::observe::observe_response;
 
 pub(super) struct RawFixture {
     pub(super) id: &'static str,
@@ -111,6 +112,11 @@ pub(super) fn fixture_sequence() -> Vec<RawFixture> {
               }
             }"#,
         ),
+        fixture(
+            "did-change-type-error",
+            "textDocument/didChange",
+            serde_json::json!({"textDocument": {"uri": uri, "version": 3}, "contentChanges": [{"text": "const BAD: i32 = \"oops\";\nfn main() {}\n"}]}),
+        ),
         request_fixture(11, "shutdown", "shutdown", serde_json::json!({})),
         fixture("exit", "exit", serde_json::json!({})),
     ]
@@ -218,69 +224,6 @@ fn digest_response(response: Option<&Value>) -> Result<LspDispatchDigest, String
         algorithm: "sha256".to_string(),
         hex: digest_hex(&bytes),
     })
-}
-
-fn observe_response(method: &str, response: Option<&Value>) -> LspDispatchObserved {
-    let mut observed = LspDispatchObserved {
-        has_result: response.is_some_and(|value| value.get("result").is_some()),
-        diagnostics: 0,
-        completion_items: 0,
-        document_symbols: 0,
-        locations: 0,
-        text_edits: 0,
-        folding_ranges: 0,
-        code_actions: 0,
-        workspace_edits: 0,
-    };
-    let Some(value) = response else {
-        return observed;
-    };
-    if value.get("method").and_then(Value::as_str) == Some("textDocument/publishDiagnostics") {
-        observed.diagnostics = value
-            .pointer("/params/diagnostics")
-            .and_then(Value::as_array)
-            .map_or(0, Vec::len);
-        return observed;
-    }
-    match method {
-        "textDocument/completion" => {
-            observed.completion_items = value
-                .pointer("/result/items")
-                .and_then(Value::as_array)
-                .map_or(0, Vec::len);
-        }
-        "textDocument/documentSymbol" => observed.document_symbols = result_array_len(value),
-        "textDocument/definition" | "textDocument/references" => {
-            observed.locations = result_array_len(value)
-        }
-        "textDocument/formatting" => observed.text_edits = result_array_len(value),
-        "textDocument/foldingRange" => observed.folding_ranges = result_array_len(value),
-        "textDocument/codeAction" => observed.code_actions = result_array_len(value),
-        "textDocument/rename" => observed.workspace_edits = workspace_edit_count(value),
-        _ => {}
-    }
-    observed
-}
-
-fn result_array_len(value: &Value) -> usize {
-    value
-        .get("result")
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len)
-}
-
-fn workspace_edit_count(value: &Value) -> usize {
-    value
-        .pointer("/result/changes")
-        .and_then(Value::as_object)
-        .map(|changes| {
-            changes
-                .values()
-                .filter_map(Value::as_array)
-                .map(Vec::len)
-                .sum()
-        })
-        .unwrap_or(0)
 }
 
 fn digest_hex(bytes: &[u8]) -> String {
