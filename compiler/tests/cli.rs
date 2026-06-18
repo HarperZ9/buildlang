@@ -11154,6 +11154,40 @@ fn corpus_verify_rejects_lsp_dispatch_rename_observed_drift() {
 }
 
 #[test]
+fn corpus_verify_rejects_lsp_dispatch_compiler_diagnostic_observed_drift() {
+    let corpus_root = temp_semantic_corpus("lsp_dispatch_compiler_diagnostic_observed");
+    write_lsp_dispatch_receipt_copy(&corpus_root, |mut receipt| {
+        let fixture = receipt["fixtures"]
+            .as_array_mut()
+            .expect("fixtures should be an array")
+            .iter_mut()
+            .find(|fixture| fixture["id"] == "did-change-type-error")
+            .expect("type-error fixture should exist");
+        fixture["observed"]["compiler_diagnostics"] = serde_json::Value::from(0);
+        receipt
+    });
+
+    assert_corpus_verify_rejects(
+        &corpus_root,
+        "lsp dispatch fixture did-change-type-error observed drift",
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_lsp_dispatch_stale_compiler_diagnostics_gap() {
+    let corpus_root = temp_semantic_corpus("lsp_dispatch_compiler_diagnostics_gap");
+    write_lsp_dispatch_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["summary"]["known_gaps"] = serde_json::json!([
+            "compiler type-checker diagnostics in LSP",
+            "full VS Code extension readiness"
+        ]);
+        receipt
+    });
+
+    assert_corpus_verify_rejects(&corpus_root, "lsp dispatch summary drift");
+}
+
+#[test]
 fn corpus_verify_rejects_lsp_dispatch_summary_drift() {
     let corpus_root = temp_semantic_corpus("lsp_dispatch_summary");
     write_lsp_dispatch_receipt_copy(&corpus_root, |mut receipt| {

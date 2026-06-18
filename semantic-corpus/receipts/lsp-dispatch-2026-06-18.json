@@ -179,6 +179,20 @@
       }
     },
     {
+      "id": "did-change-type-error",
+      "method": "textDocument/didChange",
+      "response_kind": "notification",
+      "result_digest": {
+        "algorithm": "sha256",
+        "hex": "6c2794ab25275a3d82928706b3a9e501658ebd43b5d95f1bfc2a9d0960a774af"
+      },
+      "observed": {
+        "diagnostics": 1,
+        "compiler_diagnostics": 1,
+        "type_errors": 1
+      }
+    },
+    {
       "id": "shutdown",
       "method": "shutdown",
       "response_kind": "response",
@@ -202,7 +216,7 @@
     }
   ],
   "summary": {
-    "fixture_count": 15,
+    "fixture_count": 16,
     "methods": [
       "exit",
       "initialize",
@@ -226,7 +240,6 @@
       "response"
     ],
     "known_gaps": [
-      "compiler type-checker diagnostics in LSP",
       "full VS Code extension readiness"
     ]
   }
