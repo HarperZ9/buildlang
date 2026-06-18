@@ -2316,8 +2316,7 @@ fn validate_substrate_receipt(
         .all(|command| !command.trim().is_empty())
     {
         return Err(
-            "substrate evidence_surface.commands must contain only non-empty commands"
-                .to_string(),
+            "substrate evidence_surface.commands must contain only non-empty commands".to_string(),
         );
     }
 
