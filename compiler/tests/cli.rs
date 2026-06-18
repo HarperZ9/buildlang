@@ -180,6 +180,23 @@ fn write_mir_representation_receipt_copy(
         .expect("write modified MIR representation receipt");
 }
 
+fn write_memory_layout_receipt_copy(
+    corpus_root: &Path,
+    transform: impl FnOnce(serde_json::Value) -> serde_json::Value,
+) {
+    let receipt_path = corpus_root
+        .join("receipts")
+        .join("memory-layout-2026-06-18.json");
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt_path).expect("read memory layout receipt"))
+            .expect("parse memory layout receipt");
+    let receipt = transform(receipt);
+    let rendered =
+        serde_json::to_string_pretty(&receipt).expect("render modified memory layout receipt");
+    fs::write(&receipt_path, format!("{rendered}\n"))
+        .expect("write modified memory layout receipt");
+}
+
 #[test]
 fn help_lists_doctor_command() {
     let output = quantac()
@@ -10770,6 +10787,224 @@ fn corpus_verify_checks_mir_representation_receipt() {
 }
 
 #[test]
+fn corpus_verify_checks_memory_layout_receipt() {
+    if !c_backend_ready() {
+        eprintln!("skipping memory layout receipt verification because no C backend is available");
+        return;
+    }
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(repo_root().join("semantic-corpus"))
+        .output()
+        .expect("run quantac corpus verify with memory layout receipt");
+
+    assert!(
+        output.status.success(),
+        "corpus verify should accept memory layout receipt\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    assert!(
+        stdout.contains("memory layout receipt: ok"),
+        "corpus verify should report memory layout receipt status:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_memory_layout_schema_drift() {
+    let corpus_root = temp_semantic_corpus("memory_layout_schema");
+    write_memory_layout_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["schema"] = serde_json::Value::String("quantalang-memory-layout-receipt/v9".into());
+        receipt
+    });
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(&corpus_root)
+        .output()
+        .expect("run quantac corpus verify against bad memory layout schema");
+    let _ = fs::remove_dir_all(&corpus_root);
+
+    assert!(!output.status.success(), "schema drift should fail");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("memory layout receipt has unsupported schema"),
+        "stderr should name memory layout schema drift:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_memory_layout_program_count_drift() {
+    let corpus_root = temp_semantic_corpus("memory_layout_program_count");
+    write_memory_layout_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["source_set"]["program_count"] = serde_json::Value::from(7);
+        receipt
+    });
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(&corpus_root)
+        .output()
+        .expect("run quantac corpus verify against memory layout program count drift");
+    let _ = fs::remove_dir_all(&corpus_root);
+
+    assert!(!output.status.success(), "program count drift should fail");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("memory layout source_set.program_count mismatch"),
+        "stderr should name memory layout program count drift:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_memory_layout_path_escape() {
+    let corpus_root = temp_semantic_corpus("memory_layout_path_escape");
+    write_memory_layout_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["programs"][0]["path"] = serde_json::Value::String("../outside.quanta".into());
+        receipt
+    });
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(&corpus_root)
+        .output()
+        .expect("run quantac corpus verify against memory layout path escape");
+    let _ = fs::remove_dir_all(&corpus_root);
+
+    assert!(!output.status.success(), "path escape should fail");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("memory layout program.path must stay within corpus root"),
+        "stderr should name memory layout path containment:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_memory_layout_source_digest_drift() {
+    let corpus_root = temp_semantic_corpus("memory_layout_source_digest");
+    write_memory_layout_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["programs"][0]["source_digest"]["hex"] = serde_json::Value::String("0".repeat(64));
+        receipt
+    });
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(&corpus_root)
+        .output()
+        .expect("run quantac corpus verify against memory layout source digest drift");
+    let _ = fs::remove_dir_all(&corpus_root);
+
+    assert!(!output.status.success(), "source digest drift should fail");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("memory layout program scalar_branch source_digest mismatch"),
+        "stderr should name memory layout source digest drift:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_memory_layout_observed_surface_drift() {
+    let corpus_root = temp_semantic_corpus("memory_layout_observed_surface");
+    write_memory_layout_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["programs"][1]["observed_memory_surfaces"]["references"] =
+            serde_json::Value::Bool(false);
+        receipt
+    });
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(&corpus_root)
+        .output()
+        .expect("run quantac corpus verify against memory layout observed surface drift");
+    let _ = fs::remove_dir_all(&corpus_root);
+
+    assert!(
+        !output.status.success(),
+        "observed memory surface drift should fail"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("memory layout program references_mutation observed_memory_surfaces drift"),
+        "stderr should name memory layout observed surface drift:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_memory_layout_known_gap_drift() {
+    let corpus_root = temp_semantic_corpus("memory_layout_known_gap");
+    write_memory_layout_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["summary"]["known_gaps"] = serde_json::json!(["none"]);
+        receipt
+    });
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(&corpus_root)
+        .output()
+        .expect("run quantac corpus verify against memory layout known gap drift");
+    let _ = fs::remove_dir_all(&corpus_root);
+
+    assert!(!output.status.success(), "known gap drift should fail");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("memory layout summary drift"),
+        "stderr should name memory layout summary drift:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_memory_layout_byte_layout_overclaim() {
+    let corpus_root = temp_semantic_corpus("memory_layout_overclaim");
+    write_memory_layout_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["memory_model"]["layout_claim"] =
+            serde_json::Value::String("byte-offset ABI layout verified".into());
+        receipt
+    });
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(&corpus_root)
+        .output()
+        .expect("run quantac corpus verify against memory layout overclaim");
+    let _ = fs::remove_dir_all(&corpus_root);
+
+    assert!(
+        !output.status.success(),
+        "byte layout overclaim should fail"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("memory layout memory_model drift"),
+        "stderr should name memory layout overclaim:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn corpus_verify_rejects_mir_representation_receipt_schema_drift() {
     let corpus_root = temp_semantic_corpus("mir_repr_schema");
     write_mir_representation_receipt_copy(&corpus_root, |mut receipt| {
@@ -11224,6 +11459,36 @@ fn corpus_verify_rejects_substrate_representation_receipt_path_escape() {
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("must stay within corpus root"),
         "stderr should name substrate representation receipt path containment failure:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_substrate_memory_receipt_path_escape() {
+    let corpus_root = temp_semantic_corpus("substrate_memory_path_escape");
+    write_substrate_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["memory_surface"]["memory_receipt"] =
+            serde_json::Value::String("../memory-layout-2026-06-18.json".into());
+        receipt
+    });
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(&corpus_root)
+        .output()
+        .expect("run quantac corpus verify against substrate memory receipt path escape");
+    let _ = fs::remove_dir_all(&corpus_root);
+
+    assert!(
+        !output.status.success(),
+        "substrate memory receipt path escape should fail"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("substrate memory_surface.memory_receipt must stay within corpus root"),
+        "stderr should name substrate memory receipt path containment:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
