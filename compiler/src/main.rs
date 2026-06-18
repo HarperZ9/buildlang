@@ -1934,13 +1934,16 @@ fn find_semantic_corpus_root() -> Option<PathBuf> {
         .find(|path| path.join("manifest.json").is_file())
 }
 
+fn read_json_quiet<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|err| format!("failed to read {}: {}", path.display(), err))?;
+    serde_json::from_str(&content)
+        .map_err(|err| format!("failed to parse {}: {}", path.display(), err))
+}
+
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, i32> {
-    let content = std::fs::read_to_string(path).map_err(|err| {
-        eprintln!("failed to read {}: {}", path.display(), err);
-        1
-    })?;
-    serde_json::from_str(&content).map_err(|err| {
-        eprintln!("failed to parse {}: {}", path.display(), err);
+    read_json_quiet(path).map_err(|message| {
+        eprintln!("{message}");
         1
     })
 }
@@ -1956,20 +1959,21 @@ fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), i32> {
     })
 }
 
-fn require_non_empty(value: &str, field: &str) -> Result<(), i32> {
+fn validate_non_empty(value: &str, field: &str) -> Result<(), String> {
     if value.trim().is_empty() {
-        eprintln!("substrate {field} must not be empty");
-        return Err(1);
+        return Err(format!("substrate {field} must not be empty"));
     }
     Ok(())
 }
 
-fn require_substrate_path(root: &Path, relative: &str, field: &str) -> Result<PathBuf, i32> {
-    require_non_empty(relative, field)?;
+fn validate_substrate_path(root: &Path, relative: &str, field: &str) -> Result<PathBuf, String> {
+    validate_non_empty(relative, field)?;
     let path = root.join(relative);
     if !path.is_file() {
-        eprintln!("substrate {field} path not found: {}", path.display());
-        return Err(1);
+        return Err(format!(
+            "substrate {field} path not found: {}",
+            path.display()
+        ));
     }
     Ok(path)
 }
@@ -2092,77 +2096,70 @@ fn verify_receipt(
     Ok(())
 }
 
-fn verify_substrate_receipt(
+fn validate_substrate_receipt(
     corpus_root: &Path,
     receipt: &SubstrateReceipt,
     manifest: &SemanticCorpusManifest,
-) -> Result<(), i32> {
+) -> Result<(), String> {
     if receipt.schema != "quantalang-substrate-receipt/v0" {
-        eprintln!(
+        return Err(format!(
             "substrate receipt has unsupported schema '{}'",
             receipt.schema
-        );
-        return Err(1);
+        ));
     }
     if receipt.compiler != "quantac" {
-        eprintln!(
+        return Err(format!(
             "substrate compiler mismatch: expected 'quantac', found '{}'",
             receipt.compiler
-        );
-        return Err(1);
+        ));
     }
     if receipt.language != "quantalang" {
-        eprintln!(
+        return Err(format!(
             "substrate language mismatch: expected 'quantalang', found '{}'",
             receipt.language
-        );
-        return Err(1);
+        ));
     }
-    require_non_empty(&receipt.receipt_id, "receipt_id")?;
-    require_non_empty(&receipt.created_at, "created_at")?;
+    validate_non_empty(&receipt.receipt_id, "receipt_id")?;
+    validate_non_empty(&receipt.created_at, "created_at")?;
 
     if receipt.source_set.kind != "semantic-corpus" {
-        eprintln!(
+        return Err(format!(
             "substrate source_set.kind mismatch: expected 'semantic-corpus', found '{}'",
             receipt.source_set.kind
-        );
-        return Err(1);
+        ));
     }
-    let manifest_path = require_substrate_path(
+    let manifest_path = validate_substrate_path(
         corpus_root,
         &receipt.source_set.manifest,
         "source_set.manifest",
     )?;
     if manifest_path != corpus_root.join("manifest.json") {
-        eprintln!(
+        return Err(format!(
             "substrate source_set.manifest must point at manifest.json, found {}",
             receipt.source_set.manifest
-        );
-        return Err(1);
+        ));
     }
     if receipt.source_set.program_count != manifest.programs.len() {
-        eprintln!(
+        return Err(format!(
             "substrate source_set.program_count mismatch: expected {}, found {}",
             manifest.programs.len(),
             receipt.source_set.program_count
-        );
-        return Err(1);
+        ));
     }
 
     if receipt.semantic_surface.check_receipt_schema != "quantalang-check-receipt/v1" {
-        eprintln!(
+        return Err(format!(
             "substrate semantic_surface.check_receipt_schema mismatch: found '{}'",
             receipt.semantic_surface.check_receipt_schema
-        );
-        return Err(1);
+        ));
     }
     if !receipt.semantic_surface.requires_source_digest {
-        eprintln!("substrate semantic_surface.requires_source_digest must be true");
-        return Err(1);
+        return Err("substrate semantic_surface.requires_source_digest must be true".to_string());
     }
     if !receipt.semantic_surface.requires_input_graph_digest {
-        eprintln!("substrate semantic_surface.requires_input_graph_digest must be true");
-        return Err(1);
+        return Err(
+            "substrate semantic_surface.requires_input_graph_digest must be true".to_string(),
+        );
     }
     for required in [
         "declared_effects",
@@ -2175,22 +2172,22 @@ fn verify_substrate_receipt(
             .iter()
             .any(|surface| surface == required)
         {
-            eprintln!("substrate semantic_surface.effect_surfaces missing {required}");
-            return Err(1);
+            return Err(format!(
+                "substrate semantic_surface.effect_surfaces missing {required}"
+            ));
         }
     }
 
     if receipt.execution_surface.is_empty() {
-        eprintln!("substrate execution_surface must not be empty");
-        return Err(1);
+        return Err("substrate execution_surface must not be empty".to_string());
     }
     for (label, target) in &receipt.execution_surface {
-        require_non_empty(&target.target, &format!("execution_surface.{label}.target"))?;
-        require_non_empty(
+        validate_non_empty(&target.target, &format!("execution_surface.{label}.target"))?;
+        validate_non_empty(
             &target.maturity,
             &format!("execution_surface.{label}.maturity"),
         )?;
-        require_non_empty(
+        validate_non_empty(
             &target.evidence_class,
             &format!("execution_surface.{label}.evidence_class"),
         )?;
@@ -2198,29 +2195,27 @@ fn verify_substrate_receipt(
         match target.maturity.as_str() {
             "production-anchor" => {
                 let Some(relative_receipt) = target.receipt.as_deref() else {
-                    eprintln!(
+                    return Err(format!(
                         "substrate execution_surface.{label} is production-anchor but receipt is missing"
-                    );
-                    return Err(1);
+                    ));
                 };
-                let execution_receipt_path = require_substrate_path(
+                let execution_receipt_path = validate_substrate_path(
                     corpus_root,
                     relative_receipt,
                     &format!("execution_surface.{label}.receipt"),
                 )?;
-                let execution_receipt: CorpusExecutionReceipt = read_json(&execution_receipt_path)?;
+                let execution_receipt: CorpusExecutionReceipt =
+                    read_json_quiet(&execution_receipt_path)?;
                 if execution_receipt.backend != target.target {
-                    eprintln!(
+                    return Err(format!(
                         "substrate execution_surface.{label}.receipt backend mismatch: expected '{}', found '{}'",
                         target.target, execution_receipt.backend
-                    );
-                    return Err(1);
+                    ));
                 }
                 if !receipt_has_stdout_validator(&execution_receipt) {
-                    eprintln!(
+                    return Err(format!(
                         "substrate execution_surface.{label} production-anchor requires stdout assertion evidence"
-                    );
-                    return Err(1);
+                    ));
                 }
             }
             "experimental-subset" => {
@@ -2232,25 +2227,23 @@ fn verify_substrate_receipt(
                         .unwrap_or_default()
                         .is_empty()
                 {
-                    eprintln!(
+                    return Err(format!(
                         "substrate execution_surface.{label} experimental-subset requires receipt or unsupported_mir_policy"
-                    );
-                    return Err(1);
+                    ));
                 }
                 if let Some(relative_receipt) = target.receipt.as_deref() {
-                    let execution_receipt_path = require_substrate_path(
+                    let execution_receipt_path = validate_substrate_path(
                         corpus_root,
                         relative_receipt,
                         &format!("execution_surface.{label}.receipt"),
                     )?;
                     let execution_receipt: CorpusExecutionReceipt =
-                        read_json(&execution_receipt_path)?;
+                        read_json_quiet(&execution_receipt_path)?;
                     if execution_receipt.backend != target.target {
-                        eprintln!(
+                        return Err(format!(
                             "substrate execution_surface.{label}.receipt backend mismatch: expected '{}', found '{}'",
                             target.target, execution_receipt.backend
-                        );
-                        return Err(1);
+                        ));
                     }
                 }
             }
@@ -2263,51 +2256,47 @@ fn verify_substrate_receipt(
                         .unwrap_or_default()
                         .is_empty()
                 {
-                    eprintln!(
+                    return Err(format!(
                         "substrate execution_surface.{label} experimental target requires status=unverified or unsupported_mir_policy"
-                    );
-                    return Err(1);
+                    ));
                 }
             }
             other => {
-                eprintln!("substrate execution_surface.{label} has unknown maturity '{other}'");
-                return Err(1);
+                return Err(format!(
+                    "substrate execution_surface.{label} has unknown maturity '{other}'"
+                ));
             }
         }
     }
 
-    require_non_empty(
+    validate_non_empty(
         &receipt.memory_surface.ownership_model,
         "memory_surface.ownership_model",
     )?;
     if receipt.memory_surface.known_gaps.is_empty() {
-        eprintln!("substrate memory_surface.known_gaps must not be empty");
-        return Err(1);
+        return Err("substrate memory_surface.known_gaps must not be empty".to_string());
     }
     if receipt.memory_surface.verified_surfaces.is_empty() {
-        eprintln!("substrate memory_surface.verified_surfaces must not be empty");
-        return Err(1);
+        return Err("substrate memory_surface.verified_surfaces must not be empty".to_string());
     }
 
     if receipt.representation_surface.ir != "MIR" {
-        eprintln!(
+        return Err(format!(
             "substrate representation_surface.ir mismatch: expected 'MIR', found '{}'",
             receipt.representation_surface.ir
-        );
-        return Err(1);
+        ));
     }
-    require_non_empty(
+    validate_non_empty(
         &receipt.representation_surface.fallback_policy,
         "representation_surface.fallback_policy",
     )?;
-    require_non_empty(
+    validate_non_empty(
         &receipt.representation_surface.backend_maturity_descriptor,
         "representation_surface.backend_maturity_descriptor",
     )?;
 
     if receipt.evidence_surface.commands.is_empty() {
-        eprintln!("substrate evidence_surface.commands must not be empty");
-        return Err(1);
+        return Err("substrate evidence_surface.commands must not be empty".to_string());
     }
     if !receipt
         .evidence_surface
@@ -2315,11 +2304,117 @@ fn verify_substrate_receipt(
         .iter()
         .all(|command| !command.trim().is_empty())
     {
-        eprintln!("substrate evidence_surface.commands must contain only non-empty commands");
-        return Err(1);
+        return Err(
+            "substrate evidence_surface.commands must contain only non-empty commands"
+                .to_string(),
+        );
     }
 
     Ok(())
+}
+
+fn verify_substrate_receipt(
+    corpus_root: &Path,
+    receipt: &SubstrateReceipt,
+    manifest: &SemanticCorpusManifest,
+) -> Result<(), i32> {
+    validate_substrate_receipt(corpus_root, receipt, manifest).map_err(|message| {
+        eprintln!("{message}");
+        1
+    })
+}
+
+fn substrate_invalid_rows() -> Vec<String> {
+    vec!["  receipt   invalid  run quantac corpus verify for details".to_string()]
+}
+
+fn substrate_missing_rows() -> Vec<String> {
+    vec!["  receipt   missing  run quantac corpus verify from a repository checkout".to_string()]
+}
+
+fn substrate_target<'a>(
+    receipt: &'a SubstrateReceipt,
+    target: &str,
+) -> Result<&'a SubstrateExecutionTarget, ()> {
+    receipt.execution_surface.get(target).ok_or(())
+}
+
+fn substrate_evidence_rows(corpus_root: Option<&Path>) -> Vec<String> {
+    let Some(corpus_root) = corpus_root else {
+        return substrate_missing_rows();
+    };
+    let manifest_path = corpus_root.join("manifest.json");
+    let substrate_receipt_path = corpus_root
+        .join("receipts")
+        .join("substrate-semantic-corpus-2026-06-18.json");
+
+    if !manifest_path.is_file() || !substrate_receipt_path.is_file() {
+        return substrate_missing_rows();
+    }
+
+    let manifest: SemanticCorpusManifest = match read_json_quiet(&manifest_path) {
+        Ok(manifest) => manifest,
+        Err(_) => return substrate_invalid_rows(),
+    };
+    let receipt: SubstrateReceipt = match read_json_quiet(&substrate_receipt_path) {
+        Ok(receipt) => receipt,
+        Err(_) => return substrate_invalid_rows(),
+    };
+
+    if validate_substrate_receipt(corpus_root, &receipt, &manifest).is_err() {
+        return substrate_invalid_rows();
+    }
+
+    let Ok(c_target) = substrate_target(&receipt, "c") else {
+        return substrate_invalid_rows();
+    };
+    let Ok(rust_target) = substrate_target(&receipt, "rust") else {
+        return substrate_invalid_rows();
+    };
+    let Ok(spirv_target) = substrate_target(&receipt, "spirv") else {
+        return substrate_invalid_rows();
+    };
+
+    let c_status = match c_target.maturity.as_str() {
+        "production-anchor" => "anchor",
+        _ => return substrate_invalid_rows(),
+    };
+    let rust_status = match rust_target.maturity.as_str() {
+        "experimental-subset" => "subset",
+        _ => return substrate_invalid_rows(),
+    };
+    let spirv_status = if spirv_target.status.as_deref() == Some("unverified")
+        || !spirv_target
+            .unsupported_mir_policy
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+    {
+        "unverified"
+    } else {
+        return substrate_invalid_rows();
+    };
+
+    vec![
+        format!("  receipt   ok       {}", receipt.schema),
+        format!(
+            "  corpus    ok       {} semantic program(s)",
+            manifest.programs.len()
+        ),
+        format!("  c         {c_status}   production execution evidence"),
+        format!("  rust      {rust_status}   experimental executable subset"),
+        format!("  spirv     {spirv_status} explicit unsupported-MIR posture"),
+        format!(
+            "  memory    partial  {} verified surface(s), {} known gap(s)",
+            receipt.memory_surface.verified_surfaces.len(),
+            receipt.memory_surface.known_gaps.len()
+        ),
+        format!(
+            "  repr      {}      fallback policy recorded",
+            receipt.representation_surface.ir
+        ),
+    ]
 }
 
 fn verify_c_corpus_stdout(
