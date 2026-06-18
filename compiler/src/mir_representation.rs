@@ -17,7 +17,8 @@ use quantalang::types::{TypeChecker, TypeContext};
 
 use super::{
     input_graph_digest, preprocess_includes_recording_inputs, resolve_imports_recording_inputs,
-    resolve_modules_recording_inputs, source_digest_hex, InputDigestLedger, SemanticCorpusManifest,
+    resolve_modules_recording_inputs, source_digest_hex, source_text_digest_hex, InputDigestLedger,
+    SemanticCorpusManifest,
 };
 
 pub(crate) const MIR_REPRESENTATION_RECEIPT: &str = "mir-representation-2026-06-18.json";
@@ -603,6 +604,10 @@ fn sha256_digest(hex: String) -> MirRepresentationDigest {
         algorithm: "sha256".to_string(),
         hex,
     }
+}
+
+fn mir_source_digest(bytes: &[u8]) -> MirRepresentationDigest {
+    sha256_digest(source_text_digest_hex(bytes))
 }
 
 fn mir_representation_digest(algorithm: &'static str, hex: String) -> MirRepresentationDigest {
@@ -1709,7 +1714,7 @@ fn validate_corpus_relative_path(
 }
 
 fn lower_program_to_mir(program_path: &Path) -> Result<LoweredMirProgram, String> {
-    let mut input_digest_ledger = InputDigestLedger::default();
+    let mut input_digest_ledger = InputDigestLedger::text_normalized();
     let source_bytes = std::fs::read(program_path).map_err(|err| {
         format!(
             "mir representation failed to read {}: {err}",
@@ -1717,7 +1722,7 @@ fn lower_program_to_mir(program_path: &Path) -> Result<LoweredMirProgram, String
         )
     })?;
     input_digest_ledger.record("entry", program_path, &source_bytes);
-    let source_digest = sha256_digest(source_digest_hex(&source_bytes));
+    let source_digest = mir_source_digest(&source_bytes);
     let source = String::from_utf8(source_bytes).map_err(|err| {
         format!(
             "mir representation failed to decode {} as UTF-8: {err}",
@@ -1985,6 +1990,24 @@ mod tests {
         assert_eq!(receipt.programs[0].input_graph_digest.hex.len(), 64);
         assert_eq!(receipt.programs[0].mir_digest.algorithm, "sha256");
         assert_eq!(receipt.programs[0].mir_digest.hex.len(), 64);
+    }
+
+    #[test]
+    fn mir_representation_text_digests_normalize_line_endings() {
+        let lf = b"fn main() -> i32 {\n    return 1;\n}\n";
+        let crlf = b"fn main() -> i32 {\r\n    return 1;\r\n}\r\n";
+
+        assert_eq!(mir_source_digest(lf), mir_source_digest(crlf));
+
+        let mut lf_ledger = InputDigestLedger::text_normalized();
+        lf_ledger.record("entry", Path::new("programs/main.quanta"), lf);
+        let mut crlf_ledger = InputDigestLedger::text_normalized();
+        crlf_ledger.record("entry", Path::new("programs/main.quanta"), crlf);
+
+        assert_eq!(
+            input_graph_digest(&lf_ledger.into_sorted_records()).hex,
+            input_graph_digest(&crlf_ledger.into_sorted_records()).hex
+        );
     }
 
     #[test]

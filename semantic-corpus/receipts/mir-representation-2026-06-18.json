@@ -20,11 +20,11 @@
       "path": "programs/scalar_branch.quanta",
       "source_digest": {
         "algorithm": "sha256",
-        "hex": "045025d69cdb1335e94cbb2cc11b84a84a70be5f4384dccb2857b76fd92a1209"
+        "hex": "0a025b8589a35b778471383ede457dcdda3c98a12af9d385d0572f4379f013d8"
       },
       "input_graph_digest": {
         "algorithm": "sha256",
-        "hex": "a4e4de9ca8f9d4b4a300246c1095c5f7d529aba7365cc83a4deb1985c1afa3aa"
+        "hex": "3e411f002a0493ba95421b5326159753860d0c58173e10e22cacc659638fb7af"
       },
       "mir_digest": {
         "algorithm": "sha256",
@@ -100,11 +100,11 @@
       "path": "programs/references_mutation.quanta",
       "source_digest": {
         "algorithm": "sha256",
-        "hex": "fba22d1346357fef654c2e53920303c813c0b729ec866f9438a395601b0e86a5"
+        "hex": "d299be538551c7be4352fa70ee3fd36882612417e37e5e2840e2372d45ec81b2"
       },
       "input_graph_digest": {
         "algorithm": "sha256",
-        "hex": "3c10d3c897357491f9f3f00639352bf3f9105c38ea20422c3306ee9aeeb3f494"
+        "hex": "33c1b6a915f034c5a40d64285254059a6c0b9ccf4bd11254a656b23c8b4fc7f5"
       },
       "mir_digest": {
         "algorithm": "sha256",
@@ -182,11 +182,11 @@
       "path": "programs/structs_arrays.quanta",
       "source_digest": {
         "algorithm": "sha256",
-        "hex": "f0e9ae4928f330786417a1ff9c3031514fd79ce1e19b406cc50dc0dad49805f1"
+        "hex": "59ddc9618ac56041e33f9a73ecfa9269bf53d03758bca9a5a40aea05389834c5"
       },
       "input_graph_digest": {
         "algorithm": "sha256",
-        "hex": "2482c0813397b4ccc64e1df7a2da50a10903926480d3234b4c5103981da5f613"
+        "hex": "2f3ba2981384ea06a3eaf7ed6a008fa9e6e27c6d2108bed4d70fadc628f97f35"
       },
       "mir_digest": {
         "algorithm": "sha256",
@@ -267,11 +267,11 @@
       "path": "programs/tuple_ownership_reuse.quanta",
       "source_digest": {
         "algorithm": "sha256",
-        "hex": "79637b01c87967242bd91a648f004fdcfc43f906f4f0c97e6b36d62c28a896e4"
+        "hex": "a9f33b9b5b88a1e10d421aba31173d035175a502eef93ef9044837936d65b39a"
       },
       "input_graph_digest": {
         "algorithm": "sha256",
-        "hex": "92bdf43ea7c9ff442d167b117157c088e94f4fa9b4ef661a7bc51f4d59def243"
+        "hex": "bd632401d1aacf88cf54e5673a46c2d7f160891ee2e66d5b89a0d52494fc64a5"
       },
       "mir_digest": {
         "algorithm": "sha256",
@@ -350,11 +350,11 @@
       "path": "programs/struct_aggregate_reuse.quanta",
       "source_digest": {
         "algorithm": "sha256",
-        "hex": "cc6b299dbf52057c30315668ded6e9745d232f0162318856a84814497cef0221"
+        "hex": "b3bca55e495214bc19af590ce456cd5049a64f8551de1362b475ce8c96b8c272"
       },
       "input_graph_digest": {
         "algorithm": "sha256",
-        "hex": "ac2666c0dee34f0c75abe41b0a6dd4dd48ab18fad96423bf02323a207b8c39ae"
+        "hex": "0434dce6d72ec5a5665c91af9c86d9cad0cd71999eab196f66de8749c9783eda"
       },
       "mir_digest": {
         "algorithm": "sha256",
@@ -433,11 +433,11 @@
       "path": "programs/field_assignment_reuse.quanta",
       "source_digest": {
         "algorithm": "sha256",
-        "hex": "ed87feb6cca1559bb2bbede41acef83f1532346f1e99d79c1c800c5b74561265"
+        "hex": "0384ba4cf4470cd8d03cac4ebc0af2daa77d8a24c4cea9d688ef229595d43ed4"
       },
       "input_graph_digest": {
         "algorithm": "sha256",
-        "hex": "d9006c6b47c8b6a9eacb1b06b7bc3ed30f46697b1fc8ad19a2b68fe69d108ade"
+        "hex": "b5ea650db003aa593591cca399d5d24e57102dca8081ad504bf61699263e6cd2"
       },
       "mir_digest": {
         "algorithm": "sha256",
@@ -517,11 +517,11 @@
       "path": "programs/nested_field_reuse.quanta",
       "source_digest": {
         "algorithm": "sha256",
-        "hex": "a723275adfd123c47b9ffad6d1108ccbede0e9a567a5001a93dc76ff8c0976fd"
+        "hex": "13c982f4555cd699dc4bf72d7e15d93a6e7f449c13b195c61ff5f0aa752f56a5"
       },
       "input_graph_digest": {
         "algorithm": "sha256",
-        "hex": "fe2a5a39d11218144ecdf65c03f31e6abe225ba63aebd41609e99b7529e02956"
+        "hex": "d85e9a8ffe173dcdd2161e9e1b901cc138151fd981c918551256d88a6150b504"
       },
       "mir_digest": {
         "algorithm": "sha256",
@@ -600,11 +600,11 @@
       "path": "programs/deref_reuse.quanta",
       "source_digest": {
         "algorithm": "sha256",
-        "hex": "828163bb1152683a171bc40fd76be88763f7da3e899f23dac9e51bf98c5d9407"
+        "hex": "f7fdeba524685c72653b1f1e7be6ce9ba4569d99b4b9a201d75539d15a1138e3"
       },
       "input_graph_digest": {
         "algorithm": "sha256",
-        "hex": "e4d1f13dd311c5fb7e2bfdabd88b13b76127377290c61f20967e3b4091c2c982"
+        "hex": "53ae45aa9061a23aa6eaeda4725dc0df9f895fae9a9288c59fcb6a8f5afe0aa9"
       },
       "mir_digest": {
         "algorithm": "sha256",
