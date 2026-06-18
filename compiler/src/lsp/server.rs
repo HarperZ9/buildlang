@@ -316,6 +316,11 @@ impl LanguageServer {
         self.symbols.document_symbols(&doc)
     }
 
+    /// Handle workspace symbol request for currently opened documents.
+    pub fn workspace_symbol(&self, query: &str) -> Vec<SymbolInformation> {
+        self.symbols.workspace_symbols(query)
+    }
+
     /// Handle semantic tokens request.
     pub fn semantic_tokens(&self, uri: &DocumentUri) -> Option<SemanticTokens> {
         let doc = self.documents.get(uri)?;
@@ -880,6 +885,19 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
         return Some(build_response(response_id, result));
     }
 
+    if method == "workspace/symbol" {
+        let response_id = id.unwrap_or_else(|| "1".to_string());
+        let query = match raw_params::decode_workspace_symbol_query(&message) {
+            Ok(query) => query,
+            Err(error) => return Some(build_invalid_params_response(response_id, &error)),
+        };
+        let symbols = server.workspace_symbol(&query);
+        return Some(build_response(
+            response_id,
+            response_json::build_symbol_information_json(&symbols),
+        ));
+    }
+
     if method == "textDocument/semanticTokens/full" {
         let response_id = id.unwrap_or_else(|| "1".to_string());
         let uri = match raw_params::decode_document_uri(&message) {
@@ -1050,6 +1068,7 @@ fn build_initialize_result(result: &InitializeResult) -> String {
                 .field_bool("definitionProvider", true)
                 .field_bool("referencesProvider", true)
                 .field_bool("documentSymbolProvider", true)
+                .field_bool("workspaceSymbolProvider", true)
                 .field_bool("documentFormattingProvider", true)
                 .field_bool("renameProvider", true)
                 .field_bool("foldingRangeProvider", true)
@@ -1169,6 +1188,23 @@ mod tests {
     }
 
     #[test]
+    fn raw_dispatch_initialize_reports_workspace_symbol_capability() {
+        let mut server = LanguageServer::new();
+        let response = dispatch_raw_message(
+            &mut server,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":"file:///workspace"}}"#,
+        )
+        .expect("initialize should return a response");
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("parse initialize response");
+
+        assert_eq!(
+            json["result"]["capabilities"]["workspaceSymbolProvider"],
+            true
+        );
+    }
+
+    #[test]
     fn raw_dispatch_did_open_returns_diagnostics_notification() {
         let mut server = LanguageServer::new();
         let response = dispatch_raw_message(
@@ -1237,6 +1273,47 @@ mod tests {
             "expected helper symbol in {names:?}"
         );
         assert!(names.contains(&"main"), "expected main symbol in {names:?}");
+    }
+
+    #[test]
+    fn raw_dispatch_workspace_symbol_returns_opened_symbol() {
+        let mut server = LanguageServer::new();
+        dispatch_raw_message(
+            &mut server,
+            r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.quanta","languageId":"quanta","version":1,"text":"fn helper() -> i32 { 1 }\nfn main() { helper(); }\n"}}}"#,
+        )
+        .expect("didOpen should publish diagnostics");
+
+        let response = dispatch_raw_message(
+            &mut server,
+            r#"{"jsonrpc":"2.0","id":30,"method":"workspace/symbol","params":{"query":"help"}}"#,
+        )
+        .expect("workspace/symbol should return a response");
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("parse workspace/symbol response");
+        let symbols = json["result"]
+            .as_array()
+            .expect("workspace symbol result array");
+
+        assert!(symbols.iter().any(|symbol| {
+            symbol["name"] == "helper"
+                && symbol["location"]["uri"] == "file:///workspace/main.quanta"
+        }));
+    }
+
+    #[test]
+    fn raw_dispatch_workspace_symbol_unmatched_query_returns_empty_array() {
+        let mut server = LanguageServer::new();
+        let response = dispatch_raw_message(
+            &mut server,
+            r#"{"jsonrpc":"2.0","id":31,"method":"workspace/symbol","params":{"query":"missing"}}"#,
+        )
+        .expect("workspace/symbol should return a response");
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("parse workspace/symbol response");
+
+        assert!(json.get("error").is_none());
+        assert_eq!(json["result"].as_array().expect("result array").len(), 0);
     }
 
     #[test]
@@ -1436,6 +1513,17 @@ mod tests {
         );
 
         assert_invalid_params(response, "params.textDocument.uri is required");
+    }
+
+    #[test]
+    fn raw_dispatch_invalid_params_workspace_symbol_missing_query_returns_error() {
+        let mut server = LanguageServer::new();
+        let response = dispatch_raw_message(
+            &mut server,
+            r#"{"jsonrpc":"2.0","id":32,"method":"workspace/symbol","params":{}}"#,
+        );
+
+        assert_invalid_params(response, "params.query is required");
     }
 
     #[test]
