@@ -32,6 +32,7 @@ use quantalang::types::{
     capability_effect_names, FunctionEffectSummary, TypeChecker, TypeContext, TypeError,
     TypeErrorWithSpan,
 };
+use symbol_graph::{verify_symbol_graph_receipt, SymbolGraphReceipt, SYMBOL_GRAPH_RECEIPT};
 
 fn parse_codegen_target(target: &str) -> Result<Target, String> {
     match target {
@@ -843,6 +844,7 @@ struct SubstrateReceipt {
     execution_surface: BTreeMap<String, SubstrateExecutionTarget>,
     memory_surface: SubstrateMemorySurface,
     representation_surface: SubstrateRepresentationSurface,
+    symbol_surface: SubstrateSymbolSurface,
     evidence_surface: SubstrateEvidenceSurface,
 }
 
@@ -891,6 +893,16 @@ struct SubstrateRepresentationSurface {
     fallback_policy: String,
     backend_maturity_descriptor: String,
     representation_receipt: String,
+}
+
+#[derive(serde::Deserialize)]
+struct SubstrateSymbolSurface {
+    source: String,
+    representation: String,
+    effect_anchor: String,
+    symbol_receipt: String,
+    #[serde(default)]
+    known_gaps: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1897,12 +1909,15 @@ fn cmd_corpus_verify(root: Option<&Path>, write: bool) -> Result<(), i32> {
     let substrate_receipt_path = receipts_dir.join("substrate-semantic-corpus-2026-06-18.json");
     let mir_receipt_path = receipts_dir.join(MIR_REPRESENTATION_RECEIPT);
     let memory_receipt_path = receipts_dir.join(MEMORY_LAYOUT_RECEIPT);
+    let symbol_receipt_path = receipts_dir.join(SYMBOL_GRAPH_RECEIPT);
     let substrate_receipt: SubstrateReceipt = read_json(&substrate_receipt_path)?;
     let mir_receipt: MirRepresentationReceipt = read_json(&mir_receipt_path)?;
     let memory_receipt: MemoryLayoutReceipt = read_json(&memory_receipt_path)?;
+    let symbol_receipt: SymbolGraphReceipt = read_json(&symbol_receipt_path)?;
     verify_substrate_receipt(&corpus_root, &substrate_receipt, &manifest)?;
     verify_mir_representation_receipt(&corpus_root, &mir_receipt, &manifest)?;
     verify_memory_layout_receipt(&corpus_root, &memory_receipt, &manifest)?;
+    verify_symbol_graph_receipt(&corpus_root, &symbol_receipt, &manifest)?;
     let c_passed = if write {
         let rust_receipt: CorpusExecutionReceipt = read_json(&rust_receipt_path)?;
         verify_receipt(
@@ -1941,6 +1956,7 @@ fn cmd_corpus_verify(root: Option<&Path>, write: bool) -> Result<(), i32> {
     println!("substrate receipt: ok");
     println!("mir representation receipt: ok");
     println!("memory layout receipt: ok");
+    println!("symbol graph receipt: ok");
     println!("c execution: {} passed", c_passed);
     if write {
         println!("c receipt: written");
@@ -2551,6 +2567,53 @@ fn validate_substrate_receipt(
             "substrate representation_surface.representation_receipt must point at receipts/{}, found {}",
             MIR_REPRESENTATION_RECEIPT,
             receipt.representation_surface.representation_receipt
+        ));
+    }
+
+    if receipt.symbol_surface.source != "AST" {
+        return Err(format!(
+            "substrate symbol_surface.source mismatch: expected 'AST', found '{}'",
+            receipt.symbol_surface.source
+        ));
+    }
+    if receipt.symbol_surface.representation != "MIR" {
+        return Err(format!(
+            "substrate symbol_surface.representation mismatch: expected 'MIR', found '{}'",
+            receipt.symbol_surface.representation
+        ));
+    }
+    if receipt.symbol_surface.effect_anchor != "quantalang-check-receipt/v1" {
+        return Err(format!(
+            "substrate symbol_surface.effect_anchor mismatch: expected 'quantalang-check-receipt/v1', found '{}'",
+            receipt.symbol_surface.effect_anchor
+        ));
+    }
+    if receipt.symbol_surface.known_gaps.is_empty() {
+        return Err("substrate symbol_surface.known_gaps must not be empty".to_string());
+    }
+    let symbol_receipt_path = validate_substrate_path(
+        corpus_root,
+        &receipt.symbol_surface.symbol_receipt,
+        "symbol_surface.symbol_receipt",
+    )?;
+    if symbol_receipt_path
+        != corpus_root
+            .join("receipts")
+            .join(SYMBOL_GRAPH_RECEIPT)
+            .canonicalize()
+            .map_err(|err| {
+                format!(
+                    "substrate symbol_surface.symbol_receipt failed to canonicalize expected receipt {}: {err}",
+                    corpus_root
+                        .join("receipts")
+                        .join(SYMBOL_GRAPH_RECEIPT)
+                        .display()
+                )
+            })?
+    {
+        return Err(format!(
+            "substrate symbol_surface.symbol_receipt must point at receipts/{}, found {}",
+            SYMBOL_GRAPH_RECEIPT, receipt.symbol_surface.symbol_receipt
         ));
     }
 
