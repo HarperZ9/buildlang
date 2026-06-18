@@ -76,6 +76,19 @@ fn lsp_fixture_sequence_records_semantic_tokens() {
 }
 
 #[test]
+fn lsp_fixture_sequence_records_workspace_symbols() {
+    let (_root, _manifest, receipt) = built_receipt();
+    let fixture = receipt
+        .fixtures
+        .iter()
+        .find(|fixture| fixture.id == "workspace-symbol")
+        .expect("workspace symbol fixture");
+
+    assert_eq!(fixture.method, "workspace/symbol");
+    assert!(fixture.observed.workspace_symbols > 0);
+}
+
+#[test]
 fn lsp_fixture_summary_sorts_methods_and_response_kinds() {
     let (_root, _manifest, receipt) = built_receipt();
 

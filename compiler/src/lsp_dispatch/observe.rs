@@ -20,6 +20,7 @@ pub(super) fn observe_response(method: &str, response: Option<&Value>) -> LspDis
         code_actions: 0,
         workspace_edits: 0,
         semantic_tokens: 0,
+        workspace_symbols: 0,
     };
     let Some(value) = response else {
         return observed;
@@ -54,6 +55,7 @@ pub(super) fn observe_response(method: &str, response: Option<&Value>) -> LspDis
                 .map_or(0, Vec::len);
         }
         "textDocument/documentSymbol" => observed.document_symbols = result_array_len(value),
+        "workspace/symbol" => observed.workspace_symbols = result_array_len(value),
         "textDocument/definition" | "textDocument/references" => {
             observed.locations = result_array_len(value)
         }
