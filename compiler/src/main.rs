@@ -1859,6 +1859,9 @@ fn cmd_corpus_verify(root: Option<&Path>, write: bool) -> Result<(), i32> {
     let receipts_dir = corpus_root.join("receipts");
     let c_receipt_path = receipts_dir.join("c-execution-2026-06-13.json");
     let rust_receipt_path = receipts_dir.join("rust-execution-2026-06-13.json");
+    let substrate_receipt_path = receipts_dir.join("substrate-semantic-corpus-2026-06-18.json");
+    let substrate_receipt: SubstrateReceipt = read_json(&substrate_receipt_path)?;
+    verify_substrate_receipt(&corpus_root, &substrate_receipt, &manifest)?;
     let c_passed = if write {
         let rust_receipt: CorpusExecutionReceipt = read_json(&rust_receipt_path)?;
         verify_receipt(
@@ -1894,6 +1897,7 @@ fn cmd_corpus_verify(root: Option<&Path>, write: bool) -> Result<(), i32> {
     println!("manifest: {} program(s)", manifest.programs.len());
     println!("c receipt: ok");
     println!("rust receipt: ok");
+    println!("substrate receipt: ok");
     println!("c execution: {} passed", c_passed);
     if write {
         println!("c receipt: written");
