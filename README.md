@@ -524,6 +524,14 @@ struct aggregate reuse, field assignment reuse, nested field reuse, and
 dereference reuse; unsupported MIR returns a codegen error rather than silent
 fallback.
 
+`quantac corpus verify` also validates a Substrate Receipt
+(`quantalang-substrate-receipt/v0`) for the same semantic corpus. This receipt
+aggregates existing evidence across semantic, execution, memory, representation,
+and command surfaces: C remains the production execution anchor, Rust remains an
+experimental subset lane, and unverified GPU/native lanes must keep explicit
+maturity and unsupported-behavior labels. The receipt is an evidence contract,
+not a backend promotion claim.
+
 ## Status
 
 The current release-shaped proof is the Cargo baseline above: 868 passing tests,
