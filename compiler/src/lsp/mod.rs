@@ -47,6 +47,7 @@ pub mod jsonrpc;
 pub mod message;
 pub mod raw_params;
 pub mod response_json;
+pub mod semantic_tokens;
 pub mod server;
 pub mod symbols;
 pub mod transport;
