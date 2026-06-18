@@ -798,6 +798,72 @@ struct CorpusExecutionProgram {
     expected_stdout: String,
 }
 
+#[derive(serde::Deserialize)]
+struct SubstrateReceipt {
+    schema: String,
+    receipt_id: String,
+    created_at: String,
+    compiler: String,
+    language: String,
+    source_set: SubstrateSourceSet,
+    semantic_surface: SubstrateSemanticSurface,
+    execution_surface: BTreeMap<String, SubstrateExecutionTarget>,
+    memory_surface: SubstrateMemorySurface,
+    representation_surface: SubstrateRepresentationSurface,
+    evidence_surface: SubstrateEvidenceSurface,
+}
+
+#[derive(serde::Deserialize)]
+struct SubstrateSourceSet {
+    kind: String,
+    manifest: String,
+    program_count: usize,
+}
+
+#[derive(serde::Deserialize)]
+struct SubstrateSemanticSurface {
+    check_receipt_schema: String,
+    requires_source_digest: bool,
+    requires_input_graph_digest: bool,
+    #[serde(default)]
+    effect_surfaces: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct SubstrateExecutionTarget {
+    target: String,
+    maturity: String,
+    evidence_class: String,
+    #[serde(default)]
+    receipt: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    unsupported_mir_policy: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct SubstrateMemorySurface {
+    ownership_model: String,
+    #[serde(default)]
+    verified_surfaces: Vec<String>,
+    #[serde(default)]
+    known_gaps: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct SubstrateRepresentationSurface {
+    ir: String,
+    fallback_policy: String,
+    backend_maturity_descriptor: String,
+}
+
+#[derive(serde::Deserialize)]
+struct SubstrateEvidenceSurface {
+    #[serde(default)]
+    commands: Vec<String>,
+}
+
 struct BuiltinPolicyTemplate {
     name: &'static str,
     summary: &'static str,
@@ -1886,6 +1952,31 @@ fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), i32> {
     })
 }
 
+fn require_non_empty(value: &str, field: &str) -> Result<(), i32> {
+    if value.trim().is_empty() {
+        eprintln!("substrate {field} must not be empty");
+        return Err(1);
+    }
+    Ok(())
+}
+
+fn require_substrate_path(root: &Path, relative: &str, field: &str) -> Result<PathBuf, i32> {
+    require_non_empty(relative, field)?;
+    let path = root.join(relative);
+    if !path.is_file() {
+        eprintln!("substrate {field} path not found: {}", path.display());
+        return Err(1);
+    }
+    Ok(path)
+}
+
+fn receipt_has_stdout_validator(receipt: &CorpusExecutionReceipt) -> bool {
+    receipt
+        .validator_chain
+        .iter()
+        .any(|entry| entry.eq_ignore_ascii_case("stdout assertion"))
+}
+
 fn expected_receipt_capabilities(manifest: &SemanticCorpusManifest) -> Vec<String> {
     let mut capabilities = BTreeSet::new();
     for program in &manifest.programs {
@@ -1991,6 +2082,236 @@ fn verify_receipt(
             != Some("cargo test --manifest-path compiler/Cargo.toml capability --quiet")
     {
         eprintln!("{} receipt capability metadata drift", label);
+        return Err(1);
+    }
+
+    Ok(())
+}
+
+fn verify_substrate_receipt(
+    corpus_root: &Path,
+    receipt: &SubstrateReceipt,
+    manifest: &SemanticCorpusManifest,
+) -> Result<(), i32> {
+    if receipt.schema != "quantalang-substrate-receipt/v0" {
+        eprintln!(
+            "substrate receipt has unsupported schema '{}'",
+            receipt.schema
+        );
+        return Err(1);
+    }
+    if receipt.compiler != "quantac" {
+        eprintln!(
+            "substrate compiler mismatch: expected 'quantac', found '{}'",
+            receipt.compiler
+        );
+        return Err(1);
+    }
+    if receipt.language != "quantalang" {
+        eprintln!(
+            "substrate language mismatch: expected 'quantalang', found '{}'",
+            receipt.language
+        );
+        return Err(1);
+    }
+    require_non_empty(&receipt.receipt_id, "receipt_id")?;
+    require_non_empty(&receipt.created_at, "created_at")?;
+
+    if receipt.source_set.kind != "semantic-corpus" {
+        eprintln!(
+            "substrate source_set.kind mismatch: expected 'semantic-corpus', found '{}'",
+            receipt.source_set.kind
+        );
+        return Err(1);
+    }
+    let manifest_path = require_substrate_path(
+        corpus_root,
+        &receipt.source_set.manifest,
+        "source_set.manifest",
+    )?;
+    if manifest_path != corpus_root.join("manifest.json") {
+        eprintln!(
+            "substrate source_set.manifest must point at manifest.json, found {}",
+            receipt.source_set.manifest
+        );
+        return Err(1);
+    }
+    if receipt.source_set.program_count != manifest.programs.len() {
+        eprintln!(
+            "substrate source_set.program_count mismatch: expected {}, found {}",
+            manifest.programs.len(),
+            receipt.source_set.program_count
+        );
+        return Err(1);
+    }
+
+    if receipt.semantic_surface.check_receipt_schema != "quantalang-check-receipt/v1" {
+        eprintln!(
+            "substrate semantic_surface.check_receipt_schema mismatch: found '{}'",
+            receipt.semantic_surface.check_receipt_schema
+        );
+        return Err(1);
+    }
+    if !receipt.semantic_surface.requires_source_digest {
+        eprintln!("substrate semantic_surface.requires_source_digest must be true");
+        return Err(1);
+    }
+    if !receipt.semantic_surface.requires_input_graph_digest {
+        eprintln!("substrate semantic_surface.requires_input_graph_digest must be true");
+        return Err(1);
+    }
+    for required in [
+        "declared_effects",
+        "observed_capabilities",
+        "propagated_effects",
+    ] {
+        if !receipt
+            .semantic_surface
+            .effect_surfaces
+            .iter()
+            .any(|surface| surface == required)
+        {
+            eprintln!("substrate semantic_surface.effect_surfaces missing {required}");
+            return Err(1);
+        }
+    }
+
+    if receipt.execution_surface.is_empty() {
+        eprintln!("substrate execution_surface must not be empty");
+        return Err(1);
+    }
+    for (label, target) in &receipt.execution_surface {
+        require_non_empty(&target.target, &format!("execution_surface.{label}.target"))?;
+        require_non_empty(
+            &target.maturity,
+            &format!("execution_surface.{label}.maturity"),
+        )?;
+        require_non_empty(
+            &target.evidence_class,
+            &format!("execution_surface.{label}.evidence_class"),
+        )?;
+
+        match target.maturity.as_str() {
+            "production-anchor" => {
+                let Some(relative_receipt) = target.receipt.as_deref() else {
+                    eprintln!(
+                        "substrate execution_surface.{label} is production-anchor but receipt is missing"
+                    );
+                    return Err(1);
+                };
+                let execution_receipt_path = require_substrate_path(
+                    corpus_root,
+                    relative_receipt,
+                    &format!("execution_surface.{label}.receipt"),
+                )?;
+                let execution_receipt: CorpusExecutionReceipt = read_json(&execution_receipt_path)?;
+                if execution_receipt.backend != target.target {
+                    eprintln!(
+                        "substrate execution_surface.{label}.receipt backend mismatch: expected '{}', found '{}'",
+                        target.target, execution_receipt.backend
+                    );
+                    return Err(1);
+                }
+                if !receipt_has_stdout_validator(&execution_receipt) {
+                    eprintln!(
+                        "substrate execution_surface.{label} production-anchor requires stdout assertion evidence"
+                    );
+                    return Err(1);
+                }
+            }
+            "experimental-subset" => {
+                if target.receipt.is_none()
+                    && target
+                        .unsupported_mir_policy
+                        .as_deref()
+                        .map(str::trim)
+                        .unwrap_or_default()
+                        .is_empty()
+                {
+                    eprintln!(
+                        "substrate execution_surface.{label} experimental-subset requires receipt or unsupported_mir_policy"
+                    );
+                    return Err(1);
+                }
+                if let Some(relative_receipt) = target.receipt.as_deref() {
+                    let execution_receipt_path = require_substrate_path(
+                        corpus_root,
+                        relative_receipt,
+                        &format!("execution_surface.{label}.receipt"),
+                    )?;
+                    let execution_receipt: CorpusExecutionReceipt =
+                        read_json(&execution_receipt_path)?;
+                    if execution_receipt.backend != target.target {
+                        eprintln!(
+                            "substrate execution_surface.{label}.receipt backend mismatch: expected '{}', found '{}'",
+                            target.target, execution_receipt.backend
+                        );
+                        return Err(1);
+                    }
+                }
+            }
+            maturity if maturity.starts_with("experimental") => {
+                if target.status.as_deref() != Some("unverified")
+                    && target
+                        .unsupported_mir_policy
+                        .as_deref()
+                        .map(str::trim)
+                        .unwrap_or_default()
+                        .is_empty()
+                {
+                    eprintln!(
+                        "substrate execution_surface.{label} experimental target requires status=unverified or unsupported_mir_policy"
+                    );
+                    return Err(1);
+                }
+            }
+            other => {
+                eprintln!("substrate execution_surface.{label} has unknown maturity '{other}'");
+                return Err(1);
+            }
+        }
+    }
+
+    require_non_empty(
+        &receipt.memory_surface.ownership_model,
+        "memory_surface.ownership_model",
+    )?;
+    if receipt.memory_surface.known_gaps.is_empty() {
+        eprintln!("substrate memory_surface.known_gaps must not be empty");
+        return Err(1);
+    }
+    if receipt.memory_surface.verified_surfaces.is_empty() {
+        eprintln!("substrate memory_surface.verified_surfaces must not be empty");
+        return Err(1);
+    }
+
+    if receipt.representation_surface.ir != "MIR" {
+        eprintln!(
+            "substrate representation_surface.ir mismatch: expected 'MIR', found '{}'",
+            receipt.representation_surface.ir
+        );
+        return Err(1);
+    }
+    require_non_empty(
+        &receipt.representation_surface.fallback_policy,
+        "representation_surface.fallback_policy",
+    )?;
+    require_non_empty(
+        &receipt.representation_surface.backend_maturity_descriptor,
+        "representation_surface.backend_maturity_descriptor",
+    )?;
+
+    if receipt.evidence_surface.commands.is_empty() {
+        eprintln!("substrate evidence_surface.commands must not be empty");
+        return Err(1);
+    }
+    if !receipt
+        .evidence_surface
+        .commands
+        .iter()
+        .all(|command| !command.trim().is_empty())
+    {
+        eprintln!("substrate evidence_surface.commands must contain only non-empty commands");
         return Err(1);
     }
 
