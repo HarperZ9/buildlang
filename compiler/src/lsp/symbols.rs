@@ -638,6 +638,18 @@ impl SymbolProvider {
         symbols
     }
 
+    /// Build flat symbol information for a known URI and pre-parsed symbol tree.
+    pub fn matching_symbol_information(
+        &self,
+        symbols: &[DocumentSymbol],
+        uri: &str,
+        query_lower: &str,
+    ) -> Vec<SymbolInformation> {
+        let mut result = Vec::new();
+        self.collect_matching_symbols(symbols, uri, query_lower, &mut result);
+        result
+    }
+
     /// Collect symbols matching a query recursively.
     fn collect_matching_symbols(
         &self,
