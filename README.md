@@ -31,8 +31,8 @@ quantac doctor
 ```
 
 `doctor` reports the installed compiler version, C-backend readiness, stdlib and
-local registry discovery, optional backend tools, and the current backend
-maturity table.
+local registry discovery, optional backend tools, the current backend maturity
+table, and the substrate receipt evidence posture for the semantic corpus.
 
 ## Editor support
 
