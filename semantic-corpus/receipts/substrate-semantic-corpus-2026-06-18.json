@@ -60,7 +60,8 @@
   "representation_surface": {
     "ir": "MIR",
     "fallback_policy": "unsupported or partial targets must not claim production maturity",
-    "backend_maturity_descriptor": "compiler/src/codegen/backend/STATUS.md"
+    "backend_maturity_descriptor": "compiler/src/codegen/backend/STATUS.md",
+    "representation_receipt": "receipts/mir-representation-2026-06-18.json"
   },
   "evidence_surface": {
     "commands": [
