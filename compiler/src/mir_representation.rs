@@ -1492,7 +1492,14 @@ fn write_mir_module(module: &MirModule) -> String {
         }
     }
 
-    for (index, vtable) in module.vtables.iter().enumerate() {
+    let mut vtables = module.vtables.iter().collect::<Vec<_>>();
+    vtables.sort_by(|left, right| {
+        left.trait_name
+            .as_ref()
+            .cmp(right.trait_name.as_ref())
+            .then_with(|| left.type_name.as_ref().cmp(right.type_name.as_ref()))
+    });
+    for (index, vtable) in vtables.into_iter().enumerate() {
         push_line(
             &mut output,
             format!(
@@ -1502,8 +1509,15 @@ fn write_mir_module(module: &MirModule) -> String {
                 vtable.methods.len()
             ),
         );
+        let mut methods = vtable.methods.iter().collect::<Vec<_>>();
+        methods.sort_by(|left, right| {
+            left.0
+                .as_ref()
+                .cmp(right.0.as_ref())
+                .then_with(|| left.1.as_ref().cmp(right.1.as_ref()))
+        });
         for (method_index, (method_name, function_name, signature)) in
-            vtable.methods.iter().enumerate()
+            methods.into_iter().enumerate()
         {
             push_line(
                 &mut output,
@@ -1943,7 +1957,7 @@ mod tests {
 
     use quantalang::codegen::{
         AggregateKind, BlockId, LocalId, MirBlock, MirConst, MirFnSig, MirFunction, MirLocal,
-        MirStmt, MirType, MirTypeDef, MirValue, TypeDefKind,
+        MirStmt, MirType, MirTypeDef, MirValue, MirVtable, TypeDefKind,
     };
 
     #[test]
@@ -2201,6 +2215,65 @@ mod tests {
 
         assert_eq!(first_program.operations, second_program.operations);
         assert_ne!(first_program.mir_digest, second_program.mir_digest);
+    }
+
+    #[test]
+    fn mir_digest_is_stable_for_equivalent_vtables_in_different_orders() {
+        let render_sig = MirFnSig::new(vec![MirType::i32()], MirType::Void);
+        let debug_sig = MirFnSig::new(vec![MirType::Bool], MirType::i32());
+        let eq_sig = MirFnSig::new(vec![MirType::i32(), MirType::i32()], MirType::Bool);
+
+        let mut first = MirModule::new("vtable_order");
+        first.vtables = vec![
+            MirVtable {
+                trait_name: Arc::from("Display"),
+                type_name: Arc::from("Point"),
+                methods: vec![
+                    (
+                        Arc::from("render"),
+                        Arc::from("Point_display_render"),
+                        render_sig.clone(),
+                    ),
+                    (
+                        Arc::from("debug"),
+                        Arc::from("Point_display_debug"),
+                        debug_sig.clone(),
+                    ),
+                ],
+            },
+            MirVtable {
+                trait_name: Arc::from("Eq"),
+                type_name: Arc::from("Point"),
+                methods: vec![(Arc::from("eq"), Arc::from("Point_eq"), eq_sig.clone())],
+            },
+        ];
+
+        let mut second = MirModule::new("vtable_order");
+        second.vtables = vec![
+            MirVtable {
+                trait_name: Arc::from("Eq"),
+                type_name: Arc::from("Point"),
+                methods: vec![(Arc::from("eq"), Arc::from("Point_eq"), eq_sig)],
+            },
+            MirVtable {
+                trait_name: Arc::from("Display"),
+                type_name: Arc::from("Point"),
+                methods: vec![
+                    (
+                        Arc::from("debug"),
+                        Arc::from("Point_display_debug"),
+                        debug_sig,
+                    ),
+                    (
+                        Arc::from("render"),
+                        Arc::from("Point_display_render"),
+                        render_sig,
+                    ),
+                ],
+            },
+        ];
+
+        assert_eq!(digest_mir_module(&first), digest_mir_module(&second));
     }
 
     fn quantalang_type_def_point() -> MirTypeDef {

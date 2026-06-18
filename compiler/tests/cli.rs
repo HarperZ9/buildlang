@@ -11297,6 +11297,70 @@ fn corpus_verify_rejects_substrate_representation_receipt_absolute_path() {
 }
 
 #[test]
+fn corpus_verify_rejects_substrate_representation_receipt_windows_drive_path() {
+    let corpus_root = temp_semantic_corpus("substrate_repr_windows_drive_path");
+    write_substrate_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["representation_surface"]["representation_receipt"] =
+            serde_json::Value::String("C:\\outside.json".into());
+        receipt
+    });
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(&corpus_root)
+        .output()
+        .expect(
+            "run quantac corpus verify against substrate representation receipt windows drive path",
+        );
+
+    let _ = fs::remove_dir_all(&corpus_root);
+
+    assert!(
+        !output.status.success(),
+        "corpus verify should reject substrate representation receipt windows drive path"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("must stay within corpus root"),
+        "stderr should name substrate representation receipt path containment failure:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_substrate_representation_receipt_windows_drive_relative_path() {
+    let corpus_root = temp_semantic_corpus("substrate_repr_windows_drive_relative_path");
+    write_substrate_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["representation_surface"]["representation_receipt"] =
+            serde_json::Value::String("C:outside.json".into());
+        receipt
+    });
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(&corpus_root)
+        .output()
+        .expect(
+            "run quantac corpus verify against substrate representation receipt windows drive-relative path",
+        );
+
+    let _ = fs::remove_dir_all(&corpus_root);
+
+    assert!(
+        !output.status.success(),
+        "corpus verify should reject substrate representation receipt windows drive-relative path"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("must stay within corpus root"),
+        "stderr should name substrate representation receipt path containment failure:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn corpus_verify_rejects_empty_substrate_evidence_commands() {
     let corpus_root = temp_semantic_corpus("substrate_empty_commands");
     write_substrate_receipt_copy(&corpus_root, |mut receipt| {
