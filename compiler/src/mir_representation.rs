@@ -718,14 +718,12 @@ fn validate_corpus_relative_path(
     let relative_path = Path::new(relative);
     if relative_path.is_absolute()
         || relative_path.has_root()
-        || relative_path
-            .components()
-            .any(|component| {
-                matches!(
-                    component,
-                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
-                )
-            })
+        || relative_path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
     {
         return Err(format!(
             "mir representation {field} must stay within corpus root: {relative}"
