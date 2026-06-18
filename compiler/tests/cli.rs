@@ -11092,7 +11092,13 @@ fn corpus_verify_rejects_lsp_dispatch_schema_drift() {
 fn corpus_verify_rejects_lsp_dispatch_fixture_digest_drift() {
     let corpus_root = temp_semantic_corpus("lsp_dispatch_digest");
     write_lsp_dispatch_receipt_copy(&corpus_root, |mut receipt| {
-        receipt["fixtures"][3]["result_digest"]["hex"] = serde_json::Value::String("0".repeat(64));
+        let fixture = receipt["fixtures"]
+            .as_array_mut()
+            .expect("fixtures should be an array")
+            .iter_mut()
+            .find(|fixture| fixture["id"] == "document-symbol")
+            .expect("document-symbol fixture should exist");
+        fixture["result_digest"]["hex"] = serde_json::Value::String("0".repeat(64));
         receipt
     });
 
@@ -11106,13 +11112,39 @@ fn corpus_verify_rejects_lsp_dispatch_fixture_digest_drift() {
 fn corpus_verify_rejects_lsp_dispatch_observed_drift() {
     let corpus_root = temp_semantic_corpus("lsp_dispatch_observed");
     write_lsp_dispatch_receipt_copy(&corpus_root, |mut receipt| {
-        receipt["fixtures"][3]["observed"]["document_symbols"] = serde_json::Value::from(0);
+        let fixture = receipt["fixtures"]
+            .as_array_mut()
+            .expect("fixtures should be an array")
+            .iter_mut()
+            .find(|fixture| fixture["id"] == "document-symbol")
+            .expect("document-symbol fixture should exist");
+        fixture["observed"]["document_symbols"] = serde_json::Value::from(0);
         receipt
     });
 
     assert_corpus_verify_rejects(
         &corpus_root,
         "lsp dispatch fixture document-symbol observed drift",
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_lsp_dispatch_semantic_tokens_observed_drift() {
+    let corpus_root = temp_semantic_corpus("lsp_dispatch_semantic_tokens_observed");
+    write_lsp_dispatch_receipt_copy(&corpus_root, |mut receipt| {
+        let fixture = receipt["fixtures"]
+            .as_array_mut()
+            .expect("fixtures should be an array")
+            .iter_mut()
+            .find(|fixture| fixture["id"] == "semantic-tokens")
+            .expect("semantic token fixture should exist");
+        fixture["observed"]["semantic_tokens"] = serde_json::Value::from(0);
+        receipt
+    });
+
+    assert_corpus_verify_rejects(
+        &corpus_root,
+        "lsp dispatch fixture semantic-tokens observed drift",
     );
 }
 

@@ -24,7 +24,7 @@
       "response_kind": "response",
       "result_digest": {
         "algorithm": "sha256",
-        "hex": "daecc6d0f8ab6ff9812716b344ea32e07f47c8ffd04cce4f8bbdd869c170515b"
+        "hex": "8ff6e05b4e7876d293fc31241af6784f7a7137cfbf7cfd3ef7011a20bce98cc6"
       },
       "observed": {
         "has_result": true
@@ -50,6 +50,19 @@
       },
       "observed": {
         "diagnostics": 1
+      }
+    },
+    {
+      "id": "semantic-tokens",
+      "method": "textDocument/semanticTokens/full",
+      "response_kind": "response",
+      "result_digest": {
+        "algorithm": "sha256",
+        "hex": "12ff37ac7680451b8756bc4822650915123c202c6c85dcf26bbfb32d4188a712"
+      },
+      "observed": {
+        "has_result": true,
+        "semantic_tokens": 11
       }
     },
     {
@@ -216,7 +229,7 @@
     }
   ],
   "summary": {
-    "fixture_count": 16,
+    "fixture_count": 17,
     "methods": [
       "exit",
       "initialize",
@@ -232,7 +245,8 @@
       "textDocument/formatting",
       "textDocument/hover",
       "textDocument/references",
-      "textDocument/rename"
+      "textDocument/rename",
+      "textDocument/semanticTokens/full"
     ],
     "response_kinds": [
       "none",
