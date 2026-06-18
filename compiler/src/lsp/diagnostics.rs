@@ -18,6 +18,10 @@ use crate::lexer::{Lexer, SourceFile};
 use crate::parser::Parser;
 use crate::types::{TypeChecker, TypeContext};
 
+const LEXER_DIAGNOSTIC_SOURCE: &str = "quantalang/lexer";
+const PARSER_DIAGNOSTIC_SOURCE: &str = "quantalang/parser";
+const TYPE_CHECKER_DIAGNOSTIC_SOURCE: &str = "quantalang/type-checker";
+
 // =============================================================================
 // DIAGNOSTICS PROVIDER
 // =============================================================================
@@ -75,7 +79,7 @@ impl DiagnosticsProvider {
                     },
                     severity: Some(DiagnosticSeverity::Error),
                     code: None,
-                    source: Some("quantalang".to_string()),
+                    source: Some(LEXER_DIAGNOSTIC_SOURCE.to_string()),
                     message: format!("Lexer error: {}", e),
                     tags: Vec::new(),
                     related_information: Vec::new(),
@@ -102,7 +106,7 @@ impl DiagnosticsProvider {
                     },
                     severity: Some(DiagnosticSeverity::Error),
                     code: None,
-                    source: Some("quantalang".to_string()),
+                    source: Some(PARSER_DIAGNOSTIC_SOURCE.to_string()),
                     message: format!("Parse error: {}", e),
                     tags: Vec::new(),
                     related_information: Vec::new(),
@@ -126,7 +130,7 @@ impl DiagnosticsProvider {
                 },
                 severity: Some(DiagnosticSeverity::Error),
                 code: None,
-                source: Some("quantalang".to_string()),
+                source: Some(PARSER_DIAGNOSTIC_SOURCE.to_string()),
                 message: format!("{}", err),
                 tags: Vec::new(),
                 related_information: Vec::new(),
@@ -169,7 +173,7 @@ impl DiagnosticsProvider {
                 },
                 severity: Some(DiagnosticSeverity::Error),
                 code: None,
-                source: Some("quantalang".to_string()),
+                source: Some(TYPE_CHECKER_DIAGNOSTIC_SOURCE.to_string()),
                 message: format!("{}", err),
                 tags: Vec::new(),
                 related_information: Vec::new(),
@@ -630,5 +634,27 @@ mod tests {
     fn test_remove_strings() {
         assert_eq!(remove_strings(r#"let x = "hello";"#), "let x = ;");
         assert_eq!(remove_strings(r#"let x = "foo\"bar";"#), "let x = ;");
+    }
+
+    #[test]
+    fn compiler_type_error_diagnostic_uses_type_checker_source() {
+        let documents = Arc::new(DocumentStore::new());
+        let provider = DiagnosticsProvider::new(documents.clone());
+        let doc = documents.open(TextDocumentItem {
+            uri: "file:///workspace/type_error.quanta".to_string(),
+            language_id: "quanta".to_string(),
+            version: 1,
+            text: "const BAD: i32 = \"oops\";\nfn main() {}\n".to_string(),
+        });
+        let published = provider.compute(&doc);
+
+        assert!(
+            published.diagnostics.iter().any(|d| {
+                d.source.as_deref() == Some("quantalang/type-checker")
+                    && d.message.contains("type mismatch")
+            }),
+            "expected type-checker diagnostic in {:#?}",
+            published.diagnostics
+        );
     }
 }
