@@ -1,7 +1,9 @@
 use serde_json::{json, Map, Value};
 
 use super::semantic_tokens::{SemanticTokenLegendSpec, SemanticTokens};
-use super::types::{CodeAction, Position, Range, TextEdit, WorkspaceEdit};
+use super::types::{
+    CodeAction, Location, Position, Range, SymbolInformation, TextEdit, WorkspaceEdit,
+};
 
 pub fn build_code_actions_json(actions: &[CodeAction]) -> String {
     serde_json::to_string(&actions.iter().map(code_action_json).collect::<Vec<Value>>())
@@ -28,6 +30,16 @@ pub fn build_semantic_tokens_options_json(legend: &SemanticTokenLegendSpec) -> S
     .expect("serialize semantic token options")
 }
 
+pub fn build_symbol_information_json(symbols: &[SymbolInformation]) -> String {
+    serde_json::to_string(
+        &symbols
+            .iter()
+            .map(symbol_information_json)
+            .collect::<Vec<Value>>(),
+    )
+    .expect("serialize workspace symbols")
+}
+
 fn code_action_json(action: &CodeAction) -> Value {
     let mut value = Map::new();
     value.insert("title".to_string(), json!(action.title));
@@ -39,6 +51,30 @@ fn code_action_json(action: &CodeAction) -> Value {
         value.insert("edit".to_string(), workspace_edit_json(edit));
     }
     Value::Object(value)
+}
+
+fn symbol_information_json(symbol: &SymbolInformation) -> Value {
+    let mut value = Map::new();
+    value.insert("name".to_string(), json!(symbol.name));
+    value.insert("kind".to_string(), json!(symbol.kind as u8));
+    value.insert("location".to_string(), location_json(&symbol.location));
+    if !symbol.tags.is_empty() {
+        value.insert(
+            "tags".to_string(),
+            Value::Array(symbol.tags.iter().map(|tag| json!(*tag as u8)).collect()),
+        );
+    }
+    if let Some(container) = &symbol.container_name {
+        value.insert("containerName".to_string(), json!(container));
+    }
+    Value::Object(value)
+}
+
+fn location_json(location: &Location) -> Value {
+    json!({
+        "uri": location.uri,
+        "range": range_json(&location.range),
+    })
 }
 
 fn workspace_edit_json(edit: &WorkspaceEdit) -> Value {
