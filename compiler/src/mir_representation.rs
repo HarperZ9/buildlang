@@ -1,14 +1,21 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use quantalang::codegen::{
-    AggregateKind, BinOp, CastKind, MirModule, MirPlace, MirRValue, MirStmtKind, MirTerminator,
-    PlaceProjection, UnaryOp,
+    lower::MirLowerer, AggregateKind, BinOp, CastKind, MirModule, MirPlace, MirRValue, MirStmtKind,
+    MirTerminator, PlaceProjection, UnaryOp,
 };
+use quantalang::lexer::{Lexer, SourceFile};
+use quantalang::parser::Parser;
+use quantalang::types::{TypeChecker, TypeContext};
 
-use super::SemanticCorpusManifest;
+use super::{
+    preprocess_includes, resolve_imports, resolve_modules, source_digest_hex,
+    SemanticCorpusManifest,
+};
 
 pub(crate) const MIR_REPRESENTATION_RECEIPT: &str = "mir-representation-2026-06-18.json";
 
@@ -577,26 +584,379 @@ fn projection_name(projection: &PlaceProjection) -> &'static str {
 }
 
 pub(crate) fn build_mir_representation_receipt(
-    _corpus_root: &Path,
-    _manifest: &SemanticCorpusManifest,
+    corpus_root: &Path,
+    manifest: &SemanticCorpusManifest,
 ) -> Result<MirRepresentationReceipt, String> {
-    Err("mir representation receipt construction is not implemented in Task 2".to_string())
+    let mut programs = Vec::new();
+    for program in &manifest.programs {
+        let program_path =
+            validate_corpus_relative_path(corpus_root, &program.path, "program.path")?;
+        let source_bytes = std::fs::read(&program_path).map_err(|err| {
+            format!(
+                "mir representation failed to read {}: {err}",
+                program_path.display()
+            )
+        })?;
+        let digest = MirRepresentationDigest {
+            algorithm: "sha256".to_string(),
+            hex: source_digest_hex(&source_bytes),
+        };
+        let mir = lower_program_to_mir(&program_path)?;
+        programs.push(summarize_mir_program(
+            &program.id,
+            &program.path,
+            digest,
+            &mir,
+        ));
+    }
+
+    let summary = summarize_programs(&programs);
+    Ok(MirRepresentationReceipt {
+        schema: MIR_REPRESENTATION_SCHEMA.to_string(),
+        receipt_id: "mir-representation-semantic-corpus-2026-06-18".to_string(),
+        created_at: "2026-06-18".to_string(),
+        compiler: "quantac".to_string(),
+        language: "quantalang".to_string(),
+        source_set: MirRepresentationSourceSet {
+            kind: "semantic-corpus".to_string(),
+            manifest: "manifest.json".to_string(),
+            program_count: manifest.programs.len(),
+        },
+        ir: MirRepresentationIr {
+            name: "MIR".to_string(),
+            version: "v0".to_string(),
+            lowering_pipeline: "parse -> type-check -> ast-to-mir".to_string(),
+        },
+        programs,
+        summary,
+    })
 }
 
 pub(crate) fn validate_mir_representation_receipt(
-    _corpus_root: &Path,
-    _receipt: &MirRepresentationReceipt,
-    _manifest: &SemanticCorpusManifest,
+    corpus_root: &Path,
+    receipt: &MirRepresentationReceipt,
+    manifest: &SemanticCorpusManifest,
 ) -> Result<(), String> {
-    Err("mir representation receipt validation is not implemented in Task 2".to_string())
+    if receipt.schema != MIR_REPRESENTATION_SCHEMA {
+        return Err(format!(
+            "mir representation receipt has unsupported schema '{}'",
+            receipt.schema
+        ));
+    }
+    if receipt.compiler != "quantac" {
+        return Err(format!(
+            "mir representation compiler mismatch: expected 'quantac', found '{}'",
+            receipt.compiler
+        ));
+    }
+    if receipt.language != "quantalang" {
+        return Err(format!(
+            "mir representation language mismatch: expected 'quantalang', found '{}'",
+            receipt.language
+        ));
+    }
+    if receipt.source_set.kind != "semantic-corpus" {
+        return Err(format!(
+            "mir representation source_set.kind mismatch: expected 'semantic-corpus', found '{}'",
+            receipt.source_set.kind
+        ));
+    }
+    let manifest_path = validate_corpus_relative_path(
+        corpus_root,
+        &receipt.source_set.manifest,
+        "source_set.manifest",
+    )?;
+    let expected_manifest = corpus_root
+        .join("manifest.json")
+        .canonicalize()
+        .map_err(|err| {
+            format!(
+                "mir representation failed to canonicalize expected manifest {}: {err}",
+                corpus_root.join("manifest.json").display()
+            )
+        })?;
+    if manifest_path != expected_manifest {
+        return Err(format!(
+            "mir representation source_set.manifest must point at manifest.json, found {}",
+            receipt.source_set.manifest
+        ));
+    }
+    if receipt.source_set.program_count != manifest.programs.len() {
+        return Err(format!(
+            "mir representation source_set.program_count mismatch: expected {}, found {}",
+            manifest.programs.len(),
+            receipt.source_set.program_count
+        ));
+    }
+    for program in &receipt.programs {
+        validate_corpus_relative_path(corpus_root, &program.path, "program.path")?;
+    }
+
+    let expected = build_mir_representation_receipt(corpus_root, manifest)?;
+    compare_receipts(receipt, &expected)
 }
 
 pub(crate) fn verify_mir_representation_receipt(
-    _corpus_root: &Path,
-    _receipt: &MirRepresentationReceipt,
-    _manifest: &SemanticCorpusManifest,
+    corpus_root: &Path,
+    receipt: &MirRepresentationReceipt,
+    manifest: &SemanticCorpusManifest,
 ) -> Result<(), i32> {
-    Err(1)
+    validate_mir_representation_receipt(corpus_root, receipt, manifest).map_err(|message| {
+        eprintln!("{message}");
+        1
+    })
+}
+
+fn validate_corpus_relative_path(
+    corpus_root: &Path,
+    relative: &str,
+    field: &str,
+) -> Result<PathBuf, String> {
+    if relative.trim().is_empty() {
+        return Err(format!("mir representation {field} must not be empty"));
+    }
+    let relative_path = Path::new(relative);
+    if relative_path.is_absolute()
+        || relative_path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(format!(
+            "mir representation {field} must stay within corpus root: {relative}"
+        ));
+    }
+    let canonical_root = corpus_root.canonicalize().map_err(|err| {
+        format!(
+            "mir representation {field} failed to canonicalize corpus root {}: {err}",
+            corpus_root.display()
+        )
+    })?;
+    let path = corpus_root.join(relative_path);
+    if !path.is_file() {
+        return Err(format!(
+            "mir representation {field} path not found: {}",
+            path.display()
+        ));
+    }
+    let canonical_path = path.canonicalize().map_err(|err| {
+        format!(
+            "mir representation {field} failed to canonicalize path {}: {err}",
+            path.display()
+        )
+    })?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err(format!(
+            "mir representation {field} must stay within corpus root: {relative}"
+        ));
+    }
+    Ok(canonical_path)
+}
+
+fn lower_program_to_mir(program_path: &Path) -> Result<MirModule, String> {
+    let source = std::fs::read_to_string(program_path).map_err(|err| {
+        format!(
+            "mir representation failed to read {}: {err}",
+            program_path.display()
+        )
+    })?;
+    let source = resolve_imports(&source, program_path).map_err(|_| {
+        format!(
+            "mir representation failed to resolve imports for {}",
+            program_path.display()
+        )
+    })?;
+    let base_dir = program_path.parent().unwrap_or_else(|| Path::new("."));
+    let source = preprocess_includes(&source, base_dir).map_err(|_| {
+        format!(
+            "mir representation failed to preprocess includes for {}",
+            program_path.display()
+        )
+    })?;
+    let source_file = SourceFile::new(program_path.to_string_lossy(), source);
+    let mut lexer = Lexer::new(&source_file);
+    let tokens = lexer.tokenize().map_err(|err| {
+        format!(
+            "mir representation lexer error in {}: {err}",
+            program_path.display()
+        )
+    })?;
+    let mut parser = Parser::new(&source_file, tokens);
+    let mut ast = parser.parse().map_err(|err| {
+        format!(
+            "mir representation parse error in {}: {err}",
+            program_path.display()
+        )
+    })?;
+    if !parser.errors().is_empty() {
+        let errors = parser
+            .errors()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(format!(
+            "mir representation parse errors in {}: {errors}",
+            program_path.display()
+        ));
+    }
+    resolve_modules(&mut ast, base_dir).map_err(|_| {
+        format!(
+            "mir representation failed to resolve modules for {}",
+            program_path.display()
+        )
+    })?;
+
+    let mut ctx = TypeContext::new();
+    let mut checker = TypeChecker::new(&mut ctx);
+    checker.set_source_file(&source_file);
+    checker.set_source_dir(base_dir.to_path_buf());
+    checker.check_module(&ast);
+    if checker.has_errors() {
+        let errors = checker
+            .errors()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(format!(
+            "mir representation type errors in {}: {errors}",
+            program_path.display()
+        ));
+    }
+
+    MirLowerer::with_source(&ctx, Arc::from(source_file.source()))
+        .lower_module(&ast)
+        .map_err(|err| {
+            format!(
+                "mir representation code generation error in {}: {err}",
+                program_path.display()
+            )
+        })
+}
+
+fn compare_receipts(
+    receipt: &MirRepresentationReceipt,
+    expected: &MirRepresentationReceipt,
+) -> Result<(), String> {
+    if receipt.receipt_id != expected.receipt_id {
+        return Err(format!(
+            "mir representation receipt_id mismatch: expected '{}', found '{}'",
+            expected.receipt_id, receipt.receipt_id
+        ));
+    }
+    if receipt.created_at != expected.created_at {
+        return Err(format!(
+            "mir representation created_at mismatch: expected '{}', found '{}'",
+            expected.created_at, receipt.created_at
+        ));
+    }
+    if receipt.ir != expected.ir {
+        return Err("mir representation ir drift".to_string());
+    }
+    if receipt.programs.len() != expected.programs.len() {
+        return Err(format!(
+            "mir representation program count drift: expected {}, found {}",
+            expected.programs.len(),
+            receipt.programs.len()
+        ));
+    }
+
+    for (actual_program, expected_program) in receipt.programs.iter().zip(&expected.programs) {
+        if actual_program.id != expected_program.id || actual_program.path != expected_program.path
+        {
+            return Err(format!(
+                "mir representation program order drift: expected {} at {}, found {} at {}",
+                expected_program.id, expected_program.path, actual_program.id, actual_program.path
+            ));
+        }
+        if actual_program.source_digest != expected_program.source_digest {
+            return Err(format!(
+                "mir representation program {} source_digest mismatch",
+                actual_program.id
+            ));
+        }
+        if actual_program.operations.statements != expected_program.operations.statements {
+            return Err(format!(
+                "mir representation program {} operations.statements drift",
+                actual_program.id
+            ));
+        }
+        if actual_program.operations.rvalues != expected_program.operations.rvalues {
+            return Err(format!(
+                "mir representation program {} operations.rvalues drift",
+                actual_program.id
+            ));
+        }
+        if actual_program.operations.terminators != expected_program.operations.terminators {
+            return Err(format!(
+                "mir representation program {} operations.terminators drift",
+                actual_program.id
+            ));
+        }
+        if actual_program.operations.binary_ops != expected_program.operations.binary_ops {
+            return Err(format!(
+                "mir representation program {} operations.binary_ops drift",
+                actual_program.id
+            ));
+        }
+        if actual_program.operations.unary_ops != expected_program.operations.unary_ops {
+            return Err(format!(
+                "mir representation program {} operations.unary_ops drift",
+                actual_program.id
+            ));
+        }
+        if actual_program.operations.casts != expected_program.operations.casts {
+            return Err(format!(
+                "mir representation program {} operations.casts drift",
+                actual_program.id
+            ));
+        }
+        if actual_program.operations.aggregate_kinds != expected_program.operations.aggregate_kinds
+        {
+            return Err(format!(
+                "mir representation program {} operations.aggregate_kinds drift",
+                actual_program.id
+            ));
+        }
+        if actual_program.operations.place_projections
+            != expected_program.operations.place_projections
+        {
+            return Err(format!(
+                "mir representation program {} operations.place_projections drift",
+                actual_program.id
+            ));
+        }
+        if actual_program.module != expected_program.module {
+            return Err(format!(
+                "mir representation program {} module counts drift",
+                actual_program.id
+            ));
+        }
+        if actual_program.symbols != expected_program.symbols {
+            return Err(format!(
+                "mir representation program {} symbols drift",
+                actual_program.id
+            ));
+        }
+        if actual_program.memory_surfaces != expected_program.memory_surfaces {
+            return Err(format!(
+                "mir representation program {} memory_surfaces drift",
+                actual_program.id
+            ));
+        }
+        if actual_program.control_flow != expected_program.control_flow {
+            return Err(format!(
+                "mir representation program {} control_flow drift",
+                actual_program.id
+            ));
+        }
+    }
+
+    if receipt.summary != expected.summary {
+        return Err("mir representation summary drift".to_string());
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -608,6 +968,29 @@ mod tests {
         AggregateKind, BlockId, LocalId, MirBlock, MirConst, MirFnSig, MirFunction, MirLocal,
         MirStmt, MirType, MirTypeDef, MirValue, TypeDefKind,
     };
+
+    #[test]
+    fn mir_representation_builds_receipt_for_semantic_corpus() {
+        let corpus_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("compiler manifest has repository parent")
+            .join("semantic-corpus");
+        let manifest: SemanticCorpusManifest =
+            serde_json::from_slice(&std::fs::read(corpus_root.join("manifest.json")).unwrap())
+                .unwrap();
+
+        let receipt = build_mir_representation_receipt(&corpus_root, &manifest)
+            .expect("build MIR representation receipt");
+
+        assert_eq!(receipt.schema, MIR_REPRESENTATION_SCHEMA);
+        assert_eq!(receipt.source_set.program_count, manifest.programs.len());
+        assert_eq!(receipt.programs.len(), manifest.programs.len());
+        assert_eq!(receipt.summary.program_count, manifest.programs.len());
+        assert_eq!(receipt.programs[0].id, manifest.programs[0].id);
+        assert_eq!(receipt.programs[0].path, manifest.programs[0].path);
+        assert_eq!(receipt.programs[0].source_digest.algorithm, "sha256");
+        assert_eq!(receipt.programs[0].source_digest.hex.len(), 64);
+    }
 
     #[test]
     fn mir_representation_summary_sorts_and_deduplicates_families() {

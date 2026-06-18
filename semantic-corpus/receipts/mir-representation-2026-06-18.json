@@ -1,0 +1,652 @@
+{
+  "schema": "quantalang-mir-representation-receipt/v0",
+  "receipt_id": "mir-representation-semantic-corpus-2026-06-18",
+  "created_at": "2026-06-18",
+  "compiler": "quantac",
+  "language": "quantalang",
+  "source_set": {
+    "kind": "semantic-corpus",
+    "manifest": "manifest.json",
+    "program_count": 8
+  },
+  "ir": {
+    "name": "MIR",
+    "version": "v0",
+    "lowering_pipeline": "parse -> type-check -> ast-to-mir"
+  },
+  "programs": [
+    {
+      "id": "scalar_branch",
+      "path": "programs/scalar_branch.quanta",
+      "source_digest": {
+        "algorithm": "sha256",
+        "hex": "045025d69cdb1335e94cbb2cc11b84a84a70be5f4384dccb2857b76fd92a1209"
+      },
+      "module": {
+        "function_count": 3,
+        "defined_function_count": 2,
+        "declaration_count": 1,
+        "type_count": 3,
+        "global_count": 0,
+        "string_count": 1,
+        "external_count": 0,
+        "vtable_count": 0,
+        "uniform_count": 0
+      },
+      "symbols": {
+        "functions": [
+          "choose",
+          "main"
+        ],
+        "types": [
+          "quanta_vec2",
+          "quanta_vec3",
+          "quanta_vec4"
+        ],
+        "globals": [],
+        "externals": []
+      },
+      "operations": {
+        "statements": [
+          "Assign"
+        ],
+        "rvalues": [
+          "BinaryOp",
+          "Use"
+        ],
+        "terminators": [
+          "Call",
+          "Goto",
+          "If",
+          "Return"
+        ],
+        "binary_ops": [
+          "Gt"
+        ],
+        "unary_ops": [],
+        "casts": [],
+        "aggregate_kinds": [],
+        "place_projections": []
+      },
+      "memory_surfaces": {
+        "references": false,
+        "mutable_references": false,
+        "deref_reads": false,
+        "deref_writes": false,
+        "field_reads": false,
+        "field_writes": false,
+        "index_reads": false,
+        "aggregate_values": false
+      },
+      "control_flow": {
+        "block_count": 8,
+        "branching": true,
+        "switching": false,
+        "calls": true,
+        "loops": false,
+        "unreachable": false
+      }
+    },
+    {
+      "id": "references_mutation",
+      "path": "programs/references_mutation.quanta",
+      "source_digest": {
+        "algorithm": "sha256",
+        "hex": "fba22d1346357fef654c2e53920303c813c0b729ec866f9438a395601b0e86a5"
+      },
+      "module": {
+        "function_count": 5,
+        "defined_function_count": 3,
+        "declaration_count": 2,
+        "type_count": 3,
+        "global_count": 0,
+        "string_count": 1,
+        "external_count": 0,
+        "vtable_count": 0,
+        "uniform_count": 0
+      },
+      "symbols": {
+        "functions": [
+          "add_to",
+          "main",
+          "read_value"
+        ],
+        "types": [
+          "quanta_vec2",
+          "quanta_vec3",
+          "quanta_vec4"
+        ],
+        "globals": [],
+        "externals": []
+      },
+      "operations": {
+        "statements": [
+          "Assign",
+          "DerefAssign"
+        ],
+        "rvalues": [
+          "BinaryOp",
+          "Deref",
+          "Ref",
+          "Use"
+        ],
+        "terminators": [
+          "Call",
+          "Return"
+        ],
+        "binary_ops": [
+          "Add"
+        ],
+        "unary_ops": [],
+        "casts": [],
+        "aggregate_kinds": [],
+        "place_projections": []
+      },
+      "memory_surfaces": {
+        "references": true,
+        "mutable_references": true,
+        "deref_reads": true,
+        "deref_writes": true,
+        "field_reads": false,
+        "field_writes": false,
+        "index_reads": false,
+        "aggregate_values": false
+      },
+      "control_flow": {
+        "block_count": 7,
+        "branching": false,
+        "switching": false,
+        "calls": true,
+        "loops": false,
+        "unreachable": false
+      }
+    },
+    {
+      "id": "structs_arrays",
+      "path": "programs/structs_arrays.quanta",
+      "source_digest": {
+        "algorithm": "sha256",
+        "hex": "f0e9ae4928f330786417a1ff9c3031514fd79ce1e19b406cc50dc0dad49805f1"
+      },
+      "module": {
+        "function_count": 3,
+        "defined_function_count": 2,
+        "declaration_count": 1,
+        "type_count": 4,
+        "global_count": 0,
+        "string_count": 1,
+        "external_count": 0,
+        "vtable_count": 0,
+        "uniform_count": 0
+      },
+      "symbols": {
+        "functions": [
+          "main",
+          "sum_array"
+        ],
+        "types": [
+          "Point",
+          "quanta_vec2",
+          "quanta_vec3",
+          "quanta_vec4"
+        ],
+        "globals": [],
+        "externals": []
+      },
+      "operations": {
+        "statements": [
+          "Assign"
+        ],
+        "rvalues": [
+          "Aggregate",
+          "BinaryOp",
+          "FieldAccess",
+          "IndexAccess",
+          "Use"
+        ],
+        "terminators": [
+          "Call",
+          "Return"
+        ],
+        "binary_ops": [
+          "Add"
+        ],
+        "unary_ops": [],
+        "casts": [],
+        "aggregate_kinds": [
+          "Array",
+          "Struct"
+        ],
+        "place_projections": []
+      },
+      "memory_surfaces": {
+        "references": false,
+        "mutable_references": false,
+        "deref_reads": false,
+        "deref_writes": false,
+        "field_reads": true,
+        "field_writes": false,
+        "index_reads": true,
+        "aggregate_values": true
+      },
+      "control_flow": {
+        "block_count": 5,
+        "branching": false,
+        "switching": false,
+        "calls": true,
+        "loops": false,
+        "unreachable": false
+      }
+    },
+    {
+      "id": "tuple_ownership_reuse",
+      "path": "programs/tuple_ownership_reuse.quanta",
+      "source_digest": {
+        "algorithm": "sha256",
+        "hex": "79637b01c87967242bd91a648f004fdcfc43f906f4f0c97e6b36d62c28a896e4"
+      },
+      "module": {
+        "function_count": 3,
+        "defined_function_count": 2,
+        "declaration_count": 1,
+        "type_count": 4,
+        "global_count": 0,
+        "string_count": 1,
+        "external_count": 0,
+        "vtable_count": 0,
+        "uniform_count": 0
+      },
+      "symbols": {
+        "functions": [
+          "main",
+          "sum"
+        ],
+        "types": [
+          "Tuple_i32_i32",
+          "quanta_vec2",
+          "quanta_vec3",
+          "quanta_vec4"
+        ],
+        "globals": [],
+        "externals": []
+      },
+      "operations": {
+        "statements": [
+          "Assign"
+        ],
+        "rvalues": [
+          "Aggregate",
+          "BinaryOp",
+          "FieldAccess",
+          "Use"
+        ],
+        "terminators": [
+          "Call",
+          "Return"
+        ],
+        "binary_ops": [
+          "Add"
+        ],
+        "unary_ops": [],
+        "casts": [],
+        "aggregate_kinds": [
+          "Tuple"
+        ],
+        "place_projections": []
+      },
+      "memory_surfaces": {
+        "references": false,
+        "mutable_references": false,
+        "deref_reads": false,
+        "deref_writes": false,
+        "field_reads": true,
+        "field_writes": false,
+        "index_reads": false,
+        "aggregate_values": true
+      },
+      "control_flow": {
+        "block_count": 6,
+        "branching": false,
+        "switching": false,
+        "calls": true,
+        "loops": false,
+        "unreachable": false
+      }
+    },
+    {
+      "id": "struct_aggregate_reuse",
+      "path": "programs/struct_aggregate_reuse.quanta",
+      "source_digest": {
+        "algorithm": "sha256",
+        "hex": "cc6b299dbf52057c30315668ded6e9745d232f0162318856a84814497cef0221"
+      },
+      "module": {
+        "function_count": 1,
+        "defined_function_count": 1,
+        "declaration_count": 0,
+        "type_count": 5,
+        "global_count": 0,
+        "string_count": 1,
+        "external_count": 0,
+        "vtable_count": 0,
+        "uniform_count": 0
+      },
+      "symbols": {
+        "functions": [
+          "main"
+        ],
+        "types": [
+          "Pair",
+          "Point",
+          "quanta_vec2",
+          "quanta_vec3",
+          "quanta_vec4"
+        ],
+        "globals": [],
+        "externals": []
+      },
+      "operations": {
+        "statements": [
+          "Assign"
+        ],
+        "rvalues": [
+          "Aggregate",
+          "BinaryOp",
+          "FieldAccess",
+          "Use"
+        ],
+        "terminators": [
+          "Call",
+          "Return"
+        ],
+        "binary_ops": [
+          "Add"
+        ],
+        "unary_ops": [],
+        "casts": [],
+        "aggregate_kinds": [
+          "Struct"
+        ],
+        "place_projections": []
+      },
+      "memory_surfaces": {
+        "references": false,
+        "mutable_references": false,
+        "deref_reads": false,
+        "deref_writes": false,
+        "field_reads": true,
+        "field_writes": false,
+        "index_reads": false,
+        "aggregate_values": true
+      },
+      "control_flow": {
+        "block_count": 3,
+        "branching": false,
+        "switching": false,
+        "calls": true,
+        "loops": false,
+        "unreachable": false
+      }
+    },
+    {
+      "id": "field_assignment_reuse",
+      "path": "programs/field_assignment_reuse.quanta",
+      "source_digest": {
+        "algorithm": "sha256",
+        "hex": "ed87feb6cca1559bb2bbede41acef83f1532346f1e99d79c1c800c5b74561265"
+      },
+      "module": {
+        "function_count": 1,
+        "defined_function_count": 1,
+        "declaration_count": 0,
+        "type_count": 5,
+        "global_count": 0,
+        "string_count": 1,
+        "external_count": 0,
+        "vtable_count": 0,
+        "uniform_count": 0
+      },
+      "symbols": {
+        "functions": [
+          "main"
+        ],
+        "types": [
+          "Holder",
+          "Point",
+          "quanta_vec2",
+          "quanta_vec3",
+          "quanta_vec4"
+        ],
+        "globals": [],
+        "externals": []
+      },
+      "operations": {
+        "statements": [
+          "Assign",
+          "FieldAssign"
+        ],
+        "rvalues": [
+          "Aggregate",
+          "BinaryOp",
+          "FieldAccess",
+          "Use"
+        ],
+        "terminators": [
+          "Call",
+          "Return"
+        ],
+        "binary_ops": [
+          "Add"
+        ],
+        "unary_ops": [],
+        "casts": [],
+        "aggregate_kinds": [
+          "Struct"
+        ],
+        "place_projections": []
+      },
+      "memory_surfaces": {
+        "references": false,
+        "mutable_references": false,
+        "deref_reads": false,
+        "deref_writes": false,
+        "field_reads": true,
+        "field_writes": true,
+        "index_reads": false,
+        "aggregate_values": true
+      },
+      "control_flow": {
+        "block_count": 3,
+        "branching": false,
+        "switching": false,
+        "calls": true,
+        "loops": false,
+        "unreachable": false
+      }
+    },
+    {
+      "id": "nested_field_reuse",
+      "path": "programs/nested_field_reuse.quanta",
+      "source_digest": {
+        "algorithm": "sha256",
+        "hex": "a723275adfd123c47b9ffad6d1108ccbede0e9a567a5001a93dc76ff8c0976fd"
+      },
+      "module": {
+        "function_count": 1,
+        "defined_function_count": 1,
+        "declaration_count": 0,
+        "type_count": 5,
+        "global_count": 0,
+        "string_count": 1,
+        "external_count": 0,
+        "vtable_count": 0,
+        "uniform_count": 0
+      },
+      "symbols": {
+        "functions": [
+          "main"
+        ],
+        "types": [
+          "Point",
+          "Wrapper",
+          "quanta_vec2",
+          "quanta_vec3",
+          "quanta_vec4"
+        ],
+        "globals": [],
+        "externals": []
+      },
+      "operations": {
+        "statements": [
+          "Assign"
+        ],
+        "rvalues": [
+          "Aggregate",
+          "BinaryOp",
+          "FieldAccess",
+          "Use"
+        ],
+        "terminators": [
+          "Call",
+          "Return"
+        ],
+        "binary_ops": [
+          "Add"
+        ],
+        "unary_ops": [],
+        "casts": [],
+        "aggregate_kinds": [
+          "Struct"
+        ],
+        "place_projections": []
+      },
+      "memory_surfaces": {
+        "references": false,
+        "mutable_references": false,
+        "deref_reads": false,
+        "deref_writes": false,
+        "field_reads": true,
+        "field_writes": false,
+        "index_reads": false,
+        "aggregate_values": true
+      },
+      "control_flow": {
+        "block_count": 3,
+        "branching": false,
+        "switching": false,
+        "calls": true,
+        "loops": false,
+        "unreachable": false
+      }
+    },
+    {
+      "id": "deref_reuse",
+      "path": "programs/deref_reuse.quanta",
+      "source_digest": {
+        "algorithm": "sha256",
+        "hex": "828163bb1152683a171bc40fd76be88763f7da3e899f23dac9e51bf98c5d9407"
+      },
+      "module": {
+        "function_count": 1,
+        "defined_function_count": 1,
+        "declaration_count": 0,
+        "type_count": 4,
+        "global_count": 0,
+        "string_count": 1,
+        "external_count": 0,
+        "vtable_count": 0,
+        "uniform_count": 0
+      },
+      "symbols": {
+        "functions": [
+          "main"
+        ],
+        "types": [
+          "Point",
+          "quanta_vec2",
+          "quanta_vec3",
+          "quanta_vec4"
+        ],
+        "globals": [],
+        "externals": []
+      },
+      "operations": {
+        "statements": [
+          "Assign"
+        ],
+        "rvalues": [
+          "Aggregate",
+          "BinaryOp",
+          "Deref",
+          "FieldAccess",
+          "Ref",
+          "Use"
+        ],
+        "terminators": [
+          "Call",
+          "Return"
+        ],
+        "binary_ops": [
+          "Add"
+        ],
+        "unary_ops": [],
+        "casts": [],
+        "aggregate_kinds": [
+          "Struct"
+        ],
+        "place_projections": []
+      },
+      "memory_surfaces": {
+        "references": true,
+        "mutable_references": false,
+        "deref_reads": true,
+        "deref_writes": false,
+        "field_reads": true,
+        "field_writes": false,
+        "index_reads": false,
+        "aggregate_values": true
+      },
+      "control_flow": {
+        "block_count": 3,
+        "branching": false,
+        "switching": false,
+        "calls": true,
+        "loops": false,
+        "unreachable": false
+      }
+    }
+  ],
+  "summary": {
+    "program_count": 8,
+    "statement_families": [
+      "Assign",
+      "DerefAssign",
+      "FieldAssign"
+    ],
+    "rvalue_families": [
+      "Aggregate",
+      "BinaryOp",
+      "Deref",
+      "FieldAccess",
+      "IndexAccess",
+      "Ref",
+      "Use"
+    ],
+    "terminator_families": [
+      "Call",
+      "Goto",
+      "If",
+      "Return"
+    ],
+    "memory_surfaces": [
+      "aggregate_values",
+      "deref_reads",
+      "deref_writes",
+      "field_reads",
+      "field_writes",
+      "index_reads",
+      "mutable_references",
+      "references"
+    ]
+  }
+}
