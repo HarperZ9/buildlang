@@ -6,6 +6,7 @@
 
 //! Core LSP type definitions following the Language Server Protocol specification.
 
+use super::semantic_tokens::SemanticTokensProvider;
 use std::collections::HashMap;
 
 // =============================================================================
@@ -942,6 +943,7 @@ pub struct ServerCapabilities {
 
 impl ServerCapabilities {
     pub fn full() -> Self {
+        let semantic_legend = SemanticTokensProvider::legend();
         Self {
             text_document_sync: Some(TextDocumentSyncKind::Incremental),
             completion_provider: Some(CompletionOptions {
@@ -977,7 +979,22 @@ impl ServerCapabilities {
                 prepare_provider: true,
             }),
             folding_range_provider: true,
-            semantic_tokens_provider: None, // Would need full semantic token config
+            semantic_tokens_provider: Some(SemanticTokensOptions {
+                legend: SemanticTokensLegend {
+                    token_types: semantic_legend
+                        .token_types
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    token_modifiers: semantic_legend
+                        .token_modifiers
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                },
+                range: false,
+                full: true,
+            }),
         }
     }
 }
