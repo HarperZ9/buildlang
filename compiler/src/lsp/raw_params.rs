@@ -136,6 +136,10 @@ pub fn decode_document_uri(message: &JsonRpcMessage) -> Result<DocumentUri, RawP
     required_document_uri(message)
 }
 
+pub fn decode_workspace_symbol_query(message: &JsonRpcMessage) -> Result<String, RawParamError> {
+    required_string(message, &["params", "query"], "params.query")
+}
+
 pub fn decode_code_action(message: &JsonRpcMessage) -> Result<CodeActionParams, RawParamError> {
     require_value(message, &["params", "context"], "params.context")?;
     Ok(CodeActionParams {
