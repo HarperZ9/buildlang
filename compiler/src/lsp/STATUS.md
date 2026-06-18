@@ -17,7 +17,7 @@ Last audited: 2026-06-18
 - **Dispatch receipt** (`semantic-corpus/receipts/lsp-dispatch-2026-06-18.json`): Verifies a fixed raw LSP fixture sequence through `corpus verify`, including initialize, initialized, didOpen, documentSymbol, completion, hover, definition, references, formatting, foldingRange, didChange, compiler-backed type diagnostics, codeAction, rename, shutdown, and exit.
 
 ## Partial
-- **Server runner** (`run_server()` in `server.rs`): The stdio transport loop dispatches the same raw message path covered by the LSP dispatch receipt, using a `serde_json` structural JSON-RPC parser for method, id, and common params. Params still flow through lightweight `serde_json::Value` accessors rather than typed request structs for every method.
+- **Server runner** (`run_server()` in `server.rs`): The stdio transport loop dispatches the same raw message path covered by the LSP dispatch receipt, using a `serde_json` structural JSON-RPC parser for method and id. Params for the currently dispatched raw methods decode through focused typed raw-boundary helpers before reaching the typed server methods.
 
 ## Aspirational
 - Full VS Code extension integration: `quantac lsp` starts the current server loop and dispatches several core requests, but the end-to-end VS Code language-server experience is not yet receipt-verified.
