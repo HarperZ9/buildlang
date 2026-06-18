@@ -209,8 +209,7 @@ fn write_symbol_graph_receipt_copy(
             .expect("parse symbol graph receipt");
     let rendered = serde_json::to_string_pretty(&transform(receipt))
         .expect("render modified symbol graph receipt");
-    fs::write(&receipt_path, format!("{rendered}\n"))
-        .expect("write modified symbol graph receipt");
+    fs::write(&receipt_path, format!("{rendered}\n")).expect("write modified symbol graph receipt");
 }
 
 fn assert_corpus_verify_rejects(corpus_root: &Path, expected_stderr: &str) {
@@ -10884,15 +10883,11 @@ fn corpus_verify_checks_symbol_graph_receipt() {
 fn corpus_verify_rejects_symbol_graph_schema_drift() {
     let corpus_root = temp_semantic_corpus("symbol_graph_schema");
     write_symbol_graph_receipt_copy(&corpus_root, |mut receipt| {
-        receipt["schema"] =
-            serde_json::Value::String("quantalang-symbol-graph-receipt/v9".into());
+        receipt["schema"] = serde_json::Value::String("quantalang-symbol-graph-receipt/v9".into());
         receipt
     });
 
-    assert_corpus_verify_rejects(
-        &corpus_root,
-        "symbol graph receipt has unsupported schema",
-    );
+    assert_corpus_verify_rejects(&corpus_root, "symbol graph receipt has unsupported schema");
 }
 
 #[test]
