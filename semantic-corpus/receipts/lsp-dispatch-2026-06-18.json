@@ -1,0 +1,284 @@
+{
+  "schema": "quantalang-lsp-dispatch-receipt/v0",
+  "receipt_id": "lsp-dispatch-semantic-corpus-2026-06-18",
+  "created_at": "2026-06-18",
+  "compiler": "quantac",
+  "language": "quantalang",
+  "source_set": {
+    "kind": "semantic-corpus",
+    "manifest": "manifest.json",
+    "program_count": 8
+  },
+  "lsp_model": {
+    "protocol": "LSP JSON-RPC over stdio",
+    "dispatch": "quantac lsp raw message dispatch",
+    "request_parser": "simplified string extraction",
+    "semantic_anchor": "compiler diagnostics and parser-backed document model",
+    "symbol_anchor": "receipts/symbol-graph-2026-06-18.json",
+    "module_anchor": "receipts/module-graph-2026-06-18.json"
+  },
+  "fixtures": [
+    {
+      "id": "initialize",
+      "method": "initialize",
+      "response_kind": "response",
+      "result_digest": {
+        "algorithm": "sha256",
+        "hex": "daecc6d0f8ab6ff9812716b344ea32e07f47c8ffd04cce4f8bbdd869c170515b"
+      },
+      "observed": {
+        "has_result": true,
+        "diagnostics": 0,
+        "completion_items": 0,
+        "document_symbols": 0,
+        "locations": 0,
+        "text_edits": 0,
+        "folding_ranges": 0
+      }
+    },
+    {
+      "id": "initialized",
+      "method": "initialized",
+      "response_kind": "none",
+      "result_digest": {
+        "algorithm": "sha256",
+        "hex": "140bedbf9c3f6d56a9846d2ba7088798683f4da0c248231336e6a05679e4fdfe"
+      },
+      "observed": {
+        "has_result": false,
+        "diagnostics": 0,
+        "completion_items": 0,
+        "document_symbols": 0,
+        "locations": 0,
+        "text_edits": 0,
+        "folding_ranges": 0
+      }
+    },
+    {
+      "id": "did-open",
+      "method": "textDocument/didOpen",
+      "response_kind": "notification",
+      "result_digest": {
+        "algorithm": "sha256",
+        "hex": "a5c15835d05db90b7d7b5c467d230a98b4abbfb434ada1b67c2b9c959e5a319f"
+      },
+      "observed": {
+        "has_result": false,
+        "diagnostics": 1,
+        "completion_items": 0,
+        "document_symbols": 0,
+        "locations": 0,
+        "text_edits": 0,
+        "folding_ranges": 0
+      }
+    },
+    {
+      "id": "document-symbol",
+      "method": "textDocument/documentSymbol",
+      "response_kind": "response",
+      "result_digest": {
+        "algorithm": "sha256",
+        "hex": "3a56a3d938998b5f0f1b96b86afa675316fb7ea81fe470a28dd143bdc60767e7"
+      },
+      "observed": {
+        "has_result": true,
+        "diagnostics": 0,
+        "completion_items": 0,
+        "document_symbols": 2,
+        "locations": 0,
+        "text_edits": 0,
+        "folding_ranges": 0
+      }
+    },
+    {
+      "id": "completion",
+      "method": "textDocument/completion",
+      "response_kind": "response",
+      "result_digest": {
+        "algorithm": "sha256",
+        "hex": "a764a9f6d1942b6a604bdfdb653891864d0ba9bb0b7aad315c88a95b426d1466"
+      },
+      "observed": {
+        "has_result": true,
+        "diagnostics": 0,
+        "completion_items": 42,
+        "document_symbols": 0,
+        "locations": 0,
+        "text_edits": 0,
+        "folding_ranges": 0
+      }
+    },
+    {
+      "id": "hover",
+      "method": "textDocument/hover",
+      "response_kind": "response",
+      "result_digest": {
+        "algorithm": "sha256",
+        "hex": "e925c7fe4c4e59f4df117524d8d67f408cd81a840119e65cf1f9a5067f3aaee4"
+      },
+      "observed": {
+        "has_result": true,
+        "diagnostics": 0,
+        "completion_items": 0,
+        "document_symbols": 0,
+        "locations": 0,
+        "text_edits": 0,
+        "folding_ranges": 0
+      }
+    },
+    {
+      "id": "definition",
+      "method": "textDocument/definition",
+      "response_kind": "response",
+      "result_digest": {
+        "algorithm": "sha256",
+        "hex": "d592dd0478d55e99bd8c6ad89a666962bc0656deffd6737e57498ea18cd71c7c"
+      },
+      "observed": {
+        "has_result": true,
+        "diagnostics": 0,
+        "completion_items": 0,
+        "document_symbols": 0,
+        "locations": 1,
+        "text_edits": 0,
+        "folding_ranges": 0
+      }
+    },
+    {
+      "id": "references",
+      "method": "textDocument/references",
+      "response_kind": "response",
+      "result_digest": {
+        "algorithm": "sha256",
+        "hex": "13871212654146a61027593587574ab6e5397f9515cc9b1c019f7d5ad5761f34"
+      },
+      "observed": {
+        "has_result": true,
+        "diagnostics": 0,
+        "completion_items": 0,
+        "document_symbols": 0,
+        "locations": 2,
+        "text_edits": 0,
+        "folding_ranges": 0
+      }
+    },
+    {
+      "id": "formatting",
+      "method": "textDocument/formatting",
+      "response_kind": "response",
+      "result_digest": {
+        "algorithm": "sha256",
+        "hex": "37f2bb8aa3624d9e14438bfdce5670e13b29a6e13effbd7adf335e5ea2dcd593"
+      },
+      "observed": {
+        "has_result": true,
+        "diagnostics": 0,
+        "completion_items": 0,
+        "document_symbols": 0,
+        "locations": 0,
+        "text_edits": 1,
+        "folding_ranges": 0
+      }
+    },
+    {
+      "id": "folding-range",
+      "method": "textDocument/foldingRange",
+      "response_kind": "response",
+      "result_digest": {
+        "algorithm": "sha256",
+        "hex": "4bdbfea82a5786fe3eb33df7cc41ab8b7f2cca7239271ad5938966af2334f2c2"
+      },
+      "observed": {
+        "has_result": true,
+        "diagnostics": 0,
+        "completion_items": 0,
+        "document_symbols": 0,
+        "locations": 0,
+        "text_edits": 0,
+        "folding_ranges": 1
+      }
+    },
+    {
+      "id": "did-change",
+      "method": "textDocument/didChange",
+      "response_kind": "notification",
+      "result_digest": {
+        "algorithm": "sha256",
+        "hex": "2131e0575bbfa7b918aaacb59810ee0b53fa5a7feddd4c4e71b9d95d8a99fee8"
+      },
+      "observed": {
+        "has_result": false,
+        "diagnostics": 0,
+        "completion_items": 0,
+        "document_symbols": 0,
+        "locations": 0,
+        "text_edits": 0,
+        "folding_ranges": 0
+      }
+    },
+    {
+      "id": "shutdown",
+      "method": "shutdown",
+      "response_kind": "response",
+      "result_digest": {
+        "algorithm": "sha256",
+        "hex": "3f7fe2c895b7ab4339835b00358034ced6250c8792048d69c7c71e28eeb94cf7"
+      },
+      "observed": {
+        "has_result": true,
+        "diagnostics": 0,
+        "completion_items": 0,
+        "document_symbols": 0,
+        "locations": 0,
+        "text_edits": 0,
+        "folding_ranges": 0
+      }
+    },
+    {
+      "id": "exit",
+      "method": "exit",
+      "response_kind": "none",
+      "result_digest": {
+        "algorithm": "sha256",
+        "hex": "140bedbf9c3f6d56a9846d2ba7088798683f4da0c248231336e6a05679e4fdfe"
+      },
+      "observed": {
+        "has_result": false,
+        "diagnostics": 0,
+        "completion_items": 0,
+        "document_symbols": 0,
+        "locations": 0,
+        "text_edits": 0,
+        "folding_ranges": 0
+      }
+    }
+  ],
+  "summary": {
+    "fixture_count": 13,
+    "methods": [
+      "exit",
+      "initialize",
+      "initialized",
+      "shutdown",
+      "textDocument/completion",
+      "textDocument/definition",
+      "textDocument/didChange",
+      "textDocument/didOpen",
+      "textDocument/documentSymbol",
+      "textDocument/foldingRange",
+      "textDocument/formatting",
+      "textDocument/hover",
+      "textDocument/references"
+    ],
+    "response_kinds": [
+      "none",
+      "notification",
+      "response"
+    ],
+    "known_gaps": [
+      "compiler type-checker diagnostics in LSP",
+      "full JSON-RPC deserialization",
+      "full VS Code extension readiness"
+    ]
+  }
+}

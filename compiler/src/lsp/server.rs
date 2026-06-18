@@ -1007,6 +1007,12 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
     None
 }
 
+/// Dispatch a raw LSP JSON-RPC payload through the same request path used by
+/// the stdio server loop.
+pub fn dispatch_raw_message(server: &mut LanguageServer, content: &str) -> Option<String> {
+    handle_raw_message(server, content)
+}
+
 /// Build document symbols JSON recursively.
 fn build_symbols_json(symbols: &[DocumentSymbol]) -> String {
     let mut arr = JsonArrayBuilder::new();
@@ -1141,5 +1147,74 @@ mod tests {
             extract_id(r#"{"id":"abc","method":"test"}"#),
             Some("\"abc\"".to_string())
         );
+    }
+
+    #[test]
+    fn raw_dispatch_initialize_reports_core_capabilities() {
+        let mut server = LanguageServer::new();
+        let response = dispatch_raw_message(
+            &mut server,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":"file:///workspace"}}"#,
+        )
+        .expect("initialize should return a response");
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("parse initialize response");
+
+        assert_eq!(json["jsonrpc"], "2.0");
+        assert_eq!(json["id"], 1);
+        assert_eq!(json["result"]["capabilities"]["hoverProvider"], true);
+        assert_eq!(json["result"]["capabilities"]["definitionProvider"], true);
+        assert_eq!(json["result"]["capabilities"]["referencesProvider"], true);
+        assert_eq!(
+            json["result"]["capabilities"]["documentSymbolProvider"],
+            true
+        );
+    }
+
+    #[test]
+    fn raw_dispatch_did_open_returns_diagnostics_notification() {
+        let mut server = LanguageServer::new();
+        let response = dispatch_raw_message(
+            &mut server,
+            r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.quanta","languageId":"quanta","version":1,"text":"fn main() {\n    let x = 1;\n}\n"}}}"#,
+        )
+        .expect("didOpen should publish diagnostics");
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("parse diagnostics notification");
+
+        assert_eq!(json["jsonrpc"], "2.0");
+        assert_eq!(json["method"], "textDocument/publishDiagnostics");
+        assert_eq!(json["params"]["uri"], "file:///workspace/main.quanta");
+        assert!(json["params"]["diagnostics"].is_array());
+    }
+
+    #[test]
+    fn raw_dispatch_document_symbol_returns_opened_function() {
+        let mut server = LanguageServer::new();
+        dispatch_raw_message(
+            &mut server,
+            r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.quanta","languageId":"quanta","version":1,"text":"fn helper() -> i32 { 1 }\nfn main() { helper(); }\n"}}}"#,
+        )
+        .expect("didOpen should publish diagnostics");
+
+        let response = dispatch_raw_message(
+            &mut server,
+            r#"{"jsonrpc":"2.0","id":2,"method":"textDocument/documentSymbol","params":{"textDocument":{"uri":"file:///workspace/main.quanta"}}}"#,
+        )
+        .expect("documentSymbol should return a response");
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("parse documentSymbol response");
+        let names = json["result"]
+            .as_array()
+            .expect("documentSymbol result array")
+            .iter()
+            .filter_map(|symbol| symbol["name"].as_str())
+            .collect::<Vec<_>>();
+
+        assert!(
+            names.contains(&"helper"),
+            "expected helper symbol in {names:?}"
+        );
+        assert!(names.contains(&"main"), "expected main symbol in {names:?}");
     }
 }
