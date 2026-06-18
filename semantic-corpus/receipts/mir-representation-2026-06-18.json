@@ -22,6 +22,14 @@
         "algorithm": "sha256",
         "hex": "045025d69cdb1335e94cbb2cc11b84a84a70be5f4384dccb2857b76fd92a1209"
       },
+      "input_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "a4e4de9ca8f9d4b4a300246c1095c5f7d529aba7365cc83a4deb1985c1afa3aa"
+      },
+      "mir_digest": {
+        "algorithm": "sha256",
+        "hex": "5432511b2cd813a22a2c5c7aaed6f2a1b502d3f07a9748d5354fd3ee42769d51"
+      },
       "module": {
         "function_count": 3,
         "defined_function_count": 2,
@@ -93,6 +101,14 @@
       "source_digest": {
         "algorithm": "sha256",
         "hex": "fba22d1346357fef654c2e53920303c813c0b729ec866f9438a395601b0e86a5"
+      },
+      "input_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "3c10d3c897357491f9f3f00639352bf3f9105c38ea20422c3306ee9aeeb3f494"
+      },
+      "mir_digest": {
+        "algorithm": "sha256",
+        "hex": "c62027b21e6f4c1a850dddd9ff0ed88efa001bfd61daf32a91d2f6d2285bfb5d"
       },
       "module": {
         "function_count": 5,
@@ -167,6 +183,14 @@
       "source_digest": {
         "algorithm": "sha256",
         "hex": "f0e9ae4928f330786417a1ff9c3031514fd79ce1e19b406cc50dc0dad49805f1"
+      },
+      "input_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "2482c0813397b4ccc64e1df7a2da50a10903926480d3234b4c5103981da5f613"
+      },
+      "mir_digest": {
+        "algorithm": "sha256",
+        "hex": "f85a0999eae7eb5b758252f24d4d4d52229b391b59c1b8137abaced433793dde"
       },
       "module": {
         "function_count": 3,
@@ -245,6 +269,14 @@
         "algorithm": "sha256",
         "hex": "79637b01c87967242bd91a648f004fdcfc43f906f4f0c97e6b36d62c28a896e4"
       },
+      "input_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "92bdf43ea7c9ff442d167b117157c088e94f4fa9b4ef661a7bc51f4d59def243"
+      },
+      "mir_digest": {
+        "algorithm": "sha256",
+        "hex": "8763fe8f264cb9eb121fa655ebb8368cfb4b818d1b2ce5609489223de7ffbe0f"
+      },
       "module": {
         "function_count": 3,
         "defined_function_count": 2,
@@ -320,6 +352,14 @@
         "algorithm": "sha256",
         "hex": "cc6b299dbf52057c30315668ded6e9745d232f0162318856a84814497cef0221"
       },
+      "input_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "ac2666c0dee34f0c75abe41b0a6dd4dd48ab18fad96423bf02323a207b8c39ae"
+      },
+      "mir_digest": {
+        "algorithm": "sha256",
+        "hex": "3fe3ad4afff6f15abc9fdd81f80c5ebac609416207c525505f226a8dcb71a267"
+      },
       "module": {
         "function_count": 1,
         "defined_function_count": 1,
@@ -394,6 +434,14 @@
       "source_digest": {
         "algorithm": "sha256",
         "hex": "ed87feb6cca1559bb2bbede41acef83f1532346f1e99d79c1c800c5b74561265"
+      },
+      "input_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "d9006c6b47c8b6a9eacb1b06b7bc3ed30f46697b1fc8ad19a2b68fe69d108ade"
+      },
+      "mir_digest": {
+        "algorithm": "sha256",
+        "hex": "0793afa9ed418eb816ab3176a92b092ec346c978eebdd699419455daf8a0d729"
       },
       "module": {
         "function_count": 1,
@@ -471,6 +519,14 @@
         "algorithm": "sha256",
         "hex": "a723275adfd123c47b9ffad6d1108ccbede0e9a567a5001a93dc76ff8c0976fd"
       },
+      "input_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "fe2a5a39d11218144ecdf65c03f31e6abe225ba63aebd41609e99b7529e02956"
+      },
+      "mir_digest": {
+        "algorithm": "sha256",
+        "hex": "cf7f00225a03e0b5247de91a47717742f99266683bd54559d21e9c8afc051248"
+      },
       "module": {
         "function_count": 1,
         "defined_function_count": 1,
@@ -545,6 +601,14 @@
       "source_digest": {
         "algorithm": "sha256",
         "hex": "828163bb1152683a171bc40fd76be88763f7da3e899f23dac9e51bf98c5d9407"
+      },
+      "input_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "e4d1f13dd311c5fb7e2bfdabd88b13b76127377290c61f20967e3b4091c2c982"
+      },
+      "mir_digest": {
+        "algorithm": "sha256",
+        "hex": "502a8245867f41f744de3692034a95fa4c1e101a5dede8fbba0d7cefd04209e7"
       },
       "module": {
         "function_count": 1,
