@@ -11,7 +11,7 @@
 use clap::{Parser as ClapParser, Subcommand};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -1979,14 +1979,43 @@ fn validate_non_empty(value: &str, field: &str) -> Result<(), String> {
 
 fn validate_substrate_path(root: &Path, relative: &str, field: &str) -> Result<PathBuf, String> {
     validate_non_empty(relative, field)?;
-    let path = root.join(relative);
+    let relative_path = Path::new(relative);
+    if relative_path.is_absolute()
+        || relative_path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(format!(
+            "substrate {field} must stay within corpus root: {}",
+            relative
+        ));
+    }
+    let canonical_root = root.canonicalize().map_err(|err| {
+        format!(
+            "substrate {field} failed to canonicalize corpus root {}: {err}",
+            root.display()
+        )
+    })?;
+    let path = root.join(relative_path);
     if !path.is_file() {
         return Err(format!(
             "substrate {field} path not found: {}",
             path.display()
         ));
     }
-    Ok(path)
+    let canonical_path = path.canonicalize().map_err(|err| {
+        format!(
+            "substrate {field} failed to canonicalize path {}: {err}",
+            path.display()
+        )
+    })?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err(format!(
+            "substrate {field} must stay within corpus root: {}",
+            relative
+        ));
+    }
+    Ok(canonical_path)
 }
 
 fn receipt_has_stdout_validator(receipt: &CorpusExecutionReceipt) -> bool {
@@ -2144,7 +2173,17 @@ fn validate_substrate_receipt(
         &receipt.source_set.manifest,
         "source_set.manifest",
     )?;
-    if manifest_path != corpus_root.join("manifest.json") {
+    let expected_manifest_path =
+        corpus_root
+            .join("manifest.json")
+            .canonicalize()
+            .map_err(|err| {
+                format!(
+            "substrate source_set.manifest failed to canonicalize expected manifest {}: {err}",
+            corpus_root.join("manifest.json").display()
+        )
+            })?;
+    if manifest_path != expected_manifest_path {
         return Err(format!(
             "substrate source_set.manifest must point at manifest.json, found {}",
             receipt.source_set.manifest
@@ -2192,6 +2231,13 @@ fn validate_substrate_receipt(
     if receipt.execution_surface.is_empty() {
         return Err("substrate execution_surface must not be empty".to_string());
     }
+    for required in ["c", "rust", "spirv"] {
+        if !receipt.execution_surface.contains_key(required) {
+            return Err(format!(
+                "substrate execution_surface missing required target {required}"
+            ));
+        }
+    }
     for (label, target) in &receipt.execution_surface {
         validate_non_empty(&target.target, &format!("execution_surface.{label}.target"))?;
         validate_non_empty(
@@ -2202,6 +2248,118 @@ fn validate_substrate_receipt(
             &target.evidence_class,
             &format!("execution_surface.{label}.evidence_class"),
         )?;
+        let unsupported_mir_policy = target
+            .unsupported_mir_policy
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default();
+
+        match label.as_str() {
+            "c" => {
+                if target.target != "c" {
+                    return Err(format!(
+                        "substrate execution_surface.c target mismatch: expected 'c', found '{}'",
+                        target.target
+                    ));
+                }
+                if target.maturity != "production-anchor" {
+                    return Err(format!(
+                        "substrate execution_surface.c maturity mismatch: expected 'production-anchor', found '{}'",
+                        target.maturity
+                    ));
+                }
+                let Some(relative_receipt) = target.receipt.as_deref() else {
+                    return Err(
+                        "substrate execution_surface.c is production-anchor but receipt is missing"
+                            .to_string(),
+                    );
+                };
+                let execution_receipt_path = validate_substrate_path(
+                    corpus_root,
+                    relative_receipt,
+                    "execution_surface.c.receipt",
+                )?;
+                let execution_receipt: CorpusExecutionReceipt =
+                    read_json_quiet(&execution_receipt_path)?;
+                if execution_receipt.backend != "c" {
+                    return Err(format!(
+                        "substrate execution_surface.c.receipt backend mismatch: expected 'c', found '{}'",
+                        execution_receipt.backend
+                    ));
+                }
+                if !receipt_has_stdout_validator(&execution_receipt) {
+                    return Err(
+                        "substrate execution_surface.c production-anchor requires stdout assertion evidence"
+                            .to_string(),
+                    );
+                }
+                continue;
+            }
+            "rust" => {
+                if target.target != "rust" {
+                    return Err(format!(
+                        "substrate execution_surface.rust target mismatch: expected 'rust', found '{}'",
+                        target.target
+                    ));
+                }
+                if target.maturity != "experimental-subset" {
+                    return Err(format!(
+                        "substrate execution_surface.rust maturity mismatch: expected 'experimental-subset', found '{}'",
+                        target.maturity
+                    ));
+                }
+                let Some(relative_receipt) = target.receipt.as_deref() else {
+                    return Err(
+                        "substrate execution_surface.rust experimental-subset requires receipt evidence"
+                            .to_string(),
+                    );
+                };
+                let execution_receipt_path = validate_substrate_path(
+                    corpus_root,
+                    relative_receipt,
+                    "execution_surface.rust.receipt",
+                )?;
+                let execution_receipt: CorpusExecutionReceipt =
+                    read_json_quiet(&execution_receipt_path)?;
+                if execution_receipt.backend != "rust" {
+                    return Err(format!(
+                        "substrate execution_surface.rust.receipt backend mismatch: expected 'rust', found '{}'",
+                        execution_receipt.backend
+                    ));
+                }
+                if unsupported_mir_policy.is_empty() {
+                    return Err(
+                        "substrate execution_surface.rust unsupported_mir_policy must not be empty"
+                            .to_string(),
+                    );
+                }
+                continue;
+            }
+            "spirv" => {
+                if target.target != "spirv" {
+                    return Err(format!(
+                        "substrate execution_surface.spirv target mismatch: expected 'spirv', found '{}'",
+                        target.target
+                    ));
+                }
+                if !target.maturity.starts_with("experimental") {
+                    return Err(format!(
+                        "substrate execution_surface.spirv maturity mismatch: expected experimental*, found '{}'",
+                        target.maturity
+                    ));
+                }
+                if target.status.as_deref() != Some("unverified")
+                    && unsupported_mir_policy.is_empty()
+                {
+                    return Err(
+                        "substrate execution_surface.spirv experimental target requires status=unverified or unsupported_mir_policy"
+                            .to_string(),
+                    );
+                }
+                continue;
+            }
+            _ => {}
+        }
 
         match target.maturity.as_str() {
             "production-anchor" => {
@@ -2230,14 +2388,7 @@ fn validate_substrate_receipt(
                 }
             }
             "experimental-subset" => {
-                if target.receipt.is_none()
-                    && target
-                        .unsupported_mir_policy
-                        .as_deref()
-                        .map(str::trim)
-                        .unwrap_or_default()
-                        .is_empty()
-                {
+                if target.receipt.is_none() && unsupported_mir_policy.is_empty() {
                     return Err(format!(
                         "substrate execution_surface.{label} experimental-subset requires receipt or unsupported_mir_policy"
                     ));
@@ -2260,12 +2411,7 @@ fn validate_substrate_receipt(
             }
             maturity if maturity.starts_with("experimental") => {
                 if target.status.as_deref() != Some("unverified")
-                    && target
-                        .unsupported_mir_policy
-                        .as_deref()
-                        .map(str::trim)
-                        .unwrap_or_default()
-                        .is_empty()
+                    && unsupported_mir_policy.is_empty()
                 {
                     return Err(format!(
                         "substrate execution_surface.{label} experimental target requires status=unverified or unsupported_mir_policy"
