@@ -27,13 +27,7 @@
         "hex": "daecc6d0f8ab6ff9812716b344ea32e07f47c8ffd04cce4f8bbdd869c170515b"
       },
       "observed": {
-        "has_result": true,
-        "diagnostics": 0,
-        "completion_items": 0,
-        "document_symbols": 0,
-        "locations": 0,
-        "text_edits": 0,
-        "folding_ranges": 0
+        "has_result": true
       }
     },
     {
@@ -44,15 +38,7 @@
         "algorithm": "sha256",
         "hex": "140bedbf9c3f6d56a9846d2ba7088798683f4da0c248231336e6a05679e4fdfe"
       },
-      "observed": {
-        "has_result": false,
-        "diagnostics": 0,
-        "completion_items": 0,
-        "document_symbols": 0,
-        "locations": 0,
-        "text_edits": 0,
-        "folding_ranges": 0
-      }
+      "observed": {}
     },
     {
       "id": "did-open",
@@ -63,13 +49,7 @@
         "hex": "a5c15835d05db90b7d7b5c467d230a98b4abbfb434ada1b67c2b9c959e5a319f"
       },
       "observed": {
-        "has_result": false,
-        "diagnostics": 1,
-        "completion_items": 0,
-        "document_symbols": 0,
-        "locations": 0,
-        "text_edits": 0,
-        "folding_ranges": 0
+        "diagnostics": 1
       }
     },
     {
@@ -82,12 +62,7 @@
       },
       "observed": {
         "has_result": true,
-        "diagnostics": 0,
-        "completion_items": 0,
-        "document_symbols": 2,
-        "locations": 0,
-        "text_edits": 0,
-        "folding_ranges": 0
+        "document_symbols": 2
       }
     },
     {
@@ -100,12 +75,7 @@
       },
       "observed": {
         "has_result": true,
-        "diagnostics": 0,
-        "completion_items": 42,
-        "document_symbols": 0,
-        "locations": 0,
-        "text_edits": 0,
-        "folding_ranges": 0
+        "completion_items": 42
       }
     },
     {
@@ -117,13 +87,7 @@
         "hex": "e925c7fe4c4e59f4df117524d8d67f408cd81a840119e65cf1f9a5067f3aaee4"
       },
       "observed": {
-        "has_result": true,
-        "diagnostics": 0,
-        "completion_items": 0,
-        "document_symbols": 0,
-        "locations": 0,
-        "text_edits": 0,
-        "folding_ranges": 0
+        "has_result": true
       }
     },
     {
@@ -136,12 +100,7 @@
       },
       "observed": {
         "has_result": true,
-        "diagnostics": 0,
-        "completion_items": 0,
-        "document_symbols": 0,
-        "locations": 1,
-        "text_edits": 0,
-        "folding_ranges": 0
+        "locations": 1
       }
     },
     {
@@ -154,12 +113,7 @@
       },
       "observed": {
         "has_result": true,
-        "diagnostics": 0,
-        "completion_items": 0,
-        "document_symbols": 0,
-        "locations": 2,
-        "text_edits": 0,
-        "folding_ranges": 0
+        "locations": 2
       }
     },
     {
@@ -172,12 +126,7 @@
       },
       "observed": {
         "has_result": true,
-        "diagnostics": 0,
-        "completion_items": 0,
-        "document_symbols": 0,
-        "locations": 0,
-        "text_edits": 1,
-        "folding_ranges": 0
+        "text_edits": 1
       }
     },
     {
@@ -190,11 +139,6 @@
       },
       "observed": {
         "has_result": true,
-        "diagnostics": 0,
-        "completion_items": 0,
-        "document_symbols": 0,
-        "locations": 0,
-        "text_edits": 0,
         "folding_ranges": 1
       }
     },
@@ -206,14 +150,32 @@
         "algorithm": "sha256",
         "hex": "2131e0575bbfa7b918aaacb59810ee0b53fa5a7feddd4c4e71b9d95d8a99fee8"
       },
+      "observed": {}
+    },
+    {
+      "id": "code-action",
+      "method": "textDocument/codeAction",
+      "response_kind": "response",
+      "result_digest": {
+        "algorithm": "sha256",
+        "hex": "c3b5ade184e1a2453bc515f7169c1b5e11db72972970d259bd425d53fda5ec4e"
+      },
       "observed": {
-        "has_result": false,
-        "diagnostics": 0,
-        "completion_items": 0,
-        "document_symbols": 0,
-        "locations": 0,
-        "text_edits": 0,
-        "folding_ranges": 0
+        "has_result": true,
+        "code_actions": 1
+      }
+    },
+    {
+      "id": "rename",
+      "method": "textDocument/rename",
+      "response_kind": "response",
+      "result_digest": {
+        "algorithm": "sha256",
+        "hex": "e9ba92cf48a473f5d03a6d791b3ed4675077d8c6034bcf5904040890cbe6065e"
+      },
+      "observed": {
+        "has_result": true,
+        "workspace_edits": 2
       }
     },
     {
@@ -222,16 +184,10 @@
       "response_kind": "response",
       "result_digest": {
         "algorithm": "sha256",
-        "hex": "3f7fe2c895b7ab4339835b00358034ced6250c8792048d69c7c71e28eeb94cf7"
+        "hex": "3e2bc465483e9b49ce6ed3d88c97cbdd7ba0488153135c2366c66b94e9f999d2"
       },
       "observed": {
-        "has_result": true,
-        "diagnostics": 0,
-        "completion_items": 0,
-        "document_symbols": 0,
-        "locations": 0,
-        "text_edits": 0,
-        "folding_ranges": 0
+        "has_result": true
       }
     },
     {
@@ -242,24 +198,17 @@
         "algorithm": "sha256",
         "hex": "140bedbf9c3f6d56a9846d2ba7088798683f4da0c248231336e6a05679e4fdfe"
       },
-      "observed": {
-        "has_result": false,
-        "diagnostics": 0,
-        "completion_items": 0,
-        "document_symbols": 0,
-        "locations": 0,
-        "text_edits": 0,
-        "folding_ranges": 0
-      }
+      "observed": {}
     }
   ],
   "summary": {
-    "fixture_count": 13,
+    "fixture_count": 15,
     "methods": [
       "exit",
       "initialize",
       "initialized",
       "shutdown",
+      "textDocument/codeAction",
       "textDocument/completion",
       "textDocument/definition",
       "textDocument/didChange",
@@ -268,7 +217,8 @@
       "textDocument/foldingRange",
       "textDocument/formatting",
       "textDocument/hover",
-      "textDocument/references"
+      "textDocument/references",
+      "textDocument/rename"
     ],
     "response_kinds": [
       "none",

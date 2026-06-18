@@ -12,6 +12,7 @@ use super::document::DocumentStore;
 use super::hover::HoverProvider;
 use super::jsonrpc::JsonRpcMessage;
 use super::message::*;
+use super::response_json;
 use super::symbols::SymbolProvider;
 use super::transport::*;
 use super::types::*;
@@ -908,6 +909,25 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
         ));
     }
 
+    if method == "textDocument/codeAction" {
+        let uri = message.text_document_uri().unwrap_or_default();
+        let range = message.range_at(&["params", "range"]).unwrap_or_default();
+        let params = CodeActionParams {
+            text_document: TextDocumentIdentifier { uri },
+            range,
+            context: CodeActionContext {
+                diagnostics: message.diagnostics(),
+                only: message.string_vec_at(&["params", "context", "only"]),
+                trigger_kind: message.code_action_trigger_kind(),
+            },
+        };
+        let actions = server.code_action(params);
+        return Some(build_response(
+            id.unwrap_or_else(|| "1".to_string()),
+            response_json::build_code_actions_json(&actions),
+        ));
+    }
+
     if method == "textDocument/formatting" {
         let uri = message.text_document_uri().unwrap_or_default();
         let params = DocumentFormattingParams {
@@ -927,6 +947,30 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
         return Some(build_response(
             id.unwrap_or_else(|| "1".to_string()),
             arr.build(),
+        ));
+    }
+
+    if method == "textDocument/rename" {
+        let uri = message.text_document_uri().unwrap_or_default();
+        let position = message.position().unwrap_or(Position::new(0, 0));
+        let new_name = message
+            .string_at(&["params", "newName"])
+            .unwrap_or_default();
+        let params = RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position,
+            },
+            new_name,
+        };
+        let result_json = server
+            .rename(params)
+            .as_ref()
+            .map(response_json::build_workspace_edit_json)
+            .unwrap_or_else(JsonBuilder::null);
+        return Some(build_response(
+            id.unwrap_or_else(|| "1".to_string()),
+            result_json,
         ));
     }
 
@@ -1255,5 +1299,88 @@ mod tests {
 
         assert_eq!(json["id"], 9);
         assert_eq!(json["error"]["code"], -32700);
+    }
+
+    #[test]
+    fn raw_dispatch_code_action_returns_supplied_diagnostic_quick_fix() {
+        let mut server = LanguageServer::new();
+        dispatch_raw_message(
+            &mut server,
+            r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.quanta","languageId":"quanta","version":1,"text":"fn main() {\n    let x = 1\n}\n"}}}"#,
+        )
+        .expect("didOpen should publish diagnostics");
+
+        let response = dispatch_raw_message(
+            &mut server,
+            r#"{
+              "jsonrpc": "2.0",
+              "id": 10,
+              "method": "textDocument/codeAction",
+              "params": {
+                "textDocument": { "uri": "file:///workspace/main.quanta" },
+                "range": {
+                  "start": { "line": 1, "character": 13 },
+                  "end": { "line": 1, "character": 13 }
+                },
+                "context": {
+                  "diagnostics": [{
+                    "range": {
+                      "start": { "line": 1, "character": 13 },
+                      "end": { "line": 1, "character": 13 }
+                    },
+                    "severity": 1,
+                    "source": "quantalang",
+                    "message": "expected ';'"
+                  }]
+                }
+              }
+            }"#,
+        )
+        .expect("codeAction should return a response");
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("parse codeAction response");
+
+        assert_eq!(json["id"], 10);
+        let actions = json["result"].as_array().expect("code actions array");
+        assert!(actions
+            .iter()
+            .any(|action| action["title"] == "Add missing semicolon"));
+    }
+
+    #[test]
+    fn raw_dispatch_rename_returns_workspace_edits_for_symbol_occurrences() {
+        let mut server = LanguageServer::new();
+        dispatch_raw_message(
+            &mut server,
+            r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.quanta","languageId":"quanta","version":1,"text":"fn helper() -> i32 { 1 }\nfn main() { helper(); }\n"}}}"#,
+        )
+        .expect("didOpen should publish diagnostics");
+
+        let response = dispatch_raw_message(
+            &mut server,
+            r#"{
+              "jsonrpc": "2.0",
+              "id": 11,
+              "method": "textDocument/rename",
+              "params": {
+                "textDocument": { "uri": "file:///workspace/main.quanta" },
+                "position": { "line": 1, "character": 14 },
+                "newName": "renamed_helper"
+              }
+            }"#,
+        )
+        .expect("rename should return a response");
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("parse rename response");
+
+        assert_eq!(json["id"], 11);
+        let edits = json["result"]["changes"]["file:///workspace/main.quanta"]
+            .as_array()
+            .expect("rename edits for document");
+        assert!(
+            edits.len() >= 2,
+            "expected definition and call-site edits: {edits:#?}"
+        );
+        assert!(edits.iter().all(|edit| edit["newText"] == "renamed_helper"));
     }
 }

@@ -11117,6 +11117,43 @@ fn corpus_verify_rejects_lsp_dispatch_observed_drift() {
 }
 
 #[test]
+fn corpus_verify_rejects_lsp_dispatch_code_action_observed_drift() {
+    let corpus_root = temp_semantic_corpus("lsp_dispatch_code_action_observed");
+    write_lsp_dispatch_receipt_copy(&corpus_root, |mut receipt| {
+        let fixture = receipt["fixtures"]
+            .as_array_mut()
+            .expect("fixtures should be an array")
+            .iter_mut()
+            .find(|fixture| fixture["method"] == "textDocument/codeAction")
+            .expect("codeAction fixture should exist");
+        fixture["observed"]["code_actions"] = serde_json::Value::from(0);
+        receipt
+    });
+
+    assert_corpus_verify_rejects(
+        &corpus_root,
+        "lsp dispatch fixture code-action observed drift",
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_lsp_dispatch_rename_observed_drift() {
+    let corpus_root = temp_semantic_corpus("lsp_dispatch_rename_observed");
+    write_lsp_dispatch_receipt_copy(&corpus_root, |mut receipt| {
+        let fixture = receipt["fixtures"]
+            .as_array_mut()
+            .expect("fixtures should be an array")
+            .iter_mut()
+            .find(|fixture| fixture["method"] == "textDocument/rename")
+            .expect("rename fixture should exist");
+        fixture["observed"]["workspace_edits"] = serde_json::Value::from(0);
+        receipt
+    });
+
+    assert_corpus_verify_rejects(&corpus_root, "lsp dispatch fixture rename observed drift");
+}
+
+#[test]
 fn corpus_verify_rejects_lsp_dispatch_summary_drift() {
     let corpus_root = temp_semantic_corpus("lsp_dispatch_summary");
     write_lsp_dispatch_receipt_copy(&corpus_root, |mut receipt| {

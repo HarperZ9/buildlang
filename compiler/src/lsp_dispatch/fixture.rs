@@ -70,7 +70,48 @@ pub(super) fn fixture_sequence() -> Vec<RawFixture> {
             "textDocument/didChange",
             serde_json::json!({"textDocument": {"uri": uri, "version": 2}, "contentChanges": [{"text": changed_source}]}),
         ),
-        request_fixture(9, "shutdown", "shutdown", serde_json::json!({})),
+        raw_fixture(
+            "code-action",
+            "textDocument/codeAction",
+            r#"{
+              "jsonrpc": "2.0",
+              "id": 9,
+              "method": "textDocument/codeAction",
+              "params": {
+                "textDocument": { "uri": "file:///workspace/main.quanta" },
+                "range": {
+                  "start": { "line": 2, "character": 24 },
+                  "end": { "line": 2, "character": 24 }
+                },
+                "context": {
+                  "diagnostics": [{
+                    "range": {
+                      "start": { "line": 2, "character": 24 },
+                      "end": { "line": 2, "character": 24 }
+                    },
+                    "severity": 1,
+                    "source": "quantalang",
+                    "message": "expected ';'"
+                  }]
+                }
+              }
+            }"#,
+        ),
+        raw_fixture(
+            "rename",
+            "textDocument/rename",
+            r#"{
+              "jsonrpc": "2.0",
+              "id": 10,
+              "method": "textDocument/rename",
+              "params": {
+                "textDocument": { "uri": "file:///workspace/main.quanta" },
+                "position": { "line": 3, "character": 14 },
+                "newName": "renamed_helper"
+              }
+            }"#,
+        ),
+        request_fixture(11, "shutdown", "shutdown", serde_json::json!({})),
         fixture("exit", "exit", serde_json::json!({})),
     ]
 }
@@ -188,6 +229,8 @@ fn observe_response(method: &str, response: Option<&Value>) -> LspDispatchObserv
         locations: 0,
         text_edits: 0,
         folding_ranges: 0,
+        code_actions: 0,
+        workspace_edits: 0,
     };
     let Some(value) = response else {
         return observed;
@@ -212,6 +255,8 @@ fn observe_response(method: &str, response: Option<&Value>) -> LspDispatchObserv
         }
         "textDocument/formatting" => observed.text_edits = result_array_len(value),
         "textDocument/foldingRange" => observed.folding_ranges = result_array_len(value),
+        "textDocument/codeAction" => observed.code_actions = result_array_len(value),
+        "textDocument/rename" => observed.workspace_edits = workspace_edit_count(value),
         _ => {}
     }
     observed
@@ -222,6 +267,20 @@ fn result_array_len(value: &Value) -> usize {
         .get("result")
         .and_then(Value::as_array)
         .map_or(0, Vec::len)
+}
+
+fn workspace_edit_count(value: &Value) -> usize {
+    value
+        .pointer("/result/changes")
+        .and_then(Value::as_object)
+        .map(|changes| {
+            changes
+                .values()
+                .filter_map(Value::as_array)
+                .map(Vec::len)
+                .sum()
+        })
+        .unwrap_or(0)
 }
 
 fn digest_hex(bytes: &[u8]) -> String {

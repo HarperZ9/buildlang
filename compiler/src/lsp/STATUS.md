@@ -13,11 +13,11 @@ Last audited: 2026-06-18
 - **Symbols** (`symbols.rs`, 600 lines): Document symbol extraction (functions, structs, enums, etc.).
 - **Definition** (`definition.rs`, 436 lines): Go-to-definition via symbol search across documents.
 - **Code Actions** (`actions.rs`, 428 lines): Quick fixes and refactoring suggestions.
-- **Server** (`server.rs`): Main server with lifecycle management and raw request dispatch for lifecycle, document sync, completion, hover, definition, references, document symbols, formatting, folding ranges, and unknown-method errors.
-- **Dispatch receipt** (`semantic-corpus/receipts/lsp-dispatch-2026-06-18.json`): Verifies a fixed raw LSP fixture sequence through `corpus verify`, including initialize, initialized, didOpen, documentSymbol, completion, hover, definition, references, formatting, foldingRange, didChange, shutdown, and exit.
+- **Server** (`server.rs`): Main server with lifecycle management and raw request dispatch for lifecycle, document sync, completion, hover, definition, references, document symbols, formatting, folding ranges, code actions, rename, and unknown-method errors.
+- **Dispatch receipt** (`semantic-corpus/receipts/lsp-dispatch-2026-06-18.json`): Verifies a fixed raw LSP fixture sequence through `corpus verify`, including initialize, initialized, didOpen, documentSymbol, completion, hover, definition, references, formatting, foldingRange, didChange, codeAction, rename, shutdown, and exit.
 
 ## Partial
-- **Server runner** (`run_server()` in `server.rs`): The stdio transport loop dispatches the same raw message path covered by the LSP dispatch receipt, using a `serde_json` structural JSON-RPC parser for method, id, and common params. Code actions and rename have provider methods but are not wired into the raw dispatch loop.
+- **Server runner** (`run_server()` in `server.rs`): The stdio transport loop dispatches the same raw message path covered by the LSP dispatch receipt, using a `serde_json` structural JSON-RPC parser for method, id, and common params. Params still flow through lightweight `serde_json::Value` accessors rather than typed request structs for every method.
 
 ## Aspirational
 - Full VS Code extension integration: `quantac lsp` starts the current server loop and dispatches several core requests, but the end-to-end VS Code language-server experience is not yet receipt-verified.
@@ -27,7 +27,6 @@ Last audited: 2026-06-18
 ## Not Started
 - Published VS Code extension package/release artifact.
 - No integration with the compiler's type checker for semantic diagnostics.
-- Full LSP request dispatch for every provider method.
 
 ## Honest Assessment
-The LSP module has real implementations for major language-server capabilities, and the raw `quantac lsp` dispatch path now has a semantic-corpus receipt for a representative request sequence through structural JSON-RPC parsing. The important remaining limits are typed request coverage, unwired provider methods such as code actions and rename, compiler-backed semantic diagnostics, and end-to-end VS Code verification.
+The LSP module has real implementations for major language-server capabilities, and the raw `quantac lsp` dispatch path now has a semantic-corpus receipt for a representative request sequence through structural JSON-RPC parsing. The important remaining limits are typed request coverage, compiler-backed semantic diagnostics, and end-to-end VS Code verification.
