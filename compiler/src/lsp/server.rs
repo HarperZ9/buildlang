@@ -14,6 +14,7 @@ use super::jsonrpc::JsonRpcMessage;
 use super::message::*;
 use super::raw_params;
 use super::response_json;
+use super::semantic_tokens::{SemanticTokens, SemanticTokensProvider};
 use super::symbols::SymbolProvider;
 use super::transport::*;
 use super::types::*;
@@ -63,6 +64,8 @@ pub struct LanguageServer {
     diagnostics: DiagnosticsProvider,
     /// Symbol provider.
     symbols: SymbolProvider,
+    /// Semantic tokens provider.
+    semantic_tokens: SemanticTokensProvider,
 }
 
 impl LanguageServer {
@@ -79,6 +82,7 @@ impl LanguageServer {
             hover: HoverProvider::new(documents.clone()),
             diagnostics: DiagnosticsProvider::new(documents.clone()),
             symbols: SymbolProvider::new(documents.clone()),
+            semantic_tokens: SemanticTokensProvider::new(),
         }
     }
 
@@ -310,6 +314,12 @@ impl LanguageServer {
             return Vec::new();
         };
         self.symbols.document_symbols(&doc)
+    }
+
+    /// Handle semantic tokens request.
+    pub fn semantic_tokens(&self, uri: &DocumentUri) -> Option<SemanticTokens> {
+        let doc = self.documents.get(uri)?;
+        Some(self.semantic_tokens.full(&doc))
     }
 
     /// Handle code action request.
@@ -870,6 +880,20 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
         return Some(build_response(response_id, result));
     }
 
+    if method == "textDocument/semanticTokens/full" {
+        let response_id = id.unwrap_or_else(|| "1".to_string());
+        let uri = match raw_params::decode_document_uri(&message) {
+            Ok(uri) => uri,
+            Err(error) => return Some(build_invalid_params_response(response_id, &error)),
+        };
+        let result_json = server
+            .semantic_tokens(&uri)
+            .as_ref()
+            .map(response_json::build_semantic_tokens_json)
+            .unwrap_or_else(JsonBuilder::null);
+        return Some(build_response(response_id, result_json));
+    }
+
     if method == "textDocument/codeAction" {
         let response_id = id.unwrap_or_else(|| "1".to_string());
         let params = match raw_params::decode_code_action(&message) {
@@ -1004,32 +1028,39 @@ fn extract_id(content: &str) -> Option<String> {
 fn build_initialize_result(result: &InitializeResult) -> String {
     let _caps = &result.capabilities;
 
-    let mut builder = JsonObjectBuilder::new().field(
-        "capabilities",
-        JsonObjectBuilder::new()
-            .field_number("textDocumentSync", 2) // Incremental
-            .field(
-                "completionProvider",
-                JsonObjectBuilder::new()
-                    .field(
-                        "triggerCharacters",
-                        JsonArrayBuilder::new()
-                            .item(JsonBuilder::string("."))
-                            .item(JsonBuilder::string(":"))
-                            .build(),
-                    )
-                    .field_bool("resolveProvider", true)
-                    .build(),
-            )
-            .field_bool("hoverProvider", true)
-            .field_bool("definitionProvider", true)
-            .field_bool("referencesProvider", true)
-            .field_bool("documentSymbolProvider", true)
-            .field_bool("documentFormattingProvider", true)
-            .field_bool("renameProvider", true)
-            .field_bool("foldingRangeProvider", true)
-            .build(),
-    );
+    let mut builder =
+        JsonObjectBuilder::new().field(
+            "capabilities",
+            JsonObjectBuilder::new()
+                .field_number("textDocumentSync", 2) // Incremental
+                .field(
+                    "completionProvider",
+                    JsonObjectBuilder::new()
+                        .field(
+                            "triggerCharacters",
+                            JsonArrayBuilder::new()
+                                .item(JsonBuilder::string("."))
+                                .item(JsonBuilder::string(":"))
+                                .build(),
+                        )
+                        .field_bool("resolveProvider", true)
+                        .build(),
+                )
+                .field_bool("hoverProvider", true)
+                .field_bool("definitionProvider", true)
+                .field_bool("referencesProvider", true)
+                .field_bool("documentSymbolProvider", true)
+                .field_bool("documentFormattingProvider", true)
+                .field_bool("renameProvider", true)
+                .field_bool("foldingRangeProvider", true)
+                .field(
+                    "semanticTokensProvider",
+                    response_json::build_semantic_tokens_options_json(
+                        &SemanticTokensProvider::legend(),
+                    ),
+                )
+                .build(),
+        );
 
     if let Some(ref info) = result.server_info {
         builder = builder.field(
@@ -1117,6 +1148,27 @@ mod tests {
     }
 
     #[test]
+    fn raw_dispatch_initialize_reports_semantic_tokens_capability() {
+        let mut server = LanguageServer::new();
+        let response = dispatch_raw_message(
+            &mut server,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":"file:///workspace"}}"#,
+        )
+        .expect("initialize should return a response");
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("parse initialize response");
+        let provider = &json["result"]["capabilities"]["semanticTokensProvider"];
+
+        assert_eq!(provider["range"], false);
+        assert_eq!(provider["full"], true);
+        let token_types = provider["legend"]["tokenTypes"]
+            .as_array()
+            .expect("tokenTypes array");
+        assert!(token_types.iter().any(|token| token == "function"));
+        assert!(token_types.iter().any(|token| token == "string"));
+    }
+
+    #[test]
     fn raw_dispatch_did_open_returns_diagnostics_notification() {
         let mut server = LanguageServer::new();
         let response = dispatch_raw_message(
@@ -1185,6 +1237,48 @@ mod tests {
             "expected helper symbol in {names:?}"
         );
         assert!(names.contains(&"main"), "expected main symbol in {names:?}");
+    }
+
+    #[test]
+    fn raw_dispatch_semantic_tokens_full_returns_opened_document_tokens() {
+        let mut server = LanguageServer::new();
+        dispatch_raw_message(
+            &mut server,
+            r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.quanta","languageId":"quanta","version":1,"text":"// comment\nfn helper() -> i32 { 42 }\nfn main() { helper(\"x\"); }\n"}}}"#,
+        )
+        .expect("didOpen should publish diagnostics");
+
+        let response = dispatch_raw_message(
+            &mut server,
+            r#"{"jsonrpc":"2.0","id":12,"method":"textDocument/semanticTokens/full","params":{"textDocument":{"uri":"file:///workspace/main.quanta"}}}"#,
+        )
+        .expect("semanticTokens/full should return a response");
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("parse semanticTokens response");
+        let data = json["result"]["data"]
+            .as_array()
+            .expect("semantic token data array");
+
+        assert_eq!(json["id"], 12);
+        assert!(!data.is_empty());
+        assert_eq!(data.len() % 5, 0);
+    }
+
+    #[test]
+    fn raw_dispatch_semantic_tokens_full_unknown_document_returns_null() {
+        let mut server = LanguageServer::new();
+        let response = dispatch_raw_message(
+            &mut server,
+            r#"{"jsonrpc":"2.0","id":13,"method":"textDocument/semanticTokens/full","params":{"textDocument":{"uri":"file:///workspace/missing.quanta"}}}"#,
+        )
+        .expect("semanticTokens/full should return a response");
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("parse semanticTokens response");
+
+        assert_eq!(json["id"], 13);
+        assert!(json.get("error").is_none());
+        assert!(json.get("result").is_some());
+        assert!(json["result"].is_null());
     }
 
     #[test]
@@ -1331,6 +1425,17 @@ mod tests {
         );
 
         assert_invalid_params(response, "params.context is required");
+    }
+
+    #[test]
+    fn raw_dispatch_invalid_params_semantic_tokens_missing_uri_returns_error() {
+        let mut server = LanguageServer::new();
+        let response = dispatch_raw_message(
+            &mut server,
+            r#"{"jsonrpc":"2.0","id":24,"method":"textDocument/semanticTokens/full","params":{"textDocument":{}}}"#,
+        );
+
+        assert_invalid_params(response, "params.textDocument.uri is required");
     }
 
     #[test]
