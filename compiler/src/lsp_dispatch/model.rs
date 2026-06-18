@@ -39,13 +39,24 @@ pub(crate) struct LspDispatchFixture {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) struct LspDispatchObserved {
+    #[serde(default, skip_serializing_if = "is_false")]
     pub(crate) has_result: bool,
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub(crate) diagnostics: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub(crate) completion_items: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub(crate) document_symbols: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub(crate) locations: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub(crate) text_edits: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub(crate) folding_ranges: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(crate) code_actions: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(crate) workspace_edits: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -60,4 +71,12 @@ pub(crate) struct LspDispatchSummary {
     pub(crate) methods: Vec<String>,
     pub(crate) response_kinds: Vec<String>,
     pub(crate) known_gaps: Vec<String>,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
