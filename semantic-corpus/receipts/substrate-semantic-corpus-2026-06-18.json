@@ -1,0 +1,73 @@
+{
+  "schema": "quantalang-substrate-receipt/v0",
+  "receipt_id": "substrate-semantic-corpus-2026-06-18",
+  "created_at": "2026-06-18",
+  "compiler": "quantac",
+  "language": "quantalang",
+  "source_set": {
+    "kind": "semantic-corpus",
+    "manifest": "manifest.json",
+    "program_count": 8
+  },
+  "semantic_surface": {
+    "check_receipt_schema": "quantalang-check-receipt/v1",
+    "requires_source_digest": true,
+    "requires_input_graph_digest": true,
+    "effect_surfaces": [
+      "declared_effects",
+      "observed_capabilities",
+      "propagated_effects"
+    ]
+  },
+  "execution_surface": {
+    "c": {
+      "target": "c",
+      "maturity": "production-anchor",
+      "evidence_class": "generated-artifact-execution",
+      "receipt": "receipts/c-execution-2026-06-13.json"
+    },
+    "rust": {
+      "target": "rust",
+      "maturity": "experimental-subset",
+      "evidence_class": "generated-artifact-execution",
+      "receipt": "receipts/rust-execution-2026-06-13.json",
+      "unsupported_mir_policy": "unsupported MIR returns a codegen error rather than silent fallback"
+    },
+    "spirv": {
+      "target": "spirv",
+      "maturity": "experimental-unverified",
+      "evidence_class": "not-yet-runtime-verified",
+      "status": "unverified",
+      "unsupported_mir_policy": "GPU validation requires a future spirv-val or Vulkan-host receipt"
+    }
+  },
+  "memory_surface": {
+    "ownership_model": "rust-inspired",
+    "verified_surfaces": [
+      "references_mutation",
+      "tuple_ownership_reuse",
+      "struct_aggregate_reuse",
+      "field_assignment_reuse",
+      "nested_field_reuse",
+      "deref_reuse"
+    ],
+    "known_gaps": [
+      "full interprocedural borrow proof",
+      "self-hosted stdlib execution",
+      "runtime-linked async execution"
+    ]
+  },
+  "representation_surface": {
+    "ir": "MIR",
+    "fallback_policy": "unsupported or partial targets must not claim production maturity",
+    "backend_maturity_descriptor": "compiler/src/codegen/backend/STATUS.md"
+  },
+  "evidence_surface": {
+    "commands": [
+      "cargo test --manifest-path compiler/Cargo.toml semantic_corpus_manifest --quiet",
+      "cargo test --manifest-path compiler/Cargo.toml semantic_corpus_receipt --quiet",
+      "cargo test --manifest-path compiler/Cargo.toml generated_rust_runs --quiet",
+      "cargo test --manifest-path compiler/Cargo.toml --test cli corpus_verify -- --nocapture"
+    ]
+  }
+}
