@@ -873,6 +873,7 @@ struct SubstrateRepresentationSurface {
     ir: String,
     fallback_policy: String,
     backend_maturity_descriptor: String,
+    representation_receipt: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -2461,6 +2462,32 @@ fn validate_substrate_receipt(
         &receipt.representation_surface.backend_maturity_descriptor,
         "representation_surface.backend_maturity_descriptor",
     )?;
+    let representation_receipt_path = validate_substrate_path(
+        corpus_root,
+        &receipt.representation_surface.representation_receipt,
+        "representation_surface.representation_receipt",
+    )?;
+    if representation_receipt_path
+        != corpus_root
+            .join("receipts")
+            .join(MIR_REPRESENTATION_RECEIPT)
+            .canonicalize()
+            .map_err(|err| {
+                format!(
+                    "substrate representation_surface.representation_receipt failed to canonicalize expected receipt {}: {err}",
+                    corpus_root
+                        .join("receipts")
+                        .join(MIR_REPRESENTATION_RECEIPT)
+                        .display()
+                )
+            })?
+    {
+        return Err(format!(
+            "substrate representation_surface.representation_receipt must point at receipts/{}, found {}",
+            MIR_REPRESENTATION_RECEIPT,
+            receipt.representation_surface.representation_receipt
+        ));
+    }
 
     if receipt.evidence_surface.commands.is_empty() {
         return Err("substrate evidence_surface.commands must not be empty".to_string());

@@ -531,6 +531,12 @@ and command surfaces: C remains the production execution anchor, Rust remains an
 experimental subset lane, and unverified GPU/native lanes must keep explicit
 maturity and unsupported-behavior labels. The receipt is an evidence contract,
 not a backend promotion claim.
+The same verification path now validates a MIR Representation Receipt
+(`quantalang-mir-representation-receipt/v0`) that recomputes per-program MIR
+module counts, symbols, operation families, memory-surface flags, and
+control-flow summaries from the real parse, type-check, and AST-to-MIR lowering
+pipeline. This makes the representation claim inspectable without promoting any
+experimental backend.
 
 ## Status
 
