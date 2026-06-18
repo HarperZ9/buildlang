@@ -10858,6 +10858,38 @@ fn corpus_verify_rejects_mir_representation_path_escape() {
 }
 
 #[test]
+fn corpus_verify_rejects_mir_representation_path_escape_absolute() {
+    let corpus_root = temp_semantic_corpus("mir_repr_path_escape_absolute");
+    let absolute_path = std::env::temp_dir().join("outside.quanta");
+    write_mir_representation_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["programs"][0]["path"] = serde_json::Value::String(
+            absolute_path.to_string_lossy().into_owned(),
+        );
+        receipt
+    });
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(&corpus_root)
+        .output()
+        .expect("run quantac corpus verify against MIR representation absolute path");
+
+    let _ = fs::remove_dir_all(&corpus_root);
+
+    assert!(
+        !output.status.success(),
+        "corpus verify should reject MIR representation absolute path"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("must stay within corpus root"),
+        "stderr should name MIR representation path containment failure:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn corpus_verify_rejects_mir_representation_source_digest_drift() {
     let corpus_root = temp_semantic_corpus("mir_repr_source_digest");
     write_mir_representation_receipt_copy(&corpus_root, |mut receipt| {
