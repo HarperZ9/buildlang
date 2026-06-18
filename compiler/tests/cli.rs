@@ -11149,6 +11149,26 @@ fn corpus_verify_rejects_lsp_dispatch_semantic_tokens_observed_drift() {
 }
 
 #[test]
+fn corpus_verify_rejects_lsp_dispatch_workspace_symbol_observed_drift() {
+    let corpus_root = temp_semantic_corpus("lsp_dispatch_workspace_symbol_observed");
+    write_lsp_dispatch_receipt_copy(&corpus_root, |mut receipt| {
+        let fixture = receipt["fixtures"]
+            .as_array_mut()
+            .expect("fixtures should be an array")
+            .iter_mut()
+            .find(|fixture| fixture["id"] == "workspace-symbol")
+            .expect("workspace symbol fixture should exist");
+        fixture["observed"]["workspace_symbols"] = serde_json::Value::from(0);
+        receipt
+    });
+
+    assert_corpus_verify_rejects(
+        &corpus_root,
+        "lsp dispatch fixture workspace-symbol observed drift",
+    );
+}
+
+#[test]
 fn corpus_verify_rejects_lsp_dispatch_code_action_observed_drift() {
     let corpus_root = temp_semantic_corpus("lsp_dispatch_code_action_observed");
     write_lsp_dispatch_receipt_copy(&corpus_root, |mut receipt| {

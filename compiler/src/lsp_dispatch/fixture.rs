@@ -38,6 +38,12 @@ pub(super) fn fixture_sequence() -> Vec<RawFixture> {
             "textDocument/semanticTokens/full",
             &document,
         ),
+        request_fixture(
+            13,
+            "workspace-symbol",
+            "workspace/symbol",
+            serde_json::json!({"query": "help"}),
+        ),
         raw_fixture(
             "document-symbol",
             "textDocument/documentSymbol",

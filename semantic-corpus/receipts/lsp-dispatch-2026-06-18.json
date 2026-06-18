@@ -24,7 +24,7 @@
       "response_kind": "response",
       "result_digest": {
         "algorithm": "sha256",
-        "hex": "8ff6e05b4e7876d293fc31241af6784f7a7137cfbf7cfd3ef7011a20bce98cc6"
+        "hex": "b3d6314bf5283aa3495994423b31f045837e5b3f027a88b567e29efcb9a23b8d"
       },
       "observed": {
         "has_result": true
@@ -63,6 +63,19 @@
       "observed": {
         "has_result": true,
         "semantic_tokens": 11
+      }
+    },
+    {
+      "id": "workspace-symbol",
+      "method": "workspace/symbol",
+      "response_kind": "response",
+      "result_digest": {
+        "algorithm": "sha256",
+        "hex": "81ef9e8760b37d216ea51c1724ebf3ef0988143d8ee9ab55413161eaaa07853b"
+      },
+      "observed": {
+        "has_result": true,
+        "workspace_symbols": 1
       }
     },
     {
@@ -229,7 +242,7 @@
     }
   ],
   "summary": {
-    "fixture_count": 17,
+    "fixture_count": 18,
     "methods": [
       "exit",
       "initialize",
@@ -246,7 +259,8 @@
       "textDocument/hover",
       "textDocument/references",
       "textDocument/rename",
-      "textDocument/semanticTokens/full"
+      "textDocument/semanticTokens/full",
+      "workspace/symbol"
     ],
     "response_kinds": [
       "none",
