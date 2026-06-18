@@ -10722,11 +10722,6 @@ fn corpus_verify_checks_substrate_receipt() {
 
 #[test]
 fn corpus_verify_rejects_substrate_receipt_schema_drift() {
-    if !c_backend_ready() {
-        eprintln!("skipping substrate schema drift verification because no C backend is available");
-        return;
-    }
-
     let corpus_root = temp_semantic_corpus("substrate_schema");
     write_substrate_receipt_copy(&corpus_root, |mut receipt| {
         receipt["schema"] = serde_json::Value::String("quantalang-substrate-receipt/v9".into());
@@ -10757,13 +10752,6 @@ fn corpus_verify_rejects_substrate_receipt_schema_drift() {
 
 #[test]
 fn corpus_verify_rejects_substrate_program_count_drift() {
-    if !c_backend_ready() {
-        eprintln!(
-            "skipping substrate program-count verification because no C backend is available"
-        );
-        return;
-    }
-
     let corpus_root = temp_semantic_corpus("substrate_program_count");
     write_substrate_receipt_copy(&corpus_root, |mut receipt| {
         receipt["source_set"]["program_count"] = serde_json::Value::from(7);
@@ -10794,13 +10782,6 @@ fn corpus_verify_rejects_substrate_program_count_drift() {
 
 #[test]
 fn corpus_verify_rejects_production_substrate_backend_without_receipt() {
-    if !c_backend_ready() {
-        eprintln!(
-            "skipping substrate production receipt verification because no C backend is available"
-        );
-        return;
-    }
-
     let corpus_root = temp_semantic_corpus("substrate_missing_receipt");
     write_substrate_receipt_copy(&corpus_root, |mut receipt| {
         if let Some(c) = receipt["execution_surface"]["c"].as_object_mut() {
@@ -10832,14 +10813,102 @@ fn corpus_verify_rejects_production_substrate_backend_without_receipt() {
 }
 
 #[test]
-fn corpus_verify_rejects_empty_substrate_evidence_commands() {
-    if !c_backend_ready() {
-        eprintln!(
-            "skipping substrate evidence command verification because no C backend is available"
-        );
-        return;
-    }
+fn corpus_verify_rejects_substrate_rust_subset_without_receipt() {
+    let corpus_root = temp_semantic_corpus("substrate_rust_subset_missing_receipt");
+    write_substrate_receipt_copy(&corpus_root, |mut receipt| {
+        if let Some(rust) = receipt["execution_surface"]["rust"].as_object_mut() {
+            rust.remove("receipt");
+        }
+        receipt
+    });
 
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(&corpus_root)
+        .output()
+        .expect("run quantac corpus verify against missing rust subset receipt");
+
+    let _ = fs::remove_dir_all(&corpus_root);
+
+    assert!(
+        !output.status.success(),
+        "corpus verify should reject rust subset without receipt evidence"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(
+            "substrate execution_surface.rust experimental-subset requires receipt evidence"
+        ),
+        "stderr should name missing rust subset receipt:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_substrate_missing_required_spirv_target() {
+    let corpus_root = temp_semantic_corpus("substrate_missing_spirv");
+    write_substrate_receipt_copy(&corpus_root, |mut receipt| {
+        if let Some(execution_surface) = receipt["execution_surface"].as_object_mut() {
+            execution_surface.remove("spirv");
+        }
+        receipt
+    });
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(&corpus_root)
+        .output()
+        .expect("run quantac corpus verify against missing spirv target");
+
+    let _ = fs::remove_dir_all(&corpus_root);
+
+    assert!(
+        !output.status.success(),
+        "corpus verify should reject missing required spirv target"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("substrate execution_surface missing required target spirv"),
+        "stderr should name missing required spirv target:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_substrate_receipt_path_escape() {
+    let corpus_root = temp_semantic_corpus("substrate_path_escape");
+    write_substrate_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["execution_surface"]["c"]["receipt"] =
+            serde_json::Value::String("../outside.json".into());
+        receipt
+    });
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(&corpus_root)
+        .output()
+        .expect("run quantac corpus verify against substrate path escape");
+
+    let _ = fs::remove_dir_all(&corpus_root);
+
+    assert!(
+        !output.status.success(),
+        "corpus verify should reject substrate receipt path escape"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("must stay within corpus root"),
+        "stderr should name substrate path containment failure:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_empty_substrate_evidence_commands() {
     let corpus_root = temp_semantic_corpus("substrate_empty_commands");
     write_substrate_receipt_copy(&corpus_root, |mut receipt| {
         receipt["evidence_surface"]["commands"] = serde_json::Value::Array(Vec::new());
