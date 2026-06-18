@@ -212,6 +212,21 @@ fn write_symbol_graph_receipt_copy(
     fs::write(&receipt_path, format!("{rendered}\n")).expect("write modified symbol graph receipt");
 }
 
+fn write_module_graph_receipt_copy(
+    corpus_root: &Path,
+    transform: impl FnOnce(serde_json::Value) -> serde_json::Value,
+) {
+    let receipt_path = corpus_root
+        .join("receipts")
+        .join("module-graph-2026-06-18.json");
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt_path).expect("read module graph receipt"))
+            .expect("parse module graph receipt");
+    let rendered = serde_json::to_string_pretty(&transform(receipt))
+        .expect("render modified module graph receipt");
+    fs::write(&receipt_path, format!("{rendered}\n")).expect("write modified module graph receipt");
+}
+
 fn assert_corpus_verify_rejects(corpus_root: &Path, expected_stderr: &str) {
     let output = quantac()
         .arg("corpus")
@@ -10880,6 +10895,144 @@ fn corpus_verify_checks_symbol_graph_receipt() {
 }
 
 #[test]
+fn corpus_verify_checks_module_graph_receipt() {
+    if !c_backend_ready() {
+        eprintln!("skipping module graph receipt verification because no C backend is available");
+        return;
+    }
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(repo_root().join("semantic-corpus"))
+        .output()
+        .expect("run quantac corpus verify with module graph receipt");
+
+    assert!(
+        output.status.success(),
+        "corpus verify should accept module graph receipt\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    assert!(
+        stdout.contains("module graph receipt: ok"),
+        "corpus verify should report module graph receipt status:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_module_graph_schema_drift() {
+    let corpus_root = temp_semantic_corpus("module_graph_schema");
+    write_module_graph_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["schema"] = serde_json::Value::String("quantalang-module-graph-receipt/v9".into());
+        receipt
+    });
+
+    assert_corpus_verify_rejects(&corpus_root, "module graph receipt has unsupported schema");
+}
+
+#[test]
+fn corpus_verify_rejects_module_graph_program_count_drift() {
+    let corpus_root = temp_semantic_corpus("module_graph_program_count");
+    write_module_graph_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["source_set"]["program_count"] = serde_json::Value::from(7);
+        receipt
+    });
+
+    assert_corpus_verify_rejects(
+        &corpus_root,
+        "module graph source_set.program_count mismatch",
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_module_graph_path_escape() {
+    let corpus_root = temp_semantic_corpus("module_graph_path_escape");
+    write_module_graph_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["programs"][0]["path"] = serde_json::Value::String("../outside.quanta".into());
+        receipt
+    });
+
+    assert_corpus_verify_rejects(
+        &corpus_root,
+        "module graph program.path must stay within corpus root",
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_module_graph_source_digest_drift() {
+    let corpus_root = temp_semantic_corpus("module_graph_source_digest");
+    write_module_graph_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["programs"][0]["source_digest"]["hex"] = serde_json::Value::String("0".repeat(64));
+        receipt
+    });
+
+    assert_corpus_verify_rejects(
+        &corpus_root,
+        "module graph program scalar_branch source_digest mismatch",
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_module_graph_input_graph_digest_drift() {
+    let corpus_root = temp_semantic_corpus("module_graph_input_graph_digest");
+    write_module_graph_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["programs"][0]["input_graph_digest"]["hex"] =
+            serde_json::Value::String("1".repeat(64));
+        receipt
+    });
+
+    assert_corpus_verify_rejects(
+        &corpus_root,
+        "module graph program scalar_branch input_graph_digest mismatch",
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_module_graph_inputs_drift() {
+    let corpus_root = temp_semantic_corpus("module_graph_inputs");
+    write_module_graph_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["programs"][0]["inputs"][0]["role"] = serde_json::Value::String("forged".into());
+        receipt
+    });
+
+    assert_corpus_verify_rejects(
+        &corpus_root,
+        "module graph program scalar_branch inputs drift",
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_module_graph_edges_drift() {
+    let corpus_root = temp_semantic_corpus("module_graph_edges");
+    write_module_graph_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["programs"][0]["edges"][0]["kind"] =
+            serde_json::Value::String("forged_edge".into());
+        receipt
+    });
+
+    assert_corpus_verify_rejects(
+        &corpus_root,
+        "module graph program scalar_branch edges drift",
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_module_graph_summary_drift() {
+    let corpus_root = temp_semantic_corpus("module_graph_summary");
+    write_module_graph_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["summary"]["input_count"] = serde_json::Value::from(999);
+        receipt
+    });
+
+    assert_corpus_verify_rejects(&corpus_root, "module graph summary drift");
+}
+
+#[test]
 fn corpus_verify_rejects_symbol_graph_schema_drift() {
     let corpus_root = temp_semantic_corpus("symbol_graph_schema");
     write_symbol_graph_receipt_copy(&corpus_root, |mut receipt| {
@@ -11659,6 +11812,66 @@ fn corpus_verify_rejects_substrate_memory_receipt_path_escape() {
         String::from_utf8_lossy(&output.stderr)
             .contains("substrate memory_surface.memory_receipt must stay within corpus root"),
         "stderr should name substrate memory receipt path containment:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_substrate_module_receipt_missing_path() {
+    let corpus_root = temp_semantic_corpus("substrate_module_path_missing");
+    write_substrate_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["module_surface"]["module_receipt"] =
+            serde_json::Value::String("receipts/missing-module-graph.json".into());
+        receipt
+    });
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(&corpus_root)
+        .output()
+        .expect("run quantac corpus verify against substrate module receipt missing path");
+    let _ = fs::remove_dir_all(&corpus_root);
+
+    assert!(
+        !output.status.success(),
+        "substrate module receipt missing path should fail"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("substrate module_surface.module_receipt path not found"),
+        "stderr should name substrate module receipt missing path:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_substrate_module_receipt_path_escape() {
+    let corpus_root = temp_semantic_corpus("substrate_module_path_escape");
+    write_substrate_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["module_surface"]["module_receipt"] =
+            serde_json::Value::String("../module-graph-2026-06-18.json".into());
+        receipt
+    });
+
+    let output = quantac()
+        .arg("corpus")
+        .arg("verify")
+        .arg("--root")
+        .arg(&corpus_root)
+        .output()
+        .expect("run quantac corpus verify against substrate module receipt path escape");
+    let _ = fs::remove_dir_all(&corpus_root);
+
+    assert!(
+        !output.status.success(),
+        "substrate module receipt path escape should fail"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("substrate module_surface.module_receipt must stay within corpus root"),
+        "stderr should name substrate module receipt path containment:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
 }

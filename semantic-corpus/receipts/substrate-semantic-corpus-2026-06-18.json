@@ -64,6 +64,16 @@
     "backend_maturity_descriptor": "compiler/src/codegen/backend/STATUS.md",
     "representation_receipt": "receipts/mir-representation-2026-06-18.json"
   },
+  "module_surface": {
+    "resolver": "quantac source input resolver",
+    "digest_anchor": "quantalang-check-receipt/v1 input_graph_digest",
+    "module_receipt": "receipts/module-graph-2026-06-18.json",
+    "known_gaps": [
+      "cross-package public API index",
+      "full LSP navigation readiness",
+      "package registry dependency graph"
+    ]
+  },
   "symbol_surface": {
     "source": "AST",
     "representation": "MIR",

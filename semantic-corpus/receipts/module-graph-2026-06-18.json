@@ -1,0 +1,344 @@
+{
+  "schema": "quantalang-module-graph-receipt/v0",
+  "receipt_id": "module-graph-semantic-corpus-2026-06-18",
+  "created_at": "2026-06-18",
+  "compiler": "quantac",
+  "language": "quantalang",
+  "source_set": {
+    "kind": "semantic-corpus",
+    "manifest": "manifest.json",
+    "program_count": 8
+  },
+  "module_model": {
+    "resolver": "quantac source input resolver",
+    "input_roles": [
+      "entry",
+      "include",
+      "import",
+      "module"
+    ],
+    "digest_anchor": "quantalang-check-receipt/v1 input_graph_digest",
+    "symbol_anchor": "receipts/symbol-graph-2026-06-18.json"
+  },
+  "programs": [
+    {
+      "id": "scalar_branch",
+      "path": "programs/scalar_branch.quanta",
+      "source_digest": {
+        "algorithm": "sha256",
+        "hex": "0a025b8589a35b778471383ede457dcdda3c98a12af9d385d0572f4379f013d8"
+      },
+      "input_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "3e411f002a0493ba95421b5326159753860d0c58173e10e22cacc659638fb7af"
+      },
+      "module_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "1c33d0619267e4da05ec7a13f4b7bb52ce5478e7aa40df66164105477be94d4a"
+      },
+      "inputs": [
+        {
+          "id": "input:entry:programs/scalar_branch.quanta",
+          "role": "entry",
+          "path": "programs/scalar_branch.quanta",
+          "source_digest": {
+            "algorithm": "sha256",
+            "hex": "0a025b8589a35b778471383ede457dcdda3c98a12af9d385d0572f4379f013d8"
+          }
+        }
+      ],
+      "edges": [
+        {
+          "kind": "program_entry",
+          "from": "program:scalar_branch",
+          "to": "input:entry:programs/scalar_branch.quanta"
+        }
+      ],
+      "known_gaps": [
+        "full name resolution is not claimed",
+        "package public API graph is not claimed"
+      ]
+    },
+    {
+      "id": "references_mutation",
+      "path": "programs/references_mutation.quanta",
+      "source_digest": {
+        "algorithm": "sha256",
+        "hex": "d299be538551c7be4352fa70ee3fd36882612417e37e5e2840e2372d45ec81b2"
+      },
+      "input_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "33c1b6a915f034c5a40d64285254059a6c0b9ccf4bd11254a656b23c8b4fc7f5"
+      },
+      "module_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "c67ceccc42f529c0c8ae2c437b244a8c29935106a6e8ef4b79fee5a4ff44796b"
+      },
+      "inputs": [
+        {
+          "id": "input:entry:programs/references_mutation.quanta",
+          "role": "entry",
+          "path": "programs/references_mutation.quanta",
+          "source_digest": {
+            "algorithm": "sha256",
+            "hex": "d299be538551c7be4352fa70ee3fd36882612417e37e5e2840e2372d45ec81b2"
+          }
+        }
+      ],
+      "edges": [
+        {
+          "kind": "program_entry",
+          "from": "program:references_mutation",
+          "to": "input:entry:programs/references_mutation.quanta"
+        }
+      ],
+      "known_gaps": [
+        "full name resolution is not claimed",
+        "package public API graph is not claimed"
+      ]
+    },
+    {
+      "id": "structs_arrays",
+      "path": "programs/structs_arrays.quanta",
+      "source_digest": {
+        "algorithm": "sha256",
+        "hex": "59ddc9618ac56041e33f9a73ecfa9269bf53d03758bca9a5a40aea05389834c5"
+      },
+      "input_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "2f3ba2981384ea06a3eaf7ed6a008fa9e6e27c6d2108bed4d70fadc628f97f35"
+      },
+      "module_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "716e56b978aa424a782d64ba4449b43ab90b6317be881fc3d72f2b1382b7fb68"
+      },
+      "inputs": [
+        {
+          "id": "input:entry:programs/structs_arrays.quanta",
+          "role": "entry",
+          "path": "programs/structs_arrays.quanta",
+          "source_digest": {
+            "algorithm": "sha256",
+            "hex": "59ddc9618ac56041e33f9a73ecfa9269bf53d03758bca9a5a40aea05389834c5"
+          }
+        }
+      ],
+      "edges": [
+        {
+          "kind": "program_entry",
+          "from": "program:structs_arrays",
+          "to": "input:entry:programs/structs_arrays.quanta"
+        }
+      ],
+      "known_gaps": [
+        "full name resolution is not claimed",
+        "package public API graph is not claimed"
+      ]
+    },
+    {
+      "id": "tuple_ownership_reuse",
+      "path": "programs/tuple_ownership_reuse.quanta",
+      "source_digest": {
+        "algorithm": "sha256",
+        "hex": "a9f33b9b5b88a1e10d421aba31173d035175a502eef93ef9044837936d65b39a"
+      },
+      "input_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "bd632401d1aacf88cf54e5673a46c2d7f160891ee2e66d5b89a0d52494fc64a5"
+      },
+      "module_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "1426e4a463be42795686e2446eb0ab616c1a2c7225c545305c679ce2589f667f"
+      },
+      "inputs": [
+        {
+          "id": "input:entry:programs/tuple_ownership_reuse.quanta",
+          "role": "entry",
+          "path": "programs/tuple_ownership_reuse.quanta",
+          "source_digest": {
+            "algorithm": "sha256",
+            "hex": "a9f33b9b5b88a1e10d421aba31173d035175a502eef93ef9044837936d65b39a"
+          }
+        }
+      ],
+      "edges": [
+        {
+          "kind": "program_entry",
+          "from": "program:tuple_ownership_reuse",
+          "to": "input:entry:programs/tuple_ownership_reuse.quanta"
+        }
+      ],
+      "known_gaps": [
+        "full name resolution is not claimed",
+        "package public API graph is not claimed"
+      ]
+    },
+    {
+      "id": "struct_aggregate_reuse",
+      "path": "programs/struct_aggregate_reuse.quanta",
+      "source_digest": {
+        "algorithm": "sha256",
+        "hex": "b3bca55e495214bc19af590ce456cd5049a64f8551de1362b475ce8c96b8c272"
+      },
+      "input_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "0434dce6d72ec5a5665c91af9c86d9cad0cd71999eab196f66de8749c9783eda"
+      },
+      "module_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "39f4ee28b0b3e1c9bfb3c5958a772aaf02249a91fd2de124a7c59590beb1e42d"
+      },
+      "inputs": [
+        {
+          "id": "input:entry:programs/struct_aggregate_reuse.quanta",
+          "role": "entry",
+          "path": "programs/struct_aggregate_reuse.quanta",
+          "source_digest": {
+            "algorithm": "sha256",
+            "hex": "b3bca55e495214bc19af590ce456cd5049a64f8551de1362b475ce8c96b8c272"
+          }
+        }
+      ],
+      "edges": [
+        {
+          "kind": "program_entry",
+          "from": "program:struct_aggregate_reuse",
+          "to": "input:entry:programs/struct_aggregate_reuse.quanta"
+        }
+      ],
+      "known_gaps": [
+        "full name resolution is not claimed",
+        "package public API graph is not claimed"
+      ]
+    },
+    {
+      "id": "field_assignment_reuse",
+      "path": "programs/field_assignment_reuse.quanta",
+      "source_digest": {
+        "algorithm": "sha256",
+        "hex": "0384ba4cf4470cd8d03cac4ebc0af2daa77d8a24c4cea9d688ef229595d43ed4"
+      },
+      "input_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "b5ea650db003aa593591cca399d5d24e57102dca8081ad504bf61699263e6cd2"
+      },
+      "module_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "053649cea831e9d4ad807998faee9bfd914169a2eba29610824945a6d815c832"
+      },
+      "inputs": [
+        {
+          "id": "input:entry:programs/field_assignment_reuse.quanta",
+          "role": "entry",
+          "path": "programs/field_assignment_reuse.quanta",
+          "source_digest": {
+            "algorithm": "sha256",
+            "hex": "0384ba4cf4470cd8d03cac4ebc0af2daa77d8a24c4cea9d688ef229595d43ed4"
+          }
+        }
+      ],
+      "edges": [
+        {
+          "kind": "program_entry",
+          "from": "program:field_assignment_reuse",
+          "to": "input:entry:programs/field_assignment_reuse.quanta"
+        }
+      ],
+      "known_gaps": [
+        "full name resolution is not claimed",
+        "package public API graph is not claimed"
+      ]
+    },
+    {
+      "id": "nested_field_reuse",
+      "path": "programs/nested_field_reuse.quanta",
+      "source_digest": {
+        "algorithm": "sha256",
+        "hex": "13c982f4555cd699dc4bf72d7e15d93a6e7f449c13b195c61ff5f0aa752f56a5"
+      },
+      "input_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "d85e9a8ffe173dcdd2161e9e1b901cc138151fd981c918551256d88a6150b504"
+      },
+      "module_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "371dc0dfd4eb65b0c9b561d79a76d1d8ac6f20be3116f63af6f7cfda067a521f"
+      },
+      "inputs": [
+        {
+          "id": "input:entry:programs/nested_field_reuse.quanta",
+          "role": "entry",
+          "path": "programs/nested_field_reuse.quanta",
+          "source_digest": {
+            "algorithm": "sha256",
+            "hex": "13c982f4555cd699dc4bf72d7e15d93a6e7f449c13b195c61ff5f0aa752f56a5"
+          }
+        }
+      ],
+      "edges": [
+        {
+          "kind": "program_entry",
+          "from": "program:nested_field_reuse",
+          "to": "input:entry:programs/nested_field_reuse.quanta"
+        }
+      ],
+      "known_gaps": [
+        "full name resolution is not claimed",
+        "package public API graph is not claimed"
+      ]
+    },
+    {
+      "id": "deref_reuse",
+      "path": "programs/deref_reuse.quanta",
+      "source_digest": {
+        "algorithm": "sha256",
+        "hex": "f7fdeba524685c72653b1f1e7be6ce9ba4569d99b4b9a201d75539d15a1138e3"
+      },
+      "input_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "53ae45aa9061a23aa6eaeda4725dc0df9f895fae9a9288c59fcb6a8f5afe0aa9"
+      },
+      "module_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "3861c4ecfa83d45d346bec7d15db038b17948b82a12b5dcc059c3c625367ef37"
+      },
+      "inputs": [
+        {
+          "id": "input:entry:programs/deref_reuse.quanta",
+          "role": "entry",
+          "path": "programs/deref_reuse.quanta",
+          "source_digest": {
+            "algorithm": "sha256",
+            "hex": "f7fdeba524685c72653b1f1e7be6ce9ba4569d99b4b9a201d75539d15a1138e3"
+          }
+        }
+      ],
+      "edges": [
+        {
+          "kind": "program_entry",
+          "from": "program:deref_reuse",
+          "to": "input:entry:programs/deref_reuse.quanta"
+        }
+      ],
+      "known_gaps": [
+        "full name resolution is not claimed",
+        "package public API graph is not claimed"
+      ]
+    }
+  ],
+  "summary": {
+    "program_count": 8,
+    "input_count": 8,
+    "input_roles": [
+      "entry"
+    ],
+    "edge_kinds": [
+      "program_entry"
+    ],
+    "known_gaps": [
+      "cross-package public API index",
+      "full LSP navigation readiness",
+      "package registry dependency graph"
+    ]
+  }
+}
