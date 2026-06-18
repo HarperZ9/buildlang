@@ -63,6 +63,19 @@ fn lsp_fixture_sequence_records_compiler_type_diagnostics() {
 }
 
 #[test]
+fn lsp_fixture_sequence_records_semantic_tokens() {
+    let (_root, _manifest, receipt) = built_receipt();
+    let fixture = receipt
+        .fixtures
+        .iter()
+        .find(|fixture| fixture.id == "semantic-tokens")
+        .expect("semantic token fixture");
+
+    assert_eq!(fixture.method, "textDocument/semanticTokens/full");
+    assert!(fixture.observed.semantic_tokens > 0);
+}
+
+#[test]
 fn lsp_fixture_summary_sorts_methods_and_response_kinds() {
     let (_root, _manifest, receipt) = built_receipt();
 
@@ -102,7 +115,13 @@ fn validate_rejects_lsp_dispatch_schema_drift() {
 #[test]
 fn validate_rejects_lsp_dispatch_fixture_digest_drift() {
     let (root, manifest, mut receipt) = built_receipt();
-    receipt.fixtures[3].result_digest.hex = "bad-digest".to_string();
+    receipt
+        .fixtures
+        .iter_mut()
+        .find(|fixture| fixture.id == "document-symbol")
+        .expect("document-symbol fixture")
+        .result_digest
+        .hex = "bad-digest".to_string();
 
     let error = validate_lsp_dispatch_receipt(&root, &receipt, &manifest).unwrap_err();
 
@@ -112,7 +131,13 @@ fn validate_rejects_lsp_dispatch_fixture_digest_drift() {
 #[test]
 fn validate_rejects_lsp_dispatch_observed_drift() {
     let (root, manifest, mut receipt) = built_receipt();
-    receipt.fixtures[3].observed.document_symbols = 0;
+    receipt
+        .fixtures
+        .iter_mut()
+        .find(|fixture| fixture.id == "document-symbol")
+        .expect("document-symbol fixture")
+        .observed
+        .document_symbols = 0;
 
     let error = validate_lsp_dispatch_receipt(&root, &receipt, &manifest).unwrap_err();
 

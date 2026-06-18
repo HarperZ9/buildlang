@@ -61,6 +61,8 @@ pub(crate) struct LspDispatchObserved {
     pub(crate) code_actions: usize,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub(crate) workspace_edits: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(crate) semantic_tokens: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
