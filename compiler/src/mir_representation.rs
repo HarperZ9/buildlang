@@ -5,13 +5,13 @@ use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
+use quantalang::ast::Module;
 use quantalang::codegen::{
     lower::MirLowerer, AggregateKind, BinOp, BindingKind, CallingConv, CastKind, ExternalKind,
     FloatSize, IntSize, Linkage, MirConst, MirEnumVariant, MirFnSig, MirGlobal, MirModule,
     MirPlace, MirRValue, MirStmtKind, MirTerminator, MirType, MirTypeDef, MirUniform, MirValue,
     NullaryOp, PlaceProjection, ShaderBinding, ShaderStage, TypeDefKind, UnaryOp,
 };
-use quantalang::ast::Module;
 use quantalang::lexer::{Lexer, SourceFile};
 use quantalang::parser::Parser;
 use quantalang::types::{FunctionEffectSummary, TypeChecker, TypeContext};

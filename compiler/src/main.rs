@@ -10,6 +10,7 @@
 
 mod memory_layout;
 mod mir_representation;
+mod symbol_graph;
 
 use clap::{Parser as ClapParser, Subcommand};
 use sha2::{Digest, Sha256};
