@@ -52,6 +52,7 @@ pub mod server;
 pub mod symbols;
 pub mod transport;
 pub mod types;
+pub mod workspace_index;
 
 pub use document::*;
 pub use message::*;
