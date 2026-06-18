@@ -80,6 +80,13 @@ cc hello.c -o hello
 ./hello
 ```
 
+## Usage
+
+See [USAGE.md](USAGE.md) for an install/build line, the full command and
+backend reference, and worked examples (run, type-check with a policy receipt,
+and shader output) with expected output. A runnable demo lives in
+[examples/demo](examples/demo).
+
 ## Shader Example
 
 QuantaLang can compile shader code directly to HLSL or GLSL. Create `vignette.quanta`:
