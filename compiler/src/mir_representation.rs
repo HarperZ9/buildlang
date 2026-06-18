@@ -1,20 +1,23 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use quantalang::codegen::{
-    lower::MirLowerer, AggregateKind, BinOp, CastKind, MirModule, MirPlace, MirRValue, MirStmtKind,
-    MirTerminator, PlaceProjection, UnaryOp,
+    lower::MirLowerer, AggregateKind, BinOp, BindingKind, CallingConv, CastKind, ExternalKind,
+    FloatSize, IntSize, Linkage, MirConst, MirEnumVariant, MirFnSig, MirGlobal, MirModule,
+    MirPlace, MirRValue, MirStmtKind, MirTerminator, MirType, MirTypeDef, MirUniform, MirValue,
+    NullaryOp, PlaceProjection, ShaderBinding, ShaderStage, TypeDefKind, UnaryOp,
 };
 use quantalang::lexer::{Lexer, SourceFile};
 use quantalang::parser::Parser;
 use quantalang::types::{TypeChecker, TypeContext};
 
 use super::{
-    preprocess_includes, resolve_imports, resolve_modules, source_digest_hex,
-    SemanticCorpusManifest,
+    input_graph_digest, preprocess_includes_recording_inputs, resolve_imports_recording_inputs,
+    resolve_modules_recording_inputs, source_digest_hex, InputDigestLedger, SemanticCorpusManifest,
 };
 
 pub(crate) const MIR_REPRESENTATION_RECEIPT: &str = "mir-representation-2026-06-18.json";
@@ -59,11 +62,19 @@ pub(crate) struct MirRepresentationProgram {
     pub id: String,
     pub path: String,
     pub source_digest: MirRepresentationDigest,
+    pub input_graph_digest: MirRepresentationDigest,
+    pub mir_digest: MirRepresentationDigest,
     pub module: MirRepresentationModuleCounts,
     pub symbols: MirRepresentationSymbols,
     pub operations: MirRepresentationOperations,
     pub memory_surfaces: MirRepresentationMemorySurfaces,
     pub control_flow: MirRepresentationControlFlow,
+}
+
+struct LoweredMirProgram {
+    source_digest: MirRepresentationDigest,
+    input_graph_digest: MirRepresentationDigest,
+    module: MirModule,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -207,6 +218,8 @@ fn summarize_mir_program(
     id: &str,
     path: &str,
     source_digest: MirRepresentationDigest,
+    input_graph_digest: MirRepresentationDigest,
+    mir_digest: MirRepresentationDigest,
     module: &MirModule,
 ) -> MirRepresentationProgram {
     let module_counts = MirRepresentationModuleCounts {
@@ -282,6 +295,8 @@ fn summarize_mir_program(
         id: id.to_string(),
         path: path.to_string(),
         source_digest,
+        input_graph_digest,
+        mir_digest,
         module: module_counts,
         symbols,
         operations: sets.operations(),
@@ -583,6 +598,936 @@ fn projection_name(projection: &PlaceProjection) -> &'static str {
     }
 }
 
+fn sha256_digest(hex: String) -> MirRepresentationDigest {
+    MirRepresentationDigest {
+        algorithm: "sha256".to_string(),
+        hex,
+    }
+}
+
+fn mir_representation_digest(algorithm: &'static str, hex: String) -> MirRepresentationDigest {
+    MirRepresentationDigest {
+        algorithm: algorithm.to_string(),
+        hex,
+    }
+}
+
+fn json_string(value: &str) -> String {
+    serde_json::to_string(value).expect("serialize string")
+}
+
+fn push_line(output: &mut String, line: impl AsRef<str>) {
+    output.push_str(line.as_ref());
+    output.push('\n');
+}
+
+fn format_optional_string(value: Option<&str>) -> String {
+    value.map(json_string).unwrap_or_else(|| "null".to_string())
+}
+
+fn format_optional_local(value: Option<u32>) -> String {
+    value
+        .map(|local| local.to_string())
+        .unwrap_or_else(|| "null".to_string())
+}
+
+fn format_optional_block(value: Option<u32>) -> String {
+    value
+        .map(|block| block.to_string())
+        .unwrap_or_else(|| "null".to_string())
+}
+
+fn linkage_name(linkage: Linkage) -> &'static str {
+    match linkage {
+        Linkage::Internal => "Internal",
+        Linkage::External => "External",
+        Linkage::Weak => "Weak",
+        Linkage::LinkOnce => "LinkOnce",
+    }
+}
+
+fn shader_stage_name(stage: ShaderStage) -> &'static str {
+    match stage {
+        ShaderStage::Vertex => "Vertex",
+        ShaderStage::Fragment => "Fragment",
+        ShaderStage::Compute => "Compute",
+    }
+}
+
+fn calling_conv_name(calling_conv: CallingConv) -> &'static str {
+    match calling_conv {
+        CallingConv::Quanta => "Quanta",
+        CallingConv::C => "C",
+        CallingConv::Fast => "Fast",
+        CallingConv::Cold => "Cold",
+    }
+}
+
+fn binding_kind_name(kind: &BindingKind) -> &'static str {
+    match kind {
+        BindingKind::UniformBuffer(_) => "UniformBuffer",
+        BindingKind::Texture2D => "Texture2D",
+        BindingKind::Sampler => "Sampler",
+        BindingKind::StorageBuffer(_) => "StorageBuffer",
+    }
+}
+
+fn nullary_op_name(op: NullaryOp) -> &'static str {
+    match op {
+        NullaryOp::SizeOf => "SizeOf",
+        NullaryOp::AlignOf => "AlignOf",
+    }
+}
+
+fn int_size_name(size: IntSize) -> &'static str {
+    match size {
+        IntSize::I8 => "I8",
+        IntSize::I16 => "I16",
+        IntSize::I32 => "I32",
+        IntSize::I64 => "I64",
+        IntSize::I128 => "I128",
+        IntSize::ISize => "ISize",
+    }
+}
+
+fn float_size_name(size: FloatSize) -> &'static str {
+    match size {
+        FloatSize::F32 => "F32",
+        FloatSize::F64 => "F64",
+    }
+}
+
+fn write_mir_fn_sig(output: &mut String, signature: &MirFnSig) {
+    push_line(
+        output,
+        format!(
+            "sig variadic={} calling_conv={}",
+            signature.is_variadic,
+            calling_conv_name(signature.calling_conv)
+        ),
+    );
+    push_line(output, format!("sig.params {}", signature.params.len()));
+    for (index, parameter) in signature.params.iter().enumerate() {
+        write_mir_type(output, &format!("sig.param[{index}]"), parameter);
+    }
+    write_mir_type(output, "sig.ret", &signature.ret);
+}
+
+fn write_mir_type(output: &mut String, label: &str, ty: &MirType) {
+    match ty {
+        MirType::Void => push_line(output, format!("{label} Void")),
+        MirType::Bool => push_line(output, format!("{label} Bool")),
+        MirType::Int(size, signed) => push_line(
+            output,
+            format!("{label} Int size={} signed={signed}", int_size_name(*size)),
+        ),
+        MirType::Float(size) => push_line(
+            output,
+            format!("{label} Float size={}", float_size_name(*size)),
+        ),
+        MirType::Ptr(inner) => {
+            push_line(output, format!("{label} Ptr"));
+            write_mir_type(output, &format!("{label}.inner"), inner);
+        }
+        MirType::Array(element, count) => {
+            push_line(output, format!("{label} Array count={count}"));
+            write_mir_type(output, &format!("{label}.element"), element);
+        }
+        MirType::Slice(element) => {
+            push_line(output, format!("{label} Slice"));
+            write_mir_type(output, &format!("{label}.element"), element);
+        }
+        MirType::Struct(name) => push_line(
+            output,
+            format!("{label} Struct {}", json_string(name.as_ref())),
+        ),
+        MirType::FnPtr(signature) => {
+            push_line(output, format!("{label} FnPtr"));
+            write_mir_fn_sig(output, signature);
+        }
+        MirType::Never => push_line(output, format!("{label} Never")),
+        MirType::Vector(element, lanes) => {
+            push_line(output, format!("{label} Vector lanes={lanes}"));
+            write_mir_type(output, &format!("{label}.element"), element);
+        }
+        MirType::Texture2D(element) => {
+            push_line(output, format!("{label} Texture2D"));
+            write_mir_type(output, &format!("{label}.element"), element);
+        }
+        MirType::Sampler => push_line(output, format!("{label} Sampler")),
+        MirType::SampledImage(element) => {
+            push_line(output, format!("{label} SampledImage"));
+            write_mir_type(output, &format!("{label}.element"), element);
+        }
+        MirType::TraitObject(name) => push_line(
+            output,
+            format!("{label} TraitObject {}", json_string(name.as_ref())),
+        ),
+        MirType::Vec(element) => {
+            push_line(output, format!("{label} Vec"));
+            write_mir_type(output, &format!("{label}.element"), element);
+        }
+        MirType::Map(key, value) => {
+            push_line(output, format!("{label} Map"));
+            write_mir_type(output, &format!("{label}.key"), key);
+            write_mir_type(output, &format!("{label}.value"), value);
+        }
+        MirType::Tuple(elements) => {
+            push_line(output, format!("{label} Tuple {}", elements.len()));
+            for (index, element) in elements.iter().enumerate() {
+                write_mir_type(output, &format!("{label}.element[{index}]"), element);
+            }
+        }
+    }
+}
+
+fn write_mir_const(output: &mut String, label: &str, value: &MirConst) {
+    match value {
+        MirConst::Bool(flag) => push_line(output, format!("{label} Bool {flag}")),
+        MirConst::Int(number, ty) => {
+            push_line(output, format!("{label} Int {number}"));
+            write_mir_type(output, &format!("{label}.type"), ty);
+        }
+        MirConst::Uint(number, ty) => {
+            push_line(output, format!("{label} Uint {number}"));
+            write_mir_type(output, &format!("{label}.type"), ty);
+        }
+        MirConst::Float(number, ty) => {
+            push_line(output, format!("{label} Float bits={}", number.to_bits()));
+            write_mir_type(output, &format!("{label}.type"), ty);
+        }
+        MirConst::Str(index) => push_line(output, format!("{label} Str index={index}")),
+        MirConst::ByteStr(bytes) => {
+            let mut encoded = String::with_capacity(bytes.len() * 2);
+            for byte in bytes {
+                write!(&mut encoded, "{byte:02x}").expect("write to string");
+            }
+            push_line(output, format!("{label} ByteStr {encoded}"));
+        }
+        MirConst::Null(ty) => {
+            push_line(output, format!("{label} Null"));
+            write_mir_type(output, &format!("{label}.type"), ty);
+        }
+        MirConst::Unit => push_line(output, format!("{label} Unit")),
+        MirConst::Zeroed(ty) => {
+            push_line(output, format!("{label} Zeroed"));
+            write_mir_type(output, &format!("{label}.type"), ty);
+        }
+        MirConst::Undef(ty) => {
+            push_line(output, format!("{label} Undef"));
+            write_mir_type(output, &format!("{label}.type"), ty);
+        }
+        MirConst::Struct(name, fields) => {
+            push_line(
+                output,
+                format!(
+                    "{label} Struct {} fields={}",
+                    json_string(name.as_ref()),
+                    fields.len()
+                ),
+            );
+            for (index, field) in fields.iter().enumerate() {
+                write_mir_const(output, &format!("{label}.field[{index}]"), field);
+            }
+        }
+    }
+}
+
+fn write_mir_value(output: &mut String, label: &str, value: &MirValue) {
+    match value {
+        MirValue::Local(local) => push_line(output, format!("{label} Local {}", local.0)),
+        MirValue::Const(constant) => {
+            push_line(output, format!("{label} Const"));
+            write_mir_const(output, &format!("{label}.const"), constant);
+        }
+        MirValue::Global(name) => push_line(
+            output,
+            format!("{label} Global {}", json_string(name.as_ref())),
+        ),
+        MirValue::Function(name) => push_line(
+            output,
+            format!("{label} Function {}", json_string(name.as_ref())),
+        ),
+    }
+}
+
+fn write_mir_place(output: &mut String, label: &str, place: &MirPlace) {
+    push_line(
+        output,
+        format!(
+            "{label} local={} projections={}",
+            place.local.0,
+            place.projections.len()
+        ),
+    );
+    for (index, projection) in place.projections.iter().enumerate() {
+        write_mir_projection(output, &format!("{label}.projection[{index}]"), projection);
+    }
+}
+
+fn write_mir_projection(output: &mut String, label: &str, projection: &PlaceProjection) {
+    match projection {
+        PlaceProjection::Deref => push_line(output, format!("{label} Deref")),
+        PlaceProjection::Field(index, ty) => {
+            push_line(output, format!("{label} Field index={index}"));
+            write_mir_type(output, &format!("{label}.type"), ty);
+        }
+        PlaceProjection::Index(local) => push_line(output, format!("{label} Index {}", local.0)),
+        PlaceProjection::ConstantIndex { offset, from_end } => push_line(
+            output,
+            format!("{label} ConstantIndex offset={offset} from_end={from_end}"),
+        ),
+        PlaceProjection::Subslice { from, to, from_end } => push_line(
+            output,
+            format!("{label} Subslice from={from} to={to} from_end={from_end}"),
+        ),
+        PlaceProjection::Downcast(index) => push_line(output, format!("{label} Downcast {index}")),
+    }
+}
+
+fn write_mir_rvalue(output: &mut String, label: &str, rvalue: &MirRValue) {
+    push_line(output, format!("{label} {}", rvalue_name(rvalue)));
+    match rvalue {
+        MirRValue::Use(value) => write_mir_value(output, &format!("{label}.value"), value),
+        MirRValue::BinaryOp { op, left, right } => {
+            push_line(output, format!("{label}.op {}", bin_op_name(*op)));
+            write_mir_value(output, &format!("{label}.left"), left);
+            write_mir_value(output, &format!("{label}.right"), right);
+        }
+        MirRValue::UnaryOp { op, operand } => {
+            push_line(output, format!("{label}.op {}", unary_op_name(*op)));
+            write_mir_value(output, &format!("{label}.operand"), operand);
+        }
+        MirRValue::Ref { is_mut, place } | MirRValue::AddressOf { is_mut, place } => {
+            push_line(output, format!("{label}.is_mut {is_mut}"));
+            write_mir_place(output, &format!("{label}.place"), place);
+        }
+        MirRValue::Cast { kind, value, ty } => {
+            push_line(output, format!("{label}.kind {}", cast_kind_name(*kind)));
+            write_mir_value(output, &format!("{label}.value"), value);
+            write_mir_type(output, &format!("{label}.type"), ty);
+        }
+        MirRValue::Aggregate { kind, operands } => {
+            write_mir_aggregate_kind(output, &format!("{label}.kind"), kind);
+            push_line(output, format!("{label}.operands {}", operands.len()));
+            for (index, operand) in operands.iter().enumerate() {
+                write_mir_value(output, &format!("{label}.operand[{index}]"), operand);
+            }
+        }
+        MirRValue::Repeat { value, count } => {
+            push_line(output, format!("{label}.count {count}"));
+            write_mir_value(output, &format!("{label}.value"), value);
+        }
+        MirRValue::Discriminant(place) | MirRValue::Len(place) => {
+            write_mir_place(output, &format!("{label}.place"), place);
+        }
+        MirRValue::NullaryOp(op, ty) => {
+            push_line(output, format!("{label}.op {}", nullary_op_name(*op)));
+            write_mir_type(output, &format!("{label}.type"), ty);
+        }
+        MirRValue::FieldAccess {
+            base,
+            field_name,
+            field_ty,
+        } => {
+            write_mir_value(output, &format!("{label}.base"), base);
+            push_line(
+                output,
+                format!("{label}.field {}", json_string(field_name.as_ref())),
+            );
+            write_mir_type(output, &format!("{label}.field_type"), field_ty);
+        }
+        MirRValue::VariantField {
+            base,
+            variant_name,
+            field_index,
+            field_ty,
+        } => {
+            write_mir_value(output, &format!("{label}.base"), base);
+            push_line(
+                output,
+                format!(
+                    "{label}.variant {} field_index={field_index}",
+                    json_string(variant_name.as_ref())
+                ),
+            );
+            write_mir_type(output, &format!("{label}.field_type"), field_ty);
+        }
+        MirRValue::IndexAccess {
+            base,
+            index,
+            elem_ty,
+        } => {
+            write_mir_value(output, &format!("{label}.base"), base);
+            write_mir_value(output, &format!("{label}.index"), index);
+            write_mir_type(output, &format!("{label}.element_type"), elem_ty);
+        }
+        MirRValue::Deref { ptr, pointee_ty } => {
+            write_mir_value(output, &format!("{label}.ptr"), ptr);
+            write_mir_type(output, &format!("{label}.pointee_type"), pointee_ty);
+        }
+        MirRValue::TextureSample {
+            texture,
+            sampler,
+            coords,
+        } => {
+            write_mir_value(output, &format!("{label}.texture"), texture);
+            write_mir_value(output, &format!("{label}.sampler"), sampler);
+            write_mir_value(output, &format!("{label}.coords"), coords);
+        }
+    }
+}
+
+fn write_mir_aggregate_kind(output: &mut String, label: &str, kind: &AggregateKind) {
+    match kind {
+        AggregateKind::Array(element) => {
+            push_line(output, format!("{label} Array"));
+            write_mir_type(output, &format!("{label}.element"), element);
+        }
+        AggregateKind::Tuple => push_line(output, format!("{label} Tuple")),
+        AggregateKind::Struct(name) => push_line(
+            output,
+            format!("{label} Struct {}", json_string(name.as_ref())),
+        ),
+        AggregateKind::Variant(name, discriminant, variant) => push_line(
+            output,
+            format!(
+                "{label} Variant enum={} discriminant={discriminant} variant={}",
+                json_string(name.as_ref()),
+                json_string(variant.as_ref())
+            ),
+        ),
+        AggregateKind::Closure(name) => push_line(
+            output,
+            format!("{label} Closure {}", json_string(name.as_ref())),
+        ),
+    }
+}
+
+fn write_mir_stmt(output: &mut String, label: &str, stmt: &MirStmtKind) {
+    push_line(output, format!("{label} {}", statement_name(stmt)));
+    match stmt {
+        MirStmtKind::Assign { dest, value } => {
+            push_line(output, format!("{label}.dest {}", dest.0));
+            write_mir_rvalue(output, &format!("{label}.value"), value);
+        }
+        MirStmtKind::DerefAssign { ptr, value } => {
+            push_line(output, format!("{label}.ptr {}", ptr.0));
+            write_mir_rvalue(output, &format!("{label}.value"), value);
+        }
+        MirStmtKind::FieldDerefAssign {
+            ptr,
+            field_name,
+            value,
+        } => {
+            push_line(output, format!("{label}.ptr {}", ptr.0));
+            push_line(
+                output,
+                format!("{label}.field {}", json_string(field_name.as_ref())),
+            );
+            write_mir_rvalue(output, &format!("{label}.value"), value);
+        }
+        MirStmtKind::FieldAssign {
+            base,
+            field_name,
+            value,
+        } => {
+            push_line(output, format!("{label}.base {}", base.0));
+            push_line(
+                output,
+                format!("{label}.field {}", json_string(field_name.as_ref())),
+            );
+            write_mir_rvalue(output, &format!("{label}.value"), value);
+        }
+        MirStmtKind::StorageLive(local) | MirStmtKind::StorageDead(local) => {
+            push_line(output, format!("{label}.local {}", local.0));
+        }
+        MirStmtKind::Nop => {}
+    }
+}
+
+fn write_mir_terminator(output: &mut String, label: &str, terminator: &MirTerminator) {
+    push_line(output, format!("{label} {}", terminator_name(terminator)));
+    match terminator {
+        MirTerminator::Goto(target) => push_line(output, format!("{label}.target {}", target.0)),
+        MirTerminator::If {
+            cond,
+            then_block,
+            else_block,
+        } => {
+            write_mir_value(output, &format!("{label}.cond"), cond);
+            push_line(output, format!("{label}.then {}", then_block.0));
+            push_line(output, format!("{label}.else {}", else_block.0));
+        }
+        MirTerminator::Switch {
+            value,
+            targets,
+            default,
+        } => {
+            write_mir_value(output, &format!("{label}.value"), value);
+            push_line(output, format!("{label}.targets {}", targets.len()));
+            for (index, (constant, block)) in targets.iter().enumerate() {
+                write_mir_const(output, &format!("{label}.target[{index}].value"), constant);
+                push_line(output, format!("{label}.target[{index}].block {}", block.0));
+            }
+            push_line(output, format!("{label}.default {}", default.0));
+        }
+        MirTerminator::Call {
+            func,
+            args,
+            dest,
+            target,
+            unwind,
+        } => {
+            write_mir_value(output, &format!("{label}.func"), func);
+            push_line(output, format!("{label}.args {}", args.len()));
+            for (index, argument) in args.iter().enumerate() {
+                write_mir_value(output, &format!("{label}.arg[{index}]"), argument);
+            }
+            push_line(
+                output,
+                format!(
+                    "{label}.dest {}",
+                    format_optional_local(dest.map(|value| value.0))
+                ),
+            );
+            push_line(
+                output,
+                format!(
+                    "{label}.target {}",
+                    format_optional_block(target.map(|value| value.0))
+                ),
+            );
+            push_line(
+                output,
+                format!(
+                    "{label}.unwind {}",
+                    format_optional_block(unwind.map(|value| value.0))
+                ),
+            );
+        }
+        MirTerminator::Return(value) => {
+            if let Some(value) = value {
+                write_mir_value(output, &format!("{label}.value"), value);
+            } else {
+                push_line(output, format!("{label}.value null"));
+            }
+        }
+        MirTerminator::Unreachable | MirTerminator::Resume | MirTerminator::Abort => {}
+        MirTerminator::Drop {
+            place,
+            target,
+            unwind,
+        } => {
+            write_mir_place(output, &format!("{label}.place"), place);
+            push_line(output, format!("{label}.target {}", target.0));
+            push_line(
+                output,
+                format!(
+                    "{label}.unwind {}",
+                    format_optional_block(unwind.map(|value| value.0))
+                ),
+            );
+        }
+        MirTerminator::Assert {
+            cond,
+            expected,
+            msg,
+            target,
+            unwind,
+        } => {
+            write_mir_value(output, &format!("{label}.cond"), cond);
+            push_line(output, format!("{label}.expected {expected}"));
+            push_line(output, format!("{label}.msg {}", json_string(msg.as_ref())));
+            push_line(output, format!("{label}.target {}", target.0));
+            push_line(
+                output,
+                format!(
+                    "{label}.unwind {}",
+                    format_optional_block(unwind.map(|value| value.0))
+                ),
+            );
+        }
+    }
+}
+
+fn write_shader_binding(output: &mut String, label: &str, binding: &ShaderBinding) {
+    push_line(
+        output,
+        format!(
+            "{label} set={} binding={} kind={}",
+            binding.set,
+            binding.binding,
+            binding_kind_name(&binding.kind)
+        ),
+    );
+    match &binding.kind {
+        BindingKind::UniformBuffer(name) | BindingKind::StorageBuffer(name) => {
+            push_line(
+                output,
+                format!("{label}.resource {}", json_string(name.as_ref())),
+            );
+        }
+        BindingKind::Texture2D | BindingKind::Sampler => {}
+    }
+    write_mir_type(output, &format!("{label}.type"), &binding.ty);
+}
+
+fn write_mir_global(output: &mut String, index: usize, global: &MirGlobal) {
+    push_line(
+        output,
+        format!(
+            "global[{index}] name={} mutable={} linkage={}",
+            json_string(global.name.as_ref()),
+            global.is_mut,
+            linkage_name(global.linkage)
+        ),
+    );
+    write_mir_type(output, &format!("global[{index}].type"), &global.ty);
+    if let Some(init) = &global.init {
+        write_mir_const(output, &format!("global[{index}].init"), init);
+    } else {
+        push_line(output, format!("global[{index}].init null"));
+    }
+}
+
+fn write_mir_external(
+    output: &mut String,
+    index: usize,
+    external: &quantalang::codegen::MirExternal,
+) {
+    push_line(
+        output,
+        format!(
+            "external[{index}] name={}",
+            json_string(external.name.as_ref())
+        ),
+    );
+    match &external.kind {
+        ExternalKind::Function(signature) => {
+            push_line(output, format!("external[{index}].kind Function"));
+            write_mir_fn_sig(output, signature);
+        }
+        ExternalKind::Global(ty) => {
+            push_line(output, format!("external[{index}].kind Global"));
+            write_mir_type(output, &format!("external[{index}].type"), ty);
+        }
+    }
+}
+
+fn write_mir_enum_variant(output: &mut String, label: &str, variant: &MirEnumVariant) {
+    push_line(
+        output,
+        format!(
+            "{label} name={} discriminant={}",
+            json_string(variant.name.as_ref()),
+            variant.discriminant
+        ),
+    );
+    push_line(output, format!("{label}.fields {}", variant.fields.len()));
+    for (index, (name, ty)) in variant.fields.iter().enumerate() {
+        push_line(
+            output,
+            format!(
+                "{label}.field[{index}].name {}",
+                format_optional_string(name.as_ref().map(|value| value.as_ref()))
+            ),
+        );
+        write_mir_type(output, &format!("{label}.field[{index}].type"), ty);
+    }
+}
+
+fn write_mir_type_def(output: &mut String, index: usize, ty: &MirTypeDef) {
+    push_line(
+        output,
+        format!("type[{index}] name={}", json_string(ty.name.as_ref())),
+    );
+    match &ty.kind {
+        TypeDefKind::Struct { fields, packed } => {
+            push_line(output, format!("type[{index}].kind Struct packed={packed}"));
+            push_line(output, format!("type[{index}].fields {}", fields.len()));
+            for (field_index, (name, field_ty)) in fields.iter().enumerate() {
+                push_line(
+                    output,
+                    format!(
+                        "type[{index}].field[{field_index}].name {}",
+                        format_optional_string(name.as_ref().map(|value| value.as_ref()))
+                    ),
+                );
+                write_mir_type(
+                    output,
+                    &format!("type[{index}].field[{field_index}].type"),
+                    field_ty,
+                );
+            }
+        }
+        TypeDefKind::Union { variants } => {
+            push_line(output, format!("type[{index}].kind Union"));
+            push_line(output, format!("type[{index}].variants {}", variants.len()));
+            for (variant_index, (name, variant_ty)) in variants.iter().enumerate() {
+                push_line(
+                    output,
+                    format!(
+                        "type[{index}].variant[{variant_index}].name {}",
+                        json_string(name.as_ref())
+                    ),
+                );
+                write_mir_type(
+                    output,
+                    &format!("type[{index}].variant[{variant_index}].type"),
+                    variant_ty,
+                );
+            }
+        }
+        TypeDefKind::Enum {
+            discriminant_ty,
+            variants,
+        } => {
+            push_line(output, format!("type[{index}].kind Enum"));
+            write_mir_type(
+                output,
+                &format!("type[{index}].discriminant"),
+                discriminant_ty,
+            );
+            push_line(output, format!("type[{index}].variants {}", variants.len()));
+            for (variant_index, variant) in variants.iter().enumerate() {
+                write_mir_enum_variant(
+                    output,
+                    &format!("type[{index}].variant[{variant_index}]"),
+                    variant,
+                );
+            }
+        }
+    }
+}
+
+fn write_mir_uniform(output: &mut String, index: usize, uniform: &MirUniform) {
+    push_line(
+        output,
+        format!(
+            "uniform[{index}] name={}",
+            json_string(uniform.name.as_ref())
+        ),
+    );
+    write_mir_type(output, &format!("uniform[{index}].type"), &uniform.ty);
+    if let Some(default) = &uniform.default {
+        write_mir_const(output, &format!("uniform[{index}].default"), default);
+    } else {
+        push_line(output, format!("uniform[{index}].default null"));
+    }
+}
+
+fn write_mir_module(module: &MirModule) -> String {
+    let mut output = String::new();
+    push_line(
+        &mut output,
+        format!("module {}", json_string(module.name.as_ref())),
+    );
+    push_line(
+        &mut output,
+        format!(
+            "counts functions={} globals={} types={} strings={} externals={} vtables={} uniforms={}",
+            module.functions.len(),
+            module.globals.len(),
+            module.types.len(),
+            module.strings.len(),
+            module.externals.len(),
+            module.vtables.len(),
+            module.uniforms.len()
+        ),
+    );
+
+    for (index, function) in module.functions.iter().enumerate() {
+        push_line(
+            &mut output,
+            format!(
+                "function[{index}] name={} public={} linkage={} declaration={} shader_stage={}",
+                json_string(function.name.as_ref()),
+                function.is_public,
+                linkage_name(function.linkage),
+                function.is_declaration(),
+                function
+                    .shader_stage
+                    .map(shader_stage_name)
+                    .unwrap_or("null")
+            ),
+        );
+        write_mir_fn_sig(&mut output, &function.sig);
+        push_line(
+            &mut output,
+            format!("function[{index}].bindings {}", function.bindings.len()),
+        );
+        for (binding_index, binding) in function.bindings.iter().enumerate() {
+            write_shader_binding(
+                &mut output,
+                &format!("function[{index}].binding[{binding_index}]"),
+                binding,
+            );
+        }
+        push_line(
+            &mut output,
+            format!("function[{index}].locals {}", function.locals.len()),
+        );
+        for (local_index, local) in function.locals.iter().enumerate() {
+            push_line(
+                &mut output,
+                format!(
+                    "function[{index}].local[{local_index}] id={} name={} mutable={} param={} annotations={}",
+                    local.id.0,
+                    format_optional_string(local.name.as_ref().map(|value| value.as_ref())),
+                    local.is_mut,
+                    local.is_param,
+                    local.annotations.len()
+                ),
+            );
+            write_mir_type(
+                &mut output,
+                &format!("function[{index}].local[{local_index}].type"),
+                &local.ty,
+            );
+            for (annotation_index, annotation) in local.annotations.iter().enumerate() {
+                push_line(
+                    &mut output,
+                    format!(
+                        "function[{index}].local[{local_index}].annotation[{annotation_index}] {}",
+                        json_string(annotation.as_ref())
+                    ),
+                );
+            }
+        }
+        match &function.blocks {
+            Some(blocks) => {
+                push_line(
+                    &mut output,
+                    format!("function[{index}].blocks {}", blocks.len()),
+                );
+                for (block_index, block) in blocks.iter().enumerate() {
+                    push_line(
+                        &mut output,
+                        format!(
+                            "function[{index}].block[{block_index}] id={} label={}",
+                            block.id.0,
+                            format_optional_string(
+                                block.label.as_ref().map(|value| value.as_ref())
+                            )
+                        ),
+                    );
+                    push_line(
+                        &mut output,
+                        format!(
+                            "function[{index}].block[{block_index}].stmts {}",
+                            block.stmts.len()
+                        ),
+                    );
+                    for (stmt_index, stmt) in block.stmts.iter().enumerate() {
+                        write_mir_stmt(
+                            &mut output,
+                            &format!("function[{index}].block[{block_index}].stmt[{stmt_index}]"),
+                            &stmt.kind,
+                        );
+                    }
+                    if let Some(terminator) = &block.terminator {
+                        write_mir_terminator(
+                            &mut output,
+                            &format!("function[{index}].block[{block_index}].terminator"),
+                            terminator,
+                        );
+                    } else {
+                        push_line(
+                            &mut output,
+                            format!("function[{index}].block[{block_index}].terminator null"),
+                        );
+                    }
+                }
+            }
+            None => push_line(&mut output, format!("function[{index}].blocks null")),
+        }
+    }
+
+    for (index, global) in module.globals.iter().enumerate() {
+        write_mir_global(&mut output, index, global);
+    }
+
+    for (index, ty) in module.types.iter().enumerate() {
+        write_mir_type_def(&mut output, index, ty);
+    }
+
+    for (index, string) in module.strings.iter().enumerate() {
+        push_line(
+            &mut output,
+            format!("string[{index}] {}", json_string(string.as_ref())),
+        );
+    }
+
+    for (index, external) in module.externals.iter().enumerate() {
+        write_mir_external(&mut output, index, external);
+    }
+
+    let mut trait_methods = module.trait_methods.iter().collect::<Vec<_>>();
+    trait_methods.sort_by(|left, right| left.0.as_ref().cmp(right.0.as_ref()));
+    push_line(
+        &mut output,
+        format!("trait_methods {}", trait_methods.len()),
+    );
+    for (trait_index, (trait_name, methods)) in trait_methods.into_iter().enumerate() {
+        push_line(
+            &mut output,
+            format!(
+                "trait_method[{trait_index}] trait={} methods={}",
+                json_string(trait_name.as_ref()),
+                methods.len()
+            ),
+        );
+        let mut methods = methods.iter().collect::<Vec<_>>();
+        methods.sort_by(|left, right| left.0.as_ref().cmp(right.0.as_ref()));
+        for (method_index, (method_name, signature)) in methods.into_iter().enumerate() {
+            push_line(
+                &mut output,
+                format!(
+                    "trait_method[{trait_index}].method[{method_index}] name={}",
+                    json_string(method_name.as_ref())
+                ),
+            );
+            write_mir_fn_sig(&mut output, signature);
+        }
+    }
+
+    for (index, vtable) in module.vtables.iter().enumerate() {
+        push_line(
+            &mut output,
+            format!(
+                "vtable[{index}] trait={} type={} methods={}",
+                json_string(vtable.trait_name.as_ref()),
+                json_string(vtable.type_name.as_ref()),
+                vtable.methods.len()
+            ),
+        );
+        for (method_index, (method_name, function_name, signature)) in
+            vtable.methods.iter().enumerate()
+        {
+            push_line(
+                &mut output,
+                format!(
+                    "vtable[{index}].method[{method_index}] name={} function={}",
+                    json_string(method_name.as_ref()),
+                    json_string(function_name.as_ref())
+                ),
+            );
+            write_mir_fn_sig(&mut output, signature);
+        }
+    }
+
+    for (index, uniform) in module.uniforms.iter().enumerate() {
+        write_mir_uniform(&mut output, index, uniform);
+    }
+
+    output
+}
+
+fn digest_mir_module(module: &MirModule) -> MirRepresentationDigest {
+    sha256_digest(source_digest_hex(write_mir_module(module).as_bytes()))
+}
+
 pub(crate) fn build_mir_representation_receipt(
     corpus_root: &Path,
     manifest: &SemanticCorpusManifest,
@@ -591,22 +1536,15 @@ pub(crate) fn build_mir_representation_receipt(
     for program in &manifest.programs {
         let program_path =
             validate_corpus_relative_path(corpus_root, &program.path, "program.path")?;
-        let source_bytes = std::fs::read(&program_path).map_err(|err| {
-            format!(
-                "mir representation failed to read {}: {err}",
-                program_path.display()
-            )
-        })?;
-        let digest = MirRepresentationDigest {
-            algorithm: "sha256".to_string(),
-            hex: source_digest_hex(&source_bytes),
-        };
-        let mir = lower_program_to_mir(&program_path)?;
+        let lowered = lower_program_to_mir(&program_path)?;
+        let mir_digest = digest_mir_module(&lowered.module);
         programs.push(summarize_mir_program(
             &program.id,
             &program.path,
-            digest,
-            &mir,
+            lowered.source_digest,
+            lowered.input_graph_digest,
+            mir_digest,
+            &lowered.module,
         ));
     }
 
@@ -756,26 +1694,37 @@ fn validate_corpus_relative_path(
     Ok(canonical_path)
 }
 
-fn lower_program_to_mir(program_path: &Path) -> Result<MirModule, String> {
-    let source = std::fs::read_to_string(program_path).map_err(|err| {
+fn lower_program_to_mir(program_path: &Path) -> Result<LoweredMirProgram, String> {
+    let mut input_digest_ledger = InputDigestLedger::default();
+    let source_bytes = std::fs::read(program_path).map_err(|err| {
         format!(
             "mir representation failed to read {}: {err}",
             program_path.display()
         )
     })?;
-    let source = resolve_imports(&source, program_path).map_err(|_| {
+    input_digest_ledger.record("entry", program_path, &source_bytes);
+    let source_digest = sha256_digest(source_digest_hex(&source_bytes));
+    let source = String::from_utf8(source_bytes).map_err(|err| {
         format!(
-            "mir representation failed to resolve imports for {}",
+            "mir representation failed to decode {} as UTF-8: {err}",
             program_path.display()
         )
     })?;
+    let source = resolve_imports_recording_inputs(&source, program_path, &mut input_digest_ledger)
+        .map_err(|_| {
+            format!(
+                "mir representation failed to resolve imports for {}",
+                program_path.display()
+            )
+        })?;
     let base_dir = program_path.parent().unwrap_or_else(|| Path::new("."));
-    let source = preprocess_includes(&source, base_dir).map_err(|_| {
-        format!(
-            "mir representation failed to preprocess includes for {}",
-            program_path.display()
-        )
-    })?;
+    let source = preprocess_includes_recording_inputs(&source, base_dir, &mut input_digest_ledger)
+        .map_err(|_| {
+            format!(
+                "mir representation failed to preprocess includes for {}",
+                program_path.display()
+            )
+        })?;
     let source_file = SourceFile::new(program_path.to_string_lossy(), source);
     let mut lexer = Lexer::new(&source_file);
     let tokens = lexer.tokenize().map_err(|err| {
@@ -803,12 +1752,14 @@ fn lower_program_to_mir(program_path: &Path) -> Result<MirModule, String> {
             program_path.display()
         ));
     }
-    resolve_modules(&mut ast, base_dir).map_err(|_| {
-        format!(
-            "mir representation failed to resolve modules for {}",
-            program_path.display()
-        )
-    })?;
+    resolve_modules_recording_inputs(&mut ast, base_dir, &mut input_digest_ledger).map_err(
+        |_| {
+            format!(
+                "mir representation failed to resolve modules for {}",
+                program_path.display()
+            )
+        },
+    )?;
 
     let mut ctx = TypeContext::new();
     let mut checker = TypeChecker::new(&mut ctx);
@@ -828,14 +1779,24 @@ fn lower_program_to_mir(program_path: &Path) -> Result<MirModule, String> {
         ));
     }
 
-    MirLowerer::with_source(&ctx, Arc::from(source_file.source()))
+    let input_graph_digest = input_graph_digest(&input_digest_ledger.into_sorted_records());
+    let module = MirLowerer::with_source(&ctx, Arc::from(source_file.source()))
         .lower_module(&ast)
         .map_err(|err| {
             format!(
                 "mir representation code generation error in {}: {err}",
                 program_path.display()
             )
-        })
+        })?;
+
+    Ok(LoweredMirProgram {
+        source_digest,
+        input_graph_digest: mir_representation_digest(
+            input_graph_digest.algorithm,
+            input_graph_digest.hex,
+        ),
+        module,
+    })
 }
 
 fn compare_receipts(
@@ -876,6 +1837,18 @@ fn compare_receipts(
         if actual_program.source_digest != expected_program.source_digest {
             return Err(format!(
                 "mir representation program {} source_digest mismatch",
+                actual_program.id
+            ));
+        }
+        if actual_program.input_graph_digest != expected_program.input_graph_digest {
+            return Err(format!(
+                "mir representation program {} input_graph_digest mismatch",
+                actual_program.id
+            ));
+        }
+        if actual_program.mir_digest != expected_program.mir_digest {
+            return Err(format!(
+                "mir representation program {} mir_digest mismatch",
                 actual_program.id
             ));
         }
@@ -994,6 +1967,10 @@ mod tests {
         assert_eq!(receipt.programs[0].path, manifest.programs[0].path);
         assert_eq!(receipt.programs[0].source_digest.algorithm, "sha256");
         assert_eq!(receipt.programs[0].source_digest.hex.len(), 64);
+        assert_eq!(receipt.programs[0].input_graph_digest.algorithm, "sha256");
+        assert_eq!(receipt.programs[0].input_graph_digest.hex.len(), 64);
+        assert_eq!(receipt.programs[0].mir_digest.algorithm, "sha256");
+        assert_eq!(receipt.programs[0].mir_digest.hex.len(), 64);
     }
 
     #[test]
@@ -1024,6 +2001,14 @@ mod tests {
                     algorithm: "sha256".to_string(),
                     hex: "1".repeat(64),
                 },
+                input_graph_digest: MirRepresentationDigest {
+                    algorithm: "sha256".to_string(),
+                    hex: "3".repeat(64),
+                },
+                mir_digest: MirRepresentationDigest {
+                    algorithm: "sha256".to_string(),
+                    hex: "4".repeat(64),
+                },
                 module: MirRepresentationModuleCounts::default(),
                 symbols: MirRepresentationSymbols::default(),
                 operations: MirRepresentationOperations {
@@ -1048,6 +2033,14 @@ mod tests {
                 source_digest: MirRepresentationDigest {
                     algorithm: "sha256".to_string(),
                     hex: "2".repeat(64),
+                },
+                input_graph_digest: MirRepresentationDigest {
+                    algorithm: "sha256".to_string(),
+                    hex: "5".repeat(64),
+                },
+                mir_digest: MirRepresentationDigest {
+                    algorithm: "sha256".to_string(),
+                    hex: "6".repeat(64),
                 },
                 module: MirRepresentationModuleCounts::default(),
                 symbols: MirRepresentationSymbols::default(),
@@ -1131,6 +2124,14 @@ mod tests {
                 algorithm: "sha256".to_string(),
                 hex: "3".repeat(64),
             },
+            MirRepresentationDigest {
+                algorithm: "sha256".to_string(),
+                hex: "4".repeat(64),
+            },
+            MirRepresentationDigest {
+                algorithm: "sha256".to_string(),
+                hex: "5".repeat(64),
+            },
             &module,
         );
 
@@ -1143,6 +2144,63 @@ mod tests {
             program.operations.rvalues,
             vec!["Aggregate", "FieldAccess", "Ref", "Use"]
         );
+    }
+
+    #[test]
+    fn mir_digest_changes_when_payload_changes_without_family_drift() {
+        let mut first = MirModule::new("payload_test");
+        let mut first_function = MirFunction::new("main", MirFnSig::new(vec![], MirType::Void));
+        let mut first_block = MirBlock::new(BlockId::ENTRY);
+        first_block.push_stmt(MirStmt::assign(
+            LocalId(0),
+            MirRValue::Use(MirValue::Const(MirConst::Int(1, MirType::i32()))),
+        ));
+        first_block.set_terminator(MirTerminator::Return(None));
+        first_function.add_block(first_block);
+        first.add_function(first_function);
+
+        let mut second = MirModule::new("payload_test");
+        let mut second_function = MirFunction::new("main", MirFnSig::new(vec![], MirType::Void));
+        let mut second_block = MirBlock::new(BlockId::ENTRY);
+        second_block.push_stmt(MirStmt::assign(
+            LocalId(0),
+            MirRValue::Use(MirValue::Const(MirConst::Int(2, MirType::i32()))),
+        ));
+        second_block.set_terminator(MirTerminator::Return(None));
+        second_function.add_block(second_block);
+        second.add_function(second_function);
+
+        let first_program = summarize_mir_program(
+            "payload_test",
+            "programs/payload_test.quanta",
+            MirRepresentationDigest {
+                algorithm: "sha256".to_string(),
+                hex: "7".repeat(64),
+            },
+            MirRepresentationDigest {
+                algorithm: "sha256".to_string(),
+                hex: "8".repeat(64),
+            },
+            digest_mir_module(&first),
+            &first,
+        );
+        let second_program = summarize_mir_program(
+            "payload_test",
+            "programs/payload_test.quanta",
+            MirRepresentationDigest {
+                algorithm: "sha256".to_string(),
+                hex: "7".repeat(64),
+            },
+            MirRepresentationDigest {
+                algorithm: "sha256".to_string(),
+                hex: "8".repeat(64),
+            },
+            digest_mir_module(&second),
+            &second,
+        );
+
+        assert_eq!(first_program.operations, second_program.operations);
+        assert_ne!(first_program.mir_digest, second_program.mir_digest);
     }
 
     fn quantalang_type_def_point() -> MirTypeDef {

@@ -1992,9 +1992,13 @@ fn validate_substrate_path(root: &Path, relative: &str, field: &str) -> Result<P
     validate_non_empty(relative, field)?;
     let relative_path = Path::new(relative);
     if relative_path.is_absolute()
-        || relative_path
-            .components()
-            .any(|component| matches!(component, Component::ParentDir))
+        || relative_path.has_root()
+        || relative_path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
     {
         return Err(format!(
             "substrate {field} must stay within corpus root: {}",
