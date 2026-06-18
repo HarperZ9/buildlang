@@ -556,12 +556,25 @@ struct CheckReceiptInputDigest {
 #[derive(Default)]
 struct InputDigestLedger {
     records: BTreeMap<String, CheckReceiptInputDigest>,
+    normalize_text: bool,
 }
 
 impl InputDigestLedger {
+    fn text_normalized() -> Self {
+        Self {
+            records: BTreeMap::new(),
+            normalize_text: true,
+        }
+    }
+
     fn record(&mut self, role: &str, path: &Path, bytes: &[u8]) {
         let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let source = canonical.to_string_lossy().to_string();
+        let hex = if self.normalize_text {
+            source_text_digest_hex(bytes)
+        } else {
+            source_digest_hex(bytes)
+        };
         self.records
             .entry(source.clone())
             .or_insert_with(|| CheckReceiptInputDigest {
@@ -569,7 +582,7 @@ impl InputDigestLedger {
                 source,
                 digest: CheckReceiptSourceDigest {
                     algorithm: "sha256",
-                    hex: source_digest_hex(bytes),
+                    hex,
                 },
             });
     }
@@ -3170,6 +3183,25 @@ fn source_digest_hex(bytes: &[u8]) -> String {
         write!(&mut hex, "{byte:02x}").expect("write to string");
     }
     hex
+}
+
+fn source_text_digest_hex(bytes: &[u8]) -> String {
+    let mut normalized = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\r' {
+            normalized.push(b'\n');
+            if bytes.get(index + 1) == Some(&b'\n') {
+                index += 2;
+            } else {
+                index += 1;
+            }
+        } else {
+            normalized.push(bytes[index]);
+            index += 1;
+        }
+    }
+    source_digest_hex(&normalized)
 }
 
 fn input_graph_digest(records: &[CheckReceiptInputDigest]) -> CheckReceiptSourceDigest {
