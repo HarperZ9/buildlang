@@ -453,6 +453,14 @@ fn print_tool_probe(label: &str, command: &str, args: &[&str]) {
     }
 }
 
+fn print_substrate_evidence(corpus_root: Option<&Path>) {
+    println!();
+    println!("Substrate evidence:");
+    for row in substrate_evidence_rows(corpus_root) {
+        println!("{row}");
+    }
+}
+
 fn cmd_doctor() -> Result<(), i32> {
     println!("QuantaLang Doctor");
     println!("=================");
@@ -506,6 +514,9 @@ fn cmd_doctor() -> Result<(), i32> {
     println!("  spirv    experimental  SPIR-V output; validate with spirv-val");
     println!("  x86-64   experimental  assembly/object output; linker integration is partial");
     println!("  arm64    experimental  assembly/object output; linker integration is partial");
+
+    let corpus_root = find_semantic_corpus_root();
+    print_substrate_evidence(corpus_root.as_deref());
 
     println!();
     if c_compiler.is_some() {
