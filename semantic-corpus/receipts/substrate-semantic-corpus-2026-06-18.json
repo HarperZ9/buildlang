@@ -64,6 +64,17 @@
     "backend_maturity_descriptor": "compiler/src/codegen/backend/STATUS.md",
     "representation_receipt": "receipts/mir-representation-2026-06-18.json"
   },
+  "symbol_surface": {
+    "source": "AST",
+    "representation": "MIR",
+    "effect_anchor": "quantalang-check-receipt/v1",
+    "symbol_receipt": "receipts/symbol-graph-2026-06-18.json",
+    "known_gaps": [
+      "cross-package public API index",
+      "full LSP request dispatch",
+      "full package graph resolution"
+    ]
+  },
   "evidence_surface": {
     "commands": [
       "cargo test --manifest-path compiler/Cargo.toml semantic_corpus_manifest --quiet",

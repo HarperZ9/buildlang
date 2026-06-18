@@ -19,6 +19,8 @@ use model::{
     ProgramDigestProjection, SymbolGraphModel, SymbolGraphProgram, SymbolGraphSourceSet,
     SymbolGraphSummary,
 };
+#[allow(unused_imports)]
+pub(crate) use validate::{validate_symbol_graph_receipt, verify_symbol_graph_receipt};
 
 use super::{SemanticCorpusManifest, SemanticCorpusProgram};
 
