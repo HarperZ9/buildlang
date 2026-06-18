@@ -8,6 +8,8 @@
 //!
 //! This is the main entry point for the QuantaLang compiler command-line tool.
 
+mod mir_representation;
+
 use clap::{Parser as ClapParser, Subcommand};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -15,6 +17,10 @@ use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
+#[allow(unused_imports)]
+use mir_representation::{
+    verify_mir_representation_receipt, MirRepresentationReceipt, MIR_REPRESENTATION_RECEIPT,
+};
 use quantalang::ast::{self, ItemKind, Module, Visibility};
 use quantalang::codegen::{CodeGenerator, Target};
 use quantalang::lexer::{Lexer, SourceFile, Span};
