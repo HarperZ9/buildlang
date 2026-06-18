@@ -545,6 +545,10 @@ digests, and explicit known gaps during `quantac corpus verify`. This is a
 representation-level RAM/memory evidence receipt, not a byte-offset ABI layout
 claim, allocator proof, async runtime memory proof, or full interprocedural
 borrow proof.
+The substrate path now also carries a checked
+`quantalang-symbol-graph-receipt/v0` artifact that recomputes source/MIR/effect
+symbol evidence during `quantac corpus verify` without claiming call graph, LSP
+readiness, or package API completion.
 
 ## Status
 
