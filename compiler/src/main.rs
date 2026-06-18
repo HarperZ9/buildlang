@@ -1988,8 +1988,23 @@ fn validate_non_empty(value: &str, field: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn is_lexically_invalid_substrate_relative_path(relative: &str) -> bool {
+    if relative.starts_with('\\') {
+        return true;
+    }
+
+    let bytes = relative.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+}
+
 fn validate_substrate_path(root: &Path, relative: &str, field: &str) -> Result<PathBuf, String> {
     validate_non_empty(relative, field)?;
+    if is_lexically_invalid_substrate_relative_path(relative) {
+        return Err(format!(
+            "substrate {field} must stay within corpus root: {}",
+            relative
+        ));
+    }
     let relative_path = Path::new(relative);
     if relative_path.is_absolute()
         || relative_path.has_root()
@@ -6529,6 +6544,28 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn substrate_path_lexical_windows_rejection_is_host_independent() {
+        assert!(is_lexically_invalid_substrate_relative_path(
+            "\\receipts\\mir-representation-2026-06-18.json"
+        ));
+        assert!(is_lexically_invalid_substrate_relative_path(
+            "\\\\server\\share\\outside.json"
+        ));
+        assert!(is_lexically_invalid_substrate_relative_path(
+            "\\\\?\\C:\\outside.json"
+        ));
+        assert!(is_lexically_invalid_substrate_relative_path(
+            "C:\\outside.json"
+        ));
+        assert!(is_lexically_invalid_substrate_relative_path(
+            "C:outside.json"
+        ));
+        assert!(!is_lexically_invalid_substrate_relative_path(
+            "receipts/mir-representation-2026-06-18.json"
+        ));
     }
 
     #[test]
