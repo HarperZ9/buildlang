@@ -406,10 +406,11 @@ code --install-extension editors/quantalang-0.1.0.vsix
 - **Snippets** -- type `fn`, `struct`, `match`, `#[fragment]` to expand common patterns
 - **LSP launch support** -- `quantac lsp` starts the current server loop. The
   semantic corpus verifies raw dispatch for lifecycle, document sync,
-  document symbols, completion, hover, definition, references, formatting,
-  folding ranges, code actions, rename, and compiler-backed diagnostics from
-  the lexer/parser/type-checker pipeline through structural JSON-RPC parsing.
-  End-to-end VS Code behavior is still not receipt-verified.
+  document symbols, semantic tokens v0, completion, hover, definition,
+  references, formatting, folding ranges, code actions, rename, and
+  compiler-backed diagnostics from the lexer/parser/type-checker pipeline
+  through structural JSON-RPC parsing. End-to-end VS Code behavior and full
+  compiler-backed semantic token indexing are still not receipt-verified.
 
 ### Start the LSP Manually
 
