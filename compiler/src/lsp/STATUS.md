@@ -1,6 +1,6 @@
 # Status: lsp/
 
-Last audited: 2026-06-15
+Last audited: 2026-06-18
 
 ## Working
 - **Transport** (`transport.rs`, 468 lines): Stdio-based LSP transport with Content-Length header parsing, raw message send/receive. 5 unit tests.
@@ -13,20 +13,21 @@ Last audited: 2026-06-15
 - **Symbols** (`symbols.rs`, 600 lines): Document symbol extraction (functions, structs, enums, etc.).
 - **Definition** (`definition.rs`, 436 lines): Go-to-definition via symbol search across documents.
 - **Code Actions** (`actions.rs`, 428 lines): Quick fixes and refactoring suggestions.
-- **Server** (`server.rs`, 741 lines): Main server with lifecycle management, request routing.
+- **Server** (`server.rs`): Main server with lifecycle management and raw request dispatch for lifecycle, document sync, completion, hover, definition, references, document symbols, formatting, folding ranges, and unknown-method errors.
+- **Dispatch receipt** (`semantic-corpus/receipts/lsp-dispatch-2026-06-18.json`): Verifies a fixed raw LSP fixture sequence through `corpus verify`, including initialize, initialized, didOpen, documentSymbol, completion, hover, definition, references, formatting, foldingRange, didChange, shutdown, and exit.
 
 ## Partial
-- **Server runner** (`run_server()` in `server.rs`): The `run_server()` function exists and creates a stdio transport loop. However, the JSON parsing is manual string matching (`content.contains("\"method\":\"initialize\"")`), not real JSON parsing (no serde_json). Only `initialize`, `initialized`, `shutdown`, and `exit` methods are dispatched in the runner -- all other capabilities (completion, hover, diagnostics, definition, symbols, actions) have provider implementations but **are not wired into the message dispatch loop**. The server can technically start but cannot handle real VS Code requests beyond lifecycle events.
+- **Server runner** (`run_server()` in `server.rs`): The stdio transport loop dispatches the same raw message path covered by the LSP dispatch receipt, but parsing is still manual string matching and string extraction, not full JSON-RPC deserialization. Code actions and rename have provider methods but are not wired into the raw dispatch loop.
 
 ## Aspirational
-- Full VS Code extension integration: `quantac lsp` starts the current server loop, but the loop still does not dispatch completion, hover, definition, diagnostics, symbols, or actions to their provider implementations.
+- Full VS Code extension integration: `quantac lsp` starts the current server loop and dispatches several core requests, but the end-to-end VS Code language-server experience is not yet receipt-verified.
 - Real JSON parsing: the server uses manual string matching, not proper JSON deserialization.
 - Semantic analysis integration: diagnostics are text-pattern-based (bracket matching, unused variables by regex), not driven by the actual lexer/parser/type-checker pipeline.
 
 ## Not Started
-- No VS Code extension package.
+- Published VS Code extension package/release artifact.
 - No integration with the compiler's type checker for semantic diagnostics.
-- Full request dispatch for the `quantac lsp` CLI entry point.
+- Full LSP request dispatch for every provider method.
 
 ## Honest Assessment
-Total: 7,087 lines across 12 files, 24 unit tests. The LSP module has real, substantial implementations for all major language server capabilities (completion, hover, definition, diagnostics, symbols, actions). It is now reachable through `quantac lsp`, but the server loop still uses manual string matching instead of JSON parsing and only dispatches lifecycle messages. The provider implementations work in isolation (unit-tested) but are not yet reachable from a real LSP client request. You cannot connect VS Code to this server and get working completions or diagnostics yet.
+The LSP module has real implementations for major language-server capabilities, and the raw `quantac lsp` dispatch path now has a semantic-corpus receipt for a representative request sequence. The important remaining limit is protocol quality: the runner still uses manual string matching instead of robust JSON-RPC parsing, and VS Code behavior has not been verified end to end.

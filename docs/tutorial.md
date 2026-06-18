@@ -405,9 +405,11 @@ code --install-extension editors/quantalang-0.1.0.vsix
 - **Syntax highlighting** for `.quanta` files -- keywords, types, attributes, shader builtins
 - **Snippets** -- type `fn`, `struct`, `match`, `#[fragment]` to expand common patterns
 - **LSP launch support** -- `quantac lsp` starts the current server loop. The
-  provider implementations for definition, hover, diagnostics, and completion
-  exist in the compiler tree, but request dispatch is still partial and should
-  not be treated as a full VS Code language-server experience yet.
+  semantic corpus verifies raw dispatch for lifecycle, document sync,
+  document symbols, completion, hover, definition, references, formatting,
+  folding ranges, and diagnostics notifications. Parsing is still simplified,
+  so this should not be treated as a fully verified VS Code language-server
+  experience yet.
 
 ### Start the LSP Manually
 
