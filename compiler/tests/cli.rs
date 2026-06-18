@@ -11131,6 +11131,33 @@ fn corpus_verify_rejects_lsp_dispatch_summary_drift() {
 }
 
 #[test]
+fn corpus_verify_rejects_lsp_dispatch_stale_parser_metadata() {
+    let corpus_root = temp_semantic_corpus("lsp_dispatch_parser_metadata");
+    write_lsp_dispatch_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["lsp_model"]["request_parser"] =
+            serde_json::Value::String("simplified string extraction".into());
+        receipt
+    });
+
+    assert_corpus_verify_rejects(&corpus_root, "lsp dispatch lsp_model drift");
+}
+
+#[test]
+fn corpus_verify_rejects_lsp_dispatch_stale_json_rpc_gap() {
+    let corpus_root = temp_semantic_corpus("lsp_dispatch_json_rpc_gap");
+    write_lsp_dispatch_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["summary"]["known_gaps"] = serde_json::json!([
+            "compiler type-checker diagnostics in LSP",
+            "full JSON-RPC deserialization",
+            "full VS Code extension readiness"
+        ]);
+        receipt
+    });
+
+    assert_corpus_verify_rejects(&corpus_root, "lsp dispatch summary drift");
+}
+
+#[test]
 fn corpus_verify_rejects_symbol_graph_schema_drift() {
     let corpus_root = temp_semantic_corpus("symbol_graph_schema");
     write_symbol_graph_receipt_copy(&corpus_root, |mut receipt| {

@@ -2703,9 +2703,9 @@ fn validate_substrate_receipt(
             receipt.lsp_surface.dispatch
         ));
     }
-    if receipt.lsp_surface.request_parser != "simplified string extraction" {
+    if receipt.lsp_surface.request_parser != "serde_json structural JSON-RPC parser" {
         return Err(format!(
-            "substrate lsp_surface.request_parser mismatch: expected 'simplified string extraction', found '{}'",
+            "substrate lsp_surface.request_parser mismatch: expected 'serde_json structural JSON-RPC parser', found '{}'",
             receipt.lsp_surface.request_parser
         ));
     }

@@ -43,6 +43,7 @@ pub mod definition;
 pub mod diagnostics;
 pub mod document;
 pub mod hover;
+pub mod jsonrpc;
 pub mod message;
 pub mod server;
 pub mod symbols;
