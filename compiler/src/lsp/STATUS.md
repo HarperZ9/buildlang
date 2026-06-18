@@ -17,11 +17,11 @@ Last audited: 2026-06-18
 - **Dispatch receipt** (`semantic-corpus/receipts/lsp-dispatch-2026-06-18.json`): Verifies a fixed raw LSP fixture sequence through `corpus verify`, including initialize, initialized, didOpen, documentSymbol, completion, hover, definition, references, formatting, foldingRange, didChange, shutdown, and exit.
 
 ## Partial
-- **Server runner** (`run_server()` in `server.rs`): The stdio transport loop dispatches the same raw message path covered by the LSP dispatch receipt, but parsing is still manual string matching and string extraction, not full JSON-RPC deserialization. Code actions and rename have provider methods but are not wired into the raw dispatch loop.
+- **Server runner** (`run_server()` in `server.rs`): The stdio transport loop dispatches the same raw message path covered by the LSP dispatch receipt, using a `serde_json` structural JSON-RPC parser for method, id, and common params. Code actions and rename have provider methods but are not wired into the raw dispatch loop.
 
 ## Aspirational
 - Full VS Code extension integration: `quantac lsp` starts the current server loop and dispatches several core requests, but the end-to-end VS Code language-server experience is not yet receipt-verified.
-- Real JSON parsing: the server uses manual string matching, not proper JSON deserialization.
+- Full typed LSP deserialization: the server now parses JSON structurally, but still maps params through lightweight `serde_json::Value` accessors instead of typed request structs for every method.
 - Semantic analysis integration: diagnostics are text-pattern-based (bracket matching, unused variables by regex), not driven by the actual lexer/parser/type-checker pipeline.
 
 ## Not Started
@@ -30,4 +30,4 @@ Last audited: 2026-06-18
 - Full LSP request dispatch for every provider method.
 
 ## Honest Assessment
-The LSP module has real implementations for major language-server capabilities, and the raw `quantac lsp` dispatch path now has a semantic-corpus receipt for a representative request sequence. The important remaining limit is protocol quality: the runner still uses manual string matching instead of robust JSON-RPC parsing, and VS Code behavior has not been verified end to end.
+The LSP module has real implementations for major language-server capabilities, and the raw `quantac lsp` dispatch path now has a semantic-corpus receipt for a representative request sequence through structural JSON-RPC parsing. The important remaining limits are typed request coverage, unwired provider methods such as code actions and rename, compiler-backed semantic diagnostics, and end-to-end VS Code verification.

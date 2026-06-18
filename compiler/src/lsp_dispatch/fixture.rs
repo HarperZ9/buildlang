@@ -16,10 +16,14 @@ pub(super) fn fixture_sequence() -> Vec<RawFixture> {
     let document = serde_json::json!({"uri": uri});
     let position = serde_json::json!({"line": 3, "character": 14});
     vec![
-        fixture(
+        raw_fixture(
             "initialize",
             "initialize",
-            serde_json::json!({"rootUri": "file:///workspace"}),
+            r#"{
+              "jsonrpc": "2.0",
+              "params": { "rootUri": "file:///workspace" },
+              "method": "initialize"
+            }"#,
         ),
         fixture("initialized", "initialized", serde_json::json!({})),
         fixture(
@@ -27,11 +31,15 @@ pub(super) fn fixture_sequence() -> Vec<RawFixture> {
             "textDocument/didOpen",
             serde_json::json!({"textDocument": {"uri": uri, "languageId": "quanta", "version": 1, "text": source}}),
         ),
-        text_document_fixture(
-            2,
+        raw_fixture(
             "document-symbol",
             "textDocument/documentSymbol",
-            &document,
+            r#"{
+              "method": "textDocument/documentSymbol",
+              "params": { "textDocument": { "uri": "file:///workspace/main.quanta" } },
+              "id": 2,
+              "jsonrpc": "2.0"
+            }"#,
         ),
         text_position_fixture(
             3,
@@ -96,6 +104,14 @@ fn fixture(id: &'static str, method: &'static str, params: Value) -> RawFixture 
         method,
         content: serde_json::json!({"jsonrpc": "2.0", "method": method, "params": params})
             .to_string(),
+    }
+}
+
+fn raw_fixture(id: &'static str, method: &'static str, content: &str) -> RawFixture {
+    RawFixture {
+        id,
+        method,
+        content: content.to_string(),
     }
 }
 

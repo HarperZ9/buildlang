@@ -10,6 +10,7 @@ use super::completion::CompletionProvider;
 use super::diagnostics::DiagnosticsProvider;
 use super::document::DocumentStore;
 use super::hover::HoverProvider;
+use super::jsonrpc::JsonRpcMessage;
 use super::message::*;
 use super::symbols::SymbolProvider;
 use super::transport::*;
@@ -574,69 +575,6 @@ pub fn run_server() -> Result<(), TransportError> {
     Ok(())
 }
 
-/// Extract a JSON string value for a given key (simplified parser).
-fn extract_json_string(content: &str, key: &str) -> Option<String> {
-    let pattern = format!("\"{}\"", key);
-    let pos = content.find(&pattern)?;
-    let rest = &content[pos + pattern.len()..];
-    // Skip optional whitespace and colon
-    let rest = rest.trim_start();
-    let rest = rest.strip_prefix(':')?;
-    let rest = rest.trim_start();
-    if !rest.starts_with('"') {
-        return None;
-    }
-    let rest = &rest[1..];
-    // Find closing quote (handling escaped quotes)
-    let mut end = 0;
-    let bytes = rest.as_bytes();
-    while end < bytes.len() {
-        if bytes[end] == b'"' {
-            return Some(
-                rest[..end]
-                    .replace("\\\"", "\"")
-                    .replace("\\\\", "\\")
-                    .replace("\\n", "\n")
-                    .replace("\\t", "\t"),
-            );
-        }
-        if bytes[end] == b'\\' {
-            end += 1; // skip escaped char
-        }
-        end += 1;
-    }
-    None
-}
-
-/// Extract a JSON number value for a given key (simplified parser).
-fn extract_json_number(content: &str, key: &str) -> Option<i64> {
-    let pattern = format!("\"{}\"", key);
-    let pos = content.find(&pattern)?;
-    let rest = &content[pos + pattern.len()..];
-    let rest = rest.trim_start();
-    let rest = rest.strip_prefix(':')?;
-    let rest = rest.trim_start();
-    let end = rest
-        .find(|c: char| !c.is_ascii_digit() && c != '-')
-        .unwrap_or(rest.len());
-    rest[..end].parse().ok()
-}
-
-/// Extract text document URI from JSON content.
-fn extract_uri(content: &str) -> Option<String> {
-    extract_json_string(content, "uri")
-}
-
-/// Extract position (line, character) from JSON content.
-fn extract_position(content: &str) -> Option<Position> {
-    // Find "position" object, then extract line and character within it
-    let pos_idx = content.find("\"position\"")?;
-    let rest = &content[pos_idx..];
-    let line = extract_json_number(rest, "line")? as u32;
-    let character = extract_json_number(rest, "character")? as u32;
-    Some(Position::new(line, character))
-}
-
 /// Build a JSON response with result.
 fn build_response(id: String, result: String) -> String {
     JsonObjectBuilder::new()
@@ -682,6 +620,21 @@ fn build_diagnostics_notification(params: &PublishDiagnosticsParams) -> String {
     build_notification("textDocument/publishDiagnostics", params_json)
 }
 
+/// Build a JSON-RPC error response.
+fn build_error_response(id: String, code: i32, message: &str) -> String {
+    JsonObjectBuilder::new()
+        .field_str("jsonrpc", "2.0")
+        .field("id", id)
+        .field(
+            "error",
+            JsonObjectBuilder::new()
+                .field_number("code", code)
+                .field_str("message", message)
+                .build(),
+        )
+        .build()
+}
+
 /// Build range JSON.
 fn build_range_json(range: &Range) -> String {
     JsonObjectBuilder::new()
@@ -712,14 +665,22 @@ fn build_location_json(loc: &Location) -> String {
 
 /// Handle a raw JSON message and return a response (and optionally a notification to send after).
 fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<String> {
-    let id = extract_id(content);
+    let message = match JsonRpcMessage::parse(content) {
+        Ok(message) => message,
+        Err(_) => {
+            let id = extract_id(content)?;
+            return Some(build_error_response(id, -32700, "Parse error"));
+        }
+    };
+    let id = message.id_json().map(str::to_string);
+    let method = message.method()?;
 
     // =========================================================================
     // LIFECYCLE
     // =========================================================================
 
-    if content.contains("\"method\":\"initialize\"") {
-        let root_uri = extract_json_string(content, "rootUri");
+    if method == "initialize" {
+        let root_uri = message.string_at(&["params", "rootUri"]);
         let params = InitializeParams {
             process_id: None,
             root_path: None,
@@ -736,12 +697,12 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
         ));
     }
 
-    if content.contains("\"method\":\"initialized\"") {
+    if method == "initialized" {
         server.initialized();
         return None;
     }
 
-    if content.contains("\"method\":\"shutdown\"") {
+    if method == "shutdown" {
         server.shutdown();
         return Some(build_response(
             id.unwrap_or_else(|| "1".to_string()),
@@ -749,7 +710,7 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
         ));
     }
 
-    if content.contains("\"method\":\"exit\"") {
+    if method == "exit" {
         server.exit();
         return None;
     }
@@ -758,12 +719,19 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
     // TEXT DOCUMENT SYNC
     // =========================================================================
 
-    if content.contains("\"method\":\"textDocument/didOpen\"") {
-        let uri = extract_json_string(content, "uri").unwrap_or_default();
-        let language_id =
-            extract_json_string(content, "languageId").unwrap_or_else(|| "quanta".to_string());
-        let version = extract_json_number(content, "version").unwrap_or(0) as i32;
-        let text = extract_json_string(content, "text").unwrap_or_default();
+    if method == "textDocument/didOpen" {
+        let uri = message
+            .string_at(&["params", "textDocument", "uri"])
+            .unwrap_or_default();
+        let language_id = message
+            .string_at(&["params", "textDocument", "languageId"])
+            .unwrap_or_else(|| "quanta".to_string());
+        let version = message
+            .i64_at(&["params", "textDocument", "version"])
+            .unwrap_or(0) as i32;
+        let text = message
+            .string_at(&["params", "textDocument", "text"])
+            .unwrap_or_default();
         let params = DidOpenTextDocumentParams {
             text_document: TextDocumentItem {
                 uri,
@@ -778,11 +746,12 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
         return None;
     }
 
-    if content.contains("\"method\":\"textDocument/didChange\"") {
-        let uri = extract_uri(content).unwrap_or_default();
-        let version = extract_json_number(content, "version").unwrap_or(0) as i32;
-        // Extract full text from contentChanges (simplified: assumes full sync)
-        let text = extract_json_string(content, "text").unwrap_or_default();
+    if method == "textDocument/didChange" {
+        let uri = message.text_document_uri().unwrap_or_default();
+        let version = message
+            .i64_at(&["params", "textDocument", "version"])
+            .unwrap_or(0) as i32;
+        let text = message.first_content_change_text().unwrap_or_default();
         let params = DidChangeTextDocumentParams {
             text_document: VersionedTextDocumentIdentifier { uri, version },
             content_changes: vec![TextDocumentContentChangeEvent { range: None, text }],
@@ -793,8 +762,8 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
         return None;
     }
 
-    if content.contains("\"method\":\"textDocument/didSave\"") {
-        let uri = extract_uri(content).unwrap_or_default();
+    if method == "textDocument/didSave" {
+        let uri = message.text_document_uri().unwrap_or_default();
         let params = DidSaveTextDocumentParams {
             text_document: TextDocumentIdentifier { uri },
             text: None,
@@ -805,8 +774,8 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
         return None;
     }
 
-    if content.contains("\"method\":\"textDocument/didClose\"") {
-        let uri = extract_uri(content).unwrap_or_default();
+    if method == "textDocument/didClose" {
+        let uri = message.text_document_uri().unwrap_or_default();
         server.did_close(DidCloseTextDocumentParams {
             text_document: TextDocumentIdentifier { uri },
         });
@@ -817,9 +786,9 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
     // LANGUAGE FEATURES (requests - require id)
     // =========================================================================
 
-    if content.contains("\"method\":\"textDocument/completion\"") {
-        let uri = extract_uri(content).unwrap_or_default();
-        let position = extract_position(content).unwrap_or(Position::new(0, 0));
+    if method == "textDocument/completion" {
+        let uri = message.text_document_uri().unwrap_or_default();
+        let position = message.position().unwrap_or(Position::new(0, 0));
         let params = CompletionParams {
             text_document_position: TextDocumentPositionParams {
                 text_document: TextDocumentIdentifier { uri },
@@ -859,9 +828,9 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
         ));
     }
 
-    if content.contains("\"method\":\"textDocument/hover\"") {
-        let uri = extract_uri(content).unwrap_or_default();
-        let position = extract_position(content).unwrap_or(Position::new(0, 0));
+    if method == "textDocument/hover" {
+        let uri = message.text_document_uri().unwrap_or_default();
+        let position = message.position().unwrap_or(Position::new(0, 0));
         let params = TextDocumentPositionParams {
             text_document: TextDocumentIdentifier { uri },
             position,
@@ -893,9 +862,9 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
         ));
     }
 
-    if content.contains("\"method\":\"textDocument/definition\"") {
-        let uri = extract_uri(content).unwrap_or_default();
-        let position = extract_position(content).unwrap_or(Position::new(0, 0));
+    if method == "textDocument/definition" {
+        let uri = message.text_document_uri().unwrap_or_default();
+        let position = message.position().unwrap_or(Position::new(0, 0));
         let params = TextDocumentPositionParams {
             text_document: TextDocumentIdentifier { uri },
             position,
@@ -911,9 +880,9 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
         ));
     }
 
-    if content.contains("\"method\":\"textDocument/references\"") {
-        let uri = extract_uri(content).unwrap_or_default();
-        let position = extract_position(content).unwrap_or(Position::new(0, 0));
+    if method == "textDocument/references" {
+        let uri = message.text_document_uri().unwrap_or_default();
+        let position = message.position().unwrap_or(Position::new(0, 0));
         let params = TextDocumentPositionParams {
             text_document: TextDocumentIdentifier { uri },
             position,
@@ -929,8 +898,8 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
         ));
     }
 
-    if content.contains("\"method\":\"textDocument/documentSymbol\"") {
-        let uri = extract_uri(content).unwrap_or_default();
+    if method == "textDocument/documentSymbol" {
+        let uri = message.text_document_uri().unwrap_or_default();
         let symbols = server.document_symbol(&uri);
         let result = build_symbols_json(&symbols);
         return Some(build_response(
@@ -939,8 +908,8 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
         ));
     }
 
-    if content.contains("\"method\":\"textDocument/formatting\"") {
-        let uri = extract_uri(content).unwrap_or_default();
+    if method == "textDocument/formatting" {
+        let uri = message.text_document_uri().unwrap_or_default();
         let params = DocumentFormattingParams {
             text_document: TextDocumentIdentifier { uri },
             options: FormattingOptions::default(),
@@ -961,8 +930,8 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
         ));
     }
 
-    if content.contains("\"method\":\"textDocument/foldingRange\"") {
-        let uri = extract_uri(content).unwrap_or_default();
+    if method == "textDocument/foldingRange" {
+        let uri = message.text_document_uri().unwrap_or_default();
         let ranges = server.folding_range(&uri);
         let mut arr = JsonArrayBuilder::new();
         for r in &ranges {
@@ -989,19 +958,8 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
     // UNKNOWN METHOD
     // =========================================================================
 
-    if content.contains("\"id\":") {
-        let response = JsonObjectBuilder::new()
-            .field_str("jsonrpc", "2.0")
-            .field("id", id.unwrap_or_else(|| "1".to_string()))
-            .field(
-                "error",
-                JsonObjectBuilder::new()
-                    .field_number("code", -32601)
-                    .field_str("message", "Method not found")
-                    .build(),
-            )
-            .build();
-        return Some(response);
+    if let Some(id) = id {
+        return Some(build_error_response(id, -32601, "Method not found"));
     }
 
     None
@@ -1216,5 +1174,86 @@ mod tests {
             "expected helper symbol in {names:?}"
         );
         assert!(names.contains(&"main"), "expected main symbol in {names:?}");
+    }
+
+    #[test]
+    fn raw_dispatch_initialize_accepts_pretty_json_and_string_id() {
+        let mut server = LanguageServer::new();
+        let response = dispatch_raw_message(
+            &mut server,
+            r#"{
+              "jsonrpc": "2.0",
+              "params": { "rootUri": "file:///workspace" },
+              "method": "initialize",
+              "id": "init-1"
+            }"#,
+        )
+        .expect("initialize should return a response");
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("parse initialize response");
+
+        assert_eq!(json["id"], "init-1");
+        assert_eq!(json["result"]["capabilities"]["hoverProvider"], true);
+    }
+
+    #[test]
+    fn raw_dispatch_document_symbol_accepts_reordered_pretty_json() {
+        let mut server = LanguageServer::new();
+        dispatch_raw_message(
+            &mut server,
+            r#"{
+              "params": {
+                "textDocument": {
+                  "text": "fn helper() -> i32 { 1 }\nfn main() { helper(); }\n",
+                  "version": 1,
+                  "languageId": "quanta",
+                  "uri": "file:///workspace/main.quanta"
+                }
+              },
+              "method": "textDocument/didOpen",
+              "jsonrpc": "2.0"
+            }"#,
+        )
+        .expect("didOpen should publish diagnostics");
+
+        let response = dispatch_raw_message(
+            &mut server,
+            r#"{
+              "method": "textDocument/documentSymbol",
+              "params": { "textDocument": { "uri": "file:///workspace/main.quanta" } },
+              "id": 2,
+              "jsonrpc": "2.0"
+            }"#,
+        )
+        .expect("documentSymbol should return a response");
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("parse documentSymbol response");
+        let names = json["result"]
+            .as_array()
+            .expect("documentSymbol result array")
+            .iter()
+            .filter_map(|symbol| symbol["name"].as_str())
+            .collect::<Vec<_>>();
+
+        assert!(
+            names.contains(&"helper"),
+            "expected helper symbol in {names:?}"
+        );
+        assert!(names.contains(&"main"), "expected main symbol in {names:?}");
+    }
+
+    #[test]
+    fn raw_dispatch_malformed_json_request_returns_parse_error() {
+        let mut server = LanguageServer::new();
+        let response = dispatch_raw_message(
+            &mut server,
+            r#"{"jsonrpc":"2.0","id":9,"method":"initialize""#,
+        )
+        .expect("malformed request with id should return an error response");
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("parse error response");
+
+        assert_eq!(json["id"], 9);
+        assert_eq!(json["error"]["code"], -32700);
     }
 }

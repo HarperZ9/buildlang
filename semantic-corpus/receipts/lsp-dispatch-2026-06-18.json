@@ -12,7 +12,7 @@
   "lsp_model": {
     "protocol": "LSP JSON-RPC over stdio",
     "dispatch": "quantac lsp raw message dispatch",
-    "request_parser": "simplified string extraction",
+    "request_parser": "serde_json structural JSON-RPC parser",
     "semantic_anchor": "compiler diagnostics and parser-backed document model",
     "symbol_anchor": "receipts/symbol-graph-2026-06-18.json",
     "module_anchor": "receipts/module-graph-2026-06-18.json"
@@ -277,7 +277,6 @@
     ],
     "known_gaps": [
       "compiler type-checker diagnostics in LSP",
-      "full JSON-RPC deserialization",
       "full VS Code extension readiness"
     ]
   }

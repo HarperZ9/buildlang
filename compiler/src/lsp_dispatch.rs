@@ -52,7 +52,7 @@ fn lsp_model() -> LspDispatchModel {
     LspDispatchModel {
         protocol: "LSP JSON-RPC over stdio".to_string(),
         dispatch: "quantac lsp raw message dispatch".to_string(),
-        request_parser: "simplified string extraction".to_string(),
+        request_parser: "serde_json structural JSON-RPC parser".to_string(),
         semantic_anchor: "compiler diagnostics and parser-backed document model".to_string(),
         symbol_anchor: format!("receipts/{SYMBOL_GRAPH_RECEIPT}"),
         module_anchor: format!("receipts/{MODULE_GRAPH_RECEIPT}"),
@@ -77,7 +77,6 @@ fn summarize_fixtures(fixtures: &[LspDispatchFixture]) -> LspDispatchSummary {
         known_gaps: sorted(
             [
                 "compiler type-checker diagnostics in LSP",
-                "full JSON-RPC deserialization",
                 "full VS Code extension readiness",
             ]
             .into_iter()
