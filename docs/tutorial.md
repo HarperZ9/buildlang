@@ -407,9 +407,8 @@ code --install-extension editors/quantalang-0.1.0.vsix
 - **LSP launch support** -- `quantac lsp` starts the current server loop. The
   semantic corpus verifies raw dispatch for lifecycle, document sync,
   document symbols, completion, hover, definition, references, formatting,
-  folding ranges, and diagnostics notifications. Parsing is still simplified,
-  so this should not be treated as a fully verified VS Code language-server
-  experience yet.
+  folding ranges, and diagnostics notifications through structural JSON-RPC
+  parsing. End-to-end VS Code behavior is still not receipt-verified.
 
 ### Start the LSP Manually
 
