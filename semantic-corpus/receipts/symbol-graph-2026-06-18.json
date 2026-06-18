@@ -1,0 +1,1134 @@
+{
+  "schema": "quantalang-symbol-graph-receipt/v0",
+  "receipt_id": "symbol-graph-semantic-corpus-2026-06-18",
+  "created_at": "2026-06-18",
+  "compiler": "quantac",
+  "language": "quantalang",
+  "source_set": {
+    "kind": "semantic-corpus",
+    "manifest": "manifest.json",
+    "program_count": 8
+  },
+  "symbol_model": {
+    "source": "AST",
+    "representation": "MIR",
+    "semantic_anchor": "type-checker function effect summaries",
+    "lowering_pipeline": "parse -> type-check -> ast-to-mir",
+    "representation_anchor": "receipts/mir-representation-2026-06-18.json",
+    "memory_anchor": "receipts/memory-layout-2026-06-18.json"
+  },
+  "programs": [
+    {
+      "id": "scalar_branch",
+      "path": "programs/scalar_branch.quanta",
+      "source_digest": {
+        "algorithm": "sha256",
+        "hex": "0a025b8589a35b778471383ede457dcdda3c98a12af9d385d0572f4379f013d8"
+      },
+      "input_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "3e411f002a0493ba95421b5326159753860d0c58173e10e22cacc659638fb7af"
+      },
+      "mir_digest": {
+        "algorithm": "sha256",
+        "hex": "5432511b2cd813a22a2c5c7aaed6f2a1b502d3f07a9748d5354fd3ee42769d51"
+      },
+      "symbol_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "f15fea9fa1135deb2a7babb84a4c37189933047f7f7da2832bdc196bcf0096bb"
+      },
+      "source_symbols": [
+        {
+          "id": "source:function:choose",
+          "kind": "function",
+          "name": "choose",
+          "visibility": "private",
+          "span": {
+            "start": 0,
+            "end": 58
+          },
+          "signature": {
+            "parameters": 1,
+            "has_return": true,
+            "is_async": false,
+            "is_unsafe": false,
+            "declared_effects": []
+          }
+        },
+        {
+          "id": "source:function:main",
+          "kind": "function",
+          "name": "main",
+          "visibility": "private",
+          "span": {
+            "start": 60,
+            "end": 133
+          },
+          "signature": {
+            "parameters": 0,
+            "has_return": false,
+            "is_async": false,
+            "is_unsafe": false,
+            "declared_effects": [
+              "Console"
+            ]
+          }
+        }
+      ],
+      "mir_symbols": {
+        "functions": [
+          "choose",
+          "main"
+        ],
+        "types": [
+          "quanta_vec2",
+          "quanta_vec3",
+          "quanta_vec4"
+        ],
+        "globals": [],
+        "externals": []
+      },
+      "effect_symbols": [
+        {
+          "function": "choose",
+          "declared_effects": [],
+          "observed_capabilities": [],
+          "propagated_effect_sources": []
+        },
+        {
+          "function": "main",
+          "declared_effects": [
+            "Console"
+          ],
+          "observed_capabilities": [
+            "Console"
+          ],
+          "propagated_effect_sources": []
+        }
+      ],
+      "edges": [
+        {
+          "kind": "source_to_effect_summary",
+          "from": "source:function:choose",
+          "to": "effect:function:choose"
+        },
+        {
+          "kind": "source_to_effect_summary",
+          "from": "source:function:main",
+          "to": "effect:function:main"
+        },
+        {
+          "kind": "source_to_mir_function",
+          "from": "source:function:choose",
+          "to": "mir:function:choose"
+        },
+        {
+          "kind": "source_to_mir_function",
+          "from": "source:function:main",
+          "to": "mir:function:main"
+        }
+      ],
+      "known_gaps": [
+        "call graph is not claimed",
+        "external package resolution is not claimed"
+      ]
+    },
+    {
+      "id": "references_mutation",
+      "path": "programs/references_mutation.quanta",
+      "source_digest": {
+        "algorithm": "sha256",
+        "hex": "d299be538551c7be4352fa70ee3fd36882612417e37e5e2840e2372d45ec81b2"
+      },
+      "input_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "33c1b6a915f034c5a40d64285254059a6c0b9ccf4bd11254a656b23c8b4fc7f5"
+      },
+      "mir_digest": {
+        "algorithm": "sha256",
+        "hex": "c62027b21e6f4c1a850dddd9ff0ed88efa001bfd61daf32a91d2f6d2285bfb5d"
+      },
+      "symbol_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "0c226098ab5e4b1619fec6c8ea5b370d29af27ba690d5e9c43e4c6ba7884e87e"
+      },
+      "source_symbols": [
+        {
+          "id": "source:function:add_to",
+          "kind": "function",
+          "name": "add_to",
+          "visibility": "private",
+          "span": {
+            "start": 0,
+            "end": 61
+          },
+          "signature": {
+            "parameters": 2,
+            "has_return": false,
+            "is_async": false,
+            "is_unsafe": false,
+            "declared_effects": []
+          }
+        },
+        {
+          "id": "source:function:main",
+          "kind": "function",
+          "name": "main",
+          "visibility": "private",
+          "span": {
+            "start": 105,
+            "end": 235
+          },
+          "signature": {
+            "parameters": 0,
+            "has_return": false,
+            "is_async": false,
+            "is_unsafe": false,
+            "declared_effects": [
+              "Console"
+            ]
+          }
+        },
+        {
+          "id": "source:function:read_value",
+          "kind": "function",
+          "name": "read_value",
+          "visibility": "private",
+          "span": {
+            "start": 63,
+            "end": 103
+          },
+          "signature": {
+            "parameters": 1,
+            "has_return": true,
+            "is_async": false,
+            "is_unsafe": false,
+            "declared_effects": []
+          }
+        }
+      ],
+      "mir_symbols": {
+        "functions": [
+          "add_to",
+          "main",
+          "read_value"
+        ],
+        "types": [
+          "quanta_vec2",
+          "quanta_vec3",
+          "quanta_vec4"
+        ],
+        "globals": [],
+        "externals": []
+      },
+      "effect_symbols": [
+        {
+          "function": "add_to",
+          "declared_effects": [],
+          "observed_capabilities": [],
+          "propagated_effect_sources": []
+        },
+        {
+          "function": "main",
+          "declared_effects": [
+            "Console"
+          ],
+          "observed_capabilities": [
+            "Console"
+          ],
+          "propagated_effect_sources": []
+        },
+        {
+          "function": "read_value",
+          "declared_effects": [],
+          "observed_capabilities": [],
+          "propagated_effect_sources": []
+        }
+      ],
+      "edges": [
+        {
+          "kind": "source_to_effect_summary",
+          "from": "source:function:add_to",
+          "to": "effect:function:add_to"
+        },
+        {
+          "kind": "source_to_effect_summary",
+          "from": "source:function:main",
+          "to": "effect:function:main"
+        },
+        {
+          "kind": "source_to_effect_summary",
+          "from": "source:function:read_value",
+          "to": "effect:function:read_value"
+        },
+        {
+          "kind": "source_to_mir_function",
+          "from": "source:function:add_to",
+          "to": "mir:function:add_to"
+        },
+        {
+          "kind": "source_to_mir_function",
+          "from": "source:function:main",
+          "to": "mir:function:main"
+        },
+        {
+          "kind": "source_to_mir_function",
+          "from": "source:function:read_value",
+          "to": "mir:function:read_value"
+        }
+      ],
+      "known_gaps": [
+        "call graph is not claimed",
+        "external package resolution is not claimed"
+      ]
+    },
+    {
+      "id": "structs_arrays",
+      "path": "programs/structs_arrays.quanta",
+      "source_digest": {
+        "algorithm": "sha256",
+        "hex": "59ddc9618ac56041e33f9a73ecfa9269bf53d03758bca9a5a40aea05389834c5"
+      },
+      "input_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "2f3ba2981384ea06a3eaf7ed6a008fa9e6e27c6d2108bed4d70fadc628f97f35"
+      },
+      "mir_digest": {
+        "algorithm": "sha256",
+        "hex": "f85a0999eae7eb5b758252f24d4d4d52229b391b59c1b8137abaced433793dde"
+      },
+      "symbol_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "85b7bc5f632aa251176dfb406eb5d67c425355684d5186ea1a0ea6f23accfe08"
+      },
+      "source_symbols": [
+        {
+          "id": "source:function:main",
+          "kind": "function",
+          "name": "main",
+          "visibility": "private",
+          "span": {
+            "start": 111,
+            "end": 261
+          },
+          "signature": {
+            "parameters": 0,
+            "has_return": false,
+            "is_async": false,
+            "is_unsafe": false,
+            "declared_effects": [
+              "Console"
+            ]
+          }
+        },
+        {
+          "id": "source:function:sum_array",
+          "kind": "function",
+          "name": "sum_array",
+          "visibility": "private",
+          "span": {
+            "start": 42,
+            "end": 109
+          },
+          "signature": {
+            "parameters": 1,
+            "has_return": true,
+            "is_async": false,
+            "is_unsafe": false,
+            "declared_effects": []
+          }
+        },
+        {
+          "id": "source:struct:Point",
+          "kind": "struct",
+          "name": "Point",
+          "visibility": "private",
+          "span": {
+            "start": 0,
+            "end": 40
+          }
+        },
+        {
+          "id": "source:struct:Point.field:x",
+          "kind": "struct_field",
+          "name": "x",
+          "visibility": "private",
+          "span": {
+            "start": 19,
+            "end": 25
+          }
+        },
+        {
+          "id": "source:struct:Point.field:y",
+          "kind": "struct_field",
+          "name": "y",
+          "visibility": "private",
+          "span": {
+            "start": 31,
+            "end": 37
+          }
+        }
+      ],
+      "mir_symbols": {
+        "functions": [
+          "main",
+          "sum_array"
+        ],
+        "types": [
+          "Point",
+          "quanta_vec2",
+          "quanta_vec3",
+          "quanta_vec4"
+        ],
+        "globals": [],
+        "externals": []
+      },
+      "effect_symbols": [
+        {
+          "function": "main",
+          "declared_effects": [
+            "Console"
+          ],
+          "observed_capabilities": [
+            "Console"
+          ],
+          "propagated_effect_sources": []
+        },
+        {
+          "function": "sum_array",
+          "declared_effects": [],
+          "observed_capabilities": [],
+          "propagated_effect_sources": []
+        }
+      ],
+      "edges": [
+        {
+          "kind": "source_to_effect_summary",
+          "from": "source:function:main",
+          "to": "effect:function:main"
+        },
+        {
+          "kind": "source_to_effect_summary",
+          "from": "source:function:sum_array",
+          "to": "effect:function:sum_array"
+        },
+        {
+          "kind": "source_to_mir_function",
+          "from": "source:function:main",
+          "to": "mir:function:main"
+        },
+        {
+          "kind": "source_to_mir_function",
+          "from": "source:function:sum_array",
+          "to": "mir:function:sum_array"
+        },
+        {
+          "kind": "source_to_mir_type",
+          "from": "source:struct:Point",
+          "to": "mir:type:Point"
+        }
+      ],
+      "known_gaps": [
+        "call graph is not claimed",
+        "external package resolution is not claimed"
+      ]
+    },
+    {
+      "id": "tuple_ownership_reuse",
+      "path": "programs/tuple_ownership_reuse.quanta",
+      "source_digest": {
+        "algorithm": "sha256",
+        "hex": "a9f33b9b5b88a1e10d421aba31173d035175a502eef93ef9044837936d65b39a"
+      },
+      "input_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "bd632401d1aacf88cf54e5673a46c2d7f160891ee2e66d5b89a0d52494fc64a5"
+      },
+      "mir_digest": {
+        "algorithm": "sha256",
+        "hex": "8763fe8f264cb9eb121fa655ebb8368cfb4b818d1b2ce5609489223de7ffbe0f"
+      },
+      "symbol_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "2059e1e37f3c9538ff43bf5cd5a26629e2c2116f9ea26f7b41e5cc68faeae2a5"
+      },
+      "source_symbols": [
+        {
+          "id": "source:function:main",
+          "kind": "function",
+          "name": "main",
+          "visibility": "private",
+          "span": {
+            "start": 57,
+            "end": 193
+          },
+          "signature": {
+            "parameters": 0,
+            "has_return": false,
+            "is_async": false,
+            "is_unsafe": false,
+            "declared_effects": [
+              "Console"
+            ]
+          }
+        },
+        {
+          "id": "source:function:sum",
+          "kind": "function",
+          "name": "sum",
+          "visibility": "private",
+          "span": {
+            "start": 0,
+            "end": 55
+          },
+          "signature": {
+            "parameters": 1,
+            "has_return": true,
+            "is_async": false,
+            "is_unsafe": false,
+            "declared_effects": []
+          }
+        }
+      ],
+      "mir_symbols": {
+        "functions": [
+          "main",
+          "sum"
+        ],
+        "types": [
+          "Tuple_i32_i32",
+          "quanta_vec2",
+          "quanta_vec3",
+          "quanta_vec4"
+        ],
+        "globals": [],
+        "externals": []
+      },
+      "effect_symbols": [
+        {
+          "function": "main",
+          "declared_effects": [
+            "Console"
+          ],
+          "observed_capabilities": [
+            "Console"
+          ],
+          "propagated_effect_sources": []
+        },
+        {
+          "function": "sum",
+          "declared_effects": [],
+          "observed_capabilities": [],
+          "propagated_effect_sources": []
+        }
+      ],
+      "edges": [
+        {
+          "kind": "source_to_effect_summary",
+          "from": "source:function:main",
+          "to": "effect:function:main"
+        },
+        {
+          "kind": "source_to_effect_summary",
+          "from": "source:function:sum",
+          "to": "effect:function:sum"
+        },
+        {
+          "kind": "source_to_mir_function",
+          "from": "source:function:main",
+          "to": "mir:function:main"
+        },
+        {
+          "kind": "source_to_mir_function",
+          "from": "source:function:sum",
+          "to": "mir:function:sum"
+        }
+      ],
+      "known_gaps": [
+        "call graph is not claimed",
+        "external package resolution is not claimed"
+      ]
+    },
+    {
+      "id": "struct_aggregate_reuse",
+      "path": "programs/struct_aggregate_reuse.quanta",
+      "source_digest": {
+        "algorithm": "sha256",
+        "hex": "b3bca55e495214bc19af590ce456cd5049a64f8551de1362b475ce8c96b8c272"
+      },
+      "input_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "0434dce6d72ec5a5665c91af9c86d9cad0cd71999eab196f66de8749c9783eda"
+      },
+      "mir_digest": {
+        "algorithm": "sha256",
+        "hex": "3fe3ad4afff6f15abc9fdd81f80c5ebac609416207c525505f226a8dcb71a267"
+      },
+      "symbol_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "4a50b892f28d28eff64dc11304ac68ba3f87f7d467e20a166c9b485693be1705"
+      },
+      "source_symbols": [
+        {
+          "id": "source:function:main",
+          "kind": "function",
+          "name": "main",
+          "visibility": "private",
+          "span": {
+            "start": 94,
+            "end": 241
+          },
+          "signature": {
+            "parameters": 0,
+            "has_return": false,
+            "is_async": false,
+            "is_unsafe": false,
+            "declared_effects": [
+              "Console"
+            ]
+          }
+        },
+        {
+          "id": "source:struct:Pair",
+          "kind": "struct",
+          "name": "Pair",
+          "visibility": "private",
+          "span": {
+            "start": 42,
+            "end": 92
+          }
+        },
+        {
+          "id": "source:struct:Pair.field:left",
+          "kind": "struct_field",
+          "name": "left",
+          "visibility": "private",
+          "span": {
+            "start": 60,
+            "end": 71
+          }
+        },
+        {
+          "id": "source:struct:Pair.field:right",
+          "kind": "struct_field",
+          "name": "right",
+          "visibility": "private",
+          "span": {
+            "start": 77,
+            "end": 89
+          }
+        },
+        {
+          "id": "source:struct:Point",
+          "kind": "struct",
+          "name": "Point",
+          "visibility": "private",
+          "span": {
+            "start": 0,
+            "end": 40
+          }
+        },
+        {
+          "id": "source:struct:Point.field:x",
+          "kind": "struct_field",
+          "name": "x",
+          "visibility": "private",
+          "span": {
+            "start": 19,
+            "end": 25
+          }
+        },
+        {
+          "id": "source:struct:Point.field:y",
+          "kind": "struct_field",
+          "name": "y",
+          "visibility": "private",
+          "span": {
+            "start": 31,
+            "end": 37
+          }
+        }
+      ],
+      "mir_symbols": {
+        "functions": [
+          "main"
+        ],
+        "types": [
+          "Pair",
+          "Point",
+          "quanta_vec2",
+          "quanta_vec3",
+          "quanta_vec4"
+        ],
+        "globals": [],
+        "externals": []
+      },
+      "effect_symbols": [
+        {
+          "function": "main",
+          "declared_effects": [
+            "Console"
+          ],
+          "observed_capabilities": [
+            "Console"
+          ],
+          "propagated_effect_sources": []
+        }
+      ],
+      "edges": [
+        {
+          "kind": "source_to_effect_summary",
+          "from": "source:function:main",
+          "to": "effect:function:main"
+        },
+        {
+          "kind": "source_to_mir_function",
+          "from": "source:function:main",
+          "to": "mir:function:main"
+        },
+        {
+          "kind": "source_to_mir_type",
+          "from": "source:struct:Pair",
+          "to": "mir:type:Pair"
+        },
+        {
+          "kind": "source_to_mir_type",
+          "from": "source:struct:Point",
+          "to": "mir:type:Point"
+        }
+      ],
+      "known_gaps": [
+        "call graph is not claimed",
+        "external package resolution is not claimed"
+      ]
+    },
+    {
+      "id": "field_assignment_reuse",
+      "path": "programs/field_assignment_reuse.quanta",
+      "source_digest": {
+        "algorithm": "sha256",
+        "hex": "0384ba4cf4470cd8d03cac4ebc0af2daa77d8a24c4cea9d688ef229595d43ed4"
+      },
+      "input_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "b5ea650db003aa593591cca399d5d24e57102dca8081ad504bf61699263e6cd2"
+      },
+      "mir_digest": {
+        "algorithm": "sha256",
+        "hex": "0793afa9ed418eb816ab3176a92b092ec346c978eebdd699419455daf8a0d729"
+      },
+      "symbol_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "7972a84e8545fb61cbbbc2f4288b4199b97fd32e4c8af662deae1ab68628b34e"
+      },
+      "source_symbols": [
+        {
+          "id": "source:function:main",
+          "kind": "function",
+          "name": "main",
+          "visibility": "private",
+          "span": {
+            "start": 78,
+            "end": 260
+          },
+          "signature": {
+            "parameters": 0,
+            "has_return": false,
+            "is_async": false,
+            "is_unsafe": false,
+            "declared_effects": [
+              "Console"
+            ]
+          }
+        },
+        {
+          "id": "source:struct:Holder",
+          "kind": "struct",
+          "name": "Holder",
+          "visibility": "private",
+          "span": {
+            "start": 42,
+            "end": 76
+          }
+        },
+        {
+          "id": "source:struct:Holder.field:item",
+          "kind": "struct_field",
+          "name": "item",
+          "visibility": "private",
+          "span": {
+            "start": 62,
+            "end": 73
+          }
+        },
+        {
+          "id": "source:struct:Point",
+          "kind": "struct",
+          "name": "Point",
+          "visibility": "private",
+          "span": {
+            "start": 0,
+            "end": 40
+          }
+        },
+        {
+          "id": "source:struct:Point.field:x",
+          "kind": "struct_field",
+          "name": "x",
+          "visibility": "private",
+          "span": {
+            "start": 19,
+            "end": 25
+          }
+        },
+        {
+          "id": "source:struct:Point.field:y",
+          "kind": "struct_field",
+          "name": "y",
+          "visibility": "private",
+          "span": {
+            "start": 31,
+            "end": 37
+          }
+        }
+      ],
+      "mir_symbols": {
+        "functions": [
+          "main"
+        ],
+        "types": [
+          "Holder",
+          "Point",
+          "quanta_vec2",
+          "quanta_vec3",
+          "quanta_vec4"
+        ],
+        "globals": [],
+        "externals": []
+      },
+      "effect_symbols": [
+        {
+          "function": "main",
+          "declared_effects": [
+            "Console"
+          ],
+          "observed_capabilities": [
+            "Console"
+          ],
+          "propagated_effect_sources": []
+        }
+      ],
+      "edges": [
+        {
+          "kind": "source_to_effect_summary",
+          "from": "source:function:main",
+          "to": "effect:function:main"
+        },
+        {
+          "kind": "source_to_mir_function",
+          "from": "source:function:main",
+          "to": "mir:function:main"
+        },
+        {
+          "kind": "source_to_mir_type",
+          "from": "source:struct:Holder",
+          "to": "mir:type:Holder"
+        },
+        {
+          "kind": "source_to_mir_type",
+          "from": "source:struct:Point",
+          "to": "mir:type:Point"
+        }
+      ],
+      "known_gaps": [
+        "call graph is not claimed",
+        "external package resolution is not claimed"
+      ]
+    },
+    {
+      "id": "nested_field_reuse",
+      "path": "programs/nested_field_reuse.quanta",
+      "source_digest": {
+        "algorithm": "sha256",
+        "hex": "13c982f4555cd699dc4bf72d7e15d93a6e7f449c13b195c61ff5f0aa752f56a5"
+      },
+      "input_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "d85e9a8ffe173dcdd2161e9e1b901cc138151fd981c918551256d88a6150b504"
+      },
+      "mir_digest": {
+        "algorithm": "sha256",
+        "hex": "cf7f00225a03e0b5247de91a47717742f99266683bd54559d21e9c8afc051248"
+      },
+      "symbol_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "f376638f5b2de7337939ca94795dbb93f96b3fa4ed7173a1739f2fbf2ea2bee1"
+      },
+      "source_symbols": [
+        {
+          "id": "source:function:main",
+          "kind": "function",
+          "name": "main",
+          "visibility": "private",
+          "span": {
+            "start": 80,
+            "end": 243
+          },
+          "signature": {
+            "parameters": 0,
+            "has_return": false,
+            "is_async": false,
+            "is_unsafe": false,
+            "declared_effects": [
+              "Console"
+            ]
+          }
+        },
+        {
+          "id": "source:struct:Point",
+          "kind": "struct",
+          "name": "Point",
+          "visibility": "private",
+          "span": {
+            "start": 0,
+            "end": 40
+          }
+        },
+        {
+          "id": "source:struct:Point.field:x",
+          "kind": "struct_field",
+          "name": "x",
+          "visibility": "private",
+          "span": {
+            "start": 19,
+            "end": 25
+          }
+        },
+        {
+          "id": "source:struct:Point.field:y",
+          "kind": "struct_field",
+          "name": "y",
+          "visibility": "private",
+          "span": {
+            "start": 31,
+            "end": 37
+          }
+        },
+        {
+          "id": "source:struct:Wrapper",
+          "kind": "struct",
+          "name": "Wrapper",
+          "visibility": "private",
+          "span": {
+            "start": 42,
+            "end": 78
+          }
+        },
+        {
+          "id": "source:struct:Wrapper.field:inner",
+          "kind": "struct_field",
+          "name": "inner",
+          "visibility": "private",
+          "span": {
+            "start": 63,
+            "end": 75
+          }
+        }
+      ],
+      "mir_symbols": {
+        "functions": [
+          "main"
+        ],
+        "types": [
+          "Point",
+          "Wrapper",
+          "quanta_vec2",
+          "quanta_vec3",
+          "quanta_vec4"
+        ],
+        "globals": [],
+        "externals": []
+      },
+      "effect_symbols": [
+        {
+          "function": "main",
+          "declared_effects": [
+            "Console"
+          ],
+          "observed_capabilities": [
+            "Console"
+          ],
+          "propagated_effect_sources": []
+        }
+      ],
+      "edges": [
+        {
+          "kind": "source_to_effect_summary",
+          "from": "source:function:main",
+          "to": "effect:function:main"
+        },
+        {
+          "kind": "source_to_mir_function",
+          "from": "source:function:main",
+          "to": "mir:function:main"
+        },
+        {
+          "kind": "source_to_mir_type",
+          "from": "source:struct:Point",
+          "to": "mir:type:Point"
+        },
+        {
+          "kind": "source_to_mir_type",
+          "from": "source:struct:Wrapper",
+          "to": "mir:type:Wrapper"
+        }
+      ],
+      "known_gaps": [
+        "call graph is not claimed",
+        "external package resolution is not claimed"
+      ]
+    },
+    {
+      "id": "deref_reuse",
+      "path": "programs/deref_reuse.quanta",
+      "source_digest": {
+        "algorithm": "sha256",
+        "hex": "f7fdeba524685c72653b1f1e7be6ce9ba4569d99b4b9a201d75539d15a1138e3"
+      },
+      "input_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "53ae45aa9061a23aa6eaeda4725dc0df9f895fae9a9288c59fcb6a8f5afe0aa9"
+      },
+      "mir_digest": {
+        "algorithm": "sha256",
+        "hex": "502a8245867f41f744de3692034a95fa4c1e101a5dede8fbba0d7cefd04209e7"
+      },
+      "symbol_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "dc03967ce0f06d46b5accc975727531c6255ca1783d6b378b569ce3ae3f08f3f"
+      },
+      "source_symbols": [
+        {
+          "id": "source:function:main",
+          "kind": "function",
+          "name": "main",
+          "visibility": "private",
+          "span": {
+            "start": 42,
+            "end": 188
+          },
+          "signature": {
+            "parameters": 0,
+            "has_return": false,
+            "is_async": false,
+            "is_unsafe": false,
+            "declared_effects": [
+              "Console"
+            ]
+          }
+        },
+        {
+          "id": "source:struct:Point",
+          "kind": "struct",
+          "name": "Point",
+          "visibility": "private",
+          "span": {
+            "start": 0,
+            "end": 40
+          }
+        },
+        {
+          "id": "source:struct:Point.field:x",
+          "kind": "struct_field",
+          "name": "x",
+          "visibility": "private",
+          "span": {
+            "start": 19,
+            "end": 25
+          }
+        },
+        {
+          "id": "source:struct:Point.field:y",
+          "kind": "struct_field",
+          "name": "y",
+          "visibility": "private",
+          "span": {
+            "start": 31,
+            "end": 37
+          }
+        }
+      ],
+      "mir_symbols": {
+        "functions": [
+          "main"
+        ],
+        "types": [
+          "Point",
+          "quanta_vec2",
+          "quanta_vec3",
+          "quanta_vec4"
+        ],
+        "globals": [],
+        "externals": []
+      },
+      "effect_symbols": [
+        {
+          "function": "main",
+          "declared_effects": [
+            "Console"
+          ],
+          "observed_capabilities": [
+            "Console"
+          ],
+          "propagated_effect_sources": []
+        }
+      ],
+      "edges": [
+        {
+          "kind": "source_to_effect_summary",
+          "from": "source:function:main",
+          "to": "effect:function:main"
+        },
+        {
+          "kind": "source_to_mir_function",
+          "from": "source:function:main",
+          "to": "mir:function:main"
+        },
+        {
+          "kind": "source_to_mir_type",
+          "from": "source:struct:Point",
+          "to": "mir:type:Point"
+        }
+      ],
+      "known_gaps": [
+        "call graph is not claimed",
+        "external package resolution is not claimed"
+      ]
+    }
+  ],
+  "summary": {
+    "program_count": 8,
+    "source_symbol_kinds": [
+      "function",
+      "struct",
+      "struct_field"
+    ],
+    "mir_symbol_kinds": [
+      "function",
+      "type"
+    ],
+    "effect_names": [
+      "Console"
+    ],
+    "edge_kinds": [
+      "source_to_effect_summary",
+      "source_to_mir_function",
+      "source_to_mir_type"
+    ],
+    "known_gaps": [
+      "cross-package public API index",
+      "full LSP request dispatch",
+      "full package graph resolution"
+    ]
+  }
+}
