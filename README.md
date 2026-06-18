@@ -537,6 +537,14 @@ module counts, symbols, operation families, memory-surface flags, and
 control-flow summaries from the real parse, type-check, and AST-to-MIR lowering
 pipeline. This makes the representation claim inspectable without promoting any
 experimental backend.
+The substrate path also carries a checked
+`quantalang-memory-layout-receipt/v0` artifact for the semantic corpus. It
+recomputes per-program manifest memory tags, MIR-derived memory flags,
+ownership-surface classification, layout-scope classification, source/input/MIR
+digests, and explicit known gaps during `quantac corpus verify`. This is a
+representation-level RAM/memory evidence receipt, not a byte-offset ABI layout
+claim, allocator proof, async runtime memory proof, or full interprocedural
+borrow proof.
 
 ## Status
 
