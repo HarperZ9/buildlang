@@ -94,9 +94,10 @@ The receipt builder should instantiate a fresh `LanguageServer`, replay a
 small ordered fixture sequence, normalize JSON responses into deterministic
 fields, and compare those fields against the checked receipt.
 
-The implementation may need to make the raw dispatch seam testable, for
-example by exposing a crate-visible `dispatch_raw_message()` wrapper. This
-should not require opening a real stdio transport in tests.
+The implementation should make the raw dispatch seam reusable by exposing a
+small public `dispatch_raw_message()` wrapper from the `quantalang` library.
+That lets the `quantac` binary receipt verifier replay the same raw request
+path without opening a real stdio transport in tests.
 
 ## Fixture Sequence
 
