@@ -170,7 +170,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     }
 
                     // Special-case HashMap<K, V>: resolve to MirType::Map(key, value)
-                    if type_name == "HashMap" {
+                    if type_name == "HashMap" || type_name == "BTreeMap" {
                         let key_ty =
                             if let Some(ast::GenericArg::Type(arg_ty)) = generic_args.first() {
                                 self.lower_type_from_ast(arg_ty)
@@ -184,6 +184,16 @@ impl<'ctx> MirLowerer<'ctx> {
                                 MirType::f64()
                             };
                         return MirType::Map(Box::new(key_ty), Box::new(val_ty));
+                    }
+
+                    // Special-case Box<T>/Rc<T>/Arc<T>: a smart pointer lowers to a
+                    // thin C pointer. Enough to emit valid C; trait-object dispatch
+                    // through Box<dyn Trait> (fat pointer) remains a separate gap.
+                    if matches!(type_name, "Box" | "Rc" | "Arc") {
+                        if let Some(ast::GenericArg::Type(arg_ty)) = generic_args.first() {
+                            let inner = self.lower_type_from_ast(arg_ty);
+                            return MirType::Ptr(Box::new(inner));
+                        }
                     }
 
                     // Check if this is a known generic enum or struct
@@ -302,6 +312,10 @@ impl<'ctx> MirLowerer<'ctx> {
                     _ => None,
                 }
             }
+            ExprKind::Ident(id) => self.const_values.get(&id.name).cloned(),
+            ExprKind::Path(p) => p
+                .last_ident()
+                .and_then(|i| self.const_values.get(&i.name).cloned()),
             _ => None,
         }
     }
@@ -720,7 +734,7 @@ impl<'ctx> MirLowerer<'ctx> {
     }
 
     /// Infer the MirType for a single expression (used by subst inference).
-    fn infer_single_arg_type(&self, expr: &ast::Expr) -> MirType {
+    pub(crate) fn infer_single_arg_type(&self, expr: &ast::Expr) -> MirType {
         match &expr.kind {
             ExprKind::Literal(lit) => match lit {
                 Literal::Int { suffix, .. } => suffix

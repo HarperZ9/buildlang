@@ -2427,6 +2427,23 @@ impl<'ctx> TypeInfer<'ctx> {
         }
     }
 
+    /// Like `unify`, but for an argument-passing position: a `&mut T`
+    /// argument may satisfy a `&T` parameter (mutable-to-shared reborrow).
+    /// The relaxation is outermost-only; inner mutability and every
+    /// non-argument position stay invariant via `unify`.
+    fn coerce_arg(&mut self, param: &Ty, arg: &Ty, span: Span) -> TypeResult<()> {
+        let p = self.apply(param);
+        let a = self.apply(arg);
+        if let (
+            TyKind::Ref(_, Mutability::Immutable, p_inner),
+            TyKind::Ref(_, Mutability::Mutable, a_inner),
+        ) = (&p.kind, &a.kind)
+        {
+            return self.unify(p_inner, a_inner, span);
+        }
+        self.unify(param, arg, span)
+    }
+
     // =========================================================================
     // EXPRESSION INFERENCE
     // =========================================================================
@@ -3488,7 +3505,7 @@ impl<'ctx> TypeInfer<'ctx> {
                 for (param, arg) in fn_ty.params.iter().zip(args.iter()) {
                     let arg_sources = self.call_sources(arg);
                     let arg_ty = self.infer_expr(arg);
-                    let _ = self.unify(param, &arg_ty, span);
+                    let _ = self.coerce_arg(param, &arg_ty, span);
                     self.record_effectful_argument_sources(param, &arg_sources, &fn_ty.effects);
                 }
 
@@ -3587,6 +3604,17 @@ impl<'ctx> TypeInfer<'ctx> {
             }
             // Unit type - cascading from a failed function lookup; suppress error
             TyKind::Tuple(elems) if elems.is_empty() => Ty::fresh_var(),
+            // A call on a generic type parameter bound by Fn (`f()` where `f: F`,
+            // `F: Fn(...)`) is callable; the bound signature is not tracked here so
+            // check leniently and let monomorphization supply the concrete closure.
+            TyKind::Param(..) => {
+                let _: Vec<_> = args.iter().map(|a| self.infer_expr(a)).collect();
+                Ty::fresh_var()
+            }
+            TyKind::Ref(_, _, ref inner) if matches!(inner.kind, TyKind::Param(..) | TyKind::Var(_) | TyKind::Infer(_)) => {
+                let _: Vec<_> = args.iter().map(|a| self.infer_expr(a)).collect();
+                Ty::fresh_var()
+            }
             _ => {
                 self.error(TypeError::NotCallable { ty: func_ty }, span);
                 Ty::error()
@@ -3825,7 +3853,7 @@ impl<'ctx> TypeInfer<'ctx> {
                     }
                     // Unify argument types
                     for (param, arg) in fn_ty.params.iter().zip(arg_tys.iter()) {
-                        let _ = self.unify(param, arg, span);
+                        let _ = self.coerce_arg(param, arg, span);
                     }
                     if !fn_ty.effects.is_empty() {
                         self.current_effects = self.current_effects.merge(&fn_ty.effects);
