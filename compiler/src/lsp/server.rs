@@ -12,6 +12,7 @@ use super::document::DocumentStore;
 use super::hover::HoverProvider;
 use super::jsonrpc::JsonRpcMessage;
 use super::message::*;
+use super::raw_params;
 use super::response_json;
 use super::symbols::SymbolProvider;
 use super::transport::*;
@@ -636,6 +637,10 @@ fn build_error_response(id: String, code: i32, message: &str) -> String {
         .build()
 }
 
+fn build_invalid_params_response(id: String, error: &raw_params::RawParamError) -> String {
+    build_error_response(id, -32602, &format!("Invalid params: {}", error.detail()))
+}
+
 /// Build range JSON.
 fn build_range_json(range: &Range) -> String {
     JsonObjectBuilder::new()
@@ -681,19 +686,14 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
     // =========================================================================
 
     if method == "initialize" {
-        let root_uri = message.string_at(&["params", "rootUri"]);
-        let params = InitializeParams {
-            process_id: None,
-            root_path: None,
-            root_uri,
-            capabilities: ClientCapabilities::default(),
-            initialization_options: None,
-            trace: None,
-            workspace_folders: None,
+        let response_id = id.unwrap_or_else(|| "1".to_string());
+        let params = match raw_params::decode_initialize(&message) {
+            Ok(params) => params,
+            Err(error) => return Some(build_invalid_params_response(response_id, &error)),
         };
         let result = server.initialize(params);
         return Some(build_response(
-            id.unwrap_or_else(|| "1".to_string()),
+            response_id,
             build_initialize_result(&result),
         ));
     }
@@ -721,25 +721,9 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
     // =========================================================================
 
     if method == "textDocument/didOpen" {
-        let uri = message
-            .string_at(&["params", "textDocument", "uri"])
-            .unwrap_or_default();
-        let language_id = message
-            .string_at(&["params", "textDocument", "languageId"])
-            .unwrap_or_else(|| "quanta".to_string());
-        let version = message
-            .i64_at(&["params", "textDocument", "version"])
-            .unwrap_or(0) as i32;
-        let text = message
-            .string_at(&["params", "textDocument", "text"])
-            .unwrap_or_default();
-        let params = DidOpenTextDocumentParams {
-            text_document: TextDocumentItem {
-                uri,
-                language_id,
-                version,
-                text,
-            },
+        let params = match raw_params::decode_did_open(&message) {
+            Ok(params) => params,
+            Err(error) => return id.map(|id| build_invalid_params_response(id, &error)),
         };
         if let Some(diag) = server.did_open(params) {
             return Some(build_diagnostics_notification(&diag));
@@ -748,14 +732,9 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
     }
 
     if method == "textDocument/didChange" {
-        let uri = message.text_document_uri().unwrap_or_default();
-        let version = message
-            .i64_at(&["params", "textDocument", "version"])
-            .unwrap_or(0) as i32;
-        let text = message.first_content_change_text().unwrap_or_default();
-        let params = DidChangeTextDocumentParams {
-            text_document: VersionedTextDocumentIdentifier { uri, version },
-            content_changes: vec![TextDocumentContentChangeEvent { range: None, text }],
+        let params = match raw_params::decode_did_change(&message) {
+            Ok(params) => params,
+            Err(error) => return id.map(|id| build_invalid_params_response(id, &error)),
         };
         if let Some(diag) = server.did_change(params) {
             return Some(build_diagnostics_notification(&diag));
@@ -764,10 +743,9 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
     }
 
     if method == "textDocument/didSave" {
-        let uri = message.text_document_uri().unwrap_or_default();
-        let params = DidSaveTextDocumentParams {
-            text_document: TextDocumentIdentifier { uri },
-            text: None,
+        let params = match raw_params::decode_did_save(&message) {
+            Ok(params) => params,
+            Err(error) => return id.map(|id| build_invalid_params_response(id, &error)),
         };
         if let Some(diag) = server.did_save(params) {
             return Some(build_diagnostics_notification(&diag));
@@ -776,10 +754,11 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
     }
 
     if method == "textDocument/didClose" {
-        let uri = message.text_document_uri().unwrap_or_default();
-        server.did_close(DidCloseTextDocumentParams {
-            text_document: TextDocumentIdentifier { uri },
-        });
+        let params = match raw_params::decode_did_close(&message) {
+            Ok(params) => params,
+            Err(error) => return id.map(|id| build_invalid_params_response(id, &error)),
+        };
+        server.did_close(params);
         return None;
     }
 
@@ -788,14 +767,10 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
     // =========================================================================
 
     if method == "textDocument/completion" {
-        let uri = message.text_document_uri().unwrap_or_default();
-        let position = message.position().unwrap_or(Position::new(0, 0));
-        let params = CompletionParams {
-            text_document_position: TextDocumentPositionParams {
-                text_document: TextDocumentIdentifier { uri },
-                position,
-            },
-            context: None,
+        let response_id = id.unwrap_or_else(|| "1".to_string());
+        let params = match raw_params::decode_completion(&message) {
+            Ok(params) => params,
+            Err(error) => return Some(build_invalid_params_response(response_id, &error)),
         };
         let result = server.completion(params);
         let result_json = match result {
@@ -823,18 +798,14 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
             }
             None => JsonBuilder::null(),
         };
-        return Some(build_response(
-            id.unwrap_or_else(|| "1".to_string()),
-            result_json,
-        ));
+        return Some(build_response(response_id, result_json));
     }
 
     if method == "textDocument/hover" {
-        let uri = message.text_document_uri().unwrap_or_default();
-        let position = message.position().unwrap_or(Position::new(0, 0));
-        let params = TextDocumentPositionParams {
-            text_document: TextDocumentIdentifier { uri },
-            position,
+        let response_id = id.unwrap_or_else(|| "1".to_string());
+        let params = match raw_params::decode_text_document_position(&message) {
+            Ok(params) => params,
+            Err(error) => return Some(build_invalid_params_response(response_id, &error)),
         };
         let result = server.hover(params);
         let result_json = match result {
@@ -857,82 +828,66 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
             }
             None => JsonBuilder::null(),
         };
-        return Some(build_response(
-            id.unwrap_or_else(|| "1".to_string()),
-            result_json,
-        ));
+        return Some(build_response(response_id, result_json));
     }
 
     if method == "textDocument/definition" {
-        let uri = message.text_document_uri().unwrap_or_default();
-        let position = message.position().unwrap_or(Position::new(0, 0));
-        let params = TextDocumentPositionParams {
-            text_document: TextDocumentIdentifier { uri },
-            position,
+        let response_id = id.unwrap_or_else(|| "1".to_string());
+        let params = match raw_params::decode_text_document_position(&message) {
+            Ok(params) => params,
+            Err(error) => return Some(build_invalid_params_response(response_id, &error)),
         };
         let locations = server.definition(params);
         let mut arr = JsonArrayBuilder::new();
         for loc in &locations {
             arr = arr.item(build_location_json(loc));
         }
-        return Some(build_response(
-            id.unwrap_or_else(|| "1".to_string()),
-            arr.build(),
-        ));
+        return Some(build_response(response_id, arr.build()));
     }
 
     if method == "textDocument/references" {
-        let uri = message.text_document_uri().unwrap_or_default();
-        let position = message.position().unwrap_or(Position::new(0, 0));
-        let params = TextDocumentPositionParams {
-            text_document: TextDocumentIdentifier { uri },
-            position,
+        let response_id = id.unwrap_or_else(|| "1".to_string());
+        let params = match raw_params::decode_text_document_position(&message) {
+            Ok(params) => params,
+            Err(error) => return Some(build_invalid_params_response(response_id, &error)),
         };
         let locations = server.references(params);
         let mut arr = JsonArrayBuilder::new();
         for loc in &locations {
             arr = arr.item(build_location_json(loc));
         }
-        return Some(build_response(
-            id.unwrap_or_else(|| "1".to_string()),
-            arr.build(),
-        ));
+        return Some(build_response(response_id, arr.build()));
     }
 
     if method == "textDocument/documentSymbol" {
-        let uri = message.text_document_uri().unwrap_or_default();
+        let response_id = id.unwrap_or_else(|| "1".to_string());
+        let uri = match raw_params::decode_document_uri(&message) {
+            Ok(uri) => uri,
+            Err(error) => return Some(build_invalid_params_response(response_id, &error)),
+        };
         let symbols = server.document_symbol(&uri);
         let result = build_symbols_json(&symbols);
-        return Some(build_response(
-            id.unwrap_or_else(|| "1".to_string()),
-            result,
-        ));
+        return Some(build_response(response_id, result));
     }
 
     if method == "textDocument/codeAction" {
-        let uri = message.text_document_uri().unwrap_or_default();
-        let range = message.range_at(&["params", "range"]).unwrap_or_default();
-        let params = CodeActionParams {
-            text_document: TextDocumentIdentifier { uri },
-            range,
-            context: CodeActionContext {
-                diagnostics: message.diagnostics(),
-                only: message.string_vec_at(&["params", "context", "only"]),
-                trigger_kind: message.code_action_trigger_kind(),
-            },
+        let response_id = id.unwrap_or_else(|| "1".to_string());
+        let params = match raw_params::decode_code_action(&message) {
+            Ok(params) => params,
+            Err(error) => return Some(build_invalid_params_response(response_id, &error)),
         };
         let actions = server.code_action(params);
         return Some(build_response(
-            id.unwrap_or_else(|| "1".to_string()),
+            response_id,
             response_json::build_code_actions_json(&actions),
         ));
     }
 
     if method == "textDocument/formatting" {
-        let uri = message.text_document_uri().unwrap_or_default();
-        let params = DocumentFormattingParams {
-            text_document: TextDocumentIdentifier { uri },
-            options: FormattingOptions::default(),
+        let response_id = id.unwrap_or_else(|| "1".to_string());
+        let params = match raw_params::decode_formatting(&message) {
+            Ok(params) => params,
+            Err(error) => return Some(build_invalid_params_response(response_id, &error)),
         };
         let edits = server.format(params);
         let mut arr = JsonArrayBuilder::new();
@@ -944,38 +899,29 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
                     .build(),
             );
         }
-        return Some(build_response(
-            id.unwrap_or_else(|| "1".to_string()),
-            arr.build(),
-        ));
+        return Some(build_response(response_id, arr.build()));
     }
 
     if method == "textDocument/rename" {
-        let uri = message.text_document_uri().unwrap_or_default();
-        let position = message.position().unwrap_or(Position::new(0, 0));
-        let new_name = message
-            .string_at(&["params", "newName"])
-            .unwrap_or_default();
-        let params = RenameParams {
-            text_document_position: TextDocumentPositionParams {
-                text_document: TextDocumentIdentifier { uri },
-                position,
-            },
-            new_name,
+        let response_id = id.unwrap_or_else(|| "1".to_string());
+        let params = match raw_params::decode_rename(&message) {
+            Ok(params) => params,
+            Err(error) => return Some(build_invalid_params_response(response_id, &error)),
         };
         let result_json = server
             .rename(params)
             .as_ref()
             .map(response_json::build_workspace_edit_json)
             .unwrap_or_else(JsonBuilder::null);
-        return Some(build_response(
-            id.unwrap_or_else(|| "1".to_string()),
-            result_json,
-        ));
+        return Some(build_response(response_id, result_json));
     }
 
     if method == "textDocument/foldingRange" {
-        let uri = message.text_document_uri().unwrap_or_default();
+        let response_id = id.unwrap_or_else(|| "1".to_string());
+        let uri = match raw_params::decode_document_uri(&message) {
+            Ok(uri) => uri,
+            Err(error) => return Some(build_invalid_params_response(response_id, &error)),
+        };
         let ranges = server.folding_range(&uri);
         let mut arr = JsonArrayBuilder::new();
         for r in &ranges {
@@ -992,10 +938,7 @@ fn handle_raw_message(server: &mut LanguageServer, content: &str) -> Option<Stri
             }
             arr = arr.item(obj.build());
         }
-        return Some(build_response(
-            id.unwrap_or_else(|| "1".to_string()),
-            arr.build(),
-        ));
+        return Some(build_response(response_id, arr.build()));
     }
 
     // =========================================================================
@@ -1323,6 +1266,71 @@ mod tests {
 
         assert_eq!(json["id"], 9);
         assert_eq!(json["error"]["code"], -32700);
+    }
+
+    fn assert_invalid_params(response: Option<String>, expected_detail: &str) {
+        let response = response.expect("invalid params should return an error response");
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("parse invalid params response");
+
+        assert_eq!(json["error"]["code"], -32602);
+        let message = json["error"]["message"].as_str().expect("message");
+        assert!(
+            message.contains(expected_detail),
+            "expected '{expected_detail}' in '{message}'"
+        );
+    }
+
+    #[test]
+    fn raw_dispatch_invalid_params_did_open_missing_uri_returns_error() {
+        let mut server = LanguageServer::new();
+        let response = dispatch_raw_message(
+            &mut server,
+            r#"{"jsonrpc":"2.0","id":20,"method":"textDocument/didOpen","params":{"textDocument":{"languageId":"quanta","version":1,"text":"fn main() {}\n"}}}"#,
+        );
+
+        assert_invalid_params(response, "params.textDocument.uri is required");
+    }
+
+    #[test]
+    fn raw_dispatch_invalid_params_hover_negative_position_returns_error() {
+        let mut server = LanguageServer::new();
+        let response = dispatch_raw_message(
+            &mut server,
+            r#"{"jsonrpc":"2.0","id":21,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///workspace/main.quanta"},"position":{"line":-1,"character":0}}}"#,
+        );
+
+        assert_invalid_params(
+            response,
+            "params.position.line must be a non-negative integer",
+        );
+    }
+
+    #[test]
+    fn raw_dispatch_invalid_params_rename_missing_new_name_returns_error() {
+        let mut server = LanguageServer::new();
+        dispatch_raw_message(
+            &mut server,
+            r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.quanta","languageId":"quanta","version":1,"text":"fn helper() -> i32 { 1 }\nfn main() { helper(); }\n"}}}"#,
+        )
+        .expect("didOpen should publish diagnostics");
+        let response = dispatch_raw_message(
+            &mut server,
+            r#"{"jsonrpc":"2.0","id":22,"method":"textDocument/rename","params":{"textDocument":{"uri":"file:///workspace/main.quanta"},"position":{"line":1,"character":14}}}"#,
+        );
+
+        assert_invalid_params(response, "params.newName is required");
+    }
+
+    #[test]
+    fn raw_dispatch_invalid_params_code_action_missing_context_returns_error() {
+        let mut server = LanguageServer::new();
+        let response = dispatch_raw_message(
+            &mut server,
+            r#"{"jsonrpc":"2.0","id":23,"method":"textDocument/codeAction","params":{"textDocument":{"uri":"file:///workspace/main.quanta"},"range":{"start":{"line":1,"character":13},"end":{"line":1,"character":13}}}}"#,
+        );
+
+        assert_invalid_params(response, "params.context is required");
     }
 
     #[test]
