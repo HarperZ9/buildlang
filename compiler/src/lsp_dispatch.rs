@@ -11,6 +11,7 @@ use model::{LspDispatchFixture, LspDispatchModel, LspDispatchSourceSet, LspDispa
 
 mod fixture;
 mod model;
+mod observe;
 #[cfg(test)]
 mod tests;
 mod validate;
@@ -75,13 +76,10 @@ fn summarize_fixtures(fixtures: &[LspDispatchFixture]) -> LspDispatchSummary {
                 .collect(),
         ),
         known_gaps: sorted(
-            [
-                "compiler type-checker diagnostics in LSP",
-                "full VS Code extension readiness",
-            ]
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
+            ["full VS Code extension readiness"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
         ),
     }
 }

@@ -44,6 +44,10 @@ pub(crate) struct LspDispatchObserved {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub(crate) diagnostics: usize,
     #[serde(default, skip_serializing_if = "is_zero")]
+    pub(crate) compiler_diagnostics: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(crate) type_errors: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub(crate) completion_items: usize,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub(crate) document_symbols: usize,
