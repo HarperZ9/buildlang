@@ -41,6 +41,28 @@ fn lsp_fixture_sequence_records_initialize_and_document_symbols() {
 }
 
 #[test]
+fn lsp_fixture_sequence_records_compiler_type_diagnostics() {
+    let (_root, _manifest, receipt) = built_receipt();
+    let fixture = receipt
+        .fixtures
+        .iter()
+        .find(|fixture| fixture.id == "did-change-type-error")
+        .expect("type-error fixture");
+
+    assert_eq!(fixture.method, "textDocument/didChange");
+    assert!(fixture.observed.compiler_diagnostics >= 1);
+    assert!(fixture.observed.type_errors >= 1);
+    assert!(!receipt
+        .summary
+        .known_gaps
+        .contains(&"compiler type-checker diagnostics in LSP".to_string()));
+    assert!(receipt
+        .summary
+        .known_gaps
+        .contains(&"full VS Code extension readiness".to_string()));
+}
+
+#[test]
 fn lsp_fixture_summary_sorts_methods_and_response_kinds() {
     let (_root, _manifest, receipt) = built_receipt();
 
