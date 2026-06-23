@@ -565,8 +565,9 @@ readiness, or package API completion.
 
 ## Status
 
-The current release-shaped proof is the Cargo baseline above: 868 passing tests,
-including 192 CLI tests. [TEST_RESULTS.md](TEST_RESULTS.md) is retained as a
+The current release-shaped proof is the Cargo baseline above: `cargo test
+--quiet` from `compiler/` on 2026-06-23 produced 1002 passing tests, 0 failing
+tests, and 11 ignored tests. [TEST_RESULTS.md](TEST_RESULTS.md) is retained as a
 historical C-backend output record, not the current release gate; the legacy
 `quantac test` fixture runner now needs a Console-capability annotation pass
 before it can be used as a public green-corpus claim again.
@@ -592,10 +593,10 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 ## Code Quality
 
 - **CI**: clippy (correctness) + rustfmt + `cargo test` on Linux and Windows
-- **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` is clean as of 2026-06-15
+- **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` was clean against the prior 868-test baseline as of 2026-06-15; re-run before making a current warning-clean claim
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 868 passing, 0 failing, 10 ignored, 4 filtered in local `cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write` from `compiler/` on 2026-06-15
+- **Tests**: 1002 passing, 0 failing, 11 ignored in local `cargo test --quiet` from `compiler/` on 2026-06-23
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
