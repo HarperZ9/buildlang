@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Bind every `quantac check --receipt` artifact to the exact checked source bytes with compiler version, language version, and SHA-256 digest metadata.
+**Goal:** Bind every `buildc check --receipt` artifact to the exact checked source bytes with compiler version, language version, and SHA-256 digest metadata.
 
-**Architecture:** Keep receipt rendering in `compiler/src/main.rs`, where the existing check pipeline already reads source files and builds `CheckOutcome`. Add a small source digest type and helper, compute digest from raw file bytes before import/include preprocessing, carry the metadata through `CheckOutcome`, and serialize it as additive `quantalang-check-receipt/v1` fields.
+**Architecture:** Keep receipt rendering in `compiler/src/main.rs`, where the existing check pipeline already reads source files and builds `CheckOutcome`. Add a small source digest type and helper, compute digest from raw file bytes before import/include preprocessing, carry the metadata through `CheckOutcome`, and serialize it as additive `buildlang-check-receipt/v1` fields.
 
 **Tech Stack:** Rust 2021, `sha2` for SHA-256, `serde`/`serde_json`, Clap CLI tests in `compiler/tests/cli.rs`, existing Cargo test gates.
 
@@ -14,7 +14,7 @@
 
 - Modify `compiler/Cargo.toml`: add the RustCrypto `sha2` crate under normal dependencies because the binary needs it at runtime.
 - Modify `compiler/src/main.rs`: add `CheckReceiptSourceDigest`, add source metadata to `CheckReceipt` and `CheckOutcome`, add `language_version_string`, `source_digest_hex`, and `source_digest` tests, then compute the digest from source bytes.
-- Modify `compiler/tests/cli.rs`: extend existing receipt tests and add path/content determinism tests through the built `quantac` binary.
+- Modify `compiler/tests/cli.rs`: extend existing receipt tests and add path/content determinism tests through the built `buildc` binary.
 - Modify `docs/EFFECTS_GUIDE.md`: document that check receipts are source-bound.
 - Modify `README.md`: mention source digest metadata in the capability-effects receipt description if wording still reads too weak.
 
@@ -28,14 +28,14 @@
 In `compiler/tests/cli.rs`, inside `check_receipt_stdout_records_passing_capabilities`, after:
 
 ```rust
-assert_eq!(receipt["schema"], "quantalang-check-receipt/v1");
+assert_eq!(receipt["schema"], "buildlang-check-receipt/v1");
 assert_eq!(receipt["status"], "passed");
 ```
 
 insert:
 
 ```rust
-assert_eq!(receipt["compiler"], "quantac");
+assert_eq!(receipt["compiler"], "buildc");
 assert_eq!(receipt["compiler_version"], env!("CARGO_PKG_VERSION"));
 assert_eq!(receipt["language_version"], "1.0.0");
 assert_eq!(receipt["source_digest"]["algorithm"], "sha256");
@@ -54,7 +54,7 @@ assert!(
 In `compiler/tests/cli.rs`, inside `check_receipt_file_records_failing_capability_diagnostic`, after:
 
 ```rust
-assert_eq!(receipt["schema"], "quantalang-check-receipt/v1");
+assert_eq!(receipt["schema"], "buildlang-check-receipt/v1");
 assert_eq!(receipt["status"], "failed");
 ```
 
@@ -101,23 +101,23 @@ Add this test after `check_receipt_file_records_failing_capability_diagnostic`:
 fn check_receipt_source_digest_ignores_path_for_identical_content() {
     let id = std::process::id();
     let left = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_digest_left_{id}.quanta"
+        "buildlang_check_receipt_digest_left_{id}.bld"
     ));
     let right = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_digest_right_{id}.quanta"
+        "buildlang_check_receipt_digest_right_{id}.bld"
     ));
     let source = r#"fn main() ~ Console { println!("same"); }"#;
     fs::write(&left, source).expect("write left digest fixture");
     fs::write(&right, source).expect("write right digest fixture");
 
-    let left_output = quantac()
+    let left_output = buildc()
         .arg("check")
         .arg(&left)
         .arg("--receipt")
         .arg("-")
         .output()
         .expect("run left digest receipt");
-    let right_output = quantac()
+    let right_output = buildc()
         .arg("check")
         .arg(&right)
         .arg("--receipt")
@@ -149,24 +149,24 @@ Add this test after the identical-content test:
 fn check_receipt_source_digest_changes_when_source_changes() {
     let id = std::process::id();
     let first = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_digest_first_{id}.quanta"
+        "buildlang_check_receipt_digest_first_{id}.bld"
     ));
     let second = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_digest_second_{id}.quanta"
+        "buildlang_check_receipt_digest_second_{id}.bld"
     ));
     fs::write(&first, r#"fn main() ~ Console { println!("first"); }"#)
         .expect("write first digest fixture");
     fs::write(&second, r#"fn main() ~ Console { println!("second"); }"#)
         .expect("write second digest fixture");
 
-    let first_output = quantac()
+    let first_output = buildc()
         .arg("check")
         .arg(&first)
         .arg("--receipt")
         .arg("-")
         .output()
         .expect("run first digest receipt");
-    let second_output = quantac()
+    let second_output = buildc()
         .arg("check")
         .arg(&second)
         .arg("--receipt")
@@ -235,9 +235,9 @@ In `compiler/src/main.rs`, after `type_error_kind`, add:
 fn language_version_string() -> String {
     format!(
         "{}.{}.{}",
-        quantalang::LANGUAGE_VERSION.0,
-        quantalang::LANGUAGE_VERSION.1,
-        quantalang::LANGUAGE_VERSION.2
+        buildlang::LANGUAGE_VERSION.0,
+        buildlang::LANGUAGE_VERSION.1,
+        buildlang::LANGUAGE_VERSION.2
     )
 }
 
@@ -283,7 +283,7 @@ mod check_receipt_tests {
 Run:
 
 ```powershell
-cargo test --manifest-path compiler/Cargo.toml --bin quantac source_digest --quiet
+cargo test --manifest-path compiler/Cargo.toml --bin buildc source_digest --quiet
 ```
 
 Expected: PASS after implementation.
@@ -401,7 +401,7 @@ let source = String::from_utf8(source_bytes).map_err(|e| {
 In the `Ok(CheckOutcome {` block near the end of `run_check`, add:
 
 ```rust
-compiler_version: quantalang::VERSION,
+compiler_version: buildlang::VERSION,
 language_version: language_version_string(),
 source_digest,
 ```
@@ -411,7 +411,7 @@ The beginning of the block should become:
 ```rust
 Ok(CheckOutcome {
     source: file.to_string_lossy().to_string(),
-    compiler_version: quantalang::VERSION,
+    compiler_version: buildlang::VERSION,
     language_version: language_version_string(),
     source_digest,
     items: item_count,
@@ -424,7 +424,7 @@ Ok(CheckOutcome {
 
 - [ ] **Step 6: Populate `CheckReceipt`**
 
-In `build_check_receipt`, add these fields after `compiler: "quantac",`:
+In `build_check_receipt`, add these fields after `compiler: "buildc",`:
 
 ```rust
 compiler_version: outcome.compiler_version,
@@ -467,7 +467,7 @@ In `README.md`, in the "Capability Effects" section after the paragraph ending
 with "instead of remaining invisible compiler side channels.", add:
 
 ```markdown
-`quantac check --receipt` also binds each receipt to the checked source bytes
+`buildc check --receipt` also binds each receipt to the checked source bytes
 with a SHA-256 digest plus compiler and language version metadata, giving CI and
 review tooling a stable evidence record for the exact source that passed or
 failed the capability gate.
@@ -478,8 +478,8 @@ failed the capability gate.
 In `docs/EFFECTS_GUIDE.md`, replace:
 
 ```markdown
-`quantac check <file> --receipt <path>` writes a deterministic
-`quantalang-check-receipt/v1` JSON artifact with declared effects, observed
+`buildc check <file> --receipt <path>` writes a deterministic
+`buildlang-check-receipt/v1` JSON artifact with declared effects, observed
 capability sources, pass/fail status, and compact diagnostics. Use `--receipt -`
 when a CI step or wrapper wants the receipt on stdout.
 ```
@@ -487,8 +487,8 @@ when a CI step or wrapper wants the receipt on stdout.
 with:
 
 ```markdown
-`quantac check <file> --receipt <path>` writes a deterministic
-`quantalang-check-receipt/v1` JSON artifact with compiler/language version
+`buildc check <file> --receipt <path>` writes a deterministic
+`buildlang-check-receipt/v1` JSON artifact with compiler/language version
 metadata, a SHA-256 digest of the checked source bytes, declared effects,
 observed capability sources, pass/fail status, and compact diagnostics. Use
 `--receipt -` when a CI step or wrapper wants the receipt on stdout.
@@ -547,7 +547,7 @@ Expected: both compiler test runs PASS.
 git diff --check
 git diff origin/main..HEAD --check
 git check-ignore -q .env; if ($LASTEXITCODE -eq 0) { 'env-ignored' } else { 'env-not-ignored' }
-powershell -NoProfile -ExecutionPolicy Bypass -File C:\dev\scratch\portfolio-stabilization-2026-06-13\scan-diff-secrets.ps1 -Repo C:\dev\public\pubscan\quantalang
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\dev\scratch\portfolio-stabilization-2026-06-13\scan-diff-secrets.ps1 -Repo C:\dev\public\pubscan\buildlang
 ```
 
 Expected: no whitespace errors, `.env` ignored, and secret scan prints `no-matches`.
@@ -563,7 +563,7 @@ Expected: push succeeds.
 - [ ] **Step 5: Watch GitHub workflows**
 
 ```powershell
-gh run list -R HarperZ9/quantalang --branch main --limit 8 --json databaseId,workflowName,status,conclusion,headSha,displayTitle,createdAt
+gh run list -R HarperZ9/buildlang --branch main --limit 8 --json databaseId,workflowName,status,conclusion,headSha,displayTitle,createdAt
 ```
 
 Poll until the pushed head has completed `CI` and `pages-build-deployment`.

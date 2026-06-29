@@ -5,7 +5,7 @@ allowed-tools: Bash(cargo:*, grep:*, find:*, git:*), Read, Grep, Glob
 
 # Security Check
 
-Run a comprehensive security audit of the QuantaLang project.
+Run a comprehensive security audit of the BuildLang project.
 
 ## 1. Dependency Audit
 ```bash
@@ -34,7 +34,7 @@ grep -rnE '(ghp_|gho_|github_pat_)' --include="*.rs"
 ```
 
 ## 4. Input Validation
-- Check all places that read user input (file I/O, CLI args, `.quanta` source parsing)
+- Check all places that read user input (file I/O, CLI args, `.bld` source parsing)
 - Verify bounds checking on array/slice access
 - Check for potential integer overflow in arithmetic
 - Verify no `panic!()` in library code paths (use `Result` instead)

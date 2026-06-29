@@ -96,7 +96,7 @@ Targeted verification commands:
 - `cargo fmt --manifest-path compiler/Cargo.toml -- --check`
 - `cargo test --manifest-path compiler/Cargo.toml --lib code_action --quiet`
 - `cargo test --manifest-path compiler/Cargo.toml --lib raw_dispatch --quiet`
-- `cargo test --manifest-path compiler/Cargo.toml --bin quantac lsp_dispatch --quiet`
+- `cargo test --manifest-path compiler/Cargo.toml --bin buildc lsp_dispatch --quiet`
 - `cargo test --manifest-path compiler/Cargo.toml --test cli lsp_dispatch -- --nocapture`
 - `cargo test --manifest-path compiler/Cargo.toml --test cli corpus_verify -- --nocapture`
 - `cargo run --manifest-path compiler/Cargo.toml -- corpus verify --root semantic-corpus`

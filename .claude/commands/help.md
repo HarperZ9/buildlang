@@ -1,5 +1,5 @@
 ---
-description: Show available Claude Code commands for the QuantaLang project
+description: Show available Claude Code commands for the BuildLang project
 allowed-tools:
 ---
 

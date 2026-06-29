@@ -2,15 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a first `quantalang-substrate-receipt/v0` sample receipt and verify it through `quantac corpus verify` so CPU, Rust subset, memory, semantic, representation, and evidence claims are checked through one native substrate contract.
+**Goal:** Add a first `buildlang-substrate-receipt/v0` sample receipt and verify it through `buildc corpus verify` so CPU, Rust subset, memory, semantic, representation, and evidence claims are checked through one native substrate contract.
 
-**Architecture:** Keep the first slice inside the existing semantic corpus verification path. Add a checked-in substrate receipt under `semantic-corpus/receipts/`, deserialize it in `compiler/src/main.rs`, validate it structurally against the semantic corpus manifest and referenced execution receipts, then report `substrate receipt: ok` from `quantac corpus verify`.
+**Architecture:** Keep the first slice inside the existing semantic corpus verification path. Add a checked-in substrate receipt under `semantic-corpus/receipts/`, deserialize it in `compiler/src/main.rs`, validate it structurally against the semantic corpus manifest and referenced execution receipts, then report `substrate receipt: ok` from `buildc corpus verify`.
 
-**Tech Stack:** Rust 2021, Clap-powered `quantac` CLI, Serde/serde_json, existing semantic corpus receipt model, Cargo CLI integration tests.
+**Tech Stack:** Rust 2021, Clap-powered `buildc` CLI, Serde/serde_json, existing semantic corpus receipt model, Cargo CLI integration tests.
 
 ## Global Constraints
 
-- The schema string is exactly `quantalang-substrate-receipt/v0`.
+- The schema string is exactly `buildlang-substrate-receipt/v0`.
 - The first receipt is an evidence aggregation layer, not a backend promotion claim.
 - C may be marked `production-anchor` only when backed by an execution receipt with stdout validation evidence.
 - Rust may be marked `experimental-subset` only when backed by explicit subset execution or metadata evidence.
@@ -37,7 +37,7 @@
 - Modify: `compiler/tests/cli.rs`
 
 **Interfaces:**
-- Consumes: existing `temp_semantic_corpus(label: &str) -> PathBuf`, `quantac() -> Command`, `repo_root() -> PathBuf`, and `c_backend_ready() -> bool` helpers in `compiler/tests/cli.rs`.
+- Consumes: existing `temp_semantic_corpus(label: &str) -> PathBuf`, `buildc() -> Command`, `repo_root() -> PathBuf`, and `c_backend_ready() -> bool` helpers in `compiler/tests/cli.rs`.
 - Produces: failing CLI tests that define the exact verifier behavior required by later tasks.
 
 - [ ] **Step 1: Create the substrate receipt fixture**
@@ -46,18 +46,18 @@ Create `semantic-corpus/receipts/substrate-semantic-corpus-2026-06-18.json` with
 
 ```json
 {
-  "schema": "quantalang-substrate-receipt/v0",
+  "schema": "buildlang-substrate-receipt/v0",
   "receipt_id": "substrate-semantic-corpus-2026-06-18",
   "created_at": "2026-06-18",
-  "compiler": "quantac",
-  "language": "quantalang",
+  "compiler": "buildc",
+  "language": "buildlang",
   "source_set": {
     "kind": "semantic-corpus",
     "manifest": "manifest.json",
     "program_count": 8
   },
   "semantic_surface": {
-    "check_receipt_schema": "quantalang-check-receipt/v1",
+    "check_receipt_schema": "buildlang-check-receipt/v1",
     "requires_source_digest": true,
     "requires_input_graph_digest": true,
     "effect_surfaces": [
@@ -154,13 +154,13 @@ fn corpus_verify_checks_substrate_receipt() {
         return;
     }
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(repo_root().join("semantic-corpus"))
         .output()
-        .expect("run quantac corpus verify with substrate receipt");
+        .expect("run buildc corpus verify with substrate receipt");
 
     assert!(
         output.status.success(),
@@ -192,17 +192,17 @@ fn corpus_verify_rejects_substrate_receipt_schema_drift() {
 
     let corpus_root = temp_semantic_corpus("substrate_schema");
     write_substrate_receipt_copy(&corpus_root, |mut receipt| {
-        receipt["schema"] = serde_json::Value::String("quantalang-substrate-receipt/v9".into());
+        receipt["schema"] = serde_json::Value::String("buildlang-substrate-receipt/v9".into());
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against bad substrate schema");
+        .expect("run buildc corpus verify against bad substrate schema");
 
     let _ = fs::remove_dir_all(&corpus_root);
 
@@ -237,13 +237,13 @@ fn corpus_verify_rejects_substrate_program_count_drift() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against bad substrate program count");
+        .expect("run buildc corpus verify against bad substrate program count");
 
     let _ = fs::remove_dir_all(&corpus_root);
 
@@ -280,13 +280,13 @@ fn corpus_verify_rejects_production_substrate_backend_without_receipt() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against missing production receipt");
+        .expect("run buildc corpus verify against missing production receipt");
 
     let _ = fs::remove_dir_all(&corpus_root);
 
@@ -321,13 +321,13 @@ fn corpus_verify_rejects_empty_substrate_evidence_commands() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against empty substrate commands");
+        .expect("run buildc corpus verify against empty substrate commands");
 
     let _ = fs::remove_dir_all(&corpus_root);
 
@@ -352,7 +352,7 @@ Run:
 cargo test --manifest-path compiler/Cargo.toml --test cli substrate -- --nocapture
 ```
 
-Expected: FAIL. The valid test fails because `quantac corpus verify` does not yet report `substrate receipt: ok`; invalid tests fail because no substrate verifier exists.
+Expected: FAIL. The valid test fails because `buildc corpus verify` does not yet report `substrate receipt: ok`; invalid tests fail because no substrate verifier exists.
 
 - [ ] **Step 9: Commit red tests and fixture**
 
@@ -488,23 +488,23 @@ fn verify_substrate_receipt(
     receipt: &SubstrateReceipt,
     manifest: &SemanticCorpusManifest,
 ) -> Result<(), i32> {
-    if receipt.schema != "quantalang-substrate-receipt/v0" {
+    if receipt.schema != "buildlang-substrate-receipt/v0" {
         eprintln!(
             "substrate receipt has unsupported schema '{}'",
             receipt.schema
         );
         return Err(1);
     }
-    if receipt.compiler != "quantac" {
+    if receipt.compiler != "buildc" {
         eprintln!(
-            "substrate compiler mismatch: expected 'quantac', found '{}'",
+            "substrate compiler mismatch: expected 'buildc', found '{}'",
             receipt.compiler
         );
         return Err(1);
     }
-    if receipt.language != "quantalang" {
+    if receipt.language != "buildlang" {
         eprintln!(
-            "substrate language mismatch: expected 'quantalang', found '{}'",
+            "substrate language mismatch: expected 'buildlang', found '{}'",
             receipt.language
         );
         return Err(1);
@@ -537,7 +537,7 @@ fn verify_substrate_receipt(
         return Err(1);
     }
 
-    if receipt.semantic_surface.check_receipt_schema != "quantalang-check-receipt/v1" {
+    if receipt.semantic_surface.check_receipt_schema != "buildlang-check-receipt/v1" {
         eprintln!(
             "substrate semantic_surface.check_receipt_schema mismatch: found '{}'",
             receipt.semantic_surface.check_receipt_schema
@@ -726,14 +726,14 @@ git commit -m "feat: add substrate receipt verifier"
 
 ---
 
-### Task 3: Wire Substrate Verification Into `quantac corpus verify`
+### Task 3: Wire Substrate Verification Into `buildc corpus verify`
 
 **Files:**
 - Modify: `compiler/src/main.rs`
 
 **Interfaces:**
 - Consumes: `verify_substrate_receipt(...) -> Result<(), i32>` from Task 2.
-- Produces: `quantac corpus verify` validates `semantic-corpus/receipts/substrate-semantic-corpus-2026-06-18.json` and prints `substrate receipt: ok`.
+- Produces: `buildc corpus verify` validates `semantic-corpus/receipts/substrate-semantic-corpus-2026-06-18.json` and prints `substrate receipt: ok`.
 
 - [ ] **Step 1: Read and validate substrate receipt in `cmd_corpus_verify`**
 
@@ -818,7 +818,7 @@ git commit -m "feat: verify substrate receipt in corpus checks"
 - Modify: `STATUS.md`
 
 **Interfaces:**
-- Consumes: implemented `quantac corpus verify` output from Task 3.
+- Consumes: implemented `buildc corpus verify` output from Task 3.
 - Produces: public docs that describe substrate receipts as evidence aggregation, not backend promotion.
 
 - [ ] **Step 1: Update README backend receipt section**
@@ -826,8 +826,8 @@ git commit -m "feat: verify substrate receipt in corpus checks"
 In `README.md`, in the backend section immediately after the paragraph beginning ``The Rust target emits source for a subset of MIR``, add:
 
 ```markdown
-`quantac corpus verify` also validates a Substrate Receipt
-(`quantalang-substrate-receipt/v0`) for the same semantic corpus. This receipt
+`buildc corpus verify` also validates a Substrate Receipt
+(`buildlang-substrate-receipt/v0`) for the same semantic corpus. This receipt
 aggregates existing evidence across semantic, execution, memory, representation,
 and command surfaces: C remains the production execution anchor, Rust remains an
 experimental subset lane, and unverified GPU/native lanes must keep explicit
@@ -837,10 +837,10 @@ not a backend promotion claim.
 
 - [ ] **Step 2: Update STATUS summary**
 
-In `STATUS.md`, in the long summary paragraph under `## Summary`, add this sentence after the sentence that mentions `quantac corpus verify`:
+In `STATUS.md`, in the long summary paragraph under `## Summary`, add this sentence after the sentence that mentions `buildc corpus verify`:
 
 ```markdown
-The same corpus path now carries a `quantalang-substrate-receipt/v0` aggregation receipt that checks source-set size, backend maturity, memory gaps, representation fallback policy, and evidence commands without promoting experimental backends.
+The same corpus path now carries a `buildlang-substrate-receipt/v0` aggregation receipt that checks source-set size, backend maturity, memory gaps, representation fallback policy, and evidence commands without promoting experimental backends.
 ```
 
 - [ ] **Step 3: Run formatting and focused verification**

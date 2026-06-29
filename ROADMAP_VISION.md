@@ -1,5 +1,5 @@
-# QuantaLang: The Graphics Programming Language
-# Vision Roadmap - Making QuantaLang World-Changing
+# BuildLang: The Graphics Programming Language
+# Vision Roadmap - Making BuildLang World-Changing
 
 > Current status (2026-06-15): historical/superseded graphics vision record.
 > Use `STATUS.md`, `ARCHITECTURE.md`, and
@@ -10,13 +10,13 @@
 
 ## Context
 
-Historical context from an earlier graphics push: QuantaLang had accumulated a
+Historical context from an earlier graphics push: BuildLang had accumulated a
 large Rust compiler and multiple graphics proof artifacts. Those counts and
 milestones are not the current release gate.
 
 Now it needs to become **the language elite graphics programmers demand** - the tool Pascal Gilcher, Boris Vorontsov, and every AAA shader programmer would choose over HLSL/GLSL/C++.
 
-**The core thesis:** No language lets you write math once and have it run identically on CPU and GPU, catches color space errors at compile time, and tracks floating-point precision through a rendering pipeline. QuantaLang will be the first.
+**The core thesis:** No language lets you write math once and have it run identically on CPU and GPU, catches color space errors at compile time, and tracks floating-point precision through a rendering pipeline. BuildLang will be the first.
 
 ## Current State Assessment
 
@@ -29,7 +29,7 @@ Now it needs to become **the language elite graphics programmers demand** - the 
 - Operator overloading, generics, multi-module compilation all working
 
 **What's missing (the gaps):**
-- End-to-end QuantaLang source → SPIR-V → runs on GPU: NOT proven
+- End-to-end BuildLang source → SPIR-V → runs on GPU: NOT proven
 - MIR→SPIR-V has ~50% operation coverage (many ops return zero/stub)
 - No Vulkan host runtime (only printf stubs)
 - WithEffect type annotations: not parsed, not lowered, not checked
@@ -53,18 +53,18 @@ Now it needs to become **the language elite graphics programmers demand** - the 
 
 ## Pillar 1: True Dual-Target (Q2-Q3 2027)
 
-**Goal:** A QuantaLang function with `#[fragment]` compiles to SPIR-V, loads in Vulkan, renders pixels.
+**Goal:** A BuildLang function with `#[fragment]` compiles to SPIR-V, loads in Vulkan, renders pixels.
 
-### Phase 1A: Wire the QuantaLang→SPIR-V pipeline end-to-end
+### Phase 1A: Wire the BuildLang→SPIR-V pipeline end-to-end
 
 **Problem:** The SPIR-V backend has hardcoded shader generators that produce valid SPIR-V, but the normal AST→MIR→SPIR-V path has ~50% operation coverage. Many MIR operations fall through to a default that returns zero.
 
 **Deliverables:**
 1. Fix MIR→SPIR-V operation coverage: implement FieldAccess, VariantField, IndexAccess, pointer stores, globals
-2. Make `quantac compile shader.quanta --target=spirv` produce valid SPIR-V from QuantaLang source
+2. Make `buildc compile shader.bld --target=spirv` produce valid SPIR-V from BuildLang source
 3. Test: compile a real fragment shader (PBR BRDF from test 75) to SPIR-V, validate with spirv-val
 
-**Key file:** `quantalang/compiler/src/codegen/backend/spirv.rs`
+**Key file:** `buildlang/compiler/src/codegen/backend/spirv.rs`
 - Lines 1815-1817: pointer store stubs → implement OpStore
 - Lines 1911-1915: default zero fallback → implement remaining RValues
 - Line 669+: `gen_function()` entry point for compilation
@@ -75,22 +75,22 @@ Now it needs to become **the language elite graphics programmers demand** - the 
 
 **Deliverables:**
 1. Write a minimal Vulkan host library in C (~500 lines): create instance, device, swapchain, render pass, pipeline
-2. Expose as C FFI functions callable from QuantaLang: `vk_init()`, `vk_create_pipeline(spv_bytes)`, `vk_draw()`, `vk_present()`
-3. Wire into the QuantaLang C runtime so a compiled program can create a window and render
+2. Expose as C FFI functions callable from BuildLang: `vk_init()`, `vk_create_pipeline(spv_bytes)`, `vk_draw()`, `vk_present()`
+3. Wire into the BuildLang C runtime so a compiled program can create a window and render
 
 **Key files:**
-- New: `quantalang/runtime/vulkan_host.c` - minimal Vulkan host
-- Modify: `quantalang/compiler/src/codegen/runtime.rs` - add vulkan FFI declarations
+- New: `buildlang/runtime/vulkan_host.c` - minimal Vulkan host
+- Modify: `buildlang/compiler/src/codegen/runtime.rs` - add vulkan FFI declarations
 
-### Phase 1C: The Proof - render pixels from QuantaLang
+### Phase 1C: The Proof - render pixels from BuildLang
 
 **Deliverables:**
-1. Write a complete QuantaLang program: vertex shader + fragment shader + host code
+1. Write a complete BuildLang program: vertex shader + fragment shader + host code
 2. Compile vertex/fragment to SPIR-V, host to native via C
 3. Program opens a window, renders a colored triangle, outputs a screenshot
 4. Same BRDF math compiled to C produces identical output values
 
-**Test:** `102_vulkan_triangle.quanta` - first QuantaLang program rendering real pixels via Vulkan
+**Test:** `102_vulkan_triangle.bld` - first BuildLang program rendering real pixels via Vulkan
 **Proof point:** C and SPIR-V backends produce bit-identical results for PBR functions
 
 ---
@@ -109,9 +109,9 @@ Now it needs to become **the language elite graphics programmers demand** - the 
 3. Propagate through function signatures: if input is `with ColorSpace<Linear>`, output is too
 
 **Key files:**
-- `quantalang/compiler/src/parser/ty.rs` - parse `with` after type
-- `quantalang/compiler/src/types/ty.rs` - add TyKind::Annotated { base, annotations }
-- `quantalang/compiler/src/types/infer.rs` - propagate annotations through unification
+- `buildlang/compiler/src/parser/ty.rs` - parse `with` after type
+- `buildlang/compiler/src/types/ty.rs` - add TyKind::Annotated { base, annotations }
+- `buildlang/compiler/src/types/infer.rs` - propagate annotations through unification
 
 ### Phase 2B: Color space effect definitions
 
@@ -121,7 +121,7 @@ Now it needs to become **the language elite graphics programmers demand** - the 
 3. Compiler error when mixing: `let wrong: sRGB = my_linear_color;`
 
 **Syntax:**
-```quanta
+```build
 effect ColorSpace<S> {}
 
 type LinearRGB = vec3 with ColorSpace<Linear>;
@@ -151,7 +151,7 @@ let result = pbr_shade(my_srgb_color);
 This pillar depends on Pillars 1+2 being complete. Design only - no implementation yet.
 
 **Vision:**
-```quanta
+```build
 render_graph deferred_pipeline {
     pass gbuffer {
         vertex: gbuffer_vertex,
@@ -191,11 +191,11 @@ The compiler verifies:
 **Do second (Pillar 1B):** Minimal Vulkan host
 - ~500 lines of C
 - Standard boilerplate (every Vulkan tutorial covers this)
-- Wire as FFI functions in the QuantaLang runtime
+- Wire as FFI functions in the BuildLang runtime
 
 **Do third (Pillar 1C):** The proof
-- Write the triangle demo in QuantaLang
-- This is the moment QuantaLang becomes real for graphics programmers
+- Write the triangle demo in BuildLang
+- This is the moment BuildLang becomes real for graphics programmers
 
 **Then (Pillar 2A-2C):** Color space types
 - Parser changes: small
@@ -208,9 +208,9 @@ The compiler verifies:
 
 | Milestone | Metric |
 |-----------|--------|
-| Pillar 1A | `quantac compile shader.quanta --target=spirv` produces valid SPIR-V from QuantaLang source |
-| Pillar 1B | A C program linked with the Vulkan host lib renders a triangle using QuantaLang-compiled SPIR-V |
-| Pillar 1C | A pure QuantaLang program (no C) opens a window and renders pixels via Vulkan |
+| Pillar 1A | `buildc compile shader.bld --target=spirv` produces valid SPIR-V from BuildLang source |
+| Pillar 1B | A C program linked with the Vulkan host lib renders a triangle using BuildLang-compiled SPIR-V |
+| Pillar 1C | A pure BuildLang program (no C) opens a window and renders pixels via Vulkan |
 | Pillar 2A | `fn foo(c: vec3 with ColorSpace<Linear>)` parses, type-checks, and compiles |
 | Pillar 2B | Compiler error when passing sRGB color to function expecting Linear |
 | Pillar 2C | Precision warning after 10-pass pipeline |

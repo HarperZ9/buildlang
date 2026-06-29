@@ -1,8 +1,8 @@
-QuantaLang Fair-Source License, Version 1.0
+BuildLang Fair-Source License, Version 1.0
 
 Copyright (c) 2022-2026 Zain Dana Harper. All rights reserved.
 
-This license governs use of the accompanying software ("the Software", the QuantaLang compiler and toolchain). By using,
+This license governs use of the accompanying software ("the Software", the BuildLang compiler and toolchain). By using,
 copying, modifying, or distributing the Software, you accept these terms. The
 Software is source-available, not open source: the source is published so you can
 read it, run it, and build on it, while commercial use that competes with the
@@ -74,5 +74,5 @@ project is reserved so the project can fund its own continued development.
 10. Contact
 
     For commercial licensing or to report a security issue, open a private
-    security advisory at https://github.com/HarperZ9/quantalang/security or
+    security advisory at https://github.com/HarperZ9/buildlang/security or
     reach the Licensor via https://github.com/HarperZ9.

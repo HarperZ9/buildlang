@@ -1,10 +1,10 @@
-# Quantac Check Receipts Implementation Plan
+# Buildc Check Receipts Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add deterministic JSON accountability receipts to `quantac check`.
+**Goal:** Add deterministic JSON accountability receipts to `buildc check`.
 
-**Architecture:** Keep capability evidence owned by the type/effect checker. Add a small function summary model to `compiler/src/types/check.rs`, then have `compiler/src/main.rs` render a check outcome either as existing human output or as `quantalang-check-receipt/v1` JSON. CLI tests exercise the built `quantac` binary so stdout/stderr routing and exit codes are covered.
+**Architecture:** Keep capability evidence owned by the type/effect checker. Add a small function summary model to `compiler/src/types/check.rs`, then have `compiler/src/main.rs` render a check outcome either as existing human output or as `buildlang-check-receipt/v1` JSON. CLI tests exercise the built `buildc` binary so stdout/stderr routing and exit codes are covered.
 
 **Tech Stack:** Rust compiler CLI with `clap`, `serde`, and `serde_json`; existing type checker capability source tracking; Cargo integration tests in `compiler/tests/cli.rs`.
 
@@ -25,7 +25,7 @@
 - Modify: `compiler/tests/cli.rs`
   - Add receipt CLI tests for a passing console program and a failing file capability program.
 - Modify: `README.md` and `docs/EFFECTS_GUIDE.md`
-  - Document the new `quantac check --receipt` surface.
+  - Document the new `buildc check --receipt` surface.
 
 ## Task 1: Type Checker Function Effect Summaries
 
@@ -37,7 +37,7 @@ Add these tests to the `#[cfg(test)]` module in `compiler/src/types/check.rs`:
     #[test]
     fn check_summary_records_declared_effects_and_capability_sources() {
         let source = r#"fn main() ~ Console { println!("ops"); }"#;
-        let source_file = crate::lexer::SourceFile::new("summary_test.quanta", source);
+        let source_file = crate::lexer::SourceFile::new("summary_test.bld", source);
         let mut lexer = crate::lexer::Lexer::new(&source_file);
         let tokens = lexer.tokenize().expect("tokenize summary fixture");
         let mut parser = crate::parser::Parser::new(&source_file, tokens);
@@ -78,10 +78,10 @@ Add these tests to the `#[cfg(test)]` module in `compiler/src/types/check.rs`:
 
         let mut ctx = TypeContext::new();
         let mut checker = TypeChecker::new(&mut ctx);
-        checker.check_module(&parse_module("first.quanta", first));
+        checker.check_module(&parse_module("first.bld", first));
         assert_eq!(checker.function_effect_summaries().len(), 1);
 
-        checker.check_module(&parse_module("second.quanta", second));
+        checker.check_module(&parse_module("second.bld", second));
         let summaries = checker.function_effect_summaries();
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].function, "helper");
@@ -194,19 +194,19 @@ Add these tests to `compiler/tests/cli.rs` after `check_reports_capability_effec
 #[test]
 fn check_receipt_stdout_records_passing_capabilities() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_pass_{}.quanta",
+        "buildlang_check_receipt_pass_{}.bld",
         std::process::id()
     ));
     fs::write(&fixture, r#"fn main() ~ Console { println!("ok"); }"#)
         .expect("write passing receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -218,7 +218,7 @@ fn check_receipt_stdout_records_passing_capabilities() {
     );
     let receipt: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout should be JSON receipt");
-    assert_eq!(receipt["schema"], "quantalang-check-receipt/v1");
+    assert_eq!(receipt["schema"], "buildlang-check-receipt/v1");
     assert_eq!(receipt["status"], "passed");
     assert_eq!(receipt["declared_effects"]["main"], serde_json::json!(["Console"]));
     assert_eq!(
@@ -231,20 +231,20 @@ fn check_receipt_stdout_records_passing_capabilities() {
 #[test]
 fn check_receipt_file_records_failing_capability_diagnostic() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_fail_{}.quanta",
+        "buildlang_check_receipt_fail_{}.bld",
         std::process::id()
     ));
     let receipt_path = fixture.with_extension("receipt.json");
     fs::write(&fixture, r#"fn main() { read_file("ops.txt"); }"#)
         .expect("write failing receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg(&receipt_path)
         .output()
-        .expect("run quantac check --receipt file");
+        .expect("run buildc check --receipt file");
 
     let receipt_text = fs::read_to_string(&receipt_path).expect("read receipt file");
     let _ = fs::remove_file(&fixture);
@@ -256,7 +256,7 @@ fn check_receipt_file_records_failing_capability_diagnostic() {
     );
     let receipt: serde_json::Value =
         serde_json::from_str(&receipt_text).expect("receipt file should be JSON");
-    assert_eq!(receipt["schema"], "quantalang-check-receipt/v1");
+    assert_eq!(receipt["schema"], "buildlang-check-receipt/v1");
     assert_eq!(receipt["status"], "failed");
     assert_eq!(
         receipt["observed_capabilities"]["main"]["FileSystem"],
@@ -339,8 +339,8 @@ struct CheckOutcome {
     items: usize,
     tokens: usize,
     parse_errors: Vec<String>,
-    type_errors: Vec<quantalang::types::TypeErrorWithSpan>,
-    function_summaries: Vec<quantalang::types::FunctionEffectSummary>,
+    type_errors: Vec<buildlang::types::TypeErrorWithSpan>,
+    function_summaries: Vec<buildlang::types::FunctionEffectSummary>,
 }
 ```
 
@@ -349,16 +349,16 @@ struct CheckOutcome {
 In `compiler/src/main.rs`, add:
 
 ```rust
-fn type_error_kind(error: &quantalang::types::TypeError) -> &'static str {
+fn type_error_kind(error: &buildlang::types::TypeError) -> &'static str {
     match error {
-        quantalang::types::TypeError::TypeMismatch { .. } => "TypeMismatch",
-        quantalang::types::TypeError::InfiniteType { .. } => "InfiniteType",
-        quantalang::types::TypeError::MutabilityMismatch { .. } => "MutabilityMismatch",
-        quantalang::types::TypeError::UnknownEffect { .. } => "UnknownEffect",
-        quantalang::types::TypeError::UnhandledEffect { .. } => "UnhandledEffect",
-        quantalang::types::TypeError::UndeclaredEffect { .. } => "UndeclaredEffect",
-        quantalang::types::TypeError::UnknownEffectOperation { .. } => "UnknownEffectOperation",
-        quantalang::types::TypeError::MissingHandlerClause { .. } => "MissingHandlerClause",
+        buildlang::types::TypeError::TypeMismatch { .. } => "TypeMismatch",
+        buildlang::types::TypeError::InfiniteType { .. } => "InfiniteType",
+        buildlang::types::TypeError::MutabilityMismatch { .. } => "MutabilityMismatch",
+        buildlang::types::TypeError::UnknownEffect { .. } => "UnknownEffect",
+        buildlang::types::TypeError::UnhandledEffect { .. } => "UnhandledEffect",
+        buildlang::types::TypeError::UndeclaredEffect { .. } => "UndeclaredEffect",
+        buildlang::types::TypeError::UnknownEffectOperation { .. } => "UnknownEffectOperation",
+        buildlang::types::TypeError::MissingHandlerClause { .. } => "MissingHandlerClause",
         _ => "TypeError",
     }
 }
@@ -392,8 +392,8 @@ fn build_check_receipt(outcome: &CheckOutcome) -> CheckReceipt {
     }));
 
     CheckReceipt {
-        schema: "quantalang-check-receipt/v1",
-        compiler: "quantac",
+        schema: "buildlang-check-receipt/v1",
+        compiler: "buildc",
         source: outcome.source.clone(),
         status: if diagnostics.is_empty() { "passed" } else { "failed" },
         items: outcome.items,
@@ -492,7 +492,7 @@ Run:
 
 ```powershell
 git add compiler/src/main.rs compiler/tests/cli.rs
-git commit -m "feat: emit quantac check receipts"
+git commit -m "feat: emit buildc check receipts"
 ```
 
 ## Task 3: Public Documentation
@@ -502,7 +502,7 @@ git commit -m "feat: emit quantac check receipts"
 In `README.md`, update the `check` row to:
 
 ```markdown
-| `quantac check <file> [--receipt PATH|-]` | Type-check and optionally emit a JSON accountability receipt |
+| `buildc check <file> [--receipt PATH|-]` | Type-check and optionally emit a JSON accountability receipt |
 ```
 
 - [ ] **Step 2: Add effects-guide receipt section**
@@ -510,8 +510,8 @@ In `README.md`, update the `check` row to:
 In `docs/EFFECTS_GUIDE.md`, add this paragraph after the capability diagnostics paragraph:
 
 ```markdown
-`quantac check <file> --receipt <path>` writes a deterministic
-`quantalang-check-receipt/v1` JSON artifact with declared effects, observed
+`buildc check <file> --receipt <path>` writes a deterministic
+`buildlang-check-receipt/v1` JSON artifact with declared effects, observed
 capability sources, pass/fail status, and compact diagnostics. Use
 `--receipt -` when a CI step or wrapper wants the receipt on stdout.
 ```
@@ -570,20 +570,20 @@ $env:RUSTFLAGS='-Dwarnings'; cargo test --manifest-path compiler/Cargo.toml --qu
 git diff --check
 git diff origin/main..HEAD --check
 git check-ignore -q .env
-powershell -NoProfile -ExecutionPolicy Bypass -File C:/dev/scratch/portfolio-stabilization-2026-06-13/scan-diff-secrets.ps1 -Repo C:/dev/public/pubscan/quantalang
+powershell -NoProfile -ExecutionPolicy Bypass -File C:/dev/scratch/portfolio-stabilization-2026-06-13/scan-diff-secrets.ps1 -Repo C:/dev/public/pubscan/buildlang
 ```
 
 - [ ] **Step 6: Push and verify GitHub runs**
 
 ```powershell
 git push origin main
-gh run list -R HarperZ9/quantalang --branch main --limit 8 --json databaseId,workflowName,status,conclusion,headSha,displayTitle,createdAt
+gh run list -R HarperZ9/buildlang --branch main --limit 8 --json databaseId,workflowName,status,conclusion,headSha,displayTitle,createdAt
 $head = git rev-parse HEAD
-$runs = gh run list -R HarperZ9/quantalang --branch main --limit 8 --json databaseId,workflowName,headSha | ConvertFrom-Json
+$runs = gh run list -R HarperZ9/buildlang --branch main --limit 8 --json databaseId,workflowName,headSha | ConvertFrom-Json
 $ci = $runs | Where-Object { $_.headSha -eq $head -and $_.workflowName -eq "CI" } | Select-Object -First 1
 $pages = $runs | Where-Object { $_.headSha -eq $head -and $_.workflowName -eq "pages-build-deployment" } | Select-Object -First 1
-gh run watch $ci.databaseId -R HarperZ9/quantalang --exit-status
-gh run watch $pages.databaseId -R HarperZ9/quantalang --exit-status
+gh run watch $ci.databaseId -R HarperZ9/buildlang --exit-status
+gh run watch $pages.databaseId -R HarperZ9/buildlang --exit-status
 ```
 
 Expected: CI and Pages complete successfully for the pushed head.

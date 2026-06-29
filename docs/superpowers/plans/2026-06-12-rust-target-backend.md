@@ -2,7 +2,7 @@
 
 > **For Zain:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan step-by-step.
 
-**Goal:** Add an experimental Rust source target to QuantaC and verify emitted
+**Goal:** Add an experimental Rust source target to BuildC and verify emitted
 Rust with `rustc`.
 
 **Architecture:** Extend the existing MIR backend interface with a new
@@ -10,7 +10,7 @@ Rust with `rustc`.
 return explicit unsupported-feature errors when MIR constructs are not safely
 lowered yet.
 
-**Tech Stack:** Rust compiler crate, existing QuantaLang MIR, existing CLI.
+**Tech Stack:** Rust compiler crate, existing BuildLang MIR, existing CLI.
 
 ### Task 1: Add Red Tests
 
@@ -68,7 +68,7 @@ lowered yet.
 **Commands:**
 - `C:\Users\Zain\.cargo\bin\cargo.exe fmt --manifest-path compiler\Cargo.toml`
 - `C:\Users\Zain\.cargo\bin\cargo.exe test --manifest-path compiler\Cargo.toml --quiet`
-- Generate Rust for selected programs with `quantac --target rust`.
+- Generate Rust for selected programs with `buildc --target rust`.
 - `C:\Users\Zain\.cargo\bin\rustc.exe --emit=metadata <generated>.rs`
 
 **Expected:** Rust target tests pass, full compiler tests remain green, and

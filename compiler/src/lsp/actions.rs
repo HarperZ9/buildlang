@@ -1,10 +1,10 @@
 // ===============================================================================
-// QUANTALANG LSP CODE ACTIONS
+// BUILDLANG LSP CODE ACTIONS
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
-//! Code action provider for QuantaLang.
+//! Code action provider for BuildLang.
 
 use super::document::Document;
 use super::types::*;

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Record every source file that feeds `quantac check` in check receipts, not only the entry file.
+**Goal:** Record every source file that feeds `buildc check` in check receipts, not only the entry file.
 
 **Architecture:** Add a small input digest ledger in `compiler/src/main.rs`, pass it through entry reading, import resolution, include preprocessing, and module resolution, then serialize sorted records in `CheckReceipt`.
 
@@ -17,7 +17,7 @@
 
 - [ ] **Step 1: Add CLI regression**
 
-Add a test that creates an entry file with `include!("shared.quanta");`, checks
+Add a test that creates an entry file with `include!("shared.bld");`, checks
 it with `--receipt -`, and asserts the receipt contains two input records:
 `entry` and `include`.
 
@@ -107,7 +107,7 @@ cargo fmt --manifest-path compiler/Cargo.toml -- --check
 ```powershell
 git diff --check
 git check-ignore -q .env
-powershell -NoProfile -ExecutionPolicy Bypass -File C:/dev/scratch/portfolio-stabilization-2026-06-13/scan-diff-secrets.ps1 -Repo C:/dev/public/pubscan/quantalang
+powershell -NoProfile -ExecutionPolicy Bypass -File C:/dev/scratch/portfolio-stabilization-2026-06-13/scan-diff-secrets.ps1 -Repo C:/dev/public/pubscan/buildlang
 git push origin main
-gh run list -R HarperZ9/quantalang --branch main --limit 8 --json databaseId,workflowName,status,conclusion,headSha,displayTitle,createdAt,url
+gh run list -R HarperZ9/buildlang --branch main --limit 8 --json databaseId,workflowName,status,conclusion,headSha,displayTitle,createdAt,url
 ```

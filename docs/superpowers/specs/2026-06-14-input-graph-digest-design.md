@@ -5,7 +5,7 @@ Status: Approved by standing continue direction
 
 ## Purpose
 
-`quantac check --receipt` now records an `input_digests` ledger for every entry,
+`buildc check --receipt` now records an `input_digests` ledger for every entry,
 import, include, and module file that feeds the check pipeline. That ledger is
 inspectable, but policy tooling still has to walk an array to compare source
 graphs. Add one portable graph fingerprint so CI can compare the entire checked
@@ -13,7 +13,7 @@ input set with a single value.
 
 ## Design
 
-Add `input_graph_digest` to `quantalang-check-receipt/v1`:
+Add `input_graph_digest` to `buildlang-check-receipt/v1`:
 
 ```json
 {
@@ -39,7 +39,7 @@ Rules:
 
 ## Testing
 
-- A receipt with `include!("shared.quanta")` keeps the same entry
+- A receipt with `include!("shared.bld")` keeps the same entry
   `source_digest` when only the included file changes, but changes
   `input_graph_digest`.
 - Two equivalent source graphs in different temp directories produce identical

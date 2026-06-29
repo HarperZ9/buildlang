@@ -1,3 +1,0 @@
-fn main() ~ Console {
-    println!("Hello from QuantaLang!");
-}

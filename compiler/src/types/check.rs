@@ -1,5 +1,5 @@
 // ===============================================================================
-// QUANTALANG TYPE SYSTEM - TYPE CHECKER
+// BUILDLANG TYPE SYSTEM - TYPE CHECKER
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
@@ -261,7 +261,7 @@ impl<'ctx> TypeChecker<'ctx> {
         } else if let Some(ref dir) = self.source_dir.clone() {
             // External module: load from disk
             let mod_name = m.name.name.as_ref();
-            let mod_path = dir.join(format!("{}.quanta", mod_name));
+            let mod_path = dir.join(format!("{}.bld", mod_name));
             if mod_path.exists() {
                 if let Ok(source_text) = std::fs::read_to_string(&mod_path) {
                     let source = crate::lexer::SourceFile::new(
@@ -318,7 +318,7 @@ impl<'ctx> TypeChecker<'ctx> {
                 ImplItemKind::Const { name, ty, .. } => {
                     // Register associated constants at module scope so they're
                     // accessible from other impl blocks (e.g., BRADFORD in
-                    // chromatic_adaptation.quanta).
+                    // chromatic_adaptation.bld).
                     let const_ty = self.lower_type(ty);
                     self.ctx.define_var(name.name.clone(), const_ty);
                 }
@@ -1243,11 +1243,11 @@ impl<'ctx> TypeChecker<'ctx> {
     }
 
     fn check_mod(&mut self, m: &ast::ModDef) {
-        // External module: `mod foo;` loads foo.quanta from disk
+        // External module: `mod foo;` loads foo.bld from disk
         if m.content.is_none() {
             if let Some(ref dir) = self.source_dir {
                 let mod_name = m.name.name.as_ref();
-                let mod_path = dir.join(format!("{}.quanta", mod_name));
+                let mod_path = dir.join(format!("{}.bld", mod_name));
                 if mod_path.exists() {
                     if let Ok(source_text) = std::fs::read_to_string(&mod_path) {
                         let source = crate::lexer::SourceFile::new(
@@ -1327,7 +1327,7 @@ impl<'ctx> TypeChecker<'ctx> {
             self.ctx.pop_scope();
 
             // Re-export pub items to parent scope (implicit `use mod::*`).
-            // This is the QuantaLang ecosystem convention - module contents
+            // This is the BuildLang ecosystem convention - module contents
             // are accessible by bare name from the parent scope.
             //
             // IMPORTANT: For structs and enums, reuse the existing DefId from
@@ -1573,7 +1573,7 @@ mod tests {
     use super::*;
 
     fn check_source(source: &str) -> Vec<TypeErrorWithSpan> {
-        let source_file = crate::lexer::SourceFile::new("capability_test.quanta", source);
+        let source_file = crate::lexer::SourceFile::new("capability_test.bld", source);
         let mut lexer = crate::lexer::Lexer::new(&source_file);
         let tokens = lexer.tokenize().expect("tokenize capability fixture");
         let mut parser = crate::parser::Parser::new(&source_file, tokens);
@@ -1617,11 +1617,11 @@ mod tests {
         let errors = check_source(
             r#"
             extern "C" {
-                fn quanta_file_exists(path: &str) -> bool;
+                fn build_file_exists(path: &str) -> bool;
             }
 
             fn main() {
-                quanta_file_exists("ops.txt");
+                build_file_exists("ops.txt");
             }
             "#,
         );
@@ -1637,8 +1637,8 @@ mod tests {
             errors.iter().any(|err| err
                 .notes
                 .iter()
-                .any(|note| note.contains("quanta_file_exists"))),
-            "expected diagnostic note naming quanta_file_exists, got {errors:#?}"
+                .any(|note| note.contains("build_file_exists"))),
+            "expected diagnostic note naming build_file_exists, got {errors:#?}"
         );
     }
 
@@ -1647,11 +1647,11 @@ mod tests {
         let errors = check_source(
             r#"
             extern "C" {
-                fn quanta_file_exists(path: &str) -> bool;
+                fn build_file_exists(path: &str) -> bool;
             }
 
             fn main() ~ FileSystem {
-                quanta_file_exists("ops.txt");
+                build_file_exists("ops.txt");
             }
             "#,
         );
@@ -1739,7 +1739,7 @@ mod tests {
 
     #[test]
     fn capability_gpu_runtime_call_requires_gpu_effect() {
-        let errors = check_source(r#"fn main() { quanta_vk_init(); }"#);
+        let errors = check_source(r#"fn main() { build_vk_init(); }"#);
 
         assert!(
             errors.iter().any(|err| matches!(
@@ -1751,14 +1751,14 @@ mod tests {
         assert!(
             errors
                 .iter()
-                .any(|err| err.notes.iter().any(|note| note.contains("quanta_vk_init"))),
-            "expected diagnostic note naming quanta_vk_init, got {errors:#?}"
+                .any(|err| err.notes.iter().any(|note| note.contains("build_vk_init"))),
+            "expected diagnostic note naming build_vk_init, got {errors:#?}"
         );
     }
 
     #[test]
     fn capability_declared_gpu_effect_allows_gpu_runtime_call() {
-        let errors = check_source(r#"fn main() ~ Gpu { quanta_vk_init(); }"#);
+        let errors = check_source(r#"fn main() ~ Gpu { build_vk_init(); }"#);
 
         assert!(errors.is_empty(), "expected no errors, got {errors:#?}");
     }
@@ -1768,11 +1768,11 @@ mod tests {
         let errors = check_source(
             r#"
             extern "C" {
-                fn quanta_gfx_init(width: i32, height: i32, title: &str) -> i32;
+                fn build_gfx_init(width: i32, height: i32, title: &str) -> i32;
             }
 
             fn main() {
-                quanta_gfx_init(800, 600, "QuantaLang Triangle");
+                build_gfx_init(800, 600, "BuildLang Triangle");
             }
             "#,
         );
@@ -1785,11 +1785,10 @@ mod tests {
             "expected Gpu effect error, got {errors:#?}"
         );
         assert!(
-            errors.iter().any(|err| err
-                .notes
+            errors
                 .iter()
-                .any(|note| note.contains("quanta_gfx_init"))),
-            "expected diagnostic note naming quanta_gfx_init, got {errors:#?}"
+                .any(|err| err.notes.iter().any(|note| note.contains("build_gfx_init"))),
+            "expected diagnostic note naming build_gfx_init, got {errors:#?}"
         );
     }
 
@@ -1798,11 +1797,11 @@ mod tests {
         let errors = check_source(
             r#"
             extern "C" {
-                fn quanta_gfx_init(width: i32, height: i32, title: &str) -> i32;
+                fn build_gfx_init(width: i32, height: i32, title: &str) -> i32;
             }
 
             fn main() ~ Gpu {
-                quanta_gfx_init(800, 600, "QuantaLang Triangle");
+                build_gfx_init(800, 600, "BuildLang Triangle");
             }
             "#,
         );
@@ -1812,7 +1811,7 @@ mod tests {
 
     #[test]
     fn capability_wrong_declared_effect_does_not_allow_gpu_runtime_call() {
-        let errors = check_source(r#"fn main() ~ FileSystem { quanta_vk_init(); }"#);
+        let errors = check_source(r#"fn main() ~ FileSystem { build_vk_init(); }"#);
 
         assert!(
             errors.iter().any(|err| matches!(
@@ -1851,8 +1850,8 @@ mod tests {
     fn capability_foreign_static_requires_foreign_effect() {
         let errors = check_source(
             r#"
-            extern "C" { static QUANTA_ERRNO: i32; }
-            fn main() { let code = QUANTA_ERRNO; }
+            extern "C" { static BUILD_ERRNO: i32; }
+            fn main() { let code = BUILD_ERRNO; }
             "#,
         );
 
@@ -1866,8 +1865,8 @@ mod tests {
         assert!(
             errors
                 .iter()
-                .any(|err| err.notes.iter().any(|note| note.contains("QUANTA_ERRNO"))),
-            "expected diagnostic note naming QUANTA_ERRNO, got {errors:#?}"
+                .any(|err| err.notes.iter().any(|note| note.contains("BUILD_ERRNO"))),
+            "expected diagnostic note naming BUILD_ERRNO, got {errors:#?}"
         );
     }
 
@@ -1875,8 +1874,8 @@ mod tests {
     fn capability_declared_foreign_effect_allows_foreign_static() {
         let errors = check_source(
             r#"
-            extern "C" { static QUANTA_ERRNO: i32; }
-            fn main() ~ Foreign { let code = QUANTA_ERRNO; }
+            extern "C" { static BUILD_ERRNO: i32; }
+            fn main() ~ Foreign { let code = BUILD_ERRNO; }
             "#,
         );
 
@@ -1889,7 +1888,7 @@ mod tests {
             extern "C" { fn touch(); }
             fn main() ~ Foreign { touch(); }
         "#;
-        let source_file = crate::lexer::SourceFile::new("foreign_summary_test.quanta", source);
+        let source_file = crate::lexer::SourceFile::new("foreign_summary_test.bld", source);
         let mut lexer = crate::lexer::Lexer::new(&source_file);
         let tokens = lexer.tokenize().expect("tokenize foreign summary fixture");
         let mut parser = crate::parser::Parser::new(&source_file, tokens);
@@ -1922,7 +1921,7 @@ mod tests {
     #[test]
     fn check_summary_records_declared_effects_and_capability_sources() {
         let source = r#"fn main() ~ Console { println!("ops"); }"#;
-        let source_file = crate::lexer::SourceFile::new("summary_test.quanta", source);
+        let source_file = crate::lexer::SourceFile::new("summary_test.bld", source);
         let mut lexer = crate::lexer::Lexer::new(&source_file);
         let tokens = lexer.tokenize().expect("tokenize summary fixture");
         let mut parser = crate::parser::Parser::new(&source_file, tokens);
@@ -1959,7 +1958,7 @@ mod tests {
                 load_config();
             }
         "#;
-        let source_file = crate::lexer::SourceFile::new("summary_test.quanta", source);
+        let source_file = crate::lexer::SourceFile::new("summary_test.bld", source);
         let mut lexer = crate::lexer::Lexer::new(&source_file);
         let tokens = lexer.tokenize().expect("tokenize summary fixture");
         let mut parser = crate::parser::Parser::new(&source_file, tokens);
@@ -2016,7 +2015,7 @@ mod tests {
     #[test]
     fn check_summary_records_console_macro_as_direct_not_propagated() {
         let source = r#"fn main() ~ Console { println!("ops"); }"#;
-        let source_file = crate::lexer::SourceFile::new("summary_test.quanta", source);
+        let source_file = crate::lexer::SourceFile::new("summary_test.bld", source);
         let mut lexer = crate::lexer::Lexer::new(&source_file);
         let tokens = lexer.tokenize().expect("tokenize summary fixture");
         let mut parser = crate::parser::Parser::new(&source_file, tokens);
@@ -2066,10 +2065,10 @@ mod tests {
 
         let mut ctx = TypeContext::new();
         let mut checker = TypeChecker::new(&mut ctx);
-        checker.check_module(&parse_module("first.quanta", first));
+        checker.check_module(&parse_module("first.bld", first));
         assert_eq!(checker.function_effect_summaries().len(), 1);
 
-        checker.check_module(&parse_module("second.quanta", second));
+        checker.check_module(&parse_module("second.bld", second));
         let summaries = checker.function_effect_summaries();
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].function, "helper");

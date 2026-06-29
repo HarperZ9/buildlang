@@ -1,5 +1,5 @@
 // ===============================================================================
-// QUANTALANG TYPE SYSTEM - TYPE INFERENCE
+// BUILDLANG TYPE SYSTEM - TYPE INFERENCE
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
@@ -1731,21 +1731,21 @@ impl<'ctx> TypeInfer<'ctx> {
             "args_count" => (vec![], i64_ty.clone()),
             "args_get" => (vec![i64_ty.clone()], str_ty.clone()),
             "clock_ms" | "time_unix" => (vec![], i64_ty.clone()),
-            "quanta_vk_init" => (vec![], bool_ty.clone()),
-            "quanta_vk_load_shader_file" | "quanta_vk_run_compute" => {
+            "build_vk_init" => (vec![], bool_ty.clone()),
+            "build_vk_load_shader_file" | "build_vk_run_compute" => {
                 (vec![str_ty.clone()], bool_ty.clone())
             }
-            "quanta_vk_shutdown" => (vec![], unit_ty.clone()),
-            "quanta_vk_create_graphics_pipeline" => {
+            "build_vk_shutdown" => (vec![], unit_ty.clone()),
+            "build_vk_create_graphics_pipeline" => {
                 (vec![str_ty.clone(), str_ty.clone()], bool_ty.clone())
             }
-            "quanta_vk_set_push_constant_f32" => (
+            "build_vk_set_push_constant_f32" => (
                 vec![i64_ty.clone(), Ty::float(FloatTy::F64)],
                 unit_ty.clone(),
             ),
-            "quanta_vk_draw_frame" | "quanta_vk_request_close" => (vec![], unit_ty.clone()),
-            "quanta_vk_should_close" => (vec![], i64_ty.clone()),
-            "quanta_vk_device_name" => (vec![], str_ty),
+            "build_vk_draw_frame" | "build_vk_request_close" => (vec![], unit_ty.clone()),
+            "build_vk_should_close" => (vec![], i64_ty.clone()),
+            "build_vk_device_name" => (vec![], str_ty),
             _ => return None,
         };
 
@@ -2597,7 +2597,7 @@ impl<'ctx> TypeInfer<'ctx> {
                 Ty::fresh_var()
             }
 
-            // QuantaLang AI extensions
+            // BuildLang AI extensions
             ExprKind::AIQuery { prompt, options } => {
                 // AI queries return a String or structured response
                 let _ = self.infer_expr(prompt);
@@ -2697,7 +2697,7 @@ impl<'ctx> TypeInfer<'ctx> {
             AstLiteral::Byte(_) => Ty::int(IntTy::U8),
             AstLiteral::Str { .. } => {
                 // String literals have type str (owned).
-                // At the C level all strings are QuantaString, so using the
+                // At the C level all strings are BuildString, so using the
                 // owned str type lets method calls like char_at, substring,
                 // contains, etc. pass type-checking without a workaround.
                 Ty::str()
@@ -2781,7 +2781,7 @@ impl<'ctx> TypeInfer<'ctx> {
                 // HashMap builtins
                 "map_new" | "map_insert" | "map_get" | "map_contains" | "map_len" | "map_remove" |
                 // Vulkan runtime builtins
-                "quanta_vk_init" | "quanta_vk_load_shader_file" | "quanta_vk_run_compute" | "quanta_vk_shutdown" |
+                "build_vk_init" | "build_vk_load_shader_file" | "build_vk_run_compute" | "build_vk_shutdown" |
                 // Math constants
                 "PI" | "E" | "TAU"
             );
@@ -5760,7 +5760,7 @@ mod tests {
 
     #[test]
     fn str_literal_is_owned_str() {
-        // QuantaLang strings are owned; string literals get `str` not `&str`.
+        // BuildLang strings are owned; string literals get `str` not `&str`.
         let mut ctx = TypeContext::new();
         let mut infer = TypeInfer::new(&mut ctx);
         let ty = infer.infer_literal(&AstLiteral::Str {

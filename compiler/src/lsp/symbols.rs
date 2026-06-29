@@ -1,10 +1,10 @@
 // ===============================================================================
-// QUANTALANG LSP SYMBOLS
+// BUILDLANG LSP SYMBOLS
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
-//! Document symbol provider for QuantaLang.
+//! Document symbol provider for BuildLang.
 
 use super::document::{Document, DocumentStore};
 use super::types::*;

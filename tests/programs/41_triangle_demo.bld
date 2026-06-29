@@ -1,0 +1,26 @@
+// BuildLang Triangle Demo - Test 41
+// Demonstrates FFI to graphics stub library with a render loop.
+// The stub prints what a real Vulkan backend would do.
+
+extern "C" {
+    fn build_gfx_init(width: i32, height: i32, title: &str) -> i32;
+    fn build_gfx_should_close() -> i32;
+    fn build_gfx_begin_frame();
+    fn build_gfx_clear(r: f32, g: f32, b: f32, a: f32);
+    fn build_gfx_draw(vertex_count: i32);
+    fn build_gfx_end_frame();
+    fn build_gfx_shutdown();
+}
+
+fn main() {
+    build_gfx_init(800, 600, "BuildLang Triangle");
+
+    while build_gfx_should_close() == 0 {
+        build_gfx_begin_frame();
+        build_gfx_clear(0.1, 0.1, 0.2, 1.0);
+        build_gfx_draw(3);
+        build_gfx_end_frame();
+    }
+
+    build_gfx_shutdown();
+}

@@ -1,12 +1,12 @@
 // ===============================================================================
-// QUANTALANG LEXER - SCANNER IMPLEMENTATION
+// BUILDLANG LEXER - SCANNER IMPLEMENTATION
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
 //! Main lexer implementation.
 //!
-//! This module contains the `Lexer` struct which tokenizes QuantaLang source code
+//! This module contains the `Lexer` struct which tokenizes BuildLang source code
 //! into a stream of tokens.
 
 use super::cursor::{

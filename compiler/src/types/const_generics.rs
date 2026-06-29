@@ -1,5 +1,5 @@
 // ===============================================================================
-// QUANTALANG TYPE SYSTEM - CONST GENERICS
+// BUILDLANG TYPE SYSTEM - CONST GENERICS
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
@@ -15,7 +15,7 @@
 //!
 //! ## Syntax
 //!
-//! ```quanta
+//! ```build
 //! // Array with const generic length
 //! struct Array<T, const N: usize> {
 //!     data: [T; N],

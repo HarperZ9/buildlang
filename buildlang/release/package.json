@@ -1,0 +1,63 @@
+{
+  "name": "buildlang",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Historical aspirational BuildLang v1.0.0 package manifest; not a current published release artifact",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HarperZ9/buildlang"
+  },
+  "homepage": "https://github.com/HarperZ9/buildlang",
+  "documentation": "https://github.com/HarperZ9/buildlang#readme",
+  "keywords": [
+    "compiler",
+    "systems-programming",
+    "memory-safety",
+    "performance",
+    "async",
+    "concurrency"
+  ],
+  "categories": [
+    "compilers",
+    "development-tools",
+    "programming-languages"
+  ],
+  "authors": [
+    {
+      "name": "BuildLang Team",
+      "email": "team@buildlang.org"
+    }
+  ],
+  "rust_version": null,
+  "edition": "2024",
+  "features": {
+    "default": ["std", "llvm-backend"],
+    "std": [],
+    "llvm-backend": [],
+    "cranelift-backend": [],
+    "wasm": [],
+    "gpu": [],
+    "lsp": [],
+    "full": ["std", "llvm-backend", "cranelift-backend", "wasm", "gpu", "lsp"]
+  },
+  "targets": [
+    {
+      "name": "build",
+      "kind": ["bin"],
+      "src_path": "src/main.bld"
+    },
+    {
+      "name": "std",
+      "kind": ["lib"],
+      "src_path": "src/std/mod.bld"
+    }
+  ],
+  "dependencies": {},
+  "dev_dependencies": {},
+  "build_dependencies": {},
+  "downloads": {},
+  "created_at": "2024-12-19T00:00:00Z",
+  "updated_at": "2024-12-19T00:00:00Z",
+  "yanked": true
+}

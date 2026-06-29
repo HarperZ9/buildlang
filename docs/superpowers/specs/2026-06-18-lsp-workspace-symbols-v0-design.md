@@ -11,14 +11,14 @@ already implements `workspace_symbols(query)`, and `ServerCapabilities::full()`
 sets `workspace_symbol_provider` in the Rust type model, but raw
 `workspace/symbol` dispatch is not routed or receipt-verified.
 
-This matters for the larger QuantaLang goal because workspace symbol search is
+This matters for the larger BuildLang goal because workspace symbol search is
 the editor-facing bridge between source names, machine-readable symbol
 identity, and navigation. It makes the language more discoverable to humans and
 tools without claiming a full compiler-backed global index.
 
 ## Goal
 
-Wire the existing workspace symbol provider into `quantac lsp` raw dispatch and
+Wire the existing workspace symbol provider into `buildc lsp` raw dispatch and
 prove it in the semantic-corpus LSP dispatch receipt.
 
 The implementation should:
@@ -146,7 +146,7 @@ Verification commands:
 ```powershell
 cargo fmt --manifest-path compiler\Cargo.toml -- --check
 cargo test --manifest-path compiler\Cargo.toml --lib raw_dispatch --quiet
-cargo test --manifest-path compiler\Cargo.toml --bin quantac lsp_dispatch --quiet
+cargo test --manifest-path compiler\Cargo.toml --bin buildc lsp_dispatch --quiet
 cargo test --manifest-path compiler\Cargo.toml --test cli lsp_dispatch -- --nocapture
 cargo run --manifest-path compiler\Cargo.toml -- corpus verify --root semantic-corpus
 ```
@@ -165,7 +165,7 @@ end-to-end VS Code behavior as open gaps.
 
 ## Success Criteria
 
-- `workspace/symbol` is reachable through raw `quantac lsp` dispatch.
+- `workspace/symbol` is reachable through raw `buildc lsp` dispatch.
 - Valid requests return flat LSP `SymbolInformation[]` for currently opened
   documents.
 - Malformed requests return `-32602`.

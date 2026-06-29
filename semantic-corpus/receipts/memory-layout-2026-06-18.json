@@ -1,9 +1,9 @@
 {
-  "schema": "quantalang-memory-layout-receipt/v0",
+  "schema": "buildlang-memory-layout-receipt/v0",
   "receipt_id": "memory-layout-semantic-corpus-2026-06-18",
   "created_at": "2026-06-18",
-  "compiler": "quantac",
-  "language": "quantalang",
+  "compiler": "buildc",
+  "language": "buildlang",
   "source_set": {
     "kind": "semantic-corpus",
     "manifest": "manifest.json",
@@ -20,7 +20,7 @@
   "programs": [
     {
       "id": "scalar_branch",
-      "path": "programs/scalar_branch.quanta",
+      "path": "programs/scalar_branch.bld",
       "source_digest": {
         "algorithm": "sha256",
         "hex": "0a025b8589a35b778471383ede457dcdda3c98a12af9d385d0572f4379f013d8"
@@ -31,11 +31,11 @@
       },
       "mir_digest": {
         "algorithm": "sha256",
-        "hex": "5432511b2cd813a22a2c5c7aaed6f2a1b502d3f07a9748d5354fd3ee42769d51"
+        "hex": "5ae6b61b07da86b323fbdcbc8a2b38e1db74003f89e0381cf9cb69afc98ca761"
       },
       "memory_evidence_digest": {
         "algorithm": "sha256",
-        "hex": "9cd9960e83353b38b00f77b403d852cf8565c4c4a743c91a64e1dd36a1bd6ebf"
+        "hex": "6cb97af748845b2b4ccaab1a6d8ef695296d5e6b0832201f4011984e32562c55"
       },
       "manifest_surfaces": [],
       "observed_memory_surfaces": {
@@ -71,7 +71,7 @@
     },
     {
       "id": "references_mutation",
-      "path": "programs/references_mutation.quanta",
+      "path": "programs/references_mutation.bld",
       "source_digest": {
         "algorithm": "sha256",
         "hex": "d299be538551c7be4352fa70ee3fd36882612417e37e5e2840e2372d45ec81b2"
@@ -82,11 +82,11 @@
       },
       "mir_digest": {
         "algorithm": "sha256",
-        "hex": "c62027b21e6f4c1a850dddd9ff0ed88efa001bfd61daf32a91d2f6d2285bfb5d"
+        "hex": "23d955940a63e736d7732ec4bc24174a9a9670d23cbc10c7e2eb58daf5a59559"
       },
       "memory_evidence_digest": {
         "algorithm": "sha256",
-        "hex": "a16797563d4db21fb1a81139e03b4cb3b8737b3617d61115a25c62648f96dfdf"
+        "hex": "25fb1ea3573d752998b9fa6c46da05b32a02e3f41f30c7688a28f066b6169b74"
       },
       "manifest_surfaces": [
         "immutable-reference",
@@ -125,7 +125,7 @@
     },
     {
       "id": "structs_arrays",
-      "path": "programs/structs_arrays.quanta",
+      "path": "programs/structs_arrays.bld",
       "source_digest": {
         "algorithm": "sha256",
         "hex": "59ddc9618ac56041e33f9a73ecfa9269bf53d03758bca9a5a40aea05389834c5"
@@ -136,11 +136,11 @@
       },
       "mir_digest": {
         "algorithm": "sha256",
-        "hex": "f85a0999eae7eb5b758252f24d4d4d52229b391b59c1b8137abaced433793dde"
+        "hex": "de826407f72da94dc9e22e3fac79abce279a226c508864f5891e692611e8d6bd"
       },
       "memory_evidence_digest": {
         "algorithm": "sha256",
-        "hex": "906f6ccbecc4b28ca14c8d2085838a409838f2c872bc2f7d00716096122cd40b"
+        "hex": "551308948a65a6667c2797bfdbcebac37b7d2b75bff608cb63e71af938bf6de3"
       },
       "manifest_surfaces": [
         "fixed-array",
@@ -179,7 +179,7 @@
     },
     {
       "id": "tuple_ownership_reuse",
-      "path": "programs/tuple_ownership_reuse.quanta",
+      "path": "programs/tuple_ownership_reuse.bld",
       "source_digest": {
         "algorithm": "sha256",
         "hex": "a9f33b9b5b88a1e10d421aba31173d035175a502eef93ef9044837936d65b39a"
@@ -190,11 +190,11 @@
       },
       "mir_digest": {
         "algorithm": "sha256",
-        "hex": "8763fe8f264cb9eb121fa655ebb8368cfb4b818d1b2ce5609489223de7ffbe0f"
+        "hex": "141ccab9ec85e0d9e48b142655b810c870e1d670bc49d2c4f5ab09e0a8db9738"
       },
       "memory_evidence_digest": {
         "algorithm": "sha256",
-        "hex": "133d40e454cad1735354e625f2e34499c8c7aa8bd5c5819605435d2e1f876963"
+        "hex": "febf47904a9dca6c83f2d104dbee12ce98f280ca96deae6bf3af5f787d4d3361"
       },
       "manifest_surfaces": [
         "by-value-call",
@@ -234,7 +234,7 @@
     },
     {
       "id": "struct_aggregate_reuse",
-      "path": "programs/struct_aggregate_reuse.quanta",
+      "path": "programs/struct_aggregate_reuse.bld",
       "source_digest": {
         "algorithm": "sha256",
         "hex": "b3bca55e495214bc19af590ce456cd5049a64f8551de1362b475ce8c96b8c272"
@@ -245,11 +245,11 @@
       },
       "mir_digest": {
         "algorithm": "sha256",
-        "hex": "3fe3ad4afff6f15abc9fdd81f80c5ebac609416207c525505f226a8dcb71a267"
+        "hex": "3385cd52fda723a44b7b3ad5321ca5f9eb6169c261fee05e184fad15d7da6c3a"
       },
       "memory_evidence_digest": {
         "algorithm": "sha256",
-        "hex": "c6b5819a32cb0cc8bb3a3c7e909bbea196ebb11f726d2b0821d01c87ac49e0a8"
+        "hex": "762750682f971c9d6bbf4c5f93b590c2b352a1411864c99a68cf68c2cf05b649"
       },
       "manifest_surfaces": [
         "ownership-reuse",
@@ -288,7 +288,7 @@
     },
     {
       "id": "field_assignment_reuse",
-      "path": "programs/field_assignment_reuse.quanta",
+      "path": "programs/field_assignment_reuse.bld",
       "source_digest": {
         "algorithm": "sha256",
         "hex": "0384ba4cf4470cd8d03cac4ebc0af2daa77d8a24c4cea9d688ef229595d43ed4"
@@ -299,11 +299,11 @@
       },
       "mir_digest": {
         "algorithm": "sha256",
-        "hex": "0793afa9ed418eb816ab3176a92b092ec346c978eebdd699419455daf8a0d729"
+        "hex": "2dbaf925f8c8ba4991e7d39fa79648447eefe9b43f3c77868cf06ffb7f5288ad"
       },
       "memory_evidence_digest": {
         "algorithm": "sha256",
-        "hex": "a451433addb5ebfdd376154488b3daa0c56fe95b41193cdc97cf2ebcaad842ee"
+        "hex": "6f6ed6541dfb69c392e9c751ef0f9bcaccfb49953d56777e6133039f0c6b7847"
       },
       "manifest_surfaces": [
         "field-assignment",
@@ -343,7 +343,7 @@
     },
     {
       "id": "nested_field_reuse",
-      "path": "programs/nested_field_reuse.quanta",
+      "path": "programs/nested_field_reuse.bld",
       "source_digest": {
         "algorithm": "sha256",
         "hex": "13c982f4555cd699dc4bf72d7e15d93a6e7f449c13b195c61ff5f0aa752f56a5"
@@ -354,11 +354,11 @@
       },
       "mir_digest": {
         "algorithm": "sha256",
-        "hex": "cf7f00225a03e0b5247de91a47717742f99266683bd54559d21e9c8afc051248"
+        "hex": "ae06bf05091889fd75baf07d309b68928db89165aca2d988846e2ada684d336b"
       },
       "memory_evidence_digest": {
         "algorithm": "sha256",
-        "hex": "df2a6c5eba72762583ce61cc1f208125cb56af835176b6e817e9333469bba27e"
+        "hex": "62145923bdf437e824b81a085deb20a57de84e51f04a5b89d87af14941a67e84"
       },
       "manifest_surfaces": [
         "nested-field-access",
@@ -398,7 +398,7 @@
     },
     {
       "id": "deref_reuse",
-      "path": "programs/deref_reuse.quanta",
+      "path": "programs/deref_reuse.bld",
       "source_digest": {
         "algorithm": "sha256",
         "hex": "f7fdeba524685c72653b1f1e7be6ce9ba4569d99b4b9a201d75539d15a1138e3"
@@ -409,11 +409,11 @@
       },
       "mir_digest": {
         "algorithm": "sha256",
-        "hex": "502a8245867f41f744de3692034a95fa4c1e101a5dede8fbba0d7cefd04209e7"
+        "hex": "3ef2d1958919e8cc112ab42b7c10e0c5bf8337677c0b7f80c06fc2d7ac8fa8a2"
       },
       "memory_evidence_digest": {
         "algorithm": "sha256",
-        "hex": "7dedbbdac75d63527263761b6462faeeaa50d71d8aac80211b61591df28522e5"
+        "hex": "2bea6f01698550fa60917a23d404c982ae5dd21ed3023d9d4c8e99fd80035561"
       },
       "manifest_surfaces": [
         "dereference",

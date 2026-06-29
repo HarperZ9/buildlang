@@ -1,13 +1,13 @@
 // ===============================================================================
-// QUANTALANG PACKAGE MANAGER
+// BUILDLANG PACKAGE MANAGER
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
-//! Package manager for QuantaLang (quanta-pkg).
+//! Package manager for BuildLang (build-pkg).
 //!
 //! This module provides package management functionality including:
-//! - Package manifest parsing (Quanta.toml)
+//! - Package manifest parsing (Build.toml)
 //! - Dependency resolution with semver
 //! - Registry interaction
 //! - Package building and publishing

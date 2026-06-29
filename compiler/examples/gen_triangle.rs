@@ -1,4 +1,4 @@
-use quantalang::codegen::backend::spirv::SpirvBackend;
+use buildlang::codegen::backend::spirv::SpirvBackend;
 
 fn main() {
     let mut backend = SpirvBackend::new();

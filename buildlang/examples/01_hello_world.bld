@@ -1,0 +1,5 @@
+/// Example: Hello World
+/// The simplest BuildLang program
+fn main() {
+    println!("Hello, World!");
+}

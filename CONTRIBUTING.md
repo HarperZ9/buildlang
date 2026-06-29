@@ -1,6 +1,6 @@
 # Contributing
 
-QuantaLang is a public compiler and language-surface repository. Contributions
+BuildLang is a public compiler and language-surface repository. Contributions
 should be focused, reproducible, and clear about backend maturity.
 
 Good contribution shapes:

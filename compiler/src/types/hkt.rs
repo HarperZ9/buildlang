@@ -1,15 +1,15 @@
 // ===============================================================================
-// QUANTALANG TYPE SYSTEM - HIGHER-KINDED TYPES
+// BUILDLANG TYPE SYSTEM - HIGHER-KINDED TYPES
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
-//! Higher-kinded types (HKT) for QuantaLang.
+//! Higher-kinded types (HKT) for BuildLang.
 //!
 //! This module implements a kind system that allows type constructors to be
 //! used as first-class citizens. For example:
 //!
-//! ```quanta
+//! ```build
 //! // Functor trait with higher-kinded self type
 //! trait Functor<F: * -> *> {
 //!     fn map<A, B>(self: F<A>, f: fn(A) -> B) -> F<B>;

@@ -4,7 +4,7 @@ Date: 2026-06-18
 
 ## Context
 
-`quantac lsp` now starts the stdio server loop and routes a checked raw
+`buildc lsp` now starts the stdio server loop and routes a checked raw
 JSON-RPC fixture sequence through structural parsing, typed raw-boundary param
 helpers, and existing providers. The semantic-corpus LSP receipt proves
 lifecycle, document sync, completion, hover, definition, references, document
@@ -16,7 +16,7 @@ already has a semantic-token provider slot, and the LSP method table names
 `textDocument/semanticTokens/full`, but the capability is disabled and the raw
 dispatch path returns method-not-found for semantic token requests.
 
-Semantic tokens are the next useful LSP slice because they expose QuantaLang's
+Semantic tokens are the next useful LSP slice because they expose BuildLang's
 symbols and syntax to both humans and tools as a machine-readable stream. This
 moves the language toward a shared human/machine surface without claiming that
 full VS Code extension behavior, complete semantic indexing, or unverified
@@ -24,7 +24,7 @@ native/GPU backends are done.
 
 ## Goal
 
-Add v0 full-document semantic token support for open QuantaLang documents.
+Add v0 full-document semantic token support for open BuildLang documents.
 
 The implementation should:
 
@@ -33,7 +33,7 @@ The implementation should:
 - Dispatch `textDocument/semanticTokens/full` through the existing raw
   JSON-RPC path.
 - Return LSP-compatible encoded token data for the currently open document.
-- Extend the checked LSP dispatch receipt so `quantac corpus verify` proves the
+- Extend the checked LSP dispatch receipt so `buildc corpus verify` proves the
   semantic-token request path.
 - Keep the feature honest: v0 is a responsive editor token surface, not a full
   compiler semantic database.
@@ -117,7 +117,7 @@ The provider should be lexical plus declaration-aware:
 - Comments beginning with `//` become `comment`.
 - String literals become `string`.
 - Numeric literals become `number`.
-- Known QuantaLang keywords become `keyword`.
+- Known BuildLang keywords become `keyword`.
 - These operator spans become `operator`: `+`, `-`, `*`, `/`, `%`, `=`, `==`,
   `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `!`, `->`, `=>`, `::`, `.`, `:`,
   `;`, `,`, `|`, and `&`.
@@ -226,7 +226,7 @@ Verification commands:
 cargo fmt --manifest-path compiler\Cargo.toml -- --check
 cargo test --manifest-path compiler\Cargo.toml --lib semantic_tokens --quiet
 cargo test --manifest-path compiler\Cargo.toml --lib raw_dispatch --quiet
-cargo test --manifest-path compiler\Cargo.toml --bin quantac lsp_dispatch --quiet
+cargo test --manifest-path compiler\Cargo.toml --bin buildc lsp_dispatch --quiet
 cargo test --manifest-path compiler\Cargo.toml --test cli lsp_dispatch -- --nocapture
 cargo run --manifest-path compiler\Cargo.toml -- corpus verify --root semantic-corpus
 ```
@@ -244,7 +244,7 @@ Update these docs after implementation:
 
 ## Success Criteria
 
-- `quantac lsp` initialize responses advertise a stable semantic-token legend.
+- `buildc lsp` initialize responses advertise a stable semantic-token legend.
 - Raw `textDocument/semanticTokens/full` requests against opened documents
   return LSP-compatible encoded token data.
 - The semantic-corpus LSP dispatch receipt includes and verifies semantic-token
