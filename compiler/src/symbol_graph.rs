@@ -25,7 +25,7 @@ pub(crate) use validate::{validate_symbol_graph_receipt, verify_symbol_graph_rec
 use super::{SemanticCorpusManifest, SemanticCorpusProgram};
 
 pub(crate) const SYMBOL_GRAPH_RECEIPT: &str = "symbol-graph-2026-06-18.json";
-pub(super) const SYMBOL_GRAPH_SCHEMA: &str = "quantalang-symbol-graph-receipt/v0";
+pub(super) const SYMBOL_GRAPH_SCHEMA: &str = "buildlang-symbol-graph-receipt/v0";
 
 fn sorted(values: BTreeSet<String>) -> Vec<String> {
     values.into_iter().collect()
@@ -208,8 +208,8 @@ pub(crate) fn build_symbol_graph_receipt(
         schema: SYMBOL_GRAPH_SCHEMA.to_string(),
         receipt_id: "symbol-graph-semantic-corpus-2026-06-18".to_string(),
         created_at: "2026-06-18".to_string(),
-        compiler: "quantac".to_string(),
-        language: "quantalang".to_string(),
+        compiler: "buildc".to_string(),
+        language: "buildlang".to_string(),
         source_set: SymbolGraphSourceSet {
             kind: "semantic-corpus".to_string(),
             manifest: "manifest.json".to_string(),

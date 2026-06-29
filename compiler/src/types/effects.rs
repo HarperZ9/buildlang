@@ -1,12 +1,12 @@
 // ===============================================================================
-// QUANTALANG TYPE SYSTEM - EFFECT SYSTEM
+// BUILDLANG TYPE SYSTEM - EFFECT SYSTEM
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
 //! Effect system for tracking and controlling side effects.
 //!
-//! QuantaLang uses an algebraic effect system to track:
+//! BuildLang uses an algebraic effect system to track:
 //! - I/O operations
 //! - Exceptions/errors
 //! - State mutations
@@ -16,7 +16,7 @@
 //!
 //! ## Syntax
 //!
-//! ```quanta
+//! ```build
 //! // Function with effects
 //! fn read_file(path: str) -> String with IO, Error {
 //!     // ...

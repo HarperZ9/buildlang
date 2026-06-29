@@ -4,9 +4,9 @@
 
 **Goal:** Add a checked module graph receipt that exposes the semantic corpus source input topology behind existing `input_graph_digest` evidence.
 
-**Architecture:** Mirror the recent symbol graph receipt pattern with a focused `module_graph` module that builds and verifies `quantalang-module-graph-receipt/v0`. Reuse the existing check/lowering input ledger so receipt inputs and digests stay aligned with `quantalang-check-receipt/v1`, then aggregate the receipt through `quantac corpus verify` and the substrate receipt.
+**Architecture:** Mirror the recent symbol graph receipt pattern with a focused `module_graph` module that builds and verifies `buildlang-module-graph-receipt/v0`. Reuse the existing check/lowering input ledger so receipt inputs and digests stay aligned with `buildlang-check-receipt/v1`, then aggregate the receipt through `buildc corpus verify` and the substrate receipt.
 
-**Tech Stack:** Rust, `serde`, `sha2`, existing `quantac` CLI test harness, semantic corpus JSON receipts.
+**Tech Stack:** Rust, `serde`, `sha2`, existing `buildc` CLI test harness, semantic corpus JSON receipts.
 
 ## Global Constraints
 
@@ -36,7 +36,7 @@
 - Modify: `compiler/tests/cli.rs`
 
 **Interfaces:**
-- Consumes: existing `temp_semantic_corpus`, `assert_corpus_verify_rejects`, `quantac`, `read_json`, and JSON mutation helpers in `compiler/tests/cli.rs`.
+- Consumes: existing `temp_semantic_corpus`, `assert_corpus_verify_rejects`, `buildc`, `read_json`, and JSON mutation helpers in `compiler/tests/cli.rs`.
 - Produces: failing tests that define expected CLI behavior before compiler implementation.
 
 - [ ] **Step 1: Write failing corpus verify success test**
@@ -50,13 +50,13 @@ fn corpus_verify_accepts_module_graph_receipt() {
         eprintln!("skipping module graph receipt verification because no C backend is available");
         return;
     }
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(repo_root().join("semantic-corpus"))
         .output()
-        .expect("run quantac corpus verify with module graph receipt");
+        .expect("run buildc corpus verify with module graph receipt");
 
     assert!(
         output.status.success(),
@@ -102,7 +102,7 @@ Then add focused tampering tests:
 fn corpus_verify_rejects_module_graph_schema_drift() {
     let corpus_root = temp_semantic_corpus("module_graph_schema");
     write_module_graph_receipt_copy(&corpus_root, |mut receipt| {
-        receipt["schema"] = serde_json::Value::String("quantalang-module-graph-receipt/v9".into());
+        receipt["schema"] = serde_json::Value::String("buildlang-module-graph-receipt/v9".into());
         receipt
     });
 
@@ -127,7 +127,7 @@ fn corpus_verify_rejects_module_graph_program_count_drift() {
 fn corpus_verify_rejects_module_graph_path_escape() {
     let corpus_root = temp_semantic_corpus("module_graph_path_escape");
     write_module_graph_receipt_copy(&corpus_root, |mut receipt| {
-        receipt["programs"][0]["path"] = serde_json::Value::String("../outside.quanta".into());
+        receipt["programs"][0]["path"] = serde_json::Value::String("../outside.bld".into());
         receipt
     });
 
@@ -217,7 +217,7 @@ cargo test --manifest-path compiler/Cargo.toml --test cli module_graph -- --noca
 ```
 
 Expected: tests fail because `module-graph-2026-06-18.json` is missing and
-`quantac corpus verify` does not print `module graph receipt: ok`.
+`buildc corpus verify` does not print `module graph receipt: ok`.
 
 - [ ] **Step 4: Commit the red tests after implementation turns them green**
 
@@ -322,21 +322,21 @@ fn summary_sorts_and_deduplicates_roles_and_edges() {
     let programs = vec![
         ModuleGraphProgram {
             id: "left".to_string(),
-            path: "programs/left.quanta".to_string(),
+            path: "programs/left.bld".to_string(),
             source_digest: digest.clone(),
             input_graph_digest: digest.clone(),
             module_graph_digest: digest.clone(),
             inputs: vec![
                 ModuleGraphInput {
-                    id: "input:module:programs/shared.quanta".to_string(),
+                    id: "input:module:programs/shared.bld".to_string(),
                     role: "module".to_string(),
-                    path: "programs/shared.quanta".to_string(),
+                    path: "programs/shared.bld".to_string(),
                     source_digest: digest.clone(),
                 },
                 ModuleGraphInput {
-                    id: "input:entry:programs/left.quanta".to_string(),
+                    id: "input:entry:programs/left.bld".to_string(),
                     role: "entry".to_string(),
-                    path: "programs/left.quanta".to_string(),
+                    path: "programs/left.bld".to_string(),
                     source_digest: digest.clone(),
                 },
             ],
@@ -344,32 +344,32 @@ fn summary_sorts_and_deduplicates_roles_and_edges() {
                 ModuleGraphEdge {
                     kind: "program_module".to_string(),
                     from: "program:left".to_string(),
-                    to: "input:module:programs/shared.quanta".to_string(),
+                    to: "input:module:programs/shared.bld".to_string(),
                 },
                 ModuleGraphEdge {
                     kind: "program_entry".to_string(),
                     from: "program:left".to_string(),
-                    to: "input:entry:programs/left.quanta".to_string(),
+                    to: "input:entry:programs/left.bld".to_string(),
                 },
             ],
             known_gaps: program_known_gaps(),
         },
         ModuleGraphProgram {
             id: "right".to_string(),
-            path: "programs/right.quanta".to_string(),
+            path: "programs/right.bld".to_string(),
             source_digest: digest.clone(),
             input_graph_digest: digest.clone(),
             module_graph_digest: digest.clone(),
             inputs: vec![ModuleGraphInput {
-                id: "input:entry:programs/right.quanta".to_string(),
+                id: "input:entry:programs/right.bld".to_string(),
                 role: "entry".to_string(),
-                path: "programs/right.quanta".to_string(),
+                path: "programs/right.bld".to_string(),
                 source_digest: digest,
             }],
             edges: vec![ModuleGraphEdge {
                 kind: "program_entry".to_string(),
                 from: "program:right".to_string(),
-                to: "input:entry:programs/right.quanta".to_string(),
+                to: "input:entry:programs/right.bld".to_string(),
             }],
             known_gaps: program_known_gaps(),
         },
@@ -384,7 +384,7 @@ fn summary_sorts_and_deduplicates_roles_and_edges() {
 Run:
 
 ```text
-cargo test --manifest-path compiler/Cargo.toml --bin quantac module_graph --quiet
+cargo test --manifest-path compiler/Cargo.toml --bin buildc module_graph --quiet
 ```
 
 Expected after implementation: PASS.
@@ -434,7 +434,7 @@ Run:
 
 ```text
 cargo test --manifest-path compiler/Cargo.toml --test cli module_graph -- --nocapture
-cargo test --manifest-path compiler/Cargo.toml --bin quantac module_graph --quiet
+cargo test --manifest-path compiler/Cargo.toml --bin buildc module_graph --quiet
 ```
 
 Expected after receipt artifact exists: PASS.
@@ -473,8 +473,8 @@ struct SubstrateModuleSurface {
 In `validate_substrate_receipt`, require:
 
 ```rust
-receipt.module_surface.resolver == "quantac source input resolver"
-receipt.module_surface.digest_anchor == "quantalang-check-receipt/v1 input_graph_digest"
+receipt.module_surface.resolver == "buildc source input resolver"
+receipt.module_surface.digest_anchor == "buildlang-check-receipt/v1 input_graph_digest"
 receipt.module_surface.module_receipt == format!("receipts/{MODULE_GRAPH_RECEIPT}")
 ```
 
@@ -483,7 +483,7 @@ Then validate the path exists under the corpus root with `validate_substrate_pat
 - [ ] **Step 3: Add substrate drift tests**
 
 Add tests that mutate `module_surface.module_receipt` to a missing path and an
-escaping path, then assert `quantac corpus verify` fails with a substrate
+escaping path, then assert `buildc corpus verify` fails with a substrate
 module surface diagnostic.
 
 - [ ] **Step 4: Run substrate slice**
@@ -514,7 +514,7 @@ Use a temporary helper or test-only debug print if needed, then remove it. The
 checked-in JSON must have:
 
 ```json
-"schema": "quantalang-module-graph-receipt/v0"
+"schema": "buildlang-module-graph-receipt/v0"
 ```
 
 and a program count of `8`.
@@ -557,7 +557,7 @@ Run:
 
 ```text
 cargo fmt --manifest-path compiler/Cargo.toml -- --check
-cargo test --manifest-path compiler/Cargo.toml --bin quantac module_graph --quiet
+cargo test --manifest-path compiler/Cargo.toml --bin buildc module_graph --quiet
 cargo test --manifest-path compiler/Cargo.toml --test cli module_graph -- --nocapture
 cargo test --manifest-path compiler/Cargo.toml --test cli corpus_verify -- --nocapture
 cargo test --manifest-path compiler/Cargo.toml --test cli substrate -- --nocapture

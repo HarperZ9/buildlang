@@ -186,7 +186,7 @@ mod tests {
               "id": 2,
               "method": "textDocument/hover",
               "params": {
-                "textDocument": { "uri": "file:///workspace/main.quanta" },
+                "textDocument": { "uri": "file:///workspace/main.bld" },
                 "position": { "line": 3, "character": 14 }
               }
             }"#,
@@ -197,7 +197,7 @@ mod tests {
         assert_eq!(message.id_json(), Some("2"));
         assert_eq!(
             message.text_document_uri().as_deref(),
-            Some("file:///workspace/main.quanta")
+            Some("file:///workspace/main.bld")
         );
         assert_eq!(position.line, 3);
         assert_eq!(position.character, 14);
@@ -222,7 +222,7 @@ mod tests {
                       "end": { "line": 1, "character": 14 }
                     },
                     "severity": 1,
-                    "source": "quantalang",
+                    "source": "buildlang",
                     "message": "expected ';'"
                   }],
                   "only": ["quickfix"],

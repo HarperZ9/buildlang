@@ -1,10 +1,10 @@
 // ===============================================================================
-// QUANTALANG LEXER - TOKEN DEFINITIONS
+// BUILDLANG LEXER - TOKEN DEFINITIONS
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
-//! Token types and definitions for QuantaLang.
+//! Token types and definitions for BuildLang.
 //!
 //! This module defines all the token types that can be produced by the lexer,
 //! including literals, keywords, operators, and delimiters.
@@ -971,7 +971,7 @@ impl<'a> IntoIterator for &'a DocComments {
     }
 }
 
-/// Keywords in QuantaLang.
+/// Keywords in BuildLang.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Keyword {
     // =========================================================================
@@ -1001,7 +1001,7 @@ pub enum Keyword {
     Pub,
     /// `mod`
     Mod,
-    /// `module` (QuantaLang ecosystem module declaration)
+    /// `module` (BuildLang ecosystem module declaration)
     Module,
     /// `use`
     Use,

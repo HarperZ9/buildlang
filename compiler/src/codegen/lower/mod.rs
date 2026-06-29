@@ -1,5 +1,5 @@
 // ===============================================================================
-// QUANTALANG CODE GENERATOR - AST TO MIR LOWERING
+// BUILDLANG CODE GENERATOR - AST TO MIR LOWERING
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
@@ -247,18 +247,18 @@ impl<'ctx> MirLowerer<'ctx> {
     fn register_vector_types(&mut self) {
         let f64_ty = MirType::f64();
 
-        // quanta_vec2 { x: f64, y: f64 }
+        // build_vec2 { x: f64, y: f64 }
         self.module.create_struct(
-            Arc::from("quanta_vec2"),
+            Arc::from("build_vec2"),
             vec![
                 (Some(Arc::from("x")), f64_ty.clone()),
                 (Some(Arc::from("y")), f64_ty.clone()),
             ],
         );
 
-        // quanta_vec3 { x: f64, y: f64, z: f64 }
+        // build_vec3 { x: f64, y: f64, z: f64 }
         self.module.create_struct(
-            Arc::from("quanta_vec3"),
+            Arc::from("build_vec3"),
             vec![
                 (Some(Arc::from("x")), f64_ty.clone()),
                 (Some(Arc::from("y")), f64_ty.clone()),
@@ -266,9 +266,9 @@ impl<'ctx> MirLowerer<'ctx> {
             ],
         );
 
-        // quanta_vec4 { x: f64, y: f64, z: f64, w: f64 }
+        // build_vec4 { x: f64, y: f64, z: f64, w: f64 }
         self.module.create_struct(
-            Arc::from("quanta_vec4"),
+            Arc::from("build_vec4"),
             vec![
                 (Some(Arc::from("x")), f64_ty.clone()),
                 (Some(Arc::from("y")), f64_ty.clone()),
@@ -452,7 +452,7 @@ impl<'ctx> MirLowerer<'ctx> {
             if let ast::ForeignItemKind::Fn(f) = &foreign_item.kind {
                 // Build parameter types.  For extern "C" functions, map `&str`
                 // directly to `Ptr(i8)` (i.e. `const char*`) rather than
-                // `Ptr(QuantaString)`.
+                // `Ptr(BuildString)`.
                 let params: Vec<MirType> = f
                     .sig
                     .params
@@ -613,7 +613,7 @@ impl<'ctx> MirLowerer<'ctx> {
 
     /// Lower an AST type for FFI usage.  This differs from `lower_type_from_ast`
     /// in that `&str` maps to `Ptr(i8)` (`const char*`) rather than
-    /// `Ptr(QuantaString)`, which is what C library functions expect.
+    /// `Ptr(BuildString)`, which is what C library functions expect.
     fn lower_ffi_type(&self, ty: &ast::Type) -> MirType {
         match &ty.kind {
             ast::TypeKind::Ref { ty: inner, .. } => {
@@ -819,7 +819,7 @@ impl<'ctx> MirLowerer<'ctx> {
     }
 
     /// Monomorphize a generic enum with a multi-parameter substitution map.
-    /// E.g., `Result<T, E>` + `{T: i32, E: QuantaString}` → `Result_E_QuantaString_T_i32`.
+    /// E.g., `Result<T, E>` + `{T: i32, E: BuildString}` → `Result_E_BuildString_T_i32`.
     fn monomorphize_enum_multi(
         &mut self,
         enum_name: &str,
@@ -1033,7 +1033,7 @@ impl<'ctx> MirLowerer<'ctx> {
     }
 
     /// Generate a mangled name from a base name and a substitution map.
-    /// E.g., ("Result", {T: i32, E: QuantaString}) → "Result_i32_QuantaString"
+    /// E.g., ("Result", {T: i32, E: BuildString}) → "Result_i32_BuildString"
     fn mangle_generic_name(base: &str, subst: &HashMap<Arc<str>, MirType>) -> Arc<str> {
         let mut parts = vec![base.to_string()];
         // Sort by param name for deterministic mangling

@@ -1,5 +1,5 @@
 // ============================================================================
-// QuantaLang Vulkan Host Runtime
+// BuildLang Vulkan Host Runtime
 // Copyright (c) 2024-2026 Zain Dana Harper. All Rights Reserved.
 // ============================================================================
 //
@@ -62,8 +62,8 @@ static VkSemaphore      g_render_finished = VK_NULL_HANDLE;
 static VkFence          g_in_flight_fence = VK_NULL_HANDLE;
 
 // ---- Push constant buffer (128 bytes max, matches pipeline layout) ----
-#define QUANTA_PUSH_CONSTANT_SIZE 128
-static uint8_t g_push_constants[QUANTA_PUSH_CONSTANT_SIZE];
+#define BUILD_PUSH_CONSTANT_SIZE 128
+static uint8_t g_push_constants[BUILD_PUSH_CONSTANT_SIZE];
 
 // ---- Window-close flag ----
 static int g_should_close = 0;
@@ -77,7 +77,7 @@ static int g_should_close = 0;
 static int load_spirv_file(const char* path, uint32_t** out_code, long* out_size) {
     FILE* f = fopen(path, "rb");
     if (!f) {
-        printf("[QuantaLang Vulkan] ERROR: Cannot open %s\n", path);
+        printf("[BuildLang Vulkan] ERROR: Cannot open %s\n", path);
         return 0;
     }
     fseek(f, 0, SEEK_END);
@@ -89,7 +89,7 @@ static int load_spirv_file(const char* path, uint32_t** out_code, long* out_size
     fclose(f);
 
     if (size < 4 || code[0] != 0x07230203) {
-        printf("[QuantaLang Vulkan] ERROR: Invalid SPIR-V in %s\n", path);
+        printf("[BuildLang Vulkan] ERROR: Invalid SPIR-V in %s\n", path);
         free(code);
         return 0;
     }
@@ -110,7 +110,7 @@ static VkShaderModule create_shader_module(const uint32_t* code, size_t size) {
     VkShaderModule module;
     VkResult res = vkCreateShaderModule(g_device, &info, NULL, &module);
     if (res != VK_SUCCESS) {
-        printf("[QuantaLang Vulkan] ERROR: vkCreateShaderModule failed (%d)\n", res);
+        printf("[BuildLang Vulkan] ERROR: vkCreateShaderModule failed (%d)\n", res);
         return VK_NULL_HANDLE;
     }
     return module;
@@ -120,17 +120,17 @@ static VkShaderModule create_shader_module(const uint32_t* code, size_t size) {
 // Public API: Initialization
 // ============================================================================
 
-int quanta_vk_init(void) {
+int build_vk_init(void) {
     if (g_initialized) return 1;
 
-    memset(g_push_constants, 0, QUANTA_PUSH_CONSTANT_SIZE);
+    memset(g_push_constants, 0, BUILD_PUSH_CONSTANT_SIZE);
 
     // Create Vulkan instance
     VkApplicationInfo app_info = {0};
     app_info.sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    app_info.pApplicationName   = "QuantaLang";
+    app_info.pApplicationName   = "BuildLang";
     app_info.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
-    app_info.pEngineName        = "QuantaLang Compiler";
+    app_info.pEngineName        = "BuildLang Compiler";
     app_info.engineVersion      = VK_MAKE_VERSION(1, 0, 0);
     app_info.apiVersion         = VK_API_VERSION_1_0;
 
@@ -140,7 +140,7 @@ int quanta_vk_init(void) {
 
     VkResult result = vkCreateInstance(&create_info, NULL, &g_instance);
     if (result != VK_SUCCESS) {
-        printf("[QuantaLang Vulkan] ERROR: vkCreateInstance failed (%d)\n", result);
+        printf("[BuildLang Vulkan] ERROR: vkCreateInstance failed (%d)\n", result);
         return 0;
     }
 
@@ -148,7 +148,7 @@ int quanta_vk_init(void) {
     uint32_t device_count = 0;
     vkEnumeratePhysicalDevices(g_instance, &device_count, NULL);
     if (device_count == 0) {
-        printf("[QuantaLang Vulkan] ERROR: No Vulkan-capable GPU found\n");
+        printf("[BuildLang Vulkan] ERROR: No Vulkan-capable GPU found\n");
         return 0;
     }
 
@@ -222,7 +222,7 @@ int quanta_vk_init(void) {
 
     result = vkCreateDevice(g_physical_device, &device_info, NULL, &g_device);
     if (result != VK_SUCCESS) {
-        printf("[QuantaLang Vulkan] ERROR: vkCreateDevice failed (%d)\n", result);
+        printf("[BuildLang Vulkan] ERROR: vkCreateDevice failed (%d)\n", result);
         return 0;
     }
 
@@ -237,13 +237,13 @@ int quanta_vk_init(void) {
 
     result = vkCreateCommandPool(g_device, &pool_info, NULL, &g_cmd_pool);
     if (result != VK_SUCCESS) {
-        printf("[QuantaLang Vulkan] ERROR: vkCreateCommandPool failed (%d)\n", result);
+        printf("[BuildLang Vulkan] ERROR: vkCreateCommandPool failed (%d)\n", result);
         return 0;
     }
 
     g_initialized = 1;
     g_should_close = 0;
-    printf("[QuantaLang Vulkan] Initialized on %s\n", g_device_name);
+    printf("[BuildLang Vulkan] Initialized on %s\n", g_device_name);
     return 1;
 }
 
@@ -251,7 +251,7 @@ int quanta_vk_init(void) {
 // Public API: Device query
 // ============================================================================
 
-const char* quanta_vk_device_name(void) {
+const char* build_vk_device_name(void) {
     return g_device_name;
 }
 
@@ -259,7 +259,7 @@ const char* quanta_vk_device_name(void) {
 // Public API: Shader loading
 // ============================================================================
 
-int quanta_vk_load_shader_file(const char* path) {
+int build_vk_load_shader_file(const char* path) {
     if (!g_initialized) return 0;
 
     uint32_t* code = NULL;
@@ -270,7 +270,7 @@ int quanta_vk_load_shader_file(const char* path) {
     free(code);
     if (module == VK_NULL_HANDLE) return 0;
 
-    printf("[QuantaLang Vulkan] Shader loaded: %s (%ld bytes)\n", path, size);
+    printf("[BuildLang Vulkan] Shader loaded: %s (%ld bytes)\n", path, size);
     vkDestroyShaderModule(g_device, module, NULL);
     return 1;
 }
@@ -279,7 +279,7 @@ int quanta_vk_load_shader_file(const char* path) {
 // Public API: Compute pipeline (existing)
 // ============================================================================
 
-int quanta_vk_run_compute(const char* spv_path) {
+int build_vk_run_compute(const char* spv_path) {
     if (!g_initialized) return 0;
 
     uint32_t* code = NULL;
@@ -294,7 +294,7 @@ int quanta_vk_run_compute(const char* spv_path) {
     VkPushConstantRange push_range = {0};
     push_range.stageFlags = VK_SHADER_STAGE_ALL;
     push_range.offset     = 0;
-    push_range.size       = QUANTA_PUSH_CONSTANT_SIZE;
+    push_range.size       = BUILD_PUSH_CONSTANT_SIZE;
 
     VkPipelineLayoutCreateInfo layout_info = {0};
     layout_info.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -305,7 +305,7 @@ int quanta_vk_run_compute(const char* spv_path) {
     VkResult res = vkCreatePipelineLayout(g_device, &layout_info, NULL, &pipeline_layout);
     if (res != VK_SUCCESS) {
         vkDestroyShaderModule(g_device, shader, NULL);
-        printf("[QuantaLang Vulkan] ERROR: Pipeline layout creation failed\n");
+        printf("[BuildLang Vulkan] ERROR: Pipeline layout creation failed\n");
         return 0;
     }
 
@@ -322,7 +322,7 @@ int quanta_vk_run_compute(const char* spv_path) {
     res = vkCreateComputePipelines(g_device, VK_NULL_HANDLE, 1, &pipeline_info, NULL, &pipeline);
 
     if (res == VK_SUCCESS) {
-        printf("[QuantaLang Vulkan] Compute pipeline created successfully\n");
+        printf("[BuildLang Vulkan] Compute pipeline created successfully\n");
 
         VkCommandBufferAllocateInfo cmd_info = {0};
         cmd_info.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -339,7 +339,7 @@ int quanta_vk_run_compute(const char* spv_path) {
         vkBeginCommandBuffer(cmd, &begin_info);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
         vkCmdPushConstants(cmd, pipeline_layout, VK_SHADER_STAGE_ALL,
-                           0, QUANTA_PUSH_CONSTANT_SIZE, g_push_constants);
+                           0, BUILD_PUSH_CONSTANT_SIZE, g_push_constants);
         vkCmdDispatch(cmd, 1, 1, 1);
         vkEndCommandBuffer(cmd);
 
@@ -350,11 +350,11 @@ int quanta_vk_run_compute(const char* spv_path) {
         vkQueueSubmit(g_compute_queue, 1, &submit, VK_NULL_HANDLE);
         vkQueueWaitIdle(g_compute_queue);
 
-        printf("[QuantaLang Vulkan] Compute dispatch complete (1x1x1)\n");
+        printf("[BuildLang Vulkan] Compute dispatch complete (1x1x1)\n");
         vkDestroyPipeline(g_device, pipeline, NULL);
     } else {
-        printf("[QuantaLang Vulkan] Pipeline not created (shader is fragment/vertex, not compute)\n");
-        printf("[QuantaLang Vulkan] VkShaderModule was valid -- SPIR-V accepted by driver\n");
+        printf("[BuildLang Vulkan] Pipeline not created (shader is fragment/vertex, not compute)\n");
+        printf("[BuildLang Vulkan] VkShaderModule was valid -- SPIR-V accepted by driver\n");
     }
 
     vkDestroyPipelineLayout(g_device, pipeline_layout, NULL);
@@ -367,7 +367,7 @@ int quanta_vk_run_compute(const char* spv_path) {
 // ============================================================================
 
 // Create a full graphics pipeline from separate vertex and fragment SPIR-V
-// files. Requires quanta_vk_init() to have been called first.
+// files. Requires build_vk_init() to have been called first.
 //
 // The pipeline is configured to draw a fullscreen triangle / quad:
 //   - No vertex input bindings (vertices are generated in the vertex shader)
@@ -377,9 +377,9 @@ int quanta_vk_run_compute(const char* spv_path) {
 //   - Single color attachment, no depth
 //
 // Returns 1 on success, 0 on failure.
-int quanta_vk_create_graphics_pipeline(const char* vert_path, const char* frag_path) {
+int build_vk_create_graphics_pipeline(const char* vert_path, const char* frag_path) {
     if (!g_initialized) {
-        printf("[QuantaLang Vulkan] ERROR: Not initialized\n");
+        printf("[BuildLang Vulkan] ERROR: Not initialized\n");
         return 0;
     }
 
@@ -407,7 +407,7 @@ int quanta_vk_create_graphics_pipeline(const char* vert_path, const char* frag_p
     free(vert_code);
     if (vert_module == VK_NULL_HANDLE) return 0;
 
-    printf("[QuantaLang Vulkan] Vertex shader loaded: %s (%ld bytes)\n", vert_path, vert_size);
+    printf("[BuildLang Vulkan] Vertex shader loaded: %s (%ld bytes)\n", vert_path, vert_size);
 
     // ---- Load fragment shader SPIR-V ----
     uint32_t* frag_code = NULL;
@@ -424,7 +424,7 @@ int quanta_vk_create_graphics_pipeline(const char* vert_path, const char* frag_p
         return 0;
     }
 
-    printf("[QuantaLang Vulkan] Fragment shader loaded: %s (%ld bytes)\n", frag_path, frag_size);
+    printf("[BuildLang Vulkan] Fragment shader loaded: %s (%ld bytes)\n", frag_path, frag_size);
 
     // ---- Shader stages ----
     VkPipelineShaderStageCreateInfo stages[2];
@@ -492,7 +492,7 @@ int quanta_vk_create_graphics_pipeline(const char* vert_path, const char* frag_p
     VkPushConstantRange push_range = {0};
     push_range.stageFlags = VK_SHADER_STAGE_ALL;
     push_range.offset     = 0;
-    push_range.size       = QUANTA_PUSH_CONSTANT_SIZE;
+    push_range.size       = BUILD_PUSH_CONSTANT_SIZE;
 
     VkPipelineLayoutCreateInfo layout_info = {0};
     layout_info.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -501,7 +501,7 @@ int quanta_vk_create_graphics_pipeline(const char* vert_path, const char* frag_p
 
     VkResult res = vkCreatePipelineLayout(g_device, &layout_info, NULL, &g_pipeline_layout);
     if (res != VK_SUCCESS) {
-        printf("[QuantaLang Vulkan] ERROR: Graphics pipeline layout creation failed (%d)\n", res);
+        printf("[BuildLang Vulkan] ERROR: Graphics pipeline layout creation failed (%d)\n", res);
         vkDestroyShaderModule(g_device, vert_module, NULL);
         vkDestroyShaderModule(g_device, frag_module, NULL);
         return 0;
@@ -536,7 +536,7 @@ int quanta_vk_create_graphics_pipeline(const char* vert_path, const char* frag_p
 
     res = vkCreateRenderPass(g_device, &rp_info, NULL, &g_render_pass);
     if (res != VK_SUCCESS) {
-        printf("[QuantaLang Vulkan] ERROR: Render pass creation failed (%d)\n", res);
+        printf("[BuildLang Vulkan] ERROR: Render pass creation failed (%d)\n", res);
         vkDestroyPipelineLayout(g_device, g_pipeline_layout, NULL);
         g_pipeline_layout = VK_NULL_HANDLE;
         vkDestroyShaderModule(g_device, vert_module, NULL);
@@ -568,8 +568,8 @@ int quanta_vk_create_graphics_pipeline(const char* vert_path, const char* frag_p
     vkDestroyShaderModule(g_device, frag_module, NULL);
 
     if (res != VK_SUCCESS) {
-        printf("[QuantaLang Vulkan] ERROR: Graphics pipeline creation failed (%d)\n", res);
-        printf("[QuantaLang Vulkan] (This is expected without a valid swapchain/surface)\n");
+        printf("[BuildLang Vulkan] ERROR: Graphics pipeline creation failed (%d)\n", res);
+        printf("[BuildLang Vulkan] (This is expected without a valid swapchain/surface)\n");
         // Pipeline creation failed, but the shader modules were valid.
         // In headless mode this is acceptable -- the shaders compiled to SPIR-V
         // and were accepted by the driver.
@@ -577,7 +577,7 @@ int quanta_vk_create_graphics_pipeline(const char* vert_path, const char* frag_p
     }
 
     g_graphics_ready = 1;
-    printf("[QuantaLang Vulkan] Graphics pipeline created (vert + frag)\n");
+    printf("[BuildLang Vulkan] Graphics pipeline created (vert + frag)\n");
     return 1;
 }
 
@@ -588,9 +588,9 @@ int quanta_vk_create_graphics_pipeline(const char* vert_path, const char* frag_p
 // Set a single float (4 bytes) in the push constant buffer.
 //   offset: byte offset into the 128-byte push constant block (must be < 124)
 //   value:  float value to store
-void quanta_vk_set_push_constant_f32(int offset, float value) {
-    if (offset < 0 || offset > (QUANTA_PUSH_CONSTANT_SIZE - (int)sizeof(float))) {
-        printf("[QuantaLang Vulkan] WARNING: push constant offset %d out of range\n", offset);
+void build_vk_set_push_constant_f32(int offset, float value) {
+    if (offset < 0 || offset > (BUILD_PUSH_CONSTANT_SIZE - (int)sizeof(float))) {
+        printf("[BuildLang Vulkan] WARNING: push constant offset %d out of range\n", offset);
         return;
     }
     memcpy(&g_push_constants[offset], &value, sizeof(float));
@@ -605,8 +605,8 @@ void quanta_vk_set_push_constant_f32(int offset, float value) {
 // in the vertex shader), end render pass, present.
 //
 // Prerequisites:
-//   - quanta_vk_init() succeeded
-//   - quanta_vk_create_graphics_pipeline() succeeded
+//   - build_vk_init() succeeded
+//   - build_vk_create_graphics_pipeline() succeeded
 //   - A valid swapchain exists (g_surface != VK_NULL_HANDLE)
 //
 // In headless / compute-only mode (no surface), this logs a message and
@@ -614,15 +614,15 @@ void quanta_vk_set_push_constant_f32(int offset, float value) {
 // only actually rendering when a window is present.
 //
 // Returns 1 on success, 0 if drawing was skipped or failed.
-int quanta_vk_draw_frame(void) {
+int build_vk_draw_frame(void) {
     if (!g_initialized || !g_graphics_ready) {
-        printf("[QuantaLang Vulkan] draw_frame: pipeline not ready\n");
+        printf("[BuildLang Vulkan] draw_frame: pipeline not ready\n");
         return 0;
     }
 
     // In headless mode (no swapchain), skip actual rendering but log
     if (g_swapchain == VK_NULL_HANDLE || g_surface == VK_NULL_HANDLE) {
-        printf("[QuantaLang Vulkan] draw_frame: headless mode (no swapchain), skipping present\n");
+        printf("[BuildLang Vulkan] draw_frame: headless mode (no swapchain), skipping present\n");
         return 0;
     }
 
@@ -635,7 +635,7 @@ int quanta_vk_draw_frame(void) {
     VkResult res = vkAcquireNextImageKHR(g_device, g_swapchain, UINT64_MAX,
                                           g_image_available, VK_NULL_HANDLE, &image_index);
     if (res == VK_ERROR_OUT_OF_DATE_KHR) {
-        printf("[QuantaLang Vulkan] Swapchain out of date\n");
+        printf("[BuildLang Vulkan] Swapchain out of date\n");
         return 0;
     }
 
@@ -680,7 +680,7 @@ int quanta_vk_draw_frame(void) {
 
     // Push constants before draw
     vkCmdPushConstants(g_draw_cmd, g_pipeline_layout, VK_SHADER_STAGE_ALL,
-                       0, QUANTA_PUSH_CONSTANT_SIZE, g_push_constants);
+                       0, BUILD_PUSH_CONSTANT_SIZE, g_push_constants);
 
     // Draw fullscreen triangle (3 vertices, 1 instance, no vertex buffer)
     vkCmdDraw(g_draw_cmd, 3, 1, 0, 0);
@@ -726,12 +726,12 @@ int quanta_vk_draw_frame(void) {
 // A platform integration (Win32 message pump, GLFW poll) should set
 // g_should_close = 1 when the user requests close. For headless demos,
 // the caller typically uses a frame counter instead.
-int quanta_vk_should_close(void) {
+int build_vk_should_close(void) {
     return g_should_close;
 }
 
 // Programmatically request close (for frame-counted demos)
-void quanta_vk_request_close(void) {
+void build_vk_request_close(void) {
     g_should_close = 1;
 }
 
@@ -739,7 +739,7 @@ void quanta_vk_request_close(void) {
 // Public API: Shutdown
 // ============================================================================
 
-void quanta_vk_shutdown(void) {
+void build_vk_shutdown(void) {
     if (!g_initialized) return;
 
     vkDeviceWaitIdle(g_device);
@@ -802,5 +802,5 @@ void quanta_vk_shutdown(void) {
     g_graphics_ready    = 0;
     g_should_close      = 0;
 
-    printf("[QuantaLang Vulkan] Shutdown complete\n");
+    printf("[BuildLang Vulkan] Shutdown complete\n");
 }

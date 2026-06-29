@@ -6,13 +6,13 @@
 
 **Architecture:** Keep `DiagnosticsProvider::compute` as source of truth; tag lexer/parser/type-checker diagnostics with stable LSP source strings; move LSP dispatch observation into `observe.rs`; add `compiler_diagnostics` and `type_errors`; replay a deterministic type-error fixture; regenerate the checked receipt; update docs.
 
-**Tech Stack:** Rust, `serde_json`, existing `quantac corpus verify`, semantic-corpus receipt fixtures, Cargo test slices.
+**Tech Stack:** Rust, `serde_json`, existing `buildc corpus verify`, semantic-corpus receipt fixtures, Cargo test slices.
 
 ## Global Constraints
 
-- Receipt schema remains exactly `quantalang-lsp-dispatch-receipt/v0`.
+- Receipt schema remains exactly `buildlang-lsp-dispatch-receipt/v0`.
 - New observed fields are exactly `compiler_diagnostics` and `type_errors`.
-- Compiler diagnostic source strings are exactly `quantalang/lexer`, `quantalang/parser`, and `quantalang/type-checker`.
+- Compiler diagnostic source strings are exactly `buildlang/lexer`, `buildlang/parser`, and `buildlang/type-checker`.
 - Remove `compiler type-checker diagnostics in LSP` only after checked receipt evidence exists.
 - Keep `full VS Code extension readiness`.
 - Do not claim pull diagnostics, full typed LSP deserialization, diagnostic latency, or VS Code end-to-end readiness.
@@ -33,9 +33,9 @@
 fn compiler_type_error_diagnostic_uses_type_checker_source() {
     let documents = Arc::new(DocumentStore::new());
     let provider = DiagnosticsProvider::new(documents.clone());
-    let doc = documents.open(TextDocumentItem { uri: "file:///workspace/type_error.quanta".to_string(), language_id: "quanta".to_string(), version: 1, text: "const BAD: i32 = \"oops\";\nfn main() {}\n".to_string() });
+    let doc = documents.open(TextDocumentItem { uri: "file:///workspace/type_error.bld".to_string(), language_id: "build".to_string(), version: 1, text: "const BAD: i32 = \"oops\";\nfn main() {}\n".to_string() });
     let published = provider.compute(&doc);
-    assert!(published.diagnostics.iter().any(|d| d.source.as_deref() == Some("quantalang/type-checker") && d.message.contains("type mismatch")), "expected type-checker diagnostic in {:#?}", published.diagnostics);
+    assert!(published.diagnostics.iter().any(|d| d.source.as_deref() == Some("buildlang/type-checker") && d.message.contains("type mismatch")), "expected type-checker diagnostic in {:#?}", published.diagnostics);
 }
 ```
 
@@ -45,10 +45,10 @@ fn compiler_type_error_diagnostic_uses_type_checker_source() {
 #[test]
 fn raw_dispatch_did_open_returns_type_checker_diagnostic_source() {
     let mut server = LanguageServer::new();
-    let response = dispatch_raw_message(&mut server, r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/type_error.quanta","languageId":"quanta","version":1,"text":"const BAD: i32 = \"oops\";\nfn main() {}\n"}}}"#).expect("didOpen should publish diagnostics");
+    let response = dispatch_raw_message(&mut server, r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/type_error.bld","languageId":"build","version":1,"text":"const BAD: i32 = \"oops\";\nfn main() {}\n"}}}"#).expect("didOpen should publish diagnostics");
     let json: serde_json::Value = serde_json::from_str(&response).expect("parse diagnostics");
     let diagnostics = json["params"]["diagnostics"].as_array().expect("diagnostics array");
-    assert!(diagnostics.iter().any(|d| d["source"] == "quantalang/type-checker" && d["message"].as_str().is_some_and(|m| m.contains("type mismatch"))), "expected type-checker diagnostic in {diagnostics:#?}");
+    assert!(diagnostics.iter().any(|d| d["source"] == "buildlang/type-checker" && d["message"].as_str().is_some_and(|m| m.contains("type mismatch"))), "expected type-checker diagnostic in {diagnostics:#?}");
 }
 ```
 
@@ -59,17 +59,17 @@ cargo test --manifest-path compiler\Cargo.toml --lib compiler_type_error_diagnos
 cargo test --manifest-path compiler\Cargo.toml --lib raw_dispatch_did_open_returns_type_checker_diagnostic_source --quiet
 ```
 
-Expected: both fail because compiler diagnostics currently use source `quantalang`.
+Expected: both fail because compiler diagnostics currently use source `buildlang`.
 
 - [ ] **Step 4: Implement source tags.** In `diagnostics.rs`, add:
 
 ```rust
-const LEXER_DIAGNOSTIC_SOURCE: &str = "quantalang/lexer";
-const PARSER_DIAGNOSTIC_SOURCE: &str = "quantalang/parser";
-const TYPE_CHECKER_DIAGNOSTIC_SOURCE: &str = "quantalang/type-checker";
+const LEXER_DIAGNOSTIC_SOURCE: &str = "buildlang/lexer";
+const PARSER_DIAGNOSTIC_SOURCE: &str = "buildlang/parser";
+const TYPE_CHECKER_DIAGNOSTIC_SOURCE: &str = "buildlang/type-checker";
 ```
 
-Replace only the four compiler-pipeline `source: Some("quantalang".to_string())` assignments in `check_types` with lexer, parser, parser, and type-checker constants in that order. Leave heuristic diagnostics unchanged.
+Replace only the four compiler-pipeline `source: Some("buildlang".to_string())` assignments in `check_types` with lexer, parser, parser, and type-checker constants in that order. Leave heuristic diagnostics unchanged.
 
 - [ ] **Step 5: Verify GREEN and commit.**
 
@@ -108,7 +108,7 @@ fn lsp_fixture_sequence_records_compiler_type_diagnostics() {
 - [ ] **Step 2: Verify RED.**
 
 ```powershell
-cargo test --manifest-path compiler\Cargo.toml --bin quantac lsp_fixture_sequence_records_compiler_type_diagnostics --quiet
+cargo test --manifest-path compiler\Cargo.toml --bin buildc lsp_fixture_sequence_records_compiler_type_diagnostics --quiet
 ```
 
 Expected: missing observed fields or missing `did-change-type-error`.
@@ -127,9 +127,9 @@ Use comma separators, matching the struct's existing field style.
 - [ ] **Step 4: Split observation from `fixture.rs`.** Create `observe.rs` by moving `observe_response`, `result_array_len`, and `workspace_edit_count` out of `fixture.rs`; add compiler counts in the diagnostics branch:
 
 ```rust
-const LEXER_SOURCE: &str = "quantalang/lexer";
-const PARSER_SOURCE: &str = "quantalang/parser";
-const TYPE_CHECKER_SOURCE: &str = "quantalang/type-checker";
+const LEXER_SOURCE: &str = "buildlang/lexer";
+const PARSER_SOURCE: &str = "buildlang/parser";
+const TYPE_CHECKER_SOURCE: &str = "buildlang/type-checker";
 observed.compiler_diagnostics = diagnostics.iter().filter(|d| matches!(d["source"].as_str(), Some(LEXER_SOURCE | PARSER_SOURCE | TYPE_CHECKER_SOURCE))).count();
 observed.type_errors = diagnostics.iter().filter(|d| d["source"].as_str() == Some(TYPE_CHECKER_SOURCE)).count();
 ```
@@ -147,7 +147,7 @@ In `summarize_fixtures`, set `known_gaps` to `["full VS Code extension readiness
 - [ ] **Step 6: Verify GREEN and commit.**
 
 ```powershell
-cargo test --manifest-path compiler\Cargo.toml --bin quantac lsp_dispatch --quiet
+cargo test --manifest-path compiler\Cargo.toml --bin buildc lsp_dispatch --quiet
 (Get-Content compiler\src\lsp_dispatch\fixture.rs).Count
 (Get-Content compiler\src\lsp_dispatch\observe.rs).Count
 git add compiler\src\lsp_dispatch.rs compiler\src\lsp_dispatch\fixture.rs compiler\src\lsp_dispatch\model.rs compiler\src\lsp_dispatch\observe.rs compiler\src\lsp_dispatch\tests.rs
@@ -212,7 +212,7 @@ fn write_semantic_corpus_lsp_dispatch_receipt() {
 Run:
 
 ```powershell
-cargo test --manifest-path compiler\Cargo.toml --bin quantac write_semantic_corpus_lsp_dispatch_receipt -- --ignored --nocapture
+cargo test --manifest-path compiler\Cargo.toml --bin buildc write_semantic_corpus_lsp_dispatch_receipt -- --ignored --nocapture
 ```
 
 Expected: writer passes and rewrites `semantic-corpus\receipts\lsp-dispatch-2026-06-18.json`. Remove the temporary writer immediately.
@@ -245,7 +245,7 @@ Expected: tests pass; `corpus verify` prints `lsp dispatch receipt: ok`; commit 
 cargo fmt --manifest-path compiler\Cargo.toml -- --check
 cargo test --manifest-path compiler\Cargo.toml --lib diagnostics --quiet
 cargo test --manifest-path compiler\Cargo.toml --lib raw_dispatch --quiet
-cargo test --manifest-path compiler\Cargo.toml --bin quantac lsp_dispatch --quiet
+cargo test --manifest-path compiler\Cargo.toml --bin buildc lsp_dispatch --quiet
 cargo test --manifest-path compiler\Cargo.toml --test cli lsp_dispatch -- --nocapture
 cargo test --manifest-path compiler\Cargo.toml --test cli corpus_verify -- --nocapture
 cargo run --manifest-path compiler\Cargo.toml -- corpus verify --root semantic-corpus

@@ -1,5 +1,5 @@
 // ===============================================================================
-// QUANTALANG PARSER MODULE
+// BUILDLANG PARSER MODULE
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
@@ -19,10 +19,10 @@
 //! ## Example
 //!
 //! ```rust,ignore
-//! use quantalang::parser::{Parser, parse};
-//! use quantalang::lexer::{Lexer, SourceFile};
+//! use buildlang::parser::{Parser, parse};
+//! use buildlang::lexer::{Lexer, SourceFile};
 //!
-//! let source = SourceFile::new("example.quanta", "fn main() { let x = 42; }");
+//! let source = SourceFile::new("example.bld", "fn main() { let x = 42; }");
 //! let mut lexer = Lexer::new(&source);
 //! let tokens = lexer.tokenize()?;
 //!
@@ -365,7 +365,7 @@ impl<'a> Parser<'a> {
                 }
                 attrs.push(self.parse_attribute(false)?);
             } else if self.check(&TokenKind::At) && !self.is_eof() {
-                // QuantaLang ecosystem `@` attribute syntax
+                // BuildLang ecosystem `@` attribute syntax
                 attrs.push(self.parse_at_attribute()?);
             } else {
                 break;
@@ -374,7 +374,7 @@ impl<'a> Parser<'a> {
         Ok(attrs)
     }
 
-    /// Parse a `@` prefixed attribute (QuantaLang ecosystem convention).
+    /// Parse a `@` prefixed attribute (BuildLang ecosystem convention).
     ///
     /// Supports:
     /// - `@derive(Clone, Debug)` → equivalent to `#[derive(Clone, Debug)]`

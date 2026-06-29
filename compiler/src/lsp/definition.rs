@@ -1,10 +1,10 @@
 // ===============================================================================
-// QUANTALANG LSP DEFINITION
+// BUILDLANG LSP DEFINITION
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
-//! Go to definition provider for QuantaLang.
+//! Go to definition provider for BuildLang.
 
 use super::document::{Document, DocumentStore};
 use super::types::*;

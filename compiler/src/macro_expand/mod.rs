@@ -1,12 +1,12 @@
 // ===============================================================================
-// QUANTALANG MACRO EXPANSION
+// BUILDLANG MACRO EXPANSION
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
 //! # Macro Expansion
 //!
-//! This module implements macro expansion for QuantaLang, including:
+//! This module implements macro expansion for BuildLang, including:
 //! - Declarative macros (macro_rules!)
 //! - Procedural macros
 //! - Built-in macros
@@ -22,8 +22,8 @@
 //! ## Example
 //!
 //! ```rust,ignore
-//! use quantalang::macro_expand::{MacroExpander, MacroContext};
-//! use quantalang::ast::Expr;
+//! use buildlang::macro_expand::{MacroExpander, MacroContext};
+//! use buildlang::ast::Expr;
 //!
 //! let mut ctx = MacroContext::new();
 //! let mut expander = MacroExpander::new(&mut ctx);

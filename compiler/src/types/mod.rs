@@ -1,12 +1,12 @@
 // ===============================================================================
-// QUANTALANG TYPE SYSTEM
+// BUILDLANG TYPE SYSTEM
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
 //! # Type System
 //!
-//! This module implements QuantaLang's type system, featuring:
+//! This module implements BuildLang's type system, featuring:
 //! - Hindley-Milner type inference with extensions
 //! - Bidirectional type checking
 //! - Trait-based polymorphism
@@ -30,8 +30,8 @@
 //! ## Example
 //!
 //! ```rust,ignore
-//! use quantalang::types::{TypeChecker, TypeContext};
-//! use quantalang::ast::Module;
+//! use buildlang::types::{TypeChecker, TypeContext};
+//! use buildlang::ast::Module;
 //!
 //! let mut ctx = TypeContext::new();
 //! let mut checker = TypeChecker::new(&mut ctx);

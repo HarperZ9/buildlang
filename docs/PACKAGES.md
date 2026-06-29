@@ -1,13 +1,13 @@
-# QuantaLang Package Ecosystem Design
+# BuildLang Package Ecosystem Design
 
 Version: 0.1 (Draft)
 Date: 2026-03-21
 
 ---
 
-## 1. Package Manifest (Quanta.toml)
+## 1. Package Manifest (Build.toml)
 
-Every QuantaLang project has a `Quanta.toml` at its root. This file declares
+Every BuildLang project has a `Build.toml` at its root. This file declares
 the package identity, dependencies, build targets, and features.
 
 ### 1.1 Full Manifest Format
@@ -42,11 +42,11 @@ tls = ["http/tls"]
 
 [[bin]]
 name = "my-cli"
-path = "src/main.quanta"
+path = "src/main.bld"
 
 [lib]
 name = "my_lib"
-path = "src/lib.quanta"
+path = "src/lib.bld"
 ```
 
 ### 1.2 What Already Exists in the Compiler
@@ -72,12 +72,12 @@ full format shown above.
 
 ### 2.1 Import Syntax
 
-```quanta
+```build
 // Import from standard library
 use std::collections::HashMap;
 use std::io::Read;
 
-// Import from a dependency declared in Quanta.toml
+// Import from a dependency declared in Build.toml
 use json::Value;
 use http::Client;
 
@@ -111,39 +111,39 @@ When the compiler encounters `use foo::bar::Baz;`, it resolves the path as follo
 
 3. **`<local_name>::`** where `local_name` matches a `mod <name>;` declaration --
    Local module. Resolved by filesystem convention:
-   - `mod foo;` looks for `./foo.quanta` or `./foo/mod.quanta` relative to the
+   - `mod foo;` looks for `./foo.bld` or `./foo/mod.bld` relative to the
      current file.
-   - `mod foo::bar;` looks for `./foo/bar.quanta` or `./foo/bar/mod.quanta`.
+   - `mod foo::bar;` looks for `./foo/bar.bld` or `./foo/bar/mod.bld`.
 
 4. **`self::`** -- Current module. Relative import within the same file.
 
 5. **`super::`** -- Parent module. One level up in the module hierarchy.
 
-6. **`crate::`** -- Crate root. Absolute path from the package root (`src/lib.quanta`
-   or `src/main.quanta`).
+6. **`crate::`** -- Crate root. Absolute path from the package root (`src/lib.bld`
+   or `src/main.bld`).
 
 ### 2.3 File Layout Convention
 
 ```
 my-project/
-  Quanta.toml
-  Quanta.lock
+  Build.toml
+  Build.lock
   src/
-    main.quanta          # Binary entry point
-    lib.quanta           # Library root (if [lib] is defined)
-    utils.quanta         # Module: `mod utils;` or `use crate::utils`
+    main.bld          # Binary entry point
+    lib.bld           # Library root (if [lib] is defined)
+    utils.bld         # Module: `mod utils;` or `use crate::utils`
     utils/
-      mod.quanta         # Alternative to utils.quanta
-      helpers.quanta     # Sub-module: `use crate::utils::helpers`
+      mod.bld         # Alternative to utils.bld
+      helpers.bld     # Sub-module: `use crate::utils::helpers`
   tests/
-    integration.quanta   # Integration tests
+    integration.bld   # Integration tests
   examples/
-    demo.quanta          # Example programs
+    demo.bld          # Example programs
 ```
 
 ### 2.4 Visibility
 
-```quanta
+```build
 // Public (accessible from other modules)
 pub fn public_function() { }
 pub struct PublicStruct { }
@@ -165,26 +165,26 @@ pub(super) fn parent_only() { }
 
 ### 3.1 Registry Design
 
-- **URL:** `https://registry.quantalang.org` (future, already configured as
+- **URL:** `https://registry.buildlang.org` (future, already configured as
   default in `compiler/src/pkg/registry.rs`)
 - **API:** RESTful JSON API for package metadata, tarball downloads for source
 - **Index:** Git-based index (similar to crates.io) for fast metadata lookups
-- **Authentication:** Token-based via `quantac login`
+- **Authentication:** Token-based via `buildc login`
 
 ### 3.2 CLI Commands
 
 ```
-quantac pkg init                    # Create Quanta.toml in current directory
-quantac pkg add json@1.0            # Add dependency to Quanta.toml
-quantac pkg add http --features tls # Add with features
-quantac pkg remove json             # Remove dependency
-quantac pkg update                  # Update all dependencies to latest compatible
-quantac pkg update json             # Update specific dependency
-quantac pkg publish                 # Publish package to registry
-quantac pkg search "json parser"    # Search registry
-quantac pkg info json               # Show package details
-quantac pkg login                   # Authenticate with registry
-quantac pkg yank 0.1.0              # Yank a published version
+buildc pkg init                    # Create Build.toml in current directory
+buildc pkg add json@1.0            # Add dependency to Build.toml
+buildc pkg add http --features tls # Add with features
+buildc pkg remove json             # Remove dependency
+buildc pkg update                  # Update all dependencies to latest compatible
+buildc pkg update json             # Update specific dependency
+buildc pkg publish                 # Publish package to registry
+buildc pkg search "json parser"    # Search registry
+buildc pkg info json               # Show package details
+buildc pkg login                   # Authenticate with registry
+buildc pkg yank 0.1.0              # Yank a published version
 ```
 
 ### 3.3 What Already Exists in the Compiler
@@ -192,7 +192,7 @@ quantac pkg yank 0.1.0              # Yank a published version
 The `compiler/src/pkg/registry.rs` module implements:
 
 - **`RegistryConfig`** with url, auth token, cache directory, timeout, max
-  concurrent downloads. Default URL is `https://registry.quantalang.org`.
+  concurrent downloads. Default URL is `https://registry.buildlang.org`.
 - **`RegistryError`** enum covering: Network, NotFound, VersionNotFound,
   AuthRequired, AuthFailed, RateLimited, InvalidResponse, CacheError, Io,
   ChecksumMismatch, Yanked.
@@ -211,7 +211,7 @@ The `compiler/src/pkg/resolver.rs` module implements:
 
 The `compiler/src/pkg/lockfile.rs` module implements:
 
-- **Lockfile format** (version 1) using `Quanta.lock` filename.
+- **Lockfile format** (version 1) using `Build.lock` filename.
 - **`LockfileError`** for IO, parse, version mismatch, and integrity errors.
 - **BTreeMap-based** package storage for deterministic output.
 
@@ -224,19 +224,19 @@ The `compiler/src/pkg/version.rs` module implements:
 ### 3.4 Lockfile Format
 
 ```toml
-# Quanta.lock - auto-generated, do not edit manually
+# Build.lock - auto-generated, do not edit manually
 version = 1
 
 [[package]]
 name = "json"
 version = "1.2.3"
-source = "registry+https://registry.quantalang.org"
+source = "registry+https://registry.buildlang.org"
 checksum = "sha256:abc123..."
 
 [[package]]
 name = "http"
 version = "0.2.1"
-source = "registry+https://registry.quantalang.org"
+source = "registry+https://registry.buildlang.org"
 checksum = "sha256:def456..."
 dependencies = ["json 1.2.3"]
 features = ["tls"]
@@ -251,12 +251,12 @@ source = "path+../local-lib"
 
 ## 4. What Needs to Be Built
 
-The compiler currently compiles single `.quanta` files to C via the C backend.
+The compiler currently compiles single `.bld` files to C via the C backend.
 There is no multi-file compilation, no module resolution, and no dependency
 fetching at compile time. The pkg infrastructure exists as data structures
 and algorithms but is not connected to the compilation pipeline.
 
-### 4.1 Module Resolution (finding .quanta files from `use` statements)
+### 4.1 Module Resolution (finding .bld files from `use` statements)
 
 **Current state:** The parser recognizes `use` statements syntactically but
 the compiler does not resolve them to files or load additional source.
@@ -272,7 +272,7 @@ the compiler does not resolve them to files or load additional source.
 **Dependencies:** None. This can be built now with single-crate, multi-file
 compilation as the scope.
 
-### 4.2 Multi-File Compilation (compiling multiple .quanta files into one output)
+### 4.2 Multi-File Compilation (compiling multiple .bld files into one output)
 
 **Current state:** The compiler processes one file -> one AST -> one HIR -> one
 MIR -> one C output. There is no mechanism to merge multiple MIR modules.
@@ -299,11 +299,11 @@ is embedded in the compiler.
 1. Implement `Registry::fetch()` -- HTTP GET to registry API for package metadata.
 2. Implement `Registry::download()` -- download and extract package tarball to
    cache directory.
-3. Integrate resolver: read `Quanta.toml`, resolve all dependencies, write
-   `Quanta.lock`, download missing packages.
+3. Integrate resolver: read `Build.toml`, resolve all dependencies, write
+   `Build.lock`, download missing packages.
 4. Add cache management: check if package version already exists in cache
    before downloading.
-5. Wire into CLI: `quantac pkg add`, `quantac pkg update`, etc.
+5. Wire into CLI: `buildc pkg add`, `buildc pkg update`, etc.
 
 **Dependencies:** Module resolution (4.1) must be done first so that downloaded
 packages can be compiled. An HTTP client library is needed (either vendored
@@ -311,12 +311,12 @@ or via system libcurl).
 
 ### 4.4 Build Caching (not recompiling unchanged files)
 
-**Current state:** Every `quantac build` recompiles from scratch.
+**Current state:** Every `buildc build` recompiles from scratch.
 
 **What needs to happen:**
 1. Hash each source file (content hash, not timestamp).
 2. Store compiled artifacts (MIR or C output) alongside hashes in a build
-   directory (`target/` or `.quanta-cache/`).
+   directory (`target/` or `.bld-cache/`).
 3. On rebuild, compare current hashes to stored hashes. Only recompile files
    whose hash changed or whose dependencies changed.
 4. For the C backend: compile each module to a separate `.c` file, compile
@@ -356,7 +356,7 @@ std::
 
 Since the compiler currently outputs C, the standard library would be
 implemented as:
-1. QuantaLang source files that define the public API (types, function signatures).
+1. BuildLang source files that define the public API (types, function signatures).
 2. C runtime functions (already partially in `compiler/src/codegen/runtime.rs`)
    that implement the actual behavior.
 3. The compiler maps `std::io::println` to a C `printf` call in the generated
@@ -376,14 +376,14 @@ This is the same strategy used by early Rust (pre-LLVM maturity) and by Zig
 - No multi-file, no dependencies, no caching
 
 ### Phase 1: Multi-File Compilation (estimated: 2-3 weeks of focused work)
-- Implement module resolution (find .quanta files from `mod` and `use`)
+- Implement module resolution (find .bld files from `mod` and `use`)
 - Implement MIR module merging
 - Support compiling a project directory (not just a single file)
 - **Prerequisite for everything else**
 - **Can be built now** -- no external dependencies needed
 
 ### Phase 2: Local Dependencies (estimated: 1-2 weeks after Phase 1)
-- Support `path` dependencies in Quanta.toml: `my-lib = { path = "../my-lib" }`
+- Support `path` dependencies in Build.toml: `my-lib = { path = "../my-lib" }`
 - Compile dependency packages and link their MIR/C output
 - This gives multi-package development without a registry
 - **Can be built immediately after Phase 1**
@@ -397,15 +397,15 @@ This is the same strategy used by early Rust (pre-LLVM maturity) and by Zig
 ### Phase 4: Package Registry (estimated: 4-6 weeks after Phase 2)
 - Build the registry server (separate project)
 - Add HTTP client to compiler for fetching packages
-- Implement `quantac pkg publish`, `quantac pkg add`
-- Write Quanta.lock on resolve
+- Implement `buildc pkg publish`, `buildc pkg add`
+- Write Build.lock on resolve
 - **Requires a hosted server and an HTTP client in the compiler**
 - **This is the most infrastructure-heavy phase**
 
 ### Phase 5: Standard Library (ongoing, parallel to Phases 1-4)
 - Start with `std::io::println` (already partially implemented via runtime)
 - Add `std::string`, `std::math`, `std::collections` incrementally
-- Each module is a .quanta file + C runtime backing
+- Each module is a .bld file + C runtime backing
 - **Can start in parallel with Phase 1**
 
 ### What Can Be Built Right Now
@@ -416,21 +416,21 @@ The following can be implemented immediately with zero external dependencies:
    Parse `mod` and `use` statements, resolve to files, build module tree.
 
 2. **Multi-file C output** -- extend the C backend to produce one .c file
-   from multiple .quanta sources, or produce multiple .c files and a Makefile.
+   from multiple .bld sources, or produce multiple .c files and a Makefile.
 
-3. **`quantac pkg init`** -- generate a Quanta.toml template. The `Manifest`
+3. **`buildc pkg init`** -- generate a Build.toml template. The `Manifest`
    type already has `to_toml()`.
 
 4. **Local path dependencies** -- once multi-file works, supporting
    `path = "../other-pkg"` is straightforward: read the other package's
-   Quanta.toml, find its src/ files, compile and merge.
+   Build.toml, find its src/ files, compile and merge.
 
 ### What Requires Other Features First
 
 | Feature | Requires |
 |---------|----------|
 | Registry fetch | HTTP client + hosted server |
-| `quantac pkg publish` | Registry server + auth system |
+| `buildc pkg publish` | Registry server + auth system |
 | Git dependencies | Git CLI or libgit2 |
 | Build caching | Multi-file compilation |
 | Cross-package type checking | Module resolution + name resolution |

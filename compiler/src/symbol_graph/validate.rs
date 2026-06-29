@@ -17,15 +17,15 @@ pub(crate) fn validate_symbol_graph_receipt(
             receipt.schema
         ));
     }
-    if receipt.compiler != "quantac" {
+    if receipt.compiler != "buildc" {
         return Err(format!(
-            "symbol graph compiler mismatch: expected 'quantac', found '{}'",
+            "symbol graph compiler mismatch: expected 'buildc', found '{}'",
             receipt.compiler
         ));
     }
-    if receipt.language != "quantalang" {
+    if receipt.language != "buildlang" {
         return Err(format!(
-            "symbol graph language mismatch: expected 'quantalang', found '{}'",
+            "symbol graph language mismatch: expected 'buildlang', found '{}'",
             receipt.language
         ));
     }
@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn symbol_graph_rejects_lexically_invalid_paths() {
-        for path in ["../x.quanta", "C:\\x.quanta", "C:x.quanta", "\\x.quanta"] {
+        for path in ["../x.bld", "C:\\x.bld", "C:x.bld", "\\x.bld"] {
             assert!(
                 is_lexically_invalid_relative_path(path)
                     || Path::new(path).components().any(|component| matches!(
@@ -201,8 +201,8 @@ mod tests {
             schema: SYMBOL_GRAPH_SCHEMA.to_string(),
             receipt_id: "id".to_string(),
             created_at: "2026-06-18".to_string(),
-            compiler: "quantac".to_string(),
-            language: "quantalang".to_string(),
+            compiler: "buildc".to_string(),
+            language: "buildlang".to_string(),
             source_set: SymbolGraphSourceSet {
                 kind: "semantic-corpus".to_string(),
                 manifest: "manifest.json".to_string(),

@@ -1,12 +1,12 @@
 ---
 name: code-review
-description: Perform a thorough Rust code review on the QuantaLang compiler
+description: Perform a thorough Rust code review on the BuildLang compiler
 tools: Read, Grep, Glob, Bash(git diff:*, cargo:*)
 ---
 
-# Code Review Skill (Rust / QuantaLang)
+# Code Review Skill (Rust / BuildLang)
 
-You are reviewing Rust code for the QuantaLang compiler project. This is a multi-phase compiler with lexer, parser, type checker, and code generator stages.
+You are reviewing Rust code for the BuildLang compiler project. This is a multi-phase compiler with lexer, parser, type checker, and code generator stages.
 
 ## Trigger
 User asks to review code, a PR, or recent changes.

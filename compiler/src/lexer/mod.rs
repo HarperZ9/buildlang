@@ -1,12 +1,12 @@
 // ===============================================================================
-// QUANTALANG LEXER MODULE
+// BUILDLANG LEXER MODULE
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
 //! # Lexical Analysis
 //!
-//! This module provides the lexer (tokenizer) for QuantaLang. It converts source
+//! This module provides the lexer (tokenizer) for BuildLang. It converts source
 //! code into a stream of tokens that can be consumed by the parser.
 //!
 //! ## Features
@@ -26,9 +26,9 @@
 //! ## Example
 //!
 //! ```rust,ignore
-//! use quantalang::lexer::{Lexer, SourceFile};
+//! use buildlang::lexer::{Lexer, SourceFile};
 //!
-//! let source = SourceFile::new("example.quanta", "let x = 42;");
+//! let source = SourceFile::new("example.bld", "let x = 42;");
 //! let mut lexer = Lexer::new(&source);
 //! let tokens = lexer.tokenize()?;
 //!

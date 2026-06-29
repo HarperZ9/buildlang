@@ -1,12 +1,12 @@
 // ===============================================================================
-// QUANTALANG AST - TYPES
+// BUILDLANG AST - TYPES
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
 //! Type AST nodes.
 //!
-//! Types describe the shape of values in QuantaLang.
+//! Types describe the shape of values in BuildLang.
 
 use super::{Expr, Ident, Lifetime, Mutability, NodeId, Path, TypeBound};
 use crate::lexer::Span;
@@ -157,7 +157,7 @@ pub enum TypeKind {
     Error,
 
     // =========================================================================
-    // QUANTALANG EXTENSIONS
+    // BUILDLANG EXTENSIONS
     // =========================================================================
     /// Effect annotation: `T with Effect`
     WithEffect { ty: Box<Type>, effects: Vec<Path> },

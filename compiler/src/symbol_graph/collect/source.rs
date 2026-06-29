@@ -1,5 +1,5 @@
-use quantalang::ast::{self, ItemKind, Module, Visibility};
-use quantalang::lexer::Span;
+use buildlang::ast::{self, ItemKind, Module, Visibility};
+use buildlang::lexer::Span;
 
 use super::super::model::{SymbolSourceSignature, SymbolSourceSpan, SymbolSourceSymbol};
 use super::super::sorted;

@@ -1,11 +1,11 @@
 # LSP Workspace Symbols v0 Implementation Plan
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Wire existing workspace symbol search into raw `quantac lsp` dispatch and receipt-verify it.
+**Goal:** Wire existing workspace symbol search into raw `buildc lsp` dispatch and receipt-verify it.
 
 **Architecture:** Keep the change inside the current raw LSP path: decode `workspace/symbol` params in `raw_params.rs`, delegate to the existing `SymbolProvider::workspace_symbols`, serialize flat `SymbolInformation[]`, and extend the LSP dispatch receipt observer. No new symbol provider or global compiler index is introduced.
 
-**Tech Stack:** Rust 2021, existing `quantalang::lsp` modules, `serde_json`, semantic-corpus LSP receipt verifier, Cargo test slices.
+**Tech Stack:** Rust 2021, existing `buildlang::lsp` modules, `serde_json`, semantic-corpus LSP receipt verifier, Cargo test slices.
 
 ## Global Constraints
 
@@ -59,11 +59,11 @@ fn raw_dispatch_initialize_reports_workspace_symbol_capability() {
 #[test]
 fn raw_dispatch_workspace_symbol_returns_opened_symbol() {
     let mut server = LanguageServer::new();
-    dispatch_raw_message(&mut server, r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.quanta","languageId":"quanta","version":1,"text":"fn helper() -> i32 { 1 }\nfn main() { helper(); }\n"}}}"#).expect("didOpen should publish diagnostics");
+    dispatch_raw_message(&mut server, r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.bld","languageId":"build","version":1,"text":"fn helper() -> i32 { 1 }\nfn main() { helper(); }\n"}}}"#).expect("didOpen should publish diagnostics");
     let response = dispatch_raw_message(&mut server, r#"{"jsonrpc":"2.0","id":30,"method":"workspace/symbol","params":{"query":"help"}}"#).expect("workspace/symbol should return a response");
     let json: serde_json::Value = serde_json::from_str(&response).expect("parse workspace/symbol response");
     let symbols = json["result"].as_array().expect("workspace symbol result array");
-    assert!(symbols.iter().any(|symbol| symbol["name"] == "helper" && symbol["location"]["uri"] == "file:///workspace/main.quanta"));
+    assert!(symbols.iter().any(|symbol| symbol["name"] == "helper" && symbol["location"]["uri"] == "file:///workspace/main.bld"));
 }
 
 #[test]
@@ -172,7 +172,7 @@ Add a CLI drift test in `compiler/tests/cli.rs` that finds fixture id `"workspac
 
 - [ ] **Step 2: Run RED receipt slice**
 
-Run: `cargo test --manifest-path compiler\Cargo.toml --bin quantac lsp_dispatch -- --nocapture`
+Run: `cargo test --manifest-path compiler\Cargo.toml --bin buildc lsp_dispatch -- --nocapture`
 Expected: FAIL because `workspace_symbols` is not modeled or observed.
 
 - [ ] **Step 3: Model and observe workspace symbols**
@@ -200,13 +200,13 @@ request_fixture(13, "workspace-symbol", "workspace/symbol", serde_json::json!({"
 
 Temporarily add an ignored writer in `compiler/src/lsp_dispatch/tests.rs` that writes `build_lsp_dispatch_receipt` as pretty JSON to `semantic-corpus/receipts/lsp-dispatch-2026-06-18.json`. Run it, then remove the writer before committing.
 
-Run: `cargo test --manifest-path compiler\Cargo.toml --bin quantac write_semantic_corpus_lsp_dispatch_receipt -- --ignored --nocapture`
+Run: `cargo test --manifest-path compiler\Cargo.toml --bin buildc write_semantic_corpus_lsp_dispatch_receipt -- --ignored --nocapture`
 Expected: PASS and the receipt JSON changes.
 
 - [ ] **Step 5: Run GREEN receipt slices and commit**
 
 ```powershell
-cargo test --manifest-path compiler\Cargo.toml --bin quantac lsp_dispatch --quiet
+cargo test --manifest-path compiler\Cargo.toml --bin buildc lsp_dispatch --quiet
 cargo test --manifest-path compiler\Cargo.toml --test cli lsp_dispatch -- --nocapture
 cargo run --manifest-path compiler\Cargo.toml -- corpus verify --root semantic-corpus
 git add compiler\src\lsp_dispatch compiler\tests\cli.rs semantic-corpus\receipts\lsp-dispatch-2026-06-18.json
@@ -235,7 +235,7 @@ Document that `workspace/symbol` is receipt-verified for opened documents. Keep 
 ```powershell
 cargo fmt --manifest-path compiler\Cargo.toml -- --check
 cargo test --manifest-path compiler\Cargo.toml --lib raw_dispatch --quiet
-cargo test --manifest-path compiler\Cargo.toml --bin quantac lsp_dispatch --quiet
+cargo test --manifest-path compiler\Cargo.toml --bin buildc lsp_dispatch --quiet
 cargo test --manifest-path compiler\Cargo.toml --test cli lsp_dispatch -- --nocapture
 cargo run --manifest-path compiler\Cargo.toml -- corpus verify --root semantic-corpus
 ```

@@ -1,5 +1,5 @@
 // ===============================================================================
-// QUANTALANG PARSER - ITEM PARSING
+// BUILDLANG PARSER - ITEM PARSING
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
@@ -16,7 +16,7 @@
 //! - Use declarations
 //! - Extern blocks
 //! - Macros
-//! - Effects (QuantaLang extension)
+//! - Effects (BuildLang extension)
 
 use super::{ParseError, ParseErrorKind, ParseResult, Parser};
 use crate::ast::*;
@@ -206,7 +206,7 @@ impl<'a> Parser<'a> {
             }
 
             // =================================================================
-            // MODULE DECLARATION (QuantaLang ecosystem: `module std::math`)
+            // MODULE DECLARATION (BuildLang ecosystem: `module std::math`)
             // =================================================================
             TokenKind::Keyword(Keyword::Module) => {
                 let mod_def = self.parse_module_decl(is_unsafe)?;
@@ -288,7 +288,7 @@ impl<'a> Parser<'a> {
             }
 
             // =================================================================
-            // EFFECT (QuantaLang extension)
+            // EFFECT (BuildLang extension)
             // =================================================================
             TokenKind::Keyword(Keyword::Effect) => {
                 let effect_def = self.parse_effect()?;
@@ -1184,11 +1184,11 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Parse a `module` declaration (QuantaLang ecosystem convention).
+    /// Parse a `module` declaration (BuildLang ecosystem convention).
     ///
     /// Syntax: `module name` or `module path::to::name`
     ///
-    /// This is a file-level module declaration used by .quanta ecosystem files.
+    /// This is a file-level module declaration used by .bld ecosystem files.
     /// It declares the module path for the current file. Unlike `mod`, it does
     /// not have a body or require a semicolon - the rest of the file IS the body.
     fn parse_module_decl(&mut self, is_unsafe: bool) -> ParseResult<ModDef> {
@@ -1526,7 +1526,7 @@ impl<'a> Parser<'a> {
     }
 
     // =========================================================================
-    // EFFECT (QuantaLang extension)
+    // EFFECT (BuildLang extension)
     // =========================================================================
 
     /// Parse an effect definition.
@@ -1591,7 +1591,7 @@ mod tests {
     use crate::lexer::{Lexer, SourceFile as LexerSourceFile};
 
     fn parse_item_str(s: &str) -> ParseResult<Item> {
-        let source = LexerSourceFile::new("test.quanta", s.to_string());
+        let source = LexerSourceFile::new("test.bld", s.to_string());
         let mut lexer = Lexer::new(&source);
         let tokens = lexer.tokenize().unwrap();
         let mut parser = Parser::new(&source, tokens);

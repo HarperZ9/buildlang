@@ -12,7 +12,7 @@ use super::{SemanticCorpusManifest, SemanticCorpusProgram};
 
 pub(crate) const MEMORY_LAYOUT_RECEIPT: &str = "memory-layout-2026-06-18.json";
 
-const MEMORY_LAYOUT_SCHEMA: &str = "quantalang-memory-layout-receipt/v0";
+const MEMORY_LAYOUT_SCHEMA: &str = "buildlang-memory-layout-receipt/v0";
 const C_EXECUTION_RECEIPT: &str = "c-execution-2026-06-13.json";
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -356,8 +356,8 @@ pub(crate) fn build_memory_layout_receipt(
         schema: MEMORY_LAYOUT_SCHEMA.to_string(),
         receipt_id: "memory-layout-semantic-corpus-2026-06-18".to_string(),
         created_at: "2026-06-18".to_string(),
-        compiler: "quantac".to_string(),
-        language: "quantalang".to_string(),
+        compiler: "buildc".to_string(),
+        language: "buildlang".to_string(),
         source_set: MemoryLayoutSourceSet {
             kind: "semantic-corpus".to_string(),
             manifest: "manifest.json".to_string(),
@@ -380,15 +380,15 @@ pub(crate) fn validate_memory_layout_receipt(
             receipt.schema
         ));
     }
-    if receipt.compiler != "quantac" {
+    if receipt.compiler != "buildc" {
         return Err(format!(
-            "memory layout compiler mismatch: expected 'quantac', found '{}'",
+            "memory layout compiler mismatch: expected 'buildc', found '{}'",
             receipt.compiler
         ));
     }
-    if receipt.language != "quantalang" {
+    if receipt.language != "buildlang" {
         return Err(format!(
-            "memory layout language mismatch: expected 'quantalang', found '{}'",
+            "memory layout language mismatch: expected 'buildlang', found '{}'",
             receipt.language
         ));
     }
@@ -639,7 +639,7 @@ mod tests {
     fn memory_layout_manifest_surfaces_are_sorted_and_deduplicated() {
         let program = SemanticCorpusProgram {
             id: "p".to_string(),
-            path: "programs/p.quanta".to_string(),
+            path: "programs/p.bld".to_string(),
             surfaces: vec![
                 "stdout".to_string(),
                 "ownership-reuse".to_string(),

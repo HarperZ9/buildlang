@@ -1,18 +1,18 @@
 // ===============================================================================
-// QUANTALANG RUNTIME - FOREIGN FUNCTION INTERFACE (FFI)
+// BUILDLANG RUNTIME - FOREIGN FUNCTION INTERFACE (FFI)
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
 //! Foreign Function Interface (FFI) for C interop.
 //!
-//! Provides comprehensive support for calling C functions from QuantaLang
-//! and exposing QuantaLang functions to C code.
+//! Provides comprehensive support for calling C functions from BuildLang
+//! and exposing BuildLang functions to C code.
 //!
 //! ## Features
 //!
 //! - Multiple calling conventions (C, stdcall, fastcall, etc.)
-//! - Automatic type mapping between QuantaLang and C
+//! - Automatic type mapping between BuildLang and C
 //! - Struct layout compatibility (repr(C))
 //! - Variadic function support
 //! - Callback marshalling
@@ -53,8 +53,8 @@ pub enum CallingConvention {
     Wasm,
     /// Rust calling convention (unstable ABI).
     Rust,
-    /// QuantaLang internal calling convention.
-    Quanta,
+    /// BuildLang internal calling convention.
+    Build,
 }
 
 impl CallingConvention {
@@ -73,7 +73,7 @@ impl CallingConvention {
             CallingConvention::Wasm => 0,        // ccc
             CallingConvention::System => 0,      // platform default
             CallingConvention::Rust => 0,        // no stable ABI
-            CallingConvention::Quanta => 0,      // internal
+            CallingConvention::Build => 0,       // internal
         }
     }
 
@@ -92,7 +92,7 @@ impl CallingConvention {
             CallingConvention::Wasm => "ccc",
             CallingConvention::System => "ccc",
             CallingConvention::Rust => "ccc",
-            CallingConvention::Quanta => "ccc",
+            CallingConvention::Build => "ccc",
         }
     }
 
@@ -111,7 +111,7 @@ impl CallingConvention {
             "aarch64" => Some(CallingConvention::AArch64),
             "wasm" => Some(CallingConvention::Wasm),
             "rust" => Some(CallingConvention::Rust),
-            "quanta" => Some(CallingConvention::Quanta),
+            "build" => Some(CallingConvention::Build),
             _ => None,
         }
     }

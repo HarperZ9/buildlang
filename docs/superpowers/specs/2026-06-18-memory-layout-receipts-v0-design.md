@@ -14,7 +14,7 @@ compiler pipeline.
 
 Memory/RAM Layout Receipts v0 turns that memory claim into a checked artifact.
 The receipt records deterministic per-program memory evidence from the semantic
-corpus and lowered MIR, then `quantac corpus verify` recomputes it and rejects
+corpus and lowered MIR, then `buildc corpus verify` recomputes it and rejects
 stale or inflated memory claims.
 
 The name "layout" is deliberately scoped for v0: this receipt proves observed
@@ -41,7 +41,7 @@ families once the evidence exists.
   memory-surface flags such as `references`, `mutable_references`,
   `deref_reads`, `deref_writes`, `field_reads`, `field_writes`, `index_reads`,
   and `aggregate_values`.
-- `quantac corpus verify` already validates the manifest, C/Rust execution
+- `buildc corpus verify` already validates the manifest, C/Rust execution
   receipts, substrate receipt, and MIR representation receipt.
 
 ## Alternatives Considered
@@ -67,8 +67,8 @@ RAM contract.
 
 ### Approach C: Add a Separate Memory/RAM Layout Receipt
 
-Create `quantalang-memory-layout-receipt/v0`, reference it from
-`substrate.memory_surface`, and verify it during `quantac corpus verify`.
+Create `buildlang-memory-layout-receipt/v0`, reference it from
+`substrate.memory_surface`, and verify it during `buildc corpus verify`.
 
 Tradeoff: one additional artifact and verifier path. Benefit: the memory
 contract is independently versioned, can reuse MIR representation digest
@@ -131,11 +131,11 @@ The schema should be additive and explicit about what is proven:
 
 ```json
 {
-  "schema": "quantalang-memory-layout-receipt/v0",
+  "schema": "buildlang-memory-layout-receipt/v0",
   "receipt_id": "memory-layout-semantic-corpus-2026-06-18",
   "created_at": "2026-06-18",
-  "compiler": "quantac",
-  "language": "quantalang",
+  "compiler": "buildc",
+  "language": "buildlang",
   "source_set": {
     "kind": "semantic-corpus",
     "manifest": "manifest.json",
@@ -152,7 +152,7 @@ The schema should be additive and explicit about what is proven:
   "programs": [
     {
       "id": "references_mutation",
-      "path": "programs/references_mutation.quanta",
+      "path": "programs/references_mutation.bld",
       "source_digest": {
         "algorithm": "sha256",
         "hex": "64 lowercase hex characters"
@@ -295,9 +295,9 @@ The memory receipt fits into the existing evidence chain:
    representation, and evidence posture.
 5. The memory receipt proves the detailed RAM/memory evidence behind
    `substrate.memory_surface`.
-6. `quantac corpus verify` validates all layers together.
+6. `buildc corpus verify` validates all layers together.
 
-Successful `quantac corpus verify` output should include:
+Successful `buildc corpus verify` output should include:
 
 ```text
 memory layout receipt: ok
@@ -307,9 +307,9 @@ memory layout receipt: ok
 
 The verifier should reject a memory layout receipt when:
 
-- `schema` is not `quantalang-memory-layout-receipt/v0`.
-- `compiler` is not `quantac`.
-- `language` is not `quantalang`.
+- `schema` is not `buildlang-memory-layout-receipt/v0`.
+- `compiler` is not `buildc`.
+- `language` is not `buildlang`.
 - `source_set.kind` is not `semantic-corpus`.
 - `source_set.manifest` does not point to the corpus `manifest.json`.
 - `source_set.program_count` does not match the manifest.
@@ -346,7 +346,7 @@ and MIR lowering errors should identify the program ID or path being processed.
 
 Implementation should be test-first:
 
-- CLI test: valid memory layout receipt passes and `quantac corpus verify`
+- CLI test: valid memory layout receipt passes and `buildc corpus verify`
   prints `memory layout receipt: ok`.
 - CLI test: wrong schema fails with an unsupported schema diagnostic.
 - CLI test: program count drift fails.
@@ -392,10 +392,10 @@ different slice clearer.
 This design is implemented when:
 
 - `semantic-corpus/receipts/memory-layout-2026-06-18.json` exists and uses
-  `quantalang-memory-layout-receipt/v0`.
+  `buildlang-memory-layout-receipt/v0`.
 - The substrate receipt references it through
   `memory_surface.memory_receipt`.
-- `quantac corpus verify` recomputes and validates the memory layout receipt.
+- `buildc corpus verify` recomputes and validates the memory layout receipt.
 - Successful corpus verification prints `memory layout receipt: ok`.
 - Invalid fixtures cover schema drift, program count drift, path escape, source
   digest drift, observed-memory-surface drift, summary known-gap drift, and v0
@@ -418,5 +418,5 @@ Later slices can extend this receipt family into stronger native memory proof:
 - responsiveness receipts for memory behavior in watch, LSP, and incremental
   compilation paths.
 
-The invariant is that QuantaLang's native memory thesis should grow through
+The invariant is that BuildLang's native memory thesis should grow through
 checked, scoped evidence instead of broad prose claims.

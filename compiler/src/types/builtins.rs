@@ -1,10 +1,10 @@
 // ===============================================================================
-// QUANTALANG TYPE SYSTEM - BUILT-IN TYPES AND TRAITS
+// BUILDLANG TYPE SYSTEM - BUILT-IN TYPES AND TRAITS
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
-//! Built-in types and traits for QuantaLang.
+//! Built-in types and traits for BuildLang.
 //!
 //! This module defines the core built-in types (primitives, collections) and
 //! fundamental traits (Copy, Clone, Debug, etc.) that are implicitly available.

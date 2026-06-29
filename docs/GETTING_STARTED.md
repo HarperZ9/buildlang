@@ -1,11 +1,11 @@
-# Getting Started with QuantaLang
+# Getting Started with BuildLang
 
 Current status (2026-06-15): the verified adoption path is source build,
-`quantac run` through the C backend, HLSL/GLSL shader-source output, and the
+`buildc run` through the C backend, HLSL/GLSL shader-source output, and the
 semantic corpus receipt checks. SPIR-V, LLVM, WASM, Rust, x86-64, and ARM64 are
 experimental research targets; examples below label those paths accordingly.
 
-QuantaLang is "The Effects Language" -- a systems programming language with
+BuildLang is "The Effects Language" -- a systems programming language with
 algebraic effects, designed for systems experiments and shader-oriented code
 generation. Today, C is the verified native execution path and HLSL/GLSL are the
 practical shader-output path.
@@ -27,47 +27,47 @@ cd compiler
 cargo build --release
 ```
 
-The binary is at `compiler/target/release/quantac` (or `quantac.exe` on Windows). Add it to your PATH.
+The binary is at `compiler/target/release/buildc` (or `buildc.exe` on Windows). Add it to your PATH.
 
 Check the local compiler and backend readiness:
 
 ```bash
-quantac doctor
+buildc doctor
 ```
 
 ---
 
 ## Your First Program
 
-Create `hello.quanta`:
+Create `hello.bld`:
 
-```quanta
+```build
 fn main() {
-    println!("Hello from QuantaLang!");
+    println!("Hello from BuildLang!");
 }
 ```
 
 Compile and run:
 
 ```bash
-quantac run hello.quanta
+buildc run hello.bld
 ```
 
 The repository includes the same flow as tested examples:
 
 ```bash
-quantac run examples/quickstart/hello.quanta
-quantac run examples/quickstart/ledger.quanta
-quantac run examples/quickstart/effects_greeting.quanta
+buildc run examples/quickstart/hello.bld
+buildc run examples/quickstart/ledger.bld
+buildc run examples/quickstart/effects_greeting.bld
 ```
 
 ---
 
 ## Your First Shader
 
-Create `shader.quanta`:
+Create `shader.bld`:
 
-```quanta
+```build
 fn aces_tonemap(x: f64) -> f64 {
     let num = x * (2.51 * x + 0.03);
     let den = x * (2.43 * x + 0.59) + 0.14;
@@ -86,52 +86,52 @@ fn main(color: vec3) -> vec4 {
 Compile to HLSL shader source:
 
 ```bash
-quantac shader.quanta --target hlsl -o shader.hlsl
+buildc shader.bld --target hlsl -o shader.hlsl
 ```
 
 Compile to CPU (C source for testing):
 
 ```bash
-quantac shader.quanta --target c -o shader.c
+buildc shader.bld --target c -o shader.c
 ```
 
 The SPIR-V backend is still an experimental research target. Use it for backend
 experiments, not as the current release promise:
 
 ```bash
-quantac shader.quanta --target spirv -o shader.spv
+buildc shader.bld --target spirv -o shader.spv
 ```
 
 For a tested HLSL shader quickstart:
 
 ```bash
-quantac examples/quickstart/vignette_shader.quanta --target hlsl -o vignette_shader.hlsl
+buildc examples/quickstart/vignette_shader.bld --target hlsl -o vignette_shader.hlsl
 ```
 
 ---
 
 ## Multi-Target Compilation
 
-QuantaLang exposes several code generation backends with different maturity:
+BuildLang exposes several code generation backends with different maturity:
 
 ```bash
-quantac file.quanta --target=c        # C99 source, verified adoption path
-quantac file.quanta --target=hlsl     # HLSL shader source
-quantac file.quanta --target=glsl     # GLSL shader source
-quantac file.quanta --target=llvm     # Experimental LLVM IR
-quantac file.quanta --target=wasm     # Experimental WebAssembly/WAT path
-quantac file.quanta --target=spirv    # Experimental Vulkan SPIR-V
-quantac file.quanta --target=rust     # Experimental Rust source subset
-quantac file.quanta --target=x86-64   # Experimental x86-64 assembly
-quantac file.quanta --target=arm64    # Experimental ARM64 assembly
+buildc file.bld --target=c        # C99 source, verified adoption path
+buildc file.bld --target=hlsl     # HLSL shader source
+buildc file.bld --target=glsl     # GLSL shader source
+buildc file.bld --target=llvm     # Experimental LLVM IR
+buildc file.bld --target=wasm     # Experimental WebAssembly/WAT path
+buildc file.bld --target=spirv    # Experimental Vulkan SPIR-V
+buildc file.bld --target=rust     # Experimental Rust source subset
+buildc file.bld --target=x86-64   # Experimental x86-64 assembly
+buildc file.bld --target=arm64    # Experimental ARM64 assembly
 ```
 
 The output format is also inferred from the `-o` extension:
 
 ```bash
-quantac shader.quanta -o shader.spv   # infers --target=spirv, experimental
-quantac shader.quanta -o shader.c     # infers --target=c
-quantac shader.quanta -o shader.ll    # infers --target=llvm
+buildc shader.bld -o shader.spv   # infers --target=spirv, experimental
+buildc shader.bld -o shader.c     # infers --target=c
+buildc shader.bld -o shader.ll    # infers --target=llvm
 ```
 
 ---
@@ -141,7 +141,7 @@ quantac shader.quanta -o shader.ll    # infers --target=llvm
 Watch a directory and recompile shader source on every save:
 
 ```bash
-quantac watch shaders/ --target=hlsl
+buildc watch shaders/ --target=hlsl
 ```
 
 For SPIR-V experiments, use `--target=spirv` and validate the output with the
@@ -152,21 +152,21 @@ Vulkan SDK before loading it into a renderer.
 ## CLI Commands
 
 ```
-quantac lex <file>           Tokenize and print tokens
-quantac parse <file>         Parse and print AST
-quantac check <file>         Type-check without compiling
-quantac build [path]         Compile to C -> invoke C compiler -> native executable
-quantac run <file>           Compile and run immediately
-quantac fmt <file>           Format source code
-quantac pkg <subcommand>     Package manager
-quantac watch <path>         Watch and recompile on change
-quantac lsp                  Start Language Server Protocol server
-quantac repl                 Interactive REPL
-quantac doctor               Diagnose compiler/toolchain/backend readiness
-quantac corpus verify        Verify semantic corpus receipts and C stdout
-quantac corpus verify --root <dir> --write
+buildc lex <file>           Tokenize and print tokens
+buildc parse <file>         Parse and print AST
+buildc check <file>         Type-check without compiling
+buildc build [path]         Compile to C -> invoke C compiler -> native executable
+buildc run <file>           Compile and run immediately
+buildc fmt <file>           Format source code
+buildc pkg <subcommand>     Package manager
+buildc watch <path>         Watch and recompile on change
+buildc lsp                  Start Language Server Protocol server
+buildc repl                 Interactive REPL
+buildc doctor               Diagnose compiler/toolchain/backend readiness
+buildc corpus verify        Verify semantic corpus receipts and C stdout
+buildc corpus verify --root <dir> --write
                              Verify a corpus copy and refresh its C receipt
-quantac version              Print version
+buildc version              Print version
 ```
 
 ---
@@ -175,9 +175,9 @@ quantac version              Print version
 
 ### Algebraic Effects
 
-Effects are QuantaLang's signature feature -- like checked exceptions crossed with dependency injection. You declare what side effects a function performs, and the caller decides how to handle them.
+Effects are BuildLang's signature feature -- like checked exceptions crossed with dependency injection. You declare what side effects a function performs, and the caller decides how to handle them.
 
-```quanta
+```build
 effect Render {
     fn draw(description: str) -> (),
 }
@@ -202,7 +202,7 @@ See [EFFECTS_GUIDE.md](EFFECTS_GUIDE.md) for the full effects tutorial.
 
 ### Structs and Enums
 
-```quanta
+```build
 struct Point {
     x: i32,
     y: i32,
@@ -220,7 +220,7 @@ enum Shape {
 
 ### Pattern Matching
 
-```quanta
+```build
 fn area(s: Shape) -> f64 {
     match s {
         Shape::Circle(r) => 3.14159 * r * r,
@@ -231,7 +231,7 @@ fn area(s: Shape) -> f64 {
 
 ### Closures with Captures
 
-```quanta
+```build
 let offset: i32 = 10;
 let add_offset = |x: i32| -> i32 { x + offset };
 println!("{}", add_offset(5));   // 15
@@ -239,7 +239,7 @@ println!("{}", add_offset(5));   // 15
 
 ### Traits (Static Dispatch)
 
-```quanta
+```build
 trait Shape {
     fn area(self) -> f64;
     fn name(self) -> str;
@@ -263,7 +263,7 @@ impl Shape for Circle {
 
 Built-in `vec2`, `vec3`, `vec4`, and `mat4` types with operator overloading:
 
-```quanta
+```build
 let pos = vec3(1.0, 2.0, 3.0);
 let dir = normalize(pos);
 let d = dot(dir, vec3(0.0, 1.0, 0.0));
@@ -298,7 +298,7 @@ as experimental backend work.
 
 ## VS Code Extension
 
-QuantaLang ships with a VS Code extension providing syntax highlighting:
+BuildLang ships with a VS Code extension providing syntax highlighting:
 
 ```bash
 cd editors/vscode

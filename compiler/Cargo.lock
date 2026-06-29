@@ -152,6 +152,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "buildlang"
+version = "1.0.0"
+dependencies = [
+ "bumpalo",
+ "clap",
+ "criterion",
+ "indexmap",
+ "insta",
+ "miette",
+ "pretty_assertions",
+ "proptest",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "sha2",
+ "string-interner",
+ "thiserror",
+ "unicode-normalization",
+ "unicode-xid",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -723,28 +745,6 @@ dependencies = [
  "rusty-fork",
  "tempfile",
  "unarray",
-]
-
-[[package]]
-name = "quantalang"
-version = "1.0.0"
-dependencies = [
- "bumpalo",
- "clap",
- "criterion",
- "indexmap",
- "insta",
- "miette",
- "pretty_assertions",
- "proptest",
- "rustc-hash",
- "serde",
- "serde_json",
- "sha2",
- "string-interner",
- "thiserror",
- "unicode-normalization",
- "unicode-xid",
 ]
 
 [[package]]

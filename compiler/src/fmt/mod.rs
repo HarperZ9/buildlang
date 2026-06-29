@@ -1,12 +1,12 @@
 // ===============================================================================
-// QUANTALANG CODE FORMATTER
+// BUILDLANG CODE FORMATTER
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
-//! Code formatter for QuantaLang.
+//! Code formatter for BuildLang.
 //!
-//! This module provides automatic code formatting following the QuantaLang style guide:
+//! This module provides automatic code formatting following the BuildLang style guide:
 //! - Consistent indentation (4 spaces by default)
 //! - Proper spacing around operators and keywords
 //! - Line length management (100 chars default)
@@ -16,7 +16,7 @@
 //! ## Usage
 //!
 //! ```rust,ignore
-//! use quantalang::fmt::{Formatter, FormatConfig};
+//! use buildlang::fmt::{Formatter, FormatConfig};
 //!
 //! let config = FormatConfig::default();
 //! let formatter = Formatter::new(config);

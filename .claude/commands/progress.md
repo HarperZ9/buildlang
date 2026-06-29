@@ -10,7 +10,7 @@ Generate a progress report by running these checks:
 ## Source Stats
 1. Count `.rs` files: `find . -name "*.rs" | wc -l`
 2. Count lines of Rust code: `find . -name "*.rs" -exec cat {} + | wc -l`
-3. Count `.quanta` example/test files: `find . -name "*.quanta" | wc -l`
+3. Count `.bld` example/test files: `find . -name "*.bld" | wc -l`
 4. Count modules: `find . -name "mod.rs" -o -name "lib.rs" | wc -l`
 
 ## Test Stats
