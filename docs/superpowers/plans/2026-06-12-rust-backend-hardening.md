@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Harden the QuantaC Rust backend so generated Rust is continuously checked by `rustc` for the ownership, borrow, lifetime, struct, array, and branch subset that the backend claims to support.
+**Goal:** Harden the BuildC Rust backend so generated Rust is continuously checked by `rustc` for the ownership, borrow, lifetime, struct, array, and branch subset that the backend claims to support.
 
-**Architecture:** Add backend-local regression tests that lower real `.quanta` programs to Rust source and run `rustc --emit=metadata` on the generated source. Use those tests to expose backend gaps, then keep implementation changes scoped to `compiler/src/codegen/backend/rust.rs`.
+**Architecture:** Add backend-local regression tests that lower real `.bld` programs to Rust source and run `rustc --emit=metadata` on the generated source. Use those tests to expose backend gaps, then keep implementation changes scoped to `compiler/src/codegen/backend/rust.rs`.
 
-**Tech Stack:** Rust compiler crate, QuantaLang parser/type checker/MIR lowerer, `rustc --emit=metadata`, Cargo unit tests.
+**Tech Stack:** Rust compiler crate, BuildLang parser/type checker/MIR lowerer, `rustc --emit=metadata`, Cargo unit tests.
 
 ---
 
@@ -20,8 +20,8 @@
 Add a `tests`-module helper that parses source, type-checks it, lowers to Rust, writes generated Rust to a temp file under `std::env::temp_dir()`, and invokes `rustc --emit=metadata`.
 
 ```rust
-fn compile_quanta_to_rust(source: &str) -> String {
-    let source_file = SourceFile::new("rust_backend_test.quanta", source);
+fn compile_build_to_rust(source: &str) -> String {
+    let source_file = SourceFile::new("rust_backend_test.bld", source);
     let mut lexer = Lexer::new(&source_file);
     let tokens = lexer.tokenize().expect("lexing should succeed");
     let mut parser = Parser::new(&source_file, tokens);
@@ -48,7 +48,7 @@ fn compile_quanta_to_rust(source: &str) -> String {
 fn assert_rustc_metadata_ok(name: &str, rust_source: &str) {
     let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
     let dir = std::env::temp_dir().join(format!(
-        "quantalang_rust_backend_{}_{}",
+        "buildlang_rust_backend_{}_{}",
         name,
         std::process::id()
     ));
@@ -99,7 +99,7 @@ fn main() {
     println!("{}", v);
 }
 "#;
-    let rust = compile_quanta_to_rust(source);
+    let rust = compile_build_to_rust(source);
     assert_rustc_metadata_ok("scalar_branch", &rust);
 }
 ```
@@ -125,7 +125,7 @@ fn main() {
     println!("{}", val);
 }
 "#;
-    let rust = compile_quanta_to_rust(source);
+    let rust = compile_build_to_rust(source);
     assert_rustc_metadata_ok("references", &rust);
 }
 ```
@@ -152,7 +152,7 @@ fn main() {
     println!("{}", total);
 }
 "#;
-    let rust = compile_quanta_to_rust(source);
+    let rust = compile_build_to_rust(source);
     assert_rustc_metadata_ok("structs_arrays", &rust);
 }
 ```
@@ -173,7 +173,7 @@ fn main() {
     println!("{}", *r);
 }
 "#;
-    let rust = compile_quanta_to_rust(source);
+    let rust = compile_build_to_rust(source);
     assert_rustc_metadata_ok("lifetime_smoke", &rust);
 }
 ```

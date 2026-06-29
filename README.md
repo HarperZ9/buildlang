@@ -1,35 +1,35 @@
 <p align="center">
-  <img src="docs/brand/quantalang-hero.png" alt="QuantaLang, the Effects Language compiler in the Quanta ecosystem">
+  <img src="docs/brand/buildlang-hero.png" alt="BuildLang, the Effects Language compiler in the Build ecosystem">
 </p>
-<!-- Project mark: docs/brand/quantalang-mark.svg -->
+<!-- Project mark: docs/brand/buildlang-mark.svg -->
 
-# QuantaLang
+# BuildLang
 
 > The Effects Language: a Rust-built compiler for typed effects, systems experiments, and shader-oriented code generation.
 
-[Quanta ecosystem](https://github.com/HarperZ9/quanta-universe) | [quantalang](https://github.com/HarperZ9/quantalang) | [quanta-universe](https://github.com/HarperZ9/quanta-universe) | [VS Code extension](https://github.com/HarperZ9/quantalang-vscode) | [grammar](https://github.com/HarperZ9/quantalang-tmLanguage)
+[Build ecosystem](https://github.com/HarperZ9/build-universe) | [buildlang](https://github.com/HarperZ9/buildlang) | [build-universe](https://github.com/HarperZ9/build-universe) | [VS Code extension](https://github.com/HarperZ9/buildlang-vscode) | [grammar](https://github.com/HarperZ9/buildlang-tmLanguage)
 
 [![license: fair-source](https://img.shields.io/badge/license-fair--source-blue.svg)](LICENSE)
 ![rust](https://img.shields.io/badge/rust-edition_2021-orange.svg)
 ![version](https://img.shields.io/badge/version-1.0.0-informational.svg)
-[![CI](https://github.com/HarperZ9/quantalang/actions/workflows/ci.yml/badge.svg)](https://github.com/HarperZ9/quantalang/actions/workflows/ci.yml)
-[![part of: Quanta ecosystem](https://img.shields.io/badge/part_of-Quanta_ecosystem-00b3a4.svg)](https://github.com/HarperZ9/quanta-universe)
+[![CI](https://github.com/HarperZ9/buildlang/actions/workflows/ci.yml/badge.svg)](https://github.com/HarperZ9/buildlang/actions/workflows/ci.yml)
+[![part of: Build ecosystem](https://img.shields.io/badge/part_of-Build_ecosystem-00b3a4.svg)](https://github.com/HarperZ9/build-universe)
 
 **The Effects Language** - a Rust-built compiler for typed effects, systems
 experiments, and shader-oriented code generation.
 
-QuantaLang compiles `.quanta` source files to **C** as the primary verified
+BuildLang compiles `.bld` source files to **C** as the primary verified
 execution path, emits **HLSL** and **GLSL** for shader work, and keeps SPIR-V,
 LLVM IR, WebAssembly, Rust source, x86-64, and ARM64 backends labeled as
 experimental research surfaces.
 
-**Landing page:** [harperz9.github.io/quantalang](https://harperz9.github.io/quantalang/)
+**Landing page:** [harperz9.github.io/buildlang](https://harperz9.github.io/buildlang/)
 
 ## Current status
 
-- **Release:** QuantaLang 1.0.x; compiler binary `quantac`; built with Rust (edition 2021). C is the production-grade verified backend; HLSL and GLSL ship for shader work; SPIR-V, LLVM IR, WebAssembly, Rust, x86-64, and ARM64 stay labeled experimental.
-- **Operator surface:** the `quantac` CLI exposes `lex`, `parse`, `check` (with `--receipt` / `--policy`), `build`, `run`, `test`, `repl`, `fmt`, `pkg`, `watch`, `doctor`, `corpus`, `policy`, `receipt`, and an `lsp` subcommand that starts a bundled LSP server (completion, hover, diagnostics, go-to-definition, semantic tokens). The CLI and the LSP server are the two integration surfaces; accountability receipts (`quantalang-receipt-verification/v1`) carry SHA-256 source digests for re-checkable codegen.
-- **Umbrella:** part of the operator's Quanta ecosystem alongside `quanta-universe`, the VS Code extension, and the TextMate grammar; standalone and not dependent on any single host.
+- **Release:** BuildLang 1.0.x; compiler binary `buildc`; built with Rust (edition 2021). C is the production-grade verified backend; HLSL and GLSL ship for shader work; SPIR-V, LLVM IR, WebAssembly, Rust, x86-64, and ARM64 stay labeled experimental.
+- **Operator surface:** the `buildc` CLI exposes `lex`, `parse`, `check` (with `--receipt` / `--policy`), `build`, `run`, `test`, `repl`, `fmt`, `pkg`, `watch`, `doctor`, `corpus`, `policy`, `receipt`, and an `lsp` subcommand that starts a bundled LSP server (completion, hover, diagnostics, go-to-definition, semantic tokens). The CLI and the LSP server are the two integration surfaces; accountability receipts (`buildlang-receipt-verification/v1`) carry SHA-256 source digests for re-checkable codegen.
+- **Umbrella:** part of the operator's Build ecosystem alongside `build-universe`, the VS Code extension, and the TextMate grammar; standalone and not dependent on any single host.
 - **Housekeeping:** ground-truth release evidence lives in `STATUS.md`; [CHANGELOG.md](CHANGELOG.md) tracks the current presentation pass under Unreleased.
 
 ## Install
@@ -41,13 +41,13 @@ cd compiler
 cargo build --release
 ```
 
-Add `compiler/target/release/quantac` (or
-`compiler\target\release\quantac.exe` on Windows) to your PATH.
+Add `compiler/target/release/buildc` (or
+`compiler\target\release\buildc.exe` on Windows) to your PATH.
 
 Verify your local toolchain:
 
 ```bash
-quantac doctor
+buildc doctor
 ```
 
 `doctor` reports the installed compiler version, C-backend readiness, stdlib and
@@ -57,13 +57,13 @@ table, and the substrate receipt evidence posture for the semantic corpus.
 ## Editor support
 
 VS Code extension sources live in `editors/vscode`: syntax highlighting,
-brackets, comment toggles, file icons, and optional `quantac lsp` process
+brackets, comment toggles, file icons, and optional `buildc lsp` process
 startup. LSP request dispatch is still partial; see
 `compiler/src/lsp/STATUS.md`.
 
 ## Quick Start
 
-Create `hello.quanta`:
+Create `hello.bld`:
 
 ```
 fn main() {
@@ -74,22 +74,22 @@ fn main() {
 Compile and run:
 
 ```bash
-quantac run hello.quanta
+buildc run hello.bld
 ```
 
 The repository also carries tested quickstart examples:
 
 ```bash
-quantac run examples/quickstart/hello.quanta
-quantac run examples/quickstart/ledger.quanta
-quantac run examples/quickstart/effects_greeting.quanta
-quantac examples/quickstart/vignette_shader.quanta --target hlsl -o vignette_shader.hlsl
+buildc run examples/quickstart/hello.bld
+buildc run examples/quickstart/ledger.bld
+buildc run examples/quickstart/effects_greeting.bld
+buildc examples/quickstart/vignette_shader.bld --target hlsl -o vignette_shader.hlsl
 ```
 
 Or compile to C and build manually:
 
 ```bash
-quantac hello.quanta -o hello.c
+buildc hello.bld -o hello.c
 cc hello.c -o hello
 ./hello
 ```
@@ -103,7 +103,7 @@ and shader output) with expected output. A runnable demo lives in
 
 ## Shader Example
 
-QuantaLang can compile shader code directly to HLSL or GLSL. Create `vignette.quanta`:
+BuildLang can compile shader code directly to HLSL or GLSL. Create `vignette.bld`:
 
 ```
 fn vignette(uv_x: f64, uv_y: f64, strength: f64, softness: f64) -> f64 {
@@ -125,56 +125,56 @@ fn PS_Vignette(uv: vec2) -> vec4 {
 Compile to HLSL (for ReShade / DirectX):
 
 ```bash
-quantac vignette.quanta --target hlsl -o vignette.fx
+buildc vignette.bld --target hlsl -o vignette.fx
 ```
 
 Compile to GLSL (for OpenGL / Vulkan):
 
 ```bash
-quantac vignette.quanta --target glsl -o vignette.glsl
+buildc vignette.bld --target glsl -o vignette.glsl
 ```
 
 ## CLI Commands
 
 | Command         | Description                          |
 |-----------------|--------------------------------------|
-| `quantac lex`   | Tokenize a file and print tokens     |
-| `quantac parse` | Parse a file and print the AST       |
-| `quantac check <file> [--receipt PATH|-] [--policy policy.json|--profile NAME]` | Type-check, optionally evaluate policy, and optionally emit a JSON accountability receipt |
-| `quantac build` | Build a project                      |
-| `quantac run`   | Compile and run a `.quanta` file     |
-| `quantac doctor` | Diagnose local toolchain readiness  |
-| `quantac policy list [--json]` / `quantac policy print <name>` / `quantac policy scaffold <receipt.json>` | List, emit, or scaffold check policy profiles |
-| `quantac receipt verify <receipt.json> [--source PATH] [--expect-profile NAME] [--expect-policy-digest HEX] [--json]` | Re-check a saved accountability receipt against current source inputs and optional policy expectations |
-| `quantac corpus verify [--root DIR] [--write]` | Verify semantic corpus receipts and C stdout; optionally refresh the C receipt |
+| `buildc lex`   | Tokenize a file and print tokens     |
+| `buildc parse` | Parse a file and print the AST       |
+| `buildc check <file> [--receipt PATH|-] [--policy policy.json|--profile NAME]` | Type-check, optionally evaluate policy, and optionally emit a JSON accountability receipt |
+| `buildc build` | Build a project                      |
+| `buildc run`   | Compile and run a `.bld` file     |
+| `buildc doctor` | Diagnose local toolchain readiness  |
+| `buildc policy list [--json]` / `buildc policy print <name>` / `buildc policy scaffold <receipt.json>` | List, emit, or scaffold check policy profiles |
+| `buildc receipt verify <receipt.json> [--source PATH] [--expect-profile NAME] [--expect-policy-digest HEX] [--json]` | Re-check a saved accountability receipt against current source inputs and optional policy expectations |
+| `buildc corpus verify [--root DIR] [--write]` | Verify semantic corpus receipts and C stdout; optionally refresh the C receipt |
 
 ## Capability Effects
 
-`quantac check` now treats direct ambient runtime and compile-time access as
+`buildc check` now treats direct ambient runtime and compile-time access as
 typed effects. A function that calls helpers such as `read_file`, `write_file`,
 `tcp_connect`, `process_exit`, `getenv`, `clock_ms`, Vulkan runtime helpers,
-known `quanta_*` C runtime helper aliases, compile-time include/environment
+known `build_*` C runtime helper aliases, compile-time include/environment
 macros, or an `extern` function/static must declare the matching capability
 effect in its signature:
 
-```quanta
+```build
 fn load_config() ~ FileSystem {
     read_file("ops.toml");
 }
 
 extern "C" { fn touch(); }
-extern "C" { static QUANTA_ERRNO: i32; }
+extern "C" { static BUILD_ERRNO: i32; }
 
 fn call_foreign() ~ Foreign {
     touch();
-    let code = QUANTA_ERRNO;
+    let code = BUILD_ERRNO;
 }
 ```
 
 Known runtime C helper aliases declared through `extern` blocks are classified
 by their actual capability instead of being flattened into generic FFI. For
-example, `quanta_gfx_init` requires `Gpu`, `quanta_read_file` requires
-`FileSystem`, and `quanta_tcp_connect` requires `Network`. Unknown extern
+example, `build_gfx_init` requires `Gpu`, `build_read_file` requires
+`FileSystem`, and `build_tcp_connect` requires `Network`. Unknown extern
 functions and foreign statics remain `Foreign`.
 
 Compile-time ambient macros are gated as capability access too:
@@ -309,19 +309,19 @@ selected future keeps the union of those effects and their origins until it is
 awaited, so an `if` or `match` selected task can record branch origins such as
 `task <- read_file` and `task <- getenv`.
 
-`quantac check --receipt` also binds each receipt to the checked source inputs
+`buildc check --receipt` also binds each receipt to the checked source inputs
 with SHA-256 digests plus compiler and language version metadata. The top-level
 `source_digest` records the entry file, `input_digests` records every entry,
 import, include, and module file that feeds the check pipeline, and
 `input_graph_digest` gives CI a portable fingerprint for the exact source graph
 that passed or failed the capability gate.
-`quantac receipt verify receipt.json` re-runs the check input graph and confirms
+`buildc receipt verify receipt.json` re-runs the check input graph and confirms
 the saved receipt still matches the current source bytes, compiler/language
 identity, graph digest, file-backed policy digest, any recorded built-in profile
 digest, and the replayed accountability surfaces (`declared_effects`,
 `observed_capabilities`, `propagated_effects`, diagnostics, and policy
 violations). Add `--json` to emit a
-`quantalang-receipt-verification/v1` report for CI systems that need
+`buildlang-receipt-verification/v1` report for CI systems that need
 machine-readable pass/fail checks instead of human text.
 Use `--expect-profile ci-review` when CI must reject receipts that were not
 accepted under the required built-in policy profile, including receipts whose
@@ -329,8 +329,8 @@ policy object was stripped after creation.
 Use `--expect-policy-digest sha256:<hex>` when CI must reject receipts that were
 not accepted under a specific file-backed or built-in policy digest.
 
-`quantac check --policy <policy.json>` evaluates a portable
-`quantalang-check-policy/v1` profile against declared effects and observed
+`buildc check --policy <policy.json>` evaluates a portable
+`buildlang-check-policy/v1` profile against declared effects and observed
 capabilities. Policy failures make the check fail even when type checking
 passes, and receipts record the policy path, policy digest, status, and
 structured violations.
@@ -343,15 +343,15 @@ even when it is empty. Strict profiles and scaffolded policies enable it so a
 pure receipt stays pure: later declared, observed, or propagated effect drift
 must be added to the policy deliberately.
 
-`quantac policy list` shows built-in baseline profiles,
-`quantac policy list --json` emits a machine-readable catalog with profile
+`buildc policy list` shows built-in baseline profiles,
+`buildc policy list --json` emits a machine-readable catalog with profile
 digests, and
-`quantac policy print <name> --output policy.json` writes one as normal policy
+`buildc policy print <name> --output policy.json` writes one as normal policy
 JSON. The initial profiles are `pure`, `console-only`, `offline`, and
 `ci-review`, plus `strict-accountability` for gates that require exact
 boundary/source allowlists before ambient IO is accepted.
 
-For the common case, `quantac check app.quanta --profile ci-review --receipt -`
+For the common case, `buildc check app.bld --profile ci-review --receipt -`
 evaluates a built-in profile directly without first writing a policy file.
 Receipts identify these gates with a `policy.source` such as `builtin:ci-review`.
 Built-in profile receipts also include `policy.profile` and
@@ -361,7 +361,7 @@ Use `--profile strict-accountability` when CI should reject every ambient
 capability boundary until a printed policy adds exact direct, propagated, and
 source-level allowlists, with `allowed_effects` enforced as an explicit effect
 inventory.
-Use `quantac policy scaffold receipt.json --output policy.json` to turn an
+Use `buildc policy scaffold receipt.json --output policy.json` to turn an
 accountability receipt into a strict, reviewable policy skeleton with observed
 direct boundaries, ambient helper/macro/FFI sources, propagated callers, and
 callee sources already filled in, including compile-time file/environment
@@ -369,8 +369,8 @@ macros such as `include_str!` and `env!`. Scaffolded policies also enable
 `require_effect_allowlist`, including for receipts that currently have no
 effects.
 Use `--expect-profile-digest <hex>` with `--profile` to pin check-time CI to the
-digest reported by `quantac policy list --json` or by a prior trusted receipt.
-Use `quantac receipt verify --expect-profile <name>` to pin verification-time CI
+digest reported by `buildc policy list --json` or by a prior trusted receipt.
+Use `buildc receipt verify --expect-profile <name>` to pin verification-time CI
 to the required built-in profile identity, or
 `--expect-policy-digest sha256:<hex>` to pin verification to an exact policy
 document digest.
@@ -475,7 +475,7 @@ Policy profiles can enforce that split:
 
 ```json
 {
-  "schema": "quantalang-check-policy/v1",
+  "schema": "buildlang-check-policy/v1",
   "allowed_effects": ["FileSystem", "Network"],
   "direct_effect_allowlist": {
     "FileSystem": ["load_config"]
@@ -541,8 +541,8 @@ expected stdout, generated Rust, `rustc`, and executable behavior are checked
 together; manifest contract, receipt consistency, and metadata tests keep the
 corpus and Rust execution receipt aligned. The C backend now has a matching
 semantic-corpus execution receipt for the same 8 programs, and
-`quantac corpus verify` checks the manifest, C/Rust receipts, and real
-C-backend stdout from `quantac run`. `quantac corpus verify --root <DIR>`
+`buildc corpus verify` checks the manifest, C/Rust receipts, and real
+C-backend stdout from `buildc run`. `buildc corpus verify --root <DIR>`
 points verification at a copied corpus, while `--write` rewrites the C
 execution receipt after C stdout passes and Rust receipt alignment is still
 clean. It currently covers scalar functions, locals, arithmetic, printing,
@@ -551,30 +551,30 @@ struct aggregate reuse, field assignment reuse, nested field reuse, and
 dereference reuse; unsupported MIR returns a codegen error rather than silent
 fallback.
 
-`quantac corpus verify` also validates a Substrate Receipt
-(`quantalang-substrate-receipt/v0`) for the same semantic corpus. This receipt
+`buildc corpus verify` also validates a Substrate Receipt
+(`buildlang-substrate-receipt/v0`) for the same semantic corpus. This receipt
 aggregates existing evidence across semantic, execution, memory, representation,
 and command surfaces: C remains the production execution anchor, Rust remains an
 experimental subset lane, and unverified GPU/native lanes must keep explicit
 maturity and unsupported-behavior labels. The receipt is an evidence contract,
 not a backend promotion claim.
 The same verification path now validates a MIR Representation Receipt
-(`quantalang-mir-representation-receipt/v0`) that recomputes per-program MIR
+(`buildlang-mir-representation-receipt/v0`) that recomputes per-program MIR
 module counts, symbols, operation families, memory-surface flags, and
 control-flow summaries from the real parse, type-check, and AST-to-MIR lowering
 pipeline. This makes the representation claim inspectable without promoting any
 experimental backend.
 The substrate path also carries a checked
-`quantalang-memory-layout-receipt/v0` artifact for the semantic corpus. It
+`buildlang-memory-layout-receipt/v0` artifact for the semantic corpus. It
 recomputes per-program manifest memory tags, MIR-derived memory flags,
 ownership-surface classification, layout-scope classification, source/input/MIR
-digests, and explicit known gaps during `quantac corpus verify`. This is a
+digests, and explicit known gaps during `buildc corpus verify`. This is a
 representation-level RAM/memory evidence receipt, not a byte-offset ABI layout
 claim, allocator proof, async runtime memory proof, or full interprocedural
 borrow proof.
 The substrate path now also carries a checked
-`quantalang-symbol-graph-receipt/v0` artifact that recomputes source/MIR/effect
-symbol evidence during `quantac corpus verify` without claiming call graph, LSP
+`buildlang-symbol-graph-receipt/v0` artifact that recomputes source/MIR/effect
+symbol evidence during `buildc corpus verify` without claiming call graph, LSP
 readiness, or package API completion.
 
 ## Status
@@ -583,7 +583,7 @@ The current release-shaped proof is the Cargo baseline above: `cargo test
 --quiet` from `compiler/` on 2026-06-23 produced 1002 passing tests, 0 failing
 tests, and 11 ignored tests. [TEST_RESULTS.md](TEST_RESULTS.md) is retained as a
 historical C-backend output record, not the current release gate; the legacy
-`quantac test` fixture runner now needs a Console-capability annotation pass
+`buildc test` fixture runner now needs a Console-capability annotation pass
 before it can be used as a public green-corpus claim again.
 
 The broader fixture corpus covers functions, recursion, structs, enums,
@@ -614,7 +614,7 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
   - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
   - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
   - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
-  - CLI: 192 binary-level smoke tests cover help output, `quantac doctor`, `quantac corpus verify`, `quantac receipt verify`, explicit corpus roots, C receipt writes against copied corpus fixtures, capability diagnostics, and the runnable quickstart examples
+  - CLI: 192 binary-level smoke tests cover help output, `buildc doctor`, `buildc corpus verify`, `buildc receipt verify`, explicit corpus roots, C receipt writes against copied corpus fixtures, capability diagnostics, and the runnable quickstart examples
   - Codegen: tests across 9 backends, including C formatted-print lowering, Rust source emission, Rust executable smoke checks over the semantic corpus, and semantic-corpus manifest contract/receipt consistency/metadata guards (C backend has 24 end-to-end output verification tests)
 
 ## License

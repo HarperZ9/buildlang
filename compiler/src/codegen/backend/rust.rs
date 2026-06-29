@@ -1,12 +1,12 @@
 // ===============================================================================
-// QUANTALANG CODE GENERATOR - RUST BACKEND
+// BUILDLANG CODE GENERATOR - RUST BACKEND
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
 //! Rust source backend.
 //!
-//! This backend is a conservative bridge from QuantaLang MIR to Rust source. It
+//! This backend is a conservative bridge from BuildLang MIR to Rust source. It
 //! is intentionally subset-based: MIR constructs that are not safely projected
 //! yet return `CodegenError::Unsupported` instead of emitting plausible but
 //! incorrect Rust.
@@ -68,13 +68,13 @@ impl RustBackend {
     }
 
     fn emit_runtime(&mut self) {
-        self.writeln("fn quanta_string_new<S: AsRef<str>>(s: S) -> String {");
+        self.writeln("fn build_string_new<S: AsRef<str>>(s: S) -> String {");
         self.indent += 1;
         self.writeln("s.as_ref().to_string()");
         self.indent -= 1;
         self.writeln("}");
         self.writeln("");
-        self.writeln("fn quanta_format(fmt: &str, args: &[String]) -> String {");
+        self.writeln("fn build_format(fmt: &str, args: &[String]) -> String {");
         self.indent += 1;
         self.writeln("let mut out = String::new();");
         self.writeln("let mut args_iter = args.iter();");
@@ -138,16 +138,16 @@ impl RustBackend {
         self.indent -= 1;
         self.writeln("}");
         self.writeln("");
-        self.writeln("fn quanta_printf<S: AsRef<str>>(fmt: S, args: &[String]) -> i32 {");
+        self.writeln("fn build_printf<S: AsRef<str>>(fmt: S, args: &[String]) -> i32 {");
         self.indent += 1;
-        self.writeln("print!(\"{}\", quanta_format(fmt.as_ref(), args));");
+        self.writeln("print!(\"{}\", build_format(fmt.as_ref(), args));");
         self.writeln("0");
         self.indent -= 1;
         self.writeln("}");
         self.writeln("");
-        self.writeln("fn quanta_println<S: AsRef<str>>(fmt: S, args: &[String]) -> i32 {");
+        self.writeln("fn build_println<S: AsRef<str>>(fmt: S, args: &[String]) -> i32 {");
         self.indent += 1;
-        self.writeln("println!(\"{}\", quanta_format(fmt.as_ref(), args));");
+        self.writeln("println!(\"{}\", build_format(fmt.as_ref(), args));");
         self.writeln("0");
         self.indent -= 1;
         self.writeln("}");
@@ -461,9 +461,9 @@ impl RustBackend {
                 .map(|arg| format!("format!(\"{{}}\", {})", self.value_to_rust(arg, locals)))
                 .collect::<Vec<_>>();
             let runtime_call = if func_name == "println" {
-                "quanta_println"
+                "build_println"
             } else {
-                "quanta_printf"
+                "build_printf"
             };
             let call = format!("{}({}, &[{}])", runtime_call, fmt, arg_strings.join(", "));
             if let Some(dest) = dest {
@@ -757,7 +757,7 @@ impl RustBackend {
             MirType::Ptr(inner) => format!("*mut {}", self.type_to_rust(inner)),
             MirType::Array(elem, len) => format!("[{}; {}]", self.type_to_rust(elem), len),
             MirType::Slice(elem) => format!("&[{}]", self.type_to_rust(elem)),
-            MirType::Struct(name) if name.as_ref() == "QuantaString" => "String".to_string(),
+            MirType::Struct(name) if name.as_ref() == "BuildString" => "String".to_string(),
             MirType::Struct(name) if name.as_ref() == "String" => "String".to_string(),
             MirType::Struct(name) => Self::rust_type_name(name),
             MirType::FnPtr(sig) => {
@@ -812,7 +812,7 @@ impl RustBackend {
             }
             MirType::Slice(_) => "&[]".to_string(),
             MirType::Struct(name) if name.as_ref() == "String" => "String::new()".to_string(),
-            MirType::Struct(name) if name.as_ref() == "QuantaString" => "String::new()".to_string(),
+            MirType::Struct(name) if name.as_ref() == "BuildString" => "String::new()".to_string(),
             MirType::Vec(_) => "Vec::new()".to_string(),
             MirType::Map(_, _) => "std::collections::BTreeMap::new()".to_string(),
             _ => "Default::default()".to_string(),
@@ -890,7 +890,7 @@ impl RustBackend {
     fn is_string_like_type(ty: &MirType) -> bool {
         matches!(
             ty,
-            MirType::Struct(name) if name.as_ref() == "String" || name.as_ref() == "QuantaString"
+            MirType::Struct(name) if name.as_ref() == "String" || name.as_ref() == "BuildString"
         )
     }
 
@@ -942,7 +942,7 @@ impl RustBackend {
             MirType::Array(elem, _) | MirType::Vector(elem, _) => Self::is_copy_like_type(elem),
             MirType::Tuple(_) => false,
             MirType::Struct(name)
-                if name.as_ref() == "String" || name.as_ref() == "QuantaString" =>
+                if name.as_ref() == "String" || name.as_ref() == "BuildString" =>
             {
                 false
             }
@@ -1060,7 +1060,7 @@ impl Backend for RustBackend {
         self.strings = mir.strings.clone();
         self.collect_struct_fields(&mir.types);
 
-        self.writeln("// Generated by QuantaLang Compiler");
+        self.writeln("// Generated by BuildLang Compiler");
         self.writeln("// Rust target is experimental and subset-based.");
         self.writeln("#![allow(dead_code, non_snake_case, non_camel_case_types, unused_assignments, unused_mut, unused_parens, unused_variables, unreachable_code)]");
         self.writeln("");
@@ -1095,21 +1095,21 @@ mod tests {
     use crate::types::{TypeChecker, TypeContext};
 
     const CORPUS_SCALAR_BRANCH: &str =
-        include_str!("../../../../semantic-corpus/programs/scalar_branch.quanta");
+        include_str!("../../../../semantic-corpus/programs/scalar_branch.bld");
     const CORPUS_REFERENCES_MUTATION: &str =
-        include_str!("../../../../semantic-corpus/programs/references_mutation.quanta");
+        include_str!("../../../../semantic-corpus/programs/references_mutation.bld");
     const CORPUS_STRUCTS_ARRAYS: &str =
-        include_str!("../../../../semantic-corpus/programs/structs_arrays.quanta");
+        include_str!("../../../../semantic-corpus/programs/structs_arrays.bld");
     const CORPUS_TUPLE_OWNERSHIP_REUSE: &str =
-        include_str!("../../../../semantic-corpus/programs/tuple_ownership_reuse.quanta");
+        include_str!("../../../../semantic-corpus/programs/tuple_ownership_reuse.bld");
     const CORPUS_STRUCT_AGGREGATE_REUSE: &str =
-        include_str!("../../../../semantic-corpus/programs/struct_aggregate_reuse.quanta");
+        include_str!("../../../../semantic-corpus/programs/struct_aggregate_reuse.bld");
     const CORPUS_FIELD_ASSIGNMENT_REUSE: &str =
-        include_str!("../../../../semantic-corpus/programs/field_assignment_reuse.quanta");
+        include_str!("../../../../semantic-corpus/programs/field_assignment_reuse.bld");
     const CORPUS_NESTED_FIELD_REUSE: &str =
-        include_str!("../../../../semantic-corpus/programs/nested_field_reuse.quanta");
+        include_str!("../../../../semantic-corpus/programs/nested_field_reuse.bld");
     const CORPUS_DEREF_REUSE: &str =
-        include_str!("../../../../semantic-corpus/programs/deref_reuse.quanta");
+        include_str!("../../../../semantic-corpus/programs/deref_reuse.bld");
 
     #[derive(serde::Deserialize)]
     struct SemanticCorpusManifest {
@@ -1182,8 +1182,8 @@ mod tests {
             .unwrap_or_else(|err| panic!("parse {}: {}", receipt_path.display(), err))
     }
 
-    fn compile_quanta_to_rust(source: &str) -> String {
-        let source_file = SourceFile::new("rust_backend_test.quanta", source);
+    fn compile_build_to_rust(source: &str) -> String {
+        let source_file = SourceFile::new("rust_backend_test.bld", source);
         let mut lexer = Lexer::new(&source_file);
         let tokens = lexer.tokenize().expect("lexing should succeed");
         let mut parser = Parser::new(&source_file, tokens);
@@ -1216,7 +1216,7 @@ mod tests {
     fn assert_rustc_metadata_ok(name: &str, rust_source: &str) {
         let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
         let dir = std::env::temp_dir().join(format!(
-            "quantalang_rust_backend_{}_{}",
+            "buildlang_rust_backend_{}_{}",
             name,
             std::process::id()
         ));
@@ -1245,7 +1245,7 @@ mod tests {
     fn assert_rustc_run_stdout(name: &str, rust_source: &str, expected_stdout: &str) {
         let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
         let dir = std::env::temp_dir().join(format!(
-            "quantalang_rust_backend_run_{}_{}",
+            "buildlang_rust_backend_run_{}_{}",
             name,
             std::process::id()
         ));
@@ -1299,13 +1299,13 @@ fn main() ~ Console {
     println("{}", v);
 }
 "#;
-        let rust = compile_quanta_to_rust(source);
+        let rust = compile_build_to_rust(source);
         assert_rustc_metadata_ok("scalar_branch", &rust);
     }
 
     #[test]
     fn generated_rust_runs_for_scalar_branch_subset() {
-        let rust = compile_quanta_to_rust(CORPUS_SCALAR_BRANCH);
+        let rust = compile_build_to_rust(CORPUS_SCALAR_BRANCH);
         assert_rustc_run_stdout("run_scalar_branch", &rust, "4\n");
     }
 
@@ -1327,13 +1327,13 @@ fn main() ~ Console {
     println("{}", val);
 }
 "#;
-        let rust = compile_quanta_to_rust(source);
+        let rust = compile_build_to_rust(source);
         assert_rustc_metadata_ok("references", &rust);
     }
 
     #[test]
     fn generated_rust_runs_for_reference_subset() {
-        let rust = compile_quanta_to_rust(CORPUS_REFERENCES_MUTATION);
+        let rust = compile_build_to_rust(CORPUS_REFERENCES_MUTATION);
         assert_rustc_run_stdout("run_references", &rust, "15\n");
     }
 
@@ -1356,13 +1356,13 @@ fn main() ~ Console {
     println("{}", total);
 }
 "#;
-        let rust = compile_quanta_to_rust(source);
+        let rust = compile_build_to_rust(source);
         assert_rustc_metadata_ok("structs_arrays", &rust);
     }
 
     #[test]
     fn generated_rust_runs_for_structs_and_arrays() {
-        let rust = compile_quanta_to_rust(CORPUS_STRUCTS_ARRAYS);
+        let rust = compile_build_to_rust(CORPUS_STRUCTS_ARRAYS);
         assert_rustc_run_stdout("run_structs_arrays", &rust, "12\n");
     }
 
@@ -1380,7 +1380,7 @@ fn main() ~ Console {
     println("{}", *rx);
 }
 "#;
-        let rust = compile_quanta_to_rust(source);
+        let rust = compile_build_to_rust(source);
         assert_rustc_metadata_ok("struct_field_references", &rust);
     }
 
@@ -1398,7 +1398,7 @@ fn main() ~ Console {
     println("{}", points[0].x);
 }
 "#;
-        let rust = compile_quanta_to_rust(source);
+        let rust = compile_build_to_rust(source);
         assert_rustc_metadata_ok("repeated_non_copy_struct_arrays", &rust);
     }
 
@@ -1421,7 +1421,7 @@ fn main() ~ Console {
     println("{}", first + second);
 }
 "#;
-        let rust = compile_quanta_to_rust(source);
+        let rust = compile_build_to_rust(source);
         assert_rustc_metadata_ok("reused_struct_after_by_value_call", &rust);
     }
 
@@ -1440,7 +1440,7 @@ fn main() ~ Console {
     println("{}", q.x + r.y);
 }
 "#;
-        let rust = compile_quanta_to_rust(source);
+        let rust = compile_build_to_rust(source);
         assert_rustc_metadata_ok("reused_struct_after_assignment", &rust);
     }
 
@@ -1463,13 +1463,13 @@ fn main() ~ Console {
     println("{}", pair.left.x + pair.right.y);
 }
 "#;
-        let rust = compile_quanta_to_rust(source);
+        let rust = compile_build_to_rust(source);
         assert_rustc_metadata_ok("reused_non_copy_struct_aggregate_field", &rust);
     }
 
     #[test]
     fn generated_rust_runs_for_struct_aggregate_reuse() {
-        let rust = compile_quanta_to_rust(CORPUS_STRUCT_AGGREGATE_REUSE);
+        let rust = compile_build_to_rust(CORPUS_STRUCT_AGGREGATE_REUSE);
         assert_rustc_run_stdout("run_struct_aggregate_reuse", &rust, "7\n");
     }
 
@@ -1487,7 +1487,7 @@ fn main() ~ Console {
     println("{}", pair.0.x + pair.1.y);
 }
 "#;
-        let rust = compile_quanta_to_rust(source);
+        let rust = compile_build_to_rust(source);
         assert_rustc_metadata_ok("reused_non_copy_tuple_aggregate_field", &rust);
     }
 
@@ -1511,13 +1511,13 @@ fn main() ~ Console {
     println("{}", holder.item.x + again.y);
 }
 "#;
-        let rust = compile_quanta_to_rust(source);
+        let rust = compile_build_to_rust(source);
         assert_rustc_metadata_ok("reused_non_copy_after_field_assignment", &rust);
     }
 
     #[test]
     fn generated_rust_runs_for_field_assignment_reuse() {
-        let rust = compile_quanta_to_rust(CORPUS_FIELD_ASSIGNMENT_REUSE);
+        let rust = compile_build_to_rust(CORPUS_FIELD_ASSIGNMENT_REUSE);
         assert_rustc_run_stdout("run_field_assignment_reuse", &rust, "7\n");
     }
 
@@ -1535,13 +1535,13 @@ fn main() ~ Console {
     println("{}", first + second);
 }
 "#;
-        let rust = compile_quanta_to_rust(source);
+        let rust = compile_build_to_rust(source);
         assert_rustc_metadata_ok("reused_tuple_after_by_value_call", &rust);
     }
 
     #[test]
     fn generated_rust_runs_for_tuple_after_by_value_call() {
-        let rust = compile_quanta_to_rust(CORPUS_TUPLE_OWNERSHIP_REUSE);
+        let rust = compile_build_to_rust(CORPUS_TUPLE_OWNERSHIP_REUSE);
         assert_rustc_run_stdout("run_tuple_after_by_value_call", &rust, "14\n");
     }
 
@@ -1551,7 +1551,7 @@ fn main() ~ Console {
         for program in corpus.programs {
             let source = std::fs::read_to_string(semantic_corpus_root().join(&program.path))
                 .unwrap_or_else(|err| panic!("read corpus program {}: {}", program.id, err));
-            let rust = compile_quanta_to_rust(&source);
+            let rust = compile_build_to_rust(&source);
             assert_rustc_run_stdout(
                 &format!("semantic_corpus_{}", program.id),
                 &rust,
@@ -1566,7 +1566,7 @@ fn main() ~ Console {
         let receipt = load_rust_execution_receipt();
         let mut ids = std::collections::HashSet::new();
 
-        assert_eq!(manifest.schema, "quantalang-semantic-corpus/v1");
+        assert_eq!(manifest.schema, "buildlang-semantic-corpus/v1");
         assert_eq!(
             manifest.rust_manifest_execution_test,
             "semantic_corpus_manifest_programs_run_on_rust_backend"
@@ -1672,8 +1672,8 @@ fn main() ~ Console {
         assert_eq!(
             receipt.validator_chain,
             vec![
-                "QuantaLang parser",
-                "QuantaLang type checker",
+                "BuildLang parser",
+                "BuildLang type checker",
                 "MIR lowerer",
                 "Rust backend",
                 "rustc executable build",
@@ -1702,13 +1702,13 @@ fn main() ~ Console {
     println("{}", a.x + b.y);
 }
 "#;
-        let rust = compile_quanta_to_rust(source);
+        let rust = compile_build_to_rust(source);
         assert_rustc_metadata_ok("reused_non_copy_struct_field_access", &rust);
     }
 
     #[test]
     fn generated_rust_runs_for_nested_field_reuse() {
-        let rust = compile_quanta_to_rust(CORPUS_NESTED_FIELD_REUSE);
+        let rust = compile_build_to_rust(CORPUS_NESTED_FIELD_REUSE);
         assert_rustc_run_stdout("run_nested_field_reuse", &rust, "7\n");
     }
 
@@ -1728,13 +1728,13 @@ fn main() ~ Console {
     println("{}", a.x + b.y);
 }
 "#;
-        let rust = compile_quanta_to_rust(source);
+        let rust = compile_build_to_rust(source);
         assert_rustc_metadata_ok("reused_non_copy_deref", &rust);
     }
 
     #[test]
     fn generated_rust_runs_for_deref_reuse() {
-        let rust = compile_quanta_to_rust(CORPUS_DEREF_REUSE);
+        let rust = compile_build_to_rust(CORPUS_DEREF_REUSE);
         assert_rustc_run_stdout("run_deref_reuse", &rust, "7\n");
     }
 
@@ -1751,7 +1751,7 @@ fn main() ~ Console {
     println("{}", *r);
 }
 "#;
-        let rust = compile_quanta_to_rust(source);
+        let rust = compile_build_to_rust(source);
         assert_rustc_metadata_ok("lifetime_smoke", &rust);
     }
 }

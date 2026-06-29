@@ -5,13 +5,13 @@ Status: Approved for implementation planning
 
 ## Purpose
 
-QuantaLang should make operational power visible at the language boundary.
+BuildLang should make operational power visible at the language boundary.
 The first security slice turns ambient runtime access into typed effects:
 programs that touch files, network sockets, process control, environment
 variables, clocks, console output, or foreign functions must declare those
 capabilities in function signatures or handle them explicitly.
 
-This positions `quantac` as an accountability compiler: source code does not
+This positions `buildc` as an accountability compiler: source code does not
 silently gain access to outside-world surfaces merely because a runtime helper
 exists.
 
@@ -149,7 +149,7 @@ Initial red tests:
 - Type checker test: `~ FileSystem` permits `read_file`.
 - Type checker test: wrong declared effect does not permit the call.
 - Parser/type checker test: `extern` call requires `Foreign`.
-- CLI smoke test: `quantac check` reports a capability diagnostic on a fixture.
+- CLI smoke test: `buildc check` reports a capability diagnostic on a fixture.
 - Receipt test: corpus capability metadata is preserved once receipt fields are
   introduced.
 

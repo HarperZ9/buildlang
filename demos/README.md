@@ -1,4 +1,4 @@
-# QuantaLang Visual Demo
+# BuildLang Visual Demo
 
 Current status (2026-06-15): historical/experimental local demo artifact. This
 directory preserves a Vulkan/SPIR-V proof path from the graphics work, including
@@ -7,7 +7,7 @@ the current release gate; current public proof lives in the C backend,
 HLSL/GLSL quickstart, semantic corpus receipts, and Cargo test baseline.
 
 **Experimental goal:** render a colored triangle on the GPU using
-QuantaLang-generated SPIR-V shader artifacts.
+BuildLang-generated SPIR-V shader artifacts.
 
 ## What This Proves
 
@@ -22,13 +22,13 @@ QuantaLang-generated SPIR-V shader artifacts.
 - Windows 10/11
 - Vulkan SDK (tested with 1.4.341)
 - MSVC (Visual Studio 2022/2025)
-- Rust + Cargo (for the QuantaLang compiler)
+- Rust + Cargo (for the BuildLang compiler)
 
 ### Steps
 
 ```batch
-:: 1. Generate the triangle shaders from the QuantaLang compiler
-cd quantalang
+:: 1. Generate the triangle shaders from the BuildLang compiler
+cd buildlang
 cargo run --manifest-path compiler/Cargo.toml --example gen_triangle
 
 :: 2. Validate the SPIR-V output
@@ -39,15 +39,15 @@ cargo run --manifest-path compiler/Cargo.toml --example gen_triangle
 cd demos
 cl vulkan_render.c /I %VULKAN_SDK%/Include /link vulkan-1.lib user32.lib gdi32.lib
 
-:: 4. Run (from the quantalang root directory)
+:: 4. Run (from the buildlang root directory)
 cd ..
-demos\quantalang_demo.exe
+demos\buildlang_demo.exe
 ```
 
 ## Output
 
 ```
-=== QuantaLang Visual Demo ===
+=== BuildLang Visual Demo ===
 The Graphics Programming Language
 
 GPU: NVIDIA GeForce RTX 4090
@@ -58,7 +58,7 @@ Graphics pipeline: CREATED
 === Rendering ===
 Rendered 180 frames
 
-=== QuantaLang Demo Complete ===
+=== BuildLang Demo Complete ===
 ```
 
 In the historical local run, a 1280x720 window opened displaying a colored
@@ -68,7 +68,7 @@ GPU evidence.
 ## Architecture
 
 ```
-QuantaLang Compiler (Rust)
+BuildLang Compiler (Rust)
     │
     ├── SPIR-V Backend (spirv.rs; see STATUS.md for current line count)
     │   ├── generate_triangle_vertex_shader() → hardcoded_vert.spv
@@ -87,7 +87,7 @@ QuantaLang Compiler (Rust)
     └── Render loop (180 frames, double-buffered)
 ```
 
-## QuantaLang Features Demonstrated
+## BuildLang Features Demonstrated
 
 - **Backend preservation**: SPIR-V shader-generation artifacts and Vulkan host code
 - **C/shader contrast**: examples for comparing CPU-oriented and shader-oriented paths

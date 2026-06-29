@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add checked LSP request-dispatch receipts that prove selected `quantac lsp` JSON-RPC request surfaces are reachable and structurally stable.
+**Goal:** Add checked LSP request-dispatch receipts that prove selected `buildc lsp` JSON-RPC request surfaces are reachable and structurally stable.
 
-**Architecture:** Expose the existing raw LSP dispatcher through a small public function in `compiler/src/lsp/server.rs`, then add a focused `compiler/src/lsp_dispatch.rs` receipt builder/verifier in the `quantac` binary. The receipt replays deterministic raw request fixtures against a fresh `LanguageServer`, stores stable response digests plus observed counts, is referenced from the substrate receipt, and is verified by `quantac corpus verify`.
+**Architecture:** Expose the existing raw LSP dispatcher through a small public function in `compiler/src/lsp/server.rs`, then add a focused `compiler/src/lsp_dispatch.rs` receipt builder/verifier in the `buildc` binary. The receipt replays deterministic raw request fixtures against a fresh `LanguageServer`, stores stable response digests plus observed counts, is referenced from the substrate receipt, and is verified by `buildc corpus verify`.
 
-**Tech Stack:** Rust, `serde`, `serde_json`, `sha2`, existing `quantac` CLI test harness, semantic corpus JSON receipts.
+**Tech Stack:** Rust, `serde`, `serde_json`, `sha2`, existing `buildc` CLI test harness, semantic corpus JSON receipts.
 
 ## Global Constraints
 
@@ -14,7 +14,7 @@
 - v0 must not replace the simplified JSON extraction parser with a full JSON-RPC parser.
 - v0 must not claim compiler type-checker backed LSP diagnostics.
 - v0 must not add semantic tokens, code lens, workspace symbol, execute command, latency receipts, package public API receipts, registry download behavior, or cryptographic signing.
-- The receipt schema is exactly `quantalang-lsp-dispatch-receipt/v0`.
+- The receipt schema is exactly `buildlang-lsp-dispatch-receipt/v0`.
 - The canonical receipt path is exactly `semantic-corpus/receipts/lsp-dispatch-2026-06-18.json`.
 - Successful corpus verification prints exactly `lsp dispatch receipt: ok`.
 - Manual edits use `apply_patch`.
@@ -73,14 +73,14 @@ fn raw_dispatch_did_open_returns_diagnostics_notification() {
     let mut server = LanguageServer::new();
     let response = dispatch_raw_message(
         &mut server,
-        r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.quanta","languageId":"quanta","version":1,"text":"fn main() {\n    let x = 1;\n}\n"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.bld","languageId":"build","version":1,"text":"fn main() {\n    let x = 1;\n}\n"}}}"#,
     )
     .expect("didOpen should publish diagnostics");
     let json: serde_json::Value = serde_json::from_str(&response).expect("parse diagnostics notification");
 
     assert_eq!(json["jsonrpc"], "2.0");
     assert_eq!(json["method"], "textDocument/publishDiagnostics");
-    assert_eq!(json["params"]["uri"], "file:///workspace/main.quanta");
+    assert_eq!(json["params"]["uri"], "file:///workspace/main.bld");
     assert!(json["params"]["diagnostics"].is_array());
 }
 
@@ -89,13 +89,13 @@ fn raw_dispatch_document_symbol_returns_opened_function() {
     let mut server = LanguageServer::new();
     dispatch_raw_message(
         &mut server,
-        r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.quanta","languageId":"quanta","version":1,"text":"fn helper() -> i32 { 1 }\nfn main() { helper(); }\n"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.bld","languageId":"build","version":1,"text":"fn helper() -> i32 { 1 }\nfn main() { helper(); }\n"}}}"#,
     )
     .expect("didOpen should publish diagnostics");
 
     let response = dispatch_raw_message(
         &mut server,
-        r#"{"jsonrpc":"2.0","id":2,"method":"textDocument/documentSymbol","params":{"textDocument":{"uri":"file:///workspace/main.quanta"}}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"textDocument/documentSymbol","params":{"textDocument":{"uri":"file:///workspace/main.bld"}}}"#,
     )
     .expect("documentSymbol should return a response");
     let json: serde_json::Value = serde_json::from_str(&response).expect("parse documentSymbol response");
@@ -153,7 +153,7 @@ Expected: the three raw dispatch tests pass.
 - Modify: `compiler/src/main.rs`
 
 **Interfaces:**
-- Consumes: `quantalang::lsp::server::{dispatch_raw_message, LanguageServer}`.
+- Consumes: `buildlang::lsp::server::{dispatch_raw_message, LanguageServer}`.
 - Produces:
   - `pub(crate) const LSP_DISPATCH_RECEIPT: &str = "lsp-dispatch-2026-06-18.json";`
   - `pub(crate) struct LspDispatchReceipt`
@@ -231,7 +231,7 @@ fn read_manifest(root: &Path) -> Result<SemanticCorpusManifest, String> {
 Run:
 
 ```text
-cargo test --manifest-path compiler/Cargo.toml --bin quantac lsp_dispatch --quiet
+cargo test --manifest-path compiler/Cargo.toml --bin buildc lsp_dispatch --quiet
 ```
 
 Expected: compile failures for missing receipt types and builder functions.
@@ -280,7 +280,7 @@ Fixture projection rules:
 Run:
 
 ```text
-cargo test --manifest-path compiler/Cargo.toml --bin quantac lsp_dispatch --quiet
+cargo test --manifest-path compiler/Cargo.toml --bin buildc lsp_dispatch --quiet
 ```
 
 Expected: receipt builder unit tests pass.
@@ -296,7 +296,7 @@ Expected: receipt builder unit tests pass.
 
 **Interfaces:**
 - Consumes: `build_lsp_dispatch_receipt`.
-- Produces: `quantac corpus verify` validates LSP receipt and prints `lsp dispatch receipt: ok`.
+- Produces: `buildc corpus verify` validates LSP receipt and prints `lsp dispatch receipt: ok`.
 
 - [ ] **Step 1: Write failing CLI tests**
 
@@ -328,13 +328,13 @@ fn corpus_verify_checks_lsp_dispatch_receipt() {
         eprintln!("skipping LSP dispatch receipt verification because no C backend is available");
         return;
     }
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(repo_root().join("semantic-corpus"))
         .output()
-        .expect("run quantac corpus verify with LSP dispatch receipt");
+        .expect("run buildc corpus verify with LSP dispatch receipt");
     assert!(output.status.success(), "stdout:\n{}\nstderr:\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     assert!(String::from_utf8_lossy(&output.stdout).contains("lsp dispatch receipt: ok"));
 }
@@ -343,7 +343,7 @@ fn corpus_verify_checks_lsp_dispatch_receipt() {
 fn corpus_verify_rejects_lsp_dispatch_schema_drift() {
     let corpus_root = temp_semantic_corpus("lsp_dispatch_schema");
     write_lsp_dispatch_receipt_copy(&corpus_root, |mut receipt| {
-        receipt["schema"] = serde_json::Value::String("quantalang-lsp-dispatch-receipt/v9".into());
+        receipt["schema"] = serde_json::Value::String("buildlang-lsp-dispatch-receipt/v9".into());
         receipt
     });
     assert_corpus_verify_rejects(&corpus_root, "lsp dispatch receipt has unsupported schema");
@@ -461,7 +461,7 @@ Validate exact values:
 
 ```rust
 protocol == "LSP JSON-RPC over stdio"
-dispatch == "quantac lsp raw message dispatch"
+dispatch == "buildc lsp raw message dispatch"
 request_parser == "simplified string extraction"
 lsp_receipt == format!("receipts/{LSP_DISPATCH_RECEIPT}")
 known_gaps is not empty
@@ -523,7 +523,7 @@ fn write_semantic_corpus_lsp_dispatch_receipt() {
 Run:
 
 ```text
-cargo test --manifest-path compiler/Cargo.toml --bin quantac write_semantic_corpus_lsp_dispatch_receipt -- --ignored --nocapture
+cargo test --manifest-path compiler/Cargo.toml --bin buildc write_semantic_corpus_lsp_dispatch_receipt -- --ignored --nocapture
 ```
 
 Remove the temporary ignored test immediately after generating the JSON.
@@ -535,7 +535,7 @@ Insert after `symbol_surface`:
 ```json
 "lsp_surface": {
   "protocol": "LSP JSON-RPC over stdio",
-  "dispatch": "quantac lsp raw message dispatch",
+  "dispatch": "buildc lsp raw message dispatch",
   "request_parser": "simplified string extraction",
   "lsp_receipt": "receipts/lsp-dispatch-2026-06-18.json",
   "known_gaps": [
@@ -564,7 +564,7 @@ Replace the stale partial-runner statement with text saying:
 
 ```markdown
 ## Checked Evidence
-- `semantic-corpus/receipts/lsp-dispatch-2026-06-18.json` verifies a deterministic raw JSON-RPC fixture sequence through the same dispatch function used by `quantac lsp`.
+- `semantic-corpus/receipts/lsp-dispatch-2026-06-18.json` verifies a deterministic raw JSON-RPC fixture sequence through the same dispatch function used by `buildc lsp`.
 
 ## Partial
 - The raw dispatch loop reaches lifecycle, text document sync, completion, hover, definition, references, document symbols, formatting, and folding requests.
@@ -577,7 +577,7 @@ Replace the stale partial-runner statement with text saying:
 Replace the LSP feature wording with:
 
 ```markdown
-- **LSP launch support** -- `quantac lsp` starts the current server loop. The
+- **LSP launch support** -- `buildc lsp` starts the current server loop. The
   raw dispatch path is receipt-checked for selected lifecycle, document sync,
   completion, hover, definition, references, document symbol, formatting, and
   folding requests. It still uses simplified request extraction and should not
@@ -602,7 +602,7 @@ Run:
 ```text
 cargo fmt --manifest-path compiler/Cargo.toml -- --check
 cargo test --manifest-path compiler/Cargo.toml --lib raw_dispatch --quiet
-cargo test --manifest-path compiler/Cargo.toml --bin quantac lsp_dispatch --quiet
+cargo test --manifest-path compiler/Cargo.toml --bin buildc lsp_dispatch --quiet
 cargo test --manifest-path compiler/Cargo.toml --test cli lsp_dispatch -- --nocapture
 cargo test --manifest-path compiler/Cargo.toml --test cli corpus_verify -- --nocapture
 cargo test --manifest-path compiler/Cargo.toml --test cli substrate -- --nocapture

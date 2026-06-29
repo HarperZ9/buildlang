@@ -1,4 +1,4 @@
-# QuantaLang Development Roadmap
+# BuildLang Development Roadmap
 
 Updated 2026-06-15. This roadmap is now a historical planning record, not the
 active execution plan. The current posture is wind-down and preservation: keep
@@ -110,10 +110,10 @@ Add clang/LLVM to the build environment.
 
 ### 3.2 End-to-End LLVM Pipeline
 ```
-quantac build --target llvm program.quanta
-# .quanta → .ll → clang → native executable
+buildc build --target llvm program.bld
+# .bld → .ll → clang → native executable
 ```
-- Wire quantac to invoke clang on .ll output
+- Wire buildc to invoke clang on .ll output
 - Link with C runtime (printf, malloc, etc.)
 - Verify output matches C backend for all 108 runtime-tested programs
 
@@ -122,13 +122,13 @@ quantac build --target llvm program.quanta
 - Benchmark LLVM -O2 vs gcc -O2 on C backend output
 
 ### Success criterion
-`quantac build --target llvm hello.quanta` produces a working native
+`buildc build --target llvm hello.bld` produces a working native
 executable without manual intervention.
 
 ## Phase 4: 5,000-Line Program (weeks 12-18)
 
 ### 4.1 Choose Target
-Write one genuinely useful program in QuantaLang:
+Write one genuinely useful program in BuildLang:
 - JSON parser/formatter (recursive descent + string building)
 - Markdown-to-HTML converter (text processing + file I/O)
 - Line-count tool with language detection (like tokei/cloc)
@@ -152,9 +152,9 @@ and matches reference output.
 Verify .wat output with wasmtime or wasmer.
 
 ### 5.2 Browser Playground
-- Compile the QuantaLang compiler to WASM (Rust wasm32 target)
+- Compile the BuildLang compiler to WASM (Rust wasm32 target)
 - Web page: editor + compile + output
 - Host on GitHub Pages
 
 ### Success criterion
-Anyone with a browser can write and run QuantaLang code.
+Anyone with a browser can write and run BuildLang code.

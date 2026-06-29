@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to QuantaLang will be documented in this file.
+All notable changes to BuildLang will be documented in this file.
 
 Current status note (2026-06-15): entries below preserve historical release
 claims as they were recorded at the time. Current release-shaped evidence is
@@ -10,14 +10,14 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
-- Presentation pass: README hero and brand assets under `docs/brand/`, Quanta ecosystem navigation, and Current status / Operator surface blocks.
-- Documented the operator surface across the `quantac` CLI and the bundled LSP server.
-- Relicensed to the QuantaLang Fair-Source License v1.0 under the operator's umbrella.
+- Presentation pass: README hero and brand assets under `docs/brand/`, Build ecosystem navigation, and Current status / Operator surface blocks.
+- Documented the operator surface across the `buildc` CLI and the bundled LSP server.
+- Relicensed to the BuildLang Fair-Source License v1.0 under the operator's umbrella.
 
 ## [1.0.5] - 2026-03-28 - Self-Hosted Compiler Verification
 
 ### Proven - Self-Hosting: Complete Audit of All 9 Versions
-- All 9 versions compile to C through QuantaLang; 6 run to completion, 3 have runtime bugs
+- All 9 versions compile to C through BuildLang; 6 run to completion, 3 have runtime bugs
 - **6 of 9 run to completion with verified correct output**:
   - v1: 3-pass pipeline generating C (`int x = 3 + 4; int y = x * 2;`)
   - v2: Functions + if/else + while (`square()`, `abs_val()`, `sum_to()`)
@@ -26,7 +26,7 @@ tracked in `STATUS.md`, `README.md`, and
   - v5: Function definition parsing from token stream
   - v6: Structs + branching + loops from tokens
 - **3 of 9 compile but have runtime bugs (infinite loops in character-level parsing)**:
-  - v7, v8, v9: Hang during codegen - nested while loops in hand-written character parsers don't advance past certain token boundaries. Bug is in the `.quanta` program logic, not in the QuantaLang compiler.
+  - v7, v8, v9: Hang during codegen - nested while loops in hand-written character parsers don't advance past certain token boundaries. Bug is in the `.bld` program logic, not in the BuildLang compiler.
 - Self-hosted support libraries (Option, Cmp, Span, LexerTokens) all produce correct output
 
 ---
@@ -80,7 +80,7 @@ tracked in `STATUS.md`, `README.md`, and
 
 ### Proven - Full Compilation Pipeline
 - **108/108 test programs compile and run correctly**
-- Pipeline: `.quanta` → `quantac` → C99 → MSVC → native x86-64 → correct output
+- Pipeline: `.bld` → `buildc` → C99 → MSVC → native x86-64 → correct output
 - Coverage: functions, recursion, closures, generics, traits, dynamic dispatch, algebraic effects, pattern matching, iterators, hashmaps, file I/O, vectors, color science, self-hosted compiler components
 - See [TEST_RESULTS.md](TEST_RESULTS.md) for documented outputs
 
@@ -152,9 +152,9 @@ tracked in `STATUS.md`, `README.md`, and
 ### Tooling
 - LSP server with completion, hover, and diagnostics
 - VS Code extension with syntax highlighting and LSP integration
-- CLI (`quantac`) with lex, parse, check, build, and run subcommands
-- Package manager (`quanta pkg`) with dependency resolution
-- Code formatter (`quanta fmt`)
+- CLI (`buildc`) with lex, parse, check, build, and run subcommands
+- Package manager (`build pkg`) with dependency resolution
+- Code formatter (`build fmt`)
 
 ### Known Limitations
 - Non-C backends (x86-64, AArch64, WASM, LLVM) are experimental and may not support all language features

@@ -23,8 +23,8 @@ case "$EXTENSION" in
     toml)
         # TOML - basic syntax check
         ;;
-    quanta)
-        # QuantaLang source - could run quantac check if available
+    build)
+        # BuildLang source - could run buildc check if available
         ;;
 esac
 

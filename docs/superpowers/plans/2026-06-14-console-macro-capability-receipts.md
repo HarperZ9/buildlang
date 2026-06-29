@@ -18,10 +18,10 @@
   - Record macro-origin capability effects in `ExprKind::Macro` and `StmtKind::Macro`.
 - Modify: `compiler/src/types/check.rs`
   - Add checker tests proving console macro enforcement.
-- Modify: verified `.quanta` fixtures as needed after enforcement:
-  - `semantic-corpus/programs/*.quanta`
-  - `examples/quickstart/*.quanta`
-  - CI-covered `tests/programs/*.quanta`
+- Modify: verified `.bld` fixtures as needed after enforcement:
+  - `semantic-corpus/programs/*.bld`
+  - `examples/quickstart/*.bld`
+  - CI-covered `tests/programs/*.bld`
   - Any additional fixture surfaced by focused/full tests.
 - Modify: `compiler/src/main.rs`
   - Add receipt capability metadata fields and verifier.
@@ -169,27 +169,27 @@ Expected: fixtures with `println!` and no `~ Console` fail after Task 1.
 Update functions that directly contain console macros in:
 
 ```text
-semantic-corpus/programs/*.quanta
-examples/quickstart/hello.quanta
-examples/quickstart/ledger.quanta
-examples/quickstart/effects_greeting.quanta
-tests/programs/01_hello.quanta
-tests/programs/02_variables.quanta
-tests/programs/03_functions.quanta
-tests/programs/06_recursion.quanta
-tests/programs/08_arithmetic.quanta
-tests/programs/11_structs.quanta
-tests/programs/16_closures.quanta
-tests/programs/27_effects_showcase.quanta
-tests/programs/46_color_science.quanta
-tests/programs/68_hashmap.quanta
-tests/programs/color_test.quanta
-tests/programs/cross_module_test.quanta
+semantic-corpus/programs/*.bld
+examples/quickstart/hello.bld
+examples/quickstart/ledger.bld
+examples/quickstart/effects_greeting.bld
+tests/programs/01_hello.bld
+tests/programs/02_variables.bld
+tests/programs/03_functions.bld
+tests/programs/06_recursion.bld
+tests/programs/08_arithmetic.bld
+tests/programs/11_structs.bld
+tests/programs/16_closures.bld
+tests/programs/27_effects_showcase.bld
+tests/programs/46_color_science.bld
+tests/programs/68_hashmap.bld
+tests/programs/color_test.bld
+tests/programs/cross_module_test.bld
 ```
 
 Use exact syntax:
 
-```quanta
+```build
 fn main() ~ Console {
 ```
 
@@ -399,15 +399,15 @@ $env:RUSTFLAGS='-Dwarnings'; cargo test --manifest-path compiler/Cargo.toml --qu
 git diff --check
 git diff origin/main..HEAD --check
 git check-ignore -q .env
-powershell -NoProfile -ExecutionPolicy Bypass -File C:/dev/scratch/portfolio-stabilization-2026-06-13/scan-diff-secrets.ps1 -Repo C:/dev/public/pubscan/quantalang
+powershell -NoProfile -ExecutionPolicy Bypass -File C:/dev/scratch/portfolio-stabilization-2026-06-13/scan-diff-secrets.ps1 -Repo C:/dev/public/pubscan/buildlang
 ```
 
 - [ ] **Step 6: Push and verify CI**
 
 ```powershell
 git push origin main
-gh run list -R HarperZ9/quantalang --branch main --limit 5 --json databaseId,workflowName,status,conclusion,headSha,displayTitle,createdAt
-gh run watch <new-ci-run-id> -R HarperZ9/quantalang --exit-status
+gh run list -R HarperZ9/buildlang --branch main --limit 5 --json databaseId,workflowName,status,conclusion,headSha,displayTitle,createdAt
+gh run watch <new-ci-run-id> -R HarperZ9/buildlang --exit-status
 ```
 
 Expected: CI and Pages complete successfully for the pushed head.
@@ -415,6 +415,6 @@ Expected: CI and Pages complete successfully for the pushed head.
 ## Self-Review Notes
 
 - Scope is limited to active compiler behavior, actively verified fixtures, and semantic-corpus receipts.
-- The plan deliberately avoids rewriting historical mirrors under `quantalang/` and `future/` unless a verifier names them.
+- The plan deliberately avoids rewriting historical mirrors under `buildlang/` and `future/` unless a verifier names them.
 - TDD red/green gates are explicit for macro enforcement and receipt metadata.
 - Receipt metadata is deterministic from manifest surfaces, so `corpus verify --write` cannot silently drop the capability posture.

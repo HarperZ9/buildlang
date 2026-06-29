@@ -1,5 +1,5 @@
 // ===============================================================================
-// QUANTALANG AST - ITEMS (TOP-LEVEL DECLARATIONS)
+// BUILDLANG AST - ITEMS (TOP-LEVEL DECLARATIONS)
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
@@ -94,7 +94,7 @@ pub enum ItemKind {
     Macro(Box<MacroDef>),
     /// Macro rules.
     MacroRules(Box<MacroRulesDef>),
-    /// Effect definition (QuantaLang extension).
+    /// Effect definition (BuildLang extension).
     Effect(Box<EffectDef>),
 }
 
@@ -529,7 +529,7 @@ pub struct MacroRule {
     pub span: Span,
 }
 
-/// Effect definition (QuantaLang extension).
+/// Effect definition (BuildLang extension).
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectDef {
     /// Effect name.

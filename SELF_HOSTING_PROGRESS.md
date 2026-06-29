@@ -1,15 +1,15 @@
-# QuantaLang Self-Hosting Progress
+# BuildLang Self-Hosting Progress
 
 ## Phase 6: Self-Hosting Roadmap
 
 **Date:** 2026-03-21
-**Goal:** Progressively compile the self-hosted QuantaLang codebase
+**Goal:** Progressively compile the self-hosted BuildLang codebase
 
 ---
 
 ## Files Attempted
 
-### 1. `stdlib/core/option.quanta` (Option + Result types)
+### 1. `stdlib/core/option.bld` (Option + Result types)
 
 **Status: PARTIALLY COMPILED (simplified)**
 
@@ -30,7 +30,7 @@ Original features used:
 - `impl` on nested generics: `impl<T> Option<Option<T>>`
 - Module declarations and use statements
 
-**What compiled:** Monomorphized `Option` enum (i32), `is_some`, `is_none`, `unwrap_or` methods. Free functions for `map` and `or` operations. See `tests/programs/30_self_hosted_option.quanta`.
+**What compiled:** Monomorphized `Option` enum (i32), `is_some`, `is_none`, `unwrap_or` methods. Free functions for `map` and `or` operations. See `tests/programs/30_self_hosted_option.bld`.
 
 **What blocked:**
 - Generic type parameters (the compiler handles generics but not for enum self-return)
@@ -41,7 +41,7 @@ Original features used:
 
 ---
 
-### 2. `stdlib/core/cmp.quanta` (Comparison traits + Ordering)
+### 2. `stdlib/core/cmp.bld` (Comparison traits + Ordering)
 
 **Status: PARTIALLY COMPILED (simplified)**
 
@@ -61,7 +61,7 @@ Original features used:
 - Iterator methods in slice comparison
 - `#[repr(i8)]` enum representation
 
-**What compiled:** `Ordering` enum with `is_lt`, `is_eq`, `is_gt` methods. Free functions for `reverse`, `then` (chaining), and `compare_i32`. See `tests/programs/31_self_hosted_cmp.quanta`.
+**What compiled:** `Ordering` enum with `is_lt`, `is_eq`, `is_gt` methods. Free functions for `reverse`, `then` (chaining), and `compare_i32`. See `tests/programs/31_self_hosted_cmp.bld`.
 
 **What blocked:**
 - Trait definitions (compiler has traits but not the full supertraits/defaults needed)
@@ -75,7 +75,7 @@ Original features used:
 
 ---
 
-### 3. `stdlib/core/primitives.quanta` (Primitive type methods)
+### 3. `stdlib/core/primitives.bld` (Primitive type methods)
 
 **Status: NOT COMPILABLE**
 
@@ -105,7 +105,7 @@ Original features used:
 
 ---
 
-### 4. `stdlib/core/marker.quanta` (Marker traits)
+### 4. `stdlib/core/marker.bld` (Marker traits)
 
 **Status: NOT COMPILABLE**
 
@@ -122,7 +122,7 @@ This is pure trait definitions (Sized, Copy, Clone, Drop, Send, Sync, etc.) with
 
 ---
 
-### 5. `src/lexer.quanta` (Self-hosted lexer)
+### 5. `src/lexer.bld` (Self-hosted lexer)
 
 **Status: STRUCTURE COMPILED, LOGIC NOT YET**
 
@@ -155,7 +155,7 @@ Original features used (1,179 lines):
 - Character classification logic (simplified version of `scan_token`)
 - `is_operator` query function
 
-See `tests/programs/32_self_hosted_span.quanta` and `tests/programs/33_self_hosted_lexer_tokens.quanta`.
+See `tests/programs/32_self_hosted_span.bld` and `tests/programs/33_self_hosted_lexer_tokens.bld`.
 
 **What blocked full lexer compilation:**
 - Lifetime parameters (`<'src>`)
@@ -171,7 +171,7 @@ See `tests/programs/32_self_hosted_span.quanta` and `tests/programs/33_self_host
 
 ---
 
-### 6. `src/diagnostics/span.quanta` (Source spans)
+### 6. `src/diagnostics/span.bld` (Source spans)
 
 **Status: CORE LOGIC COMPILED (simplified)**
 
@@ -188,7 +188,7 @@ Original features used (858 lines):
 - `impl Into<String>` parameter types
 - `#[cfg(test)]` test module
 
-**What compiled:** `Span` struct with `new`, `len`, `is_empty`, `contains_pos` methods, plus `span_merge` function. See `tests/programs/32_self_hosted_span.quanta`.
+**What compiled:** `Span` struct with `new`, `len`, `is_empty`, `contains_pos` methods, plus `span_merge` function. See `tests/programs/32_self_hosted_span.bld`.
 
 ---
 
@@ -196,12 +196,12 @@ Original features used (858 lines):
 
 | Test | Source File(s) | Description | Status |
 |------|---------------|-------------|--------|
-| `30_self_hosted_option.quanta` | `stdlib/core/option.quanta` | Option enum with is_some, is_none, unwrap_or, map, or | Compiles + type-checks |
-| `31_self_hosted_cmp.quanta` | `stdlib/core/cmp.quanta` | Ordering enum with is_lt/eq/gt, reverse, then, compare | Compiles + type-checks |
-| `32_self_hosted_span.quanta` | `src/lexer.quanta` + `src/diagnostics/span.quanta` | Span struct with len, is_empty, contains, merge + Token | Compiles + type-checks |
-| `33_self_hosted_lexer_tokens.quanta` | `src/lexer.quanta` | TokenKind enum (21 variants), classify_char, is_operator | Compiles + type-checks |
+| `30_self_hosted_option.bld` | `stdlib/core/option.bld` | Option enum with is_some, is_none, unwrap_or, map, or | Compiles + type-checks |
+| `31_self_hosted_cmp.bld` | `stdlib/core/cmp.bld` | Ordering enum with is_lt/eq/gt, reverse, then, compare | Compiles + type-checks |
+| `32_self_hosted_span.bld` | `src/lexer.bld` + `src/diagnostics/span.bld` | Span struct with len, is_empty, contains, merge + Token | Compiles + type-checks |
+| `33_self_hosted_lexer_tokens.bld` | `src/lexer.bld` | TokenKind enum (21 variants), classify_char, is_operator | Compiles + type-checks |
 
-All four files pass `quantac check` and compile to C output.
+All four files pass `buildc check` and compile to C output.
 
 ---
 
@@ -218,31 +218,31 @@ All four files pass `quantac check` and compile to C output.
 | Type casts (`x as u32`) | Lexer, primitives | Not yet |
 | `String` as first-class type | Lexer, all of stdlib | Strings exist but not as enum data |
 | `Vec<T>` with push/pop | Lexer | Collections exist but not generic |
-| `Result<T, E>` generic | Lexer, option.quanta | Monomorphized only |
+| `Result<T, E>` generic | Lexer, option.bld | Monomorphized only |
 | `loop` with `break` value | Lexer | `loop` exists, not break-with-value |
 
 ### Tier 2: Medium Priority (Blocks stdlib compilation)
 
 | Feature | Needed By | Status |
 |---------|-----------|--------|
-| Generic enums with methods returning Self | option.quanta, cmp.quanta | Blocked |
-| Trait supertraits (`Ord: Eq + PartialOrd`) | cmp.quanta | Not yet |
-| Default trait method implementations | cmp.quanta | Not yet |
-| Closures as method parameters (`FnOnce`) | option.quanta | Closures exist, not as params |
-| `const fn` | primitives.quanta | Not yet |
-| `#[repr(i8)]` / `#[repr(transparent)]` | cmp.quanta, marker.quanta | Not yet |
+| Generic enums with methods returning Self | option.bld, cmp.bld | Blocked |
+| Trait supertraits (`Ord: Eq + PartialOrd`) | cmp.bld | Not yet |
+| Default trait method implementations | cmp.bld | Not yet |
+| Closures as method parameters (`FnOnce`) | option.bld | Closures exist, not as params |
+| `const fn` | primitives.bld | Not yet |
+| `#[repr(i8)]` / `#[repr(transparent)]` | cmp.bld, marker.bld | Not yet |
 
 ### Tier 3: Lower Priority (Polish)
 
 | Feature | Needed By | Status |
 |---------|-----------|--------|
-| Macro definitions (`macro_rules!`) | primitives.quanta, cmp.quanta | Not yet |
+| Macro definitions (`macro_rules!`) | primitives.bld, cmp.bld | Not yet |
 | Lifetime parameters (`<'a>`) | Lexer | Not yet |
-| `unsafe` blocks | primitives.quanta | Not yet |
-| Conditional compilation (`#[cfg]`) | primitives.quanta | Not yet |
-| Auto traits / negative impls | marker.quanta | Not yet |
-| Const generics (`const N: usize`) | cmp.quanta | Not yet |
-| Never type (`!`) | option.quanta (Try) | Not yet |
+| `unsafe` blocks | primitives.bld | Not yet |
+| Conditional compilation (`#[cfg]`) | primitives.bld | Not yet |
+| Auto traits / negative impls | marker.bld | Not yet |
+| Const generics (`const N: usize`) | cmp.bld | Not yet |
+| Never type (`!`) | option.bld (Try) | Not yet |
 
 ---
 

@@ -1,4 +1,4 @@
-# QuantaLang Language Specification
+# BuildLang Language Specification
 
 Version 1.0 - March 2026
 
@@ -157,7 +157,7 @@ fn complex<T>(x: T) where T: Clone + Debug { ... }
 
 ### 2.6 Type Inference
 
-QuantaLang uses **bidirectional type inference**:
+BuildLang uses **bidirectional type inference**:
 - **Synthesis** (bottom-up): the type of an expression is computed from its subexpressions
 - **Checking** (top-down): an expected type flows down to constrain subexpressions
 
@@ -261,7 +261,7 @@ mod name {          // inline module
     pub fn foo() {}
 }
 
-mod name;           // external module (loads name.quanta from disk)
+mod name;           // external module (loads name.bld from disk)
 
 use module::item;   // import single item
 use module::*;      // glob import
@@ -337,14 +337,14 @@ Effects use one-shot continuations (setjmp/longjmp). `resume` may be called at m
 
 ## 7. Standard Library
 
-### 7.1 Core Module (`core.quanta`)
+### 7.1 Core Module (`core.bld`)
 Constants: `pi()`, `e()`, `tau()`
 Integer: `i32_min`, `i32_max`, `i32_abs`, `i32_clamp`
 Float: `f64_min`, `f64_max`, `f64_abs`, `f64_clamp`
 Predicates: `is_even`, `is_odd`, `is_positive`, `is_negative`, `is_zero`
 Number theory: `gcd`, `lcm`, `factorial`, `fibonacci`, `power`
 
-### 7.2 Math Module (`math.quanta`)
+### 7.2 Math Module (`math.bld`)
 Angle conversion: `deg_to_rad`, `rad_to_deg`
 Interpolation: `lerp`, `smoothstep`, `inverse_lerp`
 

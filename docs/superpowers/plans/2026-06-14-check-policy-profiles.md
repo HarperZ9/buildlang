@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add portable `quantalang-check-policy/v1` JSON profiles to `quantac check` so capability/effect receipts can be converted into deterministic policy pass/fail decisions.
+**Goal:** Add portable `buildlang-check-policy/v1` JSON profiles to `buildc check` so capability/effect receipts can be converted into deterministic policy pass/fail decisions.
 
 **Architecture:** Keep the first implementation inside `compiler/src/main.rs`, next to the existing check receipt pipeline, because `main.rs` already owns CLI parsing, source/policy file reads, source digesting, receipt rendering, and exit codes. Add a small policy profile model, policy evidence/violation model, evaluator, optional receipt policy object, and human diagnostics; exercise behavior through binary CLI tests in `compiler/tests/cli.rs`.
 
@@ -14,7 +14,7 @@
 
 - Modify `compiler/tests/cli.rs`: add policy fixture helpers and red tests for allow, deny, invalid schema, and receipt policy data.
 - Modify `compiler/src/main.rs`: add CLI `--policy`, policy profile loading, evaluator, policy receipt object, policy diagnostics, and exit-code integration.
-- Modify `README.md`: mention `quantac check --policy` in the CLI/security posture.
+- Modify `README.md`: mention `buildc check --policy` in the CLI/security posture.
 - Modify `docs/EFFECTS_GUIDE.md`: document the policy profile schema and behavior.
 
 ## Task 1: Add Policy CLI Red Tests
@@ -29,7 +29,7 @@ Add this helper near `receipt_from_stdout`:
 ```rust
 fn write_temp_policy(label: &str, json: &str) -> PathBuf {
     let policy = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_{}_{}.json",
+        "buildlang_check_policy_{}_{}.json",
         label,
         std::process::id()
     ));
@@ -48,13 +48,13 @@ Add this test after the existing `check_receipt_source_digest_changes_when_sourc
 #[test]
 fn check_policy_allows_console_receipt() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_console_{}.quanta",
+        "buildlang_check_policy_console_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "console_allow",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "allowed_effects": ["Console"],
           "require_source_digest": true
         }"#,
@@ -62,7 +62,7 @@ fn check_policy_allows_console_receipt() {
     fs::write(&fixture, r#"fn main() ~ Console { println!("ok"); }"#)
         .expect("write policy console fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -70,7 +70,7 @@ fn check_policy_allows_console_receipt() {
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with passing policy");
+        .expect("run buildc check with passing policy");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -83,7 +83,7 @@ fn check_policy_allows_console_receipt() {
     );
     let receipt = receipt_from_stdout(&output);
     assert_eq!(receipt["status"], "passed");
-    assert_eq!(receipt["policy"]["schema"], "quantalang-check-policy/v1");
+    assert_eq!(receipt["policy"]["schema"], "buildlang-check-policy/v1");
     assert_eq!(receipt["policy"]["status"], "passed");
     assert_eq!(receipt["policy"]["source_digest"]["algorithm"], "sha256");
     assert_eq!(
@@ -105,20 +105,20 @@ Add this test after the passing policy test:
 #[test]
 fn check_policy_denies_filesystem_even_when_typecheck_passes() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_deny_fs_{}.quanta",
+        "buildlang_check_policy_deny_fs_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "deny_fs",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "denied_effects": ["FileSystem"]
         }"#,
     );
     fs::write(&fixture, r#"fn main() ~ FileSystem { read_file("ops.txt"); }"#)
         .expect("write denied filesystem fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -126,7 +126,7 @@ fn check_policy_denies_filesystem_even_when_typecheck_passes() {
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with denied filesystem policy");
+        .expect("run buildc check with denied filesystem policy");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -166,20 +166,20 @@ Add this test after the denied-effect test:
 #[test]
 fn check_policy_allow_list_rejects_unlisted_effect() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_allow_list_{}.quanta",
+        "buildlang_check_policy_allow_list_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "allow_console_only",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "allowed_effects": ["Console"]
         }"#,
     );
     fs::write(&fixture, r#"fn main() ~ FileSystem { read_file("ops.txt"); }"#)
         .expect("write allow-list filesystem fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -187,7 +187,7 @@ fn check_policy_allow_list_rejects_unlisted_effect() {
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with allow-list policy");
+        .expect("run buildc check with allow-list policy");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -216,26 +216,26 @@ Add this test after the allow-list test:
 #[test]
 fn check_policy_rejects_unsupported_schema() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_bad_schema_{}.quanta",
+        "buildlang_check_policy_bad_schema_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "bad_schema",
         r#"{
-          "schema": "quantalang-check-policy/v0",
+          "schema": "buildlang-check-policy/v0",
           "allowed_effects": ["Console"]
         }"#,
     );
     fs::write(&fixture, r#"fn main() ~ Console { println!("ok"); }"#)
         .expect("write bad schema fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
         .arg(&policy)
         .output()
-        .expect("run quantac check with bad policy schema");
+        .expect("run buildc check with bad policy schema");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -243,7 +243,7 @@ fn check_policy_rejects_unsupported_schema() {
     assert!(!output.status.success(), "unsupported policy schema should fail");
     assert!(
         String::from_utf8_lossy(&output.stderr)
-            .contains("Unsupported check policy schema 'quantalang-check-policy/v0'"),
+            .contains("Unsupported check policy schema 'buildlang-check-policy/v0'"),
         "stderr should report unsupported schema:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -258,7 +258,7 @@ Run:
 cargo test --manifest-path compiler/Cargo.toml --test cli check_policy -- --nocapture
 ```
 
-Expected: FAIL because `quantac check` does not accept `--policy`.
+Expected: FAIL because `buildc check` does not accept `--policy`.
 
 - [ ] **Step 7: Commit red tests**
 
@@ -340,7 +340,7 @@ fn load_check_policy(path: &Path) -> Result<LoadedCheckPolicy, i32> {
         eprintln!("Error parsing policy '{}': {}", path.display(), err);
         1
     })?;
-    if profile.schema != "quantalang-check-policy/v1" {
+    if profile.schema != "buildlang-check-policy/v1" {
         eprintln!("Unsupported check policy schema '{}'", profile.schema);
         return Err(1);
     }
@@ -449,7 +449,7 @@ fn check_policy_evaluation_sorts_and_deduplicates_violations() {
             hex: source_digest_hex(b"policy"),
         },
         profile: CheckPolicyProfile {
-            schema: "quantalang-check-policy/v1".to_string(),
+            schema: "buildlang-check-policy/v1".to_string(),
             allowed_effects: vec!["Console".to_string()],
             denied_effects: vec!["Network".to_string()],
             require_source_digest: true,
@@ -457,8 +457,8 @@ fn check_policy_evaluation_sorts_and_deduplicates_violations() {
         },
     };
     let outcome = CheckOutcome {
-        source: "source.quanta".to_string(),
-        compiler_version: quantalang::VERSION,
+        source: "source.bld".to_string(),
+        compiler_version: buildlang::VERSION,
         language_version: language_version_string(),
         source_digest: CheckReceiptSourceDigest {
             algorithm: "sha256",
@@ -511,7 +511,7 @@ fn check_policy_evaluation_sorts_and_deduplicates_violations() {
 Run:
 
 ```powershell
-cargo test --manifest-path compiler/Cargo.toml --bin quantac check_policy --quiet
+cargo test --manifest-path compiler/Cargo.toml --bin buildc check_policy --quiet
 ```
 
 Expected: PASS after the helper implementation is present.
@@ -679,7 +679,7 @@ Run:
 ```powershell
 cargo test --manifest-path compiler/Cargo.toml --test cli check_policy -- --nocapture
 cargo test --manifest-path compiler/Cargo.toml --test cli check_receipt -- --nocapture
-cargo test --manifest-path compiler/Cargo.toml --bin quantac check_policy --quiet
+cargo test --manifest-path compiler/Cargo.toml --bin buildc check_policy --quiet
 ```
 
 Expected: all PASS.
@@ -702,7 +702,7 @@ git commit -m "feat: enforce check policy profiles"
 Change the check row in `README.md` to:
 
 ```markdown
-| `quantac check <file> [--receipt PATH|-] [--policy policy.json]` | Type-check, optionally evaluate policy, and optionally emit a JSON accountability receipt |
+| `buildc check <file> [--receipt PATH|-] [--policy policy.json]` | Type-check, optionally evaluate policy, and optionally emit a JSON accountability receipt |
 ```
 
 - [ ] **Step 2: Add README policy paragraph**
@@ -710,8 +710,8 @@ Change the check row in `README.md` to:
 After the existing source-bound receipt paragraph in the Capability Effects section, add:
 
 ```markdown
-`quantac check --policy <policy.json>` evaluates a portable
-`quantalang-check-policy/v1` profile against declared effects and observed
+`buildc check --policy <policy.json>` evaluates a portable
+`buildlang-check-policy/v1` profile against declared effects and observed
 capabilities. Policy failures make the check fail even when type checking
 passes, and receipts record the policy path, policy digest, status, and
 structured violations.
@@ -726,7 +726,7 @@ Policy profiles turn receipt evidence into an enforceable CI gate:
 
 ```json
 {
-  "schema": "quantalang-check-policy/v1",
+  "schema": "buildlang-check-policy/v1",
   "allowed_effects": ["Console"],
   "denied_effects": ["FileSystem", "Network", "Process", "Foreign"],
   "require_source_digest": true
@@ -736,7 +736,7 @@ Policy profiles turn receipt evidence into an enforceable CI gate:
 Run it with:
 
 ```bash
-quantac check app.quanta --policy console-only.json --receipt receipt.json
+buildc check app.bld --policy console-only.json --receipt receipt.json
 ```
 
 Denied effects always fail. If `allowed_effects` is non-empty, any declared
@@ -797,7 +797,7 @@ Expected: both compiler test runs PASS.
 git diff --check
 git diff origin/main..HEAD --check
 git check-ignore -q .env; if ($LASTEXITCODE -eq 0) { 'env-ignored' } else { 'env-not-ignored' }
-powershell -NoProfile -ExecutionPolicy Bypass -File C:\dev\scratch\portfolio-stabilization-2026-06-13\scan-diff-secrets.ps1 -Repo C:\dev\public\pubscan\quantalang
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\dev\scratch\portfolio-stabilization-2026-06-13\scan-diff-secrets.ps1 -Repo C:\dev\public\pubscan\buildlang
 ```
 
 Expected: no whitespace errors, `.env` ignored, and secret scan prints `no-matches`.
@@ -813,7 +813,7 @@ Expected: push succeeds.
 - [ ] **Step 5: Watch GitHub workflows**
 
 ```powershell
-gh run list -R HarperZ9/quantalang --branch main --limit 8 --json databaseId,workflowName,status,conclusion,headSha,displayTitle,createdAt
+gh run list -R HarperZ9/buildlang --branch main --limit 8 --json databaseId,workflowName,status,conclusion,headSha,displayTitle,createdAt
 ```
 
 Poll until the pushed head has completed `CI` and `pages-build-deployment`.

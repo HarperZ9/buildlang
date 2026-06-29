@@ -1,5 +1,0 @@
-/// Example: Hello World
-/// The simplest QuantaLang program
-fn main() {
-    println!("Hello, World!");
-}

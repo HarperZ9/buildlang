@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make Quantac/Quantalang distinguish direct capability use from propagated callee effects, surface both in machine receipts, and enforce typed provenance policy contracts in `quantac check`.
+**Goal:** Make Buildc/Buildlang distinguish direct capability use from propagated callee effects, surface both in machine receipts, and enforce typed provenance policy contracts in `buildc check`.
 
 **Architecture:** Add a second provenance map to type inference and function summaries. Keep direct ambient helpers/macros in `observed_capabilities`; record effectful function calls in `propagated_effects`. Extend check receipts and policy evaluation so accountability artifacts can prove which boundary touched an effect and which callers inherited it.
 
@@ -12,7 +12,7 @@
 
 ## Current Context
 
-- Repo: `C:\dev\public\pubscan\quantalang`
+- Repo: `C:\dev\public\pubscan\buildlang`
 - Branch: `main`
 - Latest baseline commit: `81edf4203271e2764d4bf0e088362c87ac8f0dc4`
 - Design spec: `docs/superpowers/specs/2026-06-14-effect-provenance-contracts-design.md`
@@ -44,7 +44,7 @@ fn record_capability_source(&mut self, effect_name: &str, source_name: &str) {
 
 For this source:
 
-```quanta
+```build
 fn load_config() ~ FileSystem {
     read_file("ops.txt");
 }
@@ -54,7 +54,7 @@ fn main() ~ FileSystem {
 }
 ```
 
-`quantac check --receipt -` should emit this logical shape:
+`buildc check --receipt -` should emit this logical shape:
 
 ```json
 {
@@ -351,11 +351,11 @@ fn main() ~ FileSystem {
     )
     .expect("write input");
 
-    let output = Command::new(quantac())
+    let output = Command::new(buildc())
         .args(["check", "--receipt", "-"])
         .arg(&input)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     assert!(
         output.status.success(),
@@ -444,7 +444,7 @@ Return it in the receipt:
 
 ```rust
 CheckReceipt {
-    schema: "quantalang-check-receipt/v1",
+    schema: "buildlang-check-receipt/v1",
     input,
     input_graph_digest: outcome.input_graph_digest.clone(),
     declared_effects,
@@ -505,7 +505,7 @@ fn main() ~ FileSystem {
     let policy = write_temp_policy(
         &dir,
         serde_json::json!({
-            "schema": "quantalang-check-policy/v1",
+            "schema": "buildlang-check-policy/v1",
             "allowed_effects": ["FileSystem"],
             "direct_effect_allowlist": {
                 "FileSystem": ["load_config"]
@@ -513,12 +513,12 @@ fn main() ~ FileSystem {
         }),
     );
 
-    let output = Command::new(quantac())
+    let output = Command::new(buildc())
         .args(["check", "--receipt", "-", "--policy"])
         .arg(&policy)
         .arg(&input)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     assert!(!output.status.success(), "policy should reject direct helper");
     let receipt = receipt_from_stdout(&output);
@@ -560,7 +560,7 @@ fn main() ~ FileSystem {
     let policy = write_temp_policy(
         &dir,
         serde_json::json!({
-            "schema": "quantalang-check-policy/v1",
+            "schema": "buildlang-check-policy/v1",
             "allowed_effects": ["FileSystem"],
             "direct_effect_allowlist": {
                 "FileSystem": ["load_config"]
@@ -571,12 +571,12 @@ fn main() ~ FileSystem {
         }),
     );
 
-    let output = Command::new(quantac())
+    let output = Command::new(buildc())
         .args(["check", "--receipt", "-", "--policy"])
         .arg(&policy)
         .arg(&input)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     assert!(
         output.status.success(),
@@ -615,7 +615,7 @@ fn main() ~ FileSystem {
     let policy = write_temp_policy(
         &dir,
         serde_json::json!({
-            "schema": "quantalang-check-policy/v1",
+            "schema": "buildlang-check-policy/v1",
             "allowed_effects": ["FileSystem"],
             "direct_effect_allowlist": {
                 "FileSystem": ["load_config"]
@@ -626,12 +626,12 @@ fn main() ~ FileSystem {
         }),
     );
 
-    let output = Command::new(quantac())
+    let output = Command::new(buildc())
         .args(["check", "--receipt", "-", "--policy"])
         .arg(&policy)
         .arg(&input)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     assert!(!output.status.success(), "policy should reject propagated caller");
     let receipt = receipt_from_stdout(&output);
@@ -671,7 +671,7 @@ fn check_policy_requires_valid_input_graph_digest() {
     let profile = LoadedCheckPolicy {
         path: PathBuf::from("policy.json"),
         profile: CheckPolicyProfile {
-            schema: "quantalang-check-policy/v1".to_string(),
+            schema: "buildlang-check-policy/v1".to_string(),
             allowed_effects: BTreeSet::new(),
             denied_effects: BTreeSet::new(),
             direct_effect_allowlist: BTreeMap::new(),
@@ -915,7 +915,7 @@ git commit -m "feat: enforce effect provenance contracts"
 
 ```json
 {
-  "schema": "quantalang-check-policy/v1",
+  "schema": "buildlang-check-policy/v1",
   "allowed_effects": ["FileSystem", "Network"],
   "direct_effect_allowlist": {
     "FileSystem": ["load_config"]
@@ -1003,7 +1003,7 @@ if (Test-Path scripts/ci/verify-docs.ps1) { powershell -ExecutionPolicy Bypass -
 - [ ] Run the required secret scan before committing or pushing any final changes:
 
 ```powershell
-C:\dev\scratch\portfolio-stabilization-2026-06-13\scan-diff-secrets.ps1 -Repo C:\dev\public\pubscan\quantalang
+C:\dev\scratch\portfolio-stabilization-2026-06-13\scan-diff-secrets.ps1 -Repo C:\dev\public\pubscan\buildlang
 ```
 
 Expected output:
@@ -1057,7 +1057,7 @@ pages-build-deployment success
 - `FunctionEffectSummary` exposes `observed_capabilities` and `propagated_effects` separately.
 - Direct helper and macro calls appear only under `observed_capabilities`.
 - Calls to effectful functions appear only under `propagated_effects`.
-- `quantac check --receipt -` serializes `propagated_effects`.
+- `buildc check --receipt -` serializes `propagated_effects`.
 - Policy profiles can restrict direct effect boundaries with `direct_effect_allowlist`.
 - Policy profiles can restrict propagated effect callers with `propagated_effect_allowlist`.
 - Policy profiles can require a valid SHA-256 input graph digest with `require_input_graph_digest`.

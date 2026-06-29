@@ -6,7 +6,7 @@
 
 **Architecture:** Extend the structural JSON-RPC parser with accessors for code-action and rename params, add a focused response serializer module for `CodeAction` and `WorkspaceEdit`, then add raw dispatch branches in `server.rs`. Extend the LSP dispatch receipt with observed counts for `code_actions` and `workspace_edits`.
 
-**Tech Stack:** Rust, `serde_json`, existing `quantalang::lsp` server/types/message structs, semantic-corpus receipt verifier.
+**Tech Stack:** Rust, `serde_json`, existing `buildlang::lsp` server/types/message structs, semantic-corpus receipt verifier.
 
 ## Global Constraints
 
@@ -38,7 +38,7 @@ fn raw_dispatch_code_action_returns_supplied_diagnostic_quick_fix() {
     let mut server = LanguageServer::new();
     dispatch_raw_message(
         &mut server,
-        r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.quanta","languageId":"quanta","version":1,"text":"fn main() {\n    let x = 1\n}\n"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.bld","languageId":"build","version":1,"text":"fn main() {\n    let x = 1\n}\n"}}}"#,
     )
     .expect("didOpen should publish diagnostics");
 
@@ -49,7 +49,7 @@ fn raw_dispatch_code_action_returns_supplied_diagnostic_quick_fix() {
           "id": 10,
           "method": "textDocument/codeAction",
           "params": {
-            "textDocument": { "uri": "file:///workspace/main.quanta" },
+            "textDocument": { "uri": "file:///workspace/main.bld" },
             "range": {
               "start": { "line": 1, "character": 13 },
               "end": { "line": 1, "character": 13 }
@@ -61,7 +61,7 @@ fn raw_dispatch_code_action_returns_supplied_diagnostic_quick_fix() {
                   "end": { "line": 1, "character": 13 }
                 },
                 "severity": 1,
-                "source": "quantalang",
+                "source": "buildlang",
                 "message": "expected ';'"
               }]
             }
@@ -87,7 +87,7 @@ fn raw_dispatch_rename_returns_workspace_edits_for_symbol_occurrences() {
     let mut server = LanguageServer::new();
     dispatch_raw_message(
         &mut server,
-        r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.quanta","languageId":"quanta","version":1,"text":"fn helper() -> i32 { 1 }\nfn main() { helper(); }\n"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.bld","languageId":"build","version":1,"text":"fn helper() -> i32 { 1 }\nfn main() { helper(); }\n"}}}"#,
     )
     .expect("didOpen should publish diagnostics");
 
@@ -98,7 +98,7 @@ fn raw_dispatch_rename_returns_workspace_edits_for_symbol_occurrences() {
           "id": 11,
           "method": "textDocument/rename",
           "params": {
-            "textDocument": { "uri": "file:///workspace/main.quanta" },
+            "textDocument": { "uri": "file:///workspace/main.bld" },
             "position": { "line": 1, "character": 14 },
             "newName": "renamed_helper"
           }
@@ -108,7 +108,7 @@ fn raw_dispatch_rename_returns_workspace_edits_for_symbol_occurrences() {
     let json: serde_json::Value = serde_json::from_str(&response).expect("parse response");
 
     assert_eq!(json["id"], 11);
-    let edits = json["result"]["changes"]["file:///workspace/main.quanta"]
+    let edits = json["result"]["changes"]["file:///workspace/main.bld"]
         .as_array()
         .expect("rename edits for document");
     assert!(edits.len() >= 2, "expected definition and call-site edits: {edits:#?}");
@@ -288,7 +288,7 @@ Run:
 cargo fmt --manifest-path compiler\Cargo.toml -- --check
 cargo test --manifest-path compiler\Cargo.toml --lib code_action --quiet
 cargo test --manifest-path compiler\Cargo.toml --lib raw_dispatch --quiet
-cargo test --manifest-path compiler\Cargo.toml --bin quantac lsp_dispatch --quiet
+cargo test --manifest-path compiler\Cargo.toml --bin buildc lsp_dispatch --quiet
 cargo test --manifest-path compiler\Cargo.toml --test cli lsp_dispatch -- --nocapture
 cargo test --manifest-path compiler\Cargo.toml --test cli corpus_verify -- --nocapture
 cargo run --manifest-path compiler\Cargo.toml -- corpus verify --root semantic-corpus

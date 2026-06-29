@@ -124,11 +124,11 @@ mod tests {
     fn workspace_edit_json_sorts_changes_by_uri() {
         let mut edit = WorkspaceEdit::new();
         edit.add_edit(
-            "file:///b.quanta".to_string(),
+            "file:///b.bld".to_string(),
             TextEdit::insert(Position::new(0, 0), "b".to_string()),
         );
         edit.add_edit(
-            "file:///a.quanta".to_string(),
+            "file:///a.bld".to_string(),
             TextEdit::insert(Position::new(0, 0), "a".to_string()),
         );
 
@@ -140,14 +140,14 @@ mod tests {
             .keys()
             .cloned()
             .collect::<Vec<_>>();
-        assert_eq!(keys, vec!["file:///a.quanta", "file:///b.quanta"]);
+        assert_eq!(keys, vec!["file:///a.bld", "file:///b.bld"]);
     }
 
     #[test]
     fn code_action_json_includes_edit() {
         let mut edit = WorkspaceEdit::new();
         edit.add_edit(
-            "file:///main.quanta".to_string(),
+            "file:///main.bld".to_string(),
             TextEdit::insert(Position::new(1, 13), ";".to_string()),
         );
         let action = CodeAction::new("Add missing semicolon")

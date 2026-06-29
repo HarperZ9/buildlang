@@ -1,11 +1,11 @@
-# QuantaLang Shader Programming Guide
+# BuildLang Shader Programming Guide
 
 Current status (2026-06-15): HLSL and GLSL shader-source output are the
 practical shader path. SPIR-V material in this guide is retained as
 experimental backend documentation and historical graphics-roadmap context, not
 as the current release promise.
 
-This guide covers shader-oriented QuantaLang examples. If you know HLSL or
+This guide covers shader-oriented BuildLang examples. If you know HLSL or
 GLSL, much of the syntax will look familiar; the verified path today is to run
 CPU examples through C and inspect generated HLSL/GLSL shader source.
 
@@ -13,10 +13,10 @@ CPU examples through C and inspect generated HLSL/GLSL shader source.
 
 ## The Dual-Target Story
 
-Shader functions use normal QuantaLang syntax. The compiler can emit C for CPU
+Shader functions use normal BuildLang syntax. The compiler can emit C for CPU
 tests and shader source for HLSL/GLSL; SPIR-V emission remains experimental:
 
-```quanta
+```build
 // This function is just math. The verified route is C; shader-source routes
 // can emit HLSL/GLSL, while SPIR-V is experimental.
 fn aces_tonemap(x: f64) -> f64 {
@@ -42,10 +42,10 @@ fn main() {
 ```
 
 ```bash
-quantac shader.quanta -o shader.hlsl  # Shader source: HLSL
-quantac shader.quanta -o shader.glsl  # Shader source: GLSL
-quantac shader.quanta -o shader.c     # CPU: testable C code
-quantac shader.quanta -o shader.spv   # Experimental: Vulkan SPIR-V
+buildc shader.bld -o shader.hlsl  # Shader source: HLSL
+buildc shader.bld -o shader.glsl  # Shader source: GLSL
+buildc shader.bld -o shader.c     # CPU: testable C code
+buildc shader.bld -o shader.spv   # Experimental: Vulkan SPIR-V
 ```
 
 Use the C route for executable checks and HLSL/GLSL output for current shader
@@ -64,7 +64,7 @@ Annotate your entry point function with a shader stage attribute:
 | `#[fragment]` | Fragment               | Compute pixel colors             |
 | `#[compute]`  | GLCompute              | General-purpose GPU compute      |
 
-```quanta
+```build
 #[vertex]
 fn vs_main(vertex_id: i32) -> VertexOutput { ... }
 
@@ -93,7 +93,7 @@ the specific fixture you are using.
 
 Constructors:
 
-```quanta
+```build
 let a = vec2(1.0, 2.0);
 let b = vec3(1.0, 0.0, 0.0);
 let c = vec4(0.0, 0.5, 1.0, 1.0);
@@ -101,7 +101,7 @@ let c = vec4(0.0, 0.5, 1.0, 1.0);
 
 Field access and swizzling:
 
-```quanta
+```build
 let pos = vec3(1.0, 2.0, 3.0);
 pos.x               // 1.0
 pos.xy              // vec2(1.0, 2.0)
@@ -115,7 +115,7 @@ color.rg             // vec2(1.0, 0.5)
 
 Arithmetic operators work component-wise:
 
-```quanta
+```build
 let a = vec3(1.0, 2.0, 3.0);
 let b = vec3(4.0, 5.0, 6.0);
 let c = a + b;       // vec3(5.0, 7.0, 9.0)
@@ -129,7 +129,7 @@ let e = a - b;       // vec3(-3.0, -3.0, -3.0)
 |--------|-------|---------------|---------------------------|
 | `mat4` | 4x4   | OpTypeMatrix  | Column-major 4x4 matrix   |
 
-```quanta
+```build
 let identity = mat4_identity();
 let model = mat4_translate(vec3(5.0, 1.0, 3.0));
 let scaled = mat4_scale(vec3(2.0, 2.0, 2.0));
@@ -144,7 +144,7 @@ let world_pos = model * vec4(0.0, 0.0, 0.0, 1.0);
 
 ### Scalar Types
 
-| QuantaLang | CPU          | GPU (SPIR-V)   |
+| BuildLang | CPU          | GPU (SPIR-V)   |
 |-----------|--------------|----------------|
 | `f64`     | double       | OpTypeFloat 32 |
 | `f32`     | float        | OpTypeFloat 32 |
@@ -159,7 +159,7 @@ Write shader math with the precision required by the target you are testing.
 The experimental SPIR-V backend lowers standard shader floats toward 32-bit GPU
 operations, but this is not a blanket runtime guarantee for arbitrary programs.
 
-```quanta
+```build
 // You write f64:
 fn fresnel(cos_theta: f64, f0: f64) -> f64 {
     f0 + (1.0 - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0)
@@ -205,7 +205,7 @@ normalize(v)  reflect(incident, normal)
 
 Example -- Phong lighting in 4 lines:
 
-```quanta
+```build
 fn phong(normal: vec3, light_dir: vec3) -> vec3 {
     let ambient = vec3(0.1, 0.1, 0.1);
     let diff = clamp(dot(normalize(normal), normalize(light_dir)), 0.0, 1.0);
@@ -219,7 +219,7 @@ fn phong(normal: vec3, light_dir: vec3) -> vec3 {
 
 A vertex shader takes a `vertex_id` parameter (maps to `gl_VertexIndex`) and returns a struct with at least a `position: vec4` field:
 
-```quanta
+```build
 struct VertexOutput {
     position: vec4,
     color: vec3,
@@ -265,7 +265,7 @@ On the experimental SPIR-V path, the compiler attempts to:
 - Decomposes the struct return into separate output variables
 
 Compile for HLSL/GLSL inspection first, or for SPIR-V research with validation:
-`quantac triangle_vert.quanta -o vert.spv`
+`buildc triangle_vert.bld -o vert.spv`
 
 ---
 
@@ -273,7 +273,7 @@ Compile for HLSL/GLSL inspection first, or for SPIR-V research with validation:
 
 A fragment shader takes interpolated inputs from the vertex stage and returns a `vec4` color:
 
-```quanta
+```build
 fn aces_tonemap(x: f64) -> f64 {
     let num = x * (2.51 * x + 0.03);
     let den = x * (2.43 * x + 0.59) + 0.14;
@@ -295,7 +295,7 @@ On the experimental SPIR-V path, the compiler attempts to:
 - Sets `OpExecutionMode OriginUpperLeft`
 
 Compile for HLSL/GLSL inspection first, or for SPIR-V research with validation:
-`quantac triangle_frag.quanta -o frag.spv`
+`buildc triangle_frag.bld -o frag.spv`
 
 ---
 
@@ -304,7 +304,7 @@ Compile for HLSL/GLSL inspection first, or for SPIR-V research with validation:
 When a vertex shader returns a struct, the experimental SPIR-V path attempts to
 decompose it into separate output variables:
 
-```quanta
+```build
 struct VertexOutput {
     position: vec4,    // -> BuiltIn Position
     color: vec3,       // -> Location 0
@@ -322,7 +322,7 @@ During development, use the watch command to recompile shader source on save:
 
 ```bash
 # Terminal 1: watch and recompile
-quantac watch shaders/ --target=hlsl
+buildc watch shaders/ --target=hlsl
 
 # Terminal 2: your Vulkan app
 ./my_engine
@@ -331,8 +331,8 @@ quantac watch shaders/ --target=hlsl
 For SPIR-V experiments, switch the target to `spirv` and validate the generated
 `.spv` before reloading it. Typical source-output workflow:
 
-1. Edit `shaders/postprocess.quanta` in your editor
-2. `quantac watch` detects the change, recompiles to `postprocess.spv`
+1. Edit `shaders/postprocess.bld` in your editor
+2. `buildc watch` detects the change, recompiles to `postprocess.spv`
 3. Your engine sees the new `.spv`, recreates the pipeline
 4. New shader is live in < 1 second
 
@@ -340,9 +340,9 @@ For SPIR-V experiments, switch the target to `spirv` and validate the generated
 
 ## Example: Cook-Torrance PBR BRDF
 
-A full physically-based rendering shader. The same code used in Unreal Engine and Frostbite, written in QuantaLang:
+A full physically-based rendering shader. The same code used in Unreal Engine and Frostbite, written in BuildLang:
 
-```quanta
+```build
 fn pi() -> f64 { 3.14159265358979 }
 
 // Fresnel-Schlick: F(h,v) = F0 + (1-F0)(1-h.v)^5
@@ -432,8 +432,8 @@ fn main() {
 Compile:
 
 ```bash
-quantac pbr_brdf.quanta -o pbr_brdf.spv    # GPU
-quantac pbr_brdf.quanta -o pbr_brdf.c      # CPU test harness
+buildc pbr_brdf.bld -o pbr_brdf.spv    # GPU
+buildc pbr_brdf.bld -o pbr_brdf.c      # CPU test harness
 ```
 
 ---
@@ -442,7 +442,7 @@ quantac pbr_brdf.quanta -o pbr_brdf.c      # CPU test harness
 
 Height-based fog with Beer-Lambert extinction and Henyey-Greenstein phase scattering. The kind of shader Pascal Gilcher writes for ReShade:
 
-```quanta
+```build
 fn pi() -> f64 { 3.14159265358979 }
 
 // Beer-Lambert extinction: transmittance = e^(-density * distance)
@@ -518,7 +518,7 @@ fn main() {
 
 ## Tips for C++/HLSL Programmers
 
-| HLSL / GLSL              | QuantaLang                        |
+| HLSL / GLSL              | BuildLang                        |
 |--------------------------|-----------------------------------|
 | `float4`                 | `vec4`                            |
 | `float3x3`              | (not yet -- use `mat4`)           |
@@ -528,7 +528,7 @@ fn main() {
 | `cbuffer`               | uniform buffer (in progress)      |
 | `Texture2D.Sample()`    | texture sampling (in progress)    |
 | `#include`              | functions are just functions      |
-| separate `.hlsl` files  | same `.quanta` file for CPU + GPU |
+| separate `.hlsl` files  | same `.bld` file for CPU + GPU |
 | `[numthreads(8,8,1)]`   | `#[compute]`                      |
 
 Key differences from HLSL/GLSL:

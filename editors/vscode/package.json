@@ -1,12 +1,12 @@
 {
-  "name": "quantalang",
-  "displayName": "QuantaLang",
-  "description": "QuantaLang language support - syntax highlighting, snippets, and bracket matching",
+  "name": "buildlang",
+  "displayName": "BuildLang",
+  "description": "BuildLang language support - syntax highlighting, snippets, and bracket matching",
   "version": "1.0.0",
   "publisher": "HarperZ9",
   "repository": {
     "type": "git",
-    "url": "https://github.com/HarperZ9/quantalang"
+    "url": "https://github.com/HarperZ9/buildlang"
   },
   "license": "MIT",
   "engines": {
@@ -16,49 +16,49 @@
     "Programming Languages"
   ],
   "activationEvents": [
-    "onLanguage:quantalang"
+    "onLanguage:buildlang"
   ],
   "main": "./out/extension.js",
   "contributes": {
     "languages": [
       {
-        "id": "quantalang",
+        "id": "buildlang",
         "aliases": [
-          "QuantaLang",
-          "quanta"
+          "BuildLang",
+          "build"
         ],
         "extensions": [
-          ".quanta"
+          ".bld"
         ],
         "configuration": "./language-configuration.json",
         "icon": {
-          "light": "./icons/quanta-light.png",
-          "dark": "./icons/quanta-dark.png"
+          "light": "./icons/build-light.png",
+          "dark": "./icons/build-dark.png"
         }
       }
     ],
     "grammars": [
       {
-        "language": "quantalang",
-        "scopeName": "source.quanta",
-        "path": "./syntaxes/quantalang.tmLanguage.json"
+        "language": "buildlang",
+        "scopeName": "source.bld",
+        "path": "./syntaxes/buildlang.tmLanguage.json"
       }
     ],
     "snippets": [
       {
-        "language": "quantalang",
-        "path": "./snippets/quantalang.json"
+        "language": "buildlang",
+        "path": "./snippets/buildlang.json"
       }
     ],
     "configuration": {
-      "title": "QuantaLang",
+      "title": "BuildLang",
       "properties": {
-        "quantalang.serverPath": {
+        "buildlang.serverPath": {
           "type": "string",
-          "default": "quantac",
-          "description": "Path to the quantac compiler binary"
+          "default": "buildc",
+          "description": "Path to the buildc compiler binary"
         },
-        "quantalang.target": {
+        "buildlang.target": {
           "type": "string",
           "default": "c",
           "enum": [

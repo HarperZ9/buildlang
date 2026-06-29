@@ -1,11 +1,11 @@
 // ===============================================================================
-// QUANTALANG COMPILER
+// BUILDLANG COMPILER
 // "The Language That Evolves"
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 //
-// QuantaLang is a multi-paradigm systems programming language featuring:
+// BuildLang is a multi-paradigm systems programming language featuring:
 // - Strong static typing with gradual inference
 // - Memory safety without garbage collection (ownership + borrowing)
 // - First-class effects system
@@ -22,9 +22,9 @@
 #![allow(ambiguous_glob_reexports)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
-//! # QuantaLang Compiler
+//! # BuildLang Compiler
 //!
-//! This crate provides the complete QuantaLang compiler implementation including:
+//! This crate provides the complete BuildLang compiler implementation including:
 //! - Lexical analysis (tokenization)
 //! - Parsing (recursive descent with Pratt parsing for expressions)
 //! - Type checking (Hindley-Milner with extensions)
@@ -33,11 +33,11 @@
 //! ## Example
 //!
 //! ```rust,ignore
-//! use quantalang::{compile, CompileOptions, Target};
+//! use buildlang::{compile, CompileOptions, Target};
 //!
 //! let source = r#"
 //!     fn main() {
-//!         println("Hello, QuantaLang!")
+//!         println("Hello, BuildLang!")
 //!     }
 //! "#;
 //!

@@ -5,57 +5,57 @@ Status: Design approved; pending implementation planning
 
 ## Purpose
 
-`quantac check --receipt` now produces source-bound accountability evidence:
+`buildc check --receipt` now produces source-bound accountability evidence:
 compiler version, language version, source digest, declared effects, observed
 capability sources, and diagnostics. The next step is a portable policy profile
 that lets CI and review tooling turn that evidence into a deterministic
 pass/fail decision.
 
-This slice makes QuantaLang more useful as an ops accountability language: code
+This slice makes BuildLang more useful as an ops accountability language: code
 does not merely reveal operational capabilities; teams can enforce which effects
 are acceptable for a given lane.
 
 ## Existing Context
 
-- `compiler/src/main.rs` owns `quantac check`, source digesting, receipt
+- `compiler/src/main.rs` owns `buildc check`, source digesting, receipt
   rendering, and CLI exit behavior.
 - `CheckReceipt` already records source-bound check evidence under
-  `quantalang-check-receipt/v1`.
+  `buildlang-check-receipt/v1`.
 - `FunctionEffectSummary` exposes declared effects and observed capability
   sources from the type/effect checker.
 - CLI tests in `compiler/tests/cli.rs` already exercise passing/failing
-  receipts through the built `quantac` binary.
+  receipts through the built `buildc` binary.
 - Public docs describe capability effects and source-bound receipts.
 
 ## Command Surface
 
-Extend `quantac check` with an optional policy file:
+Extend `buildc check` with an optional policy file:
 
 ```text
-quantac check <FILE> --policy <POLICY.json>
-quantac check <FILE> --policy <POLICY.json> --receipt <PATH>
-quantac check <FILE> --policy <POLICY.json> --receipt -
+buildc check <FILE> --policy <POLICY.json>
+buildc check <FILE> --policy <POLICY.json> --receipt <PATH>
+buildc check <FILE> --policy <POLICY.json> --receipt -
 ```
 
 Behavior:
 
 - Without `--policy`, current check and receipt behavior stays unchanged.
-- With `--policy`, `quantac` reads and validates the policy profile, runs the
+- With `--policy`, `buildc` reads and validates the policy profile, runs the
   normal check pipeline, evaluates the policy against the check outcome, and
   exits nonzero if type/parse diagnostics or policy violations exist.
 - If `--receipt` is also present, the receipt includes the policy evidence and
   decision.
-- If policy file reading or JSON/schema validation fails, `quantac` exits
+- If policy file reading or JSON/schema validation fails, `buildc` exits
   nonzero with a clear configuration error. No receipt is required for invalid
   policy configuration in this first slice.
 
 ## Policy Schema
 
-The first schema is `quantalang-check-policy/v1`:
+The first schema is `buildlang-check-policy/v1`:
 
 ```json
 {
-  "schema": "quantalang-check-policy/v1",
+  "schema": "buildlang-check-policy/v1",
   "allowed_effects": ["Console"],
   "denied_effects": ["FileSystem", "Network", "Process", "Foreign"],
   "require_source_digest": true
@@ -64,7 +64,7 @@ The first schema is `quantalang-check-policy/v1`:
 
 Field rules:
 
-- `schema` is required and must be exactly `quantalang-check-policy/v1`.
+- `schema` is required and must be exactly `buildlang-check-policy/v1`.
 - `allowed_effects` is optional. When present and non-empty, every declared
   effect and observed capability effect must be listed.
 - `denied_effects` is optional. Any declared effect or observed capability
@@ -82,13 +82,13 @@ policy from general effect policy if real users need that distinction.
 
 ## Receipt Extension
 
-When policy evaluation runs, extend `quantalang-check-receipt/v1` with an
+When policy evaluation runs, extend `buildlang-check-receipt/v1` with an
 optional `policy` object:
 
 ```json
 {
   "policy": {
-    "schema": "quantalang-check-policy/v1",
+    "schema": "buildlang-check-policy/v1",
     "source": "policy/console-only.json",
     "source_digest": {
       "algorithm": "sha256",
@@ -208,9 +208,9 @@ Verification for the implementation branch:
 
 The slice is acceptable when:
 
-- `quantac check` behavior is unchanged without `--policy`;
+- `buildc check` behavior is unchanged without `--policy`;
 - valid policy profiles can allow, deny, or restrict effects deterministically;
-- policy failures make `quantac check` exit nonzero even when type checking
+- policy failures make `buildc check` exit nonzero even when type checking
   passes;
 - policy receipts record policy schema, path, SHA-256 digest, status, and
   structured violations;

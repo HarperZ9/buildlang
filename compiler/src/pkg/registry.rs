@@ -1,5 +1,5 @@
 // ===============================================================================
-// QUANTALANG PACKAGE REGISTRY CLIENT
+// BUILDLANG PACKAGE REGISTRY CLIENT
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
@@ -7,7 +7,7 @@
 //! Registry client for downloading and publishing packages.
 //!
 //! Supports:
-//! - Default Quanta registry (registry.quantalang.org)
+//! - Default Build registry (registry.buildlang.org)
 //! - Custom registries
 //! - Git repositories
 //! - Local paths
@@ -37,9 +37,9 @@ pub struct RegistryConfig {
 impl Default for RegistryConfig {
     fn default() -> Self {
         Self {
-            url: "https://registry.quantalang.org".to_string(),
+            url: "https://registry.buildlang.org".to_string(),
             token: None,
-            cache_dir: dirs_cache().join("quanta").join("registry"),
+            cache_dir: dirs_cache().join("build").join("registry"),
             timeout: Duration::from_secs(30),
             max_concurrent: 4,
         }
@@ -175,8 +175,8 @@ pub struct VersionInfo {
     pub yanked: bool,
     /// Published timestamp
     pub published_at: Option<SystemTime>,
-    /// Minimum Quanta version required
-    pub quanta_version: Option<VersionReq>,
+    /// Minimum Build version required
+    pub build_version: Option<VersionReq>,
 }
 
 /// Downloaded package
@@ -333,7 +333,7 @@ impl Registry {
         let url = format!("{}/api/v1/packages/new", self.config.url);
 
         // Create multipart body
-        let boundary = "----QuantaPublishBoundary";
+        let boundary = "----BuildPublishBoundary";
         let mut body = Vec::new();
 
         // Add manifest part
@@ -509,7 +509,7 @@ impl Registry {
     }
 
     fn load_manifest(&self, path: &Path) -> Result<Manifest, RegistryError> {
-        let manifest_path = path.join("Quanta.toml");
+        let manifest_path = path.join("Build.toml");
         let content = std::fs::read_to_string(&manifest_path)?;
         Manifest::from_str(&content)
             .map_err(|e| RegistryError::InvalidResponse(format!("invalid manifest: {}", e)))
@@ -578,7 +578,7 @@ impl PackageCache {
     /// Get cached package
     pub fn get_package(&self, name: &str, version: &Version) -> Option<PathBuf> {
         let path = self.package_path(name, version);
-        if path.exists() && path.join("Quanta.toml").exists() {
+        if path.exists() && path.join("Build.toml").exists() {
             Some(path)
         } else {
             None
@@ -753,7 +753,7 @@ impl PathSource {
 
     /// Load manifest from path
     pub fn load_manifest(&self) -> Result<Manifest, RegistryError> {
-        let manifest_path = self.path.join("Quanta.toml");
+        let manifest_path = self.path.join("Build.toml");
         let content = std::fs::read_to_string(&manifest_path)?;
         Manifest::from_str(&content)
             .map_err(|e| RegistryError::InvalidResponse(format!("invalid manifest: {}", e)))

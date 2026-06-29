@@ -11,7 +11,7 @@ pub(super) struct RawFixture {
 }
 
 pub(super) fn fixture_sequence() -> Vec<RawFixture> {
-    let uri = "file:///workspace/main.quanta";
+    let uri = "file:///workspace/main.bld";
     let source = "// fixture comment\n// folded comment\nfn helper() -> i32 { 1 }   \nfn main() { helper(); }\n";
     let changed_source = "// fixture comment\n// folded comment\nfn helper() -> i32 { 2 }\nfn main() { helper(); }\n";
     let document = serde_json::json!({"uri": uri});
@@ -30,7 +30,7 @@ pub(super) fn fixture_sequence() -> Vec<RawFixture> {
         fixture(
             "did-open",
             "textDocument/didOpen",
-            serde_json::json!({"textDocument": {"uri": uri, "languageId": "quanta", "version": 1, "text": source}}),
+            serde_json::json!({"textDocument": {"uri": uri, "languageId": "build", "version": 1, "text": source}}),
         ),
         text_document_fixture(
             12,
@@ -49,7 +49,7 @@ pub(super) fn fixture_sequence() -> Vec<RawFixture> {
             "textDocument/documentSymbol",
             r#"{
               "method": "textDocument/documentSymbol",
-              "params": { "textDocument": { "uri": "file:///workspace/main.quanta" } },
+              "params": { "textDocument": { "uri": "file:///workspace/main.bld" } },
               "id": 2,
               "jsonrpc": "2.0"
             }"#,
@@ -91,7 +91,7 @@ pub(super) fn fixture_sequence() -> Vec<RawFixture> {
               "id": 9,
               "method": "textDocument/codeAction",
               "params": {
-                "textDocument": { "uri": "file:///workspace/main.quanta" },
+                "textDocument": { "uri": "file:///workspace/main.bld" },
                 "range": {
                   "start": { "line": 2, "character": 24 },
                   "end": { "line": 2, "character": 24 }
@@ -103,7 +103,7 @@ pub(super) fn fixture_sequence() -> Vec<RawFixture> {
                       "end": { "line": 2, "character": 24 }
                     },
                     "severity": 1,
-                    "source": "quantalang",
+                    "source": "buildlang",
                     "message": "expected ';'"
                   }]
                 }
@@ -118,7 +118,7 @@ pub(super) fn fixture_sequence() -> Vec<RawFixture> {
               "id": 10,
               "method": "textDocument/rename",
               "params": {
-                "textDocument": { "uri": "file:///workspace/main.quanta" },
+                "textDocument": { "uri": "file:///workspace/main.bld" },
                 "position": { "line": 3, "character": 14 },
                 "newName": "renamed_helper"
               }

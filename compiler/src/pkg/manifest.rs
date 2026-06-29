@@ -1,10 +1,10 @@
 // ===============================================================================
-// QUANTALANG PACKAGE MANIFEST
+// BUILDLANG PACKAGE MANIFEST
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
-//! Package manifest parsing (Quanta.toml).
+//! Package manifest parsing (Build.toml).
 
 use super::version::{Version, VersionError, VersionReq};
 use std::collections::HashMap;
@@ -14,7 +14,7 @@ use std::path::Path;
 // MANIFEST
 // =============================================================================
 
-/// Package manifest (Quanta.toml).
+/// Package manifest (Build.toml).
 #[derive(Debug, Clone)]
 pub struct Manifest {
     /// Package metadata.

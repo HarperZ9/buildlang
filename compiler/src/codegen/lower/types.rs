@@ -1,5 +1,5 @@
 // ===============================================================================
-// QUANTALANG CODE GENERATOR - TYPE LOWERING
+// BUILDLANG CODE GENERATOR - TYPE LOWERING
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
@@ -175,7 +175,7 @@ impl<'ctx> MirLowerer<'ctx> {
                             if let Some(ast::GenericArg::Type(arg_ty)) = generic_args.first() {
                                 self.lower_type_from_ast(arg_ty)
                             } else {
-                                MirType::Struct(Arc::from("QuantaString"))
+                                MirType::Struct(Arc::from("BuildString"))
                             };
                         let val_ty =
                             if let Some(ast::GenericArg::Type(arg_ty)) = generic_args.get(1) {
@@ -233,11 +233,11 @@ impl<'ctx> MirLowerer<'ctx> {
                 "f64" => MirType::f64(),
                 "bool" => MirType::Bool,
                 "char" => MirType::u32(),
-                "str" | "String" => MirType::Struct(Arc::from("QuantaString")),
-                "vec2" => MirType::Struct(Arc::from("quanta_vec2")),
-                "vec3" => MirType::Struct(Arc::from("quanta_vec3")),
-                "vec4" => MirType::Struct(Arc::from("quanta_vec4")),
-                "mat4" => MirType::Struct(Arc::from("quanta_mat4")),
+                "str" | "String" => MirType::Struct(Arc::from("BuildString")),
+                "vec2" => MirType::Struct(Arc::from("build_vec2")),
+                "vec3" => MirType::Struct(Arc::from("build_vec3")),
+                "vec4" => MirType::Struct(Arc::from("build_vec4")),
+                "mat4" => MirType::Struct(Arc::from("build_mat4")),
                 // Resolve Self to the current impl's concrete type name
                 "Self" => {
                     if let Some(ref impl_ty) = self.current_impl_type {
@@ -587,9 +587,9 @@ impl<'ctx> MirLowerer<'ctx> {
         }
     }
 
-    /// Map a MirType to the QuantaLang source-level type name used for AST
+    /// Map a MirType to the BuildLang source-level type name used for AST
     /// substitution (e.g. MirType::i32() -> "i32", MirType::f64() -> "f64").
-    fn mir_type_to_quanta_name(ty: &MirType) -> &'static str {
+    fn mir_type_to_build_name(ty: &MirType) -> &'static str {
         match ty {
             MirType::Bool => "bool",
             MirType::Int(IntSize::I8, true) => "i8",
@@ -763,7 +763,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     .unwrap_or(MirType::f64()),
                 Literal::Bool(_) => MirType::Bool,
                 Literal::Char(_) => MirType::u32(),
-                Literal::Str { .. } => MirType::Struct(Arc::from("QuantaString")),
+                Literal::Str { .. } => MirType::Struct(Arc::from("BuildString")),
                 _ => MirType::i32(),
             },
             ExprKind::Ident(ident) => {
@@ -837,7 +837,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     if let Some(ident) = path.last_ident() {
                         // Check if this ident is any of the type params
                         if let Some(concrete_ty) = subst.get(&ident.name) {
-                            let concrete_name = Self::mir_type_to_quanta_name(concrete_ty);
+                            let concrete_name = Self::mir_type_to_build_name(concrete_ty);
                             let new_ident = ast::Ident {
                                 name: Arc::from(concrete_name),
                                 span: ident.span,

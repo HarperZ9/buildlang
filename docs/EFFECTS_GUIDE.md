@@ -1,6 +1,6 @@
-# QuantaLang Algebraic Effects Guide
+# BuildLang Algebraic Effects Guide
 
-Algebraic effects are QuantaLang's signature feature. Think of them as checked exceptions crossed with dependency injection: a function declares what side effects it performs, and the caller decides how to handle them. This gives you compile-time control over I/O, rendering, logging, and anything else that touches the outside world.
+Algebraic effects are BuildLang's signature feature. Think of them as checked exceptions crossed with dependency injection: a function declares what side effects it performs, and the caller decides how to handle them. This gives you compile-time control over I/O, rendering, logging, and anything else that touches the outside world.
 
 ---
 
@@ -21,7 +21,7 @@ No interfaces, no virtual dispatch, no runtime overhead. The effect handler is r
 
 An effect declares a set of operations. It does not implement them -- that is the handler's job.
 
-```quanta
+```build
 effect Greeting {
     fn greet(name: str) -> (),
 }
@@ -31,7 +31,7 @@ This says: "There exists a side effect called `Greeting` with one operation `gre
 
 An effect can have multiple operations:
 
-```quanta
+```build
 effect Render {
     fn draw(description: str) -> (),
     fn clear(r: f64, g: f64, b: f64) -> (),
@@ -45,7 +45,7 @@ effect Render {
 
 A function that uses an effect must declare it in its signature with `~`:
 
-```quanta
+```build
 fn welcome() ~ Greeting {
     perform Greeting.greet("Alice");
 }
@@ -53,7 +53,7 @@ fn welcome() ~ Greeting {
 
 The `~ Greeting` annotation means: "this function performs the Greeting effect." The compiler tracks this -- if you forget the annotation, you get a compile error. If you call a function that performs effects, your function must either handle them or propagate them in its own signature.
 
-```quanta
+```build
 fn welcome_everyone() ~ Greeting {
     perform Greeting.greet("Alice");
     perform Greeting.greet("Bob");
@@ -66,7 +66,7 @@ fn welcome_everyone() ~ Greeting {
 ## Capability Effects
 
 Some effects are built into the compiler because they describe ambient runtime
-or compile-time capabilities rather than user-defined operations. `quantac
+or compile-time capabilities rather than user-defined operations. `buildc
 check` surfaces these as ordinary effect requirements, so operational access has
 to appear in the function type instead of hiding behind a runtime helper or
 macro expansion.
@@ -80,12 +80,12 @@ macro expansion.
 | `Clock` | `clock_ms`, `time_unix` |
 | `Console` | `read_line`, `read_all`, `stdin_is_pipe`, direct print helpers, console macros such as `println!`, `print!`, `eprintln!`, `eprint!`, and diagnostic logging macros |
 | `Foreign` | calls to unknown functions declared in `extern` blocks and reads from foreign statics |
-| `Gpu` | direct `quanta_vk_*` and `quanta_gfx_*` runtime helpers |
+| `Gpu` | direct `build_vk_*` and `build_gfx_*` runtime helpers |
 
-Known `quanta_*` C runtime helper aliases declared through `extern` blocks are
+Known `build_*` C runtime helper aliases declared through `extern` blocks are
 classified by their specific domain capability instead of generic `Foreign`.
-For example, `quanta_read_file` is `FileSystem`, `quanta_tcp_connect` is
-`Network`, and `quanta_gfx_init` is `Gpu`. Unknown extern functions and
+For example, `build_read_file` is `FileSystem`, `build_tcp_connect` is
+`Network`, and `build_gfx_init` is `Gpu`. Unknown extern functions and
 foreign statics remain `Foreign`.
 
 Compile-time ambient macros are direct capability surfaces too. `include!`,
@@ -100,16 +100,16 @@ loaded through `mod foo;` receive the same macro-argument capability gate as
 the entry source. Unknown extern calls and foreign static reads inside macro
 arguments are surfaced as direct `Foreign` boundaries too.
 
-```quanta
+```build
 fn load_config() {
     read_file("ops.toml");
 }
 ```
 
-`quantac check` rejects that function because it performs `FileSystem` without
+`buildc check` rejects that function because it performs `FileSystem` without
 declaring it. The fixed version makes the capability part of the signature:
 
-```quanta
+```build
 fn load_config() ~ FileSystem {
     read_file("ops.toml");
 }
@@ -117,13 +117,13 @@ fn load_config() ~ FileSystem {
 
 The same rule applies to FFI:
 
-```quanta
+```build
 extern "C" { fn touch(); }
-extern "C" { static QUANTA_ERRNO: i32; }
+extern "C" { static BUILD_ERRNO: i32; }
 
 fn call_foreign() ~ Foreign {
     touch();
-    let code = QUANTA_ERRNO;
+    let code = BUILD_ERRNO;
 }
 ```
 
@@ -232,23 +232,23 @@ read_file("ops.toml") };` does not perform `FileSystem` at construction time;
 between async blocks with different capability effects, the selected future
 carries the union and each branch origin until await.
 
-`quantac check <file> --receipt <path>` writes a deterministic
-`quantalang-check-receipt/v1` JSON artifact with compiler/language version
+`buildc check <file> --receipt <path>` writes a deterministic
+`buildlang-check-receipt/v1` JSON artifact with compiler/language version
 metadata, a SHA-256 digest of the entry source bytes, an `input_digests` ledger
 for every entry, import, include, and module file read by the check pipeline, an
 `input_graph_digest` fingerprint for the whole checked source graph, declared
 effects, observed capability sources, propagated effect callees, pass/fail
 status, and compact diagnostics. Use `--receipt -` when a CI step or wrapper
 wants the receipt on stdout.
-Use `quantac receipt verify receipt.json` to re-check a saved receipt against
-the current source graph. Add `--source path/to/app.quanta` when the source has
+Use `buildc receipt verify receipt.json` to re-check a saved receipt against
+the current source graph. Add `--source path/to/app.bld` when the source has
 moved and the receipt's embedded source path should be overridden. Verification
 checks the receipt schema, compiler/language identity, entry source digest,
 input graph digest, file-backed policy digest, and any recorded built-in profile
 digest. It also replays the compiler check and compares the saved
 `declared_effects`, `observed_capabilities`, `propagated_effects`, diagnostics,
 and policy violations against the current compiler result. Add `--json` to emit
-a `quantalang-receipt-verification/v1` report with one pass/fail record per
+a `buildlang-receipt-verification/v1` report with one pass/fail record per
 verification check.
 Add `--expect-profile ci-review` when a verification job must prove the receipt
 was accepted under a specific built-in profile, not merely under whatever policy
@@ -261,8 +261,8 @@ including direct calls and macro-argument uses such as `read_file`, `tcp_connect
 `include_str!`, `env!`, `println!`, process helpers, or FFI helpers.
 Raw unknown extern-block calls are direct `Foreign` entries. Known runtime
 helper aliases declared in extern blocks are recorded under their specific
-capability, such as `Gpu` for `quanta_gfx_init` or `FileSystem` for
-`quanta_read_file`; foreign static reads are direct `Foreign` entries; calls to
+capability, such as `Gpu` for `build_gfx_init` or `FileSystem` for
+`build_read_file`; foreign static reads are direct `Foreign` entries; calls to
 local wrappers around those extern functions are propagated dependencies.
 Qualified ambient helpers keep their full source path, and ambient macros keep
 their `!` suffix, which lets `direct_capability_source_allowlist` distinguish
@@ -367,7 +367,7 @@ Policy profiles turn receipt evidence into an enforceable CI gate:
 
 ```json
 {
-  "schema": "quantalang-check-policy/v1",
+  "schema": "buildlang-check-policy/v1",
   "allowed_effects": ["FileSystem", "Console"],
   "direct_effect_allowlist": {
     "FileSystem": ["load_config"]
@@ -397,7 +397,7 @@ Policy profiles turn receipt evidence into an enforceable CI gate:
 Run it with:
 
 ```bash
-quantac check app.quanta --policy console-only.json --receipt receipt.json
+buildc check app.bld --policy console-only.json --receipt receipt.json
 ```
 
 Denied effects always fail. If `allowed_effects` is non-empty, any declared
@@ -426,42 +426,42 @@ For adoption, start from observed evidence instead of hand-copying receipt
 fields:
 
 ```bash
-quantac check app.quanta --receipt receipt.json
-quantac policy scaffold receipt.json --output policy.json
+buildc check app.bld --receipt receipt.json
+buildc policy scaffold receipt.json --output policy.json
 ```
 
 The scaffolded policy keeps digest, effect-inventory, provenance, source, and
 coverage requirements enabled, fills exact direct and propagated allowlists
 from the receipt, and should be reviewed before it becomes a CI gate.
 
-Use `quantac policy list` to see built-in starting profiles, or
-`quantac policy list --json` to emit a machine-readable
-`quantalang-policy-catalog/v1` catalog with profile names, summaries, policy
+Use `buildc policy list` to see built-in starting profiles, or
+`buildc policy list --json` to emit a machine-readable
+`buildlang-policy-catalog/v1` catalog with profile names, summaries, policy
 schemas, and SHA-256 digests. Then emit one profile with:
 
 ```bash
-quantac policy print pure --output policy.json
+buildc policy print pure --output policy.json
 ```
 
 Or run a built-in profile directly during a check:
 
 ```bash
-quantac check app.quanta --profile ci-review --receipt -
+buildc check app.bld --profile ci-review --receipt -
 ```
 
 For stored receipts, pin verification to that same built-in profile:
 
 ```bash
-quantac receipt verify receipt.json --expect-profile ci-review --json
+buildc receipt verify receipt.json --expect-profile ci-review --json
 ```
 
 For file-backed policies, pin the policy document digest instead:
 
 ```bash
-quantac receipt verify receipt.json --expect-policy-digest sha256:<hex> --json
+buildc receipt verify receipt.json --expect-policy-digest sha256:<hex> --json
 ```
 
-The built-in profiles are valid `quantalang-check-policy/v1` JSON and are meant
+The built-in profiles are valid `buildlang-check-policy/v1` JSON and are meant
 for CI bootstrapping: `pure` denies every built-in ambient capability,
 `console-only` permits only console access, `offline` permits local file,
 environment, clock, and console work while denying network/process/FFI/GPU, and
@@ -476,7 +476,7 @@ direct profile checks record `policy.source` as `builtin:<name>`,
 `policy.profile_digest` as the SHA-256 digest of the emitted built-in policy
 JSON.
 For locked CI gates, add `--expect-profile-digest <hex>` alongside `--profile`
-using the digest from `quantac policy list --json` or a prior trusted receipt;
+using the digest from `buildc policy list --json` or a prior trusted receipt;
 the check fails before source analysis if the selected built-in profile has
 changed.
 
@@ -486,7 +486,7 @@ changed.
 
 The caller wraps the effectful code in a `handle/with` block and provides implementations for each operation:
 
-```quanta
+```build
 fn main() {
     handle {
         welcome()
@@ -506,7 +506,7 @@ When `welcome()` executes `perform Greeting.greet("Alice")`, control transfers t
 
 Here is the pattern that makes effects powerful for game engines:
 
-```quanta
+```build
 effect Render {
     fn draw(description: str) -> (),
 }
@@ -541,7 +541,7 @@ fn render_scene() ~ Render {
 
 ### Production Handler (Vulkan)
 
-```quanta
+```build
 fn main() {
     handle {
         render_scene()
@@ -556,7 +556,7 @@ fn main() {
 
 ### Test Handler (Mock)
 
-```quanta
+```build
 fn test_render() {
     handle {
         render_scene()
@@ -571,7 +571,7 @@ fn test_render() {
 
 ### Profiling Handler
 
-```quanta
+```build
 fn profile_render() {
     handle {
         render_scene()
@@ -591,7 +591,7 @@ The `render_scene` function is identical in all three cases. Only the handler ch
 
 Effects propagate through the call stack. If function A calls function B which performs an effect, function A must either handle it or declare it:
 
-```quanta
+```build
 effect Logger {
     fn log(message: str) -> (),
 }
@@ -653,7 +653,7 @@ Effects give you:
 
 ## Implementation Details
 
-Under the hood, QuantaLang compiles effects to `setjmp`/`longjmp` on the C backend. When you `perform` an effect:
+Under the hood, BuildLang compiles effects to `setjmp`/`longjmp` on the C backend. When you `perform` an effect:
 
 1. The runtime saves the current continuation (registers + stack pointer) with `setjmp`
 2. Control jumps to the nearest matching handler via `longjmp`
@@ -665,7 +665,7 @@ This is efficient -- no heap allocation, no garbage collection, no virtual dispa
 
 ## Quick Reference
 
-```quanta
+```build
 // Define an effect
 effect EffectName {
     fn operation(param: Type) -> ReturnType,
@@ -698,7 +698,7 @@ handle {
 
 ### Swap rendering backend
 
-```quanta
+```build
 effect GPU {
     fn submit_draw_call(mesh: str, shader: str) -> (),
 }
@@ -718,7 +718,7 @@ handle { render_frame() } with {
 
 ### Record and replay
 
-```quanta
+```build
 effect Input {
     fn get_key(key: str) -> bool,
 }
@@ -748,7 +748,7 @@ handle { game_tick() } with {
 
 ## Next Steps
 
-- `tests/programs/27_effects_showcase.quanta` -- minimal working effect example
-- `tests/programs/38_graphics_demo.quanta` -- effects + vector math + rendering
+- `tests/programs/27_effects_showcase.bld` -- minimal working effect example
+- `tests/programs/38_graphics_demo.bld` -- effects + vector math + rendering
 - [SHADER_GUIDE.md](SHADER_GUIDE.md) -- write shaders that compile to CPU and GPU
 - [GETTING_STARTED.md](GETTING_STARTED.md) -- full language overview

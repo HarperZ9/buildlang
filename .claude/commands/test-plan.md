@@ -24,12 +24,12 @@ allowed-tools: Read, Grep, Glob, Bash(git:*, cargo:*)
 
 ### Integration Tests
 - Test compiler pipeline stages end-to-end
-- Test that valid `.quanta` programs compile and produce correct output
-- Test that invalid `.quanta` programs produce helpful error messages
+- Test that valid `.bld` programs compile and produce correct output
+- Test that invalid `.bld` programs produce helpful error messages
 
 ### Regression Tests
 - For each bug fix, add a test that would have caught the bug
-- Test previously failing `.quanta` programs from `examples/` or `tests/`
+- Test previously failing `.bld` programs from `examples/` or `tests/`
 
 ### Property Tests (if proptest is available)
 - Parsing round-trips: parse -> AST -> pretty-print -> parse again

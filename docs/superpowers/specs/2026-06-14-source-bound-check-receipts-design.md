@@ -5,7 +5,7 @@ Status: Approved for implementation planning
 
 ## Purpose
 
-`quantac check --receipt` now emits deterministic accountability JSON for typed
+`buildc check --receipt` now emits deterministic accountability JSON for typed
 capability checks. The next hardening slice should bind each receipt to the
 exact source bytes that were checked, so CI, release tooling, and downstream
 policy consumers can distinguish "this file passed" from "some file at this path
@@ -24,21 +24,21 @@ capability vocabulary.
   diagnostics.
 - `compiler/src/lib.rs` exposes `VERSION` and `LANGUAGE_VERSION`.
 - CLI receipt tests already exercise both stdout receipts and file receipts
-  through the built `quantac` binary.
+  through the built `buildc` binary.
 - Semantic-corpus receipts have backend execution evidence, but arbitrary source
   checks are the user-facing receipt surface for practical ops workflows.
 
 ## Design
 
-Extend `quantalang-check-receipt/v1` with backward-compatible fields:
+Extend `buildlang-check-receipt/v1` with backward-compatible fields:
 
 ```json
 {
-  "schema": "quantalang-check-receipt/v1",
-  "compiler": "quantac",
+  "schema": "buildlang-check-receipt/v1",
+  "compiler": "buildc",
   "compiler_version": "1.0.0",
   "language_version": "1.0.0",
-  "source": "path/to/file.quanta",
+  "source": "path/to/file.bld",
   "source_digest": {
     "algorithm": "sha256",
     "hex": "..."
@@ -49,8 +49,8 @@ Extend `quantalang-check-receipt/v1` with backward-compatible fields:
 
 Field rules:
 
-- `compiler_version` uses `quantalang::VERSION`.
-- `language_version` renders `quantalang::LANGUAGE_VERSION` as
+- `compiler_version` uses `buildlang::VERSION`.
+- `language_version` renders `buildlang::LANGUAGE_VERSION` as
   `major.minor.patch`.
 - `source_digest.algorithm` is exactly `sha256`.
 - `source_digest.hex` is lowercase hexadecimal SHA-256 over the exact bytes read
@@ -59,7 +59,7 @@ Field rules:
   timestamps, current working directory, and receipt output target.
 - Passing and failing receipts both include source metadata.
 
-The schema string remains `quantalang-check-receipt/v1` because added fields are
+The schema string remains `buildlang-check-receipt/v1` because added fields are
 backward-compatible for JSON consumers that ignore unknown members. A future
 schema bump should be reserved for removing or retyping existing fields.
 
@@ -94,7 +94,7 @@ Implementation must be test-first.
 
 Initial red tests:
 
-- CLI test: `quantac check fixture.quanta --receipt -` includes
+- CLI test: `buildc check fixture.bld --receipt -` includes
   `compiler_version`, `language_version`, `source_digest.algorithm == "sha256"`,
   and a 64-character lowercase hex digest.
 - CLI test: two temporary files with identical contents but different paths

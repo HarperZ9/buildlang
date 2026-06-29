@@ -5,7 +5,7 @@ Status: Approved direction; written spec pending user review
 
 ## Purpose
 
-QuantaLang now has checked receipts for execution, substrate posture, MIR
+BuildLang now has checked receipts for execution, substrate posture, MIR
 representation, memory layout, module graph, and symbol graph evidence. Those
 receipts prove compiler-side semantic artifacts, but they do not prove the
 interactive surface where humans and tools ask the compiler questions and get
@@ -16,11 +16,11 @@ editors, agents, and automation can all speak JSON-RPC over the same server
 surface. Provider implementations already exist for completion, hover,
 definition, references, document symbols, formatting, folding, code actions,
 and diagnostics. The weaker part is evidence: there is no checked receipt that
-exercises `quantac lsp` request dispatch end to end, and the LSP status docs
+exercises `buildc lsp` request dispatch end to end, and the LSP status docs
 are stale relative to the current `server.rs` dispatch loop.
 
 LSP Request-Dispatch Receipts v0 adds a checked artifact for deterministic raw
-LSP request fixtures. `quantac corpus verify` should verify that selected LSP
+LSP request fixtures. `buildc corpus verify` should verify that selected LSP
 requests are dispatched, return valid JSON-RPC envelopes, expose expected
 capabilities, and keep known gaps explicit. This is an evidence layer, not a
 claim of full VS Code production readiness.
@@ -67,8 +67,8 @@ behavior with evidence, then a later v1 can harden parsing behind tests.
 
 ### Approach C: Add Checked LSP Request-Dispatch Receipts
 
-Create `quantalang-lsp-dispatch-receipt/v0`, verify selected raw request
-fixtures during `quantac corpus verify`, reference the receipt from substrate
+Create `buildlang-lsp-dispatch-receipt/v0`, verify selected raw request
+fixtures during `buildc corpus verify`, reference the receipt from substrate
 evidence, and update LSP docs to match the verified scope.
 
 Tradeoff: one more receipt family and verifier path. Benefit: the editor/agent
@@ -87,7 +87,7 @@ The first implementation should add:
   by the server loop
 - a substrate `interaction_surface` or `lsp_surface` block referencing the
   receipt
-- `quantac corpus verify` integration
+- `buildc corpus verify` integration
 - updated LSP status/tutorial wording
 
 The receipt builder should instantiate a fresh `LanguageServer`, replay a
@@ -95,8 +95,8 @@ small ordered fixture sequence, normalize JSON responses into deterministic
 fields, and compare those fields against the checked receipt.
 
 The implementation should make the raw dispatch seam reusable by exposing a
-small public `dispatch_raw_message()` wrapper from the `quantalang` library.
-That lets the `quantac` binary receipt verifier replay the same raw request
+small public `dispatch_raw_message()` wrapper from the `buildlang` library.
+That lets the `buildc` binary receipt verifier replay the same raw request
 path without opening a real stdio transport in tests.
 
 ## Fixture Sequence
@@ -105,7 +105,7 @@ v0 should cover a minimal but representative editor session:
 
 1. `initialize`
 2. `initialized`
-3. `textDocument/didOpen` with a small `.quanta` source containing at least one
+3. `textDocument/didOpen` with a small `.bld` source containing at least one
    function and one call site
 4. `textDocument/documentSymbol`
 5. `textDocument/completion`
@@ -133,11 +133,11 @@ The schema should be:
 
 ```json
 {
-  "schema": "quantalang-lsp-dispatch-receipt/v0",
+  "schema": "buildlang-lsp-dispatch-receipt/v0",
   "receipt_id": "lsp-dispatch-semantic-corpus-2026-06-18",
   "created_at": "2026-06-18",
-  "compiler": "quantac",
-  "language": "quantalang",
+  "compiler": "buildc",
+  "language": "buildlang",
   "source_set": {
     "kind": "semantic-corpus",
     "manifest": "manifest.json",
@@ -145,7 +145,7 @@ The schema should be:
   },
   "lsp_model": {
     "protocol": "LSP JSON-RPC over stdio",
-    "dispatch": "quantac lsp raw message dispatch",
+    "dispatch": "buildc lsp raw message dispatch",
     "request_parser": "simplified string extraction",
     "semantic_anchor": "LSP providers over DocumentStore",
     "symbol_anchor": "receipts/symbol-graph-2026-06-18.json",
@@ -197,9 +197,9 @@ same projection.
 
 The verifier should reject the receipt when:
 
-- `schema` is not `quantalang-lsp-dispatch-receipt/v0`.
-- `compiler` is not `quantac`.
-- `language` is not `quantalang`.
+- `schema` is not `buildlang-lsp-dispatch-receipt/v0`.
+- `compiler` is not `buildc`.
+- `language` is not `buildlang`.
 - `source_set.kind` is not `semantic-corpus`.
 - `source_set.manifest` does not point at `manifest.json`.
 - `source_set.program_count` differs from the manifest.
@@ -256,7 +256,7 @@ Implementation should be test-first:
   the fixture document.
 - Unit test: raw completion, hover, definition, references, formatting, and
   folding requests return valid JSON-RPC response envelopes.
-- CLI test: valid LSP dispatch receipt passes `quantac corpus verify` and
+- CLI test: valid LSP dispatch receipt passes `buildc corpus verify` and
   prints `lsp dispatch receipt: ok`.
 - CLI test: wrong schema fails.
 - CLI test: fixture digest drift fails.
@@ -269,7 +269,7 @@ Implementation should be test-first:
 Targeted verification commands:
 
 ```text
-cargo test --manifest-path compiler/Cargo.toml --bin quantac lsp --quiet
+cargo test --manifest-path compiler/Cargo.toml --bin buildc lsp --quiet
 cargo test --manifest-path compiler/Cargo.toml --test cli lsp_dispatch -- --nocapture
 cargo test --manifest-path compiler/Cargo.toml --test cli corpus_verify -- --nocapture
 cargo test --manifest-path compiler/Cargo.toml --test cli substrate -- --nocapture
@@ -294,9 +294,9 @@ git diff --check
 This design is implemented when:
 
 - `semantic-corpus/receipts/lsp-dispatch-2026-06-18.json` exists and uses
-  `quantalang-lsp-dispatch-receipt/v0`.
+  `buildlang-lsp-dispatch-receipt/v0`.
 - The substrate receipt references it through an LSP/interaction surface.
-- `quantac corpus verify` recomputes and validates the LSP dispatch receipt.
+- `buildc corpus verify` recomputes and validates the LSP dispatch receipt.
 - Successful corpus verification prints `lsp dispatch receipt: ok`.
 - Invalid fixtures cover schema drift, fixture digest drift, observed-count
   drift, summary drift, and substrate reference drift.

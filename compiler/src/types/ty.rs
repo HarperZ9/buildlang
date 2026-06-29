@@ -1,12 +1,12 @@
 // ===============================================================================
-// QUANTALANG TYPE SYSTEM - TYPE REPRESENTATION
+// BUILDLANG TYPE SYSTEM - TYPE REPRESENTATION
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
 //! Core type representation for the type system.
 //!
-//! Types in QuantaLang are represented as a tree structure with sharing
+//! Types in BuildLang are represented as a tree structure with sharing
 //! through interning. Type variables are used during inference and are
 //! resolved through unification.
 
@@ -188,7 +188,7 @@ impl fmt::Display for TyVarId {
     }
 }
 
-/// A type in the QuantaLang type system.
+/// A type in the BuildLang type system.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Ty {
     /// The kind of type.
@@ -367,7 +367,7 @@ impl Ty {
     /// Create a String type (as a well-known type placeholder).
     /// In a full implementation, this would use a real DefId for String.
     pub fn string() -> Self {
-        // Owned string type - maps to QuantaString in the C backend.
+        // Owned string type - maps to BuildString in the C backend.
         Self::str()
     }
 
@@ -375,7 +375,7 @@ impl Ty {
     /// In a full implementation, this would use a real DefId for Vec.
     pub fn vec(elem: Ty) -> Self {
         // Vec<T> is represented as a Struct type with a known name.
-        // The C backend maps this to QuantaVecHandle.
+        // The C backend maps this to BuildVecHandle.
         // The element type is preserved for generic instantiation.
         Self::new(TyKind::Adt(DefId::DUMMY, vec![elem]))
     }

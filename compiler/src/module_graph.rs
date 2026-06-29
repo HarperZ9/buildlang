@@ -7,8 +7,8 @@ mod validate;
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use quantalang::lexer::{Lexer, SourceFile};
-use quantalang::parser::Parser;
+use buildlang::lexer::{Lexer, SourceFile};
+use buildlang::parser::Parser;
 
 pub(crate) use model::ModuleGraphReceipt;
 use model::{
@@ -28,7 +28,7 @@ use super::{
 };
 
 pub(crate) const MODULE_GRAPH_RECEIPT: &str = "module-graph-2026-06-18.json";
-pub(super) const MODULE_GRAPH_SCHEMA: &str = "quantalang-module-graph-receipt/v0";
+pub(super) const MODULE_GRAPH_SCHEMA: &str = "buildlang-module-graph-receipt/v0";
 
 fn program_known_gaps() -> Vec<String> {
     sorted(
@@ -57,14 +57,14 @@ fn summary_known_gaps() -> Vec<String> {
 
 fn module_model() -> ModuleGraphModel {
     ModuleGraphModel {
-        resolver: "quantac source input resolver".to_string(),
+        resolver: "buildc source input resolver".to_string(),
         input_roles: vec![
             "entry".to_string(),
             "include".to_string(),
             "import".to_string(),
             "module".to_string(),
         ],
-        digest_anchor: "quantalang-check-receipt/v1 input_graph_digest".to_string(),
+        digest_anchor: "buildlang-check-receipt/v1 input_graph_digest".to_string(),
         symbol_anchor: format!("receipts/{}", crate::symbol_graph::SYMBOL_GRAPH_RECEIPT),
     }
 }
@@ -224,8 +224,8 @@ pub(crate) fn build_module_graph_receipt(
         schema: MODULE_GRAPH_SCHEMA.to_string(),
         receipt_id: "module-graph-semantic-corpus-2026-06-18".to_string(),
         created_at: "2026-06-18".to_string(),
-        compiler: "quantac".to_string(),
-        language: "quantalang".to_string(),
+        compiler: "buildc".to_string(),
+        language: "buildlang".to_string(),
         source_set: ModuleGraphSourceSet {
             kind: "semantic-corpus".to_string(),
             manifest: "manifest.json".to_string(),

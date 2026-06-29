@@ -2,9 +2,9 @@ use serde_json::Value;
 
 use super::model::LspDispatchObserved;
 
-const LEXER_SOURCE: &str = "quantalang/lexer";
-const PARSER_SOURCE: &str = "quantalang/parser";
-const TYPE_CHECKER_SOURCE: &str = "quantalang/type-checker";
+const LEXER_SOURCE: &str = "buildlang/lexer";
+const PARSER_SOURCE: &str = "buildlang/parser";
+const TYPE_CHECKER_SOURCE: &str = "buildlang/type-checker";
 
 pub(super) fn observe_response(method: &str, response: Option<&Value>) -> LspDispatchObserved {
     let mut observed = LspDispatchObserved {

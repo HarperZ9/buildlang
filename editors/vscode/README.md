@@ -1,11 +1,11 @@
-# QuantaLang for Visual Studio Code
+# BuildLang for Visual Studio Code
 
-Language support for [QuantaLang](https://github.com/HarperZ9/quantalang) -- syntax highlighting, snippets, and bracket matching for `.quanta` files.
+Language support for [BuildLang](https://github.com/HarperZ9/buildlang) -- syntax highlighting, snippets, and bracket matching for `.bld` files.
 
 ## Features
 
 - **Syntax highlighting** -- keywords, types, effects, attributes, strings, numbers, comments, macros, operators, and more
-- **Optional LSP process launch** via `quantac lsp` -- the current server loop
+- **Optional LSP process launch** via `buildc lsp` -- the current server loop
   starts, but real client request dispatch is still partial; diagnostics,
   go-to-definition, hover, and completion providers are not yet working VS Code
   features
@@ -31,19 +31,19 @@ Then press **F5** in VS Code to launch an Extension Development Host with the ex
 ```bash
 npm install -g @vscode/vsce
 vsce package
-code --install-extension quantalang-1.0.0.vsix
+code --install-extension buildlang-1.0.0.vsix
 ```
 
 ## Configuration
 
 | Setting                  | Default    | Description                          |
 |--------------------------|------------|--------------------------------------|
-| `quantalang.serverPath`  | `quantac`  | Path to the `quantac` compiler binary |
-| `quantalang.target`      | `c`        | Default compilation target (`c`, `llvm`, `wasm`, `spirv`, `x86-64`, `arm64`) |
+| `buildlang.serverPath`  | `buildc`  | Path to the `buildc` compiler binary |
+| `buildlang.target`      | `c`        | Default compilation target (`c`, `llvm`, `wasm`, `spirv`, `x86-64`, `arm64`) |
 
 ## Language Server
 
-The extension can start the QuantaLang language server process (`quantac lsp`).
+The extension can start the BuildLang language server process (`buildc lsp`).
 The current compiler-side server loop is lifecycle-only for real clients, so
 syntax highlighting, snippets, brackets, comments, and file icons are the
 reliable editor features today. LSP providers exist in the compiler tree but are
@@ -54,10 +54,10 @@ Install the compiler:
 ```bash
 cd compiler
 cargo build --release
-# The binary is at compiler/target/release/quantac
+# The binary is at compiler/target/release/buildc
 ```
 
-Then either add it to your PATH or set `quantalang.serverPath` in VS Code settings.
+Then either add it to your PATH or set `buildlang.serverPath` in VS Code settings.
 
 ## Snippets
 
@@ -85,7 +85,7 @@ Then either add it to your PATH or set `quantalang.serverPath` in VS Code settin
 
 ## Supported Syntax
 
-The grammar covers all current QuantaLang constructs:
+The grammar covers all current BuildLang constructs:
 
 - Control flow: `if`, `else`, `match`, `loop`, `while`, `for`, `in`, `break`, `continue`, `return`
 - Declarations: `fn`, `struct`, `enum`, `trait`, `impl`, `type`, `const`, `static`, `let`, `mut`, `pub`, `mod`, `use`, `extern`

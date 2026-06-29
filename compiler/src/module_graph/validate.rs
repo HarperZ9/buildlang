@@ -15,15 +15,15 @@ pub(crate) fn validate_module_graph_receipt(
             receipt.schema
         ));
     }
-    if receipt.compiler != "quantac" {
+    if receipt.compiler != "buildc" {
         return Err(format!(
-            "module graph compiler mismatch: expected 'quantac', found '{}'",
+            "module graph compiler mismatch: expected 'buildc', found '{}'",
             receipt.compiler
         ));
     }
-    if receipt.language != "quantalang" {
+    if receipt.language != "buildlang" {
         return Err(format!(
-            "module graph language mismatch: expected 'quantalang', found '{}'",
+            "module graph language mismatch: expected 'buildlang', found '{}'",
             receipt.language
         ));
     }

@@ -1,5 +1,5 @@
 // ===============================================================================
-// QUANTALANG PARSER - EXPRESSION PARSING (PRATT)
+// BUILDLANG PARSER - EXPRESSION PARSING (PRATT)
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
@@ -1625,7 +1625,7 @@ impl<'a> Parser<'a> {
 
     /// Parse a handle expression:
     ///
-    /// ```quanta
+    /// ```build
     /// handle {
     ///     body_expression
     /// } with {
@@ -1822,7 +1822,7 @@ mod tests {
 
     /// Parse a standalone expression by wrapping it in `fn test() { EXPR; }`.
     fn parse_expr_str(s: &str) -> ParseResult<Expr> {
-        let source = LexerSourceFile::new("test.quanta", format!("fn test() {{ {}; }}", s));
+        let source = LexerSourceFile::new("test.bld", format!("fn test() {{ {}; }}", s));
         let mut lexer = Lexer::new(&source);
         let tokens = lexer.tokenize().unwrap();
         let mut parser = Parser::new(&source, tokens);

@@ -4,13 +4,13 @@ Date: 2026-06-18
 
 ## Context
 
-`workspace/symbol` is now reachable through raw `quantac lsp` dispatch and is
+`workspace/symbol` is now reachable through raw `buildc lsp` dispatch and is
 receipt-verified in `semantic-corpus/receipts/lsp-dispatch-2026-06-18.json`.
 That implementation searches the `DocumentStore`, so it only sees documents
 opened through LSP notifications.
 
 The next useful step is project-backed discovery: a symbol search should find
-symbols in ordinary `.quanta` files under the initialized workspace root even
+symbols in ordinary `.bld` files under the initialized workspace root even
 when those files are not currently open in the editor. This moves the LSP
 surface closer to a human/machine shared project map without claiming full
 compiler-resolved type, effect, module, or package identity.
@@ -24,7 +24,7 @@ The implementation should:
 
 - Use `initialize.params.rootUri` as the workspace root when it maps to a local
   filesystem directory.
-- Discover `.quanta` files under that root with deterministic ordering.
+- Discover `.bld` files under that root with deterministic ordering.
 - Reuse the existing symbol parser so file-backed and opened-document-backed
   symbols have the same shape.
 - Overlay opened documents over indexed files so unsaved editor state wins.
@@ -65,7 +65,7 @@ symbol cache that delegates symbol extraction to `SymbolProvider`.
 
 - `workspace_index.rs`
   - converts supported `file://` root URIs into local paths
-  - recursively discovers `.quanta` files
+  - recursively discovers `.bld` files
   - applies exclusion rules and file caps
   - reads file contents and builds temporary `Document` values
   - asks `SymbolProvider` to parse each document
@@ -134,7 +134,7 @@ Excluded directory names:
 
 Excluded files:
 
-- non-`.quanta` files
+- non-`.bld` files
 - files larger than the byte cap
 - files that cannot be read as UTF-8
 
@@ -160,13 +160,13 @@ The raw `workspace/symbol` param contract stays unchanged: missing or non-string
 Extend the LSP dispatch fixture with a checked deterministic workspace root at
 `semantic-corpus/lsp-workspace/` containing two files:
 
-- `main.quanta`, opened through `didOpen`
-- `library.quanta`, left unopened on disk
+- `main.bld`, opened through `didOpen`
+- `library.bld`, left unopened on disk
 
 The fixture should use the stable LSP root URI `file:///workspace` while the
 receipt builder maps that URI to the checked fixture directory. The
 `workspace/symbol` fixture should query a symbol that exists only in
-`library.quanta`. The receipt should record a nonzero `workspace_symbols` count
+`library.bld`. The receipt should record a nonzero `workspace_symbols` count
 for an unopened file-backed result without embedding machine-specific absolute
 paths in the checked JSON.
 
@@ -180,7 +180,7 @@ both paths:
 
 Raw dispatch tests:
 
-- initialize with local `rootUri` indexes an unopened `.quanta` file.
+- initialize with local `rootUri` indexes an unopened `.bld` file.
 - `workspace/symbol` returns a symbol from an unopened indexed file.
 - opened document content overrides an indexed file with the same URI.
 - unsupported `rootUri` leaves the index empty but does not break opened
@@ -208,7 +208,7 @@ Verification commands:
 cargo fmt --manifest-path compiler\Cargo.toml -- --check
 cargo test --manifest-path compiler\Cargo.toml --lib workspace_symbol --quiet
 cargo test --manifest-path compiler\Cargo.toml --lib raw_dispatch --quiet
-cargo test --manifest-path compiler\Cargo.toml --bin quantac lsp_dispatch --quiet
+cargo test --manifest-path compiler\Cargo.toml --bin buildc lsp_dispatch --quiet
 cargo test --manifest-path compiler\Cargo.toml --test cli lsp_dispatch -- --nocapture
 cargo run --manifest-path compiler\Cargo.toml -- corpus verify --root semantic-corpus
 ```
@@ -227,7 +227,7 @@ global symbol identity and end-to-end VS Code behavior as open gaps.
 
 ## Success Criteria
 
-- `workspace/symbol` finds symbols in bounded unopened `.quanta` files below a
+- `workspace/symbol` finds symbols in bounded unopened `.bld` files below a
   supported local `rootUri`.
 - Opened documents override indexed file contents for the same URI.
 - Unsupported or absent roots preserve opened-document behavior.

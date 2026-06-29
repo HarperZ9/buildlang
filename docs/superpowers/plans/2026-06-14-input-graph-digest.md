@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a portable graph-level digest to `quantac check --receipt` so the full checked source input set can be compared with one SHA-256 value.
+**Goal:** Add a portable graph-level digest to `buildc check --receipt` so the full checked source input set can be compared with one SHA-256 value.
 
 **Architecture:** Keep the receipt schema additive. Reuse `CheckReceiptSourceDigest` for `input_graph_digest`, compute it from sorted `input_digests` records in `compiler/src/main.rs`, and prove behavior through CLI receipt tests.
 

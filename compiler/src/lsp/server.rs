@@ -1,5 +1,5 @@
 // ===============================================================================
-// QUANTALANG LSP SERVER
+// BUILDLANG LSP SERVER
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
@@ -46,7 +46,7 @@ pub enum ServerState {
 // LSP SERVER
 // =============================================================================
 
-/// The QuantaLang Language Server.
+/// The BuildLang Language Server.
 pub struct LanguageServer {
     /// Server state.
     state: ServerState,
@@ -121,7 +121,7 @@ impl LanguageServer {
         InitializeResult {
             capabilities: ServerCapabilities::full(),
             server_info: Some(ServerInfo {
-                name: "quantalang-lsp".to_string(),
+                name: "buildlang-lsp".to_string(),
                 version: Some(env!("CARGO_PKG_VERSION").to_string()),
             }),
         }
@@ -670,7 +670,7 @@ fn build_diagnostics_notification(params: &PublishDiagnosticsParams) -> String {
                 .field("range", build_range_json(&d.range))
                 .field_number("severity", severity)
                 .field_str("message", &d.message)
-                .field_str("source", d.source.as_deref().unwrap_or("quantalang"))
+                .field_str("source", d.source.as_deref().unwrap_or("buildlang"))
                 .build(),
         );
     }
@@ -1149,7 +1149,7 @@ mod tests {
 
     fn temp_workspace_root(label: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
-            "quantalang_lsp_workspace_{label}_{}",
+            "buildlang_lsp_workspace_{label}_{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&root);
@@ -1276,7 +1276,7 @@ mod tests {
         let mut server = LanguageServer::new();
         let response = dispatch_raw_message(
             &mut server,
-            r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.quanta","languageId":"quanta","version":1,"text":"fn main() {\n    let x = 1;\n}\n"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.bld","languageId":"build","version":1,"text":"fn main() {\n    let x = 1;\n}\n"}}}"#,
         )
         .expect("didOpen should publish diagnostics");
         let json: serde_json::Value =
@@ -1284,7 +1284,7 @@ mod tests {
 
         assert_eq!(json["jsonrpc"], "2.0");
         assert_eq!(json["method"], "textDocument/publishDiagnostics");
-        assert_eq!(json["params"]["uri"], "file:///workspace/main.quanta");
+        assert_eq!(json["params"]["uri"], "file:///workspace/main.bld");
         assert!(json["params"]["diagnostics"].is_array());
     }
 
@@ -1293,7 +1293,7 @@ mod tests {
         let mut server = LanguageServer::new();
         let response = dispatch_raw_message(
             &mut server,
-            r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/type_error.quanta","languageId":"quanta","version":1,"text":"const BAD: i32 = \"oops\";\nfn main() {}\n"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/type_error.bld","languageId":"build","version":1,"text":"const BAD: i32 = \"oops\";\nfn main() {}\n"}}}"#,
         )
         .expect("didOpen should publish diagnostics");
         let json: serde_json::Value = serde_json::from_str(&response).expect("parse diagnostics");
@@ -1303,7 +1303,7 @@ mod tests {
 
         assert!(
             diagnostics.iter().any(|d| {
-                d["source"] == "quantalang/type-checker"
+                d["source"] == "buildlang/type-checker"
                     && d["message"]
                         .as_str()
                         .is_some_and(|message| message.contains("type mismatch"))
@@ -1317,13 +1317,13 @@ mod tests {
         let mut server = LanguageServer::new();
         dispatch_raw_message(
             &mut server,
-            r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.quanta","languageId":"quanta","version":1,"text":"fn helper() -> i32 { 1 }\nfn main() { helper(); }\n"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.bld","languageId":"build","version":1,"text":"fn helper() -> i32 { 1 }\nfn main() { helper(); }\n"}}}"#,
         )
         .expect("didOpen should publish diagnostics");
 
         let response = dispatch_raw_message(
             &mut server,
-            r#"{"jsonrpc":"2.0","id":2,"method":"textDocument/documentSymbol","params":{"textDocument":{"uri":"file:///workspace/main.quanta"}}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"textDocument/documentSymbol","params":{"textDocument":{"uri":"file:///workspace/main.bld"}}}"#,
         )
         .expect("documentSymbol should return a response");
         let json: serde_json::Value =
@@ -1347,7 +1347,7 @@ mod tests {
         let mut server = LanguageServer::new();
         dispatch_raw_message(
             &mut server,
-            r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.quanta","languageId":"quanta","version":1,"text":"fn helper() -> i32 { 1 }\nfn main() { helper(); }\n"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.bld","languageId":"build","version":1,"text":"fn helper() -> i32 { 1 }\nfn main() { helper(); }\n"}}}"#,
         )
         .expect("didOpen should publish diagnostics");
 
@@ -1363,8 +1363,7 @@ mod tests {
             .expect("workspace symbol result array");
 
         assert!(symbols.iter().any(|symbol| {
-            symbol["name"] == "helper"
-                && symbol["location"]["uri"] == "file:///workspace/main.quanta"
+            symbol["name"] == "helper" && symbol["location"]["uri"] == "file:///workspace/main.bld"
         }));
     }
 
@@ -1372,7 +1371,7 @@ mod tests {
     fn raw_dispatch_workspace_symbol_returns_unopened_root_file_symbol() {
         let root = temp_workspace_root("unopened");
         std::fs::write(
-            root.join("library.quanta"),
+            root.join("library.bld"),
             "fn library_helper() -> i32 { 7 }\n",
         )
         .expect("write library");
@@ -1404,7 +1403,7 @@ mod tests {
     #[test]
     fn raw_dispatch_open_document_overrides_indexed_file_symbol() {
         let root = temp_workspace_root("override");
-        let file = root.join("main.quanta");
+        let file = root.join("main.bld");
         std::fs::write(&file, "fn disk_only() -> i32 { 1 }\n").expect("write disk file");
         let root_uri = path_file_uri(&root);
         let file_uri = path_file_uri(&file);
@@ -1419,7 +1418,7 @@ mod tests {
         dispatch_raw_message(
             &mut server,
             &format!(
-                r#"{{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{{"textDocument":{{"uri":"{file_uri}","languageId":"quanta","version":1,"text":"fn editor_only() -> i32 {{ 2 }}\n"}}}}}}"#
+                r#"{{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{{"textDocument":{{"uri":"{file_uri}","languageId":"build","version":1,"text":"fn editor_only() -> i32 {{ 2 }}\n"}}}}}}"#
             ),
         )
         .expect("didOpen response");
@@ -1472,13 +1471,13 @@ mod tests {
         let mut server = LanguageServer::new();
         dispatch_raw_message(
             &mut server,
-            r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.quanta","languageId":"quanta","version":1,"text":"// comment\nfn helper() -> i32 { 42 }\nfn main() { helper(\"x\"); }\n"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.bld","languageId":"build","version":1,"text":"// comment\nfn helper() -> i32 { 42 }\nfn main() { helper(\"x\"); }\n"}}}"#,
         )
         .expect("didOpen should publish diagnostics");
 
         let response = dispatch_raw_message(
             &mut server,
-            r#"{"jsonrpc":"2.0","id":12,"method":"textDocument/semanticTokens/full","params":{"textDocument":{"uri":"file:///workspace/main.quanta"}}}"#,
+            r#"{"jsonrpc":"2.0","id":12,"method":"textDocument/semanticTokens/full","params":{"textDocument":{"uri":"file:///workspace/main.bld"}}}"#,
         )
         .expect("semanticTokens/full should return a response");
         let json: serde_json::Value =
@@ -1497,7 +1496,7 @@ mod tests {
         let mut server = LanguageServer::new();
         let response = dispatch_raw_message(
             &mut server,
-            r#"{"jsonrpc":"2.0","id":13,"method":"textDocument/semanticTokens/full","params":{"textDocument":{"uri":"file:///workspace/missing.quanta"}}}"#,
+            r#"{"jsonrpc":"2.0","id":13,"method":"textDocument/semanticTokens/full","params":{"textDocument":{"uri":"file:///workspace/missing.bld"}}}"#,
         )
         .expect("semanticTokens/full should return a response");
         let json: serde_json::Value =
@@ -1539,8 +1538,8 @@ mod tests {
                 "textDocument": {
                   "text": "fn helper() -> i32 { 1 }\nfn main() { helper(); }\n",
                   "version": 1,
-                  "languageId": "quanta",
-                  "uri": "file:///workspace/main.quanta"
+                  "languageId": "build",
+                  "uri": "file:///workspace/main.bld"
                 }
               },
               "method": "textDocument/didOpen",
@@ -1553,7 +1552,7 @@ mod tests {
             &mut server,
             r#"{
               "method": "textDocument/documentSymbol",
-              "params": { "textDocument": { "uri": "file:///workspace/main.quanta" } },
+              "params": { "textDocument": { "uri": "file:///workspace/main.bld" } },
               "id": 2,
               "jsonrpc": "2.0"
             }"#,
@@ -1608,7 +1607,7 @@ mod tests {
         let mut server = LanguageServer::new();
         let response = dispatch_raw_message(
             &mut server,
-            r#"{"jsonrpc":"2.0","id":20,"method":"textDocument/didOpen","params":{"textDocument":{"languageId":"quanta","version":1,"text":"fn main() {}\n"}}}"#,
+            r#"{"jsonrpc":"2.0","id":20,"method":"textDocument/didOpen","params":{"textDocument":{"languageId":"build","version":1,"text":"fn main() {}\n"}}}"#,
         );
 
         assert_invalid_params(response, "params.textDocument.uri is required");
@@ -1619,7 +1618,7 @@ mod tests {
         let mut server = LanguageServer::new();
         let response = dispatch_raw_message(
             &mut server,
-            r#"{"jsonrpc":"2.0","id":21,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///workspace/main.quanta"},"position":{"line":-1,"character":0}}}"#,
+            r#"{"jsonrpc":"2.0","id":21,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///workspace/main.bld"},"position":{"line":-1,"character":0}}}"#,
         );
 
         assert_invalid_params(
@@ -1633,12 +1632,12 @@ mod tests {
         let mut server = LanguageServer::new();
         dispatch_raw_message(
             &mut server,
-            r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.quanta","languageId":"quanta","version":1,"text":"fn helper() -> i32 { 1 }\nfn main() { helper(); }\n"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.bld","languageId":"build","version":1,"text":"fn helper() -> i32 { 1 }\nfn main() { helper(); }\n"}}}"#,
         )
         .expect("didOpen should publish diagnostics");
         let response = dispatch_raw_message(
             &mut server,
-            r#"{"jsonrpc":"2.0","id":22,"method":"textDocument/rename","params":{"textDocument":{"uri":"file:///workspace/main.quanta"},"position":{"line":1,"character":14}}}"#,
+            r#"{"jsonrpc":"2.0","id":22,"method":"textDocument/rename","params":{"textDocument":{"uri":"file:///workspace/main.bld"},"position":{"line":1,"character":14}}}"#,
         );
 
         assert_invalid_params(response, "params.newName is required");
@@ -1649,7 +1648,7 @@ mod tests {
         let mut server = LanguageServer::new();
         let response = dispatch_raw_message(
             &mut server,
-            r#"{"jsonrpc":"2.0","id":23,"method":"textDocument/codeAction","params":{"textDocument":{"uri":"file:///workspace/main.quanta"},"range":{"start":{"line":1,"character":13},"end":{"line":1,"character":13}}}}"#,
+            r#"{"jsonrpc":"2.0","id":23,"method":"textDocument/codeAction","params":{"textDocument":{"uri":"file:///workspace/main.bld"},"range":{"start":{"line":1,"character":13},"end":{"line":1,"character":13}}}}"#,
         );
 
         assert_invalid_params(response, "params.context is required");
@@ -1682,7 +1681,7 @@ mod tests {
         let mut server = LanguageServer::new();
         dispatch_raw_message(
             &mut server,
-            r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.quanta","languageId":"quanta","version":1,"text":"fn main() {\n    let x = 1\n}\n"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.bld","languageId":"build","version":1,"text":"fn main() {\n    let x = 1\n}\n"}}}"#,
         )
         .expect("didOpen should publish diagnostics");
 
@@ -1693,7 +1692,7 @@ mod tests {
               "id": 10,
               "method": "textDocument/codeAction",
               "params": {
-                "textDocument": { "uri": "file:///workspace/main.quanta" },
+                "textDocument": { "uri": "file:///workspace/main.bld" },
                 "range": {
                   "start": { "line": 1, "character": 13 },
                   "end": { "line": 1, "character": 13 }
@@ -1705,7 +1704,7 @@ mod tests {
                       "end": { "line": 1, "character": 13 }
                     },
                     "severity": 1,
-                    "source": "quantalang",
+                    "source": "buildlang",
                     "message": "expected ';'"
                   }]
                 }
@@ -1728,7 +1727,7 @@ mod tests {
         let mut server = LanguageServer::new();
         dispatch_raw_message(
             &mut server,
-            r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.quanta","languageId":"quanta","version":1,"text":"fn helper() -> i32 { 1 }\nfn main() { helper(); }\n"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.bld","languageId":"build","version":1,"text":"fn helper() -> i32 { 1 }\nfn main() { helper(); }\n"}}}"#,
         )
         .expect("didOpen should publish diagnostics");
 
@@ -1739,7 +1738,7 @@ mod tests {
               "id": 11,
               "method": "textDocument/rename",
               "params": {
-                "textDocument": { "uri": "file:///workspace/main.quanta" },
+                "textDocument": { "uri": "file:///workspace/main.bld" },
                 "position": { "line": 1, "character": 14 },
                 "newName": "renamed_helper"
               }
@@ -1750,7 +1749,7 @@ mod tests {
             serde_json::from_str(&response).expect("parse rename response");
 
         assert_eq!(json["id"], 11);
-        let edits = json["result"]["changes"]["file:///workspace/main.quanta"]
+        let edits = json["result"]["changes"]["file:///workspace/main.bld"]
             .as_array()
             .expect("rename edits for document");
         assert!(

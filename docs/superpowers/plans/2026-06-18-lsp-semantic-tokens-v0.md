@@ -1,11 +1,11 @@
 # LSP Semantic Tokens v0 Implementation Plan
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add receipt-verified full-document LSP semantic tokens for open QuantaLang documents.
+**Goal:** Add receipt-verified full-document LSP semantic tokens for open BuildLang documents.
 
 **Architecture:** Create a focused `compiler/src/lsp/semantic_tokens.rs` provider that scans an open `Document`, classifies v0 token kinds, and emits LSP relative token data. Keep `server.rs` responsible for routing and response JSON; extend the existing LSP dispatch receipt to prove the new method.
 
-**Tech Stack:** Rust 2021, existing `quantalang::lsp` modules, `serde_json`, semantic-corpus LSP receipt verifier, Cargo test slices.
+**Tech Stack:** Rust 2021, existing `buildlang::lsp` modules, `serde_json`, semantic-corpus LSP receipt verifier, Cargo test slices.
 
 ## Global Constraints
 
@@ -49,11 +49,11 @@ mod tests {
     use crate::lsp::document::Document;
 
     fn doc(source: &str) -> Document {
-        Document::new("file:///main.quanta".into(), "quanta".into(), 1, source.into())
+        Document::new("file:///main.bld".into(), "build".into(), 1, source.into())
     }
 
     #[test]
-    fn semantic_tokens_encode_core_quantalang_surface() {
+    fn semantic_tokens_encode_core_buildlang_surface() {
         let tokens = SemanticTokensProvider::new().full(&doc(
             "// comment\nfn helper() -> i32 { 42 }\nfn main() { helper(\"x\"); }\n",
         ));
@@ -212,7 +212,7 @@ Add an `lsp_dispatch` unit test that finds fixture id `"semantic-tokens"` and as
 
 - [ ] **Step 2: Run RED receipt slice**
 
-Run: `cargo test --manifest-path compiler\Cargo.toml --bin quantac lsp_dispatch -- --nocapture`
+Run: `cargo test --manifest-path compiler\Cargo.toml --bin buildc lsp_dispatch -- --nocapture`
 Expected: FAIL because `semantic_tokens` is not modeled or observed.
 
 - [ ] **Step 3: Model, observe, and fixture semantic tokens**
@@ -244,13 +244,13 @@ text_document_fixture(12, "semantic-tokens", "textDocument/semanticTokens/full",
 
 Temporarily add an ignored writer test in `compiler/src/lsp_dispatch/tests.rs` that writes `build_lsp_dispatch_receipt` as pretty JSON to `semantic-corpus/receipts/lsp-dispatch-2026-06-18.json`. Run it, then remove the writer before committing.
 
-Run: `cargo test --manifest-path compiler\Cargo.toml --bin quantac write_semantic_corpus_lsp_dispatch_receipt -- --ignored --nocapture`
+Run: `cargo test --manifest-path compiler\Cargo.toml --bin buildc write_semantic_corpus_lsp_dispatch_receipt -- --ignored --nocapture`
 Expected: PASS and the receipt JSON changes.
 
 - [ ] **Step 5: Run GREEN receipt slices and commit**
 
 ```powershell
-cargo test --manifest-path compiler\Cargo.toml --bin quantac lsp_dispatch --quiet
+cargo test --manifest-path compiler\Cargo.toml --bin buildc lsp_dispatch --quiet
 cargo test --manifest-path compiler\Cargo.toml --test cli lsp_dispatch -- --nocapture
 cargo run --manifest-path compiler\Cargo.toml -- corpus verify --root semantic-corpus
 git add compiler\src\lsp_dispatch compiler\tests\cli.rs semantic-corpus\receipts\lsp-dispatch-2026-06-18.json
@@ -280,7 +280,7 @@ Document that LSP semantic tokens v0 are implemented and receipt-verified. Keep 
 cargo fmt --manifest-path compiler\Cargo.toml -- --check
 cargo test --manifest-path compiler\Cargo.toml --lib semantic_tokens --quiet
 cargo test --manifest-path compiler\Cargo.toml --lib raw_dispatch --quiet
-cargo test --manifest-path compiler\Cargo.toml --bin quantac lsp_dispatch --quiet
+cargo test --manifest-path compiler\Cargo.toml --bin buildc lsp_dispatch --quiet
 cargo test --manifest-path compiler\Cargo.toml --test cli lsp_dispatch -- --nocapture
 cargo run --manifest-path compiler\Cargo.toml -- corpus verify --root semantic-corpus
 ```

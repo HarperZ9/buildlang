@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add executable smoke validation for the QuantaC Rust backend so selected generated Rust programs are compiled, run, and checked for deterministic stdout.
+**Goal:** Add executable smoke validation for the BuildC Rust backend so selected generated Rust programs are compiled, run, and checked for deterministic stdout.
 
 **Architecture:** Extend the existing Rust backend test harness with a runtime verifier beside `assert_rustc_metadata_ok`. Keep metadata tests as broad compile coverage and add a small execution subset for scalar branching, references, structs/arrays, and tuple ownership reuse.
 
-**Tech Stack:** Rust compiler crate, QuantaLang parser/type checker/MIR lowerer, `rustc`, Cargo unit tests, repository status docs.
+**Tech Stack:** Rust compiler crate, BuildLang parser/type checker/MIR lowerer, `rustc`, Cargo unit tests, repository status docs.
 
 **Implementation result (2026-06-13):** Completed using checked-in semantic
 corpus programs instead of duplicating inline source in every runtime smoke
@@ -38,7 +38,7 @@ fn main() {
     println("{}", v);
 }
 "#;
-    let rust = compile_quanta_to_rust(source);
+    let rust = compile_build_to_rust(source);
     assert_rustc_run_stdout("run_scalar_branch", &rust, "4\n");
 }
 ```
@@ -48,7 +48,7 @@ fn main() {
 Run:
 
 ```powershell
-cargo test --manifest-path public/pubscan/quantalang/compiler/Cargo.toml generated_rust_runs_for_scalar_branch_subset --quiet
+cargo test --manifest-path public/pubscan/buildlang/compiler/Cargo.toml generated_rust_runs_for_scalar_branch_subset --quiet
 ```
 
 Expected: compile failure because `assert_rustc_run_stdout` is not defined.
@@ -61,7 +61,7 @@ Add this helper after `assert_rustc_metadata_ok`:
 fn assert_rustc_run_stdout(name: &str, rust_source: &str, expected_stdout: &str) {
     let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
     let dir = std::env::temp_dir().join(format!(
-        "quantalang_rust_backend_run_{}_{}",
+        "buildlang_rust_backend_run_{}_{}",
         name,
         std::process::id()
     ));
@@ -133,7 +133,7 @@ fn main() {
     println("{}", val);
 }
 "#;
-    let rust = compile_quanta_to_rust(source);
+    let rust = compile_build_to_rust(source);
     assert_rustc_run_stdout("run_references", &rust, "15\n");
 }
 ```
@@ -160,7 +160,7 @@ fn main() {
     println("{}", total);
 }
 "#;
-    let rust = compile_quanta_to_rust(source);
+    let rust = compile_build_to_rust(source);
     assert_rustc_run_stdout("run_structs_arrays", &rust, "12\n");
 }
 ```
@@ -182,7 +182,7 @@ fn main() {
     println("{}", first + second);
 }
 "#;
-    let rust = compile_quanta_to_rust(source);
+    let rust = compile_build_to_rust(source);
     assert_rustc_run_stdout("run_tuple_after_by_value_call", &rust, "14\n");
 }
 ```
@@ -192,7 +192,7 @@ fn main() {
 Run:
 
 ```powershell
-cargo test --manifest-path public/pubscan/quantalang/compiler/Cargo.toml generated_rust_runs --quiet
+cargo test --manifest-path public/pubscan/buildlang/compiler/Cargo.toml generated_rust_runs --quiet
 ```
 
 Expected: 4 tests passed.
@@ -202,8 +202,8 @@ Expected: 4 tests passed.
 **Files:**
 - Modify: `README.md`
 - Modify: `STATUS.md`
-- Modify: `project-docs/records/QUANTALANG-QUANTAC-STACK-ASSESSMENT-2026-06-13.md`
-- Modify: `project-docs/roadmaps/contracts/backend-capability-descriptor-quantalang-2026-06-12.json`
+- Modify: `project-docs/records/BUILDLANG-BUILDC-STACK-ASSESSMENT-2026-06-13.md`
+- Modify: `project-docs/roadmaps/contracts/backend-capability-descriptor-buildlang-2026-06-12.json`
 
 - [ ] **Step 1: Update test counts**
 
@@ -227,7 +227,7 @@ Update the Rust backend notes to include the generated Rust executable smoke tes
 Run:
 
 ```powershell
-cargo fmt --manifest-path public/pubscan/quantalang/compiler/Cargo.toml -- --check
+cargo fmt --manifest-path public/pubscan/buildlang/compiler/Cargo.toml -- --check
 ```
 
 Expected: exit 0.
@@ -237,7 +237,7 @@ Expected: exit 0.
 Run:
 
 ```powershell
-cargo test --manifest-path public/pubscan/quantalang/compiler/Cargo.toml generated_rust_compiles --quiet
+cargo test --manifest-path public/pubscan/buildlang/compiler/Cargo.toml generated_rust_compiles --quiet
 ```
 
 Expected: all generated Rust metadata tests pass.
@@ -247,7 +247,7 @@ Expected: all generated Rust metadata tests pass.
 Run:
 
 ```powershell
-cargo test --manifest-path public/pubscan/quantalang/compiler/Cargo.toml generated_rust_runs --quiet
+cargo test --manifest-path public/pubscan/buildlang/compiler/Cargo.toml generated_rust_runs --quiet
 ```
 
 Expected: all generated Rust execution tests pass.
@@ -257,7 +257,7 @@ Expected: all generated Rust execution tests pass.
 Run:
 
 ```powershell
-cargo test --manifest-path public/pubscan/quantalang/compiler/Cargo.toml rust_target --quiet
+cargo test --manifest-path public/pubscan/buildlang/compiler/Cargo.toml rust_target --quiet
 ```
 
 Expected: CLI Rust target/alias test passes.
@@ -267,7 +267,7 @@ Expected: CLI Rust target/alias test passes.
 Run:
 
 ```powershell
-cargo test --manifest-path public/pubscan/quantalang/compiler/Cargo.toml --quiet
+cargo test --manifest-path public/pubscan/buildlang/compiler/Cargo.toml --quiet
 ```
 
 Expected: full suite passes with the verified count and 11 ignored tests.
@@ -277,8 +277,8 @@ Expected: full suite passes with the verified count and 11 ignored tests.
 Run:
 
 ```powershell
-python -m json.tool project-docs/roadmaps/contracts/backend-capability-descriptor-quantalang-2026-06-12.json
-git -C public/pubscan/quantalang diff --check -- README.md STATUS.md compiler/src/codegen/backend/rust.rs docs/superpowers/plans/2026-06-13-rust-execution-layer.md
+python -m json.tool project-docs/roadmaps/contracts/backend-capability-descriptor-buildlang-2026-06-12.json
+git -C public/pubscan/buildlang diff --check -- README.md STATUS.md compiler/src/codegen/backend/rust.rs docs/superpowers/plans/2026-06-13-rust-execution-layer.md
 ```
 
 Expected: both commands exit 0.

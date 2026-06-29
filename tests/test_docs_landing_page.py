@@ -46,21 +46,21 @@ def test_current_progress_evidence_is_visible() -> None:
     assert "868 passing compiler tests" in source
     assert "192 CLI tests" in source
     assert "8-program semantic corpus" in source
-    assert "quantac corpus verify" in source
-    assert "quantac doctor" in source
-    assert "quantac run examples/quickstart/effects_greeting.quanta" in source
-    assert "QuantaLang overview" in source
+    assert "buildc corpus verify" in source
+    assert "buildc doctor" in source
+    assert "buildc run examples/quickstart/effects_greeting.bld" in source
+    assert "BuildLang overview" in source
     assert "Rust compiler research you can run." in source
-    assert "QuantaLang is a language research project and compiler prototype." in source
-    assert "The supported execution path lowers <code>.quanta</code> files to C99; HLSL/GLSL emit shader source; the remaining backends are labeled research targets." in source
+    assert "BuildLang is a language research project and compiler prototype." in source
+    assert "The supported execution path lowers <code>.bld</code> files to C99; HLSL/GLSL emit shader source; the remaining backends are labeled research targets." in source
     assert "At a glance" in source
     assert "What this is" in source
-    assert "A Rust-built compiler for <code>.quanta</code> files, effects experiments, C output, shader-source output, and provenance-oriented language research." in source
+    assert "A Rust-built compiler for <code>.bld</code> files, effects experiments, C output, shader-source output, and provenance-oriented language research." in source
     assert "What works now" in source
     assert "C execution is the verified path; HLSL/GLSL shader-source output works; other targets are research-grade." in source
     assert "Where to start" in source
     assert "Run the quickstart, inspect STATUS and TEST_RESULTS, then read the roadmap for the live-state direction." in source
-    assert "<code>.quanta</code> to C99 is the supported native path" in source
+    assert "<code>.bld</code> to C99 is the supported native path" in source
     assert "HLSL/GLSL emit shader source" in source
     assert "the remaining backends are labeled research targets" in source
     assert "What you can run today" in source
@@ -69,8 +69,8 @@ def test_current_progress_evidence_is_visible() -> None:
     assert "Start there, then decide for yourself what the evidence supports." in source
     assert "Where it is now" in source
     assert "Where it is trying to go" in source
-    assert "Today, QuantaLang is a Rust-built effects compiler with a verified C execution path, working HLSL/GLSL shader-source output, typed effect receipts, policy gates, SourceId provenance, and semantic-corpus checks." in source
-    assert "Long term, QuantaLang is meant to become a live-state-aware language substrate: one source shape that can coordinate CPU and GPU outputs, declare machine and model boundaries, and emit receipts that WARDEN-style membrane tooling can inspect." in source
+    assert "Today, BuildLang is a Rust-built effects compiler with a verified C execution path, working HLSL/GLSL shader-source output, typed effect receipts, policy gates, SourceId provenance, and semantic-corpus checks." in source
+    assert "Long term, BuildLang is meant to become a live-state-aware language substrate: one source shape that can coordinate CPU and GPU outputs, declare machine and model boundaries, and emit receipts that WARDEN-style membrane tooling can inspect." in source
     assert "A compiler you can run, with the receipts close by" not in source
     assert "A compiler with receipts" not in source
     assert "The strongest path today is concrete" not in source
@@ -82,9 +82,9 @@ def test_immediate_user_value_is_explicit() -> None:
 
     assert "Evidence" in source
     assert "How to judge it" in source
-    assert "Build <code>quantac</code>, run <code>hello.quanta</code>, <code>ledger.quanta</code>, and <code>effects_greeting.quanta</code>, then verify the 8-program semantic corpus. The point is not a perfect language ecosystem; it is a real compiler path with receipts nearby." in source
-    assert "Compile <code>vignette_shader.quanta</code> to HLSL or GLSL when you want readable shader output from Quanta source." in source
-    assert "<code>STATUS.md</code> says the self-hosted compiler and standard library exist as <code>.quanta</code> source, but cannot be compiled or executed today." in source
+    assert "Build <code>buildc</code>, run <code>hello.bld</code>, <code>ledger.bld</code>, and <code>effects_greeting.bld</code>, then verify the 8-program semantic corpus. The point is not a perfect language ecosystem; it is a real compiler path with receipts nearby." in source
+    assert "Compile <code>vignette_shader.bld</code> to HLSL or GLSL when you want readable shader output from Build source." in source
+    assert "<code>STATUS.md</code> says the self-hosted compiler and standard library exist as <code>.bld</code> source, but cannot be compiled or executed today." in source
     assert "Immediate value as of June 15, 2026" not in source
     assert "Who uses it" not in source
     assert "What it does not claim" not in source
@@ -101,10 +101,10 @@ def test_compiler_workflow_and_capabilities_are_plainly_explained() -> None:
     assert "The pattern matches the surrounding body of work: build the artifact, then name exactly what it can and cannot do." in source
     assert "This is the same instinct as the rest of my work" not in source
     assert "Algebraic effects" in source
-    assert "vignette_shader.quanta" in source
+    assert "vignette_shader.bld" in source
     assert "C99" in source
     assert "VS Code extension" in source
-    assert "Quanta Universe" in source
+    assert "Build Universe" in source
     assert "part sketchbook, part research map" in source
 
 
@@ -122,7 +122,7 @@ def test_live_state_provenance_aspiration_is_explicit_without_overclaiming() -> 
     assert "programmatic sensory organs" in source
     assert "Accountability is not the cage around capability" in source
     assert "LLMs can hallucinate the state they describe; compilers and machines can report the state they actually touched." in source
-    assert "QuantaLang points toward code that declares effects, records ambient capability use, emits CPU and shader artifacts with maturity labels, and hands those receipts to WARDEN-style live-state tooling." in source
+    assert "BuildLang points toward code that declares effects, records ambient capability use, emits CPU and shader artifacts with maturity labels, and hands those receipts to WARDEN-style live-state tooling." in source
     assert "creative tools, research pipelines, and security workflows" in source
     assert "This is an aspiration, not a finished platform claim." in source
     assert "C remains the verified execution path today; HLSL/GLSL are working shader-source outputs; simultaneous CPU/GPU orchestration with WARDEN is the direction, not the current release promise." in source
