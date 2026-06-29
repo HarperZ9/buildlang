@@ -571,23 +571,39 @@ impl TypeContext {
     /// Searches all registered trait impls whose `self_ty` matches the given
     /// type and returns the trait method signature if found.
     pub fn lookup_trait_method(&self, self_ty: &Ty, method_name: &str) -> Option<&TraitMethod> {
+        // Auto-deref the receiver: a `&self`/`&mut self` method is invoked on a
+        // `&T`/`&mut T`, but the impl's `self_ty` is the bare `T`. Look through
+        // one layer of reference (or raw pointer) so reference receivers match.
+        let lookup_ty = match &self_ty.kind {
+            TyKind::Ref(_, _, inner) | TyKind::Ptr(_, inner) => inner.as_ref(),
+            _ => self_ty,
+        };
         // Find trait impls whose self_ty matches
         for impl_ in &self.impls {
-            let matches = match (&impl_.self_ty.kind, &self_ty.kind) {
+            let matches = match (&impl_.self_ty.kind, &lookup_ty.kind) {
                 (TyKind::Adt(d1, _), TyKind::Adt(d2, _)) => d1 == d2,
                 _ => false,
             };
-            if matches && impl_.methods.contains_key(method_name) {
-                // Look up the method signature from the trait definition
-                if let Some(trait_def) = self.traits.get(&impl_.trait_id) {
-                    if let Some(method) = trait_def
-                        .methods
-                        .iter()
-                        .find(|m| m.name.as_ref() == method_name)
-                    {
-                        return Some(method);
-                    }
-                }
+            if !matches {
+                continue;
+            }
+            // Look up the method signature from the trait definition.
+            let Some(trait_def) = self.traits.get(&impl_.trait_id) else {
+                continue;
+            };
+            let Some(method) = trait_def
+                .methods
+                .iter()
+                .find(|m| m.name.as_ref() == method_name)
+            else {
+                continue;
+            };
+            // The method is callable on this type if either the impl provides
+            // its own definition, or the trait supplies a default body. The
+            // latter is what makes provided/default trait methods such as
+            // `PartialEq::ne` resolve when an `impl` only overrides `eq`.
+            if impl_.methods.contains_key(method_name) || method.has_default {
+                return Some(method);
             }
         }
         None

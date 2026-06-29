@@ -973,12 +973,11 @@ impl<'ctx> TypeChecker<'ctx> {
             }
         }
 
-        // Check each impl item
-        for item in &impl_.items {
-            self.check_impl_item(item, self_ty);
-        }
-
-        // Register the implementation - collect associated types and methods
+        // Register the implementation BEFORE checking method bodies so that a
+        // method can call sibling methods of the same trait impl (including
+        // required methods and defaulted methods). Without this pre-pass,
+        // `self.cmp(other)` inside `Ord::max_by` would not resolve because the
+        // impl was not yet visible to method resolution.
         let generics = self.collect_generics(&impl_.generics);
 
         // Collect associated types from impl items
@@ -1018,6 +1017,11 @@ impl<'ctx> TypeChecker<'ctx> {
         };
 
         self.ctx.register_impl(trait_impl);
+
+        // Check each impl item (bodies can now resolve sibling trait methods).
+        for item in &impl_.items {
+            self.check_impl_item(item, self_ty);
+        }
     }
 
     fn check_inherent_impl(&mut self, impl_: &ast::ImplDef, self_ty: &Ty, _span: Span) {
@@ -2082,5 +2086,304 @@ mod tests {
         let mut ctx = TypeContext::new();
         let checker = TypeChecker::new(&mut ctx);
         assert!(!checker.has_errors());
+    }
+
+    // =========================================================================
+    // SELF-HOSTING BRICK 1: trait default methods, reference receivers, and
+    // closures as method parameters. These patterns are required by the
+    // self-hosted `core::cmp` (PartialEq::ne default) and `core::option`
+    // (closure-taking combinators) modules.
+    // =========================================================================
+
+    /// A trait default method (`ne` calling `eq`) must resolve at a call site
+    /// even when the `impl` only provides the required method. This is the
+    /// exact shape of `PartialEq::ne` in `stdlib/core/cmp.bld`.
+    #[test]
+    fn trait_default_method_resolves_with_reference_receiver() {
+        let errors = check_source(
+            r#"
+            trait MyEq {
+                fn eq(&self, other: &Self) -> bool;
+                fn ne(&self, other: &Self) -> bool {
+                    !self.eq(other)
+                }
+            }
+
+            struct P { x: i32 }
+
+            impl MyEq for P {
+                fn eq(&self, other: &P) -> bool {
+                    self.x == other.x
+                }
+            }
+
+            fn check() -> bool {
+                let a = P { x: 1 };
+                let b = P { x: 2 };
+                a.ne(&b)
+            }
+            "#,
+        );
+
+        assert!(
+            !errors.iter().any(|err| matches!(
+                &err.error,
+                TypeError::UndefinedMethod { method, .. } if method == "ne"
+            )),
+            "default trait method `ne` should resolve, got {errors:#?}"
+        );
+        assert!(errors.is_empty(), "expected no errors, got {errors:#?}");
+    }
+
+    /// A by-value default method (`greet` calling `name`) must also resolve.
+    #[test]
+    fn trait_default_method_resolves_by_value() {
+        let errors = check_source(
+            r#"
+            trait Greet {
+                fn name(self) -> i32;
+                fn greet(self) -> i32 {
+                    self.name() + 1
+                }
+            }
+
+            struct P { x: i32 }
+
+            impl Greet for P {
+                fn name(self) -> i32 { self.x }
+            }
+
+            fn check() -> i32 {
+                let a = P { x: 1 };
+                a.greet()
+            }
+            "#,
+        );
+
+        assert!(errors.is_empty(), "expected no errors, got {errors:#?}");
+    }
+
+    /// A default method that does not call back into the trait should still
+    /// resolve when the impl omits it.
+    #[test]
+    fn trait_default_method_standalone_resolves() {
+        let errors = check_source(
+            r#"
+            trait Greet {
+                fn base(&self) -> i32;
+                fn doubled(&self) -> i32 {
+                    42
+                }
+            }
+
+            struct P { x: i32 }
+
+            impl Greet for P {
+                fn base(&self) -> i32 { self.x }
+            }
+
+            fn check() -> i32 {
+                let a = P { x: 1 };
+                a.doubled()
+            }
+            "#,
+        );
+
+        assert!(errors.is_empty(), "expected no errors, got {errors:#?}");
+    }
+
+    /// An impl that overrides a default method must still resolve to the
+    /// overriding signature (no regression from the default-method change).
+    #[test]
+    fn trait_default_method_override_resolves() {
+        let errors = check_source(
+            r#"
+            trait Greet {
+                fn base(&self) -> i32;
+                fn doubled(&self) -> i32 { 0 }
+            }
+
+            struct P { x: i32 }
+
+            impl Greet for P {
+                fn base(&self) -> i32 { self.x }
+                fn doubled(&self) -> i32 { self.x * 2 }
+            }
+
+            fn check() -> i32 {
+                let a = P { x: 5 };
+                a.doubled()
+            }
+            "#,
+        );
+
+        assert!(errors.is_empty(), "expected no errors, got {errors:#?}");
+    }
+
+    /// Generic `&self` reference receivers in a generic impl, with one method
+    /// calling another, mirror `Option::is_none` calling `Option::is_some`.
+    #[test]
+    fn generic_reference_receiver_methods_resolve() {
+        let errors = check_source(
+            r#"
+            enum Opt<T> {
+                None,
+                Some(T),
+            }
+
+            impl<T> Opt<T> {
+                fn is_some(&self) -> bool {
+                    match self {
+                        Opt::Some(_) => true,
+                        Opt::None => false,
+                    }
+                }
+                fn is_none(&self) -> bool {
+                    !self.is_some()
+                }
+            }
+
+            fn check() -> bool {
+                let s: Opt<i32> = Opt::None;
+                s.is_none()
+            }
+            "#,
+        );
+
+        assert!(errors.is_empty(), "expected no errors, got {errors:#?}");
+    }
+
+    /// End-to-end shape of the self-hosted `core::cmp` traits: `PartialEq`
+    /// with a defaulted `ne`, an `Ord`-style supertrait, reference receivers,
+    /// and a default method that chains through the required method.
+    #[test]
+    fn cmp_style_trait_hierarchy_checks() {
+        let errors = check_source(
+            r#"
+            trait PartialEq {
+                fn eq(&self, other: &Self) -> bool;
+                fn ne(&self, other: &Self) -> bool {
+                    !self.eq(other)
+                }
+            }
+
+            trait Ord: PartialEq {
+                fn cmp(&self, other: &Self) -> i32;
+                fn max_by(self, other: Self) -> Self;
+            }
+
+            struct N { v: i32 }
+
+            impl PartialEq for N {
+                fn eq(&self, other: &N) -> bool {
+                    self.v == other.v
+                }
+            }
+
+            impl Ord for N {
+                fn cmp(&self, other: &N) -> i32 {
+                    if self.v < other.v {
+                        -1
+                    } else if self.ne(other) {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                fn max_by(self, other: N) -> N {
+                    if self.cmp(&other) < 0 { other } else { self }
+                }
+            }
+
+            fn check() -> i32 {
+                let a = N { v: 1 };
+                let b = N { v: 2 };
+                let m = a.max_by(b);
+                m.v
+            }
+            "#,
+        );
+
+        assert!(errors.is_empty(), "expected no errors, got {errors:#?}");
+    }
+
+    /// Soundness boundary: a trait default method must NOT resolve on a type
+    /// that does not implement the trait. The default-method fix only applies
+    /// when a matching impl exists.
+    #[test]
+    fn trait_default_method_does_not_resolve_without_impl() {
+        let errors = check_source(
+            r#"
+            trait MyEq {
+                fn eq(&self, other: &Self) -> bool;
+                fn ne(&self, other: &Self) -> bool {
+                    !self.eq(other)
+                }
+            }
+
+            struct P { x: i32 }
+            struct Q { y: i32 }
+
+            impl MyEq for P {
+                fn eq(&self, other: &P) -> bool { self.x == other.x }
+            }
+
+            fn check() -> bool {
+                let a = Q { y: 1 };
+                let b = Q { y: 2 };
+                a.ne(&b)
+            }
+            "#,
+        );
+
+        assert!(
+            errors.iter().any(|err| matches!(
+                &err.error,
+                TypeError::UndefinedMethod { method, .. } if method == "ne"
+            )),
+            "default method `ne` must not resolve on a non-implementing type, got {errors:#?}"
+        );
+    }
+
+    /// Closures passed as method parameters (both `impl Trait` and an explicit
+    /// `F: FnOnce` bound), chained, mirror `Option::map` / `Option::and_then`.
+    #[test]
+    fn closures_as_method_parameters_resolve() {
+        let errors = check_source(
+            r#"
+            enum Opt<T> {
+                None,
+                Some(T),
+            }
+
+            impl<T> Opt<T> {
+                fn map<U, F: FnOnce(T) -> U>(self, f: F) -> Opt<U> {
+                    match self {
+                        Opt::Some(x) => Opt::Some(f(x)),
+                        Opt::None => Opt::None,
+                    }
+                }
+                fn is_some_and(self, f: impl FnOnce(T) -> bool) -> bool {
+                    match self {
+                        Opt::Some(x) => f(x),
+                        Opt::None => false,
+                    }
+                }
+                fn unwrap_or(self, fallback: T) -> T {
+                    match self {
+                        Opt::Some(x) => x,
+                        Opt::None => fallback,
+                    }
+                }
+            }
+
+            fn check() -> i32 {
+                let s = Opt::Some(10);
+                s.map(|x| x + 1).unwrap_or(0)
+            }
+            "#,
+        );
+
+        assert!(errors.is_empty(), "expected no errors, got {errors:#?}");
     }
 }
