@@ -12446,3 +12446,227 @@ fn quickstart_shader_example_compiles_to_hlsl() {
 
     let _ = fs::remove_dir_all(&out_dir);
 }
+
+// =============================================================================
+// Transpile-preservation criterion (Phase 1, brick 2)
+//
+// Criterion: when the SAME program is lowered to the MIR interlingua and then
+// emitted through two different backend target languages, the observable
+// contract that must be preserved is byte-identical stdout AND equal process
+// exit status, independent of the target language. The test below asserts that
+// the C and Rust backends AGREE WITH EACH OTHER (not merely that each matches
+// its own pre-recorded expected stdout). Honest scope: only the Rust-supported
+// corpus subset can be cross-checked; the C path covers the whole corpus.
+//
+// See docs/superpowers/specs/transpile-preservation-criterion.md.
+// =============================================================================
+
+#[derive(serde::Deserialize)]
+struct PreservationCorpusManifest {
+    programs: Vec<PreservationCorpusProgram>,
+}
+
+#[derive(serde::Deserialize)]
+struct PreservationCorpusProgram {
+    id: String,
+    path: String,
+    rust_execution_test: String,
+}
+
+fn semantic_corpus_root() -> PathBuf {
+    repo_root().join("semantic-corpus")
+}
+
+fn load_preservation_corpus() -> PreservationCorpusManifest {
+    let manifest_path = semantic_corpus_root().join("manifest.json");
+    let manifest = fs::read_to_string(&manifest_path)
+        .unwrap_or_else(|err| panic!("read {}: {}", manifest_path.display(), err));
+    serde_json::from_str(&manifest)
+        .unwrap_or_else(|err| panic!("parse {}: {}", manifest_path.display(), err))
+}
+
+/// True when a `rustc` invocation is available to compile the Rust backend's
+/// output. Honors the `RUSTC` override the existing rust.rs tests use.
+fn rustc_available() -> bool {
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    Command::new(rustc)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// Lower a BuildLang source string through the front end and the Rust backend,
+/// returning the generated Rust source. Mirrors `compile_build_to_rust` in the
+/// rust backend's unit tests, but reached through the public library API.
+fn lower_source_to_rust(source: &str) -> String {
+    use buildlang::lexer::{Lexer, SourceFile};
+    use buildlang::parser::Parser;
+    use buildlang::types::{TypeChecker, TypeContext};
+    use buildlang::{CodeGenerator, Target};
+
+    let source_file = SourceFile::new("transpile_preservation_test.bld", source);
+    let mut lexer = Lexer::new(&source_file);
+    let tokens = lexer.tokenize().expect("lexing should succeed");
+    let mut parser = Parser::new(&source_file, tokens);
+    let ast = parser.parse().expect("parsing should succeed");
+    assert!(
+        parser.errors().is_empty(),
+        "unexpected parser errors: {:?}",
+        parser.errors()
+    );
+
+    let mut ctx = TypeContext::new();
+    let mut checker = TypeChecker::new(&mut ctx);
+    checker.set_source_file(&source_file);
+    checker.check_module(&ast);
+    assert!(
+        !checker.has_errors(),
+        "unexpected type errors: {:?}",
+        checker.errors()
+    );
+
+    let mut codegen = CodeGenerator::with_source(&ctx, Target::Rust, source_file.source().into());
+    codegen
+        .generate(&ast)
+        .expect("rust codegen should succeed")
+        .as_string()
+        .expect("generated Rust should be UTF-8")
+}
+
+struct RunResult {
+    stdout: String,
+    exit_code: Option<i32>,
+}
+
+/// Compile generated Rust with `rustc`, run the executable, and capture stdout
+/// (CRLF-normalized) plus the process exit code.
+fn rustc_compile_and_run(name: &str, rust_source: &str) -> RunResult {
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang_transpile_preservation_{}_{}",
+        name,
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).expect("create temp dir");
+    let source_path = dir.join("generated.rs");
+    let exe_path = dir.join(format!("generated{}", std::env::consts::EXE_SUFFIX));
+    fs::write(&source_path, rust_source).expect("write generated Rust");
+
+    let compile = Command::new(&rustc)
+        .arg(&source_path)
+        .arg("-o")
+        .arg(&exe_path)
+        .output()
+        .expect("invoke rustc");
+    assert!(
+        compile.status.success(),
+        "rustc failed for {name}\nstdout:\n{}\nstderr:\n{}\nsource:\n{}",
+        String::from_utf8_lossy(&compile.stdout),
+        String::from_utf8_lossy(&compile.stderr),
+        rust_source
+    );
+
+    let run = Command::new(&exe_path)
+        .output()
+        .expect("run generated Rust executable");
+    let stdout = String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n");
+    let result = RunResult {
+        stdout,
+        exit_code: run.status.code(),
+    };
+    let _ = fs::remove_dir_all(&dir);
+    result
+}
+
+/// Run a corpus program through the production C path (`buildc run`) and capture
+/// stdout (CRLF-normalized) plus the process exit code.
+fn c_backend_run(program_path: &Path) -> RunResult {
+    let output = buildc()
+        .arg("run")
+        .arg(program_path)
+        .output()
+        .unwrap_or_else(|err| panic!("run buildc run for {}: {}", program_path.display(), err));
+    assert!(
+        output.status.success(),
+        "C backend run failed for {}\nstdout:\n{}\nstderr:\n{}",
+        program_path.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    RunResult {
+        stdout: String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+        exit_code: output.status.code(),
+    }
+}
+
+/// Executable witness of the transpile-preservation criterion: for every
+/// Rust-supported corpus program, lowering the same source through the C
+/// backend and through the Rust backend must produce byte-identical stdout and
+/// equal exit status. This asserts the two backends AGREE WITH EACH OTHER, not
+/// merely that each reproduces its own expected stdout.
+#[test]
+fn transpile_preservation_c_and_rust_backends_agree_on_stdout() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping transpile-preservation cross-check: no C backend available (buildc doctor)"
+        );
+        return;
+    }
+    if !rustc_available() {
+        eprintln!("skipping transpile-preservation cross-check: rustc not available");
+        return;
+    }
+
+    let corpus = load_preservation_corpus();
+    let mut cross_checked = 0usize;
+
+    for program in &corpus.programs {
+        // Honest scope: only programs the Rust backend can execute are
+        // cross-checked. Programs without a `generated_rust_runs_for_*`
+        // execution test are covered by the C path alone.
+        if !program
+            .rust_execution_test
+            .starts_with("generated_rust_runs_for_")
+        {
+            continue;
+        }
+
+        let program_path = semantic_corpus_root().join(&program.path);
+        let source = fs::read_to_string(&program_path)
+            .unwrap_or_else(|err| panic!("read corpus program {}: {}", program.id, err));
+
+        let c_result = c_backend_run(&program_path);
+        let rust_source = lower_source_to_rust(&source);
+        let rust_result = rustc_compile_and_run(&program.id, &rust_source);
+
+        assert_eq!(
+            c_result.stdout, rust_result.stdout,
+            "transpile-preservation DIVERGENCE for {}: C and Rust backends disagree on stdout\n\
+             C stdout:    {:?}\n\
+             Rust stdout: {:?}",
+            program.id, c_result.stdout, rust_result.stdout
+        );
+        assert_eq!(
+            c_result.exit_code, rust_result.exit_code,
+            "transpile-preservation DIVERGENCE for {}: C and Rust backends disagree on exit status\n\
+             C exit:    {:?}\n\
+             Rust exit: {:?}",
+            program.id, c_result.exit_code, rust_result.exit_code
+        );
+
+        cross_checked += 1;
+    }
+
+    assert!(
+        cross_checked > 0,
+        "transpile-preservation harness cross-checked zero programs; \
+         the Rust-supported corpus subset should be non-empty"
+    );
+    eprintln!(
+        "transpile-preservation: C and Rust backends agree on stdout + exit status \
+         for {cross_checked} corpus program(s)"
+    );
+}
