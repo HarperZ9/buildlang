@@ -267,8 +267,33 @@ enum Commands {
     /// Diagnose local compiler, toolchain, backend, and package readiness
     Doctor,
 
+    /// Mid-level IR (MIR) interlingua: emit and load the versioned JSON form
+    Mir {
+        #[command(subcommand)]
+        command: MirCommands,
+    },
+
     /// Print version information
     Version,
+}
+
+#[derive(Subcommand)]
+enum MirCommands {
+    /// Lower a program to MIR and write the versioned `buildlang.mir/v0` JSON
+    Emit {
+        /// Input BuildLang source file
+        file: PathBuf,
+
+        /// Output JSON file (defaults to stdout)
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+    },
+
+    /// Load a `buildlang.mir/v0` JSON file and print its digest and summary
+    Load {
+        /// Input MIR JSON file written by `buildc mir emit`
+        file: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -397,6 +422,7 @@ fn main() -> ExitCode {
         Some(Commands::Receipt { command }) => cmd_receipt(command),
         Some(Commands::Lint { file }) => cmd_lint(&file),
         Some(Commands::Doctor) => cmd_doctor(),
+        Some(Commands::Mir { command }) => cmd_mir(command),
         Some(Commands::Test {
             directory,
             filter,
@@ -2995,6 +3021,66 @@ fn cmd_lex(file: &PathBuf, verbose: bool) -> Result<(), i32> {
     }
 
     println!("\nTotal: {} tokens", tokens.len());
+    Ok(())
+}
+
+fn cmd_mir(command: MirCommands) -> Result<(), i32> {
+    match command {
+        MirCommands::Emit { file, output } => cmd_mir_emit(&file, output.as_deref()),
+        MirCommands::Load { file } => cmd_mir_load(&file),
+    }
+}
+
+fn cmd_mir_emit(file: &Path, output: Option<&Path>) -> Result<(), i32> {
+    let lowered = mir_representation::lower_program_to_mir(file).map_err(|message| {
+        eprintln!("{message}");
+        1
+    })?;
+    let envelope = buildlang::codegen::MirModuleEnvelope::wrap(&lowered.module);
+
+    if let Some(path) = output {
+        write_json(path, &envelope)?;
+        println!("Wrote {} MIR to {}", envelope.schema, path.display());
+    } else {
+        let json = envelope.to_json_pretty().map_err(|err| {
+            eprintln!("failed to serialize MIR: {err}");
+            1
+        })?;
+        println!("{json}");
+    }
+    Ok(())
+}
+
+fn cmd_mir_load(file: &Path) -> Result<(), i32> {
+    let json = std::fs::read_to_string(file).map_err(|err| {
+        eprintln!("Error reading file '{}': {}", file.display(), err);
+        1
+    })?;
+    let envelope = buildlang::codegen::MirModuleEnvelope::from_json(&json).map_err(|message| {
+        eprintln!("{message}");
+        1
+    })?;
+
+    let module = &envelope.module;
+    let digest = mir_representation::digest_mir_module(module);
+    let defined = module
+        .functions
+        .iter()
+        .filter(|function| !function.is_declaration())
+        .count();
+    println!("schema: {}", envelope.schema);
+    println!("module: {}", module.name);
+    println!("mir_digest: {}:{}", digest.algorithm, digest.hex);
+    println!(
+        "functions: {} ({} defined, {} declarations)",
+        module.functions.len(),
+        defined,
+        module.functions.len() - defined,
+    );
+    println!("types: {}", module.types.len());
+    println!("globals: {}", module.globals.len());
+    println!("strings: {}", module.strings.len());
+    println!("externals: {}", module.externals.len());
     Ok(())
 }
 
