@@ -1,8 +1,15 @@
+<p align="center">
+  <img src="docs/brand/quantalang-hero.png" alt="QuantaLang, the Effects Language compiler in the Quanta ecosystem">
+</p>
+<!-- Project mark: docs/brand/quantalang-mark.svg -->
+
 # QuantaLang
 
 > The Effects Language: a Rust-built compiler for typed effects, systems experiments, and shader-oriented code generation.
 
-[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[Quanta ecosystem](https://github.com/HarperZ9/quanta-universe) | [quantalang](https://github.com/HarperZ9/quantalang) | [quanta-universe](https://github.com/HarperZ9/quanta-universe) | [VS Code extension](https://github.com/HarperZ9/quantalang-vscode) | [grammar](https://github.com/HarperZ9/quantalang-tmLanguage)
+
+[![license: fair-source](https://img.shields.io/badge/license-fair--source-blue.svg)](LICENSE)
 ![rust](https://img.shields.io/badge/rust-edition_2021-orange.svg)
 ![version](https://img.shields.io/badge/version-1.0.0-informational.svg)
 [![CI](https://github.com/HarperZ9/quantalang/actions/workflows/ci.yml/badge.svg)](https://github.com/HarperZ9/quantalang/actions/workflows/ci.yml)
@@ -17,6 +24,13 @@ LLVM IR, WebAssembly, Rust source, x86-64, and ARM64 backends labeled as
 experimental research surfaces.
 
 **Landing page:** [harperz9.github.io/quantalang](https://harperz9.github.io/quantalang/)
+
+## Current status
+
+- **Release:** QuantaLang 1.0.x; compiler binary `quantac`; built with Rust (edition 2021). C is the production-grade verified backend; HLSL and GLSL ship for shader work; SPIR-V, LLVM IR, WebAssembly, Rust, x86-64, and ARM64 stay labeled experimental.
+- **Operator surface:** the `quantac` CLI exposes `lex`, `parse`, `check` (with `--receipt` / `--policy`), `build`, `run`, `test`, `repl`, `fmt`, `pkg`, `watch`, `doctor`, `corpus`, `policy`, `receipt`, and an `lsp` subcommand that starts a bundled LSP server (completion, hover, diagnostics, go-to-definition, semantic tokens). The CLI and the LSP server are the two integration surfaces; accountability receipts (`quantalang-receipt-verification/v1`) carry SHA-256 source digests for re-checkable codegen.
+- **Umbrella:** part of the operator's Quanta ecosystem alongside `quanta-universe`, the VS Code extension, and the TextMate grammar; standalone and not dependent on any single host.
+- **Housekeeping:** ground-truth release evidence lives in `STATUS.md`; [CHANGELOG.md](CHANGELOG.md) tracks the current presentation pass under Unreleased.
 
 ## Install
 
