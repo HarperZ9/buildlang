@@ -8,6 +8,12 @@ tracked in `STATUS.md`, `README.md`, and
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
 `108/108` or `132/132` are not the current release gate.
 
+## Unreleased
+
+- Presentation pass: README hero and brand assets under `docs/brand/`, Quanta ecosystem navigation, and Current status / Operator surface blocks.
+- Documented the operator surface across the `quantac` CLI and the bundled LSP server.
+- Relicensed to the QuantaLang Fair-Source License v1.0 under the operator's umbrella.
+
 ## [1.0.5] - 2026-03-28 - Self-Hosted Compiler Verification
 
 ### Proven - Self-Hosting: Complete Audit of All 9 Versions
