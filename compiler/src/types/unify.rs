@@ -1,5 +1,5 @@
 // ===============================================================================
-// QUANTALANG TYPE SYSTEM - UNIFICATION
+// BUILDLANG TYPE SYSTEM - UNIFICATION
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
@@ -131,7 +131,7 @@ impl Unifier {
             (TyKind::Str, TyKind::Str) => Ok(()),
 
             // String coercion: `str` and `&str` / `&'static str` are
-            // interchangeable in QuantaLang (both map to QuantaString).
+            // interchangeable in BuildLang (both map to BuildString).
             (TyKind::Str, TyKind::Ref(_, _, inner)) | (TyKind::Ref(_, _, inner), TyKind::Str)
                 if inner.kind == TyKind::Str =>
             {
@@ -238,11 +238,11 @@ impl Unifier {
                     return Err(TypeError::UnsafetyMismatch);
                 }
                 // ABI matching: ABIs must be compatible for function pointers
-                // None (default Quanta ABI) is compatible with explicit "quanta"
+                // None (default Build ABI) is compatible with explicit "build"
                 // Different explicit ABIs are incompatible
                 match (&fn1.abi, &fn2.abi) {
                     (None, None) => {}
-                    (None, Some(a)) | (Some(a), None) if &**a == "quanta" => {}
+                    (None, Some(a)) | (Some(a), None) if &**a == "build" => {}
                     (Some(a1), Some(a2)) if a1 == a2 => {}
                     (Some(a1), Some(a2)) => {
                         return Err(TypeError::AbiMismatch {

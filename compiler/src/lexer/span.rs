@@ -1,5 +1,5 @@
 // ===============================================================================
-// QUANTALANG LEXER - SOURCE LOCATION TRACKING
+// BUILDLANG LEXER - SOURCE LOCATION TRACKING
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
@@ -406,7 +406,7 @@ mod tests {
 
     #[test]
     fn test_position_lookup() {
-        let source = SourceFile::new("test.quanta", "line 1\nline 2\nline 3");
+        let source = SourceFile::new("test.bld", "line 1\nline 2\nline 3");
 
         let pos0 = source.lookup_position(BytePos(0));
         assert_eq!(pos0.line, 1);
@@ -419,7 +419,7 @@ mod tests {
 
     #[test]
     fn test_line_source() {
-        let source = SourceFile::new("test.quanta", "line 1\nline 2\nline 3");
+        let source = SourceFile::new("test.bld", "line 1\nline 2\nline 3");
 
         assert_eq!(source.line_source(0), Some("line 1"));
         assert_eq!(source.line_source(1), Some("line 2"));
@@ -438,7 +438,7 @@ mod tests {
 
     #[test]
     fn test_unicode_column() {
-        let source = SourceFile::new("test.quanta", "let x = 'a'");
+        let source = SourceFile::new("test.bld", "let x = 'a'");
         let pos = source.lookup_position(BytePos(8));
         assert_eq!(pos.column, 9); // Position of 'a'
     }

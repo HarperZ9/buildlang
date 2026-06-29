@@ -1,5 +1,5 @@
 // ===============================================================================
-// QUANTALANG LSP DOCUMENT STORE
+// BUILDLANG LSP DOCUMENT STORE
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
@@ -19,7 +19,7 @@ use std::sync::{Arc, RwLock};
 pub struct Document {
     /// The document URI.
     pub uri: DocumentUri,
-    /// Language ID (e.g., "quanta").
+    /// Language ID (e.g., "build").
     pub language_id: String,
     /// Version number.
     pub version: i32,
@@ -471,8 +471,8 @@ mod tests {
     #[test]
     fn test_document_offset_at() {
         let doc = Document::new(
-            "file:///test.quanta".to_string(),
-            "quanta".to_string(),
+            "file:///test.bld".to_string(),
+            "build".to_string(),
             1,
             "hello\nworld\n".to_string(),
         );
@@ -486,8 +486,8 @@ mod tests {
     #[test]
     fn test_document_position_at() {
         let doc = Document::new(
-            "file:///test.quanta".to_string(),
-            "quanta".to_string(),
+            "file:///test.bld".to_string(),
+            "build".to_string(),
             1,
             "hello\nworld\n".to_string(),
         );
@@ -501,8 +501,8 @@ mod tests {
     #[test]
     fn test_document_word_at() {
         let doc = Document::new(
-            "file:///test.quanta".to_string(),
-            "quanta".to_string(),
+            "file:///test.bld".to_string(),
+            "build".to_string(),
             1,
             "fn hello_world() {}".to_string(),
         );

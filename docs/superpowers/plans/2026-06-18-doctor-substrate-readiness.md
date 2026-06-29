@@ -2,21 +2,21 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make `quantac doctor` print a diagnostic `Substrate evidence:` section derived from the verified substrate receipt without changing doctor exit semantics.
+**Goal:** Make `buildc doctor` print a diagnostic `Substrate evidence:` section derived from the verified substrate receipt without changing doctor exit semantics.
 
-**Architecture:** Keep the substrate receipt as the source of truth. Split substrate verification into a pure validation helper plus the existing hard-gate printing wrapper, then reuse the pure helper to render doctor-only evidence rows on stdout. `quantac corpus verify` remains the command that exits nonzero and prints field-level drift diagnostics.
+**Architecture:** Keep the substrate receipt as the source of truth. Split substrate verification into a pure validation helper plus the existing hard-gate printing wrapper, then reuse the pure helper to render doctor-only evidence rows on stdout. `buildc corpus verify` remains the command that exits nonzero and prints field-level drift diagnostics.
 
-**Tech Stack:** Rust 2021, Clap-powered `quantac` CLI, Serde/serde_json, existing semantic corpus receipt model, Cargo CLI integration tests.
+**Tech Stack:** Rust 2021, Clap-powered `buildc` CLI, Serde/serde_json, existing semantic corpus receipt model, Cargo CLI integration tests.
 
 ## Global Constraints
 
-- `quantac doctor` remains diagnostic-only and exits successfully for missing or invalid substrate evidence.
-- `quantac corpus verify` remains the hard failing gate for substrate receipt drift.
+- `buildc doctor` remains diagnostic-only and exits successfully for missing or invalid substrate evidence.
+- `buildc corpus verify` remains the hard failing gate for substrate receipt drift.
 - No new substrate schema version is introduced.
 - No new backend production claim is added.
 - No SPIR-V, LLVM, WASM, x86-64, or ARM64 execution proof is added.
 - No generated substrate receipt writer is added.
-- No new `quantac substrate` command is added.
+- No new `buildc substrate` command is added.
 - Doctor output must be derived from the substrate receipt content, not README or STATUS prose.
 - Missing substrate evidence is reported on stdout as `receipt   missing`.
 - Invalid substrate evidence is reported on stdout as `receipt   invalid`.
@@ -39,8 +39,8 @@
 - Modify: `compiler/src/main.rs`
 
 **Interfaces:**
-- Consumes: existing `quantac() -> Command`, `repo_root() -> PathBuf`, and `doctor_reports_adoption_readiness_summary`.
-- Produces: failing tests that define `quantac doctor` substrate output and helper behavior.
+- Consumes: existing `buildc() -> Command`, `repo_root() -> PathBuf`, and `doctor_reports_adoption_readiness_summary`.
+- Produces: failing tests that define `buildc doctor` substrate output and helper behavior.
 
 - [ ] **Step 1: Extend the doctor CLI smoke test**
 
@@ -49,7 +49,7 @@ In `compiler/tests/cli.rs`, inside `doctor_reports_adoption_readiness_summary`, 
 ```rust
         "Substrate evidence:",
         "receipt   ok",
-        "quantalang-substrate-receipt/v0",
+        "buildlang-substrate-receipt/v0",
         "corpus    ok",
         "8 semantic program(s)",
         "c         anchor",
@@ -64,15 +64,15 @@ The full expected array should become:
 
 ```rust
     for expected in [
-        "QuantaLang Doctor",
-        "quantac:",
+        "BuildLang Doctor",
+        "buildc:",
         "C backend:",
         "stdlib:",
         "registry:",
         "Backend maturity:",
         "Substrate evidence:",
         "receipt   ok",
-        "quantalang-substrate-receipt/v0",
+        "buildlang-substrate-receipt/v0",
         "corpus    ok",
         "8 semantic program(s)",
         "c         anchor",
@@ -102,7 +102,7 @@ In `compiler/src/main.rs`, inside the existing `#[cfg(test)] mod tests`, add the
         assert_eq!(
             substrate_evidence_rows(None),
             vec![
-                "  receipt   missing  run quantac corpus verify from a repository checkout"
+                "  receipt   missing  run buildc corpus verify from a repository checkout"
                     .to_string()
             ]
         );
@@ -111,7 +111,7 @@ In `compiler/src/main.rs`, inside the existing `#[cfg(test)] mod tests`, add the
     #[test]
     fn doctor_substrate_rows_report_invalid_when_receipt_is_malformed() {
         let root = std::env::temp_dir().join(format!(
-            "quantalang_doctor_substrate_invalid_{}",
+            "buildlang_doctor_substrate_invalid_{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&root);
@@ -119,7 +119,7 @@ In `compiler/src/main.rs`, inside the existing `#[cfg(test)] mod tests`, add the
         std::fs::write(
             root.join("manifest.json"),
             r#"{
-  "schema": "quantalang-semantic-corpus/v1",
+  "schema": "buildlang-semantic-corpus/v1",
   "programs": []
 }
 "#,
@@ -129,7 +129,7 @@ In `compiler/src/main.rs`, inside the existing `#[cfg(test)] mod tests`, add the
             root.join("receipts")
                 .join("substrate-semantic-corpus-2026-06-18.json"),
             r#"{
-  "schema": "quantalang-substrate-receipt/v9"
+  "schema": "buildlang-substrate-receipt/v9"
 }
 "#,
         )
@@ -137,7 +137,7 @@ In `compiler/src/main.rs`, inside the existing `#[cfg(test)] mod tests`, add the
 
         assert_eq!(
             substrate_evidence_rows(Some(&root)),
-            vec!["  receipt   invalid  run quantac corpus verify for details".to_string()]
+            vec!["  receipt   invalid  run buildc corpus verify for details".to_string()]
         );
 
         let _ = std::fs::remove_dir_all(&root);
@@ -162,7 +162,7 @@ Run:
 cargo test --manifest-path compiler/Cargo.toml --test cli doctor -- --nocapture
 ```
 
-Expected: FAIL because `quantac doctor` does not yet print `Substrate evidence:`.
+Expected: FAIL because `buildc doctor` does not yet print `Substrate evidence:`.
 
 - [ ] **Step 5: Commit red tests**
 
@@ -285,12 +285,12 @@ After `verify_substrate_receipt`, add:
 
 ```rust
 fn substrate_invalid_rows() -> Vec<String> {
-    vec!["  receipt   invalid  run quantac corpus verify for details".to_string()]
+    vec!["  receipt   invalid  run buildc corpus verify for details".to_string()]
 }
 
 fn substrate_missing_rows() -> Vec<String> {
     vec![
-        "  receipt   missing  run quantac corpus verify from a repository checkout".to_string(),
+        "  receipt   missing  run buildc corpus verify from a repository checkout".to_string(),
     ]
 }
 
@@ -398,7 +398,7 @@ Run:
 cargo test --manifest-path compiler/Cargo.toml --test cli substrate -- --nocapture
 ```
 
-Expected: PASS. Existing invalid substrate receipt CLI tests still see the same stderr substrings from `quantac corpus verify`.
+Expected: PASS. Existing invalid substrate receipt CLI tests still see the same stderr substrings from `buildc corpus verify`.
 
 - [ ] **Step 7: Confirm doctor CLI is still red**
 
@@ -421,7 +421,7 @@ git commit -m "feat: prepare substrate evidence rows for doctor"
 
 ---
 
-### Task 3: Wire Substrate Evidence Into `quantac doctor`
+### Task 3: Wire Substrate Evidence Into `buildc doctor`
 
 **Files:**
 - Modify: `compiler/src/main.rs`
@@ -482,7 +482,7 @@ cargo test --manifest-path compiler/Cargo.toml --test cli substrate -- --nocaptu
 cargo test --manifest-path compiler/Cargo.toml --test cli corpus_verify -- --nocapture
 ```
 
-Expected: PASS. `quantac corpus verify` remains the hard failing gate for substrate drift.
+Expected: PASS. `buildc corpus verify` remains the hard failing gate for substrate drift.
 
 - [ ] **Step 5: Commit doctor wiring**
 
@@ -501,12 +501,12 @@ git commit -m "feat: report substrate evidence in doctor"
 - Modify: `README.md`
 
 **Interfaces:**
-- Consumes: `quantac doctor` output from Task 3.
+- Consumes: `buildc doctor` output from Task 3.
 - Produces: concise public docs that name doctor substrate visibility without promoting any backend.
 
 - [ ] **Step 1: Update README doctor description**
 
-In `README.md`, in the Install section paragraph immediately after `quantac doctor`, replace:
+In `README.md`, in the Install section paragraph immediately after `buildc doctor`, replace:
 
 ```markdown
 `doctor` reports the installed compiler version, C-backend readiness, stdlib and

@@ -5,10 +5,10 @@ Status: Approved for implementation planning
 
 ## Purpose
 
-QuantaLang now has a checked-in `quantalang-substrate-receipt/v0` artifact and
-`quantac corpus verify` validates it as a hard evidence gate. That is useful for
+BuildLang now has a checked-in `buildlang-substrate-receipt/v0` artifact and
+`buildc corpus verify` validates it as a hard evidence gate. That is useful for
 CI and release checks, but the evidence is still hidden from the command users
-run when they want to understand local readiness: `quantac doctor`.
+run when they want to understand local readiness: `buildc doctor`.
 
 Doctor Substrate Readiness makes the substrate receipt visible at the adoption
 boundary. The goal is to let humans and tooling see, in one diagnostic surface,
@@ -21,17 +21,17 @@ inflating backend maturity claims.
 - `semantic-corpus/receipts/substrate-semantic-corpus-2026-06-18.json` records
   semantic, execution, memory, representation, and command evidence for the
   current semantic corpus.
-- `quantac corpus verify` reads the receipt, validates its schema, checks the
+- `buildc corpus verify` reads the receipt, validates its schema, checks the
   corpus program count, verifies backend maturity constraints, and rejects
   missing evidence for production claims.
-- `quantac doctor` already reports local toolchain readiness, optional backend
+- `buildc doctor` already reports local toolchain readiness, optional backend
   tools, and backend maturity labels.
-- `quantac doctor` does not yet report whether the substrate receipt exists,
+- `buildc doctor` does not yet report whether the substrate receipt exists,
   whether it verifies, or what evidence posture it contains.
 
 ## Alternatives Considered
 
-### Approach A: Add a New `quantac substrate status` Command
+### Approach A: Add a New `buildc substrate status` Command
 
 This would give substrate evidence its own command and keep `doctor` compact.
 
@@ -45,13 +45,13 @@ This would make `doctor` fail when the substrate receipt is missing or invalid.
 
 Tradeoff: `doctor` is currently diagnostic-only and succeeds even when optional
 tools are absent. Turning substrate drift into a doctor failure would make
-`doctor` behave like a release gate, duplicating `quantac corpus verify`.
+`doctor` behave like a release gate, duplicating `buildc corpus verify`.
 
 ### Approach C: Add a Diagnostic `Substrate evidence:` Section to Doctor
 
 This reuses the existing substrate receipt and verifier, prints compact evidence
-status in `quantac doctor`, and keeps hard failure semantics in
-`quantac corpus verify`.
+status in `buildc doctor`, and keeps hard failure semantics in
+`buildc corpus verify`.
 
 Tradeoff: it adds more doctor output, but it puts the project thesis in the
 place users already inspect for readiness.
@@ -60,12 +60,12 @@ Recommendation: Approach C.
 
 ## User-Facing Output
 
-When the receipt exists and verifies, `quantac doctor` should print a section
+When the receipt exists and verifies, `buildc doctor` should print a section
 like:
 
 ```text
 Substrate evidence:
-  receipt   ok       quantalang-substrate-receipt/v0
+  receipt   ok       buildlang-substrate-receipt/v0
   corpus    ok       8 semantic program(s)
   c         anchor   production execution evidence
   rust      subset   experimental executable subset
@@ -81,7 +81,7 @@ If the receipt is missing, doctor should still exit successfully and print:
 
 ```text
 Substrate evidence:
-  receipt   missing  run quantac corpus verify from a repository checkout
+  receipt   missing  run buildc corpus verify from a repository checkout
 ```
 
 If the receipt exists but fails verification, doctor should still exit
@@ -89,10 +89,10 @@ successfully and print:
 
 ```text
 Substrate evidence:
-  receipt   invalid  run quantac corpus verify for details
+  receipt   invalid  run buildc corpus verify for details
 ```
 
-The detailed error remains owned by `quantac corpus verify`.
+The detailed error remains owned by `buildc corpus verify`.
 
 ## Architecture
 
@@ -124,7 +124,7 @@ surfaces can reuse the same validation without changing exit behavior.
 
 ## Data Flow
 
-`quantac doctor` should keep its existing sections:
+`buildc doctor` should keep its existing sections:
 
 1. Header and version.
 2. C backend readiness.
@@ -150,7 +150,7 @@ from README or STATUS prose. At minimum:
 
 ## Error Handling
 
-`quantac doctor` remains diagnostic-only:
+`buildc doctor` remains diagnostic-only:
 
 - missing corpus root: print `receipt missing`;
 - missing manifest: print `receipt missing`;
@@ -159,7 +159,7 @@ from README or STATUS prose. At minimum:
 - substrate validation error: print `receipt invalid`;
 - all successful: print the full compact evidence summary.
 
-`quantac corpus verify` remains the command that exits nonzero and prints field
+`buildc corpus verify` remains the command that exits nonzero and prints field
 level validation errors for substrate drift.
 
 ## Testing
@@ -171,7 +171,7 @@ Test coverage should include:
 
 - `doctor_reports_adoption_readiness_summary` expects `Substrate evidence:`.
 - The same test, or a focused new test, expects `receipt   ok`,
-  `quantalang-substrate-receipt/v0`, `corpus    ok`, `c         anchor`,
+  `buildlang-substrate-receipt/v0`, `corpus    ok`, `c         anchor`,
   `rust      subset`, `spirv     unverified`, `memory    partial`, and
   `repr      MIR`.
 - Existing substrate and corpus verification tests remain the hard evidence
@@ -192,29 +192,29 @@ cargo test --manifest-path compiler/Cargo.toml --test cli substrate -- --nocaptu
 - No new backend production claim.
 - No SPIR-V, LLVM, WASM, x86-64, or ARM64 execution proof.
 - No generated substrate receipt writer.
-- No new `quantac substrate` command.
-- No change to `quantac doctor` exit semantics.
+- No new `buildc substrate` command.
+- No change to `buildc doctor` exit semantics.
 - No broad README/STATUS rewrite.
 
 ## Acceptance Criteria
 
 This design is implemented when:
 
-- `quantac doctor` prints a `Substrate evidence:` section.
+- `buildc doctor` prints a `Substrate evidence:` section.
 - A valid repository checkout reports the substrate receipt as `ok`.
 - Doctor output summarizes the current corpus count, C anchor, Rust subset lane,
   SPIR-V unverified posture, memory verified/gap counts, and MIR fallback
   posture from the receipt.
 - Missing or invalid substrate evidence is reported on stdout without making
   `doctor` fail.
-- `quantac corpus verify` remains the hard failing gate for substrate drift.
+- `buildc corpus verify` remains the hard failing gate for substrate drift.
 - Focused CLI tests pass.
 
 ## Future Extensions
 
 Later slices can make this section richer without changing its purpose:
 
-- JSON output for `quantac doctor --json`;
+- JSON output for `buildc doctor --json`;
 - per-program MIR operation coverage;
 - symbol graph evidence;
 - GPU validator evidence when SPIR-V has `spirv-val` or Vulkan-host receipts;

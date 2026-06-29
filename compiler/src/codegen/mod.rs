@@ -1,12 +1,12 @@
 // ===============================================================================
-// QUANTALANG CODE GENERATOR
+// BUILDLANG CODE GENERATOR
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
 //! # Code Generation
 //!
-//! This module implements code generation for QuantaLang, transforming
+//! This module implements code generation for BuildLang, transforming
 //! type-checked AST into executable code through multiple backends.
 //!
 //! ## Architecture
@@ -38,8 +38,8 @@
 //! ## Example
 //!
 //! ```rust,ignore
-//! use quantalang::codegen::{CodeGenerator, Target};
-//! use quantalang::types::TypeContext;
+//! use buildlang::codegen::{CodeGenerator, Target};
+//! use buildlang::types::TypeContext;
 //!
 //! let mut ctx = TypeContext::new();
 //! let mut codegen = CodeGenerator::new(&ctx, Target::C);

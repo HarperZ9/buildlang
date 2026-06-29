@@ -1,10 +1,10 @@
 // ===============================================================================
-// QUANTALANG RUNTIME - GARBAGE COLLECTOR
+// BUILDLANG RUNTIME - GARBAGE COLLECTOR
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
-//! Garbage collection support for QuantaLang.
+//! Garbage collection support for BuildLang.
 //!
 //! Implements a hybrid memory management strategy:
 //! - Reference counting for most objects
@@ -13,7 +13,7 @@
 //!
 //! ## Design Philosophy
 //!
-//! QuantaLang uses a "pay for what you use" memory model:
+//! BuildLang uses a "pay for what you use" memory model:
 //! - Stack-allocated values by default
 //! - Reference-counted heap allocations when needed
 //! - Cycle detection runs periodically or on-demand

@@ -1,10 +1,10 @@
 // ===============================================================================
-// QUANTALANG RUNTIME SUPPORT
+// BUILDLANG RUNTIME SUPPORT
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
-//! Runtime support for QuantaLang programs.
+//! Runtime support for BuildLang programs.
 //!
 //! This module provides runtime infrastructure including:
 //! - Foreign Function Interface (FFI) for C interop
@@ -13,7 +13,7 @@
 //!
 //! ## FFI Example
 //!
-//! ```quanta
+//! ```build
 //! extern "C" {
 //!     fn printf(format: *const i8, ...) -> i32;
 //!     fn malloc(size: usize) -> *mut u8;
@@ -28,7 +28,7 @@
 //!
 //! ## Memory Management
 //!
-//! ```quanta
+//! ```build
 //! // Automatic reference counting
 //! let obj = Box::new(MyStruct { value: 42 });
 //!

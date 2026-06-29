@@ -14,15 +14,15 @@ pub(crate) fn validate_lsp_dispatch_receipt(
             receipt.schema
         ));
     }
-    if receipt.compiler != "quantac" {
+    if receipt.compiler != "buildc" {
         return Err(format!(
-            "lsp dispatch compiler mismatch: expected 'quantac', found '{}'",
+            "lsp dispatch compiler mismatch: expected 'buildc', found '{}'",
             receipt.compiler
         ));
     }
-    if receipt.language != "quantalang" {
+    if receipt.language != "buildlang" {
         return Err(format!(
-            "lsp dispatch language mismatch: expected 'quantalang', found '{}'",
+            "lsp dispatch language mismatch: expected 'buildlang', found '{}'",
             receipt.language
         ));
     }

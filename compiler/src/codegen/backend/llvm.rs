@@ -1,5 +1,5 @@
 // ===============================================================================
-// QUANTALANG CODE GENERATOR - LLVM BACKEND
+// BUILDLANG CODE GENERATOR - LLVM BACKEND
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
@@ -154,7 +154,7 @@ impl LlvmBackend {
 
     /// Generate the module header.
     fn gen_module_header(&mut self, module: &MirModule) {
-        writeln!(&mut self.output, "; QuantaLang LLVM IR Output").unwrap();
+        writeln!(&mut self.output, "; BuildLang LLVM IR Output").unwrap();
         writeln!(&mut self.output, "; Module: {}", module.name).unwrap();
         writeln!(&mut self.output).unwrap();
         writeln!(&mut self.output, "source_filename = \"{}\"", module.name).unwrap();
@@ -360,7 +360,7 @@ impl LlvmBackend {
 
     /// Emit runtime type definitions that the C backend provides via its
     /// embedded runtime header. These must exist in the LLVM module so that
-    /// functions referencing QuantaString, QuantaHandler, etc. can be typed.
+    /// functions referencing BuildString, BuildHandler, etc. can be typed.
     fn gen_runtime_types(&mut self, module: &MirModule) {
         // Collect names of types already defined by gen_type_defs
         let defined: std::collections::HashSet<String> =
@@ -368,11 +368,11 @@ impl LlvmBackend {
 
         writeln!(&mut self.output, "\n; Runtime types").unwrap();
 
-        // QuantaString: { ptr, i64, i64 } (data, len, cap)
-        if !defined.contains("QuantaString") {
-            writeln!(&mut self.output, "%QuantaString = type {{ ptr, i64, i64 }}").unwrap();
+        // BuildString: { ptr, i64, i64 } (data, len, cap)
+        if !defined.contains("BuildString") {
+            writeln!(&mut self.output, "%BuildString = type {{ ptr, i64, i64 }}").unwrap();
             self.type_defs.push(crate::codegen::ir::MirTypeDef {
-                name: std::sync::Arc::from("QuantaString"),
+                name: std::sync::Arc::from("BuildString"),
                 kind: crate::codegen::ir::TypeDefKind::Struct {
                     fields: vec![
                         (
@@ -404,24 +404,24 @@ impl LlvmBackend {
             });
         }
 
-        // QuantaVec: { ptr, i64, i64, i64 } (data, len, cap, elem_size)
-        if !defined.contains("QuantaVec") {
+        // BuildVec: { ptr, i64, i64, i64 } (data, len, cap, elem_size)
+        if !defined.contains("BuildVec") {
             writeln!(
                 &mut self.output,
-                "%QuantaVec = type {{ ptr, i64, i64, i64 }}"
+                "%BuildVec = type {{ ptr, i64, i64, i64 }}"
             )
             .unwrap();
         }
 
-        // QuantaHandler: { [64 x i8], i32, ptr, ptr } (jmp_buf, effect_id, data, parent)
-        if !defined.contains("QuantaHandler") {
+        // BuildHandler: { [64 x i8], i32, ptr, ptr } (jmp_buf, effect_id, data, parent)
+        if !defined.contains("BuildHandler") {
             writeln!(
                 &mut self.output,
-                "%QuantaHandler = type {{ [64 x i8], i32, ptr, ptr }}"
+                "%BuildHandler = type {{ [64 x i8], i32, ptr, ptr }}"
             )
             .unwrap();
             self.type_defs.push(crate::codegen::ir::MirTypeDef {
-                name: std::sync::Arc::from("QuantaHandler"),
+                name: std::sync::Arc::from("BuildHandler"),
                 kind: crate::codegen::ir::TypeDefKind::Struct {
                     fields: vec![
                         (
@@ -2269,8 +2269,8 @@ impl LlvmBackend {
             // Opaque GPU types - represent as opaque pointers in LLVM
             MirType::Texture2D(_) | MirType::Sampler | MirType::SampledImage(_) => Ok("ptr".into()),
             MirType::TraitObject(_) => Ok("{ ptr, ptr }".to_string()), // data ptr + vtable ptr
-            MirType::Vec(_) => Ok("ptr".to_string()), // QuantaVecHandle is a pointer
-            MirType::Map(_, _) => Ok("ptr".to_string()), // QuantaMapHandle is a pointer
+            MirType::Vec(_) => Ok("ptr".to_string()), // BuildVecHandle is a pointer
+            MirType::Map(_, _) => Ok("ptr".to_string()), // BuildMapHandle is a pointer
             MirType::Tuple(elems) => {
                 if elems.is_empty() {
                     Ok("void".into())
@@ -2310,8 +2310,8 @@ impl LlvmBackend {
             // Opaque GPU types - pointer-sized
             MirType::Texture2D(_) | MirType::Sampler | MirType::SampledImage(_) => 8,
             MirType::TraitObject(_) => 16, // fat pointer: data ptr + vtable ptr
-            MirType::Vec(_) => 8,          // QuantaVecHandle is a pointer
-            MirType::Map(_, _) => 8,       // QuantaMapHandle is a pointer
+            MirType::Vec(_) => 8,          // BuildVecHandle is a pointer
+            MirType::Map(_, _) => 8,       // BuildMapHandle is a pointer
             MirType::Tuple(elems) => elems.iter().map(|e| self.type_size(e)).sum(),
         }
     }
@@ -2585,7 +2585,7 @@ impl LlvmBackend {
     /// Convert calling convention to LLVM string.
     fn llvm_calling_conv(&self, conv: CallingConv) -> &'static str {
         match conv {
-            CallingConv::Quanta => "",
+            CallingConv::Build => "",
             CallingConv::C => "ccc",
             CallingConv::Fast => "fastcc",
             CallingConv::Cold => "coldcc",
@@ -2684,7 +2684,7 @@ impl LlvmBackend {
             }
         }
         // Type not found - return field 0 as fallback for opaque types.
-        // This handles runtime types like QuantaString that may be
+        // This handles runtime types like BuildString that may be
         // referenced through field access patterns in the MIR.
         Ok(0)
     }
@@ -3023,7 +3023,7 @@ mod tests {
         let output = String::from_utf8(code.data).unwrap();
 
         // Check header
-        assert!(output.contains("QuantaLang LLVM IR Output"));
+        assert!(output.contains("BuildLang LLVM IR Output"));
         assert!(output.contains("Module: test"));
         assert!(output.contains("target triple"));
 

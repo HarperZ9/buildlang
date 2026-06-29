@@ -1,5 +1,5 @@
 // ===============================================================================
-// QUANTALANG CODE GENERATOR - MACRO AND CLOSURE LOWERING
+// BUILDLANG CODE GENERATOR - MACRO AND CLOSURE LOWERING
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
@@ -573,8 +573,8 @@ impl<'ctx> MirLowerer<'ctx> {
     /// ```
     ///
     /// Generates MIR that:
-    /// 1. Allocates a `QuantaHandler` on the stack (as a struct local).
-    /// 2. Calls `quanta_push_handler(&handler, effect_id)`.
+    /// 1. Allocates a `BuildHandler` on the stack (as a struct local).
+    /// 2. Calls `build_push_handler(&handler, effect_id)`.
     /// 3. Calls `setjmp(handler.env)`:
     ///    - If the result is 0  -> execute the body normally, then pop the handler.
     ///    - If the result is N  -> dispatch to handler clause N-1.
@@ -601,11 +601,11 @@ impl<'ctx> MirLowerer<'ctx> {
             .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
 
         // The handler struct is opaque at the MIR level; the C backend will emit
-        // a `QuantaHandler` declaration for it.  We represent it as an i8 array
+        // a `BuildHandler` declaration for it.  We represent it as an i8 array
         // large enough to hold the C struct (the runtime defines the real type).
         let handler_local = builder.create_named_local(
             format!("__handler_{}", effect_name),
-            MirType::Struct(Arc::from("QuantaHandler")),
+            MirType::Struct(Arc::from("BuildHandler")),
         );
 
         // The local that receives the setjmp return value (0 = normal, N = op N-1).
@@ -635,11 +635,11 @@ impl<'ctx> MirLowerer<'ctx> {
             builder.goto(push_block);
             builder.switch_to_block(push_block);
 
-            // quanta_push_handler(&handler, effect_id)
-            let push_fn = MirValue::Function(Arc::from("quanta_push_handler"));
+            // build_push_handler(&handler, effect_id)
+            let push_fn = MirValue::Function(Arc::from("build_push_handler"));
             // Take address of the handler struct so the C call gets a pointer.
             let handler_ptr_local = builder.create_local(MirType::Ptr(Box::new(MirType::Struct(
-                Arc::from("QuantaHandler"),
+                Arc::from("BuildHandler"),
             ))));
             builder.assign(
                 handler_ptr_local,
@@ -660,7 +660,7 @@ impl<'ctx> MirLowerer<'ctx> {
 
             // setjmp(handler.env) - pass the handler local directly;
             // the C backend will emit `.env` when it sees a setjmp call
-            // with a QuantaHandler-typed argument.
+            // with a BuildHandler-typed argument.
             let setjmp_fn = MirValue::Function(Arc::from("setjmp"));
             let cont2 = builder.create_block();
             builder.call(
@@ -717,7 +717,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 }
             }
             // Pop the handler after the body completes normally.
-            let pop_fn = MirValue::Function(Arc::from("quanta_pop_handler"));
+            let pop_fn = MirValue::Function(Arc::from("build_pop_handler"));
             let cont = builder.create_block();
             builder.call(pop_fn, vec![], None, cont);
             builder.switch_to_block(cont);
@@ -787,7 +787,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     builder.assign(handle_result, MirRValue::Use(handler_val));
                 }
                 // Pop handler after handling.
-                let pop_fn = MirValue::Function(Arc::from("quanta_pop_handler"));
+                let pop_fn = MirValue::Function(Arc::from("build_pop_handler"));
                 let cont = builder.create_block();
                 builder.call(pop_fn, vec![], None, cont);
                 builder.switch_to_block(cont);
@@ -826,7 +826,7 @@ impl<'ctx> MirLowerer<'ctx> {
     /// perform Effect.op(arg1, arg2, ...)
     /// ```
     ///
-    /// Generates a call to `quanta_perform(effect_id, op_id, arg_ptr, result_ptr)`
+    /// Generates a call to `build_perform(effect_id, op_id, arg_ptr, result_ptr)`
     /// which longjmps to the nearest matching handler.  The first argument is
     /// passed via the `arg` pointer; the result pointer is set up so the handler
     /// can write a return value back to the perform-site (for the one-shot model
@@ -893,8 +893,8 @@ impl<'ctx> MirLowerer<'ctx> {
             },
         );
 
-        // quanta_perform(effect_id, op_id, &arg, &result)
-        let perform_fn = MirValue::Function(Arc::from("quanta_perform"));
+        // build_perform(effect_id, op_id, &arg, &result)
+        let perform_fn = MirValue::Function(Arc::from("build_perform"));
         let eid_val = MirValue::Const(MirConst::Int(eid as i128, MirType::i32()));
         let op_val = MirValue::Const(MirConst::Int(op_id as i128, MirType::i32()));
 
@@ -912,7 +912,7 @@ impl<'ctx> MirLowerer<'ctx> {
         );
         builder.switch_to_block(cont);
 
-        // In practice quanta_perform never returns (it longjmps), but at the MIR
+        // In practice build_perform never returns (it longjmps), but at the MIR
         // level we model the continuation so the CFG remains well-formed.  The
         // result local is available if a future coroutine-based implementation
         // stores a return value there.
@@ -964,7 +964,7 @@ impl<'ctx> MirLowerer<'ctx> {
             if !has_valid_spans && !tokens.is_empty() {
                 // Tokens have synthetic spans - this vec! was already expanded
                 // by the macro expander. Create an empty vec as placeholder.
-                let new_fn = MirValue::Function(Arc::from("quanta_hvec_new_f64"));
+                let new_fn = MirValue::Function(Arc::from("build_hvec_new_f64"));
                 let vec_ty = MirType::Vec(Box::new(MirType::f64()));
                 let builder = self
                     .current_fn
@@ -983,7 +983,7 @@ impl<'ctx> MirLowerer<'ctx> {
 
         if all_groups.is_empty() {
             // vec![] with no args -- create empty i32 vec
-            let new_fn = MirValue::Function(Arc::from("quanta_hvec_new_i32"));
+            let new_fn = MirValue::Function(Arc::from("build_hvec_new_i32"));
             let vec_ty = MirType::Vec(Box::new(MirType::i32()));
             let builder = self
                 .current_fn
@@ -1161,18 +1161,18 @@ impl<'ctx> MirLowerer<'ctx> {
     }
 
     /// Select the correct C-level vec_new / vec_push function names based on element type.
-    /// Returns the C runtime function names (not the QuantaLang builtin names).
+    /// Returns the C runtime function names (not the BuildLang builtin names).
     fn vec_fn_names_for_type(elem_ty: &MirType) -> (&'static str, &'static str) {
         match elem_ty {
             MirType::Float(FloatSize::F64) | MirType::Float(FloatSize::F32) => {
-                ("quanta_hvec_new_f64", "quanta_hvec_push_f64")
+                ("build_hvec_new_f64", "build_hvec_push_f64")
             }
             MirType::Int(IntSize::I64, _) | MirType::Int(IntSize::ISize, _) => {
-                ("quanta_hvec_new_i64", "quanta_hvec_push_i64")
+                ("build_hvec_new_i64", "build_hvec_push_i64")
             }
             _ => {
                 // Default to i32 for everything else
-                ("quanta_hvec_new_i32", "quanta_hvec_push_i32")
+                ("build_hvec_new_i32", "build_hvec_push_i32")
             }
         }
     }
@@ -1495,9 +1495,9 @@ impl<'ctx> MirLowerer<'ctx> {
             match self.parse_and_lower_macro_arg(arg_src) {
                 Ok(val) => {
                     let ty = self.type_of_value(&val);
-                    // For QuantaString values, extract .ptr for printf
+                    // For BuildString values, extract .ptr for printf
                     if let MirType::Struct(ref name) = ty {
-                        if name.as_ref() == "QuantaString" {
+                        if name.as_ref() == "BuildString" {
                             let builder = self.current_fn.as_mut().unwrap();
                             let ptr_local =
                                 builder.create_local(MirType::Ptr(Box::new(MirType::i8())));
@@ -1819,7 +1819,7 @@ impl<'ctx> MirLowerer<'ctx> {
             }
             Some(MirType::Bool) => "%s".to_string(), // printed via ternary in C
             Some(MirType::Ptr(_)) => "%s".to_string(), // assume string pointer
-            Some(MirType::Struct(name)) if name.as_ref() == "QuantaString" => "%s".to_string(),
+            Some(MirType::Struct(name)) if name.as_ref() == "BuildString" => "%s".to_string(),
             _ => "%d".to_string(), // default for integers (most common)
         }
     }
@@ -2457,12 +2457,12 @@ impl<'ctx> MirLowerer<'ctx> {
     fn vec_get_len_fn_names(elem_ty: &MirType) -> (&'static str, &'static str) {
         match elem_ty {
             MirType::Float(FloatSize::F64) | MirType::Float(FloatSize::F32) => {
-                ("quanta_hvec_get_f64", "quanta_hvec_len")
+                ("build_hvec_get_f64", "build_hvec_len")
             }
             MirType::Int(IntSize::I64, _) | MirType::Int(IntSize::ISize, _) => {
-                ("quanta_hvec_get_i64", "quanta_hvec_len")
+                ("build_hvec_get_i64", "build_hvec_len")
             }
-            _ => ("quanta_hvec_get_i32", "quanta_hvec_len"),
+            _ => ("build_hvec_get_i32", "build_hvec_len"),
         }
     }
 }

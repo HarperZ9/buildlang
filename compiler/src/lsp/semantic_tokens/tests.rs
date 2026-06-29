@@ -2,16 +2,11 @@ use super::*;
 use crate::lsp::document::Document;
 
 fn doc(source: &str) -> Document {
-    Document::new(
-        "file:///main.quanta".into(),
-        "quanta".into(),
-        1,
-        source.into(),
-    )
+    Document::new("file:///main.bld".into(), "build".into(), 1, source.into())
 }
 
 #[test]
-fn semantic_tokens_encode_core_quantalang_surface() {
+fn semantic_tokens_encode_core_buildlang_surface() {
     let tokens = SemanticTokensProvider::new().full(&doc(
         "// comment\nfn helper() -> i32 { 42 }\nfn main() { helper(\"x\"); }\n",
     ));

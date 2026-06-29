@@ -1,6 +1,6 @@
-# Getting Started with QuantaLang
+# Getting Started with BuildLang
 
-Write shader-oriented QuantaLang examples, emit HLSL/GLSL shader source, and
+Write shader-oriented BuildLang examples, emit HLSL/GLSL shader source, and
 run CPU examples through the verified C backend. SPIR-V remains experimental;
 inspect generated `.fx` files before trying them in ReShade.
 
@@ -8,21 +8,21 @@ inspect generated `.fx` files before trying them in ReShade.
 
 ```bash
 # Build from source (requires Rust toolchain)
-cd quantalang/compiler
+cd buildlang/compiler
 cargo build --release
 
 # Add to PATH
 export PATH="$PWD/target/release:$PATH"
 
 # Verify
-quantac doctor
+buildc doctor
 ```
 
 ## Hello Shader (5 minutes)
 
-Create `hello.quanta`:
+Create `hello.bld`:
 
-```quanta
+```build
 #[uniform]
 const brightness: f64 = 1.0;
 
@@ -40,7 +40,7 @@ fn PS_Hello(uv: vec2) -> vec4 {
 Compile to ReShade:
 
 ```bash
-quantac hello.quanta --target hlsl -o hello.fx
+buildc hello.bld --target hlsl -o hello.fx
 ```
 
 Inspect `hello.fx` before use. If it matches the ReShade conventions you need,
@@ -49,24 +49,24 @@ copy it into `reshade-shaders/Shaders/` and test it in a local ReShade runtime.
 The repository also includes a tested shader quickstart:
 
 ```bash
-quantac examples/quickstart/vignette_shader.quanta --target hlsl -o vignette_shader.hlsl
+buildc examples/quickstart/vignette_shader.bld --target hlsl -o vignette_shader.hlsl
 ```
 
 ## What Just Happened
 
-| QuantaLang | Generated HLSL |
+| BuildLang | Generated HLSL |
 |------------|---------------|
 | `#[uniform] const brightness: f64 = 1.0;` | `uniform float brightness < ui_type = "slider"; ... > = 1.0;` |
 | `#[fragment] fn PS_Hello(uv: vec2) -> vec4` | `float4 PS_Hello(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target0` |
 | `tex2d(uv)` | `tex2D(ReShade::BackBuffer, uv)` |
 | `vec4(r, g, b, 1.0)` | `float4(r, g, b, 1.0)` |
-| (auto-generated) | `technique Quanta_PS_Hello { pass { ... } }` |
+| (auto-generated) | `technique Build_PS_Hello { pass { ... } }` |
 
 ## Language Basics
 
 ### Types
 
-```quanta
+```build
 let x: i32 = 42;        // 32-bit integer
 let y: f64 = 3.14;      // 64-bit float (maps to float in HLSL)
 let v: vec4 = vec4(1.0, 0.0, 0.0, 1.0);  // RGBA color
@@ -75,7 +75,7 @@ let b: bool = true;
 
 ### Functions
 
-```quanta
+```build
 fn add(a: f64, b: f64) -> f64 {
     a + b    // last expression is the return value
 }
@@ -83,7 +83,7 @@ fn add(a: f64, b: f64) -> f64 {
 
 ### Control Flow
 
-```quanta
+```build
 if x > 0.5 {
     1.0
 } else {
@@ -102,7 +102,7 @@ for j in 0..10 {
 
 ### Structs
 
-```quanta
+```build
 struct Color {
     r: f64,
     g: f64,
@@ -120,7 +120,7 @@ impl Color {
 
 ### Uniforms (ReShade Sliders)
 
-```quanta
+```build
 #[uniform]
 const exposure: f64 = 0.0;
 
@@ -132,14 +132,14 @@ These become adjustable sliders in ReShade's UI.
 
 ### Texture Sampling
 
-```quanta
+```build
 let color = tex2d(uv);              // Sample backbuffer
 let depth = tex2d_depth(uv);        // Sample depth buffer
 ```
 
 ### Fragment Shaders
 
-```quanta
+```build
 #[fragment]
 fn PS_MyEffect(uv: vec2) -> vec4 {
     // uv.x, uv.y = screen coordinates (0..1)
@@ -159,7 +159,7 @@ The compiler auto-generates:
 
 All standard shader math functions are available:
 
-```quanta
+```build
 sin(x)  cos(x)  tan(x)  sqrt(x)  pow(x, y)  abs(x)  exp(x)
 floor(x)  ceil(x)  round(x)  fract(x)  min(a, b)  max(a, b)
 clamp(x, lo, hi)  smoothstep(edge0, edge1, x)  mix(a, b, t)
@@ -168,7 +168,7 @@ dot(a, b)  cross(a, b)  normalize(v)  length(v)  reflect(i, n)
 
 ### Color Space Safety
 
-```quanta
+```build
 fn tonemap(c: vec3 with ColorSpace<Linear>) -> vec3 with ColorSpace<sRGB> {
     // The compiler enforces: input must be Linear, output is sRGB.
     // Passing sRGB to a function expecting Linear = compile error.
@@ -180,26 +180,26 @@ fn tonemap(c: vec3 with ColorSpace<Linear>) -> vec3 with ColorSpace<sRGB> {
 Same source, every target:
 
 ```bash
-quantac shader.quanta --target hlsl -o shader.fx      # ReShade / DirectX
-quantac shader.quanta --target glsl -o shader.glsl     # OpenGL / Vulkan
-quantac shader.quanta --target spirv -o shader.spv      # Vulkan binary
-quantac shader.quanta --target c -o shader.c            # CPU validation
+buildc shader.bld --target hlsl -o shader.fx      # ReShade / DirectX
+buildc shader.bld --target glsl -o shader.glsl     # OpenGL / Vulkan
+buildc shader.bld --target spirv -o shader.spv      # Vulkan binary
+buildc shader.bld --target c -o shader.c            # CPU validation
 ```
 
 ## VS Code Extension
 
-Install the QuantaLang extension for:
+Install the BuildLang extension for:
 - Syntax highlighting (keywords, types, shader intrinsics)
 - Code snippets (`fn`, `fragment`, `uniform`, `vignette`, `hash`)
-- LSP diagnostics (when `quantac` is in PATH)
+- LSP diagnostics (when `buildc` is in PATH)
 
 ## Example: SSAO Shader Fixture
 
-See `demos/ssao.quanta` for a QuantaLang SSAO source fixture with depth
+See `demos/ssao.bld` for a BuildLang SSAO source fixture with depth
 sampling, random kernel loop, occlusion computation, and adjustable uniforms.
 It is useful for HLSL output inspection, but current release verification does
 not claim ReShade runtime validation for this demo.
 
 ```bash
-quantac demos/ssao.quanta --target hlsl -o ssao.fx
+buildc demos/ssao.bld --target hlsl -o ssao.fx
 ```

@@ -1,12 +1,12 @@
 // ===============================================================================
-// QUANTALANG PARSER - TYPE PARSING
+// BUILDLANG PARSER - TYPE PARSING
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
 //! Type parsing.
 //!
-//! This module handles parsing of all type expressions in QuantaLang.
+//! This module handles parsing of all type expressions in BuildLang.
 
 use super::{ParseError, ParseErrorKind, ParseResult, Parser};
 use crate::ast::*;

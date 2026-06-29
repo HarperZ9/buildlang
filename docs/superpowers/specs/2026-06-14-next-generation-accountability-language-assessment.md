@@ -5,12 +5,12 @@ Status: Assessment complete; implementation design requires approval
 
 ## Purpose
 
-QuantaLang needs a reason to exist that is stronger than "another systems
+BuildLang needs a reason to exist that is stronger than "another systems
 language with several backends." The current compiler has a working C execution
 path, an effect system, capability gates, policy profiles, and source/input
 receipts. That combination points to a sharper product identity:
 
-QuantaLang should become an accountability language for operational software.
+BuildLang should become an accountability language for operational software.
 It should make power visible, typed, reviewable, policy-checkable, and
 receipt-backed before code reaches execution.
 
@@ -27,7 +27,7 @@ This assessment records the next strategic slice for that direction.
   `gh issue list`.
 - One open Dependabot PR exists and its checks are green, but it is not the
   strategic compiler lane. Confidence: high, verified with `gh pr list`.
-- `quantac check` currently supports typed capability effects, check receipts,
+- `buildc check` currently supports typed capability effects, check receipts,
   policy profiles, per-input SHA-256 ledgers, and an `input_graph_digest`.
   Confidence: high, verified in `README.md`, `docs/EFFECTS_GUIDE.md`,
   `compiler/src/main.rs`, `compiler/src/types/capabilities.rs`, and
@@ -127,7 +127,7 @@ The implementation should stay close to the existing checker flow:
 
 1. `TypeInfer` already records direct capability sources as
    `observed_capabilities`.
-2. When `TypeInfer` sees a call to a known Quanta function whose signature has
+2. When `TypeInfer` sees a call to a known Build function whose signature has
    effects, it should record a propagated-effect source:
    effect name -> callee function name.
 3. `FunctionEffectSummary` should carry both direct observed capabilities and
@@ -147,12 +147,12 @@ interprocedural graph solving. It only needs to distinguish:
 
 ## Policy Extension Sketch
 
-The current schema can remain `quantalang-check-policy/v1` if fields are
+The current schema can remain `buildlang-check-policy/v1` if fields are
 additive and optional:
 
 ```json
 {
-  "schema": "quantalang-check-policy/v1",
+  "schema": "buildlang-check-policy/v1",
   "allowed_effects": ["Console", "FileSystem"],
   "denied_effects": ["Network", "Foreign"],
   "direct_effect_allowlist": {

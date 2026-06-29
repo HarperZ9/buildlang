@@ -40,7 +40,7 @@ mod tests {
 }
 ```
 
-## QuantaLang-Specific Patterns
+## BuildLang-Specific Patterns
 
 ### Lexer Tests
 ```rust

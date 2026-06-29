@@ -1,5 +1,5 @@
 // ===============================================================================
-// QUANTALANG CODE GENERATOR - SPIR-V BACKEND
+// BUILDLANG CODE GENERATOR - SPIR-V BACKEND
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
@@ -7,7 +7,7 @@
 //! SPIR-V code generation backend for GPU compute shaders.
 //!
 //! Generates SPIR-V binary format for Vulkan/OpenCL compute shaders.
-//! This backend is specifically designed for QuantaLang's GPU compute
+//! This backend is specifically designed for BuildLang's GPU compute
 //! capabilities.
 //!
 //! ## Features
@@ -40,7 +40,7 @@ const SPIRV_VERSION: u32 = 0x00010500;
 /// SPIR-V version (1.0) -- used for graphics shaders / Vulkan 1.0.
 const SPIRV_VERSION_1_0: u32 = 0x00010000;
 
-/// QuantaLang generator ID.
+/// BuildLang generator ID.
 const GENERATOR_ID: u32 = 0x51414E54; // "QANT" in hex
 
 // =============================================================================
@@ -1417,23 +1417,23 @@ impl SpirvBackend {
             "log" => Some(28),         // GLSLstd450Log
 
             // Standard math (2-arg)
-            "pow" => Some(26),                     // GLSLstd450Pow
-            "quanta_min_i32" | "fmin" => Some(37), // GLSLstd450FMin
-            "quanta_max_i32" | "fmax" => Some(40), // GLSLstd450FMax
+            "pow" => Some(26),                    // GLSLstd450Pow
+            "build_min_i32" | "fmin" => Some(37), // GLSLstd450FMin
+            "build_max_i32" | "fmax" => Some(40), // GLSLstd450FMax
 
             // Shader math (2-arg or 3-arg)
-            "quanta_clampf" => Some(43),     // GLSLstd450FClamp
-            "quanta_smoothstep" => Some(49), // GLSLstd450SmoothStep
-            "quanta_mix" => Some(46),        // GLSLstd450FMix
-            "quanta_step" => Some(48),       // GLSLstd450Step
-            "quanta_fract" => Some(10),      // GLSLstd450Fract
+            "build_clampf" => Some(43),     // GLSLstd450FClamp
+            "build_smoothstep" => Some(49), // GLSLstd450SmoothStep
+            "build_mix" => Some(46),        // GLSLstd450FMix
+            "build_step" => Some(48),       // GLSLstd450Step
+            "build_fract" => Some(10),      // GLSLstd450Fract
 
             // Vector math
-            "quanta_normalize3" | "quanta_normalize2" | "quanta_normalize4" => Some(69), // GLSLstd450Normalize
-            "quanta_length3" | "quanta_length2" | "quanta_length4" => Some(66), // GLSLstd450Length
-            "quanta_cross" => Some(68),                                         // GLSLstd450Cross
-            "quanta_reflect3" => Some(71),                                      // GLSLstd450Reflect
-            "quanta_dot3" | "quanta_dot2" | "quanta_dot4" => None, // OpDot is a core op, not GLSL.std.450
+            "build_normalize3" | "build_normalize2" | "build_normalize4" => Some(69), // GLSLstd450Normalize
+            "build_length3" | "build_length2" | "build_length4" => Some(66), // GLSLstd450Length
+            "build_cross" => Some(68),                                       // GLSLstd450Cross
+            "build_reflect3" => Some(71),                                    // GLSLstd450Reflect
+            "build_dot3" | "build_dot2" | "build_dot4" => None, // OpDot is a core op, not GLSL.std.450
 
             _ => None,
         }
@@ -1494,24 +1494,24 @@ impl SpirvBackend {
                 self.emit_global(SpvOp::OpTypeRuntimeArray, &[id, elem_id]);
             }
             MirType::Struct(name) => {
-                // Map quanta_vec2/3/4 to SPIR-V OpTypeVector (not struct).
+                // Map build_vec2/3/4 to SPIR-V OpTypeVector (not struct).
                 // These are GPU-native vector types with SIMD semantics.
                 match name.as_ref() {
-                    "quanta_vec2" => {
+                    "build_vec2" => {
                         // After coercion pass, struct fields are f32. Use f32 for GPU.
                         let elem_id = self.get_type_id(&MirType::Float(FloatSize::F32));
                         self.emit_global(SpvOp::OpTypeVector, &[id, elem_id, 2]);
-                        self.emit_name(id, "quanta_vec2");
+                        self.emit_name(id, "build_vec2");
                     }
-                    "quanta_vec3" => {
+                    "build_vec3" => {
                         let elem_id = self.get_type_id(&MirType::Float(FloatSize::F32));
                         self.emit_global(SpvOp::OpTypeVector, &[id, elem_id, 3]);
-                        self.emit_name(id, "quanta_vec3");
+                        self.emit_name(id, "build_vec3");
                     }
-                    "quanta_vec4" => {
+                    "build_vec4" => {
                         let elem_id = self.get_type_id(&MirType::Float(FloatSize::F32));
                         self.emit_global(SpvOp::OpTypeVector, &[id, elem_id, 4]);
-                        self.emit_name(id, "quanta_vec4");
+                        self.emit_name(id, "build_vec4");
                     }
                     _ => {
                         // Regular struct type
@@ -1585,7 +1585,7 @@ impl SpirvBackend {
                     &[ptr_ty, SpvStorageClass::Function as u32, u32_ty],
                 );
                 self.emit_global(SpvOp::OpTypeStruct, &[id, ptr_ty]);
-                self.emit_name(id, "QuantaVecHandle");
+                self.emit_name(id, "BuildVecHandle");
             }
             MirType::Map(_, _) => {
                 // HashMap<K,V> is an opaque pointer handle in SPIR-V
@@ -1596,7 +1596,7 @@ impl SpirvBackend {
                     &[ptr_ty, SpvStorageClass::Function as u32, u32_ty],
                 );
                 self.emit_global(SpvOp::OpTypeStruct, &[id, ptr_ty]);
-                self.emit_name(id, "QuantaMapHandle");
+                self.emit_name(id, "BuildMapHandle");
             }
             MirType::Tuple(elems) => {
                 // Tuples map to SPIR-V structs.
@@ -2226,12 +2226,12 @@ impl SpirvBackend {
                 let tex_id = self.gen_value(texture, func)?;
                 let samp_id = self.gen_value(sampler, func)?;
                 let coords_id = self.gen_value(coords, func)?;
-                let result_ty = MirType::Struct(Arc::from("quanta_vec4")); // vec4 result
+                let result_ty = MirType::Struct(Arc::from("build_vec4")); // vec4 result
                 let result_ty_id = self.get_type_id(&result_ty);
 
                 // Create sampled image from texture + sampler
                 let sampled_img_ty_id = self.get_type_id(&MirType::SampledImage(Box::new(
-                    MirType::Struct(Arc::from("quanta_vec4")),
+                    MirType::Struct(Arc::from("build_vec4")),
                 )));
                 let combined_id = self.alloc_id();
                 self.emit(
@@ -2843,7 +2843,7 @@ impl SpirvBackend {
     // =========================================================================
     // These methods construct complete, valid SPIR-V binaries for specific
     // shader programs by calling the emission helpers directly. This bypasses
-    // the full QuantaLang MIR pipeline and proves the backend CAN generate
+    // the full BuildLang MIR pipeline and proves the backend CAN generate
     // valid vertex/fragment shaders that pass spirv-val and load into Vulkan.
 
     /// Generate a complete SPIR-V binary for a minimal triangle fragment shader.
@@ -4193,13 +4193,13 @@ impl SpirvBackend {
         if func.sig.ret != MirType::Void {
             let ret_ty = &func.sig.ret;
 
-            // Built-in vector types (quanta_vec2/3/4) are single output values
+            // Built-in vector types (build_vec2/3/4) are single output values
             let is_builtin_vec = matches!(ret_ty, MirType::Struct(ref name)
-                if name.as_ref() == "quanta_vec2" || name.as_ref() == "quanta_vec3" || name.as_ref() == "quanta_vec4");
+                if name.as_ref() == "build_vec2" || name.as_ref() == "build_vec3" || name.as_ref() == "build_vec4");
 
-            // For vertex shaders returning quanta_vec4: treat as gl_Position
+            // For vertex shaders returning build_vec4: treat as gl_Position
             let is_vertex_position = matches!(exec_model, SpvExecutionModel::Vertex)
-                && matches!(ret_ty, MirType::Struct(ref name) if name.as_ref() == "quanta_vec4");
+                && matches!(ret_ty, MirType::Struct(ref name) if name.as_ref() == "build_vec4");
 
             if matches!(exec_model, SpvExecutionModel::Vertex) && !is_builtin_vec {
                 // User struct return: split into individual output fields
@@ -4218,7 +4218,7 @@ impl SpirvBackend {
                                 .map(|n| n.as_ref() == "position")
                                 .unwrap_or(false);
                             let is_vec4 = matches!(field_ty, MirType::Vector(ref elem, 4) if elem.is_float())
-                                || matches!(field_ty, MirType::Struct(ref n) if n.as_ref() == "quanta_vec4");
+                                || matches!(field_ty, MirType::Struct(ref n) if n.as_ref() == "build_vec4");
 
                             if is_position && is_vec4 {
                                 self.emit_decoration(
@@ -4274,7 +4274,7 @@ impl SpirvBackend {
                 }
             } else {
                 // Built-in vec return (vertex position) or fragment shader output
-                // quanta_vec types already map to OpTypeVector in get_type_id
+                // build_vec types already map to OpTypeVector in get_type_id
                 let ptr_ty_id = self.get_ptr_type_id(ret_ty, SpvStorageClass::Output);
                 let var_id = self.alloc_id();
                 self.emit_global(
@@ -5243,7 +5243,7 @@ mod tests {
     fn validate_spirv_bytes(bytes: &[u8], label: &str) -> Result<(), String> {
         use std::io::Write;
 
-        let tmp_path = std::env::temp_dir().join(format!("quantalang_test_{}.spv", label));
+        let tmp_path = std::env::temp_dir().join(format!("buildlang_test_{}.spv", label));
         let mut f = std::fs::File::create(&tmp_path)
             .map_err(|e| format!("Failed to create temp file: {}", e))?;
         f.write_all(bytes)
@@ -5298,30 +5298,28 @@ mod tests {
         // Generate and write fragment shader
         let mut backend = SpirvBackend::new();
         let frag_bytes = backend.generate_triangle_fragment_shader();
-        let frag_path = out_dir.join("quanta_frag.spv");
-        let mut f = std::fs::File::create(&frag_path).expect("Failed to create quanta_frag.spv");
+        let frag_path = out_dir.join("build_frag.spv");
+        let mut f = std::fs::File::create(&frag_path).expect("Failed to create build_frag.spv");
         f.write_all(&frag_bytes)
-            .expect("Failed to write quanta_frag.spv");
+            .expect("Failed to write build_frag.spv");
 
         // Validate
-        validate_spirv_bytes(&frag_bytes, "quanta_frag")
-            .expect("quanta_frag.spv failed validation");
+        validate_spirv_bytes(&frag_bytes, "build_frag").expect("build_frag.spv failed validation");
 
         // Generate and write vertex shader
         let mut backend = SpirvBackend::new();
         let vert_bytes = backend.generate_triangle_vertex_shader();
-        let vert_path = out_dir.join("quanta_vert.spv");
-        let mut f = std::fs::File::create(&vert_path).expect("Failed to create quanta_vert.spv");
+        let vert_path = out_dir.join("build_vert.spv");
+        let mut f = std::fs::File::create(&vert_path).expect("Failed to create build_vert.spv");
         f.write_all(&vert_bytes)
-            .expect("Failed to write quanta_vert.spv");
+            .expect("Failed to write build_vert.spv");
 
         // Validate
-        validate_spirv_bytes(&vert_bytes, "quanta_vert")
-            .expect("quanta_vert.spv failed validation");
+        validate_spirv_bytes(&vert_bytes, "build_vert").expect("build_vert.spv failed validation");
 
         // Verify files exist and have content
-        assert!(frag_path.exists(), "quanta_frag.spv was not written");
-        assert!(vert_path.exists(), "quanta_vert.spv was not written");
+        assert!(frag_path.exists(), "build_frag.spv was not written");
+        assert!(vert_path.exists(), "build_vert.spv was not written");
         assert!(
             frag_bytes.len() > 100,
             "Fragment shader too small: {} bytes",
@@ -5355,7 +5353,7 @@ mod tests {
 
         // Write to examples directory
         let out_dir = std::env::temp_dir();
-        let path = out_dir.join("quanta_uniform_vert.spv");
+        let path = out_dir.join("build_uniform_vert.spv");
         std::fs::write(&path, &bytes).expect("Failed to write uniform vertex shader");
     }
 
@@ -5380,7 +5378,7 @@ mod tests {
 
         // Write to examples directory
         let out_dir = std::env::temp_dir();
-        let path = out_dir.join("quanta_textured_frag.spv");
+        let path = out_dir.join("build_textured_frag.spv");
         std::fs::write(&path, &bytes).expect("Failed to write textured fragment shader");
     }
 
@@ -5394,9 +5392,9 @@ mod tests {
         // Generate uniform vertex shader (MVP transform from UBO)
         let mut backend = SpirvBackend::new();
         let vert_bytes = backend.generate_uniform_vertex_shader();
-        let vert_path = out_dir.join("quanta_uniform_vert.spv");
+        let vert_path = out_dir.join("build_uniform_vert.spv");
         let mut f =
-            std::fs::File::create(&vert_path).expect("Failed to create quanta_uniform_vert.spv");
+            std::fs::File::create(&vert_path).expect("Failed to create build_uniform_vert.spv");
         f.write_all(&vert_bytes).expect("Failed to write");
         validate_spirv_bytes(&vert_bytes, "uniform_vert")
             .expect("Uniform vertex shader failed validation");
@@ -5404,9 +5402,9 @@ mod tests {
         // Generate textured fragment shader (texture sampling)
         let mut backend = SpirvBackend::new();
         let frag_bytes = backend.generate_textured_fragment_shader();
-        let frag_path = out_dir.join("quanta_textured_frag.spv");
+        let frag_path = out_dir.join("build_textured_frag.spv");
         let mut f =
-            std::fs::File::create(&frag_path).expect("Failed to create quanta_textured_frag.spv");
+            std::fs::File::create(&frag_path).expect("Failed to create build_textured_frag.spv");
         f.write_all(&frag_bytes).expect("Failed to write");
         validate_spirv_bytes(&frag_bytes, "textured_frag")
             .expect("Textured fragment shader failed validation");

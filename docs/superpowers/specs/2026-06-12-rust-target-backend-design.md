@@ -5,7 +5,7 @@ Status: Accepted for first implementation slice
 
 ## Purpose
 
-Add Rust as a first-class QuantaC code generation target so QuantaLang can use
+Add Rust as a first-class BuildC code generation target so BuildLang can use
 Rust as a typed substrate and verification bridge rather than only treating
 Rust as the compiler implementation language.
 
@@ -24,10 +24,10 @@ The first backend is intentionally narrow:
 
 ## Ownership Bridge
 
-The compiler already performs QuantaLang borrow-state checks during type
+The compiler already performs BuildLang borrow-state checks during type
 inference. This slice does not replace that with a Rust clone; it projects
 borrow-shaped MIR into Rust syntax so `rustc` can act as an additional backend
-validation layer. The QuantaLang checker remains the language authority, while
+validation layer. The BuildLang checker remains the language authority, while
 Rust gives a concrete systems-language substrate for the portable subset.
 
 ## Non-Goals
@@ -41,7 +41,7 @@ Rust gives a concrete systems-language substrate for the portable subset.
 ## Acceptance
 
 - Compiler unit tests pass.
-- `quantac --target rust` emits `.rs` files.
+- `buildc --target rust` emits `.rs` files.
 - Generated Rust for at least hello, functions, variables, arithmetic, and
   simple branching passes `rustc --emit=metadata`.
 - Documentation states the Rust target status as experimental and subset-based.

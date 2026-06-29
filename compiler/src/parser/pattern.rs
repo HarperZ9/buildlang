@@ -1,12 +1,12 @@
 // ===============================================================================
-// QUANTALANG PARSER - PATTERN PARSING
+// BUILDLANG PARSER - PATTERN PARSING
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
 //! Pattern parsing.
 //!
-//! This module handles parsing of all pattern expressions in QuantaLang,
+//! This module handles parsing of all pattern expressions in BuildLang,
 //! used in match arms, let bindings, function parameters, etc.
 
 use super::{ParseError, ParseErrorKind, ParseResult, Parser};
@@ -664,7 +664,7 @@ mod tests {
 
     /// Parse a pattern by wrapping it in `fn test() { let PATTERN = x; }`.
     fn parse_pattern_str(s: &str) -> ParseResult<Pattern> {
-        let source = LexerSourceFile::new("test.quanta", format!("fn test() {{ let {} = x; }}", s));
+        let source = LexerSourceFile::new("test.bld", format!("fn test() {{ let {} = x; }}", s));
         let mut lexer = Lexer::new(&source);
         let tokens = lexer.tokenize().unwrap();
         let mut parser = Parser::new(&source, tokens);

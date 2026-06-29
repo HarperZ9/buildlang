@@ -5,7 +5,7 @@ Status: Approved for implementation planning
 
 ## Purpose
 
-`quantac check` should produce a machine-readable accountability artifact for
+`buildc check` should produce a machine-readable accountability artifact for
 ordinary source files. The compiler already enforces capability effects such as
 `Console`, `FileSystem`, `Network`, `Process`, `Environment`, `Clock`,
 `Foreign`, and `Gpu`; this slice exposes the same evidence as deterministic
@@ -27,15 +27,15 @@ gates can consume.
 - Semantic-corpus receipts already record capability metadata for curated
   backend execution evidence, but they do not cover arbitrary user source.
 - CLI tests in `compiler/tests/cli.rs` already exercise capability diagnostics
-  through the built `quantac` binary.
+  through the built `buildc` binary.
 
 ## Command Surface
 
-Extend `quantac check` with:
+Extend `buildc check` with:
 
 ```text
-quantac check <FILE> --receipt <PATH>
-quantac check <FILE> --receipt -
+buildc check <FILE> --receipt <PATH>
+buildc check <FILE> --receipt -
 ```
 
 Behavior:
@@ -50,15 +50,15 @@ Behavior:
 
 ## Receipt Shape
 
-The first schema is `quantalang-check-receipt/v1`.
+The first schema is `buildlang-check-receipt/v1`.
 
 Required fields:
 
 ```json
 {
-  "schema": "quantalang-check-receipt/v1",
-  "compiler": "quantac",
-  "source": "path/to/file.quanta",
+  "schema": "buildlang-check-receipt/v1",
+  "compiler": "buildc",
+  "source": "path/to/file.bld",
   "status": "passed",
   "items": 1,
   "tokens": 12,
@@ -149,7 +149,7 @@ Verification for the implementation branch:
 
 The slice is acceptable when:
 
-- `quantac check` works exactly as before without `--receipt`;
+- `buildc check` works exactly as before without `--receipt`;
 - `--receipt -` emits parseable JSON to stdout;
 - `--receipt <PATH>` writes parseable JSON to the requested path;
 - passing receipts include declared and observed capability evidence;

@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 520" role="img" aria-label="BuildLang README hero for the Build ecosystem. Typed effects in, verified C out.">
+  <title>BuildLang hero</title>
+  <desc>BuildLang README hero for the Build ecosystem. Typed effects in, verified C out across eight codegen backends.</desc>
+  <rect width="1280" height="520" rx="34" fill="#f4f3ef"/>
+  <path d="M80 96 H1200 M80 424 H1200" stroke="#0b0c0e" stroke-opacity=".14"/>
+  <text x="80" y="86" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="20" letter-spacing="6" fill="#585c64">BUILD ECOSYSTEM / THE EFFECTS LANGUAGE</text>
+  <text x="76" y="334" font-family="Arial Black, Impact, system-ui, sans-serif" font-size="150" letter-spacing="0" fill="#0b0c0e" fill-opacity=".08">BUILDLANG</text>
+  <text font-family="Arial, Helvetica, sans-serif" font-size="40" font-weight="700" fill="#0b0c0e">
+    <tspan x="84" y="188">Typed effects in, verified C out,</tspan>
+    <tspan x="84" dy="48">across eight codegen backends.</tspan>
+  </text>
+  <text x="86" y="290" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="22" fill="#2f3238">LEX / PARSE / TYPE / EFFECTS / CODEGEN</text>
+  <g transform="translate(902 96) scale(.66)">
+    <path d="M206 104 C156 104 178 198 126 220 C178 242 156 336 206 336" fill="none" stroke="#0b0c0e" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M314 104 C364 104 342 198 394 220 C342 242 364 336 314 336" fill="none" stroke="#0b0c0e" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="260" cy="220" r="24" fill="#4636e8"/>
+  </g>
+</svg>

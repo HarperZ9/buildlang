@@ -1,5 +1,5 @@
 // ===============================================================================
-// QUANTALANG LSP TYPES
+// BUILDLANG LSP TYPES
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
@@ -208,7 +208,7 @@ pub struct AnnotatedTextEdit {
 pub struct TextDocumentItem {
     /// The text document's URI.
     pub uri: DocumentUri,
-    /// The language id (e.g., "quanta").
+    /// The language id (e.g., "build").
     pub language_id: String,
     /// Version number.
     pub version: i32,
@@ -294,7 +294,7 @@ impl Diagnostic {
             range,
             severity: Some(DiagnosticSeverity::Error),
             code: None,
-            source: Some("quantalang".to_string()),
+            source: Some("buildlang".to_string()),
             message: message.into(),
             tags: Vec::new(),
             related_information: Vec::new(),
@@ -306,7 +306,7 @@ impl Diagnostic {
             range,
             severity: Some(DiagnosticSeverity::Warning),
             code: None,
-            source: Some("quantalang".to_string()),
+            source: Some("buildlang".to_string()),
             message: message.into(),
             tags: Vec::new(),
             related_information: Vec::new(),
@@ -318,7 +318,7 @@ impl Diagnostic {
             range,
             severity: Some(DiagnosticSeverity::Hint),
             code: None,
-            source: Some("quantalang".to_string()),
+            source: Some("buildlang".to_string()),
             message: message.into(),
             tags: Vec::new(),
             related_information: Vec::new(),
