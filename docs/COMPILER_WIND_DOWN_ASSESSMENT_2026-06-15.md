@@ -1,3 +1,9 @@
+> **Superseded 2026-06-29** by `docs/UNIVERSAL_SUBSTRATE_DIRECTIVE_2026-06-29.md`.
+> The wind-down is lifted for the MIR-interlingua, effects/data substrate, C-path
+> hardening, and self-hosting lanes, and kept in force only for full native/GPU
+> backend productionization. This document is preserved unedited below for the
+> provenance trail; it no longer governs posture.
+
 # Compiler Wind-Down Assessment - 2026-06-15
 
 This note captures the current posture for winding down full-scale QuantaLang
