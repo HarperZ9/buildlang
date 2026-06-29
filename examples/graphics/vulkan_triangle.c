@@ -1,5 +1,5 @@
 /*
- * vulkan_triangle.c - QuantaLang Vulkan Triangle Renderer
+ * vulkan_triangle.c - BuildLang Vulkan Triangle Renderer
  *
  * A standalone C program that renders a colored triangle using Vulkan + Win32.
  * No GLFW, no external dependencies beyond the Vulkan SDK and Windows API.
@@ -22,7 +22,7 @@
  * -------------------------------------------------------------------------- */
 #define WINDOW_WIDTH   800
 #define WINDOW_HEIGHT  600
-#define WINDOW_TITLE   "QuantaLang - Vulkan Triangle (Hot Reload)"
+#define WINDOW_TITLE   "BuildLang - Vulkan Triangle (Hot Reload)"
 #define MAX_FRAMES_IN_FLIGHT 2
 #define HOT_RELOAD_CHECK_INTERVAL 60  /* check every N frames */
 
@@ -213,7 +213,7 @@ static void create_window(void) {
     wc.lpfnWndProc   = WndProc;
     wc.hInstance      = g_hinstance;
     wc.hCursor        = LoadCursor(NULL, IDC_ARROW);
-    wc.lpszClassName  = "QuantaLangVulkanClass";
+    wc.lpszClassName  = "BuildLangVulkanClass";
 
     if (!RegisterClassA(&wc)) {
         fprintf(stderr, "Failed to register window class\n");
@@ -225,7 +225,7 @@ static void create_window(void) {
     AdjustWindowRect(&rect, WS_OVERLAPPEDWINDOW, FALSE);
 
     g_hwnd = CreateWindowExA(
-        0, "QuantaLangVulkanClass", WINDOW_TITLE, WS_OVERLAPPEDWINDOW,
+        0, "BuildLangVulkanClass", WINDOW_TITLE, WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT,
         rect.right - rect.left, rect.bottom - rect.top,
         NULL, NULL, g_hinstance, NULL);
@@ -246,9 +246,9 @@ static void create_instance(void) {
     VkApplicationInfo app_info;
     memset(&app_info, 0, sizeof(app_info));
     app_info.sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    app_info.pApplicationName   = "QuantaLang Triangle";
+    app_info.pApplicationName   = "BuildLang Triangle";
     app_info.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
-    app_info.pEngineName        = "QuantaLang";
+    app_info.pEngineName        = "BuildLang";
     app_info.engineVersion      = VK_MAKE_VERSION(1, 0, 0);
     app_info.apiVersion         = VK_API_VERSION_1_0;
 
@@ -622,18 +622,18 @@ static uint32_t* load_spv_file(const char* path, size_t* out_size) {
 }
 
 static void create_pipeline(void) {
-    /* Try to load QuantaLang-generated shaders first, fall back to embedded GLSL ones */
+    /* Try to load BuildLang-generated shaders first, fall back to embedded GLSL ones */
     size_t ql_vert_size = 0, ql_frag_size = 0;
-    uint32_t* ql_vert = load_spv_file("quanta_vert.spv", &ql_vert_size);
-    uint32_t* ql_frag = load_spv_file("quanta_frag.spv", &ql_frag_size);
+    uint32_t* ql_vert = load_spv_file("build_vert.spv", &ql_vert_size);
+    uint32_t* ql_frag = load_spv_file("build_frag.spv", &ql_frag_size);
 
     VkShaderModule vert_mod, frag_mod;
     if (ql_vert && ql_frag) {
-        printf("[QUANTALANG] Using QuantaLang-generated shaders!\n");
+        printf("[BUILDLANG] Using BuildLang-generated shaders!\n");
         vert_mod = create_shader_module(ql_vert, ql_vert_size);
         frag_mod = create_shader_module(ql_frag, ql_frag_size);
     } else {
-        printf("[GLSL] Using embedded GLSL shaders (QuantaLang .spv files not found)\n");
+        printf("[GLSL] Using embedded GLSL shaders (BuildLang .spv files not found)\n");
         vert_mod = create_shader_module(vert_spv, vert_spv_size);
         frag_mod = create_shader_module(frag_spv, frag_spv_size);
     }
@@ -1024,8 +1024,8 @@ static time_t get_file_mtime(const char* path) {
 }
 
 static int check_shader_reload(void) {
-    time_t vert_t = get_file_mtime("quanta_vert.spv");
-    time_t frag_t = get_file_mtime("quanta_frag.spv");
+    time_t vert_t = get_file_mtime("build_vert.spv");
+    time_t frag_t = get_file_mtime("build_frag.spv");
 
     if ((vert_t > g_vert_mtime && g_vert_mtime > 0) ||
         (frag_t > g_frag_mtime && g_frag_mtime > 0)) {
@@ -1054,7 +1054,7 @@ static void reload_pipeline(void) {
  * Entry point
  * -------------------------------------------------------------------------- */
 int main(void) {
-    printf("=== QuantaLang Vulkan Triangle Renderer ===\n\n");
+    printf("=== BuildLang Vulkan Triangle Renderer ===\n\n");
 
     create_window();
     create_instance();
@@ -1069,8 +1069,8 @@ int main(void) {
     create_sync_objects();
 
     printf("\n[main] Entering render loop (press ESC or close window to exit)\n");
-    printf("[main] Shader hot reload ENABLED - edit .quanta files and recompile!\n");
-    printf("[main] Run: quantac watch . --target=spirv   (in another terminal)\n\n");
+    printf("[main] Shader hot reload ENABLED - edit .bld files and recompile!\n");
+    printf("[main] Run: buildc watch . --target=spirv   (in another terminal)\n\n");
 
     /* Main message + render loop */
     while (g_running) {

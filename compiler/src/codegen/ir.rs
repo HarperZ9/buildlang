@@ -1,5 +1,5 @@
 // ===============================================================================
-// QUANTALANG CODE GENERATOR - MID-LEVEL IR
+// BUILDLANG CODE GENERATOR - MID-LEVEL IR
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
@@ -274,7 +274,7 @@ impl MirFnSig {
             params,
             ret,
             is_variadic: false,
-            calling_conv: CallingConv::Quanta,
+            calling_conv: CallingConv::Build,
         }
     }
 }
@@ -282,8 +282,8 @@ impl MirFnSig {
 /// Calling convention.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CallingConv {
-    /// Default QuantaLang calling convention.
-    Quanta,
+    /// Default BuildLang calling convention.
+    Build,
     /// C calling convention.
     C,
     /// Fast calling convention.
@@ -849,9 +849,9 @@ pub enum MirType {
     /// Trait object: fat pointer (data_ptr: *void, vtable_ptr: *VTable).
     /// The Arc<str> is the trait name.
     TraitObject(Arc<str>),
-    /// Dynamic array Vec<T>: heap-allocated handle wrapping QuantaVec.
+    /// Dynamic array Vec<T>: heap-allocated handle wrapping BuildVec.
     Vec(Box<MirType>),
-    /// HashMap<K, V>: heap-allocated handle wrapping QuantaHashMap.
+    /// HashMap<K, V>: heap-allocated handle wrapping BuildHashMap.
     Map(Box<MirType>, Box<MirType>),
     /// Tuple type: (T0, T1, ...).
     Tuple(Vec<MirType>),
@@ -1030,8 +1030,8 @@ impl MirType {
                 None // Opaque GPU types - no CPU bit size
             }
             MirType::TraitObject(_) => Some(ptr_size * 2), // Fat pointer: data + vtable
-            MirType::Vec(_) => Some(ptr_size),             // QuantaVecHandle is a pointer
-            MirType::Map(_, _) => Some(ptr_size),          // QuantaMapHandle is a pointer
+            MirType::Vec(_) => Some(ptr_size),             // BuildVecHandle is a pointer
+            MirType::Map(_, _) => Some(ptr_size),          // BuildMapHandle is a pointer
             MirType::Tuple(elems) => {
                 let mut total = 0u32;
                 for e in elems {

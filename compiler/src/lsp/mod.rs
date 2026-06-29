@@ -1,10 +1,10 @@
 // ===============================================================================
-// QUANTALANG LANGUAGE SERVER PROTOCOL
+// BUILDLANG LANGUAGE SERVER PROTOCOL
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
-//! Language Server Protocol implementation for QuantaLang.
+//! Language Server Protocol implementation for BuildLang.
 //!
 //! This module provides full LSP support including:
 //! - Text document synchronization

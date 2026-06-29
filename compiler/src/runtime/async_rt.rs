@@ -1,10 +1,10 @@
 // ===============================================================================
-// QUANTALANG ASYNC RUNTIME
+// BUILDLANG ASYNC RUNTIME
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
-//! Async runtime with work-stealing scheduler for QuantaLang.
+//! Async runtime with work-stealing scheduler for BuildLang.
 //!
 //! This module provides the async/await runtime infrastructure including:
 //! - Work-stealing task scheduler

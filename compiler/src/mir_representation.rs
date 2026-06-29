@@ -5,16 +5,16 @@ use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use quantalang::ast::Module;
-use quantalang::codegen::{
+use buildlang::ast::Module;
+use buildlang::codegen::{
     lower::MirLowerer, AggregateKind, BinOp, BindingKind, CallingConv, CastKind, ExternalKind,
     FloatSize, IntSize, Linkage, MirConst, MirEnumVariant, MirFnSig, MirGlobal, MirModule,
     MirPlace, MirRValue, MirStmtKind, MirTerminator, MirType, MirTypeDef, MirUniform, MirValue,
     NullaryOp, PlaceProjection, ShaderBinding, ShaderStage, TypeDefKind, UnaryOp,
 };
-use quantalang::lexer::{Lexer, SourceFile};
-use quantalang::parser::Parser;
-use quantalang::types::{FunctionEffectSummary, TypeChecker, TypeContext};
+use buildlang::lexer::{Lexer, SourceFile};
+use buildlang::parser::Parser;
+use buildlang::types::{FunctionEffectSummary, TypeChecker, TypeContext};
 
 use super::{
     input_graph_digest, preprocess_includes_recording_inputs, resolve_imports_recording_inputs,
@@ -24,7 +24,7 @@ use super::{
 
 pub(crate) const MIR_REPRESENTATION_RECEIPT: &str = "mir-representation-2026-06-18.json";
 
-const MIR_REPRESENTATION_SCHEMA: &str = "quantalang-mir-representation-receipt/v0";
+const MIR_REPRESENTATION_SCHEMA: &str = "buildlang-mir-representation-receipt/v0";
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) struct MirRepresentationReceipt {
@@ -695,7 +695,7 @@ fn shader_stage_name(stage: ShaderStage) -> &'static str {
 
 fn calling_conv_name(calling_conv: CallingConv) -> &'static str {
     match calling_conv {
-        CallingConv::Quanta => "Quanta",
+        CallingConv::Build => "Build",
         CallingConv::C => "C",
         CallingConv::Fast => "Fast",
         CallingConv::Cold => "Cold",
@@ -1233,7 +1233,7 @@ fn write_mir_global(output: &mut String, index: usize, global: &MirGlobal) {
 fn write_mir_external(
     output: &mut String,
     index: usize,
-    external: &quantalang::codegen::MirExternal,
+    external: &buildlang::codegen::MirExternal,
 ) {
     push_line(
         output,
@@ -1606,8 +1606,8 @@ pub(crate) fn build_mir_representation_receipt(
         schema: MIR_REPRESENTATION_SCHEMA.to_string(),
         receipt_id: "mir-representation-semantic-corpus-2026-06-18".to_string(),
         created_at: "2026-06-18".to_string(),
-        compiler: "quantac".to_string(),
-        language: "quantalang".to_string(),
+        compiler: "buildc".to_string(),
+        language: "buildlang".to_string(),
         source_set: MirRepresentationSourceSet {
             kind: "semantic-corpus".to_string(),
             manifest: "manifest.json".to_string(),
@@ -1634,15 +1634,15 @@ pub(crate) fn validate_mir_representation_receipt(
             receipt.schema
         ));
     }
-    if receipt.compiler != "quantac" {
+    if receipt.compiler != "buildc" {
         return Err(format!(
-            "mir representation compiler mismatch: expected 'quantac', found '{}'",
+            "mir representation compiler mismatch: expected 'buildc', found '{}'",
             receipt.compiler
         ));
     }
-    if receipt.language != "quantalang" {
+    if receipt.language != "buildlang" {
         return Err(format!(
-            "mir representation language mismatch: expected 'quantalang', found '{}'",
+            "mir representation language mismatch: expected 'buildlang', found '{}'",
             receipt.language
         ));
     }
@@ -1997,7 +1997,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use quantalang::codegen::{
+    use buildlang::codegen::{
         AggregateKind, BlockId, LocalId, MirBlock, MirConst, MirFnSig, MirFunction, MirLocal,
         MirStmt, MirType, MirTypeDef, MirValue, MirVtable, TypeDefKind,
     };
@@ -2037,9 +2037,9 @@ mod tests {
         assert_eq!(mir_source_digest(lf), mir_source_digest(crlf));
 
         let mut lf_ledger = InputDigestLedger::text_normalized();
-        lf_ledger.record("entry", Path::new("programs/main.quanta"), lf);
+        lf_ledger.record("entry", Path::new("programs/main.bld"), lf);
         let mut crlf_ledger = InputDigestLedger::text_normalized();
-        crlf_ledger.record("entry", Path::new("programs/main.quanta"), crlf);
+        crlf_ledger.record("entry", Path::new("programs/main.bld"), crlf);
 
         assert_eq!(
             input_graph_digest(&lf_ledger.into_sorted_records()).hex,
@@ -2070,7 +2070,7 @@ mod tests {
         let programs = vec![
             MirRepresentationProgram {
                 id: "b".to_string(),
-                path: "programs/b.quanta".to_string(),
+                path: "programs/b.bld".to_string(),
                 source_digest: MirRepresentationDigest {
                     algorithm: "sha256".to_string(),
                     hex: "1".repeat(64),
@@ -2103,7 +2103,7 @@ mod tests {
             },
             MirRepresentationProgram {
                 id: "a".to_string(),
-                path: "programs/a.quanta".to_string(),
+                path: "programs/a.bld".to_string(),
                 source_digest: MirRepresentationDigest {
                     algorithm: "sha256".to_string(),
                     hex: "2".repeat(64),
@@ -2148,7 +2148,7 @@ mod tests {
     #[test]
     fn mir_representation_memory_surfaces_derive_from_mir() {
         let mut module = MirModule::new("memory_test");
-        module.add_type(quantalang_type_def_point());
+        module.add_type(buildlang_type_def_point());
 
         let sig = MirFnSig::new(vec![], MirType::Void);
         let mut func = MirFunction::new("main", sig);
@@ -2193,7 +2193,7 @@ mod tests {
 
         let program = summarize_mir_program(
             "memory_test",
-            "programs/memory_test.quanta",
+            "programs/memory_test.bld",
             MirRepresentationDigest {
                 algorithm: "sha256".to_string(),
                 hex: "3".repeat(64),
@@ -2246,7 +2246,7 @@ mod tests {
 
         let first_program = summarize_mir_program(
             "payload_test",
-            "programs/payload_test.quanta",
+            "programs/payload_test.bld",
             MirRepresentationDigest {
                 algorithm: "sha256".to_string(),
                 hex: "7".repeat(64),
@@ -2260,7 +2260,7 @@ mod tests {
         );
         let second_program = summarize_mir_program(
             "payload_test",
-            "programs/payload_test.quanta",
+            "programs/payload_test.bld",
             MirRepresentationDigest {
                 algorithm: "sha256".to_string(),
                 hex: "7".repeat(64),
@@ -2336,7 +2336,7 @@ mod tests {
         assert_eq!(digest_mir_module(&first), digest_mir_module(&second));
     }
 
-    fn quantalang_type_def_point() -> MirTypeDef {
+    fn buildlang_type_def_point() -> MirTypeDef {
         MirTypeDef {
             name: Arc::from("Point"),
             kind: TypeDefKind::Struct {

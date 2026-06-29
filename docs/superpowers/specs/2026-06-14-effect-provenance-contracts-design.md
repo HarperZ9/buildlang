@@ -5,14 +5,14 @@ Status: Design captured for review; implementation not started
 
 ## Purpose
 
-QuantaLang already makes ambient operational power visible as typed effects:
+BuildLang already makes ambient operational power visible as typed effects:
 direct file, network, process, environment, clock, console, GPU, and FFI access
 must appear in function signatures and check receipts. The next accountability
 step is provenance: distinguish a function that directly touches an ambient
 surface from a function that only propagates an effect because it calls another
 effectful function.
 
-This slice turns `quantac check --receipt --policy` from a flat allow/deny gate
+This slice turns `buildc check --receipt --policy` from a flat allow/deny gate
 into a practical operational contract system:
 
 - direct ambient access can be restricted to narrow boundary functions;
@@ -30,11 +30,11 @@ into a practical operational contract system:
 - `compiler/src/types/check.rs` exposes `FunctionEffectSummary` with
   `declared_effects` and `observed_capabilities`.
 - `compiler/src/main.rs` serializes those summaries into
-  `quantalang-check-receipt/v1` and evaluates `quantalang-check-policy/v1`.
+  `buildlang-check-receipt/v1` and evaluates `buildlang-check-policy/v1`.
 - `source_digest`, `input_digests`, and `input_graph_digest` already bind the
   receipt to the checked source graph.
 - The next-generation assessment recommends this slice as the highest-leverage
-  direction for Quanta as an operational accountability language.
+  direction for Build as an operational accountability language.
 
 ## Problem
 
@@ -61,7 +61,7 @@ That is too coarse for real adoption. Practical policies need to distinguish:
 ### Receipt Extension
 
 Add a top-level `propagated_effects` object to
-`quantalang-check-receipt/v1`:
+`buildlang-check-receipt/v1`:
 
 ```json
 {
@@ -143,12 +143,12 @@ compiler solve global provenance in this slice.
 
 ### Policy Extension
 
-Keep the existing schema string, `quantalang-check-policy/v1`, because these
+Keep the existing schema string, `buildlang-check-policy/v1`, because these
 fields are optional and additive:
 
 ```json
 {
-  "schema": "quantalang-check-policy/v1",
+  "schema": "buildlang-check-policy/v1",
   "allowed_effects": ["Console", "FileSystem"],
   "denied_effects": ["Network", "Foreign"],
   "direct_effect_allowlist": {
@@ -286,7 +286,7 @@ Verification for the implementation branch:
 
 The slice is acceptable when:
 
-- existing `quantac check` behavior is unchanged without `--policy` or
+- existing `buildc check` behavior is unchanged without `--policy` or
   `--receipt`;
 - receipts distinguish direct ambient capability sources from propagated
   effectful callee sources;

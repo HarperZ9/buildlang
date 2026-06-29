@@ -1,14 +1,14 @@
-# QuantaLang Architecture
+# BuildLang Architecture
 
 ## Overview
 
-QuantaLang -- "The Effects Language" -- has a working Rust-based compiler and a large body
+BuildLang -- "The Effects Language" -- has a working Rust-based compiler and a large body
 of aspirational self-hosted code. This document explains what each directory contains and
 what actually works today.
 
 ## `compiler/` -- The Real Compiler (Rust)
 
-This is the working implementation. It compiles QuantaLang source to C99, invokes a system
+This is the working implementation. It compiles BuildLang source to C99, invokes a system
 C compiler (gcc/clang/MSVC), and produces native executables.
 
 **Pipeline:** Lexer -> Parser -> Type Checker -> MIR -> C Backend -> Executable
@@ -23,12 +23,12 @@ What works end-to-end:
 
 What exists with narrower maturity:
 - Rust, LLVM, WASM, SPIR-V, x86-64, and ARM64 backends are selectable through
-  `quantac build --target`, but remain experimental or validation lanes rather
+  `buildc build --target`, but remain experimental or validation lanes rather
   than production targets.
 - HLSL and GLSL shader output are useful public adjuncts, with less release
   weight than the C backend.
 - LSP server, code formatter, and package manager have CLI entry points
-  (`quantac lsp`, `quantac fmt`, `quantac pkg`), but LSP request dispatch is
+  (`buildc lsp`, `buildc fmt`, `buildc pkg`), but LSP request dispatch is
   still limited and the package manager has no live registry.
 
 Key paths:
@@ -43,23 +43,23 @@ Key paths:
 
 CLI today:
 ```
-quantac lex <file>       # Tokenize and print tokens
-quantac parse <file>     # Parse and print AST
-quantac check <file>     # Type-check
-quantac build [path]     # Compile to C -> native executable
-quantac build --target <target>
-quantac run <file>       # Compile and run
-quantac test             # Legacy fixture runner; not the current release gate
-quantac fmt <file>       # Format source
-quantac pkg <subcommand> # Package manager surface
-quantac watch [path]     # Watch and recompile
-quantac lsp              # Start current LSP server loop
-quantac doctor           # Toolchain/backend readiness diagnostics
-quantac corpus verify    # Verify semantic corpus receipts and C stdout
-quantac policy ...       # Built-in check policy profiles
-quantac receipt verify   # Verify saved check receipts
-quantac repl             # Interactive REPL
-quantac version          # Print version
+buildc lex <file>       # Tokenize and print tokens
+buildc parse <file>     # Parse and print AST
+buildc check <file>     # Type-check
+buildc build [path]     # Compile to C -> native executable
+buildc build --target <target>
+buildc run <file>       # Compile and run
+buildc test             # Legacy fixture runner; not the current release gate
+buildc fmt <file>       # Format source
+buildc pkg <subcommand> # Package manager surface
+buildc watch [path]     # Watch and recompile
+buildc lsp              # Start current LSP server loop
+buildc doctor           # Toolchain/backend readiness diagnostics
+buildc corpus verify    # Verify semantic corpus receipts and C stdout
+buildc policy ...       # Built-in check policy profiles
+buildc receipt verify   # Verify saved check receipts
+buildc repl             # Interactive REPL
+buildc version          # Print version
 ```
 
 ## `future/` -- Aspirational Self-Hosted Compiler
@@ -67,7 +67,7 @@ quantac version          # Print version
 **The self-hosted compiler in `future/` is a design document expressed as code. It
 represents the future vision but cannot be compiled by the current compiler.**
 
-This directory contains 251,590 lines of `.quanta` code: a complete self-hosted compiler,
+This directory contains 251,590 lines of `.bld` code: a complete self-hosted compiler,
 standard library, and test suite. None of it compiles or executes. The Rust compiler does
 not yet support the module system, import syntax, generics, or standard library that this
 code relies on.
@@ -80,10 +80,10 @@ Key paths:
 - `future/tests/` -- test suite for the self-hosted compiler
 - `future/release/` -- release packaging
 
-This code is valuable as a specification and roadmap. It defines what QuantaLang's syntax,
+This code is valuable as a specification and roadmap. It defines what BuildLang's syntax,
 standard library, and tooling should look like when the language is capable of self-hosting.
 
-## `quantalang/` -- Aspirational Self-Hosted Tree and Historical Release Materials
+## `buildlang/` -- Aspirational Self-Hosted Tree and Historical Release Materials
 
 What remains in this directory:
 - `examples/` -- aspirational example programs (effects demos, HTTP server,
@@ -100,20 +100,20 @@ it is verified by the Rust compiler in `compiler/`.
 
 This directory contains legacy fixture programs, shader fixtures, cross-target
 artifacts, and focused examples. Some files still compile and run with the
-current Rust compiler, but the historical `quantac test` sweep is no longer a
+current Rust compiler, but the historical `buildc test` sweep is no longer a
 green release gate because older fixtures predate explicit capability
 annotations.
 
 The active release-shaped proof is the Cargo baseline in `README.md` and
-`STATUS.md`, plus semantic-corpus receipt verification. A live `quantac test`
+`STATUS.md`, plus semantic-corpus receipt verification. A live `buildc test`
 run on 2026-06-15 starts 137 legacy fixtures and stops at
-`tests/programs/04_if_else.quanta` because that fixture lacks the now-required
+`tests/programs/04_if_else.bld` because that fixture lacks the now-required
 `Console` capability annotation.
 
 ## `src/` -- Top-Level Source
 
-Contains additional QuantaLang source files (lexer, parser, stdlib, VM) at the project
-root level. Like `quantalang/quantalang/`, these are aspirational and do not compile with
+Contains additional BuildLang source files (lexer, parser, stdlib, VM) at the project
+root level. Like `buildlang/buildlang/`, these are aspirational and do not compile with
 the current compiler.
 
 ## Line Counts
@@ -122,7 +122,7 @@ the current compiler.
 |---|---|---|---|
 | `compiler/src/` | 88,946 | Rust | Working core, partial tools |
 | `compiler/tests/` | 10,976 | Rust | Working CLI/integration tests |
-| `tests/programs/` | 153 `.quanta` files | QuantaLang | Legacy/current mixed fixtures |
-| `future/self-hosted-compiler/` | 217,961 | QuantaLang | Aspirational |
-| `future/stdlib/` | 26,124 | QuantaLang | Aspirational |
-| `future/tests/` | 7,505 | QuantaLang | Aspirational |
+| `tests/programs/` | 153 `.bld` files | BuildLang | Legacy/current mixed fixtures |
+| `future/self-hosted-compiler/` | 217,961 | BuildLang | Aspirational |
+| `future/stdlib/` | 26,124 | BuildLang | Aspirational |
+| `future/tests/` | 7,505 | BuildLang | Aspirational |

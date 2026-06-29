@@ -5,7 +5,7 @@ Status: Approved by standing continue direction
 
 ## Purpose
 
-`quantac check --receipt` currently records a SHA-256 digest for the entry
+`buildc check --receipt` currently records a SHA-256 digest for the entry
 source file. That is useful, but the checker also resolves registry imports,
 `include!("...")` directives, and `mod foo;` files before type checking. A
 receipt can therefore remain unchanged when a transitive checked input changes.
@@ -17,14 +17,14 @@ file whose bytes feed the check.
 
 ## Receipt Shape
 
-Add an `input_digests` array to `quantalang-check-receipt/v1`:
+Add an `input_digests` array to `buildlang-check-receipt/v1`:
 
 ```json
 {
   "input_digests": [
     {
       "role": "entry",
-      "source": "app.quanta",
+      "source": "app.bld",
       "digest": {
         "algorithm": "sha256",
         "hex": "..."
@@ -32,7 +32,7 @@ Add an `input_digests` array to `quantalang-check-receipt/v1`:
     },
     {
       "role": "include",
-      "source": "shared.quanta",
+      "source": "shared.bld",
       "digest": {
         "algorithm": "sha256",
         "hex": "..."
@@ -46,7 +46,7 @@ Rules:
 
 - `source_digest` remains the SHA-256 digest of the entry file bytes.
 - `input_digests` includes the entry file and every file read by import,
-  include, or module resolution during `quantac check`.
+  include, or module resolution during `buildc check`.
 - Each digest is over exact file bytes before UTF-8 conversion or parsing.
 - Duplicate canonical paths are recorded once, using the first role observed.
 - Output is deterministic: sorted by role and source path before serialization.

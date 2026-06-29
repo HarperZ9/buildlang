@@ -2,15 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a checked Memory/RAM Layout Receipt for the semantic corpus and make `quantac corpus verify` recompute and verify memory evidence from manifest tags plus lowered MIR.
+**Goal:** Add a checked Memory/RAM Layout Receipt for the semantic corpus and make `buildc corpus verify` recompute and verify memory evidence from manifest tags plus lowered MIR.
 
 **Architecture:** Keep detailed memory receipt DTOs, classification, digesting, and validation in a focused `compiler/src/memory_layout.rs` module. Reuse the MIR representation lowering/digest path so memory evidence is bound to the same source/input/MIR facts, and keep `compiler/src/main.rs` as the corpus orchestration layer that reads receipts, validates substrate references, and prints receipt status.
 
-**Tech Stack:** Rust 2021, `serde`, `serde_json`, `sha2`, existing `quantac` parser/type-checker/MIR APIs, existing Cargo CLI integration tests.
+**Tech Stack:** Rust 2021, `serde`, `serde_json`, `sha2`, existing `buildc` parser/type-checker/MIR APIs, existing Cargo CLI integration tests.
 
 ## Global Constraints
 
-- Schema must be exactly `quantalang-memory-layout-receipt/v0`.
+- Schema must be exactly `buildlang-memory-layout-receipt/v0`.
 - Checked-in receipt path must be exactly `semantic-corpus/receipts/memory-layout-2026-06-18.json`.
 - Substrate receipt reference must be exactly `memory_surface.memory_receipt`.
 - Do not add a public memory dump command in this slice.
@@ -40,7 +40,7 @@
 - Modify: `compiler/tests/cli.rs`
 
 **Interfaces:**
-- Consumes: existing `temp_semantic_corpus(label: &str) -> PathBuf`, `quantac() -> Command`, `repo_root() -> PathBuf`, `c_backend_ready() -> bool`, and `write_substrate_receipt_copy`.
+- Consumes: existing `temp_semantic_corpus(label: &str) -> PathBuf`, `buildc() -> Command`, `repo_root() -> PathBuf`, `c_backend_ready() -> bool`, and `write_substrate_receipt_copy`.
 - Produces: `write_memory_layout_receipt_copy(corpus_root: &Path, transform: impl FnOnce(serde_json::Value) -> serde_json::Value)`.
 
 - [ ] **Step 1: Add the copied memory receipt helper**
@@ -78,13 +78,13 @@ fn corpus_verify_checks_memory_layout_receipt() {
         return;
     }
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(repo_root().join("semantic-corpus"))
         .output()
-        .expect("run quantac corpus verify with memory layout receipt");
+        .expect("run buildc corpus verify with memory layout receipt");
 
     assert!(
         output.status.success(),
@@ -112,17 +112,17 @@ fn corpus_verify_rejects_memory_layout_schema_drift() {
     let corpus_root = temp_semantic_corpus("memory_layout_schema");
     write_memory_layout_receipt_copy(&corpus_root, |mut receipt| {
         receipt["schema"] =
-            serde_json::Value::String("quantalang-memory-layout-receipt/v9".into());
+            serde_json::Value::String("buildlang-memory-layout-receipt/v9".into());
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against bad memory layout schema");
+        .expect("run buildc corpus verify against bad memory layout schema");
     let _ = fs::remove_dir_all(&corpus_root);
 
     assert!(!output.status.success(), "schema drift should fail");
@@ -142,13 +142,13 @@ fn corpus_verify_rejects_memory_layout_program_count_drift() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against memory layout program count drift");
+        .expect("run buildc corpus verify against memory layout program count drift");
     let _ = fs::remove_dir_all(&corpus_root);
 
     assert!(!output.status.success(), "program count drift should fail");
@@ -164,17 +164,17 @@ fn corpus_verify_rejects_memory_layout_program_count_drift() {
 fn corpus_verify_rejects_memory_layout_path_escape() {
     let corpus_root = temp_semantic_corpus("memory_layout_path_escape");
     write_memory_layout_receipt_copy(&corpus_root, |mut receipt| {
-        receipt["programs"][0]["path"] = serde_json::Value::String("../outside.quanta".into());
+        receipt["programs"][0]["path"] = serde_json::Value::String("../outside.bld".into());
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against memory layout path escape");
+        .expect("run buildc corpus verify against memory layout path escape");
     let _ = fs::remove_dir_all(&corpus_root);
 
     assert!(!output.status.success(), "path escape should fail");
@@ -194,13 +194,13 @@ fn corpus_verify_rejects_memory_layout_source_digest_drift() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against memory layout source digest drift");
+        .expect("run buildc corpus verify against memory layout source digest drift");
     let _ = fs::remove_dir_all(&corpus_root);
 
     assert!(!output.status.success(), "source digest drift should fail");
@@ -221,13 +221,13 @@ fn corpus_verify_rejects_memory_layout_observed_surface_drift() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against memory layout observed surface drift");
+        .expect("run buildc corpus verify against memory layout observed surface drift");
     let _ = fs::remove_dir_all(&corpus_root);
 
     assert!(!output.status.success(), "observed memory surface drift should fail");
@@ -247,13 +247,13 @@ fn corpus_verify_rejects_memory_layout_known_gap_drift() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against memory layout known gap drift");
+        .expect("run buildc corpus verify against memory layout known gap drift");
     let _ = fs::remove_dir_all(&corpus_root);
 
     assert!(!output.status.success(), "known gap drift should fail");
@@ -273,13 +273,13 @@ fn corpus_verify_rejects_memory_layout_byte_layout_overclaim() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against memory layout overclaim");
+        .expect("run buildc corpus verify against memory layout overclaim");
     let _ = fs::remove_dir_all(&corpus_root);
 
     assert!(!output.status.success(), "byte layout overclaim should fail");
@@ -305,13 +305,13 @@ fn corpus_verify_rejects_substrate_memory_receipt_path_escape() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against substrate memory receipt path escape");
+        .expect("run buildc corpus verify against substrate memory receipt path escape");
     let _ = fs::remove_dir_all(&corpus_root);
 
     assert!(!output.status.success(), "substrate memory receipt path escape should fail");
@@ -427,7 +427,7 @@ use crate::mir_representation::{
 use super::{SemanticCorpusManifest, SemanticCorpusProgram};
 
 pub(crate) const MEMORY_LAYOUT_RECEIPT: &str = "memory-layout-2026-06-18.json";
-const MEMORY_LAYOUT_SCHEMA: &str = "quantalang-memory-layout-receipt/v0";
+const MEMORY_LAYOUT_SCHEMA: &str = "buildlang-memory-layout-receipt/v0";
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) struct MemoryLayoutReceipt {
@@ -598,7 +598,7 @@ mod tests {
     fn memory_layout_manifest_surfaces_are_sorted_and_deduplicated() {
         let program = SemanticCorpusProgram {
             id: "p".to_string(),
-            path: "programs/p.quanta".to_string(),
+            path: "programs/p.bld".to_string(),
             surfaces: vec![
                 "stdout".to_string(),
                 "ownership-reuse".to_string(),
@@ -799,7 +799,7 @@ Run:
 cargo test --manifest-path compiler\Cargo.toml memory_layout_builds_receipt_for_semantic_corpus -- --nocapture
 ```
 
-Expected: output contains one valid `quantalang-memory-layout-receipt/v0` JSON object. The committed test must not leave the temporary print in place.
+Expected: output contains one valid `buildlang-memory-layout-receipt/v0` JSON object. The committed test must not leave the temporary print in place.
 
 - [ ] **Step 5: Run corpus CLI slice**
 
@@ -827,7 +827,7 @@ git commit -m "feat: verify memory layout receipts"
 - Modify: `STATUS.md`
 
 **Interfaces:**
-- Consumes: successful `quantac corpus verify` output and the receipt paths.
+- Consumes: successful `buildc corpus verify` output and the receipt paths.
 - Produces: user-facing documentation that memory layout receipts are representation-level RAM evidence, not ABI layout or full borrow proof.
 
 - [ ] **Step 1: Update README substrate receipt section**
@@ -836,10 +836,10 @@ In the section that describes substrate receipts and MIR representation receipts
 
 ```markdown
 The substrate path also carries a checked
-`quantalang-memory-layout-receipt/v0` artifact for the semantic corpus. It
+`buildlang-memory-layout-receipt/v0` artifact for the semantic corpus. It
 recomputes per-program manifest memory tags, MIR-derived memory flags,
 ownership-surface classification, layout-scope classification, source/input/MIR
-digests, and explicit known gaps during `quantac corpus verify`. This is a
+digests, and explicit known gaps during `buildc corpus verify`. This is a
 representation-level RAM/memory evidence receipt, not a byte-offset ABI layout
 claim, allocator proof, async runtime memory proof, or full interprocedural
 borrow proof.
@@ -851,7 +851,7 @@ In `STATUS.md`, extend the summary paragraph that names the MIR representation r
 
 ```markdown
 The same verification path now also checks a
-`quantalang-memory-layout-receipt/v0` artifact that binds the corpus memory
+`buildlang-memory-layout-receipt/v0` artifact that binds the corpus memory
 surface to manifest tags, MIR-derived memory flags, ownership/layout
 classification, digest evidence, and explicit known gaps without claiming
 byte-level ABI layout or full borrow proof.
@@ -863,7 +863,7 @@ Run:
 
 ```powershell
 git diff --check
-rg -n "memory layout receipt|quantalang-memory-layout-receipt/v0|byte-level ABI" README.md STATUS.md
+rg -n "memory layout receipt|buildlang-memory-layout-receipt/v0|byte-level ABI" README.md STATUS.md
 ```
 
 Expected: `git diff --check` exits 0 and `rg` shows the new documentation in both files.

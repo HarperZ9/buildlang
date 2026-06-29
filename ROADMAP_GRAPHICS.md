@@ -1,4 +1,4 @@
-# QuantaLang Graphics Roadmap
+# BuildLang Graphics Roadmap
 
 > Current status (2026-06-15): historical planning record, superseded by
 > `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`. Do not treat the March
@@ -33,7 +33,7 @@ counts live in `STATUS.md`, `ARCHITECTURE.md`, and the wind-down assessment.
 ### GPU Pipeline (A1-A5 Progress)
 - **A1 DONE:** SPIR-V produces valid vertex + fragment shaders (pass spirv-val)
 - **A2 DONE:** Vulkan FFI bindings, window creation
-- **A3 DONE:** Triangle on screen - QuantaLang-generated SPIR-V shaders on GPU
+- **A3 DONE:** Triangle on screen - BuildLang-generated SPIR-V shaders on GPU
 - **A5 IN PROGRESS:** Uniform buffer vertex shader (MVP matrix from UBO) - SPIR-V validates
 - **A5 IN PROGRESS:** Textured fragment shader (texture sampling) - SPIR-V validates
 - MIR types: Texture2D, Sampler, SampledImage, ShaderBinding, BindingKind
@@ -53,7 +53,7 @@ counts live in `STATUS.md`, `ARCHITECTURE.md`, and the wind-down assessment.
 
 ### A1: SPIR-V Backend Produces Valid Shaders (Weeks 1-3)
 
-**Goal:** `quantac build shader.quanta --target=spirv` produces a `.spv` file that `spirv-val` accepts.
+**Goal:** `buildc build shader.bld --target=spirv` produces a `.spv` file that `spirv-val` accepts.
 
 **Step A1.1: Validate existing SPIR-V opcodes**
 - The backend already has OpTypeVector, OpTypeMatrix, OpDot, OpVectorShuffle, all GLSL.std.450 builtins
@@ -68,7 +68,7 @@ counts live in `STATUS.md`, `ARCHITECTURE.md`, and the wind-down assessment.
 - OpExecutionMode for fragment shaders (OriginUpperLeft)
 
 **Step A1.3: Minimal vertex + fragment shader pair**
-```quanta
+```build
 #[vertex]
 fn vs_main(position: vec3, color: vec3) -> vec4 {
     vec4(position, 1.0)  // pass-through vertex shader
@@ -82,17 +82,17 @@ fn fs_main(color: vec3) -> vec4 {
 Compile to two .spv files. Validate with spirv-val. This is the milestone.
 
 **Step A1.4: Wire --target=spirv into CLI**
-- `quantac build shader.quanta --target=spirv` produces .spv
+- `buildc build shader.bld --target=spirv` produces .spv
 - Multi-output: vertex and fragment shaders in separate files
 - Error messages specific to shader compilation ("cannot use effect in shader function")
 
-**Deliverable:** A valid SPIR-V shader pair that passes spirv-val, compiled from QuantaLang source.
+**Deliverable:** A valid SPIR-V shader pair that passes spirv-val, compiled from BuildLang source.
 
 ---
 
 ### A2: Vulkan FFI Bindings (Weeks 3-5)
 
-**Goal:** Call Vulkan API functions from QuantaLang through C FFI.
+**Goal:** Call Vulkan API functions from BuildLang through C FFI.
 
 **Step A2.1: extern "C" block parsing**
 - Parse `extern "C" { fn vkCreateInstance(...) -> VkResult; }` syntax
@@ -100,7 +100,7 @@ Compile to two .spv files. Validate with spirv-val. This is the milestone.
 - Wire it through to the lowerer - extern functions skip body lowering and emit as C `extern` declarations
 
 **Step A2.2: Vulkan type definitions**
-```quanta
+```build
 // Opaque handles
 struct VkInstance { handle: u64 }
 struct VkDevice { handle: u64 }
@@ -116,8 +116,8 @@ extern "C" {
 }
 ```
 
-**Step A2.3: Minimal Vulkan bootstrap in QuantaLang**
-Write the minimum Vulkan setup code in QuantaLang:
+**Step A2.3: Minimal Vulkan bootstrap in BuildLang**
+Write the minimum Vulkan setup code in BuildLang:
 - Create instance
 - Select physical device
 - Create logical device
@@ -127,10 +127,10 @@ Write the minimum Vulkan setup code in QuantaLang:
 - Create command buffers
 - Main render loop
 
-This is ~500-800 lines of QuantaLang code. It's boilerplate, but it's QuantaLang boilerplate - proving the language can express Vulkan API patterns.
+This is ~500-800 lines of BuildLang code. It's boilerplate, but it's BuildLang boilerplate - proving the language can express Vulkan API patterns.
 
 **Step A2.4: Window creation via GLFW FFI**
-```quanta
+```build
 extern "C" {
     fn glfwInit() -> i32;
     fn glfwCreateWindow(width: i32, height: i32, title: &str, monitor: u64, share: u64) -> u64;
@@ -140,22 +140,22 @@ extern "C" {
 }
 ```
 
-**Deliverable:** A QuantaLang program that opens a window using GLFW and creates a Vulkan instance.
+**Deliverable:** A BuildLang program that opens a window using GLFW and creates a Vulkan instance.
 
 ---
 
 ### A3: Render a Triangle (Weeks 5-7)
 
-**Goal:** The "Hello World" of graphics - a colored triangle on screen, with shader and engine code both in QuantaLang.
+**Goal:** The "Hello World" of graphics - a colored triangle on screen, with shader and engine code both in BuildLang.
 
 **Step A3.1: Combine A1 + A2**
-- Compile vertex + fragment shaders to SPIR-V using `quantac --target=spirv`
+- Compile vertex + fragment shaders to SPIR-V using `buildc --target=spirv`
 - Load the SPIR-V into the Vulkan pipeline
 - Submit draw commands
 
 **Step A3.2: The demo program**
-```quanta
-// triangle.quanta - THE demo that proves QuantaLang is real
+```build
+// triangle.bld - THE demo that proves BuildLang is real
 
 #[vertex]
 fn vertex_shader(position: vec3, color: vec3) -> VertexOutput {
@@ -172,7 +172,7 @@ fn fragment_shader(input: VertexOutput) -> vec4 {
 
 fn main() {
     // Create window and Vulkan context
-    let window = create_window(800, 600, "QuantaLang Triangle");
+    let window = create_window(800, 600, "BuildLang Triangle");
     let renderer = create_vulkan_renderer(window);
 
     // Load shaders (compiled from THIS file)
@@ -198,7 +198,7 @@ fn main() {
 
 **Step A3.3: Effect-controlled rendering**
 Refactor the triangle to use effects:
-```quanta
+```build
 effect Render {
     fn begin_frame() -> (),
     fn bind_pipeline(pipeline: u64) -> (),
@@ -230,7 +230,7 @@ fn main() {
 }
 ```
 
-**Deliverable:** A QuantaLang program that renders a colored triangle on screen, with both shader code and engine code written in QuantaLang.
+**Deliverable:** A BuildLang program that renders a colored triangle on screen, with both shader code and engine code written in BuildLang.
 
 ---
 
@@ -243,7 +243,7 @@ fn main() {
 - Sample from a render target texture
 
 **Step A4.2: ACES tone mapping as a shader**
-```quanta
+```build
 #[fragment]
 fn tonemap_pass(uv: vec2) -> vec4 {
     let hdr_color = texture_sample(hdr_buffer, uv);
@@ -259,9 +259,9 @@ The same `aces_tonemap` function from test 39 - now running on the GPU.
 - Pass 2: Apply tone mapping
 - Pass 3: Present to screen
 
-This demonstrates QuantaLang's unique value: the SAME function compiles to both CPU (for unit testing) and GPU (for real-time rendering).
+This demonstrates BuildLang's unique value: the SAME function compiles to both CPU (for unit testing) and GPU (for real-time rendering).
 
-**Deliverable:** A post-processing pipeline running on the GPU, using QuantaLang shaders that were previously tested on the CPU.
+**Deliverable:** A post-processing pipeline running on the GPU, using BuildLang shaders that were previously tested on the CPU.
 
 ---
 
@@ -274,7 +274,7 @@ This demonstrates QuantaLang's unique value: the SAME function compiles to both 
 - Texture coordinate interpolation from vertex to fragment
 
 **Step A5.2: Uniform buffer support**
-```quanta
+```build
 #[uniform(binding = 0)]
 struct CameraData {
     view: mat4,
@@ -292,7 +292,7 @@ fn vs_main(position: vec3, camera: CameraData) -> vec4 {
 - Rotating cube with model/view/projection matrices
 - Camera controlled by uniform buffer updated from CPU each frame
 
-**Deliverable:** A textured, lit, rotating cube rendered by QuantaLang shaders with uniform buffer input.
+**Deliverable:** A textured, lit, rotating cube rendered by BuildLang shaders with uniform buffer input.
 
 ---
 
@@ -302,12 +302,12 @@ fn vs_main(position: vec3, camera: CameraData) -> vec4 {
 
 **Step B1.1: Fix vec3 parameter field access**
 - The type checker loses vector type info through function parameters
-- `fn foo(v: vec3) -> f64 { v.x }` fails because `v` has type `?T` not `quanta_vec3`
+- `fn foo(v: vec3) -> f64 { v.x }` fails because `v` has type `?T` not `build_vec3`
 - Fix: propagate type annotations through function parameter type resolution
 
 **Step B1.2: String != operator**
-- Currently `s != ""` generates raw struct comparison instead of `!quanta_string_eq()`
-- Fix in lower_binary for Ne on QuantaString types
+- Currently `s != ""` generates raw struct comparison instead of `!build_string_eq()`
+- Fix in lower_binary for Ne on BuildString types
 
 **Step B1.3: Generic enum/struct types**
 - `Option<T>` instead of monomorphized `OptionI32`
@@ -319,7 +319,7 @@ fn vs_main(position: vec3, camera: CameraData) -> vec4 {
 
 ### B2: Standard Library Expansion (Weeks 13-15)
 
-**Step B2.1: Vec<T> backed by QuantaVec runtime**
+**Step B2.1: Vec<T> backed by BuildVec runtime**
 - Push, pop, get, set, len, capacity
 - For-in iteration
 
@@ -340,7 +340,7 @@ fn vs_main(position: vec3, camera: CameraData) -> vec4 {
 - Approach: CPS transform in the MIR → C backend, or embed libmprompt
 
 **Step B3.2: Async/await as effect sugar**
-```quanta
+```build
 // async/await is just syntax sugar for the Async effect
 async fn fetch_data(url: str) -> str {
     // desugars to: perform Async.yield_() between IO operations
@@ -348,7 +348,7 @@ async fn fetch_data(url: str) -> str {
 ```
 
 **Step B3.3: Effect polymorphism in codegen**
-```quanta
+```build
 fn map<A, B, E>(items: Vec<A>, f: fn(A) ~ E -> B) ~ E -> Vec<B>
 ```
 - The type system already supports open effect rows
@@ -357,9 +357,9 @@ fn map<A, B, E>(items: Vec<A>, f: fn(A) ~ E -> B) ~ E -> Vec<B>
 ### B4: Package Ecosystem (Weeks 18-20)
 
 **Step B4.1: Wire package manager to CLI**
-- `quantac pkg init` - create Quanta.toml
-- `quantac pkg add json` - add dependency
-- `quantac pkg build` - build with dependencies
+- `buildc pkg init` - create Build.toml
+- `buildc pkg add json` - add dependency
+- `buildc pkg build` - build with dependencies
 
 **Step B4.2: Module system improvements**
 - Nested modules: `mod rendering::pipeline`
@@ -374,7 +374,7 @@ fn map<A, B, E>(items: Vec<A>, f: fn(A) ~ E -> B) ~ E -> Vec<B>
 ### B5: Error Messages and Diagnostics (Weeks 20-22)
 
 **Step B5.1: Source location in errors**
-- "error at shader.quanta:15:8: undefined variable 'texCoord'"
+- "error at shader.bld:15:8: undefined variable 'texCoord'"
 - Underline the exact span in the source
 
 **Step B5.2: Suggestion engine**
@@ -391,10 +391,10 @@ fn map<A, B, E>(items: Vec<A>, f: fn(A) ~ E -> B) ~ E -> Vec<B>
 
 ### C1: Spinning Cube Demo (Weeks 22-24)
 
-**Goal:** One program. One file. Opens a window. Renders a spinning, lit, textured cube. Shader and engine code both in QuantaLang. Effects control the rendering pipeline.
+**Goal:** One program. One file. Opens a window. Renders a spinning, lit, textured cube. Shader and engine code both in BuildLang. Effects control the rendering pipeline.
 
-```quanta
-// cube_demo.quanta - The QuantaLang Graphics Showcase
+```build
+// cube_demo.bld - The BuildLang Graphics Showcase
 //
 // This single file contains:
 // - Vertex and fragment shaders (compile to SPIR-V for GPU)
@@ -428,7 +428,7 @@ effect Render {
 }
 
 fn main() {
-    let window = create_window(1280, 720, "QuantaLang Cube");
+    let window = create_window(1280, 720, "BuildLang Cube");
     let ctx = init_vulkan(window);
     let cube = load_cube_mesh(ctx);
     let mut angle: f64 = 0.0;
@@ -458,17 +458,17 @@ This is the demo that changes minds. One file. Shader + engine. CPU-testable lig
 
 ### C2: ReShade-Style Post-Processing Framework (Weeks 24-28)
 
-**Goal:** Build a QuantaLang version of ReShade's post-processing framework - the kind of tool Pascal Gilcher works with daily.
+**Goal:** Build a BuildLang version of ReShade's post-processing framework - the kind of tool Pascal Gilcher works with daily.
 
 - Multiple configurable post-processing effects
-- Each effect is a QuantaLang module with a fragment shader
+- Each effect is a BuildLang module with a fragment shader
 - Effects chain: scene → bloom → tone map → color grade → FXAA → output
 - UI for enabling/disabling effects (using effects for UI state!)
 - Hot reload: change a shader file, see it update immediately
 
 ### C3: Minimal Game Engine (Weeks 28-36)
 
-**Goal:** A small but complete game engine written entirely in QuantaLang.
+**Goal:** A small but complete game engine written entirely in BuildLang.
 
 - Scene graph with entities, components, transforms
 - Forward rendering with point/directional lights
@@ -479,7 +479,7 @@ This is the demo that changes minds. One file. Shader + engine. CPU-testable lig
 - Audio (via FFI to miniaudio or similar)
 
 Everything uses effects:
-```quanta
+```build
 effect Physics { fn step(dt: f64) -> (), fn raycast(origin: vec3, dir: vec3) -> Hit }
 effect Audio { fn play(sound: str) -> (), fn set_volume(vol: f64) -> () }
 effect Input { fn is_key_pressed(key: i32) -> bool, fn mouse_pos() -> vec2 }
@@ -495,7 +495,7 @@ Swap handlers for testing. Record effects for replay. Profile by timing handlers
 |-------|-------|-----------|
 | **A1** | 1-3 | SPIR-V backend produces valid shader pairs |
 | **A2** | 3-5 | Vulkan FFI bindings, window creation |
-| **A3** | 5-7 | **Triangle on screen** - both shader and engine in QuantaLang |
+| **A3** | 5-7 | **Triangle on screen** - both shader and engine in BuildLang |
 | **A4** | 7-9 | Post-processing (ACES tone mapping on GPU) |
 | **A5** | 9-11 | Textures, uniform buffers, MVP transforms |
 | **B1** | 11-13 | Type system fixes, generic types |
@@ -511,12 +511,12 @@ Swap handlers for testing. Record effects for replay. Profile by timing handlers
 
 ## Success Criteria
 
-**For Pascal Gilcher:** "I can write my ReShade shaders in QuantaLang, test them on CPU, compile to SPIR-V, and hot reload them. The swizzling and math feel native. Effects let me swap between quality presets without recompiling."
+**For Pascal Gilcher:** "I can write my ReShade shaders in BuildLang, test them on CPU, compile to SPIR-V, and hot reload them. The swizzling and math feel native. Effects let me swap between quality presets without recompiling."
 
-**For Boris Vorontsov:** "I can build ENB-level post-processing in QuantaLang with zero-overhead abstractions. The memory layout control is precise. The SPIR-V output is optimal. I can inject effects into any game's rendering pipeline."
+**For Boris Vorontsov:** "I can build ENB-level post-processing in BuildLang with zero-overhead abstractions. The memory layout control is precise. The SPIR-V output is optimal. I can inject effects into any game's rendering pipeline."
 
 **For every game programmer:** "I write my engine and my shaders in the same language. I test rendering on CPU. I debug shader math with printf. The effect system replaces my dependency injection framework, my event system, and my command pattern - all at once."
 
 ---
 
-*QuantaLang: Mathematically precise. GPU-native. Effect-controlled. One language for everything.*
+*BuildLang: Mathematically precise. GPU-native. Effect-controlled. One language for everything.*

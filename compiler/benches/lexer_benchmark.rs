@@ -1,15 +1,15 @@
 // ===============================================================================
-// QUANTALANG LEXER - BENCHMARKS
+// BUILDLANG LEXER - BENCHMARKS
 // ===============================================================================
 // Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
 // ===============================================================================
 
+use buildlang::lexer::{Lexer, SourceFile};
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-use quantalang::lexer::{Lexer, SourceFile};
 
-/// Sample QuantaLang source code for benchmarking.
+/// Sample BuildLang source code for benchmarking.
 const SAMPLE_CODE: &str = r#"
-// QuantaLang Sample Code
+// BuildLang Sample Code
 module sample
 
 use std::collections::HashMap
@@ -44,7 +44,7 @@ pub enum Result<T, E> {
 pub fn main() {
     let x = 42;
     let y = 3.14159;
-    let s = "Hello, QuantaLang!";
+    let s = "Hello, BuildLang!";
     let b = true;
 
     // Control flow

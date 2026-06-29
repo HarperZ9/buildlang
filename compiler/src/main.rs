@@ -1,12 +1,12 @@
 // ===============================================================================
-// QUANTALANG COMPILER - MAIN ENTRY POINT
+// BUILDLANG COMPILER - MAIN ENTRY POINT
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
-//! QuantaLang Compiler (`quantac`)
+//! BuildLang Compiler (`buildc`)
 //!
-//! This is the main entry point for the QuantaLang compiler command-line tool.
+//! This is the main entry point for the BuildLang compiler command-line tool.
 
 mod lsp_dispatch;
 mod memory_layout;
@@ -21,6 +21,14 @@ use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use buildlang::ast::{self, ItemKind, Module, Visibility};
+use buildlang::codegen::{CodeGenerator, Target};
+use buildlang::lexer::{Lexer, SourceFile, Span};
+use buildlang::parser::Parser;
+use buildlang::types::{
+    capability_effect_names, FunctionEffectSummary, TypeChecker, TypeContext, TypeError,
+    TypeErrorWithSpan,
+};
 use lsp_dispatch::{verify_lsp_dispatch_receipt, LspDispatchReceipt, LSP_DISPATCH_RECEIPT};
 use memory_layout::{verify_memory_layout_receipt, MemoryLayoutReceipt, MEMORY_LAYOUT_RECEIPT};
 #[allow(unused_imports)]
@@ -28,14 +36,6 @@ use mir_representation::{
     verify_mir_representation_receipt, MirRepresentationReceipt, MIR_REPRESENTATION_RECEIPT,
 };
 use module_graph::{verify_module_graph_receipt, ModuleGraphReceipt, MODULE_GRAPH_RECEIPT};
-use quantalang::ast::{self, ItemKind, Module, Visibility};
-use quantalang::codegen::{CodeGenerator, Target};
-use quantalang::lexer::{Lexer, SourceFile, Span};
-use quantalang::parser::Parser;
-use quantalang::types::{
-    capability_effect_names, FunctionEffectSummary, TypeChecker, TypeContext, TypeError,
-    TypeErrorWithSpan,
-};
 use symbol_graph::{verify_symbol_graph_receipt, SymbolGraphReceipt, SYMBOL_GRAPH_RECEIPT};
 
 fn parse_codegen_target(target: &str) -> Result<Target, String> {
@@ -70,12 +70,12 @@ fn target_from_extension(ext: &str) -> Option<Target> {
     }
 }
 
-/// QuantaLang Compiler
+/// BuildLang Compiler
 #[derive(ClapParser)]
-#[command(name = "quantac")]
+#[command(name = "buildc")]
 #[command(author = "Zain Dana Harper")]
 #[command(version)]
-#[command(about = "The QuantaLang compiler - a multi-paradigm systems programming language")]
+#[command(about = "The BuildLang compiler - a multi-paradigm systems programming language")]
 #[command(long_about = None)]
 struct Cli {
     /// The command to run
@@ -201,7 +201,7 @@ enum Commands {
         target: String,
     },
 
-    /// Format QuantaLang source files
+    /// Format BuildLang source files
     Fmt {
         /// Input file to format
         file: PathBuf,
@@ -239,7 +239,7 @@ enum Commands {
         command: ReceiptCommands,
     },
 
-    /// Run tests - compile .quanta programs and verify output against .expected files
+    /// Run tests - compile .bld programs and verify output against .expected files
     Test {
         /// Directory containing test programs [default: tests/programs]
         #[arg(default_value = "tests/programs")]
@@ -258,7 +258,7 @@ enum Commands {
         no_fail_fast: bool,
     },
 
-    /// Lint QuantaLang source files
+    /// Lint BuildLang source files
     Lint {
         /// Input file to lint
         file: PathBuf,
@@ -273,7 +273,7 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum PkgCommands {
-    /// Initialize a new Quanta.toml manifest
+    /// Initialize a new Build.toml manifest
     Init {
         /// Project directory
         #[arg(default_value = ".")]
@@ -331,7 +331,7 @@ enum PolicyCommands {
     },
     /// Scaffold an exact strict policy from a check receipt
     Scaffold {
-        /// Check receipt JSON written by `quantac check --receipt`
+        /// Check receipt JSON written by `buildc check --receipt`
         receipt: PathBuf,
         /// Write the scaffolded policy to a file instead of stdout
         #[arg(short, long, value_name = "PATH")]
@@ -341,9 +341,9 @@ enum PolicyCommands {
 
 #[derive(Subcommand)]
 enum ReceiptCommands {
-    /// Verify a quantac check receipt against current source inputs
+    /// Verify a buildc check receipt against current source inputs
     Verify {
-        /// Check receipt JSON written by `quantac check --receipt`
+        /// Check receipt JSON written by `buildc check --receipt`
         receipt: PathBuf,
         /// Source file to verify instead of the source path embedded in the receipt
         #[arg(long, value_name = "PATH")]
@@ -430,14 +430,14 @@ fn main() -> ExitCode {
 }
 
 fn print_version() {
-    println!("QuantaLang Compiler (quantac) {}", quantalang::VERSION);
+    println!("BuildLang Compiler (buildc) {}", buildlang::VERSION);
     println!(
         "Language version: {}.{}.{}",
-        quantalang::LANGUAGE_VERSION.0,
-        quantalang::LANGUAGE_VERSION.1,
-        quantalang::LANGUAGE_VERSION.2
+        buildlang::LANGUAGE_VERSION.0,
+        buildlang::LANGUAGE_VERSION.1,
+        buildlang::LANGUAGE_VERSION.2
     );
-    println!("{}", quantalang::COPYRIGHT);
+    println!("{}", buildlang::COPYRIGHT);
 }
 
 fn command_version(command: &str, args: &[&str]) -> Option<String> {
@@ -476,14 +476,10 @@ fn print_substrate_evidence(corpus_root: Option<&Path>) {
 }
 
 fn cmd_doctor() -> Result<(), i32> {
-    println!("QuantaLang Doctor");
+    println!("BuildLang Doctor");
     println!("=================");
     println!();
-    println!(
-        "quantac: {} ({})",
-        quantalang::VERSION,
-        std::env::consts::OS
-    );
+    println!("buildc: {} ({})", buildlang::VERSION, std::env::consts::OS);
 
     let c_compiler = find_c_compiler();
     match &c_compiler {
@@ -494,7 +490,7 @@ fn cmd_doctor() -> Result<(), i32> {
     match find_stdlib_path() {
         Some(path) => println!("stdlib: {}", path.display()),
         None => {
-            println!("stdlib: not found; set QUANTALANG_STDLIB or install stdlib/ beside quantac")
+            println!("stdlib: not found; set BUILDLANG_STDLIB or install stdlib/ beside buildc")
         }
     }
 
@@ -519,7 +515,7 @@ fn cmd_doctor() -> Result<(), i32> {
 
     println!();
     println!("Backend maturity:");
-    println!("  c        primary       executable C99 path used by quantac run");
+    println!("  c        primary       executable C99 path used by buildc run");
     println!("  hlsl     supported     shader source output");
     println!("  glsl     supported     shader source output");
     println!("  rust     experimental  source output with semantic-corpus subset checks");
@@ -967,7 +963,7 @@ const BUILTIN_POLICY_TEMPLATES: &[BuiltinPolicyTemplate] = &[
 fn builtin_policy_profile(name: &str) -> Option<serde_json::Value> {
     match name {
         "pure" => Some(serde_json::json!({
-            "schema": "quantalang-check-policy/v1",
+            "schema": "buildlang-check-policy/v1",
             "denied_effects": [
                 "FileSystem",
                 "Network",
@@ -982,7 +978,7 @@ fn builtin_policy_profile(name: &str) -> Option<serde_json::Value> {
             "require_input_graph_digest": true
         })),
         "console-only" => Some(serde_json::json!({
-            "schema": "quantalang-check-policy/v1",
+            "schema": "buildlang-check-policy/v1",
             "allowed_effects": ["Console"],
             "denied_effects": [
                 "FileSystem",
@@ -997,7 +993,7 @@ fn builtin_policy_profile(name: &str) -> Option<serde_json::Value> {
             "require_input_graph_digest": true
         })),
         "offline" => Some(serde_json::json!({
-            "schema": "quantalang-check-policy/v1",
+            "schema": "buildlang-check-policy/v1",
             "allowed_effects": [
                 "FileSystem",
                 "Environment",
@@ -1014,7 +1010,7 @@ fn builtin_policy_profile(name: &str) -> Option<serde_json::Value> {
             "require_input_graph_digest": true
         })),
         "ci-review" => Some(serde_json::json!({
-            "schema": "quantalang-check-policy/v1",
+            "schema": "buildlang-check-policy/v1",
             "denied_effects": [
                 "Network",
                 "Process",
@@ -1025,7 +1021,7 @@ fn builtin_policy_profile(name: &str) -> Option<serde_json::Value> {
             "require_input_graph_digest": true
         })),
         "strict-accountability" => Some(serde_json::json!({
-            "schema": "quantalang-check-policy/v1",
+            "schema": "buildlang-check-policy/v1",
             "denied_effects": [
                 "Network",
                 "Process",
@@ -1081,13 +1077,13 @@ fn builtin_policy_catalog_json() -> String {
             serde_json::json!({
                 "name": template.name,
                 "summary": template.summary,
-                "policy_schema": "quantalang-check-policy/v1",
+                "policy_schema": "buildlang-check-policy/v1",
                 "digest": digest
             })
         })
         .collect::<Vec<_>>();
     let mut json = serde_json::to_string_pretty(&serde_json::json!({
-        "schema": "quantalang-policy-catalog/v1",
+        "schema": "buildlang-policy-catalog/v1",
         "profiles": profiles
     }))
     .expect("built-in policy catalog is JSON");
@@ -1181,7 +1177,7 @@ fn effect_function_allowlist(
 
 fn scaffold_policy_from_receipt(receipt: &serde_json::Value) -> Result<CheckPolicyProfile, i32> {
     let schema = receipt_field_str(receipt, "/schema", "schema")?;
-    if schema != "quantalang-check-receipt/v1" {
+    if schema != "buildlang-check-receipt/v1" {
         eprintln!("Error: unsupported check receipt schema `{}`", schema);
         return Err(1);
     }
@@ -1193,7 +1189,7 @@ fn scaffold_policy_from_receipt(receipt: &serde_json::Value) -> Result<CheckPoli
     allowed_effects.extend(propagated_sources.keys().cloned());
 
     Ok(CheckPolicyProfile {
-        schema: "quantalang-check-policy/v1".to_string(),
+        schema: "buildlang-check-policy/v1".to_string(),
         allowed_effects: allowed_effects.into_iter().collect(),
         denied_effects: Vec::new(),
         direct_effect_allowlist: effect_function_allowlist(&direct_sources),
@@ -1634,14 +1630,14 @@ fn cmd_receipt_verify(
 
     let receipt: serde_json::Value = read_json(receipt_path)?;
     let schema = receipt_field_str(&receipt, "/schema", "schema")?;
-    if schema != "quantalang-check-receipt/v1" {
+    if schema != "buildlang-check-receipt/v1" {
         eprintln!("Error: unsupported check receipt schema `{}`", schema);
         return Err(1);
     }
     let compiler = receipt_field_str(&receipt, "/compiler", "compiler")?;
-    if compiler != "quantac" {
+    if compiler != "buildc" {
         eprintln!(
-            "Error: receipt compiler mismatch: expected quantac, got {}",
+            "Error: receipt compiler mismatch: expected buildc, got {}",
             compiler
         );
         return Err(1);
@@ -1738,7 +1734,7 @@ fn cmd_receipt_verify_json(
     let mut checks = Vec::new();
 
     let schema = receipt_field_str(&receipt, "/schema", "schema")?;
-    let expected_schema = "quantalang-check-receipt/v1".to_string();
+    let expected_schema = "buildlang-check-receipt/v1".to_string();
     push_receipt_verification_check(
         &mut checks,
         "schema",
@@ -1752,10 +1748,10 @@ fn cmd_receipt_verify_json(
     push_receipt_verification_check(
         &mut checks,
         "compiler",
-        Some("quantac".to_string()),
+        Some("buildc".to_string()),
         Some(compiler.to_string()),
         None,
-        (compiler != "quantac").then(|| "receipt compiler mismatch".to_string()),
+        (compiler != "buildc").then(|| "receipt compiler mismatch".to_string()),
     );
 
     let compiler_version = receipt_field_str(&receipt, "/compiler_version", "compiler_version")?;
@@ -1870,7 +1866,7 @@ fn cmd_receipt_verify_json(
 
     let passed = checks.iter().all(|check| check.status == "passed");
     let report = ReceiptVerificationReport {
-        schema: "quantalang-receipt-verification/v1",
+        schema: "buildlang-receipt-verification/v1",
         receipt: receipt_path.to_string_lossy().to_string(),
         source: source_path.to_string_lossy().to_string(),
         status: if passed { "passed" } else { "failed" },
@@ -1920,7 +1916,7 @@ fn cmd_corpus_verify(root: Option<&Path>, write: bool) -> Result<(), i32> {
 
     let manifest_path = corpus_root.join("manifest.json");
     let manifest: SemanticCorpusManifest = read_json(&manifest_path)?;
-    if manifest.schema != "quantalang-semantic-corpus/v1" {
+    if manifest.schema != "buildlang-semantic-corpus/v1" {
         eprintln!(
             "semantic corpus manifest has unsupported schema '{}'",
             manifest.schema
@@ -1937,6 +1933,19 @@ fn cmd_corpus_verify(root: Option<&Path>, write: bool) -> Result<(), i32> {
     let module_receipt_path = receipts_dir.join(MODULE_GRAPH_RECEIPT);
     let symbol_receipt_path = receipts_dir.join(SYMBOL_GRAPH_RECEIPT);
     let lsp_receipt_path = receipts_dir.join(LSP_DISPATCH_RECEIPT);
+
+    if write {
+        refresh_representation_receipts(
+            &corpus_root,
+            &manifest,
+            &mir_receipt_path,
+            &memory_receipt_path,
+            &module_receipt_path,
+            &symbol_receipt_path,
+            &lsp_receipt_path,
+        )?;
+    }
+
     let substrate_receipt: SubstrateReceipt = read_json(&substrate_receipt_path)?;
     let mir_receipt: MirRepresentationReceipt = read_json(&mir_receipt_path)?;
     let memory_receipt: MemoryLayoutReceipt = read_json(&memory_receipt_path)?;
@@ -1993,8 +2002,52 @@ fn cmd_corpus_verify(root: Option<&Path>, write: bool) -> Result<(), i32> {
     println!("c execution: {} passed", c_passed);
     if write {
         println!("c receipt: written");
+        println!("representation receipts: written");
     }
     Ok(())
+}
+
+/// Regenerate the representation receipts (mir, memory layout, module graph,
+/// symbol graph, lsp dispatch) from current corpus source and write them back to
+/// disk. This is the sanctioned `--write` refresh mode: each receipt is rebuilt
+/// through the same `build_*` builder the verifier uses, so the written receipt
+/// is self-consistent with the current source rather than a hand-edited digest.
+#[allow(clippy::too_many_arguments)]
+fn refresh_representation_receipts(
+    corpus_root: &Path,
+    manifest: &SemanticCorpusManifest,
+    mir_receipt_path: &Path,
+    memory_receipt_path: &Path,
+    module_receipt_path: &Path,
+    symbol_receipt_path: &Path,
+    lsp_receipt_path: &Path,
+) -> Result<(), i32> {
+    let mir_receipt = mir_representation::build_mir_representation_receipt(corpus_root, manifest)
+        .map_err(report_corpus_error)?;
+    write_json(mir_receipt_path, &mir_receipt)?;
+
+    let memory_receipt = memory_layout::build_memory_layout_receipt(corpus_root, manifest)
+        .map_err(report_corpus_error)?;
+    write_json(memory_receipt_path, &memory_receipt)?;
+
+    let module_receipt = module_graph::build_module_graph_receipt(corpus_root, manifest)
+        .map_err(report_corpus_error)?;
+    write_json(module_receipt_path, &module_receipt)?;
+
+    let symbol_receipt = symbol_graph::build_symbol_graph_receipt(corpus_root, manifest)
+        .map_err(report_corpus_error)?;
+    write_json(symbol_receipt_path, &symbol_receipt)?;
+
+    let lsp_receipt = lsp_dispatch::build_lsp_dispatch_receipt(corpus_root, manifest)
+        .map_err(report_corpus_error)?;
+    write_json(lsp_receipt_path, &lsp_receipt)?;
+
+    Ok(())
+}
+
+fn report_corpus_error(message: String) -> i32 {
+    eprintln!("{message}");
+    1
 }
 
 fn find_semantic_corpus_root() -> Option<PathBuf> {
@@ -2241,21 +2294,21 @@ fn validate_substrate_receipt(
     receipt: &SubstrateReceipt,
     manifest: &SemanticCorpusManifest,
 ) -> Result<(), String> {
-    if receipt.schema != "quantalang-substrate-receipt/v0" {
+    if receipt.schema != "buildlang-substrate-receipt/v0" {
         return Err(format!(
             "substrate receipt has unsupported schema '{}'",
             receipt.schema
         ));
     }
-    if receipt.compiler != "quantac" {
+    if receipt.compiler != "buildc" {
         return Err(format!(
-            "substrate compiler mismatch: expected 'quantac', found '{}'",
+            "substrate compiler mismatch: expected 'buildc', found '{}'",
             receipt.compiler
         ));
     }
-    if receipt.language != "quantalang" {
+    if receipt.language != "buildlang" {
         return Err(format!(
-            "substrate language mismatch: expected 'quantalang', found '{}'",
+            "substrate language mismatch: expected 'buildlang', found '{}'",
             receipt.language
         ));
     }
@@ -2297,7 +2350,7 @@ fn validate_substrate_receipt(
         ));
     }
 
-    if receipt.semantic_surface.check_receipt_schema != "quantalang-check-receipt/v1" {
+    if receipt.semantic_surface.check_receipt_schema != "buildlang-check-receipt/v1" {
         return Err(format!(
             "substrate semantic_surface.check_receipt_schema mismatch: found '{}'",
             receipt.semantic_surface.check_receipt_schema
@@ -2603,15 +2656,15 @@ fn validate_substrate_receipt(
         ));
     }
 
-    if receipt.module_surface.resolver != "quantac source input resolver" {
+    if receipt.module_surface.resolver != "buildc source input resolver" {
         return Err(format!(
-            "substrate module_surface.resolver mismatch: expected 'quantac source input resolver', found '{}'",
+            "substrate module_surface.resolver mismatch: expected 'buildc source input resolver', found '{}'",
             receipt.module_surface.resolver
         ));
     }
-    if receipt.module_surface.digest_anchor != "quantalang-check-receipt/v1 input_graph_digest" {
+    if receipt.module_surface.digest_anchor != "buildlang-check-receipt/v1 input_graph_digest" {
         return Err(format!(
-            "substrate module_surface.digest_anchor mismatch: expected 'quantalang-check-receipt/v1 input_graph_digest', found '{}'",
+            "substrate module_surface.digest_anchor mismatch: expected 'buildlang-check-receipt/v1 input_graph_digest', found '{}'",
             receipt.module_surface.digest_anchor
         ));
     }
@@ -2656,9 +2709,9 @@ fn validate_substrate_receipt(
             receipt.symbol_surface.representation
         ));
     }
-    if receipt.symbol_surface.effect_anchor != "quantalang-check-receipt/v1" {
+    if receipt.symbol_surface.effect_anchor != "buildlang-check-receipt/v1" {
         return Err(format!(
-            "substrate symbol_surface.effect_anchor mismatch: expected 'quantalang-check-receipt/v1', found '{}'",
+            "substrate symbol_surface.effect_anchor mismatch: expected 'buildlang-check-receipt/v1', found '{}'",
             receipt.symbol_surface.effect_anchor
         ));
     }
@@ -2697,9 +2750,9 @@ fn validate_substrate_receipt(
             receipt.lsp_surface.protocol
         ));
     }
-    if receipt.lsp_surface.dispatch != "quantac lsp raw message dispatch" {
+    if receipt.lsp_surface.dispatch != "buildc lsp raw message dispatch" {
         return Err(format!(
-            "substrate lsp_surface.dispatch mismatch: expected 'quantac lsp raw message dispatch', found '{}'",
+            "substrate lsp_surface.dispatch mismatch: expected 'buildc lsp raw message dispatch', found '{}'",
             receipt.lsp_surface.dispatch
         ));
     }
@@ -2767,11 +2820,11 @@ fn verify_substrate_receipt(
 }
 
 fn substrate_invalid_rows() -> Vec<String> {
-    vec!["  receipt   invalid  run quantac corpus verify for details".to_string()]
+    vec!["  receipt   invalid  run buildc corpus verify for details".to_string()]
 }
 
 fn substrate_missing_rows() -> Vec<String> {
-    vec!["  receipt   missing  run quantac corpus verify from a repository checkout".to_string()]
+    vec!["  receipt   missing  run buildc corpus verify from a repository checkout".to_string()]
 }
 
 fn substrate_target<'a>(
@@ -2863,14 +2916,14 @@ fn verify_c_corpus_stdout(
     corpus_root: &Path,
     manifest: &SemanticCorpusManifest,
 ) -> Result<usize, i32> {
-    let quantac = std::env::current_exe().map_err(|err| {
-        eprintln!("failed to locate current quantac executable: {}", err);
+    let buildc = std::env::current_exe().map_err(|err| {
+        eprintln!("failed to locate current buildc executable: {}", err);
         1
     })?;
 
     for program in &manifest.programs {
         let program_path = corpus_root.join(&program.path);
-        let output = std::process::Command::new(&quantac)
+        let output = std::process::Command::new(&buildc)
             .arg("run")
             .arg(&program_path)
             .output()
@@ -2996,23 +3049,23 @@ fn cmd_parse(file: &PathBuf, json: bool) -> Result<(), i32> {
     Ok(())
 }
 
-fn item_kind_name(kind: &quantalang::ast::ItemKind) -> &'static str {
+fn item_kind_name(kind: &buildlang::ast::ItemKind) -> &'static str {
     match kind {
-        quantalang::ast::ItemKind::Function(_) => "Function",
-        quantalang::ast::ItemKind::Struct(_) => "Struct",
-        quantalang::ast::ItemKind::Enum(_) => "Enum",
-        quantalang::ast::ItemKind::Trait(_) => "Trait",
-        quantalang::ast::ItemKind::Impl(_) => "Impl",
-        quantalang::ast::ItemKind::TypeAlias(_) => "TypeAlias",
-        quantalang::ast::ItemKind::Const(_) => "Const",
-        quantalang::ast::ItemKind::Static(_) => "Static",
-        quantalang::ast::ItemKind::Mod(_) => "Mod",
-        quantalang::ast::ItemKind::Use(_) => "Use",
-        quantalang::ast::ItemKind::ExternCrate(_) => "ExternCrate",
-        quantalang::ast::ItemKind::ExternBlock(_) => "ExternBlock",
-        quantalang::ast::ItemKind::Macro(_) => "Macro",
-        quantalang::ast::ItemKind::MacroRules(_) => "MacroRules",
-        quantalang::ast::ItemKind::Effect(_) => "Effect",
+        buildlang::ast::ItemKind::Function(_) => "Function",
+        buildlang::ast::ItemKind::Struct(_) => "Struct",
+        buildlang::ast::ItemKind::Enum(_) => "Enum",
+        buildlang::ast::ItemKind::Trait(_) => "Trait",
+        buildlang::ast::ItemKind::Impl(_) => "Impl",
+        buildlang::ast::ItemKind::TypeAlias(_) => "TypeAlias",
+        buildlang::ast::ItemKind::Const(_) => "Const",
+        buildlang::ast::ItemKind::Static(_) => "Static",
+        buildlang::ast::ItemKind::Mod(_) => "Mod",
+        buildlang::ast::ItemKind::Use(_) => "Use",
+        buildlang::ast::ItemKind::ExternCrate(_) => "ExternCrate",
+        buildlang::ast::ItemKind::ExternBlock(_) => "ExternBlock",
+        buildlang::ast::ItemKind::Macro(_) => "Macro",
+        buildlang::ast::ItemKind::MacroRules(_) => "MacroRules",
+        buildlang::ast::ItemKind::Effect(_) => "Effect",
     }
 }
 
@@ -3035,24 +3088,24 @@ fn format_ast_json(ast: &Module) -> String {
     output
 }
 
-fn struct_field_count(fields: &quantalang::ast::StructFields) -> usize {
+fn struct_field_count(fields: &buildlang::ast::StructFields) -> usize {
     match fields {
-        quantalang::ast::StructFields::Named(f) => f.len(),
-        quantalang::ast::StructFields::Tuple(f) => f.len(),
-        quantalang::ast::StructFields::Unit => 0,
+        buildlang::ast::StructFields::Named(f) => f.len(),
+        buildlang::ast::StructFields::Tuple(f) => f.len(),
+        buildlang::ast::StructFields::Unit => 0,
     }
 }
 
-fn print_item_summary(item: &quantalang::ast::Item, indent: usize) {
+fn print_item_summary(item: &buildlang::ast::Item, indent: usize) {
     let prefix = "  ".repeat(indent);
     match &item.kind {
-        quantalang::ast::ItemKind::Function(f) => {
+        buildlang::ast::ItemKind::Function(f) => {
             println!("{}fn {}()", prefix, f.name.name);
             if let Some(ret) = &f.sig.return_ty {
                 println!("{}  -> {:?}", prefix, ret);
             }
         }
-        quantalang::ast::ItemKind::Struct(s) => {
+        buildlang::ast::ItemKind::Struct(s) => {
             println!(
                 "{}struct {} ({} fields)",
                 prefix,
@@ -3060,7 +3113,7 @@ fn print_item_summary(item: &quantalang::ast::Item, indent: usize) {
                 struct_field_count(&s.fields)
             );
         }
-        quantalang::ast::ItemKind::Enum(e) => {
+        buildlang::ast::ItemKind::Enum(e) => {
             println!(
                 "{}enum {} ({} variants)",
                 prefix,
@@ -3068,31 +3121,31 @@ fn print_item_summary(item: &quantalang::ast::Item, indent: usize) {
                 e.variants.len()
             );
         }
-        quantalang::ast::ItemKind::Trait(t) => {
+        buildlang::ast::ItemKind::Trait(t) => {
             println!("{}trait {} ({} items)", prefix, t.name.name, t.items.len());
         }
-        quantalang::ast::ItemKind::Impl(i) => {
+        buildlang::ast::ItemKind::Impl(i) => {
             println!("{}impl ({} items)", prefix, i.items.len());
         }
-        quantalang::ast::ItemKind::TypeAlias(t) => {
+        buildlang::ast::ItemKind::TypeAlias(t) => {
             println!("{}type {}", prefix, t.name.name);
         }
-        quantalang::ast::ItemKind::Const(c) => {
+        buildlang::ast::ItemKind::Const(c) => {
             println!("{}const {}", prefix, c.name.name);
         }
-        quantalang::ast::ItemKind::Static(s) => {
+        buildlang::ast::ItemKind::Static(s) => {
             println!("{}static {}", prefix, s.name.name);
         }
-        quantalang::ast::ItemKind::Mod(m) => {
+        buildlang::ast::ItemKind::Mod(m) => {
             println!("{}mod {}", prefix, m.name.name);
         }
-        quantalang::ast::ItemKind::Use(u) => {
+        buildlang::ast::ItemKind::Use(u) => {
             println!("{}use {:?}", prefix, u.tree);
         }
-        quantalang::ast::ItemKind::ExternCrate(e) => {
+        buildlang::ast::ItemKind::ExternCrate(e) => {
             println!("{}extern crate {}", prefix, e.name.name);
         }
-        quantalang::ast::ItemKind::ExternBlock(e) => {
+        buildlang::ast::ItemKind::ExternBlock(e) => {
             println!(
                 "{}extern \"{}\" ({} items)",
                 prefix,
@@ -3100,13 +3153,13 @@ fn print_item_summary(item: &quantalang::ast::Item, indent: usize) {
                 e.items.len()
             );
         }
-        quantalang::ast::ItemKind::Macro(m) => {
+        buildlang::ast::ItemKind::Macro(m) => {
             println!("{}macro {:?}!", prefix, m.name.as_ref().map(|n| &n.name));
         }
-        quantalang::ast::ItemKind::MacroRules(m) => {
+        buildlang::ast::ItemKind::MacroRules(m) => {
             println!("{}macro_rules! {}", prefix, m.name.name);
         }
-        quantalang::ast::ItemKind::Effect(e) => {
+        buildlang::ast::ItemKind::Effect(e) => {
             println!("{}effect {}", prefix, e.name.name);
         }
     }
@@ -3165,7 +3218,7 @@ fn preprocess_includes_inner(
     for line in source.lines() {
         let trimmed = line.trim();
 
-        // Match: include!("some/path.quanta");
+        // Match: include!("some/path.bld");
         if let Some(path_str) = trimmed
             .strip_prefix("include!(\"")
             .and_then(|s| s.strip_suffix("\");"))
@@ -3236,13 +3289,13 @@ fn preprocess_includes_inner(
 // =============================================================================
 
 /// Scan `source` for lines matching `// import <name>` or `use <name>;`.
-/// For each match, look for `registry/packages/<name>/src/lib.quanta` relative
+/// For each match, look for `registry/packages/<name>/src/lib.bld` relative
 /// to the repo root (derived from `input_file`).  If found, prepend its contents
 /// to the source so the combined text can be parsed as a single compilation unit.
 ///
 /// Name normalisation: underscores in the import name are converted to hyphens
 /// when looking up the package directory (e.g. `use std_math;` maps to
-/// `registry/packages/std-math/src/lib.quanta`).
+/// `registry/packages/std-math/src/lib.bld`).
 fn resolve_imports(source: &str, input_file: &Path) -> Result<String, i32> {
     let mut ledger = None;
     resolve_imports_inner(source, input_file, &mut ledger)
@@ -3312,7 +3365,7 @@ fn resolve_imports_inner(
             if let Some(ref reg) = registry_dir {
                 // Normalise: underscores -> hyphens for the directory name.
                 let pkg_dir_name = name.replace('_', "-");
-                let lib_path = reg.join(&pkg_dir_name).join("src").join("lib.quanta");
+                let lib_path = reg.join(&pkg_dir_name).join("src").join("lib.bld");
                 if lib_path.exists() {
                     let bytes = std::fs::read(&lib_path).map_err(|e| {
                         eprintln!(
@@ -3384,9 +3437,9 @@ fn type_error_kind(error: &TypeError) -> &'static str {
 fn language_version_string() -> String {
     format!(
         "{}.{}.{}",
-        quantalang::LANGUAGE_VERSION.0,
-        quantalang::LANGUAGE_VERSION.1,
-        quantalang::LANGUAGE_VERSION.2
+        buildlang::LANGUAGE_VERSION.0,
+        buildlang::LANGUAGE_VERSION.1,
+        buildlang::LANGUAGE_VERSION.2
     )
 }
 
@@ -3456,7 +3509,7 @@ fn load_check_policy(path: &Path) -> Result<LoadedCheckPolicy, i32> {
         eprintln!("Error parsing policy '{}': {}", path.display(), err);
         1
     })?;
-    if profile.schema != "quantalang-check-policy/v1" {
+    if profile.schema != "buildlang-check-policy/v1" {
         eprintln!("Unsupported check policy schema '{}'", profile.schema);
         return Err(1);
     }
@@ -3487,7 +3540,7 @@ fn load_builtin_check_policy(name: &str) -> Result<LoadedCheckPolicy, i32> {
         eprintln!("Error parsing built-in policy profile '{}': {}", name, err);
         1
     })?;
-    if profile.schema != "quantalang-check-policy/v1" {
+    if profile.schema != "buildlang-check-policy/v1" {
         eprintln!("Unsupported check policy schema '{}'", profile.schema);
         return Err(1);
     }
@@ -3986,8 +4039,8 @@ fn build_check_receipt(
     });
 
     CheckReceipt {
-        schema: "quantalang-check-receipt/v1",
-        compiler: "quantac",
+        schema: "buildlang-check-receipt/v1",
+        compiler: "buildc",
         compiler_version: outcome.compiler_version,
         language_version: outcome.language_version.clone(),
         source: outcome.source.clone(),
@@ -4059,7 +4112,7 @@ fn run_check(file: &Path) -> Result<CheckOutcome, i32> {
 
     Ok(CheckOutcome {
         source: file.to_string_lossy().to_string(),
-        compiler_version: quantalang::VERSION,
+        compiler_version: buildlang::VERSION,
         language_version: language_version_string(),
         source_digest,
         input_graph_digest,
@@ -4388,9 +4441,9 @@ fn find_msvc_cl() -> Option<String> {
         std::env::set_var("PATH", &new_path);
 
         // Also store the paths for explicit use by invoke_c_compiler
-        std::env::set_var("QUANTALANG_MSVC_INCLUDE", &include_path);
-        std::env::set_var("QUANTALANG_MSVC_LIB", &lib_path);
-        std::env::set_var("QUANTALANG_MSVC_BIN", bin_dir.to_string_lossy().as_ref());
+        std::env::set_var("BUILDLANG_MSVC_INCLUDE", &include_path);
+        std::env::set_var("BUILDLANG_MSVC_LIB", &lib_path);
+        std::env::set_var("BUILDLANG_MSVC_BIN", bin_dir.to_string_lossy().as_ref());
 
         return Some(cl_exe.to_string_lossy().to_string());
     }
@@ -4426,9 +4479,9 @@ fn invoke_c_compiler(
         let opt_flag = if release { "/O2" } else { "/Zi" };
 
         if let (Ok(inc), Ok(lib), Ok(bin)) = (
-            std::env::var("QUANTALANG_MSVC_INCLUDE"),
-            std::env::var("QUANTALANG_MSVC_LIB"),
-            std::env::var("QUANTALANG_MSVC_BIN"),
+            std::env::var("BUILDLANG_MSVC_INCLUDE"),
+            std::env::var("BUILDLANG_MSVC_LIB"),
+            std::env::var("BUILDLANG_MSVC_BIN"),
         ) {
             let bat_path = c_file.with_extension("bat");
             let exe_path = exe_file.to_string_lossy().replace('/', "\\");
@@ -4535,25 +4588,25 @@ fn cmd_build(
     keep_c: bool,
     target_str: &str,
 ) -> Result<(), i32> {
-    // Look for Quanta.toml or main.quanta in the project directory
-    let manifest_path = path.join("Quanta.toml");
+    // Look for Build.toml or main.bld in the project directory
+    let manifest_path = path.join("Build.toml");
     let main_path = if manifest_path.exists() {
         // Read manifest to find entry point
-        path.join("src").join("main.quanta")
+        path.join("src").join("main.bld")
     } else {
-        // Look for main.quanta directly
-        let main_file = path.join("main.quanta");
+        // Look for main.bld directly
+        let main_file = path.join("main.bld");
         if main_file.exists() {
             main_file
         } else {
-            path.join("src").join("main.quanta")
+            path.join("src").join("main.bld")
         }
     };
 
     if !main_path.exists() {
         eprintln!("Could not find entry point. Expected one of:");
-        eprintln!("  - {}/main.quanta", path.display());
-        eprintln!("  - {}/src/main.quanta", path.display());
+        eprintln!("  - {}/main.bld", path.display());
+        eprintln!("  - {}/src/main.bld", path.display());
         return Err(1);
     }
 
@@ -4919,7 +4972,7 @@ fn cmd_build(
 
     let compiler = find_c_compiler().ok_or_else(|| {
         eprintln!("Error: No C compiler found on the system.");
-        eprintln!("QuantaLang needs a C compiler to produce executables.");
+        eprintln!("BuildLang needs a C compiler to produce executables.");
         eprintln!();
         if cfg!(windows) {
             eprintln!("Install one of the following:");
@@ -4995,7 +5048,7 @@ fn run_temp_build_dir(file: &Path) -> PathBuf {
         .unwrap_or(0);
 
     std::env::temp_dir().join(format!(
-        "quantalang_run_{}_{}_{}_{}",
+        "buildlang_run_{}_{}_{}_{}",
         stem,
         std::process::id(),
         nanos,
@@ -5083,7 +5136,7 @@ fn cmd_run(file: &PathBuf, args: &[String]) -> Result<(), i32> {
     // Find and invoke C compiler
     let compiler = find_c_compiler().ok_or_else(|| {
         eprintln!("Error: No C compiler found on the system.");
-        eprintln!("QuantaLang needs a C compiler to compile and run programs.");
+        eprintln!("BuildLang needs a C compiler to compile and run programs.");
         eprintln!();
         if cfg!(windows) {
             eprintln!("Install one of: cl.exe (MSVC), gcc (MinGW), or clang");
@@ -5138,14 +5191,14 @@ fn cmd_test(
     verbose: bool,
     no_fail_fast: bool,
 ) -> Result<(), i32> {
-    // Discover .quanta test files
+    // Discover .bld test files
     let entries: Vec<_> = match std::fs::read_dir(directory) {
         Ok(dir) => dir
             .filter_map(|e| e.ok())
             .filter(|e| {
                 e.path()
                     .extension()
-                    .map(|ext| ext == "quanta")
+                    .map(|ext| ext == "bld")
                     .unwrap_or(false)
             })
             .collect(),
@@ -5175,10 +5228,10 @@ fn cmd_test(
     // Only include tests that have .expected files
     let test_pairs: Vec<(PathBuf, PathBuf)> = tests
         .iter()
-        .filter_map(|quanta_file| {
-            let expected = quanta_file.with_extension("expected");
+        .filter_map(|build_file| {
+            let expected = build_file.with_extension("expected");
             if expected.exists() {
-                Some((quanta_file.clone(), expected))
+                Some((build_file.clone(), expected))
             } else {
                 None
             }
@@ -5202,28 +5255,27 @@ fn cmd_test(
 
     println!("running {} tests\n", total);
 
-    for (quanta_file, expected_file) in &test_pairs {
-        let name = quanta_file
+    for (build_file, expected_file) in &test_pairs {
+        let name = build_file
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("???");
 
         // --- Compile and capture output ---
         let result = (|| -> Result<String, String> {
-            let source =
-                std::fs::read_to_string(quanta_file).map_err(|e| format!("read: {}", e))?;
-            let source = resolve_imports(&source, quanta_file).map_err(|_| "import".to_string())?;
-            let run_base = quanta_file.parent().unwrap_or(Path::new("."));
+            let source = std::fs::read_to_string(build_file).map_err(|e| format!("read: {}", e))?;
+            let source = resolve_imports(&source, build_file).map_err(|_| "import".to_string())?;
+            let run_base = build_file.parent().unwrap_or(Path::new("."));
             let source =
                 preprocess_includes(&source, run_base).map_err(|_| "include".to_string())?;
 
-            let source_file = SourceFile::new(quanta_file.to_string_lossy(), source);
+            let source_file = SourceFile::new(build_file.to_string_lossy(), source);
             let mut lexer = Lexer::new(&source_file);
             let tokens = lexer.tokenize().map_err(|e| format!("lex: {}", e))?;
             let mut parser = Parser::new(&source_file, tokens);
             let mut ast = parser.parse().map_err(|e| format!("parse: {}", e))?;
 
-            let source_dir = quanta_file.parent().unwrap_or(Path::new("."));
+            let source_dir = build_file.parent().unwrap_or(Path::new("."));
             let _ = resolve_modules(&mut ast, source_dir);
 
             let mut ctx = TypeContext::new();
@@ -5243,7 +5295,7 @@ fn cmd_test(
                 .map_err(|e| format!("codegen: {}", e))?;
 
             // Use a unique temp directory per test to avoid MSVC bat conflicts
-            let test_dir = std::env::temp_dir().join(format!("quantatest_{}", name));
+            let test_dir = std::env::temp_dir().join(format!("buildtest_{}", name));
             let _ = std::fs::create_dir_all(&test_dir);
             let c_file = test_dir.join("main.c");
             let exe_file = test_dir.join(if cfg!(windows) { "main.exe" } else { "main" });
@@ -5463,7 +5515,7 @@ fn cmd_lint(file: &PathBuf) -> Result<(), i32> {
 }
 
 fn cmd_repl() -> Result<(), i32> {
-    println!("QuantaLang REPL v{}", quantalang::VERSION);
+    println!("BuildLang REPL v{}", buildlang::VERSION);
     println!("Type :help for help, :quit to exit");
     println!();
 
@@ -5501,7 +5553,7 @@ fn cmd_repl() -> Result<(), i32> {
                     println!("  :history       - Show command history");
                     println!("  :clear         - Clear the screen");
                     println!();
-                    println!("Or enter QuantaLang code to parse and analyze.");
+                    println!("Or enter BuildLang code to parse and analyze.");
                 }
                 ":history" => {
                     for (i, cmd) in history.iter().enumerate() {
@@ -5653,11 +5705,11 @@ fn cmd_repl() -> Result<(), i32> {
 
 fn cmd_lsp() -> Result<(), i32> {
     eprintln!(
-        "QuantaLang LSP server v{} starting on stdio...",
-        quantalang::VERSION
+        "BuildLang LSP server v{} starting on stdio...",
+        buildlang::VERSION
     );
 
-    match quantalang::lsp::run_server() {
+    match buildlang::lsp::run_server() {
         Ok(()) => {
             eprintln!("LSP server shut down cleanly.");
             Ok(())
@@ -5675,7 +5727,7 @@ fn cmd_fmt(file: &PathBuf, check: bool, write: bool) -> Result<(), i32> {
         1
     })?;
 
-    let formatter = quantalang::fmt::Formatter::default_formatter();
+    let formatter = buildlang::fmt::Formatter::default_formatter();
     let formatted = formatter.format_str(&source).map_err(|e| {
         eprintln!("Format error: {}", e);
         1
@@ -5758,9 +5810,9 @@ fn load_local_registry_index() -> HashMap<String, LocalRegistryEntry> {
 fn cmd_pkg(cmd: PkgCommands) -> Result<(), i32> {
     match cmd {
         PkgCommands::Init { path } => {
-            let manifest_path = path.join("Quanta.toml");
+            let manifest_path = path.join("Build.toml");
             if manifest_path.exists() {
-                eprintln!("Quanta.toml already exists in {}", path.display());
+                eprintln!("Build.toml already exists in {}", path.display());
                 return Err(1);
             }
             let dir_name = path
@@ -5773,35 +5825,35 @@ fn cmd_pkg(cmd: PkgCommands) -> Result<(), i32> {
                 dir_name
             );
             std::fs::write(&manifest_path, &manifest).map_err(|e| {
-                eprintln!("Error creating Quanta.toml: {}", e);
+                eprintln!("Error creating Build.toml: {}", e);
                 1
             })?;
             println!("Created {}", manifest_path.display());
             Ok(())
         }
         PkgCommands::Add { name, version } => {
-            let manifest_path = Path::new("Quanta.toml");
+            let manifest_path = Path::new("Build.toml");
             if !manifest_path.exists() {
-                eprintln!("No Quanta.toml found. Run `quantac pkg init` first.");
+                eprintln!("No Build.toml found. Run `buildc pkg init` first.");
                 return Err(1);
             }
             let mut content = std::fs::read_to_string(manifest_path).map_err(|e| {
-                eprintln!("Error reading Quanta.toml: {}", e);
+                eprintln!("Error reading Build.toml: {}", e);
                 1
             })?;
             let ver = version.unwrap_or_else(|| "*".to_string());
             content.push_str(&format!("{} = \"{}\"\n", name, ver));
             std::fs::write(manifest_path, &content).map_err(|e| {
-                eprintln!("Error writing Quanta.toml: {}", e);
+                eprintln!("Error writing Build.toml: {}", e);
                 1
             })?;
             println!("Added {} = \"{}\"", name, ver);
             Ok(())
         }
         PkgCommands::Resolve { path } => {
-            let manifest_path = path.join("Quanta.toml");
+            let manifest_path = path.join("Build.toml");
             if !manifest_path.exists() {
-                eprintln!("No Quanta.toml found in {}", path.display());
+                eprintln!("No Build.toml found in {}", path.display());
                 return Err(1);
             }
             println!("Resolving dependencies from {}...", manifest_path.display());
@@ -5877,7 +5929,7 @@ fn cmd_pkg(cmd: PkgCommands) -> Result<(), i32> {
 /// Resolve `mod foo;` declarations by loading and parsing external module files.
 ///
 /// For each `mod foo;` (a mod declaration with no body), this function:
-/// 1. Looks for `foo.quanta` in the same directory, or `foo/mod.quanta`
+/// 1. Looks for `foo.bld` in the same directory, or `foo/mod.bld`
 /// 2. Parses that file
 /// 3. Recursively resolves sub-module declarations
 /// 4. Collects all item names defined in the module
@@ -5890,10 +5942,10 @@ fn cmd_pkg(cmd: PkgCommands) -> Result<(), i32> {
 /// Find the stdlib directory. Searches:
 /// 1. `stdlib/` relative to the compiler executable
 /// 2. `../stdlib/` relative to the compiler executable (for dev builds)
-/// 3. `QUANTALANG_STDLIB` environment variable
+/// 3. `BUILDLANG_STDLIB` environment variable
 fn find_stdlib_path() -> Option<PathBuf> {
     // Check env var first
-    if let Ok(path) = std::env::var("QUANTALANG_STDLIB") {
+    if let Ok(path) = std::env::var("BUILDLANG_STDLIB") {
         let p = PathBuf::from(path);
         if p.is_dir() {
             return Some(p);
@@ -5907,7 +5959,7 @@ fn find_stdlib_path() -> Option<PathBuf> {
             if candidate.is_dir() {
                 return Some(candidate);
             }
-            // ../stdlib/ (dev layout: compiler/target/release/quantac → ../../stdlib)
+            // ../stdlib/ (dev layout: compiler/target/release/buildc → ../../stdlib)
             for ancestor in exe_dir.ancestors().skip(1).take(4) {
                 let candidate = ancestor.join("stdlib");
                 if candidate.is_dir() {
@@ -5962,12 +6014,12 @@ fn resolve_modules_with_prefix(
     let mut new_items: Vec<ast::Item> = Vec::new();
 
     for mod_name in &mod_names {
-        // Look for foo.quanta or foo/mod.quanta
-        let mod_file = source_dir.join(format!("{}.quanta", mod_name));
-        let mod_dir_file = source_dir.join(mod_name).join("mod.quanta");
+        // Look for foo.bld or foo/mod.bld
+        let mod_file = source_dir.join(format!("{}.bld", mod_name));
+        let mod_dir_file = source_dir.join(mod_name).join("mod.bld");
 
         // Search order: source directory → stdlib directory → skip
-        let stdlib_file = find_stdlib_path().map(|p| p.join(format!("{}.quanta", mod_name)));
+        let stdlib_file = find_stdlib_path().map(|p| p.join(format!("{}.bld", mod_name)));
 
         let (actual_file, sub_source_dir) = if mod_file.exists() {
             (mod_file, source_dir.to_path_buf())
@@ -6177,7 +6229,7 @@ fn rewrite_expr_node(expr: &mut ast::Expr, mod_defined: &HashSet<String>, prefix
 }
 
 /// Rewrite bare function calls in the main program to use module-prefixed names.
-/// E.g., `i32_min(a, b)` → `core_i32_min(a, b)` when `core.quanta` defines `i32_min`.
+/// E.g., `i32_min(a, b)` → `core_i32_min(a, b)` when `core.bld` defines `i32_min`.
 fn rewrite_imported_calls(body: &mut ast::Block, imported: &HashMap<String, String>) {
     for stmt in &mut body.stmts {
         match &mut stmt.kind {
@@ -6519,8 +6571,8 @@ fn cmd_compile(
 /// Watch shader files for changes and recompile automatically.
 ///
 /// Usage:
-///   quantac watch shaders/ --target=spirv
-///   quantac watch shader.quanta --target=spirv
+///   buildc watch shaders/ --target=spirv
+///   buildc watch shader.bld --target=spirv
 fn cmd_watch(path: &PathBuf, target_str: &str) -> Result<(), i32> {
     use std::collections::HashMap;
     use std::time::{Duration, SystemTime};
@@ -6543,7 +6595,7 @@ fn cmd_watch(path: &PathBuf, target_str: &str) -> Result<(), i32> {
         }
     };
 
-    // Collect .quanta files to watch
+    // Collect .bld files to watch
     let files_to_watch: Vec<PathBuf> = if path.is_dir() {
         std::fs::read_dir(path)
             .map_err(|e| {
@@ -6553,22 +6605,22 @@ fn cmd_watch(path: &PathBuf, target_str: &str) -> Result<(), i32> {
             .filter_map(|entry| {
                 let entry = entry.ok()?;
                 let p = entry.path();
-                if p.extension().and_then(|e| e.to_str()) == Some("quanta") {
+                if p.extension().and_then(|e| e.to_str()) == Some("bld") {
                     Some(p)
                 } else {
                     None
                 }
             })
             .collect()
-    } else if path.extension().and_then(|e| e.to_str()) == Some("quanta") {
+    } else if path.extension().and_then(|e| e.to_str()) == Some("bld") {
         vec![path.clone()]
     } else {
-        eprintln!("Expected a .quanta file or directory");
+        eprintln!("Expected a .bld file or directory");
         return Err(1);
     };
 
     if files_to_watch.is_empty() {
-        eprintln!("No .quanta files found in '{}'", path.display());
+        eprintln!("No .bld files found in '{}'", path.display());
         return Err(1);
     }
 
@@ -6665,7 +6717,7 @@ fn cmd_watch(path: &PathBuf, target_str: &str) -> Result<(), i32> {
     }
 }
 
-/// Compile a single .quanta file to the given output path.
+/// Compile a single .bld file to the given output path.
 fn compile_single_file(input: &Path, output: &Path) -> Result<(), String> {
     let source = std::fs::read_to_string(input).map_err(|e| format!("read error: {}", e))?;
 
@@ -6754,7 +6806,7 @@ mod tests {
         assert_eq!(
             substrate_evidence_rows(None),
             vec![
-                "  receipt   missing  run quantac corpus verify from a repository checkout"
+                "  receipt   missing  run buildc corpus verify from a repository checkout"
                     .to_string()
             ]
         );
@@ -6763,7 +6815,7 @@ mod tests {
     #[test]
     fn doctor_substrate_rows_report_invalid_when_receipt_is_malformed() {
         let root = std::env::temp_dir().join(format!(
-            "quantalang_doctor_substrate_invalid_{}",
+            "buildlang_doctor_substrate_invalid_{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&root);
@@ -6771,7 +6823,7 @@ mod tests {
         std::fs::write(
             root.join("manifest.json"),
             r#"{
-  "schema": "quantalang-semantic-corpus/v1",
+  "schema": "buildlang-semantic-corpus/v1",
   "programs": []
 }
 "#,
@@ -6781,7 +6833,7 @@ mod tests {
             root.join("receipts")
                 .join("substrate-semantic-corpus-2026-06-18.json"),
             r#"{
-  "schema": "quantalang-substrate-receipt/v9"
+  "schema": "buildlang-substrate-receipt/v9"
 }
 "#,
         )
@@ -6789,7 +6841,7 @@ mod tests {
 
         assert_eq!(
             substrate_evidence_rows(Some(&root)),
-            vec!["  receipt   invalid  run quantac corpus verify for details".to_string()]
+            vec!["  receipt   invalid  run buildc corpus verify for details".to_string()]
         );
 
         let _ = std::fs::remove_dir_all(&root);
@@ -6828,7 +6880,7 @@ mod tests {
             builtin_profile: None,
             builtin_profile_digest: None,
             profile: CheckPolicyProfile {
-                schema: "quantalang-check-policy/v1".to_string(),
+                schema: "buildlang-check-policy/v1".to_string(),
                 allowed_effects: vec!["Console".to_string()],
                 denied_effects: vec!["Network".to_string()],
                 direct_effect_allowlist: BTreeMap::new(),
@@ -6844,8 +6896,8 @@ mod tests {
             },
         };
         let outcome = CheckOutcome {
-            source: "source.quanta".to_string(),
-            compiler_version: quantalang::VERSION,
+            source: "source.bld".to_string(),
+            compiler_version: buildlang::VERSION,
             language_version: language_version_string(),
             source_digest: CheckReceiptSourceDigest {
                 algorithm: "sha256",
@@ -6874,7 +6926,7 @@ mod tests {
         };
 
         let decision = evaluate_check_policy(&policy, &outcome);
-        assert_eq!(decision.schema, "quantalang-check-policy/v1");
+        assert_eq!(decision.schema, "buildlang-check-policy/v1");
         assert_eq!(decision.source, "policy.json");
         assert_eq!(decision.source_digest.algorithm, "sha256");
         assert_eq!(check_policy_status(&decision), "failed");
@@ -6911,7 +6963,7 @@ mod tests {
             builtin_profile: None,
             builtin_profile_digest: None,
             profile: CheckPolicyProfile {
-                schema: "quantalang-check-policy/v1".to_string(),
+                schema: "buildlang-check-policy/v1".to_string(),
                 allowed_effects: Vec::new(),
                 denied_effects: Vec::new(),
                 direct_effect_allowlist: BTreeMap::new(),
@@ -6927,8 +6979,8 @@ mod tests {
             },
         };
         let outcome = CheckOutcome {
-            source: "source.quanta".to_string(),
-            compiler_version: quantalang::VERSION,
+            source: "source.bld".to_string(),
+            compiler_version: buildlang::VERSION,
             language_version: language_version_string(),
             source_digest: CheckReceiptSourceDigest {
                 algorithm: "sha256",
@@ -6956,13 +7008,13 @@ mod tests {
     #[test]
     fn check_policy_loads_profile_and_digest() {
         let path = std::env::temp_dir().join(format!(
-            "quantalang_check_policy_load_{}.json",
+            "buildlang_check_policy_load_{}.json",
             std::process::id()
         ));
         std::fs::write(
             &path,
             r#"{
-              "schema": "quantalang-check-policy/v1",
+              "schema": "buildlang-check-policy/v1",
               "allowed_effects": ["Console"],
               "unknown_future_field": true
             }"#,
@@ -6972,7 +7024,7 @@ mod tests {
         let loaded = load_check_policy(&path).expect("policy should load");
         let _ = std::fs::remove_file(&path);
 
-        assert_eq!(loaded.profile.schema, "quantalang-check-policy/v1");
+        assert_eq!(loaded.profile.schema, "buildlang-check-policy/v1");
         assert_eq!(loaded.profile.allowed_effects, vec!["Console"]);
         assert!(loaded.profile.direct_effect_allowlist.is_empty());
         assert!(loaded.profile.direct_capability_source_allowlist.is_empty());
@@ -6989,7 +7041,7 @@ mod tests {
 
     #[test]
     fn run_temp_build_dirs_are_unique_for_same_source() {
-        let source = PathBuf::from("semantic-corpus/programs/scalar_branch.quanta");
+        let source = PathBuf::from("semantic-corpus/programs/scalar_branch.bld");
 
         let first = run_temp_build_dir(&source);
         let second = run_temp_build_dir(&source);
@@ -6999,19 +7051,19 @@ mod tests {
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or_default()
-            .starts_with("quantalang_run_scalar_branch_"));
+            .starts_with("buildlang_run_scalar_branch_"));
     }
 
     #[test]
     fn run_temp_build_dirs_sanitize_source_stems() {
-        let source = PathBuf::from("semantic-corpus/programs/weird file!.quanta");
+        let source = PathBuf::from("semantic-corpus/programs/weird file!.bld");
         let dir = run_temp_build_dir(&source);
         let name = dir
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or_default();
 
-        assert!(name.starts_with("quantalang_run_weird_file__"));
+        assert!(name.starts_with("buildlang_run_weird_file__"));
         assert!(!name.contains(' '));
         assert!(!name.contains('!'));
     }

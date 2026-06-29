@@ -1,0 +1,483 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "BuildLang",
+  "scopeName": "source.bld",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#attributes" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#keywords" },
+    { "include": "#effect-keywords" },
+    { "include": "#function-definition" },
+    { "include": "#shader-builtins" },
+    { "include": "#function-call" },
+    { "include": "#macro-invocation" },
+    { "include": "#struct-definition" },
+    { "include": "#enum-definition" },
+    { "include": "#trait-definition" },
+    { "include": "#impl-block" },
+    { "include": "#type-names" },
+    { "include": "#lifetime" },
+    { "include": "#constants" },
+    { "include": "#operators" },
+    { "include": "#punctuation" },
+    { "include": "#variables" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.documentation.bld",
+          "match": "///.*$"
+        },
+        {
+          "name": "comment.line.double-slash.bld",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.bld",
+          "begin": "/\\*",
+          "end": "\\*/",
+          "patterns": [
+            { "include": "#comments" }
+          ]
+        }
+      ]
+    },
+
+    "attributes": {
+      "patterns": [
+        {
+          "name": "meta.attribute.bld",
+          "begin": "#\\[",
+          "end": "\\]",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.attribute.begin.bld" }
+          },
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.attribute.end.bld" }
+          },
+          "patterns": [
+            {
+              "name": "entity.name.function.attribute.shader.bld",
+              "match": "\\b(vertex|fragment|compute|uniform)\\b"
+            },
+            {
+              "name": "entity.name.function.attribute.bld",
+              "match": "\\b[a-zA-Z_][a-zA-Z0-9_]*\\b"
+            },
+            { "include": "#strings" },
+            { "include": "#numbers" }
+          ]
+        }
+      ]
+    },
+
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.bld",
+          "begin": "\"",
+          "end": "\"",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.string.begin.bld" }
+          },
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.string.end.bld" }
+          },
+          "patterns": [
+            {
+              "name": "constant.character.escape.bld",
+              "match": "\\\\[nrt\\\\\"'0]"
+            },
+            {
+              "name": "constant.character.escape.unicode.bld",
+              "match": "\\\\u\\{[0-9a-fA-F]+\\}"
+            },
+            {
+              "name": "constant.character.escape.hex.bld",
+              "match": "\\\\x[0-9a-fA-F]{2}"
+            },
+            {
+              "name": "meta.interpolation.bld",
+              "begin": "\\{",
+              "end": "\\}",
+              "beginCaptures": {
+                "0": { "name": "punctuation.definition.interpolation.begin.bld" }
+              },
+              "endCaptures": {
+                "0": { "name": "punctuation.definition.interpolation.end.bld" }
+              },
+              "patterns": [
+                { "include": "source.bld" }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.single.bld",
+          "match": "'[^'\\\\]'",
+          "captures": {
+            "0": { "name": "string.quoted.single.bld" }
+          }
+        },
+        {
+          "name": "string.quoted.single.escape.bld",
+          "match": "'\\\\[nrt\\\\\"'0]'"
+        }
+      ]
+    },
+
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.bld",
+          "match": "\\b0x[0-9a-fA-F][0-9a-fA-F_]*(i8|i16|i32|i64|i128|u8|u16|u32|u64|u128)?\\b"
+        },
+        {
+          "name": "constant.numeric.binary.bld",
+          "match": "\\b0b[01][01_]*(i8|i16|i32|i64|i128|u8|u16|u32|u64|u128)?\\b"
+        },
+        {
+          "name": "constant.numeric.octal.bld",
+          "match": "\\b0o[0-7][0-7_]*(i8|i16|i32|i64|i128|u8|u16|u32|u64|u128)?\\b"
+        },
+        {
+          "name": "constant.numeric.float.bld",
+          "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*([eE][+-]?[0-9][0-9_]*)?(f32|f64)?\\b"
+        },
+        {
+          "name": "constant.numeric.float.exponent.bld",
+          "match": "\\b[0-9][0-9_]*[eE][+-]?[0-9][0-9_]*(f32|f64)?\\b"
+        },
+        {
+          "name": "constant.numeric.integer.bld",
+          "match": "\\b[0-9][0-9_]*(i8|i16|i32|i64|i128|u8|u16|u32|u64|u128|f32|f64|usize|isize)?\\b"
+        }
+      ]
+    },
+
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.flow.bld",
+          "match": "\\b(if|else|match|loop|while|for|in|break|continue|return)\\b"
+        },
+        {
+          "name": "keyword.declaration.bld",
+          "match": "\\b(fn|struct|enum|trait|impl|type|const|static|let|mut|pub|mod|use|extern)\\b"
+        },
+        {
+          "name": "keyword.other.type.bld",
+          "match": "\\b(where|dyn|typeof|sizeof|as)\\b"
+        },
+        {
+          "name": "keyword.other.async.bld",
+          "match": "\\b(async|await)\\b"
+        },
+        {
+          "name": "keyword.reserved.bld",
+          "match": "\\b(abstract|become|do|final|override|priv|try|yield|union|default|auto)\\b"
+        },
+        {
+          "name": "variable.language.self.bld",
+          "match": "\\bself\\b"
+        },
+        {
+          "name": "entity.name.type.self.bld",
+          "match": "\\bSelf\\b"
+        }
+      ]
+    },
+
+    "effect-keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.effect.bld",
+          "match": "\\b(effect|handle|perform|with|resume)\\b"
+        },
+        {
+          "comment": "Effect annotation on function signatures: ~ EffectName",
+          "match": "(~)\\s+([A-Z][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.operator.effect.bld" },
+            "2": { "name": "entity.name.type.effect.bld" }
+          }
+        }
+      ]
+    },
+
+    "function-definition": {
+      "patterns": [
+        {
+          "comment": "Generic function definition: fn name<T>",
+          "match": "\\b(fn)\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*(<)",
+          "captures": {
+            "1": { "name": "keyword.declaration.bld" },
+            "2": { "name": "entity.name.function.bld" },
+            "3": { "name": "punctuation.definition.generic.begin.bld" }
+          }
+        },
+        {
+          "comment": "Function definition: fn name",
+          "match": "\\b(fn)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.bld" },
+            "2": { "name": "entity.name.function.bld" }
+          }
+        }
+      ]
+    },
+
+    "function-call": {
+      "patterns": [
+        {
+          "comment": "Method call: .name(",
+          "match": "(?<=\\.)([a-z_][a-zA-Z0-9_]*)\\s*(?=\\()",
+          "captures": {
+            "1": { "name": "entity.name.function.call.bld" }
+          }
+        }
+      ]
+    },
+
+    "macro-invocation": {
+      "patterns": [
+        {
+          "comment": "Macro call: name!(...)",
+          "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s*(!)",
+          "captures": {
+            "1": { "name": "entity.name.function.macro.bld" },
+            "2": { "name": "keyword.operator.macro.bld" }
+          }
+        }
+      ]
+    },
+
+    "struct-definition": {
+      "patterns": [
+        {
+          "comment": "Struct definition: struct Name",
+          "match": "\\b(struct)\\s+([A-Z][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.bld" },
+            "2": { "name": "entity.name.type.struct.bld" }
+          }
+        }
+      ]
+    },
+
+    "enum-definition": {
+      "patterns": [
+        {
+          "comment": "Enum definition: enum Name",
+          "match": "\\b(enum)\\s+([A-Z][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.bld" },
+            "2": { "name": "entity.name.type.enum.bld" }
+          }
+        }
+      ]
+    },
+
+    "trait-definition": {
+      "patterns": [
+        {
+          "comment": "Trait definition: trait Name",
+          "match": "\\b(trait)\\s+([A-Z][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.bld" },
+            "2": { "name": "entity.name.type.trait.bld" }
+          }
+        }
+      ]
+    },
+
+    "impl-block": {
+      "patterns": [
+        {
+          "comment": "impl Trait for Type",
+          "match": "\\b(impl)\\s+([A-Z][a-zA-Z0-9_]*)\\s+(for)\\s+([A-Z][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.bld" },
+            "2": { "name": "entity.name.type.trait.bld" },
+            "3": { "name": "keyword.declaration.bld" },
+            "4": { "name": "entity.name.type.struct.bld" }
+          }
+        },
+        {
+          "comment": "impl Type",
+          "match": "\\b(impl)\\s+([A-Z][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.bld" },
+            "2": { "name": "entity.name.type.struct.bld" }
+          }
+        }
+      ]
+    },
+
+    "type-names": {
+      "patterns": [
+        {
+          "comment": "Primitive types",
+          "name": "storage.type.primitive.bld",
+          "match": "\\b(bool|char|str|i8|i16|i32|i64|i128|u8|u16|u32|u64|u128|f32|f64|usize|isize)\\b"
+        },
+        {
+          "comment": "GPU vector/matrix types",
+          "name": "storage.type.gpu.bld",
+          "match": "\\b(vec2|vec3|vec4|mat2|mat3|mat4|ivec2|ivec3|ivec4|uvec2|uvec3|uvec4|dvec2|dvec3|dvec4)\\b"
+        },
+        {
+          "comment": "Path-qualified type: Type::Variant",
+          "match": "\\b([A-Z][a-zA-Z0-9_]*)(::)([A-Z][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "entity.name.type.bld" },
+            "2": { "name": "punctuation.separator.path.bld" },
+            "3": { "name": "entity.name.type.variant.bld" }
+          }
+        },
+        {
+          "comment": "Capitalized identifiers as types (but not after fn, let, etc.)",
+          "match": "(?<![.])\\b([A-Z][a-zA-Z0-9_]*)\\b(?!\\s*[!(])",
+          "captures": {
+            "1": { "name": "entity.name.type.bld" }
+          }
+        }
+      ]
+    },
+
+    "lifetime": {
+      "patterns": [
+        {
+          "name": "storage.modifier.lifetime.bld",
+          "match": "'[a-zA-Z_][a-zA-Z0-9_]*\\b"
+        }
+      ]
+    },
+
+    "shader-builtins": {
+      "patterns": [
+        {
+          "comment": "Texture sampling intrinsics",
+          "name": "support.function.texture.bld",
+          "match": "\\b(tex2d|tex2d_depth|texture_sample)\\b(?=\\s*\\()"
+        },
+        {
+          "comment": "Math intrinsics (highlighted when used as function calls)",
+          "name": "support.function.math.bld",
+          "match": "\\b(sin|cos|tan|sqrt|pow|abs|exp|log|log2|log10|atan2|floor|ceil|round|fract|min|max|clamp|smoothstep|mix|lerp|step)\\b(?=\\s*\\()"
+        },
+        {
+          "comment": "Vector/geometry intrinsics",
+          "name": "support.function.vector.bld",
+          "match": "\\b(dot|cross|normalize|length|reflect|distance)\\b(?=\\s*\\()"
+        },
+        {
+          "comment": "Vector/matrix constructors",
+          "name": "support.function.constructor.bld",
+          "match": "\\b(vec2|vec3|vec4|mat4)\\b(?=\\s*\\()"
+        }
+      ]
+    },
+
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.bld",
+          "match": "\\b(true|false)\\b"
+        },
+        {
+          "comment": "SCREAMING_SNAKE constants",
+          "name": "constant.other.caps.bld",
+          "match": "\\b[A-Z][A-Z0-9_]{2,}\\b"
+        }
+      ]
+    },
+
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.arrow.bld",
+          "match": "->"
+        },
+        {
+          "name": "keyword.operator.fat-arrow.bld",
+          "match": "=>"
+        },
+        {
+          "name": "keyword.operator.path.bld",
+          "match": "::"
+        },
+        {
+          "name": "keyword.operator.comparison.bld",
+          "match": "(==|!=|<=|>=|<|>)"
+        },
+        {
+          "name": "keyword.operator.logical.bld",
+          "match": "(&&|\\|\\||!(?!=))"
+        },
+        {
+          "name": "keyword.operator.arithmetic.bld",
+          "match": "(\\+|-|\\*|/|%)"
+        },
+        {
+          "name": "keyword.operator.bitwise.bld",
+          "match": "(&|\\||\\^|<<|>>)"
+        },
+        {
+          "name": "keyword.operator.assignment.bld",
+          "match": "(=|\\+=|-=|\\*=|/=|%=|&=|\\|=|\\^=|<<=|>>=)"
+        },
+        {
+          "name": "keyword.operator.range.bld",
+          "match": "\\.\\."
+        },
+        {
+          "name": "keyword.operator.reference.bld",
+          "match": "&"
+        },
+        {
+          "name": "keyword.operator.effect.tilde.bld",
+          "match": "~"
+        },
+        {
+          "name": "keyword.operator.try.bld",
+          "match": "\\?"
+        }
+      ]
+    },
+
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.separator.comma.bld",
+          "match": ","
+        },
+        {
+          "name": "punctuation.terminator.semicolon.bld",
+          "match": ";"
+        },
+        {
+          "name": "punctuation.separator.colon.bld",
+          "match": ":"
+        },
+        {
+          "name": "punctuation.separator.dot.bld",
+          "match": "\\."
+        }
+      ]
+    },
+
+    "variables": {
+      "patterns": [
+        {
+          "comment": "Identifiers",
+          "name": "variable.other.bld",
+          "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
+        }
+      ]
+    }
+  }
+}

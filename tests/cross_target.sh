@@ -1,17 +1,17 @@
 #!/bin/bash
 # Cross-Target Math Verification Harness
-# Compiles .quanta functions to C, HLSL, and GLSL and compares outputs.
-# Verifies that the same QuantaLang source produces structurally equivalent
+# Compiles .bld functions to C, HLSL, and GLSL and compares outputs.
+# Verifies that the same BuildLang source produces structurally equivalent
 # mathematical expressions across all three text backends.
 #
 # Usage: bash tests/cross_target.sh
-# Requires: quantac in PATH or at compiler/target/release/quantac.exe
+# Requires: buildc in PATH or at compiler/target/release/buildc.exe
 
 set -e
 
-QUANTAC="compiler/target/release/quantac.exe"
-if [ ! -f "$QUANTAC" ]; then
-    QUANTAC="$(which quantac 2>/dev/null || echo quantac)"
+BUILDC="compiler/target/release/buildc.exe"
+if [ ! -f "$BUILDC" ]; then
+    BUILDC="$(which buildc 2>/dev/null || echo buildc)"
 fi
 
 PASS=0
@@ -21,14 +21,14 @@ ERRORS=""
 
 compile_and_check() {
     local src="$1"
-    local name="$(basename "$src" .quanta)"
+    local name="$(basename "$src" .bld)"
     local outdir="tests/cross_target_out"
     mkdir -p "$outdir"
 
     echo "--- $name ---"
 
     # Compile to C
-    if $QUANTAC "$src" --target c -o "$outdir/${name}.c" 2>/dev/null; then
+    if $BUILDC "$src" --target c -o "$outdir/${name}.c" 2>/dev/null; then
         echo "  C:    OK"
         PASS=$((PASS + 1))
     else
@@ -38,7 +38,7 @@ compile_and_check() {
     fi
 
     # Compile to HLSL
-    if $QUANTAC "$src" --target hlsl -o "$outdir/${name}.hlsl" 2>/dev/null; then
+    if $BUILDC "$src" --target hlsl -o "$outdir/${name}.hlsl" 2>/dev/null; then
         echo "  HLSL: OK"
         PASS=$((PASS + 1))
     else
@@ -48,7 +48,7 @@ compile_and_check() {
     fi
 
     # Compile to GLSL
-    if $QUANTAC "$src" --target glsl -o "$outdir/${name}.glsl" 2>/dev/null; then
+    if $BUILDC "$src" --target glsl -o "$outdir/${name}.glsl" 2>/dev/null; then
         echo "  GLSL: OK"
         PASS=$((PASS + 1))
     else
@@ -69,20 +69,20 @@ compile_and_check() {
 }
 
 echo "================================================"
-echo "QuantaLang Cross-Target Math Verification"
+echo "BuildLang Cross-Target Math Verification"
 echo "================================================"
 echo ""
 
 # Core math test
-compile_and_check "tests/cross_target_test.quanta"
+compile_and_check "tests/cross_target_test.bld"
 
 # Shader demos
-for f in demos/*.quanta; do
+for f in demos/*.bld; do
     compile_and_check "$f"
 done
 
 # Shader test programs
-for f in tests/shaders/*.quanta; do
+for f in tests/shaders/*.bld; do
     compile_and_check "$f"
 done
 

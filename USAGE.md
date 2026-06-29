@@ -1,13 +1,13 @@
-# QuantaLang Usage Guide
+# BuildLang Usage Guide
 
-This guide covers installing the `quantac` compiler and using its real
-command surface. QuantaLang compiles `.quanta` source files to **C** as the
+This guide covers installing the `buildc` compiler and using its real
+command surface. BuildLang compiles `.bld` source files to **C** as the
 primary verified execution path and emits **HLSL**/**GLSL** for shader work,
 with additional experimental backends.
 
 All commands and flags below are taken from the compiler's actual CLI
 definition (`compiler/src/main.rs`). The worked examples were run against a
-local debug build of `quantac` 1.0.0 on Windows; the captured output is shown
+local debug build of `buildc` 1.0.0 on Windows; the captured output is shown
 verbatim. Output captured from an actual run is marked **(verified)**; any
 output that was not run is marked **(illustrative)**.
 
@@ -22,44 +22,44 @@ cargo build --release
 
 Add the produced binary to your `PATH`:
 
-- Linux/macOS: `compiler/target/release/quantac`
-- Windows: `compiler\target\release\quantac.exe`
+- Linux/macOS: `compiler/target/release/buildc`
+- Windows: `compiler\target\release\buildc.exe`
 
 Confirm your local toolchain (C compiler, stdlib, optional backend tools):
 
 ```bash
-quantac doctor
+buildc doctor
 ```
 
 ## Command Reference
 
-These are the subcommands exposed by `quantac` (run `quantac --help` for the
-authoritative list and `quantac <command> --help` for per-command flags):
+These are the subcommands exposed by `buildc` (run `buildc --help` for the
+authoritative list and `buildc <command> --help` for per-command flags):
 
 | Command            | Purpose                                                      |
 |--------------------|-------------------------------------------------------------|
-| `quantac <file>`   | Compile a file (no subcommand); honors `-o`, `--target`, `-O`, `-g` |
-| `quantac run`      | Compile and run a `.quanta` file via the C backend          |
-| `quantac build`    | Build a project (`--emit c|exe`, `--release`, `--target`, `--keep-c`) |
-| `quantac check`    | Type-check; optional `--receipt`, `--policy`, `--profile`   |
-| `quantac lex`      | Tokenize a file and print tokens                            |
-| `quantac parse`    | Parse a file and print the AST (`--json` for JSON)          |
-| `quantac fmt`      | Format source (`--check`, `--write`)                        |
-| `quantac lint`     | Lint a source file                                          |
-| `quantac repl`     | Start a REPL session                                        |
-| `quantac lsp`      | Start the Language Server Protocol server                  |
-| `quantac watch`    | Watch files and recompile on change (`--target spirv|c`)    |
-| `quantac pkg`      | Package manager (`init`, `add`, `resolve`, `search`)        |
-| `quantac policy`   | Built-in check policy profiles (`list`, `print`, `scaffold`)|
-| `quantac receipt`  | Verify a saved check receipt (`verify`)                     |
-| `quantac corpus`   | Verify the semantic corpus (`verify`)                       |
-| `quantac test`     | Run `.quanta` programs against `.expected` files            |
-| `quantac doctor`   | Diagnose local toolchain, backend, and package readiness    |
-| `quantac version`  | Print version information                                   |
+| `buildc <file>`   | Compile a file (no subcommand); honors `-o`, `--target`, `-O`, `-g` |
+| `buildc run`      | Compile and run a `.bld` file via the C backend          |
+| `buildc build`    | Build a project (`--emit c|exe`, `--release`, `--target`, `--keep-c`) |
+| `buildc check`    | Type-check; optional `--receipt`, `--policy`, `--profile`   |
+| `buildc lex`      | Tokenize a file and print tokens                            |
+| `buildc parse`    | Parse a file and print the AST (`--json` for JSON)          |
+| `buildc fmt`      | Format source (`--check`, `--write`)                        |
+| `buildc lint`     | Lint a source file                                          |
+| `buildc repl`     | Start a REPL session                                        |
+| `buildc lsp`      | Start the Language Server Protocol server                  |
+| `buildc watch`    | Watch files and recompile on change (`--target spirv|c`)    |
+| `buildc pkg`      | Package manager (`init`, `add`, `resolve`, `search`)        |
+| `buildc policy`   | Built-in check policy profiles (`list`, `print`, `scaffold`)|
+| `buildc receipt`  | Verify a saved check receipt (`verify`)                     |
+| `buildc corpus`   | Verify the semantic corpus (`verify`)                       |
+| `buildc test`     | Run `.bld` programs against `.expected` files            |
+| `buildc doctor`   | Diagnose local toolchain, backend, and package readiness    |
+| `buildc version`  | Print version information                                   |
 
 ### Top-level compile flags
 
-When invoked without a subcommand (`quantac <file>`):
+When invoked without a subcommand (`buildc <file>`):
 
 - `-o, --output <FILE>` — output file path
 - `--target <NAME>` — code generation backend (see below)
@@ -69,7 +69,7 @@ When invoked without a subcommand (`quantac <file>`):
 
 ### Code generation targets
 
-`--target` (and `quantac build --target`) accepts:
+`--target` (and `buildc build --target`) accepts:
 
 | Target  | Flag value(s)              | Status       |
 |---------|----------------------------|--------------|
@@ -90,11 +90,11 @@ The examples below use those files so they stay aligned with the compiler.
 
 ### 1. Run a program
 
-`examples/quickstart/hello.quanta`:
+`examples/quickstart/hello.bld`:
 
-```quanta
+```build
 fn main() ~ Console {
-    println!("Hello from QuantaLang!");
+    println!("Hello from BuildLang!");
 }
 ```
 
@@ -102,19 +102,19 @@ fn main() ~ Console {
 effect. Compile and run via the C backend:
 
 ```bash
-quantac run examples/quickstart/hello.quanta
+buildc run examples/quickstart/hello.bld
 ```
 
 Output **(verified)**:
 
 ```
-Hello from QuantaLang!
+Hello from BuildLang!
 ```
 
-The `ledger.quanta` example (functions, mutable locals, a `while` loop):
+The `ledger.bld` example (functions, mutable locals, a `while` loop):
 
 ```bash
-quantac run examples/quickstart/ledger.quanta
+buildc run examples/quickstart/ledger.bld
 ```
 
 Output **(verified)** — `100 + 5*3`:
@@ -128,7 +128,7 @@ balance: 115
 Emit C and compile it with your system C compiler:
 
 ```bash
-quantac examples/quickstart/hello.quanta -o hello.c
+buildc examples/quickstart/hello.bld -o hello.c
 cc hello.c -o hello
 ./hello
 ```
@@ -136,20 +136,20 @@ cc hello.c -o hello
 The first command prints (path will be your output path) **(verified)**:
 
 ```
-Compiled examples/quickstart/hello.quanta -> hello.c
+Compiled examples/quickstart/hello.bld -> hello.c
 ```
 
-The generated C begins with `// Generated by QuantaLang Compiler` and a
+The generated C begins with `// Generated by BuildLang Compiler` and a
 portability prelude before the lowered program.
 
 ### 3. Type-check with a capability policy and receipt
 
-`quantac check` type-checks and reports capability effects. Add `--profile`
+`buildc check` type-checks and reports capability effects. Add `--profile`
 to evaluate a built-in policy and `--receipt -` to print a machine-readable
 accountability receipt to stdout:
 
 ```bash
-quantac check examples/quickstart/hello.quanta --profile console-only --receipt -
+buildc check examples/quickstart/hello.bld --profile console-only --receipt -
 ```
 
 The human summary is printed first, then the JSON receipt. Output begins
@@ -160,10 +160,10 @@ Lexing... OK (15 tokens)
 Parsing... OK (1 items)
 Type checking... OK
 
-No errors found in 'examples/quickstart/hello.quanta'
+No errors found in 'examples/quickstart/hello.bld'
 {
-  "schema": "quantalang-check-receipt/v1",
-  "compiler": "quantac",
+  "schema": "buildlang-check-receipt/v1",
+  "compiler": "buildc",
   "compiler_version": "1.0.0",
   "language_version": "1.0.0",
   ...
@@ -180,7 +180,7 @@ No errors found in 'examples/quickstart/hello.quanta'
 List the built-in policy profiles with:
 
 ```bash
-quantac policy list
+buildc policy list
 ```
 
 Output **(verified)**:
@@ -197,29 +197,29 @@ Built-in check policy profiles:
 Save a receipt to a file and re-verify it later against the current source:
 
 ```bash
-quantac check app.quanta --profile ci-review --receipt receipt.json
-quantac receipt verify receipt.json --expect-profile ci-review
+buildc check app.bld --profile ci-review --receipt receipt.json
+buildc receipt verify receipt.json --expect-profile ci-review
 ```
 
 ### 4. Compile a shader to HLSL
 
-`examples/quickstart/vignette_shader.quanta` defines a `#[fragment]` entry
+`examples/quickstart/vignette_shader.bld` defines a `#[fragment]` entry
 point. Compile it to HLSL for ReShade / DirectX:
 
 ```bash
-quantac examples/quickstart/vignette_shader.quanta --target hlsl -o vignette_shader.hlsl
+buildc examples/quickstart/vignette_shader.bld --target hlsl -o vignette_shader.hlsl
 ```
 
 The command prints **(verified)**:
 
 ```
-Compiled examples/quickstart/vignette_shader.quanta -> vignette_shader.hlsl
+Compiled examples/quickstart/vignette_shader.bld -> vignette_shader.hlsl
 ```
 
 The generated HLSL **(verified, excerpt)**:
 
 ```hlsl
-// Generated by QuantaLang Compiler
+// Generated by BuildLang Compiler
 // Target: HLSL (DirectX / ReShade)
 // Do not edit manually
 

@@ -1,12 +1,12 @@
 // ===============================================================================
-// QUANTALANG AST - EXPRESSIONS
+// BUILDLANG AST - EXPRESSIONS
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
 //! Expression AST nodes.
 //!
-//! Expressions are the core of QuantaLang - everything that produces a value.
+//! Expressions are the core of BuildLang - everything that produces a value.
 
 use super::{
     AssignOp, Attribute, BinOp, Block, Ident, Mutability, NodeId, Path, Pattern, Type, UnaryOp,
@@ -310,7 +310,7 @@ pub enum ExprKind {
     },
 
     // =========================================================================
-    // QUANTALANG EXTENSIONS
+    // BUILDLANG EXTENSIONS
     // =========================================================================
     /// AI query: `@ai("prompt")`
     AIQuery {

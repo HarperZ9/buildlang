@@ -5,7 +5,7 @@ Last audited: 2026-06-15
 2026-06-15 wind-down assessment: see
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md` for the current product
 posture. This backend-local file is retained as an implementation inventory.
-Non-C targets are selectable through `quantac build --target`, but C remains
+Non-C targets are selectable through `buildc build --target`, but C remains
 the only production-backed end-to-end target. This inventory describes apparent
 backend coverage from source and unit tests; it is not a substitute for
 end-to-end executable/module receipts.
@@ -20,7 +20,7 @@ receipt aligned with the manifest.
 
 2026-06-13 C update: function-style `println("{}", value)` now lowers to C
 `printf` format specifiers instead of printing the literal format string. The
-current 8-program semantic corpus was run through `quantac run`, parallel-probed
+current 8-program semantic corpus was run through `buildc run`, parallel-probed
 with per-run temp build directories, and recorded in
 `semantic-corpus/receipts/c-execution-2026-06-13.json`.
 
@@ -186,7 +186,7 @@ reasonable technical sequence:
 - All implement `Backend` trait with `generate()` returning `CodegenResult<GeneratedCode>`
 - All handle the core MIR operation set (Use, BinaryOp, UnaryOp, basic terminators)
 - None handle FieldAccess or VariantField (struct/enum member access)
-- Non-C backends are selectable through `quantac build --target`, but they do
+- Non-C backends are selectable through `buildc build --target`, but they do
   not carry the C backend's production claim
 - Rust now has a narrow executable stdout smoke slice; other non-C backends do
   not yet have end-to-end tests that produce and run an executable/module

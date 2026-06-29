@@ -5,14 +5,14 @@ Status: Approved design slice; implementation plan pending user review
 
 ## Purpose
 
-QuantaLang and `quantac` already expose several pieces of the long-term native
+BuildLang and `buildc` already expose several pieces of the long-term native
 language thesis: a Rust compiler, a C execution anchor, typed capability
 effects, source-bound check receipts, input graph digests, semantic corpus
 receipts, and experimental CPU/GPU/backend surfaces. Those pieces are useful,
 but they are still reported through separate artifacts.
 
 Substrate Receipts v0 creates one machine-readable evidence layer that describes
-what a QuantaLang program touches, represents, lowers to, and proves. The goal is
+what a BuildLang program touches, represents, lowers to, and proves. The goal is
 to make CPU, GPU, memory, semantics, symbols, representations, backend maturity,
 and verification evidence visible to humans and machines through the same
 contract.
@@ -25,12 +25,12 @@ claims each time.
 
 ## Current Evidence
 
-- `quantac check --receipt` emits deterministic accountability receipts with
+- `buildc check --receipt` emits deterministic accountability receipts with
   declared effects, observed capability sources, propagated effects, source
   digest metadata, transitive input digests, and an input graph digest.
-- `quantac receipt verify` re-checks saved accountability receipts against the
+- `buildc receipt verify` re-checks saved accountability receipts against the
   current source graph and optional policy or profile expectations.
-- `quantac corpus verify` validates the semantic corpus manifest, C execution
+- `buildc corpus verify` validates the semantic corpus manifest, C execution
   receipt, Rust execution receipt, and current C-backend stdout.
 - The C backend is the product execution anchor. It is the only backend with the
   current production execution claim.
@@ -55,7 +55,7 @@ semantic, and representation surfaces.
 
 ### Approach B: More Accountability Policy Rules
 
-Continue deepening `quantac check` policy profiles and effect provenance.
+Continue deepening `buildc check` policy profiles and effect provenance.
 
 Tradeoff: this preserves the strongest current differentiator, but it remains
 mostly semantic and policy-oriented. It does not bind backend and representation
@@ -77,8 +77,8 @@ Recommendation: Approach C.
 ## Architecture
 
 Substrate Receipts v0 adds a new public artifact family under
-`semantic-corpus/receipts/` and a verifier path in `quantac corpus verify` or a
-future `quantac substrate verify` command. The first implementation should use a
+`semantic-corpus/receipts/` and a verifier path in `buildc corpus verify` or a
+future `buildc substrate verify` command. The first implementation should use a
 checked-in sample receipt and tests before adding any generated receipt writer.
 
 The receipt has these top-level surfaces:
@@ -98,7 +98,7 @@ The receipt has these top-level surfaces:
 The first slice should not require a full compiler analysis pass for every
 program. It can bind existing evidence:
 
-- source/input evidence from `quantalang-check-receipt/v1`;
+- source/input evidence from `buildlang-check-receipt/v1`;
 - C/Rust corpus evidence from semantic corpus execution receipts;
 - backend maturity from a checked-in descriptor derived from
   `compiler/src/codegen/backend/STATUS.md`;
@@ -110,18 +110,18 @@ The schema should be additive and stable:
 
 ```json
 {
-  "schema": "quantalang-substrate-receipt/v0",
+  "schema": "buildlang-substrate-receipt/v0",
   "receipt_id": "substrate-semantic-corpus-2026-06-18",
   "created_at": "2026-06-18",
-  "compiler": "quantac",
-  "language": "quantalang",
+  "compiler": "buildc",
+  "language": "buildlang",
   "source_set": {
     "kind": "semantic-corpus",
     "manifest": "semantic-corpus/manifest.json",
     "program_count": 8
   },
   "semantic_surface": {
-    "check_receipt_schema": "quantalang-check-receipt/v1",
+    "check_receipt_schema": "buildlang-check-receipt/v1",
     "requires_source_digest": true,
     "requires_input_graph_digest": true,
     "effect_surfaces": [
@@ -193,9 +193,9 @@ The schema should be additive and stable:
 The first verifier should enforce structural truth rather than deep semantic
 analysis:
 
-- `schema` must be `quantalang-substrate-receipt/v0`.
+- `schema` must be `buildlang-substrate-receipt/v0`.
 - `source_set.manifest` must exist and parse as
-  `quantalang-semantic-corpus/v1`.
+  `buildlang-semantic-corpus/v1`.
 - `source_set.program_count` must match the manifest program count.
 - Every execution surface must include `target`, `maturity`, `evidence_class`,
   and either a `receipt` path or a clear `status` of `unverified`.
@@ -215,11 +215,11 @@ unverified, or aspirational, but it cannot silently imply proof.
 
 The first implementation can choose the smallest local fit:
 
-Option 1: extend `quantac corpus verify` to validate
+Option 1: extend `buildc corpus verify` to validate
 `semantic-corpus/receipts/substrate-*.json` after existing manifest and C/Rust
 receipt checks.
 
-Option 2: add a focused `quantac substrate verify <receipt.json>` command once
+Option 2: add a focused `buildc substrate verify <receipt.json>` command once
 the schema stabilizes.
 
 The recommended first implementation is Option 1 because it reuses the existing
@@ -254,7 +254,7 @@ Implementation should be test-first:
 
 - No backend productionization in this slice.
 - No full SPIR-V, LLVM, WASM, x86-64, or ARM64 execution proof.
-- No replacement for `quantalang-check-receipt/v1`.
+- No replacement for `buildlang-check-receipt/v1`.
 - No replacement for semantic corpus C or Rust execution receipts.
 - No cryptographic signing layer.
 - No package registry trust model.
@@ -265,7 +265,7 @@ Implementation should be test-first:
 
 This design is implemented when:
 
-- A `quantalang-substrate-receipt/v0` sample receipt exists for the current
+- A `buildlang-substrate-receipt/v0` sample receipt exists for the current
   semantic corpus.
 - The verifier checks schema, source set, manifest count, backend maturity,
   memory surface gaps, representation fallback policy, and evidence commands.
@@ -288,7 +288,7 @@ Substrate Receipts v0 is a base layer. Later slices can add:
 - symbol graph receipts for public APIs and package boundaries;
 - latency and responsiveness receipts for watch, LSP, and incremental compile
   surfaces;
-- self-hosting readiness receipts for Quanta-written compiler components.
+- self-hosting readiness receipts for Build-written compiler components.
 
 The important invariant is that the native substrate grows through receipts that
 bind claims to evidence, not through broader prose claims.

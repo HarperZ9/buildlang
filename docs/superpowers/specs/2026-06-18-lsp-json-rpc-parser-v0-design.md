@@ -3,7 +3,7 @@
 ## Goal
 
 Replace the current exact-substring LSP raw-message dispatch with a small
-structural JSON parser so `quantac lsp` accepts normal JSON-RPC formatting:
+structural JSON parser so `buildc lsp` accepts normal JSON-RPC formatting:
 pretty-printed payloads, reordered fields, string or numeric IDs, and nested
 `params` objects.
 
@@ -65,7 +65,7 @@ Targeted verification commands:
 
 - `cargo fmt --manifest-path compiler/Cargo.toml -- --check`
 - `cargo test --manifest-path compiler/Cargo.toml --lib json_rpc --quiet`
-- `cargo test --manifest-path compiler/Cargo.toml --bin quantac lsp_dispatch --quiet`
+- `cargo test --manifest-path compiler/Cargo.toml --bin buildc lsp_dispatch --quiet`
 - `cargo test --manifest-path compiler/Cargo.toml --test cli lsp_dispatch -- --nocapture`
 - `cargo test --manifest-path compiler/Cargo.toml --test cli corpus_verify -- --nocapture`
 - `cargo run --manifest-path compiler/Cargo.toml -- corpus verify --root semantic-corpus`

@@ -1,24 +1,24 @@
-# QuantaLang Demo
+# BuildLang Demo
 
 > Best-effort demo - not runtime-verified by author.
 
-A small, self-contained QuantaLang program (`temperature.quanta`) that
-exercises the practical CPU surface of `quantac`:
+A small, self-contained BuildLang program (`temperature.bld`) that
+exercises the practical CPU surface of `buildc`:
 
 - a pure helper function (`to_fahrenheit`),
 - mutable locals and a `while` loop,
 - the `Console` capability effect carried by `println!`.
 
-The output shown below was captured from a local debug build of `quantac`
+The output shown below was captured from a local debug build of `buildc`
 1.0.0; treat the commands and output as best-effort and re-run them against
 your own build to confirm.
 
 ## Run it
 
-From the repository root, after building `quantac` (see [USAGE.md](../../USAGE.md)):
+From the repository root, after building `buildc` (see [USAGE.md](../../USAGE.md)):
 
 ```bash
-quantac run examples/demo/temperature.quanta
+buildc run examples/demo/temperature.bld
 ```
 
 Output:
@@ -36,7 +36,7 @@ Output:
 built-in policy permits exactly that capability and denies the rest:
 
 ```bash
-quantac check examples/demo/temperature.quanta --profile console-only
+buildc check examples/demo/temperature.bld --profile console-only
 ```
 
 Output:
@@ -46,18 +46,18 @@ Lexing... OK (65 tokens)
 Parsing... OK (2 items)
 Type checking... OK
 
-No errors found in 'examples/demo/temperature.quanta'
+No errors found in 'examples/demo/temperature.bld'
 ```
 
 Add `--receipt -` to print a machine-readable accountability receipt, or
-`--receipt receipt.json` to save one for `quantac receipt verify`.
+`--receipt receipt.json` to save one for `buildc receipt verify`.
 
 ## Compile to C
 
-To emit C and build it with your system C compiler instead of `quantac run`:
+To emit C and build it with your system C compiler instead of `buildc run`:
 
 ```bash
-quantac examples/demo/temperature.quanta -o temperature.c
+buildc examples/demo/temperature.bld -o temperature.c
 cc temperature.c -o temperature
 ./temperature
 ```

@@ -2,18 +2,18 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a checked MIR representation receipt for the semantic corpus and make `quantac corpus verify` recompute and verify it from the real parse, type-check, and AST-to-MIR lowering pipeline.
+**Goal:** Add a checked MIR representation receipt for the semantic corpus and make `buildc corpus verify` recompute and verify it from the real parse, type-check, and AST-to-MIR lowering pipeline.
 
 **Architecture:** Keep the inventory builder and verifier in a focused binary-crate module, `compiler/src/mir_representation.rs`. `compiler/src/main.rs` remains the corpus orchestration layer: it reads the receipt, delegates MIR validation, validates the substrate reference path, and prints the receipt status. CLI tests mutate copied semantic-corpus fixtures to prove stale representation claims are rejected.
 
-**Tech Stack:** Rust 2021, `serde`, `serde_json`, `sha2`, existing `quantac` parser/type-checker/codegen APIs, existing Cargo CLI integration tests.
+**Tech Stack:** Rust 2021, `serde`, `serde_json`, `sha2`, existing `buildc` parser/type-checker/codegen APIs, existing Cargo CLI integration tests.
 
 ## Global Constraints
 
-- Schema must be exactly `quantalang-mir-representation-receipt/v0`.
+- Schema must be exactly `buildlang-mir-representation-receipt/v0`.
 - Checked-in receipt path must be exactly `semantic-corpus/receipts/mir-representation-2026-06-18.json`.
 - Substrate receipt reference must be exactly `representation_surface.representation_receipt`.
-- Do not add a public `quantac mir dump` command in this slice.
+- Do not add a public `buildc mir dump` command in this slice.
 - Do not add a public representation receipt writer in this slice.
 - Do not promote SPIR-V, LLVM, WASM, x86-64, ARM64, or Rust backend maturity.
 - Receipt arrays must be sorted and deduplicated.
@@ -38,7 +38,7 @@
 - Modify: `compiler/tests/cli.rs`
 
 **Interfaces:**
-- Consumes: existing `temp_semantic_corpus(label: &str) -> PathBuf`, `quantac() -> Command`, `repo_root() -> PathBuf`, and `c_backend_ready() -> bool`.
+- Consumes: existing `temp_semantic_corpus(label: &str) -> PathBuf`, `buildc() -> Command`, `repo_root() -> PathBuf`, and `c_backend_ready() -> bool`.
 - Produces: `write_mir_representation_receipt_copy(corpus_root: &Path, transform: impl FnOnce(serde_json::Value) -> serde_json::Value)` for later test tasks.
 
 - [ ] **Step 1: Add the copied-receipt helper**
@@ -76,13 +76,13 @@ fn corpus_verify_checks_mir_representation_receipt() {
         return;
     }
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(repo_root().join("semantic-corpus"))
         .output()
-        .expect("run quantac corpus verify with MIR representation receipt");
+        .expect("run buildc corpus verify with MIR representation receipt");
 
     assert!(
         output.status.success(),
@@ -110,17 +110,17 @@ fn corpus_verify_rejects_mir_representation_receipt_schema_drift() {
     let corpus_root = temp_semantic_corpus("mir_repr_schema");
     write_mir_representation_receipt_copy(&corpus_root, |mut receipt| {
         receipt["schema"] =
-            serde_json::Value::String("quantalang-mir-representation-receipt/v9".into());
+            serde_json::Value::String("buildlang-mir-representation-receipt/v9".into());
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against bad MIR representation schema");
+        .expect("run buildc corpus verify against bad MIR representation schema");
 
     let _ = fs::remove_dir_all(&corpus_root);
 
@@ -144,13 +144,13 @@ fn corpus_verify_rejects_mir_representation_program_count_drift() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against MIR representation program count drift");
+        .expect("run buildc corpus verify against MIR representation program count drift");
 
     let _ = fs::remove_dir_all(&corpus_root);
 
@@ -170,17 +170,17 @@ fn corpus_verify_rejects_mir_representation_program_count_drift() {
 fn corpus_verify_rejects_mir_representation_path_escape() {
     let corpus_root = temp_semantic_corpus("mir_repr_path_escape");
     write_mir_representation_receipt_copy(&corpus_root, |mut receipt| {
-        receipt["programs"][0]["path"] = serde_json::Value::String("../outside.quanta".into());
+        receipt["programs"][0]["path"] = serde_json::Value::String("../outside.bld".into());
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against MIR representation path escape");
+        .expect("run buildc corpus verify against MIR representation path escape");
 
     let _ = fs::remove_dir_all(&corpus_root);
 
@@ -203,13 +203,13 @@ fn corpus_verify_rejects_mir_representation_source_digest_drift() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against MIR representation source digest drift");
+        .expect("run buildc corpus verify against MIR representation source digest drift");
 
     let _ = fs::remove_dir_all(&corpus_root);
 
@@ -234,13 +234,13 @@ fn corpus_verify_rejects_mir_representation_operation_drift() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against MIR representation operation drift");
+        .expect("run buildc corpus verify against MIR representation operation drift");
 
     let _ = fs::remove_dir_all(&corpus_root);
 
@@ -265,7 +265,7 @@ Run:
 cargo test --manifest-path compiler\Cargo.toml --test cli mir_representation -- --nocapture
 ```
 
-Expected: FAIL. The helper compiles only after the checked-in receipt path exists in copied corpus fixtures; the valid test also fails because `quantac corpus verify` does not print `mir representation receipt: ok`.
+Expected: FAIL. The helper compiles only after the checked-in receipt path exists in copied corpus fixtures; the valid test also fails because `buildc corpus verify` does not print `mir representation receipt: ok`.
 
 - [ ] **Step 5: Commit the red tests**
 
@@ -298,7 +298,7 @@ At the top of `compiler/src/main.rs`, below the crate documentation imports and 
 mod mir_representation;
 ```
 
-After the existing `use quantalang::types::{...};` block, add:
+After the existing `use buildlang::types::{...};` block, add:
 
 ```rust
 use mir_representation::{
@@ -315,14 +315,14 @@ use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use quantalang::ast;
-use quantalang::codegen::{
+use buildlang::ast;
+use buildlang::codegen::{
     AggregateKind, BinOp, CastKind, CodeGenerator, MirModule, MirPlace, MirRValue, MirStmtKind,
     MirTerminator, MirType, PlaceProjection, Target, UnaryOp,
 };
-use quantalang::lexer::{Lexer, SourceFile};
-use quantalang::parser::Parser;
-use quantalang::types::{TypeChecker, TypeContext};
+use buildlang::lexer::{Lexer, SourceFile};
+use buildlang::parser::Parser;
+use buildlang::types::{TypeChecker, TypeContext};
 
 use super::{
     preprocess_includes, resolve_imports, resolve_modules, source_digest_hex,
@@ -332,7 +332,7 @@ use super::{
 pub(crate) const MIR_REPRESENTATION_RECEIPT: &str =
     "mir-representation-2026-06-18.json";
 
-const MIR_REPRESENTATION_SCHEMA: &str = "quantalang-mir-representation-receipt/v0";
+const MIR_REPRESENTATION_SCHEMA: &str = "buildlang-mir-representation-receipt/v0";
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) struct MirRepresentationReceipt {
@@ -483,7 +483,7 @@ At the bottom of `compiler/src/mir_representation.rs`, add these tests before im
 #[cfg(test)]
 mod tests {
     use super::*;
-    use quantalang::codegen::{
+    use buildlang::codegen::{
         AggregateKind, BinOp, BlockId, MirBlock, MirConst, MirFnSig, MirFunction, MirLocal,
         MirStmt, MirValue,
     };
@@ -493,7 +493,7 @@ mod tests {
         let programs = vec![
             MirRepresentationProgram {
                 id: "b".to_string(),
-                path: "programs/b.quanta".to_string(),
+                path: "programs/b.bld".to_string(),
                 source_digest: MirRepresentationDigest {
                     algorithm: "sha256".to_string(),
                     hex: "1".repeat(64),
@@ -518,7 +518,7 @@ mod tests {
             },
             MirRepresentationProgram {
                 id: "a".to_string(),
-                path: "programs/a.quanta".to_string(),
+                path: "programs/a.bld".to_string(),
                 source_digest: MirRepresentationDigest {
                     algorithm: "sha256".to_string(),
                     hex: "2".repeat(64),
@@ -555,7 +555,7 @@ mod tests {
     #[test]
     fn mir_representation_memory_surfaces_derive_from_mir() {
         let mut module = MirModule::new("memory_test");
-        module.add_type(quantalang_type_def_point());
+        module.add_type(buildlang_type_def_point());
 
         let sig = MirFnSig::new(vec![], MirType::Void);
         let mut func = MirFunction::new("main", sig);
@@ -597,7 +597,7 @@ mod tests {
 
         let program = summarize_mir_program(
             "memory_test",
-            "programs/memory_test.quanta",
+            "programs/memory_test.bld",
             MirRepresentationDigest {
                 algorithm: "sha256".to_string(),
                 hex: "3".repeat(64),
@@ -616,10 +616,10 @@ mod tests {
         );
     }
 
-    fn quantalang_type_def_point() -> quantalang::codegen::MirTypeDef {
-        quantalang::codegen::MirTypeDef {
+    fn buildlang_type_def_point() -> buildlang::codegen::MirTypeDef {
+        buildlang::codegen::MirTypeDef {
             name: Arc::from("Point"),
-            kind: quantalang::codegen::TypeDefKind::Struct {
+            kind: buildlang::codegen::TypeDefKind::Struct {
                 fields: vec![(Some(Arc::from("x")), MirType::i32())],
                 packed: false,
             },
@@ -1029,8 +1029,8 @@ pub(crate) fn build_mir_representation_receipt(
         schema: MIR_REPRESENTATION_SCHEMA.to_string(),
         receipt_id: "mir-representation-semantic-corpus-2026-06-18".to_string(),
         created_at: "2026-06-18".to_string(),
-        compiler: "quantac".to_string(),
-        language: "quantalang".to_string(),
+        compiler: "buildc".to_string(),
+        language: "buildlang".to_string(),
         source_set: MirRepresentationSourceSet {
             kind: "semantic-corpus".to_string(),
             manifest: "manifest.json".to_string(),
@@ -1063,15 +1063,15 @@ pub(crate) fn validate_mir_representation_receipt(
             receipt.schema
         ));
     }
-    if receipt.compiler != "quantac" {
+    if receipt.compiler != "buildc" {
         return Err(format!(
-            "mir representation compiler mismatch: expected 'quantac', found '{}'",
+            "mir representation compiler mismatch: expected 'buildc', found '{}'",
             receipt.compiler
         ));
     }
-    if receipt.language != "quantalang" {
+    if receipt.language != "buildlang" {
         return Err(format!(
-            "mir representation language mismatch: expected 'quantalang', found '{}'",
+            "mir representation language mismatch: expected 'buildlang', found '{}'",
             receipt.language
         ));
     }
@@ -1241,13 +1241,13 @@ fn corpus_verify_rejects_substrate_representation_receipt_path_escape() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against substrate representation receipt path escape");
+        .expect("run buildc corpus verify against substrate representation receipt path escape");
 
     let _ = fs::remove_dir_all(&corpus_root);
 
@@ -1342,7 +1342,7 @@ In `README.md`, extend the substrate receipt paragraph with:
 
 ```markdown
 The same verification path now validates a MIR Representation Receipt
-(`quantalang-mir-representation-receipt/v0`) that recomputes per-program MIR
+(`buildlang-mir-representation-receipt/v0`) that recomputes per-program MIR
 module counts, symbols, operation families, memory-surface flags, and
 control-flow summaries from the real parse, type-check, and AST-to-MIR lowering
 pipeline. This makes the representation claim inspectable without promoting any
@@ -1355,9 +1355,9 @@ In `STATUS.md`, update the summary paragraph sentence about the substrate receip
 
 ```markdown
 Its representation surface is now backed by a checked
-`quantalang-mir-representation-receipt/v0` artifact that recomputes per-program
+`buildlang-mir-representation-receipt/v0` artifact that recomputes per-program
 MIR operation families, symbols, memory-surface flags, and control-flow
-summaries during `quantac corpus verify`.
+summaries during `buildc corpus verify`.
 ```
 
 - [ ] **Step 6: Run tests and confirm GREEN**

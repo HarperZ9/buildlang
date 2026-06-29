@@ -6,8 +6,8 @@ use std::{
 
 use sha2::{Digest, Sha256};
 
-fn quantac() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_quantac"))
+fn buildc() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_buildc"))
 }
 
 fn repo_root() -> PathBuf {
@@ -22,10 +22,7 @@ fn quickstart_example(name: &str) -> PathBuf {
 }
 
 fn c_backend_ready() -> bool {
-    let output = quantac()
-        .arg("doctor")
-        .output()
-        .expect("run quantac doctor");
+    let output = buildc().arg("doctor").output().expect("run buildc doctor");
     let stdout = String::from_utf8_lossy(&output.stdout);
     stdout.contains("Ready for practical C-backend examples: yes")
 }
@@ -52,7 +49,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 fn write_temp_policy(label: &str, json: &str) -> PathBuf {
     let policy = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_{}_{}.json",
+        "buildlang_check_policy_{}_{}.json",
         label,
         std::process::id()
     ));
@@ -138,7 +135,7 @@ fn copy_dir_recursive(source: &Path, destination: &Path) {
 
 fn temp_semantic_corpus(label: &str) -> PathBuf {
     let destination = std::env::temp_dir().join(format!(
-        "quantalang_semantic_corpus_{}_{}",
+        "buildlang_semantic_corpus_{}_{}",
         label,
         std::process::id()
     ));
@@ -243,13 +240,13 @@ fn write_lsp_dispatch_receipt_copy(
 }
 
 fn assert_corpus_verify_rejects(corpus_root: &Path, expected_stderr: &str) {
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(corpus_root)
         .output()
-        .expect("run quantac corpus verify against symbol graph fixture");
+        .expect("run buildc corpus verify against symbol graph fixture");
     let _ = fs::remove_dir_all(corpus_root);
 
     assert!(!output.status.success(), "fixture should fail");
@@ -262,14 +259,11 @@ fn assert_corpus_verify_rejects(corpus_root: &Path, expected_stderr: &str) {
 
 #[test]
 fn help_lists_doctor_command() {
-    let output = quantac()
-        .arg("--help")
-        .output()
-        .expect("run quantac --help");
+    let output = buildc().arg("--help").output().expect("run buildc --help");
 
     assert!(
         output.status.success(),
-        "quantac --help should exit successfully"
+        "buildc --help should exit successfully"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -281,33 +275,30 @@ fn help_lists_doctor_command() {
 
 #[test]
 fn doctor_reports_adoption_readiness_summary() {
-    let output = quantac()
-        .arg("doctor")
-        .output()
-        .expect("run quantac doctor");
+    let output = buildc().arg("doctor").output().expect("run buildc doctor");
 
     assert!(
         output.status.success(),
-        "quantac doctor should exit successfully; stderr:\n{}",
+        "buildc doctor should exit successfully; stderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
         output.stderr.is_empty(),
-        "quantac doctor should report diagnostics on stdout only:\n{}",
+        "buildc doctor should report diagnostics on stdout only:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     for expected in [
-        "QuantaLang Doctor",
-        "quantac:",
+        "BuildLang Doctor",
+        "buildc:",
         "C backend:",
         "stdlib:",
         "registry:",
         "Backend maturity:",
         "Substrate evidence:",
         "receipt   ok",
-        "quantalang-substrate-receipt/v0",
+        "buildlang-substrate-receipt/v0",
         "corpus    ok",
         "8 semantic program(s)",
         "c         anchor",
@@ -329,14 +320,11 @@ fn doctor_reports_adoption_readiness_summary() {
 
 #[test]
 fn help_lists_corpus_command() {
-    let output = quantac()
-        .arg("--help")
-        .output()
-        .expect("run quantac --help");
+    let output = buildc().arg("--help").output().expect("run buildc --help");
 
     assert!(
         output.status.success(),
-        "quantac --help should exit successfully"
+        "buildc --help should exit successfully"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -349,17 +337,17 @@ fn help_lists_corpus_command() {
 #[test]
 fn check_reports_capability_effect_for_ambient_file_call() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_capability_gate_{}.quanta",
+        "buildlang_capability_gate_{}.bld",
         std::process::id()
     ));
     fs::write(&fixture, r#"fn main() { read_file("ops.txt"); }"#)
         .expect("write capability fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -383,17 +371,17 @@ fn check_reports_capability_effect_for_ambient_file_call() {
 #[test]
 fn check_reports_capability_effect_for_qualified_ambient_call() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_qualified_capability_gate_{}.quanta",
+        "buildlang_qualified_capability_gate_{}.bld",
         std::process::id()
     ));
     fs::write(&fixture, r#"fn main() { io::read_file("ops.txt"); }"#)
         .expect("write qualified capability fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -417,17 +405,16 @@ fn check_reports_capability_effect_for_qualified_ambient_call() {
 #[test]
 fn check_reports_capability_effect_for_gpu_runtime_call() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_gpu_capability_gate_{}.quanta",
+        "buildlang_gpu_capability_gate_{}.bld",
         std::process::id()
     ));
-    fs::write(&fixture, r#"fn main() { quanta_vk_init(); }"#)
-        .expect("write gpu capability fixture");
+    fs::write(&fixture, r#"fn main() { build_vk_init(); }"#).expect("write gpu capability fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -442,7 +429,7 @@ fn check_reports_capability_effect_for_gpu_runtime_call() {
         stderr
     );
     assert!(
-        stderr.contains("quanta_vk_init"),
+        stderr.contains("build_vk_init"),
         "diagnostic should name triggering GPU helper:\n{}",
         stderr
     );
@@ -451,19 +438,19 @@ fn check_reports_capability_effect_for_gpu_runtime_call() {
 #[test]
 fn check_receipt_stdout_records_passing_capabilities() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_pass_{}.quanta",
+        "buildlang_check_receipt_pass_{}.bld",
         std::process::id()
     ));
     fs::write(&fixture, r#"fn main() ~ Console { println!("ok"); }"#)
         .expect("write passing receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -475,9 +462,9 @@ fn check_receipt_stdout_records_passing_capabilities() {
     );
     let receipt: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout should be JSON receipt");
-    assert_eq!(receipt["schema"], "quantalang-check-receipt/v1");
+    assert_eq!(receipt["schema"], "buildlang-check-receipt/v1");
     assert_eq!(receipt["status"], "passed");
-    assert_eq!(receipt["compiler"], "quantac");
+    assert_eq!(receipt["compiler"], "buildc");
     assert_eq!(receipt["compiler_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(receipt["language_version"], "1.0.0");
     assert_eq!(receipt["source_digest"]["algorithm"], "sha256");
@@ -505,7 +492,7 @@ fn check_receipt_stdout_records_passing_capabilities() {
 #[test]
 fn check_reports_capability_effect_for_include_str_macro() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_include_str_capability_gate_{}.quanta",
+        "buildlang_include_str_capability_gate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -514,11 +501,11 @@ fn check_reports_capability_effect_for_include_str_macro() {
     )
     .expect("write include_str macro capability fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -542,7 +529,7 @@ fn check_reports_capability_effect_for_include_str_macro() {
 #[test]
 fn check_reports_capability_effect_for_ambient_call_inside_macro_argument() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_macro_arg_capability_gate_{}.quanta",
+        "buildlang_macro_arg_capability_gate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -551,11 +538,11 @@ fn check_reports_capability_effect_for_ambient_call_inside_macro_argument() {
     )
     .expect("write macro argument capability fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -579,13 +566,13 @@ fn check_reports_capability_effect_for_ambient_call_inside_macro_argument() {
 #[test]
 fn check_reports_capability_effect_for_macro_argument_call_in_external_module() {
     let dir = std::env::temp_dir().join(format!(
-        "quantalang_module_macro_arg_capability_gate_{}",
+        "buildlang_module_macro_arg_capability_gate_{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create module macro argument fixture dir");
-    let entry = dir.join("main.quanta");
-    let module = dir.join("ops.quanta");
+    let entry = dir.join("main.bld");
+    let module = dir.join("ops.bld");
 
     fs::write(
         &entry,
@@ -603,11 +590,11 @@ fn main() {}
     )
     .expect("write module macro argument module fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&entry)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_dir_all(&dir);
 
@@ -631,7 +618,7 @@ fn main() {}
 #[test]
 fn check_receipt_records_env_macro_capability_source() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_env_macro_{}.quanta",
+        "buildlang_check_receipt_env_macro_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -640,13 +627,13 @@ fn check_receipt_records_env_macro_capability_source() {
     )
     .expect("write env macro receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -670,7 +657,7 @@ fn check_receipt_records_env_macro_capability_source() {
 #[test]
 fn check_receipt_records_macro_argument_capability_source() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_macro_arg_capability_{}.quanta",
+        "buildlang_check_receipt_macro_arg_capability_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -679,13 +666,13 @@ fn check_receipt_records_macro_argument_capability_source() {
     )
     .expect("write macro argument capability receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -713,13 +700,13 @@ fn check_receipt_records_macro_argument_capability_source() {
 #[test]
 fn check_receipt_records_macro_argument_capability_source_in_external_module() {
     let dir = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_module_macro_arg_capability_{}",
+        "buildlang_check_receipt_module_macro_arg_capability_{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create module macro argument receipt fixture dir");
-    let entry = dir.join("main.quanta");
-    let module = dir.join("ops.quanta");
+    let entry = dir.join("main.bld");
+    let module = dir.join("ops.bld");
 
     fs::write(
         &entry,
@@ -737,13 +724,13 @@ fn main() {}
     )
     .expect("write module macro argument receipt module fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&entry)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_dir_all(&dir);
 
@@ -771,19 +758,19 @@ fn main() {}
 #[test]
 fn check_receipt_records_gpu_capability_source() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_gpu_{}.quanta",
+        "buildlang_check_receipt_gpu_{}.bld",
         std::process::id()
     ));
-    fs::write(&fixture, r#"fn main() ~ Gpu { quanta_vk_init(); }"#)
+    fs::write(&fixture, r#"fn main() ~ Gpu { build_vk_init(); }"#)
         .expect("write gpu receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -800,37 +787,37 @@ fn check_receipt_records_gpu_capability_source() {
     );
     assert_eq!(
         receipt["observed_capabilities"]["main"]["Gpu"],
-        serde_json::json!(["quanta_vk_init"])
+        serde_json::json!(["build_vk_init"])
     );
 }
 
 #[test]
 fn check_receipt_records_graphics_runtime_capability_source() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_graphics_runtime_{}.quanta",
+        "buildlang_check_receipt_graphics_runtime_{}.bld",
         std::process::id()
     ));
     fs::write(
         &fixture,
         r#"
 extern "C" {
-    fn quanta_gfx_init(width: i32, height: i32, title: &str) -> i32;
+    fn build_gfx_init(width: i32, height: i32, title: &str) -> i32;
 }
 
 fn main() ~ Gpu {
-    quanta_gfx_init(800, 600, "QuantaLang Triangle");
+    build_gfx_init(800, 600, "BuildLang Triangle");
 }
 "#,
     )
     .expect("write graphics runtime receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -847,14 +834,14 @@ fn main() ~ Gpu {
     );
     assert_eq!(
         receipt["observed_capabilities"]["main"]["Gpu"],
-        serde_json::json!(["quanta_gfx_init"])
+        serde_json::json!(["build_gfx_init"])
     );
 }
 
 #[test]
 fn check_receipt_records_qualified_capability_source() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_qualified_capability_{}.quanta",
+        "buildlang_check_receipt_qualified_capability_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -863,13 +850,13 @@ fn check_receipt_records_qualified_capability_source() {
     )
     .expect("write qualified capability receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -889,7 +876,7 @@ fn check_receipt_records_qualified_capability_source() {
 #[test]
 fn check_receipt_records_foreign_call_as_direct_capability_source() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_foreign_{}.quanta",
+        "buildlang_check_receipt_foreign_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -904,13 +891,13 @@ fn main() ~ Foreign {
     )
     .expect("write foreign receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -941,28 +928,28 @@ fn main() ~ Foreign {
 #[test]
 fn check_receipt_records_foreign_static_as_direct_capability_source() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_foreign_static_{}.quanta",
+        "buildlang_check_receipt_foreign_static_{}.bld",
         std::process::id()
     ));
     fs::write(
         &fixture,
         r#"
-extern "C" { static QUANTA_ERRNO: i32; }
+extern "C" { static BUILD_ERRNO: i32; }
 
 fn main() ~ Foreign {
-    let code = QUANTA_ERRNO;
+    let code = BUILD_ERRNO;
 }
 "#,
     )
     .expect("write foreign static receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -979,7 +966,7 @@ fn main() ~ Foreign {
     );
     assert_eq!(
         receipt["observed_capabilities"]["main"]["Foreign"],
-        serde_json::json!(["QUANTA_ERRNO"])
+        serde_json::json!(["BUILD_ERRNO"])
     );
     assert_eq!(
         receipt["propagated_effects"]["main"]
@@ -993,7 +980,7 @@ fn main() ~ Foreign {
 #[test]
 fn check_reports_foreign_call_inside_macro_argument() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_macro_arg_foreign_call_gate_{}.quanta",
+        "buildlang_macro_arg_foreign_call_gate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -1008,11 +995,11 @@ fn main() ~ Console {
     )
     .expect("write macro argument foreign call fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -1036,28 +1023,28 @@ fn main() ~ Console {
 #[test]
 fn check_receipt_records_foreign_static_inside_macro_argument() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_macro_arg_foreign_static_{}.quanta",
+        "buildlang_check_receipt_macro_arg_foreign_static_{}.bld",
         std::process::id()
     ));
     fs::write(
         &fixture,
         r#"
-extern "C" { static QUANTA_ERRNO: i32; }
+extern "C" { static BUILD_ERRNO: i32; }
 
 fn main() ~ Console + Foreign {
-    println!("{}", QUANTA_ERRNO);
+    println!("{}", BUILD_ERRNO);
 }
 "#,
     )
     .expect("write macro argument foreign static receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -1078,14 +1065,14 @@ fn main() ~ Console + Foreign {
     );
     assert_eq!(
         receipt["observed_capabilities"]["main"]["Foreign"],
-        serde_json::json!(["QUANTA_ERRNO"])
+        serde_json::json!(["BUILD_ERRNO"])
     );
 }
 
 #[test]
 fn check_receipt_records_propagated_effects_separately() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_propagated_{}.quanta",
+        "buildlang_check_receipt_propagated_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -1102,13 +1089,13 @@ fn main() ~ FileSystem {
     )
     .expect("write propagated receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -1147,7 +1134,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_reports_effect_for_effectful_method_call() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_effectful_method_gate_{}.quanta",
+        "buildlang_effectful_method_gate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -1169,11 +1156,11 @@ fn main() {
     )
     .expect("write effectful method fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -1197,7 +1184,7 @@ fn main() {
 #[test]
 fn check_receipt_records_effectful_method_call_source() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_effectful_method_{}.quanta",
+        "buildlang_check_receipt_effectful_method_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -1219,13 +1206,13 @@ fn main() ~ FileSystem {
     )
     .expect("write effectful method receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -1249,7 +1236,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_reports_effect_for_effectful_associated_function_call() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_effectful_associated_function_gate_{}.quanta",
+        "buildlang_effectful_associated_function_gate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -1270,11 +1257,11 @@ fn main() {
     )
     .expect("write effectful associated function fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -1298,7 +1285,7 @@ fn main() {
 #[test]
 fn check_receipt_records_effectful_associated_function_call_source() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_effectful_associated_function_{}.quanta",
+        "buildlang_check_receipt_effectful_associated_function_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -1319,13 +1306,13 @@ fn main() ~ FileSystem {
     )
     .expect("write effectful associated function receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -1349,7 +1336,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_reports_effect_for_effectful_trait_object_method_call() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_effectful_trait_object_method_gate_{}.quanta",
+        "buildlang_effectful_trait_object_method_gate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -1366,11 +1353,11 @@ fn run(loader: dyn Loader) {
     )
     .expect("write effectful trait object method fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -1394,7 +1381,7 @@ fn run(loader: dyn Loader) {
 #[test]
 fn check_reports_effect_for_effectful_callback_parameter() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_effectful_callback_gate_{}.quanta",
+        "buildlang_effectful_callback_gate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -1407,11 +1394,11 @@ fn run(loader: fn() with FileSystem) {
     )
     .expect("write effectful callback fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -1435,7 +1422,7 @@ fn run(loader: fn() with FileSystem) {
 #[test]
 fn check_receipt_records_effectful_callback_parameter_source() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_effectful_callback_{}.quanta",
+        "buildlang_check_receipt_effectful_callback_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -1448,13 +1435,13 @@ fn run(loader: fn() with FileSystem) ~ FileSystem {
     )
     .expect("write effectful callback receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -1482,7 +1469,7 @@ fn run(loader: fn() with FileSystem) ~ FileSystem {
 #[test]
 fn check_receipt_records_effectful_returning_callback_source() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_effectful_returning_callback_{}.quanta",
+        "buildlang_check_receipt_effectful_returning_callback_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -1495,13 +1482,13 @@ fn run(loader: (fn() -> str) with FileSystem) -> str ~ FileSystem {
     )
     .expect("write returning effectful callback receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -1522,7 +1509,7 @@ fn run(loader: (fn() -> str) with FileSystem) -> str ~ FileSystem {
 #[test]
 fn check_receipt_records_effectful_callback_argument_source() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_effectful_callback_arg_{}.quanta",
+        "buildlang_check_receipt_effectful_callback_arg_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -1543,13 +1530,13 @@ fn main() ~ FileSystem {
     )
     .expect("write effectful callback argument receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -1581,7 +1568,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_reports_effect_for_effectful_callback_argument_source() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_effectful_callback_arg_gate_{}.quanta",
+        "buildlang_effectful_callback_arg_gate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -1602,11 +1589,11 @@ fn main() {
     )
     .expect("write effectful callback argument gate fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -1635,7 +1622,7 @@ fn main() {
 #[test]
 fn check_rejects_effectful_callback_erasure_into_pure_signature() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_effectful_callback_erasure_{}.quanta",
+        "buildlang_effectful_callback_erasure_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -1652,11 +1639,11 @@ fn main() {
     )
     .expect("write effectful callback erasure fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -1680,7 +1667,7 @@ fn main() {
 #[test]
 fn check_reports_effect_for_ambient_function_alias_call() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_ambient_alias_gate_{}.quanta",
+        "buildlang_ambient_alias_gate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -1694,11 +1681,11 @@ fn main() {
     )
     .expect("write ambient alias fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -1722,7 +1709,7 @@ fn main() {
 #[test]
 fn check_receipt_records_ambient_function_alias_as_propagated_source() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_ambient_alias_{}.quanta",
+        "buildlang_check_receipt_ambient_alias_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -1736,13 +1723,13 @@ fn main() ~ FileSystem {
     )
     .expect("write ambient alias receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -1770,7 +1757,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_clears_stale_sources_for_shadowed_ambient_alias() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_shadowed_ambient_alias_{}.quanta",
+        "buildlang_check_receipt_shadowed_ambient_alias_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -1789,13 +1776,13 @@ fn main() ~ FileSystem {
     )
     .expect("write shadowed ambient alias receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -1823,7 +1810,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_rebinds_assigned_effectful_function_alias_source() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_assigned_effectful_alias_{}.quanta",
+        "buildlang_check_receipt_assigned_effectful_alias_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -1846,13 +1833,13 @@ fn main() ~ FileSystem {
     )
     .expect("write assigned effectful alias receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -1880,7 +1867,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_rebinds_assigned_effectful_struct_field_source() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_assigned_effectful_field_{}.quanta",
+        "buildlang_check_receipt_assigned_effectful_field_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -1907,13 +1894,13 @@ fn main() ~ FileSystem {
     )
     .expect("write assigned effectful field receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -1941,7 +1928,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_rebinds_assigned_effectful_struct_object_source() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_assigned_effectful_struct_object_{}.quanta",
+        "buildlang_check_receipt_assigned_effectful_struct_object_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -1969,13 +1956,13 @@ fn main() ~ FileSystem {
     )
     .expect("write assigned effectful struct object receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -2003,7 +1990,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_rebinds_assigned_effectful_tuple_field_source() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_assigned_effectful_tuple_field_{}.quanta",
+        "buildlang_check_receipt_assigned_effectful_tuple_field_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -2026,13 +2013,13 @@ fn main() ~ FileSystem {
     )
     .expect("write assigned effectful tuple field receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -2060,7 +2047,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_rebinds_assigned_effectful_index_source() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_assigned_effectful_index_{}.quanta",
+        "buildlang_check_receipt_assigned_effectful_index_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -2083,13 +2070,13 @@ fn main() ~ FileSystem {
     )
     .expect("write assigned effectful index receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -2117,7 +2104,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_records_repeated_effectful_index_source_origin() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_repeated_effectful_index_{}.quanta",
+        "buildlang_check_receipt_repeated_effectful_index_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -2135,13 +2122,13 @@ fn main() ~ FileSystem {
     )
     .expect("write repeated effectful index receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -2169,7 +2156,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_clears_stale_sources_for_assigned_ambient_alias() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_assigned_ambient_alias_{}.quanta",
+        "buildlang_check_receipt_assigned_ambient_alias_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -2188,13 +2175,13 @@ fn main() ~ FileSystem {
     )
     .expect("write assigned ambient alias receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -2222,7 +2209,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_effectful_closure_literal_is_pure_until_called() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_effectful_closure_literal_pure_until_called_{}.quanta",
+        "buildlang_effectful_closure_literal_pure_until_called_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -2235,11 +2222,11 @@ fn main() {
     )
     .expect("write effectful closure literal fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -2254,7 +2241,7 @@ fn main() {
 #[test]
 fn check_effectful_tuple_struct_constructor_is_pure_until_called() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_effectful_tuple_struct_constructor_pure_until_called_{}.quanta",
+        "buildlang_effectful_tuple_struct_constructor_pure_until_called_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -2273,13 +2260,13 @@ fn main() {
     )
     .expect("write effectful tuple struct constructor fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -2310,7 +2297,7 @@ fn main() {
 #[test]
 fn check_reports_effect_for_effectful_closure_alias_call() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_effectful_closure_alias_gate_{}.quanta",
+        "buildlang_effectful_closure_alias_gate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -2324,11 +2311,11 @@ fn main() {
     )
     .expect("write effectful closure alias fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -2352,7 +2339,7 @@ fn main() {
 #[test]
 fn check_receipt_records_effectful_closure_alias_as_propagated_source() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_effectful_closure_alias_{}.quanta",
+        "buildlang_check_receipt_effectful_closure_alias_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -2366,13 +2353,13 @@ fn main() ~ FileSystem {
     )
     .expect("write effectful closure alias receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -2400,7 +2387,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_reports_effect_for_immediate_effectful_closure_call() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_immediate_effectful_closure_gate_{}.quanta",
+        "buildlang_immediate_effectful_closure_gate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -2413,11 +2400,11 @@ fn main() {
     )
     .expect("write immediate effectful closure fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -2441,7 +2428,7 @@ fn main() {
 #[test]
 fn check_receipt_records_immediate_effectful_closure_call_source() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_immediate_effectful_closure_{}.quanta",
+        "buildlang_check_receipt_immediate_effectful_closure_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -2454,13 +2441,13 @@ fn main() ~ FileSystem {
     )
     .expect("write immediate effectful closure receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -2488,7 +2475,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_effectful_async_block_is_pure_until_awaited() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_effectful_async_block_pure_until_awaited_{}.quanta",
+        "buildlang_effectful_async_block_pure_until_awaited_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -2501,11 +2488,11 @@ fn main() {
     )
     .expect("write effectful async block fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -2520,7 +2507,7 @@ fn main() {
 #[test]
 fn check_reports_effect_for_awaited_effectful_async_block() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_awaited_effectful_async_block_gate_{}.quanta",
+        "buildlang_awaited_effectful_async_block_gate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -2534,11 +2521,11 @@ fn main() {
     )
     .expect("write awaited effectful async block fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -2562,7 +2549,7 @@ fn main() {
 #[test]
 fn check_receipt_records_awaited_async_block_source() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_awaited_async_block_{}.quanta",
+        "buildlang_check_receipt_awaited_async_block_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -2576,13 +2563,13 @@ fn main() ~ FileSystem {
     )
     .expect("write awaited async block receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -2610,7 +2597,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_rejects_await_operator_on_selected_effectful_function_value() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_await_selected_effectful_function_gate_{}.quanta",
+        "buildlang_await_selected_effectful_function_gate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -2633,11 +2620,11 @@ fn main() {
     )
     .expect("write await selected effectful function fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -2661,7 +2648,7 @@ fn main() {
 #[test]
 fn check_selected_async_block_is_pure_until_awaited() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_selected_async_block_pure_until_awaited_{}.quanta",
+        "buildlang_selected_async_block_pure_until_awaited_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -2679,11 +2666,11 @@ fn main() {
     )
     .expect("write selected async block fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -2698,7 +2685,7 @@ fn main() {
 #[test]
 fn check_reports_effects_for_awaited_selected_async_block() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_awaited_selected_async_block_gate_{}.quanta",
+        "buildlang_awaited_selected_async_block_gate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -2717,11 +2704,11 @@ fn main() {
     )
     .expect("write awaited selected async block fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -2760,7 +2747,7 @@ fn main() {
 #[test]
 fn check_receipt_records_awaited_selected_async_block_sources() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_awaited_selected_async_block_{}.quanta",
+        "buildlang_check_receipt_awaited_selected_async_block_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -2779,13 +2766,13 @@ fn main() ~ FileSystem + Environment {
     )
     .expect("write awaited selected async block receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -2817,7 +2804,7 @@ fn main() ~ FileSystem + Environment {
 #[test]
 fn check_reports_effects_for_awaited_match_selected_async_block() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_awaited_match_selected_async_block_gate_{}.quanta",
+        "buildlang_awaited_match_selected_async_block_gate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -2835,11 +2822,11 @@ fn main() {
     )
     .expect("write awaited match selected async block fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -2878,7 +2865,7 @@ fn main() {
 #[test]
 fn check_receipt_records_awaited_match_selected_async_block_sources() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_awaited_match_selected_async_block_{}.quanta",
+        "buildlang_check_receipt_awaited_match_selected_async_block_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -2896,13 +2883,13 @@ fn main() ~ FileSystem + Environment {
     )
     .expect("write awaited match selected async block receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -2934,7 +2921,7 @@ fn main() ~ FileSystem + Environment {
 #[test]
 fn check_reports_effect_for_effectful_struct_field_call() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_struct_field_effect_gate_{}.quanta",
+        "buildlang_struct_field_effect_gate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -2952,11 +2939,11 @@ fn main() {
     )
     .expect("write struct field effect fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -2980,7 +2967,7 @@ fn main() {
 #[test]
 fn check_receipt_records_effectful_struct_field_call_source() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_struct_field_effect_{}.quanta",
+        "buildlang_check_receipt_struct_field_effect_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -2998,13 +2985,13 @@ fn main() ~ FileSystem {
     )
     .expect("write struct field effect receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -3032,7 +3019,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_records_struct_update_effectful_field_origin() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_struct_update_effectful_field_{}.quanta",
+        "buildlang_check_receipt_struct_update_effectful_field_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -3055,13 +3042,13 @@ fn main() ~ FileSystem {
     )
     .expect("write struct update effectful field receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -3089,7 +3076,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_records_nested_struct_update_effectful_field_origin() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_nested_struct_update_effectful_field_{}.quanta",
+        "buildlang_check_receipt_nested_struct_update_effectful_field_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -3116,13 +3103,13 @@ fn main() ~ FileSystem {
     )
     .expect("write nested struct update effectful field receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -3150,7 +3137,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_records_destructured_nested_struct_update_effectful_field_origin() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_destructured_nested_struct_update_effectful_field_{}.quanta",
+        "buildlang_check_receipt_destructured_nested_struct_update_effectful_field_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -3178,13 +3165,13 @@ fn main() ~ FileSystem {
     )
     .expect("write destructured nested struct update effectful field receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -3212,7 +3199,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_records_struct_update_expression_destructured_effectful_field_origin() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_struct_update_expression_destructured_effectful_field_{}.quanta",
+        "buildlang_check_receipt_struct_update_expression_destructured_effectful_field_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -3239,13 +3226,13 @@ fn main() ~ FileSystem {
     )
     .expect("write struct update expression destructured effectful field receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -3273,7 +3260,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_records_struct_update_expression_explicit_field_destructured_origin() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_struct_update_expression_explicit_field_destructured_{}.quanta",
+        "buildlang_check_receipt_struct_update_expression_explicit_field_destructured_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -3301,13 +3288,13 @@ fn main() ~ FileSystem {
     )
     .expect("write struct update expression explicit field destructured receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -3335,7 +3322,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_records_tuple_literal_destructured_aggregate_origin_without_stale_alias() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_tuple_literal_destructured_aggregate_{}.quanta",
+        "buildlang_check_receipt_tuple_literal_destructured_aggregate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -3358,13 +3345,13 @@ fn main() ~ FileSystem {
     )
     .expect("write tuple literal destructured aggregate receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -3392,7 +3379,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_records_stored_variant_aggregate_origin_without_stale_alias() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_stored_variant_aggregate_{}.quanta",
+        "buildlang_check_receipt_stored_variant_aggregate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -3423,13 +3410,13 @@ fn main() ~ FileSystem {
     )
     .expect("write stored variant aggregate receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -3457,7 +3444,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_records_selected_aggregate_origin_without_stale_branch_aliases() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_selected_aggregate_{}.quanta",
+        "buildlang_check_receipt_selected_aggregate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -3486,13 +3473,13 @@ fn main() ~ FileSystem {
     )
     .expect("write selected aggregate receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -3520,7 +3507,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_records_tuple_destructured_selected_aggregate_origins() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_tuple_selected_aggregate_{}.quanta",
+        "buildlang_check_receipt_tuple_selected_aggregate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -3549,13 +3536,13 @@ fn main() ~ FileSystem {
     )
     .expect("write tuple destructured selected aggregate receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -3583,7 +3570,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_records_nested_if_let_selected_aggregate_origins() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_nested_if_let_selected_aggregate_{}.quanta",
+        "buildlang_check_receipt_nested_if_let_selected_aggregate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -3620,13 +3607,13 @@ fn main() ~ FileSystem {
     )
     .expect("write nested if-let selected aggregate receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -3654,7 +3641,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_records_tuple_destructured_nested_if_let_selected_aggregate_origins() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_tuple_nested_if_let_selected_aggregate_{}.quanta",
+        "buildlang_check_receipt_tuple_nested_if_let_selected_aggregate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -3691,13 +3678,13 @@ fn main() ~ FileSystem {
     )
     .expect("write destructured nested if-let selected aggregate receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -3725,7 +3712,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_records_shorthand_aggregate_field_origin_without_stale_alias() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_shorthand_aggregate_field_{}.quanta",
+        "buildlang_check_receipt_shorthand_aggregate_field_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -3752,13 +3739,13 @@ fn main() ~ FileSystem {
     )
     .expect("write shorthand aggregate field receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -3786,7 +3773,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_records_direct_shorthand_aggregate_destructuring_origin_without_stale_alias() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_direct_shorthand_aggregate_{}.quanta",
+        "buildlang_check_receipt_direct_shorthand_aggregate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -3813,13 +3800,13 @@ fn main() ~ FileSystem {
     )
     .expect("write direct shorthand aggregate destructuring receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -3847,7 +3834,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_clears_stale_aggregate_sources_for_shadowed_opaque_binding() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_shadowed_opaque_aggregate_{}.quanta",
+        "buildlang_check_receipt_shadowed_opaque_aggregate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -3874,13 +3861,13 @@ fn main() ~ FileSystem {
     )
     .expect("write shadowed opaque aggregate receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -3908,7 +3895,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_clears_outer_aggregate_sources_for_inner_shadowed_opaque_binding() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_inner_shadowed_opaque_aggregate_{}.quanta",
+        "buildlang_check_receipt_inner_shadowed_opaque_aggregate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -3937,13 +3924,13 @@ fn main() ~ FileSystem {
     )
     .expect("write inner shadowed opaque aggregate receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -3971,7 +3958,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_clears_outer_aggregate_sources_when_inner_shadow_is_copied() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_inner_shadowed_aggregate_copy_{}.quanta",
+        "buildlang_check_receipt_inner_shadowed_aggregate_copy_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -4001,13 +3988,13 @@ fn main() ~ FileSystem {
     )
     .expect("write inner shadowed aggregate copy receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -4035,7 +4022,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_reports_effect_for_effectful_tuple_field_call() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_tuple_field_effect_gate_{}.quanta",
+        "buildlang_tuple_field_effect_gate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -4049,11 +4036,11 @@ fn main() {
     )
     .expect("write tuple field effect fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -4077,7 +4064,7 @@ fn main() {
 #[test]
 fn check_receipt_refreshes_outer_alias_source_after_inner_block_assignment() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_inner_assignment_alias_{}.quanta",
+        "buildlang_check_receipt_inner_assignment_alias_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -4102,13 +4089,13 @@ fn main() ~ FileSystem {
     )
     .expect("write inner assignment alias receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -4136,7 +4123,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_refreshes_outer_aggregate_source_after_inner_block_assignment() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_inner_assignment_aggregate_{}.quanta",
+        "buildlang_check_receipt_inner_assignment_aggregate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -4165,13 +4152,13 @@ fn main() ~ FileSystem {
     )
     .expect("write inner assignment aggregate receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -4199,7 +4186,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_merges_outer_alias_sources_after_conditional_assignment() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_conditional_assignment_alias_{}.quanta",
+        "buildlang_check_receipt_conditional_assignment_alias_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -4225,13 +4212,13 @@ fn main() ~ FileSystem {
     )
     .expect("write conditional assignment alias receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -4259,7 +4246,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_merges_outer_aggregate_sources_after_conditional_assignment() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_conditional_assignment_aggregate_{}.quanta",
+        "buildlang_check_receipt_conditional_assignment_aggregate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -4289,13 +4276,13 @@ fn main() ~ FileSystem {
     )
     .expect("write conditional assignment aggregate receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -4323,7 +4310,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_merges_outer_alias_sources_after_if_let_assignment() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_if_let_assignment_alias_{}.quanta",
+        "buildlang_check_receipt_if_let_assignment_alias_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -4354,13 +4341,13 @@ fn main() ~ FileSystem {
     )
     .expect("write if-let assignment alias receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -4388,7 +4375,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_merges_outer_aggregate_sources_after_if_let_assignment() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_if_let_assignment_aggregate_{}.quanta",
+        "buildlang_check_receipt_if_let_assignment_aggregate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -4423,13 +4410,13 @@ fn main() ~ FileSystem {
     )
     .expect("write if-let assignment aggregate receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -4457,7 +4444,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_merges_outer_alias_sources_after_if_else_assignment() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_if_else_assignment_alias_{}.quanta",
+        "buildlang_check_receipt_if_else_assignment_alias_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -4489,13 +4476,13 @@ fn main() ~ FileSystem {
     )
     .expect("write if-else assignment alias receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -4523,7 +4510,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_merges_outer_alias_sources_after_match_assignment() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_match_assignment_alias_{}.quanta",
+        "buildlang_check_receipt_match_assignment_alias_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -4554,13 +4541,13 @@ fn main() ~ FileSystem {
     )
     .expect("write match assignment alias receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -4588,7 +4575,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_keeps_pre_match_alias_source_after_guarded_match_assignment() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_guarded_match_assignment_alias_{}.quanta",
+        "buildlang_check_receipt_guarded_match_assignment_alias_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -4620,13 +4607,13 @@ fn main() ~ FileSystem {
     )
     .expect("write guarded match assignment alias receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -4654,7 +4641,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_merges_outer_aggregate_sources_after_match_assignment() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_match_assignment_aggregate_{}.quanta",
+        "buildlang_check_receipt_match_assignment_aggregate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -4689,13 +4676,13 @@ fn main() ~ FileSystem {
     )
     .expect("write match assignment aggregate receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -4723,7 +4710,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_merges_outer_alias_sources_after_while_assignment() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_while_assignment_alias_{}.quanta",
+        "buildlang_check_receipt_while_assignment_alias_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -4749,13 +4736,13 @@ fn main() ~ FileSystem {
     )
     .expect("write while assignment alias receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -4783,7 +4770,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_merges_outer_aggregate_sources_after_while_assignment() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_while_assignment_aggregate_{}.quanta",
+        "buildlang_check_receipt_while_assignment_aggregate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -4813,13 +4800,13 @@ fn main() ~ FileSystem {
     )
     .expect("write while assignment aggregate receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -4847,7 +4834,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_merges_outer_alias_sources_after_for_assignment() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_for_assignment_alias_{}.quanta",
+        "buildlang_check_receipt_for_assignment_alias_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -4872,13 +4859,13 @@ fn main() ~ FileSystem {
     )
     .expect("write for assignment alias receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -4906,7 +4893,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_merges_outer_alias_sources_after_while_let_assignment() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_while_let_assignment_alias_{}.quanta",
+        "buildlang_check_receipt_while_let_assignment_alias_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -4937,13 +4924,13 @@ fn main() ~ FileSystem {
     )
     .expect("write while-let assignment alias receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -4971,7 +4958,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_merges_outer_aggregate_sources_after_while_let_assignment() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_while_let_assignment_aggregate_{}.quanta",
+        "buildlang_check_receipt_while_let_assignment_aggregate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -5006,13 +4993,13 @@ fn main() ~ FileSystem {
     )
     .expect("write while-let assignment aggregate receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -5040,7 +5027,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_merges_outer_alias_sources_after_loop_break_assignment() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_loop_break_assignment_alias_{}.quanta",
+        "buildlang_check_receipt_loop_break_assignment_alias_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -5070,13 +5057,13 @@ fn main() ~ FileSystem {
     )
     .expect("write loop break assignment alias receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -5104,7 +5091,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_merges_outer_aggregate_sources_after_loop_break_assignment() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_loop_break_assignment_aggregate_{}.quanta",
+        "buildlang_check_receipt_loop_break_assignment_aggregate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -5138,13 +5125,13 @@ fn main() ~ FileSystem {
     )
     .expect("write loop break assignment aggregate receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -5172,7 +5159,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_records_effectful_tuple_field_call_source() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_tuple_field_effect_{}.quanta",
+        "buildlang_check_receipt_tuple_field_effect_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -5186,13 +5173,13 @@ fn main() ~ FileSystem {
     )
     .expect("write tuple field effect receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -5220,7 +5207,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_reports_effect_for_effectful_index_call() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_index_effect_gate_{}.quanta",
+        "buildlang_index_effect_gate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -5234,11 +5221,11 @@ fn main() {
     )
     .expect("write index effect fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -5262,7 +5249,7 @@ fn main() {
 #[test]
 fn check_receipt_records_effectful_index_call_source() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_index_effect_{}.quanta",
+        "buildlang_check_receipt_index_effect_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -5276,13 +5263,13 @@ fn main() ~ FileSystem {
     )
     .expect("write index effect receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -5310,7 +5297,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_reports_effect_for_immediate_returned_effectful_function_call() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_returned_effectful_function_gate_{}.quanta",
+        "buildlang_returned_effectful_function_gate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -5327,11 +5314,11 @@ fn main() {
     )
     .expect("write returned effectful function fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -5355,7 +5342,7 @@ fn main() {
 #[test]
 fn check_receipt_records_immediate_returned_effectful_function_call_source() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_returned_effectful_function_{}.quanta",
+        "buildlang_check_receipt_returned_effectful_function_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -5372,13 +5359,13 @@ fn main() ~ FileSystem {
     )
     .expect("write returned effectful function receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -5406,7 +5393,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_reports_effect_for_pipe_effectful_function_call() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_pipe_effectful_function_gate_{}.quanta",
+        "buildlang_pipe_effectful_function_gate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -5423,13 +5410,13 @@ fn main() {
     )
     .expect("write pipe effectful function fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -5461,7 +5448,7 @@ fn main() {
 #[test]
 fn check_receipt_records_pipe_effectful_function_call_source() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_pipe_effectful_function_{}.quanta",
+        "buildlang_check_receipt_pipe_effectful_function_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -5478,13 +5465,13 @@ fn main() ~ FileSystem {
     )
     .expect("write pipe effectful function receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -5512,7 +5499,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_rejects_function_values_with_shift_operator() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_function_shift_gate_{}.quanta",
+        "buildlang_function_shift_gate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -5533,13 +5520,13 @@ fn main() {
     )
     .expect("write function shift fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -5566,7 +5553,7 @@ fn main() {
 #[test]
 fn check_reports_effect_for_control_flow_selected_effectful_function_call() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_control_flow_selected_effectful_function_gate_{}.quanta",
+        "buildlang_control_flow_selected_effectful_function_gate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -5588,11 +5575,11 @@ fn main() {
     )
     .expect("write control-flow selected effectful function fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -5621,7 +5608,7 @@ fn main() {
 #[test]
 fn check_receipt_records_control_flow_selected_effectful_function_sources() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_control_flow_effectful_function_{}.quanta",
+        "buildlang_check_receipt_control_flow_effectful_function_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -5643,13 +5630,13 @@ fn main() ~ FileSystem {
     )
     .expect("write control-flow selected effectful function receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -5677,7 +5664,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_reports_effect_for_match_selected_effectful_function_call() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_match_selected_effectful_function_gate_{}.quanta",
+        "buildlang_match_selected_effectful_function_gate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -5702,11 +5689,11 @@ fn main() {
     )
     .expect("write match selected effectful function fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -5735,7 +5722,7 @@ fn main() {
 #[test]
 fn check_receipt_records_match_selected_effectful_function_sources() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_match_effectful_function_{}.quanta",
+        "buildlang_check_receipt_match_effectful_function_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -5760,13 +5747,13 @@ fn main() ~ FileSystem {
     )
     .expect("write match selected effectful function receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -5794,7 +5781,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_reports_effect_for_let_bound_selected_effectful_function_call() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_let_bound_selected_effectful_function_gate_{}.quanta",
+        "buildlang_let_bound_selected_effectful_function_gate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -5817,11 +5804,11 @@ fn main() {
     )
     .expect("write let-bound selected effectful function fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -5855,7 +5842,7 @@ fn main() {
 #[test]
 fn check_reports_effect_for_if_let_bound_selected_effectful_function_call() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_if_let_bound_selected_effectful_function_gate_{}.quanta",
+        "buildlang_if_let_bound_selected_effectful_function_gate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -5882,11 +5869,11 @@ fn main() {
     )
     .expect("write if-let-bound selected effectful function fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -5920,7 +5907,7 @@ fn main() {
 #[test]
 fn check_rejects_try_operator_on_selected_effectful_function_value() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_try_selected_effectful_function_gate_{}.quanta",
+        "buildlang_try_selected_effectful_function_gate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -5943,11 +5930,11 @@ fn main() {
     )
     .expect("write try selected effectful function fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -5971,7 +5958,7 @@ fn main() {
 #[test]
 fn check_receipt_records_let_bound_selected_effectful_function_sources() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_let_bound_selected_effectful_function_{}.quanta",
+        "buildlang_check_receipt_let_bound_selected_effectful_function_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -5994,13 +5981,13 @@ fn main() ~ FileSystem {
     )
     .expect("write let-bound selected effectful function receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -6028,7 +6015,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_records_if_let_bound_selected_effectful_function_sources() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_if_let_bound_selected_effectful_function_{}.quanta",
+        "buildlang_check_receipt_if_let_bound_selected_effectful_function_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -6055,13 +6042,13 @@ fn main() ~ FileSystem {
     )
     .expect("write if-let-bound selected effectful function receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -6089,7 +6076,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_records_cast_selected_effectful_function_sources() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_cast_selected_effectful_function_{}.quanta",
+        "buildlang_check_receipt_cast_selected_effectful_function_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -6112,13 +6099,13 @@ fn main() ~ FileSystem {
     )
     .expect("write cast selected effectful function receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -6146,7 +6133,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_rejects_cast_laundering_selected_effectful_function_to_pure_callback() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_cast_selected_effectful_function_to_pure_gate_{}.quanta",
+        "buildlang_cast_selected_effectful_function_to_pure_gate_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -6169,11 +6156,11 @@ fn main() {
     )
     .expect("write pure cast selected effectful function fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -6192,7 +6179,7 @@ fn main() {
 #[test]
 fn check_receipt_records_ref_deref_selected_effectful_function_sources() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_ref_deref_selected_effectful_function_{}.quanta",
+        "buildlang_check_receipt_ref_deref_selected_effectful_function_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -6216,13 +6203,13 @@ fn main() ~ FileSystem {
     )
     .expect("write ref-deref selected effectful function receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -6250,7 +6237,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_records_tuple_destructured_selected_effectful_function_sources() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_tuple_destructured_selected_effectful_function_{}.quanta",
+        "buildlang_check_receipt_tuple_destructured_selected_effectful_function_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -6273,13 +6260,13 @@ fn main() ~ FileSystem {
     )
     .expect("write tuple-destructured effectful function receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -6307,7 +6294,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_records_struct_destructured_selected_effectful_function_sources() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_struct_destructured_selected_effectful_function_{}.quanta",
+        "buildlang_check_receipt_struct_destructured_selected_effectful_function_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -6335,13 +6322,13 @@ fn main() ~ FileSystem {
     )
     .expect("write struct-destructured effectful function receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -6369,7 +6356,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_records_slice_destructured_selected_effectful_function_sources() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_slice_destructured_selected_effectful_function_{}.quanta",
+        "buildlang_check_receipt_slice_destructured_selected_effectful_function_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -6393,13 +6380,13 @@ fn main() ~ FileSystem {
     )
     .expect("write slice-destructured effectful function receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -6427,7 +6414,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_records_tuple_struct_destructured_selected_effectful_function_sources() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_tuple_struct_destructured_selected_effectful_function_{}.quanta",
+        "buildlang_check_receipt_tuple_struct_destructured_selected_effectful_function_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -6453,13 +6440,13 @@ fn main() ~ FileSystem {
     )
     .expect("write tuple-struct destructured selected effectful function receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -6487,7 +6474,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_receipt_records_enum_variant_destructured_selected_effectful_function_sources() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_enum_variant_destructured_selected_effectful_function_{}.quanta",
+        "buildlang_check_receipt_enum_variant_destructured_selected_effectful_function_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -6520,13 +6507,13 @@ fn main() ~ FileSystem {
     )
     .expect("write enum-variant destructured selected effectful function receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -6554,7 +6541,7 @@ fn main() ~ FileSystem {
 #[test]
 fn check_struct_enum_variant_destructured_callback_requires_declared_effect() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_struct_enum_variant_callback_requires_effect_{}.quanta",
+        "buildlang_check_struct_enum_variant_callback_requires_effect_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -6587,13 +6574,13 @@ fn main() {
     )
     .expect("write struct enum variant callback effect fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -6626,7 +6613,7 @@ fn main() {
 #[test]
 fn check_if_let_destructured_enum_variant_callback_requires_declared_effect() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_if_let_enum_variant_callback_requires_effect_{}.quanta",
+        "buildlang_check_if_let_enum_variant_callback_requires_effect_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -6659,13 +6646,13 @@ fn main() {
     )
     .expect("write if-let enum variant callback effect fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -6698,7 +6685,7 @@ fn main() {
 #[test]
 fn check_while_let_destructured_enum_variant_callback_requires_declared_effect() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_while_let_enum_variant_callback_requires_effect_{}.quanta",
+        "buildlang_check_while_let_enum_variant_callback_requires_effect_{}.bld",
         std::process::id()
     ));
     fs::write(
@@ -6732,13 +6719,13 @@ fn main() {
     )
     .expect("write while-let enum variant callback effect fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check --receipt -");
+        .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
@@ -6771,20 +6758,20 @@ fn main() {
 #[test]
 fn check_receipt_file_records_failing_capability_diagnostic() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_fail_{}.quanta",
+        "buildlang_check_receipt_fail_{}.bld",
         std::process::id()
     ));
     let receipt_path = fixture.with_extension("receipt.json");
     fs::write(&fixture, r#"fn main() { read_file("ops.txt"); }"#)
         .expect("write failing receipt fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--receipt")
         .arg(&receipt_path)
         .output()
-        .expect("run quantac check --receipt file");
+        .expect("run buildc check --receipt file");
 
     let receipt_text = fs::read_to_string(&receipt_path).expect("read receipt file");
     let _ = fs::remove_file(&fixture);
@@ -6796,7 +6783,7 @@ fn check_receipt_file_records_failing_capability_diagnostic() {
     );
     let receipt: serde_json::Value =
         serde_json::from_str(&receipt_text).expect("receipt file should be JSON");
-    assert_eq!(receipt["schema"], "quantalang-check-receipt/v1");
+    assert_eq!(receipt["schema"], "buildlang-check-receipt/v1");
     assert_eq!(receipt["status"], "failed");
     assert_eq!(receipt["compiler_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(receipt["language_version"], "1.0.0");
@@ -6831,22 +6818,20 @@ fn check_receipt_file_records_failing_capability_diagnostic() {
 #[test]
 fn check_receipt_source_digest_ignores_path_for_identical_content() {
     let id = std::process::id();
-    let left =
-        std::env::temp_dir().join(format!("quantalang_check_receipt_digest_left_{id}.quanta"));
-    let right =
-        std::env::temp_dir().join(format!("quantalang_check_receipt_digest_right_{id}.quanta"));
+    let left = std::env::temp_dir().join(format!("buildlang_check_receipt_digest_left_{id}.bld"));
+    let right = std::env::temp_dir().join(format!("buildlang_check_receipt_digest_right_{id}.bld"));
     let source = r#"fn main() ~ Console { println!("same"); }"#;
     fs::write(&left, source).expect("write left digest fixture");
     fs::write(&right, source).expect("write right digest fixture");
 
-    let left_output = quantac()
+    let left_output = buildc()
         .arg("check")
         .arg(&left)
         .arg("--receipt")
         .arg("-")
         .output()
         .expect("run left digest receipt");
-    let right_output = quantac()
+    let right_output = buildc()
         .arg("check")
         .arg(&right)
         .arg("--receipt")
@@ -6879,24 +6864,22 @@ fn check_receipt_source_digest_ignores_path_for_identical_content() {
 #[test]
 fn check_receipt_source_digest_changes_when_source_changes() {
     let id = std::process::id();
-    let first =
-        std::env::temp_dir().join(format!("quantalang_check_receipt_digest_first_{id}.quanta"));
-    let second = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_digest_second_{id}.quanta"
-    ));
+    let first = std::env::temp_dir().join(format!("buildlang_check_receipt_digest_first_{id}.bld"));
+    let second =
+        std::env::temp_dir().join(format!("buildlang_check_receipt_digest_second_{id}.bld"));
     fs::write(&first, r#"fn main() ~ Console { println!("first"); }"#)
         .expect("write first digest fixture");
     fs::write(&second, r#"fn main() ~ Console { println!("second"); }"#)
         .expect("write second digest fixture");
 
-    let first_output = quantac()
+    let first_output = buildc()
         .arg("check")
         .arg(&first)
         .arg("--receipt")
         .arg("-")
         .output()
         .expect("run first digest receipt");
-    let second_output = quantac()
+    let second_output = buildc()
         .arg("check")
         .arg(&second)
         .arg("--receipt")
@@ -6920,23 +6903,23 @@ fn check_receipt_source_digest_changes_when_source_changes() {
 #[test]
 fn check_receipt_input_digests_track_included_source_changes() {
     let dir = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_inputs_{}",
+        "buildlang_check_receipt_inputs_{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create input digest fixture dir");
-    let entry = dir.join("entry.quanta");
-    let shared = dir.join("shared.quanta");
+    let entry = dir.join("entry.bld");
+    let shared = dir.join("shared.bld");
     fs::write(
         &entry,
-        r#"include!("shared.quanta");
+        r#"include!("shared.bld");
 fn main() ~ Console { println!("{}", value()); }
 "#,
     )
     .expect("write entry fixture");
     fs::write(&shared, "fn value() -> i32 { 7 }\n").expect("write first include fixture");
 
-    let first_output = quantac()
+    let first_output = buildc()
         .arg("check")
         .arg(&entry)
         .arg("--receipt")
@@ -6954,13 +6937,13 @@ fn main() ~ Console { println!("{}", value()); }
         .as_str()
         .expect("entry source digest")
         .to_string();
-    let first_input_entry = input_digest_hex(&first_receipt, "entry", "entry.quanta");
-    let first_input_include = input_digest_hex(&first_receipt, "include", "shared.quanta");
+    let first_input_entry = input_digest_hex(&first_receipt, "entry", "entry.bld");
+    let first_input_include = input_digest_hex(&first_receipt, "include", "shared.bld");
     let first_graph_digest = input_graph_digest_hex(&first_receipt);
     assert_eq!(first_entry_digest, first_input_entry);
 
     fs::write(&shared, "fn value() -> i32 { 8 }\n").expect("write changed include fixture");
-    let second_output = quantac()
+    let second_output = buildc()
         .arg("check")
         .arg(&entry)
         .arg("--receipt")
@@ -6979,12 +6962,12 @@ fn main() ~ Console { println!("{}", value()); }
     let second_receipt = receipt_from_stdout(&second_output);
     assert_eq!(second_receipt["source_digest"]["hex"], first_entry_digest);
     assert_eq!(
-        input_digest_hex(&second_receipt, "entry", "entry.quanta"),
+        input_digest_hex(&second_receipt, "entry", "entry.bld"),
         first_input_entry
     );
     assert_ne!(input_graph_digest_hex(&second_receipt), first_graph_digest);
     assert_ne!(
-        input_digest_hex(&second_receipt, "include", "shared.quanta"),
+        input_digest_hex(&second_receipt, "include", "shared.bld"),
         first_input_include
     );
 }
@@ -6992,16 +6975,16 @@ fn main() ~ Console { println!("{}", value()); }
 #[test]
 fn check_receipt_input_digests_record_imports_and_modules() {
     let dir = std::env::temp_dir().join(format!(
-        "quantalang_check_receipt_graph_{}",
+        "buildlang_check_receipt_graph_{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&dir);
     let package_dir = dir.join("registry/packages/std-math/src");
     fs::create_dir_all(&package_dir).expect("create import package dir");
     fs::create_dir_all(dir.join("helpers")).expect("create helper module dir");
-    let entry = dir.join("entry.quanta");
-    let imported = package_dir.join("lib.quanta");
-    let module = dir.join("helpers/mod.quanta");
+    let entry = dir.join("entry.bld");
+    let imported = package_dir.join("lib.bld");
+    let module = dir.join("helpers/mod.bld");
 
     fs::write(&imported, "fn imported_value() -> i32 { 2 }\n").expect("write import fixture");
     fs::write(&module, "fn module_value() -> i32 { 5 }\n").expect("write module fixture");
@@ -7016,7 +6999,7 @@ fn main() ~ Console {
     )
     .expect("write graph entry fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&entry)
         .arg("--receipt")
@@ -7033,9 +7016,9 @@ fn main() ~ Console {
         String::from_utf8_lossy(&output.stderr)
     );
     let receipt = receipt_from_stdout(&output);
-    input_digest_hex(&receipt, "entry", "entry.quanta");
-    input_digest_hex(&receipt, "import", "lib.quanta");
-    input_digest_hex(&receipt, "module", "mod.quanta");
+    input_digest_hex(&receipt, "entry", "entry.bld");
+    input_digest_hex(&receipt, "import", "lib.bld");
+    input_digest_hex(&receipt, "module", "mod.bld");
 }
 
 #[test]
@@ -7045,17 +7028,17 @@ fn check_receipt_input_graph_digest_is_path_portable() {
 
     for label in ["left", "right"] {
         let dir = std::env::temp_dir().join(format!(
-            "quantalang_check_receipt_graph_digest_{}_{}",
+            "buildlang_check_receipt_graph_digest_{}_{}",
             label,
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("create graph digest fixture dir");
-        let entry = dir.join("entry.quanta");
-        let shared = dir.join("shared.quanta");
+        let entry = dir.join("entry.bld");
+        let shared = dir.join("shared.bld");
         fs::write(
             &entry,
-            r#"include!("shared.quanta");
+            r#"include!("shared.bld");
 fn main() ~ Console { println!("{}", value()); }
 "#,
         )
@@ -7063,7 +7046,7 @@ fn main() ~ Console { println!("{}", value()); }
         fs::write(&shared, "fn value() -> i32 { 11 }\n")
             .expect("write graph digest include fixture");
 
-        let output = quantac()
+        let output = buildc()
             .arg("check")
             .arg(&entry)
             .arg("--receipt")
@@ -7091,16 +7074,16 @@ fn main() ~ Console { println!("{}", value()); }
 #[test]
 fn receipt_verify_accepts_fresh_check_receipt() {
     let dir = std::env::temp_dir().join(format!(
-        "quantalang_receipt_verify_fresh_{}",
+        "buildlang_receipt_verify_fresh_{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create receipt verify fixture dir");
-    let entry = dir.join("entry.quanta");
+    let entry = dir.join("entry.bld");
     let receipt = dir.join("receipt.json");
     fs::write(&entry, r#"fn main() {}"#).expect("write receipt verify entry");
 
-    let check_output = quantac()
+    let check_output = buildc()
         .arg("check")
         .arg(&entry)
         .arg("--profile")
@@ -7116,7 +7099,7 @@ fn receipt_verify_accepts_fresh_check_receipt() {
         String::from_utf8_lossy(&check_output.stderr)
     );
 
-    let verify_output = quantac()
+    let verify_output = buildc()
         .args(["receipt", "verify"])
         .arg(&receipt)
         .output()
@@ -7140,16 +7123,16 @@ fn receipt_verify_accepts_fresh_check_receipt() {
 #[test]
 fn receipt_verify_json_reports_passed_checks() {
     let dir = std::env::temp_dir().join(format!(
-        "quantalang_receipt_verify_json_pass_{}",
+        "buildlang_receipt_verify_json_pass_{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create receipt json fixture dir");
-    let entry = dir.join("entry.quanta");
+    let entry = dir.join("entry.bld");
     let receipt = dir.join("receipt.json");
     fs::write(&entry, r#"fn main() {}"#).expect("write receipt json entry");
 
-    let check_output = quantac()
+    let check_output = buildc()
         .arg("check")
         .arg(&entry)
         .arg("--profile")
@@ -7165,7 +7148,7 @@ fn receipt_verify_json_reports_passed_checks() {
         String::from_utf8_lossy(&check_output.stderr)
     );
 
-    let verify_output = quantac()
+    let verify_output = buildc()
         .args(["receipt", "verify"])
         .arg(&receipt)
         .arg("--json")
@@ -7182,7 +7165,7 @@ fn receipt_verify_json_reports_passed_checks() {
     );
     let report: serde_json::Value =
         serde_json::from_slice(&verify_output.stdout).expect("verification report should be JSON");
-    assert_eq!(report["schema"], "quantalang-receipt-verification/v1");
+    assert_eq!(report["schema"], "buildlang-receipt-verification/v1");
     assert_eq!(report["status"], "passed");
     assert_eq!(
         verification_check(&report, "source_digest")["status"],
@@ -7201,16 +7184,16 @@ fn receipt_verify_json_reports_passed_checks() {
 #[test]
 fn receipt_verify_expect_profile_rejects_stripped_policy() {
     let dir = std::env::temp_dir().join(format!(
-        "quantalang_receipt_verify_expect_profile_stripped_{}",
+        "buildlang_receipt_verify_expect_profile_stripped_{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create expect profile fixture dir");
-    let entry = dir.join("entry.quanta");
+    let entry = dir.join("entry.bld");
     let receipt = dir.join("receipt.json");
     fs::write(&entry, r#"fn main() {}"#).expect("write expect profile entry");
 
-    let check_output = quantac()
+    let check_output = buildc()
         .arg("check")
         .arg(&entry)
         .arg("--profile")
@@ -7239,7 +7222,7 @@ fn receipt_verify_expect_profile_rejects_stripped_policy() {
     )
     .expect("write stripped profile receipt");
 
-    let verify_output = quantac()
+    let verify_output = buildc()
         .args(["receipt", "verify"])
         .arg(&receipt)
         .arg("--expect-profile")
@@ -7264,16 +7247,16 @@ fn receipt_verify_expect_profile_rejects_stripped_policy() {
 #[test]
 fn receipt_verify_json_reports_expected_profile_mismatch() {
     let dir = std::env::temp_dir().join(format!(
-        "quantalang_receipt_verify_expect_profile_json_{}",
+        "buildlang_receipt_verify_expect_profile_json_{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create expect profile json fixture dir");
-    let entry = dir.join("entry.quanta");
+    let entry = dir.join("entry.bld");
     let receipt = dir.join("receipt.json");
     fs::write(&entry, r#"fn main() {}"#).expect("write expect profile json entry");
 
-    let check_output = quantac()
+    let check_output = buildc()
         .arg("check")
         .arg(&entry)
         .arg("--profile")
@@ -7289,7 +7272,7 @@ fn receipt_verify_json_reports_expected_profile_mismatch() {
         String::from_utf8_lossy(&check_output.stderr)
     );
 
-    let verify_output = quantac()
+    let verify_output = buildc()
         .args(["receipt", "verify"])
         .arg(&receipt)
         .arg("--expect-profile")
@@ -7323,24 +7306,24 @@ fn receipt_verify_json_reports_expected_profile_mismatch() {
 #[test]
 fn receipt_verify_json_reports_failed_input_graph() {
     let dir = std::env::temp_dir().join(format!(
-        "quantalang_receipt_verify_json_fail_{}",
+        "buildlang_receipt_verify_json_fail_{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create receipt json failure fixture dir");
-    let entry = dir.join("entry.quanta");
-    let shared = dir.join("shared.quanta");
+    let entry = dir.join("entry.bld");
+    let shared = dir.join("shared.bld");
     let receipt = dir.join("receipt.json");
     fs::write(
         &entry,
-        r#"include!("shared.quanta");
+        r#"include!("shared.bld");
 fn main() ~ Console { println!("{}", value()); }
 "#,
     )
     .expect("write receipt json failure entry");
     fs::write(&shared, "fn value() -> i32 { 7 }\n").expect("write first shared source");
 
-    let check_output = quantac()
+    let check_output = buildc()
         .arg("check")
         .arg(&entry)
         .arg("--receipt")
@@ -7355,7 +7338,7 @@ fn main() ~ Console { println!("{}", value()); }
     );
 
     fs::write(&shared, "fn value() -> i32 { 8 }\n").expect("mutate shared source for json verify");
-    let verify_output = quantac()
+    let verify_output = buildc()
         .args(["receipt", "verify"])
         .arg(&receipt)
         .arg("--json")
@@ -7370,7 +7353,7 @@ fn main() ~ Console { println!("{}", value()); }
     );
     let report: serde_json::Value =
         serde_json::from_slice(&verify_output.stdout).expect("failure report should be JSON");
-    assert_eq!(report["schema"], "quantalang-receipt-verification/v1");
+    assert_eq!(report["schema"], "buildlang-receipt-verification/v1");
     assert_eq!(report["status"], "failed");
     let graph_check = verification_check(&report, "input_graph_digest");
     assert_eq!(graph_check["status"], "failed");
@@ -7386,12 +7369,12 @@ fn main() ~ Console { println!("{}", value()); }
 #[test]
 fn receipt_verify_rejects_changed_policy_file_digest() {
     let dir = std::env::temp_dir().join(format!(
-        "quantalang_receipt_verify_policy_{}",
+        "buildlang_receipt_verify_policy_{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create receipt policy fixture dir");
-    let entry = dir.join("entry.quanta");
+    let entry = dir.join("entry.bld");
     let policy = dir.join("policy.json");
     let receipt = dir.join("receipt.json");
     fs::write(&entry, r#"fn main() ~ Console { println!("ok"); }"#)
@@ -7399,7 +7382,7 @@ fn receipt_verify_rejects_changed_policy_file_digest() {
     fs::write(
         &policy,
         r#"{
-  "schema": "quantalang-check-policy/v1",
+  "schema": "buildlang-check-policy/v1",
   "allowed_effects": ["Console"],
   "require_source_digest": true
 }
@@ -7407,7 +7390,7 @@ fn receipt_verify_rejects_changed_policy_file_digest() {
     )
     .expect("write initial policy");
 
-    let check_output = quantac()
+    let check_output = buildc()
         .arg("check")
         .arg(&entry)
         .arg("--policy")
@@ -7426,14 +7409,14 @@ fn receipt_verify_rejects_changed_policy_file_digest() {
     fs::write(
         &policy,
         r#"{
-  "schema": "quantalang-check-policy/v1",
+  "schema": "buildlang-check-policy/v1",
   "allowed_effects": ["FileSystem"],
   "require_source_digest": true
 }
 "#,
     )
     .expect("mutate policy file");
-    let verify_output = quantac()
+    let verify_output = buildc()
         .args(["receipt", "verify"])
         .arg(&receipt)
         .output()
@@ -7455,12 +7438,12 @@ fn receipt_verify_rejects_changed_policy_file_digest() {
 #[test]
 fn receipt_verify_json_reports_failed_policy_file_digest() {
     let dir = std::env::temp_dir().join(format!(
-        "quantalang_receipt_verify_policy_json_{}",
+        "buildlang_receipt_verify_policy_json_{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create receipt policy json fixture dir");
-    let entry = dir.join("entry.quanta");
+    let entry = dir.join("entry.bld");
     let policy = dir.join("policy.json");
     let receipt = dir.join("receipt.json");
     fs::write(&entry, r#"fn main() ~ Console { println!("ok"); }"#)
@@ -7468,7 +7451,7 @@ fn receipt_verify_json_reports_failed_policy_file_digest() {
     fs::write(
         &policy,
         r#"{
-  "schema": "quantalang-check-policy/v1",
+  "schema": "buildlang-check-policy/v1",
   "allowed_effects": ["Console"],
   "require_source_digest": true
 }
@@ -7476,7 +7459,7 @@ fn receipt_verify_json_reports_failed_policy_file_digest() {
     )
     .expect("write initial json policy");
 
-    let check_output = quantac()
+    let check_output = buildc()
         .arg("check")
         .arg(&entry)
         .arg("--policy")
@@ -7495,14 +7478,14 @@ fn receipt_verify_json_reports_failed_policy_file_digest() {
     fs::write(
         &policy,
         r#"{
-  "schema": "quantalang-check-policy/v1",
+  "schema": "buildlang-check-policy/v1",
   "allowed_effects": ["FileSystem"],
   "require_source_digest": true
 }
 "#,
     )
     .expect("mutate json policy file");
-    let verify_output = quantac()
+    let verify_output = buildc()
         .args(["receipt", "verify"])
         .arg(&receipt)
         .arg("--json")
@@ -7532,12 +7515,12 @@ fn receipt_verify_json_reports_failed_policy_file_digest() {
 #[test]
 fn receipt_verify_expect_policy_digest_rejects_stripped_policy() {
     let dir = std::env::temp_dir().join(format!(
-        "quantalang_receipt_verify_expect_policy_stripped_{}",
+        "buildlang_receipt_verify_expect_policy_stripped_{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create expect policy digest fixture dir");
-    let entry = dir.join("entry.quanta");
+    let entry = dir.join("entry.bld");
     let policy = dir.join("policy.json");
     let receipt = dir.join("receipt.json");
     fs::write(&entry, r#"fn main() ~ Console { println!("ok"); }"#)
@@ -7545,7 +7528,7 @@ fn receipt_verify_expect_policy_digest_rejects_stripped_policy() {
     fs::write(
         &policy,
         r#"{
-  "schema": "quantalang-check-policy/v1",
+  "schema": "buildlang-check-policy/v1",
   "allowed_effects": ["Console"],
   "require_source_digest": true
 }
@@ -7553,7 +7536,7 @@ fn receipt_verify_expect_policy_digest_rejects_stripped_policy() {
     )
     .expect("write expected policy");
 
-    let check_output = quantac()
+    let check_output = buildc()
         .arg("check")
         .arg(&entry)
         .arg("--policy")
@@ -7586,7 +7569,7 @@ fn receipt_verify_expect_policy_digest_rejects_stripped_policy() {
     )
     .expect("write stripped policy receipt");
 
-    let verify_output = quantac()
+    let verify_output = buildc()
         .args(["receipt", "verify"])
         .arg(&receipt)
         .arg("--expect-policy-digest")
@@ -7610,12 +7593,12 @@ fn receipt_verify_expect_policy_digest_rejects_stripped_policy() {
 #[test]
 fn receipt_verify_expect_policy_digest_rejects_algorithm_tamper() {
     let dir = std::env::temp_dir().join(format!(
-        "quantalang_receipt_verify_expect_policy_algorithm_{}",
+        "buildlang_receipt_verify_expect_policy_algorithm_{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create expect policy digest algorithm fixture dir");
-    let entry = dir.join("entry.quanta");
+    let entry = dir.join("entry.bld");
     let policy = dir.join("policy.json");
     let receipt = dir.join("receipt.json");
     fs::write(&entry, r#"fn main() ~ Console { println!("ok"); }"#)
@@ -7623,7 +7606,7 @@ fn receipt_verify_expect_policy_digest_rejects_algorithm_tamper() {
     fs::write(
         &policy,
         r#"{
-  "schema": "quantalang-check-policy/v1",
+  "schema": "buildlang-check-policy/v1",
   "allowed_effects": ["Console"],
   "require_source_digest": true
 }
@@ -7631,7 +7614,7 @@ fn receipt_verify_expect_policy_digest_rejects_algorithm_tamper() {
     )
     .expect("write expected algorithm policy");
 
-    let check_output = quantac()
+    let check_output = buildc()
         .arg("check")
         .arg(&entry)
         .arg("--policy")
@@ -7665,7 +7648,7 @@ fn receipt_verify_expect_policy_digest_rejects_algorithm_tamper() {
     )
     .expect("write algorithm-tampered policy receipt");
 
-    let verify_output = quantac()
+    let verify_output = buildc()
         .args(["receipt", "verify"])
         .arg(&receipt)
         .arg("--expect-policy-digest")
@@ -7694,12 +7677,12 @@ fn receipt_verify_expect_policy_digest_rejects_algorithm_tamper() {
 #[test]
 fn receipt_verify_json_reports_expected_policy_digest_mismatch() {
     let dir = std::env::temp_dir().join(format!(
-        "quantalang_receipt_verify_expect_policy_json_{}",
+        "buildlang_receipt_verify_expect_policy_json_{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create expect policy digest json fixture dir");
-    let entry = dir.join("entry.quanta");
+    let entry = dir.join("entry.bld");
     let policy = dir.join("policy.json");
     let receipt = dir.join("receipt.json");
     fs::write(&entry, r#"fn main() ~ Console { println!("ok"); }"#)
@@ -7707,7 +7690,7 @@ fn receipt_verify_json_reports_expected_policy_digest_mismatch() {
     fs::write(
         &policy,
         r#"{
-  "schema": "quantalang-check-policy/v1",
+  "schema": "buildlang-check-policy/v1",
   "allowed_effects": ["Console"],
   "require_source_digest": true
 }
@@ -7715,7 +7698,7 @@ fn receipt_verify_json_reports_expected_policy_digest_mismatch() {
     )
     .expect("write expected json policy");
 
-    let check_output = quantac()
+    let check_output = buildc()
         .arg("check")
         .arg(&entry)
         .arg("--policy")
@@ -7739,7 +7722,7 @@ fn receipt_verify_json_reports_expected_policy_digest_mismatch() {
         .to_string();
     let wrong_digest = "0".repeat(64);
 
-    let verify_output = quantac()
+    let verify_output = buildc()
         .args(["receipt", "verify"])
         .arg(&receipt)
         .arg("--expect-policy-digest")
@@ -7773,17 +7756,17 @@ fn receipt_verify_json_reports_expected_policy_digest_mismatch() {
 #[test]
 fn receipt_verify_rejects_tampered_observed_capabilities() {
     let dir = std::env::temp_dir().join(format!(
-        "quantalang_receipt_verify_tampered_capabilities_{}",
+        "buildlang_receipt_verify_tampered_capabilities_{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create tampered receipt fixture dir");
-    let entry = dir.join("entry.quanta");
+    let entry = dir.join("entry.bld");
     let receipt = dir.join("receipt.json");
     fs::write(&entry, r#"fn main() ~ Console { println!("ok"); }"#)
         .expect("write tampered receipt entry");
 
-    let check_output = quantac()
+    let check_output = buildc()
         .arg("check")
         .arg(&entry)
         .arg("--receipt")
@@ -7807,7 +7790,7 @@ fn receipt_verify_rejects_tampered_observed_capabilities() {
     )
     .expect("write tampered receipt");
 
-    let verify_output = quantac()
+    let verify_output = buildc()
         .args(["receipt", "verify"])
         .arg(&receipt)
         .output()
@@ -7830,12 +7813,12 @@ fn receipt_verify_rejects_tampered_observed_capabilities() {
 #[test]
 fn receipt_verify_json_reports_tampered_propagated_effects() {
     let dir = std::env::temp_dir().join(format!(
-        "quantalang_receipt_verify_tampered_propagated_{}",
+        "buildlang_receipt_verify_tampered_propagated_{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create tampered propagated receipt fixture dir");
-    let entry = dir.join("entry.quanta");
+    let entry = dir.join("entry.bld");
     let receipt = dir.join("receipt.json");
     fs::write(
         &entry,
@@ -7851,7 +7834,7 @@ fn main() ~ FileSystem {
     )
     .expect("write propagated receipt entry");
 
-    let check_output = quantac()
+    let check_output = buildc()
         .arg("check")
         .arg(&entry)
         .arg("--receipt")
@@ -7875,7 +7858,7 @@ fn main() ~ FileSystem {
     )
     .expect("write tampered propagated receipt");
 
-    let verify_output = quantac()
+    let verify_output = buildc()
         .args(["receipt", "verify"])
         .arg(&receipt)
         .arg("--json")
@@ -7905,24 +7888,24 @@ fn main() ~ FileSystem {
 #[test]
 fn receipt_verify_rejects_changed_input_graph() {
     let dir = std::env::temp_dir().join(format!(
-        "quantalang_receipt_verify_graph_{}",
+        "buildlang_receipt_verify_graph_{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create receipt graph fixture dir");
-    let entry = dir.join("entry.quanta");
-    let shared = dir.join("shared.quanta");
+    let entry = dir.join("entry.bld");
+    let shared = dir.join("shared.bld");
     let receipt = dir.join("receipt.json");
     fs::write(
         &entry,
-        r#"include!("shared.quanta");
+        r#"include!("shared.bld");
 fn main() ~ Console { println!("{}", value()); }
 "#,
     )
     .expect("write receipt graph entry");
     fs::write(&shared, "fn value() -> i32 { 7 }\n").expect("write first shared source");
 
-    let check_output = quantac()
+    let check_output = buildc()
         .arg("check")
         .arg(&entry)
         .arg("--receipt")
@@ -7937,7 +7920,7 @@ fn main() ~ Console { println!("{}", value()); }
     );
 
     fs::write(&shared, "fn value() -> i32 { 8 }\n").expect("mutate shared source");
-    let verify_output = quantac()
+    let verify_output = buildc()
         .args(["receipt", "verify"])
         .arg(&receipt)
         .output()
@@ -7959,16 +7942,16 @@ fn main() ~ Console { println!("{}", value()); }
 #[test]
 fn receipt_verify_rejects_tampered_builtin_profile_digest() {
     let dir = std::env::temp_dir().join(format!(
-        "quantalang_receipt_verify_profile_{}",
+        "buildlang_receipt_verify_profile_{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create receipt profile fixture dir");
-    let entry = dir.join("entry.quanta");
+    let entry = dir.join("entry.bld");
     let receipt_path = dir.join("receipt.json");
     fs::write(&entry, r#"fn main() {}"#).expect("write pure entry");
 
-    let check_output = quantac()
+    let check_output = buildc()
         .arg("check")
         .arg(&entry)
         .arg("--profile")
@@ -7994,7 +7977,7 @@ fn receipt_verify_rejects_tampered_builtin_profile_digest() {
     )
     .expect("write tampered receipt");
 
-    let verify_output = quantac()
+    let verify_output = buildc()
         .args(["receipt", "verify"])
         .arg(&receipt_path)
         .output()
@@ -8020,13 +8003,13 @@ fn receipt_verify_rejects_tampered_builtin_profile_digest() {
 #[test]
 fn check_policy_allows_console_receipt() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_console_{}.quanta",
+        "buildlang_check_policy_console_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "console_allow",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "allowed_effects": ["Console"],
           "require_source_digest": true
         }"#,
@@ -8034,7 +8017,7 @@ fn check_policy_allows_console_receipt() {
     fs::write(&fixture, r#"fn main() ~ Console { println!("ok"); }"#)
         .expect("write policy console fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -8042,7 +8025,7 @@ fn check_policy_allows_console_receipt() {
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with passing policy");
+        .expect("run buildc check with passing policy");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -8055,7 +8038,7 @@ fn check_policy_allows_console_receipt() {
     );
     let receipt = receipt_from_stdout(&output);
     assert_eq!(receipt["status"], "passed");
-    assert_eq!(receipt["policy"]["schema"], "quantalang-check-policy/v1");
+    assert_eq!(receipt["policy"]["schema"], "buildlang-check-policy/v1");
     assert_eq!(receipt["policy"]["status"], "passed");
     assert_eq!(receipt["policy"]["source_digest"]["algorithm"], "sha256");
     assert_eq!(
@@ -8074,13 +8057,13 @@ fn check_policy_allows_console_receipt() {
 #[test]
 fn check_policy_denies_filesystem_even_when_typecheck_passes() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_deny_fs_{}.quanta",
+        "buildlang_check_policy_deny_fs_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "deny_fs",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "denied_effects": ["FileSystem"]
         }"#,
     );
@@ -8090,7 +8073,7 @@ fn check_policy_denies_filesystem_even_when_typecheck_passes() {
     )
     .expect("write denied filesystem fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -8098,7 +8081,7 @@ fn check_policy_denies_filesystem_even_when_typecheck_passes() {
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with denied filesystem policy");
+        .expect("run buildc check with denied filesystem policy");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -8132,20 +8115,20 @@ fn check_policy_denies_filesystem_even_when_typecheck_passes() {
 #[test]
 fn check_policy_denies_gpu_even_when_typecheck_passes() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_deny_gpu_{}.quanta",
+        "buildlang_check_policy_deny_gpu_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "deny_gpu",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "denied_effects": ["Gpu"]
         }"#,
     );
-    fs::write(&fixture, r#"fn main() ~ Gpu { quanta_vk_init(); }"#)
+    fs::write(&fixture, r#"fn main() ~ Gpu { build_vk_init(); }"#)
         .expect("write denied gpu fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -8153,7 +8136,7 @@ fn check_policy_denies_gpu_even_when_typecheck_passes() {
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with denied gpu policy");
+        .expect("run buildc check with denied gpu policy");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -8170,7 +8153,7 @@ fn check_policy_denies_gpu_even_when_typecheck_passes() {
             violation["kind"] == "DeniedEffect"
                 && violation["effect"] == "Gpu"
                 && violation["function"] == "main"
-                && violation["source"] == "quanta_vk_init"
+                && violation["source"] == "build_vk_init"
         }),
         "expected Gpu denied violation in {violations:#?}"
     );
@@ -8179,19 +8162,19 @@ fn check_policy_denies_gpu_even_when_typecheck_passes() {
 #[test]
 fn check_policy_rejects_unknown_effect_name() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_unknown_effect_{}.quanta",
+        "buildlang_check_policy_unknown_effect_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "unknown_effect",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "denied_effects": ["Netwrok"]
         }"#,
     );
     fs::write(&fixture, r#"fn main() {}"#).expect("write unknown policy effect fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -8199,7 +8182,7 @@ fn check_policy_rejects_unknown_effect_name() {
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with unknown policy effect");
+        .expect("run buildc check with unknown policy effect");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -8238,13 +8221,13 @@ fn check_policy_rejects_unknown_effect_name() {
 #[test]
 fn check_policy_allows_source_defined_effect_name() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_user_effect_{}.quanta",
+        "buildlang_check_policy_user_effect_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "user_effect",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "allowed_effects": ["Audit"]
         }"#,
     );
@@ -8260,7 +8243,7 @@ fn main() ~ Audit {}
     )
     .expect("write source-defined effect fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -8268,7 +8251,7 @@ fn main() ~ Audit {}
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with source-defined effect policy");
+        .expect("run buildc check with source-defined effect policy");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -8294,13 +8277,13 @@ fn main() ~ Audit {}
 #[test]
 fn check_policy_allow_list_rejects_unlisted_effect() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_allow_list_{}.quanta",
+        "buildlang_check_policy_allow_list_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "allow_console_only",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "allowed_effects": ["Console"]
         }"#,
     );
@@ -8310,7 +8293,7 @@ fn check_policy_allow_list_rejects_unlisted_effect() {
     )
     .expect("write allow-list filesystem fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -8318,7 +8301,7 @@ fn check_policy_allow_list_rejects_unlisted_effect() {
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with allow-list policy");
+        .expect("run buildc check with allow-list policy");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -8344,13 +8327,13 @@ fn check_policy_allow_list_rejects_unlisted_effect() {
 #[test]
 fn check_policy_required_effect_allowlist_rejects_unlisted_declared_effect() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_require_effect_allowlist_{}.quanta",
+        "buildlang_check_policy_require_effect_allowlist_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "require_effect_allowlist",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "allowed_effects": [],
           "require_effect_allowlist": true
         }"#,
@@ -8367,7 +8350,7 @@ fn main() ~ Audit {}
     )
     .expect("write required effect allowlist fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -8375,7 +8358,7 @@ fn main() ~ Audit {}
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with required effect allowlist");
+        .expect("run buildc check with required effect allowlist");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -8403,13 +8386,13 @@ fn main() ~ Audit {}
 #[test]
 fn check_policy_direct_allowlist_rejects_unapproved_direct_effect() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_direct_allowlist_{}.quanta",
+        "buildlang_check_policy_direct_allowlist_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "direct_allowlist",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "allowed_effects": ["FileSystem"],
           "direct_effect_allowlist": {
             "FileSystem": ["load_config"]
@@ -8422,7 +8405,7 @@ fn check_policy_direct_allowlist_rejects_unapproved_direct_effect() {
     )
     .expect("write direct allowlist fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -8430,7 +8413,7 @@ fn check_policy_direct_allowlist_rejects_unapproved_direct_effect() {
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with direct allowlist policy");
+        .expect("run buildc check with direct allowlist policy");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -8461,13 +8444,13 @@ fn check_policy_direct_allowlist_rejects_unapproved_direct_effect() {
 #[test]
 fn check_policy_provenance_allowlists_accept_boundary_and_caller() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_provenance_accept_{}.quanta",
+        "buildlang_check_policy_provenance_accept_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "provenance_accept",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "allowed_effects": ["FileSystem"],
           "direct_effect_allowlist": {
             "FileSystem": ["load_config"]
@@ -8491,7 +8474,7 @@ fn main() ~ FileSystem {
     )
     .expect("write provenance allowlist fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -8499,7 +8482,7 @@ fn main() ~ FileSystem {
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with provenance allowlists");
+        .expect("run buildc check with provenance allowlists");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -8521,13 +8504,13 @@ fn main() ~ FileSystem {
 #[test]
 fn check_policy_strict_allowlist_coverage_rejects_unused_direct_entry() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_unused_direct_allowlist_{}.quanta",
+        "buildlang_check_policy_unused_direct_allowlist_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "unused_direct_allowlist",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "allowed_effects": ["FileSystem"],
           "direct_effect_allowlist": {
             "FileSystem": ["load_config", "legacy_loader"]
@@ -8552,7 +8535,7 @@ fn main() ~ FileSystem {
     )
     .expect("write unused direct allowlist fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -8560,7 +8543,7 @@ fn main() ~ FileSystem {
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with strict allowlist coverage");
+        .expect("run buildc check with strict allowlist coverage");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -8594,13 +8577,13 @@ fn main() ~ FileSystem {
 #[test]
 fn check_policy_strict_allowlist_coverage_rejects_unused_propagated_entry() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_unused_propagated_allowlist_{}.quanta",
+        "buildlang_check_policy_unused_propagated_allowlist_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "unused_propagated_allowlist",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "allowed_effects": ["FileSystem"],
           "direct_effect_allowlist": {
             "FileSystem": ["load_config"]
@@ -8625,7 +8608,7 @@ fn main() ~ FileSystem {
     )
     .expect("write unused propagated allowlist fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -8633,7 +8616,7 @@ fn main() ~ FileSystem {
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with strict propagated allowlist coverage");
+        .expect("run buildc check with strict propagated allowlist coverage");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -8667,13 +8650,13 @@ fn main() ~ FileSystem {
 #[test]
 fn check_policy_strict_allowlist_coverage_accepts_used_entries() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_used_allowlist_{}.quanta",
+        "buildlang_check_policy_used_allowlist_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "used_allowlist",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "allowed_effects": ["FileSystem"],
           "direct_effect_allowlist": {
             "FileSystem": ["load_config"]
@@ -8698,7 +8681,7 @@ fn main() ~ FileSystem {
     )
     .expect("write used allowlist fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -8706,7 +8689,7 @@ fn main() ~ FileSystem {
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with used strict allowlists");
+        .expect("run buildc check with used strict allowlists");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -8728,13 +8711,13 @@ fn main() ~ FileSystem {
 #[test]
 fn check_policy_requires_direct_provenance_allowlist_entry() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_require_direct_allowlist_{}.quanta",
+        "buildlang_check_policy_require_direct_allowlist_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "require_direct_allowlist",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "allowed_effects": ["FileSystem"],
           "require_provenance_allowlists": true
         }"#,
@@ -8745,7 +8728,7 @@ fn check_policy_requires_direct_provenance_allowlist_entry() {
     )
     .expect("write required direct allowlist fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -8753,7 +8736,7 @@ fn check_policy_requires_direct_provenance_allowlist_entry() {
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with required direct allowlist");
+        .expect("run buildc check with required direct allowlist");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -8783,13 +8766,13 @@ fn check_policy_requires_direct_provenance_allowlist_entry() {
 #[test]
 fn check_policy_requires_propagated_provenance_allowlist_entry() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_require_propagated_allowlist_{}.quanta",
+        "buildlang_check_policy_require_propagated_allowlist_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "require_propagated_allowlist",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "allowed_effects": ["FileSystem"],
           "direct_effect_allowlist": {
             "FileSystem": ["load_config"]
@@ -8811,7 +8794,7 @@ fn main() ~ FileSystem {
     )
     .expect("write required propagated allowlist fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -8819,7 +8802,7 @@ fn main() ~ FileSystem {
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with required propagated allowlist");
+        .expect("run buildc check with required propagated allowlist");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -8849,13 +8832,13 @@ fn main() ~ FileSystem {
 #[test]
 fn check_policy_required_provenance_allowlists_accept_explicit_entries() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_required_allowlists_accept_{}.quanta",
+        "buildlang_check_policy_required_allowlists_accept_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "required_allowlists_accept",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "allowed_effects": ["FileSystem"],
           "direct_effect_allowlist": {
             "FileSystem": ["load_config"]
@@ -8880,7 +8863,7 @@ fn main() ~ FileSystem {
     )
     .expect("write required allowlists accept fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -8888,7 +8871,7 @@ fn main() ~ FileSystem {
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with required explicit allowlists");
+        .expect("run buildc check with required explicit allowlists");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -8910,13 +8893,13 @@ fn main() ~ FileSystem {
 #[test]
 fn check_policy_direct_capability_source_allowlist_rejects_unapproved_source() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_direct_source_reject_{}.quanta",
+        "buildlang_check_policy_direct_source_reject_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "direct_source_reject",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "allowed_effects": ["FileSystem"],
           "direct_effect_allowlist": {
             "FileSystem": ["load_config"]
@@ -8942,7 +8925,7 @@ fn main() ~ FileSystem {
     )
     .expect("write direct source allowlist rejection fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -8950,7 +8933,7 @@ fn main() ~ FileSystem {
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with direct source allowlist");
+        .expect("run buildc check with direct source allowlist");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -8980,13 +8963,13 @@ fn main() ~ FileSystem {
 #[test]
 fn check_policy_direct_capability_source_allowlist_accepts_approved_source() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_direct_source_accept_{}.quanta",
+        "buildlang_check_policy_direct_source_accept_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "direct_source_accept",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "allowed_effects": ["FileSystem"],
           "direct_effect_allowlist": {
             "FileSystem": ["load_config"]
@@ -9012,7 +8995,7 @@ fn main() ~ FileSystem {
     )
     .expect("write direct source allowlist acceptance fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -9020,7 +9003,7 @@ fn main() ~ FileSystem {
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with approved direct source allowlist");
+        .expect("run buildc check with approved direct source allowlist");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -9042,13 +9025,13 @@ fn main() ~ FileSystem {
 #[test]
 fn check_policy_strict_allowlist_coverage_rejects_unused_direct_capability_source_entry() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_unused_direct_source_allowlist_{}.quanta",
+        "buildlang_check_policy_unused_direct_source_allowlist_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "unused_direct_source_allowlist",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "allowed_effects": ["FileSystem"],
           "direct_effect_allowlist": {
             "FileSystem": ["load_config"]
@@ -9078,7 +9061,7 @@ fn main() ~ FileSystem {
     )
     .expect("write unused direct source allowlist fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -9086,7 +9069,7 @@ fn main() ~ FileSystem {
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with strict direct source coverage");
+        .expect("run buildc check with strict direct source coverage");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -9116,13 +9099,13 @@ fn main() ~ FileSystem {
 #[test]
 fn check_policy_propagated_effect_source_allowlist_rejects_unapproved_callee() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_propagated_source_reject_{}.quanta",
+        "buildlang_check_policy_propagated_source_reject_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "propagated_source_reject",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "allowed_effects": ["FileSystem"],
           "direct_effect_allowlist": {
             "FileSystem": ["load_config", "load_secret"]
@@ -9155,7 +9138,7 @@ fn main() ~ FileSystem {
     )
     .expect("write propagated source allowlist rejection fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -9163,7 +9146,7 @@ fn main() ~ FileSystem {
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with propagated source allowlist");
+        .expect("run buildc check with propagated source allowlist");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -9193,13 +9176,13 @@ fn main() ~ FileSystem {
 #[test]
 fn check_policy_propagated_effect_source_allowlist_accepts_approved_callee() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_propagated_source_accept_{}.quanta",
+        "buildlang_check_policy_propagated_source_accept_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "propagated_source_accept",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "allowed_effects": ["FileSystem"],
           "direct_effect_allowlist": {
             "FileSystem": ["load_config"]
@@ -9228,7 +9211,7 @@ fn main() ~ FileSystem {
     )
     .expect("write propagated source allowlist acceptance fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -9236,7 +9219,7 @@ fn main() ~ FileSystem {
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with approved propagated source allowlist");
+        .expect("run buildc check with approved propagated source allowlist");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -9258,13 +9241,13 @@ fn main() ~ FileSystem {
 #[test]
 fn check_policy_propagated_effect_source_allowlist_accepts_approved_method() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_propagated_method_source_accept_{}.quanta",
+        "buildlang_check_policy_propagated_method_source_accept_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "propagated_method_source_accept",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "allowed_effects": ["FileSystem"],
           "direct_effect_allowlist": {
             "FileSystem": ["load"]
@@ -9298,7 +9281,7 @@ fn main() ~ FileSystem {
     )
     .expect("write propagated method source allowlist acceptance fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -9306,7 +9289,7 @@ fn main() ~ FileSystem {
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with approved propagated method source allowlist");
+        .expect("run buildc check with approved propagated method source allowlist");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -9332,13 +9315,13 @@ fn main() ~ FileSystem {
 #[test]
 fn check_policy_strict_allowlist_coverage_rejects_unused_propagated_effect_source_entry() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_unused_propagated_source_allowlist_{}.quanta",
+        "buildlang_check_policy_unused_propagated_source_allowlist_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "unused_propagated_source_allowlist",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "allowed_effects": ["FileSystem"],
           "direct_effect_allowlist": {
             "FileSystem": ["load_config"]
@@ -9368,7 +9351,7 @@ fn main() ~ FileSystem {
     )
     .expect("write unused propagated source allowlist fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -9376,7 +9359,7 @@ fn main() ~ FileSystem {
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with strict propagated source coverage");
+        .expect("run buildc check with strict propagated source coverage");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -9406,13 +9389,13 @@ fn main() ~ FileSystem {
 #[test]
 fn check_policy_require_source_allowlists_rejects_missing_direct_source_entry() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_require_direct_source_{}.quanta",
+        "buildlang_check_policy_require_direct_source_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "require_direct_source",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "allowed_effects": ["FileSystem"],
           "direct_effect_allowlist": {
             "FileSystem": ["load_config"]
@@ -9430,7 +9413,7 @@ fn load_config() ~ FileSystem {
     )
     .expect("write required direct source allowlist fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -9438,7 +9421,7 @@ fn load_config() ~ FileSystem {
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with required direct source allowlist");
+        .expect("run buildc check with required direct source allowlist");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -9468,13 +9451,13 @@ fn load_config() ~ FileSystem {
 #[test]
 fn check_policy_require_source_allowlists_rejects_missing_propagated_source_entry() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_require_propagated_source_{}.quanta",
+        "buildlang_check_policy_require_propagated_source_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "require_propagated_source",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "allowed_effects": ["FileSystem"],
           "direct_effect_allowlist": {
             "FileSystem": ["load_config"]
@@ -9504,7 +9487,7 @@ fn main() ~ FileSystem {
     )
     .expect("write required propagated source allowlist fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -9512,7 +9495,7 @@ fn main() ~ FileSystem {
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with required propagated source allowlist");
+        .expect("run buildc check with required propagated source allowlist");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -9542,13 +9525,13 @@ fn main() ~ FileSystem {
 #[test]
 fn check_policy_require_source_allowlists_accepts_explicit_source_entries() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_require_sources_accept_{}.quanta",
+        "buildlang_check_policy_require_sources_accept_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "require_sources_accept",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "allowed_effects": ["FileSystem"],
           "direct_effect_allowlist": {
             "FileSystem": ["load_config"]
@@ -9583,7 +9566,7 @@ fn main() ~ FileSystem {
     )
     .expect("write required source allowlists acceptance fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -9591,7 +9574,7 @@ fn main() ~ FileSystem {
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with required explicit source allowlists");
+        .expect("run buildc check with required explicit source allowlists");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -9613,13 +9596,13 @@ fn main() ~ FileSystem {
 #[test]
 fn check_policy_propagated_allowlist_rejects_unlisted_caller() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_propagated_reject_{}.quanta",
+        "buildlang_check_policy_propagated_reject_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "propagated_reject",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "allowed_effects": ["FileSystem"],
           "direct_effect_allowlist": {
             "FileSystem": ["load_config"]
@@ -9643,7 +9626,7 @@ fn main() ~ FileSystem {
     )
     .expect("write propagated allowlist fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -9651,7 +9634,7 @@ fn main() ~ FileSystem {
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with propagated allowlist policy");
+        .expect("run buildc check with propagated allowlist policy");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -9682,26 +9665,26 @@ fn main() ~ FileSystem {
 #[test]
 fn check_policy_rejects_unsupported_schema() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_policy_bad_schema_{}.quanta",
+        "buildlang_check_policy_bad_schema_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "bad_schema",
         r#"{
-          "schema": "quantalang-check-policy/v0",
+          "schema": "buildlang-check-policy/v0",
           "allowed_effects": ["Console"]
         }"#,
     );
     fs::write(&fixture, r#"fn main() ~ Console { println!("ok"); }"#)
         .expect("write bad schema fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
         .arg(&policy)
         .output()
-        .expect("run quantac check with bad policy schema");
+        .expect("run buildc check with bad policy schema");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -9712,7 +9695,7 @@ fn check_policy_rejects_unsupported_schema() {
     );
     assert!(
         String::from_utf8_lossy(&output.stderr)
-            .contains("Unsupported check policy schema 'quantalang-check-policy/v0'"),
+            .contains("Unsupported check policy schema 'buildlang-check-policy/v0'"),
         "stderr should report unsupported schema:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -9720,10 +9703,10 @@ fn check_policy_rejects_unsupported_schema() {
 
 #[test]
 fn policy_list_includes_builtin_security_profiles() {
-    let output = quantac()
+    let output = buildc()
         .args(["policy", "list"])
         .output()
-        .expect("run quantac policy list");
+        .expect("run buildc policy list");
 
     assert!(
         output.status.success(),
@@ -9753,10 +9736,10 @@ fn policy_list_includes_builtin_security_profiles() {
 
 #[test]
 fn policy_list_json_emits_catalog_with_profile_digests() {
-    let output = quantac()
+    let output = buildc()
         .args(["policy", "list", "--json"])
         .output()
-        .expect("run quantac policy list --json");
+        .expect("run buildc policy list --json");
 
     assert!(
         output.status.success(),
@@ -9766,7 +9749,7 @@ fn policy_list_json_emits_catalog_with_profile_digests() {
     );
     let catalog: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("catalog should be JSON");
-    assert_eq!(catalog["schema"], "quantalang-policy-catalog/v1");
+    assert_eq!(catalog["schema"], "buildlang-policy-catalog/v1");
     let profiles = catalog["profiles"]
         .as_array()
         .expect("profiles should be an array");
@@ -9786,7 +9769,7 @@ fn policy_list_json_emits_catalog_with_profile_digests() {
     );
     for profile in profiles {
         assert_eq!(
-            profile["policy_schema"], "quantalang-check-policy/v1",
+            profile["policy_schema"], "buildlang-check-policy/v1",
             "profile should name the policy schema: {profile:#?}"
         );
         assert!(
@@ -9809,18 +9792,18 @@ fn policy_list_json_emits_catalog_with_profile_digests() {
 #[test]
 fn policy_list_json_digest_matches_printed_profile() {
     let dir = std::env::temp_dir().join(format!(
-        "quantalang_policy_catalog_digest_{}",
+        "buildlang_policy_catalog_digest_{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create policy catalog digest directory");
     let profile_path = dir.join("ci-review.json");
 
-    let catalog_output = quantac()
+    let catalog_output = buildc()
         .args(["policy", "list", "--json"])
         .output()
-        .expect("run quantac policy list --json");
-    let print_output = quantac()
+        .expect("run buildc policy list --json");
+    let print_output = buildc()
         .args(["policy", "print", "ci-review", "--output"])
         .arg(&profile_path)
         .output()
@@ -9859,10 +9842,10 @@ fn policy_list_json_digest_matches_printed_profile() {
 
 #[test]
 fn policy_print_emits_valid_pure_profile() {
-    let output = quantac()
+    let output = buildc()
         .args(["policy", "print", "pure"])
         .output()
-        .expect("run quantac policy print pure");
+        .expect("run buildc policy print pure");
 
     assert!(
         output.status.success(),
@@ -9872,7 +9855,7 @@ fn policy_print_emits_valid_pure_profile() {
     );
     let profile: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("policy profile should be JSON");
-    assert_eq!(profile["schema"], "quantalang-check-policy/v1");
+    assert_eq!(profile["schema"], "buildlang-check-policy/v1");
     assert_eq!(profile["require_source_digest"], true);
     assert_eq!(profile["require_input_graph_digest"], true);
     let denied = profile["denied_effects"]
@@ -9890,10 +9873,10 @@ fn policy_print_emits_valid_pure_profile() {
 
 #[test]
 fn policy_print_emits_strict_accountability_profile_with_source_gates() {
-    let output = quantac()
+    let output = buildc()
         .args(["policy", "print", "strict-accountability"])
         .output()
-        .expect("run quantac policy print strict-accountability");
+        .expect("run buildc policy print strict-accountability");
 
     assert!(
         output.status.success(),
@@ -9903,7 +9886,7 @@ fn policy_print_emits_strict_accountability_profile_with_source_gates() {
     );
     let profile: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("policy profile should be JSON");
-    assert_eq!(profile["schema"], "quantalang-check-policy/v1");
+    assert_eq!(profile["schema"], "buildlang-check-policy/v1");
     assert_eq!(profile["require_source_digest"], true);
     assert_eq!(profile["require_input_graph_digest"], true);
     assert_eq!(profile["require_effect_allowlist"], true);
@@ -9924,12 +9907,12 @@ fn policy_print_emits_strict_accountability_profile_with_source_gates() {
 #[test]
 fn policy_scaffold_from_receipt_emits_exact_source_allowlists() {
     let dir = std::env::temp_dir().join(format!(
-        "quantalang_policy_scaffold_receipt_{}",
+        "buildlang_policy_scaffold_receipt_{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create policy scaffold fixture directory");
-    let input = dir.join("app.quanta");
+    let input = dir.join("app.bld");
     let receipt = dir.join("receipt.json");
     let policy = dir.join("policy.json");
     fs::write(
@@ -9946,7 +9929,7 @@ fn main() ~ FileSystem {
     )
     .expect("write policy scaffold input");
 
-    let check = quantac()
+    let check = buildc()
         .arg("check")
         .arg(&input)
         .arg("--receipt")
@@ -9960,7 +9943,7 @@ fn main() ~ FileSystem {
         String::from_utf8_lossy(&check.stderr)
     );
 
-    let scaffold = quantac()
+    let scaffold = buildc()
         .arg("policy")
         .arg("scaffold")
         .arg(&receipt)
@@ -9978,7 +9961,7 @@ fn main() ~ FileSystem {
     let scaffolded: serde_json::Value =
         serde_json::from_slice(&fs::read(&policy).expect("read scaffolded policy"))
             .expect("scaffolded policy should be JSON");
-    assert_eq!(scaffolded["schema"], "quantalang-check-policy/v1");
+    assert_eq!(scaffolded["schema"], "buildlang-check-policy/v1");
     assert_eq!(
         scaffolded["allowed_effects"],
         serde_json::json!(["FileSystem"])
@@ -10006,7 +9989,7 @@ fn main() ~ FileSystem {
     assert_eq!(scaffolded["require_source_allowlists"], true);
     assert_eq!(scaffolded["require_allowlist_coverage"], true);
 
-    let verify_scaffold = quantac()
+    let verify_scaffold = buildc()
         .arg("check")
         .arg(&input)
         .arg("--policy")
@@ -10034,17 +10017,17 @@ fn main() ~ FileSystem {
 #[test]
 fn policy_scaffold_from_pure_receipt_rejects_later_effect_drift() {
     let dir = std::env::temp_dir().join(format!(
-        "quantalang_policy_scaffold_pure_drift_{}",
+        "buildlang_policy_scaffold_pure_drift_{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create pure scaffold drift fixture directory");
-    let input = dir.join("app.quanta");
+    let input = dir.join("app.bld");
     let receipt = dir.join("receipt.json");
     let policy = dir.join("policy.json");
     fs::write(&input, "fn main() {}\n").expect("write pure policy scaffold input");
 
-    let check = quantac()
+    let check = buildc()
         .arg("check")
         .arg(&input)
         .arg("--receipt")
@@ -10058,7 +10041,7 @@ fn policy_scaffold_from_pure_receipt_rejects_later_effect_drift() {
         String::from_utf8_lossy(&check.stderr)
     );
 
-    let scaffold = quantac()
+    let scaffold = buildc()
         .arg("policy")
         .arg("scaffold")
         .arg(&receipt)
@@ -10089,7 +10072,7 @@ fn main() ~ Audit {}
 "#,
     )
     .expect("write drifted effect input");
-    let drift = quantac()
+    let drift = buildc()
         .arg("check")
         .arg(&input)
         .arg("--policy")
@@ -10123,12 +10106,12 @@ fn main() ~ Audit {}
 #[test]
 fn policy_scaffold_from_foreign_receipt_preserves_direct_ffi_boundary() {
     let dir = std::env::temp_dir().join(format!(
-        "quantalang_policy_scaffold_foreign_{}",
+        "buildlang_policy_scaffold_foreign_{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create foreign scaffold fixture directory");
-    let input = dir.join("app.quanta");
+    let input = dir.join("app.bld");
     let receipt = dir.join("receipt.json");
     fs::write(
         &input,
@@ -10142,7 +10125,7 @@ fn main() ~ Foreign {
     )
     .expect("write foreign policy scaffold input");
 
-    let check = quantac()
+    let check = buildc()
         .arg("check")
         .arg(&input)
         .arg("--receipt")
@@ -10156,7 +10139,7 @@ fn main() ~ Foreign {
         String::from_utf8_lossy(&check.stderr)
     );
 
-    let scaffold = quantac()
+    let scaffold = buildc()
         .arg("policy")
         .arg("scaffold")
         .arg(&receipt)
@@ -10196,12 +10179,12 @@ fn main() ~ Foreign {
 #[test]
 fn policy_scaffold_from_qualified_capability_receipt_preserves_source_path() {
     let dir = std::env::temp_dir().join(format!(
-        "quantalang_policy_scaffold_qualified_capability_{}",
+        "buildlang_policy_scaffold_qualified_capability_{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create qualified scaffold fixture directory");
-    let input = dir.join("app.quanta");
+    let input = dir.join("app.bld");
     let receipt = dir.join("receipt.json");
     fs::write(
         &input,
@@ -10209,7 +10192,7 @@ fn policy_scaffold_from_qualified_capability_receipt_preserves_source_path() {
     )
     .expect("write qualified policy scaffold input");
 
-    let check = quantac()
+    let check = buildc()
         .arg("check")
         .arg(&input)
         .arg("--receipt")
@@ -10223,7 +10206,7 @@ fn policy_scaffold_from_qualified_capability_receipt_preserves_source_path() {
         String::from_utf8_lossy(&check.stderr)
     );
 
-    let scaffold = quantac()
+    let scaffold = buildc()
         .arg("policy")
         .arg("scaffold")
         .arg(&receipt)
@@ -10252,15 +10235,15 @@ fn policy_scaffold_from_qualified_capability_receipt_preserves_source_path() {
 #[test]
 fn printed_pure_policy_rejects_console_program() {
     let dir = std::env::temp_dir().join(format!(
-        "quantalang_printed_pure_policy_{}",
+        "buildlang_printed_pure_policy_{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create pure policy fixture directory");
     let policy_path = dir.join("pure-policy.json");
-    let fixture = dir.join("console.quanta");
+    let fixture = dir.join("console.bld");
 
-    let print = quantac()
+    let print = buildc()
         .args(["policy", "print", "pure", "--output"])
         .arg(&policy_path)
         .output()
@@ -10274,7 +10257,7 @@ fn printed_pure_policy_rejects_console_program() {
 
     fs::write(&fixture, r#"fn main() ~ Console { println!("blocked"); }"#)
         .expect("write console fixture");
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -10282,7 +10265,7 @@ fn printed_pure_policy_rejects_console_program() {
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with pure policy");
+        .expect("run buildc check with pure policy");
 
     assert!(
         !output.status.success(),
@@ -10309,13 +10292,13 @@ fn printed_pure_policy_rejects_console_program() {
 #[test]
 fn check_profile_strict_accountability_rejects_ambient_console_without_allowlists() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_profile_strict_accountability_{}.quanta",
+        "buildlang_check_profile_strict_accountability_{}.bld",
         std::process::id()
     ));
     fs::write(&fixture, r#"fn main() ~ Console { println!("blocked"); }"#)
         .expect("write console fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--profile")
@@ -10323,7 +10306,7 @@ fn check_profile_strict_accountability_rejects_ambient_console_without_allowlist
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with strict-accountability profile");
+        .expect("run buildc check with strict-accountability profile");
 
     let _ = fs::remove_file(&fixture);
 
@@ -10353,13 +10336,13 @@ fn check_profile_strict_accountability_rejects_ambient_console_without_allowlist
 #[test]
 fn check_profile_pure_rejects_console_program_without_policy_file() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_profile_pure_{}.quanta",
+        "buildlang_check_profile_pure_{}.bld",
         std::process::id()
     ));
     fs::write(&fixture, r#"fn main() ~ Console { println!("blocked"); }"#)
         .expect("write console fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--profile")
@@ -10367,7 +10350,7 @@ fn check_profile_pure_rejects_console_program_without_policy_file() {
         .arg("--receipt")
         .arg("-")
         .output()
-        .expect("run quantac check with pure profile");
+        .expect("run buildc check with pure profile");
 
     let _ = fs::remove_file(&fixture);
 
@@ -10404,14 +10387,13 @@ fn check_profile_pure_rejects_console_program_without_policy_file() {
 
 #[test]
 fn check_profile_receipt_digest_matches_printed_builtin_profile() {
-    let dir =
-        std::env::temp_dir().join(format!("quantalang_profile_digest_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("buildlang_profile_digest_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create profile digest fixture directory");
     let profile_path = dir.join("pure.json");
-    let input = dir.join("pure.quanta");
+    let input = dir.join("pure.bld");
 
-    let print = quantac()
+    let print = buildc()
         .args(["policy", "print", "pure", "--output"])
         .arg(&profile_path)
         .output()
@@ -10424,7 +10406,7 @@ fn check_profile_receipt_digest_matches_printed_builtin_profile() {
     );
     fs::write(&input, r#"fn main() {}"#).expect("write pure input");
 
-    let via_profile = quantac()
+    let via_profile = buildc()
         .arg("check")
         .arg(&input)
         .arg("--profile")
@@ -10433,7 +10415,7 @@ fn check_profile_receipt_digest_matches_printed_builtin_profile() {
         .arg("-")
         .output()
         .expect("run check with built-in profile");
-    let via_policy = quantac()
+    let via_policy = buildc()
         .arg("check")
         .arg(&input)
         .arg("--policy")
@@ -10475,18 +10457,18 @@ fn check_profile_receipt_digest_matches_printed_builtin_profile() {
 #[test]
 fn check_profile_expect_digest_accepts_matching_builtin_digest() {
     let dir = std::env::temp_dir().join(format!(
-        "quantalang_profile_expect_digest_{}",
+        "buildlang_profile_expect_digest_{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create profile digest fixture directory");
-    let input = dir.join("pure.quanta");
+    let input = dir.join("pure.bld");
     fs::write(&input, r#"fn main() {}"#).expect("write pure input");
 
-    let catalog_output = quantac()
+    let catalog_output = buildc()
         .args(["policy", "list", "--json"])
         .output()
-        .expect("run quantac policy list --json");
+        .expect("run buildc policy list --json");
     assert!(
         catalog_output.status.success(),
         "policy catalog should succeed\nstdout:\n{}\nstderr:\n{}",
@@ -10505,7 +10487,7 @@ fn check_profile_expect_digest_accepts_matching_builtin_digest() {
         .expect("pure digest")
         .to_string();
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&input)
         .arg("--profile")
@@ -10533,13 +10515,13 @@ fn check_profile_expect_digest_accepts_matching_builtin_digest() {
 #[test]
 fn check_profile_expect_digest_rejects_mismatch() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_profile_digest_mismatch_{}.quanta",
+        "buildlang_check_profile_digest_mismatch_{}.bld",
         std::process::id()
     ));
     fs::write(&fixture, r#"fn main() {}"#).expect("write pure fixture");
     let wrong_digest = "0".repeat(64);
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--profile")
@@ -10569,12 +10551,12 @@ fn check_profile_expect_digest_rejects_mismatch() {
 #[test]
 fn check_expect_profile_digest_requires_builtin_profile() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_profile_digest_without_profile_{}.quanta",
+        "buildlang_check_profile_digest_without_profile_{}.bld",
         std::process::id()
     ));
     fs::write(&fixture, r#"fn main() {}"#).expect("write pure fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--expect-profile-digest")
@@ -10598,18 +10580,18 @@ fn check_expect_profile_digest_requires_builtin_profile() {
 #[test]
 fn check_profile_rejects_unknown_builtin_profile() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_profile_unknown_{}.quanta",
+        "buildlang_check_profile_unknown_{}.bld",
         std::process::id()
     ));
     fs::write(&fixture, r#"fn main() {}"#).expect("write pure fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--profile")
         .arg("missing")
         .output()
-        .expect("run quantac check with missing profile");
+        .expect("run buildc check with missing profile");
 
     let _ = fs::remove_file(&fixture);
 
@@ -10625,20 +10607,20 @@ fn check_profile_rejects_unknown_builtin_profile() {
 #[test]
 fn check_rejects_policy_file_and_builtin_profile_together() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_check_profile_conflict_{}.quanta",
+        "buildlang_check_profile_conflict_{}.bld",
         std::process::id()
     ));
     let policy = write_temp_policy(
         "profile_conflict",
         r#"{
-          "schema": "quantalang-check-policy/v1",
+          "schema": "buildlang-check-policy/v1",
           "allowed_effects": ["Console"]
         }"#,
     );
     fs::write(&fixture, r#"fn main() ~ Console { println!("ok"); }"#)
         .expect("write conflict fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .arg("--policy")
@@ -10646,7 +10628,7 @@ fn check_rejects_policy_file_and_builtin_profile_together() {
         .arg("--profile")
         .arg("pure")
         .output()
-        .expect("run quantac check with conflicting policy inputs");
+        .expect("run buildc check with conflicting policy inputs");
 
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_file(&policy);
@@ -10669,13 +10651,13 @@ fn corpus_verify_accepts_explicit_root() {
         return;
     }
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(repo_root().join("semantic-corpus"))
         .output()
-        .expect("run quantac corpus verify with explicit root");
+        .expect("run buildc corpus verify with explicit root");
 
     assert!(
         output.status.success(),
@@ -10714,14 +10696,14 @@ fn corpus_verify_write_repairs_receipt_program_drift_in_copy() {
     );
     fs::write(&c_receipt_path, drifted_receipt).expect("write drifted copied C receipt");
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .arg("--write")
         .output()
-        .expect("run quantac corpus verify --write");
+        .expect("run buildc corpus verify --write");
 
     assert!(
         output.status.success(),
@@ -10758,11 +10740,11 @@ fn corpus_verify_checks_manifest_receipts_and_c_execution() {
         return;
     }
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .output()
-        .expect("run quantac corpus verify");
+        .expect("run buildc corpus verify");
 
     assert!(
         output.status.success(),
@@ -10794,13 +10776,13 @@ fn corpus_verify_checks_substrate_receipt() {
         return;
     }
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(repo_root().join("semantic-corpus"))
         .output()
-        .expect("run quantac corpus verify with substrate receipt");
+        .expect("run buildc corpus verify with substrate receipt");
 
     assert!(
         output.status.success(),
@@ -10826,13 +10808,13 @@ fn corpus_verify_checks_mir_representation_receipt() {
         return;
     }
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(repo_root().join("semantic-corpus"))
         .output()
-        .expect("run quantac corpus verify with MIR representation receipt");
+        .expect("run buildc corpus verify with MIR representation receipt");
 
     assert!(
         output.status.success(),
@@ -10856,13 +10838,13 @@ fn corpus_verify_checks_memory_layout_receipt() {
         return;
     }
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(repo_root().join("semantic-corpus"))
         .output()
-        .expect("run quantac corpus verify with memory layout receipt");
+        .expect("run buildc corpus verify with memory layout receipt");
 
     assert!(
         output.status.success(),
@@ -10886,13 +10868,13 @@ fn corpus_verify_checks_symbol_graph_receipt() {
         return;
     }
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(repo_root().join("semantic-corpus"))
         .output()
-        .expect("run quantac corpus verify with symbol graph receipt");
+        .expect("run buildc corpus verify with symbol graph receipt");
 
     assert!(
         output.status.success(),
@@ -10916,13 +10898,13 @@ fn corpus_verify_checks_module_graph_receipt() {
         return;
     }
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(repo_root().join("semantic-corpus"))
         .output()
-        .expect("run quantac corpus verify with module graph receipt");
+        .expect("run buildc corpus verify with module graph receipt");
 
     assert!(
         output.status.success(),
@@ -10946,13 +10928,13 @@ fn corpus_verify_checks_lsp_dispatch_receipt() {
         return;
     }
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(repo_root().join("semantic-corpus"))
         .output()
-        .expect("run quantac corpus verify with LSP dispatch receipt");
+        .expect("run buildc corpus verify with LSP dispatch receipt");
 
     assert!(
         output.status.success(),
@@ -10973,7 +10955,7 @@ fn corpus_verify_checks_lsp_dispatch_receipt() {
 fn corpus_verify_rejects_module_graph_schema_drift() {
     let corpus_root = temp_semantic_corpus("module_graph_schema");
     write_module_graph_receipt_copy(&corpus_root, |mut receipt| {
-        receipt["schema"] = serde_json::Value::String("quantalang-module-graph-receipt/v9".into());
+        receipt["schema"] = serde_json::Value::String("buildlang-module-graph-receipt/v9".into());
         receipt
     });
 
@@ -10998,7 +10980,7 @@ fn corpus_verify_rejects_module_graph_program_count_drift() {
 fn corpus_verify_rejects_module_graph_path_escape() {
     let corpus_root = temp_semantic_corpus("module_graph_path_escape");
     write_module_graph_receipt_copy(&corpus_root, |mut receipt| {
-        receipt["programs"][0]["path"] = serde_json::Value::String("../outside.quanta".into());
+        receipt["programs"][0]["path"] = serde_json::Value::String("../outside.bld".into());
         receipt
     });
 
@@ -11081,7 +11063,7 @@ fn corpus_verify_rejects_module_graph_summary_drift() {
 fn corpus_verify_rejects_lsp_dispatch_schema_drift() {
     let corpus_root = temp_semantic_corpus("lsp_dispatch_schema");
     write_lsp_dispatch_receipt_copy(&corpus_root, |mut receipt| {
-        receipt["schema"] = serde_json::Value::String("quantalang-lsp-dispatch-receipt/v9".into());
+        receipt["schema"] = serde_json::Value::String("buildlang-lsp-dispatch-receipt/v9".into());
         receipt
     });
 
@@ -11284,7 +11266,7 @@ fn corpus_verify_rejects_lsp_dispatch_stale_json_rpc_gap() {
 fn corpus_verify_rejects_symbol_graph_schema_drift() {
     let corpus_root = temp_semantic_corpus("symbol_graph_schema");
     write_symbol_graph_receipt_copy(&corpus_root, |mut receipt| {
-        receipt["schema"] = serde_json::Value::String("quantalang-symbol-graph-receipt/v9".into());
+        receipt["schema"] = serde_json::Value::String("buildlang-symbol-graph-receipt/v9".into());
         receipt
     });
 
@@ -11309,7 +11291,7 @@ fn corpus_verify_rejects_symbol_graph_program_count_drift() {
 fn corpus_verify_rejects_symbol_graph_path_escape() {
     let corpus_root = temp_semantic_corpus("symbol_graph_path_escape");
     write_symbol_graph_receipt_copy(&corpus_root, |mut receipt| {
-        receipt["programs"][0]["path"] = serde_json::Value::String("../outside.quanta".into());
+        receipt["programs"][0]["path"] = serde_json::Value::String("../outside.bld".into());
         receipt
     });
 
@@ -11391,17 +11373,17 @@ fn corpus_verify_rejects_symbol_graph_lsp_overclaim() {
 fn corpus_verify_rejects_memory_layout_schema_drift() {
     let corpus_root = temp_semantic_corpus("memory_layout_schema");
     write_memory_layout_receipt_copy(&corpus_root, |mut receipt| {
-        receipt["schema"] = serde_json::Value::String("quantalang-memory-layout-receipt/v9".into());
+        receipt["schema"] = serde_json::Value::String("buildlang-memory-layout-receipt/v9".into());
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against bad memory layout schema");
+        .expect("run buildc corpus verify against bad memory layout schema");
     let _ = fs::remove_dir_all(&corpus_root);
 
     assert!(!output.status.success(), "schema drift should fail");
@@ -11421,13 +11403,13 @@ fn corpus_verify_rejects_memory_layout_program_count_drift() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against memory layout program count drift");
+        .expect("run buildc corpus verify against memory layout program count drift");
     let _ = fs::remove_dir_all(&corpus_root);
 
     assert!(!output.status.success(), "program count drift should fail");
@@ -11443,17 +11425,17 @@ fn corpus_verify_rejects_memory_layout_program_count_drift() {
 fn corpus_verify_rejects_memory_layout_path_escape() {
     let corpus_root = temp_semantic_corpus("memory_layout_path_escape");
     write_memory_layout_receipt_copy(&corpus_root, |mut receipt| {
-        receipt["programs"][0]["path"] = serde_json::Value::String("../outside.quanta".into());
+        receipt["programs"][0]["path"] = serde_json::Value::String("../outside.bld".into());
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against memory layout path escape");
+        .expect("run buildc corpus verify against memory layout path escape");
     let _ = fs::remove_dir_all(&corpus_root);
 
     assert!(!output.status.success(), "path escape should fail");
@@ -11473,13 +11455,13 @@ fn corpus_verify_rejects_memory_layout_source_digest_drift() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against memory layout source digest drift");
+        .expect("run buildc corpus verify against memory layout source digest drift");
     let _ = fs::remove_dir_all(&corpus_root);
 
     assert!(!output.status.success(), "source digest drift should fail");
@@ -11500,13 +11482,13 @@ fn corpus_verify_rejects_memory_layout_observed_surface_drift() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against memory layout observed surface drift");
+        .expect("run buildc corpus verify against memory layout observed surface drift");
     let _ = fs::remove_dir_all(&corpus_root);
 
     assert!(
@@ -11529,13 +11511,13 @@ fn corpus_verify_rejects_memory_layout_known_gap_drift() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against memory layout known gap drift");
+        .expect("run buildc corpus verify against memory layout known gap drift");
     let _ = fs::remove_dir_all(&corpus_root);
 
     assert!(!output.status.success(), "known gap drift should fail");
@@ -11555,13 +11537,13 @@ fn corpus_verify_rejects_memory_layout_byte_layout_overclaim() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against memory layout overclaim");
+        .expect("run buildc corpus verify against memory layout overclaim");
     let _ = fs::remove_dir_all(&corpus_root);
 
     assert!(
@@ -11580,17 +11562,17 @@ fn corpus_verify_rejects_mir_representation_receipt_schema_drift() {
     let corpus_root = temp_semantic_corpus("mir_repr_schema");
     write_mir_representation_receipt_copy(&corpus_root, |mut receipt| {
         receipt["schema"] =
-            serde_json::Value::String("quantalang-mir-representation-receipt/v9".into());
+            serde_json::Value::String("buildlang-mir-representation-receipt/v9".into());
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against bad MIR representation schema");
+        .expect("run buildc corpus verify against bad MIR representation schema");
 
     let _ = fs::remove_dir_all(&corpus_root);
 
@@ -11614,13 +11596,13 @@ fn corpus_verify_rejects_mir_representation_program_count_drift() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against MIR representation program count drift");
+        .expect("run buildc corpus verify against MIR representation program count drift");
 
     let _ = fs::remove_dir_all(&corpus_root);
 
@@ -11640,17 +11622,17 @@ fn corpus_verify_rejects_mir_representation_program_count_drift() {
 fn corpus_verify_rejects_mir_representation_path_escape() {
     let corpus_root = temp_semantic_corpus("mir_repr_path_escape");
     write_mir_representation_receipt_copy(&corpus_root, |mut receipt| {
-        receipt["programs"][0]["path"] = serde_json::Value::String("../outside.quanta".into());
+        receipt["programs"][0]["path"] = serde_json::Value::String("../outside.bld".into());
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against MIR representation path escape");
+        .expect("run buildc corpus verify against MIR representation path escape");
 
     let _ = fs::remove_dir_all(&corpus_root);
 
@@ -11668,20 +11650,20 @@ fn corpus_verify_rejects_mir_representation_path_escape() {
 #[test]
 fn corpus_verify_rejects_mir_representation_path_escape_absolute() {
     let corpus_root = temp_semantic_corpus("mir_repr_path_escape_absolute");
-    let absolute_path = std::env::temp_dir().join("outside.quanta");
+    let absolute_path = std::env::temp_dir().join("outside.bld");
     write_mir_representation_receipt_copy(&corpus_root, |mut receipt| {
         receipt["programs"][0]["path"] =
             serde_json::Value::String(absolute_path.to_string_lossy().into_owned());
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against MIR representation absolute path");
+        .expect("run buildc corpus verify against MIR representation absolute path");
 
     let _ = fs::remove_dir_all(&corpus_root);
 
@@ -11704,13 +11686,13 @@ fn corpus_verify_rejects_mir_representation_source_digest_drift() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against MIR representation source digest drift");
+        .expect("run buildc corpus verify against MIR representation source digest drift");
 
     let _ = fs::remove_dir_all(&corpus_root);
 
@@ -11734,13 +11716,13 @@ fn corpus_verify_rejects_mir_representation_operation_drift() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against MIR representation operation drift");
+        .expect("run buildc corpus verify against MIR representation operation drift");
 
     let _ = fs::remove_dir_all(&corpus_root);
 
@@ -11765,13 +11747,13 @@ fn corpus_verify_rejects_mir_representation_input_graph_digest_drift() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against MIR representation input graph digest drift");
+        .expect("run buildc corpus verify against MIR representation input graph digest drift");
 
     let _ = fs::remove_dir_all(&corpus_root);
 
@@ -11795,13 +11777,13 @@ fn corpus_verify_rejects_mir_representation_mir_digest_drift() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against MIR representation MIR digest drift");
+        .expect("run buildc corpus verify against MIR representation MIR digest drift");
 
     let _ = fs::remove_dir_all(&corpus_root);
 
@@ -11821,17 +11803,17 @@ fn corpus_verify_rejects_mir_representation_mir_digest_drift() {
 fn corpus_verify_rejects_substrate_receipt_schema_drift() {
     let corpus_root = temp_semantic_corpus("substrate_schema");
     write_substrate_receipt_copy(&corpus_root, |mut receipt| {
-        receipt["schema"] = serde_json::Value::String("quantalang-substrate-receipt/v9".into());
+        receipt["schema"] = serde_json::Value::String("buildlang-substrate-receipt/v9".into());
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against bad substrate schema");
+        .expect("run buildc corpus verify against bad substrate schema");
 
     let _ = fs::remove_dir_all(&corpus_root);
 
@@ -11855,13 +11837,13 @@ fn corpus_verify_rejects_substrate_program_count_drift() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against bad substrate program count");
+        .expect("run buildc corpus verify against bad substrate program count");
 
     let _ = fs::remove_dir_all(&corpus_root);
 
@@ -11887,13 +11869,13 @@ fn corpus_verify_rejects_production_substrate_backend_without_receipt() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against missing production receipt");
+        .expect("run buildc corpus verify against missing production receipt");
 
     let _ = fs::remove_dir_all(&corpus_root);
 
@@ -11919,13 +11901,13 @@ fn corpus_verify_rejects_substrate_rust_subset_without_receipt() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against missing rust subset receipt");
+        .expect("run buildc corpus verify against missing rust subset receipt");
 
     let _ = fs::remove_dir_all(&corpus_root);
 
@@ -11952,13 +11934,13 @@ fn corpus_verify_rejects_substrate_missing_required_spirv_target() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against missing spirv target");
+        .expect("run buildc corpus verify against missing spirv target");
 
     let _ = fs::remove_dir_all(&corpus_root);
 
@@ -11983,13 +11965,13 @@ fn corpus_verify_rejects_substrate_receipt_path_escape() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against substrate path escape");
+        .expect("run buildc corpus verify against substrate path escape");
 
     let _ = fs::remove_dir_all(&corpus_root);
 
@@ -12013,13 +11995,13 @@ fn corpus_verify_rejects_substrate_representation_receipt_path_escape() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against substrate representation receipt path escape");
+        .expect("run buildc corpus verify against substrate representation receipt path escape");
 
     let _ = fs::remove_dir_all(&corpus_root);
 
@@ -12043,13 +12025,13 @@ fn corpus_verify_rejects_substrate_memory_receipt_path_escape() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against substrate memory receipt path escape");
+        .expect("run buildc corpus verify against substrate memory receipt path escape");
     let _ = fs::remove_dir_all(&corpus_root);
 
     assert!(
@@ -12073,13 +12055,13 @@ fn corpus_verify_rejects_substrate_module_receipt_missing_path() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against substrate module receipt missing path");
+        .expect("run buildc corpus verify against substrate module receipt missing path");
     let _ = fs::remove_dir_all(&corpus_root);
 
     assert!(
@@ -12103,13 +12085,13 @@ fn corpus_verify_rejects_substrate_module_receipt_path_escape() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against substrate module receipt path escape");
+        .expect("run buildc corpus verify against substrate module receipt path escape");
     let _ = fs::remove_dir_all(&corpus_root);
 
     assert!(
@@ -12133,13 +12115,13 @@ fn corpus_verify_rejects_substrate_symbol_receipt_path_escape() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against substrate symbol receipt path escape");
+        .expect("run buildc corpus verify against substrate symbol receipt path escape");
     let _ = fs::remove_dir_all(&corpus_root);
 
     assert!(
@@ -12163,13 +12145,13 @@ fn corpus_verify_rejects_substrate_lsp_receipt_missing_path() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against substrate LSP receipt missing path");
+        .expect("run buildc corpus verify against substrate LSP receipt missing path");
     let _ = fs::remove_dir_all(&corpus_root);
 
     assert!(
@@ -12193,13 +12175,13 @@ fn corpus_verify_rejects_substrate_lsp_receipt_path_escape() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against substrate LSP receipt path escape");
+        .expect("run buildc corpus verify against substrate LSP receipt path escape");
     let _ = fs::remove_dir_all(&corpus_root);
 
     assert!(
@@ -12228,14 +12210,14 @@ fn corpus_verify_rejects_substrate_representation_receipt_root_qualified_path() 
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
         .expect(
-            "run quantac corpus verify against substrate representation receipt root-qualified path",
+            "run buildc corpus verify against substrate representation receipt root-qualified path",
         );
 
     let _ = fs::remove_dir_all(&corpus_root);
@@ -12261,13 +12243,13 @@ fn corpus_verify_rejects_substrate_representation_receipt_absolute_path() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against substrate representation receipt absolute path");
+        .expect("run buildc corpus verify against substrate representation receipt absolute path");
 
     let _ = fs::remove_dir_all(&corpus_root);
 
@@ -12291,14 +12273,14 @@ fn corpus_verify_rejects_substrate_representation_receipt_windows_drive_path() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
         .expect(
-            "run quantac corpus verify against substrate representation receipt windows drive path",
+            "run buildc corpus verify against substrate representation receipt windows drive path",
         );
 
     let _ = fs::remove_dir_all(&corpus_root);
@@ -12323,14 +12305,14 @@ fn corpus_verify_rejects_substrate_representation_receipt_windows_drive_relative
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
         .expect(
-            "run quantac corpus verify against substrate representation receipt windows drive-relative path",
+            "run buildc corpus verify against substrate representation receipt windows drive-relative path",
         );
 
     let _ = fs::remove_dir_all(&corpus_root);
@@ -12354,13 +12336,13 @@ fn corpus_verify_rejects_empty_substrate_evidence_commands() {
         receipt
     });
 
-    let output = quantac()
+    let output = buildc()
         .arg("corpus")
         .arg("verify")
         .arg("--root")
         .arg(&corpus_root)
         .output()
-        .expect("run quantac corpus verify against empty substrate commands");
+        .expect("run buildc corpus verify against empty substrate commands");
 
     let _ = fs::remove_dir_all(&corpus_root);
 
@@ -12379,17 +12361,17 @@ fn corpus_verify_rejects_empty_substrate_evidence_commands() {
 #[test]
 fn quickstart_examples_are_typechecked() {
     for name in [
-        "hello.quanta",
-        "ledger.quanta",
-        "effects_greeting.quanta",
-        "vignette_shader.quanta",
+        "hello.bld",
+        "ledger.bld",
+        "effects_greeting.bld",
+        "vignette_shader.bld",
     ] {
         let path = quickstart_example(name);
-        let output = quantac()
+        let output = buildc()
             .arg("check")
             .arg(&path)
             .output()
-            .unwrap_or_else(|err| panic!("run quantac check for {name}: {err}"));
+            .unwrap_or_else(|err| panic!("run buildc check for {name}: {err}"));
 
         assert!(
             output.status.success(),
@@ -12408,15 +12390,15 @@ fn quickstart_cpu_examples_run_when_c_backend_is_ready() {
     }
 
     for (name, expected_stdout) in [
-        ("hello.quanta", "Hello from QuantaLang!\n"),
-        ("ledger.quanta", "balance: 115\n"),
-        ("effects_greeting.quanta", "Hello, teammate!\n"),
+        ("hello.bld", "Hello from BuildLang!\n"),
+        ("ledger.bld", "balance: 115\n"),
+        ("effects_greeting.bld", "Hello, teammate!\n"),
     ] {
-        let output = quantac()
+        let output = buildc()
             .arg("run")
             .arg(quickstart_example(name))
             .output()
-            .unwrap_or_else(|err| panic!("run quantac run for {name}: {err}"));
+            .unwrap_or_else(|err| panic!("run buildc run for {name}: {err}"));
 
         assert!(
             output.status.success(),
@@ -12432,15 +12414,15 @@ fn quickstart_cpu_examples_run_when_c_backend_is_ready() {
 #[test]
 fn quickstart_shader_example_compiles_to_hlsl() {
     let out_dir = std::env::temp_dir().join(format!(
-        "quantalang_quickstart_shader_{}",
+        "buildlang_quickstart_shader_{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&out_dir);
     fs::create_dir_all(&out_dir).expect("create quickstart shader temp dir");
     let output_path = out_dir.join("vignette_shader.hlsl");
 
-    let output = quantac()
-        .arg(quickstart_example("vignette_shader.quanta"))
+    let output = buildc()
+        .arg(quickstart_example("vignette_shader.bld"))
         .arg("--target")
         .arg("hlsl")
         .arg("-o")

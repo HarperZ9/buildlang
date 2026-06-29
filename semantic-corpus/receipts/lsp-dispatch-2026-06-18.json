@@ -1,9 +1,9 @@
 {
-  "schema": "quantalang-lsp-dispatch-receipt/v0",
+  "schema": "buildlang-lsp-dispatch-receipt/v0",
   "receipt_id": "lsp-dispatch-semantic-corpus-2026-06-18",
   "created_at": "2026-06-18",
-  "compiler": "quantac",
-  "language": "quantalang",
+  "compiler": "buildc",
+  "language": "buildlang",
   "source_set": {
     "kind": "semantic-corpus",
     "manifest": "manifest.json",
@@ -11,7 +11,7 @@
   },
   "lsp_model": {
     "protocol": "LSP JSON-RPC over stdio",
-    "dispatch": "quantac lsp raw message dispatch",
+    "dispatch": "buildc lsp raw message dispatch",
     "request_parser": "serde_json structural JSON-RPC parser",
     "semantic_anchor": "compiler diagnostics and parser-backed document model",
     "symbol_anchor": "receipts/symbol-graph-2026-06-18.json",
@@ -24,7 +24,7 @@
       "response_kind": "response",
       "result_digest": {
         "algorithm": "sha256",
-        "hex": "b3d6314bf5283aa3495994423b31f045837e5b3f027a88b567e29efcb9a23b8d"
+        "hex": "413f3d9d68e192f99ba11e765d5d408ea1f156e980a86fccf01c92e323726c52"
       },
       "observed": {
         "has_result": true
@@ -46,7 +46,7 @@
       "response_kind": "notification",
       "result_digest": {
         "algorithm": "sha256",
-        "hex": "a5c15835d05db90b7d7b5c467d230a98b4abbfb434ada1b67c2b9c959e5a319f"
+        "hex": "4d52ae5744cd0a4e29a8e2664a537af56e44d1b8d305951f380bf7bbba7f2c16"
       },
       "observed": {
         "diagnostics": 1
@@ -71,7 +71,7 @@
       "response_kind": "response",
       "result_digest": {
         "algorithm": "sha256",
-        "hex": "81ef9e8760b37d216ea51c1724ebf3ef0988143d8ee9ab55413161eaaa07853b"
+        "hex": "cf6e785707e1d43876a371c43fcbcb2958e42a1dd0c6752351750d895130e7d1"
       },
       "observed": {
         "has_result": true,
@@ -110,7 +110,7 @@
       "response_kind": "response",
       "result_digest": {
         "algorithm": "sha256",
-        "hex": "e925c7fe4c4e59f4df117524d8d67f408cd81a840119e65cf1f9a5067f3aaee4"
+        "hex": "a02b2d8845805f47b15db2f99caa4cddedf63f22b8fe19de79e24d2d60949ec5"
       },
       "observed": {
         "has_result": true
@@ -122,7 +122,7 @@
       "response_kind": "response",
       "result_digest": {
         "algorithm": "sha256",
-        "hex": "d592dd0478d55e99bd8c6ad89a666962bc0656deffd6737e57498ea18cd71c7c"
+        "hex": "2407328ea517847c8154ab2d77216733bd1333062c02993bee09d342f44bf871"
       },
       "observed": {
         "has_result": true,
@@ -135,7 +135,7 @@
       "response_kind": "response",
       "result_digest": {
         "algorithm": "sha256",
-        "hex": "13871212654146a61027593587574ab6e5397f9515cc9b1c019f7d5ad5761f34"
+        "hex": "2cc3a00304a701845508892ffca609702f88845d6fdedbf23655db2e6f8e404d"
       },
       "observed": {
         "has_result": true,
@@ -174,7 +174,7 @@
       "response_kind": "notification",
       "result_digest": {
         "algorithm": "sha256",
-        "hex": "2131e0575bbfa7b918aaacb59810ee0b53fa5a7feddd4c4e71b9d95d8a99fee8"
+        "hex": "ba6f49ec8b05d8be23e790e5a510a616b5b32c3c8b0819808cdaf7efa4ca45dc"
       },
       "observed": {}
     },
@@ -184,7 +184,7 @@
       "response_kind": "response",
       "result_digest": {
         "algorithm": "sha256",
-        "hex": "c3b5ade184e1a2453bc515f7169c1b5e11db72972970d259bd425d53fda5ec4e"
+        "hex": "99cf8a599c71ba0e160c151de6fd6b4e4588f603321f5bfc66816648eb694694"
       },
       "observed": {
         "has_result": true,
@@ -197,7 +197,7 @@
       "response_kind": "response",
       "result_digest": {
         "algorithm": "sha256",
-        "hex": "e9ba92cf48a473f5d03a6d791b3ed4675077d8c6034bcf5904040890cbe6065e"
+        "hex": "d3b8c54b515fef047af50a132a73f317eb76f60653d6f393b1b705993f227ade"
       },
       "observed": {
         "has_result": true,
@@ -210,7 +210,7 @@
       "response_kind": "notification",
       "result_digest": {
         "algorithm": "sha256",
-        "hex": "6c2794ab25275a3d82928706b3a9e501658ebd43b5d95f1bfc2a9d0960a774af"
+        "hex": "cdb2a27f1131ef49547c5e1d9d6d1d05abb338aaed9e729fe4a8b32826ab1449"
       },
       "observed": {
         "diagnostics": 1,

@@ -1,10 +1,10 @@
 // ===============================================================================
-// QUANTALANG LSP DIAGNOSTICS
+// BUILDLANG LSP DIAGNOSTICS
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
-//! Diagnostics provider for QuantaLang.
+//! Diagnostics provider for BuildLang.
 //!
 //! Provides both text-pattern-based checks (brackets, syntax) and
 //! real type checker diagnostics (undefined variables, type mismatches).
@@ -18,9 +18,9 @@ use crate::lexer::{Lexer, SourceFile};
 use crate::parser::Parser;
 use crate::types::{TypeChecker, TypeContext};
 
-const LEXER_DIAGNOSTIC_SOURCE: &str = "quantalang/lexer";
-const PARSER_DIAGNOSTIC_SOURCE: &str = "quantalang/parser";
-const TYPE_CHECKER_DIAGNOSTIC_SOURCE: &str = "quantalang/type-checker";
+const LEXER_DIAGNOSTIC_SOURCE: &str = "buildlang/lexer";
+const PARSER_DIAGNOSTIC_SOURCE: &str = "buildlang/parser";
+const TYPE_CHECKER_DIAGNOSTIC_SOURCE: &str = "buildlang/type-checker";
 
 // =============================================================================
 // DIAGNOSTICS PROVIDER
@@ -641,8 +641,8 @@ mod tests {
         let documents = Arc::new(DocumentStore::new());
         let provider = DiagnosticsProvider::new(documents.clone());
         let doc = documents.open(TextDocumentItem {
-            uri: "file:///workspace/type_error.quanta".to_string(),
-            language_id: "quanta".to_string(),
+            uri: "file:///workspace/type_error.bld".to_string(),
+            language_id: "build".to_string(),
             version: 1,
             text: "const BAD: i32 = \"oops\";\nfn main() {}\n".to_string(),
         });
@@ -650,7 +650,7 @@ mod tests {
 
         assert!(
             published.diagnostics.iter().any(|d| {
-                d.source.as_deref() == Some("quantalang/type-checker")
+                d.source.as_deref() == Some("buildlang/type-checker")
                     && d.message.contains("type mismatch")
             }),
             "expected type-checker diagnostic in {:#?}",

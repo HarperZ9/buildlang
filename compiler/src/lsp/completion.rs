@@ -1,10 +1,10 @@
 // ===============================================================================
-// QUANTALANG LSP COMPLETION
+// BUILDLANG LSP COMPLETION
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
-//! Code completion provider for QuantaLang.
+//! Code completion provider for BuildLang.
 
 use super::document::{Document, DocumentStore};
 use super::types::*;

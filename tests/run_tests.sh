@@ -1,6 +1,6 @@
 #!/bin/bash
-# QuantaLang End-to-End Test Runner
-# Compiles each .quanta test program to C, compiles the C, runs it,
+# BuildLang End-to-End Test Runner
+# Compiles each .bld test program to C, compiles the C, runs it,
 # and compares output to .expected file.
 
 COMPILER="cargo run --manifest-path compiler/Cargo.toml --quiet --"
@@ -9,11 +9,11 @@ FAIL=0
 SKIP=0
 TOTAL=0
 
-for qfile in tests/programs/*.quanta; do
-    name=$(basename "$qfile" .quanta)
+for qfile in tests/programs/*.bld; do
+    name=$(basename "$qfile" .bld)
     expected="tests/programs/${name}.expected"
-    c_out="/tmp/quantatest_${name}.c"
-    exe_out="/tmp/quantatest_${name}"
+    c_out="/tmp/buildtest_${name}.c"
+    exe_out="/tmp/buildtest_${name}"
 
     TOTAL=$((TOTAL + 1))
 
@@ -23,7 +23,7 @@ for qfile in tests/programs/*.quanta; do
         continue
     fi
 
-    # Step 1: Compile .quanta to .c
+    # Step 1: Compile .bld to .c
     $COMPILER "$qfile" -o "$c_out" 2>/dev/null
     if [ $? -ne 0 ]; then
         echo "FAIL $name (compilation to C failed)"

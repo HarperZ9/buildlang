@@ -9,8 +9,8 @@ import {
 let client: LanguageClient | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
-    const config = vscode.workspace.getConfiguration('quantalang');
-    const serverPath = config.get<string>('serverPath', 'quantac');
+    const config = vscode.workspace.getConfiguration('buildlang');
+    const serverPath = config.get<string>('serverPath', 'buildc');
 
     const serverOptions: ServerOptions = {
         command: serverPath,
@@ -18,15 +18,15 @@ export function activate(context: vscode.ExtensionContext) {
     };
 
     const clientOptions: LanguageClientOptions = {
-        documentSelector: [{ scheme: 'file', language: 'quantalang' }],
+        documentSelector: [{ scheme: 'file', language: 'buildlang' }],
         synchronize: {
-            fileEvents: vscode.workspace.createFileSystemWatcher('**/*.quanta'),
+            fileEvents: vscode.workspace.createFileSystemWatcher('**/*.bld'),
         },
     };
 
     client = new LanguageClient(
-        'quantalang',
-        'QuantaLang Language Server',
+        'buildlang',
+        'BuildLang Language Server',
         serverOptions,
         clientOptions
     );
@@ -35,9 +35,9 @@ export function activate(context: vscode.ExtensionContext) {
         // The language server isn't available yet - syntax highlighting
         // still works without it. Log silently so users aren't alarmed.
         console.log(
-            'QuantaLang language server not found. ' +
+            'BuildLang language server not found. ' +
             'Syntax highlighting is active. ' +
-            'Install quantac and set quantalang.serverPath to exercise the partial LSP server.'
+            'Install buildc and set buildlang.serverPath to exercise the partial LSP server.'
         );
     });
 }

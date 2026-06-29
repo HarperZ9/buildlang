@@ -1,4 +1,4 @@
-use quantalang::types::FunctionEffectSummary;
+use buildlang::types::FunctionEffectSummary;
 
 use super::super::model::SymbolGraphEffectSymbol;
 use super::super::sorted;

@@ -1,12 +1,12 @@
 // ===============================================================================
-// QUANTALANG AST MODULE
+// BUILDLANG AST MODULE
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
 //! # Abstract Syntax Tree
 //!
-//! This module defines the AST node types for QuantaLang. The AST is produced
+//! This module defines the AST node types for BuildLang. The AST is produced
 //! by the parser and consumed by later stages (type checking, code generation).
 //!
 //! ## Design Principles

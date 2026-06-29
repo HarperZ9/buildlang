@@ -1,8 +1,8 @@
 // ============================================================================
-// QuantaLang Visual Demo - Triangle on RTX 4090
+// BuildLang Visual Demo - Triangle on RTX 4090
 // Copyright (c) 2024-2026 Zain Dana Harper. All Rights Reserved.
 // ============================================================================
-// Opens a Win32 window, creates a Vulkan swapchain, loads QuantaLang-compiled
+// Opens a Win32 window, creates a Vulkan swapchain, loads BuildLang-compiled
 // SPIR-V shaders, renders a colored triangle, presents frames.
 // Build: cl vulkan_render.c /I %VULKAN_SDK%/Include /link vulkan-1.lib user32.lib gdi32.lib
 
@@ -80,7 +80,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 int main(int argc, char** argv) {
-    printf("=== QuantaLang Visual Demo ===\n");
+    printf("=== BuildLang Visual Demo ===\n");
     printf("The Graphics Programming Language\n\n");
 
     // ---- Create Window ----
@@ -90,13 +90,13 @@ int main(int argc, char** argv) {
     wc.lpfnWndProc = wnd_proc;
     wc.hInstance = GetModuleHandleA(NULL);
     wc.hCursor = LoadCursorA(NULL, IDC_ARROW);
-    wc.lpszClassName = "QuantaLangDemo";
+    wc.lpszClassName = "BuildLangDemo";
     RegisterClassExA(&wc);
 
     RECT rect = {0, 0, WIDTH, HEIGHT};
     AdjustWindowRect(&rect, WS_OVERLAPPEDWINDOW, FALSE);
-    HWND hwnd = CreateWindowExA(0, "QuantaLangDemo",
-        "QuantaLang \xE2\x80\x94 The Graphics Programming Language",
+    HWND hwnd = CreateWindowExA(0, "BuildLangDemo",
+        "BuildLang \xE2\x80\x94 The Graphics Programming Language",
         WS_OVERLAPPEDWINDOW | WS_VISIBLE,
         CW_USEDEFAULT, CW_USEDEFAULT,
         rect.right - rect.left, rect.bottom - rect.top,
@@ -104,7 +104,7 @@ int main(int argc, char** argv) {
 
     // ---- Create Vulkan Instance ----
     VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO};
-    app.pApplicationName = "QuantaLang Demo";
+    app.pApplicationName = "BuildLang Demo";
     app.apiVersion = VK_API_VERSION_1_0;
     const char* inst_ext[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
     VkInstanceCreateInfo ci = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
@@ -233,8 +233,8 @@ int main(int argc, char** argv) {
     rpci.pDependencies = &dep;
     vkCreateRenderPass(g_device, &rpci, NULL, &g_render_pass);
 
-    // ---- Load Shaders (QuantaLang-compiled SPIR-V) ----
-    // Load QuantaLang source-compiled SPIR-V (full AST→MIR→SPIR-V pipeline)
+    // ---- Load Shaders (BuildLang-compiled SPIR-V) ----
+    // Load BuildLang source-compiled SPIR-V (full AST→MIR→SPIR-V pipeline)
     size_t vert_size, frag_size;
     uint32_t* vert_code = load_spv("demos/vert.spv", &vert_size);
     uint32_t* frag_code = load_spv("demos/frag.spv", &frag_size);
@@ -245,8 +245,8 @@ int main(int argc, char** argv) {
 
     if (!vert_code || !frag_code) {
         printf("ERROR: No SPIR-V shaders found. Compile with:\n");
-        printf("  quantac demos/triangle_vertex.quanta --target spirv -o demos/triangle_vertex.spv\n");
-        printf("  quantac demos/triangle_fragment.quanta --target spirv -o demos/triangle_fragment.spv\n");
+        printf("  buildc demos/triangle_vertex.bld --target spirv -o demos/triangle_vertex.spv\n");
+        printf("  buildc demos/triangle_fragment.bld --target spirv -o demos/triangle_fragment.spv\n");
         return 1;
     }
 
@@ -309,7 +309,7 @@ int main(int argc, char** argv) {
     if (pipe_result != VK_SUCCESS) {
         printf("Pipeline creation: %s (code %d)\n",
                pipe_result == VK_SUCCESS ? "OK" : "FAILED", pipe_result);
-        printf("Note: QuantaLang-compiled shaders may need entry point adjustment.\n");
+        printf("Note: BuildLang-compiled shaders may need entry point adjustment.\n");
         printf("The shaders loaded and validated - the pipeline requires matching I/O.\n");
     } else {
         printf("Graphics pipeline: CREATED\n");
@@ -446,6 +446,6 @@ int main(int argc, char** argv) {
     free(vert_code);
     free(frag_code);
 
-    printf("\n=== QuantaLang Demo Complete ===\n");
+    printf("\n=== BuildLang Demo Complete ===\n");
     return 0;
 }

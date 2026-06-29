@@ -110,7 +110,7 @@ impl WorkspaceSymbolIndex {
                 }
                 continue;
             }
-            if !is_quanta_file(&path) {
+            if !is_build_file(&path) {
                 continue;
             }
             if self.stats.indexed_files >= MAX_INDEXED_FILES {
@@ -146,15 +146,15 @@ impl WorkspaceSymbolIndex {
             self.stats.skipped_read_errors += 1;
             return;
         };
-        let doc = Document::new(uri.clone(), "quanta".to_string(), 0, content);
+        let doc = Document::new(uri.clone(), "build".to_string(), 0, content);
         self.symbols_by_uri
             .insert(uri, symbols.document_symbols(&doc));
         self.stats.indexed_files += 1;
     }
 }
 
-fn is_quanta_file(path: &Path) -> bool {
-    path.extension().and_then(|ext| ext.to_str()) == Some("quanta")
+fn is_build_file(path: &Path) -> bool {
+    path.extension().and_then(|ext| ext.to_str()) == Some("bld")
 }
 
 fn is_excluded_dir(path: &Path) -> bool {
@@ -242,7 +242,7 @@ mod tests {
 
     fn temp_root(label: &str) -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!(
-            "quantalang_lsp_index_{label}_{}",
+            "buildlang_lsp_index_{label}_{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&root);
@@ -251,16 +251,13 @@ mod tests {
     }
 
     #[test]
-    fn indexes_quanta_files_in_sorted_order_and_skips_excluded_dirs() {
+    fn indexes_build_files_in_sorted_order_and_skips_excluded_dirs() {
         let root = temp_root("sorted");
-        std::fs::write(root.join("b.quanta"), "fn beta() -> i32 { 2 }\n").expect("write b");
-        std::fs::write(root.join("a.quanta"), "fn alpha() -> i32 { 1 }\n").expect("write a");
+        std::fs::write(root.join("b.bld"), "fn beta() -> i32 { 2 }\n").expect("write b");
+        std::fs::write(root.join("a.bld"), "fn alpha() -> i32 { 1 }\n").expect("write a");
         std::fs::create_dir_all(root.join("target")).expect("create target");
-        std::fs::write(
-            root.join("target").join("hidden.quanta"),
-            "fn hidden() {}\n",
-        )
-        .expect("write hidden");
+        std::fs::write(root.join("target").join("hidden.bld"), "fn hidden() {}\n")
+            .expect("write hidden");
 
         let mut index = WorkspaceSymbolIndex::new();
         let stats = index.rebuild_from_path("file:///workspace", &root, &provider());
@@ -269,13 +266,13 @@ mod tests {
         assert_eq!(
             index.symbols().keys().cloned().collect::<Vec<_>>(),
             vec![
-                "file:///workspace/a.quanta".to_string(),
-                "file:///workspace/b.quanta".to_string(),
+                "file:///workspace/a.bld".to_string(),
+                "file:///workspace/b.bld".to_string(),
             ]
         );
         assert!(!index
             .symbols()
-            .contains_key("file:///workspace/target/hidden.quanta"));
+            .contains_key("file:///workspace/target/hidden.bld"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -284,7 +281,7 @@ mod tests {
         let root = temp_root("cap");
         for i in 0..(MAX_INDEXED_FILES + 1) {
             std::fs::write(
-                root.join(format!("f{i:03}.quanta")),
+                root.join(format!("f{i:03}.bld")),
                 format!("fn f{i}() {{}}\n"),
             )
             .expect("write file");

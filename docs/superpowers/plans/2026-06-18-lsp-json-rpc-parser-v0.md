@@ -60,8 +60,8 @@ fn raw_dispatch_document_symbol_accepts_reordered_pretty_json() {
             "textDocument": {
               "text": "fn helper() -> i32 { 1 }\nfn main() { helper(); }\n",
               "version": 1,
-              "languageId": "quanta",
-              "uri": "file:///workspace/main.quanta"
+              "languageId": "build",
+              "uri": "file:///workspace/main.bld"
             }
           },
           "method": "textDocument/didOpen",
@@ -73,7 +73,7 @@ fn raw_dispatch_document_symbol_accepts_reordered_pretty_json() {
         &mut server,
         r#"{
           "method": "textDocument/documentSymbol",
-          "params": { "textDocument": { "uri": "file:///workspace/main.quanta" } },
+          "params": { "textDocument": { "uri": "file:///workspace/main.bld" } },
           "id": 2,
           "jsonrpc": "2.0"
         }"#,
@@ -189,7 +189,7 @@ Run:
 ```powershell
 cargo fmt --manifest-path compiler\Cargo.toml -- --check
 cargo test --manifest-path compiler\Cargo.toml --lib json_rpc --quiet
-cargo test --manifest-path compiler\Cargo.toml --bin quantac lsp_dispatch --quiet
+cargo test --manifest-path compiler\Cargo.toml --bin buildc lsp_dispatch --quiet
 cargo test --manifest-path compiler\Cargo.toml --test cli lsp_dispatch -- --nocapture
 cargo test --manifest-path compiler\Cargo.toml --test cli corpus_verify -- --nocapture
 cargo run --manifest-path compiler\Cargo.toml -- corpus verify --root semantic-corpus
