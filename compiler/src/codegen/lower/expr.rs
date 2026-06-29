@@ -1595,12 +1595,14 @@ impl<'ctx> MirLowerer<'ctx> {
                 MirType::i32()
             }
             ExprKind::Call { func, .. } => self.resolve_call_return_type(func),
-            ExprKind::MethodCall { receiver, method, .. } => {
+            ExprKind::MethodCall {
+                receiver, method, ..
+            } => {
                 let recv = self.infer_expr_type(receiver);
                 match method.name.as_ref() {
                     "len" | "count" | "capacity" => MirType::usize(),
-                    "is_some" | "is_none" | "is_ok" | "is_err" | "is_empty"
-                    | "contains" | "contains_key" | "starts_with" | "ends_with" => MirType::Bool,
+                    "is_some" | "is_none" | "is_ok" | "is_err" | "is_empty" | "contains"
+                    | "contains_key" | "starts_with" | "ends_with" => MirType::Bool,
                     "clone" | "to_owned" => recv,
                     "get" | "get_mut" => match recv {
                         MirType::Map(_, v) => *v,
@@ -1635,7 +1637,11 @@ impl<'ctx> MirLowerer<'ctx> {
                     if let Some(td) = self.module.find_type(sname.as_ref()) {
                         if let TypeDefKind::Struct { fields, .. } = &td.kind {
                             for (fname, fty) in fields {
-                                if fname.as_deref().map(|n| n == field.name.as_ref()).unwrap_or(false) {
+                                if fname
+                                    .as_deref()
+                                    .map(|n| n == field.name.as_ref())
+                                    .unwrap_or(false)
+                                {
                                     return fty.clone();
                                 }
                             }

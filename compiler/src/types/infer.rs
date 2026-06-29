@@ -3611,7 +3611,12 @@ impl<'ctx> TypeInfer<'ctx> {
                 let _: Vec<_> = args.iter().map(|a| self.infer_expr(a)).collect();
                 Ty::fresh_var()
             }
-            TyKind::Ref(_, _, ref inner) if matches!(inner.kind, TyKind::Param(..) | TyKind::Var(_) | TyKind::Infer(_)) => {
+            TyKind::Ref(_, _, ref inner)
+                if matches!(
+                    inner.kind,
+                    TyKind::Param(..) | TyKind::Var(_) | TyKind::Infer(_)
+                ) =>
+            {
                 let _: Vec<_> = args.iter().map(|a| self.infer_expr(a)).collect();
                 Ty::fresh_var()
             }

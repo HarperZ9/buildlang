@@ -241,7 +241,10 @@ impl CBackend {
                                 .collect();
                             out.push(MirTypeDef {
                                 name,
-                                kind: TypeDefKind::Struct { fields, packed: false },
+                                kind: TypeDefKind::Struct {
+                                    fields,
+                                    packed: false,
+                                },
                             });
                         }
                     }
@@ -266,8 +269,7 @@ impl CBackend {
                 _ => {}
             }
         }
-        let existing: HashSet<String> =
-            module.types.iter().map(|t| t.name.to_string()).collect();
+        let existing: HashSet<String> = module.types.iter().map(|t| t.name.to_string()).collect();
         let mut seen: HashSet<String> = HashSet::new();
         let mut out: Vec<MirTypeDef> = Vec::new();
         for td in &module.types {
@@ -303,7 +305,7 @@ impl CBackend {
         out
     }
 
-        fn generate_type_definitions(&mut self, types: &[MirTypeDef]) -> CodegenResult<()> {
+    fn generate_type_definitions(&mut self, types: &[MirTypeDef]) -> CodegenResult<()> {
         if types.is_empty() {
             return Ok(());
         }
@@ -317,7 +319,10 @@ impl CBackend {
             if let TypeDefKind::Struct { fields, .. } = &ty.kind {
                 for (_, field_ty) in fields {
                     if let MirType::Struct(name) = field_ty {
-                        if name.starts_with("Tuple_") && !type_names.contains(name.as_ref()) && !emitted_tuples.contains(name.as_ref()) {
+                        if name.starts_with("Tuple_")
+                            && !type_names.contains(name.as_ref())
+                            && !emitted_tuples.contains(name.as_ref())
+                        {
                             emitted_tuples.insert(name.to_string());
                             // Parse the tuple element types from the mangled name
                             let parts: Vec<&str> = name[6..].split('_').collect();
@@ -351,7 +356,9 @@ impl CBackend {
                         });
                         if !elems.is_empty() && all_prim {
                             let name = MirType::tuple_type_name(elems);
-                            if !type_names.contains(name.as_ref()) && !emitted_tuples.contains(name.as_ref()) {
+                            if !type_names.contains(name.as_ref())
+                                && !emitted_tuples.contains(name.as_ref())
+                            {
                                 emitted_tuples.insert(name.to_string());
                                 let field_ctypes: Vec<String> =
                                     elems.iter().map(|e| self.type_to_c(e)).collect();
@@ -2419,13 +2426,24 @@ impl CBackend {
                     // (structs, tuples) use the generic pointer getter + cast/deref so
                     // Vec<struct> / Vec<tuple> indexing reads the element by value.
                     match elem_ty {
-                        MirType::Float(_) => format!("quanta_hvec_get_f64({}, {})", base_str, index_str),
-                        MirType::Int(IntSize::I64, _) => format!("quanta_hvec_get_i64({}, {})", base_str, index_str),
-                        MirType::Struct(n) if n.as_ref() == "QuantaString" => format!("quanta_hvec_get_str({}, {})", base_str, index_str),
-                        MirType::Int(..) | MirType::Bool => format!("quanta_hvec_get_i32({}, {})", base_str, index_str),
+                        MirType::Float(_) => {
+                            format!("quanta_hvec_get_f64({}, {})", base_str, index_str)
+                        }
+                        MirType::Int(IntSize::I64, _) => {
+                            format!("quanta_hvec_get_i64({}, {})", base_str, index_str)
+                        }
+                        MirType::Struct(n) if n.as_ref() == "QuantaString" => {
+                            format!("quanta_hvec_get_str({}, {})", base_str, index_str)
+                        }
+                        MirType::Int(..) | MirType::Bool => {
+                            format!("quanta_hvec_get_i32({}, {})", base_str, index_str)
+                        }
                         other => {
                             let ct = self.type_to_c(other);
-                            format!("(*({}*)quanta_vec_get({}.inner, {}))", ct, base_str, index_str)
+                            format!(
+                                "(*({}*)quanta_vec_get({}.inner, {}))",
+                                ct, base_str, index_str
+                            )
                         }
                     }
                 } else {
