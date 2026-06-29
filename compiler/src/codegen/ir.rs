@@ -17,16 +17,104 @@
 //! - Values are in SSA form (each value assigned exactly once)
 //! - Types are explicit and fully resolved
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
+
+// ============================================================================
+// SERIALIZATION: VERSIONED INTERLINGUA ENVELOPE
+// ============================================================================
+
+/// Schema string identifying the MIR interlingua wire format.
+///
+/// This is the durable, versioned contract for serialized MIR. Bump the
+/// `/vN` suffix on any breaking change to the on-the-wire shape so consumers
+/// can reject or migrate incompatible payloads.
+pub const MIR_SCHEMA: &str = "buildlang.mir/v0";
+
+/// A versioned envelope wrapping a [`MirModule`] for serialization.
+///
+/// The envelope is the canonical interchange form of MIR: it carries the
+/// [`MIR_SCHEMA`] tag alongside the module so that a deserializer can verify
+/// it is reading a format it understands before reconstructing the graph.
+///
+/// Round-trip is lossless: `from_json(to_json(m)) == m` for any module
+/// (floats, including non-finite and `-0.0`, are preserved bit-exact).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MirModuleEnvelope {
+    /// Format tag; always [`MIR_SCHEMA`] when produced by this compiler.
+    pub schema: String,
+    /// The wrapped MIR module.
+    pub module: MirModule,
+}
+
+impl MirModuleEnvelope {
+    /// Wrap a borrowed module in a versioned envelope (clones the module).
+    pub fn wrap(module: &MirModule) -> Self {
+        Self {
+            schema: MIR_SCHEMA.to_string(),
+            module: module.clone(),
+        }
+    }
+
+    /// Wrap an owned module in a versioned envelope.
+    pub fn new(module: MirModule) -> Self {
+        Self {
+            schema: MIR_SCHEMA.to_string(),
+            module,
+        }
+    }
+
+    /// Serialize this envelope to pretty-printed JSON.
+    pub fn to_json_pretty(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
+    /// Serialize this envelope to compact JSON.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+
+    /// Deserialize an envelope from JSON, rejecting unknown schema strings.
+    pub fn from_json(json: &str) -> Result<Self, String> {
+        let envelope: Self = serde_json::from_str(json).map_err(|err| err.to_string())?;
+        if envelope.schema != MIR_SCHEMA {
+            return Err(format!(
+                "unsupported MIR schema '{}', expected '{}'",
+                envelope.schema, MIR_SCHEMA
+            ));
+        }
+        Ok(envelope)
+    }
+}
+
+/// Lossless `f64` serde: store the raw IEEE-754 bit pattern as a `u64`.
+///
+/// `serde_json` serializes non-finite floats (`NaN`, `±∞`) as JSON `null`,
+/// which does not round-trip, and even finite floats can suffer from
+/// formatter-dependent shortest-representation choices. Encoding the bit
+/// pattern guarantees every `f64` (including `NaN` payloads, `±∞`, `-0.0`,
+/// and subnormals) round-trips bit-exact.
+mod lossless_f64 {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u64(value.to_bits())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
+        let bits = u64::deserialize(deserializer)?;
+        Ok(f64::from_bits(bits))
+    }
+}
 
 // ============================================================================
 // MODULE STRUCTURE
 // ============================================================================
 
 /// Vtable definition for trait object dynamic dispatch.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MirVtable {
     /// Trait name.
     pub trait_name: Arc<str>,
@@ -37,6 +125,7 @@ pub struct MirVtable {
 }
 
 /// A MIR module (compilation unit).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MirModule {
     /// Module name.
     pub name: Arc<str>,
@@ -59,7 +148,7 @@ pub struct MirModule {
 }
 
 /// A shader uniform declaration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MirUniform {
     /// Uniform name.
     pub name: Arc<str>,
@@ -128,7 +217,7 @@ impl MirModule {
 // ============================================================================
 
 /// GPU shader stage for graphics pipeline functions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ShaderStage {
     /// Vertex shader stage.
     Vertex,
@@ -139,7 +228,7 @@ pub enum ShaderStage {
 }
 
 /// Descriptor binding kind for shader resources.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BindingKind {
     /// Uniform buffer (constant data from CPU).
     UniformBuffer(Arc<str>),
@@ -152,7 +241,7 @@ pub enum BindingKind {
 }
 
 /// A shader resource binding (descriptor set + binding index).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ShaderBinding {
     /// Descriptor set index.
     pub set: u32,
@@ -165,7 +254,7 @@ pub struct ShaderBinding {
 }
 
 /// A MIR function.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MirFunction {
     /// Function name.
     pub name: Arc<str>,
@@ -255,7 +344,7 @@ impl MirFunction {
 }
 
 /// Function signature.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MirFnSig {
     /// Parameter types.
     pub params: Vec<MirType>,
@@ -280,7 +369,7 @@ impl MirFnSig {
 }
 
 /// Calling convention.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CallingConv {
     /// Default BuildLang calling convention.
     Build,
@@ -293,7 +382,7 @@ pub enum CallingConv {
 }
 
 /// Linkage type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Linkage {
     /// Internal (private to the module).
     Internal,
@@ -310,7 +399,7 @@ pub enum Linkage {
 // ============================================================================
 
 /// A basic block ID.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BlockId(pub u32);
 
 impl BlockId {
@@ -325,7 +414,7 @@ impl fmt::Display for BlockId {
 }
 
 /// A basic block.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MirBlock {
     /// Block ID.
     pub id: BlockId,
@@ -374,7 +463,7 @@ impl MirBlock {
 // ============================================================================
 
 /// A local variable ID.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LocalId(pub u32);
 
 impl fmt::Display for LocalId {
@@ -384,7 +473,7 @@ impl fmt::Display for LocalId {
 }
 
 /// A local variable declaration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MirLocal {
     /// Local ID.
     pub id: LocalId,
@@ -428,7 +517,7 @@ impl MirLocal {
 }
 
 /// A value (operand).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MirValue {
     /// Reference to a local.
     Local(LocalId),
@@ -456,7 +545,7 @@ impl fmt::Display for MirValue {
 // ============================================================================
 
 /// A MIR statement.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MirStmt {
     /// The kind of statement.
     pub kind: MirStmtKind,
@@ -490,7 +579,7 @@ impl MirStmt {
 }
 
 /// Kind of MIR statement.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MirStmtKind {
     /// Assignment: `local = rvalue`
     Assign { dest: LocalId, value: MirRValue },
@@ -523,7 +612,7 @@ pub enum MirStmtKind {
 }
 
 /// A right-hand value (rvalue).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MirRValue {
     /// Use a value directly.
     Use(MirValue),
@@ -603,7 +692,7 @@ pub enum MirRValue {
 }
 
 /// A place (lvalue).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MirPlace {
     /// The base local.
     pub local: LocalId,
@@ -640,7 +729,7 @@ impl MirPlace {
 }
 
 /// Place projection.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PlaceProjection {
     /// Dereference.
     Deref,
@@ -657,7 +746,7 @@ pub enum PlaceProjection {
 }
 
 /// Binary operators.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BinOp {
     // Arithmetic
     Add,
@@ -694,7 +783,7 @@ pub enum BinOp {
 }
 
 /// Unary operators.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnaryOp {
     /// Logical/bitwise not.
     Not,
@@ -703,7 +792,7 @@ pub enum UnaryOp {
 }
 
 /// Cast kinds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CastKind {
     /// Integer to integer.
     IntToInt,
@@ -726,7 +815,7 @@ pub enum CastKind {
 }
 
 /// Aggregate kinds.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AggregateKind {
     /// Array.
     Array(MirType),
@@ -741,7 +830,7 @@ pub enum AggregateKind {
 }
 
 /// Nullary operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NullaryOp {
     /// Size of type.
     SizeOf,
@@ -754,7 +843,7 @@ pub enum NullaryOp {
 // ============================================================================
 
 /// Block terminator.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MirTerminator {
     /// Unconditional goto.
     Goto(BlockId),
@@ -816,7 +905,7 @@ pub enum MirTerminator {
 // ============================================================================
 
 /// MIR type.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MirType {
     /// Void (unit).
     Void,
@@ -1100,7 +1189,7 @@ impl fmt::Display for MirType {
 }
 
 /// Integer sizes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum IntSize {
     I8,
     I16,
@@ -1125,7 +1214,7 @@ impl IntSize {
 }
 
 /// Float sizes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FloatSize {
     F32,
     F64,
@@ -1146,7 +1235,7 @@ impl FloatSize {
 // ============================================================================
 
 /// MIR constant.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MirConst {
     /// Boolean.
     Bool(bool),
@@ -1154,8 +1243,10 @@ pub enum MirConst {
     Int(i128, MirType),
     /// Unsigned integer.
     Uint(u128, MirType),
-    /// Float.
-    Float(f64, MirType),
+    /// Float. The value is serialized via its raw IEEE-754 bit pattern so that
+    /// every `f64` (including `NaN`, `±∞`, `-0.0`, and subnormals) round-trips
+    /// bit-exact through JSON.
+    Float(#[serde(with = "lossless_f64")] f64, MirType),
     /// String (index into string table).
     Str(u32),
     /// Byte string.
@@ -1204,7 +1295,7 @@ impl fmt::Display for MirConst {
 // ============================================================================
 
 /// Global variable.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MirGlobal {
     /// Name.
     pub name: Arc<str>,
@@ -1232,7 +1323,7 @@ impl MirGlobal {
 }
 
 /// External declaration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MirExternal {
     /// Name.
     pub name: Arc<str>,
@@ -1241,7 +1332,7 @@ pub struct MirExternal {
 }
 
 /// Kind of external.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ExternalKind {
     /// External function.
     Function(MirFnSig),
@@ -1254,7 +1345,7 @@ pub enum ExternalKind {
 // ============================================================================
 
 /// Type definition.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MirTypeDef {
     /// Name.
     pub name: Arc<str>,
@@ -1263,7 +1354,7 @@ pub struct MirTypeDef {
 }
 
 /// Kind of type definition.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TypeDefKind {
     /// Struct.
     Struct {
@@ -1280,7 +1371,7 @@ pub enum TypeDefKind {
 }
 
 /// Enum variant.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MirEnumVariant {
     /// Variant name.
     pub name: Arc<str>,
