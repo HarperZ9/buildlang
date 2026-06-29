@@ -2336,6 +2336,146 @@ mod tests {
         assert_eq!(digest_mir_module(&first), digest_mir_module(&second));
     }
 
+    // =========================================================================
+    // MIR INTERLINGUA ROUND-TRIP TESTS (buildlang.mir/v0)
+    // =========================================================================
+
+    #[test]
+    fn mir_envelope_schema_string_is_versioned() {
+        use buildlang::codegen::MIR_SCHEMA;
+        assert_eq!(MIR_SCHEMA, "buildlang.mir/v0");
+    }
+
+    #[test]
+    fn mir_envelope_round_trips_for_every_corpus_program() {
+        use buildlang::codegen::MirModuleEnvelope;
+
+        let corpus_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("compiler manifest has repository parent")
+            .join("semantic-corpus");
+        let manifest: SemanticCorpusManifest =
+            serde_json::from_slice(&std::fs::read(corpus_root.join("manifest.json")).unwrap())
+                .unwrap();
+
+        assert!(
+            !manifest.programs.is_empty(),
+            "semantic corpus must contain programs"
+        );
+
+        for program in &manifest.programs {
+            let program_path =
+                validate_corpus_relative_path(&corpus_root, &program.path, "program.path")
+                    .expect("corpus program path resolves");
+            let lowered = lower_program_to_mir(&program_path)
+                .unwrap_or_else(|err| panic!("lower {} to MIR: {err}", program.id));
+
+            // 1. Wrap in the versioned envelope and serialize to JSON.
+            let envelope = MirModuleEnvelope::wrap(&lowered.module);
+            assert_eq!(envelope.schema, "buildlang.mir/v0");
+            let json = serde_json::to_string(&envelope)
+                .unwrap_or_else(|err| panic!("serialize {} MIR to JSON: {err}", program.id));
+
+            // 2. Deserialize back to an owned envelope/module.
+            let restored: MirModuleEnvelope = serde_json::from_str(&json)
+                .unwrap_or_else(|err| panic!("deserialize {} MIR from JSON: {err}", program.id));
+            assert_eq!(
+                restored.schema, "buildlang.mir/v0",
+                "schema survives round-trip for {}",
+                program.id
+            );
+
+            // 3. Structural equality: the deserialized module equals the original.
+            assert_eq!(
+                restored.module, lowered.module,
+                "structural round-trip mismatch for {}",
+                program.id
+            );
+
+            // 4. Digest equality: receipt digest of the round-tripped module is
+            //    byte-identical to the original (proves the interlingua is faithful
+            //    and the serde additions did not perturb the receipt surface).
+            assert_eq!(
+                digest_mir_module(&restored.module),
+                digest_mir_module(&lowered.module),
+                "MIR digest round-trip mismatch for {}",
+                program.id
+            );
+
+            // 5. Re-serializing the restored module yields identical JSON (idempotent).
+            let rejson = serde_json::to_string(&MirModuleEnvelope::wrap(&restored.module))
+                .expect("re-serialize restored MIR");
+            assert_eq!(
+                json, rejson,
+                "JSON serialization is not idempotent for {}",
+                program.id
+            );
+        }
+    }
+
+    #[test]
+    fn mir_envelope_round_trips_lossless_floats_including_non_finite() {
+        use buildlang::codegen::MirModuleEnvelope;
+
+        // Floats (incl. NaN, +/-inf, -0.0, subnormal) must survive bit-exact.
+        let floats = [
+            0.0_f64,
+            -0.0_f64,
+            1.0_f64,
+            -1.5_f64,
+            f64::MIN_POSITIVE,
+            f64::MAX,
+            f64::MIN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            std::f64::consts::PI,
+            5e-324_f64, // smallest positive subnormal
+        ];
+
+        let mut module = MirModule::new("float_roundtrip");
+        let mut func = MirFunction::new("main", MirFnSig::new(vec![], MirType::Void));
+        let mut block = MirBlock::new(BlockId::ENTRY);
+        for (i, f) in floats.iter().enumerate() {
+            block.push_stmt(MirStmt::assign(
+                LocalId(i as u32),
+                MirRValue::Use(MirValue::Const(MirConst::Float(*f, MirType::f64()))),
+            ));
+        }
+        block.set_terminator(MirTerminator::Return(None));
+        func.add_block(block);
+        module.add_function(func);
+
+        let json = serde_json::to_string(&MirModuleEnvelope::wrap(&module)).expect("serialize");
+        let restored: MirModuleEnvelope = serde_json::from_str(&json).expect("deserialize");
+
+        let restored_func = &restored.module.functions[0];
+        let restored_block = &restored_func.blocks.as_ref().unwrap()[0];
+        for (i, original) in floats.iter().enumerate() {
+            match &restored_block.stmts[i].kind {
+                MirStmtKind::Assign {
+                    value: MirRValue::Use(MirValue::Const(MirConst::Float(v, _))),
+                    ..
+                } => {
+                    assert_eq!(
+                        v.to_bits(),
+                        original.to_bits(),
+                        "float {original} did not round-trip bit-exact"
+                    );
+                }
+                other => panic!("unexpected stmt kind: {other:?}"),
+            }
+        }
+
+        // The whole module must be structurally equal under PartialEq too
+        // (note: this also exercises NaN handling in the derived PartialEq path
+        // via bit comparison, which we route through digest equality instead).
+        assert_eq!(
+            digest_mir_module(&restored.module),
+            digest_mir_module(&module)
+        );
+    }
+
     fn buildlang_type_def_point() -> MirTypeDef {
         MirTypeDef {
             name: Arc::from("Point"),
