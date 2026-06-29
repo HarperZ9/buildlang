@@ -21,7 +21,7 @@ Last audited: 2026-06-18
 - **Server runner** (`run_server()` in `server.rs`): The stdio transport loop dispatches the same raw message path covered by the LSP dispatch receipt, using a `serde_json` structural JSON-RPC parser for method and id. Params for the currently dispatched raw methods decode through focused typed raw-boundary helpers before reaching the typed server methods.
 
 ## Aspirational
-- Full VS Code extension integration: `quantac lsp` starts the current server loop and dispatches several core requests, but the end-to-end VS Code language-server experience is not yet receipt-verified.
+- Full VS Code extension integration: `buildc lsp` starts the current server loop and dispatches several core requests, but the end-to-end VS Code language-server experience is not yet receipt-verified.
 - Full typed LSP deserialization: the server now parses JSON structurally, but still maps params through lightweight `serde_json::Value` accessors instead of typed request structs for every method.
 - Full compiler-backed semantic indexing for semantic tokens: v0 tokens are lexical and declaration-aware, not resolved type/effect/module identities.
 - Full compiler-backed workspace symbol indexing: `workspace/symbol` is receipt-verified for currently opened documents, not unopened files, workspace folders, package graphs, or resolved module/type/effect identities.
@@ -30,4 +30,4 @@ Last audited: 2026-06-18
 - Published VS Code extension package/release artifact.
 
 ## Honest Assessment
-The LSP module has real implementations for major language-server capabilities, and the raw `quantac lsp` dispatch path now has a semantic-corpus receipt for a representative request sequence through structural JSON-RPC parsing, semantic tokens v0, opened-document workspace symbols, and compiler-backed diagnostics. The important remaining limits are full compiler-backed semantic token and workspace-symbol indexing, typed request coverage, and end-to-end VS Code verification.
+The LSP module has real implementations for major language-server capabilities, and the raw `buildc lsp` dispatch path now has a semantic-corpus receipt for a representative request sequence through structural JSON-RPC parsing, semantic tokens v0, opened-document workspace symbols, and compiler-backed diagnostics. The important remaining limits are full compiler-backed semantic token and workspace-symbol indexing, typed request coverage, and end-to-end VS Code verification.

@@ -1,4 +1,4 @@
-use quantalang::ast::{self, ImplItemKind, Item, StructFields, TraitDef, TraitItemKind};
+use buildlang::ast::{self, ImplItemKind, Item, StructFields, TraitDef, TraitItemKind};
 
 use super::super::model::SymbolSourceSymbol;
 use super::source::{fn_signature, push_symbol, visibility_name};

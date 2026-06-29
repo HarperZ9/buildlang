@@ -1,0 +1,157 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# BUILDLANG COMPILER - Build Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+# Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[package]
+name = "buildlang"
+version = "1.0.0"
+authors = ["Zain Dana Harper"]
+edition = "2025"
+license = "Proprietary"
+description = "The BuildLang compiler and standard library"
+repository = "https://github.com/builduniverse/buildlang"
+keywords = ["compiler", "systems-programming", "kernel", "trading"]
+categories = ["compilers", "development-tools"]
+
+[lib]
+name = "buildlang"
+path = "src/lib.bld"
+
+[[bin]]
+name = "buildc"
+path = "src/main.bld"
+
+[dependencies]
+# Core library is built-in
+
+[dev-dependencies]
+# Test framework
+
+[features]
+default = ["std"]
+std = []
+alloc = []
+
+# Target-specific backends
+x86_64 = []
+aarch64 = []
+riscv64 = []
+wasm = []
+
+# Optimization features
+lto = []
+pgo = []
+
+# Debug features  
+debug-assertions = []
+overflow-checks = []
+
+[profile.dev]
+opt-level = 0
+debug = true
+debug-assertions = true
+overflow-checks = true
+lto = false
+panic = "unwind"
+incremental = true
+
+[profile.release]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+lto = true
+panic = "abort"
+strip = "symbols"
+
+[profile.release-with-debug]
+inherits = "release"
+debug = true
+strip = "none"
+
+[profile.bench]
+inherits = "release"
+debug = true
+
+[target.x86_64-unknown-linux-gnu]
+linker = "cc"
+rustflags = ["-C", "target-cpu=native"]
+
+[target.x86_64-unknown-none]
+linker = "ld.lld"
+rustflags = ["-C", "link-arg=-nostdlib", "-C", "link-arg=-static"]
+
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+
+[target.aarch64-unknown-none]
+linker = "ld.lld"
+rustflags = ["-C", "link-arg=-nostdlib"]
+
+[workspace]
+members = [
+    "stdlib/core",
+    "stdlib/alloc",
+    "stdlib/std",
+]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MODULE MANIFEST
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[modules]
+# Compiler frontend
+lexer = { path = "src/lexer.bld", lines = 1179 }
+ast = { path = "src/ast.bld", lines = 999 }
+parser = { path = "src/parser.bld", lines = 2592 }
+types = { path = "src/types.bld", lines = 1044 }
+hir = { path = "src/hir.bld", lines = 1047 }
+
+# Compiler middle-end
+mir = { path = "src/mir.bld", lines = 1326 }
+
+# Compiler backend
+codegen = { path = "src/codegen.bld", lines = 1390 }
+codegen_x86_64 = { path = "src/codegen_x86_64.bld", lines = 2159 }
+
+# Driver
+driver = { path = "src/driver.bld", lines = 861 }
+
+# Library entry
+lib = { path = "src/lib.bld", lines = 740 }
+
+[stdlib.core]
+# Standard library core (no_std compatible)
+intrinsics = { path = "stdlib/core/intrinsics.bld", lines = 770 }
+marker = { path = "stdlib/core/marker.bld", lines = 576 }
+primitives = { path = "stdlib/core/primitives.bld", lines = 1172 }
+option = { path = "stdlib/core/option.bld", lines = 883 }
+iter = { path = "stdlib/core/iter.bld", lines = 1242 }
+cmp = { path = "stdlib/core/cmp.bld", lines = 824 }
+ops = { path = "stdlib/core/ops.bld", lines = 702 }
+mem = { path = "stdlib/core/mem.bld", lines = 615 }
+ptr = { path = "stdlib/core/ptr.bld", lines = 1018 }
+lib = { path = "stdlib/core/lib.bld", lines = 646 }
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STATISTICS
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Component          Files    Lines    Description
+# ─────────────────────────────────────────────────────────────────────────────
+# Compiler            11     13,337    Full compilation pipeline
+#   - Frontend         5      6,861    Lexer, Parser, Types, AST
+#   - Middle-end       2      2,373    HIR, MIR, Borrow Checker
+#   - Backend          2      3,549    x86_64 Codegen, ELF Writer
+#   - Driver           2        874    CLI, Build System
+#
+# Standard Library    10      8,448    Core library (no_std)
+#   - Types            4      3,231    Primitives, Option, Iter
+#   - Traits           3      2,102    Marker, Cmp, Ops
+#   - Memory           2      1,633    Mem, Ptr, NonNull
+#   - Prelude          1        646    Re-exports, Conversions
+#
+# TOTAL               21     21,785    Complete BuildLang Implementation
+# ═══════════════════════════════════════════════════════════════════════════════

@@ -1,5 +1,5 @@
 // ===============================================================================
-// QUANTALANG PARSER - STATEMENT PARSING
+// BUILDLANG PARSER - STATEMENT PARSING
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
@@ -255,7 +255,7 @@ mod tests {
     use crate::lexer::{Lexer, SourceFile as LexerSourceFile};
 
     fn parse_stmt_from_str(s: &str) -> ParseResult<Stmt> {
-        let source = LexerSourceFile::new("test.quanta", format!("fn test() {{ {} }}", s));
+        let source = LexerSourceFile::new("test.bld", format!("fn test() {{ {} }}", s));
         let mut lexer = Lexer::new(&source);
         let tokens = lexer.tokenize().unwrap();
         let mut parser = Parser::new(&source, tokens);

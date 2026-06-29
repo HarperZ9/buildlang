@@ -1,6 +1,6 @@
 # Tutorial: Build a Calculator with Algebraic Effects
 
-Learn QuantaLang's killer feature by building a calculator that handles errors,
+Learn BuildLang's killer feature by building a calculator that handles errors,
 logging, and state through algebraic effects.
 
 ## What You'll Learn
@@ -14,7 +14,7 @@ logging, and state through algebraic effects.
 
 Let's start with basic arithmetic:
 
-```quanta
+```build
 fn add(a: f64, b: f64) -> f64 { a + b }
 fn sub(a: f64, b: f64) -> f64 { a - b }
 fn mul(a: f64, b: f64) -> f64 { a * b }
@@ -31,9 +31,9 @@ This works, but what about division? Division by zero is an error.
 ## Step 2: Division with the Fail Effect
 
 In most languages, you'd return `Result<f64, String>` or throw an exception.
-In QuantaLang, we use an effect:
+In BuildLang, we use an effect:
 
-```quanta
+```build
 effect Fail<E> {
     fn fail(error: E) -> !,
 }
@@ -64,7 +64,7 @@ tells the type system this function might fail, but the return type stays clean.
 An effect must be handled before it reaches `main`. The `handle...with` block
 catches effect operations and decides what to do:
 
-```quanta
+```build
 fn main() {
     handle {
         let result = div(10.0, 3.0);
@@ -96,7 +96,7 @@ prefix it with `_` because we don't resume on failure; we just print and stop.
 Here's where effects shine. Functions that perform effects compose naturally --
 no `?` operator, no `Ok()` wrapping, no `if err != nil`:
 
-```quanta
+```build
 fn calculate(x: f64, y: f64, z: f64) ~ Fail<str> -> f64 {
     let sum = add(x, y);
     let product = mul(sum, z);
@@ -141,14 +141,14 @@ func calculate(x, y, z float64) (float64, error) {
 }
 ```
 
-QuantaLang's version reads like the error handling isn't there -- because it
+BuildLang's version reads like the error handling isn't there -- because it
 isn't in the business logic. It's in the handler.
 
 ## Step 5: Adding a Logging Effect
 
 What if we want to log every operation? Define another effect:
 
-```quanta
+```build
 effect Log {
     fn log(message: str) -> (),
 }
@@ -156,7 +156,7 @@ effect Log {
 
 Now update `div` to use both effects:
 
-```quanta
+```build
 fn div_logged(a: f64, b: f64) ~ Fail<str>, Log -> f64 {
     perform Log.log("dividing");
     if b == 0.0 {
@@ -174,7 +174,7 @@ injection framework.
 
 Handle both effects at the call site:
 
-```quanta
+```build
 fn main() {
     handle {
         let r = div_logged(10.0, 3.0);
@@ -217,7 +217,7 @@ that performs the effect doesn't know or care.
 The same calculator code can behave differently depending on which handler wraps it.
 This is the real power of algebraic effects.
 
-```quanta
+```build
 // Production: print errors, log to console
 fn run_production() {
     handle {
@@ -259,7 +259,7 @@ change. Zero modifications to business logic.
 A handler can resume with a different value, changing the result of the `perform`
 expression. This lets you implement fallback behavior:
 
-```quanta
+```build
 fn div_with_fallback(a: f64, b: f64) ~ Fail<str> -> f64 {
     if b == 0.0 {
         perform Fail.fail("division by zero")
@@ -314,7 +314,7 @@ no other mainstream error handling mechanism supports.
 
 Here is the complete calculator with both effects, ready to compile:
 
-```quanta
+```build
 effect Fail<E> {
     fn fail(error: E) -> !,
 }
@@ -373,7 +373,7 @@ Answer: 9.0
 
 ## Next Steps
 
-- Read the effect examples in `quantalang/quantalang/examples/` for more patterns
+- Read the effect examples in `buildlang/buildlang/examples/` for more patterns
   (async, state, comparison with Rust/Go)
 - Look at the test programs in `tests/programs/` for working code you can compile today
 - Check `STATUS.md` for the current state of the compiler

@@ -1,14 +1,14 @@
-# AGENTS.md - QuantaLang
+# AGENTS.md - BuildLang
 
 ## Scope
 
-This file applies to the QuantaLang repository. Root workspace instructions
+This file applies to the BuildLang repository. Root workspace instructions
 still apply; this repo is a public compiler, language, editor-support, and
 semantic-corpus product surface.
 
 ## Product Boundary
 
-QuantaLang is the public language/compiler anchor for the Quanta ecosystem.
+BuildLang is the public language/compiler anchor for the Build ecosystem.
 Treat it as a release-candidate product with several maturity layers:
 
 - Primary: C backend, CLI, parser/typechecker/MIR pipeline, docs, examples, and
@@ -17,7 +17,7 @@ Treat it as a release-candidate product with several maturity layers:
   semantic corpus, language docs, and release packaging docs.
 - Experimental: Rust, LLVM, WASM, SPIR-V, x86-64, and ARM64 backends. These must
   state their maturity plainly and fail loudly on unsupported MIR.
-- Aspirational: self-hosting and broader `quantalang/` release materials. Keep
+- Aspirational: self-hosting and broader `buildlang/` release materials. Keep
   them described as future or partial unless the compiler can build them.
 
 Publishable surfaces:

@@ -34,9 +34,9 @@ Keep the existing `DiagnosticsProvider::compute` pipeline as the source of
 truth. Give compiler-pipeline diagnostics stable LSP `source` values so receipt
 observation does not depend on matching localized message text:
 
-- `quantalang/lexer`
-- `quantalang/parser`
-- `quantalang/type-checker`
+- `buildlang/lexer`
+- `buildlang/parser`
+- `buildlang/type-checker`
 
 Add receipt observation fields in `compiler/src/lsp_dispatch/model.rs` and
 extraction logic in `compiler/src/lsp_dispatch/fixture.rs` so a diagnostics
@@ -44,7 +44,7 @@ notification can distinguish:
 
 - total diagnostics;
 - compiler diagnostics from the lexer/parser/type-checker pipeline;
-- type-checker diagnostics from `quantalang/type-checker`.
+- type-checker diagnostics from `buildlang/type-checker`.
 
 The first implementation should avoid storing full diagnostic payloads. Stable
 counts are enough for v0 and keep the receipt reviewable.
@@ -68,7 +68,7 @@ on workspace files. The fixture id should make the source clear, for example
 ## Receipt Contract
 
 The LSP dispatch receipt will retain schema
-`quantalang-lsp-dispatch-receipt/v0` and add these observed fields:
+`buildlang-lsp-dispatch-receipt/v0` and add these observed fields:
 
 - `compiler_diagnostics`
 - `type_errors`
@@ -131,7 +131,7 @@ Targeted verification commands:
 - `cargo fmt --manifest-path compiler/Cargo.toml -- --check`
 - `cargo test --manifest-path compiler/Cargo.toml --lib diagnostics --quiet`
 - `cargo test --manifest-path compiler/Cargo.toml --lib raw_dispatch --quiet`
-- `cargo test --manifest-path compiler/Cargo.toml --bin quantac lsp_dispatch --quiet`
+- `cargo test --manifest-path compiler/Cargo.toml --bin buildc lsp_dispatch --quiet`
 - `cargo test --manifest-path compiler/Cargo.toml --test cli lsp_dispatch -- --nocapture`
 - `cargo test --manifest-path compiler/Cargo.toml --test cli corpus_verify -- --nocapture`
 - `cargo run --manifest-path compiler/Cargo.toml -- corpus verify --root semantic-corpus`

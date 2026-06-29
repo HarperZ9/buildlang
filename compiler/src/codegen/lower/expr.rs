@@ -1,5 +1,5 @@
 // ===============================================================================
-// QUANTALANG CODE GENERATOR - EXPRESSION LOWERING
+// BUILDLANG CODE GENERATOR - EXPRESSION LOWERING
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
@@ -493,13 +493,13 @@ impl<'ctx> MirLowerer<'ctx> {
             Literal::Char(c) => Ok(MirValue::Const(MirConst::Uint(*c as u128, MirType::u32()))),
             Literal::Str { value, .. } => {
                 let idx = self.module.intern_string(value.clone());
-                // Wrap string literal in quanta_string_new() to produce a QuantaString
+                // Wrap string literal in build_string_new() to produce a BuildString
                 let builder = self.current_fn.as_mut().ok_or_else(|| {
                     CodegenError::Internal("No current function for string literal".to_string())
                 })?;
-                let result = builder.create_local(MirType::Struct(Arc::from("QuantaString")));
+                let result = builder.create_local(MirType::Struct(Arc::from("BuildString")));
                 let cont = builder.create_block();
-                let func = MirValue::Function(Arc::from("quanta_string_new"));
+                let func = MirValue::Function(Arc::from("build_string_new"));
                 let str_ptr = MirValue::Const(MirConst::Str(idx));
                 builder.call(func, vec![str_ptr], Some(result), cont);
                 builder.switch_to_block(cont);
@@ -729,26 +729,26 @@ impl<'ctx> MirLowerer<'ctx> {
             }
         };
 
-        // Check if operands are strings (QuantaString) for special operator handling
+        // Check if operands are strings (BuildString) for special operator handling
         let left_ty = self.type_of_value(&left_val);
         let is_string_op =
-            matches!(&left_ty, MirType::Struct(name) if name.as_ref() == "QuantaString");
+            matches!(&left_ty, MirType::Struct(name) if name.as_ref() == "BuildString");
 
-        // String concatenation: `+` on QuantaString -> quanta_string_concat()
+        // String concatenation: `+` on BuildString -> build_string_concat()
         if is_string_op && op == AstBinOp::Add {
             let builder = self
                 .current_fn
                 .as_mut()
                 .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-            let result = builder.create_local(MirType::Struct(Arc::from("QuantaString")));
+            let result = builder.create_local(MirType::Struct(Arc::from("BuildString")));
             let cont = builder.create_block();
-            let func = MirValue::Function(Arc::from("quanta_string_concat"));
+            let func = MirValue::Function(Arc::from("build_string_concat"));
             builder.call(func, vec![left_val, right_val], Some(result), cont);
             builder.switch_to_block(cont);
             return Ok(values::local(result));
         }
 
-        // String comparison: `==` on QuantaString -> quanta_string_eq()
+        // String comparison: `==` on BuildString -> build_string_eq()
         if is_string_op && op == AstBinOp::Eq {
             let builder = self
                 .current_fn
@@ -756,13 +756,13 @@ impl<'ctx> MirLowerer<'ctx> {
                 .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
             let result = builder.create_local(MirType::Bool);
             let cont = builder.create_block();
-            let func = MirValue::Function(Arc::from("quanta_string_eq"));
+            let func = MirValue::Function(Arc::from("build_string_eq"));
             builder.call(func, vec![left_val, right_val], Some(result), cont);
             builder.switch_to_block(cont);
             return Ok(values::local(result));
         }
 
-        // String inequality: `!=` on QuantaString -> !quanta_string_eq()
+        // String inequality: `!=` on BuildString -> !build_string_eq()
         if is_string_op && op == AstBinOp::Ne {
             let builder = self
                 .current_fn
@@ -770,7 +770,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
             let eq_result = builder.create_local(MirType::Bool);
             let cont = builder.create_block();
-            let func = MirValue::Function(Arc::from("quanta_string_eq"));
+            let func = MirValue::Function(Arc::from("build_string_eq"));
             builder.call(func, vec![left_val, right_val], Some(eq_result), cont);
             builder.switch_to_block(cont);
             // Negate the result: != is !eq
@@ -779,7 +779,7 @@ impl<'ctx> MirLowerer<'ctx> {
             return Ok(values::local(neg_result));
         }
 
-        // Vector arithmetic: +, -, * on quanta_vecN types
+        // Vector arithmetic: +, -, * on build_vecN types
         if let MirType::Struct(ref name) = left_ty {
             if let Some(n) = Self::vec_component_count(name) {
                 let op_suffix = match op {
@@ -789,7 +789,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     _ => None,
                 };
                 if let Some(suffix) = op_suffix {
-                    let c_func = format!("quanta_vec{}_{}", n, suffix);
+                    let c_func = format!("build_vec{}_{}", n, suffix);
                     let builder = self
                         .current_fn
                         .as_mut()
@@ -807,21 +807,21 @@ impl<'ctx> MirLowerer<'ctx> {
         // Mat4 multiplication: mat4 * mat4 or mat4 * vec4
         if op == AstBinOp::Mul {
             if let MirType::Struct(ref name) = left_ty {
-                if name.as_ref() == "quanta_mat4" {
+                if name.as_ref() == "build_mat4" {
                     let right_ty = self.type_of_value(&right_val);
                     let (c_func, ret_ty) = if let MirType::Struct(ref rname) = right_ty {
-                        if rname.as_ref() == "quanta_mat4" {
-                            ("quanta_mat4_mul", MirType::Struct(Arc::from("quanta_mat4")))
-                        } else if rname.as_ref() == "quanta_vec4" {
+                        if rname.as_ref() == "build_mat4" {
+                            ("build_mat4_mul", MirType::Struct(Arc::from("build_mat4")))
+                        } else if rname.as_ref() == "build_vec4" {
                             (
-                                "quanta_mat4_mul_vec4",
-                                MirType::Struct(Arc::from("quanta_vec4")),
+                                "build_mat4_mul_vec4",
+                                MirType::Struct(Arc::from("build_vec4")),
                             )
                         } else {
-                            ("quanta_mat4_mul", left_ty.clone())
+                            ("build_mat4_mul", left_ty.clone())
                         }
                     } else {
-                        ("quanta_mat4_mul", left_ty.clone())
+                        ("build_mat4_mul", left_ty.clone())
                     };
                     let builder = self
                         .current_fn
@@ -988,12 +988,12 @@ impl<'ctx> MirLowerer<'ctx> {
             }
         }
 
-        // Vector negation: -vec -> quanta_vecN_neg(vec)
+        // Vector negation: -vec -> build_vecN_neg(vec)
         if matches!(op, AstUnaryOp::Neg) {
             let inner_ty = self.type_of_value(&inner_val);
             if let MirType::Struct(ref name) = inner_ty {
                 if let Some(n) = Self::vec_component_count(name) {
-                    let c_func = format!("quanta_vec{}_neg", n);
+                    let c_func = format!("build_vec{}_neg", n);
                     let builder = self
                         .current_fn
                         .as_mut()
@@ -1173,7 +1173,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     let tex = self.lower_expr(&args[0])?;
                     let samp = self.lower_expr(&args[1])?;
                     let coords = self.lower_expr(&args[2])?;
-                    let result_ty = MirType::Struct(Arc::from("quanta_vec4"));
+                    let result_ty = MirType::Struct(Arc::from("build_vec4"));
                     let builder = self.current_fn.as_mut().unwrap();
                     let dest = builder.create_local(result_ty);
                     builder.assign(
@@ -1247,9 +1247,9 @@ impl<'ctx> MirLowerer<'ctx> {
             .map(|a| self.lower_expr(a))
             .collect::<CodegenResult<_>>()?;
 
-        // ---- Coerce QuantaString args to raw char* for FFI calls ----
+        // ---- Coerce BuildString args to raw char* for FFI calls ----
         // When calling an extern "C" function that expects `const char*`
-        // (`Ptr(i8)`), but the argument is a QuantaString (from a string
+        // (`Ptr(i8)`), but the argument is a BuildString (from a string
         // literal), extract the `.ptr` field automatically.
         if let Some(fn_name) = self.extract_call_name(func) {
             if let Some(target_fn) = self.module.find_function(fn_name) {
@@ -1261,7 +1261,7 @@ impl<'ctx> MirLowerer<'ctx> {
                             {
                                 let arg_ty = self.type_of_value(arg_val);
                                 if let MirType::Struct(ref name) = arg_ty {
-                                    if name.as_ref() == "QuantaString" {
+                                    if name.as_ref() == "BuildString" {
                                         if let MirValue::Local(local_id) = arg_val {
                                             let builder = self.current_fn.as_mut().unwrap();
                                             let ptr_local = builder.create_local(MirType::Ptr(
@@ -1286,9 +1286,9 @@ impl<'ctx> MirLowerer<'ctx> {
             }
         }
 
-        // ---- Coerce QuantaString args to char* for builtin I/O calls ----
+        // ---- Coerce BuildString args to char* for builtin I/O calls ----
         // Runtime builtins like read_file, write_file, file_exists expect
-        // const char* but the lowerer passes QuantaString values.
+        // const char* but the lowerer passes BuildString values.
         if let Some(fn_name) = self.extract_call_name(func) {
             let needs_str_coerce = matches!(
                 fn_name,
@@ -1298,8 +1298,8 @@ impl<'ctx> MirLowerer<'ctx> {
                     | "read_bytes"
                     | "write_bytes"
                     | "append_file"
-                    | "quanta_vk_load_shader_file"
-                    | "quanta_vk_run_compute"
+                    | "build_vk_load_shader_file"
+                    | "build_vk_run_compute"
                     | "map_insert"
                     | "map_get"
                     | "map_contains"
@@ -1315,7 +1315,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 for arg_val in arg_vals.iter_mut() {
                     let arg_ty = self.type_of_value(arg_val);
                     if let MirType::Struct(ref name) = arg_ty {
-                        if name.as_ref() == "QuantaString" {
+                        if name.as_ref() == "BuildString" {
                             if let MirValue::Local(local_id) = arg_val {
                                 let builder = self.current_fn.as_mut().unwrap();
                                 let ptr_local =
@@ -1390,13 +1390,13 @@ impl<'ctx> MirLowerer<'ctx> {
     }
 
     /// Lower a vector constructor call: `vec2(x,y)`, `vec3(x,y,z)`, `vec4(x,y,z,w)`.
-    /// Generates a struct aggregate for the corresponding `quanta_vecN` type.
+    /// Generates a struct aggregate for the corresponding `build_vecN` type.
     fn lower_vec_constructor(
         &mut self,
         components: u32,
         args: &[ast::Expr],
     ) -> CodegenResult<MirValue> {
-        let struct_name = format!("quanta_vec{}", components);
+        let struct_name = format!("build_vec{}", components);
         let mut operands = Vec::new();
         for arg in args {
             operands.push(self.lower_expr(arg)?);
@@ -1420,9 +1420,9 @@ impl<'ctx> MirLowerer<'ctx> {
     /// Determine the vector component count from a struct type name.
     fn vec_component_count(struct_name: &str) -> Option<u32> {
         match struct_name {
-            "quanta_vec2" => Some(2),
-            "quanta_vec3" => Some(3),
-            "quanta_vec4" => Some(4),
+            "build_vec2" => Some(2),
+            "build_vec3" => Some(3),
+            "build_vec4" => Some(4),
             _ => None,
         }
     }
@@ -1461,22 +1461,22 @@ impl<'ctx> MirLowerer<'ctx> {
 
         // Determine the C function name and return type
         let (c_func, ret_ty) = match name {
-            "dot" => (format!("quanta_dot{}", n), MirType::f64()),
-            "normalize" => (format!("quanta_normalize{}", n), first_ty.clone()),
-            "length" => (format!("quanta_length{}", n), MirType::f64()),
+            "dot" => (format!("build_dot{}", n), MirType::f64()),
+            "normalize" => (format!("build_normalize{}", n), first_ty.clone()),
+            "length" => (format!("build_length{}", n), MirType::f64()),
             "cross" => {
                 if n != 3 {
                     return None;
                 }
-                ("quanta_cross".to_string(), first_ty.clone())
+                ("build_cross".to_string(), first_ty.clone())
             }
             "reflect" => {
                 if n != 3 {
                     return None;
                 }
-                ("quanta_reflect3".to_string(), first_ty.clone())
+                ("build_reflect3".to_string(), first_ty.clone())
             }
-            "lerp" => (format!("quanta_lerp{}", n), first_ty.clone()),
+            "lerp" => (format!("build_lerp{}", n), first_ty.clone()),
             _ => return None,
         };
 
@@ -1515,20 +1515,17 @@ impl<'ctx> MirLowerer<'ctx> {
     ) -> Option<CodegenResult<MirValue>> {
         let (c_func, ret_ty) = match name {
             "mat4_identity" => (
-                "quanta_mat4_identity",
-                MirType::Struct(Arc::from("quanta_mat4")),
+                "build_mat4_identity",
+                MirType::Struct(Arc::from("build_mat4")),
             ),
             "mat4_translate" => (
-                "quanta_mat4_translate",
-                MirType::Struct(Arc::from("quanta_mat4")),
+                "build_mat4_translate",
+                MirType::Struct(Arc::from("build_mat4")),
             ),
-            "mat4_scale" => (
-                "quanta_mat4_scale",
-                MirType::Struct(Arc::from("quanta_mat4")),
-            ),
+            "mat4_scale" => ("build_mat4_scale", MirType::Struct(Arc::from("build_mat4"))),
             "mat4_perspective" => (
-                "quanta_mat4_perspective",
-                MirType::Struct(Arc::from("quanta_mat4")),
+                "build_mat4_perspective",
+                MirType::Struct(Arc::from("build_mat4")),
             ),
             _ => return None,
         };
@@ -1570,8 +1567,8 @@ impl<'ctx> MirLowerer<'ctx> {
             MirType::Float(FloatSize::F32) => "float".to_string(),
             MirType::Bool => "bool".to_string(),
             MirType::Struct(name) => name.replace("::", "_").replace(" ", "_"),
-            MirType::Vec(_) => "QuantaVecHandle".to_string(),
-            MirType::Map(_, _) => "QuantaStrF64MapHandle".to_string(),
+            MirType::Vec(_) => "BuildVecHandle".to_string(),
+            MirType::Map(_, _) => "BuildStrF64MapHandle".to_string(),
             _ => "int32_t".to_string(),
         }
     }
@@ -1752,17 +1749,17 @@ impl<'ctx> MirLowerer<'ctx> {
             }
             // Vector constructors return struct types
             match fn_name.as_str() {
-                "vec2" => return MirType::Struct(Arc::from("quanta_vec2")),
-                "vec3" => return MirType::Struct(Arc::from("quanta_vec3")),
-                "vec4" => return MirType::Struct(Arc::from("quanta_vec4")),
+                "vec2" => return MirType::Struct(Arc::from("build_vec2")),
+                "vec3" => return MirType::Struct(Arc::from("build_vec3")),
+                "vec4" => return MirType::Struct(Arc::from("build_vec4")),
                 "normalize" | "cross" | "reflect" => {
-                    return MirType::Struct(Arc::from("quanta_vec3"))
+                    return MirType::Struct(Arc::from("build_vec3"))
                 }
                 // Texture sampling - returns vec4 (tex2d_depth returns f64 for single channel)
-                "tex2d" | "texture_sample" => return MirType::Struct(Arc::from("quanta_vec4")),
+                "tex2d" | "texture_sample" => return MirType::Struct(Arc::from("build_vec4")),
                 "tex2d_depth" => return MirType::f64(),
                 "mat4_identity" | "mat4_translate" | "mat4_scale" | "mat4_perspective" => {
-                    return MirType::Struct(Arc::from("quanta_mat4"));
+                    return MirType::Struct(Arc::from("build_mat4"));
                 }
                 // Vec builtins (i32 default)
                 "vec_new" => return MirType::Vec(Box::new(MirType::i32())),
@@ -1781,48 +1778,48 @@ impl<'ctx> MirLowerer<'ctx> {
                 "vec_pop_i64" => return MirType::i64(),
                 "vec_push_i64" => return MirType::Void,
                 // File I/O builtins
-                "read_file" => return MirType::Struct(Arc::from("QuantaString")),
+                "read_file" => return MirType::Struct(Arc::from("BuildString")),
                 "write_file" => return MirType::Bool,
                 "file_exists" => return MirType::Bool,
                 // Binary file I/O builtins
-                "read_bytes" => return MirType::Struct(Arc::from("QuantaString")),
+                "read_bytes" => return MirType::Struct(Arc::from("BuildString")),
                 "write_bytes" => return MirType::Bool,
                 "append_file" => return MirType::Bool,
                 // CLI / stdin builtins
                 "args_count" => return MirType::i64(),
-                "args_get" => return MirType::Struct(Arc::from("QuantaString")),
-                "read_line" => return MirType::Struct(Arc::from("QuantaString")),
-                "read_all" => return MirType::Struct(Arc::from("QuantaString")),
+                "args_get" => return MirType::Struct(Arc::from("BuildString")),
+                "read_line" => return MirType::Struct(Arc::from("BuildString")),
+                "read_all" => return MirType::Struct(Arc::from("BuildString")),
                 "stdin_is_pipe" => return MirType::Bool,
                 // Process builtins
                 "process_exit" => return MirType::Void,
                 // Directory traversal builtins
                 "list_dir" => {
-                    return MirType::Vec(Box::new(MirType::Struct(Arc::from("QuantaString"))))
+                    return MirType::Vec(Box::new(MirType::Struct(Arc::from("BuildString"))))
                 }
                 "is_dir" => return MirType::Bool,
                 "file_size" => return MirType::i64(),
                 // String vec builtins
                 "vec_new_str" => {
-                    return MirType::Vec(Box::new(MirType::Struct(Arc::from("QuantaString"))))
+                    return MirType::Vec(Box::new(MirType::Struct(Arc::from("BuildString"))))
                 }
-                "vec_get_str" => return MirType::Struct(Arc::from("QuantaString")),
+                "vec_get_str" => return MirType::Struct(Arc::from("BuildString")),
                 "vec_push_str" => return MirType::Void,
                 // TCP socket builtins
                 "tcp_connect" => return MirType::i64(),
                 "tcp_send" => return MirType::i64(),
-                "tcp_recv" => return MirType::Struct(Arc::from("QuantaString")),
+                "tcp_recv" => return MirType::Struct(Arc::from("BuildString")),
                 "tcp_close" => return MirType::Void,
                 // Environment variable builtins
-                "getenv" => return MirType::Struct(Arc::from("QuantaString")),
+                "getenv" => return MirType::Struct(Arc::from("BuildString")),
                 // Clock / time builtins
                 "clock_ms" | "time_unix" => return MirType::i64(),
                 // Format builtins
                 "to_string_i32" | "to_string_f64" => {
-                    return MirType::Struct(Arc::from("QuantaString"))
+                    return MirType::Struct(Arc::from("BuildString"))
                 }
                 // HashMap builtins (legacy i32->i32)
-                "map_new_i32" => return MirType::Struct(Arc::from("QuantaMapHandle")),
+                "map_new_i32" => return MirType::Struct(Arc::from("BuildMapHandle")),
                 "map_get_i32" => return MirType::i32(),
                 "map_len_i32" => return MirType::i64(),
                 "map_contains_i32" | "map_remove_i32" => return MirType::Bool,
@@ -1831,16 +1828,16 @@ impl<'ctx> MirLowerer<'ctx> {
                 // Type::new() constructor calls (from path resolution)
                 "HashMap_new" => {
                     return MirType::Map(
-                        Box::new(MirType::Struct(Arc::from("QuantaString"))),
+                        Box::new(MirType::Struct(Arc::from("BuildString"))),
                         Box::new(MirType::f64()),
                     )
                 }
                 "HashSet_new" => return MirType::Struct(Arc::from("HashSet")),
-                "String_new" => return MirType::Struct(Arc::from("QuantaString")),
+                "String_new" => return MirType::Struct(Arc::from("BuildString")),
                 "VecDeque_new" => return MirType::Struct(Arc::from("VecDeque")),
                 "map_new" => {
                     return MirType::Map(
-                        Box::new(MirType::Struct(Arc::from("QuantaString"))),
+                        Box::new(MirType::Struct(Arc::from("BuildString"))),
                         Box::new(MirType::f64()),
                     )
                 }
@@ -2028,7 +2025,7 @@ impl<'ctx> MirLowerer<'ctx> {
         // s.trim(), s.split(), s.split_whitespace(), s.lines()
         // =================================================================
         if let MirType::Struct(ref name) = receiver_ty {
-            if name.as_ref() == "QuantaString" {
+            if name.as_ref() == "BuildString" {
                 let method_name = method.name.as_ref();
 
                 // --- No-arg methods returning usize ---
@@ -2039,7 +2036,7 @@ impl<'ctx> MirLowerer<'ctx> {
                         .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
                     let result = builder.create_local(MirType::usize());
                     let cont = builder.create_block();
-                    let func = MirValue::Function(Arc::from("quanta_string_len"));
+                    let func = MirValue::Function(Arc::from("build_string_len"));
                     builder.call(func, vec![receiver_val], Some(result), cont);
                     builder.switch_to_block(cont);
                     return Ok(values::local(result));
@@ -2053,14 +2050,14 @@ impl<'ctx> MirLowerer<'ctx> {
                         .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
                     let result = builder.create_local(MirType::Bool);
                     let cont = builder.create_block();
-                    let func = MirValue::Function(Arc::from("quanta_string_is_empty"));
+                    let func = MirValue::Function(Arc::from("build_string_is_empty"));
                     builder.call(func, vec![receiver_val], Some(result), cont);
                     builder.switch_to_block(cont);
                     return Ok(values::local(result));
                 }
 
                 // --- Identity methods that return the string itself ---
-                // chars()/as_bytes()/collect() in .quanta are identity ops
+                // chars()/as_bytes()/collect() in .bld are identity ops
                 // in C because strings are already byte-accessible.
                 // For Ptr receivers, dereference first.
                 if method_name == "chars" || method_name == "as_bytes" || method_name == "bytes" {
@@ -2069,12 +2066,12 @@ impl<'ctx> MirLowerer<'ctx> {
                             CodegenError::Internal("No current function".to_string())
                         })?;
                         let derefed =
-                            builder.create_local(MirType::Struct(Arc::from("QuantaString")));
+                            builder.create_local(MirType::Struct(Arc::from("BuildString")));
                         builder.assign(
                             derefed,
                             MirRValue::Deref {
                                 ptr: receiver_val,
-                                pointee_ty: MirType::Struct(Arc::from("QuantaString")),
+                                pointee_ty: MirType::Struct(Arc::from("BuildString")),
                             },
                         );
                         return Ok(values::local(derefed));
@@ -2082,11 +2079,11 @@ impl<'ctx> MirLowerer<'ctx> {
                     return Ok(receiver_val);
                 }
 
-                // --- No-arg methods returning QuantaString ---
+                // --- No-arg methods returning BuildString ---
                 let no_arg_str_fn: Option<&str> = match method_name {
-                    "to_uppercase" => Some("quanta_string_to_upper"),
-                    "to_lowercase" => Some("quanta_string_to_lower"),
-                    "trim" => Some("quanta_string_trim"),
+                    "to_uppercase" => Some("build_string_to_upper"),
+                    "to_lowercase" => Some("build_string_to_lower"),
+                    "trim" => Some("build_string_trim"),
                     _ => None,
                 };
                 if let Some(c_fn) = no_arg_str_fn {
@@ -2094,7 +2091,7 @@ impl<'ctx> MirLowerer<'ctx> {
                         .current_fn
                         .as_mut()
                         .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-                    let result = builder.create_local(MirType::Struct(Arc::from("QuantaString")));
+                    let result = builder.create_local(MirType::Struct(Arc::from("BuildString")));
                     let cont = builder.create_block();
                     let func = MirValue::Function(Arc::from(c_fn));
                     builder.call(func, vec![receiver_val], Some(result), cont);
@@ -2102,11 +2099,11 @@ impl<'ctx> MirLowerer<'ctx> {
                     return Ok(values::local(result));
                 }
 
-                // --- Single-arg methods returning bool (arg is QuantaString) ---
+                // --- Single-arg methods returning bool (arg is BuildString) ---
                 let one_arg_bool_fn: Option<&str> = match method_name {
-                    "starts_with" => Some("quanta_string_starts_with"),
-                    "ends_with" => Some("quanta_string_ends_with"),
-                    "contains" => Some("quanta_string_contains"),
+                    "starts_with" => Some("build_string_starts_with"),
+                    "ends_with" => Some("build_string_ends_with"),
+                    "contains" => Some("build_string_contains"),
                     _ => None,
                 };
                 if let Some(c_fn) = one_arg_bool_fn {
@@ -2126,7 +2123,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     return Ok(values::local(result));
                 }
 
-                // --- split(delim) → QuantaVec of QuantaString ---
+                // --- split(delim) → BuildVec of BuildString ---
                 if method_name == "split" {
                     let mut arg_vals = vec![receiver_val];
                     for arg in args {
@@ -2136,37 +2133,37 @@ impl<'ctx> MirLowerer<'ctx> {
                         .current_fn
                         .as_mut()
                         .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-                    let result = builder.create_local(MirType::Struct(Arc::from("QuantaVec")));
+                    let result = builder.create_local(MirType::Struct(Arc::from("BuildVec")));
                     let cont = builder.create_block();
-                    let func = MirValue::Function(Arc::from("quanta_string_split"));
+                    let func = MirValue::Function(Arc::from("build_string_split"));
                     builder.call(func, arg_vals, Some(result), cont);
                     builder.switch_to_block(cont);
                     return Ok(values::local(result));
                 }
 
-                // --- split_whitespace() → QuantaVec of QuantaString ---
+                // --- split_whitespace() → BuildVec of BuildString ---
                 if method_name == "split_whitespace" {
                     let builder = self
                         .current_fn
                         .as_mut()
                         .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-                    let result = builder.create_local(MirType::Struct(Arc::from("QuantaVec")));
+                    let result = builder.create_local(MirType::Struct(Arc::from("BuildVec")));
                     let cont = builder.create_block();
-                    let func = MirValue::Function(Arc::from("quanta_string_split_ws"));
+                    let func = MirValue::Function(Arc::from("build_string_split_ws"));
                     builder.call(func, vec![receiver_val], Some(result), cont);
                     builder.switch_to_block(cont);
                     return Ok(values::local(result));
                 }
 
-                // --- lines() → QuantaVec of QuantaString ---
+                // --- lines() → BuildVec of BuildString ---
                 if method_name == "lines" {
                     let builder = self
                         .current_fn
                         .as_mut()
                         .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-                    let result = builder.create_local(MirType::Struct(Arc::from("QuantaVec")));
+                    let result = builder.create_local(MirType::Struct(Arc::from("BuildVec")));
                     let cont = builder.create_block();
-                    let func = MirValue::Function(Arc::from("quanta_string_lines"));
+                    let func = MirValue::Function(Arc::from("build_string_lines"));
                     builder.call(func, vec![receiver_val], Some(result), cont);
                     builder.switch_to_block(cont);
                     return Ok(values::local(result));
@@ -2180,7 +2177,7 @@ impl<'ctx> MirLowerer<'ctx> {
                         .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
                     let result = builder.create_local(MirType::i64());
                     let cont = builder.create_block();
-                    let func = MirValue::Function(Arc::from("quanta_string_parse_int"));
+                    let func = MirValue::Function(Arc::from("build_string_parse_int"));
                     builder.call(func, vec![receiver_val], Some(result), cont);
                     builder.switch_to_block(cont);
                     return Ok(values::local(result));
@@ -2194,28 +2191,28 @@ impl<'ctx> MirLowerer<'ctx> {
                         .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
                     let result = builder.create_local(MirType::f64());
                     let cont = builder.create_block();
-                    let func = MirValue::Function(Arc::from("quanta_string_parse_float"));
+                    let func = MirValue::Function(Arc::from("build_string_parse_float"));
                     builder.call(func, vec![receiver_val], Some(result), cont);
                     builder.switch_to_block(cont);
                     return Ok(values::local(result));
                 }
 
-                // --- char_at(index) → QuantaString ---
+                // --- char_at(index) → BuildString ---
                 if method_name == "char_at" && args.len() == 1 {
                     let idx_val = self.lower_expr(&args[0])?;
                     let builder = self
                         .current_fn
                         .as_mut()
                         .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-                    let result = builder.create_local(MirType::Struct(Arc::from("QuantaString")));
+                    let result = builder.create_local(MirType::Struct(Arc::from("BuildString")));
                     let cont = builder.create_block();
-                    let func = MirValue::Function(Arc::from("quanta_string_char_at"));
+                    let func = MirValue::Function(Arc::from("build_string_char_at"));
                     builder.call(func, vec![receiver_val, idx_val], Some(result), cont);
                     builder.switch_to_block(cont);
                     return Ok(values::local(result));
                 }
 
-                // --- substring(start, len) → QuantaString ---
+                // --- substring(start, len) → BuildString ---
                 if method_name == "substring" && args.len() == 2 {
                     let start_val = self.lower_expr(&args[0])?;
                     let len_val = self.lower_expr(&args[1])?;
@@ -2223,9 +2220,9 @@ impl<'ctx> MirLowerer<'ctx> {
                         .current_fn
                         .as_mut()
                         .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-                    let result = builder.create_local(MirType::Struct(Arc::from("QuantaString")));
+                    let result = builder.create_local(MirType::Struct(Arc::from("BuildString")));
                     let cont = builder.create_block();
-                    let func = MirValue::Function(Arc::from("quanta_string_substring"));
+                    let func = MirValue::Function(Arc::from("build_string_substring"));
                     builder.call(
                         func,
                         vec![receiver_val, start_val, len_val],
@@ -2236,7 +2233,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     return Ok(values::local(result));
                 }
 
-                // --- replace(old, new) → QuantaString ---
+                // --- replace(old, new) → BuildString ---
                 if method_name == "replace" && args.len() == 2 {
                     let mut arg_vals = vec![receiver_val];
                     for arg in args {
@@ -2246,24 +2243,24 @@ impl<'ctx> MirLowerer<'ctx> {
                         .current_fn
                         .as_mut()
                         .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-                    let result = builder.create_local(MirType::Struct(Arc::from("QuantaString")));
+                    let result = builder.create_local(MirType::Struct(Arc::from("BuildString")));
                     let cont = builder.create_block();
-                    let func = MirValue::Function(Arc::from("quanta_string_replace"));
+                    let func = MirValue::Function(Arc::from("build_string_replace"));
                     builder.call(func, arg_vals, Some(result), cont);
                     builder.switch_to_block(cont);
                     return Ok(values::local(result));
                 }
 
-                // --- repeat(count) → QuantaString ---
+                // --- repeat(count) → BuildString ---
                 if method_name == "repeat" && args.len() == 1 {
                     let count_val = self.lower_expr(&args[0])?;
                     let builder = self
                         .current_fn
                         .as_mut()
                         .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-                    let result = builder.create_local(MirType::Struct(Arc::from("QuantaString")));
+                    let result = builder.create_local(MirType::Struct(Arc::from("BuildString")));
                     let cont = builder.create_block();
-                    let func = MirValue::Function(Arc::from("quanta_string_repeat"));
+                    let func = MirValue::Function(Arc::from("build_string_repeat"));
                     builder.call(func, vec![receiver_val, count_val], Some(result), cont);
                     builder.switch_to_block(cont);
                     return Ok(values::local(result));
@@ -2278,7 +2275,7 @@ impl<'ctx> MirLowerer<'ctx> {
                         .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
                     let result = builder.create_local(MirType::i64());
                     let cont = builder.create_block();
-                    let func = MirValue::Function(Arc::from("quanta_string_index_of"));
+                    let func = MirValue::Function(Arc::from("build_string_index_of"));
                     builder.call(func, vec![receiver_val, substr_val], Some(result), cont);
                     builder.switch_to_block(cont);
                     return Ok(values::local(result));
@@ -2293,7 +2290,7 @@ impl<'ctx> MirLowerer<'ctx> {
                         .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
                     let result = builder.create_local(MirType::i64());
                     let cont = builder.create_block();
-                    let func = MirValue::Function(Arc::from("quanta_string_compare"));
+                    let func = MirValue::Function(Arc::from("build_string_compare"));
                     builder.call(func, vec![receiver_val, other_val], Some(result), cont);
                     builder.switch_to_block(cont);
                     return Ok(values::local(result));
@@ -2646,11 +2643,11 @@ impl<'ctx> MirLowerer<'ctx> {
             return Ok(values::local(result));
         }
 
-        // &QuantaString method dispatch: handle chars/as_bytes on pointer receivers.
-        // These dereference the pointer and return the QuantaString value.
+        // &BuildString method dispatch: handle chars/as_bytes on pointer receivers.
+        // These dereference the pointer and return the BuildString value.
         if let MirType::Ptr(ref inner) = receiver_ty {
             if let MirType::Struct(ref name) = inner.as_ref() {
-                if name.as_ref() == "QuantaString" {
+                if name.as_ref() == "BuildString" {
                     let method_name = method.name.as_ref();
                     if method_name == "chars"
                         || method_name == "as_bytes"
@@ -2662,12 +2659,12 @@ impl<'ctx> MirLowerer<'ctx> {
                             CodegenError::Internal("No current function".to_string())
                         })?;
                         let derefed =
-                            builder.create_local(MirType::Struct(Arc::from("QuantaString")));
+                            builder.create_local(MirType::Struct(Arc::from("BuildString")));
                         builder.assign(
                             derefed,
                             MirRValue::Deref {
                                 ptr: receiver_val,
-                                pointee_ty: MirType::Struct(Arc::from("QuantaString")),
+                                pointee_ty: MirType::Struct(Arc::from("BuildString")),
                             },
                         );
                         return Ok(values::local(derefed));
@@ -2677,30 +2674,30 @@ impl<'ctx> MirLowerer<'ctx> {
         }
 
         // Vec<T> method dispatch: map .push/.len/.get/.pop/.is_empty/.clear
-        // to typed runtime functions (quanta_hvec_*).
+        // to typed runtime functions (build_hvec_*).
         if let MirType::Vec(ref elem_ty) = receiver_ty {
             let method_name = method.name.as_ref();
             let type_suffix = match elem_ty.as_ref() {
                 MirType::Float(_) => "f64",
                 MirType::Int(IntSize::I64, _) => "i64",
-                MirType::Struct(n) if n.as_ref() == "QuantaString" => "str",
+                MirType::Struct(n) if n.as_ref() == "BuildString" => "str",
                 _ => "i32",
             };
 
             let (runtime_fn, ret_ty): (Option<String>, MirType) = match method_name {
                 "push" => (
-                    Some(format!("quanta_hvec_push_{}", type_suffix)),
+                    Some(format!("build_hvec_push_{}", type_suffix)),
                     MirType::Void,
                 ),
                 "pop" => (
-                    Some(format!("quanta_hvec_pop_{}", type_suffix)),
+                    Some(format!("build_hvec_pop_{}", type_suffix)),
                     *elem_ty.clone(),
                 ),
                 "get" | "index" => (
-                    Some(format!("quanta_hvec_get_{}", type_suffix)),
+                    Some(format!("build_hvec_get_{}", type_suffix)),
                     *elem_ty.clone(),
                 ),
-                "len" => (Some("quanta_hvec_len".to_string()), MirType::usize()),
+                "len" => (Some("build_hvec_len".to_string()), MirType::usize()),
                 "is_empty" => {
                     // Lower as len() == 0
                     let arg_vals = vec![receiver_val];
@@ -2710,7 +2707,7 @@ impl<'ctx> MirLowerer<'ctx> {
                         .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
                     let len_result = builder.create_local(MirType::usize());
                     let cont = builder.create_block();
-                    let func = MirValue::Function(Arc::from("quanta_hvec_len"));
+                    let func = MirValue::Function(Arc::from("build_hvec_len"));
                     builder.call(func, arg_vals, Some(len_result), cont);
                     builder.switch_to_block(cont);
                     let zero = builder.create_local(MirType::usize());
@@ -2724,7 +2721,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     );
                     return Ok(values::local(result));
                 }
-                "clear" => (Some("quanta_hvec_free".to_string()), MirType::Void),
+                "clear" => (Some("build_hvec_free".to_string()), MirType::Void),
                 _ => (None, MirType::Void),
             };
 
@@ -2752,33 +2749,24 @@ impl<'ctx> MirLowerer<'ctx> {
             let method_name = method.name.as_ref();
 
             let (runtime_fn, ret_ty): (Option<String>, MirType) = match method_name {
-                "insert" => (
-                    Some("quanta_hmap_insert_str_f64".to_string()),
-                    MirType::Void,
-                ),
+                "insert" => (Some("build_hmap_insert_str_f64".to_string()), MirType::Void),
                 "get" => {
                     let val_c = match val_ty.as_ref() {
                         MirType::Float(_) => None,
                         _ => Some(format!(
-                            "quanta_hmap_get_val_{}",
+                            "build_hmap_get_val_{}",
                             Self::type_to_c_name(val_ty)
                         )),
                     };
-                    let fn_name = val_c.unwrap_or_else(|| "quanta_hmap_get_str_f64".to_string());
+                    let fn_name = val_c.unwrap_or_else(|| "build_hmap_get_str_f64".to_string());
                     (Some(fn_name), *val_ty.clone())
                 }
                 "contains" | "contains_key" => (
-                    Some("quanta_hmap_contains_str_f64".to_string()),
+                    Some("build_hmap_contains_str_f64".to_string()),
                     MirType::Bool,
                 ),
-                "len" => (
-                    Some("quanta_hmap_len_str_f64".to_string()),
-                    MirType::usize(),
-                ),
-                "remove" => (
-                    Some("quanta_hmap_remove_str_f64".to_string()),
-                    MirType::Void,
-                ),
+                "len" => (Some("build_hmap_len_str_f64".to_string()), MirType::usize()),
+                "remove" => (Some("build_hmap_remove_str_f64".to_string()), MirType::Void),
                 "is_empty" => {
                     let builder = self
                         .current_fn
@@ -2787,7 +2775,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     let len_result = builder.create_local(MirType::usize());
                     let cont = builder.create_block();
                     builder.call(
-                        MirValue::Function(Arc::from("quanta_hmap_len_str_f64")),
+                        MirValue::Function(Arc::from("build_hmap_len_str_f64")),
                         vec![receiver_val],
                         Some(len_result),
                         cont,
@@ -2834,8 +2822,8 @@ impl<'ctx> MirLowerer<'ctx> {
             if name.as_ref() == "HashSet" {
                 let method_name = method.name.as_ref();
                 let (runtime_fn, ret_ty): (Option<&str>, MirType) = match method_name {
-                    "insert" => (Some("quanta_hset_insert"), MirType::Void),
-                    "contains" => (Some("quanta_hset_contains"), MirType::Bool),
+                    "insert" => (Some("build_hset_insert"), MirType::Void),
+                    "contains" => (Some("build_hset_contains"), MirType::Bool),
                     "len" => (None, MirType::usize()),
                     "is_empty" => (None, MirType::Bool),
                     "clone" => (None, receiver_ty.clone()),
@@ -2871,7 +2859,7 @@ impl<'ctx> MirLowerer<'ctx> {
             let method_name = method.name.as_ref();
             if method_name == "clone" || method_name == "to_owned" {
                 let is_safe_clone = matches!(&receiver_ty,
-                    MirType::Struct(n) if n.as_ref() == "QuantaString"
+                    MirType::Struct(n) if n.as_ref() == "BuildString"
                 ) || matches!(
                     &receiver_ty,
                     MirType::Int(..) | MirType::Float(..) | MirType::Bool | MirType::Ptr(..)
@@ -4821,12 +4809,12 @@ impl<'ctx> MirLowerer<'ctx> {
         let _ = is_ptr_deref; // used implicitly by FieldAccess on pointer-typed base
 
         // Swizzle support: multi-character field access on vector types
-        // e.g. color.xyz → quanta_vec3_new(color.x, color.y, color.z)
+        // e.g. color.xyz → build_vec3_new(color.x, color.y, color.z)
         if let MirType::Struct(ref struct_name) = effective_ty {
             if let Some(max_comp) = Self::vec_component_count(struct_name) {
                 if Self::is_swizzle_pattern(&field_name, max_comp) {
                     let swizzle_len = field_name.len() as u32;
-                    let result_type_name = format!("quanta_vec{}", swizzle_len);
+                    let result_type_name = format!("build_vec{}", swizzle_len);
                     let result_ty = MirType::Struct(Arc::from(result_type_name.as_str()));
                     let component_names: Vec<&str> = vec!["x", "y", "z", "w"];
 
@@ -4851,8 +4839,8 @@ impl<'ctx> MirLowerer<'ctx> {
                         component_vals.push(values::local(comp_local));
                     }
 
-                    // Build constructor call: quanta_vecN_new(...)
-                    let constructor = format!("quanta_vec{}_new", swizzle_len);
+                    // Build constructor call: build_vecN_new(...)
+                    let constructor = format!("build_vec{}_new", swizzle_len);
                     let builder = self
                         .current_fn
                         .as_mut()

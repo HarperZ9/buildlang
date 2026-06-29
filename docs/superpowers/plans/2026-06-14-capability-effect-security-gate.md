@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make ambient file, network, process, environment, clock, console, GPU, and foreign-function access visible as typed QuantaLang effects enforced by `quantac`.
+**Goal:** Make ambient file, network, process, environment, clock, console, GPU, and foreign-function access visible as typed BuildLang effects enforced by `buildc`.
 
 **Architecture:** Add a compiler-owned capability registry in the type layer, register capability effects as built-ins, and feed required effects into existing type inference. Reuse the current function checker’s undeclared-effect diagnostics, adding capability source notes so users see which ambient call triggered the requirement.
 
-**Tech Stack:** Rust compiler code in `compiler/src/types`, existing QuantaLang parser/typechecker/codegen tests, Cargo integration tests for `quantac check`.
+**Tech Stack:** Rust compiler code in `compiler/src/types`, existing BuildLang parser/typechecker/codegen tests, Cargo integration tests for `buildc check`.
 
 ---
 
@@ -25,7 +25,7 @@
 - Modify: `compiler/src/types/check.rs`
   - Preserves declared effects in function bindings, assigns `Foreign` to extern function bindings, and attaches source notes to capability diagnostics.
 - Modify: `compiler/tests/cli.rs`
-  - Adds a `quantac check` smoke test for a capability diagnostic.
+  - Adds a `buildc check` smoke test for a capability diagnostic.
 - No changes in this first implementation to codegen output, runtime C helpers, or semantic-corpus receipt JSON.
 
 ## Task 1: Capability Registry
@@ -53,7 +53,7 @@ mod tests {
         assert_eq!(capability_effect_for_call("process_exit"), Some("Process"));
         assert_eq!(capability_effect_for_call("getenv"), Some("Environment"));
         assert_eq!(capability_effect_for_call("clock_ms"), Some("Clock"));
-        assert_eq!(capability_effect_for_call("quanta_vk_init"), Some("Gpu"));
+        assert_eq!(capability_effect_for_call("build_vk_init"), Some("Gpu"));
         assert_eq!(capability_effect_for_call("sqrt"), None);
     }
 
@@ -126,11 +126,11 @@ pub fn capability_effect_for_call(name: &str) -> Option<&'static str> {
         "getenv" | "args_count" | "args_get" => Some(ENVIRONMENT),
         "read_line" | "read_all" | "stdin_is_pipe" => Some(CONSOLE),
         "clock_ms" | "time_unix" => Some(CLOCK),
-        "quanta_vk_init" | "quanta_vk_load_shader_file" | "quanta_vk_run_compute"
-        | "quanta_vk_shutdown" | "quanta_vk_create_graphics_pipeline"
-        | "quanta_vk_set_push_constant_f32" | "quanta_vk_draw_frame"
-        | "quanta_vk_should_close" | "quanta_vk_request_close"
-        | "quanta_vk_device_name" => Some(GPU),
+        "build_vk_init" | "build_vk_load_shader_file" | "build_vk_run_compute"
+        | "build_vk_shutdown" | "build_vk_create_graphics_pipeline"
+        | "build_vk_set_push_constant_f32" | "build_vk_draw_frame"
+        | "build_vk_should_close" | "build_vk_request_close"
+        | "build_vk_device_name" => Some(GPU),
         _ => None,
     }
 }
@@ -184,7 +184,7 @@ Add helper tests to the `#[cfg(test)]` module in `compiler/src/types/check.rs`:
 
 ```rust
     fn check_source(source: &str) -> Vec<TypeErrorWithSpan> {
-        let source_file = crate::lexer::SourceFile::new("capability_test.quanta", source);
+        let source_file = crate::lexer::SourceFile::new("capability_test.bld", source);
         let mut lexer = crate::lexer::Lexer::new(&source_file);
         let tokens = lexer.tokenize().expect("tokenize capability fixture");
         let mut parser = crate::parser::Parser::new(&source_file, tokens);
@@ -453,17 +453,17 @@ Add this test to `compiler/tests/cli.rs`:
 #[test]
 fn check_reports_capability_effect_for_ambient_file_call() {
     let fixture = std::env::temp_dir().join(format!(
-        "quantalang_capability_gate_{}.quanta",
+        "buildlang_capability_gate_{}.bld",
         std::process::id()
     ));
     fs::write(&fixture, r#"fn main() { read_file("ops.txt"); }"#)
         .expect("write capability fixture");
 
-    let output = quantac()
+    let output = buildc()
         .arg("check")
         .arg(&fixture)
         .output()
-        .expect("run quantac check");
+        .expect("run buildc check");
 
     let _ = fs::remove_file(&fixture);
 
@@ -499,7 +499,7 @@ Expected: PASS. If it fails because `cmd_check` prints errors without notes, upd
 
 ```powershell
 git add compiler/tests/cli.rs compiler/src/main.rs
-git commit -m "test: cover capability diagnostics in quantac check"
+git commit -m "test: cover capability diagnostics in buildc check"
 ```
 
 ## Task 4: Verification And Public Posture
@@ -538,7 +538,7 @@ Expected: all non-ignored tests pass with warnings denied.
 cargo fmt --manifest-path compiler/Cargo.toml -- --check
 git diff --check
 git check-ignore -q .env
-powershell -NoProfile -ExecutionPolicy Bypass -File C:/dev/scratch/portfolio-stabilization-2026-06-13/scan-diff-secrets.ps1 -Repo C:/dev/public/pubscan/quantalang
+powershell -NoProfile -ExecutionPolicy Bypass -File C:/dev/scratch/portfolio-stabilization-2026-06-13/scan-diff-secrets.ps1 -Repo C:/dev/public/pubscan/buildlang
 ```
 
 Expected: all commands exit successfully; secret scan prints `no-matches`.
@@ -558,7 +558,7 @@ If no docs changed, skip this commit and record that public claim updates are de
 
 ```powershell
 git push origin main
-gh run list -R HarperZ9/quantalang --branch main --limit 3 --json databaseId,workflowName,status,conclusion,headSha,displayTitle,createdAt
+gh run list -R HarperZ9/buildlang --branch main --limit 3 --json databaseId,workflowName,status,conclusion,headSha,displayTitle,createdAt
 ```
 
 Expected: latest CI runs on the pushed head. Watch the CI run to completion and fix any failures before calling the feature complete.

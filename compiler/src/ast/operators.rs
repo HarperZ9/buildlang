@@ -1,12 +1,12 @@
 // ===============================================================================
-// QUANTALANG AST - OPERATORS
+// BUILDLANG AST - OPERATORS
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
-//! Operator definitions and precedence for QuantaLang.
+//! Operator definitions and precedence for BuildLang.
 //!
-//! Precedence levels follow Rust conventions with QuantaLang extensions:
+//! Precedence levels follow Rust conventions with BuildLang extensions:
 //! - Higher numbers = tighter binding
 //! - Associativity determines left-to-right vs right-to-left parsing
 
@@ -28,7 +28,7 @@ pub enum BinOp {
     Div,
     /// Remainder/Modulo: `%`
     Rem,
-    /// Power: `**` (QuantaLang extension)
+    /// Power: `**` (BuildLang extension)
     Pow,
 
     // =========================================================================
@@ -78,7 +78,7 @@ pub enum BinOp {
     RangeInclusive,
 
     // =========================================================================
-    // SPECIAL OPERATORS (QuantaLang extensions)
+    // SPECIAL OPERATORS (BuildLang extensions)
     // =========================================================================
     /// Pipe operator: `|>` (function application)
     Pipe,

@@ -5,7 +5,7 @@ Status: Approved direction; written spec pending user review
 
 ## Purpose
 
-QuantaLang already has a checked substrate receipt that says the semantic corpus
+BuildLang already has a checked substrate receipt that says the semantic corpus
 uses `MIR` as its representation surface. That is directionally correct, but it
 does not prove which MIR operations, statement families, terminators, types,
 symbols, or memory-relevant projections are actually produced for the corpus.
@@ -13,7 +13,7 @@ symbols, or memory-relevant projections are actually produced for the corpus.
 MIR Representation Receipts v0 turns that implicit representation claim into a
 machine-readable evidence artifact. The receipt records a deterministic
 per-program inventory produced from the same parse, type-check, and AST-to-MIR
-lowering path used by real compilation. `quantac corpus verify` then recomputes
+lowering path used by real compilation. `buildc corpus verify` then recomputes
 the inventory and rejects stale or inflated representation claims.
 
 This moves the project toward the long-term native-language thesis by making
@@ -23,7 +23,7 @@ backend and does not claim GPU/native runtime maturity.
 
 ## Current Evidence
 
-- `quantac corpus verify` already validates the semantic corpus manifest, C and
+- `buildc corpus verify` already validates the semantic corpus manifest, C and
   Rust execution receipts, C stdout behavior, and the substrate receipt.
 - The substrate receipt already has a `representation_surface` block with
   `ir: "MIR"`, a fallback policy, and a backend maturity descriptor.
@@ -38,7 +38,7 @@ backend and does not claim GPU/native runtime maturity.
 
 ## Alternatives Considered
 
-### Approach A: Add a `quantac mir dump` Command First
+### Approach A: Add a `buildc mir dump` Command First
 
 Expose a general MIR dump command and later build receipts on top.
 
@@ -49,7 +49,7 @@ instead of deterministic receipt verification.
 ### Approach B: Extend the Substrate Receipt Directly
 
 Add MIR operation arrays directly inside
-`quantalang-substrate-receipt/v0`.
+`buildlang-substrate-receipt/v0`.
 
 Tradeoff: smaller file count, but it would make the substrate receipt too large
 and harder to evolve. Representation inventories should be independently
@@ -57,8 +57,8 @@ versioned because they will change more often than backend maturity labels.
 
 ### Approach C: Add a Separate MIR Representation Receipt
 
-Create `quantalang-mir-representation-receipt/v0`, reference it from the
-substrate receipt, and verify it during `quantac corpus verify`.
+Create `buildlang-mir-representation-receipt/v0`, reference it from the
+substrate receipt, and verify it during `buildc corpus verify`.
 
 Tradeoff: one additional artifact and verifier path. Benefit: the
 representation contract is focused, independently testable, and can later grow
@@ -95,11 +95,11 @@ The schema should be additive and stable:
 
 ```json
 {
-  "schema": "quantalang-mir-representation-receipt/v0",
+  "schema": "buildlang-mir-representation-receipt/v0",
   "receipt_id": "mir-representation-semantic-corpus-2026-06-18",
   "created_at": "2026-06-18",
-  "compiler": "quantac",
-  "language": "quantalang",
+  "compiler": "buildc",
+  "language": "buildlang",
   "source_set": {
     "kind": "semantic-corpus",
     "manifest": "manifest.json",
@@ -113,7 +113,7 @@ The schema should be additive and stable:
   "programs": [
     {
       "id": "scalar_branch",
-      "path": "programs/scalar_branch.quanta",
+      "path": "programs/scalar_branch.bld",
       "source_digest": {
         "algorithm": "sha256",
         "hex": "64 lowercase hex characters"
@@ -131,7 +131,7 @@ The schema should be additive and stable:
       },
       "symbols": {
         "functions": ["main"],
-        "types": ["quanta_vec2", "quanta_vec3", "quanta_vec4"],
+        "types": ["build_vec2", "build_vec3", "build_vec4"],
         "globals": [],
         "externals": []
       },
@@ -248,7 +248,7 @@ The representation receipt fits into the existing evidence chain:
    representation, and evidence posture.
 5. The MIR representation receipt proves the concrete representation inventory
    behind `representation_surface.ir = "MIR"`.
-6. `quantac corpus verify` validates all five layers together.
+6. `buildc corpus verify` validates all five layers together.
 
 The substrate receipt should add:
 
@@ -263,9 +263,9 @@ to exist and remain under the corpus root.
 
 The verifier should reject a MIR representation receipt when:
 
-- `schema` is not `quantalang-mir-representation-receipt/v0`.
-- `compiler` is not `quantac`.
-- `language` is not `quantalang`.
+- `schema` is not `buildlang-mir-representation-receipt/v0`.
+- `compiler` is not `buildc`.
+- `language` is not `buildlang`.
 - `source_set.kind` is not `semantic-corpus`.
 - `source_set.manifest` does not point to the corpus `manifest.json`.
 - `source_set.program_count` does not match the manifest.
@@ -288,7 +288,7 @@ Diagnostics should name the exact surface where possible, for example:
 
 ## CLI Shape
 
-The first implementation should extend `quantac corpus verify`. Successful
+The first implementation should extend `buildc corpus verify`. Successful
 output should include:
 
 ```text
@@ -315,7 +315,7 @@ processed.
 
 Implementation should be test-first:
 
-- CLI test: valid MIR representation receipt passes and `quantac corpus verify`
+- CLI test: valid MIR representation receipt passes and `buildc corpus verify`
   prints `mir representation receipt: ok`.
 - CLI test: wrong schema fails with an unsupported schema diagnostic.
 - CLI test: program count drift fails.
@@ -345,7 +345,7 @@ different slice clearer.
 
 - No backend productionization.
 - No new SPIR-V, LLVM, WASM, x86-64, or ARM64 execution claim.
-- No general public `quantac mir dump` command in this slice.
+- No general public `buildc mir dump` command in this slice.
 - No receipt writer in the first implementation.
 - No full MIR pretty-printer.
 - No full memory-layout ABI proof.
@@ -358,11 +358,11 @@ different slice clearer.
 This design is implemented when:
 
 - `semantic-corpus/receipts/mir-representation-2026-06-18.json` exists and uses
-  `quantalang-mir-representation-receipt/v0`.
+  `buildlang-mir-representation-receipt/v0`.
 - The receipt records per-program source digests, module counts, symbols,
   operation families, memory-surface flags, control-flow summaries, and corpus
   summary unions.
-- `quantac corpus verify` recomputes the representation inventory from the real
+- `buildc corpus verify` recomputes the representation inventory from the real
   parse, type-check, and MIR lowering pipeline.
 - The verifier rejects at least four invalid receipt fixtures or copied-corpus
   mutations with actionable diagnostics.
@@ -378,7 +378,7 @@ This design is implemented when:
 
 Later slices can add:
 
-- a controlled `quantac corpus verify --write-representation` refresh mode;
+- a controlled `buildc corpus verify --write-representation` refresh mode;
 - backend-specific unsupported-MIR manifests derived from the same inventory;
 - symbol graph receipts for public APIs, packages, traits, and module
   boundaries;

@@ -5,7 +5,7 @@ Status: Approved direction; written spec pending user review
 
 ## Purpose
 
-QuantaLang now has checked substrate evidence for execution, MIR
+BuildLang now has checked substrate evidence for execution, MIR
 representation, and memory/RAM surfaces. The remaining gap in the near-term
 native-language thesis is symbols: a shared surface where source names, MIR
 names, callable identity, type identity, and effect/capability identity can be
@@ -21,7 +21,7 @@ not checked corpus evidence.
 Symbol Graph Receipts v0 creates a dedicated checked artifact for the semantic
 corpus. It records deterministic per-program source symbols, MIR symbols, and
 basic edges between declarations, lowered symbols, type definitions, and effect
-surfaces. `quantac corpus verify` will recompute the graph and reject stale or
+surfaces. `buildc corpus verify` will recompute the graph and reject stale or
 inflated symbol claims.
 
 This slice is intentionally an evidence contract, not a full name resolver,
@@ -48,7 +48,7 @@ later receipts.
 - LSP symbol, definition, and hover providers exist, but they use line-oriented
   local document parsing and are not yet the authoritative compiler symbol
   graph.
-- `quantac corpus verify` already validates the manifest, C/Rust execution
+- `buildc corpus verify` already validates the manifest, C/Rust execution
   receipts, substrate receipt, MIR representation receipt, memory layout
   receipt, and real C stdout.
 
@@ -57,7 +57,7 @@ later receipts.
 ### Approach A: Extend the MIR Representation Receipt
 
 Add source symbols and effect summaries to
-`quantalang-mir-representation-receipt/v0`.
+`buildlang-mir-representation-receipt/v0`.
 
 Tradeoff: fewer files and less verifier wiring, but the MIR receipt would become
 too broad. MIR representation answers "what was lowered"; symbol graph evidence
@@ -72,12 +72,12 @@ receipt source of truth.
 Tradeoff: this pulls symbol receipts toward editor behavior before the LSP
 server has full request dispatch. The current LSP providers are useful evidence
 of intent, but the receipt should use the parser, AST, type checker, and MIR
-lowering path that `quantac` already verifies.
+lowering path that `buildc` already verifies.
 
 ### Approach C: Add a Separate Symbol Graph Receipt
 
-Create `quantalang-symbol-graph-receipt/v0`, reference it from the substrate
-receipt, and verify it during `quantac corpus verify`.
+Create `buildlang-symbol-graph-receipt/v0`, reference it from the substrate
+receipt, and verify it during `buildc corpus verify`.
 
 Tradeoff: one additional artifact and verifier path. Benefit: the symbol graph
 contract is focused, can bridge source/MIR/effect evidence, and can later grow
@@ -117,7 +117,7 @@ The substrate receipt should add a `symbol_surface` block:
 "symbol_surface": {
   "source": "AST",
   "representation": "MIR",
-  "effect_anchor": "quantalang-check-receipt/v1",
+  "effect_anchor": "buildlang-check-receipt/v1",
   "symbol_receipt": "receipts/symbol-graph-2026-06-18.json",
   "known_gaps": [
     "full package graph resolution",
@@ -136,11 +136,11 @@ The schema should be additive and stable:
 
 ```json
 {
-  "schema": "quantalang-symbol-graph-receipt/v0",
+  "schema": "buildlang-symbol-graph-receipt/v0",
   "receipt_id": "symbol-graph-semantic-corpus-2026-06-18",
   "created_at": "2026-06-18",
-  "compiler": "quantac",
-  "language": "quantalang",
+  "compiler": "buildc",
+  "language": "buildlang",
   "source_set": {
     "kind": "semantic-corpus",
     "manifest": "manifest.json",
@@ -157,7 +157,7 @@ The schema should be additive and stable:
   "programs": [
     {
       "id": "scalar_branch",
-      "path": "programs/scalar_branch.quanta",
+      "path": "programs/scalar_branch.bld",
       "source_digest": {
         "algorithm": "sha256",
         "hex": "64 lowercase hex characters"
@@ -195,7 +195,7 @@ The schema should be additive and stable:
       ],
       "mir_symbols": {
         "functions": ["choose", "main"],
-        "types": ["quanta_vec2", "quanta_vec3", "quanta_vec4"],
+        "types": ["build_vec2", "build_vec3", "build_vec4"],
         "globals": [],
         "externals": []
       },
@@ -335,9 +335,9 @@ The symbol graph receipt fits into the existing evidence chain:
    representation, symbol, and evidence posture.
 5. The symbol graph receipt proves the detailed source/MIR/effect symbol
    bridge behind `substrate.symbol_surface`.
-6. `quantac corpus verify` validates all layers together.
+6. `buildc corpus verify` validates all layers together.
 
-Successful `quantac corpus verify` output should include:
+Successful `buildc corpus verify` output should include:
 
 ```text
 symbol graph receipt: ok
@@ -347,9 +347,9 @@ symbol graph receipt: ok
 
 The verifier should reject a symbol graph receipt when:
 
-- `schema` is not `quantalang-symbol-graph-receipt/v0`.
-- `compiler` is not `quantac`.
-- `language` is not `quantalang`.
+- `schema` is not `buildlang-symbol-graph-receipt/v0`.
+- `compiler` is not `buildc`.
+- `language` is not `buildlang`.
 - `source_set.kind` is not `semantic-corpus`.
 - `source_set.manifest` does not point to the corpus `manifest.json`.
 - `source_set.program_count` does not match the manifest.
@@ -388,7 +388,7 @@ and MIR lowering errors should identify the program ID or path being processed.
 
 Implementation should be test-first:
 
-- CLI test: valid symbol graph receipt passes and `quantac corpus verify`
+- CLI test: valid symbol graph receipt passes and `buildc corpus verify`
   prints `symbol graph receipt: ok`.
 - CLI test: wrong schema fails with an unsupported schema diagnostic.
 - CLI test: program count drift fails.
@@ -412,8 +412,8 @@ The implementation plan should keep test slices narrow:
 cargo test --manifest-path compiler/Cargo.toml --test cli symbol_graph -- --nocapture
 cargo test --manifest-path compiler/Cargo.toml --test cli corpus_verify -- --nocapture
 cargo test --manifest-path compiler/Cargo.toml --test cli substrate -- --nocapture
-cargo test --manifest-path compiler/Cargo.toml --bin quantac symbol_graph --quiet
-cargo test --manifest-path compiler/Cargo.toml --bin quantac mir_representation --quiet
+cargo test --manifest-path compiler/Cargo.toml --bin buildc symbol_graph --quiet
+cargo test --manifest-path compiler/Cargo.toml --bin buildc mir_representation --quiet
 ```
 
 Exact test names may differ if the existing test organization makes a different
@@ -438,9 +438,9 @@ slice clearer.
 This design is implemented when:
 
 - `semantic-corpus/receipts/symbol-graph-2026-06-18.json` exists and uses
-  `quantalang-symbol-graph-receipt/v0`.
+  `buildlang-symbol-graph-receipt/v0`.
 - The substrate receipt references it through `symbol_surface.symbol_receipt`.
-- `quantac corpus verify` recomputes and validates the symbol graph receipt.
+- `buildc corpus verify` recomputes and validates the symbol graph receipt.
 - Successful corpus verification prints `symbol graph receipt: ok`.
 - Invalid fixtures cover schema drift, program count drift, path escape, source
   digest drift, source-symbol drift, MIR-symbol drift, edge drift, and v0
@@ -464,6 +464,6 @@ Later slices can extend this receipt family into stronger native symbol proof:
   lanes;
 - incremental symbol graph receipts for watch and responsiveness surfaces.
 
-The invariant is that QuantaLang's shared human/machine language should grow
+The invariant is that BuildLang's shared human/machine language should grow
 through checked symbol evidence, not through editor helper claims or broad prose
 assertions.

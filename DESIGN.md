@@ -1,12 +1,12 @@
-# QuantaLang Compiler Design
+# BuildLang Compiler Design
 
-> Architectural documentation for the QuantaLang compiler (`quantac`).
+> Architectural documentation for the BuildLang compiler (`buildc`).
 > 88,946 lines of Rust across 87 source files in `compiler/src/`.
 
 ## Pipeline Overview
 
 ```
-source.quanta
+source.bld
     |
     v
 Preprocessor (include!() expansion, double-inclusion guard)
@@ -233,14 +233,14 @@ The largest module. Handles:
 The production backend. `CBackend` emits C99-compliant code:
 
 1. **Standard includes**: `stdint.h`, `stdbool.h`, `stdio.h`, `stdlib.h`, `string.h`, `math.h`, `time.h`
-2. **Embedded runtime**: the full `runtime_header()` is inlined (QuantaString, QuantaVec, QuantaHashMap, print helpers, math builtins)
+2. **Embedded runtime**: the full `runtime_header()` is inlined (BuildString, BuildVec, BuildHashMap, print helpers, math builtins)
 3. **Type definitions**: structs, enums (tagged unions)
 4. **Vtable types and instances**: for `dyn Trait` dynamic dispatch
 5. **String table**: interned string literals
 6. **Forward declarations**: all function prototypes
 7. **Function bodies**: basic blocks emitted as labeled statements with `goto`-based control flow
 
-The generated C is compiled to native executables via `gcc` (Linux/MSYS2) or MSVC (`cl.exe` on Windows). The `quantac build` command handles this automatically, with `--emit c` to stop at the C source stage and `--keep-c` to preserve intermediates.
+The generated C is compiled to native executables via `gcc` (Linux/MSYS2) or MSVC (`cl.exe` on Windows). The `buildc build` command handles this automatically, with `--emit c` to stop at the C source stage and `--keep-c` to preserve intermediates.
 
 ### LLVM Backend -- `llvm.rs` (3,041 lines)
 
@@ -279,15 +279,15 @@ Experimental direct native code generation for AArch64. Instruction encoding in 
 
 **2,125 lines** of Rust that generates ~187 C static functions embedded in every compiled program's output. The runtime provides:
 
-- **QuantaString**: ptr/len/cap representation. Concat, length, equality, substring, split, trim, contains, starts_with, ends_with, replace, to_uppercase/lowercase, char_at, free
-- **QuantaVec**: generic dynamic array (void* + len + cap + elem_size). Push, get, pop, free. Type-specialized handle variants for i32, i64, f64 with heap-allocated backing
-- **QuantaHashMap**: open-addressing hash map with string keys. Put, get, contains, remove, keys iteration, free
-- **Format helpers**: `quanta_format_i32`, `quanta_format_f64`, `quanta_format_str` -- snprintf wrappers returning QuantaString
+- **BuildString**: ptr/len/cap representation. Concat, length, equality, substring, split, trim, contains, starts_with, ends_with, replace, to_uppercase/lowercase, char_at, free
+- **BuildVec**: generic dynamic array (void* + len + cap + elem_size). Push, get, pop, free. Type-specialized handle variants for i32, i64, f64 with heap-allocated backing
+- **BuildHashMap**: open-addressing hash map with string keys. Put, get, contains, remove, keys iteration, free
+- **Format helpers**: `build_format_i32`, `build_format_f64`, `build_format_str` -- snprintf wrappers returning BuildString
 - **Print helpers**: type-specialized print functions for formatted output
-- **Math builtins**: `quanta_min`, `quanta_max`, `quanta_abs`, `quanta_pow`, `quanta_sqrt`, trigonometric functions
-- **File I/O**: `quanta_read_file`, `quanta_write_file`, `quanta_file_exists`
-- **Environment**: `quanta_getenv`, `quanta_clock`
-- **I/O initialization**: `__quanta_init_io()` disables stdout/stderr buffering
+- **Math builtins**: `build_min`, `build_max`, `build_abs`, `build_pow`, `build_sqrt`, trigonometric functions
+- **File I/O**: `build_read_file`, `build_write_file`, `build_file_exists`
+- **Environment**: `build_getenv`, `build_clock`
+- **I/O initialization**: `__build_init_io()` disables stdout/stderr buffering
 
 ## Preprocessor (`src/main.rs`)
 
@@ -300,7 +300,7 @@ Experimental direct native code generation for AArch64. Instruction encoding in 
 - **Recursion depth limit**: `MAX_INCLUDE_DEPTH` prevents circular includes
 - **Recursive expansion**: included files' own `include!()` directives are expanded transitively
 
-This is a pragmatic text-level preprocessor rather than a proper module system. It works well for the current stdlib (`include!("../stdlib/lines.quanta")`) and multi-file programs. A proper module system with namespaced imports is planned.
+This is a pragmatic text-level preprocessor rather than a proper module system. It works well for the current stdlib (`include!("../stdlib/lines.bld")`) and multi-file programs. A proper module system with namespaced imports is planned.
 
 ## Macro System (`src/macro_expand/`)
 
@@ -311,7 +311,7 @@ Supports `macro_rules!` definitions with pattern matching and template expansion
 ## Language Server Protocol (`src/lsp/`)
 
 **7,087 lines** across 12 files. Provider implementations exist for the major
-LSP features, but the current `quantac lsp` server loop only dispatches
+LSP features, but the current `buildc lsp` server loop only dispatches
 lifecycle messages for real clients:
 - **Diagnostics** (`diagnostics.rs`): real-time error reporting
 - **Completion** (`completion.rs`): context-aware code completion
@@ -324,12 +324,12 @@ lifecycle messages for real clients:
 
 ## Formatter (`src/fmt/`)
 
-**1,657 lines** across 4 files. Accessed via `quantac fmt`. `formatter.rs` implements a pretty-printer that reformats QuantaLang source with configurable options (`config.rs`): indent width, max line width, trailing commas, etc.
+**1,657 lines** across 4 files. Accessed via `buildc fmt`. `formatter.rs` implements a pretty-printer that reformats BuildLang source with configurable options (`config.rs`): indent width, max line width, trailing commas, etc.
 
 ## Package Manager (`src/pkg/`)
 
-**3,503 lines** across 6 files. Accessed via `quantac pkg`. Implements:
-- `manifest.rs`: `Quanta.toml` parsing
+**3,503 lines** across 6 files. Accessed via `buildc pkg`. Implements:
+- `manifest.rs`: `Build.toml` parsing
 - `lockfile.rs`: lockfile generation and reading
 - `resolver.rs`: dependency resolution
 - `registry.rs`: package registry client
@@ -337,21 +337,21 @@ lifecycle messages for real clients:
 
 ## CLI Commands (`src/main.rs`)
 
-**6,069 lines.** The `quantac` binary supports these subcommands via `clap`:
+**6,069 lines.** The `buildc` binary supports these subcommands via `clap`:
 
 | Command | Description |
 |---------|-------------|
-| `quantac <file>` | Compile a file (default) |
-| `quantac build` | Build a project (`--emit c`/`exe`, `--target c`/`llvm`/`wasm`/`spirv`/`hlsl`/`glsl`, `--keep-c`) |
-| `quantac run <file>` | Compile and run |
-| `quantac lex <file>` | Tokenize and print tokens |
-| `quantac parse <file>` | Parse and print AST (with `--json` option) |
-| `quantac check <file>` | Type-check only |
-| `quantac fmt <file>` | Format source (`--check`, `--write`) |
-| `quantac lsp` | Start LSP server |
-| `quantac watch <path>` | Watch and recompile shaders |
-| `quantac pkg init/add/resolve/search` | Package management |
-| `quantac version` | Print version info |
+| `buildc <file>` | Compile a file (default) |
+| `buildc build` | Build a project (`--emit c`/`exe`, `--target c`/`llvm`/`wasm`/`spirv`/`hlsl`/`glsl`, `--keep-c`) |
+| `buildc run <file>` | Compile and run |
+| `buildc lex <file>` | Tokenize and print tokens |
+| `buildc parse <file>` | Parse and print AST (with `--json` option) |
+| `buildc check <file>` | Type-check only |
+| `buildc fmt <file>` | Format source (`--check`, `--write`) |
+| `buildc lsp` | Start LSP server |
+| `buildc watch <path>` | Watch and recompile shaders |
+| `buildc pkg init/add/resolve/search` | Package management |
+| `buildc version` | Print version info |
 
 ## Key Design Decisions
 
@@ -378,15 +378,15 @@ Struct field assignment went through several iterations:
 1. **Initial approach**: struct fields were set only via aggregate initialization (`Struct { field: value }`)
 2. **Problem**: this forced constructing entire structs at once, making incremental field modification impossible
 3. **Fix** (task #107): `FieldAssign` and `FieldDerefAssign` MIR statements were added, generating `local.field = value` and `ptr->field = value` in C. This required the C backend to emit structs as flat C structs with named fields rather than opaque blobs
-4. **Result**: QuantaLang structs map directly to C structs, and field assignment generates direct field stores. This keeps the generated code simple and cache-friendly
+4. **Result**: BuildLang structs map directly to C structs, and field assignment generates direct field stores. This keeps the generated code simple and cache-friendly
 
 ### Why `include!()` instead of proper modules?
 
 Pragmatic choice driven by development priorities:
 
-1. **Immediate need**: the stdlib (`lines.quanta`, `args.quanta`, `string_pool.quanta`, `tokenizer.quanta`) needed to be sharable across 60+ programs
+1. **Immediate need**: the stdlib (`lines.bld`, `args.bld`, `string_pool.bld`, `tokenizer.bld`) needed to be sharable across 60+ programs
 2. **Simple implementation**: ~80 lines of text-level preprocessing vs. hundreds of lines for a proper module resolver with namespaces, visibility rules, and separate compilation
-3. **Works now**: programs use `include!("../stdlib/lines.quanta")` and get textual inclusion with double-include guards and recursion depth limits
+3. **Works now**: programs use `include!("../stdlib/lines.bld")` and get textual inclusion with double-include guards and recursion depth limits
 4. **Proper modules planned**: the AST already has `ItemKind::Mod` and `ItemKind::Use`, and the package manager has dependency resolution. Wiring these into the compiler pipeline for namespace-qualified imports is the next major infrastructure milestone
 
 ### Why SSA with basic blocks (not tree-based codegen)?
@@ -403,7 +403,7 @@ The MIR uses SSA form with explicit basic blocks rather than directly walking th
 
 Algorithm W (Damas-Milner) infers types purely bottom-up: it synthesizes the type of every expression, then unifies at usage sites. This works for Haskell-style languages where every expression has exactly one principal type.
 
-QuantaLang has features that break the Algorithm W assumption:
+BuildLang has features that break the Algorithm W assumption:
 - **Integer literal overloading**: `42` could be `i8`, `i32`, `i64`, `u32`, etc. Algorithm W would either default to one type or require explicit annotation on every literal.
 - **Struct literal disambiguation**: `Point { x: 1, y: 2 }` needs to know the target type to resolve which `Point` is being constructed when there are multiple types with the same name across modules.
 - **Method call resolution**: `x.foo()` requires knowing the type of `x` to look up `foo` in the correct impl. With traits, there may be multiple `foo` methods, and only the expected return type can disambiguate.
@@ -436,7 +436,7 @@ The limitation: `longjmp` destroys stack frames between the handler and the perf
 
 Color science has a class of bugs that type systems normally can't catch: passing a linear-light RGB value to a function expecting sRGB, or mixing Display P3 and Rec.709 primaries. These are all `(f32, f32, f32)` at the type level but semantically incompatible.
 
-QuantaLang's type annotations attach metadata strings (like `ColorSpace:Linear` or `ColorSpace:sRGB`) to types. The unifier checks annotation compatibility: if both operands of a binary operation carry annotations in the same category, they must match. This catches `linear_rgb + srgb_rgb` at compile time.
+BuildLang's type annotations attach metadata strings (like `ColorSpace:Linear` or `ColorSpace:sRGB`) to types. The unifier checks annotation compatibility: if both operands of a binary operation carry annotations in the same category, they must match. This catches `linear_rgb + srgb_rgb` at compile time.
 
 The design is intentionally minimal - annotations are strings, not a full dependent type system. They're checked structurally (category:value matching) rather than requiring a dedicated solver. This keeps the type checker simple while catching the most common class of color space bugs.
 
@@ -446,7 +446,7 @@ The limitation: annotations are per-type, not per-value. If a function takes `Ve
 
 1. **Generics are monomorphized eagerly**: every generic instantiation generates a separate function. No polymorphic compilation. This means compile times scale with the number of instantiations, not the number of generic definitions.
 2. **Partial borrow checking**: The compiler enforces basic borrowing rules: no mutable aliasing (`&mut` while `&` or `&mut` is active), no returning references to local variables, and scope-based borrow expiry. References are properly typed (`&x` → `Ref(T)`, `*non_ref` → error). However, the borrow checker does not yet implement: (a) NLL - borrows expire at scope boundaries, not at last use, (b) interprocedural lifetime analysis - function signatures don't carry lifetime parameters, (c) full region inference with constraint solving. The C backend still emits raw pointers. These are the next items for the borrow checker.
-3. **Module system is partial**: Inline `mod foo { ... }` blocks work with proper scoping, and `use` statements resolve through a module registry. However, external file modules (`mod foo;` loading from `foo.quanta`) and the `include!()` preprocessor are not yet unified into a single module resolver. Separate compilation and incremental builds are not supported.
+3. **Module system is partial**: Inline `mod foo { ... }` blocks work with proper scoping, and `use` statements resolve through a module registry. However, external file modules (`mod foo;` loading from `foo.bld`) and the `include!()` preprocessor are not yet unified into a single module resolver. Separate compilation and incremental builds are not supported.
 4. **Effect system is one-shot only**: `resume` can be called at most once per `perform` due to the setjmp/longjmp implementation. This is a deliberate trade-off for C backend portability - CPS transform would enable multi-shot but doubles code size and makes generated C unreadable.
 
 ### Resolved (Previously Listed as Limitations)

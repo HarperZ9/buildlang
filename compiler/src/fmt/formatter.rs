@@ -1,10 +1,10 @@
 // ===============================================================================
-// QUANTALANG FORMATTER
+// BUILDLANG FORMATTER
 // ===============================================================================
 // Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
 // ===============================================================================
 
-//! Main formatter implementation for QuantaLang source code.
+//! Main formatter implementation for BuildLang source code.
 
 use super::config::{BraceStyle, FormatConfig, TrailingComma};
 
@@ -12,7 +12,7 @@ use super::config::{BraceStyle, FormatConfig, TrailingComma};
 // FORMATTER
 // =============================================================================
 
-/// QuantaLang source code formatter.
+/// BuildLang source code formatter.
 pub struct Formatter {
     /// Configuration.
     config: FormatConfig,

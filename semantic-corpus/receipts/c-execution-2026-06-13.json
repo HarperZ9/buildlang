@@ -1,10 +1,10 @@
 {
   "receipt_id": "c-execution-2026-06-13",
   "created_at": "2026-06-13",
-  "compiler": "quantac",
+  "compiler": "buildc",
   "backend": "c",
   "evidence_class": "generated-artifact-execution",
-  "command": "public/pubscan/quantalang/compiler/target/debug/quantac.exe run <semantic-corpus-program>",
+  "command": "public/pubscan/buildlang/compiler/target/debug/buildc.exe run <semantic-corpus-program>",
   "execution_mode": "sequential-and-parallel-probed",
   "result": {
     "passed": 8,
@@ -20,56 +20,56 @@
   "capability_gate": "passed",
   "capability_gate_test": "cargo test --manifest-path compiler/Cargo.toml capability --quiet",
   "validator_chain": [
-    "QuantaLang parser",
-    "QuantaLang type checker",
+    "BuildLang parser",
+    "BuildLang type checker",
     "MIR lowerer",
     "C backend",
     "MSVC cl.exe executable build",
     "stdout assertion"
   ],
   "notes": [
-    "Sequential quantac run checks matched manifest stdout for all 8 programs.",
-    "Parallel quantac run checks over the same 8 programs passed after the CLI moved C build artifacts into per-run temp directories."
+    "Sequential buildc run checks matched manifest stdout for all 8 programs.",
+    "Parallel buildc run checks over the same 8 programs passed after the CLI moved C build artifacts into per-run temp directories."
   ],
   "programs": [
     {
       "id": "scalar_branch",
-      "path": "../programs/scalar_branch.quanta",
+      "path": "../programs/scalar_branch.bld",
       "expected_stdout": "4\n"
     },
     {
       "id": "references_mutation",
-      "path": "../programs/references_mutation.quanta",
+      "path": "../programs/references_mutation.bld",
       "expected_stdout": "15\n"
     },
     {
       "id": "structs_arrays",
-      "path": "../programs/structs_arrays.quanta",
+      "path": "../programs/structs_arrays.bld",
       "expected_stdout": "12\n"
     },
     {
       "id": "tuple_ownership_reuse",
-      "path": "../programs/tuple_ownership_reuse.quanta",
+      "path": "../programs/tuple_ownership_reuse.bld",
       "expected_stdout": "14\n"
     },
     {
       "id": "struct_aggregate_reuse",
-      "path": "../programs/struct_aggregate_reuse.quanta",
+      "path": "../programs/struct_aggregate_reuse.bld",
       "expected_stdout": "7\n"
     },
     {
       "id": "field_assignment_reuse",
-      "path": "../programs/field_assignment_reuse.quanta",
+      "path": "../programs/field_assignment_reuse.bld",
       "expected_stdout": "7\n"
     },
     {
       "id": "nested_field_reuse",
-      "path": "../programs/nested_field_reuse.quanta",
+      "path": "../programs/nested_field_reuse.bld",
       "expected_stdout": "7\n"
     },
     {
       "id": "deref_reuse",
-      "path": "../programs/deref_reuse.quanta",
+      "path": "../programs/deref_reuse.bld",
       "expected_stdout": "7\n"
     }
   ]

@@ -1,18 +1,18 @@
 // ===============================================================================
-// QUANTALANG PARSER - TESTS
+// BUILDLANG PARSER - TESTS
 // ===============================================================================
 // Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
 // ===============================================================================
 
-//! Comprehensive tests for the QuantaLang parser.
+//! Comprehensive tests for the BuildLang parser.
 
-use quantalang::lexer::{Lexer, SourceFile};
-use quantalang::parser::{Parser, parse_source, ParseResult};
-use quantalang::ast::*;
+use buildlang::lexer::{Lexer, SourceFile};
+use buildlang::parser::{Parser, parse_source, ParseResult};
+use buildlang::ast::*;
 
 /// Helper to parse source code and return the AST.
 fn parse(source: &str) -> ParseResult<Module> {
-    parse_source("test.quanta", source)
+    parse_source("test.bld", source)
 }
 
 /// Helper to check if parsing succeeds.
@@ -746,10 +746,10 @@ mod errors {
 }
 
 // =============================================================================
-// QUANTALANG EXTENSION TESTS
+// BUILDLANG EXTENSION TESTS
 // =============================================================================
 
-mod quantalang_extensions {
+mod buildlang_extensions {
     use super::*;
 
     #[test]
@@ -757,5 +757,5 @@ mod quantalang_extensions {
         assert!(parses("effect Console { fn print(msg: &str); fn read() -> String; }"));
     }
 
-    // TODO: Add more QuantaLang-specific tests when features are fully implemented
+    // TODO: Add more BuildLang-specific tests when features are fully implemented
 }

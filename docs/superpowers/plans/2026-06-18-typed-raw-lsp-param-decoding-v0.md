@@ -6,7 +6,7 @@
 
 **Architecture:** Keep `server.rs` responsible for routing and response JSON. Add `compiler/src/lsp/raw_params.rs` to convert `JsonRpcMessage` into existing typed LSP structs from `message.rs` and `types.rs`. Valid-request behavior and the semantic-corpus LSP dispatch receipt remain stable.
 
-**Tech Stack:** Rust 2021, `serde_json::Value`, existing QuantaLang LSP structs, Cargo test slices.
+**Tech Stack:** Rust 2021, `serde_json::Value`, existing BuildLang LSP structs, Cargo test slices.
 
 ## Global Constraints
 
@@ -51,7 +51,7 @@ fn raw_dispatch_invalid_params_did_open_missing_uri_returns_error() {
     let mut server = LanguageServer::new();
     let response = dispatch_raw_message(
         &mut server,
-        r#"{"jsonrpc":"2.0","id":20,"method":"textDocument/didOpen","params":{"textDocument":{"languageId":"quanta","version":1,"text":"fn main() {}\n"}}}"#,
+        r#"{"jsonrpc":"2.0","id":20,"method":"textDocument/didOpen","params":{"textDocument":{"languageId":"build","version":1,"text":"fn main() {}\n"}}}"#,
     );
     assert_invalid_params(response, "params.textDocument.uri is required");
 }
@@ -61,7 +61,7 @@ fn raw_dispatch_invalid_params_hover_negative_position_returns_error() {
     let mut server = LanguageServer::new();
     let response = dispatch_raw_message(
         &mut server,
-        r#"{"jsonrpc":"2.0","id":21,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///workspace/main.quanta"},"position":{"line":-1,"character":0}}}"#,
+        r#"{"jsonrpc":"2.0","id":21,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///workspace/main.bld"},"position":{"line":-1,"character":0}}}"#,
     );
     assert_invalid_params(response, "params.position.line must be a non-negative integer");
 }
@@ -71,12 +71,12 @@ fn raw_dispatch_invalid_params_rename_missing_new_name_returns_error() {
     let mut server = LanguageServer::new();
     dispatch_raw_message(
         &mut server,
-        r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.quanta","languageId":"quanta","version":1,"text":"fn helper() -> i32 { 1 }\nfn main() { helper(); }\n"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.bld","languageId":"build","version":1,"text":"fn helper() -> i32 { 1 }\nfn main() { helper(); }\n"}}}"#,
     )
     .expect("didOpen should publish diagnostics");
     let response = dispatch_raw_message(
         &mut server,
-        r#"{"jsonrpc":"2.0","id":22,"method":"textDocument/rename","params":{"textDocument":{"uri":"file:///workspace/main.quanta"},"position":{"line":1,"character":14}}}"#,
+        r#"{"jsonrpc":"2.0","id":22,"method":"textDocument/rename","params":{"textDocument":{"uri":"file:///workspace/main.bld"},"position":{"line":1,"character":14}}}"#,
     );
     assert_invalid_params(response, "params.newName is required");
 }
@@ -86,7 +86,7 @@ fn raw_dispatch_invalid_params_code_action_missing_context_returns_error() {
     let mut server = LanguageServer::new();
     let response = dispatch_raw_message(
         &mut server,
-        r#"{"jsonrpc":"2.0","id":23,"method":"textDocument/codeAction","params":{"textDocument":{"uri":"file:///workspace/main.quanta"},"range":{"start":{"line":1,"character":13},"end":{"line":1,"character":13}}}}"#,
+        r#"{"jsonrpc":"2.0","id":23,"method":"textDocument/codeAction","params":{"textDocument":{"uri":"file:///workspace/main.bld"},"range":{"start":{"line":1,"character":13},"end":{"line":1,"character":13}}}}"#,
     );
     assert_invalid_params(response, "params.context is required");
 }
@@ -237,7 +237,7 @@ git commit -m "feat: decode raw lsp params through typed helpers"
 Run:
 
 ```powershell
-cargo test --manifest-path compiler\Cargo.toml --bin quantac lsp_dispatch --quiet
+cargo test --manifest-path compiler\Cargo.toml --bin buildc lsp_dispatch --quiet
 cargo test --manifest-path compiler\Cargo.toml --test cli lsp_dispatch -- --nocapture
 cargo run --manifest-path compiler\Cargo.toml -- corpus verify --root semantic-corpus
 ```
@@ -260,7 +260,7 @@ Run:
 
 ```powershell
 git diff --check
-cargo test --manifest-path compiler\Cargo.toml --bin quantac lsp_dispatch --quiet
+cargo test --manifest-path compiler\Cargo.toml --bin buildc lsp_dispatch --quiet
 git add compiler\src\lsp\STATUS.md
 git diff --cached --check
 git commit -m "docs: record typed raw lsp param decoding"
@@ -277,7 +277,7 @@ Run:
 ```powershell
 cargo fmt --manifest-path compiler\Cargo.toml -- --check
 cargo test --manifest-path compiler\Cargo.toml --lib raw_dispatch --quiet
-cargo test --manifest-path compiler\Cargo.toml --bin quantac lsp_dispatch --quiet
+cargo test --manifest-path compiler\Cargo.toml --bin buildc lsp_dispatch --quiet
 cargo test --manifest-path compiler\Cargo.toml --test cli lsp_dispatch -- --nocapture
 cargo run --manifest-path compiler\Cargo.toml -- corpus verify --root semantic-corpus
 git check-ignore .env .env.local .env.production

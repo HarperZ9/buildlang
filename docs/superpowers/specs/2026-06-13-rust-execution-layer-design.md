@@ -6,7 +6,7 @@ Status: Implemented for first smoke slice
 ## Purpose
 
 Move the Rust backend from compile-only validation to a first executable
-behavior layer. The backend already lowers selected QuantaLang programs to Rust
+behavior layer. The backend already lowers selected BuildLang programs to Rust
 source and checks them with `rustc --emit=metadata`; this slice adds a narrower
 gate that compiles generated Rust to an executable, runs it, and verifies stdout.
 
@@ -28,7 +28,7 @@ The executable layer is intentionally small:
 ## Architecture
 
 The helper lives in the Rust backend test module beside
-`assert_rustc_metadata_ok`. It reuses `compile_quanta_to_rust` so the tested path
+`assert_rustc_metadata_ok`. It reuses `compile_build_to_rust` so the tested path
 stays parser -> type checker -> MIR -> Rust backend -> rustc -> executable.
 
 The generated executable is not installed or reused. Each test creates a

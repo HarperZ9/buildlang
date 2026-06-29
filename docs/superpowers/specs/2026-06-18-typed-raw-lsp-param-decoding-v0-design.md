@@ -4,7 +4,7 @@ Date: 2026-06-18
 
 ## Context
 
-`quantac lsp` now dispatches a representative raw JSON-RPC request sequence and
+`buildc lsp` now dispatches a representative raw JSON-RPC request sequence and
 the semantic corpus verifies that path through
 `semantic-corpus/receipts/lsp-dispatch-2026-06-18.json`. The remaining typed
 coverage gap is narrower: `compiler/src/lsp/server.rs` still converts request
@@ -133,7 +133,7 @@ Implementation verification should include:
 ```powershell
 cargo fmt --manifest-path compiler\Cargo.toml -- --check
 cargo test --manifest-path compiler\Cargo.toml --lib raw_dispatch --quiet
-cargo test --manifest-path compiler\Cargo.toml --bin quantac lsp_dispatch --quiet
+cargo test --manifest-path compiler\Cargo.toml --bin buildc lsp_dispatch --quiet
 cargo test --manifest-path compiler\Cargo.toml --test cli lsp_dispatch -- --nocapture
 cargo run --manifest-path compiler\Cargo.toml -- corpus verify --root semantic-corpus
 git diff --check

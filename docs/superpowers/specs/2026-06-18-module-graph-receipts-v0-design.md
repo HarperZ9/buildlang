@@ -5,7 +5,7 @@ Status: Approved direction; written spec for implementation
 
 ## Purpose
 
-QuantaLang now has checked evidence for execution, MIR representation, memory
+BuildLang now has checked evidence for execution, MIR representation, memory
 layout, and source/MIR/effect symbols. The next gap is cross-file identity.
 The compiler already lets imports, `include!` files, and resolved `mod` files
 affect the input graph digest, but that digest is intentionally opaque. It
@@ -18,7 +18,7 @@ file was compiled, which additional source inputs were resolved, what role each
 input played, and which deterministic edges tie the entry program to imports,
 includes, and modules.
 
-This is an evidence layer, not a full package system. It moves QuantaLang
+This is an evidence layer, not a full package system. It moves BuildLang
 toward a native shared language surface by making file and module identity
 inspectable while leaving public API indexing, full name resolution, LSP
 navigation, and package registry semantics for later slices.
@@ -29,12 +29,12 @@ navigation, and package registry semantics for later slices.
   inputs with source digests.
 - `input_graph_digest` is path-portable and based on source role plus content
   digest, not absolute machine paths.
-- `resolve_imports_recording_inputs` records registry package `src/lib.quanta`
+- `resolve_imports_recording_inputs` records registry package `src/lib.bld`
   files for bare `use <name>;` and `// import <name>` forms.
 - `preprocess_includes_recording_inputs` records files used by source
   `include!("...")` preprocessing.
 - `resolve_modules_recording_inputs` records files resolved from `mod foo;`
-  declarations, including `foo.quanta`, `foo/mod.quanta`, and stdlib fallback.
+  declarations, including `foo.bld`, `foo/mod.bld`, and stdlib fallback.
 - Existing CLI tests already exercise include, registry import, and module
   input digest behavior using temporary fixtures.
 - The canonical semantic corpus currently contains eight single-file programs.
@@ -61,8 +61,8 @@ will later feed package graphs, LSP navigation, and incremental compilation.
 
 ### Approach C: Add a Dedicated Module Graph Receipt
 
-Create `quantalang-module-graph-receipt/v0`, reference it from the substrate
-receipt, and verify it in `quantac corpus verify`.
+Create `buildlang-module-graph-receipt/v0`, reference it from the substrate
+receipt, and verify it in `buildc corpus verify`.
 
 Tradeoff: one more receipt and verifier path. Benefit: the receipt has one
 clear responsibility and can later grow into package and editor graph evidence
@@ -77,7 +77,7 @@ The first implementation adds:
 - `semantic-corpus/receipts/module-graph-2026-06-18.json`
 - a focused `compiler/src/module_graph.rs` receipt builder and verifier
 - a `module_surface` block in the substrate receipt
-- `quantac corpus verify` integration
+- `buildc corpus verify` integration
 - targeted CLI tests for successful verification and receipt drift
 
 The builder should reuse the existing lowering path where practical so module
@@ -97,26 +97,26 @@ The schema is:
 
 ```json
 {
-  "schema": "quantalang-module-graph-receipt/v0",
+  "schema": "buildlang-module-graph-receipt/v0",
   "receipt_id": "module-graph-semantic-corpus-2026-06-18",
   "created_at": "2026-06-18",
-  "compiler": "quantac",
-  "language": "quantalang",
+  "compiler": "buildc",
+  "language": "buildlang",
   "source_set": {
     "kind": "semantic-corpus",
     "manifest": "manifest.json",
     "program_count": 8
   },
   "module_model": {
-    "resolver": "quantac source input resolver",
+    "resolver": "buildc source input resolver",
     "input_roles": ["entry", "include", "import", "module"],
-    "digest_anchor": "quantalang-check-receipt/v1 input_graph_digest",
+    "digest_anchor": "buildlang-check-receipt/v1 input_graph_digest",
     "symbol_anchor": "receipts/symbol-graph-2026-06-18.json"
   },
   "programs": [
     {
       "id": "scalar_branch",
-      "path": "programs/scalar_branch.quanta",
+      "path": "programs/scalar_branch.bld",
       "source_digest": {
         "algorithm": "sha256",
         "hex": "64 lowercase hex characters"
@@ -131,9 +131,9 @@ The schema is:
       },
       "inputs": [
         {
-          "id": "input:entry:programs/scalar_branch.quanta",
+          "id": "input:entry:programs/scalar_branch.bld",
           "role": "entry",
-          "path": "programs/scalar_branch.quanta",
+          "path": "programs/scalar_branch.bld",
           "source_digest": {
             "algorithm": "sha256",
             "hex": "64 lowercase hex characters"
@@ -144,7 +144,7 @@ The schema is:
         {
           "kind": "program_entry",
           "from": "program:scalar_branch",
-          "to": "input:entry:programs/scalar_branch.quanta"
+          "to": "input:entry:programs/scalar_branch.bld"
         }
       ],
       "known_gaps": [
@@ -176,7 +176,7 @@ Inputs:
 
 - Every program has one `entry` input matching the manifest path.
 - `include` inputs represent files pulled in by `include!("...")`.
-- `import` inputs represent registry package `src/lib.quanta` files resolved
+- `import` inputs represent registry package `src/lib.bld` files resolved
   by bare `use <name>;` or `// import <name>`.
 - `module` inputs represent files resolved by `mod foo;`.
 - Input paths in the canonical semantic corpus receipt must be relative to the
@@ -199,9 +199,9 @@ instead of only the digest ledger.
 
 The verifier should reject a module graph receipt when:
 
-- `schema` is not `quantalang-module-graph-receipt/v0`.
-- `compiler` is not `quantac`.
-- `language` is not `quantalang`.
+- `schema` is not `buildlang-module-graph-receipt/v0`.
+- `compiler` is not `buildc`.
+- `language` is not `buildlang`.
 - `source_set.kind` is not `semantic-corpus`.
 - `source_set.manifest` is not `manifest.json`.
 - `source_set.program_count` differs from the manifest.
@@ -231,8 +231,8 @@ The substrate receipt should add:
 
 ```json
 "module_surface": {
-  "resolver": "quantac source input resolver",
-  "digest_anchor": "quantalang-check-receipt/v1 input_graph_digest",
+  "resolver": "buildc source input resolver",
+  "digest_anchor": "buildlang-check-receipt/v1 input_graph_digest",
   "module_receipt": "receipts/module-graph-2026-06-18.json",
   "known_gaps": [
     "cross-package public API index",
@@ -249,7 +249,7 @@ to the canonical module graph receipt under `semantic-corpus/receipts/`.
 
 Implementation should be test-first:
 
-- CLI test: valid module graph receipt passes and `quantac corpus verify`
+- CLI test: valid module graph receipt passes and `buildc corpus verify`
   prints `module graph receipt: ok`.
 - CLI test: wrong schema fails with an unsupported schema diagnostic.
 - CLI test: program count drift fails.
@@ -271,7 +271,7 @@ Targeted verification commands:
 cargo test --manifest-path compiler/Cargo.toml --test cli module_graph -- --nocapture
 cargo test --manifest-path compiler/Cargo.toml --test cli corpus_verify -- --nocapture
 cargo test --manifest-path compiler/Cargo.toml --test cli substrate -- --nocapture
-cargo test --manifest-path compiler/Cargo.toml --bin quantac module_graph --quiet
+cargo test --manifest-path compiler/Cargo.toml --bin buildc module_graph --quiet
 cargo fmt --manifest-path compiler/Cargo.toml -- --check
 git diff --check
 ```
@@ -293,9 +293,9 @@ git diff --check
 This design is implemented when:
 
 - `semantic-corpus/receipts/module-graph-2026-06-18.json` exists and uses
-  `quantalang-module-graph-receipt/v0`.
+  `buildlang-module-graph-receipt/v0`.
 - The substrate receipt references it through `module_surface.module_receipt`.
-- `quantac corpus verify` recomputes and validates the module graph receipt.
+- `buildc corpus verify` recomputes and validates the module graph receipt.
 - Successful corpus verification prints `module graph receipt: ok`.
 - Invalid fixtures cover schema drift, program count drift, path escape,
   digest drift, input drift, edge drift, summary drift, and substrate reference

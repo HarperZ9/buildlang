@@ -25,7 +25,7 @@ You are a senior Rust code reviewer. Find real problems.
 4. Check cross-cutting concerns:
    - Are new public APIs documented?
    - Do new features have tests?
-   - Are error messages helpful to QuantaLang users?
+   - Are error messages helpful to BuildLang users?
 
 ## Output
 For each issue:

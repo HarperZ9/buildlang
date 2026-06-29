@@ -52,24 +52,24 @@ jobs:
       - name: Build release
         working-directory: compiler
         run: cargo build --release
-      - name: Compile .quanta test programs (end-to-end proof)
+      - name: Compile .bld test programs (end-to-end proof)
         shell: bash
         run: |
-          QUANTAC="compiler/target/release/quantac"
-          if [ "$RUNNER_OS" = "Windows" ]; then QUANTAC="${QUANTAC}.exe"; fi
+          BUILDC="compiler/target/release/buildc"
+          if [ "$RUNNER_OS" = "Windows" ]; then BUILDC="${BUILDC}.exe"; fi
 
           pass=0; fail=0
-          for f in tests/programs/01_hello.quanta \
-                   tests/programs/02_variables.quanta \
-                   tests/programs/03_functions.quanta \
-                   tests/programs/06_recursion.quanta \
-                   tests/programs/08_arithmetic.quanta \
-                   tests/programs/11_structs.quanta \
-                   tests/programs/16_closures.quanta \
-                   tests/programs/27_effects_showcase.quanta \
-                   tests/programs/46_color_science.quanta \
-                   tests/programs/68_hashmap.quanta; do
-            if $QUANTAC "$f" --target c -o /dev/null 2>/dev/null; then
+          for f in tests/programs/01_hello.bld \
+                   tests/programs/02_variables.bld \
+                   tests/programs/03_functions.bld \
+                   tests/programs/06_recursion.bld \
+                   tests/programs/08_arithmetic.bld \
+                   tests/programs/11_structs.bld \
+                   tests/programs/16_closures.bld \
+                   tests/programs/27_effects_showcase.bld \
+                   tests/programs/46_color_science.bld \
+                   tests/programs/68_hashmap.bld; do
+            if $BUILDC "$f" --target c -o /dev/null 2>/dev/null; then
               echo "PASS: $(basename $f)"
               pass=$((pass + 1))
             else
@@ -83,38 +83,38 @@ jobs:
       - name: Negative tests (must be REJECTED by compiler)
         shell: bash
         run: |
-          QUANTAC="compiler/target/release/quantac"
-          if [ "$RUNNER_OS" = "Windows" ]; then QUANTAC="${QUANTAC}.exe"; fi
+          BUILDC="compiler/target/release/buildc"
+          if [ "$RUNNER_OS" = "Windows" ]; then BUILDC="${BUILDC}.exe"; fi
 
           neg_pass=0; neg_fail=0
 
           # Type mismatch
-          echo 'fn main() { let x: i32 = "hello"; }' > /tmp/neg_type.quanta
-          if ! $QUANTAC /tmp/neg_type.quanta --target c -o /dev/null 2>/dev/null; then
+          echo 'fn main() { let x: i32 = "hello"; }' > /tmp/neg_type.bld
+          if ! $BUILDC /tmp/neg_type.bld --target c -o /dev/null 2>/dev/null; then
             echo "  REJECT OK: type mismatch"; neg_pass=$((neg_pass + 1))
           else
             echo "  BUG: accepted type mismatch"; neg_fail=$((neg_fail + 1))
           fi
 
           # Undefined variable
-          echo 'fn main() { let y = x + 1; }' > /tmp/neg_undef.quanta
-          if ! $QUANTAC /tmp/neg_undef.quanta --target c -o /dev/null 2>/dev/null; then
+          echo 'fn main() { let y = x + 1; }' > /tmp/neg_undef.bld
+          if ! $BUILDC /tmp/neg_undef.bld --target c -o /dev/null 2>/dev/null; then
             echo "  REJECT OK: undefined variable"; neg_pass=$((neg_pass + 1))
           else
             echo "  BUG: accepted undefined variable"; neg_fail=$((neg_fail + 1))
           fi
 
           # Wrong arg count
-          echo 'fn add(a: i32, b: i32) -> i32 { a + b } fn main() { add(1); }' > /tmp/neg_args.quanta
-          if ! $QUANTAC /tmp/neg_args.quanta --target c -o /dev/null 2>/dev/null; then
+          echo 'fn add(a: i32, b: i32) -> i32 { a + b } fn main() { add(1); }' > /tmp/neg_args.bld
+          if ! $BUILDC /tmp/neg_args.bld --target c -o /dev/null 2>/dev/null; then
             echo "  REJECT OK: wrong arg count"; neg_pass=$((neg_pass + 1))
           else
             echo "  BUG: accepted wrong arg count"; neg_fail=$((neg_fail + 1))
           fi
 
           # Return type mismatch
-          echo 'fn get() -> i32 { "not a number" } fn main() { get(); }' > /tmp/neg_ret.quanta
-          if ! $QUANTAC /tmp/neg_ret.quanta --target c -o /dev/null 2>/dev/null; then
+          echo 'fn get() -> i32 { "not a number" } fn main() { get(); }' > /tmp/neg_ret.bld
+          if ! $BUILDC /tmp/neg_ret.bld --target c -o /dev/null 2>/dev/null; then
             echo "  REJECT OK: return type mismatch"; neg_pass=$((neg_pass + 1))
           else
             echo "  BUG: accepted return type mismatch"; neg_fail=$((neg_fail + 1))
@@ -127,11 +127,11 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          QUANTAC="compiler/target/release/quantac"
+          BUILDC="compiler/target/release/buildc"
 
-          # Compile color_test.quanta → C → binary → run
-          echo "=== color_test.quanta: full pipeline ==="
-          $QUANTAC tests/programs/color_test.quanta --target c -o /tmp/color_test.c
+          # Compile color_test.bld → C → binary → run
+          echo "=== color_test.bld: full pipeline ==="
+          $BUILDC tests/programs/color_test.bld --target c -o /tmp/color_test.c
           gcc -O2 -o /tmp/color_test /tmp/color_test.c -lm
           /tmp/color_test
           if [ $? -ne 0 ]; then
@@ -141,8 +141,8 @@ jobs:
           echo "=== Self-verifying test PASSED ==="
 
           # Cross-module import test: compile + run
-          echo "=== cross_module_test.quanta: mod geometry import ==="
-          $QUANTAC tests/programs/cross_module_test.quanta --target c -o /tmp/cross_module_test.c
+          echo "=== cross_module_test.bld: mod geometry import ==="
+          $BUILDC tests/programs/cross_module_test.bld --target c -o /tmp/cross_module_test.c
           gcc -O2 -o /tmp/cross_module_test /tmp/cross_module_test.c -lm
           /tmp/cross_module_test
           if [ $? -ne 0 ]; then

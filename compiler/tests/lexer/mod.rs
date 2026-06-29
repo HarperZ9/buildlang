@@ -1,10 +1,10 @@
 // ===============================================================================
-// QUANTALANG LEXER - INTEGRATION TESTS
+// BUILDLANG LEXER - INTEGRATION TESTS
 // ===============================================================================
 // Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
 // ===============================================================================
 
-use quantalang::lexer::{
+use buildlang::lexer::{
     tokenize, tokenize_file, Delimiter, IntBase, Keyword, LiteralKind, SourceFile, Token,
     TokenKind, Lexer, LexerConfig,
 };
@@ -533,7 +533,7 @@ fn test_boolean_keywords() {
 }
 
 #[test]
-fn test_quanta_specific_keywords() {
+fn test_build_specific_keywords() {
     expect_single_token("ai", TokenKind::Keyword(Keyword::AI));
     expect_single_token("neural", TokenKind::Keyword(Keyword::Neural));
     expect_single_token("infer", TokenKind::Keyword(Keyword::Infer));
