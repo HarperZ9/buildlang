@@ -146,6 +146,9 @@ impl CBackend {
             // Aggregate element (a user struct, vector type, etc.): use a
             // monomorphized, element-sized wrapper keyed by the struct name.
             MirType::Struct(n) => n.to_string(),
+            // Nested collection element: keyed by its C handle type name.
+            MirType::Vec(_) => "BuildVecHandle".to_string(),
+            MirType::Map(_, _) => "BuildMapHandle".to_string(),
             _ => "i32".to_string(),
         }
     }
@@ -154,6 +157,7 @@ impl CBackend {
     /// (rather than one of the built-in i32/i64/f64/str handle families).
     fn vec_elem_needs_sized_wrapper(elem: &MirType) -> bool {
         matches!(elem, MirType::Struct(n) if n.as_ref() != "BuildString")
+            || matches!(elem, MirType::Vec(_) | MirType::Map(_, _))
     }
 
     /// The directly-named callee of a `Call`, if any.

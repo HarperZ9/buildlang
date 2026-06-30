@@ -10,6 +10,15 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Stdlib (nested `Vec<Vec<_>>` / `Vec<HashMap<_,_>>`): a vector whose element is
+  itself a collection now works. `grid.push(row)` dispatched to
+  `build_hvec_push_i32`, passing a `BuildVecHandle` where an `int32_t` was expected
+  (C2440). The Vec element-suffix logic (`hvec_elem_suffix`,
+  `vec_elem_needs_sized_wrapper`, and the lowering's method `type_suffix`) now
+  treats a `Vec`/`Map` element as an aggregate keyed by its handle type
+  (`BuildVecHandle`/`BuildMapHandle`), so the monomorphized element-sized wrappers
+  are generated and used. Verified end-to-end under MSVC: `Vec<Vec<i32>>` push +
+  nested index reads `2`. Covered by `nested_vec_of_vec_uses_handle_element_wrappers`.
 - Codegen (`for c in s.chars()`): iterating a string now works. `chars()`/`bytes()`
   are identity ops returning the BuildString, and `for` over a BuildString fell
   through to the no-op loop (zero iterations, so the body never ran - silently
