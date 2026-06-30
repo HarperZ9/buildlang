@@ -655,8 +655,11 @@ int r = buildlang_square(7);  // 49
 
 Ordinary BuildLang functions stay internal (`static`) so a whole-program build
 keeps a clean symbol table; only functions you explicitly mark `extern "C"` are
-exported. Together with header-backed extern blocks, this closes the loop:
-BuildLang can call into any C-ABI library and be called by any C-ABI consumer.
+exported. `buildc build --emit header` writes a `main.h` declaring those
+exports (with an include guard and a `#ifdef __cplusplus extern "C"` guard), so
+C and C++ consumers can `#include` it instead of hand-writing prototypes.
+Together with header-backed extern blocks, this closes the loop: BuildLang can
+call into any C-ABI library and be called by any C-ABI consumer.
 
 ## Status
 

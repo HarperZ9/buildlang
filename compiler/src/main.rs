@@ -161,7 +161,8 @@ enum Commands {
         #[arg(long)]
         release: bool,
 
-        /// Emit type: 'c' for C source only, 'exe' for executable (default)
+        /// Emit type: 'c' for C source only, 'header' for a C export header,
+        /// 'exe' for executable (default)
         #[arg(long, default_value = "exe")]
         emit: String,
 
@@ -4983,6 +4984,7 @@ fn cmd_build(
     }
 
     let emit_c_only = emit == "c";
+    let emit_header = emit == "header";
 
     // Resolve the code generation target.
     let target = parse_codegen_target(target_str).map_err(|err| {
@@ -5028,7 +5030,14 @@ fn cmd_build(
     })?;
 
     let total_steps =
-        if emit_c_only || use_llvm || use_native || use_wasm || use_spirv || use_shader || use_rust
+        if emit_c_only
+            || emit_header
+            || use_llvm
+            || use_native
+            || use_wasm
+            || use_spirv
+            || use_shader
+            || use_rust
         {
             4
         } else {
@@ -5092,6 +5101,20 @@ fn cmd_build(
         eprintln!("Failed to create output directory: {}", e);
         1
     })?;
+
+    // --emit=header: write a C header declaring the `extern "C"` exports so
+    // other languages can call into the compiled BuildLang code.
+    if emit_header {
+        let header = codegen.c_export_header().unwrap_or_default();
+        let header_file = output_dir.join("main.h");
+        std::fs::write(&header_file, header.as_bytes()).map_err(|e| {
+            eprintln!("Failed to write header file: {}", e);
+            1
+        })?;
+        println!("\nHeader generated!");
+        println!("Output: {}", header_file.display());
+        return Ok(());
+    }
 
     if use_spirv {
         // SPIR-V target: write .spv binary
