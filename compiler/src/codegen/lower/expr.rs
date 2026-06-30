@@ -3104,6 +3104,14 @@ impl<'ctx> MirLowerer<'ctx> {
                 ),
                 "len" => (Some("build_hmap_len_str_f64".to_string()), MirType::usize()),
                 "remove" => (Some("build_hmap_remove_str_f64".to_string()), MirType::Void),
+                // keys() -> Vec<String> (a real Vec handle, so `for k in m.keys()`,
+                // indexing, and .len() all work). values() is deferred: it needs
+                // the str->f64 map's insert key-coercion fix first, and the value
+                // type threading to read non-f64 values correctly.
+                "keys" => (
+                    Some("build_hmap_keys_str_f64".to_string()),
+                    MirType::Vec(Box::new(MirType::Struct(Arc::from("BuildString")))),
+                ),
                 "is_empty" => {
                     let builder = self
                         .current_fn

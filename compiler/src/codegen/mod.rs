@@ -1292,6 +1292,25 @@ mod tests {
     }
 
     #[test]
+    fn hashmap_keys_returns_a_string_vec() {
+        // `m.keys()` must return a Vec<String> handle (so iteration / .len() work),
+        // via the runtime key-collection function - not an undefined `keys` call.
+        let code = source_to_c(
+            "fn main() { let mut m: HashMap<String, i32> = HashMap::new(); \
+             m.insert(String::from(\"a\"), 1); \
+             let _n = m.keys().len(); }",
+        );
+        assert!(
+            code.contains("build_hmap_keys_str_f64("),
+            "m.keys() must call the runtime key-collection function:\n{code}"
+        );
+        assert!(
+            !code.contains("= keys(") && !code.contains(" keys("),
+            "keys() must not lower to an undefined call:\n{code}"
+        );
+    }
+
+    #[test]
     fn vec_contains_dispatches_to_runtime_scan() {
         // `v.contains(x)` must dispatch to the element-typed runtime scan, not an
         // undefined `contains` call.
