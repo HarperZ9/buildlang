@@ -1151,6 +1151,20 @@ impl<'ctx> MirLowerer<'ctx> {
                 };
                 builder.binary_op(local, bin_op, values::local(local), val);
             }
+        } else if let ExprKind::Ident(ident) = &target.kind {
+            // Deref and field assignments were handled above, so a bare-identifier
+            // target that resolves to no local is a module global / mutable static
+            // (anything else would have been rejected by the type checker). The C
+            // backend has no global-store form yet, so emitting nothing here would
+            // SILENTLY DROP the write (data loss). Fail closed with a clear error
+            // instead of miscompiling. Full global-store support is tracked
+            // separately (it needs a cross-backend MIR store form).
+            return Err(CodegenError::Unsupported(format!(
+                "assignment to `{}`: storing to a module global/static is not yet \
+                 implemented in the C backend (the write would be silently lost). \
+                 Use a local or pass a mutable reference.",
+                ident.name
+            )));
         }
 
         Ok(values::unit())

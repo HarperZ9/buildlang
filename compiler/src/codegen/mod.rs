@@ -957,6 +957,26 @@ mod tests {
     }
 
     #[test]
+    fn assignment_to_global_fails_closed_not_silent() {
+        // Storing to a module global/static silently dropped the write (data
+        // loss). Until real global-store support lands it must fail loudly.
+        let src = "static mut SINK: i32 = 0;\nfn set() { SINK = 5; }";
+        let module = crate::parser::parse_source("test.bld", src).expect("source should parse");
+        let ctx = TypeContext::new();
+        let mut codegen = CodeGenerator::new(&ctx, Target::C);
+        let result = codegen.generate(&module);
+        assert!(
+            result.is_err(),
+            "assignment to a module global must not silently succeed"
+        );
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("SINK") && msg.contains("global"),
+            "the error should name the global and explain the limitation: {msg}"
+        );
+    }
+
+    #[test]
     fn vec_new_dispatches_to_element_typed_constructor() {
         // `Vec::new()` must lower to the element-typed runtime constructor
         // (build_hvec_new_str for Vec<String>), not an undefined `Vec_new`.
