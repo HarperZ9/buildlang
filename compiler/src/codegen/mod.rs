@@ -1091,6 +1091,33 @@ mod tests {
     }
 
     #[test]
+    fn try_operator_unwraps_result_ok_and_propagates_err() {
+        // `let v = parse(s)?;` must unwrap the Ok payload (so `v` is the inner
+        // i32, usable in `v * 2`) and early-return the whole Result on Err.
+        // Previously `?` was a no-op for runtime Result: `v` stayed the whole
+        // Result struct and `v * 2` multiplied a struct (a C error).
+        let code = source_to_c(
+            "fn parse(s: i32) -> Result<i32, String> { \
+               if s < 0 { return Err(String::from(\"neg\")); } \
+               return Ok(s); \
+             }\n\
+             fn doubled(s: i32) -> Result<i32, String> { \
+               let v = parse(s)?; \
+               return Ok(v * 2); \
+             }\n\
+             fn main() { let _r = doubled(5); }",
+        );
+        // `v` must be the unwrapped i32 payload, not the whole Result struct.
+        // Before the fix `?` was a no-op and `v` was declared `Result v;`, so
+        // `v * 2` multiplied a struct.
+        assert!(
+            code.contains("int32_t v") && !code.contains("Result v"),
+            "the ? operator must bind the unwrapped Ok payload (int32_t v), \
+             not the whole Result:\n{code}"
+        );
+    }
+
+    #[test]
     fn option_string_payload_is_boxed_through_the_pointer_slot() {
         // A 24-byte BuildString does not fit the 8-byte union; `Some(s)` must
         // box it (malloc + store the pointer in .value.p) and the match must
