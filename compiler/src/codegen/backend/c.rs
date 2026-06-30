@@ -654,6 +654,7 @@ impl CBackend {
             MirStmtKind::FieldAssign { base, value, .. } => {
                 *base == x || Self::rvalue_mentions(value, x)
             }
+            MirStmtKind::GlobalStore { value, .. } => Self::rvalue_mentions(value, x),
             MirStmtKind::StorageLive(_) | MirStmtKind::StorageDead(_) | MirStmtKind::Nop => false,
         }
     }
@@ -842,6 +843,13 @@ impl CBackend {
                             return true;
                         }
                     }
+                    // Storing `id` (or a value derived from it) into a module
+                    // global lets it outlive the function: a hard escape.
+                    MirStmtKind::GlobalStore { value, .. } => {
+                        if Self::rvalue_mentions(value, id) {
+                            return true;
+                        }
+                    }
                     MirStmtKind::StorageLive(_)
                     | MirStmtKind::StorageDead(_)
                     | MirStmtKind::Nop => {}
@@ -878,6 +886,11 @@ impl CBackend {
                     }
                     MirStmtKind::FieldAssign { base, value, .. } => {
                         if *base == t || Self::rvalue_mentions(value, t) {
+                            return true;
+                        }
+                    }
+                    MirStmtKind::GlobalStore { value, .. } => {
+                        if Self::rvalue_mentions(value, t) {
                             return true;
                         }
                     }
@@ -2680,6 +2693,13 @@ impl CBackend {
                 self.write_indent();
                 let rvalue = self.rvalue_to_c(value, locals)?;
                 write!(self.output, "{}.{} = {};\n", base_name, field_name, rvalue).unwrap();
+            }
+            MirStmtKind::GlobalStore { name, value } => {
+                // `GLOBAL = value;` - the C global identifier matches the
+                // definition and the read path (value_to_c on MirValue::Global).
+                self.write_indent();
+                let rvalue = self.rvalue_to_c(value, locals)?;
+                write!(self.output, "{} = {};\n", name, rvalue).unwrap();
             }
             MirStmtKind::StorageLive(_) | MirStmtKind::StorageDead(_) => {
                 // No-op in C
