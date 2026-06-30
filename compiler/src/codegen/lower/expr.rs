@@ -3602,6 +3602,29 @@ impl<'ctx> MirLowerer<'ctx> {
         let scrutinee_val = self.lower_expr(scrutinee)?;
         let scrutinee_ty = self.type_of_value(&scrutinee_val);
 
+        // If the scrutinee is a pointer to an enum (e.g. `match self` in a
+        // `&self` enum method), dereference it to the enum value so the enum-tag
+        // match path applies instead of an invalid struct/pointer `==`.
+        let (scrutinee_val, scrutinee_ty) = match &scrutinee_ty {
+            MirType::Ptr(inner) => match inner.as_ref() {
+                MirType::Struct(name) if self.is_enum_type(name) => {
+                    let pointee = (**inner).clone();
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let derefed = builder.create_local(pointee.clone());
+                    builder.assign(
+                        derefed,
+                        MirRValue::Deref {
+                            ptr: scrutinee_val,
+                            pointee_ty: pointee.clone(),
+                        },
+                    );
+                    (values::local(derefed), pointee)
+                }
+                _ => (scrutinee_val, scrutinee_ty),
+            },
+            _ => (scrutinee_val, scrutinee_ty),
+        };
+
         // Runtime Result match: `match res { Ok(x) => ..., Err(e) => ... }`
         // The runtime Result struct has `is_ok: bool`, an `ok` union, and an
         // `err: BuildString`. The Ok payload type is threaded from the binding
