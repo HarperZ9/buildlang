@@ -7,12 +7,13 @@
 
 > The Effects Language: a Rust-built compiler for typed effects, systems experiments, and shader-oriented code generation.
 
-[Build ecosystem](https://github.com/HarperZ9/quanta-universe) | [buildlang](https://github.com/HarperZ9/quantalang) | [build-universe](https://github.com/HarperZ9/quanta-universe) | [VS Code extension](https://github.com/HarperZ9/quantalang-vscode) | [grammar](https://github.com/HarperZ9/quantalang-tmLanguage)
+[Build ecosystem](https://github.com/HarperZ9/quanta-universe) | [buildlang](https://github.com/HarperZ9/buildlang) | [build-universe](https://github.com/HarperZ9/quanta-universe) | [VS Code extension](https://github.com/HarperZ9/buildlang-vscode) | [grammar](https://github.com/HarperZ9/buildlang-tmLanguage)
 
 [![license: fair-source](https://img.shields.io/badge/license-fair--source-blue.svg)](LICENSE)
 ![rust](https://img.shields.io/badge/rust-edition_2021-orange.svg)
-![version](https://img.shields.io/badge/version-1.0.0-informational.svg)
-[![CI](https://github.com/HarperZ9/quantalang/actions/workflows/ci.yml/badge.svg)](https://github.com/HarperZ9/quantalang/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/badge/crates.io-buildlang-blue.svg)](https://crates.io/crates/buildlang)
+![version](https://img.shields.io/badge/version-1.0.x-informational.svg)
+[![CI](https://github.com/HarperZ9/buildlang/actions/workflows/ci.yml/badge.svg)](https://github.com/HarperZ9/buildlang/actions/workflows/ci.yml)
 [![part of: Build ecosystem](https://img.shields.io/badge/part_of-Build_ecosystem-00b3a4.svg)](https://github.com/HarperZ9/quanta-universe)
 
 **The Effects Language** - a Rust-built compiler for typed effects, systems
@@ -31,7 +32,7 @@ experimental research surfaces.
 - **Type system:** Hindley-Milner inference with typed algebraic effects, plus an **experimental** opt-in `#[linear]` attribute toward **no-cloning** — a `#[linear]` struct/enum value should be moved/consumed at most once (the foundation shared by quantum qubits, on-chain no-double-spend, and resource handles). It conservatively rejects a large, regression-tested set of compositional escapes, but it is **not yet fully sound** (a few known-open classes remain; full soundness needs an affine/borrow checker on MIR). Borrows do not consume; ordinary types keep copy-like reuse. Honest scope, what's enforced, and what's open: [docs/LINEAR-TYPES.md](docs/LINEAR-TYPES.md); also `examples/linear/`, [CHANGELOG.md](CHANGELOG.md), `docs/QUANTUM-HOST.md`.
 - **Operator surface:** the `buildc` CLI exposes `lex`, `parse`, `check` (with `--receipt` / `--policy`), `build`, `run`, `test`, `repl`, `fmt`, `pkg`, `watch`, `doctor`, `corpus`, `policy`, `receipt`, and an `lsp` subcommand that starts a bundled LSP server (completion, hover, diagnostics, go-to-definition, semantic tokens). The CLI and the LSP server are the two integration surfaces; accountability receipts (`buildlang-receipt-verification/v1`) carry SHA-256 source digests for re-checkable codegen.
 - **Umbrella:** part of the operator's Build ecosystem alongside `build-universe`, the VS Code extension, and the TextMate grammar; standalone and not dependent on any single host.
-- **Repository naming:** public product names are BuildLang, `buildc`, and `.bld`. The GitHub repository still uses its legacy slug until the public repo rename is finished.
+- **Repository naming:** public product names are BuildLang, `buildc`, and `.bld`; the crate is [`buildlang`](https://crates.io/crates/buildlang) on crates.io and the repo is [`HarperZ9/buildlang`](https://github.com/HarperZ9/buildlang) on GitHub. The former `quantalang` crate is deprecated and points here.
 - **Housekeeping:** ground-truth release evidence lives in `STATUS.md`; [CHANGELOG.md](CHANGELOG.md) tracks the current presentation pass under Unreleased.
 
 ## Install
