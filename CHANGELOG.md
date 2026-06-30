@@ -10,6 +10,17 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Stdlib (sum-type method-call scrutinees): `match recv.method() { ... }` and
+  `recv.method()?` now thread the `Result`/`Option` payload type from the
+  method's signature, so a method returning `Result<f64, _>` / `Option<f64>` is
+  read from the correct union slot. Previously only free-function calls and
+  let-annotations were threaded; a method-call scrutinee defaulted to `i32` and
+  read the wrong slot (silent garbage for non-`i32` payloads). The collection
+  pass now records each impl method's payload types keyed by its mangled
+  `Type_method` name, and the match-site resolver handles `MethodCall` by
+  resolving the receiver type to that name. Verified end-to-end under MSVC: a
+  method returning `Result<f64, String>` matched directly prints `ok 2.5`.
+  Covered by `match_on_method_call_threads_the_result_payload_type`.
 - Stdlib (`Result<T, E>` arbitrary Err): the `Err` payload is no longer limited
   to `String`. The runtime `Result` struct's `err` field is now a typed union
   (`{ int64_t err_i; double err_f; void* err_p; }`) symmetric to `ok`, so

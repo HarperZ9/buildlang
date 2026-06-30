@@ -1059,6 +1059,37 @@ mod tests {
     }
 
     #[test]
+    fn match_on_method_call_threads_the_result_payload_type() {
+        // `match p.run(1) { Ok(x) => ... }` where run returns Result<f64, _>
+        // must read the float slot. Method-call scrutinees were not threaded, so
+        // the match defaulted to i32 and read ok_i (the double bits as an int).
+        let code = source_to_c(
+            "struct Parser { base: i32 }\n\
+             impl Parser { \
+               fn run(self: &Parser, n: i32) -> Result<f64, String> { \
+                 if n < 0 { return Err(String::from(\"neg\")); } \
+                 return Ok(2.5); \
+               } \
+             }\n\
+             fn main() { \
+               let p = Parser { base: 0 }; \
+               match p.run(1) { \
+                 Ok(x) => { let _a = x; } \
+                 Err(e) => { let _b = e; } \
+               } \
+             }",
+        );
+        // `run` constructs into ok_f; with threading the match also reads ok_f,
+        // so ok_i never appears. Without it the match read the wrong slot
+        // (`(int32_t)…ok.ok_i`), reinterpreting the double bits.
+        assert!(
+            code.contains(".ok.ok_f") && !code.contains(".ok.ok_i"),
+            "the match on a method call returning Result<f64,_> must read the \
+             float ok slot, not the i32 slot:\n{code}"
+        );
+    }
+
+    #[test]
     fn result_supports_a_non_string_err_payload() {
         // `Result<i32, i32>` must carry an i32 Err in a typed union slot, not the
         // hardcoded `BuildString err` field (which made `r.err = 404` assign an
