@@ -146,6 +146,8 @@ pub(crate) enum IterStep<'a> {
     Enumerate,
     /// `.cloned()` - identity (no-op for Copy types).
     Cloned,
+    /// `.rev()` - iterate the source in reverse order.
+    Rev,
 }
 
 /// Terminal operation of an iterator chain.
