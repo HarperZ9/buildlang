@@ -100,6 +100,33 @@ pub struct MirLowerer<'ctx> {
     /// and from Some(value) construction. Used by lower_runtime_option_match
     /// to bind pattern variables with the correct type instead of i32.
     pub(crate) option_inner_types: HashMap<LocalId, MirType>,
+    /// Tracks the Ok payload type T for locals holding runtime Result<T, E> values.
+    /// Populated from let-binding type annotations (`let r: Result<i32, String> = ...`).
+    /// Used by lower_runtime_result_match to read the Ok union slot with the
+    /// correct type instead of defaulting to i32 (which would silently mis-read
+    /// f64/pointer Ok payloads).
+    pub(crate) result_ok_types: HashMap<LocalId, MirType>,
+    /// Tracks the Err payload type E for locals holding runtime Result<T, E>.
+    /// Populated from let-binding annotations. Used by lower_runtime_result_match
+    /// to read the Err union slot with the correct type. Defaults to BuildString
+    /// (the common String-error case) when absent.
+    pub(crate) result_err_types: HashMap<LocalId, MirType>,
+    /// Maps a function name to the Ok payload type of its `Result<Ok, Err>`
+    /// return type, captured during the collection pass. Lets a `match call() {
+    /// Ok(x) => ... }` on a direct call recover the Ok type even with no
+    /// intervening let-binding annotation. Keyed by the declared (unmangled)
+    /// function name.
+    pub(crate) fn_result_ok_types: HashMap<Arc<str>, MirType>,
+    /// Maps a function name to the Err payload type E of its `Result<Ok, Err>`
+    /// return, captured during the collection pass. Lets a direct-call match
+    /// bind the Err arm with the right type. Keyed by the declared name.
+    pub(crate) fn_result_err_types: HashMap<Arc<str>, MirType>,
+    /// Maps a function name to the inner payload type T of its `Option<T>`
+    /// return type, captured during the collection pass. Lets a `match call() {
+    /// Some(x) => ... }` on a direct call read the correct union slot even with
+    /// no intervening let annotation (symmetric to fn_result_ok_types). Keyed by
+    /// the declared (unmangled) function name.
+    pub(crate) fn_option_inner_types: HashMap<Arc<str>, MirType>,
     /// Const name -> evaluated literal value, collected in a pre-pass so
     /// that const identifiers used as array lengths (`[T; MAX_DIMS]`) resolve.
     pub(crate) const_values: HashMap<Arc<str>, MirConst>,
@@ -113,6 +140,8 @@ pub struct MirLowerer<'ctx> {
 pub(crate) enum IterStep<'a> {
     /// `.map(|params| body)` - transform each element.
     Map { closure: &'a ast::Expr },
+    /// `.filter(|x| pred)` - keep only elements for which the predicate holds.
+    Filter { closure: &'a ast::Expr },
     /// `.enumerate()` - prepend an index to each element.
     Enumerate,
     /// `.cloned()` - identity (no-op for Copy types).
@@ -128,6 +157,16 @@ pub(crate) enum IterTerminal<'a> {
         init: &'a ast::Expr,
         closure: &'a ast::Expr,
     }, // fields accessible via match pattern
+    /// `.sum()` - add all elements, starting from a zero accumulator.
+    Sum,
+    /// `.count()` - count elements, starting from zero.
+    Count,
+    /// `.product()` - multiply all elements, starting from one.
+    Product,
+    /// `.any(|x| pred)` - true if the predicate holds for any element.
+    Any { closure: &'a ast::Expr },
+    /// `.all(|x| pred)` - true if the predicate holds for every element.
+    All { closure: &'a ast::Expr },
 }
 
 /// A fully parsed iterator chain: `source.iter().<steps>.<terminal>`.
@@ -170,6 +209,11 @@ impl<'ctx> MirLowerer<'ctx> {
             tuple_type_defs: HashSet::new(),
             expected_type: None,
             option_inner_types: HashMap::new(),
+            result_ok_types: HashMap::new(),
+            result_err_types: HashMap::new(),
+            fn_result_ok_types: HashMap::new(),
+            fn_result_err_types: HashMap::new(),
+            fn_option_inner_types: HashMap::new(),
             const_values: HashMap::new(),
         }
     }
@@ -203,6 +247,11 @@ impl<'ctx> MirLowerer<'ctx> {
             tuple_type_defs: HashSet::new(),
             expected_type: None,
             option_inner_types: HashMap::new(),
+            result_ok_types: HashMap::new(),
+            result_err_types: HashMap::new(),
+            fn_result_ok_types: HashMap::new(),
+            fn_result_err_types: HashMap::new(),
+            fn_option_inner_types: HashMap::new(),
             const_values: HashMap::new(),
         }
     }
@@ -469,16 +518,19 @@ impl<'ctx> MirLowerer<'ctx> {
 
                 let mut sig = MirFnSig::new(params, ret);
                 sig.calling_conv = CallingConv::C;
-                sig.is_variadic = f.sig.params.iter().any(|_| false); // checked below
-
-                // Check for variadic: if the last token in the AST param
-                // list is `...` we won't see it as a Param; instead we rely
-                // on the function signature's abi hint.  For now, detect
-                // common variadic C functions by name.
-                // TODO: Add proper variadic parsing support.
+                // Carry the parsed `...` variadic marker (e.g. `printf`) so the
+                // C backend emits a trailing `, ...` in the declaration.
+                sig.is_variadic = f.sig.is_variadic;
 
                 let mut func = MirFunction::declaration(f.name.name.clone(), sig);
                 func.is_public = true;
+                // Carry the extern block's `header "..."` clause onto each
+                // declaration so the C backend can emit the right `#include`
+                // and skip synthesizing a prototype for it.
+                func.link_header = eb.header.as_deref().map(Arc::from);
+                // Carry the `link "..."` clause so the build driver can pass
+                // the library to the C compiler.
+                func.link_lib = eb.link.as_deref().map(Arc::from);
 
                 // Set parameter names on the declaration so the C backend can
                 // emit readable prototypes.
@@ -497,6 +549,23 @@ impl<'ctx> MirLowerer<'ctx> {
                 }
 
                 self.module.add_function(func);
+            } else if let ast::ForeignItemKind::Static {
+                name,
+                mutability,
+                ty,
+            } = &foreign_item.kind
+            {
+                // A foreign `static` lowers to an external-declaration global:
+                // it is referenced, never defined. It carries the block's
+                // header/link so the C backend includes the header (or emits a
+                // bare `extern` declaration) and links the library.
+                let mut global = MirGlobal::new(name.name.clone(), self.lower_ffi_type(ty));
+                global.is_extern_decl = true;
+                global.is_mut = matches!(mutability, ast::Mutability::Mutable);
+                global.linkage = Linkage::External;
+                global.link_header = eb.header.as_deref().map(Arc::from);
+                global.link_lib = eb.link.as_deref().map(Arc::from);
+                self.module.add_global(global);
             }
         }
         Ok(())
@@ -1137,9 +1206,78 @@ impl<'ctx> MirLowerer<'ctx> {
                 .unwrap_or(MirType::Void);
             let sig = MirFnSig::new(params, ret);
             self.module.declare_function(f.name.name.clone(), sig);
+
+            // Capture the Ok payload type for `-> Result<Ok, Err>` returns so a
+            // `match call() { Ok(x) => ... }` on a direct call can read the
+            // correct union slot without an intervening let annotation.
+            if let Some(ref ret_ty) = f.sig.return_ty {
+                if let Some(ok_ty) = self.result_ok_inner_from_ast(ret_ty) {
+                    self.fn_result_ok_types.insert(f.name.name.clone(), ok_ty);
+                }
+                if let Some(err_ty) = self.result_err_inner_from_ast(ret_ty) {
+                    self.fn_result_err_types.insert(f.name.name.clone(), err_ty);
+                }
+                // Same threading for `-> Option<T>` so a direct-call Some match
+                // reads the correct slot (symmetric to the Result Ok case).
+                if let Some(inner_ty) = self.option_inner_from_ast(ret_ty) {
+                    self.fn_option_inner_types
+                        .insert(f.name.name.clone(), inner_ty);
+                }
+            }
         }
 
         Ok(())
+    }
+
+    /// If the AST type is `Result<Ok, Err>`, lower and return the `Ok` payload
+    /// type. Returns None for any non-Result type. Used to thread the Ok type
+    /// from a function signature to its match sites.
+    pub(crate) fn result_ok_inner_from_ast(&self, ty: &ast::Type) -> Option<MirType> {
+        self.generic_first_arg_from_ast(ty, "Result")
+    }
+
+    /// If the AST type is `Result<Ok, Err>`, lower and return the `Err` payload
+    /// type (the second generic argument). Returns None for any non-Result type.
+    pub(crate) fn result_err_inner_from_ast(&self, ty: &ast::Type) -> Option<MirType> {
+        if let ast::TypeKind::Path(ref path) = ty.kind {
+            let is_result = path
+                .last_ident()
+                .map(|i| i.name.as_ref() == "Result")
+                .unwrap_or(false);
+            if is_result {
+                if let Some(args) = path.last_generics() {
+                    if let Some(ast::GenericArg::Type(ref err_ast_ty)) = args.get(1) {
+                        return Some(self.lower_type_from_ast(err_ast_ty));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// If the AST type is `Option<T>`, lower and return the `T` payload type.
+    /// Returns None for any non-Option type.
+    pub(crate) fn option_inner_from_ast(&self, ty: &ast::Type) -> Option<MirType> {
+        self.generic_first_arg_from_ast(ty, "Option")
+    }
+
+    /// If the AST type is `Wrapper<First, ...>`, lower and return `First`.
+    /// Returns None when the type head doesn't match `wrapper` or has no args.
+    fn generic_first_arg_from_ast(&self, ty: &ast::Type, wrapper: &str) -> Option<MirType> {
+        if let ast::TypeKind::Path(ref path) = ty.kind {
+            let matches_head = path
+                .last_ident()
+                .map(|i| i.name.as_ref() == wrapper)
+                .unwrap_or(false);
+            if matches_head {
+                if let Some(args) = path.last_generics() {
+                    if let Some(ast::GenericArg::Type(ref inner_ast_ty)) = args.first() {
+                        return Some(self.lower_type_from_ast(inner_ast_ty));
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Collect impl block methods, registering them as `TypeName_methodName` functions.
@@ -1225,6 +1363,21 @@ impl<'ctx> MirLowerer<'ctx> {
                     }
                     _ => ret,
                 };
+                // Thread the method's Result/Option payload types, keyed by the
+                // mangled name, so a `match recv.method() { ... }` reads the
+                // correct union slot (mirrors collect_function for free fns).
+                if let Some(ref ret_ty) = f.sig.return_ty {
+                    if let Some(ok_ty) = self.result_ok_inner_from_ast(ret_ty) {
+                        self.fn_result_ok_types.insert(mangled.clone(), ok_ty);
+                    }
+                    if let Some(err_ty) = self.result_err_inner_from_ast(ret_ty) {
+                        self.fn_result_err_types.insert(mangled.clone(), err_ty);
+                    }
+                    if let Some(inner_ty) = self.option_inner_from_ast(ret_ty) {
+                        self.fn_option_inner_types.insert(mangled.clone(), inner_ty);
+                    }
+                }
+
                 self.module
                     .declare_function(mangled, MirFnSig::new(params, ret));
             }
@@ -1561,6 +1714,13 @@ impl<'ctx> MirLowerer<'ctx> {
             let mut func = builder.build();
             if is_main {
                 func.linkage = Linkage::External; // main must not be static
+            }
+            // An `extern "C" fn` definition is an explicit C-ABI export: give it
+            // external linkage so the symbol is callable from C (not `static`),
+            // and mark it for declaration in the generated C export header.
+            if f.sig.abi.is_some() {
+                func.linkage = Linkage::External;
+                func.is_c_export = true;
             }
             func.is_public = is_main || self.current_item_vis.unwrap_or(true);
 

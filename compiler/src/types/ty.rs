@@ -297,6 +297,7 @@ impl Ty {
             abi: None,
             effects: super::effects::EffectRow::empty(),
             lifetime_params: Vec::new(),
+            is_variadic: false,
         }))
     }
 
@@ -313,6 +314,7 @@ impl Ty {
             abi: None,
             effects,
             lifetime_params: Vec::new(),
+            is_variadic: false,
         }))
     }
 
@@ -329,6 +331,7 @@ impl Ty {
             abi: None,
             effects: super::effects::EffectRow::empty(),
             lifetime_params,
+            is_variadic: false,
         }))
     }
 
@@ -346,7 +349,16 @@ impl Ty {
             abi: None,
             effects,
             lifetime_params,
+            is_variadic: false,
         }))
+    }
+
+    /// Mark a function type as C-style variadic (no-op for non-function types).
+    pub fn with_variadic(mut self, is_variadic: bool) -> Self {
+        if let TyKind::Fn(ref mut fn_ty) = self.kind {
+            fn_ty.is_variadic = is_variadic;
+        }
+        self
     }
 
     /// Create an ADT (struct/enum) type.
@@ -498,6 +510,7 @@ impl Ty {
                 abi: fn_ty.abi.clone(),
                 effects: fn_ty.effects.clone(),
                 lifetime_params: fn_ty.lifetime_params.clone(),
+                is_variadic: fn_ty.is_variadic,
             })),
             TyKind::Adt(def_id, substs) => Ty::adt(
                 *def_id,
@@ -566,6 +579,7 @@ impl Ty {
                 abi: fn_ty.abi.clone(),
                 effects: fn_ty.effects.clone(),
                 lifetime_params: fn_ty.lifetime_params.clone(),
+                is_variadic: fn_ty.is_variadic,
             })),
             TyKind::Adt(def_id, substs) => Ty::adt(
                 *def_id,
@@ -603,6 +617,7 @@ impl Ty {
                     abi: fn_ty.abi.clone(),
                     effects: fn_ty.effects.clone(),
                     lifetime_params: fn_ty.lifetime_params.clone(),
+                    is_variadic: fn_ty.is_variadic,
                 })),
                 TyKind::Adt(def_id, substs) => {
                     Ty::adt(*def_id, substs.iter().map(|t| freshen(t, cache)).collect())
@@ -963,6 +978,10 @@ pub struct FnTy {
     /// Lifetime parameters declared on this function (e.g., `'a`, `'b` in `fn foo<'a, 'b>(...)`).
     /// Used for interprocedural borrow tracking at call sites.
     pub lifetime_params: Vec<Arc<str>>,
+    /// Whether the function is C-style variadic (ends with `...`). When true, a
+    /// call may pass more arguments than there are declared parameters; the
+    /// extra arguments are unchecked, as in C.
+    pub is_variadic: bool,
 }
 
 /// A definition ID for ADTs, traits, etc.

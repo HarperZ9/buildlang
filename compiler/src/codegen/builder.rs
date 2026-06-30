@@ -255,6 +255,11 @@ impl MirBuilder {
         });
     }
 
+    /// Store to a module global / mutable static: `GLOBAL = value`.
+    pub fn push_global_store(&mut self, name: Arc<str>, value: MirRValue) {
+        self.push_stmt(MirStmtKind::GlobalStore { name, value });
+    }
+
     /// Create an aggregate (tuple, struct, array).
     pub fn aggregate(&mut self, dest: LocalId, kind: AggregateKind, operands: Vec<MirValue>) {
         self.assign(dest, MirRValue::Aggregate { kind, operands });
