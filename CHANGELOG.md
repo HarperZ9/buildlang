@@ -10,6 +10,14 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Stdlib (`HashMap::keys`): `m.keys()` now returns a `Vec<String>` handle (so
+  `for k in m.keys()`, indexing, and `.len()` work), via a runtime
+  `build_hmap_keys_str_f64` that walks the occupied buckets and wraps each key.
+  Was an undefined symbol. Verified end-to-end under MSVC: iterating the keys of a
+  two-entry map runs twice (`n 2`). Covered by `hashmap_keys_returns_a_string_vec`.
+  (`.values()` is deferred - it needs the str->f64 map's insert key-coercion fix
+  and value-type threading first; both logged as follow-ups.)
+
 - Stdlib (iterator `.take(n)` / `.skip(n)`): both are now recognized steps.
   `.take(n)` yields the first `n` elements then exits the loop; `.skip(n)` drops
   the first `n`. They use per-iteration counters (not source-index checks), so

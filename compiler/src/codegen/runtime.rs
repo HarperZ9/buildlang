@@ -494,6 +494,21 @@ static BuildStrF64MapHandle build_hmap_new_str_f64(void) {
     return h;
 }
 
+// Collect a string-keyed map's keys into a Vec<String> handle, backing
+// `m.keys()` (iteration order is bucket order, unspecified like Rust's).
+static BuildVecHandle build_hmap_keys_str_f64(BuildStrF64MapHandle h) {
+    BuildVecHandle v;
+    v.inner = (BuildVec*)malloc(sizeof(BuildVec));
+    *v.inner = build_vec_new(sizeof(BuildString));
+    for (size_t __i = 0; __i < h.inner->cap; __i++) {
+        if (h.inner->occupied[__i]) {
+            BuildString __kbuf = build_string_new(h.inner->keys[__i]);
+            build_vec_push(v.inner, &__kbuf);
+        }
+    }
+    return v;
+}
+
 static void __build_hmap_grow_str_f64(BuildStrF64Map* m) {
     size_t old_cap = m->cap;
     char** old_keys = m->keys;
