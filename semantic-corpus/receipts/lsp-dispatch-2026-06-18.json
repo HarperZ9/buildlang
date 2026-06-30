@@ -24,7 +24,7 @@
       "response_kind": "response",
       "result_digest": {
         "algorithm": "sha256",
-        "hex": "413f3d9d68e192f99ba11e765d5d408ea1f156e980a86fccf01c92e323726c52"
+        "hex": "d53114a34761c088b1bff8002f3155262137ec30e85da466b797d36a0d32250a"
       },
       "observed": {
         "has_result": true
