@@ -10,6 +10,16 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Native FFI (variadic): extern functions accept a trailing C-style `...`
+  (e.g. `fn printf(fmt: &str, ...) -> i32`). The parser records it on
+  `FnSig.is_variadic`, lowering carries it to the MIR signature so the C backend
+  emits a trailing `, ...`, and the type checker (`FnTy.is_variadic`) lets a
+  variadic call pass more arguments than there are fixed parameters while a
+  non-variadic call still enforces exact arity. `printf("%d and %d\n", 1, 2)`
+  now parses, type-checks, and lowers to `printf(fmt, 1, 2)`. Covered by
+  `extern_variadic_fn_parses`, `variadic_extern_emits_ellipsis_in_c`,
+  `variadic_extern_call_with_extra_args_typechecks`, and a non-variadic arity
+  regression test.
 - Native FFI (export header): `buildc build --emit header` writes a C header
   (`main.h`) declaring the program's `extern "C"` exports, with an include
   guard, the integer/bool/size typedefs the prototypes use, and a

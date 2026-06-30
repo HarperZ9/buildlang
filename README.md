@@ -630,9 +630,24 @@ behavior: buildc synthesizes a prototype for non-standard functions and relies
 on the standard includes for the C library. Foreign `static` declarations work
 the same way: a `static` carries the block's `header`/`link` and is emitted as
 an external reference (the header declares it, or buildc emits a bare
-`extern <type> <name>;`), never a conflicting definition. Foreign calls still
-require the `Foreign` capability effect, so native interop stays inside the same
-accountability gate as every other ambient surface.
+`extern <type> <name>;`), never a conflicting definition. A function may end
+with a C-style `...` to declare it variadic, so `printf`-family functions work:
+
+```build
+extern "C" {
+    fn printf(fmt: &str, ...) -> i32;
+}
+
+fn main() ~ Foreign {
+    printf("%d and %d\n", 1, 2);
+}
+```
+
+A variadic call may pass more arguments than there are fixed parameters (the
+extra ones are unchecked, as in C), while a non-variadic call still requires an
+exact argument count. Foreign calls still require the `Foreign` capability
+effect, so native interop stays inside the same accountability gate as every
+other ambient surface.
 
 ### Exporting BuildLang functions to C
 

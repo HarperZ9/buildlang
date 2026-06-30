@@ -1,0 +1,18 @@
+// Calling a C variadic function (printf-family)
+// ============================================
+//
+// A trailing `...` in an extern function declares it C-style variadic. A call
+// may then pass more arguments than there are fixed parameters; the extra ones
+// are unchecked, exactly as in C. `printf` is provided by <stdio.h> (one of the
+// standard includes), so no header clause is needed here.
+//
+//     buildc check examples/variadic/main.bld
+//     buildc build examples/variadic --emit c
+
+extern "C" {
+    fn printf(fmt: &str, ...) -> i32;
+}
+
+fn main() ~ Foreign {
+    printf("the answer is %d and %d\n", 1, 2);
+}
