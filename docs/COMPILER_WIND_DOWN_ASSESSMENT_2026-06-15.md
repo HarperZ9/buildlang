@@ -6,14 +6,14 @@
 
 # Compiler Wind-Down Assessment - 2026-06-15
 
-This note captures the current posture for winding down full-scale QuantaLang
+This note captures the current posture for winding down full-scale BuildLang
 compiler/language development and shifting toward preservation, packaging, and
 selective maintenance.
 
 ## Recommendation
 
 Freeze broad language expansion after the current accountability/security
-slice. Keep QuantaLang positioned as a working compiler core with a verified C
+slice. Keep BuildLang positioned as a working compiler core with a verified C
 path, a practical accountability/effects model, and clearly labeled
 experimental backend research. Future work should be limited to:
 
@@ -33,9 +33,9 @@ The production claim remains the C path:
 
 - parser -> type checker -> MIR -> C backend -> native executable;
 - semantic corpus receipts for the current 8-program corpus;
-- `quantac corpus verify` coverage for manifest, C/Rust receipts, and real
+- `buildc corpus verify` coverage for manifest, C/Rust receipts, and real
   C-backend stdout;
-- `quantac doctor` for local readiness diagnostics.
+- `buildc doctor` for local readiness diagnostics.
 
 The broader compiler is valuable as a public research/product surface, but the
 release-candidate boundary should stay honest: C is the practical target;
@@ -116,7 +116,7 @@ Wind-down action:
 
 ## Recent Update Digest
 
-The last couple of days moved QuantaLang from "compiler with effects" toward a
+The last couple of days moved BuildLang from "compiler with effects" toward a
 typed accountability language:
 
 - direct ambient capability gate for file, network, process, environment,

@@ -161,7 +161,8 @@ enum Commands {
         #[arg(long)]
         release: bool,
 
-        /// Emit type: 'c' for C source only, 'exe' for executable (default)
+        /// Emit type: 'c' for C source only, 'header' for a C export header,
+        /// 'exe' for executable (default)
         #[arg(long, default_value = "exe")]
         emit: String,
 
@@ -310,6 +311,28 @@ enum BdfCommands {
     Validate {
         /// Input file (auto-detected: binary if it starts with the BDF magic)
         file: PathBuf,
+    },
+
+    /// Bridge a `project-telos.flagship-action/v1` JSON envelope into a
+    /// canonical-binary BDF message (lossless)
+    FromFlagshipAction {
+        /// Input flagship-action/v1 JSON file
+        input: PathBuf,
+
+        /// Output binary `.bdf` message file (defaults to stdout as raw bytes)
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+    },
+
+    /// Reconstruct a `project-telos.flagship-action/v1` JSON envelope from a
+    /// canonical-binary BDF message (lossless)
+    ToFlagshipAction {
+        /// Input binary `.bdf` message written by `from-flagship-action`
+        input: PathBuf,
+
+        /// Output JSON file (defaults to stdout)
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
     },
 }
 
@@ -3126,6 +3149,12 @@ fn cmd_bdf(command: BdfCommands) -> Result<(), i32> {
         BdfCommands::Encode { input, output } => cmd_bdf_encode(&input, output.as_deref()),
         BdfCommands::Decode { input, output } => cmd_bdf_decode(&input, output.as_deref()),
         BdfCommands::Validate { file } => cmd_bdf_validate(&file),
+        BdfCommands::FromFlagshipAction { input, output } => {
+            cmd_bdf_from_flagship_action(&input, output.as_deref())
+        }
+        BdfCommands::ToFlagshipAction { input, output } => {
+            cmd_bdf_to_flagship_action(&input, output.as_deref())
+        }
     }
 }
 
@@ -3232,6 +3261,69 @@ fn cmd_bdf_validate(file: &Path) -> Result<(), i32> {
     println!("canonical_bytes: {}", value.to_bytes().len());
     println!("payload_digest: sha256:{digest}");
     println!("status: valid");
+    Ok(())
+}
+
+fn cmd_bdf_from_flagship_action(input: &Path, output: Option<&Path>) -> Result<(), i32> {
+    let json = std::fs::read_to_string(input).map_err(|err| {
+        eprintln!("Error reading file '{}': {}", input.display(), err);
+        1
+    })?;
+    let message = buildlang::bdf::flagship_action_to_bdf(&json).map_err(|err| {
+        eprintln!(
+            "Error bridging flagship-action '{}': {}",
+            input.display(),
+            err
+        );
+        1
+    })?;
+    let bytes = message.to_bytes();
+
+    if let Some(path) = output {
+        std::fs::write(path, &bytes).map_err(|err| {
+            eprintln!("Error writing '{}': {}", path.display(), err);
+            1
+        })?;
+        println!(
+            "Wrote {} byte(s) of {} to {} (payload sha256:{})",
+            bytes.len(),
+            buildlang::bdf::BDF_MESSAGE_SCHEMA,
+            path.display(),
+            message.receipt.sha256
+        );
+    } else {
+        write_stdout_bytes(&bytes)?;
+    }
+    Ok(())
+}
+
+fn cmd_bdf_to_flagship_action(input: &Path, output: Option<&Path>) -> Result<(), i32> {
+    let bytes = std::fs::read(input).map_err(|err| {
+        eprintln!("Error reading file '{}': {}", input.display(), err);
+        1
+    })?;
+    let message = buildlang::bdf::BdfMessage::from_bytes(&bytes).map_err(|err| {
+        eprintln!("Error decoding BDF message '{}': {}", input.display(), err);
+        1
+    })?;
+    let json = buildlang::bdf::bdf_to_flagship_action_pretty(&message).map_err(|err| {
+        eprintln!(
+            "Error reconstructing flagship-action JSON from '{}': {}",
+            input.display(),
+            err
+        );
+        1
+    })?;
+
+    if let Some(path) = output {
+        std::fs::write(path, format!("{json}\n")).map_err(|err| {
+            eprintln!("Error writing '{}': {}", path.display(), err);
+            1
+        })?;
+        println!("Wrote flagship-action/v1 JSON to {}", path.display());
+    } else {
+        println!("{json}");
+    }
     Ok(())
 }
 
@@ -4724,6 +4816,7 @@ fn invoke_c_compiler(
     c_file: &std::path::Path,
     exe_file: &std::path::Path,
     release: bool,
+    user_libs: &[String],
 ) -> Result<(), i32> {
     let is_msvc =
         compiler.starts_with("cl") || compiler.ends_with("cl.exe") || compiler.ends_with("cl");
@@ -4746,6 +4839,11 @@ fn invoke_c_compiler(
             let bat_path = c_file.with_extension("bat");
             let exe_path = exe_file.to_string_lossy().replace('/', "\\");
             // Write bat file with MSVC env setup and compilation
+            let mut all_libs: Vec<String> = host_c_link_libraries(true)
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            all_libs.extend(user_link_flags(user_libs, true));
             let bat_content = format!(
                 "set \"INCLUDE={}\"\r\nset \"LIB={}\"\r\nset \"PATH={};%PATH%\"\r\ncl.exe /nologo /W0 /std:c11 {} \"{}\" /Fe\"{}\" {} 1>&2\r\n",
                 inc,
@@ -4754,7 +4852,7 @@ fn invoke_c_compiler(
                 opt_flag,
                 c_path,
                 exe_path,
-                host_c_link_libraries(true).join(" ")
+                all_libs.join(" ")
             );
             std::fs::write(&bat_path, &bat_content).map_err(|e| {
                 eprintln!("Failed to write build script: {}", e);
@@ -4779,6 +4877,7 @@ fn invoke_c_compiler(
             cmd.arg("/nologo");
             cmd.arg("/W0");
             cmd.args(host_c_link_libraries(true));
+            cmd.args(user_link_flags(user_libs, true));
         }
     } else {
         // GCC / Clang / cc - POSIX-style flags
@@ -4792,6 +4891,7 @@ fn invoke_c_compiler(
             cmd.arg("-g");
         }
         cmd.args(host_c_link_libraries(false));
+        cmd.args(user_link_flags(user_libs, false));
     }
 
     let output = cmd.output().map_err(|e| {
@@ -4837,6 +4937,21 @@ fn c_link_libraries(target_os: &str, is_msvc: bool) -> &'static [&'static str] {
     }
 }
 
+/// Format user-declared FFI libraries (from extern blocks' `link "..."`
+/// clauses) as C compiler arguments. MSVC takes `name.lib`; gcc/clang/cc take
+/// `-lname`. The actual library resolution is handled by the C toolchain.
+fn user_link_flags(libs: &[String], is_msvc: bool) -> Vec<String> {
+    libs.iter()
+        .map(|lib| {
+            if is_msvc {
+                format!("{lib}.lib")
+            } else {
+                format!("-l{lib}")
+            }
+        })
+        .collect()
+}
+
 // =============================================================================
 // BUILD COMMAND
 // =============================================================================
@@ -4871,6 +4986,7 @@ fn cmd_build(
     }
 
     let emit_c_only = emit == "c";
+    let emit_header = emit == "header";
 
     // Resolve the code generation target.
     let target = parse_codegen_target(target_str).map_err(|err| {
@@ -4915,13 +5031,19 @@ fn cmd_build(
         1
     })?;
 
-    let total_steps =
-        if emit_c_only || use_llvm || use_native || use_wasm || use_spirv || use_shader || use_rust
-        {
-            4
-        } else {
-            5
-        };
+    let total_steps = if emit_c_only
+        || emit_header
+        || use_llvm
+        || use_native
+        || use_wasm
+        || use_spirv
+        || use_shader
+        || use_rust
+    {
+        4
+    } else {
+        5
+    };
     println!("[1/{}] Lexing... OK ({} tokens)", total_steps, tokens.len());
 
     // Parse
@@ -4980,6 +5102,20 @@ fn cmd_build(
         eprintln!("Failed to create output directory: {}", e);
         1
     })?;
+
+    // --emit=header: write a C header declaring the `extern "C"` exports so
+    // other languages can call into the compiled BuildLang code.
+    if emit_header {
+        let header = codegen.c_export_header().unwrap_or_default();
+        let header_file = output_dir.join("main.h");
+        std::fs::write(&header_file, header.as_bytes()).map_err(|e| {
+            eprintln!("Failed to write header file: {}", e);
+            1
+        })?;
+        println!("\nHeader generated!");
+        println!("Output: {}", header_file.display());
+        return Ok(());
+    }
 
     if use_spirv {
         // SPIR-V target: write .spv binary
@@ -5254,7 +5390,13 @@ fn cmd_build(
         total_steps, compiler
     );
 
-    invoke_c_compiler(&compiler, &c_output_file, &exe_output_file, release)?;
+    invoke_c_compiler(
+        &compiler,
+        &c_output_file,
+        &exe_output_file,
+        release,
+        &output.link_libraries,
+    )?;
 
     println!("     Compilation... OK");
 
@@ -5406,7 +5548,7 @@ fn cmd_run(file: &PathBuf, args: &[String]) -> Result<(), i32> {
         1
     })?;
 
-    invoke_c_compiler(&compiler, &c_file, &exe_file, false)?;
+    invoke_c_compiler(&compiler, &c_file, &exe_file, false, &output.link_libraries)?;
 
     // Verify the executable was created
     if !exe_file.exists() {
@@ -5563,7 +5705,7 @@ fn cmd_test(
             std::fs::write(&c_file, &output.data).map_err(|e| format!("write: {}", e))?;
 
             let compiler = find_c_compiler().ok_or_else(|| "no C compiler".to_string())?;
-            invoke_c_compiler(&compiler, &c_file, &exe_file, false)
+            invoke_c_compiler(&compiler, &c_file, &exe_file, false, &output.link_libraries)
                 .map_err(|_| "cc".to_string())?;
 
             // MSVC bat outputs temp.exe in the c_file directory
@@ -7046,6 +7188,22 @@ mod tests {
         assert_eq!(c_link_libraries("windows", true), &["ws2_32.lib"]);
         assert_eq!(c_link_libraries("linux", false), &["-lm"]);
         assert_eq!(c_link_libraries("macos", true), &[] as &[&str]);
+    }
+
+    #[test]
+    fn user_link_flags_format_per_toolchain() {
+        // gcc / clang / cc style.
+        assert_eq!(
+            user_link_flags(&["sqlite3".to_string(), "z".to_string()], false),
+            vec!["-lsqlite3".to_string(), "-lz".to_string()]
+        );
+        // MSVC style.
+        assert_eq!(
+            user_link_flags(&["sqlite3".to_string()], true),
+            vec!["sqlite3.lib".to_string()]
+        );
+        // No libraries declared -> no extra flags.
+        assert!(user_link_flags(&[], false).is_empty());
     }
 
     #[test]

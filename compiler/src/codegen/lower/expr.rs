@@ -222,6 +222,20 @@ impl<'ctx> MirLowerer<'ctx> {
             None
         };
 
+        // Track Result<Ok, Err> Ok/Err payload types from the annotation so a
+        // later `match r { Ok(x) => ..., Err(e) => ... }` reads the correct
+        // union slots.
+        let result_ok = if let Some(ref ast_ty) = local.ty {
+            self.result_ok_inner_from_ast(ast_ty)
+        } else {
+            None
+        };
+        let result_err = if let Some(ref ast_ty) = local.ty {
+            self.result_err_inner_from_ast(ast_ty)
+        } else {
+            None
+        };
+
         // Now borrow current_fn and use it
         let builder = self
             .current_fn
@@ -236,6 +250,13 @@ impl<'ctx> MirLowerer<'ctx> {
             // Record the Option inner type if extracted from annotation
             if let Some(inner_ty) = option_inner {
                 self.option_inner_types.insert(local_id, inner_ty);
+            }
+            // Record the Result Ok/Err payload types if extracted from annotation
+            if let Some(ok_ty) = result_ok {
+                self.result_ok_types.insert(local_id, ok_ty);
+            }
+            if let Some(err_ty) = result_err {
+                self.result_err_types.insert(local_id, err_ty);
             }
 
             // Initialize if there's an init expression
@@ -290,45 +311,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 expr: scrutinee,
                 then_branch,
                 else_branch,
-            } => {
-                // Evaluate scrutinee, bind pattern variable, then take branch.
-                let scrut_val = self.lower_expr(scrutinee)?;
-                let scrut_ty = self.type_of_value(&scrut_val);
-
-                // Bind inner pattern variable (Some(x) → bind x)
-                // Use tracked Option inner type when available.
-                let if_let_binding_ty = if let MirValue::Local(id) = &scrut_val {
-                    self.option_inner_types
-                        .get(id)
-                        .cloned()
-                        .unwrap_or_else(|| scrut_ty.clone())
-                } else {
-                    scrut_ty.clone()
-                };
-                if let ast::PatternKind::TupleStruct { patterns, .. } = &pattern.kind {
-                    for pat in patterns.iter() {
-                        if let ast::PatternKind::Ident { name, .. } = &pat.kind {
-                            let builder = self.current_fn.as_mut().ok_or_else(|| {
-                                CodegenError::Internal("No current function".to_string())
-                            })?;
-                            let local = builder
-                                .create_named_local(name.name.clone(), if_let_binding_ty.clone());
-                            builder.assign(local, MirRValue::Use(scrut_val.clone()));
-                            self.var_map.insert(name.name.clone(), local);
-                        }
-                    }
-                } else if let ast::PatternKind::Ident { name, .. } = &pattern.kind {
-                    let builder = self
-                        .current_fn
-                        .as_mut()
-                        .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-                    let local = builder.create_named_local(name.name.clone(), scrut_ty.clone());
-                    builder.assign(local, MirRValue::Use(scrut_val.clone()));
-                    self.var_map.insert(name.name.clone(), local);
-                }
-
-                self.lower_if_unconditional(then_branch, else_branch.as_deref())
-            }
+            } => self.lower_if_let(pattern, scrutinee, then_branch, else_branch.as_deref()),
             ExprKind::Match { scrutinee, arms } => self.lower_match(scrutinee, arms),
 
             ExprKind::Loop { body, label } => self.lower_loop(body, label.as_ref()),
@@ -431,9 +414,9 @@ impl<'ctx> MirLowerer<'ctx> {
                         Ok(values::unit())
                     }
                     "format" => {
-                        // format! returns a string - for now return a string constant
-                        let s = self.extract_string_from_tokens(tokens);
-                        Ok(MirValue::Const(MirConst::Str(self.module.intern_string(s))))
+                        // format! builds an owned BuildString from the template
+                        // and arguments (was a stub that dropped the arguments).
+                        self.lower_format_macro(tokens)
                     }
                     "vec" => self.lower_vec_macro(tokens),
                     _ => {
@@ -1123,6 +1106,63 @@ impl<'ctx> MirLowerer<'ctx> {
             return Ok(values::unit());
         }
 
+        // Handle indexed assignment into a Vec: `v[i] = value`. Without this the
+        // write fell through every target arm and was silently dropped (the
+        // element kept its old value). Dispatches to a typed runtime setter.
+        if let ExprKind::Index { expr: arr, index } = &target.kind {
+            let recv_val = self.lower_expr(arr)?;
+            let recv_ty = self.type_of_value(&recv_val);
+            if let MirType::Vec(ref elem_ty) = recv_ty {
+                let suffix = match elem_ty.as_ref() {
+                    MirType::Float(_) => "f64",
+                    MirType::Int(IntSize::I64, _) => "i64",
+                    MirType::Struct(n) if n.as_ref() == "BuildString" => "str",
+                    _ => "i32",
+                };
+                let idx_val = self.lower_expr(index)?;
+                // For a compound assignment, read the current element, apply the
+                // op, then store; a plain `=` stores the value directly.
+                let store_val = if op == ast::AssignOp::Assign {
+                    val
+                } else {
+                    let get_fn =
+                        MirValue::Function(Arc::from(format!("build_hvec_get_{}", suffix)));
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let cur = builder.create_local((**elem_ty).clone());
+                    let cont = builder.create_block();
+                    builder.call(
+                        get_fn,
+                        vec![recv_val.clone(), idx_val.clone()],
+                        Some(cur),
+                        cont,
+                    );
+                    builder.switch_to_block(cont);
+                    let bin_op = match op {
+                        ast::AssignOp::AddAssign => BinOp::Add,
+                        ast::AssignOp::SubAssign => BinOp::Sub,
+                        ast::AssignOp::MulAssign => BinOp::Mul,
+                        ast::AssignOp::DivAssign => BinOp::Div,
+                        ast::AssignOp::RemAssign => BinOp::Rem,
+                        ast::AssignOp::BitAndAssign => BinOp::BitAnd,
+                        ast::AssignOp::BitOrAssign => BinOp::BitOr,
+                        ast::AssignOp::BitXorAssign => BinOp::BitXor,
+                        ast::AssignOp::ShlAssign => BinOp::Shl,
+                        ast::AssignOp::ShrAssign => BinOp::Shr,
+                        _ => BinOp::Add,
+                    };
+                    let combined = builder.create_local((**elem_ty).clone());
+                    builder.binary_op(combined, bin_op, values::local(cur), val);
+                    values::local(combined)
+                };
+                let set_fn = MirValue::Function(Arc::from(format!("build_hvec_set_{}", suffix)));
+                let builder = self.current_fn.as_mut().unwrap();
+                let cont = builder.create_block();
+                builder.call(set_fn, vec![recv_val, idx_val, store_val], None, cont);
+                builder.switch_to_block(cont);
+                return Ok(values::unit());
+            }
+        }
+
         // Get the target local
         let target_local = match &target.kind {
             ExprKind::Ident(ident) => self.var_map.get(&ident.name).copied(),
@@ -1151,6 +1191,38 @@ impl<'ctx> MirLowerer<'ctx> {
                 };
                 builder.binary_op(local, bin_op, values::local(local), val);
             }
+        } else if let ExprKind::Ident(ident) = &target.kind {
+            // Deref and field assignments were handled above, so a bare-identifier
+            // target that resolves to no local is a module global / mutable static
+            // (anything else would have been rejected by the type checker). MIR
+            // `Assign` targets only locals, so the write is represented as a
+            // `GlobalStore` (the C backend emits `NAME = value;`; the drop analysis
+            // treats it as an escape). Compound assignment to a global reads the
+            // current value, applies the op, and stores back.
+            let name = ident.name.clone();
+            let store_val = if op == ast::AssignOp::Assign {
+                MirRValue::Use(val)
+            } else {
+                let bin_op = match op {
+                    ast::AssignOp::AddAssign => BinOp::Add,
+                    ast::AssignOp::SubAssign => BinOp::Sub,
+                    ast::AssignOp::MulAssign => BinOp::Mul,
+                    ast::AssignOp::DivAssign => BinOp::Div,
+                    ast::AssignOp::RemAssign => BinOp::Rem,
+                    ast::AssignOp::BitAndAssign => BinOp::BitAnd,
+                    ast::AssignOp::BitOrAssign => BinOp::BitOr,
+                    _ => BinOp::Add,
+                };
+                let val_ty = self.type_of_value(&val);
+                let builder = self.current_fn.as_mut().unwrap();
+                let cur = builder.create_local(val_ty.clone());
+                builder.assign(cur, MirRValue::Use(MirValue::Global(name.clone())));
+                let tmp = builder.create_local(val_ty);
+                builder.binary_op(tmp, bin_op, values::local(cur), val);
+                MirRValue::Use(values::local(tmp))
+            };
+            let builder = self.current_fn.as_mut().unwrap();
+            builder.push_global_store(name, store_val);
         }
 
         Ok(values::unit())
@@ -1833,7 +1905,18 @@ impl<'ctx> MirLowerer<'ctx> {
                     )
                 }
                 "HashSet_new" => return MirType::Struct(Arc::from("HashSet")),
-                "String_new" => return MirType::Struct(Arc::from("BuildString")),
+                // Some(x) constructs an Option; without this the dest fell back to
+                // i32 and the Option struct was never built (a real C2440).
+                "Some" => return MirType::Struct(Arc::from("Option")),
+                // Ok(x)/Err(e) construct a Result; without this the dest fell
+                // back to i32 and the Result struct was never built (the same
+                // C2440 class the Option fix closed).
+                "Ok" | "Err" => return MirType::Struct(Arc::from("Result")),
+                // Both String constructors yield an owned heap string. Without
+                // `String_from` here the dest local fell back to i32, so
+                // `let s = String::from(x)` emitted `int32_t s = build_string_new(...)`,
+                // a real C2440 (BuildString -> int32_t) under a C compiler.
+                "String_new" | "String_from" => return MirType::Struct(Arc::from("BuildString")),
                 "VecDeque_new" => return MirType::Struct(Arc::from("VecDeque")),
                 "map_new" => {
                     return MirType::Map(
@@ -2009,7 +2092,10 @@ impl<'ctx> MirLowerer<'ctx> {
         // and desugar to imperative loops rather than actual iterator objects.
         // =====================================================================
         let method_name = method.name.as_ref();
-        if method_name == "collect" || method_name == "fold" {
+        if matches!(
+            method_name,
+            "collect" | "fold" | "sum" | "count" | "product" | "any" | "all"
+        ) {
             if let Some(chain) = Self::try_parse_iter_chain(receiver, method_name, args) {
                 return self.lower_iter_chain(&chain);
             }
@@ -2123,6 +2209,32 @@ impl<'ctx> MirLowerer<'ctx> {
                     return Ok(values::local(result));
                 }
 
+                // --- push_str(x): append in place ---
+                // `s.push_str(x)` reassigns `s` to `build_string_concat(s, x)`.
+                // String literals already lower to BuildString, so the argument
+                // needs no coercion. Returns unit.
+                if method_name == "push_str" && args.len() == 1 {
+                    let receiver_local = match receiver_val {
+                        MirValue::Local(id) => Some(id),
+                        _ => None,
+                    };
+                    let arg_val = self.lower_expr(&args[0])?;
+                    let builder = self
+                        .current_fn
+                        .as_mut()
+                        .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                    let result = builder.create_local(MirType::Struct(Arc::from("BuildString")));
+                    let cont = builder.create_block();
+                    let func = MirValue::Function(Arc::from("build_string_concat"));
+                    builder.call(func, vec![receiver_val, arg_val], Some(result), cont);
+                    builder.switch_to_block(cont);
+                    // Write the concatenated string back to the receiver local.
+                    if let Some(id) = receiver_local {
+                        builder.assign(id, MirRValue::Use(values::local(result)));
+                    }
+                    return Ok(values::unit());
+                }
+
                 // --- split(delim) → BuildVec of BuildString ---
                 if method_name == "split" {
                     let mut arg_vals = vec![receiver_val];
@@ -2133,37 +2245,44 @@ impl<'ctx> MirLowerer<'ctx> {
                         .current_fn
                         .as_mut()
                         .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-                    let result = builder.create_local(MirType::Struct(Arc::from("BuildVec")));
+                    // Result is a Vec<String> handle so .len()/for/indexing work.
+                    let result = builder.create_local(MirType::Vec(Box::new(MirType::Struct(
+                        Arc::from("BuildString"),
+                    ))));
                     let cont = builder.create_block();
-                    let func = MirValue::Function(Arc::from("build_string_split"));
+                    let func = MirValue::Function(Arc::from("build_string_split_h"));
                     builder.call(func, arg_vals, Some(result), cont);
                     builder.switch_to_block(cont);
                     return Ok(values::local(result));
                 }
 
-                // --- split_whitespace() → BuildVec of BuildString ---
+                // --- split_whitespace() → Vec<String> ---
                 if method_name == "split_whitespace" {
                     let builder = self
                         .current_fn
                         .as_mut()
                         .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-                    let result = builder.create_local(MirType::Struct(Arc::from("BuildVec")));
+                    let result = builder.create_local(MirType::Vec(Box::new(MirType::Struct(
+                        Arc::from("BuildString"),
+                    ))));
                     let cont = builder.create_block();
-                    let func = MirValue::Function(Arc::from("build_string_split_ws"));
+                    let func = MirValue::Function(Arc::from("build_string_split_ws_h"));
                     builder.call(func, vec![receiver_val], Some(result), cont);
                     builder.switch_to_block(cont);
                     return Ok(values::local(result));
                 }
 
-                // --- lines() → BuildVec of BuildString ---
+                // --- lines() → Vec<String> ---
                 if method_name == "lines" {
                     let builder = self
                         .current_fn
                         .as_mut()
                         .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-                    let result = builder.create_local(MirType::Struct(Arc::from("BuildVec")));
+                    let result = builder.create_local(MirType::Vec(Box::new(MirType::Struct(
+                        Arc::from("BuildString"),
+                    ))));
                     let cont = builder.create_block();
-                    let func = MirValue::Function(Arc::from("build_string_lines"));
+                    let func = MirValue::Function(Arc::from("build_string_lines_h"));
                     builder.call(func, vec![receiver_val], Some(result), cont);
                     builder.switch_to_block(cont);
                     return Ok(values::local(result));
@@ -2673,15 +2792,213 @@ impl<'ctx> MirLowerer<'ctx> {
             }
         }
 
+        // Option<T> method dispatch: is_some/is_none read the has_value
+        // discriminant; unwrap/unwrap_or read the typed payload slot. The
+        // payload type is the tracked inner type (default i32).
+        if matches!(&receiver_ty, MirType::Struct(n) if n.as_ref() == "Option") {
+            let method_name = method.name.as_ref();
+            let inner_ty = match &receiver_val {
+                MirValue::Local(id) => self
+                    .option_inner_types
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(MirType::i32),
+                _ => MirType::i32(),
+            };
+            match method_name {
+                "is_some" | "is_none" => {
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let scrut = builder.create_local(MirType::Struct(Arc::from("Option")));
+                    builder.assign(scrut, MirRValue::Use(receiver_val));
+                    let hv = builder.create_local(MirType::Bool);
+                    builder.assign(
+                        hv,
+                        MirRValue::FieldAccess {
+                            base: values::local(scrut),
+                            field_name: Arc::from("has_value"),
+                            field_ty: MirType::Bool,
+                        },
+                    );
+                    if method_name == "is_none" {
+                        let neg = builder.create_local(MirType::Bool);
+                        builder.unary_op(neg, UnaryOp::Not, values::local(hv));
+                        return Ok(values::local(neg));
+                    }
+                    return Ok(values::local(hv));
+                }
+                "unwrap" => {
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let scrut = builder.create_local(MirType::Struct(Arc::from("Option")));
+                    builder.assign(scrut, MirRValue::Use(receiver_val));
+                    let val = builder.create_local(inner_ty.clone());
+                    builder.assign(
+                        val,
+                        MirRValue::FieldAccess {
+                            base: values::local(scrut),
+                            field_name: Arc::from("value"),
+                            field_ty: inner_ty,
+                        },
+                    );
+                    return Ok(values::local(val));
+                }
+                "unwrap_or" if args.len() == 1 => {
+                    let default_val = self.lower_expr(&args[0])?;
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let scrut = builder.create_local(MirType::Struct(Arc::from("Option")));
+                    builder.assign(scrut, MirRValue::Use(receiver_val));
+                    let hv = builder.create_local(MirType::Bool);
+                    builder.assign(
+                        hv,
+                        MirRValue::FieldAccess {
+                            base: values::local(scrut),
+                            field_name: Arc::from("has_value"),
+                            field_ty: MirType::Bool,
+                        },
+                    );
+                    let result = builder.create_local(inner_ty.clone());
+                    let some_block = builder.create_block();
+                    let none_block = builder.create_block();
+                    let merge_block = builder.create_block();
+                    builder.branch(values::local(hv), some_block, none_block);
+                    // Some: read the payload.
+                    builder.switch_to_block(some_block);
+                    builder.assign(
+                        result,
+                        MirRValue::FieldAccess {
+                            base: values::local(scrut),
+                            field_name: Arc::from("value"),
+                            field_ty: inner_ty,
+                        },
+                    );
+                    builder.goto(merge_block);
+                    // None: use the default.
+                    builder.switch_to_block(none_block);
+                    builder.assign(result, MirRValue::Use(default_val));
+                    builder.goto(merge_block);
+                    builder.switch_to_block(merge_block);
+                    return Ok(values::local(result));
+                }
+                _ => {}
+            }
+        }
+
+        // Result<T,E> method dispatch: is_ok/is_err read the is_ok discriminant;
+        // unwrap/unwrap_or read the typed ok slot; unwrap_err reads the err slot.
+        if matches!(&receiver_ty, MirType::Struct(n) if n.as_ref() == "Result") {
+            let method_name = method.name.as_ref();
+            let ok_ty = match &receiver_val {
+                MirValue::Local(id) => self
+                    .result_ok_types
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(MirType::i32),
+                _ => MirType::i32(),
+            };
+            let err_ty = match &receiver_val {
+                MirValue::Local(id) => self
+                    .result_err_types
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| MirType::Struct(Arc::from("BuildString"))),
+                _ => MirType::Struct(Arc::from("BuildString")),
+            };
+            match method_name {
+                "is_ok" | "is_err" => {
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let scrut = builder.create_local(MirType::Struct(Arc::from("Result")));
+                    builder.assign(scrut, MirRValue::Use(receiver_val));
+                    let ok = builder.create_local(MirType::Bool);
+                    builder.assign(
+                        ok,
+                        MirRValue::FieldAccess {
+                            base: values::local(scrut),
+                            field_name: Arc::from("is_ok"),
+                            field_ty: MirType::Bool,
+                        },
+                    );
+                    if method_name == "is_err" {
+                        let neg = builder.create_local(MirType::Bool);
+                        builder.unary_op(neg, UnaryOp::Not, values::local(ok));
+                        return Ok(values::local(neg));
+                    }
+                    return Ok(values::local(ok));
+                }
+                "unwrap" | "unwrap_err" => {
+                    let (field, ty) = if method_name == "unwrap_err" {
+                        ("err", err_ty)
+                    } else {
+                        ("ok", ok_ty)
+                    };
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let scrut = builder.create_local(MirType::Struct(Arc::from("Result")));
+                    builder.assign(scrut, MirRValue::Use(receiver_val));
+                    let val = builder.create_local(ty.clone());
+                    builder.assign(
+                        val,
+                        MirRValue::FieldAccess {
+                            base: values::local(scrut),
+                            field_name: Arc::from(field),
+                            field_ty: ty,
+                        },
+                    );
+                    return Ok(values::local(val));
+                }
+                "unwrap_or" if args.len() == 1 => {
+                    let default_val = self.lower_expr(&args[0])?;
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let scrut = builder.create_local(MirType::Struct(Arc::from("Result")));
+                    builder.assign(scrut, MirRValue::Use(receiver_val));
+                    let ok = builder.create_local(MirType::Bool);
+                    builder.assign(
+                        ok,
+                        MirRValue::FieldAccess {
+                            base: values::local(scrut),
+                            field_name: Arc::from("is_ok"),
+                            field_ty: MirType::Bool,
+                        },
+                    );
+                    let result = builder.create_local(ok_ty.clone());
+                    let ok_block = builder.create_block();
+                    let err_block = builder.create_block();
+                    let merge_block = builder.create_block();
+                    builder.branch(values::local(ok), ok_block, err_block);
+                    builder.switch_to_block(ok_block);
+                    builder.assign(
+                        result,
+                        MirRValue::FieldAccess {
+                            base: values::local(scrut),
+                            field_name: Arc::from("ok"),
+                            field_ty: ok_ty,
+                        },
+                    );
+                    builder.goto(merge_block);
+                    builder.switch_to_block(err_block);
+                    builder.assign(result, MirRValue::Use(default_val));
+                    builder.goto(merge_block);
+                    builder.switch_to_block(merge_block);
+                    return Ok(values::local(result));
+                }
+                _ => {}
+            }
+        }
+
         // Vec<T> method dispatch: map .push/.len/.get/.pop/.is_empty/.clear
         // to typed runtime functions (build_hvec_*).
         if let MirType::Vec(ref elem_ty) = receiver_ty {
             let method_name = method.name.as_ref();
-            let type_suffix = match elem_ty.as_ref() {
-                MirType::Float(_) => "f64",
-                MirType::Int(IntSize::I64, _) => "i64",
-                MirType::Struct(n) if n.as_ref() == "BuildString" => "str",
-                _ => "i32",
+            let type_suffix: String = match elem_ty.as_ref() {
+                MirType::Float(_) => "f64".to_string(),
+                MirType::Int(IntSize::I64, _) => "i64".to_string(),
+                MirType::Struct(n) if n.as_ref() == "BuildString" => "str".to_string(),
+                // Aggregate element (user struct etc.): element-sized wrapper
+                // keyed by the struct name (matches the C backend's generated
+                // build_hvec_*_<Struct> wrappers).
+                MirType::Struct(n) => n.to_string(),
+                // Nested collection element (Vec<Vec<_>>, Vec<HashMap<_,_>>): the
+                // element is a handle struct; key the sized wrapper by its C type.
+                MirType::Vec(_) => "BuildVecHandle".to_string(),
+                MirType::Map(_, _) => "BuildMapHandle".to_string(),
+                _ => "i32".to_string(),
             };
 
             let (runtime_fn, ret_ty): (Option<String>, MirType) = match method_name {
@@ -2722,6 +3039,16 @@ impl<'ctx> MirLowerer<'ctx> {
                     return Ok(values::local(result));
                 }
                 "clear" => (Some("build_hvec_free".to_string()), MirType::Void),
+                "contains" => (
+                    Some(format!("build_hvec_contains_{}", type_suffix)),
+                    MirType::Bool,
+                ),
+                // sort() in place (ascending); string element sort is a
+                // follow-up - only the numeric families have comparators.
+                "sort" if matches!(type_suffix.as_str(), "i32" | "i64" | "f64") => (
+                    Some(format!("build_hvec_sort_{}", type_suffix)),
+                    MirType::Void,
+                ),
                 _ => (None, MirType::Void),
             };
 
@@ -2749,7 +3076,17 @@ impl<'ctx> MirLowerer<'ctx> {
             let method_name = method.name.as_ref();
 
             let (runtime_fn, ret_ty): (Option<String>, MirType) = match method_name {
-                "insert" => (Some("build_hmap_insert_str_f64".to_string()), MirType::Void),
+                "insert" => {
+                    // Non-f64 values go through the value-typed wrapper (which boxes
+                    // values larger than the 8-byte slot, e.g. BuildString). f64
+                    // values use the native str->f64 path. Previously insert always
+                    // used str->f64, passing a BuildString to a `double` param (C2440).
+                    let fn_name = match val_ty.as_ref() {
+                        MirType::Float(_) => "build_hmap_insert_str_f64".to_string(),
+                        _ => format!("build_hmap_insert_val_{}", Self::type_to_c_name(val_ty)),
+                    };
+                    (Some(fn_name), MirType::Void)
+                }
                 "get" => {
                     let val_c = match val_ty.as_ref() {
                         MirType::Float(_) => None,
@@ -2883,6 +3220,38 @@ impl<'ctx> MirLowerer<'ctx> {
             }
         }
 
+        // Numeric / string `.to_string()`: dispatch to the type-specific runtime
+        // formatter (each returns a fresh owned BuildString), or return the
+        // receiver unchanged for a String. Without this, `to_string` fell through
+        // to the bare-name fallback and emitted an undefined `to_string` symbol.
+        if method.name.as_ref() == "to_string" && args.is_empty() {
+            let runtime = match &receiver_ty {
+                MirType::Int(..) => Some("build_i64_to_string"),
+                MirType::Float(..) => Some("build_f64_to_string"),
+                MirType::Struct(n) if n.as_ref() == "BuildString" => {
+                    // String::to_string() is identity; return the receiver.
+                    return Ok(receiver_val);
+                }
+                _ => None,
+            };
+            if let Some(rt) = runtime {
+                let builder = self
+                    .current_fn
+                    .as_mut()
+                    .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                let result = builder.create_local(MirType::Struct(Arc::from("BuildString")));
+                let cont = builder.create_block();
+                builder.call(
+                    MirValue::Function(Arc::from(rt)),
+                    vec![receiver_val.clone()],
+                    Some(result),
+                    cont,
+                );
+                builder.switch_to_block(cont);
+                return Ok(values::local(result));
+            }
+        }
+
         // Fallback: lower as a regular function call with receiver as first argument.
         let mut arg_vals = vec![receiver_val];
         for arg in args {
@@ -2913,6 +3282,137 @@ impl<'ctx> MirLowerer<'ctx> {
         builder.call(func, arg_vals, Some(result), cont);
         builder.switch_to_block(cont);
         Ok(values::local(result))
+    }
+
+    /// Lower `if let PATTERN = SCRUTINEE { then } else { else }`.
+    /// For a runtime Option/Result scrutinee this tests the discriminant
+    /// (has_value / is_ok, negated for None / Err), binds the payload from the
+    /// typed union slot in the matched branch, and runs the unmatched branch
+    /// otherwise. Falls back to a plain binding for other scrutinees.
+    fn lower_if_let(
+        &mut self,
+        pattern: &ast::Pattern,
+        scrutinee: &ast::Expr,
+        then_branch: &ast::Block,
+        else_branch: Option<&ast::Expr>,
+    ) -> CodegenResult<MirValue> {
+        let scrut_val = self.lower_expr(scrutinee)?;
+        let scrut_ty = self.type_of_value(&scrut_val);
+        let is_option = matches!(&scrut_ty, MirType::Struct(n) if n.as_ref() == "Option");
+        let is_result = matches!(&scrut_ty, MirType::Struct(n) if n.as_ref() == "Result");
+
+        // Variant name and the (optional) bound payload identifier.
+        let (variant, bind_name): (Option<Arc<str>>, Option<Arc<str>>) = match &pattern.kind {
+            ast::PatternKind::TupleStruct { path, patterns } => {
+                let v = path.segments.last().map(|s| s.ident.name.clone());
+                let b = patterns.first().and_then(|p| match &p.kind {
+                    ast::PatternKind::Ident { name, .. } => Some(name.name.clone()),
+                    _ => None,
+                });
+                (v, b)
+            }
+            ast::PatternKind::Ident { name, .. } => (Some(name.name.clone()), None),
+            _ => (None, None),
+        };
+        let variant_str = variant.as_deref();
+
+        if is_option || is_result {
+            // Resolve the payload type and the union field for the bound value.
+            let (payload_ty, payload_field) = if is_option {
+                (
+                    self.option_inner_type_for(scrutinee, &scrut_val)
+                        .unwrap_or_else(MirType::i32),
+                    "value",
+                )
+            } else if variant_str == Some("Err") {
+                (self.result_err_type_for(scrutinee, &scrut_val), "err")
+            } else {
+                (self.result_ok_type_for(scrutinee, &scrut_val), "ok")
+            };
+            let disc_field = if is_option { "has_value" } else { "is_ok" };
+            // None / Err match when the discriminant is FALSE.
+            let negate = matches!(variant_str, Some("None") | Some("Err"));
+
+            let builder = self.current_fn.as_mut().unwrap();
+            let scrut_local = builder.create_local(scrut_ty.clone());
+            builder.assign(scrut_local, MirRValue::Use(scrut_val));
+            let disc = builder.create_local(MirType::Bool);
+            builder.assign(
+                disc,
+                MirRValue::FieldAccess {
+                    base: values::local(scrut_local),
+                    field_name: Arc::from(disc_field),
+                    field_ty: MirType::Bool,
+                },
+            );
+            let cond = if negate {
+                let neg = builder.create_local(MirType::Bool);
+                builder.unary_op(neg, UnaryOp::Not, values::local(disc));
+                values::local(neg)
+            } else {
+                values::local(disc)
+            };
+
+            let then_block = builder.create_block();
+            let else_block = builder.create_block();
+            let merge_block = builder.create_block();
+            builder.branch(cond, then_block, else_block);
+
+            // Matched branch: bind the payload (when the pattern binds one).
+            builder.switch_to_block(then_block);
+            let saved_vars = self.var_map.clone();
+            if let Some(name) = bind_name {
+                let builder = self.current_fn.as_mut().unwrap();
+                let bound = builder.create_named_local(name.clone(), payload_ty.clone());
+                builder.assign(
+                    bound,
+                    MirRValue::FieldAccess {
+                        base: values::local(scrut_local),
+                        field_name: Arc::from(payload_field),
+                        field_ty: payload_ty,
+                    },
+                );
+                self.var_map.insert(name, bound);
+            }
+            let then_val = self.lower_block(then_branch)?;
+            self.var_map = saved_vars.clone();
+            let result_ty = then_val
+                .as_ref()
+                .map(|v| self.type_of_value(v))
+                .unwrap_or(MirType::Void);
+            let builder = self.current_fn.as_mut().unwrap();
+            let result = builder.create_local(result_ty);
+            if let Some(v) = then_val {
+                builder.assign(result, MirRValue::Use(v));
+            }
+            builder.goto(merge_block);
+
+            // Unmatched branch.
+            let builder = self.current_fn.as_mut().unwrap();
+            builder.switch_to_block(else_block);
+            if let Some(else_expr) = else_branch {
+                let else_val = self.lower_expr(else_expr)?;
+                self.var_map = saved_vars;
+                let builder = self.current_fn.as_mut().unwrap();
+                if !matches!(else_val, MirValue::Const(MirConst::Unit)) {
+                    builder.assign(result, MirRValue::Use(else_val));
+                }
+            }
+            let builder = self.current_fn.as_mut().unwrap();
+            builder.goto(merge_block);
+            builder.switch_to_block(merge_block);
+            return Ok(values::local(result));
+        }
+
+        // Fallback (non-sum-type scrutinee): bind the whole value and run the
+        // then-branch. Rare; preserves the previous best-effort behavior.
+        if let Some(name) = bind_name.or(variant) {
+            let builder = self.current_fn.as_mut().unwrap();
+            let local = builder.create_named_local(name.clone(), scrut_ty.clone());
+            builder.assign(local, MirRValue::Use(scrut_val));
+            self.var_map.insert(name, local);
+        }
+        self.lower_if_unconditional(then_branch, else_branch)
     }
 
     fn lower_if(
@@ -3007,11 +3507,16 @@ impl<'ctx> MirLowerer<'ctx> {
 
     /// Lower `match opt { Some(x) => body1, None => body2 }` for runtime Option.
     /// The runtime Option struct has `has_value: bool` and `value: union { i64 i; double f; void* p; }`.
+    /// `inner_ty_override` threads the payload type recovered at the match site
+    /// (from a binding annotation or the matched call's `-> Option<T>` return)
+    /// so the union slot is read with the correct type; it takes priority over
+    /// the per-local table and the i32 fallback.
     fn lower_runtime_option_match(
         &mut self,
         scrutinee_val: MirValue,
         scrutinee_ty: &MirType,
         arms: &[ast::MatchArm],
+        inner_ty_override: Option<MirType>,
     ) -> CodegenResult<MirValue> {
         let builder = self
             .current_fn
@@ -3096,11 +3601,12 @@ impl<'ctx> MirLowerer<'ctx> {
                         if let ast::PatternKind::Ident { name, .. } = &pat.kind {
                             let builder = self.current_fn.as_mut().unwrap();
                             let inner_ty = if is_real_option {
-                                // Look up tracked inner type from let-binding annotation.
-                                // Falls back to i32 when no annotation is available.
-                                self.option_inner_types
-                                    .get(&scrut_local)
-                                    .cloned()
+                                // Priority: threaded override (binding annotation
+                                // or matched call's `-> Option<T>`), then the
+                                // per-local table, then i32.
+                                inner_ty_override
+                                    .clone()
+                                    .or_else(|| self.option_inner_types.get(&scrut_local).cloned())
                                     .unwrap_or_else(MirType::i32)
                             } else {
                                 scrutinee_ty.clone() // i32 fallback - same type as scrutinee
@@ -3152,6 +3658,205 @@ impl<'ctx> MirLowerer<'ctx> {
         Ok(values::local(result))
     }
 
+    /// Lower `match res { Ok(x) => body1, Err(e) => body2 }` for runtime Result.
+    /// The runtime Result struct has `is_ok: bool`, `ok: union { i64 ok_i;
+    /// double ok_f; void* ok_p; }`, and `err: BuildString`. The Ok payload type
+    /// is threaded in (`ok_ty`) so the union slot is read with the correct type
+    /// rather than defaulting to i32 (which would silently mis-read f64/pointer
+    /// Ok payloads). The Err payload is always a BuildString in the current
+    /// runtime.
+    fn lower_runtime_result_match(
+        &mut self,
+        scrutinee_val: MirValue,
+        scrutinee_ty: &MirType,
+        arms: &[ast::MatchArm],
+        ok_ty: MirType,
+        err_ty: MirType,
+    ) -> CodegenResult<MirValue> {
+        let builder = self
+            .current_fn
+            .as_mut()
+            .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+
+        let scrut_local = builder.create_local(scrutinee_ty.clone());
+        builder.assign(scrut_local, MirRValue::Use(scrutinee_val));
+
+        // Discriminant: is_ok.
+        let is_ok = builder.create_local(MirType::Bool);
+        builder.assign(
+            is_ok,
+            MirRValue::FieldAccess {
+                base: values::local(scrut_local),
+                field_name: Arc::from("is_ok"),
+                field_ty: MirType::Bool,
+            },
+        );
+
+        let merge_block = builder.create_block();
+        let ok_block = builder.create_block();
+        let err_block = builder.create_block();
+
+        // Result type for the match expression value.
+        let ret_ty = builder.return_type().clone();
+        let result_ty = if ret_ty == MirType::Void {
+            MirType::i32()
+        } else {
+            ret_ty
+        };
+        let result = builder.create_local(result_ty);
+
+        builder.branch(values::local(is_ok), ok_block, err_block);
+
+        for arm in arms {
+            let variant = match &arm.pattern.kind {
+                ast::PatternKind::TupleStruct { path, .. } => {
+                    path.segments.last().map(|s| s.ident.name.as_ref())
+                }
+                _ => None,
+            };
+            let is_ok_arm = variant == Some("Ok");
+            let is_err_arm = variant == Some("Err");
+
+            // Choose the arm's block, the bound field name, and the bound type.
+            let (block, field_name, bind_ty) = if is_ok_arm {
+                (ok_block, "ok", ok_ty.clone())
+            } else if is_err_arm {
+                (err_block, "err", err_ty.clone())
+            } else {
+                // Wildcard / binding arm: treat as the Err fall-through so a
+                // catch-all still produces a value.
+                (err_block, "err", err_ty.clone())
+            };
+
+            let builder = self.current_fn.as_mut().unwrap();
+            builder.switch_to_block(block);
+
+            // Bind the inner pattern variable from the typed field.
+            if let ast::PatternKind::TupleStruct { patterns, .. } = &arm.pattern.kind {
+                for pat in patterns.iter() {
+                    if let ast::PatternKind::Ident { name, .. } = &pat.kind {
+                        let builder = self.current_fn.as_mut().unwrap();
+                        let inner_local =
+                            builder.create_named_local(name.name.clone(), bind_ty.clone());
+                        builder.assign(
+                            inner_local,
+                            MirRValue::FieldAccess {
+                                base: values::local(scrut_local),
+                                field_name: Arc::from(field_name),
+                                field_ty: bind_ty.clone(),
+                            },
+                        );
+                        self.var_map.insert(name.name.clone(), inner_local);
+                    }
+                }
+            }
+
+            let body_val = self.lower_expr(&arm.body)?;
+            let builder = self.current_fn.as_mut().unwrap();
+            if !matches!(body_val, MirValue::Const(MirConst::Unit)) {
+                builder.assign(result, MirRValue::Use(body_val));
+            }
+            builder.goto(merge_block);
+        }
+
+        let builder = self.current_fn.as_mut().unwrap();
+        builder.switch_to_block(merge_block);
+        Ok(values::local(result))
+    }
+
+    /// Determine the Ok payload type of a Result-valued match scrutinee.
+    /// Priority: a let-binding annotation tracked per-local, then the return
+    /// signature of a directly-matched call, then i32. The Err payload is
+    /// always a BuildString in the current runtime.
+    fn result_ok_type_for(&self, scrutinee: &ast::Expr, scrutinee_val: &MirValue) -> MirType {
+        // Local tracked from a `let r: Result<Ok, Err> = ...` annotation.
+        if let MirValue::Local(id) = scrutinee_val {
+            if let Some(ty) = self.result_ok_types.get(id) {
+                return ty.clone();
+            }
+        }
+        // Direct `match call() { Ok(x) => ... }`: recover from the callee sig.
+        if let Some(name) = self.scrutinee_callee_name(scrutinee) {
+            if let Some(ty) = self.fn_result_ok_types.get(&name) {
+                return ty.clone();
+            }
+        }
+        MirType::i32()
+    }
+
+    /// Resolve the function/method name a match scrutinee calls, if any. A free
+    /// call yields its (possibly module-qualified) name; a method call resolves
+    /// the receiver's type to the mangled `Type_method` name. Used to look up
+    /// the per-function Result/Option payload-type tables.
+    fn scrutinee_callee_name(&self, scrutinee: &ast::Expr) -> Option<Arc<str>> {
+        match &scrutinee.kind {
+            ExprKind::Call { func, .. } => match &func.kind {
+                ExprKind::Ident(ident) => Some(ident.name.clone()),
+                ExprKind::Path(path) => path.last_ident().map(|i| i.name.clone()),
+                _ => None,
+            },
+            ExprKind::MethodCall {
+                receiver, method, ..
+            } => {
+                let recv_ty = self.infer_expr_type(receiver);
+                let type_name = match &recv_ty {
+                    MirType::Struct(n) => Some(n.clone()),
+                    MirType::Ptr(inner) => match &**inner {
+                        MirType::Struct(n) => Some(n.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                }?;
+                self.impl_methods
+                    .get(&(type_name, method.name.clone()))
+                    .cloned()
+            }
+            _ => None,
+        }
+    }
+
+    /// Determine the Err payload type of a Result-valued match scrutinee.
+    /// Priority: a let-binding annotation tracked per-local, then the matched
+    /// call's `Result<Ok, Err>` signature, then BuildString (the common
+    /// String-error case, which keeps unannotated string-error matches working).
+    fn result_err_type_for(&self, scrutinee: &ast::Expr, scrutinee_val: &MirValue) -> MirType {
+        if let MirValue::Local(id) = scrutinee_val {
+            if let Some(ty) = self.result_err_types.get(id) {
+                return ty.clone();
+            }
+        }
+        if let Some(name) = self.scrutinee_callee_name(scrutinee) {
+            if let Some(ty) = self.fn_result_err_types.get(&name) {
+                return ty.clone();
+            }
+        }
+        MirType::Struct(Arc::from("BuildString"))
+    }
+
+    /// Determine the payload type of an Option-valued match scrutinee, when it
+    /// can be recovered. Priority: a let-binding annotation tracked per-local,
+    /// then the `-> Option<T>` return of a directly-matched call. Returns None
+    /// when neither is available (the match then falls back to i32).
+    fn option_inner_type_for(
+        &self,
+        scrutinee: &ast::Expr,
+        scrutinee_val: &MirValue,
+    ) -> Option<MirType> {
+        // Local tracked from a `let o: Option<T> = ...` annotation.
+        if let MirValue::Local(id) = scrutinee_val {
+            if let Some(ty) = self.option_inner_types.get(id) {
+                return Some(ty.clone());
+            }
+        }
+        // Direct `match call() { Some(x) => ... }`: recover from the callee sig.
+        if let Some(name) = self.scrutinee_callee_name(scrutinee) {
+            if let Some(ty) = self.fn_option_inner_types.get(&name) {
+                return Some(ty.clone());
+            }
+        }
+        None
+    }
+
     fn lower_match(
         &mut self,
         scrutinee: &ast::Expr,
@@ -3161,12 +3866,54 @@ impl<'ctx> MirLowerer<'ctx> {
         let scrutinee_val = self.lower_expr(scrutinee)?;
         let scrutinee_ty = self.type_of_value(&scrutinee_val);
 
+        // If the scrutinee is a pointer to an enum (e.g. `match self` in a
+        // `&self` enum method), dereference it to the enum value so the enum-tag
+        // match path applies instead of an invalid struct/pointer `==`.
+        let (scrutinee_val, scrutinee_ty) = match &scrutinee_ty {
+            MirType::Ptr(inner) => match inner.as_ref() {
+                MirType::Struct(name) if self.is_enum_type(name) => {
+                    let pointee = (**inner).clone();
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let derefed = builder.create_local(pointee.clone());
+                    builder.assign(
+                        derefed,
+                        MirRValue::Deref {
+                            ptr: scrutinee_val,
+                            pointee_ty: pointee.clone(),
+                        },
+                    );
+                    (values::local(derefed), pointee)
+                }
+                _ => (scrutinee_val, scrutinee_ty),
+            },
+            _ => (scrutinee_val, scrutinee_ty),
+        };
+
+        // Runtime Result match: `match res { Ok(x) => ..., Err(e) => ... }`
+        // The runtime Result struct has `is_ok: bool`, an `ok` union, and an
+        // `err: BuildString`. The Ok payload type is threaded from the binding
+        // annotation or callee signature so the union slot is read correctly.
+        let is_runtime_result =
+            matches!(&scrutinee_ty, MirType::Struct(n) if n.as_ref() == "Result");
+        if is_runtime_result {
+            let ok_ty = self.result_ok_type_for(scrutinee, &scrutinee_val);
+            let err_ty = self.result_err_type_for(scrutinee, &scrutinee_val);
+            return self.lower_runtime_result_match(
+                scrutinee_val,
+                &scrutinee_ty,
+                arms,
+                ok_ty,
+                err_ty,
+            );
+        }
+
         // Runtime Option match: `match opt { Some(x) => ..., None => ... }`
         // The runtime Option struct has fields `has_value: bool` and `value: union`.
         let is_runtime_option =
             matches!(&scrutinee_ty, MirType::Struct(n) if n.as_ref() == "Option");
         if is_runtime_option {
-            return self.lower_runtime_option_match(scrutinee_val, &scrutinee_ty, arms);
+            let inner = self.option_inner_type_for(scrutinee, &scrutinee_val);
+            return self.lower_runtime_option_match(scrutinee_val, &scrutinee_ty, arms, inner);
         }
 
         // Check if this is an enum match (scrutinee type is a known enum).
@@ -3190,7 +3937,14 @@ impl<'ctx> MirLowerer<'ctx> {
                     )
                 });
                 if has_option_arms {
-                    return self.lower_runtime_option_match(scrutinee_val, &scrutinee_ty, arms);
+                    // Primitive (i32) scrutinee: no override; the scrutinee type
+                    // itself is the payload type.
+                    return self.lower_runtime_option_match(
+                        scrutinee_val,
+                        &scrutinee_ty,
+                        arms,
+                        None,
+                    );
                 }
             }
         }
@@ -3949,6 +4703,19 @@ impl<'ctx> MirLowerer<'ctx> {
         // Determine if this is an array type and extract element type + length
         let (elem_ty, arr_len) = match &iter_ty {
             MirType::Array(elem, len) => (elem.as_ref().clone(), *len),
+            // `for x in v` over a Vec<T>: a runtime-length index loop. Previously
+            // this fell through to the no-op loop below, silently dropping the
+            // iteration (the body never ran).
+            MirType::Vec(elem) => {
+                let elem_ty = elem.as_ref().clone();
+                return self.lower_for_vec(pattern, iter_val, elem_ty, body);
+            }
+            // `for c in s.chars()` / `for c in s`: iterate the string's bytes.
+            // chars()/bytes() are identity ops, so the iterable is a BuildString.
+            // Previously this fell to the no-op loop (zero iterations).
+            MirType::Struct(n) if n.as_ref() == "BuildString" => {
+                return self.lower_for_string(pattern, iter_val, body);
+            }
             _ => {
                 // Not an array - try iterator protocol: call .next() in a loop.
                 // Requires the type to have a `next` method registered in impl_methods
@@ -4043,6 +4810,186 @@ impl<'ctx> MirLowerer<'ctx> {
         let builder = self.current_fn.as_mut().unwrap();
         builder.switch_to_block(exit_block);
 
+        Ok(values::unit())
+    }
+
+    /// Lower `for x in v { body }` over a `Vec<T>` to a runtime-length index loop:
+    /// `len = build_hvec_len(v); for idx in 0..len { x = v[idx]; body }`. Element
+    /// access uses `IndexAccess`, which the C backend lowers to the typed
+    /// `build_hvec_get_<suffix>` accessor.
+    fn lower_for_vec(
+        &mut self,
+        pattern: &ast::Pattern,
+        iter_val: MirValue,
+        elem_ty: MirType,
+        body: &ast::Block,
+    ) -> CodegenResult<MirValue> {
+        let builder = self
+            .current_fn
+            .as_mut()
+            .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+
+        // Hold the vec handle in a local.
+        let arr_local = builder.create_local(MirType::Vec(Box::new(elem_ty.clone())));
+        builder.assign(arr_local, MirRValue::Use(iter_val));
+
+        // Read the length once before the loop: `len = build_hvec_len(v)`.
+        // `Call` is a terminator, so it splits into a continuation block.
+        let len_local = builder.create_local(MirType::i64());
+        let after_len = builder.create_block();
+        builder.call(
+            MirValue::Function(Arc::from("build_hvec_len")),
+            vec![values::local(arr_local)],
+            Some(len_local),
+            after_len,
+        );
+        builder.switch_to_block(after_len);
+
+        // `let mut __idx = 0;`
+        let idx_local = builder.create_local(MirType::i64());
+        builder.assign(
+            idx_local,
+            MirRValue::Use(MirValue::Const(MirConst::Int(0, MirType::i64()))),
+        );
+
+        let cond_block = builder.create_block();
+        let body_block = builder.create_block();
+        let incr_block = builder.create_block();
+        let exit_block = builder.create_block();
+
+        self.loop_stack.push((incr_block, exit_block));
+
+        let builder = self.current_fn.as_mut().unwrap();
+        builder.goto(cond_block);
+        builder.switch_to_block(cond_block);
+
+        // `if __idx < len { body } else { exit }`
+        let cmp = builder.create_local(MirType::Bool);
+        builder.binary_op(
+            cmp,
+            BinOp::Lt,
+            values::local(idx_local),
+            values::local(len_local),
+        );
+        builder.branch(values::local(cmp), body_block, exit_block);
+
+        // Body: `x = v[__idx];`
+        builder.switch_to_block(body_block);
+        let elem_local = builder.create_local(elem_ty.clone());
+        builder.assign(
+            elem_local,
+            MirRValue::IndexAccess {
+                base: values::local(arr_local),
+                index: values::local(idx_local),
+                elem_ty: elem_ty.clone(),
+            },
+        );
+
+        let saved_vars = self.var_map.clone();
+        self.bind_for_pattern(pattern, elem_local, &elem_ty)?;
+        self.lower_block(body)?;
+        self.var_map = saved_vars;
+
+        let builder = self.current_fn.as_mut().unwrap();
+        builder.goto(incr_block);
+
+        // `__idx = __idx + 1;`
+        builder.switch_to_block(incr_block);
+        let one = MirValue::Const(MirConst::Int(1, MirType::i64()));
+        let next_idx = builder.create_local(MirType::i64());
+        builder.binary_op(next_idx, BinOp::Add, values::local(idx_local), one);
+        builder.assign(idx_local, MirRValue::Use(values::local(next_idx)));
+        builder.goto(cond_block);
+
+        self.loop_stack.pop();
+
+        let builder = self.current_fn.as_mut().unwrap();
+        builder.switch_to_block(exit_block);
+
+        Ok(values::unit())
+    }
+
+    /// Lower `for c in <string>` as a runtime-length loop over the string's
+    /// bytes, binding each byte (as i32) to the pattern variable.
+    fn lower_for_string(
+        &mut self,
+        pattern: &ast::Pattern,
+        iter_val: MirValue,
+        body: &ast::Block,
+    ) -> CodegenResult<MirValue> {
+        let byte_ty = MirType::i32();
+        let builder = self
+            .current_fn
+            .as_mut()
+            .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+
+        let str_local = builder.create_local(MirType::Struct(Arc::from("BuildString")));
+        builder.assign(str_local, MirRValue::Use(iter_val));
+
+        // len = build_string_len(s)  (Call is a terminator -> split block).
+        let len_local = builder.create_local(MirType::i64());
+        let after_len = builder.create_block();
+        builder.call(
+            MirValue::Function(Arc::from("build_string_len")),
+            vec![values::local(str_local)],
+            Some(len_local),
+            after_len,
+        );
+        builder.switch_to_block(after_len);
+
+        let idx_local = builder.create_local(MirType::i64());
+        builder.assign(
+            idx_local,
+            MirRValue::Use(MirValue::Const(MirConst::Int(0, MirType::i64()))),
+        );
+
+        let cond_block = builder.create_block();
+        let body_block = builder.create_block();
+        let incr_block = builder.create_block();
+        let exit_block = builder.create_block();
+        self.loop_stack.push((incr_block, exit_block));
+
+        let builder = self.current_fn.as_mut().unwrap();
+        builder.goto(cond_block);
+        builder.switch_to_block(cond_block);
+        let cmp = builder.create_local(MirType::Bool);
+        builder.binary_op(
+            cmp,
+            BinOp::Lt,
+            values::local(idx_local),
+            values::local(len_local),
+        );
+        builder.branch(values::local(cmp), body_block, exit_block);
+
+        // Body: c = build_string_byte_at(s, idx)  (Call -> split block).
+        builder.switch_to_block(body_block);
+        let elem_local = builder.create_local(byte_ty.clone());
+        let after_get = builder.create_block();
+        builder.call(
+            MirValue::Function(Arc::from("build_string_byte_at")),
+            vec![values::local(str_local), values::local(idx_local)],
+            Some(elem_local),
+            after_get,
+        );
+        builder.switch_to_block(after_get);
+
+        let saved_vars = self.var_map.clone();
+        self.bind_for_pattern(pattern, elem_local, &byte_ty)?;
+        self.lower_block(body)?;
+        self.var_map = saved_vars;
+
+        let builder = self.current_fn.as_mut().unwrap();
+        builder.goto(incr_block);
+        builder.switch_to_block(incr_block);
+        let one = MirValue::Const(MirConst::Int(1, MirType::i64()));
+        let next_idx = builder.create_local(MirType::i64());
+        builder.binary_op(next_idx, BinOp::Add, values::local(idx_local), one);
+        builder.assign(idx_local, MirRValue::Use(values::local(next_idx)));
+        builder.goto(cond_block);
+
+        self.loop_stack.pop();
+        let builder = self.current_fn.as_mut().unwrap();
+        builder.switch_to_block(exit_block);
         Ok(values::unit())
     }
 
@@ -4429,6 +5376,31 @@ impl<'ctx> MirLowerer<'ctx> {
         let inner_val = self.lower_expr(inner)?;
         let inner_ty = self.type_of_value(&inner_val);
 
+        // Runtime Result/Option `?`: these are the runtime structs (is_ok /
+        // has_value + a union slot), not user-defined tagged enums, so the
+        // enum-tag path below does not apply. Unwrap the success payload as the
+        // expression value, or early-return the whole value to propagate the
+        // Err/None (the enclosing function returns the same runtime type, so the
+        // discriminant and err/none payload carry through unchanged).
+        if let MirType::Struct(ref name) = inner_ty {
+            if name.as_ref() == "Result" {
+                let ok_ty = self.result_ok_type_for(inner, &inner_val);
+                return self.lower_try_runtime_sumtype(inner_val, &inner_ty, "is_ok", "ok", ok_ty);
+            }
+            if name.as_ref() == "Option" {
+                let payload_ty = self
+                    .option_inner_type_for(inner, &inner_val)
+                    .unwrap_or_else(MirType::i32);
+                return self.lower_try_runtime_sumtype(
+                    inner_val,
+                    &inner_ty,
+                    "has_value",
+                    "value",
+                    payload_ty,
+                );
+            }
+        }
+
         // The inner value must be an enum type (Result or Option)
         let enum_name = if let MirType::Struct(ref name) = inner_ty {
             name.clone()
@@ -4574,6 +5546,65 @@ impl<'ctx> MirLowerer<'ctx> {
             // The result is the unwrapped value from the Ok block
             Ok(values::local(unwrapped))
         }
+    }
+
+    /// Lower `expr?` where `expr` is a runtime `Result`/`Option` struct. On the
+    /// success discriminant the expression value is the unwrapped payload (read
+    /// from the typed union slot, boxing-aware in the C backend); on the failure
+    /// discriminant the whole value is returned early to propagate the Err/None.
+    fn lower_try_runtime_sumtype(
+        &mut self,
+        inner_val: MirValue,
+        inner_ty: &MirType,
+        disc_field: &str,
+        payload_field: &str,
+        payload_ty: MirType,
+    ) -> CodegenResult<MirValue> {
+        let builder = self.current_fn.as_mut().ok_or_else(|| {
+            CodegenError::Internal("No current function for try operator".to_string())
+        })?;
+
+        let scrut = builder.create_local(inner_ty.clone());
+        builder.assign(scrut, MirRValue::Use(inner_val));
+
+        // Success discriminant (is_ok / has_value): true => unwrap, false =>
+        // propagate.
+        let disc = builder.create_local(MirType::Bool);
+        builder.assign(
+            disc,
+            MirRValue::FieldAccess {
+                base: values::local(scrut),
+                field_name: Arc::from(disc_field),
+                field_ty: MirType::Bool,
+            },
+        );
+
+        let ok_block = builder.create_block();
+        let fail_block = builder.create_block();
+        let cont_block = builder.create_block();
+        builder.branch(values::local(disc), ok_block, fail_block);
+
+        // Success: read the payload from the typed slot.
+        builder.switch_to_block(ok_block);
+        let unwrapped = builder.create_local(payload_ty.clone());
+        builder.assign(
+            unwrapped,
+            MirRValue::FieldAccess {
+                base: values::local(scrut),
+                field_name: Arc::from(payload_field),
+                field_ty: payload_ty,
+            },
+        );
+        builder.goto(cont_block);
+
+        // Failure: return the whole value to propagate Err/None unchanged.
+        builder.switch_to_block(fail_block);
+        builder.ret(Some(values::local(scrut)));
+
+        // An unreachable block separates the early return from the continuation.
+        let _unreachable = builder.create_block();
+        builder.switch_to_block(cont_block);
+        Ok(values::local(unwrapped))
     }
 
     fn lower_break(

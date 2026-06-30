@@ -261,6 +261,24 @@ pub struct MirFunction {
     pub shader_stage: Option<ShaderStage>,
     /// Shader resource bindings (uniform buffers, textures, samplers).
     pub bindings: Vec<ShaderBinding>,
+    /// Backing C header for a foreign declaration, from an extern block's
+    /// `header "..."` clause. When set, the C backend emits an `#include` for
+    /// this header and trusts it for the prototype instead of synthesizing an
+    /// `extern` declaration. Skipped during serialization when absent so MIR
+    /// for non-FFI functions is unchanged and remains backward compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_header: Option<Arc<str>>,
+    /// Library to link for a foreign declaration, from an extern block's
+    /// `link "..."` clause. The build driver passes it to the C compiler
+    /// (`-lname` for gcc/clang/cc, `name.lib` for MSVC). Skipped during
+    /// serialization when absent so non-FFI MIR stays backward compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_lib: Option<Arc<str>>,
+    /// Whether this function is a C-ABI export (an `extern "C" fn` definition).
+    /// Exports get external linkage and are declared in the generated C header
+    /// so other languages can call them. Skipped when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_c_export: bool,
 }
 
 impl MirFunction {
@@ -275,6 +293,9 @@ impl MirFunction {
             linkage: Linkage::Internal,
             shader_stage: None,
             bindings: Vec::new(),
+            link_header: None,
+            link_lib: None,
+            is_c_export: false,
         }
     }
 
@@ -289,6 +310,9 @@ impl MirFunction {
             linkage: Linkage::External,
             shader_stage: None,
             bindings: Vec::new(),
+            link_header: None,
+            link_lib: None,
+            is_c_export: false,
         }
     }
 
@@ -589,6 +613,12 @@ pub enum MirStmtKind {
         field_name: Arc<str>,
         value: MirRValue,
     },
+
+    /// Store to a module global / mutable static: `GLOBAL = value`.
+    /// MIR `Assign` targets only locals, so a write to a module-level global is
+    /// represented here. Lowered from `lower_assign` when the assignment target
+    /// is a bare identifier that names a global rather than a local.
+    GlobalStore { name: Arc<str>, value: MirRValue },
 
     /// Storage live (local becomes valid).
     StorageLive(LocalId),
@@ -1296,6 +1326,20 @@ pub struct MirGlobal {
     pub is_mut: bool,
     /// Linkage.
     pub linkage: Linkage,
+    /// Whether this global is only an external declaration (a foreign
+    /// `static` from an extern block). Such globals are referenced, never
+    /// defined: the C backend either relies on the declared `header` or emits
+    /// a bare `extern` declaration instead of a definition.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_extern_decl: bool,
+    /// Backing C header for a foreign static, from the extern block's
+    /// `header "..."` clause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_header: Option<Arc<str>>,
+    /// Library to link for a foreign static, from the extern block's
+    /// `link "..."` clause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_lib: Option<Arc<str>>,
 }
 
 impl MirGlobal {
@@ -1307,6 +1351,9 @@ impl MirGlobal {
             init: None,
             is_mut: false,
             linkage: Linkage::Internal,
+            is_extern_decl: false,
+            link_header: None,
+            link_lib: None,
         }
     }
 }
