@@ -69,6 +69,10 @@ harness = false
 name = "parser"
 path = "tests/parser/mod.rs"
 
+[[test]]
+name = "lexer"
+path = "tests/lexer/mod.rs"
+
 [profile.release]
 lto = true
 codegen-units = 1
