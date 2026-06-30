@@ -1059,6 +1059,27 @@ mod tests {
     }
 
     #[test]
+    fn iterator_sum_terminal_desugars_to_an_accumulator_loop() {
+        // `v.iter().map(|x| x * 2).sum()` must desugar to a loop with a running
+        // accumulator, not leave `.iter()` as an undefined `iter` call (which
+        // failed to link).
+        let code = source_to_c(
+            "fn main() { \
+               let v: Vec<i32> = vec![1, 2, 3, 4]; \
+               let _total: i32 = v.iter().map(|x| x * 2).sum(); \
+             }",
+        );
+        assert!(
+            !code.contains("= iter(") && !code.contains(" iter("),
+            "the iterator chain must not emit an undefined `iter` call:\n{code}"
+        );
+        assert!(
+            code.contains("build_hvec_get_i32") && code.contains("build_hvec_len"),
+            "the sum chain must lower to a runtime-length element loop:\n{code}"
+        );
+    }
+
+    #[test]
     fn nested_result_of_option_boxes_a_none_payload() {
         // `Ok(None)` in a `-> Result<Option<i32>, String>` must box the Option
         // payload (it is 16 bytes, > the 8-byte slot), the same as `Ok(Some(n))`.

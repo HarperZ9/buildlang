@@ -10,6 +10,14 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Stdlib (iterator `.sum()`): `v.iter()...sum()` is now a recognized terminal,
+  desugaring to an accumulator loop (`acc = acc + elem` from a zero of the output
+  element type). Previously only `.collect()` and `.fold()` triggered iterator-
+  chain desugaring, so a chain ending in `.sum()` left `.iter()` as an undefined
+  `iter` call that failed to link. Composes with the existing `.map()` step.
+  Verified end-to-end under MSVC: `v.iter().map(|x| x * 2).sum()` over
+  `[1,2,3,4]` prints `sum 20`. Covered by
+  `iterator_sum_terminal_desugars_to_an_accumulator_loop`.
 - Stdlib (nested sum types): `Ok(None)` / `Some(None)` in a function returning a
   nested type like `Result<Option<i32>, String>` now box the inner `Option`
   payload correctly. `None` is a non-local constant, so the construction handler
