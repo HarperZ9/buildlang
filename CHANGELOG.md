@@ -10,6 +10,16 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Stdlib (`Vec<struct>`): a vector of a user struct (or other aggregate element)
+  now constructs, pushes, indexes, and pops correctly. `Vec<P>::new()` /
+  `v.push(P { .. })` previously dispatched to the `i32` element family
+  (`build_hvec_new_i32` / `build_hvec_push_i32`), passing a struct where an
+  `int32_t` was expected (a C error). The backend now emits monomorphized,
+  element-sized wrappers (`build_hvec_new_<T>` / `push` / `get` / `pop`) keyed by
+  the struct name for each aggregate Vec element type, riding the size-aware
+  generic `BuildVec`, and both the `Vec::new` and method dispatch select them.
+  Verified end-to-end under MSVC: a `Vec<Pt>` with three pushes summed via index
+  prints `sum 66`. Covered by `vec_of_struct_uses_sized_element_wrappers`.
 - Stdlib (sum-type method-call scrutinees): `match recv.method() { ... }` and
   `recv.method()?` now thread the `Result`/`Option` payload type from the
   method's signature, so a method returning `Result<f64, _>` / `Option<f64>` is

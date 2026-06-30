@@ -137,14 +137,23 @@ impl CBackend {
 
     /// The runtime suffix for an element-typed `Vec` handle (`build_hvec_*_<suffix>`
     /// and `build_hvec_new_<suffix>`), chosen from the Vec's element type.
-    fn hvec_elem_suffix(elem: &MirType) -> &'static str {
+    fn hvec_elem_suffix(elem: &MirType) -> String {
         match elem {
-            MirType::Struct(n) if n.as_ref() == "BuildString" => "str",
-            MirType::Int(IntSize::I64, _) => "i64",
-            MirType::Int(..) => "i32",
-            MirType::Float(..) => "f64",
-            _ => "i32",
+            MirType::Struct(n) if n.as_ref() == "BuildString" => "str".to_string(),
+            MirType::Int(IntSize::I64, _) => "i64".to_string(),
+            MirType::Int(..) => "i32".to_string(),
+            MirType::Float(..) => "f64".to_string(),
+            // Aggregate element (a user struct, vector type, etc.): use a
+            // monomorphized, element-sized wrapper keyed by the struct name.
+            MirType::Struct(n) => n.to_string(),
+            _ => "i32".to_string(),
         }
+    }
+
+    /// True when a Vec element type needs a monomorphized element-sized wrapper
+    /// (rather than one of the built-in i32/i64/f64/str handle families).
+    fn vec_elem_needs_sized_wrapper(elem: &MirType) -> bool {
+        matches!(elem, MirType::Struct(n) if n.as_ref() != "BuildString")
     }
 
     /// The directly-named callee of a `Call`, if any.
@@ -1189,6 +1198,39 @@ impl CBackend {
                     self.output
                         .push_str("    build_hmap_insert_str_f64(h, key.ptr, __d);\n}\n\n");
                 }
+            }
+        }
+
+        // Generate monomorphized Vec element wrappers for aggregate element
+        // types (user structs etc.). The built-in i32/i64/f64/str families cover
+        // scalars and strings; an aggregate element rides in the size-aware
+        // generic BuildVec via a per-type wrapper so `Vec<P>` push/get/pop work.
+        {
+            let mut vec_elem_types: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            for func in &module.functions {
+                for local in &func.locals {
+                    if let MirType::Vec(ref elem) = local.ty {
+                        if Self::vec_elem_needs_sized_wrapper(elem) {
+                            vec_elem_types.insert(self.type_to_c(elem));
+                        }
+                    }
+                }
+            }
+            if !vec_elem_types.is_empty() {
+                self.output
+                    .push_str("// Monomorphized Vec element wrappers for aggregate element types\n");
+                // Deterministic order for reproducible codegen (receipts).
+                let mut entries: Vec<&String> = vec_elem_types.iter().collect();
+                entries.sort();
+                for elem_c in entries {
+                    let suffix = elem_c.replace('*', "ptr").replace(' ', "_");
+                    write!(self.output, "static BuildVecHandle build_hvec_new_{suffix}(void) {{ BuildVecHandle h; h.inner = (BuildVec*)malloc(sizeof(BuildVec)); *h.inner = build_vec_new(sizeof({elem_c})); return h; }}\n").unwrap();
+                    write!(self.output, "static void build_hvec_push_{suffix}(BuildVecHandle h, {elem_c} val) {{ build_vec_push(h.inner, &val); }}\n").unwrap();
+                    write!(self.output, "static {elem_c} build_hvec_get_{suffix}(BuildVecHandle h, size_t index) {{ return *({elem_c}*)build_vec_get(h.inner, index); }}\n").unwrap();
+                    write!(self.output, "static {elem_c} build_hvec_pop_{suffix}(BuildVecHandle h) {{ {elem_c} __z; memset(&__z, 0, sizeof(__z)); if (h.inner->len == 0) return __z; h.inner->len--; return *({elem_c}*)((char*)h.inner->ptr + h.inner->len * h.inner->elem_size); }}\n").unwrap();
+                }
+                self.output.push('\n');
             }
         }
 
@@ -2921,7 +2963,7 @@ impl CBackend {
                                 MirType::Vec(elem) => Some(Self::hvec_elem_suffix(elem)),
                                 _ => None,
                             })
-                            .unwrap_or("i32");
+                            .unwrap_or_else(|| "i32".to_string());
                         let dest_name = self.local_name(*dest_local, locals);
                         write!(self.output, "{} = build_hvec_new_{}();\n", dest_name, suffix)
                             .unwrap();
