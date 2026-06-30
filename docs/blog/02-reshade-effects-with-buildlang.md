@@ -353,7 +353,7 @@ buildc run ssao.bld
 ## Get Started
 
 ```bash
-git clone https://github.com/HarperZ9/buildlang.git
+git clone https://github.com/HarperZ9/quantalang.git
 cd buildlang
 cargo build --release
 
