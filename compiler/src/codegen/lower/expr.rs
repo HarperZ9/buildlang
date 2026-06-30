@@ -4702,6 +4702,12 @@ impl<'ctx> MirLowerer<'ctx> {
                 let elem_ty = elem.as_ref().clone();
                 return self.lower_for_vec(pattern, iter_val, elem_ty, body);
             }
+            // `for c in s.chars()` / `for c in s`: iterate the string's bytes.
+            // chars()/bytes() are identity ops, so the iterable is a BuildString.
+            // Previously this fell to the no-op loop (zero iterations).
+            MirType::Struct(n) if n.as_ref() == "BuildString" => {
+                return self.lower_for_string(pattern, iter_val, body);
+            }
             _ => {
                 // Not an array - try iterator protocol: call .next() in a loop.
                 // Requires the type to have a `next` method registered in impl_methods
@@ -4892,6 +4898,90 @@ impl<'ctx> MirLowerer<'ctx> {
         let builder = self.current_fn.as_mut().unwrap();
         builder.switch_to_block(exit_block);
 
+        Ok(values::unit())
+    }
+
+    /// Lower `for c in <string>` as a runtime-length loop over the string's
+    /// bytes, binding each byte (as i32) to the pattern variable.
+    fn lower_for_string(
+        &mut self,
+        pattern: &ast::Pattern,
+        iter_val: MirValue,
+        body: &ast::Block,
+    ) -> CodegenResult<MirValue> {
+        let byte_ty = MirType::i32();
+        let builder = self
+            .current_fn
+            .as_mut()
+            .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+
+        let str_local = builder.create_local(MirType::Struct(Arc::from("BuildString")));
+        builder.assign(str_local, MirRValue::Use(iter_val));
+
+        // len = build_string_len(s)  (Call is a terminator -> split block).
+        let len_local = builder.create_local(MirType::i64());
+        let after_len = builder.create_block();
+        builder.call(
+            MirValue::Function(Arc::from("build_string_len")),
+            vec![values::local(str_local)],
+            Some(len_local),
+            after_len,
+        );
+        builder.switch_to_block(after_len);
+
+        let idx_local = builder.create_local(MirType::i64());
+        builder.assign(
+            idx_local,
+            MirRValue::Use(MirValue::Const(MirConst::Int(0, MirType::i64()))),
+        );
+
+        let cond_block = builder.create_block();
+        let body_block = builder.create_block();
+        let incr_block = builder.create_block();
+        let exit_block = builder.create_block();
+        self.loop_stack.push((incr_block, exit_block));
+
+        let builder = self.current_fn.as_mut().unwrap();
+        builder.goto(cond_block);
+        builder.switch_to_block(cond_block);
+        let cmp = builder.create_local(MirType::Bool);
+        builder.binary_op(
+            cmp,
+            BinOp::Lt,
+            values::local(idx_local),
+            values::local(len_local),
+        );
+        builder.branch(values::local(cmp), body_block, exit_block);
+
+        // Body: c = build_string_byte_at(s, idx)  (Call -> split block).
+        builder.switch_to_block(body_block);
+        let elem_local = builder.create_local(byte_ty.clone());
+        let after_get = builder.create_block();
+        builder.call(
+            MirValue::Function(Arc::from("build_string_byte_at")),
+            vec![values::local(str_local), values::local(idx_local)],
+            Some(elem_local),
+            after_get,
+        );
+        builder.switch_to_block(after_get);
+
+        let saved_vars = self.var_map.clone();
+        self.bind_for_pattern(pattern, elem_local, &byte_ty)?;
+        self.lower_block(body)?;
+        self.var_map = saved_vars;
+
+        let builder = self.current_fn.as_mut().unwrap();
+        builder.goto(incr_block);
+        builder.switch_to_block(incr_block);
+        let one = MirValue::Const(MirConst::Int(1, MirType::i64()));
+        let next_idx = builder.create_local(MirType::i64());
+        builder.binary_op(next_idx, BinOp::Add, values::local(idx_local), one);
+        builder.assign(idx_local, MirRValue::Use(values::local(next_idx)));
+        builder.goto(cond_block);
+
+        self.loop_stack.pop();
+        let builder = self.current_fn.as_mut().unwrap();
+        builder.switch_to_block(exit_block);
         Ok(values::unit())
     }
 

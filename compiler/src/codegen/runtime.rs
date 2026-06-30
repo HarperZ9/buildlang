@@ -131,6 +131,12 @@ static void build_string_free(BuildString s) {
     if (s.cap > 0) free((void*)s.ptr);
 }
 
+// Byte at index `i` of a string (as an int32), for `for c in s.chars()`.
+static int32_t build_string_byte_at(BuildString s, size_t i) {
+    if (i >= s.len) return 0;
+    return (int32_t)(unsigned char)s.ptr[i];
+}
+
 // --- Vec (dynamic array) type ---
 
 typedef struct {

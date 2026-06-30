@@ -10,6 +10,15 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Codegen (`for c in s.chars()`): iterating a string now works. `chars()`/`bytes()`
+  are identity ops returning the BuildString, and `for` over a BuildString fell
+  through to the no-op loop (zero iterations, so the body never ran - silently
+  wrong). `lower_for` now has a BuildString arm (`lower_for_string`) that loops by
+  `build_string_len` and binds each byte (as i32) via a new `build_string_byte_at`
+  runtime helper. Verified end-to-end under MSVC: iterating `"hello"` runs 5 times;
+  the byte sum of `"AB"` is `131` (65+66). Covered by
+  `for_over_string_chars_emits_a_byte_loop`. (Yields raw bytes, not decoded UTF-8
+  code points - multi-byte chars are a follow-up.)
 - Stdlib (`Vec::sort`): `v.sort()` now sorts the vector in place (ascending) via
   the runtime `build_hvec_sort_{i32,i64,f64}` (qsort with a numeric comparator).
   Was an undefined symbol. Verified end-to-end under MSVC: sorting
