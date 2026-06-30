@@ -10,6 +10,15 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Stdlib (iterator `.filter()`): `.filter(|x| pred)` is now a real iterator step.
+  A chain containing it (e.g. `v.iter().filter(|x| x > 2).sum()`) previously left
+  `.iter()` undefined because `filter` wasn't a recognized step. The desugaring
+  evaluates the predicate per element and branches straight to the loop increment
+  when it does not hold, skipping that element from the rest of the pipeline and
+  the terminal. Composes with `.map()` and all terminals. Verified end-to-end
+  under MSVC over `[1,2,3,4,5]`: `filter(x<3).sum()` is `3`,
+  `filter(x>2).map(x*10).sum()` is `120`, `filter(x>3).count()` is `2`. Covered by
+  `iterator_filter_step_skips_non_matching_elements`.
 - Stdlib (`format!`): now actually formats. It was a stub that returned the raw
   template string and dropped every argument (so `format!("{} is {}", name, age)`
   yielded a bare `const char*` that printed as a pointer). `format!` now reuses
