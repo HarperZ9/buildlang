@@ -106,12 +106,21 @@ pub struct MirLowerer<'ctx> {
     /// correct type instead of defaulting to i32 (which would silently mis-read
     /// f64/pointer Ok payloads).
     pub(crate) result_ok_types: HashMap<LocalId, MirType>,
+    /// Tracks the Err payload type E for locals holding runtime Result<T, E>.
+    /// Populated from let-binding annotations. Used by lower_runtime_result_match
+    /// to read the Err union slot with the correct type. Defaults to BuildString
+    /// (the common String-error case) when absent.
+    pub(crate) result_err_types: HashMap<LocalId, MirType>,
     /// Maps a function name to the Ok payload type of its `Result<Ok, Err>`
     /// return type, captured during the collection pass. Lets a `match call() {
     /// Ok(x) => ... }` on a direct call recover the Ok type even with no
     /// intervening let-binding annotation. Keyed by the declared (unmangled)
     /// function name.
     pub(crate) fn_result_ok_types: HashMap<Arc<str>, MirType>,
+    /// Maps a function name to the Err payload type E of its `Result<Ok, Err>`
+    /// return, captured during the collection pass. Lets a direct-call match
+    /// bind the Err arm with the right type. Keyed by the declared name.
+    pub(crate) fn_result_err_types: HashMap<Arc<str>, MirType>,
     /// Maps a function name to the inner payload type T of its `Option<T>`
     /// return type, captured during the collection pass. Lets a `match call() {
     /// Some(x) => ... }` on a direct call read the correct union slot even with
@@ -189,7 +198,9 @@ impl<'ctx> MirLowerer<'ctx> {
             expected_type: None,
             option_inner_types: HashMap::new(),
             result_ok_types: HashMap::new(),
+            result_err_types: HashMap::new(),
             fn_result_ok_types: HashMap::new(),
+            fn_result_err_types: HashMap::new(),
             fn_option_inner_types: HashMap::new(),
             const_values: HashMap::new(),
         }
@@ -225,7 +236,9 @@ impl<'ctx> MirLowerer<'ctx> {
             expected_type: None,
             option_inner_types: HashMap::new(),
             result_ok_types: HashMap::new(),
+            result_err_types: HashMap::new(),
             fn_result_ok_types: HashMap::new(),
+            fn_result_err_types: HashMap::new(),
             fn_option_inner_types: HashMap::new(),
             const_values: HashMap::new(),
         }
@@ -1189,6 +1202,9 @@ impl<'ctx> MirLowerer<'ctx> {
                 if let Some(ok_ty) = self.result_ok_inner_from_ast(ret_ty) {
                     self.fn_result_ok_types.insert(f.name.name.clone(), ok_ty);
                 }
+                if let Some(err_ty) = self.result_err_inner_from_ast(ret_ty) {
+                    self.fn_result_err_types.insert(f.name.name.clone(), err_ty);
+                }
                 // Same threading for `-> Option<T>` so a direct-call Some match
                 // reads the correct slot (symmetric to the Result Ok case).
                 if let Some(inner_ty) = self.option_inner_from_ast(ret_ty) {
@@ -1206,6 +1222,25 @@ impl<'ctx> MirLowerer<'ctx> {
     /// from a function signature to its match sites.
     pub(crate) fn result_ok_inner_from_ast(&self, ty: &ast::Type) -> Option<MirType> {
         self.generic_first_arg_from_ast(ty, "Result")
+    }
+
+    /// If the AST type is `Result<Ok, Err>`, lower and return the `Err` payload
+    /// type (the second generic argument). Returns None for any non-Result type.
+    pub(crate) fn result_err_inner_from_ast(&self, ty: &ast::Type) -> Option<MirType> {
+        if let ast::TypeKind::Path(ref path) = ty.kind {
+            let is_result = path
+                .last_ident()
+                .map(|i| i.name.as_ref() == "Result")
+                .unwrap_or(false);
+            if is_result {
+                if let Some(args) = path.last_generics() {
+                    if let Some(ast::GenericArg::Type(ref err_ast_ty)) = args.get(1) {
+                        return Some(self.lower_type_from_ast(err_ast_ty));
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// If the AST type is `Option<T>`, lower and return the `T` payload type.

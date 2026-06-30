@@ -10,6 +10,19 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Stdlib (`Result<T, E>` arbitrary Err): the `Err` payload is no longer limited
+  to `String`. The runtime `Result` struct's `err` field is now a typed union
+  (`{ int64_t err_i; double err_f; void* err_p; }`) symmetric to `ok`, so
+  `Result<i32, i32>`, `Result<i32, f64>`, `Result<_, MyError>`, etc. work.
+  `Err(e)` writes the typed slot (boxing payloads >8 bytes such as `String`); the
+  match `Err` arm and `?` propagation read it back with the threaded Err type
+  (per-local annotation, then the matched call's `Result<Ok, Err>` signature,
+  then `String` as the default for unannotated string-error matches). Previously
+  `err` was a hardcoded `BuildString`, so `Err(404)` emitted `r.err = 404`
+  (assigning an int to a struct - a C error). Verified end-to-end under MSVC:
+  `Result<i32, i32>` -> `err 404`, `Result<i32, f64>` -> `errf 3.14`, let-bound
+  `Result<i32, i32>` -> `errc 500`, and the `String` case still prints `err bad`.
+  Covered by `result_supports_a_non_string_err_payload`.
 - Stdlib (`?` try operator): `expr?` on a runtime `Result`/`Option` now unwraps
   the success payload as the expression value and early-returns the whole value
   to propagate `Err`/`None`. Previously `?` was a silent no-op for the runtime

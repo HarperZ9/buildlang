@@ -222,10 +222,16 @@ impl<'ctx> MirLowerer<'ctx> {
             None
         };
 
-        // Track Result<Ok, Err> Ok payload type from the annotation so a later
-        // `match r { Ok(x) => ... }` reads the correct union slot.
+        // Track Result<Ok, Err> Ok/Err payload types from the annotation so a
+        // later `match r { Ok(x) => ..., Err(e) => ... }` reads the correct
+        // union slots.
         let result_ok = if let Some(ref ast_ty) = local.ty {
             self.result_ok_inner_from_ast(ast_ty)
+        } else {
+            None
+        };
+        let result_err = if let Some(ref ast_ty) = local.ty {
+            self.result_err_inner_from_ast(ast_ty)
         } else {
             None
         };
@@ -245,9 +251,12 @@ impl<'ctx> MirLowerer<'ctx> {
             if let Some(inner_ty) = option_inner {
                 self.option_inner_types.insert(local_id, inner_ty);
             }
-            // Record the Result Ok payload type if extracted from annotation
+            // Record the Result Ok/Err payload types if extracted from annotation
             if let Some(ok_ty) = result_ok {
                 self.result_ok_types.insert(local_id, ok_ty);
+            }
+            if let Some(err_ty) = result_err {
+                self.result_err_types.insert(local_id, err_ty);
             }
 
             // Initialize if there's an init expression
@@ -3275,6 +3284,7 @@ impl<'ctx> MirLowerer<'ctx> {
         scrutinee_ty: &MirType,
         arms: &[ast::MatchArm],
         ok_ty: MirType,
+        err_ty: MirType,
     ) -> CodegenResult<MirValue> {
         let builder = self
             .current_fn
@@ -3310,8 +3320,6 @@ impl<'ctx> MirLowerer<'ctx> {
 
         builder.branch(values::local(is_ok), ok_block, err_block);
 
-        let err_string_ty = MirType::Struct(Arc::from("BuildString"));
-
         for arm in arms {
             let variant = match &arm.pattern.kind {
                 ast::PatternKind::TupleStruct { path, .. } => {
@@ -3326,11 +3334,11 @@ impl<'ctx> MirLowerer<'ctx> {
             let (block, field_name, bind_ty) = if is_ok_arm {
                 (ok_block, "ok", ok_ty.clone())
             } else if is_err_arm {
-                (err_block, "err", err_string_ty.clone())
+                (err_block, "err", err_ty.clone())
             } else {
                 // Wildcard / binding arm: treat as the Err fall-through so a
                 // catch-all still produces a value.
-                (err_block, "err", err_string_ty.clone())
+                (err_block, "err", err_ty.clone())
             };
 
             let builder = self.current_fn.as_mut().unwrap();
@@ -3396,6 +3404,31 @@ impl<'ctx> MirLowerer<'ctx> {
         MirType::i32()
     }
 
+    /// Determine the Err payload type of a Result-valued match scrutinee.
+    /// Priority: a let-binding annotation tracked per-local, then the matched
+    /// call's `Result<Ok, Err>` signature, then BuildString (the common
+    /// String-error case, which keeps unannotated string-error matches working).
+    fn result_err_type_for(&self, scrutinee: &ast::Expr, scrutinee_val: &MirValue) -> MirType {
+        if let MirValue::Local(id) = scrutinee_val {
+            if let Some(ty) = self.result_err_types.get(id) {
+                return ty.clone();
+            }
+        }
+        if let ExprKind::Call { func, .. } = &scrutinee.kind {
+            let name = match &func.kind {
+                ExprKind::Ident(ident) => Some(ident.name.clone()),
+                ExprKind::Path(path) => path.last_ident().map(|i| i.name.clone()),
+                _ => None,
+            };
+            if let Some(name) = name {
+                if let Some(ty) = self.fn_result_err_types.get(&name) {
+                    return ty.clone();
+                }
+            }
+        }
+        MirType::Struct(Arc::from("BuildString"))
+    }
+
     /// Determine the payload type of an Option-valued match scrutinee, when it
     /// can be recovered. Priority: a let-binding annotation tracked per-local,
     /// then the `-> Option<T>` return of a directly-matched call. Returns None
@@ -3444,7 +3477,9 @@ impl<'ctx> MirLowerer<'ctx> {
             matches!(&scrutinee_ty, MirType::Struct(n) if n.as_ref() == "Result");
         if is_runtime_result {
             let ok_ty = self.result_ok_type_for(scrutinee, &scrutinee_val);
-            return self.lower_runtime_result_match(scrutinee_val, &scrutinee_ty, arms, ok_ty);
+            let err_ty = self.result_err_type_for(scrutinee, &scrutinee_val);
+            return self
+                .lower_runtime_result_match(scrutinee_val, &scrutinee_ty, arms, ok_ty, err_ty);
         }
 
         // Runtime Option match: `match opt { Some(x) => ..., None => ... }`
