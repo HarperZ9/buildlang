@@ -1429,6 +1429,25 @@ mod tests {
     }
 
     #[test]
+    fn iterator_take_and_skip_steps_desugar() {
+        // `.take(n)` / `.skip(n)` use per-iteration counters (not source-index
+        // checks) so they compose with each other and with filter. They must
+        // desugar to the element loop, not leave `.iter()` undefined.
+        let code = source_to_c(
+            "fn main() { let v: Vec<i32> = vec![1, 2, 3, 4, 5]; \
+             let _c: i32 = v.iter().skip(1).take(2).sum(); }",
+        );
+        assert!(
+            !code.contains("= iter(") && !code.contains(" iter("),
+            "the take/skip chain must not emit an undefined `iter` call:\n{code}"
+        );
+        assert!(
+            code.contains("build_hvec_get_i32(") && code.contains("build_hvec_len("),
+            "the take/skip chain must lower to a runtime-length element loop:\n{code}"
+        );
+    }
+
+    #[test]
     fn iterator_rev_step_iterates_in_reverse() {
         // `v.iter().rev()...` must iterate the source in reverse: start at len-1
         // and step down. Without it `.iter()` was an undefined call.

@@ -148,6 +148,10 @@ pub(crate) enum IterStep<'a> {
     Cloned,
     /// `.rev()` - iterate the source in reverse order.
     Rev,
+    /// `.take(n)` - yield only the first `n` elements (by source position).
+    Take { count: &'a ast::Expr },
+    /// `.skip(n)` - skip the first `n` elements (by source position).
+    Skip { count: &'a ast::Expr },
 }
 
 /// Terminal operation of an iterator chain.
