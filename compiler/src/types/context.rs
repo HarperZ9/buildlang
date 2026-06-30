@@ -661,13 +661,35 @@ impl TypeContext {
     // =========================================================================
 
     /// Register trait bounds for a type parameter (e.g., `T: Clone + Debug`).
+    ///
+    /// Bounds accumulate: a parameter can gather bounds from several sources
+    /// (an inline `T: A`, a where-clause `where T: B`, and an enclosing impl's
+    /// `impl<T: C>`). Each call adds to the parameter's existing set rather than
+    /// replacing it, so none of those sources clobbers another.
     pub fn register_param_bounds(&mut self, param_name: Arc<str>, trait_names: Vec<Arc<str>>) {
-        self.param_trait_bounds.insert(param_name, trait_names);
+        let entry = self.param_trait_bounds.entry(param_name).or_default();
+        for name in trait_names {
+            if !entry.contains(&name) {
+                entry.push(name);
+            }
+        }
     }
 
     /// Clear all type parameter trait bounds (call when leaving a generic scope).
     pub fn clear_param_bounds(&mut self) {
         self.param_trait_bounds.clear();
+    }
+
+    /// Clone the current type-parameter trait bounds so they can be restored
+    /// later. Used to layer a method's own bounds on top of an enclosing impl's
+    /// bounds and then unwind cleanly without disturbing what is in scope now.
+    pub fn param_bounds_snapshot(&self) -> HashMap<Arc<str>, Vec<Arc<str>>> {
+        self.param_trait_bounds.clone()
+    }
+
+    /// Restore a previously snapshotted type-parameter trait-bound map.
+    pub fn restore_param_bounds(&mut self, bounds: HashMap<Arc<str>, Vec<Arc<str>>>) {
+        self.param_trait_bounds = bounds;
     }
 
     /// Look up a method on a type parameter by searching its trait bounds.
