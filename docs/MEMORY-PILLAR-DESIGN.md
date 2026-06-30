@@ -297,12 +297,19 @@ owner set, container insert callees are non-borrows (so the owner escapes), the
 whole-function escape scan is order-insensitive, and every string method mallocs a
 fresh buffer (never aliases its receiver) and is absent from the allocating set.
 
-Remaining HARD GATES before the flag default may flip: (a) the `static mut` store
-lowering gap is fixed AND `owned_string_escapes` is extended to treat a
-global-target store as an escape (then the module-wide guard can be narrowed);
-(b) the function-exit scope is lifted to block/scope-scoped drops so a loop has
-bounded peak memory (the third increment). Until then the flag stays off by
-default; the verified baseline is untouched.
+UPDATE (2026-06-30): the `static mut` stash coupling is now closed at the source.
+Assigning to a module global/static previously dropped the store silently
+(`lower_assign` only resolved local targets); it now FAILS CLOSED with a clear
+`CodegenError::Unsupported` (commit 79e765e). So a program that would stash an
+owned string into a global no longer compiles and cannot reach the drop analysis
+at all. The module-wide mutable-global guard remains as defense in depth. When full
+global-store SUPPORT lands (a cross-backend MIR store form), `owned_string_escapes`
+must treat a global-target store as an escape before that guard is narrowed.
+
+Remaining HARD GATE before the flag default may flip: the function-exit scope is
+lifted to block/scope-scoped drops so a loop has bounded peak memory (the third
+increment). Until then the flag stays off by default; the verified baseline is
+untouched.
 
 ## Why this is documented rather than already implemented
 
