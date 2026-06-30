@@ -10,6 +10,13 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Stdlib (iterator `.count()` / `.product()`): both join `.sum()` as recognized
+  accumulator terminals. `.count()` lowers to a `+1`-per-element i64 counter;
+  `.product()` to an `acc = acc * elem` loop from one. Without them a chain
+  ending in either left `.iter()` as an undefined call. Verified end-to-end under
+  MSVC: over `[2,3,4]`, `count` is `3` and `product` is `24` (alongside the
+  existing `sum`). Covered by `iterator_count_terminal_counts_elements` and
+  `iterator_product_terminal_multiplies_elements`.
 - Stdlib (iterator `.sum()`): `v.iter()...sum()` is now a recognized terminal,
   desugaring to an accumulator loop (`acc = acc + elem` from a zero of the output
   element type). Previously only `.collect()` and `.fold()` triggered iterator-
