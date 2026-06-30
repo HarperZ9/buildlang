@@ -61,11 +61,11 @@ authoritative list and `buildc <command> --help` for per-command flags):
 
 When invoked without a subcommand (`buildc <file>`):
 
-- `-o, --output <FILE>` — output file path
-- `--target <NAME>` — code generation backend (see below)
-- `-O, --opt-level <0-3>` — optimization level (default `0`)
-- `-g, --debug` — emit debug information
-- `-v, --verbose` — verbose output
+- `-o, --output <FILE>` -- output file path
+- `--target <NAME>` -- code generation backend (see below)
+- `-O, --opt-level <0-3>` -- optimization level (default `0`)
+- `-g, --debug` -- emit debug information
+- `-v, --verbose` -- verbose output
 
 ### Code generation targets
 
@@ -117,7 +117,7 @@ The `ledger.bld` example (functions, mutable locals, a `while` loop):
 buildc run examples/quickstart/ledger.bld
 ```
 
-Output **(verified)** — `100 + 5*3`:
+Output **(verified)** -- `100 + 5*3`:
 
 ```
 balance: 115

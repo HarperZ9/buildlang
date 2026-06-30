@@ -7,13 +7,13 @@
 
 > The Effects Language: a Rust-built compiler for typed effects, systems experiments, and shader-oriented code generation.
 
-[Build ecosystem](https://github.com/HarperZ9/build-universe) | [buildlang](https://github.com/HarperZ9/buildlang) | [build-universe](https://github.com/HarperZ9/build-universe) | [VS Code extension](https://github.com/HarperZ9/buildlang-vscode) | [grammar](https://github.com/HarperZ9/buildlang-tmLanguage)
+[Build ecosystem](https://github.com/HarperZ9/quanta-universe) | [buildlang](https://github.com/HarperZ9/quantalang) | [build-universe](https://github.com/HarperZ9/quanta-universe) | [VS Code extension](https://github.com/HarperZ9/quantalang-vscode) | [grammar](https://github.com/HarperZ9/quantalang-tmLanguage)
 
 [![license: fair-source](https://img.shields.io/badge/license-fair--source-blue.svg)](LICENSE)
 ![rust](https://img.shields.io/badge/rust-edition_2021-orange.svg)
 ![version](https://img.shields.io/badge/version-1.0.0-informational.svg)
-[![CI](https://github.com/HarperZ9/buildlang/actions/workflows/ci.yml/badge.svg)](https://github.com/HarperZ9/buildlang/actions/workflows/ci.yml)
-[![part of: Build ecosystem](https://img.shields.io/badge/part_of-Build_ecosystem-00b3a4.svg)](https://github.com/HarperZ9/build-universe)
+[![CI](https://github.com/HarperZ9/quantalang/actions/workflows/ci.yml/badge.svg)](https://github.com/HarperZ9/quantalang/actions/workflows/ci.yml)
+[![part of: Build ecosystem](https://img.shields.io/badge/part_of-Build_ecosystem-00b3a4.svg)](https://github.com/HarperZ9/quanta-universe)
 
 **The Effects Language** - a Rust-built compiler for typed effects, systems
 experiments, and shader-oriented code generation.
@@ -30,6 +30,7 @@ experimental research surfaces.
 - **Release:** BuildLang 1.0.x; compiler binary `buildc`; built with Rust (edition 2021). C is the production-grade verified backend; HLSL and GLSL ship for shader work; SPIR-V, LLVM IR, WebAssembly, Rust, x86-64, and ARM64 stay labeled experimental.
 - **Operator surface:** the `buildc` CLI exposes `lex`, `parse`, `check` (with `--receipt` / `--policy`), `build`, `run`, `test`, `repl`, `fmt`, `pkg`, `watch`, `doctor`, `corpus`, `policy`, `receipt`, and an `lsp` subcommand that starts a bundled LSP server (completion, hover, diagnostics, go-to-definition, semantic tokens). The CLI and the LSP server are the two integration surfaces; accountability receipts (`buildlang-receipt-verification/v1`) carry SHA-256 source digests for re-checkable codegen.
 - **Umbrella:** part of the operator's Build ecosystem alongside `build-universe`, the VS Code extension, and the TextMate grammar; standalone and not dependent on any single host.
+- **Repository naming:** public product names are BuildLang, `buildc`, and `.bld`. The GitHub repository still uses its legacy slug until the public repo rename is finished.
 - **Housekeeping:** ground-truth release evidence lives in `STATUS.md`; [CHANGELOG.md](CHANGELOG.md) tracks the current presentation pass under Unreleased.
 
 ## Install
@@ -100,6 +101,25 @@ See [USAGE.md](USAGE.md) for an install/build line, the full command and
 backend reference, and worked examples (run, type-check with a policy receipt,
 and shader output) with expected output. A runnable demo lives in
 [examples/demo](examples/demo).
+
+## For developers
+
+The main implementation lives under `compiler/`. Use the targeted checks below
+before changing public compiler behavior, receipts, corpus verification, or the
+CLI surface:
+
+```bash
+cargo test --manifest-path compiler/Cargo.toml --bin buildc --quiet
+cargo fmt --manifest-path compiler/Cargo.toml --check
+cargo clippy --manifest-path compiler/Cargo.toml -- -D clippy::correctness -A clippy::complexity -A clippy::style -A clippy::pedantic -A clippy::perf
+buildc doctor
+buildc corpus verify
+git diff --check
+```
+
+Keep `.bld` examples, `buildc` command docs, receipts, and semantic-corpus
+evidence aligned. When behavior changes, update tests and public docs in the
+same branch.
 
 ## Shader Example
 

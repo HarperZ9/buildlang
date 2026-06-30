@@ -315,7 +315,7 @@ Future directions:
 ## Try It
 
 ```bash
-git clone https://github.com/HarperZ9/buildlang.git
+git clone https://github.com/HarperZ9/quantalang.git
 cd buildlang
 cargo build --release
 
@@ -333,4 +333,4 @@ The type checker is live. Your colors are safe.
 
 ---
 
-*BuildLang is open source under the MIT license. GitHub: [HarperZ9/buildlang](https://github.com/HarperZ9/buildlang)*
+*BuildLang is open source under the MIT license. GitHub: [BuildLang compiler repo](https://github.com/HarperZ9/quantalang)*
