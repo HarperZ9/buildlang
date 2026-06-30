@@ -180,6 +180,27 @@ pub enum TypeError {
     #[error("cannot return reference to local variable `{variable}`")]
     ReferenceEscapesScope { variable: String },
 
+    /// A `#[linear]` value was used after it was already consumed.
+    ///
+    /// Values whose nominal type is marked `#[linear]` may be moved/consumed
+    /// at most once (no-cloning). This enforces qubit no-cloning, on-chain
+    /// no-double-spend, and resource-handle safety. Borrow it with `&` to read
+    /// it without consuming, or restructure so it is consumed on exactly one path.
+    #[error("use of linear value `{name}` after it was consumed (linear values cannot be cloned or used twice)")]
+    LinearUseAfterMove { name: String },
+
+    /// A non-`#[linear]` aggregate has a field whose type is `#[linear]`.
+    ///
+    /// A linear value placed in an untracked aggregate could be read out
+    /// repeatedly, laundering it past no-cloning. The container must itself
+    /// be marked `#[linear]` so the whole aggregate is move-tracked.
+    #[error("non-linear type `{container}` cannot contain linear field `{field}: {field_type}` (mark `{container}` as `#[linear]`)")]
+    LinearFieldInNonLinearType {
+        container: String,
+        field: String,
+        field_type: String,
+    },
+
     /// Invalid binary operation.
     #[error("cannot apply binary operator `{op}` to types `{left}` and `{right}`")]
     InvalidBinaryOp { op: String, left: Ty, right: Ty },

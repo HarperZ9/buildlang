@@ -10,6 +10,28 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Type system (linear types / no-cloning): an opt-in `#[linear]` attribute on a
+  struct or enum marks its values as a tracked resource that may be moved /
+  consumed **at most once**. The type checker now rejects use-after-consume
+  (`use of linear value 'q' after it was consumed`), which is the no-cloning rule
+  for quantum qubits, the no-double-spend rule for on-chain assets, and
+  resource-handle safety for fin-sec settlement obligations - one type-system
+  feature for all three foundations. Borrows (`&q`) do not consume; ordinary
+  (non-`#[linear]`) types keep copy-like reuse, so the change is backward
+  compatible (full suite stays green). Coverage: let-bound locals, function
+  parameters, branch joins (`if`/`if let`/`match`, conservative union-of-consumed
+  so a value consumed on any path is poisoned afterward), and a loop guard
+  (consuming an outer linear value inside a loop is a potential double-use and is
+  rejected). A containment rule rejects a non-`#[linear]` aggregate that holds a
+  linear field (`non-linear type 'Wallet' cannot contain linear field
+  'coin: Coin'`), preventing the resource from being laundered out of an
+  untracked wrapper. Built on the existing move/borrow analysis; 10 type-checker
+  tests (`linear_*`, `nonlinear_struct_with_linear_field_is_rejected`); verified
+  end-to-end via `buildc check`. Deferred to a follow-up: drop-without-consume
+  ("must use") enforcement and per-path (non-conservative) branch tracking. The
+  analysis is deliberately sound-over-complete - it may reject some safe programs
+  rather than ever permit a clone. See `docs/QUANTUM-HOST.md` (brick 1).
+
 - Stdlib (`HashMap::keys`): `m.keys()` now returns a `Vec<String>` handle (so
   `for k in m.keys()`, indexing, and `.len()` work), via a runtime
   `build_hmap_keys_str_f64` that walks the occupied buckets and wraps each key.

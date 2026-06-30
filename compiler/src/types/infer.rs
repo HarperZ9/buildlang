@@ -9,7 +9,7 @@
 //! This module implements bidirectional type inference for expressions.
 //! It combines inference (synthesizing types) with checking (verifying against expected types).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use crate::ast::{self, AssignOp, BinOp, ExprKind, Literal as AstLiteral, UnaryOp};
@@ -90,6 +90,33 @@ pub struct TypeInfer<'ctx> {
     source_text: Option<Arc<str>>,
     /// Source ID associated with `source_text`.
     source_id: Option<SourceId>,
+    /// Per-binding linear-resource state for `#[linear]`-typed locals/params
+    /// (no-cloning / no-double-spend / resource-handle tracking).
+    linear_slots: HashMap<String, LinearSlot>,
+    /// Active borrow-context depth. When `> 0`, a use of a value is a borrow
+    /// (`&x`) and must NOT consume a linear value; when `0`, it is a move.
+    borrow_depth: u32,
+    /// Number of enclosing loop scopes. Consuming a linear value declared
+    /// outside the current loop is a potential double-use (the loop may repeat).
+    loop_depth: u32,
+    /// Parallel marker stack: whether each pushed scope is a loop, so the
+    /// scope-pop path can keep `loop_depth` balanced.
+    linear_loop_markers: Vec<bool>,
+}
+
+/// Tracking state for a single `#[linear]`-typed binding.
+#[derive(Debug, Clone)]
+struct LinearSlot {
+    status: LinearStatus,
+    /// `loop_depth` in effect where this binding was introduced.
+    decl_loop_depth: u32,
+}
+
+/// Whether a linear binding is still usable or has been consumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinearStatus {
+    Live,
+    Consumed,
 }
 
 struct BreakSourceFrame {
@@ -258,6 +285,10 @@ impl<'ctx> TypeInfer<'ctx> {
             borrow_state: super::ty::BorrowState::new(),
             source_text: None,
             source_id: None,
+            linear_slots: HashMap::new(),
+            borrow_depth: 0,
+            loop_depth: 0,
+            linear_loop_markers: Vec::new(),
         }
     }
 
@@ -297,6 +328,10 @@ impl<'ctx> TypeInfer<'ctx> {
             borrow_state: super::ty::BorrowState::new(),
             source_text: None,
             source_id: None,
+            linear_slots: HashMap::new(),
+            borrow_depth: 0,
+            loop_depth: 0,
+            linear_loop_markers: Vec::new(),
         }
     }
 
@@ -501,6 +536,11 @@ impl<'ctx> TypeInfer<'ctx> {
     fn push_scope(&mut self, kind: ScopeKind) {
         self.ctx.push_scope(kind);
         self.source_bindings.push(BTreeMap::new());
+        let is_loop = matches!(kind, ScopeKind::Loop);
+        self.linear_loop_markers.push(is_loop);
+        if is_loop {
+            self.loop_depth += 1;
+        }
     }
 
     fn pop_scope(&mut self) {
@@ -508,6 +548,103 @@ impl<'ctx> TypeInfer<'ctx> {
         if self.source_bindings.len() > 1 {
             self.source_bindings.pop();
         }
+        if let Some(true) = self.linear_loop_markers.pop() {
+            self.loop_depth = self.loop_depth.saturating_sub(1);
+        }
+    }
+
+    // =========================================================================
+    // LINEAR RESOURCE TRACKING (no-cloning / no-double-spend)
+    //
+    // A binding whose nominal type is marked `#[linear]` may be moved/consumed
+    // at most once. Borrows (`&x`) do not consume. Ordinary (non-linear) types
+    // are untracked and keep copy-like reuse. The analysis is intentionally
+    // conservative: it favors soundness (never let a linear value be used
+    // twice) over completeness (it may reject some safe programs, e.g. a
+    // by-value field read of a linear local, or a consume inside a loop).
+    // =========================================================================
+
+    /// If `ty` resolves to a `#[linear]` nominal type, return its `DefId`.
+    fn linear_def_of(&self, ty: &Ty) -> Option<DefId> {
+        match self.apply(ty).kind {
+            TyKind::Adt(def_id, _) if self.ctx.is_linear_def(def_id) => Some(def_id),
+            _ => None,
+        }
+    }
+
+    /// Register a function parameter (bound into the context by the checker,
+    /// not via this inferer's `bind_pattern`) for linear resource tracking.
+    /// Without this, a function consuming its own linear parameter twice would
+    /// escape no-cloning enforcement.
+    pub fn register_linear_param(&mut self, name: &str, ty: &Ty) {
+        self.register_linear_local(name, ty);
+    }
+
+    /// Register a freshly-bound local/param. If its type is linear it becomes a
+    /// tracked, live linear slot; otherwise any prior tracking for that name is
+    /// cleared (a non-linear shadow is not resource-tracked).
+    fn register_linear_local(&mut self, name: &str, ty: &Ty) {
+        if self.linear_def_of(ty).is_some() {
+            self.linear_slots.insert(
+                name.to_string(),
+                LinearSlot {
+                    status: LinearStatus::Live,
+                    decl_loop_depth: self.loop_depth,
+                },
+            );
+        } else {
+            self.linear_slots.remove(name);
+        }
+    }
+
+    /// Record a by-value use (move) of `name`. Errors if the value was already
+    /// consumed, or if it is consumed inside a loop deeper than its declaration
+    /// (the loop body may run more than once -> potential double-use).
+    fn consume_linear(&mut self, name: &str, span: Span) {
+        let Some(slot) = self.linear_slots.get(name).cloned() else {
+            return;
+        };
+        match slot.status {
+            LinearStatus::Consumed => {
+                self.error(
+                    TypeError::LinearUseAfterMove {
+                        name: name.to_string(),
+                    },
+                    span,
+                );
+            }
+            LinearStatus::Live => {
+                if self.loop_depth > slot.decl_loop_depth {
+                    self.error(
+                        TypeError::LinearUseAfterMove {
+                            name: name.to_string(),
+                        },
+                        span,
+                    );
+                }
+                if let Some(s) = self.linear_slots.get_mut(name) {
+                    s.status = LinearStatus::Consumed;
+                }
+            }
+        }
+    }
+
+    /// Merge linear slot snapshots from mutually-exclusive control-flow paths.
+    /// A binding is Consumed after the join if it was consumed on ANY path
+    /// (conservative: a later use must then be rejected).
+    fn merge_linear_snapshots(
+        snaps: &[HashMap<String, LinearSlot>],
+    ) -> HashMap<String, LinearSlot> {
+        let mut out: HashMap<String, LinearSlot> = HashMap::new();
+        for snap in snaps {
+            for (name, slot) in snap {
+                let entry = out.entry(name.clone()).or_insert_with(|| slot.clone());
+                if slot.status == LinearStatus::Consumed {
+                    entry.status = LinearStatus::Consumed;
+                }
+            }
+        }
+        out
     }
 
     fn bind_call_sources(&mut self, name: &str, sources: Vec<String>) {
@@ -2725,6 +2862,11 @@ impl<'ctx> TypeInfer<'ctx> {
                     .add(super::effects::Effect::new(super::capabilities::FOREIGN));
                 self.record_capability_source(super::capabilities::FOREIGN, name);
             }
+            // No-cloning: a by-value use (borrow_depth == 0) of a linear local
+            // consumes it; a second consume is an error.
+            if self.borrow_depth == 0 {
+                self.consume_linear(name, span);
+            }
             ty
         } else {
             // Check if this is a known builtin (math functions, vector constructors, I/O)
@@ -3024,7 +3166,15 @@ impl<'ctx> TypeInfer<'ctx> {
     // =========================================================================
 
     fn infer_unary(&mut self, op: UnaryOp, expr: &ast::Expr) -> Ty {
+        // `&x` / `&mut x` borrow their operand: it must not consume a linear value.
+        let is_borrow = matches!(op, UnaryOp::Ref | UnaryOp::RefMut);
+        if is_borrow {
+            self.borrow_depth += 1;
+        }
         let inner_ty = self.infer_expr(expr);
+        if is_borrow {
+            self.borrow_depth = self.borrow_depth.saturating_sub(1);
+        }
 
         match op {
             UnaryOp::Neg => {
@@ -4237,21 +4387,27 @@ impl<'ctx> TypeInfer<'ctx> {
         let cond_ty = self.infer_expr(condition);
         let _ = self.unify(&cond_ty, &Ty::bool(), span);
         let pre_branch_sources = self.source_bindings.clone();
+        let pre_branch_linear = self.linear_slots.clone();
 
         let then_ty = self.infer_block(then_branch);
         let then_sources = self.source_bindings.clone();
+        let then_linear = self.linear_slots.clone();
 
         if let Some(else_expr) = else_branch {
             self.source_bindings = pre_branch_sources.clone();
+            self.linear_slots = pre_branch_linear.clone();
             let else_ty = self.infer_expr(else_expr);
             let else_sources = self.source_bindings.clone();
+            let else_linear = self.linear_slots.clone();
             let _ = self.unify(&then_ty, &else_ty, span);
             self.source_bindings =
                 Self::merge_source_binding_snapshots(&[then_sources, else_sources]);
+            self.linear_slots = Self::merge_linear_snapshots(&[then_linear, else_linear]);
             self.merge_future_effect_annotations(&then_ty, &else_ty)
         } else {
             self.source_bindings =
                 Self::merge_source_binding_snapshots(&[pre_branch_sources, then_sources]);
+            self.linear_slots = Self::merge_linear_snapshots(&[pre_branch_linear, then_linear]);
             // if without else returns unit
             let _ = self.unify(&then_ty, &Ty::unit(), span);
             Ty::unit()
@@ -4269,24 +4425,30 @@ impl<'ctx> TypeInfer<'ctx> {
         let scrutinee_ty = self.infer_expr(scrutinee);
         let pre_branch_sources = self.source_bindings.clone();
 
+        let pre_branch_linear = self.linear_slots.clone();
         self.check_pattern(pattern, &scrutinee_ty);
         self.source_bindings.push(BTreeMap::new());
         self.bind_pattern_call_sources(pattern, scrutinee);
         let then_ty = self.infer_block(then_branch);
         self.source_bindings.pop();
         let then_sources = self.source_bindings.clone();
+        let then_linear = self.linear_slots.clone();
 
         if let Some(else_expr) = else_branch {
             self.source_bindings = pre_branch_sources.clone();
+            self.linear_slots = pre_branch_linear.clone();
             let else_ty = self.infer_expr(else_expr);
             let else_sources = self.source_bindings.clone();
+            let else_linear = self.linear_slots.clone();
             let _ = self.unify(&then_ty, &else_ty, span);
             self.source_bindings =
                 Self::merge_source_binding_snapshots(&[then_sources, else_sources]);
+            self.linear_slots = Self::merge_linear_snapshots(&[then_linear, else_linear]);
             self.merge_future_effect_annotations(&then_ty, &else_ty)
         } else {
             self.source_bindings =
                 Self::merge_source_binding_snapshots(&[pre_branch_sources, then_sources]);
+            self.linear_slots = Self::merge_linear_snapshots(&[pre_branch_linear, then_linear]);
             Ty::unit()
         }
     }
@@ -4294,12 +4456,15 @@ impl<'ctx> TypeInfer<'ctx> {
     fn infer_match(&mut self, scrutinee: &ast::Expr, arms: &[ast::MatchArm], span: Span) -> Ty {
         let scrutinee_ty = self.infer_expr(scrutinee);
         let pre_match_sources = self.source_bindings.clone();
+        let pre_match_linear = self.linear_slots.clone();
         let mut arm_source_snapshots = Vec::new();
+        let mut arm_linear_snapshots: Vec<HashMap<String, LinearSlot>> = Vec::new();
 
         let mut result_ty = Ty::fresh_var();
 
         for arm in arms {
             self.source_bindings = pre_match_sources.clone();
+            self.linear_slots = pre_match_linear.clone();
 
             // Type check pattern against scrutinee
             self.check_pattern(&arm.pattern, &scrutinee_ty);
@@ -4319,15 +4484,19 @@ impl<'ctx> TypeInfer<'ctx> {
 
             self.source_bindings.pop();
             arm_source_snapshots.push(self.source_bindings.clone());
+            arm_linear_snapshots.push(self.linear_slots.clone());
         }
 
         if arm_source_snapshots.is_empty() {
             self.source_bindings = pre_match_sources;
+            self.linear_slots = pre_match_linear;
         } else {
             if arms.iter().any(|arm| arm.guard.is_some()) {
                 arm_source_snapshots.push(pre_match_sources);
+                arm_linear_snapshots.push(pre_match_linear.clone());
             }
             self.source_bindings = Self::merge_source_binding_snapshots(&arm_source_snapshots);
+            self.linear_slots = Self::merge_linear_snapshots(&arm_linear_snapshots);
         }
 
         // Exhaustiveness checking: determine the enum type from either
@@ -4868,7 +5037,10 @@ impl<'ctx> TypeInfer<'ctx> {
     }
 
     fn infer_ref(&mut self, mutability: ast::Mutability, expr: &ast::Expr) -> Ty {
+        // A reference borrows its operand: it must not consume a linear value.
+        self.borrow_depth += 1;
         let inner_ty = self.infer_expr(expr);
+        self.borrow_depth = self.borrow_depth.saturating_sub(1);
         // Borrow checking happens at the let-binding site (infer_local),
         // not here. Temporary references (&x passed directly to a function)
         // are consumed immediately and don't need tracking.
@@ -5283,6 +5455,9 @@ impl<'ctx> TypeInfer<'ctx> {
             ast::PatternKind::Wildcard => {}
             ast::PatternKind::Ident { name, .. } => {
                 self.ctx.define_var(name.name.clone(), ty.clone());
+                // Track `#[linear]` bindings (lets, params, destructured fields)
+                // for no-cloning enforcement.
+                self.register_linear_local(name.name.as_ref(), ty);
             }
             ast::PatternKind::Tuple(patterns) => {
                 match &ty.kind {
