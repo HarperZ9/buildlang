@@ -7,11 +7,12 @@ inspect generated `.fx` files before trying them in ReShade.
 ## Install
 
 ```bash
-# Build from source (requires Rust toolchain)
+# From crates.io (installs the buildc binary)
+cargo install buildlang
+
+# ...or build from source (requires Rust toolchain)
 cd buildlang/compiler
 cargo build --release
-
-# Add to PATH
 export PATH="$PWD/target/release:$PATH"
 
 # Verify
