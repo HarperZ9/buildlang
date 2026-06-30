@@ -3509,7 +3509,12 @@ impl<'ctx> TypeInfer<'ctx> {
             }
             TyKind::Ref(_, _, inner) => {
                 // Auto-deref for field access on references
-                self.infer_field_on_type(inner, field, span)
+                let result = self.infer_field_on_type(inner, field, span);
+                // No-cloning: a linear value cannot be moved out from behind a
+                // reference (`w.coin` where `w: &Wrap` borrows `w`, so the field
+                // read does not consume it and could be repeated).
+                self.reject_linear_escape(&result, span, "a field read through a reference");
+                result
             }
             // Inference variables - allow field access, return fresh var
             TyKind::Var(_) | TyKind::Infer(_) => Ty::fresh_var(),
@@ -4716,7 +4721,11 @@ impl<'ctx> TypeInfer<'ctx> {
     }
 
     fn infer_while(&mut self, condition: &ast::Expr, body: &ast::Block) -> Ty {
+        // The condition is re-evaluated every iteration, so consuming an outer
+        // linear value there is a potential repeat-consume: treat it as in-loop.
+        self.loop_depth += 1;
         let cond_ty = self.infer_expr(condition);
+        self.loop_depth = self.loop_depth.saturating_sub(1);
         let _ = self.unify(&cond_ty, &Ty::bool(), condition.span);
         let pre_loop_sources = self.source_bindings.clone();
 
@@ -4763,7 +4772,11 @@ impl<'ctx> TypeInfer<'ctx> {
         expr: &ast::Expr,
         body: &ast::Block,
     ) -> Ty {
+        // The scrutinee is re-evaluated every iteration, so consuming an outer
+        // linear value there is a potential repeat-consume: treat it as in-loop.
+        self.loop_depth += 1;
         let expr_ty = self.infer_expr(expr);
+        self.loop_depth = self.loop_depth.saturating_sub(1);
         let pre_loop_sources = self.source_bindings.clone();
 
         self.push_scope(ScopeKind::Loop);
@@ -5484,6 +5497,11 @@ impl<'ctx> TypeInfer<'ctx> {
                 } else {
                     // Shorthand field: `field` means `field: field`
                     if let Some(var_ty) = self.ctx.lookup_var(field_name) {
+                        // A shorthand field moves the variable by value, so it
+                        // consumes a linear local just like `field: field` would.
+                        if self.borrow_depth == 0 {
+                            self.consume_linear(field_name, span);
+                        }
                         var_ty
                     } else {
                         self.error(
