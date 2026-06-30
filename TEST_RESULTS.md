@@ -1,10 +1,10 @@
 # BuildLang Historical End-to-End Test Results
 
-**Current status (2026-06-23): this page is a historical C-backend test
+**Current status (2026-06-30): this page is a historical C-backend test
 record, not the current release gate.** The current release-shaped proof is the
 Cargo baseline documented in `README.md` and `STATUS.md`: `cargo test --quiet`
-from `compiler/` produced 1002 passing tests, 0 failing tests, and 11 ignored
-tests. A live `buildc test`
+from `compiler/` produced lib 872, bin 44, cli 263, lexer 51, parser 83 passing
+tests (0 failing). A live `buildc test`
 run on 2026-06-15 starts 137 legacy fixture tests and stops at
 `tests/programs/04_if_else.bld` because older fixtures predate explicit
 `Console` capability annotations, reporting 3 passed, 1 error, and 16 skipped

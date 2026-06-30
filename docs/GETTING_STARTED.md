@@ -20,7 +20,15 @@ practical shader-output path.
 
 ---
 
-## Building the Compiler
+## Installing the Compiler
+
+The quickest path installs the `buildc` binary from crates.io:
+
+```bash
+cargo install buildlang
+```
+
+(Formerly published as `quantalang`, now deprecated.) Or build from source:
 
 ```bash
 cd compiler
