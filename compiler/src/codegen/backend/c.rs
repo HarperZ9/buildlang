@@ -2441,11 +2441,7 @@ impl CBackend {
     fn c_callable_prototype(&self, func: &MirFunction) -> String {
         let mut s = String::new();
         let ret = self.type_to_c(&func.sig.ret);
-        let name = if matches!(func.name.as_ref(), "min" | "max" | "abs") {
-            format!("_{}", func.name)
-        } else {
-            func.name.to_string()
-        };
+        let name = Self::user_fn_emit_name(func.name.as_ref());
         s.push_str(&format!("{} {}(", ret, name));
 
         let params: Vec<_> = func.locals.iter().filter(|l| l.is_param).collect();
@@ -2497,12 +2493,8 @@ impl CBackend {
             Linkage::LinkOnce => self.output.push_str("static inline "),
         }
 
-        // Escape user-defined function names that conflict with C macros
-        let func_name = if matches!(func.name.as_ref(), "min" | "max" | "abs") {
-            format!("_{}", func.name)
-        } else {
-            func.name.to_string()
-        };
+        // Escape user-defined function names that conflict with C macros/stdlib.
+        let func_name = Self::user_fn_emit_name(func.name.as_ref());
         write!(self.output, "{} {}(", ret_type, func_name).unwrap();
 
         // For main(), always emit (int argc, char** argv) signature
@@ -3583,6 +3575,13 @@ impl CBackend {
                 "Stdin" => return "((io_Stdin){ 0 })".to_string(),
                 "Stdout" => return "((io_Stdout){ 0 })".to_string(),
                 "Stderr" => return "((io_Stderr){ 0 })".to_string(),
+                // A function reference in value position (a direct call's callee)
+                // must get the same stdlib-collision escape as its definition.
+                other if !Self::is_runtime_or_builtin_fn(other)
+                    && Self::is_c_stdlib_collision(other) =>
+                {
+                    format!("_{}", other)
+                }
                 _ => name.to_string(),
             },
             MirValue::Function(name) => {
@@ -3602,7 +3601,7 @@ impl CBackend {
                 // known builtins.  These are already correct as-is.
                 if Self::is_runtime_or_builtin_fn(name) {
                     name.to_string()
-                } else if Self::is_c_reserved(name) {
+                } else if Self::is_c_reserved(name) || Self::is_c_stdlib_collision(name) {
                     format!("_{}", name)
                 } else {
                     name.to_string()
@@ -4476,6 +4475,50 @@ impl CBackend {
         }
 
         used
+    }
+
+    /// True when a user-defined function name collides with a C standard-library
+    /// function that is NOT one of our recognized math/runtime builtins. Such a
+    /// name must be emitted with a leading underscore at the definition, forward
+    /// declaration, and every call site, or the C compiler reports a redefinition
+    /// (or silently binds calls to the libc symbol). Names that are intentional
+    /// builtins (abs, exit, malloc, ...) are deliberately excluded.
+    fn is_c_stdlib_collision(name: &str) -> bool {
+        matches!(
+            name,
+            "div" | "ldiv"
+                | "lldiv"
+                | "labs"
+                | "llabs"
+                | "system"
+                | "remove"
+                | "rename"
+                | "getenv"
+                | "putenv"
+                | "rand"
+                | "srand"
+                | "qsort"
+                | "bsearch"
+                | "atexit"
+                | "abort"
+                | "atoi"
+                | "atol"
+                | "atof"
+                | "strtol"
+                | "strtod"
+                | "toupper"
+                | "tolower"
+        )
+    }
+
+    /// Emit name for a user-defined function: prefixed with `_` when it collides
+    /// with a C macro (min/max/abs) or stdlib function (div, system, ...).
+    fn user_fn_emit_name(name: &str) -> String {
+        if matches!(name, "min" | "max" | "abs") || Self::is_c_stdlib_collision(name) {
+            format!("_{}", name)
+        } else {
+            name.to_string()
+        }
     }
 
     fn is_runtime_or_builtin_fn(name: &str) -> bool {

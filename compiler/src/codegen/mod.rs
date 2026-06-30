@@ -1144,6 +1144,21 @@ mod tests {
     }
 
     #[test]
+    fn user_function_named_like_c_stdlib_is_escaped() {
+        // A user function named `div` (a C stdlib function) must be emitted with
+        // a leading underscore at the definition AND every call site, or the C
+        // compiler reports a redefinition / binds the call to libc's div.
+        let code = source_to_c(
+            "fn div(a: i32, b: i32) -> i32 { return a / b; }\n\
+             fn main() { let _x = div(20, 4); }",
+        );
+        assert!(
+            code.contains("_div(int32_t a, int32_t b)") && code.contains("= _div(20, 4)"),
+            "a user `div` must be escaped at both definition and call:\n{code}"
+        );
+    }
+
+    #[test]
     fn if_let_some_tests_discriminant_and_binds_payload() {
         // `if let Some(x) = opt { ... } else { ... }` must test has_value and bind
         // x from the payload slot - not bind the whole Option and run both

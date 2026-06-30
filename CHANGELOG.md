@@ -10,6 +10,17 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Codegen (C stdlib name collisions): a user function named like a C standard
+  library function (e.g. `div`, `remove`, `system`, `rand`, `qsort`) is now
+  emitted with a leading underscore at its definition, forward declaration, AND
+  every call site. Previously only C macros (`min`/`max`/`abs`) were escaped, so
+  `fn div(...)` collided with libc's `div` - a redefinition (C2371) and a
+  `div_t`-vs-return-type mismatch (C2440). A shared `user_fn_emit_name` /
+  `is_c_stdlib_collision` pair now drives all three emit sites consistently;
+  runtime `build_*` helpers and intentional math builtins (`abs`, `exit`, ...)
+  are untouched. Verified end-to-end under MSVC: `fn div` + `fn remove` compile
+  and print `d 5` / `r 9`. Covered by
+  `user_function_named_like_c_stdlib_is_escaped`.
 - Codegen (`if let`): `if let Some(x) = opt { ... } else { ... }` now works. It
   was fundamentally broken for runtime Option/Result: it bound the pattern
   variable to the *whole* Option struct and ran the branches unconditionally (no
