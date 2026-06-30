@@ -41,6 +41,10 @@ pub struct TypeContext {
     /// Next definition ID.
     next_def_id: u32,
 
+    /// Type DefIds marked `#[linear]`: values of these types may be moved /
+    /// consumed at most once (no-cloning / no-double-spend / resource safety).
+    linear_defs: HashSet<DefId>,
+
     /// The current Self type (set when inside an impl block).
     current_self_ty: Option<Ty>,
 
@@ -293,6 +297,7 @@ impl TypeContext {
             aliases: HashMap::new(),
             functions: HashMap::new(),
             next_def_id: 0,
+            linear_defs: HashSet::new(),
             current_self_ty: None,
             inherent_methods: HashMap::new(),
             param_trait_bounds: HashMap::new(),
@@ -369,6 +374,16 @@ impl TypeContext {
         let id = DefId::new(0, self.next_def_id);
         self.next_def_id += 1;
         id
+    }
+
+    /// Mark a type definition as `#[linear]`.
+    pub fn mark_linear(&mut self, def_id: DefId) {
+        self.linear_defs.insert(def_id);
+    }
+
+    /// Whether a type definition is marked `#[linear]`.
+    pub fn is_linear_def(&self, def_id: DefId) -> bool {
+        self.linear_defs.contains(&def_id)
     }
 
     // =========================================================================
