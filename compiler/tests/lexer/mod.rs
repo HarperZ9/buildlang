@@ -5,8 +5,7 @@
 // ===============================================================================
 
 use buildlang::lexer::{
-    tokenize, tokenize_file, Delimiter, IntBase, Keyword, LiteralKind, SourceFile, Token,
-    TokenKind, Lexer, LexerConfig,
+    tokenize, Delimiter, IntBase, Keyword, Lexer, LiteralKind, SourceFile, Token, TokenKind,
 };
 
 // =============================================================================
@@ -15,10 +14,6 @@ use buildlang::lexer::{
 
 fn lex(source: &str) -> Vec<Token> {
     tokenize(source).expect("lexer should succeed")
-}
-
-fn lex_kinds(source: &str) -> Vec<TokenKind> {
-    lex(source).into_iter().map(|t| t.kind).collect()
 }
 
 fn expect_single_token(source: &str, expected: TokenKind) {
@@ -372,10 +367,13 @@ fn test_raw_strings() {
         },
     );
 
+    // To embed the sequence `"##` inside a raw string, the delimiter needs
+    // strictly more hashes than the embedded run: `r###"..."###` can contain
+    // `"##`, whereas `r##"..."##` would terminate at the first `"##`.
     expect_single_token(
-        r####"r##"even more ##"## raw"##"####,
+        r####"r###"even more ##"## raw"###"####,
         TokenKind::Literal {
-            kind: LiteralKind::RawStr { n_hashes: Some(2) },
+            kind: LiteralKind::RawStr { n_hashes: Some(3) },
             suffix: None,
         },
     );
@@ -559,11 +557,14 @@ fn test_identifiers() {
 
 #[test]
 fn test_unicode_identifiers() {
-    expect_single_token("", TokenKind::Ident);
-    expect_single_token("cafe", TokenKind::Ident);
-    expect_single_token("", TokenKind::Ident);
-    expect_single_token("", TokenKind::Ident);
-    expect_single_token("nombre", TokenKind::Ident);
+    // Written with \u escapes so the test source stays pure ASCII and the exact
+    // UTF-8 identifiers are reconstructed by the compiler regardless of file
+    // encoding handling.
+    expect_single_token("caf\u{e9}", TokenKind::Ident); // cafe with e-acute
+    expect_single_token("na\u{ef}ve", TokenKind::Ident); // naive with i-diaeresis
+    expect_single_token("\u{3a9}mega", TokenKind::Ident); // Greek capital omega + mega
+    expect_single_token("\u{540d}\u{524d}", TokenKind::Ident); // Japanese: namae
+    expect_single_token("\u{43f}\u{435}\u{440}", TokenKind::Ident); // Cyrillic: per
 }
 
 #[test]
@@ -731,12 +732,12 @@ fn test_span_accuracy() {
 
 #[test]
 fn test_unicode_span() {
-    let source = "let  = 42"; // 3-byte character
+    let source = "let \u{540d} = 42"; // \u{540d} is a 3-byte UTF-8 character
     let file = SourceFile::anonymous(source);
     let mut lexer = Lexer::new(&file);
     let tokens = lexer.tokenize().unwrap();
 
-    // "" should span 3 bytes
+    // the identifier token should span 3 bytes
     assert_eq!(tokens[1].span.len(), 3);
 }
 
