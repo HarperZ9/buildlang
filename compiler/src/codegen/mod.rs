@@ -997,6 +997,23 @@ mod tests {
     }
 
     #[test]
+    fn some_constructs_option_struct_not_bare_call() {
+        // Some(x) must construct an Option (has_value + typed union slot), not an
+        // undefined `Some(x)` call into a mistyped i32 dest (the old C2440).
+        let code = source_to_c(
+            "fn opt() -> Option<i32> { return Some(7); }\nfn main() { let _o = opt(); }",
+        );
+        assert!(
+            !code.contains("= Some("),
+            "Some must not lower to an undefined `Some` call:\n{code}"
+        );
+        assert!(
+            code.contains(".has_value = true") && code.contains(".value.i ="),
+            "Some must construct the Option struct with a typed union slot:\n{code}"
+        );
+    }
+
+    #[test]
     fn for_over_vec_emits_a_runtime_length_loop() {
         // `for x in v` over a Vec must emit a real index loop bounded by
         // build_hvec_len, not the silent no-op that previously dropped the body.

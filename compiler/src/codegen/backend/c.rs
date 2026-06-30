@@ -2999,6 +2999,39 @@ impl CBackend {
                     return Ok(());
                 }
 
+                // Runtime Some(x): construct an Option with the payload in the
+                // typed 8-byte union slot (`.value.i` integer/bool, `.value.f`
+                // float, `.value.p` pointer). Previously Some lowered to an
+                // undefined `Some(x)` call into an i32-typed dest (a C2440).
+                if func_str == "Some" && args.len() == 1 {
+                    if let Some(dest_local) = dest {
+                        let dest_name = self.local_name(*dest_local, locals);
+                        let arg = self.value_to_c(&args[0], locals);
+                        let (slot, cast) = match &args[0] {
+                            MirValue::Local(id) => match locals.get(id.0 as usize).map(|l| &l.ty) {
+                                Some(MirType::Float(_)) => ("f", "(double)"),
+                                Some(MirType::Ptr(_)) => ("p", "(void*)"),
+                                _ => ("i", "(int64_t)"),
+                            },
+                            MirValue::Const(MirConst::Float(..)) => ("f", "(double)"),
+                            _ => ("i", "(int64_t)"),
+                        };
+                        write!(self.output, "{}.has_value = true;\n", dest_name).unwrap();
+                        self.write_indent();
+                        write!(
+                            self.output,
+                            "{}.value.{} = {}({});\n",
+                            dest_name, slot, cast, arg
+                        )
+                        .unwrap();
+                    }
+                    if let Some(target) = target {
+                        self.write_indent();
+                        write!(self.output, "goto bb{};\n", target.0).unwrap();
+                    }
+                    return Ok(());
+                }
+
                 // Unit struct constructors: Stdin, Stdout, Stderr - emit zero-init.
                 const UNIT_STRUCTS: &[(&str, &str)] = &[
                     ("Stdin", "io_Stdin"),
@@ -3555,9 +3588,30 @@ impl CBackend {
                 NullaryOp::AlignOf => format!("_Alignof({})", self.type_to_c(ty)),
             },
             MirRValue::FieldAccess {
-                base, field_name, ..
+                base,
+                field_name,
+                field_ty,
             } => {
                 let base_str = self.value_to_c(base, locals);
+                // Option payload read: `opt.value` is an 8-byte union; read the
+                // typed slot (`.i`/`.f`/`.p`) and cast back to the payload type.
+                let base_is_option = matches!(base, MirValue::Local(id)
+                    if locals.get(id.0 as usize)
+                        .map(|l| matches!(&l.ty, MirType::Struct(n) if n.as_ref() == "Option"))
+                        .unwrap_or(false));
+                if base_is_option && field_name.as_ref() == "value" {
+                    let slot = match field_ty {
+                        MirType::Float(_) => "f",
+                        MirType::Ptr(_) => "p",
+                        _ => "i",
+                    };
+                    return Ok(format!(
+                        "({}){}.value.{}",
+                        self.type_to_c(field_ty),
+                        base_str,
+                        slot
+                    ));
+                }
                 // If the base value is a pointer type, use -> instead of .
                 let is_ptr = match base {
                     MirValue::Local(id) => locals
