@@ -10,6 +10,12 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Native FFI (export header): `buildc build --emit header` writes a C header
+  (`main.h`) declaring the program's `extern "C"` exports, with an include
+  guard, the integer/bool/size typedefs the prototypes use, and a
+  `#ifdef __cplusplus extern "C"` linkage guard. C and C++ consumers can
+  `#include` it and call into the compiled BuildLang code. Covered by
+  `extern_c_fn_is_marked_c_export` and `c_export_header_declares_exports_only`.
 - Native FFI (export): `extern "C" fn` is now accepted as a function
   *definition*, not only inside extern blocks. A C-ABI function definition gets
   external linkage and a stable, unmangled name, so it compiles to a

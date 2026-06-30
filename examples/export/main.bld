@@ -14,6 +14,8 @@
 //
 // Emit the C with:
 //     buildc build examples/export --emit c
+// Emit a C header (main.h) that consumers can #include:
+//     buildc build examples/export --emit header
 
 extern "C" fn buildlang_square(n: i32) -> i32 {
     n * n

@@ -170,6 +170,13 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub fn mir(&self) -> Option<&MirModule> {
         self.mir.as_ref()
     }
+
+    /// Generate a C header declaring the last-generated module's `extern "C"`
+    /// exports. Returns `None` if no module has been generated yet.
+    pub fn c_export_header(&self) -> Option<String> {
+        let mir = self.mir.as_ref()?;
+        Some(backend::c::CBackend::new().generate_c_header(mir))
+    }
 }
 
 /// Generated code output.
@@ -869,6 +876,62 @@ mod tests {
         assert!(
             !code.contains("static int32_t exported_add"),
             "a C-ABI export must not be emitted static:\n{code}"
+        );
+    }
+
+    #[test]
+    fn extern_c_fn_is_marked_c_export() {
+        let module = crate::parser::parse_source(
+            "test.bld",
+            "extern \"C\" fn ex(n: i32) -> i32 { n }\nfn internal(n: i32) -> i32 { n }",
+        )
+        .expect("source should parse");
+        let ctx = TypeContext::new();
+        let mut cg = CodeGenerator::new(&ctx, Target::C);
+        cg.generate(&module).expect("codegen should succeed");
+        let mir = cg.mir().expect("mir should be present");
+        // Lowering adds a forward-declaration entry plus the definition entry,
+        // so check across all entries: the export's definition carries the flag.
+        assert!(
+            mir.functions.iter().any(|f| &*f.name == "ex" && f.is_c_export),
+            "an extern \"C\" fn should be marked a C export"
+        );
+        assert!(
+            !mir.functions.iter().any(|f| &*f.name == "internal" && f.is_c_export),
+            "a regular fn should not be a C export"
+        );
+    }
+
+    #[test]
+    fn c_export_header_declares_exports_only() {
+        let module = crate::parser::parse_source(
+            "test.bld",
+            "extern \"C\" fn ex(n: i32) -> i32 { n }\n\
+             fn internal(n: i32) -> i32 { n }\n\
+             fn main() {}",
+        )
+        .expect("source should parse");
+        let ctx = TypeContext::new();
+        let mut cg = CodeGenerator::new(&ctx, Target::C);
+        cg.generate(&module).expect("codegen should succeed");
+        let header = cg.c_export_header().expect("a module was generated");
+
+        assert!(header.contains("#pragma once"), "missing include guard:\n{header}");
+        assert!(
+            header.contains("extern \"C\""),
+            "missing C++ linkage guard:\n{header}"
+        );
+        assert!(
+            header.contains("int32_t ex(int32_t n);"),
+            "missing export prototype:\n{header}"
+        );
+        assert!(
+            !header.contains("internal"),
+            "internal function must not be exported:\n{header}"
+        );
+        assert!(
+            !header.contains(" main("),
+            "main must not be exported:\n{header}"
         );
     }
 
