@@ -1144,6 +1144,30 @@ mod tests {
     }
 
     #[test]
+    fn iterator_any_all_predicate_terminals_desugar() {
+        // `v.iter().any(|x| pred)` and `.all(|x| pred)` desugar to a boolean
+        // accumulator loop, not undefined `iter`/`any`/`all` calls.
+        let any_code = source_to_c(
+            "fn main() { let v: Vec<i32> = vec![1, 2, 3, 4]; let _a = v.iter().any(|x| x > 3); }",
+        );
+        assert!(
+            !any_code.contains(" iter(") && !any_code.contains("= any("),
+            "any must desugar, not emit undefined iter/any calls:\n{any_code}"
+        );
+        assert!(
+            any_code.contains("build_hvec_get_i32(") && any_code.contains("build_hvec_len("),
+            "any must lower to a runtime-length element loop:\n{any_code}"
+        );
+        let all_code = source_to_c(
+            "fn main() { let v: Vec<i32> = vec![1, 2, 3, 4]; let _a = v.iter().all(|x| x > 0); }",
+        );
+        assert!(
+            !all_code.contains(" iter(") && !all_code.contains("= all("),
+            "all must desugar, not emit undefined iter/all calls:\n{all_code}"
+        );
+    }
+
+    #[test]
     fn iterator_count_terminal_counts_elements() {
         // `v.iter().filter-less count()` desugars to a +1 accumulator loop, not
         // an undefined `iter`/`count` call.
