@@ -690,8 +690,8 @@ call into any C-ABI library and be called by any C-ABI consumer.
 ## Status
 
 The current release-shaped proof is the Cargo baseline above: `cargo test
---quiet` from `compiler/` on 2026-06-23 produced 1002 passing tests, 0 failing
-tests, and 11 ignored tests. [TEST_RESULTS.md](TEST_RESULTS.md) is retained as a
+--quiet` from `compiler/` on 2026-06-30 produced lib 872, bin 44, cli 263, lexer
+51, parser 83 passing tests (0 failing). [TEST_RESULTS.md](TEST_RESULTS.md) is retained as a
 historical C-backend output record, not the current release gate; the legacy
 `buildc test` fixture runner now needs a Console-capability annotation pass
 before it can be used as a public green-corpus claim again.
@@ -717,16 +717,19 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 ## Code Quality
 
 - **CI**: clippy (correctness) + rustfmt + `cargo test` on Linux and Windows
-- **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo test --manifest-path compiler/Cargo.toml --quiet` was clean against the prior 868-test baseline as of 2026-06-15; re-run before making a current warning-clean claim
+- **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo build --manifest-path compiler/Cargo.toml` is clean as of 2026-06-30; re-run before making a current warning-clean claim
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: 1002 passing, 0 failing, 11 ignored in local `cargo test --quiet` from `compiler/` on 2026-06-23
-  - Type inference: 54 tests (unification, bidirectional flow, effect inference, const generics)
-  - Lexer: 51 tests (token types, spans, Unicode, edge cases, error recovery)
-  - Parser: 85 tests (all expression/item/pattern forms, malformed programs)
-  - CLI: 192 binary-level smoke tests cover help output, `buildc doctor`, `buildc corpus verify`, `buildc receipt verify`, explicit corpus roots, C receipt writes against copied corpus fixtures, capability diagnostics, and the runnable quickstart examples
-  - Codegen: tests across 9 backends, including C formatted-print lowering, Rust source emission, Rust executable smoke checks over the semantic corpus, and semantic-corpus manifest contract/receipt consistency/metadata guards (C backend has 24 end-to-end output verification tests)
+- **Tests**: lib 872, bin 44, cli 263, lexer 51, parser 83 passing (0 failing) in local `cargo test --quiet` from `compiler/` on 2026-06-30
+  - Library (872): type inference + effects + linear-type no-cloning, lexer/parser units, MIR + codegen across backends, the semantic-corpus receipt builders, and LSP dispatch
+  - Lexer: 51 integration tests (token types, spans, Unicode, edge cases, error recovery)
+  - Parser: 83 integration tests (all expression/item/pattern forms, malformed programs)
+  - CLI (263): binary-level smoke tests over help/`doctor`/`corpus verify`/`receipt verify`, capability diagnostics, runnable quickstart examples, and end-to-end C-backend execution checks (including the Option<i64>, 64-bit-literal, and overflow-safe-arithmetic regressions)
+  - Codegen: tests across the C/Rust/HLSL/GLSL/SPIR-V/LLVM/WASM/x86-64/ARM64 backends, with the C path verified end-to-end against the semantic corpus
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details.
+BuildLang Fair-Source License v1.0 — source-available, **not** open source: the
+source is published so you can read it, run it, and build on it, while commercial
+use that competes with the project is reserved. See [LICENSE](LICENSE) for the
+full terms.
