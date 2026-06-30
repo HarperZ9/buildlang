@@ -2887,6 +2887,38 @@ impl<'ctx> MirLowerer<'ctx> {
             }
         }
 
+        // Numeric / string `.to_string()`: dispatch to the type-specific runtime
+        // formatter (each returns a fresh owned BuildString), or return the
+        // receiver unchanged for a String. Without this, `to_string` fell through
+        // to the bare-name fallback and emitted an undefined `to_string` symbol.
+        if method.name.as_ref() == "to_string" && args.is_empty() {
+            let runtime = match &receiver_ty {
+                MirType::Int(..) => Some("build_i64_to_string"),
+                MirType::Float(..) => Some("build_f64_to_string"),
+                MirType::Struct(n) if n.as_ref() == "BuildString" => {
+                    // String::to_string() is identity; return the receiver.
+                    return Ok(receiver_val);
+                }
+                _ => None,
+            };
+            if let Some(rt) = runtime {
+                let builder = self
+                    .current_fn
+                    .as_mut()
+                    .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                let result = builder.create_local(MirType::Struct(Arc::from("BuildString")));
+                let cont = builder.create_block();
+                builder.call(
+                    MirValue::Function(Arc::from(rt)),
+                    vec![receiver_val.clone()],
+                    Some(result),
+                    cont,
+                );
+                builder.switch_to_block(cont);
+                return Ok(values::local(result));
+            }
+        }
+
         // Fallback: lower as a regular function call with receiver as first argument.
         let mut arg_vals = vec![receiver_val];
         for arg in args {
