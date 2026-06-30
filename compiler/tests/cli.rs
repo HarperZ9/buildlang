@@ -12602,6 +12602,26 @@ fn c_backend_run(program_path: &Path) -> RunResult {
     }
 }
 
+/// Foundation: overflow-safe checked + saturating integer arithmetic
+/// (examples/finance/safe_math.bld) runs end-to-end. Exercises the i64-literal,
+/// `Option<i64>`-return, `match`-with-if-arms, `&&`/`else if`, and `0 - MAX - 1`
+/// (i64::MIN) paths together. `saturating_add` must CLAMP to i64::MAX, not wrap.
+#[test]
+fn safe_math_checked_and_saturating_arithmetic_runs() {
+    if !c_backend_ready() {
+        eprintln!("skipping safe_math e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../examples/finance/safe_math.bld");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout,
+        "add ok 102599\nadd overflow 1\nsub ok 60\nsat_add 9223372036854775807\nsat_sub 60\n",
+        "checked/saturating arithmetic must detect overflow and clamp, not wrap"
+    );
+}
+
 /// Regression: an unsuffixed integer literal exceeding i32 range must keep its
 /// full 64-bit value end-to-end. Previously it was silently truncated to 32 bits
 /// in both the type checker (defaulted to an i32 inference var) and the MIR
