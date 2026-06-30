@@ -2073,7 +2073,10 @@ impl<'ctx> MirLowerer<'ctx> {
         // and desugar to imperative loops rather than actual iterator objects.
         // =====================================================================
         let method_name = method.name.as_ref();
-        if method_name == "collect" || method_name == "fold" || method_name == "sum" {
+        if matches!(
+            method_name,
+            "collect" | "fold" | "sum" | "count" | "product"
+        ) {
             if let Some(chain) = Self::try_parse_iter_chain(receiver, method_name, args) {
                 return self.lower_iter_chain(&chain);
             }

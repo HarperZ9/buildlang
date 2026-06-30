@@ -1059,6 +1059,39 @@ mod tests {
     }
 
     #[test]
+    fn iterator_count_terminal_counts_elements() {
+        // `v.iter().filter-less count()` desugars to a +1 accumulator loop, not
+        // an undefined `iter`/`count` call.
+        let code = source_to_c(
+            "fn main() { let v: Vec<i32> = vec![5, 6, 7]; let _c = v.iter().count(); }",
+        );
+        assert!(
+            !code.contains(" count(") && !code.contains("= count("),
+            "count must not emit an undefined `count` call:\n{code}"
+        );
+        assert!(
+            code.contains("build_hvec_len("),
+            "count must lower to a runtime-length element loop:\n{code}"
+        );
+    }
+
+    #[test]
+    fn iterator_product_terminal_multiplies_elements() {
+        // `v.iter().product()` desugars to a `acc = acc * elem` loop from 1.
+        let code = source_to_c(
+            "fn main() { let v: Vec<i32> = vec![2, 3, 4]; let _p: i32 = v.iter().product(); }",
+        );
+        assert!(
+            !code.contains(" product(") && !code.contains("= product("),
+            "product must not emit an undefined `product` call:\n{code}"
+        );
+        assert!(
+            code.contains("build_hvec_get_i32(") && code.contains("build_hvec_len("),
+            "product must lower to a runtime-length element loop:\n{code}"
+        );
+    }
+
+    #[test]
     fn iterator_sum_terminal_desugars_to_an_accumulator_loop() {
         // `v.iter().map(|x| x * 2).sum()` must desugar to a loop with a running
         // accumulator, not leave `.iter()` as an undefined `iter` call (which

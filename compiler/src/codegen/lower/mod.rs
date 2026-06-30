@@ -157,6 +157,10 @@ pub(crate) enum IterTerminal<'a> {
     }, // fields accessible via match pattern
     /// `.sum()` - add all elements, starting from a zero accumulator.
     Sum,
+    /// `.count()` - count elements, starting from zero.
+    Count,
+    /// `.product()` - multiply all elements, starting from one.
+    Product,
 }
 
 /// A fully parsed iterator chain: `source.iter().<steps>.<terminal>`.

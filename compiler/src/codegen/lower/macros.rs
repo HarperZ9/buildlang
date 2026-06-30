@@ -1978,6 +1978,8 @@ impl<'ctx> MirLowerer<'ctx> {
                 closure: &terminal_args[1],
             },
             "sum" if terminal_args.is_empty() => IterTerminal::Sum,
+            "count" if terminal_args.is_empty() => IterTerminal::Count,
+            "product" if terminal_args.is_empty() => IterTerminal::Product,
             _ => return None,
         };
 
@@ -2134,6 +2136,27 @@ impl<'ctx> MirLowerer<'ctx> {
                 builder.assign(acc, MirRValue::Use(MirValue::Const(zero)));
                 (acc, false)
             }
+            IterTerminal::Count => {
+                // i64 counter initialized to zero; the element value is ignored.
+                let builder = self.current_fn.as_mut().unwrap();
+                let acc = builder.create_local(MirType::i64());
+                builder.assign(
+                    acc,
+                    MirRValue::Use(MirValue::Const(MirConst::Int(0, MirType::i64()))),
+                );
+                (acc, false)
+            }
+            IterTerminal::Product => {
+                // Accumulator of the output element type, initialized to one.
+                let one = match &output_elem_ty {
+                    MirType::Float(_) => MirConst::Float(1.0, output_elem_ty.clone()),
+                    _ => MirConst::Int(1, output_elem_ty.clone()),
+                };
+                let builder = self.current_fn.as_mut().unwrap();
+                let acc = builder.create_local(output_elem_ty.clone());
+                builder.assign(acc, MirRValue::Use(MirValue::Const(one)));
+                (acc, false)
+            }
         };
 
         // 6. Create the loop: for i in 0..len { ... }
@@ -2239,6 +2262,26 @@ impl<'ctx> MirLowerer<'ctx> {
                 let builder = self.current_fn.as_mut().unwrap();
                 let next = builder.create_local(val_ty);
                 builder.binary_op(next, BinOp::Add, values::local(result_local), current_val);
+                builder.assign(result_local, MirRValue::Use(values::local(next)));
+            }
+            IterTerminal::Count => {
+                // acc = acc + 1 (the element value is unused)
+                let builder = self.current_fn.as_mut().unwrap();
+                let next = builder.create_local(MirType::i64());
+                builder.binary_op(
+                    next,
+                    BinOp::Add,
+                    values::local(result_local),
+                    MirValue::Const(MirConst::Int(1, MirType::i64())),
+                );
+                builder.assign(result_local, MirRValue::Use(values::local(next)));
+            }
+            IterTerminal::Product => {
+                // acc = acc * current_val
+                let val_ty = self.type_of_value(&current_val);
+                let builder = self.current_fn.as_mut().unwrap();
+                let next = builder.create_local(val_ty);
+                builder.binary_op(next, BinOp::Mul, values::local(result_local), current_val);
                 builder.assign(result_local, MirRValue::Use(values::local(next)));
             }
         }
