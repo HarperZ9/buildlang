@@ -1144,6 +1144,30 @@ mod tests {
     }
 
     #[test]
+    fn match_on_ref_enum_dereferences_for_the_tag_path() {
+        // `match self { Dir::North => ... }` inside a `&self` enum method: the
+        // scrutinee is `Dir*`, so it must be dereferenced to take the enum-tag
+        // match path, not a struct `==` comparison on the pointer.
+        let code = source_to_c(
+            "enum Dir { North, South }\n\
+             impl Dir { fn code(self: &Dir) -> i32 { \
+               match self { Dir::North => 1, Dir::South => 2 } \
+             } }\n\
+             fn main() { let d = Dir::South; let _c = d.code(); }",
+        );
+        // The match must read the tag and compare it to the integer
+        // discriminants (`.tag == 0`, `.tag == 1`), via a dereference of `self`.
+        assert!(
+            code.contains("(*self)"),
+            "the &self enum match must dereference the pointer scrutinee:\n{code}"
+        );
+        assert!(
+            code.contains(".tag"),
+            "the &self enum match must compare the tag field:\n{code}"
+        );
+    }
+
+    #[test]
     fn option_methods_is_some_and_unwrap_or() {
         // `opt.is_some()` reads has_value; `opt.unwrap_or(d)` reads the payload
         // slot when present else the default. Neither must lower to an undefined
