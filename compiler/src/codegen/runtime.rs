@@ -59,7 +59,11 @@ typedef struct {
         double ok_f;
         void* ok_p;
     } ok;
-    BuildString err;
+    union {
+        int64_t err_i;
+        double err_f;
+        void* err_p;
+    } err;
 } Result;
 
 // --- Collection types (opaque handles) ---
