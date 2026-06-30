@@ -204,6 +204,30 @@ static int32_t build_hvec_pop_i32(BuildVecHandle h) {
     return *(int32_t*)((char*)h.inner->ptr + h.inner->len * h.inner->elem_size);
 }
 static void build_hvec_free(BuildVecHandle h) { build_vec_free(h.inner); free(h.inner); }
+static bool build_hvec_contains_i32(BuildVecHandle h, int32_t val) {
+    for (size_t i = 0; i < h.inner->len; i++) {
+        if (*(int32_t*)build_vec_get(h.inner, i) == val) return true;
+    }
+    return false;
+}
+static bool build_hvec_contains_i64(BuildVecHandle h, int64_t val) {
+    for (size_t i = 0; i < h.inner->len; i++) {
+        if (*(int64_t*)build_vec_get(h.inner, i) == val) return true;
+    }
+    return false;
+}
+static bool build_hvec_contains_f64(BuildVecHandle h, double val) {
+    for (size_t i = 0; i < h.inner->len; i++) {
+        if (*(double*)build_vec_get(h.inner, i) == val) return true;
+    }
+    return false;
+}
+static bool build_hvec_contains_str(BuildVecHandle h, BuildString val) {
+    for (size_t i = 0; i < h.inner->len; i++) {
+        if (build_string_eq(*(BuildString*)build_vec_get(h.inner, i), val)) return true;
+    }
+    return false;
+}
 
 // f64 handle variants
 static BuildVecHandle build_hvec_new_f64(void) {
