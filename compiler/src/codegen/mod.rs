@@ -957,6 +957,31 @@ mod tests {
     }
 
     #[test]
+    fn numeric_to_string_dispatches_to_runtime_formatter() {
+        // `n.to_string()` on a number must lower to the type-specific runtime
+        // formatter (build_i64_to_string / build_f64_to_string), not a bare
+        // `to_string` symbol that fails to link.
+        let int_code = source_to_c("fn main() { let n = 42; let u = n.to_string(); }");
+        assert!(
+            !int_code.contains("= to_string("),
+            "integer to_string must not emit an undefined `to_string` call:\n{int_code}"
+        );
+        assert!(
+            int_code.contains("build_i64_to_string("),
+            "integer to_string must call build_i64_to_string:\n{int_code}"
+        );
+        let flt_code = source_to_c("fn main() { let x = 3.5; let u = x.to_string(); }");
+        assert!(
+            !flt_code.contains("= to_string("),
+            "float to_string must not emit an undefined `to_string` call:\n{flt_code}"
+        );
+        assert!(
+            flt_code.contains("build_f64_to_string("),
+            "float to_string must call build_f64_to_string:\n{flt_code}"
+        );
+    }
+
+    #[test]
     fn string_from_dest_is_typed_buildstring_not_int() {
         // EVERY dest of `build_string_new(...)` must be declared `BuildString`,
         // not `int32_t`. `String::from(...)` lowers to `build_string_new(...)`
