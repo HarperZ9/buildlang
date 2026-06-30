@@ -2052,6 +2052,58 @@ mod tests {
     }
 
     #[test]
+    fn linear_field_read_through_reference_is_rejected() {
+        // Moving a linear field out from behind a borrow (`w.coin` where
+        // `w: &Wrap`) does not consume `w`, so it could be repeated.
+        let errors = check_source(
+            "#[linear]\nstruct Coin { value: i64 }\n\
+             #[linear]\nstruct Wrap { coin: Coin }\n\
+             fn take(w: &Wrap) -> Coin { w.coin }\n\
+             fn spend(c: Coin) -> i64 { c.value }\n\
+             fn main() ~ Console { let coin = Coin { value: 1 }; \
+             let w = Wrap { coin: coin }; \
+             let a = spend(take(&w)); let b = spend(take(&w)); \
+             println(\"{} {}\", a, b); }",
+        );
+        assert!(
+            has_any_linear_error(&errors),
+            "moving a linear field out through a reference must be rejected: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_shorthand_field_init_consumes() {
+        // `Wallet { coin }` shorthand moves `coin`; using it again is an error.
+        let errors = check_source(
+            "#[linear]\nstruct Coin { value: i64 }\n\
+             #[linear]\nstruct Wallet { coin: Coin }\n\
+             fn spend(c: Coin) -> i64 { c.value }\n\
+             fn main() ~ Console { let coin = Coin { value: 1 }; \
+             let w = Wallet { coin }; let a = spend(coin); println(\"{}\", a); }",
+        );
+        assert!(
+            has_any_linear_error(&errors),
+            "a shorthand field init must consume the moved linear local: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_consumed_in_while_condition_errors() {
+        // A while condition is re-evaluated each iteration; consuming an outer
+        // linear there is a potential repeat-consume.
+        let errors = check_source(
+            "#[linear]\nstruct Coin { value: i64 }\n\
+             fn drain(c: Coin) -> bool { c.value > 0 }\n\
+             fn main() ~ Console { let coin = Coin { value: 1 }; \
+             while drain(coin) { println(\"loop\"); } }",
+        );
+        assert!(
+            has_any_linear_error(&errors),
+            "consuming a linear value in a while condition must be rejected: {errors:#?}"
+        );
+    }
+
+    #[test]
     fn linear_value_captured_in_closure_is_rejected() {
         let errors = check_source(&format!(
             "{LINEAR_PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
