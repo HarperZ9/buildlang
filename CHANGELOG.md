@@ -10,6 +10,12 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Stdlib (iterator `.rev()`): `v.iter().rev()...` now iterates the source in
+  reverse - the loop starts at `len-1`, steps the (signed) index down, and exits
+  below 0. Was an unrecognized step, so the chain left `.iter()` undefined.
+  Composes with the terminals and other steps. Verified end-to-end under MSVC over
+  `[1,2,3,4]`: `rev().sum()` is `10`, and `rev().collect()` yields `[4,3,2,1]`
+  (first `4`, last `1`). Covered by `iterator_rev_step_iterates_in_reverse`.
 - Parser (`handle` as an identifier): a function named `handle` is now callable.
   `handle` is the effect-handler keyword (`handle { ... } with { ... }`), and the
   parser unconditionally parsed `handle(...)` as a handler expression - swallowing

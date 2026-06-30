@@ -1429,6 +1429,24 @@ mod tests {
     }
 
     #[test]
+    fn iterator_rev_step_iterates_in_reverse() {
+        // `v.iter().rev()...` must iterate the source in reverse: start at len-1
+        // and step down. Without it `.iter()` was an undefined call.
+        let code = source_to_c(
+            "fn main() { let v: Vec<i32> = vec![1, 2, 3]; \
+             let _s: i32 = v.iter().rev().sum(); }",
+        );
+        assert!(
+            !code.contains("= iter(") && !code.contains(" iter("),
+            "the reversed chain must not emit an undefined `iter` call:\n{code}"
+        );
+        assert!(
+            code.contains("build_hvec_len(") && code.contains("build_hvec_get_i32("),
+            "the reversed chain must lower to a runtime-length element loop:\n{code}"
+        );
+    }
+
+    #[test]
     fn iterator_sum_terminal_desugars_to_an_accumulator_loop() {
         // `v.iter().map(|x| x * 2).sum()` must desugar to a loop with a running
         // accumulator, not leave `.iter()` as an undefined `iter` call (which
