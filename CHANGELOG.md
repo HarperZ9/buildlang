@@ -10,6 +10,15 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Codegen (match on `&self` enum): `match self { Variant => ... }` inside a
+  `&self`/`&mut self` enum method now compiles. The scrutinee is a pointer to the
+  enum, so the enum-tag match path (which keys on a `Struct` scrutinee) was
+  skipped and the generic fallback emitted an invalid struct/pointer `==`
+  comparison (`(_2 == (Dir){ .tag = 0 })` - C2088/C2440). `lower_match` now
+  dereferences a pointer-to-enum scrutinee to the enum value before dispatching,
+  so the tag comparison applies. Verified end-to-end under MSVC: `impl Dir { fn
+  code(&self) -> i32 { match self { ... } } }` prints `c 2`. Covered by
+  `match_on_ref_enum_dereferences_for_the_tag_path`.
 - Stdlib (`Option<T>` methods): `is_some()`, `is_none()`, `unwrap()`, and
   `unwrap_or(default)` now work. They were unimplemented (undefined symbols that
   failed to link). `is_some`/`is_none` read the `has_value` discriminant;
