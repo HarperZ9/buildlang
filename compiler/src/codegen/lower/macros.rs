@@ -2061,6 +2061,10 @@ impl<'ctx> MirLowerer<'ctx> {
                             steps.push(IterStep::Cloned);
                             current = receiver;
                         }
+                        "rev" if args.is_empty() => {
+                            steps.push(IterStep::Rev);
+                            current = receiver;
+                        }
                         _ => return None, // Unknown intermediate method
                     }
                 }
@@ -2135,6 +2139,9 @@ impl<'ctx> MirLowerer<'ctx> {
         // 3. Check for enumerate step - affects how many closure params we
         //    bind (index + element vs just element).
         let has_enumerate = chain.steps.iter().any(|s| matches!(s, IterStep::Enumerate));
+        // `.rev()` iterates the source in reverse: start at len-1, step down,
+        // exit when the (signed) index drops below 0.
+        let reversed = chain.steps.iter().any(|s| matches!(s, IterStep::Rev));
 
         // 4. Determine result element type by walking the steps.
         //    After map closures, the type may change based on the closure's
@@ -2220,10 +2227,20 @@ impl<'ctx> MirLowerer<'ctx> {
         let idx_local = {
             let builder = self.current_fn.as_mut().unwrap();
             let idx = builder.create_local(MirType::i64());
-            builder.assign(
-                idx,
-                MirRValue::Use(MirValue::Const(MirConst::Int(0, MirType::i64()))),
-            );
+            if reversed {
+                // idx = len - 1
+                builder.binary_op(
+                    idx,
+                    BinOp::Sub,
+                    values::local(len_local),
+                    MirValue::Const(MirConst::Int(1, MirType::i64())),
+                );
+            } else {
+                builder.assign(
+                    idx,
+                    MirRValue::Use(MirValue::Const(MirConst::Int(0, MirType::i64()))),
+                );
+            }
             idx
         };
 
@@ -2238,16 +2255,25 @@ impl<'ctx> MirLowerer<'ctx> {
             (cond, body, incr, exit)
         };
 
-        // Condition: idx < len
+        // Condition: forward `idx < len`, reversed `idx >= 0`.
         {
             let builder = self.current_fn.as_mut().unwrap();
             let cmp = builder.create_local(MirType::Bool);
-            builder.binary_op(
-                cmp,
-                BinOp::Lt,
-                values::local(idx_local),
-                values::local(len_local),
-            );
+            if reversed {
+                builder.binary_op(
+                    cmp,
+                    BinOp::Ge,
+                    values::local(idx_local),
+                    MirValue::Const(MirConst::Int(0, MirType::i64())),
+                );
+            } else {
+                builder.binary_op(
+                    cmp,
+                    BinOp::Lt,
+                    values::local(idx_local),
+                    values::local(len_local),
+                );
+            }
             builder.branch(values::local(cmp), body_block, exit_block);
             builder.switch_to_block(body_block);
         }
@@ -2307,6 +2333,9 @@ impl<'ctx> MirLowerer<'ctx> {
                 }
                 IterStep::Cloned => {
                     // No-op for Copy types.
+                }
+                IterStep::Rev => {
+                    // Direction is handled by the loop bounds; per-element no-op.
                 }
             }
         }
@@ -2401,7 +2430,7 @@ impl<'ctx> MirLowerer<'ctx> {
             let next_idx = builder.create_local(MirType::i64());
             builder.binary_op(
                 next_idx,
-                BinOp::Add,
+                if reversed { BinOp::Sub } else { BinOp::Add },
                 values::local(idx_local),
                 MirValue::Const(MirConst::Int(1, MirType::i64())),
             );
@@ -2639,7 +2668,10 @@ impl<'ctx> MirLowerer<'ctx> {
                         }
                     }
                 }
-                IterStep::Filter { .. } | IterStep::Enumerate | IterStep::Cloned => {
+                IterStep::Filter { .. }
+                | IterStep::Enumerate
+                | IterStep::Cloned
+                | IterStep::Rev => {
                     // These don't change the element type.
                 }
             }
