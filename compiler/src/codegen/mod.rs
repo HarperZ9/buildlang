@@ -946,6 +946,17 @@ mod tests {
     }
 
     #[test]
+    fn string_from_does_not_emit_undefined_symbol() {
+        // String::from must lower to the runtime allocator, not an undefined
+        // `String_from` symbol that fails to link.
+        let code = source_to_c("fn main() { let s = String::from(\"hi\"); }");
+        assert!(
+            !code.contains("String_from"),
+            "String::from must not emit an undefined String_from call:\n{code}"
+        );
+    }
+
+    #[test]
     fn variadic_extern_emits_ellipsis_in_c() {
         // A non-standard variadic extern is synthesized with a trailing `, ...`.
         let code = source_to_c("extern \"C\" { fn my_printf(fmt: &str, ...) -> i32; }");
