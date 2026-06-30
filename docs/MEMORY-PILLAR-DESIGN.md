@@ -79,6 +79,10 @@ Insert drops for the clearest sound case and grow coverage from there:
 - Runtime: compile each case with MSVC AddressSanitizer (`cl /fsanitize=address`)
   and run, asserting no use-after-free and no double-free, and that the targeted
   allocations are freed. The semantic corpus c-execution must stay 8/8.
+  CONFIRMED 2026-06-30: this MSVC has working ASan; a deliberate use-after-free
+  compiled with `/fsanitize=address` reports `AddressSanitizer: heap-use-after-free`
+  at runtime (run the exe with the MSVC bin on PATH so the asan runtime DLL
+  resolves). The safety net for drop insertion is therefore ready to use.
 - The pillar is only "done" when a long-running allocation loop has bounded peak
   memory under ASan, not merely when the corpus passes.
 
