@@ -1202,6 +1202,20 @@ mod tests {
     }
 
     #[test]
+    fn for_over_string_chars_emits_a_byte_loop() {
+        // `for c in s.chars()` must emit a runtime-length byte loop, not the
+        // silent no-op (zero iterations) it fell through to before.
+        let code = source_to_c(
+            "fn main() { let s = String::from(\"hi\"); let mut n = 0; \
+             for c in s.chars() { n = n + 1; } }",
+        );
+        assert!(
+            code.contains("build_string_len(") && code.contains("build_string_byte_at("),
+            "for-over-chars must loop over the string bytes:\n{code}"
+        );
+    }
+
+    #[test]
     fn vec_sort_dispatches_to_runtime_qsort() {
         // `v.sort()` must dispatch to the element-typed runtime sort, not an
         // undefined `sort` call.
