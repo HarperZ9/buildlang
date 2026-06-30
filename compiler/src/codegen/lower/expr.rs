@@ -2773,6 +2773,96 @@ impl<'ctx> MirLowerer<'ctx> {
             }
         }
 
+        // Option<T> method dispatch: is_some/is_none read the has_value
+        // discriminant; unwrap/unwrap_or read the typed payload slot. The
+        // payload type is the tracked inner type (default i32).
+        if matches!(&receiver_ty, MirType::Struct(n) if n.as_ref() == "Option") {
+            let method_name = method.name.as_ref();
+            let inner_ty = match &receiver_val {
+                MirValue::Local(id) => self
+                    .option_inner_types
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(MirType::i32),
+                _ => MirType::i32(),
+            };
+            match method_name {
+                "is_some" | "is_none" => {
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let scrut = builder.create_local(MirType::Struct(Arc::from("Option")));
+                    builder.assign(scrut, MirRValue::Use(receiver_val));
+                    let hv = builder.create_local(MirType::Bool);
+                    builder.assign(
+                        hv,
+                        MirRValue::FieldAccess {
+                            base: values::local(scrut),
+                            field_name: Arc::from("has_value"),
+                            field_ty: MirType::Bool,
+                        },
+                    );
+                    if method_name == "is_none" {
+                        let neg = builder.create_local(MirType::Bool);
+                        builder.unary_op(neg, UnaryOp::Not, values::local(hv));
+                        return Ok(values::local(neg));
+                    }
+                    return Ok(values::local(hv));
+                }
+                "unwrap" => {
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let scrut = builder.create_local(MirType::Struct(Arc::from("Option")));
+                    builder.assign(scrut, MirRValue::Use(receiver_val));
+                    let val = builder.create_local(inner_ty.clone());
+                    builder.assign(
+                        val,
+                        MirRValue::FieldAccess {
+                            base: values::local(scrut),
+                            field_name: Arc::from("value"),
+                            field_ty: inner_ty,
+                        },
+                    );
+                    return Ok(values::local(val));
+                }
+                "unwrap_or" if args.len() == 1 => {
+                    let default_val = self.lower_expr(&args[0])?;
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let scrut = builder.create_local(MirType::Struct(Arc::from("Option")));
+                    builder.assign(scrut, MirRValue::Use(receiver_val));
+                    let hv = builder.create_local(MirType::Bool);
+                    builder.assign(
+                        hv,
+                        MirRValue::FieldAccess {
+                            base: values::local(scrut),
+                            field_name: Arc::from("has_value"),
+                            field_ty: MirType::Bool,
+                        },
+                    );
+                    let result = builder.create_local(inner_ty.clone());
+                    let some_block = builder.create_block();
+                    let none_block = builder.create_block();
+                    let merge_block = builder.create_block();
+                    builder.branch(values::local(hv), some_block, none_block);
+                    // Some: read the payload.
+                    builder.switch_to_block(some_block);
+                    builder.assign(
+                        result,
+                        MirRValue::FieldAccess {
+                            base: values::local(scrut),
+                            field_name: Arc::from("value"),
+                            field_ty: inner_ty,
+                        },
+                    );
+                    builder.goto(merge_block);
+                    // None: use the default.
+                    builder.switch_to_block(none_block);
+                    builder.assign(result, MirRValue::Use(default_val));
+                    builder.goto(merge_block);
+                    builder.switch_to_block(merge_block);
+                    return Ok(values::local(result));
+                }
+                _ => {}
+            }
+        }
+
         // Vec<T> method dispatch: map .push/.len/.get/.pop/.is_empty/.clear
         // to typed runtime functions (build_hvec_*).
         if let MirType::Vec(ref elem_ty) = receiver_ty {
