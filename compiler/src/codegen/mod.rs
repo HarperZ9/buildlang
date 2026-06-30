@@ -1059,6 +1059,33 @@ mod tests {
     }
 
     #[test]
+    fn vec_of_struct_uses_sized_element_wrappers() {
+        // `Vec<P>` where P is a struct must construct/push via element-sized
+        // wrappers, not build_hvec_new_i32 / build_hvec_push_i32 (which take an
+        // int32 and reject a struct - a C error).
+        let code = source_to_c(
+            "struct P { x: i32 }\n\
+             fn main() { \
+               let mut v: Vec<P> = Vec::new(); \
+               v.push(P { x: 7 }); \
+               let _q = v[0]; \
+             }",
+        );
+        // The i32 wrappers are always defined in the runtime preamble; assert on
+        // the call sites. `= build_hvec_new_P()` is the construction call (the
+        // definition is `build_hvec_new_P(void)`), and a `build_hvec_push_P`
+        // wrapper is generated + called for the struct element.
+        assert!(
+            code.contains("= build_hvec_new_P()"),
+            "Vec<struct>::new must dispatch to the struct-sized constructor:\n{code}"
+        );
+        assert!(
+            code.contains("build_hvec_push_P(") && code.contains("build_hvec_get_P("),
+            "Vec<struct> push/get must use the struct-sized element wrappers:\n{code}"
+        );
+    }
+
+    #[test]
     fn match_on_method_call_threads_the_result_payload_type() {
         // `match p.run(1) { Ok(x) => ... }` where run returns Result<f64, _>
         // must read the float slot. Method-call scrutinees were not threaded, so

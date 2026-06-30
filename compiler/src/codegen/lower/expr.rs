@@ -2748,11 +2748,15 @@ impl<'ctx> MirLowerer<'ctx> {
         // to typed runtime functions (build_hvec_*).
         if let MirType::Vec(ref elem_ty) = receiver_ty {
             let method_name = method.name.as_ref();
-            let type_suffix = match elem_ty.as_ref() {
-                MirType::Float(_) => "f64",
-                MirType::Int(IntSize::I64, _) => "i64",
-                MirType::Struct(n) if n.as_ref() == "BuildString" => "str",
-                _ => "i32",
+            let type_suffix: String = match elem_ty.as_ref() {
+                MirType::Float(_) => "f64".to_string(),
+                MirType::Int(IntSize::I64, _) => "i64".to_string(),
+                MirType::Struct(n) if n.as_ref() == "BuildString" => "str".to_string(),
+                // Aggregate element (user struct etc.): element-sized wrapper
+                // keyed by the struct name (matches the C backend's generated
+                // build_hvec_*_<Struct> wrappers).
+                MirType::Struct(n) => n.to_string(),
+                _ => "i32".to_string(),
             };
 
             let (runtime_fn, ret_ty): (Option<String>, MirType) = match method_name {
