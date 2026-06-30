@@ -2172,37 +2172,44 @@ impl<'ctx> MirLowerer<'ctx> {
                         .current_fn
                         .as_mut()
                         .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-                    let result = builder.create_local(MirType::Struct(Arc::from("BuildVec")));
+                    // Result is a Vec<String> handle so .len()/for/indexing work.
+                    let result = builder.create_local(MirType::Vec(Box::new(MirType::Struct(
+                        Arc::from("BuildString"),
+                    ))));
                     let cont = builder.create_block();
-                    let func = MirValue::Function(Arc::from("build_string_split"));
+                    let func = MirValue::Function(Arc::from("build_string_split_h"));
                     builder.call(func, arg_vals, Some(result), cont);
                     builder.switch_to_block(cont);
                     return Ok(values::local(result));
                 }
 
-                // --- split_whitespace() → BuildVec of BuildString ---
+                // --- split_whitespace() → Vec<String> ---
                 if method_name == "split_whitespace" {
                     let builder = self
                         .current_fn
                         .as_mut()
                         .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-                    let result = builder.create_local(MirType::Struct(Arc::from("BuildVec")));
+                    let result = builder.create_local(MirType::Vec(Box::new(MirType::Struct(
+                        Arc::from("BuildString"),
+                    ))));
                     let cont = builder.create_block();
-                    let func = MirValue::Function(Arc::from("build_string_split_ws"));
+                    let func = MirValue::Function(Arc::from("build_string_split_ws_h"));
                     builder.call(func, vec![receiver_val], Some(result), cont);
                     builder.switch_to_block(cont);
                     return Ok(values::local(result));
                 }
 
-                // --- lines() → BuildVec of BuildString ---
+                // --- lines() → Vec<String> ---
                 if method_name == "lines" {
                     let builder = self
                         .current_fn
                         .as_mut()
                         .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-                    let result = builder.create_local(MirType::Struct(Arc::from("BuildVec")));
+                    let result = builder.create_local(MirType::Vec(Box::new(MirType::Struct(
+                        Arc::from("BuildString"),
+                    ))));
                     let cont = builder.create_block();
-                    let func = MirValue::Function(Arc::from("build_string_lines"));
+                    let func = MirValue::Function(Arc::from("build_string_lines_h"));
                     builder.call(func, vec![receiver_val], Some(result), cont);
                     builder.switch_to_block(cont);
                     return Ok(values::local(result));
