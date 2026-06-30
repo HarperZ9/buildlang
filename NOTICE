@@ -1,0 +1,29 @@
+NOTICE - Third-Party Attributions
+=================================
+
+BuildLang (formerly QuantaLang)
+Copyright (c) 2024-2026 Zain Dana Harper.
+Licensed under the BuildLang Fair-Source License v1.0 (see LICENSE).
+
+This product includes original software whose API design was informed by, but
+which does not copy the source of, the following project:
+
+rayon - https://github.com/rayon-rs/rayon
+  Copyright (c) 2010 The Rust Project Developers (Niko Matsakis and contributors)
+  Licensed under MIT OR Apache-2.0.
+
+  BuildLang's parallel-iterator API surface - the ParallelIterator and
+  IntoParallelIterator traits and the par_iter / map / filter / reduce / collect
+  method names - is deliberately modeled on rayon's public API so the two are
+  familiar to the same audience.
+
+  The BuildLang implementation in buildlang/src/concurrent/parallel.bld is an
+  independent reimplementation. It uses a batch Consumer and a hand-rolled
+  split/join over BuildLang's own thread pool, and does not reproduce rayon's
+  source or its internal architecture (it has no UnindexedConsumer, Producer,
+  bridge, or Folder machinery; its trait contract is drive / Consumer::consume
+  over a Vec, not rayon's drive_unindexed / Folder streaming model).
+
+  rayon appears only as a transitive, development-only dependency of the Rust
+  compiler crate, pulled in by the `criterion` benchmarking framework. It is not
+  a runtime dependency of BuildLang and no rayon source is vendored.
