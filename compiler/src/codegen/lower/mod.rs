@@ -1586,6 +1586,11 @@ impl<'ctx> MirLowerer<'ctx> {
             if is_main {
                 func.linkage = Linkage::External; // main must not be static
             }
+            // An `extern "C" fn` definition is an explicit C-ABI export: give it
+            // external linkage so the symbol is callable from C (not `static`).
+            if f.sig.abi.is_some() {
+                func.linkage = Linkage::External;
+            }
             func.is_public = is_main || self.current_item_vis.unwrap_or(true);
 
             // Set shader stage from attributes (#[vertex], #[fragment], #[compute])

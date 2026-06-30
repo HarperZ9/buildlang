@@ -634,6 +634,30 @@ an external reference (the header declares it, or buildc emits a bare
 require the `Foreign` capability effect, so native interop stays inside the same
 accountability gate as every other ambient surface.
 
+### Exporting BuildLang functions to C
+
+Interop runs both directions. An `extern "C" fn` definition gives a BuildLang
+function C linkage and a stable, unmangled symbol name, so it compiles to a
+non-`static` C function that C, and any language that speaks the C ABI, can
+call directly:
+
+```build
+extern "C" fn buildlang_square(n: i32) -> i32 {
+    n * n
+}
+```
+
+```c
+// from C:
+extern int buildlang_square(int n);
+int r = buildlang_square(7);  // 49
+```
+
+Ordinary BuildLang functions stay internal (`static`) so a whole-program build
+keeps a clean symbol table; only functions you explicitly mark `extern "C"` are
+exported. Together with header-backed extern blocks, this closes the loop:
+BuildLang can call into any C-ABI library and be called by any C-ABI consumer.
+
 ## Status
 
 The current release-shaped proof is the Cargo baseline above: `cargo test
