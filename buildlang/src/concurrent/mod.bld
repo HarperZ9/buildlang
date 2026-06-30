@@ -11,7 +11,7 @@
 // - Lock-free data structures (Queue, Stack, Deque)
 // - Work-stealing thread pool
 // - Extended atomic operations
-// - Parallel iterators (rayon-style)
+// - Parallel iterators (API modeled on rayon, MIT/Apache-2.0; see NOTICE)
 //
 // ═══════════════════════════════════════════════════════════════════════════════
 
