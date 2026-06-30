@@ -1144,6 +1144,25 @@ mod tests {
     }
 
     #[test]
+    fn if_let_some_tests_discriminant_and_binds_payload() {
+        // `if let Some(x) = opt { ... } else { ... }` must test has_value and bind
+        // x from the payload slot - not bind the whole Option and run both
+        // branches unconditionally (the old broken behavior).
+        let code = source_to_c(
+            "fn get(n: i32) -> Option<i32> { if n > 0 { return Some(n * 2); } return None; }\n\
+             fn main() { if let Some(x) = get(5) { let _a = x; } else { let _b = 0; } }",
+        );
+        assert!(
+            code.contains(".has_value"),
+            "if-let on Option must branch on has_value:\n{code}"
+        );
+        assert!(
+            code.contains(".value.i"),
+            "if-let must bind the payload from the typed value slot:\n{code}"
+        );
+    }
+
+    #[test]
     fn match_on_ref_enum_dereferences_for_the_tag_path() {
         // `match self { Dir::North => ... }` inside a `&self` enum method: the
         // scrutinee is `Dir*`, so it must be dereferenced to take the enum-tag

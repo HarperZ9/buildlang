@@ -10,6 +10,15 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Codegen (`if let`): `if let Some(x) = opt { ... } else { ... }` now works. It
+  was fundamentally broken for runtime Option/Result: it bound the pattern
+  variable to the *whole* Option struct and ran the branches unconditionally (no
+  discriminant test), so `if let Some(x) = get(5)` printed an empty `x` AND took
+  the else branch. `if let` now tests the discriminant (`has_value` / `is_ok`,
+  negated for `None` / `Err`), binds the payload from the typed union slot in the
+  matched branch, and runs the unmatched branch otherwise. Verified end-to-end
+  under MSVC: `if let Some(x) = get(5)` prints `got 10`, the `None` case prints
+  `none 0`. Covered by `if_let_some_tests_discriminant_and_binds_payload`.
 - Codegen (match on `&self` enum): `match self { Variant => ... }` inside a
   `&self`/`&mut self` enum method now compiles. The scrutinee is a pointer to the
   enum, so the enum-tag match path (which keys on a `Struct` scrutinee) was
