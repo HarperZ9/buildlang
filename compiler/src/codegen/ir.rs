@@ -91,23 +91,12 @@ impl MirModuleEnvelope {
 
 /// Lossless `f64` serde: store the raw IEEE-754 bit pattern as a `u64`.
 ///
-/// `serde_json` serializes non-finite floats (`NaN`, `±∞`) as JSON `null`,
-/// which does not round-trip, and even finite floats can suffer from
-/// formatter-dependent shortest-representation choices. Encoding the bit
-/// pattern guarantees every `f64` (including `NaN` payloads, `±∞`, `-0.0`,
-/// and subnormals) round-trips bit-exact.
-mod lossless_f64 {
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_u64(value.to_bits())
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
-        let bits = u64::deserialize(deserializer)?;
-        Ok(f64::from_bits(bits))
-    }
-}
+/// The implementation lives in [`crate::serde_float`], the single source of
+/// truth shared with the Build Data Format (`buildlang.bdf/v0`), so a float
+/// embedded in either the MIR or BDF wire form encodes identically. Encoding
+/// the bit pattern guarantees every `f64` (including `NaN` payloads, `±∞`,
+/// `-0.0`, and subnormals) round-trips bit-exact.
+use crate::serde_float as lossless_f64;
 
 // ============================================================================
 // MODULE STRUCTURE
