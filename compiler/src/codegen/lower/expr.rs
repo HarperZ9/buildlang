@@ -3111,11 +3111,16 @@ impl<'ctx> MirLowerer<'ctx> {
 
     /// Lower `match opt { Some(x) => body1, None => body2 }` for runtime Option.
     /// The runtime Option struct has `has_value: bool` and `value: union { i64 i; double f; void* p; }`.
+    /// `inner_ty_override` threads the payload type recovered at the match site
+    /// (from a binding annotation or the matched call's `-> Option<T>` return)
+    /// so the union slot is read with the correct type; it takes priority over
+    /// the per-local table and the i32 fallback.
     fn lower_runtime_option_match(
         &mut self,
         scrutinee_val: MirValue,
         scrutinee_ty: &MirType,
         arms: &[ast::MatchArm],
+        inner_ty_override: Option<MirType>,
     ) -> CodegenResult<MirValue> {
         let builder = self
             .current_fn
@@ -3200,11 +3205,12 @@ impl<'ctx> MirLowerer<'ctx> {
                         if let ast::PatternKind::Ident { name, .. } = &pat.kind {
                             let builder = self.current_fn.as_mut().unwrap();
                             let inner_ty = if is_real_option {
-                                // Look up tracked inner type from let-binding annotation.
-                                // Falls back to i32 when no annotation is available.
-                                self.option_inner_types
-                                    .get(&scrut_local)
-                                    .cloned()
+                                // Priority: threaded override (binding annotation
+                                // or matched call's `-> Option<T>`), then the
+                                // per-local table, then i32.
+                                inner_ty_override
+                                    .clone()
+                                    .or_else(|| self.option_inner_types.get(&scrut_local).cloned())
                                     .unwrap_or_else(MirType::i32)
                             } else {
                                 scrutinee_ty.clone() // i32 fallback - same type as scrutinee
@@ -3390,6 +3396,37 @@ impl<'ctx> MirLowerer<'ctx> {
         MirType::i32()
     }
 
+    /// Determine the payload type of an Option-valued match scrutinee, when it
+    /// can be recovered. Priority: a let-binding annotation tracked per-local,
+    /// then the `-> Option<T>` return of a directly-matched call. Returns None
+    /// when neither is available (the match then falls back to i32).
+    fn option_inner_type_for(
+        &self,
+        scrutinee: &ast::Expr,
+        scrutinee_val: &MirValue,
+    ) -> Option<MirType> {
+        // Local tracked from a `let o: Option<T> = ...` annotation.
+        if let MirValue::Local(id) = scrutinee_val {
+            if let Some(ty) = self.option_inner_types.get(id) {
+                return Some(ty.clone());
+            }
+        }
+        // Direct `match call() { Some(x) => ... }`: recover from the callee sig.
+        if let ExprKind::Call { func, .. } = &scrutinee.kind {
+            let name = match &func.kind {
+                ExprKind::Ident(ident) => Some(ident.name.clone()),
+                ExprKind::Path(path) => path.last_ident().map(|i| i.name.clone()),
+                _ => None,
+            };
+            if let Some(name) = name {
+                if let Some(ty) = self.fn_option_inner_types.get(&name) {
+                    return Some(ty.clone());
+                }
+            }
+        }
+        None
+    }
+
     fn lower_match(
         &mut self,
         scrutinee: &ast::Expr,
@@ -3415,7 +3452,8 @@ impl<'ctx> MirLowerer<'ctx> {
         let is_runtime_option =
             matches!(&scrutinee_ty, MirType::Struct(n) if n.as_ref() == "Option");
         if is_runtime_option {
-            return self.lower_runtime_option_match(scrutinee_val, &scrutinee_ty, arms);
+            let inner = self.option_inner_type_for(scrutinee, &scrutinee_val);
+            return self.lower_runtime_option_match(scrutinee_val, &scrutinee_ty, arms, inner);
         }
 
         // Check if this is an enum match (scrutinee type is a known enum).
@@ -3439,7 +3477,14 @@ impl<'ctx> MirLowerer<'ctx> {
                     )
                 });
                 if has_option_arms {
-                    return self.lower_runtime_option_match(scrutinee_val, &scrutinee_ty, arms);
+                    // Primitive (i32) scrutinee: no override; the scrutinee type
+                    // itself is the payload type.
+                    return self.lower_runtime_option_match(
+                        scrutinee_val,
+                        &scrutinee_ty,
+                        arms,
+                        None,
+                    );
                 }
             }
         }
