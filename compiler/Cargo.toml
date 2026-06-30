@@ -2,21 +2,21 @@
 # BUILDLANG COMPILER
 # "The Language That Evolves"
 # ===============================================================================
-# Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
+# Copyright (c) 2022-2026 Zain Dana Harper. BuildLang Fair-Source License v1.0 (see LICENSE).
 # ===============================================================================
 
 [package]
 name = "buildlang"
-version = "1.0.0"
+version = "1.0.5"
 edition = "2021"
 rust-version = "1.70"
 authors = ["Zain Dana Harper"]
-description = "Effects-oriented compiler with a verified C path, shader output, and experimental backend research"
-license-file = "../LICENSE"
-repository = "https://github.com/HarperZ9/quantalang"
+description = "BuildLang (buildc): an effects-oriented compiler with a verified C path, shader output, experimental backends, and opt-in linear types"
+license-file = "LICENSE"
+repository = "https://github.com/HarperZ9/buildlang"
 homepage = "https://harperz9.github.io/buildlang.html"
-documentation = "https://github.com/HarperZ9/quantalang#readme"
-readme = "../README.md"
+documentation = "https://docs.rs/buildlang"
+readme = "README.md"
 keywords = ["compiler", "language", "effects", "shaders", "systems"]
 categories = ["compilers", "development-tools", "graphics"]
 

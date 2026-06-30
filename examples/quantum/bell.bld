@@ -1,0 +1,82 @@
+// Quantum spike: a 2-qubit Bell-state circuit, simulated in BuildLang.
+//
+// Circuit:  q0 --[H]--*--   q1 -----(X)--   (control q0, target q1)
+// Prepares (|00> + |11>) / sqrt(2): the canonical entangled Bell pair.
+//
+// The state vector holds the 4 real amplitudes for |00>,|01>,|10>,|11>
+// (this circuit stays real). Gates are explicit index transforms. We then
+// (a) print the measurement probabilities (deterministic proof of the Bell
+// correlation) and (b) sample 2000 shots with an LCG RNG to show measured
+// outcomes are ~50/50 over {00,11} and never {01,10} - i.e. entanglement.
+
+fn main() ~ Console + Clock {
+    // amp[i] = amplitude of basis state i (i = 2*q0 + q1, q0 = high bit).
+    let mut amp: Vec<f64> = vec![1.0, 0.0, 0.0, 0.0]; // start in |00>
+    let inv: f64 = 0.70710678118654752440;            // 1/sqrt(2)
+
+    // --- H on q0 (high bit): mixes |0,b> with |1,b> for each low bit b ---
+    let a0 = amp[0];
+    let a1 = amp[1];
+    let a2 = amp[2];
+    let a3 = amp[3];
+    amp[0] = inv * (a0 + a2);
+    amp[1] = inv * (a1 + a3);
+    amp[2] = inv * (a0 - a2);
+    amp[3] = inv * (a1 - a3);
+
+    // --- CNOT (control q0, target q1): swaps |10> and |11> ---
+    let t2 = amp[2];
+    let t3 = amp[3];
+    amp[2] = t3;
+    amp[3] = t2;
+
+    // --- Measurement probabilities (|amp|^2), as integer permille ---
+    let mut prob: Vec<f64> = vec![0.0, 0.0, 0.0, 0.0];
+    let mut i = 0;
+    while i < 4 {
+        let v = amp[i];
+        prob[i] = v * v;
+        i = i + 1;
+    }
+    println("P(00) permille {}", prob[0] * 1000.0);
+    println("P(01) permille {}", prob[1] * 1000.0);
+    println("P(10) permille {}", prob[2] * 1000.0);
+    println("P(11) permille {}", prob[3] * 1000.0);
+
+    // --- Sample 2000 shots from the distribution with an LCG RNG ---
+    let seed = clock_ms();
+    let mut state = seed;
+    let mut c00 = 0;
+    let mut c01 = 0;
+    let mut c10 = 0;
+    let mut c11 = 0;
+    let mut shot = 0;
+    while shot < 2000 {
+        // LCG (Numerical Recipes constants), take a [0,1) double.
+        state = state * 1664525 + 1013904223;
+        let bits = state % 1000000;
+        let r: f64 = bits as f64 / 1000000.0;
+        // Inverse-CDF over the 4 outcomes.
+        let mut acc = prob[0];
+        if r < acc {
+            c00 = c00 + 1;
+        } else {
+            acc = acc + prob[1];
+            if r < acc {
+                c01 = c01 + 1;
+            } else {
+                acc = acc + prob[2];
+                if r < acc {
+                    c10 = c10 + 1;
+                } else {
+                    c11 = c11 + 1;
+                }
+            }
+        }
+        shot = shot + 1;
+    }
+    println("shots 00 {}", c00);
+    println("shots 01 {}", c01);
+    println("shots 10 {}", c10);
+    println("shots 11 {}", c11);
+}

@@ -1,7 +1,7 @@
 // ===============================================================================
 // BUILDLANG TYPE SYSTEM - TYPE CHECKER
 // ===============================================================================
-// Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
+// Copyright (c) 2022-2026 Zain Dana Harper. BuildLang Fair-Source License v1.0 (see LICENSE).
 // ===============================================================================
 
 //! Type checker for items (functions, structs, enums, traits, impls).
@@ -143,6 +143,11 @@ impl<'ctx> TypeChecker<'ctx> {
             self.collect_item(item);
         }
 
+        // Linear containment: a non-`#[linear]` aggregate may not hold a linear
+        // field (it would launder the resource past no-cloning). Runs after all
+        // types are collected so every field type's linearity is known.
+        self.validate_linear_containment(module);
+
         // Register built-in trait stubs AFTER user types so DefIds are consistent
         self.ctx.register_builtin_traits();
 
@@ -225,8 +230,12 @@ impl<'ctx> TypeChecker<'ctx> {
     /// Collect type definitions from an item (first pass).
     fn collect_item(&mut self, item: &ast::Item) {
         match &item.kind {
-            ItemKind::Struct(s) => self.collect_struct(s, item.span),
-            ItemKind::Enum(e) => self.collect_enum(e, item.span),
+            ItemKind::Struct(s) => {
+                self.collect_struct(s, item.span, Self::has_linear_attr(&item.attrs))
+            }
+            ItemKind::Enum(e) => {
+                self.collect_enum(e, item.span, Self::has_linear_attr(&item.attrs))
+            }
             ItemKind::TypeAlias(ta) => self.collect_type_alias(ta, item.span),
             ItemKind::Trait(t) => self.collect_trait(t, item.span),
             ItemKind::Function(f) => self.collect_function(f, item.span),
@@ -329,8 +338,87 @@ impl<'ctx> TypeChecker<'ctx> {
         self.ctx.pop_scope();
     }
 
-    fn collect_struct(&mut self, s: &ast::StructDef, _span: Span) {
+    /// Whether an item's attribute list contains the `#[linear]` marker.
+    fn has_linear_attr(attrs: &[ast::Attribute]) -> bool {
+        attrs.iter().any(|attr| {
+            attr.path
+                .segments
+                .first()
+                .map_or(false, |seg| seg.ident.name.as_ref() == "linear")
+        })
+    }
+
+    /// Enforce the linear containment rule: a non-`#[linear]` struct or enum
+    /// must not have a field whose type is `#[linear]`. Otherwise the linear
+    /// value could be read out of the untracked aggregate repeatedly,
+    /// laundering it past no-cloning.
+    fn validate_linear_containment(&mut self, module: &ast::Module) {
+        for item in &module.items {
+            if Self::has_linear_attr(&item.attrs) {
+                continue; // a linear aggregate is itself move-tracked
+            }
+            match &item.kind {
+                ItemKind::Struct(s) => {
+                    let container = s.name.name.to_string();
+                    self.check_fields_not_linear(&container, &s.fields, item.span);
+                }
+                ItemKind::Enum(e) => {
+                    let container = e.name.name.to_string();
+                    for variant in &e.variants {
+                        self.check_fields_not_linear(&container, &variant.fields, item.span);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Report any field of `fields` whose type resolves to a `#[linear]` type.
+    fn check_fields_not_linear(
+        &mut self,
+        container: &str,
+        fields: &ast::StructFields,
+        span: Span,
+    ) {
+        let raw: Vec<(String, &ast::Type)> = match fields {
+            StructFields::Named(fs) => fs
+                .iter()
+                .map(|f| (f.name.name.to_string(), f.ty.as_ref()))
+                .collect(),
+            StructFields::Tuple(fs) => fs
+                .iter()
+                .enumerate()
+                .map(|(i, f)| (i.to_string(), f.ty.as_ref()))
+                .collect(),
+            StructFields::Unit => Vec::new(),
+        };
+        for (field_name, field_ty_ast) in raw {
+            let ty = self.lower_type(field_ty_ast);
+            if let TyKind::Adt(def_id, _) = &ty.kind {
+                if self.ctx.is_linear_def(*def_id) {
+                    let field_type = self
+                        .ctx
+                        .lookup_type(*def_id)
+                        .map(|d| d.name.to_string())
+                        .unwrap_or_else(|| "?".to_string());
+                    self.errors.push(TypeErrorWithSpan::new(
+                        TypeError::LinearFieldInNonLinearType {
+                            container: container.to_string(),
+                            field: field_name,
+                            field_type,
+                        },
+                        span,
+                    ));
+                }
+            }
+        }
+    }
+
+    fn collect_struct(&mut self, s: &ast::StructDef, _span: Span, is_linear: bool) {
         let def_id = self.ctx.fresh_def_id();
+        if is_linear {
+            self.ctx.mark_linear(def_id);
+        }
 
         let generics = self.collect_generics(&s.generics);
         let num_generics = generics.len();
@@ -387,8 +475,11 @@ impl<'ctx> TypeChecker<'ctx> {
         }
     }
 
-    fn collect_enum(&mut self, e: &ast::EnumDef, _span: Span) {
+    fn collect_enum(&mut self, e: &ast::EnumDef, _span: Span, is_linear: bool) {
         let def_id = self.ctx.fresh_def_id();
+        if is_linear {
+            self.ctx.mark_linear(def_id);
+        }
 
         let generics = self.collect_generics(&e.generics);
 
@@ -691,10 +782,16 @@ impl<'ctx> TypeChecker<'ctx> {
             }
             self.register_generic_param_bounds(&f.generics);
 
-            // Add function parameters
+            // Add function parameters. Capture linear-typed Ident params so we
+            // can hand them to the body inferer for no-cloning tracking (the
+            // inferer is created fresh below and does not see these bindings).
+            let mut param_bindings: Vec<(String, Ty)> = Vec::new();
             for param in &f.sig.params {
                 let ty = self.lower_type(&param.ty);
                 self.bind_pattern(&param.pattern, &ty);
+                if let ast::PatternKind::Ident { name, .. } = &param.pattern.kind {
+                    param_bindings.push((name.name.as_ref().to_string(), ty));
+                }
             }
 
             // Set expected return type FIRST, before creating TypeInfer
@@ -744,6 +841,11 @@ impl<'ctx> TypeChecker<'ctx> {
                 // inside nested control flow (while/if/match) are properly
                 // type-checked against the function signature.
                 infer.set_return_ty(expected_ret.clone());
+                // Hand linear-typed parameters to the inferer so consuming a
+                // linear parameter more than once is rejected (no-cloning).
+                for (name, ty) in &param_bindings {
+                    infer.register_linear_param(name, ty);
+                }
                 // Register all user-defined effects so infer_perform can resolve them
                 for eff in user_effects {
                     infer.register_effect(eff);
@@ -1312,7 +1414,11 @@ impl<'ctx> TypeChecker<'ctx> {
                                                 .lookup_type_by_name(s.name.name.as_ref())
                                                 .is_none()
                                             {
-                                                self.collect_struct(s, item.span);
+                                                self.collect_struct(
+                                                    s,
+                                                    item.span,
+                                                    Self::has_linear_attr(&item.attrs),
+                                                );
                                             }
                                         }
                                         ItemKind::Enum(e) => {
@@ -1321,7 +1427,11 @@ impl<'ctx> TypeChecker<'ctx> {
                                                 .lookup_type_by_name(e.name.name.as_ref())
                                                 .is_none()
                                             {
-                                                self.collect_enum(e, item.span);
+                                                self.collect_enum(
+                                                    e,
+                                                    item.span,
+                                                    Self::has_linear_attr(&item.attrs),
+                                                );
                                             }
                                         }
                                         _ => {}
@@ -1380,13 +1490,13 @@ impl<'ctx> TypeChecker<'ctx> {
                         // so that the DefId is identical to the one used inside
                         // the module scope.
                         if self.ctx.lookup_type_by_name(s.name.name.as_ref()).is_none() {
-                            self.collect_struct(s, item.span);
+                            self.collect_struct(s, item.span, Self::has_linear_attr(&item.attrs));
                         }
                     }
                     ItemKind::Enum(e) => {
                         // Same as structs: reuse existing DefId.
                         if self.ctx.lookup_type_by_name(e.name.name.as_ref()).is_none() {
-                            self.collect_enum(e, item.span);
+                            self.collect_enum(e, item.span, Self::has_linear_attr(&item.attrs));
                         }
                     }
                     ItemKind::Impl(impl_) => {
@@ -1643,6 +1753,400 @@ mod tests {
                 .any(|e| matches!(e.error, TypeError::ArityMismatch { .. })),
             "a non-variadic call with extra args must still raise ArityMismatch: {:?}",
             errors
+        );
+    }
+
+    // =========================================================================
+    // LINEAR TYPES (no-cloning / no-double-spend) -- opt-in via `#[linear]`.
+    //
+    // A value whose nominal type is marked `#[linear]` may be *consumed*
+    // (used by value) at most once. This is the no-cloning rule for qubits,
+    // the no-double-spend rule for on-chain assets, and resource-handle
+    // safety for fin-sec settlement obligations -- one type-system feature
+    // serving all three. Borrows (`&q`) do not consume. Ordinary types are
+    // unaffected (copy-like reuse is preserved).
+    // =========================================================================
+
+    const LINEAR_PRELUDE: &str = "#[linear]\nstruct Qubit { id: i64 }\n\
+         fn consume(q: Qubit) -> i64 { q.id }\n\
+         fn observe(q: &Qubit) -> i64 { 0 }\n";
+
+    fn has_linear_use_after_move(errors: &[TypeErrorWithSpan]) -> bool {
+        errors
+            .iter()
+            .any(|e| matches!(e.error, TypeError::LinearUseAfterMove { .. }))
+    }
+
+    #[test]
+    fn linear_single_use_is_ok() {
+        let errors = check_source(&format!(
+            "{LINEAR_PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+             let a = consume(q); println(\"{{}}\", a); }}"
+        ));
+        assert!(
+            !has_linear_use_after_move(&errors),
+            "using a linear value exactly once must be clean: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_value_used_twice_via_call_errors() {
+        let errors = check_source(&format!(
+            "{LINEAR_PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+             let a = consume(q); let b = consume(q); println(\"{{}}\", a + b); }}"
+        ));
+        assert!(
+            has_linear_use_after_move(&errors),
+            "consuming a linear value twice must be rejected (no-cloning): {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_value_moved_via_let_then_used_errors() {
+        let errors = check_source(&format!(
+            "{LINEAR_PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+             let q2 = q; let a = consume(q); println(\"{{}}\", a); }}"
+        ));
+        assert!(
+            has_linear_use_after_move(&errors),
+            "a linear value moved via `let` then used again must be rejected: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_value_can_be_borrowed_without_consuming() {
+        let errors = check_source(&format!(
+            "{LINEAR_PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+             let a = observe(&q); let b = observe(&q); let c = consume(q); \
+             println(\"{{}}\", a + b + c); }}"
+        ));
+        assert!(
+            !has_linear_use_after_move(&errors),
+            "borrowing a linear value must not consume it: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn ordinary_value_can_still_be_reused() {
+        // Backward-compat guard: a non-`#[linear]` struct keeps copy-like reuse.
+        let errors = check_source(
+            "struct Coin { value: i64 }\n\
+             fn spend(c: Coin) -> i64 { c.value }\n\
+             fn main() ~ Console { let coin = Coin { value: 1 }; \
+             let a = spend(coin); let b = spend(coin); println(\"{}\", a + b); }",
+        );
+        assert!(
+            !has_linear_use_after_move(&errors),
+            "ordinary (non-linear) values must remain freely reusable: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_value_consumed_in_branch_then_used_after_errors() {
+        // Conservative soundness: consumed on *any* path -> poisoned afterward.
+        let errors = check_source(&format!(
+            "{LINEAR_PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+             let cond = true; if cond {{ let a = consume(q); println(\"{{}}\", a); }} \
+             let b = consume(q); println(\"{{}}\", b); }}"
+        ));
+        assert!(
+            has_linear_use_after_move(&errors),
+            "a linear value consumed in a branch then used after must be rejected: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_value_consumed_in_loop_body_errors() {
+        // A loop body may run more than once; consuming an outer linear there
+        // is a potential double-use and must be rejected.
+        let errors = check_source(&format!(
+            "{LINEAR_PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+             let mut i = 0; while i < 2 {{ let a = consume(q); i = i + 1; }} }}"
+        ));
+        assert!(
+            has_linear_use_after_move(&errors),
+            "consuming an outer linear value inside a loop must be rejected: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_param_single_use_is_ok() {
+        let errors = check_source(&format!(
+            "{LINEAR_PRELUDE}fn forward(q: Qubit) -> i64 {{ consume(q) }}\n\
+             fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; println(\"{{}}\", forward(q)); }}"
+        ));
+        assert!(
+            !has_linear_use_after_move(&errors),
+            "using a linear parameter exactly once must be clean: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_param_consumed_twice_errors() {
+        // A linear function *parameter* must be subject to no-cloning too.
+        let errors = check_source(&format!(
+            "{LINEAR_PRELUDE}fn waste(q: Qubit) -> i64 {{ let a = consume(q); \
+             let b = consume(q); a + b }}\n\
+             fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; println(\"{{}}\", waste(q)); }}"
+        ));
+        assert!(
+            has_linear_use_after_move(&errors),
+            "consuming a linear parameter twice must be rejected: {errors:#?}"
+        );
+    }
+
+    fn has_linear_containment(errors: &[TypeErrorWithSpan]) -> bool {
+        errors
+            .iter()
+            .any(|e| matches!(e.error, TypeError::LinearFieldInNonLinearType { .. }))
+    }
+
+    #[test]
+    fn nonlinear_struct_with_linear_field_is_rejected() {
+        // A non-linear type cannot hold a linear field, or the linear value
+        // could be laundered (read out repeatedly) past no-cloning.
+        let errors = check_source(
+            "#[linear]\nstruct Coin { value: i64 }\n\
+             struct Wallet { coin: Coin }\n",
+        );
+        assert!(
+            has_linear_containment(&errors),
+            "a non-linear struct holding a linear field must be rejected: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_struct_with_linear_field_is_allowed() {
+        // Marking the container `#[linear]` makes the whole aggregate tracked.
+        let errors = check_source(
+            "#[linear]\nstruct Coin { value: i64 }\n\
+             #[linear]\nstruct Wallet { coin: Coin }\n",
+        );
+        assert!(
+            !has_linear_containment(&errors),
+            "a linear container may hold a linear field: {errors:#?}"
+        );
+    }
+
+    // -- Soundness: a linear value may not enter a position the move-analysis
+    //    cannot follow (aggregates, generics, closures, deref). These programs
+    //    are the confirmed bypasses from the adversarial soundness pass; each
+    //    must now be REJECTED with some linear error. --
+
+    fn has_any_linear_error(errors: &[TypeErrorWithSpan]) -> bool {
+        errors.iter().any(|e| {
+            matches!(
+                e.error,
+                TypeError::LinearUseAfterMove { .. }
+                    | TypeError::LinearFieldInNonLinearType { .. }
+                    | TypeError::LinearInUnsupportedPosition { .. }
+            )
+        })
+    }
+
+    #[test]
+    fn linear_value_in_tuple_is_rejected() {
+        let errors = check_source(&format!(
+            "{LINEAR_PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+             let t = (q, 0); let a = t.0; let b = t.0; \
+             let x = consume(a); let y = consume(b); println(\"{{}}\", x + y); }}"
+        ));
+        assert!(
+            has_any_linear_error(&errors),
+            "storing a linear value in a tuple must be rejected: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_value_in_array_is_rejected() {
+        let errors = check_source(&format!(
+            "{LINEAR_PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+             let arr = [q]; let a = arr[0]; let b = arr[0]; \
+             let x = consume(a); let y = consume(b); println(\"{{}}\", x + y); }}"
+        ));
+        assert!(
+            has_any_linear_error(&errors),
+            "storing a linear value in an array must be rejected: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_value_in_array_repeat_is_rejected() {
+        let errors = check_source(&format!(
+            "{LINEAR_PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+             let arr = [q; 3]; let a = arr[0]; let b = arr[1]; \
+             let x = consume(a); let y = consume(b); println(\"{{}}\", x + y); }}"
+        ));
+        assert!(
+            has_any_linear_error(&errors),
+            "array-repeat of a linear value (a literal clone) must be rejected: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_value_through_generic_fn_is_rejected() {
+        let errors = check_source(&format!(
+            "{LINEAR_PRELUDE}fn thru<T>(x: T) -> T {{ x }}\n\
+             fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; let c = thru(q); \
+             let a = consume(c); let b = consume(c); println(\"{{}}\", a + b); }}"
+        ));
+        assert!(
+            has_any_linear_error(&errors),
+            "passing a linear value through a generic parameter must be rejected: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_value_moved_out_of_reference_is_rejected() {
+        let errors = check_source(&format!(
+            "{LINEAR_PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+             let r = &q; let a = *r; let b = *r; \
+             let x = consume(a); let y = consume(b); println(\"{{}}\", x + y); }}"
+        ));
+        assert!(
+            has_any_linear_error(&errors),
+            "moving a linear value out of a reference (deref-copy) must be rejected: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_value_in_generic_struct_is_rejected() {
+        let errors = check_source(&format!(
+            "{LINEAR_PRELUDE}struct Holder<T> {{ item: T }}\n\
+             fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+             let h = Holder {{ item: q }}; let a = h.item; let b = h.item; \
+             let x = consume(a); let y = consume(b); println(\"{{}}\", x + y); }}"
+        ));
+        assert!(
+            has_any_linear_error(&errors),
+            "storing a linear value in a generic struct field must be rejected: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_value_in_option_is_rejected() {
+        let errors = check_source(&format!(
+            "{LINEAR_PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+             let opt = Some(q); println(\"made an option\"); }}"
+        ));
+        assert!(
+            has_any_linear_error(&errors),
+            "wrapping a linear value in Option (a generic container) must be rejected: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_consumed_then_revived_by_inner_shadow_errors() {
+        // An inner-block binding that shadows the (already consumed) outer
+        // linear must not revive the outer slot when the block exits.
+        let errors = check_source(&format!(
+            "{LINEAR_PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+             let a = consume(q); \
+             {{ let q = Qubit {{ id: 2 }}; let _ = observe(&q); }} \
+             let b = consume(q); println(\"{{}}\", a + b); }}"
+        ));
+        assert!(
+            has_any_linear_error(&errors),
+            "an inner shadow must not revive a consumed outer linear: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_field_read_through_reference_is_rejected() {
+        // Moving a linear field out from behind a borrow (`w.coin` where
+        // `w: &Wrap`) does not consume `w`, so it could be repeated.
+        let errors = check_source(
+            "#[linear]\nstruct Coin { value: i64 }\n\
+             #[linear]\nstruct Wrap { coin: Coin }\n\
+             fn take(w: &Wrap) -> Coin { w.coin }\n\
+             fn spend(c: Coin) -> i64 { c.value }\n\
+             fn main() ~ Console { let coin = Coin { value: 1 }; \
+             let w = Wrap { coin: coin }; \
+             let a = spend(take(&w)); let b = spend(take(&w)); \
+             println(\"{} {}\", a, b); }",
+        );
+        assert!(
+            has_any_linear_error(&errors),
+            "moving a linear field out through a reference must be rejected: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_shorthand_field_init_consumes() {
+        // `Wallet { coin }` shorthand moves `coin`; using it again is an error.
+        let errors = check_source(
+            "#[linear]\nstruct Coin { value: i64 }\n\
+             #[linear]\nstruct Wallet { coin: Coin }\n\
+             fn spend(c: Coin) -> i64 { c.value }\n\
+             fn main() ~ Console { let coin = Coin { value: 1 }; \
+             let w = Wallet { coin }; let a = spend(coin); println(\"{}\", a); }",
+        );
+        assert!(
+            has_any_linear_error(&errors),
+            "a shorthand field init must consume the moved linear local: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_consumed_in_while_condition_errors() {
+        // A while condition is re-evaluated each iteration; consuming an outer
+        // linear there is a potential repeat-consume.
+        let errors = check_source(
+            "#[linear]\nstruct Coin { value: i64 }\n\
+             fn drain(c: Coin) -> bool { c.value > 0 }\n\
+             fn main() ~ Console { let coin = Coin { value: 1 }; \
+             while drain(coin) { println(\"loop\"); } }",
+        );
+        assert!(
+            has_any_linear_error(&errors),
+            "consuming a linear value in a while condition must be rejected: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_method_call_on_borrowed_receiver_is_rejected() {
+        // `(&coin).burn()` where `burn(self)` would move the linear out of a
+        // borrow; the self-kind isn't visible, so it is conservatively rejected.
+        let errors = check_source(
+            "#[linear]\nstruct Coin { value: i64 }\n\
+             trait Burnable { fn burn(self) -> i64; }\n\
+             impl Burnable for Coin { fn burn(self) -> i64 { self.value } }\n\
+             fn spend(c: Coin) -> i64 { c.value }\n\
+             fn main() ~ Console { let coin = Coin { value: 1 }; \
+             let a = (&coin).burn(); let b = spend(coin); println(\"{} {}\", a, b); }",
+        );
+        assert!(
+            has_any_linear_error(&errors),
+            "a method call on a borrowed linear receiver must be rejected: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_value_in_builtin_collection_is_rejected() {
+        // Moving a linear value into a builtin Vec lets it be read out twice.
+        let errors = check_source(
+            "#[linear]\nstruct Coin { value: i64 }\n\
+             fn spend(c: Coin) -> i64 { c.value }\n\
+             fn main() ~ Console { let coin = Coin { value: 1 }; \
+             let v = vec_new(); vec_push(v, coin); \
+             let a = spend(vec_get(v, 0)); let b = spend(vec_get(v, 0)); \
+             println(\"{} {}\", a, b); }",
+        );
+        assert!(
+            has_any_linear_error(&errors),
+            "storing a linear value in a builtin collection must be rejected: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_value_captured_in_closure_is_rejected() {
+        let errors = check_source(&format!(
+            "{LINEAR_PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+             let f = || consume(q); let a = f(); let b = f(); println(\"{{}}\", a + b); }}"
+        ));
+        assert!(
+            has_any_linear_error(&errors),
+            "capturing+consuming a linear value in a closure must be rejected: {errors:#?}"
         );
     }
 

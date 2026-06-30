@@ -1,7 +1,7 @@
 // ===============================================================================
 // BUILDLANG COMPILER - BDF PLAIN-JSON ADAPTER
 // ===============================================================================
-// Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
+// Copyright (c) 2022-2026 Zain Dana Harper. BuildLang Fair-Source License v1.0 (see LICENSE).
 // ===============================================================================
 
 //! A faithful, order-preserving bridge between *plain* JSON and [`BdfValue`].
