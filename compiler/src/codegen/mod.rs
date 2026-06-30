@@ -1059,6 +1059,32 @@ mod tests {
     }
 
     #[test]
+    fn nested_result_of_option_boxes_a_none_payload() {
+        // `Ok(None)` in a `-> Result<Option<i32>, String>` must box the Option
+        // payload (it is 16 bytes, > the 8-byte slot), the same as `Ok(Some(n))`.
+        // Previously `None` (a non-local const) wasn't detected as an aggregate,
+        // so the construct cast the Option struct to int64_t into ok_i - a C
+        // error, and a mismatch with the boxed read.
+        let code = source_to_c(
+            "fn f(n: i32) -> Result<Option<i32>, String> { \
+               if n < 0 { return Err(String::from(\"neg\")); } \
+               if n == 0 { return Ok(None); } \
+               return Ok(Some(n)); \
+             }\n\
+             fn main() { let _r = f(0); }",
+        );
+        assert!(
+            !code.contains("ok.ok_i = (int64_t)(((Option)"),
+            "Ok(None) must not cast the Option payload into the i32 slot:\n{code}"
+        );
+        // Both Ok arms (Some and None) box the Option payload into ok_p.
+        assert!(
+            code.matches("Option* __ok_box").count() >= 2,
+            "both Ok(Some) and Ok(None) must box the Option payload:\n{code}"
+        );
+    }
+
+    #[test]
     fn vec_of_struct_uses_sized_element_wrappers() {
         // `Vec<P>` where P is a struct must construct/push via element-sized
         // wrappers, not build_hvec_new_i32 / build_hvec_push_i32 (which take an

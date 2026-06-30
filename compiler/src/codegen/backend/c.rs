@@ -3049,12 +3049,7 @@ impl CBackend {
                     if let Some(dest_local) = dest {
                         let dest_name = self.local_name(*dest_local, locals);
                         let arg = self.value_to_c(&args[0], locals);
-                        let arg_ty: Option<MirType> = match &args[0] {
-                            MirValue::Local(id) => {
-                                locals.get(id.0 as usize).map(|l| l.ty.clone())
-                            }
-                            _ => None,
-                        };
+                        let arg_ty = self.sumtype_arg_type(&args[0], locals);
                         let boxed = arg_ty
                             .as_ref()
                             .map(Self::payload_needs_boxing)
@@ -3109,12 +3104,7 @@ impl CBackend {
                     if let Some(dest_local) = dest {
                         let dest_name = self.local_name(*dest_local, locals);
                         let arg = self.value_to_c(&args[0], locals);
-                        let arg_ty: Option<MirType> = match &args[0] {
-                            MirValue::Local(id) => {
-                                locals.get(id.0 as usize).map(|l| l.ty.clone())
-                            }
-                            _ => None,
-                        };
+                        let arg_ty = self.sumtype_arg_type(&args[0], locals);
                         let boxed = arg_ty
                             .as_ref()
                             .map(Self::payload_needs_boxing)
@@ -3180,12 +3170,7 @@ impl CBackend {
                             )
                             .unwrap();
                         } else {
-                            let arg_ty: Option<MirType> = match &args[0] {
-                                MirValue::Local(id) => {
-                                    locals.get(id.0 as usize).map(|l| l.ty.clone())
-                                }
-                                _ => None,
-                            };
+                            let arg_ty = self.sumtype_arg_type(&args[0], locals);
                             let boxed = arg_ty
                                 .as_ref()
                                 .map(Self::payload_needs_boxing)
@@ -4001,6 +3986,21 @@ impl CBackend {
             | MirValue::Const(MirConst::Zeroed(ty))
             | MirValue::Const(MirConst::Undef(ty)) => Some(ty),
             MirValue::Const(MirConst::Str(_)) => None,
+            _ => None,
+        }
+    }
+
+    /// Resolve the MIR type of a value passed to a sum-type constructor
+    /// (`Ok`/`Err`/`Some`), for deciding whether the payload must be boxed.
+    /// Beyond locals, this recognizes the `None` value (a `Global`/`Function`
+    /// literal that is an `Option`), so `Ok(None)` / `Some(None)` box correctly
+    /// instead of casting the Option struct into the scalar slot.
+    fn sumtype_arg_type(&self, value: &MirValue, locals: &[MirLocal]) -> Option<MirType> {
+        match value {
+            MirValue::Local(id) => locals.get(id.0 as usize).map(|l| l.ty.clone()),
+            MirValue::Global(n) | MirValue::Function(n) if n.as_ref() == "None" => {
+                Some(MirType::Struct(Arc::from("Option")))
+            }
             _ => None,
         }
     }
