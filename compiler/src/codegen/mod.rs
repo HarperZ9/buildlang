@@ -1246,6 +1246,25 @@ mod tests {
     }
 
     #[test]
+    fn nested_vec_of_vec_uses_handle_element_wrappers() {
+        // `Vec<Vec<i32>>` push/get must use the BuildVecHandle-sized element
+        // wrappers, not build_hvec_push_i32 (which passed a handle as an int32).
+        let code = source_to_c(
+            "fn main() { \
+               let mut grid: Vec<Vec<i32>> = Vec::new(); \
+               let mut row: Vec<i32> = Vec::new(); \
+               row.push(1); \
+               grid.push(row); \
+               let _r = grid[0]; \
+             }",
+        );
+        assert!(
+            code.contains("build_hvec_push_BuildVecHandle("),
+            "Vec<Vec<_>> push must use the handle-sized element wrapper:\n{code}"
+        );
+    }
+
+    #[test]
     fn vec_contains_dispatches_to_runtime_scan() {
         // `v.contains(x)` must dispatch to the element-typed runtime scan, not an
         // undefined `contains` call.

@@ -2995,6 +2995,10 @@ impl<'ctx> MirLowerer<'ctx> {
                 // keyed by the struct name (matches the C backend's generated
                 // build_hvec_*_<Struct> wrappers).
                 MirType::Struct(n) => n.to_string(),
+                // Nested collection element (Vec<Vec<_>>, Vec<HashMap<_,_>>): the
+                // element is a handle struct; key the sized wrapper by its C type.
+                MirType::Vec(_) => "BuildVecHandle".to_string(),
+                MirType::Map(_, _) => "BuildMapHandle".to_string(),
                 _ => "i32".to_string(),
             };
 
