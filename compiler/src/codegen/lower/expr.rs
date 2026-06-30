@@ -3389,19 +3389,43 @@ impl<'ctx> MirLowerer<'ctx> {
             }
         }
         // Direct `match call() { Ok(x) => ... }`: recover from the callee sig.
-        if let ExprKind::Call { func, .. } = &scrutinee.kind {
-            let name = match &func.kind {
-                ExprKind::Ident(ident) => Some(ident.name.clone()),
-                ExprKind::Path(path) => path.last_ident().map(|i| i.name.clone()),
-                _ => None,
-            };
-            if let Some(name) = name {
-                if let Some(ty) = self.fn_result_ok_types.get(&name) {
-                    return ty.clone();
-                }
+        if let Some(name) = self.scrutinee_callee_name(scrutinee) {
+            if let Some(ty) = self.fn_result_ok_types.get(&name) {
+                return ty.clone();
             }
         }
         MirType::i32()
+    }
+
+    /// Resolve the function/method name a match scrutinee calls, if any. A free
+    /// call yields its (possibly module-qualified) name; a method call resolves
+    /// the receiver's type to the mangled `Type_method` name. Used to look up
+    /// the per-function Result/Option payload-type tables.
+    fn scrutinee_callee_name(&self, scrutinee: &ast::Expr) -> Option<Arc<str>> {
+        match &scrutinee.kind {
+            ExprKind::Call { func, .. } => match &func.kind {
+                ExprKind::Ident(ident) => Some(ident.name.clone()),
+                ExprKind::Path(path) => path.last_ident().map(|i| i.name.clone()),
+                _ => None,
+            },
+            ExprKind::MethodCall {
+                receiver, method, ..
+            } => {
+                let recv_ty = self.infer_expr_type(receiver);
+                let type_name = match &recv_ty {
+                    MirType::Struct(n) => Some(n.clone()),
+                    MirType::Ptr(inner) => match &**inner {
+                        MirType::Struct(n) => Some(n.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                }?;
+                self.impl_methods
+                    .get(&(type_name, method.name.clone()))
+                    .cloned()
+            }
+            _ => None,
+        }
     }
 
     /// Determine the Err payload type of a Result-valued match scrutinee.
@@ -3414,16 +3438,9 @@ impl<'ctx> MirLowerer<'ctx> {
                 return ty.clone();
             }
         }
-        if let ExprKind::Call { func, .. } = &scrutinee.kind {
-            let name = match &func.kind {
-                ExprKind::Ident(ident) => Some(ident.name.clone()),
-                ExprKind::Path(path) => path.last_ident().map(|i| i.name.clone()),
-                _ => None,
-            };
-            if let Some(name) = name {
-                if let Some(ty) = self.fn_result_err_types.get(&name) {
-                    return ty.clone();
-                }
+        if let Some(name) = self.scrutinee_callee_name(scrutinee) {
+            if let Some(ty) = self.fn_result_err_types.get(&name) {
+                return ty.clone();
             }
         }
         MirType::Struct(Arc::from("BuildString"))
@@ -3445,16 +3462,9 @@ impl<'ctx> MirLowerer<'ctx> {
             }
         }
         // Direct `match call() { Some(x) => ... }`: recover from the callee sig.
-        if let ExprKind::Call { func, .. } = &scrutinee.kind {
-            let name = match &func.kind {
-                ExprKind::Ident(ident) => Some(ident.name.clone()),
-                ExprKind::Path(path) => path.last_ident().map(|i| i.name.clone()),
-                _ => None,
-            };
-            if let Some(name) = name {
-                if let Some(ty) = self.fn_option_inner_types.get(&name) {
-                    return Some(ty.clone());
-                }
+        if let Some(name) = self.scrutinee_callee_name(scrutinee) {
+            if let Some(ty) = self.fn_option_inner_types.get(&name) {
+                return Some(ty.clone());
             }
         }
         None
