@@ -84,11 +84,14 @@ indexed assignment, arithmetic, the `~ Clock` effect).
    (consuming an outer linear value inside a loop is rejected). A **containment
    rule** rejects a non-`#[linear]` aggregate holding a linear field, so the
    resource cannot be laundered out of an untracked wrapper. Built on the
-   existing move/borrow analysis; 10 type-checker tests; verified end-to-end via
-   `buildc check`. *Deferred to brick 1b: drop-without-consume ("must use")
-   enforcement and per-path (non-conservative) branch tracking. The analysis is
-   deliberately sound-over-complete: it may reject some safe programs rather than
-   ever permit a clone.*
+   existing move/borrow analysis; verified by three adversarial passes that
+   closed 14 compositional escape classes (each a regression test). **Status:
+   experimental, not yet fully sound** - a third pass still found a few open
+   classes (pattern-match-through-a-borrow, enum-variant shorthand init, generic
+   deref/result, match-guard fall-through, borrow-after-move). Full no-cloning
+   soundness needs an affine/borrow checker on MIR. Honest scope is in
+   `docs/LINEAR-TYPES.md`. *Also deferred to brick 1b: drop-without-consume
+   ("must use") enforcement and per-path branch tracking.*
 2. **`~ Quantum` effect + gate intrinsics** - `qubit() -> Qubit`, `h(Qubit)`,
    `cnot(Qubit, Qubit)`, `measure(Qubit) -> i32`, expressed in MIR/stdlib, with
    measurement carrying the effect.

@@ -30,7 +30,13 @@ tracked in `STATUS.md`, `README.md`, and
   end-to-end via `buildc check`. Deferred to a follow-up: drop-without-consume
   ("must use") enforcement and per-path (non-conservative) branch tracking. The
   analysis is deliberately sound-over-complete - it may reject some safe programs
-  rather than ever permit a clone. See `docs/QUANTUM-HOST.md` (brick 1).
+  rather than ever permit a clone. **Status: experimental, not yet fully sound.**
+  Three adversarial verification passes closed 14 compositional escape classes
+  (each now a regression test) but a third pass still found a few open classes
+  (pattern-match-through-a-borrow, enum-variant shorthand init, generic
+  deref/result, match-guard fall-through, borrow-after-move). Full no-cloning
+  soundness needs an affine/borrow checker on MIR. What is enforced and what is
+  open: `docs/LINEAR-TYPES.md`. See also `docs/QUANTUM-HOST.md` (brick 1).
 
 - Stdlib (`HashMap::keys`): `m.keys()` now returns a `Vec<String>` handle (so
   `for k in m.keys()`, indexing, and `.len()` work), via a runtime
