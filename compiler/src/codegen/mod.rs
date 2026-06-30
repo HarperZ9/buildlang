@@ -181,6 +181,10 @@ pub struct GeneratedCode {
     pub data: Vec<u8>,
     /// Optional debug information.
     pub debug_info: Option<DebugInfo>,
+    /// Libraries this output must be linked against, from extern blocks'
+    /// `link "..."` clauses. The build driver passes these to the C compiler.
+    /// Empty unless the program declares foreign libraries.
+    pub link_libraries: Vec<String>,
 }
 
 impl GeneratedCode {
@@ -190,12 +194,19 @@ impl GeneratedCode {
             format,
             data,
             debug_info: None,
+            link_libraries: Vec::new(),
         }
     }
 
     /// Add debug information.
     pub fn with_debug_info(mut self, debug_info: DebugInfo) -> Self {
         self.debug_info = Some(debug_info);
+        self
+    }
+
+    /// Attach the libraries this output must be linked against.
+    pub fn with_link_libraries(mut self, link_libraries: Vec<String>) -> Self {
+        self.link_libraries = link_libraries;
         self
     }
 
@@ -632,6 +643,30 @@ mod tests {
     }
 
     #[test]
+    fn extern_link_clause_lowers_to_mir_link_lib() {
+        // A `link` clause must survive lowering so the build driver knows which
+        // libraries to pass to the C compiler.
+        let module = crate::parser::parse_source(
+            "test.bld",
+            "extern \"C\" link \"sqlite3\" header \"<sqlite3.h>\" { fn sqlite3_libversion() -> i32; }",
+        )
+        .expect("source should parse");
+
+        let ctx = TypeContext::new();
+        let mut codegen = CodeGenerator::new(&ctx, Target::C);
+        codegen.generate(&module).expect("codegen should succeed");
+
+        let mir = codegen.mir().expect("mir should be present");
+        let decl = mir
+            .functions
+            .iter()
+            .find(|f| &*f.name == "sqlite3_libversion")
+            .expect("foreign declaration should be lowered");
+        assert_eq!(decl.link_lib.as_deref(), Some("sqlite3"));
+        assert_eq!(decl.link_header.as_deref(), Some("<sqlite3.h>"));
+    }
+
+    #[test]
     fn extern_without_header_has_no_link_header() {
         let module = crate::parser::parse_source(
             "test.bld",
@@ -708,6 +743,50 @@ mod tests {
         let i_sqlite = code.find("#include <sqlite3.h>").unwrap();
         let i_zlib = code.find("#include <zlib.h>").unwrap();
         assert!(i_sqlite < i_zlib, "FFI headers should be emitted in sorted order:\n{code}");
+    }
+
+    #[test]
+    fn generated_code_carries_link_libraries_from_link_clause() {
+        let module = crate::parser::parse_source(
+            "test.bld",
+            "extern \"C\" link \"sqlite3\" header \"<sqlite3.h>\" { fn s() -> i32; }\n\
+             extern \"C\" link \"z\" { fn zf() -> i32; }",
+        )
+        .expect("source should parse");
+        let ctx = TypeContext::new();
+        let mut codegen = CodeGenerator::new(&ctx, Target::C);
+        let out = codegen.generate(&module).expect("codegen should succeed");
+        // Distinct libraries, sorted and de-duplicated, for reproducible builds.
+        assert_eq!(
+            out.link_libraries,
+            vec!["sqlite3".to_string(), "z".to_string()]
+        );
+    }
+
+    #[test]
+    fn generated_code_has_no_link_libraries_without_link_clause() {
+        let module = crate::parser::parse_source(
+            "test.bld",
+            "extern \"C\" header \"<sqlite3.h>\" { fn s() -> i32; }",
+        )
+        .expect("source should parse");
+        let ctx = TypeContext::new();
+        let mut codegen = CodeGenerator::new(&ctx, Target::C);
+        let out = codegen.generate(&module).expect("codegen should succeed");
+        assert!(out.link_libraries.is_empty());
+    }
+
+    #[test]
+    fn c_backend_notes_required_link_libraries_in_source() {
+        // The link requirement is consumed at compile time, so surface it as a
+        // greppable note in the emitted C for anyone inspecting `--emit c`.
+        let code = source_to_c(
+            "extern \"C\" link \"sqlite3\" header \"<sqlite3.h>\" { fn s() -> i32; }",
+        );
+        assert!(
+            code.contains("buildc-link: sqlite3"),
+            "generated C should note the required link library:\n{code}"
+        );
     }
 
     #[test]

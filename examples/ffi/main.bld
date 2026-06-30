@@ -1,22 +1,24 @@
-// Native FFI: header-backed extern block
-// =======================================
+// Native FFI: header-backed extern block with automatic linking
+// =============================================================
 //
 // A `header "..."` clause names the C header that backs an extern block's
-// declarations. When BuildLang compiles to C, the backend emits the matching
-// `#include` and trusts that header for the function's prototype, types, and
-// macros instead of synthesizing its own declaration. This is how BuildLang
-// integrates a third-party C-ABI library natively and at an embedded level.
+// declarations; a `link "..."` clause names the library to link against.
+// The two clauses may appear in either order after the ABI.
 //
-// The angle-bracket form `"<sqlite3.h>"` selects a system/library include
-// (`#include <sqlite3.h>`). A plain form like `"mylib.h"` would instead select
-// a local include (`#include "mylib.h"`).
+// When BuildLang compiles to C, the backend:
+//   - emits `#include <sqlite3.h>` and trusts that header for the prototype
+//     (it never synthesizes its own, possibly-conflicting, declaration), and
+//   - records `sqlite3` as a required link library.
+// `buildc build` then passes the library to the C compiler automatically
+// (`-lsqlite3` for gcc/clang/cc, `sqlite3.lib` for MSVC), so a program that
+// calls into a third-party C library builds and links in one command.
 //
-// Build the C source with:
+// Inspect the generated C and link requirement with:
 //     buildc build examples/ffi --emit c
-// Then compile and link it against the real library with your C toolchain:
-//     cc <generated>.c -lsqlite3 -o sqlite_version
+// Build and link the executable in one step (needs sqlite3 installed):
+//     buildc build examples/ffi
 
-extern "C" header "<sqlite3.h>" {
+extern "C" link "sqlite3" header "<sqlite3.h>" {
     // SQLite's real prototype is `const char *sqlite3_libversion(void);`.
     // We never re-declare it: the included header is authoritative.
     fn sqlite3_libversion() -> &str;

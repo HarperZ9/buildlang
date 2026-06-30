@@ -469,6 +469,12 @@ pub struct ExternBlockDef {
     /// verbatim: a value wrapped in `<...>` selects an angle-bracket include
     /// (system/library headers), anything else selects a quoted include.
     pub header: Option<String>,
+    /// Library to link named by an optional `link "..."` clause.
+    ///
+    /// When present, `buildc build` adds the library to the C compiler
+    /// invocation (`-lname` for gcc/clang/cc, `name.lib` for MSVC), so a
+    /// program that calls into the library links in one command.
+    pub link: Option<String>,
     /// Items.
     pub items: Vec<ForeignItem>,
 }

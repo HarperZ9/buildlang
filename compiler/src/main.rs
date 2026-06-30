@@ -4815,6 +4815,7 @@ fn invoke_c_compiler(
     c_file: &std::path::Path,
     exe_file: &std::path::Path,
     release: bool,
+    user_libs: &[String],
 ) -> Result<(), i32> {
     let is_msvc =
         compiler.starts_with("cl") || compiler.ends_with("cl.exe") || compiler.ends_with("cl");
@@ -4837,6 +4838,9 @@ fn invoke_c_compiler(
             let bat_path = c_file.with_extension("bat");
             let exe_path = exe_file.to_string_lossy().replace('/', "\\");
             // Write bat file with MSVC env setup and compilation
+            let mut all_libs: Vec<String> =
+                host_c_link_libraries(true).iter().map(|s| s.to_string()).collect();
+            all_libs.extend(user_link_flags(user_libs, true));
             let bat_content = format!(
                 "set \"INCLUDE={}\"\r\nset \"LIB={}\"\r\nset \"PATH={};%PATH%\"\r\ncl.exe /nologo /W0 /std:c11 {} \"{}\" /Fe\"{}\" {} 1>&2\r\n",
                 inc,
@@ -4845,7 +4849,7 @@ fn invoke_c_compiler(
                 opt_flag,
                 c_path,
                 exe_path,
-                host_c_link_libraries(true).join(" ")
+                all_libs.join(" ")
             );
             std::fs::write(&bat_path, &bat_content).map_err(|e| {
                 eprintln!("Failed to write build script: {}", e);
@@ -4870,6 +4874,7 @@ fn invoke_c_compiler(
             cmd.arg("/nologo");
             cmd.arg("/W0");
             cmd.args(host_c_link_libraries(true));
+            cmd.args(user_link_flags(user_libs, true));
         }
     } else {
         // GCC / Clang / cc - POSIX-style flags
@@ -4883,6 +4888,7 @@ fn invoke_c_compiler(
             cmd.arg("-g");
         }
         cmd.args(host_c_link_libraries(false));
+        cmd.args(user_link_flags(user_libs, false));
     }
 
     let output = cmd.output().map_err(|e| {
@@ -4926,6 +4932,21 @@ fn c_link_libraries(target_os: &str, is_msvc: bool) -> &'static [&'static str] {
         (_, false) => &["-lm"],
         _ => &[],
     }
+}
+
+/// Format user-declared FFI libraries (from extern blocks' `link "..."`
+/// clauses) as C compiler arguments. MSVC takes `name.lib`; gcc/clang/cc take
+/// `-lname`. The actual library resolution is handled by the C toolchain.
+fn user_link_flags(libs: &[String], is_msvc: bool) -> Vec<String> {
+    libs.iter()
+        .map(|lib| {
+            if is_msvc {
+                format!("{lib}.lib")
+            } else {
+                format!("-l{lib}")
+            }
+        })
+        .collect()
 }
 
 // =============================================================================
@@ -5345,7 +5366,13 @@ fn cmd_build(
         total_steps, compiler
     );
 
-    invoke_c_compiler(&compiler, &c_output_file, &exe_output_file, release)?;
+    invoke_c_compiler(
+        &compiler,
+        &c_output_file,
+        &exe_output_file,
+        release,
+        &output.link_libraries,
+    )?;
 
     println!("     Compilation... OK");
 
@@ -5497,7 +5524,7 @@ fn cmd_run(file: &PathBuf, args: &[String]) -> Result<(), i32> {
         1
     })?;
 
-    invoke_c_compiler(&compiler, &c_file, &exe_file, false)?;
+    invoke_c_compiler(&compiler, &c_file, &exe_file, false, &output.link_libraries)?;
 
     // Verify the executable was created
     if !exe_file.exists() {
@@ -5654,7 +5681,7 @@ fn cmd_test(
             std::fs::write(&c_file, &output.data).map_err(|e| format!("write: {}", e))?;
 
             let compiler = find_c_compiler().ok_or_else(|| "no C compiler".to_string())?;
-            invoke_c_compiler(&compiler, &c_file, &exe_file, false)
+            invoke_c_compiler(&compiler, &c_file, &exe_file, false, &output.link_libraries)
                 .map_err(|_| "cc".to_string())?;
 
             // MSVC bat outputs temp.exe in the c_file directory
@@ -7137,6 +7164,22 @@ mod tests {
         assert_eq!(c_link_libraries("windows", true), &["ws2_32.lib"]);
         assert_eq!(c_link_libraries("linux", false), &["-lm"]);
         assert_eq!(c_link_libraries("macos", true), &[] as &[&str]);
+    }
+
+    #[test]
+    fn user_link_flags_format_per_toolchain() {
+        // gcc / clang / cc style.
+        assert_eq!(
+            user_link_flags(&["sqlite3".to_string(), "z".to_string()], false),
+            vec!["-lsqlite3".to_string(), "-lz".to_string()]
+        );
+        // MSVC style.
+        assert_eq!(
+            user_link_flags(&["sqlite3".to_string()], true),
+            vec!["sqlite3.lib".to_string()]
+        );
+        // No libraries declared -> no extra flags.
+        assert!(user_link_flags(&[], false).is_empty());
     }
 
     #[test]

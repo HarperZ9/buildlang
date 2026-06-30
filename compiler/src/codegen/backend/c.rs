@@ -144,6 +144,24 @@ impl CBackend {
             self.output.push('\n');
         }
 
+        // Libraries named by `link "..."` clauses. Linking happens at compile
+        // time, so record the requirement as a greppable note for anyone
+        // inspecting the emitted C (e.g. via `buildc build --emit c`). The
+        // build driver passes these to the C compiler automatically.
+        let mut link_libs: Vec<&str> = module
+            .functions
+            .iter()
+            .filter_map(|f| f.link_lib.as_deref())
+            .collect();
+        link_libs.sort_unstable();
+        link_libs.dedup();
+        if !link_libs.is_empty() {
+            for lib in link_libs {
+                self.output.push_str(&format!("// buildc-link: {lib}\n"));
+            }
+            self.output.push('\n');
+        }
+
         // Undefine known Windows API macros that collide with common type names
         self.output.push_str("#ifdef _WIN32\n");
         self.output.push_str("#undef DeviceCapabilities\n");
@@ -3091,10 +3109,18 @@ impl Backend for CBackend {
 
         self.generate_module(mir)?;
 
-        Ok(GeneratedCode::new(
-            OutputFormat::CSource,
-            self.output.as_bytes().to_vec(),
-        ))
+        // Collect the libraries named by `link "..."` clauses, sorted and
+        // de-duplicated, so the build driver can pass them to the C compiler.
+        let mut link_libraries: Vec<String> = mir
+            .functions
+            .iter()
+            .filter_map(|f| f.link_lib.as_deref().map(str::to_string))
+            .collect();
+        link_libraries.sort_unstable();
+        link_libraries.dedup();
+
+        Ok(GeneratedCode::new(OutputFormat::CSource, self.output.as_bytes().to_vec())
+            .with_link_libraries(link_libraries))
     }
 
     fn target(&self) -> Target {
