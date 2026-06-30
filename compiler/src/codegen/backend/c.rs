@@ -50,6 +50,10 @@ pub struct CBackend {
     /// gap), so freeing would risk a dangling alias. Conservative: leak, never
     /// corrupt. See docs/MEMORY-PILLAR-DESIGN.md.
     module_mut_global_alias_risk: bool,
+    /// Owned heap locals to free at the START of a block (block-scoped drops),
+    /// keyed by the block's `bb<id>`. Bounds loop memory; disjoint from
+    /// `current_fn_freeable`. Empty unless the experimental path is enabled.
+    current_fn_block_frees: std::collections::HashMap<u32, Vec<LocalId>>,
 }
 
 impl CBackend {
@@ -66,6 +70,7 @@ impl CBackend {
             local_string_literals: std::collections::HashMap::new(),
             current_fn_freeable: Vec::new(),
             module_mut_global_alias_risk: false,
+            current_fn_block_frees: std::collections::HashMap::new(),
         }
     }
 
@@ -347,6 +352,331 @@ impl CBackend {
         // Deterministic order for reproducible codegen (receipts).
         out.sort_by_key(|id| id.0);
         out
+    }
+
+    /// Owned heap `BuildString` candidates passing every soundness gate EXCEPT
+    /// the drop-PLACEMENT gate (definite-init for function-exit, isolated-edge for
+    /// block-scoped). Returns `(local, defining-block-index)`. Recomputes the
+    /// ownership/move/taint/one-def/escape gates independently of
+    /// `freeable_owned_string_locals` (which stays byte-identical and verified) so
+    /// the block-scoped pass adds zero risk to the function-exit path. Empty if the
+    /// module-wide mutable-global guard is active.
+    fn sound_owned_candidates(&self, func: &MirFunction) -> Vec<(LocalId, usize)> {
+        if self.module_mut_global_alias_risk {
+            return Vec::new();
+        }
+        let blocks = match &func.blocks {
+            Some(b) if !b.is_empty() => b,
+            _ => return Vec::new(),
+        };
+        let is_owned_buildstring = |id: LocalId| -> bool {
+            func.locals.iter().any(|l| {
+                l.id == id
+                    && !l.is_param
+                    && matches!(l.ty, MirType::Struct(ref n) if n.as_ref() == "BuildString")
+            })
+        };
+        let mut owner_def: std::collections::HashMap<LocalId, usize> =
+            std::collections::HashMap::new();
+        for (bi, block) in blocks.iter().enumerate() {
+            if let Some(MirTerminator::Call {
+                func: callee,
+                dest: Some(d),
+                ..
+            }) = &block.terminator
+            {
+                if is_owned_buildstring(*d)
+                    && Self::callee_name(callee)
+                        .map(Self::allocates_owned_string)
+                        .unwrap_or(false)
+                {
+                    owner_def.entry(*d).or_insert(bi);
+                }
+            }
+        }
+        let mut moved_from: std::collections::HashSet<LocalId> = std::collections::HashSet::new();
+        loop {
+            let mut changed = false;
+            for (bi, block) in blocks.iter().enumerate() {
+                for stmt in &block.stmts {
+                    if let MirStmtKind::Assign {
+                        dest,
+                        value: MirRValue::Use(MirValue::Local(src)),
+                    } = &stmt.kind
+                    {
+                        if owner_def.contains_key(src) {
+                            if moved_from.insert(*src) {
+                                changed = true;
+                            }
+                            if is_owned_buildstring(*dest) && !owner_def.contains_key(dest) {
+                                owner_def.insert(*dest, bi);
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let mut acquirers: std::collections::HashMap<LocalId, Vec<LocalId>> =
+            std::collections::HashMap::new();
+        for block in blocks {
+            for stmt in &block.stmts {
+                if let MirStmtKind::Assign {
+                    dest,
+                    value: MirRValue::Use(MirValue::Local(src)),
+                } = &stmt.kind
+                {
+                    if owner_def.contains_key(src) && owner_def.contains_key(dest) {
+                        acquirers.entry(*src).or_default().push(*dest);
+                    }
+                }
+            }
+        }
+        let mut tainted: std::collections::HashSet<LocalId> = std::collections::HashSet::new();
+        let mut worklist: Vec<LocalId> = Vec::new();
+        for dests in acquirers.values() {
+            if dests.len() > 1 {
+                for d in dests {
+                    if tainted.insert(*d) {
+                        worklist.push(*d);
+                    }
+                }
+            }
+        }
+        while let Some(n) = worklist.pop() {
+            if let Some(dests) = acquirers.get(&n) {
+                for d in dests {
+                    if tainted.insert(*d) {
+                        worklist.push(*d);
+                    }
+                }
+            }
+        }
+        let def_count = |id: LocalId| -> usize {
+            let mut n = 0usize;
+            for block in blocks {
+                for stmt in &block.stmts {
+                    if matches!(&stmt.kind, MirStmtKind::Assign { dest, .. } if *dest == id) {
+                        n += 1;
+                    }
+                }
+                if matches!(&block.terminator, Some(MirTerminator::Call { dest: Some(d), .. }) if *d == id)
+                {
+                    n += 1;
+                }
+            }
+            n
+        };
+        let mut out = Vec::new();
+        for (&id, &def_bi) in &owner_def {
+            if moved_from.contains(&id) || tainted.contains(&id) {
+                continue;
+            }
+            if def_count(id) != 1 {
+                continue;
+            }
+            if Self::owned_string_escapes(id, blocks) {
+                continue;
+            }
+            out.push((id, def_bi));
+        }
+        out.sort_by_key(|(id, _)| id.0);
+        out
+    }
+
+    /// The move-source chain of `id`: every local whose buffer `id` ultimately
+    /// acquired through a chain of `dest = Use(src)` moves (`id`'s immediate
+    /// source, its source, ...). These locals alias `id`'s heap buffer, so a
+    /// `.ptr` borrow taken off ANY of them must also be confined to `id`'s block
+    /// before `id` is block-scoped freed. Closes the move-source borrow gap the
+    /// adversarial audit flagged (latent: not currently source-reachable).
+    fn move_source_chain(id: LocalId, blocks: &[MirBlock]) -> Vec<LocalId> {
+        let mut chain = Vec::new();
+        let mut cur = id;
+        loop {
+            let mut next = None;
+            for block in blocks {
+                for stmt in &block.stmts {
+                    if let MirStmtKind::Assign {
+                        dest,
+                        value: MirRValue::Use(MirValue::Local(src)),
+                    } = &stmt.kind
+                    {
+                        if *dest == cur {
+                            next = Some(*src);
+                        }
+                    }
+                }
+            }
+            match next {
+                Some(s) if !chain.contains(&s) && s != id => {
+                    chain.push(s);
+                    cur = s;
+                }
+                _ => break,
+            }
+        }
+        chain
+    }
+
+    /// Owned heap locals to free at the START of a block (block-scoped drops),
+    /// keyed by the C `bb<id>` block id where the free is emitted. This reclaims
+    /// loop-body allocations the function-exit pass cannot (their def does not
+    /// dominate the return), bounding loop peak memory.
+    ///
+    /// ADDITIVE and DISJOINT from `fn_exit` (the function-exit free set), so no
+    /// buffer is freed twice. The placement is the subtle part (see
+    /// docs/MEMORY-PILLAR-DESIGN.md, third increment): a `.ptr` borrow of the owner
+    /// is typically consumed by the defining block's TERMINATOR (e.g. `printf`), so
+    /// freeing at end-of-statements would be a use-after-free. Instead free at the
+    /// START of the defining block's successor `S`, only on an ISOLATED edge
+    /// (`B` has one successor `S`, `S` has one predecessor `B`), with `L`, its move
+    /// sources, and all their `.ptr` borrow temps confined to `B`.
+    fn block_scoped_freeable(
+        &self,
+        func: &MirFunction,
+        fn_exit: &[LocalId],
+    ) -> std::collections::HashMap<u32, Vec<LocalId>> {
+        let mut map: std::collections::HashMap<u32, Vec<LocalId>> =
+            std::collections::HashMap::new();
+        let blocks = match &func.blocks {
+            Some(b) if !b.is_empty() => b,
+            _ => return map,
+        };
+        let fn_exit_set: std::collections::HashSet<LocalId> = fn_exit.iter().copied().collect();
+        let id_to_index = Self::block_id_index(blocks);
+        // The entry block runs once at function start BEFORE any predecessor, so a
+        // free placed at its start would free a not-yet-allocated local. Never
+        // target it, even if a back-edge gives it a single CFG predecessor.
+        let entry = id_to_index.get(&0).copied().unwrap_or(0);
+        let mut pred_count = vec![0usize; blocks.len()];
+        for b in blocks {
+            for s in Self::terminator_successors(&b.terminator, &id_to_index) {
+                if s < pred_count.len() {
+                    pred_count[s] += 1;
+                }
+            }
+        }
+        for (id, def_bi) in self.sound_owned_candidates(func) {
+            if fn_exit_set.contains(&id) {
+                continue;
+            }
+            // `id`, its move sources, and all their `.ptr` borrow temps must be
+            // confined to `def_bi`.
+            if !Self::live_range_confined_to_block(id, def_bi, blocks) {
+                continue;
+            }
+            // Isolated edge `def_bi -> S`: free at the start of `S`, after the
+            // defining block's terminator has consumed any borrow.
+            let succs = Self::terminator_successors(&blocks[def_bi].terminator, &id_to_index);
+            if succs.len() != 1 {
+                continue;
+            }
+            let s = succs[0];
+            if s == def_bi || s == entry || pred_count[s] != 1 {
+                continue;
+            }
+            map.entry(blocks[s].id.0).or_default().push(id);
+        }
+        for v in map.values_mut() {
+            v.sort_by_key(|id| id.0);
+        }
+        map
+    }
+
+    /// True if `id`, every local in its move-source chain, and every `.ptr`/field
+    /// borrow temp derived from any of them are USED only within block index `b`.
+    /// (`sound_owned_candidates` already guarantees a `.ptr` temp flows only to
+    /// non-retaining borrow calls and is never copied, so confining those uses to
+    /// `b` confines the whole buffer live range to `b`: it is dead in every
+    /// successor.)
+    fn live_range_confined_to_block(id: LocalId, b: usize, blocks: &[MirBlock]) -> bool {
+        // The locals that alias `id`'s buffer: `id` plus its move sources.
+        let mut aliases = vec![id];
+        aliases.extend(Self::move_source_chain(id, blocks));
+        // Collect borrow temps `T = <alias>.<field>`; any created outside `b`
+        // already breaks confinement.
+        let mut borrows: Vec<LocalId> = Vec::new();
+        for (bi, block) in blocks.iter().enumerate() {
+            for stmt in &block.stmts {
+                if let MirStmtKind::Assign {
+                    dest,
+                    value:
+                        MirRValue::FieldAccess {
+                            base: MirValue::Local(base),
+                            ..
+                        },
+                } = &stmt.kind
+                {
+                    if aliases.contains(base) {
+                        if bi != b {
+                            return false;
+                        }
+                        borrows.push(*dest);
+                    }
+                }
+            }
+        }
+        let confined = |x: LocalId| -> bool {
+            for (bi, block) in blocks.iter().enumerate() {
+                if bi == b {
+                    continue;
+                }
+                let used = block
+                    .stmts
+                    .iter()
+                    .any(|s| Self::stmt_uses_local(&s.kind, x))
+                    || Self::terminator_uses_local(&block.terminator, x);
+                if used {
+                    return false;
+                }
+            }
+            true
+        };
+        // `id` itself must be confined; the move sources are moved-from (dead after
+        // their move) so we only need their BORROWS confined, which is enforced
+        // above. The borrow temps must not leak out of `b`.
+        confined(id) && borrows.iter().all(|t| confined(*t))
+    }
+
+    /// True if statement `kind` USES `x` (reads it). The `Assign` dest is a
+    /// definition, not a use, so it is excluded.
+    fn stmt_uses_local(kind: &MirStmtKind, x: LocalId) -> bool {
+        match kind {
+            MirStmtKind::Assign { value, .. } => Self::rvalue_mentions(value, x),
+            MirStmtKind::DerefAssign { ptr, value } => *ptr == x || Self::rvalue_mentions(value, x),
+            MirStmtKind::FieldDerefAssign { ptr, value, .. } => {
+                *ptr == x || Self::rvalue_mentions(value, x)
+            }
+            MirStmtKind::FieldAssign { base, value, .. } => {
+                *base == x || Self::rvalue_mentions(value, x)
+            }
+            MirStmtKind::StorageLive(_) | MirStmtKind::StorageDead(_) | MirStmtKind::Nop => false,
+        }
+    }
+
+    /// True if a terminator USES `x` (any appearance as a value or place). A
+    /// `Call` dest is a definition and is not represented here.
+    fn terminator_uses_local(term: &Option<MirTerminator>, x: LocalId) -> bool {
+        let is = |v: &MirValue| matches!(v, MirValue::Local(l) if *l == x);
+        match term {
+            Some(MirTerminator::If { cond, .. }) => is(cond),
+            Some(MirTerminator::Switch { value, .. }) => is(value),
+            Some(MirTerminator::Call { func, args, .. }) => is(func) || args.iter().any(is),
+            Some(MirTerminator::Return(Some(v))) => is(v),
+            Some(MirTerminator::Assert { cond, .. }) => is(cond),
+            Some(MirTerminator::Drop { place, .. }) => {
+                place.local == x
+                    || place
+                        .projections
+                        .iter()
+                        .any(|p| matches!(p, PlaceProjection::Index(l) if *l == x))
+            }
+            _ => false,
+        }
     }
 
     /// Blocks reachable from the entry (`BlockId(0)` if present, else index 0).
@@ -1657,6 +1987,11 @@ impl CBackend {
         } else {
             Vec::new()
         };
+        self.current_fn_block_frees = if Self::experimental_free_enabled() {
+            self.block_scoped_freeable(func, &self.current_fn_freeable)
+        } else {
+            std::collections::HashMap::new()
+        };
         self.generate_function_signature(func)?;
         self.output.push_str(" {\n");
         self.indent += 1;
@@ -1745,6 +2080,18 @@ impl CBackend {
                         .map(|l| l.to_string())
                         .unwrap_or_else(|| format!("bb{}", block.id.0));
                     write!(self.output, "{}:\n", label).unwrap();
+                }
+
+                // Block-scoped drops: free owned heap locals at the START of this
+                // block, after the predecessor's terminator has consumed any
+                // borrow. Disjoint from the function-exit set; empty unless the
+                // experimental path is enabled.
+                if let Some(frees) = self.current_fn_block_frees.get(&block.id.0).cloned() {
+                    for id in frees {
+                        let name = self.local_name(id, &func.locals);
+                        self.write_indent();
+                        writeln!(self.output, "build_string_free({});", name).unwrap();
+                    }
                 }
 
                 // Generate statements
@@ -4490,6 +4837,117 @@ mod tests {
         assert!(
             backend.freeable_owned_string_locals(&func).is_empty(),
             "an escaping borrowed .ptr temp must block freeing its owner"
+        );
+    }
+
+    fn i64_local(id: u32, name: &str) -> MirLocal {
+        MirLocal {
+            id: LocalId(id),
+            name: Some(Arc::from(name)),
+            ty: MirType::i64(),
+            is_mut: false,
+            is_param: false,
+            annotations: Vec::new(),
+        }
+    }
+
+    // bb0 `if c -> bb1/bb4`; bb1 `concat -> _1 -> bb2`; bb2 `s=_1; p=s.ptr; <term>`;
+    // bb3; bb4 `goto bb5`; bb5 `return`. `s` (local 2) is never function-exit
+    // freeable (bb2 does not dominate the return: bb5 is also reachable via bb4).
+    fn confined_owner_func(borrow_escapes: bool) -> MirFunction {
+        let mut func = MirFunction::new("f", MirFnSig::new(vec![], MirType::Void));
+        func.locals.push(MirLocal {
+            id: LocalId(0),
+            name: Some(Arc::from("c")),
+            ty: MirType::Bool,
+            is_mut: false,
+            is_param: true,
+            annotations: Vec::new(),
+        });
+        func.locals.push(bs(1, "_t"));
+        func.locals.push(bs(2, "s"));
+        func.locals.push(i64_local(3, "p"));
+        let mut b0 = MirBlock::new(BlockId(0));
+        b0.terminator = Some(MirTerminator::If {
+            cond: MirValue::Local(LocalId(0)),
+            then_block: BlockId(1),
+            else_block: BlockId(4),
+        });
+        let mut b1 = MirBlock::new(BlockId(1));
+        b1.terminator = Some(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("build_string_concat")),
+            args: vec![],
+            dest: Some(LocalId(1)),
+            target: Some(BlockId(2)),
+            unwind: None,
+        });
+        let mut b2 = MirBlock::new(BlockId(2));
+        b2.stmts.push(MirStmt::assign(
+            LocalId(2),
+            MirRValue::Use(MirValue::Local(LocalId(1))),
+        ));
+        b2.stmts.push(MirStmt::assign(
+            LocalId(3),
+            MirRValue::FieldAccess {
+                base: MirValue::Local(LocalId(2)),
+                field_name: Arc::from("ptr"),
+                field_ty: MirType::i64(),
+            },
+        ));
+        let mut b3 = MirBlock::new(BlockId(3));
+        if borrow_escapes {
+            b2.terminator = Some(MirTerminator::Goto(BlockId(3)));
+            b3.terminator = Some(MirTerminator::Call {
+                func: MirValue::Function(Arc::from("printf")),
+                args: vec![MirValue::Local(LocalId(3))],
+                dest: None,
+                target: Some(BlockId(5)),
+                unwind: None,
+            });
+        } else {
+            b2.terminator = Some(MirTerminator::Call {
+                func: MirValue::Function(Arc::from("printf")),
+                args: vec![MirValue::Local(LocalId(3))],
+                dest: None,
+                target: Some(BlockId(3)),
+                unwind: None,
+            });
+            b3.terminator = Some(MirTerminator::Goto(BlockId(5)));
+        }
+        let mut b4 = MirBlock::new(BlockId(4));
+        b4.terminator = Some(MirTerminator::Goto(BlockId(5)));
+        let mut b5 = MirBlock::new(BlockId(5));
+        b5.terminator = Some(MirTerminator::Return(None));
+        func.blocks = Some(vec![b0, b1, b2, b3, b4, b5]);
+        func
+    }
+
+    #[test]
+    fn block_scoped_frees_confined_owner_at_successor_start() {
+        let backend = CBackend::new();
+        let func = confined_owner_func(false);
+        let fn_exit = backend.freeable_owned_string_locals(&func);
+        assert!(
+            !fn_exit.contains(&LocalId(2)),
+            "s must not be function-exit freeable: its block does not dominate the return"
+        );
+        let map = backend.block_scoped_freeable(&func, &fn_exit);
+        assert_eq!(
+            map.get(&3).map(|v| v.as_slice()),
+            Some(&[LocalId(2)][..]),
+            "confined owner `s` must be freed at the start of bb3: {map:?}"
+        );
+    }
+
+    #[test]
+    fn block_scoped_skips_owner_whose_borrow_escapes_its_block() {
+        let backend = CBackend::new();
+        let func = confined_owner_func(true);
+        let fn_exit = backend.freeable_owned_string_locals(&func);
+        let map = backend.block_scoped_freeable(&func, &fn_exit);
+        assert!(
+            map.values().all(|v| !v.contains(&LocalId(2))),
+            "an owner whose .ptr borrow outlives its block must not be block-scoped freed: {map:?}"
         );
     }
 
