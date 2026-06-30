@@ -231,7 +231,7 @@ The key insight is that the frontend (lexer, parser, type checker) is shared. On
 ## Try It
 
 ```bash
-git clone https://github.com/HarperZ9/buildlang.git
+git clone https://github.com/HarperZ9/quantalang.git
 cd buildlang
 cargo build --release
 
