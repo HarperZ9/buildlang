@@ -3434,6 +3434,22 @@ impl<'ctx> MirLowerer<'ctx> {
         self.lower_if_unconditional(then_branch, else_branch)
     }
 
+    /// Whether a MIR type is an aggregate (struct/enum/Option/Vec/Map/tuple/
+    /// array/slice), as opposed to a primitive (int/bool/void) that an
+    /// unresolved branch value such as `None` may default to.
+    fn is_aggregate_mir_ty(ty: &MirType) -> bool {
+        matches!(
+            ty,
+            MirType::Struct(_)
+                | MirType::Vec(_)
+                | MirType::Map(_, _)
+                | MirType::Tuple(_)
+                | MirType::Array(_, _)
+                | MirType::Slice(_)
+                | MirType::TraitObject(_)
+        )
+    }
+
     fn lower_if(
         &mut self,
         condition: &ast::Expr,
@@ -3491,7 +3507,18 @@ impl<'ctx> MirLowerer<'ctx> {
         if let Some(else_expr) = else_branch {
             let else_val = self.lower_expr(else_expr)?;
             self.var_map = saved_vars;
+            // The result type was derived from the then-branch. If the else-branch
+            // has an aggregate type (e.g. then = `None` which defaults to i32, but
+            // else = `Some(x)` -> `Option`), retype the result local to the
+            // aggregate so it is not declared as (and truncated to) a primitive.
+            // The type checker guarantees both branches share a type, so the
+            // aggregate is the correct one whenever the two MIR types disagree.
+            let else_ty = self.type_of_value(&else_val);
             let builder = self.current_fn.as_mut().unwrap();
+            let cur_ty = builder.local_type(result).unwrap_or(MirType::Void);
+            if Self::is_aggregate_mir_ty(&else_ty) && !Self::is_aggregate_mir_ty(&cur_ty) {
+                builder.retype_local(result, else_ty);
+            }
             builder.assign(result, MirRValue::Use(else_val));
         }
         {

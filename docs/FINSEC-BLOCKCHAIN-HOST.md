@@ -35,9 +35,11 @@
   *(Related foundation fix landed 2026-06-30: unsuffixed integer literals over
   i32 range were being silently truncated to 32 bits in both the type checker and
   the MIR lowering — e.g. a 64-bit value printed as `-808`. Now widened to i64 /
-  i128, so wide money/hash literals are exact. A separate open bug: an
-  `Option<i64>`-return + match miscompiles the 64-bit payload as `int32_t`; until
-  that lands, use a result struct, as `examples/finance/checked.bld` does.)*
+  i128, so wide money/hash literals are exact. Also fixed: an `Option<i64>`-return
+  + match miscompiled the 64-bit payload as `int32_t` (the if-expression result
+  local took the `None` branch's i32 default); `lower_if` now retypes the result
+  local to the aggregate branch type, so `examples/finance/checked.bld` returns
+  `Option<i64>` directly and runs end-to-end.)*
 - **No native decimal / fixed-point.** Money must be exact in minor units; float
   is forbidden. Today you hand-roll integer cents (the spike does). A native
   `decimal` / fixed-point type is the fin-sec brick.
