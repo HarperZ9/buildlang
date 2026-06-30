@@ -3007,23 +3007,50 @@ impl CBackend {
                     if let Some(dest_local) = dest {
                         let dest_name = self.local_name(*dest_local, locals);
                         let arg = self.value_to_c(&args[0], locals);
-                        let (slot, cast) = match &args[0] {
-                            MirValue::Local(id) => match locals.get(id.0 as usize).map(|l| &l.ty) {
-                                Some(MirType::Float(_)) => ("f", "(double)"),
-                                Some(MirType::Ptr(_)) => ("p", "(void*)"),
-                                _ => ("i", "(int64_t)"),
-                            },
-                            MirValue::Const(MirConst::Float(..)) => ("f", "(double)"),
-                            _ => ("i", "(int64_t)"),
+                        let arg_ty: Option<MirType> = match &args[0] {
+                            MirValue::Local(id) => {
+                                locals.get(id.0 as usize).map(|l| l.ty.clone())
+                            }
+                            _ => None,
                         };
+                        let boxed = arg_ty
+                            .as_ref()
+                            .map(Self::payload_needs_boxing)
+                            .unwrap_or(false);
                         write!(self.output, "{}.has_value = true;\n", dest_name).unwrap();
                         self.write_indent();
-                        write!(
-                            self.output,
-                            "{}.value.{} = {}({});\n",
-                            dest_name, slot, cast, arg
-                        )
-                        .unwrap();
+                        if boxed {
+                            // Payload >8 bytes: box it (malloc + copy) and store
+                            // the pointer in the .p slot.
+                            let ct = self.type_to_c(arg_ty.as_ref().unwrap());
+                            write!(
+                                self.output,
+                                "{{ {ct}* __opt_box = ({ct}*)malloc(sizeof({ct})); \
+                                 *__opt_box = {arg}; {dest}.value.p = (void*)__opt_box; }}\n",
+                                ct = ct,
+                                arg = arg,
+                                dest = dest_name
+                            )
+                            .unwrap();
+                        } else {
+                            let (slot, cast) = match &args[0] {
+                                MirValue::Local(id) => {
+                                    match locals.get(id.0 as usize).map(|l| &l.ty) {
+                                        Some(MirType::Float(_)) => ("f", "(double)"),
+                                        Some(MirType::Ptr(_)) => ("p", "(void*)"),
+                                        _ => ("i", "(int64_t)"),
+                                    }
+                                }
+                                MirValue::Const(MirConst::Float(..)) => ("f", "(double)"),
+                                _ => ("i", "(int64_t)"),
+                            };
+                            write!(
+                                self.output,
+                                "{}.value.{} = {}({});\n",
+                                dest_name, slot, cast, arg
+                            )
+                            .unwrap();
+                        }
                     }
                     if let Some(target) = target {
                         self.write_indent();
@@ -3040,19 +3067,46 @@ impl CBackend {
                     if let Some(dest_local) = dest {
                         let dest_name = self.local_name(*dest_local, locals);
                         let arg = self.value_to_c(&args[0], locals);
-                        let (slot, cast) = match &args[0] {
-                            MirValue::Local(id) => match locals.get(id.0 as usize).map(|l| &l.ty) {
-                                Some(MirType::Float(_)) => ("ok_f", "(double)"),
-                                Some(MirType::Ptr(_)) => ("ok_p", "(void*)"),
-                                _ => ("ok_i", "(int64_t)"),
-                            },
-                            MirValue::Const(MirConst::Float(..)) => ("ok_f", "(double)"),
-                            _ => ("ok_i", "(int64_t)"),
+                        let arg_ty: Option<MirType> = match &args[0] {
+                            MirValue::Local(id) => {
+                                locals.get(id.0 as usize).map(|l| l.ty.clone())
+                            }
+                            _ => None,
                         };
+                        let boxed = arg_ty
+                            .as_ref()
+                            .map(Self::payload_needs_boxing)
+                            .unwrap_or(false);
                         write!(self.output, "{}.is_ok = true;\n", dest_name).unwrap();
                         self.write_indent();
-                        write!(self.output, "{}.ok.{} = {}({});\n", dest_name, slot, cast, arg)
+                        if boxed {
+                            // Payload >8 bytes: box it and store the pointer in
+                            // the ok_p slot.
+                            let ct = self.type_to_c(arg_ty.as_ref().unwrap());
+                            write!(
+                                self.output,
+                                "{{ {ct}* __ok_box = ({ct}*)malloc(sizeof({ct})); \
+                                 *__ok_box = {arg}; {dest}.ok.ok_p = (void*)__ok_box; }}\n",
+                                ct = ct,
+                                arg = arg,
+                                dest = dest_name
+                            )
                             .unwrap();
+                        } else {
+                            let (slot, cast) = match &args[0] {
+                                MirValue::Local(id) => {
+                                    match locals.get(id.0 as usize).map(|l| &l.ty) {
+                                        Some(MirType::Float(_)) => ("ok_f", "(double)"),
+                                        Some(MirType::Ptr(_)) => ("ok_p", "(void*)"),
+                                        _ => ("ok_i", "(int64_t)"),
+                                    }
+                                }
+                                MirValue::Const(MirConst::Float(..)) => ("ok_f", "(double)"),
+                                _ => ("ok_i", "(int64_t)"),
+                            };
+                            write!(self.output, "{}.ok.{} = {}({});\n", dest_name, slot, cast, arg)
+                                .unwrap();
+                        }
                     }
                     if let Some(target) = target {
                         self.write_indent();
@@ -3321,6 +3375,25 @@ impl CBackend {
     // =========================================================================
     // TYPE AND VALUE CONVERSION
     // =========================================================================
+
+    /// True when a sum-type payload of this type does not fit the 8-byte
+    /// Option/Result union slot and must be boxed (malloc + store the pointer in
+    /// the `.p` / `.ok_p` slot). Scalars and pointers fit inline; aggregates
+    /// (BuildString and other structs, tuples, arrays, collection handles) are
+    /// boxed. Boxing round-trips any value; it is correctness-safe even for an
+    /// 8-byte handle.
+    fn payload_needs_boxing(ty: &MirType) -> bool {
+        !matches!(
+            ty,
+            MirType::Int(..)
+                | MirType::Float(..)
+                | MirType::Bool
+                | MirType::Ptr(..)
+                | MirType::FnPtr(..)
+                | MirType::Void
+                | MirType::Never
+        )
+    }
 
     fn type_to_c(&self, ty: &MirType) -> String {
         match ty {
@@ -3657,6 +3730,12 @@ impl CBackend {
                         .map(|l| matches!(&l.ty, MirType::Struct(n) if n.as_ref() == "Option"))
                         .unwrap_or(false));
                 if base_is_option && field_name.as_ref() == "value" {
+                    // Boxed payload (>8 bytes): the .p slot holds a malloc'd
+                    // pointer; deref it back to the payload type.
+                    if Self::payload_needs_boxing(field_ty) {
+                        let ct = self.type_to_c(field_ty);
+                        return Ok(format!("(*({}*){}.value.p)", ct, base_str));
+                    }
                     let slot = match field_ty {
                         MirType::Float(_) => "f",
                         MirType::Ptr(_) => "p",
@@ -3677,6 +3756,11 @@ impl CBackend {
                         .map(|l| matches!(&l.ty, MirType::Struct(n) if n.as_ref() == "Result"))
                         .unwrap_or(false));
                 if base_is_result && field_name.as_ref() == "ok" {
+                    // Boxed Ok payload (>8 bytes): deref the malloc'd pointer.
+                    if Self::payload_needs_boxing(field_ty) {
+                        let ct = self.type_to_c(field_ty);
+                        return Ok(format!("(*({}*){}.ok.ok_p)", ct, base_str));
+                    }
                     let slot = match field_ty {
                         MirType::Float(_) => "ok_f",
                         MirType::Ptr(_) => "ok_p",

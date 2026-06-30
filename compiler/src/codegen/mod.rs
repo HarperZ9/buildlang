@@ -1091,6 +1091,33 @@ mod tests {
     }
 
     #[test]
+    fn option_string_payload_is_boxed_through_the_pointer_slot() {
+        // A 24-byte BuildString does not fit the 8-byte union; `Some(s)` must
+        // box it (malloc + store the pointer in .value.p) and the match must
+        // deref-read it. Previously the construct cast a struct to int64_t.
+        let code = source_to_c(
+            "fn lookup(n: i32) -> Option<String> { \
+               if n == 1 { return Some(String::from(\"found\")); } \
+               return None; \
+             }\n\
+             fn main() { \
+               match lookup(1) { \
+                 Some(s) => { let _t = s; } \
+                 None => {} \
+               } \
+             }",
+        );
+        assert!(
+            code.contains("malloc(sizeof(BuildString))") && code.contains(".value.p"),
+            "Some(String) must box the payload (malloc + .value.p):\n{code}"
+        );
+        assert!(
+            code.contains("*(BuildString*)"),
+            "the Option<String> match must deref-read the boxed payload:\n{code}"
+        );
+    }
+
+    #[test]
     fn result_match_tests_is_ok_and_binds_typed_slots() {
         // `match r { Ok(n) => ..., Err(e) => ... }` must branch on `is_ok`, read
         // the Ok payload from the typed union slot, and bind Err from the err
