@@ -597,6 +597,35 @@ The substrate path now also carries a checked
 symbol evidence during `buildc corpus verify` without claiming call graph, LSP
 readiness, or package API completion.
 
+### Native FFI: header-backed extern blocks
+
+An `extern` block can name the C header that backs its declarations with a
+`header "..."` clause. The C backend then emits the matching `#include` and
+trusts that header for the prototypes, types, and macros instead of
+synthesizing its own declaration. This is how BuildLang integrates a
+third-party C-ABI library natively, and through the C ABI it reaches any
+language that exposes one, such as C, C++, Rust, and Zig:
+
+```build
+extern "C" header "<sqlite3.h>" {
+    fn sqlite3_libversion() -> &str;
+}
+
+fn main() ~ Foreign {
+    let version = sqlite3_libversion();
+}
+```
+
+A header written in angle-bracket form (`"<sqlite3.h>"`) becomes
+`#include <sqlite3.h>` for system and library headers; any other form
+(`"mylib.h"`) becomes `#include "mylib.h"` for local headers. Headers are
+emitted once each and in sorted order so generated C stays reproducible for
+receipts. An extern block with no `header` clause keeps the existing behavior:
+buildc synthesizes a prototype for non-standard functions and relies on the
+standard includes for the C library. Foreign calls still require the `Foreign`
+capability effect, so native interop stays inside the same accountability gate
+as every other ambient surface.
+
 ## Status
 
 The current release-shaped proof is the Cargo baseline above: `cargo test
