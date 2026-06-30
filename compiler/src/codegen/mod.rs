@@ -1059,6 +1059,28 @@ mod tests {
     }
 
     #[test]
+    fn vtable_wrapper_passes_pointer_self_for_ref_methods() {
+        // A trait method taking `&self` must have its vtable wrapper pass the
+        // receiver pointer to the concrete fn (which takes `Type*`), not a
+        // dereferenced value. Always dereferencing produced
+        // `Dog_say((*(Dog*)__self))` - passing a Dog where a Dog* was expected.
+        let code = source_to_c(
+            "trait Speak { fn say(self: &Self) -> i32; }\n\
+             struct Dog { v: i32 }\n\
+             impl Speak for Dog { fn say(self: &Dog) -> i32 { return self.v; } }\n\
+             fn main() { let d = Dog { v: 7 }; let _r = d.say(); }",
+        );
+        assert!(
+            code.contains("Dog_say((Dog*)__self)"),
+            "the &self vtable wrapper must pass the receiver pointer:\n{code}"
+        );
+        assert!(
+            !code.contains("Dog_say((*(Dog*)__self))"),
+            "the &self vtable wrapper must not pass a dereferenced value:\n{code}"
+        );
+    }
+
+    #[test]
     fn iterator_filter_step_skips_non_matching_elements() {
         // `v.iter().filter(|x| x > 2).sum()` must desugar (filter is a real step),
         // not leave `.iter()` as an undefined call.

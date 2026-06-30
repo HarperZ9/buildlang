@@ -10,6 +10,16 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Codegen (trait vtable wrappers): a trait method taking `&self` / `&mut self`
+  now compiles. The generated vtable wrapper always dereferenced `void* __self`
+  to a value before calling the concrete method, so a `&self` method (which takes
+  `Type*`) got a value where a pointer was expected (`Dog_say((*(Dog*)__self))` -
+  C2440). The wrapper now passes `(Type*)__self` when the self parameter is a
+  pointer and the dereferenced value only for by-value `self`. This generated for
+  every `impl Trait for Type`, so it broke compilation of any program with a
+  `&self` trait method even without dynamic dispatch. Verified end-to-end under
+  MSVC: `impl Speak for Dog { fn say(&self) ... }` prints `s 7`. Covered by
+  `vtable_wrapper_passes_pointer_self_for_ref_methods`.
 - Stdlib (iterator `.filter()`): `.filter(|x| pred)` is now a real iterator step.
   A chain containing it (e.g. `v.iter().filter(|x| x > 2).sum()`) previously left
   `.iter()` undefined because `filter` wasn't a recognized step. The desugaring
