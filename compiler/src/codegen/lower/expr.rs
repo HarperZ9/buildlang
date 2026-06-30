@@ -2767,7 +2767,17 @@ impl<'ctx> MirLowerer<'ctx> {
             let method_name = method.name.as_ref();
 
             let (runtime_fn, ret_ty): (Option<String>, MirType) = match method_name {
-                "insert" => (Some("build_hmap_insert_str_f64".to_string()), MirType::Void),
+                "insert" => {
+                    // Non-f64 values go through the value-typed wrapper (which boxes
+                    // values larger than the 8-byte slot, e.g. BuildString). f64
+                    // values use the native str->f64 path. Previously insert always
+                    // used str->f64, passing a BuildString to a `double` param (C2440).
+                    let fn_name = match val_ty.as_ref() {
+                        MirType::Float(_) => "build_hmap_insert_str_f64".to_string(),
+                        _ => format!("build_hmap_insert_val_{}", Self::type_to_c_name(val_ty)),
+                    };
+                    (Some(fn_name), MirType::Void)
+                }
                 "get" => {
                     let val_c = match val_ty.as_ref() {
                         MirType::Float(_) => None,

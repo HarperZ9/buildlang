@@ -788,14 +788,25 @@ impl CBackend {
         // Generate monomorphized HashMap wrappers for non-f64 value types.
         // Scan all function locals to discover Map types used in the module.
         {
-            let mut map_val_types: std::collections::HashSet<String> =
-                std::collections::HashSet::new();
+            // Collect (C type, is-scalar) for each non-f64 map value type. Scalars
+            // (<= 8 bytes) ride in the map's native 8-byte slot; non-scalars (e.g.
+            // BuildString, 24 bytes) are BOXED (a heap pointer rides in the slot)
+            // so the full value round-trips instead of being truncated.
+            let mut map_val_types: std::collections::HashMap<String, bool> =
+                std::collections::HashMap::new();
             for func in &module.functions {
                 for local in &func.locals {
                     if let MirType::Map(_, ref val_ty) = local.ty {
                         let val_c = self.type_to_c(val_ty);
                         if val_c != "double" {
-                            map_val_types.insert(val_c);
+                            let is_scalar = matches!(
+                                val_ty.as_ref(),
+                                MirType::Int(..)
+                                    | MirType::Float(..)
+                                    | MirType::Bool
+                                    | MirType::Ptr(..)
+                            );
+                            map_val_types.insert(val_c, is_scalar);
                         }
                     }
                 }
@@ -803,28 +814,37 @@ impl CBackend {
             if !map_val_types.is_empty() {
                 self.output
                     .push_str("// Monomorphized HashMap wrappers for non-f64 value types\n");
-                for val_c in &map_val_types {
+                // Deterministic order for reproducible codegen (receipts).
+                let mut entries: Vec<(&String, &bool)> = map_val_types.iter().collect();
+                entries.sort_by(|a, b| a.0.cmp(b.0));
+                // The key is a `BuildString` (string-keyed map family), passed by
+                // value by the method dispatch; the wrappers use its `.ptr`. Taking
+                // `BuildString key` avoids a key coercion the generated wrappers
+                // would otherwise need.
+                for (val_c, &is_scalar) in entries {
                     let safe_name = val_c.replace("*", "ptr").replace(" ", "_");
-                    write!(self.output, "static {} build_hmap_get_val_{}(BuildStrF64MapHandle h, const char* key) {{\n", val_c, safe_name).unwrap();
-                    write!(
-                        self.output,
-                        "    double d = build_hmap_get_str_f64(h, key);\n"
-                    )
-                    .unwrap();
-                    write!(self.output, "    {} v; memset(&v, 0, sizeof(v));\n", val_c).unwrap();
-                    write!(
-                        self.output,
-                        "    memcpy(&v, &d, sizeof(d) < sizeof(v) ? sizeof(d) : sizeof(v));\n"
-                    )
-                    .unwrap();
-                    write!(self.output, "    return v;\n}}\n").unwrap();
-                    write!(self.output, "static void build_hmap_insert_val_{}(BuildStrF64MapHandle h, const char* key, {} value) {{\n", safe_name, val_c).unwrap();
-                    write!(self.output, "    double d = 0; memcpy(&d, &value, sizeof(value) < sizeof(d) ? sizeof(value) : sizeof(d));\n").unwrap();
-                    write!(
-                        self.output,
-                        "    build_hmap_insert_str_f64(h, key, d);\n}}\n\n"
-                    )
-                    .unwrap();
+                    // get
+                    write!(self.output, "static {val_c} build_hmap_get_val_{safe_name}(BuildStrF64MapHandle h, BuildString key) {{\n").unwrap();
+                    write!(self.output, "    if (!build_hmap_contains_str_f64(h, key.ptr)) {{ {val_c} __z; memset(&__z, 0, sizeof(__z)); return __z; }}\n").unwrap();
+                    self.output
+                        .push_str("    double __d = build_hmap_get_str_f64(h, key.ptr);\n");
+                    if is_scalar {
+                        write!(self.output, "    {val_c} __v; memset(&__v, 0, sizeof(__v));\n").unwrap();
+                        self.output.push_str("    memcpy(&__v, &__d, sizeof(__d) < sizeof(__v) ? sizeof(__d) : sizeof(__v));\n    return __v;\n}\n");
+                    } else {
+                        write!(self.output, "    {val_c}* __b; memcpy(&__b, &__d, sizeof(__b));\n").unwrap();
+                        write!(self.output, "    if (!__b) {{ {val_c} __z; memset(&__z, 0, sizeof(__z)); return __z; }}\n    return *__b;\n}}\n").unwrap();
+                    }
+                    // insert
+                    write!(self.output, "static void build_hmap_insert_val_{safe_name}(BuildStrF64MapHandle h, BuildString key, {val_c} value) {{\n").unwrap();
+                    self.output.push_str("    double __d = 0;\n");
+                    if is_scalar {
+                        self.output.push_str("    memcpy(&__d, &value, sizeof(value) < sizeof(__d) ? sizeof(value) : sizeof(__d));\n");
+                    } else {
+                        write!(self.output, "    {val_c}* __b = ({val_c}*)malloc(sizeof({val_c})); *__b = value; memcpy(&__d, &__b, sizeof(__b));\n").unwrap();
+                    }
+                    self.output
+                        .push_str("    build_hmap_insert_str_f64(h, key.ptr, __d);\n}\n\n");
                 }
             }
         }
