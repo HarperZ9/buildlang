@@ -1202,6 +1202,23 @@ mod tests {
     }
 
     #[test]
+    fn vec_contains_dispatches_to_runtime_scan() {
+        // `v.contains(x)` must dispatch to the element-typed runtime scan, not an
+        // undefined `contains` call.
+        let code = source_to_c(
+            "fn main() { let v: Vec<i32> = vec![3, 1, 2]; let _h = v.contains(2); }",
+        );
+        assert!(
+            !code.contains("= contains(") && !code.contains(" contains("),
+            "contains must not lower to an undefined call:\n{code}"
+        );
+        assert!(
+            code.contains("build_hvec_contains_i32("),
+            "Vec<i32>.contains must call the i32 runtime scan:\n{code}"
+        );
+    }
+
+    #[test]
     fn result_methods_is_ok_and_unwrap_or() {
         // `res.is_ok()` reads is_ok; `res.unwrap_or(d)` reads the ok slot when
         // ok else the default. Neither must lower to an undefined call.
