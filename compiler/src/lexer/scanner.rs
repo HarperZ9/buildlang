@@ -1549,6 +1549,13 @@ impl<'a> Lexer<'a> {
     fn scan_dsl_block(&mut self, name: String) -> LexerResult<Token> {
         self.cursor.bump(); // consume '!'
 
+        // Allow whitespace between `!` and the opening delimiter, so that the
+        // conventional `sql! { ... }` spacing lexes the same as `sql!{ ... }`
+        // (mirrors how `vec! [...]` is accepted in Rust-like macro syntax).
+        while self.cursor.first() != EOF_CHAR && self.cursor.first().is_whitespace() {
+            self.cursor.bump();
+        }
+
         // Determine delimiter
         let (open, close) = match self.cursor.first() {
             '{' => ('{', '}'),
