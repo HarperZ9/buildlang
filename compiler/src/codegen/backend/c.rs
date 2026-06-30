@@ -4717,6 +4717,36 @@ mod tests {
     }
 
     #[test]
+    fn global_store_of_owner_is_an_escape() {
+        // Storing an owned string into a module global is a hard escape, caught by
+        // owned_string_escapes even with the module-wide guard OFF (fresh backend).
+        // This is the coupling that makes narrowing the guard sound: a value
+        // stashed into a global is never freed.
+        let backend = CBackend::new(); // module_mut_global_alias_risk = false
+        let mut func = MirFunction::new("f", MirFnSig::new(vec![], MirType::Void));
+        func.locals.push(bs(0, "c"));
+        let mut b0 = MirBlock::new(BlockId(0));
+        b0.terminator = Some(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("build_string_concat")),
+            args: vec![],
+            dest: Some(LocalId(0)),
+            target: Some(BlockId(1)),
+            unwind: None,
+        });
+        let mut b1 = MirBlock::new(BlockId(1));
+        b1.stmts.push(MirStmt::new(MirStmtKind::GlobalStore {
+            name: Arc::from("G"),
+            value: MirRValue::Use(MirValue::Local(LocalId(0))),
+        }));
+        b1.terminator = Some(MirTerminator::Return(None));
+        func.blocks = Some(vec![b0, b1]);
+        assert!(
+            backend.freeable_owned_string_locals(&func).is_empty(),
+            "an owner stored into a global must not be freed (escape coupling)"
+        );
+    }
+
+    #[test]
     fn ty_alias_risk_classifies_scalars_safe_and_pointers_risky() {
         assert!(!CBackend::ty_can_hold_heap_string_alias(&MirType::i32()));
         assert!(!CBackend::ty_can_hold_heap_string_alias(&MirType::Bool));
