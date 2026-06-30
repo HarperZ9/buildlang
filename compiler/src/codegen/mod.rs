@@ -1059,6 +1059,25 @@ mod tests {
     }
 
     #[test]
+    fn string_push_str_appends_in_place_via_concat() {
+        // `s.push_str(x)` must append to `s` (reassigning it to the concatenated
+        // result), not lower to an undefined `push_str` call.
+        let code = source_to_c(
+            "fn main() { let mut s = String::from(\"Hello\"); s.push_str(\", World\"); }",
+        );
+        // The undefined-call form would be `= push_str(` or a bare `push_str(s`;
+        // `build_hvec_push_str` in the runtime is unrelated.
+        assert!(
+            !code.contains("= push_str(") && !code.contains(" push_str(s"),
+            "push_str must not lower to an undefined `push_str` call:\n{code}"
+        );
+        assert!(
+            code.contains("build_string_concat("),
+            "push_str must append via build_string_concat:\n{code}"
+        );
+    }
+
+    #[test]
     fn vtable_wrapper_passes_pointer_self_for_ref_methods() {
         // A trait method taking `&self` must have its vtable wrapper pass the
         // receiver pointer to the concrete fn (which takes `Type*`), not a

@@ -2190,6 +2190,32 @@ impl<'ctx> MirLowerer<'ctx> {
                     return Ok(values::local(result));
                 }
 
+                // --- push_str(x): append in place ---
+                // `s.push_str(x)` reassigns `s` to `build_string_concat(s, x)`.
+                // String literals already lower to BuildString, so the argument
+                // needs no coercion. Returns unit.
+                if method_name == "push_str" && args.len() == 1 {
+                    let receiver_local = match receiver_val {
+                        MirValue::Local(id) => Some(id),
+                        _ => None,
+                    };
+                    let arg_val = self.lower_expr(&args[0])?;
+                    let builder = self
+                        .current_fn
+                        .as_mut()
+                        .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                    let result = builder.create_local(MirType::Struct(Arc::from("BuildString")));
+                    let cont = builder.create_block();
+                    let func = MirValue::Function(Arc::from("build_string_concat"));
+                    builder.call(func, vec![receiver_val, arg_val], Some(result), cont);
+                    builder.switch_to_block(cont);
+                    // Write the concatenated string back to the receiver local.
+                    if let Some(id) = receiver_local {
+                        builder.assign(id, MirRValue::Use(values::local(result)));
+                    }
+                    return Ok(values::unit());
+                }
+
                 // --- split(delim) → BuildVec of BuildString ---
                 if method_name == "split" {
                     let mut arg_vals = vec![receiver_val];
