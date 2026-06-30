@@ -365,7 +365,24 @@ impl<'a> Parser<'a> {
         let name = self.expect_ident()?;
         let generics = self.parse_generics()?;
 
-        let (params, _) = self.parse_paren_comma_seq(|p| p.parse_fn_param())?;
+        // Parse the parameter list, detecting a trailing C-style `...` variadic
+        // marker (e.g. `printf(fmt: &str, ...)`). The `...` must be the last
+        // entry and is not itself a parameter.
+        self.expect(&TokenKind::OpenDelim(Delimiter::Paren))?;
+        let mut params = Vec::new();
+        let mut is_variadic = false;
+        while !self.check(&TokenKind::CloseDelim(Delimiter::Paren)) {
+            if self.check(&TokenKind::DotDotDot) {
+                self.advance(); // consume `...`
+                is_variadic = true;
+                break;
+            }
+            params.push(self.parse_fn_param()?);
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(&TokenKind::CloseDelim(Delimiter::Paren))?;
 
         let return_ty = if self.eat(&TokenKind::Arrow) {
             Some(Box::new(self.parse_type()?))
@@ -416,6 +433,7 @@ impl<'a> Parser<'a> {
                 is_const,
                 abi,
                 params,
+                is_variadic,
                 return_ty,
                 effects,
             },
@@ -1740,6 +1758,31 @@ mod tests {
                 assert_eq!(eb.abi, None);
             }
             other => panic!("expected ExternBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extern_variadic_fn_parses() {
+        let item =
+            parse_item_str("extern \"C\" { fn printf(fmt: &str, ...) -> i32; }").unwrap();
+        match &item.kind {
+            ItemKind::ExternBlock(eb) => match &eb.items[0].kind {
+                ForeignItemKind::Fn(f) => {
+                    assert!(f.sig.is_variadic, "printf should be variadic");
+                    assert_eq!(f.sig.params.len(), 1, "the `...` is not a normal param");
+                }
+                other => panic!("expected Fn, got {:?}", other),
+            },
+            other => panic!("expected ExternBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn non_variadic_fn_is_not_variadic() {
+        let item = parse_item_str("fn add(a: i32, b: i32) -> i32 { a + b }").unwrap();
+        match &item.kind {
+            ItemKind::Function(f) => assert!(!f.sig.is_variadic),
+            other => panic!("expected Function, got {:?}", other),
         }
     }
 

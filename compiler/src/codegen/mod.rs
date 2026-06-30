@@ -946,6 +946,17 @@ mod tests {
     }
 
     #[test]
+    fn variadic_extern_emits_ellipsis_in_c() {
+        // A non-standard variadic extern is synthesized with a trailing `, ...`.
+        let code = source_to_c("extern \"C\" { fn my_printf(fmt: &str, ...) -> i32; }");
+        assert!(code.contains("my_printf"), "declaration should be present:\n{code}");
+        assert!(
+            code.contains(", ...)"),
+            "a variadic extern should emit a trailing `, ...`:\n{code}"
+        );
+    }
+
+    #[test]
     fn c_backend_still_synthesizes_extern_without_header() {
         // Regression guard: an extern block with no header keeps the existing
         // behavior of synthesizing a prototype for non-standard functions.

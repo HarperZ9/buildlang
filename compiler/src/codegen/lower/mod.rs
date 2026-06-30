@@ -469,13 +469,9 @@ impl<'ctx> MirLowerer<'ctx> {
 
                 let mut sig = MirFnSig::new(params, ret);
                 sig.calling_conv = CallingConv::C;
-                sig.is_variadic = f.sig.params.iter().any(|_| false); // checked below
-
-                // Check for variadic: if the last token in the AST param
-                // list is `...` we won't see it as a Param; instead we rely
-                // on the function signature's abi hint.  For now, detect
-                // common variadic C functions by name.
-                // TODO: Add proper variadic parsing support.
+                // Carry the parsed `...` variadic marker (e.g. `printf`) so the
+                // C backend emits a trailing `, ...` in the declaration.
+                sig.is_variadic = f.sig.is_variadic;
 
                 let mut func = MirFunction::declaration(f.name.name.clone(), sig);
                 func.is_public = true;
