@@ -10,6 +10,15 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Stdlib (`Option<T>` methods): `is_some()`, `is_none()`, `unwrap()`, and
+  `unwrap_or(default)` now work. They were unimplemented (undefined symbols that
+  failed to link). `is_some`/`is_none` read the `has_value` discriminant;
+  `unwrap` reads the typed payload slot; `unwrap_or` branches on `has_value`,
+  reading the payload when present and the default otherwise. Verified end-to-end
+  under MSVC: `find(5).unwrap_or(0)` is `50`, `find(0).unwrap_or(-1)` is `-1`,
+  `is_some()`/`is_none()` return the right booleans. Covered by
+  `option_methods_is_some_and_unwrap_or`. (Payload slot uses the tracked inner
+  type, defaulting to i32 when untracked - same threading caveat as the match.)
 - Stdlib (iterator `.any()` / `.all()`): predicate terminals join the accumulator
   family. `.any(|x| pred)` folds the per-element predicate with OR from `false`;
   `.all(|x| pred)` with AND from `true`. Without them a chain ending in either

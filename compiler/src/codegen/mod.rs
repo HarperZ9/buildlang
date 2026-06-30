@@ -1144,6 +1144,29 @@ mod tests {
     }
 
     #[test]
+    fn option_methods_is_some_and_unwrap_or() {
+        // `opt.is_some()` reads has_value; `opt.unwrap_or(d)` reads the payload
+        // slot when present else the default. Neither must lower to an undefined
+        // `is_some`/`unwrap_or` call.
+        let code = source_to_c(
+            "fn find(n: i32) -> Option<i32> { if n > 0 { return Some(n); } return None; }\n\
+             fn main() { \
+               let x = find(5); \
+               let _v = x.unwrap_or(0); \
+               let _s = find(0).is_some(); \
+             }",
+        );
+        assert!(
+            !code.contains("= unwrap_or(") && !code.contains("= is_some("),
+            "Option methods must not lower to undefined calls:\n{code}"
+        );
+        assert!(
+            code.contains(".has_value"),
+            "Option methods must read the has_value discriminant:\n{code}"
+        );
+    }
+
+    #[test]
     fn iterator_any_all_predicate_terminals_desugar() {
         // `v.iter().any(|x| pred)` and `.all(|x| pred)` desugar to a boolean
         // accumulator loop, not undefined `iter`/`any`/`all` calls.
