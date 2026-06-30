@@ -268,6 +268,12 @@ pub struct MirFunction {
     /// for non-FFI functions is unchanged and remains backward compatible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_header: Option<Arc<str>>,
+    /// Library to link for a foreign declaration, from an extern block's
+    /// `link "..."` clause. The build driver passes it to the C compiler
+    /// (`-lname` for gcc/clang/cc, `name.lib` for MSVC). Skipped during
+    /// serialization when absent so non-FFI MIR stays backward compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_lib: Option<Arc<str>>,
 }
 
 impl MirFunction {
@@ -283,6 +289,7 @@ impl MirFunction {
             shader_stage: None,
             bindings: Vec::new(),
             link_header: None,
+            link_lib: None,
         }
     }
 
@@ -298,6 +305,7 @@ impl MirFunction {
             shader_stage: None,
             bindings: Vec::new(),
             link_header: None,
+            link_lib: None,
         }
     }
 

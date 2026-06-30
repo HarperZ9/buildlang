@@ -1384,22 +1384,34 @@ impl<'a> Parser<'a> {
             None
         };
 
-        // Optional `header "path"` clause naming the backing C header. `header`
-        // is a contextual keyword: it is unambiguous here because an extern
-        // block body is opened by `{`, never a bare identifier.
-        let header = if self.check_ident()
-            && self.source.slice(self.current_span()) == "header"
-        {
-            self.advance(); // consume `header`
-            if let TokenKind::Literal { .. } = self.current_kind() {
-                let token_span = self.advance().span;
-                Some(self.source.slice(token_span).trim_matches('"').to_string())
-            } else {
-                return Err(self.error_expected("header path string literal"));
+        // Optional `link "lib"` and `header "path"` clauses, in any order,
+        // naming the library to link and the C header that backs the block.
+        // Both are contextual keywords: unambiguous here because an extern
+        // block body opens with `{`, never a bare identifier.
+        let mut link = None;
+        let mut header = None;
+        loop {
+            if !self.check_ident() {
+                break;
             }
-        } else {
-            None
-        };
+            let is_link = self.source.slice(self.current_span()) == "link";
+            let is_header = self.source.slice(self.current_span()) == "header";
+            if !is_link && !is_header {
+                break;
+            }
+            self.advance(); // consume `link` or `header`
+            let value = if let TokenKind::Literal { .. } = self.current_kind() {
+                let token_span = self.advance().span;
+                self.source.slice(token_span).trim_matches('"').to_string()
+            } else {
+                return Err(self.error_expected("string literal after extern block clause"));
+            };
+            if is_link {
+                link = Some(value);
+            } else {
+                header = Some(value);
+            }
+        }
 
         self.expect(&TokenKind::OpenDelim(Delimiter::Brace))?;
 
@@ -1414,6 +1426,7 @@ impl<'a> Parser<'a> {
             is_unsafe,
             abi,
             header,
+            link,
             items,
         })
     }
@@ -1706,6 +1719,56 @@ mod tests {
                 assert_eq!(eb.header.as_deref(), Some("mylib.h"));
                 assert_eq!(eb.abi, None);
             }
+            other => panic!("expected ExternBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extern_block_link_clause() {
+        // `link "lib"` names the library to link, so `buildc build` can pass -llib.
+        let item = parse_item_str("extern \"C\" link \"sqlite3\" { fn s() -> i32; }").unwrap();
+        match &item.kind {
+            ItemKind::ExternBlock(eb) => {
+                assert_eq!(eb.link.as_deref(), Some("sqlite3"));
+                assert_eq!(eb.header, None);
+            }
+            other => panic!("expected ExternBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extern_block_link_and_header_any_order() {
+        // Both clauses may appear, in either order, after the ABI.
+        let lh = parse_item_str(
+            "extern \"C\" link \"sqlite3\" header \"<sqlite3.h>\" { fn s() -> i32; }",
+        )
+        .unwrap();
+        match &lh.kind {
+            ItemKind::ExternBlock(eb) => {
+                assert_eq!(eb.link.as_deref(), Some("sqlite3"));
+                assert_eq!(eb.header.as_deref(), Some("<sqlite3.h>"));
+            }
+            other => panic!("expected ExternBlock, got {:?}", other),
+        }
+
+        let hl = parse_item_str(
+            "extern \"C\" header \"<sqlite3.h>\" link \"sqlite3\" { fn s() -> i32; }",
+        )
+        .unwrap();
+        match &hl.kind {
+            ItemKind::ExternBlock(eb) => {
+                assert_eq!(eb.link.as_deref(), Some("sqlite3"));
+                assert_eq!(eb.header.as_deref(), Some("<sqlite3.h>"));
+            }
+            other => panic!("expected ExternBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extern_block_without_link_is_none() {
+        let item = parse_item_str("extern \"C\" { fn foo(); }").unwrap();
+        match &item.kind {
+            ItemKind::ExternBlock(eb) => assert_eq!(eb.link, None),
             other => panic!("expected ExternBlock, got {:?}", other),
         }
     }

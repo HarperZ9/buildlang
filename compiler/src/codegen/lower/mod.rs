@@ -483,6 +483,9 @@ impl<'ctx> MirLowerer<'ctx> {
                 // declaration so the C backend can emit the right `#include`
                 // and skip synthesizing a prototype for it.
                 func.link_header = eb.header.as_deref().map(Arc::from);
+                // Carry the `link "..."` clause so the build driver can pass
+                // the library to the C compiler.
+                func.link_lib = eb.link.as_deref().map(Arc::from);
 
                 // Set parameter names on the declaration so the C backend can
                 // emit readable prototypes.
