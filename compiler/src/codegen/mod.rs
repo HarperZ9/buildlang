@@ -957,6 +957,26 @@ mod tests {
     }
 
     #[test]
+    fn vec_new_dispatches_to_element_typed_constructor() {
+        // `Vec::new()` must lower to the element-typed runtime constructor
+        // (build_hvec_new_str for Vec<String>), not an undefined `Vec_new`.
+        let str_code = source_to_c("fn main() { let mut v: Vec<String> = Vec::new(); }");
+        assert!(
+            !str_code.contains("= Vec_new("),
+            "Vec::new must not emit an undefined `Vec_new` call:\n{str_code}"
+        );
+        assert!(
+            str_code.contains("build_hvec_new_str("),
+            "Vec<String>::new must call build_hvec_new_str:\n{str_code}"
+        );
+        let i32_code = source_to_c("fn main() { let mut v: Vec<i32> = Vec::new(); }");
+        assert!(
+            i32_code.contains("build_hvec_new_i32("),
+            "Vec<i32>::new must call build_hvec_new_i32:\n{i32_code}"
+        );
+    }
+
+    #[test]
     fn numeric_to_string_dispatches_to_runtime_formatter() {
         // `n.to_string()` on a number must lower to the type-specific runtime
         // formatter (build_i64_to_string / build_f64_to_string), not a bare
