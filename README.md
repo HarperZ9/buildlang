@@ -36,7 +36,16 @@ experimental research surfaces.
 
 ## Install
 
-Build from the repository source:
+From crates.io (installs the `buildc` binary):
+
+```bash
+cargo install buildlang
+```
+
+> Previously published as `quantalang`; that crate is deprecated and now points
+> here. Use `buildlang` / `buildc`.
+
+Or build from the repository source:
 
 ```bash
 cd compiler
