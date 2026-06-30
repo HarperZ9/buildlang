@@ -32,6 +32,12 @@
   behavior yet. For money and consensus that is a critical-bug class: a silent
   wrap is a minted-coin or a mispriced trade. **Deterministic checked / wrapping
   / saturating arithmetic is the decisive first brick** for both domains.
+  *(Related foundation fix landed 2026-06-30: unsuffixed integer literals over
+  i32 range were being silently truncated to 32 bits in both the type checker and
+  the MIR lowering — e.g. a 64-bit value printed as `-808`. Now widened to i64 /
+  i128, so wide money/hash literals are exact. A separate open bug: an
+  `Option<i64>`-return + match miscompiles the 64-bit payload as `int32_t`; until
+  that lands, use a result struct, as `examples/finance/checked.bld` does.)*
 - **No native decimal / fixed-point.** Money must be exact in minor units; float
   is forbidden. Today you hand-roll integer cents (the spike does). A native
   `decimal` / fixed-point type is the fin-sec brick.
