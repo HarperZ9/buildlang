@@ -1154,17 +1154,35 @@ impl<'ctx> MirLowerer<'ctx> {
         } else if let ExprKind::Ident(ident) = &target.kind {
             // Deref and field assignments were handled above, so a bare-identifier
             // target that resolves to no local is a module global / mutable static
-            // (anything else would have been rejected by the type checker). The C
-            // backend has no global-store form yet, so emitting nothing here would
-            // SILENTLY DROP the write (data loss). Fail closed with a clear error
-            // instead of miscompiling. Full global-store support is tracked
-            // separately (it needs a cross-backend MIR store form).
-            return Err(CodegenError::Unsupported(format!(
-                "assignment to `{}`: storing to a module global/static is not yet \
-                 implemented in the C backend (the write would be silently lost). \
-                 Use a local or pass a mutable reference.",
-                ident.name
-            )));
+            // (anything else would have been rejected by the type checker). MIR
+            // `Assign` targets only locals, so the write is represented as a
+            // `GlobalStore` (the C backend emits `NAME = value;`; the drop analysis
+            // treats it as an escape). Compound assignment to a global reads the
+            // current value, applies the op, and stores back.
+            let name = ident.name.clone();
+            let store_val = if op == ast::AssignOp::Assign {
+                MirRValue::Use(val)
+            } else {
+                let bin_op = match op {
+                    ast::AssignOp::AddAssign => BinOp::Add,
+                    ast::AssignOp::SubAssign => BinOp::Sub,
+                    ast::AssignOp::MulAssign => BinOp::Mul,
+                    ast::AssignOp::DivAssign => BinOp::Div,
+                    ast::AssignOp::RemAssign => BinOp::Rem,
+                    ast::AssignOp::BitAndAssign => BinOp::BitAnd,
+                    ast::AssignOp::BitOrAssign => BinOp::BitOr,
+                    _ => BinOp::Add,
+                };
+                let val_ty = self.type_of_value(&val);
+                let builder = self.current_fn.as_mut().unwrap();
+                let cur = builder.create_local(val_ty.clone());
+                builder.assign(cur, MirRValue::Use(MirValue::Global(name.clone())));
+                let tmp = builder.create_local(val_ty);
+                builder.binary_op(tmp, bin_op, values::local(cur), val);
+                MirRValue::Use(values::local(tmp))
+            };
+            let builder = self.current_fn.as_mut().unwrap();
+            builder.push_global_store(name, store_val);
         }
 
         Ok(values::unit())

@@ -361,6 +361,7 @@ fn collect_stmt(
             memory.field_writes = true;
             collect_rvalue(value, sets, memory);
         }
+        MirStmtKind::GlobalStore { value, .. } => collect_rvalue(value, sets, memory),
         MirStmtKind::StorageLive(_) | MirStmtKind::StorageDead(_) | MirStmtKind::Nop => {}
     }
 }
@@ -519,6 +520,7 @@ fn statement_name(stmt: &MirStmtKind) -> &'static str {
         MirStmtKind::DerefAssign { .. } => "DerefAssign",
         MirStmtKind::FieldDerefAssign { .. } => "FieldDerefAssign",
         MirStmtKind::FieldAssign { .. } => "FieldAssign",
+        MirStmtKind::GlobalStore { .. } => "GlobalStore",
         MirStmtKind::StorageLive(_) => "StorageLive",
         MirStmtKind::StorageDead(_) => "StorageDead",
         MirStmtKind::Nop => "Nop",
@@ -1075,6 +1077,13 @@ fn write_mir_stmt(output: &mut String, label: &str, stmt: &MirStmtKind) {
             push_line(
                 output,
                 format!("{label}.field {}", json_string(field_name.as_ref())),
+            );
+            write_mir_rvalue(output, &format!("{label}.value"), value);
+        }
+        MirStmtKind::GlobalStore { name, value } => {
+            push_line(
+                output,
+                format!("{label}.global {}", json_string(name.as_ref())),
             );
             write_mir_rvalue(output, &format!("{label}.value"), value);
         }

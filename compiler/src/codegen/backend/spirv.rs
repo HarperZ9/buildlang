@@ -2025,6 +2025,12 @@ impl SpirvBackend {
     /// Generate a statement.
     fn gen_stmt(&mut self, stmt: &MirStmt, func: &MirFunction) -> CodegenResult<()> {
         match &stmt.kind {
+            MirStmtKind::GlobalStore { .. } => {
+                return Err(CodegenError::Unsupported(
+                    "store to a module global is not supported in the SPIR-V backend"
+                        .to_string(),
+                ));
+            }
             MirStmtKind::Assign { dest, value } => {
                 let val_id = self.gen_rvalue(value, func)?;
                 let ptr_id = *self

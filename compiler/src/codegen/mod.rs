@@ -957,22 +957,15 @@ mod tests {
     }
 
     #[test]
-    fn assignment_to_global_fails_closed_not_silent() {
-        // Storing to a module global/static silently dropped the write (data
-        // loss). Until real global-store support lands it must fail loudly.
+    fn assignment_to_global_emits_a_store() {
+        // Storing to a module global/static is lowered to a GlobalStore and the C
+        // backend emits `NAME = value;` (previously this silently dropped the
+        // write, then fail-closed; now it is supported).
         let src = "static mut SINK: i32 = 0;\nfn set() { SINK = 5; }";
-        let module = crate::parser::parse_source("test.bld", src).expect("source should parse");
-        let ctx = TypeContext::new();
-        let mut codegen = CodeGenerator::new(&ctx, Target::C);
-        let result = codegen.generate(&module);
+        let code = source_to_c(src);
         assert!(
-            result.is_err(),
-            "assignment to a module global must not silently succeed"
-        );
-        let msg = format!("{}", result.unwrap_err());
-        assert!(
-            msg.contains("SINK") && msg.contains("global"),
-            "the error should name the global and explain the limitation: {msg}"
+            code.contains("SINK = 5;"),
+            "a store to global SINK must be emitted:\n{code}"
         );
     }
 

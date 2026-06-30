@@ -614,6 +614,15 @@ pub enum MirStmtKind {
         value: MirRValue,
     },
 
+    /// Store to a module global / mutable static: `GLOBAL = value`.
+    /// MIR `Assign` targets only locals, so a write to a module-level global is
+    /// represented here. Lowered from `lower_assign` when the assignment target
+    /// is a bare identifier that names a global rather than a local.
+    GlobalStore {
+        name: Arc<str>,
+        value: MirRValue,
+    },
+
     /// Storage live (local becomes valid).
     StorageLive(LocalId),
 
