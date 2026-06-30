@@ -1747,9 +1747,20 @@ impl CBackend {
                     vtable.type_name, vtable.trait_name, method_name
                 );
 
-                // Generate: ret wrapper(void* self, ...) { return concrete(*(Type*)self, ...); }
+                // Generate: ret wrapper(void* self, ...) { return concrete(<self>, ...); }
+                // The receiver is passed as a pointer when the method takes
+                // `&self`/`&mut self` (a pointer self param), or dereferenced to a
+                // value when it takes `self` by value. Always dereferencing broke
+                // `&self` trait methods (passing a value where a pointer was
+                // expected).
+                let self_is_ref = sig.params.first().map(|p| p.is_pointer()).unwrap_or(false);
+                let self_arg = if self_is_ref {
+                    format!("({}*)__self", vtable.type_name)
+                } else {
+                    format!("(*({}*)__self)", vtable.type_name)
+                };
                 let mut wrapper_params = vec!["void* __self".to_string()];
-                let mut call_args = vec![format!("(*({}*)__self)", vtable.type_name)];
+                let mut call_args = vec![self_arg];
                 for (i, param) in sig.params.iter().skip(1).enumerate() {
                     let param_ty = self.type_to_c(param);
                     wrapper_params.push(format!("{} __arg{}", param_ty, i));
