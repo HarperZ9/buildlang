@@ -3858,8 +3858,12 @@ impl<'ctx> TypeInfer<'ctx> {
                 for source in &call_sources {
                     self.record_call_capability(source);
                 }
+                // Builtins (vec_push, map_insert, ...) resolve to `Error` here and
+                // are dispatched by codegen. A linear value passed to such an
+                // untracked builtin (e.g. stored into a Vec) escapes no-cloning.
                 for arg in args {
-                    let _ = self.infer_expr(arg);
+                    let ty = self.infer_expr(arg);
+                    self.reject_linear_escape(&ty, arg.span, "a builtin call (e.g. a collection)");
                 }
                 Ty::fresh_var()
             }
@@ -4092,6 +4096,17 @@ impl<'ctx> TypeInfer<'ctx> {
     ) -> Ty {
         let receiver_ty = self.infer_expr(receiver);
         let receiver_ty = self.apply(&receiver_ty);
+        // No-cloning: a method whose `self` is by-value would move the linear
+        // value out of a borrowed receiver (`(&coin).burn()`), and the self-kind
+        // is not visible here. Conservatively reject calling a method on a
+        // borrowed linear value (a plain linear receiver is consumed as usual).
+        if let TyKind::Ref(_, _, inner) = &receiver_ty.kind {
+            self.reject_linear_escape(
+                inner,
+                span,
+                "a method call on a borrowed linear value",
+            );
+        }
         let method_source = self.method_call_source(&receiver_ty, method.name.as_ref());
 
         // Infer argument types
