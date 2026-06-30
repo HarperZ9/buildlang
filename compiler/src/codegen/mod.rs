@@ -997,6 +997,20 @@ mod tests {
     }
 
     #[test]
+    fn for_over_vec_emits_a_runtime_length_loop() {
+        // `for x in v` over a Vec must emit a real index loop bounded by
+        // build_hvec_len, not the silent no-op that previously dropped the body.
+        let code = source_to_c(
+            "fn main() { let mut v: Vec<i32> = Vec::new(); v.push(1); \
+             let mut s = 0; for x in v { s = s + x; } }",
+        );
+        assert!(
+            code.contains("build_hvec_len("),
+            "for-over-Vec must emit a runtime-length loop (build_hvec_len):\n{code}"
+        );
+    }
+
+    #[test]
     fn vec_new_dispatches_to_element_typed_constructor() {
         // `Vec::new()` must lower to the element-typed runtime constructor
         // (build_hvec_new_str for Vec<String>), not an undefined `Vec_new`.
