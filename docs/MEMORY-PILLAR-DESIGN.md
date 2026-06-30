@@ -169,6 +169,63 @@ growing test set. Coverage then broadens (allow uses that are only field reads
 flowing to known non-retaining functions like `printf`/`build_print_*`; then
 block-scoped drops with definite-init flags) one ASan-verified step at a time.
 
+### Second increment: move-aware ownership (MIR-grounded, 2026-06-30)
+
+Inspecting the actual MIR for `fn main() ~ Console { let s = String::from("hello"); println!("{}", s); }`
+corrected the planned "non-retaining-call whitelist" next step: the real blocker
+is not borrowing, it is MOVE-ALIASING. The lowered MIR is a three-local chain:
+
+- `_1 = build_string_new("hello")`  (Call dest, block 0) - buffer A, intermediate
+- `_2 = String_from(_1)`            (Call dest, block 1) - buffer B, a fresh copy
+- `s = Use(_2)`                     (Assign,    block 2) - STRUCT COPY: `_2` and `s`
+  now hold the same `.ptr`, i.e. they ALIAS buffer B
+- `_4 = s.ptr; printf(fmt, _4)`     (field read feeding a non-retaining call)
+
+So a naive "free every owned BuildString" frees buffer B twice (via `_2` and via
+`s`): a double-free. The `let` binding is a move at the language level (BuildString
+is move-only, so the checker forbids use-after-move), but at MIR/C level it is a
+struct copy that creates a transient alias. Sound reclamation therefore needs MOVE
+TRACKING, not just a borrow whitelist.
+
+Bounded sound rule (the second increment, still opt-in, ASan-gated). Free an
+owning BuildString local `L` at every `Return` iff ALL hold:
+
+1. `L` is non-parameter and typed `BuildString`.
+2. `L` is OWNING: it is the `dest` of a Call to a known ALLOCATING runtime
+   function (allocates a fresh heap buffer: `build_string_new`, `String_new`,
+   `String_from`, `read_file`/`read_line`/`read_all`/`getenv`, `to_string_*`,
+   `build_string_concat`, ...), OR it is move-acquired by `Assign { dest: L,
+   value: Use(src) }` where `src` is itself an owning BuildString.
+3. Definite init: `L`'s defining block dominates every `Return` block (so `L` is
+   initialized on every path to a free; this matters because `build_string_free`
+   only self-guards on `cap`, and an uninitialized BuildString has garbage `cap`).
+4. `L` is NOT moved-from: there is no `Assign { value: Use(L) }` transferring `L`'s
+   buffer to another owner (if there is, that other owner is freed instead; `L` is
+   excluded - this is the alias guard that prevents the double-free above).
+5. `L` does not ESCAPE. Every use of `L` other than its definition is exactly one
+   of: (a) a direct argument to a whitelisted BORROW call (reads, never retains or
+   frees the arg: `String_from`, `printf`, `build_print_*`, `build_string_len`,
+   `build_string_eq`, ...); or (b) a `FieldAccess { base: L, field: ptr|len|cap }`
+   into a temp `T` where `T` is a non-aggregate scalar/pointer whose every use is
+   itself a whitelisted borrow-call argument (one-hop taint: `L -> T -> borrow`).
+   Any other appearance (returned, address-taken, stored into an aggregate or
+   field, passed to a non-whitelisted call, or a `T` that escapes) means `L`
+   escapes and is NOT freed.
+
+Each heap buffer is then freed exactly once: an alloc-defined local that is later
+moved-from is excluded by (4); its move destination (move-acquired by (2)) is the
+sole freer. The borrow whitelist in (5) is the ONLY trust surface - every function
+on it must be audited to read-but-never-retain-or-free its BuildString/`.ptr`
+argument; when in doubt, leave it off (the local then leaks, which is safe).
+
+Verification bar for this increment (must all pass before the flag default flips):
+golden unit tests that FREE the simple owned case and do NOT free each unsound
+case (moved-out/returned, stored-into-Vec, aliased, escaping `.ptr`); an ASan
+battery (`cl /fsanitize=address`) over those same programs asserting zero
+use-after-free and zero double-free AND that a long allocation loop has bounded
+peak memory; corpus c-execution stays 8/8 with the flag on; and an adversarial
+pass that actively tries to construct a program the rule mis-frees.
+
 ## Why this is documented rather than already implemented
 
 The transpiler/effects/receipts pillars were bounded, TDD-verifiable bricks and
