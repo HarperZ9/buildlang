@@ -281,6 +281,14 @@ static BuildString build_format_str(const char* fmt, const char* v) {
 }
 
 static BuildString build_i32_to_string(int32_t v) { return build_format_i32("%d", v); }
+static BuildString build_i64_to_string(int64_t v) {
+    char buf[32];
+    int n = snprintf(buf, sizeof(buf), "%lld", (long long)v);
+    char* heap = (char*)malloc(n + 1);
+    memcpy(heap, buf, n + 1);
+    BuildString qs; qs.ptr = heap; qs.len = n; qs.cap = n + 1;
+    return qs;
+}
 static BuildString build_f64_to_string(double v) { return build_format_f64("%g", v); }
 
 // --- Math constants ---
