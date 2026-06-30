@@ -1351,6 +1351,21 @@ impl<'ctx> MirLowerer<'ctx> {
                     }
                     _ => ret,
                 };
+                // Thread the method's Result/Option payload types, keyed by the
+                // mangled name, so a `match recv.method() { ... }` reads the
+                // correct union slot (mirrors collect_function for free fns).
+                if let Some(ref ret_ty) = f.sig.return_ty {
+                    if let Some(ok_ty) = self.result_ok_inner_from_ast(ret_ty) {
+                        self.fn_result_ok_types.insert(mangled.clone(), ok_ty);
+                    }
+                    if let Some(err_ty) = self.result_err_inner_from_ast(ret_ty) {
+                        self.fn_result_err_types.insert(mangled.clone(), err_ty);
+                    }
+                    if let Some(inner_ty) = self.option_inner_from_ast(ret_ty) {
+                        self.fn_option_inner_types.insert(mangled.clone(), inner_ty);
+                    }
+                }
+
                 self.module
                     .declare_function(mangled, MirFnSig::new(params, ret));
             }
