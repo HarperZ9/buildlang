@@ -10,6 +10,17 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Stdlib (sum-type large payloads): `Option<T>` and `Result<T, E>` now carry
+  payloads that do not fit the 8-byte union slot (e.g. `String`/`BuildString`,
+  24 bytes). `Some(s)` / `Ok(s)` box the payload (`malloc` + copy, pointer stored
+  in the `.value.p` / `.ok.ok_p` slot) and the match deref-reads it
+  (`*(BuildString*)…`). Previously the construct cast a struct to `int64_t`.
+  Scalars and pointers still go inline. Verified end-to-end under MSVC:
+  `Option<String>` prints `some found`, `Result<String, String>` prints
+  `ok nonzero` / `err zero`. Covered by
+  `option_string_payload_is_boxed_through_the_pointer_slot`. (The boxed
+  allocation is freed only under the opt-in drop-analysis path; in the default
+  no-free mode it leaks, consistent with current owned-string handling.)
 - Stdlib (`Option<T>` payload threading): `match call() { Some(x) => ... }` on a
   direct call to a `-> Option<T>` function now reads the correct union slot for a
   non-`i32` scalar payload. Previously the match defaulted the payload type to
