@@ -10,6 +10,13 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Stdlib (iterator `.any()` / `.all()`): predicate terminals join the accumulator
+  family. `.any(|x| pred)` folds the per-element predicate with OR from `false`;
+  `.all(|x| pred)` with AND from `true`. Without them a chain ending in either
+  left `.iter()` undefined. Verified end-to-end under MSVC over `[1,2,3,4]`:
+  `any(x>3)`=true, `any(x>9)`=false, `all(x>0)`=true, `all(x>2)`=false. Covered by
+  `iterator_any_all_predicate_terminals_desugar`. (Evaluates the whole range - no
+  early short-circuit - which is correct but not optimal.)
 - Stdlib (`String::push_str`): `s.push_str(x)` now appends in place. It was
   unimplemented (lowered to an undefined `push_str` symbol that failed to link).
   It now reassigns the receiver local to `build_string_concat(s, x)` (string
