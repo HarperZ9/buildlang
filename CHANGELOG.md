@@ -18,6 +18,15 @@ tracked in `STATUS.md`, `README.md`, and
   This is the native, embedded integration path for any C-ABI library. Covered
   by parser, lowering, and C-backend tests (`extern_block_header_*`,
   `extern_header_clause_lowers_to_mir_link_header`, `c_backend_*header*`).
+- Native FFI: extern blocks also accept an optional `link "..."` clause naming
+  the library to link. `buildc build` passes it to the C compiler (`-lname`
+  for gcc/clang/cc, `name.lib` for MSVC) and the emitted C records a greppable
+  `// buildc-link: name` note. The `link` and `header` clauses may appear in
+  either order, so a program that calls a third-party C library builds and
+  links in one command. Covered by parser, lowering, `GeneratedCode`, and
+  `user_link_flags` tests (`extern_block_link_*`,
+  `extern_link_clause_lowers_to_mir_link_lib`, `generated_code_*link*`,
+  `user_link_flags_format_per_toolchain`).
 - Presentation pass: README hero and brand assets under `docs/brand/`, Build ecosystem navigation, and Current status / Operator surface blocks.
 - Documented the operator surface across the `buildc` CLI and the bundled LSP server.
 - Relicensed to the BuildLang Fair-Source License v1.0 under the operator's umbrella.
