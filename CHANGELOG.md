@@ -10,6 +10,12 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Stdlib (iterator `enumerate().map(|(i, x)| ...)`): a map closure with a single
+  tuple parameter `|(i, x)|` after `.enumerate()` now binds both the index and the
+  element. Previously only `|i, x|` (two separate params) was handled; the tuple
+  form bound neither (C2065 'i' undeclared). Verified end-to-end under MSVC:
+  `v.iter().enumerate().map(|(i, x)| i + x).sum()` over `[10,20,30]` is
+  `63 = (0+10)+(1+20)+(2+30)`. Covered by `enumerate_map_binds_a_tuple_param`.
 - Stdlib (nested `Vec<Vec<_>>` / `Vec<HashMap<_,_>>`): a vector whose element is
   itself a collection now works. `grid.push(row)` dispatched to
   `build_hvec_push_i32`, passing a `BuildVecHandle` where an `int32_t` was expected
