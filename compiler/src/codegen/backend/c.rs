@@ -2074,6 +2074,32 @@ impl CBackend {
                     return Ok(());
                 }
 
+                // String::from(s) → build_string_new(<s as const char*>): copy the
+                // &str into a freshly allocated owned String. A &str literal/value
+                // is a BuildString here, whose char buffer is its `.ptr` field;
+                // anything else is already a `const char*`. (Without this,
+                // String::from lowered to an undefined `String_from` symbol.)
+                if func_str == "String_from" && args.len() == 1 {
+                    if let Some(dest_local) = dest {
+                        let dest_name = self.local_name(*dest_local, locals);
+                        let arg = self.value_to_c(&args[0], locals);
+                        let arg_is_string = matches!(&args[0],
+                            MirValue::Local(l) if locals.iter().any(|loc| loc.id == *l
+                                && matches!(loc.ty, MirType::Struct(ref n) if n.as_ref() == "BuildString")));
+                        let cptr = if arg_is_string {
+                            format!("{}.ptr", arg)
+                        } else {
+                            arg
+                        };
+                        write!(self.output, "{} = build_string_new({});\n", dest_name, cptr).unwrap();
+                    }
+                    if let Some(target) = target {
+                        self.write_indent();
+                        write!(self.output, "goto bb{};\n", target.0).unwrap();
+                    }
+                    return Ok(());
+                }
+
                 // clone(x) → direct copy (x is value-typed in C)
                 if func_str == "clone" && args.len() == 1 {
                     let arg_str = self.value_to_c(&args[0], locals);
