@@ -7,13 +7,13 @@
 
 > The Effects Language: a Rust-built compiler for typed effects, systems experiments, and shader-oriented code generation.
 
-[Build ecosystem](https://github.com/HarperZ9/build-universe) | [buildlang](https://github.com/HarperZ9/buildlang) | [build-universe](https://github.com/HarperZ9/build-universe) | [VS Code extension](https://github.com/HarperZ9/buildlang-vscode) | [grammar](https://github.com/HarperZ9/buildlang-tmLanguage)
+[Build ecosystem](https://github.com/HarperZ9/quanta-universe) | [buildlang](https://github.com/HarperZ9/quantalang) | [build-universe](https://github.com/HarperZ9/quanta-universe) | [VS Code extension](https://github.com/HarperZ9/quantalang-vscode) | [grammar](https://github.com/HarperZ9/quantalang-tmLanguage)
 
 [![license: fair-source](https://img.shields.io/badge/license-fair--source-blue.svg)](LICENSE)
 ![rust](https://img.shields.io/badge/rust-edition_2021-orange.svg)
 ![version](https://img.shields.io/badge/version-1.0.0-informational.svg)
-[![CI](https://github.com/HarperZ9/buildlang/actions/workflows/ci.yml/badge.svg)](https://github.com/HarperZ9/buildlang/actions/workflows/ci.yml)
-[![part of: Build ecosystem](https://img.shields.io/badge/part_of-Build_ecosystem-00b3a4.svg)](https://github.com/HarperZ9/build-universe)
+[![CI](https://github.com/HarperZ9/quantalang/actions/workflows/ci.yml/badge.svg)](https://github.com/HarperZ9/quantalang/actions/workflows/ci.yml)
+[![part of: Build ecosystem](https://img.shields.io/badge/part_of-Build_ecosystem-00b3a4.svg)](https://github.com/HarperZ9/quanta-universe)
 
 **The Effects Language** - a Rust-built compiler for typed effects, systems
 experiments, and shader-oriented code generation.
@@ -30,6 +30,7 @@ experimental research surfaces.
 - **Release:** BuildLang 1.0.x; compiler binary `buildc`; built with Rust (edition 2021). C is the production-grade verified backend; HLSL and GLSL ship for shader work; SPIR-V, LLVM IR, WebAssembly, Rust, x86-64, and ARM64 stay labeled experimental.
 - **Operator surface:** the `buildc` CLI exposes `lex`, `parse`, `check` (with `--receipt` / `--policy`), `build`, `run`, `test`, `repl`, `fmt`, `pkg`, `watch`, `doctor`, `corpus`, `policy`, `receipt`, and an `lsp` subcommand that starts a bundled LSP server (completion, hover, diagnostics, go-to-definition, semantic tokens). The CLI and the LSP server are the two integration surfaces; accountability receipts (`buildlang-receipt-verification/v1`) carry SHA-256 source digests for re-checkable codegen.
 - **Umbrella:** part of the operator's Build ecosystem alongside `build-universe`, the VS Code extension, and the TextMate grammar; standalone and not dependent on any single host.
+- **Repository naming:** public product names are BuildLang, `buildc`, and `.bld`. The GitHub repository still uses its legacy slug until the public repo rename is finished.
 - **Housekeeping:** ground-truth release evidence lives in `STATUS.md`; [CHANGELOG.md](CHANGELOG.md) tracks the current presentation pass under Unreleased.
 
 ## Install
@@ -100,6 +101,25 @@ See [USAGE.md](USAGE.md) for an install/build line, the full command and
 backend reference, and worked examples (run, type-check with a policy receipt,
 and shader output) with expected output. A runnable demo lives in
 [examples/demo](examples/demo).
+
+## For developers
+
+The main implementation lives under `compiler/`. Use the targeted checks below
+before changing public compiler behavior, receipts, corpus verification, or the
+CLI surface:
+
+```bash
+cargo test --manifest-path compiler/Cargo.toml --bin buildc --quiet
+cargo fmt --manifest-path compiler/Cargo.toml --check
+cargo clippy --manifest-path compiler/Cargo.toml -- -D clippy::correctness -A clippy::complexity -A clippy::style -A clippy::pedantic -A clippy::perf
+buildc doctor
+buildc corpus verify
+git diff --check
+```
+
+Keep `.bld` examples, `buildc` command docs, receipts, and semantic-corpus
+evidence aligned. When behavior changes, update tests and public docs in the
+same branch.
 
 ## Shader Example
 
@@ -576,6 +596,85 @@ The substrate path now also carries a checked
 `buildlang-symbol-graph-receipt/v0` artifact that recomputes source/MIR/effect
 symbol evidence during `buildc corpus verify` without claiming call graph, LSP
 readiness, or package API completion.
+
+### Native FFI: header-backed extern blocks
+
+An `extern` block can name the C header that backs its declarations with a
+`header "..."` clause, and the library to link with a `link "..."` clause. The
+two clauses may appear in either order after the ABI. The C backend emits the
+matching `#include` and trusts that header for the prototypes, types, and
+macros instead of synthesizing its own declaration, and `buildc build` passes
+the named library to the C compiler. This is how BuildLang integrates a
+third-party C-ABI library natively and links it in one command, and through the
+C ABI it reaches any language that exposes one, such as C, C++, Rust, and Zig:
+
+```build
+extern "C" link "sqlite3" header "<sqlite3.h>" {
+    fn sqlite3_libversion() -> &str;
+}
+
+fn main() ~ Foreign {
+    let version = sqlite3_libversion();
+}
+```
+
+A header written in angle-bracket form (`"<sqlite3.h>"`) becomes
+`#include <sqlite3.h>` for system and library headers; any other form
+(`"mylib.h"`) becomes `#include "mylib.h"` for local headers. Headers are
+emitted once each and in sorted order so generated C stays reproducible for
+receipts. A `link "sqlite3"` clause adds the library to the C compiler
+invocation (`-lsqlite3` for gcc/clang/cc, `sqlite3.lib` for MSVC) and records a
+`// buildc-link: sqlite3` note in the emitted C so the requirement is visible
+under `--emit c`. An extern block with no `header` clause keeps the existing
+behavior: buildc synthesizes a prototype for non-standard functions and relies
+on the standard includes for the C library. Foreign `static` declarations work
+the same way: a `static` carries the block's `header`/`link` and is emitted as
+an external reference (the header declares it, or buildc emits a bare
+`extern <type> <name>;`), never a conflicting definition. A function may end
+with a C-style `...` to declare it variadic, so `printf`-family functions work:
+
+```build
+extern "C" {
+    fn printf(fmt: &str, ...) -> i32;
+}
+
+fn main() ~ Foreign {
+    printf("%d and %d\n", 1, 2);
+}
+```
+
+A variadic call may pass more arguments than there are fixed parameters (the
+extra ones are unchecked, as in C), while a non-variadic call still requires an
+exact argument count. Foreign calls still require the `Foreign` capability
+effect, so native interop stays inside the same accountability gate as every
+other ambient surface.
+
+### Exporting BuildLang functions to C
+
+Interop runs both directions. An `extern "C" fn` definition gives a BuildLang
+function C linkage and a stable, unmangled symbol name, so it compiles to a
+non-`static` C function that C, and any language that speaks the C ABI, can
+call directly:
+
+```build
+extern "C" fn buildlang_square(n: i32) -> i32 {
+    n * n
+}
+```
+
+```c
+// from C:
+extern int buildlang_square(int n);
+int r = buildlang_square(7);  // 49
+```
+
+Ordinary BuildLang functions stay internal (`static`) so a whole-program build
+keeps a clean symbol table; only functions you explicitly mark `extern "C"` are
+exported. `buildc build --emit header` writes a `main.h` declaring those
+exports (with an include guard and a `#ifdef __cplusplus extern "C"` guard), so
+C and C++ consumers can `#include` it instead of hand-writing prototypes.
+Together with header-backed extern blocks, this closes the loop: BuildLang can
+call into any C-ABI library and be called by any C-ABI consumer.
 
 ## Status
 

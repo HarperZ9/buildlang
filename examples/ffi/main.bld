@@ -1,0 +1,32 @@
+// Native FFI: header-backed extern block with automatic linking
+// =============================================================
+//
+// A `header "..."` clause names the C header that backs an extern block's
+// declarations; a `link "..."` clause names the library to link against.
+// The two clauses may appear in either order after the ABI.
+//
+// When BuildLang compiles to C, the backend:
+//   - emits `#include <sqlite3.h>` and trusts that header for the prototype
+//     (it never synthesizes its own, possibly-conflicting, declaration), and
+//   - records `sqlite3` as a required link library.
+// `buildc build` then passes the library to the C compiler automatically
+// (`-lsqlite3` for gcc/clang/cc, `sqlite3.lib` for MSVC), so a program that
+// calls into a third-party C library builds and links in one command.
+//
+// Inspect the generated C and link requirement with:
+//     buildc build examples/ffi --emit c
+// Build and link the executable in one step (needs sqlite3 installed):
+//     buildc build examples/ffi
+
+extern "C" link "sqlite3" header "<sqlite3.h>" {
+    // SQLite's real prototype is `const char *sqlite3_libversion(void);`.
+    // We never re-declare it: the included header is authoritative.
+    fn sqlite3_libversion() -> &str;
+}
+
+// Calling into a foreign library is an effectful boundary, so `main` must
+// declare the `Foreign` capability. Native interop stays inside the same
+// accountability gate as every other ambient surface in BuildLang.
+fn main() ~ Foreign {
+    let _version = sqlite3_libversion();
+}

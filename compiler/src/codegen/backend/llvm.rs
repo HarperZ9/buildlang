@@ -1260,6 +1260,11 @@ impl LlvmBackend {
             MirStmtKind::Assign { dest, value } => {
                 self.gen_assign(*dest, value, func)?;
             }
+            MirStmtKind::GlobalStore { .. } => {
+                return Err(CodegenError::Unsupported(
+                    "store to a module global is not yet supported in the LLVM backend".to_string(),
+                ));
+            }
             MirStmtKind::DerefAssign { ptr, .. } => {
                 let ptr_name = self.get_local_name(*ptr)?;
                 writeln!(&mut self.output, "  ; deref_store *{} = <value>", ptr_name).unwrap();

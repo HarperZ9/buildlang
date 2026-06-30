@@ -547,7 +547,8 @@ impl<'ctx> TypeChecker<'ctx> {
                         sig.ret.clone(),
                         effects,
                         sig.lifetime_params.clone(),
-                    );
+                    )
+                    .with_variadic(f.sig.is_variadic);
                     self.ctx.define_var(f.name.name.clone(), fn_ty);
                     self.ctx.register_foreign_function(f.name.name.clone());
                 }
@@ -1613,6 +1614,36 @@ mod tests {
         checker.set_source_file(&source_file);
         checker.check_module(&module);
         checker.take_errors()
+    }
+
+    #[test]
+    fn variadic_extern_call_with_extra_args_typechecks() {
+        let errors = check_source(
+            "extern \"C\" { fn my_printf(fmt: &str, ...) -> i32; }\n\
+             fn main() ~ Foreign { my_printf(\"%d %d\", 1, 2); }",
+        );
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e.error, TypeError::ArityMismatch { .. })),
+            "a variadic extern call with extra args must not raise ArityMismatch: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn non_variadic_call_with_extra_args_still_errors() {
+        let errors = check_source(
+            "extern \"C\" { fn takes_one(x: i32) -> i32; }\n\
+             fn main() ~ Foreign { takes_one(1, 2); }",
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e.error, TypeError::ArityMismatch { .. })),
+            "a non-variadic call with extra args must still raise ArityMismatch: {:?}",
+            errors
+        );
     }
 
     #[test]

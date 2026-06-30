@@ -1474,11 +1474,16 @@ impl<'ctx> MirLowerer<'ctx> {
         false
     }
 
-    pub(crate) fn lower_print_macro(
+    /// Shared format-macro processing for `print!`/`println!`/`format!`: parse
+    /// the format string and arguments, convert `{}`/`{:?}`/`{:.N}` placeholders
+    /// to C printf specifiers, intern the C format string, and return its string
+    /// index plus the lowered argument values (BuildString args reduced to their
+    /// `.ptr`, trimmed to the placeholder count).
+    fn prepare_format_call(
         &mut self,
         tokens: &[ast::TokenTree],
         newline: bool,
-    ) -> CodegenResult<()> {
+    ) -> CodegenResult<(u32, Vec<MirValue>)> {
         // Extract the format string from the macro tokens.
         let format_str = self.extract_string_from_tokens(tokens);
 
@@ -1615,32 +1620,60 @@ impl<'ctx> MirLowerer<'ctx> {
 
         // Trim arg_values to the number of placeholders we actually found.
         let arg_values: Vec<MirValue> = arg_values.into_iter().take(placeholder_count).collect();
+        Ok((str_idx, arg_values))
+    }
 
+    /// `print!`/`println!`/`eprint!`/`dbg!`: format the arguments and write the
+    /// result to stdout via printf.
+    pub(crate) fn lower_print_macro(
+        &mut self,
+        tokens: &[ast::TokenTree],
+        newline: bool,
+    ) -> CodegenResult<()> {
+        let (str_idx, arg_values) = self.prepare_format_call(tokens, newline)?;
         let builder = self
             .current_fn
             .as_mut()
             .ok_or_else(|| CodegenError::Internal("No current function for macro".into()))?;
-
-        // Create a local for the format string pointer
         let fmt_local = builder.create_local(MirType::Ptr(Box::new(MirType::i8())));
         builder.assign(
             fmt_local,
             MirRValue::Use(MirValue::Const(MirConst::Str(str_idx))),
         );
-
-        // Create a continuation block for after the call
         let continue_block = builder.create_block();
-
-        // Call printf with format string + arguments
         let printf_fn = MirValue::Function(Arc::from("printf"));
         let mut call_args = vec![MirValue::Local(fmt_local)];
         call_args.extend(arg_values);
         builder.call(printf_fn, call_args, None, continue_block);
-
-        // Switch to the continuation block
         builder.switch_to_block(continue_block);
-
         Ok(())
+    }
+
+    /// `format!`: build an owned `BuildString` from the format string and
+    /// arguments via the variadic `build_sprintf` runtime function (no trailing
+    /// newline; returns the string instead of printing it).
+    pub(crate) fn lower_format_macro(
+        &mut self,
+        tokens: &[ast::TokenTree],
+    ) -> CodegenResult<MirValue> {
+        let (str_idx, arg_values) = self.prepare_format_call(tokens, false)?;
+        let builder = self
+            .current_fn
+            .as_mut()
+            .ok_or_else(|| CodegenError::Internal("No current function for macro".into()))?;
+        let fmt_local = builder.create_local(MirType::Ptr(Box::new(MirType::i8())));
+        builder.assign(
+            fmt_local,
+            MirRValue::Use(MirValue::Const(MirConst::Str(str_idx))),
+        );
+        let result = builder.create_local(MirType::Struct(Arc::from("BuildString")));
+        let continue_block = builder.create_block();
+        let sprintf_fn = MirValue::Function(Arc::from("build_sprintf"));
+        let mut call_args = vec![MirValue::Local(fmt_local)];
+        call_args.extend(arg_values);
+        builder.call(sprintf_fn, call_args, Some(result), continue_block);
+        builder.switch_to_block(continue_block);
+        Ok(values::local(result))
     }
 
     /// Extract the source text of each argument expression in a macro call,
@@ -1977,6 +2010,15 @@ impl<'ctx> MirLowerer<'ctx> {
                 init: &terminal_args[0],
                 closure: &terminal_args[1],
             },
+            "sum" if terminal_args.is_empty() => IterTerminal::Sum,
+            "count" if terminal_args.is_empty() => IterTerminal::Count,
+            "product" if terminal_args.is_empty() => IterTerminal::Product,
+            "any" if terminal_args.len() == 1 => IterTerminal::Any {
+                closure: &terminal_args[0],
+            },
+            "all" if terminal_args.len() == 1 => IterTerminal::All {
+                closure: &terminal_args[0],
+            },
             _ => return None,
         };
 
@@ -2005,6 +2047,10 @@ impl<'ctx> MirLowerer<'ctx> {
                         }
                         "map" if args.len() == 1 => {
                             steps.push(IterStep::Map { closure: &args[0] });
+                            current = receiver;
+                        }
+                        "filter" if args.len() == 1 => {
+                            steps.push(IterStep::Filter { closure: &args[0] });
                             current = receiver;
                         }
                         "enumerate" if args.is_empty() => {
@@ -2122,6 +2168,52 @@ impl<'ctx> MirLowerer<'ctx> {
                 builder.assign(acc, MirRValue::Use(init_val));
                 (acc, false)
             }
+            IterTerminal::Sum => {
+                // Accumulator of the output element type, initialized to zero.
+                let zero = match &output_elem_ty {
+                    MirType::Float(_) => MirConst::Float(0.0, output_elem_ty.clone()),
+                    _ => MirConst::Int(0, output_elem_ty.clone()),
+                };
+                let builder = self.current_fn.as_mut().unwrap();
+                let acc = builder.create_local(output_elem_ty.clone());
+                builder.assign(acc, MirRValue::Use(MirValue::Const(zero)));
+                (acc, false)
+            }
+            IterTerminal::Count => {
+                // i64 counter initialized to zero; the element value is ignored.
+                let builder = self.current_fn.as_mut().unwrap();
+                let acc = builder.create_local(MirType::i64());
+                builder.assign(
+                    acc,
+                    MirRValue::Use(MirValue::Const(MirConst::Int(0, MirType::i64()))),
+                );
+                (acc, false)
+            }
+            IterTerminal::Product => {
+                // Accumulator of the output element type, initialized to one.
+                let one = match &output_elem_ty {
+                    MirType::Float(_) => MirConst::Float(1.0, output_elem_ty.clone()),
+                    _ => MirConst::Int(1, output_elem_ty.clone()),
+                };
+                let builder = self.current_fn.as_mut().unwrap();
+                let acc = builder.create_local(output_elem_ty.clone());
+                builder.assign(acc, MirRValue::Use(MirValue::Const(one)));
+                (acc, false)
+            }
+            IterTerminal::Any { .. } => {
+                // bool accumulator, false until a matching element is seen.
+                let builder = self.current_fn.as_mut().unwrap();
+                let acc = builder.create_local(MirType::Bool);
+                builder.assign(acc, MirRValue::Use(MirValue::Const(MirConst::Bool(false))));
+                (acc, false)
+            }
+            IterTerminal::All { .. } => {
+                // bool accumulator, true until a non-matching element is seen.
+                let builder = self.current_fn.as_mut().unwrap();
+                let acc = builder.create_local(MirType::Bool);
+                builder.assign(acc, MirRValue::Use(MirValue::Const(MirConst::Bool(true))));
+                (acc, false)
+            }
         };
 
         // 6. Create the loop: for i in 0..len { ... }
@@ -2190,6 +2282,24 @@ impl<'ctx> MirLowerer<'ctx> {
                         },
                     )?;
                 }
+                IterStep::Filter { closure } => {
+                    // Evaluate the predicate on the current element; if it does
+                    // not hold, skip straight to the increment block (drop this
+                    // element from the rest of the pipeline and the terminal).
+                    let keep = self.lower_iter_map_inline(
+                        closure,
+                        current_val.clone(),
+                        if has_enumerate {
+                            Some(values::local(idx_local))
+                        } else {
+                            None
+                        },
+                    )?;
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let keep_block = builder.create_block();
+                    builder.branch(keep, keep_block, incr_block);
+                    builder.switch_to_block(keep_block);
+                }
                 IterStep::Enumerate => {
                     // enumerate doesn't change the value; it just means
                     // subsequent map closures get (index, elem).  The index
@@ -2220,6 +2330,66 @@ impl<'ctx> MirLowerer<'ctx> {
                     self.lower_iter_fold_inline(closure, values::local(result_local), current_val)?;
                 let builder = self.current_fn.as_mut().unwrap();
                 builder.assign(result_local, MirRValue::Use(new_acc));
+            }
+            IterTerminal::Sum => {
+                // acc = acc + current_val
+                let val_ty = self.type_of_value(&current_val);
+                let builder = self.current_fn.as_mut().unwrap();
+                let next = builder.create_local(val_ty);
+                builder.binary_op(next, BinOp::Add, values::local(result_local), current_val);
+                builder.assign(result_local, MirRValue::Use(values::local(next)));
+            }
+            IterTerminal::Count => {
+                // acc = acc + 1 (the element value is unused)
+                let builder = self.current_fn.as_mut().unwrap();
+                let next = builder.create_local(MirType::i64());
+                builder.binary_op(
+                    next,
+                    BinOp::Add,
+                    values::local(result_local),
+                    MirValue::Const(MirConst::Int(1, MirType::i64())),
+                );
+                builder.assign(result_local, MirRValue::Use(values::local(next)));
+            }
+            IterTerminal::Product => {
+                // acc = acc * current_val
+                let val_ty = self.type_of_value(&current_val);
+                let builder = self.current_fn.as_mut().unwrap();
+                let next = builder.create_local(val_ty);
+                builder.binary_op(next, BinOp::Mul, values::local(result_local), current_val);
+                builder.assign(result_local, MirRValue::Use(values::local(next)));
+            }
+            IterTerminal::Any { closure } => {
+                // acc = acc || pred(elem)  (bitwise-or on bool is correct here)
+                let pred = self.lower_iter_map_inline(
+                    closure,
+                    current_val,
+                    if has_enumerate {
+                        Some(values::local(idx_local))
+                    } else {
+                        None
+                    },
+                )?;
+                let builder = self.current_fn.as_mut().unwrap();
+                let next = builder.create_local(MirType::Bool);
+                builder.binary_op(next, BinOp::BitOr, values::local(result_local), pred);
+                builder.assign(result_local, MirRValue::Use(values::local(next)));
+            }
+            IterTerminal::All { closure } => {
+                // acc = acc && pred(elem)  (bitwise-and on bool is correct here)
+                let pred = self.lower_iter_map_inline(
+                    closure,
+                    current_val,
+                    if has_enumerate {
+                        Some(values::local(idx_local))
+                    } else {
+                        None
+                    },
+                )?;
+                let builder = self.current_fn.as_mut().unwrap();
+                let next = builder.create_local(MirType::Bool);
+                builder.binary_op(next, BinOp::BitAnd, values::local(result_local), pred);
+                builder.assign(result_local, MirRValue::Use(values::local(next)));
             }
         }
 
@@ -2295,6 +2465,31 @@ impl<'ctx> MirLowerer<'ctx> {
                     let local = builder.create_local(param_ty);
                     builder.assign(local, MirRValue::Use(elem_val));
                     self.var_map.insert(name.name.clone(), local);
+                }
+            } else if params.len() == 1
+                && index_val.is_some()
+                && matches!(&params[0].pattern.kind, ast::PatternKind::Tuple(t) if t.len() == 2)
+            {
+                // enumerate-style with a tuple param: |(i, x)| body.
+                // First tuple element = index, second = element.
+                if let ast::PatternKind::Tuple(elems) = &params[0].pattern.kind {
+                    if let ast::PatternKind::Ident { name, .. } = &elems[0].kind {
+                        let old = self.var_map.get(&name.name).copied();
+                        saved.push((name.name.clone(), old));
+                        let builder = self.current_fn.as_mut().unwrap();
+                        let local = builder.create_local(MirType::i64());
+                        builder.assign(local, MirRValue::Use(index_val.clone().unwrap()));
+                        self.var_map.insert(name.name.clone(), local);
+                    }
+                    if let ast::PatternKind::Ident { name, .. } = &elems[1].kind {
+                        let old = self.var_map.get(&name.name).copied();
+                        saved.push((name.name.clone(), old));
+                        let elem_ty = self.type_of_value(&elem_val);
+                        let builder = self.current_fn.as_mut().unwrap();
+                        let local = builder.create_local(elem_ty);
+                        builder.assign(local, MirRValue::Use(elem_val));
+                        self.var_map.insert(name.name.clone(), local);
+                    }
                 }
             } else if let Some(first_param) = params.first() {
                 // Single-param: |x| body
@@ -2444,7 +2639,7 @@ impl<'ctx> MirLowerer<'ctx> {
                         }
                     }
                 }
-                IterStep::Enumerate | IterStep::Cloned => {
+                IterStep::Filter { .. } | IterStep::Enumerate | IterStep::Cloned => {
                     // These don't change the element type.
                 }
             }

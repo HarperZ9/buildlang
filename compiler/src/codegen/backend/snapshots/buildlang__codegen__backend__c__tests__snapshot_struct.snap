@@ -29,6 +29,7 @@ expression: code
 #include <ctype.h>
 #include <time.h>
 #include <assert.h>
+#include <stdarg.h>
 
 #ifdef _WIN32
 #undef DeviceCapabilities
@@ -81,7 +82,11 @@ typedef struct {
         double ok_f;
         void* ok_p;
     } ok;
-    BuildString err;
+    union {
+        int64_t err_i;
+        double err_f;
+        void* err_p;
+    } err;
 } Result;
 
 // --- Collection types (opaque handles) ---
@@ -147,6 +152,12 @@ static bool build_string_eq(BuildString a, BuildString b) {
 
 static void build_string_free(BuildString s) {
     if (s.cap > 0) free((void*)s.ptr);
+}
+
+// Byte at index `i` of a string (as an int32), for `for c in s.chars()`.
+static int32_t build_string_byte_at(BuildString s, size_t i) {
+    if (i >= s.len) return 0;
+    return (int32_t)(unsigned char)s.ptr[i];
 }
 
 // --- Vec (dynamic array) type ---
@@ -222,6 +233,63 @@ static int32_t build_hvec_pop_i32(BuildVecHandle h) {
     return *(int32_t*)((char*)h.inner->ptr + h.inner->len * h.inner->elem_size);
 }
 static void build_hvec_free(BuildVecHandle h) { build_vec_free(h.inner); free(h.inner); }
+static int __build_cmp_i32(const void* a, const void* b) {
+    int32_t x = *(const int32_t*)a, y = *(const int32_t*)b;
+    return (x > y) - (x < y);
+}
+static int __build_cmp_i64(const void* a, const void* b) {
+    int64_t x = *(const int64_t*)a, y = *(const int64_t*)b;
+    return (x > y) - (x < y);
+}
+static int __build_cmp_f64(const void* a, const void* b) {
+    double x = *(const double*)a, y = *(const double*)b;
+    return (x > y) - (x < y);
+}
+static void build_hvec_sort_i32(BuildVecHandle h) {
+    if (h.inner->len > 1) qsort(h.inner->ptr, h.inner->len, sizeof(int32_t), __build_cmp_i32);
+}
+static void build_hvec_sort_i64(BuildVecHandle h) {
+    if (h.inner->len > 1) qsort(h.inner->ptr, h.inner->len, sizeof(int64_t), __build_cmp_i64);
+}
+static void build_hvec_sort_f64(BuildVecHandle h) {
+    if (h.inner->len > 1) qsort(h.inner->ptr, h.inner->len, sizeof(double), __build_cmp_f64);
+}
+static void build_hvec_set_i32(BuildVecHandle h, size_t i, int32_t val) {
+    if (i < h.inner->len) *(int32_t*)build_vec_get(h.inner, i) = val;
+}
+static void build_hvec_set_i64(BuildVecHandle h, size_t i, int64_t val) {
+    if (i < h.inner->len) *(int64_t*)build_vec_get(h.inner, i) = val;
+}
+static void build_hvec_set_f64(BuildVecHandle h, size_t i, double val) {
+    if (i < h.inner->len) *(double*)build_vec_get(h.inner, i) = val;
+}
+static void build_hvec_set_str(BuildVecHandle h, size_t i, BuildString val) {
+    if (i < h.inner->len) *(BuildString*)build_vec_get(h.inner, i) = val;
+}
+static bool build_hvec_contains_i32(BuildVecHandle h, int32_t val) {
+    for (size_t i = 0; i < h.inner->len; i++) {
+        if (*(int32_t*)build_vec_get(h.inner, i) == val) return true;
+    }
+    return false;
+}
+static bool build_hvec_contains_i64(BuildVecHandle h, int64_t val) {
+    for (size_t i = 0; i < h.inner->len; i++) {
+        if (*(int64_t*)build_vec_get(h.inner, i) == val) return true;
+    }
+    return false;
+}
+static bool build_hvec_contains_f64(BuildVecHandle h, double val) {
+    for (size_t i = 0; i < h.inner->len; i++) {
+        if (*(double*)build_vec_get(h.inner, i) == val) return true;
+    }
+    return false;
+}
+static bool build_hvec_contains_str(BuildVecHandle h, BuildString val) {
+    for (size_t i = 0; i < h.inner->len; i++) {
+        if (build_string_eq(*(BuildString*)build_vec_get(h.inner, i), val)) return true;
+    }
+    return false;
+}
 
 // f64 handle variants
 static BuildVecHandle build_hvec_new_f64(void) {
@@ -281,7 +349,31 @@ static BuildString build_format_str(const char* fmt, const char* v) {
 }
 
 static BuildString build_i32_to_string(int32_t v) { return build_format_i32("%d", v); }
+static BuildString build_i64_to_string(int64_t v) {
+    char buf[32];
+    int n = snprintf(buf, sizeof(buf), "%lld", (long long)v);
+    char* heap = (char*)malloc(n + 1);
+    memcpy(heap, buf, n + 1);
+    BuildString qs; qs.ptr = heap; qs.len = n; qs.cap = n + 1;
+    return qs;
+}
 static BuildString build_f64_to_string(double v) { return build_format_f64("%g", v); }
+
+// Variadic sprintf into a heap-owned BuildString. Backs the `format!` macro:
+// the lowering builds a C printf-style format string and passes the same
+// arguments it would to printf, but the result is captured as an owned string.
+static BuildString build_sprintf(const char* fmt, ...) {
+    va_list args; va_start(args, fmt);
+    va_list args2; va_copy(args2, args);
+    int n = vsnprintf(NULL, 0, fmt, args);
+    va_end(args);
+    if (n < 0) { va_end(args2); return build_string_new(""); }
+    char* heap = (char*)malloc((size_t)n + 1);
+    vsnprintf(heap, (size_t)n + 1, fmt, args2);
+    va_end(args2);
+    BuildString qs; qs.ptr = heap; qs.len = (size_t)n; qs.cap = (size_t)n + 1;
+    return qs;
+}
 
 // --- Math constants ---
 static const double BUILD_PI = 3.14159265358979323846;
@@ -1135,6 +1227,22 @@ static BuildVec build_string_split_ws(BuildString s) {
 static BuildVec build_string_lines(BuildString s) {
     BuildString delim; delim.ptr = "\n"; delim.len = 1; delim.cap = 0;
     return build_string_split(s, delim);
+}
+
+// Handle-returning split variants: box the BuildVec so the result is a proper
+// Vec<String> (BuildVecHandle), integrating with build_hvec_len / build_hvec_get_str
+// / for-loop iteration / indexing.
+static BuildVecHandle build_string_split_h(BuildString s, BuildString delim) {
+    BuildVecHandle h; h.inner = (BuildVec*)malloc(sizeof(BuildVec));
+    *h.inner = build_string_split(s, delim); return h;
+}
+static BuildVecHandle build_string_split_ws_h(BuildString s) {
+    BuildVecHandle h; h.inner = (BuildVec*)malloc(sizeof(BuildVec));
+    *h.inner = build_string_split_ws(s); return h;
+}
+static BuildVecHandle build_string_lines_h(BuildString s) {
+    BuildVecHandle h; h.inner = (BuildVec*)malloc(sizeof(BuildVec));
+    *h.inner = build_string_lines(s); return h;
 }
 
 // --- Command-line arguments ---

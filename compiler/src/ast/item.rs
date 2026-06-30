@@ -124,6 +124,9 @@ pub struct FnSig {
     pub abi: Option<String>,
     /// Parameters.
     pub params: Vec<Param>,
+    /// Whether the function ends with a C-style `...` variadic marker. Only
+    /// meaningful for `extern "C"` functions (e.g. `printf`).
+    pub is_variadic: bool,
     /// Return type (None for unit).
     pub return_ty: Option<Box<Type>>,
     /// Effect annotations.
@@ -138,6 +141,7 @@ impl Default for FnSig {
             is_const: false,
             abi: None,
             params: Vec::new(),
+            is_variadic: false,
             return_ty: None,
             effects: Vec::new(),
         }
@@ -461,6 +465,20 @@ pub struct ExternBlockDef {
     pub is_unsafe: bool,
     /// ABI.
     pub abi: Option<String>,
+    /// Backing C header named by an optional `header "..."` clause.
+    ///
+    /// When present, the C backend emits an `#include` for this header and
+    /// trusts it for the prototypes of the block's functions instead of
+    /// synthesizing its own `extern` declarations. The string is stored
+    /// verbatim: a value wrapped in `<...>` selects an angle-bracket include
+    /// (system/library headers), anything else selects a quoted include.
+    pub header: Option<String>,
+    /// Library to link named by an optional `link "..."` clause.
+    ///
+    /// When present, `buildc build` adds the library to the C compiler
+    /// invocation (`-lname` for gcc/clang/cc, `name.lib` for MSVC), so a
+    /// program that calls into the library links in one command.
+    pub link: Option<String>,
     /// Items.
     pub items: Vec<ForeignItem>,
 }

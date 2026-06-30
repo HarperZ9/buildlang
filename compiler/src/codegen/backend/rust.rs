@@ -333,6 +333,10 @@ impl RustBackend {
                     rvalue
                 ));
             }
+            MirStmtKind::GlobalStore { name, value } => {
+                let rvalue = self.rvalue_to_rust(value, locals)?;
+                self.writeln(&format!("{} = {};", Self::rust_ident(name), rvalue));
+            }
             MirStmtKind::StorageLive(_) | MirStmtKind::StorageDead(_) | MirStmtKind::Nop => {}
         }
         Ok(())

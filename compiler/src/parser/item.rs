@@ -248,14 +248,36 @@ impl<'a> Parser<'a> {
                         span,
                     ))
                 } else {
-                    let extern_block = self.parse_extern_block(is_unsafe)?;
-                    let span = start.merge(&self.tokens[self.pos.saturating_sub(1)].span);
-                    Ok(Item::new(
-                        ItemKind::ExternBlock(Box::new(extern_block)),
-                        vis,
-                        attrs,
-                        span,
-                    ))
+                    // Optional ABI string after `extern`, consumed here so we can
+                    // tell `extern "C" fn ...` (a C-ABI function definition, i.e.
+                    // an export) apart from `extern "C" { ... }` (an extern block).
+                    let abi = if let TokenKind::Literal { .. } = self.current_kind() {
+                        let token_span = self.advance().span;
+                        Some(self.source.slice(token_span).trim_matches('"').to_string())
+                    } else {
+                        None
+                    };
+
+                    if self.check_keyword(Keyword::Fn) {
+                        let mut fn_def = self.parse_fn(is_unsafe, false, false)?;
+                        fn_def.sig.abi = abi;
+                        let span = start.merge(&self.tokens[self.pos.saturating_sub(1)].span);
+                        Ok(Item::new(
+                            ItemKind::Function(Box::new(fn_def)),
+                            vis,
+                            attrs,
+                            span,
+                        ))
+                    } else {
+                        let extern_block = self.parse_extern_block(is_unsafe, abi)?;
+                        let span = start.merge(&self.tokens[self.pos.saturating_sub(1)].span);
+                        Ok(Item::new(
+                            ItemKind::ExternBlock(Box::new(extern_block)),
+                            vis,
+                            attrs,
+                            span,
+                        ))
+                    }
                 }
             }
 
@@ -343,7 +365,24 @@ impl<'a> Parser<'a> {
         let name = self.expect_ident()?;
         let generics = self.parse_generics()?;
 
-        let (params, _) = self.parse_paren_comma_seq(|p| p.parse_fn_param())?;
+        // Parse the parameter list, detecting a trailing C-style `...` variadic
+        // marker (e.g. `printf(fmt: &str, ...)`). The `...` must be the last
+        // entry and is not itself a parameter.
+        self.expect(&TokenKind::OpenDelim(Delimiter::Paren))?;
+        let mut params = Vec::new();
+        let mut is_variadic = false;
+        while !self.check(&TokenKind::CloseDelim(Delimiter::Paren)) {
+            if self.check(&TokenKind::DotDotDot) {
+                self.advance(); // consume `...`
+                is_variadic = true;
+                break;
+            }
+            params.push(self.parse_fn_param()?);
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(&TokenKind::CloseDelim(Delimiter::Paren))?;
 
         let return_ty = if self.eat(&TokenKind::Arrow) {
             Some(Box::new(self.parse_type()?))
@@ -394,6 +433,7 @@ impl<'a> Parser<'a> {
                 is_const,
                 abi,
                 params,
+                is_variadic,
                 return_ty,
                 effects,
             },
@@ -1375,14 +1415,41 @@ impl<'a> Parser<'a> {
         Ok(ExternCrateDef { name, rename })
     }
 
-    /// Parse extern block.
-    fn parse_extern_block(&mut self, is_unsafe: bool) -> ParseResult<ExternBlockDef> {
-        let abi = if let TokenKind::Literal { .. } = self.current_kind() {
-            let token_span = self.advance().span;
-            Some(self.source.slice(token_span).trim_matches('"').to_string())
-        } else {
-            None
-        };
+    /// Parse extern block. The optional ABI string is parsed by the caller (so
+    /// it can disambiguate `extern "C" fn ...` from a block) and passed in.
+    fn parse_extern_block(
+        &mut self,
+        is_unsafe: bool,
+        abi: Option<String>,
+    ) -> ParseResult<ExternBlockDef> {
+        // Optional `link "lib"` and `header "path"` clauses, in any order,
+        // naming the library to link and the C header that backs the block.
+        // Both are contextual keywords: unambiguous here because an extern
+        // block body opens with `{`, never a bare identifier.
+        let mut link = None;
+        let mut header = None;
+        loop {
+            if !self.check_ident() {
+                break;
+            }
+            let is_link = self.source.slice(self.current_span()) == "link";
+            let is_header = self.source.slice(self.current_span()) == "header";
+            if !is_link && !is_header {
+                break;
+            }
+            self.advance(); // consume `link` or `header`
+            let value = if let TokenKind::Literal { .. } = self.current_kind() {
+                let token_span = self.advance().span;
+                self.source.slice(token_span).trim_matches('"').to_string()
+            } else {
+                return Err(self.error_expected("string literal after extern block clause"));
+            };
+            if is_link {
+                link = Some(value);
+            } else {
+                header = Some(value);
+            }
+        }
 
         self.expect(&TokenKind::OpenDelim(Delimiter::Brace))?;
 
@@ -1396,6 +1463,8 @@ impl<'a> Parser<'a> {
         Ok(ExternBlockDef {
             is_unsafe,
             abi,
+            header,
+            link,
             items,
         })
     }
@@ -1642,6 +1711,157 @@ mod tests {
                 }
             }
             other => panic!("expected Struct, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extern_block_header_clause() {
+        // `header "path"` after the ABI names the backing C header for native FFI.
+        let item =
+            parse_item_str("extern \"C\" header \"sqlite3.h\" { fn sqlite3_libversion() -> i32; }")
+                .unwrap();
+        match &item.kind {
+            ItemKind::ExternBlock(eb) => {
+                assert_eq!(eb.header.as_deref(), Some("sqlite3.h"));
+                assert_eq!(eb.abi.as_deref(), Some("C"));
+            }
+            other => panic!("expected ExternBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extern_block_header_angle_form_preserved() {
+        // The angle-bracket form is kept verbatim so the backend can emit `<...>`.
+        let item =
+            parse_item_str("extern \"C\" header \"<sqlite3.h>\" { fn f() -> i32; }").unwrap();
+        match &item.kind {
+            ItemKind::ExternBlock(eb) => assert_eq!(eb.header.as_deref(), Some("<sqlite3.h>")),
+            other => panic!("expected ExternBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extern_block_without_header_is_none() {
+        let item = parse_item_str("extern \"C\" { fn foo(); }").unwrap();
+        match &item.kind {
+            ItemKind::ExternBlock(eb) => assert_eq!(eb.header, None),
+            other => panic!("expected ExternBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extern_block_header_without_abi() {
+        let item = parse_item_str("extern header \"mylib.h\" { fn g(); }").unwrap();
+        match &item.kind {
+            ItemKind::ExternBlock(eb) => {
+                assert_eq!(eb.header.as_deref(), Some("mylib.h"));
+                assert_eq!(eb.abi, None);
+            }
+            other => panic!("expected ExternBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extern_variadic_fn_parses() {
+        let item = parse_item_str("extern \"C\" { fn printf(fmt: &str, ...) -> i32; }").unwrap();
+        match &item.kind {
+            ItemKind::ExternBlock(eb) => match &eb.items[0].kind {
+                ForeignItemKind::Fn(f) => {
+                    assert!(f.sig.is_variadic, "printf should be variadic");
+                    assert_eq!(f.sig.params.len(), 1, "the `...` is not a normal param");
+                }
+                other => panic!("expected Fn, got {:?}", other),
+            },
+            other => panic!("expected ExternBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn non_variadic_fn_is_not_variadic() {
+        let item = parse_item_str("fn add(a: i32, b: i32) -> i32 { a + b }").unwrap();
+        match &item.kind {
+            ItemKind::Function(f) => assert!(!f.sig.is_variadic),
+            other => panic!("expected Function, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extern_block_link_clause() {
+        // `link "lib"` names the library to link, so `buildc build` can pass -llib.
+        let item = parse_item_str("extern \"C\" link \"sqlite3\" { fn s() -> i32; }").unwrap();
+        match &item.kind {
+            ItemKind::ExternBlock(eb) => {
+                assert_eq!(eb.link.as_deref(), Some("sqlite3"));
+                assert_eq!(eb.header, None);
+            }
+            other => panic!("expected ExternBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extern_block_link_and_header_any_order() {
+        // Both clauses may appear, in either order, after the ABI.
+        let lh = parse_item_str(
+            "extern \"C\" link \"sqlite3\" header \"<sqlite3.h>\" { fn s() -> i32; }",
+        )
+        .unwrap();
+        match &lh.kind {
+            ItemKind::ExternBlock(eb) => {
+                assert_eq!(eb.link.as_deref(), Some("sqlite3"));
+                assert_eq!(eb.header.as_deref(), Some("<sqlite3.h>"));
+            }
+            other => panic!("expected ExternBlock, got {:?}", other),
+        }
+
+        let hl = parse_item_str(
+            "extern \"C\" header \"<sqlite3.h>\" link \"sqlite3\" { fn s() -> i32; }",
+        )
+        .unwrap();
+        match &hl.kind {
+            ItemKind::ExternBlock(eb) => {
+                assert_eq!(eb.link.as_deref(), Some("sqlite3"));
+                assert_eq!(eb.header.as_deref(), Some("<sqlite3.h>"));
+            }
+            other => panic!("expected ExternBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extern_block_without_link_is_none() {
+        let item = parse_item_str("extern \"C\" { fn foo(); }").unwrap();
+        match &item.kind {
+            ItemKind::ExternBlock(eb) => assert_eq!(eb.link, None),
+            other => panic!("expected ExternBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extern_c_fn_definition_parses_as_function() {
+        // `extern "C" fn ... { ... }` is a function definition (a C-ABI export),
+        // not an extern block.
+        let item = parse_item_str("extern \"C\" fn exported_add(a: i32, b: i32) -> i32 { a + b }")
+            .unwrap();
+        match &item.kind {
+            ItemKind::Function(f) => {
+                assert_eq!(f.name.as_str(), "exported_add");
+                assert_eq!(f.sig.abi.as_deref(), Some("C"));
+                assert!(f.body.is_some());
+            }
+            other => panic!("expected Function, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extern_block_still_parses_after_extern_fn_support() {
+        // Regression: `extern "C" { ... }` (with clauses) must still parse as a
+        // block, not be mistaken for a function definition.
+        let item = parse_item_str("extern \"C\" header \"<m.h>\" { fn f() -> i32; }").unwrap();
+        match &item.kind {
+            ItemKind::ExternBlock(eb) => {
+                assert_eq!(eb.header.as_deref(), Some("<m.h>"));
+                assert_eq!(eb.items.len(), 1);
+            }
+            other => panic!("expected ExternBlock, got {:?}", other),
         }
     }
 

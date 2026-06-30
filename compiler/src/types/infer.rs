@@ -3492,7 +3492,14 @@ impl<'ctx> TypeInfer<'ctx> {
 
         match &func_ty.kind {
             TyKind::Fn(fn_ty) => {
-                if fn_ty.params.len() != args.len() {
+                // A C-style variadic function accepts at least its fixed
+                // parameters; the extra arguments are unchecked, as in C.
+                let arity_ok = if fn_ty.is_variadic {
+                    args.len() >= fn_ty.params.len()
+                } else {
+                    args.len() == fn_ty.params.len()
+                };
+                if !arity_ok {
                     self.error(
                         TypeError::ArityMismatch {
                             expected: fn_ty.params.len(),
@@ -3507,6 +3514,14 @@ impl<'ctx> TypeInfer<'ctx> {
                     let arg_ty = self.infer_expr(arg);
                     let _ = self.coerce_arg(param, &arg_ty, span);
                     self.record_effectful_argument_sources(param, &arg_sources, &fn_ty.effects);
+                }
+
+                // Variadic: infer any extra (unchecked) arguments so internal
+                // type errors and effects within them are still recorded.
+                if fn_ty.is_variadic && args.len() > fn_ty.params.len() {
+                    for arg in args.iter().skip(fn_ty.params.len()) {
+                        let _ = self.infer_expr(arg);
+                    }
                 }
 
                 self.record_effectful_callee_sources(&call_sources, &fn_ty.effects);
@@ -5503,6 +5518,7 @@ impl<'ctx> TypeInfer<'ctx> {
                     abi: None,
                     effects: super::effects::EffectRow::empty(),
                     lifetime_params: Vec::new(),
+                    is_variadic: false,
                 }))
             }
             ast::TypeKind::Path(path) => self.lower_type_path(path),
