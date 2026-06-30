@@ -1763,8 +1763,7 @@ mod tests {
 
     #[test]
     fn extern_variadic_fn_parses() {
-        let item =
-            parse_item_str("extern \"C\" { fn printf(fmt: &str, ...) -> i32; }").unwrap();
+        let item = parse_item_str("extern \"C\" { fn printf(fmt: &str, ...) -> i32; }").unwrap();
         match &item.kind {
             ItemKind::ExternBlock(eb) => match &eb.items[0].kind {
                 ForeignItemKind::Fn(f) => {
@@ -1840,9 +1839,8 @@ mod tests {
     fn extern_c_fn_definition_parses_as_function() {
         // `extern "C" fn ... { ... }` is a function definition (a C-ABI export),
         // not an extern block.
-        let item =
-            parse_item_str("extern \"C\" fn exported_add(a: i32, b: i32) -> i32 { a + b }")
-                .unwrap();
+        let item = parse_item_str("extern \"C\" fn exported_add(a: i32, b: i32) -> i32 { a + b }")
+            .unwrap();
         match &item.kind {
             ItemKind::Function(f) => {
                 assert_eq!(f.name.as_str(), "exported_add");

@@ -4839,8 +4839,10 @@ fn invoke_c_compiler(
             let bat_path = c_file.with_extension("bat");
             let exe_path = exe_file.to_string_lossy().replace('/', "\\");
             // Write bat file with MSVC env setup and compilation
-            let mut all_libs: Vec<String> =
-                host_c_link_libraries(true).iter().map(|s| s.to_string()).collect();
+            let mut all_libs: Vec<String> = host_c_link_libraries(true)
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
             all_libs.extend(user_link_flags(user_libs, true));
             let bat_content = format!(
                 "set \"INCLUDE={}\"\r\nset \"LIB={}\"\r\nset \"PATH={};%PATH%\"\r\ncl.exe /nologo /W0 /std:c11 {} \"{}\" /Fe\"{}\" {} 1>&2\r\n",
@@ -5029,20 +5031,19 @@ fn cmd_build(
         1
     })?;
 
-    let total_steps =
-        if emit_c_only
-            || emit_header
-            || use_llvm
-            || use_native
-            || use_wasm
-            || use_spirv
-            || use_shader
-            || use_rust
-        {
-            4
-        } else {
-            5
-        };
+    let total_steps = if emit_c_only
+        || emit_header
+        || use_llvm
+        || use_native
+        || use_wasm
+        || use_spirv
+        || use_shader
+        || use_rust
+    {
+        4
+    } else {
+        5
+    };
     println!("[1/{}] Lexing... OK ({} tokens)", total_steps, tokens.len());
 
     // Parse

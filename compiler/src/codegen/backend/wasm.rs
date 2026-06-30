@@ -848,8 +848,7 @@ impl WasmBackend {
         match &stmt.kind {
             MirStmtKind::GlobalStore { .. } => {
                 return Err(CodegenError::Unsupported(
-                    "store to a module global is not yet supported in the WASM backend"
-                        .to_string(),
+                    "store to a module global is not yet supported in the WASM backend".to_string(),
                 ));
             }
             MirStmtKind::Assign { dest, value } => {

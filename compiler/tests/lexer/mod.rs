@@ -620,7 +620,9 @@ fn test_sql_dsl() {
 fn test_regex_dsl() {
     expect_single_token(
         "regex! { [a-z]+ }",
-        TokenKind::DslBlock { name: "regex".into() },
+        TokenKind::DslBlock {
+            name: "regex".into(),
+        },
     );
 }
 
@@ -628,7 +630,9 @@ fn test_regex_dsl() {
 fn test_json_dsl() {
     expect_single_token(
         r#"json! { "key": "value" }"#,
-        TokenKind::DslBlock { name: "json".into() },
+        TokenKind::DslBlock {
+            name: "json".into(),
+        },
     );
 }
 

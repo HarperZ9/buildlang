@@ -1154,8 +1154,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     builder.binary_op(combined, bin_op, values::local(cur), val);
                     values::local(combined)
                 };
-                let set_fn =
-                    MirValue::Function(Arc::from(format!("build_hvec_set_{}", suffix)));
+                let set_fn = MirValue::Function(Arc::from(format!("build_hvec_set_{}", suffix)));
                 let builder = self.current_fn.as_mut().unwrap();
                 let cont = builder.create_block();
                 builder.call(set_fn, vec![recv_val, idx_val, store_val], None, cont);
@@ -3899,8 +3898,13 @@ impl<'ctx> MirLowerer<'ctx> {
         if is_runtime_result {
             let ok_ty = self.result_ok_type_for(scrutinee, &scrutinee_val);
             let err_ty = self.result_err_type_for(scrutinee, &scrutinee_val);
-            return self
-                .lower_runtime_result_match(scrutinee_val, &scrutinee_ty, arms, ok_ty, err_ty);
+            return self.lower_runtime_result_match(
+                scrutinee_val,
+                &scrutinee_ty,
+                arms,
+                ok_ty,
+                err_ty,
+            );
         }
 
         // Runtime Option match: `match opt { Some(x) => ..., None => ... }`
@@ -5388,7 +5392,11 @@ impl<'ctx> MirLowerer<'ctx> {
                     .option_inner_type_for(inner, &inner_val)
                     .unwrap_or_else(MirType::i32);
                 return self.lower_try_runtime_sumtype(
-                    inner_val, &inner_ty, "has_value", "value", payload_ty,
+                    inner_val,
+                    &inner_ty,
+                    "has_value",
+                    "value",
+                    payload_ty,
                 );
             }
         }

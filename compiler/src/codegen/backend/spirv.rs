@@ -2027,8 +2027,7 @@ impl SpirvBackend {
         match &stmt.kind {
             MirStmtKind::GlobalStore { .. } => {
                 return Err(CodegenError::Unsupported(
-                    "store to a module global is not supported in the SPIR-V backend"
-                        .to_string(),
+                    "store to a module global is not supported in the SPIR-V backend".to_string(),
                 ));
             }
             MirStmtKind::Assign { dest, value } => {
