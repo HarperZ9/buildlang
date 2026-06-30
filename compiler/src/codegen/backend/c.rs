@@ -38,6 +38,10 @@ pub struct CBackend {
     string_literals: Vec<Arc<str>>,
     /// Function-local BuildString temps that originated from string literals.
     local_string_literals: std::collections::HashMap<LocalId, u32>,
+    /// Owned heap (BuildString) locals proven safe to free at every `return` of
+    /// the current function (see `freeable_owned_string_locals`). Empty unless
+    /// the experimental drop-insertion path is enabled.
+    current_fn_freeable: Vec<LocalId>,
 }
 
 impl CBackend {
@@ -52,7 +56,121 @@ impl CBackend {
             current_fn_name: None,
             string_literals: Vec::new(),
             local_string_literals: std::collections::HashMap::new(),
+            current_fn_freeable: Vec::new(),
         }
+    }
+
+    /// Whether the experimental deterministic-free path is enabled. Off by
+    /// default so the verified baseline (corpus c-execution, all current
+    /// programs) keeps the existing leak-but-correct behavior; enabled by
+    /// setting `BUILDLANG_EXPERIMENTAL_FREE` while the analysis is matured and
+    /// proven under AddressSanitizer.
+    fn experimental_free_enabled() -> bool {
+        std::env::var_os("BUILDLANG_EXPERIMENTAL_FREE").is_some()
+    }
+
+    /// Conservatively find owned `BuildString` locals that are sound to free at
+    /// every `return` of the function. A local qualifies iff it is
+    /// non-parameter, is the destination of an allocating `Call` in the entry
+    /// block (so it is definitely initialized at any return), and is never
+    /// referenced anywhere else in the function (so it was never moved,
+    /// aliased, returned, or read). Such a local uniquely owns a heap buffer
+    /// that nothing else touches, and `build_string_free` is self-guarding, so
+    /// freeing it is sound. The soundness depends on `local_is_referenced`
+    /// being a COMPLETE scan over every MIR value and place.
+    fn freeable_owned_string_locals(&self, func: &MirFunction) -> Vec<LocalId> {
+        let blocks = match &func.blocks {
+            Some(b) if !b.is_empty() => b,
+            _ => return Vec::new(),
+        };
+        let mut out = Vec::new();
+        for local in &func.locals {
+            if local.is_param {
+                continue;
+            }
+            if !matches!(local.ty, MirType::Struct(ref n) if n.as_ref() == "BuildString") {
+                continue;
+            }
+            // Defined as the dest of a Call in the entry block (definite init).
+            let defined_in_entry = matches!(
+                &blocks[0].terminator,
+                Some(MirTerminator::Call { dest: Some(d), .. }) if *d == local.id
+            );
+            if !defined_in_entry {
+                continue;
+            }
+            if Self::local_is_referenced(local.id, blocks) {
+                continue;
+            }
+            out.push(local.id);
+        }
+        out
+    }
+
+    /// True if `id` is referenced as a value or place anywhere in any block.
+    /// A `Call` destination is an assignment target, not a reference, so a
+    /// local that is only ever a Call dest (its allocation) reads as
+    /// unreferenced. This scan must cover every MIR variant that can mention a
+    /// local; a miss would free a live value.
+    fn local_is_referenced(id: LocalId, blocks: &[MirBlock]) -> bool {
+        let v = |val: &MirValue| matches!(val, MirValue::Local(l) if *l == id);
+        let p = |pl: &MirPlace| {
+            pl.local == id
+                || pl
+                    .projections
+                    .iter()
+                    .any(|pr| matches!(pr, PlaceProjection::Index(l) if *l == id))
+        };
+        let rv = |r: &MirRValue| match r {
+            MirRValue::Use(x) => v(x),
+            MirRValue::BinaryOp { left, right, .. } => v(left) || v(right),
+            MirRValue::UnaryOp { operand, .. } => v(operand),
+            MirRValue::Ref { place, .. } | MirRValue::AddressOf { place, .. } => p(place),
+            MirRValue::Cast { value, .. } => v(value),
+            MirRValue::Aggregate { operands, .. } => operands.iter().any(v),
+            MirRValue::Repeat { value, .. } => v(value),
+            MirRValue::Discriminant(place) | MirRValue::Len(place) => p(place),
+            MirRValue::NullaryOp(..) => false,
+            MirRValue::FieldAccess { base, .. } => v(base),
+            MirRValue::VariantField { base, .. } => v(base),
+            MirRValue::IndexAccess { base, index, .. } => v(base) || v(index),
+            MirRValue::Deref { ptr, .. } => v(ptr),
+            MirRValue::TextureSample {
+                texture,
+                sampler,
+                coords,
+            } => v(texture) || v(sampler) || v(coords),
+        };
+        for block in blocks {
+            for stmt in &block.stmts {
+                let hit = match &stmt.kind {
+                    MirStmtKind::Assign { value, .. } => rv(value),
+                    MirStmtKind::DerefAssign { ptr, value } => *ptr == id || rv(value),
+                    MirStmtKind::FieldDerefAssign { ptr, value, .. } => *ptr == id || rv(value),
+                    MirStmtKind::FieldAssign { base, value, .. } => *base == id || rv(value),
+                    MirStmtKind::StorageLive(l) | MirStmtKind::StorageDead(l) => *l == id,
+                    MirStmtKind::Nop => false,
+                };
+                if hit {
+                    return true;
+                }
+            }
+            let term_hit = match &block.terminator {
+                Some(MirTerminator::If { cond, .. }) => v(cond),
+                Some(MirTerminator::Switch { value, .. }) => v(value),
+                Some(MirTerminator::Call { func, args, .. }) => v(func) || args.iter().any(v),
+                Some(MirTerminator::Return(Some(val))) => v(val),
+                Some(MirTerminator::Drop { place, .. }) => p(place),
+                Some(MirTerminator::Assert { cond, .. }) => v(cond),
+                // Goto, Return(None), Resume, Abort, and the unwind/target block
+                // ids carry no local references.
+                _ => false,
+            };
+            if term_hit {
+                return true;
+            }
+        }
+        false
     }
 
     /// Write indentation.
@@ -1053,6 +1171,11 @@ impl CBackend {
         self.current_ret_ty = func.sig.ret.clone();
         self.current_fn_name = Some(func.name.to_string());
         self.local_string_literals.clear();
+        self.current_fn_freeable = if Self::experimental_free_enabled() {
+            self.freeable_owned_string_locals(func)
+        } else {
+            Vec::new()
+        };
         self.generate_function_signature(func)?;
         self.output.push_str(" {\n");
         self.indent += 1;
@@ -2104,6 +2227,19 @@ impl CBackend {
                 }
             }
             MirTerminator::Return(value) => {
+                // Free owned heap locals proven safe to drop at function exit
+                // (experimental, opt-in; the set is empty unless enabled).
+                if !self.current_fn_freeable.is_empty() {
+                    let names: Vec<String> = self
+                        .current_fn_freeable
+                        .iter()
+                        .map(|id| self.local_name(*id, locals))
+                        .collect();
+                    for name in names {
+                        self.write_indent();
+                        writeln!(self.output, "build_string_free({});", name).unwrap();
+                    }
+                }
                 // Flush stdout before returning to ensure all output is visible,
                 // especially when running as a child process on Windows.
                 self.write_indent();
@@ -3450,6 +3586,72 @@ mod tests {
         assert_eq!(backend.target(), Target::C);
     }
 
+    fn freeable_string_local(referenced: bool) -> MirFunction {
+        // A function with one non-param BuildString local defined by an
+        // allocating Call in the entry block. If `referenced`, the local is
+        // returned (a use); otherwise it is never used.
+        let mut func = MirFunction::new("f", MirFnSig::new(vec![], MirType::Void));
+        func.locals.push(MirLocal {
+            id: LocalId(0),
+            name: Some(Arc::from("s")),
+            ty: MirType::Struct(Arc::from("BuildString")),
+            is_mut: false,
+            is_param: false,
+            annotations: Vec::new(),
+        });
+        let mut entry = MirBlock::new(BlockId(0));
+        entry.terminator = Some(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("build_string_new")),
+            args: Vec::new(),
+            dest: Some(LocalId(0)),
+            target: Some(BlockId(1)),
+            unwind: None,
+        });
+        let mut exit = MirBlock::new(BlockId(1));
+        exit.terminator = Some(MirTerminator::Return(if referenced {
+            Some(MirValue::Local(LocalId(0)))
+        } else {
+            None
+        }));
+        func.blocks = Some(vec![entry, exit]);
+        func
+    }
+
+    #[test]
+    fn freeable_owned_string_local_is_detected_when_unused() {
+        let backend = CBackend::new();
+        let func = freeable_string_local(false);
+        assert_eq!(
+            backend.freeable_owned_string_locals(&func),
+            vec![LocalId(0)],
+            "an unused owned BuildString local defined in the entry block should be freeable"
+        );
+    }
+
+    #[test]
+    fn referenced_owned_string_local_is_not_freed() {
+        let backend = CBackend::new();
+        let func = freeable_string_local(true);
+        assert!(
+            backend.freeable_owned_string_locals(&func).is_empty(),
+            "a returned (referenced) BuildString local must not be freed"
+        );
+    }
+
+    #[test]
+    fn parameter_string_local_is_not_freed() {
+        // A BuildString PARAMETER is owned by the caller; the callee must never
+        // free it even if it appears unused in the body.
+        let backend = CBackend::new();
+        let mut func = freeable_string_local(false);
+        func.locals[0].is_param = true;
+        assert!(
+            backend.freeable_owned_string_locals(&func).is_empty(),
+            "a parameter must not be freed by the callee"
+        );
+    }
+
+    #[test]
     #[test]
     fn test_c_backend_includes() {
         let module_builder = MirModuleBuilder::new("test");
