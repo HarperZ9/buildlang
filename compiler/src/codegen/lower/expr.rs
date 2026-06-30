@@ -1865,6 +1865,9 @@ impl<'ctx> MirLowerer<'ctx> {
                     )
                 }
                 "HashSet_new" => return MirType::Struct(Arc::from("HashSet")),
+                // Some(x) constructs an Option; without this the dest fell back to
+                // i32 and the Option struct was never built (a real C2440).
+                "Some" => return MirType::Struct(Arc::from("Option")),
                 // Both String constructors yield an owned heap string. Without
                 // `String_from` here the dest local fell back to i32, so
                 // `let s = String::from(x)` emitted `int32_t s = build_string_new(...)`,
