@@ -1262,8 +1262,7 @@ impl LlvmBackend {
             }
             MirStmtKind::GlobalStore { .. } => {
                 return Err(CodegenError::Unsupported(
-                    "store to a module global is not yet supported in the LLVM backend"
-                        .to_string(),
+                    "store to a module global is not yet supported in the LLVM backend".to_string(),
                 ));
             }
             MirStmtKind::DerefAssign { ptr, .. } => {

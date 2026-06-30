@@ -321,7 +321,9 @@ impl CBackend {
         let return_blocks: Vec<usize> = blocks
             .iter()
             .enumerate()
-            .filter(|(i, b)| reachable[*i] && matches!(b.terminator, Some(MirTerminator::Return(_))))
+            .filter(|(i, b)| {
+                reachable[*i] && matches!(b.terminator, Some(MirTerminator::Return(_)))
+            })
             .map(|(i, _)| i)
             .collect();
 
@@ -1061,7 +1063,12 @@ impl CBackend {
             .functions
             .iter()
             .filter_map(|f| f.link_header.as_deref())
-            .chain(module.globals.iter().filter_map(|g| g.link_header.as_deref()))
+            .chain(
+                module
+                    .globals
+                    .iter()
+                    .filter_map(|g| g.link_header.as_deref()),
+            )
             .collect();
         ffi_headers.sort_unstable();
         ffi_headers.dedup();
@@ -1070,12 +1077,10 @@ impl CBackend {
             for header in ffi_headers {
                 if header.starts_with('<') {
                     // Verbatim angle-bracket form, e.g. <sqlite3.h>.
-                    self.output
-                        .push_str(&format!("#include {header}\n"));
+                    self.output.push_str(&format!("#include {header}\n"));
                 } else {
                     // Quoted form for local/relative headers, e.g. "mylib.h".
-                    self.output
-                        .push_str(&format!("#include \"{header}\"\n"));
+                    self.output.push_str(&format!("#include \"{header}\"\n"));
                 }
             }
             self.output.push('\n');
@@ -1186,10 +1191,18 @@ impl CBackend {
                     self.output
                         .push_str("    double __d = build_hmap_get_str_f64(h, key.ptr);\n");
                     if is_scalar {
-                        write!(self.output, "    {val_c} __v; memset(&__v, 0, sizeof(__v));\n").unwrap();
+                        write!(
+                            self.output,
+                            "    {val_c} __v; memset(&__v, 0, sizeof(__v));\n"
+                        )
+                        .unwrap();
                         self.output.push_str("    memcpy(&__v, &__d, sizeof(__d) < sizeof(__v) ? sizeof(__d) : sizeof(__v));\n    return __v;\n}\n");
                     } else {
-                        write!(self.output, "    {val_c}* __b; memcpy(&__b, &__d, sizeof(__b));\n").unwrap();
+                        write!(
+                            self.output,
+                            "    {val_c}* __b; memcpy(&__b, &__d, sizeof(__b));\n"
+                        )
+                        .unwrap();
                         write!(self.output, "    if (!__b) {{ {val_c} __z; memset(&__z, 0, sizeof(__z)); return __z; }}\n    return *__b;\n}}\n").unwrap();
                     }
                     // insert
@@ -1223,8 +1236,9 @@ impl CBackend {
                 }
             }
             if !vec_elem_types.is_empty() {
-                self.output
-                    .push_str("// Monomorphized Vec element wrappers for aggregate element types\n");
+                self.output.push_str(
+                    "// Monomorphized Vec element wrappers for aggregate element types\n",
+                );
                 // Deterministic order for reproducible codegen (receipts).
                 let mut entries: Vec<&String> = vec_elem_types.iter().collect();
                 entries.sort();
@@ -2973,8 +2987,12 @@ impl CBackend {
                             })
                             .unwrap_or_else(|| "i32".to_string());
                         let dest_name = self.local_name(*dest_local, locals);
-                        write!(self.output, "{} = build_hvec_new_{}();\n", dest_name, suffix)
-                            .unwrap();
+                        write!(
+                            self.output,
+                            "{} = build_hvec_new_{}();\n",
+                            dest_name, suffix
+                        )
+                        .unwrap();
                     }
                     if let Some(target) = target {
                         self.write_indent();
@@ -3013,7 +3031,8 @@ impl CBackend {
                         } else {
                             arg
                         };
-                        write!(self.output, "{} = build_string_new({});\n", dest_name, cptr).unwrap();
+                        write!(self.output, "{} = build_string_new({});\n", dest_name, cptr)
+                            .unwrap();
                     }
                     if let Some(target) = target {
                         self.write_indent();
@@ -3144,8 +3163,12 @@ impl CBackend {
                                 MirValue::Const(MirConst::Float(..)) => ("ok_f", "(double)"),
                                 _ => ("ok_i", "(int64_t)"),
                             };
-                            write!(self.output, "{}.ok.{} = {}({});\n", dest_name, slot, cast, arg)
-                                .unwrap();
+                            write!(
+                                self.output,
+                                "{}.ok.{} = {}({});\n",
+                                dest_name, slot, cast, arg
+                            )
+                            .unwrap();
                         }
                     }
                     if let Some(target) = target {
@@ -3581,8 +3604,9 @@ impl CBackend {
                 "Stderr" => return "((io_Stderr){ 0 })".to_string(),
                 // A function reference in value position (a direct call's callee)
                 // must get the same stdlib-collision escape as its definition.
-                other if !Self::is_runtime_or_builtin_fn(other)
-                    && Self::is_c_stdlib_collision(other) =>
+                other
+                    if !Self::is_runtime_or_builtin_fn(other)
+                        && Self::is_c_stdlib_collision(other) =>
                 {
                     format!("_{}", other)
                 }
@@ -4490,7 +4514,8 @@ impl CBackend {
     fn is_c_stdlib_collision(name: &str) -> bool {
         matches!(
             name,
-            "div" | "ldiv"
+            "div"
+                | "ldiv"
                 | "lldiv"
                 | "labs"
                 | "llabs"
@@ -4628,8 +4653,10 @@ impl Backend for CBackend {
         link_libraries.sort_unstable();
         link_libraries.dedup();
 
-        Ok(GeneratedCode::new(OutputFormat::CSource, self.output.as_bytes().to_vec())
-            .with_link_libraries(link_libraries))
+        Ok(
+            GeneratedCode::new(OutputFormat::CSource, self.output.as_bytes().to_vec())
+                .with_link_libraries(link_libraries),
+        )
     }
 
     fn target(&self) -> Target {
