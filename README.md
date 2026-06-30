@@ -627,8 +627,11 @@ invocation (`-lsqlite3` for gcc/clang/cc, `sqlite3.lib` for MSVC) and records a
 `// buildc-link: sqlite3` note in the emitted C so the requirement is visible
 under `--emit c`. An extern block with no `header` clause keeps the existing
 behavior: buildc synthesizes a prototype for non-standard functions and relies
-on the standard includes for the C library. Foreign calls still require the
-`Foreign` capability effect, so native interop stays inside the same
+on the standard includes for the C library. Foreign `static` declarations work
+the same way: a `static` carries the block's `header`/`link` and is emitted as
+an external reference (the header declares it, or buildc emits a bare
+`extern <type> <name>;`), never a conflicting definition. Foreign calls still
+require the `Foreign` capability effect, so native interop stays inside the same
 accountability gate as every other ambient surface.
 
 ## Status

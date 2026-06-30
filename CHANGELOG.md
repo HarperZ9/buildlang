@@ -18,6 +18,14 @@ tracked in `STATUS.md`, `README.md`, and
   This is the native, embedded integration path for any C-ABI library. Covered
   by parser, lowering, and C-backend tests (`extern_block_header_*`,
   `extern_header_clause_lowers_to_mir_link_header`, `c_backend_*header*`).
+- Native FFI: foreign `static` declarations in extern blocks now lower and
+  generate correct C. A foreign static is treated as an external declaration,
+  never a definition: it carries the block's `header`/`link` clauses, so the C
+  backend includes the header (or emits a bare `extern <type> <name>;` when no
+  header backs it) and links the library. Previously a foreign static
+  type-checked but produced C that referenced an undeclared symbol. Covered by
+  `extern_static_lowers_to_external_global_with_header` and
+  `c_backend_foreign_static_*` tests.
 - Native FFI: extern blocks also accept an optional `link "..."` clause naming
   the library to link. `buildc build` passes it to the C compiler (`-lname`
   for gcc/clang/cc, `name.lib` for MSVC) and the emitted C records a greppable

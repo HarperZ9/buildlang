@@ -125,6 +125,7 @@ impl CBackend {
             .functions
             .iter()
             .filter_map(|f| f.link_header.as_deref())
+            .chain(module.globals.iter().filter_map(|g| g.link_header.as_deref()))
             .collect();
         ffi_headers.sort_unstable();
         ffi_headers.dedup();
@@ -152,6 +153,7 @@ impl CBackend {
             .functions
             .iter()
             .filter_map(|f| f.link_lib.as_deref())
+            .chain(module.globals.iter().filter_map(|g| g.link_lib.as_deref()))
             .collect();
         link_libs.sort_unstable();
         link_libs.dedup();
@@ -843,6 +845,18 @@ impl CBackend {
         self.output.push_str("// Global variables\n");
         for global in globals {
             let c_type = self.type_to_c(&global.ty);
+
+            // A foreign `static` is an external declaration, never a definition.
+            // If a header backs it, the header declares it and we emit nothing;
+            // otherwise emit a bare `extern` declaration to reference the symbol.
+            if global.is_extern_decl {
+                if global.link_header.is_none() {
+                    self.output
+                        .push_str(&format!("extern {} {};\n", c_type, global.name));
+                }
+                continue;
+            }
+
             let mut decl = if global.is_mut {
                 format!("{} {}", c_type, global.name)
             } else {
@@ -3114,7 +3128,9 @@ impl Backend for CBackend {
         let mut link_libraries: Vec<String> = mir
             .functions
             .iter()
-            .filter_map(|f| f.link_lib.as_deref().map(str::to_string))
+            .filter_map(|f| f.link_lib.as_deref())
+            .chain(mir.globals.iter().filter_map(|g| g.link_lib.as_deref()))
+            .map(str::to_string)
             .collect();
         link_libraries.sort_unstable();
         link_libraries.dedup();
