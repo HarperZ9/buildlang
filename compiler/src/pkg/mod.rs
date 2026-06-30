@@ -1,7 +1,7 @@
 // ===============================================================================
 // BUILDLANG PACKAGE MANAGER
 // ===============================================================================
-// Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
+// Copyright (c) 2022-2026 Zain Dana Harper. BuildLang Fair-Source License v1.0 (see LICENSE).
 // ===============================================================================
 
 //! Package manager for BuildLang (build-pkg).
