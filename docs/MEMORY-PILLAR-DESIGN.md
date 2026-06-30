@@ -330,31 +330,49 @@ let s = a + b; println!("{}", s); i = i + 1; }`):
 - The function-exit pass cannot free `_10`: its defining block bb8 does not dominate
   the return (bb3). So `_10` leaks one buffer per iteration today.
 
-Freeing `_10` at the END of bb8 (after its statements, before the terminator)
-reclaims it every iteration -> bounded peak memory.
+CRITICAL PLACEMENT HAZARD (caught in design, 2026-06-30 - records why the naive
+placement is a use-after-free). The obvious idea "free `_10` at the END of bb8,
+after its statements, before the terminator" is UNSOUND. bb8 is
+`_10 = _9; _11 = _10.ptr; <terminator: printf(fmt, _11)>`. The statement
+`_11 = _10.ptr` copies the BUFFER POINTER (a borrow), and the terminator `printf`
+READS through `_11`. Freeing `_10` before the terminator frees the buffer `_11`
+points into, so the very next instruction (the print) is a heap-use-after-free.
+The borrow flows INTO the terminator, so the free must land AFTER the terminator
+runs, not before it. Any block-scoped scheme that frees at end-of-statements while
+a `.ptr` borrow of the owner is consumed by the terminator is wrong - and the
+print case (the whole point) is exactly that shape.
+
+Corrected sound placement: free `L` at the START of `B`'s successor `S`, only on an
+ISOLATED edge `B -> S` (B has exactly one successor S, and S has exactly one
+predecessor B). Then the print terminator has already run (the borrow is consumed),
+`S` is reached exactly once per execution of `B`, and `L` plus all its `.ptr`
+borrows are dead at `S` (verified, not assumed). For the loop, bb8's only successor
+is bb9 and bb9's only predecessor is bb8, so the free lands at the start of bb9
+(inside the loop body, after the print) - reclaiming the buffer each iteration with
+no UAF and no double free.
 
 Tightest provably-sound first sub-step (ADDITIVE; does NOT touch the verified
 function-exit path, so no buffer can be freed twice). Free an owned heap local `L`
-at the end of block `B` iff:
+at the START of block `S` iff:
 
 1. `L` passes ALL the second-increment ownership/escape/move/taint/one-def gates
    (the same `sound owned` predicate), and `L` is NOT in the function-exit free set
    (disjointness -> no double free).
-2. `L` is DEFINED in `B` (its single definition's dest is in `B`).
-3. Every USE of `L` in the whole function is inside `B`'s STATEMENTS - never in
-   another block and never in `B`'s terminator. (Restricting the def and all uses to
-   the same block makes "dead after the last use" hold without a full liveness
-   pass: any path that returns to the use re-executes the def at `B`'s start first,
-   so `L` is dead on every out-edge of `B`. Requiring the uses to be in statements,
-   not the terminator, lets the free sit after the statements and before the
-   terminator's control transfer.)
+2. `L` is DEFINED in a block `B`, and every USE of `L` AND of every `.ptr`/field
+   borrow temp derived from `L` is within `B` (statements or terminator) - never in
+   another block. (Confining the live range of `L` and its borrows to `B` makes "L
+   and its borrows are dead after B" hold without a full liveness pass: a path back
+   to a use re-executes the def at `B` first.)
+3. `B` has exactly one successor `S` and `S` has exactly one predecessor `B` (an
+   isolated edge), so freeing at the start of `S` runs once per `B` and after `B`'s
+   terminator has consumed any borrow.
 
-Then the free goes at the end of `B`'s statements. Coverage is intentionally narrow
-(single-block def-and-use); it already captures the dominant loop pattern
-(allocate, read once via `.ptr` into a print, discard). Later sub-steps add real
-per-local liveness (live_out via backward dataflow over the candidates) to free
-locals whose use spans blocks, and drop flags for conditional ownership - each
-ASan-verified.
+The free is emitted at the START of `S`'s statements. Coverage is intentionally
+narrow (single-block live range + isolated successor edge); it already captures the
+dominant loop pattern (allocate, read once via `.ptr` into a print, discard). Later
+sub-steps add real per-local liveness (live_out via backward dataflow, tracking the
+borrow temps too) to free locals whose live range spans blocks or whose successor
+edge is not isolated (needs edge-splitting / drop flags) - each ASan-verified.
 
 Verification bar (all required before the flag default may flip): golden unit tests
 that place the free inside the loop-body block for the print-temp and place NONE for
