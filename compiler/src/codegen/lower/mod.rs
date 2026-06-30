@@ -140,6 +140,8 @@ pub struct MirLowerer<'ctx> {
 pub(crate) enum IterStep<'a> {
     /// `.map(|params| body)` - transform each element.
     Map { closure: &'a ast::Expr },
+    /// `.filter(|x| pred)` - keep only elements for which the predicate holds.
+    Filter { closure: &'a ast::Expr },
     /// `.enumerate()` - prepend an index to each element.
     Enumerate,
     /// `.cloned()` - identity (no-op for Copy types).

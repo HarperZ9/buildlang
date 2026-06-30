@@ -2043,6 +2043,10 @@ impl<'ctx> MirLowerer<'ctx> {
                             steps.push(IterStep::Map { closure: &args[0] });
                             current = receiver;
                         }
+                        "filter" if args.len() == 1 => {
+                            steps.push(IterStep::Filter { closure: &args[0] });
+                            current = receiver;
+                        }
                         "enumerate" if args.is_empty() => {
                             steps.push(IterStep::Enumerate);
                             current = receiver;
@@ -2257,6 +2261,24 @@ impl<'ctx> MirLowerer<'ctx> {
                             None
                         },
                     )?;
+                }
+                IterStep::Filter { closure } => {
+                    // Evaluate the predicate on the current element; if it does
+                    // not hold, skip straight to the increment block (drop this
+                    // element from the rest of the pipeline and the terminal).
+                    let keep = self.lower_iter_map_inline(
+                        closure,
+                        current_val.clone(),
+                        if has_enumerate {
+                            Some(values::local(idx_local))
+                        } else {
+                            None
+                        },
+                    )?;
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let keep_block = builder.create_block();
+                    builder.branch(keep, keep_block, incr_block);
+                    builder.switch_to_block(keep_block);
                 }
                 IterStep::Enumerate => {
                     // enumerate doesn't change the value; it just means
@@ -2540,7 +2562,7 @@ impl<'ctx> MirLowerer<'ctx> {
                         }
                     }
                 }
-                IterStep::Enumerate | IterStep::Cloned => {
+                IterStep::Filter { .. } | IterStep::Enumerate | IterStep::Cloned => {
                     // These don't change the element type.
                 }
             }

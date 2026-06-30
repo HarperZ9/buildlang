@@ -1059,6 +1059,26 @@ mod tests {
     }
 
     #[test]
+    fn iterator_filter_step_skips_non_matching_elements() {
+        // `v.iter().filter(|x| x > 2).sum()` must desugar (filter is a real step),
+        // not leave `.iter()` as an undefined call.
+        let code = source_to_c(
+            "fn main() { \
+               let v: Vec<i32> = vec![1, 2, 3, 4]; \
+               let _s: i32 = v.iter().filter(|x| x > 2).sum(); \
+             }",
+        );
+        assert!(
+            !code.contains("= iter(") && !code.contains(" iter("),
+            "the filtered chain must not emit an undefined `iter` call:\n{code}"
+        );
+        assert!(
+            code.contains("build_hvec_get_i32(") && code.contains("build_hvec_len("),
+            "the filtered sum must lower to a runtime-length element loop:\n{code}"
+        );
+    }
+
+    #[test]
     fn format_macro_builds_a_string_from_args_not_a_bare_template() {
         // `format!("{} is {}", name, age)` must build an owned BuildString via
         // build_sprintf with the args, not return the raw template string (the
