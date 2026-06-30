@@ -4826,6 +4826,27 @@ impl<'ctx> MirLowerer<'ctx> {
         let inner_val = self.lower_expr(inner)?;
         let inner_ty = self.type_of_value(&inner_val);
 
+        // Runtime Result/Option `?`: these are the runtime structs (is_ok /
+        // has_value + a union slot), not user-defined tagged enums, so the
+        // enum-tag path below does not apply. Unwrap the success payload as the
+        // expression value, or early-return the whole value to propagate the
+        // Err/None (the enclosing function returns the same runtime type, so the
+        // discriminant and err/none payload carry through unchanged).
+        if let MirType::Struct(ref name) = inner_ty {
+            if name.as_ref() == "Result" {
+                let ok_ty = self.result_ok_type_for(inner, &inner_val);
+                return self.lower_try_runtime_sumtype(inner_val, &inner_ty, "is_ok", "ok", ok_ty);
+            }
+            if name.as_ref() == "Option" {
+                let payload_ty = self
+                    .option_inner_type_for(inner, &inner_val)
+                    .unwrap_or_else(MirType::i32);
+                return self.lower_try_runtime_sumtype(
+                    inner_val, &inner_ty, "has_value", "value", payload_ty,
+                );
+            }
+        }
+
         // The inner value must be an enum type (Result or Option)
         let enum_name = if let MirType::Struct(ref name) = inner_ty {
             name.clone()
@@ -4971,6 +4992,65 @@ impl<'ctx> MirLowerer<'ctx> {
             // The result is the unwrapped value from the Ok block
             Ok(values::local(unwrapped))
         }
+    }
+
+    /// Lower `expr?` where `expr` is a runtime `Result`/`Option` struct. On the
+    /// success discriminant the expression value is the unwrapped payload (read
+    /// from the typed union slot, boxing-aware in the C backend); on the failure
+    /// discriminant the whole value is returned early to propagate the Err/None.
+    fn lower_try_runtime_sumtype(
+        &mut self,
+        inner_val: MirValue,
+        inner_ty: &MirType,
+        disc_field: &str,
+        payload_field: &str,
+        payload_ty: MirType,
+    ) -> CodegenResult<MirValue> {
+        let builder = self.current_fn.as_mut().ok_or_else(|| {
+            CodegenError::Internal("No current function for try operator".to_string())
+        })?;
+
+        let scrut = builder.create_local(inner_ty.clone());
+        builder.assign(scrut, MirRValue::Use(inner_val));
+
+        // Success discriminant (is_ok / has_value): true => unwrap, false =>
+        // propagate.
+        let disc = builder.create_local(MirType::Bool);
+        builder.assign(
+            disc,
+            MirRValue::FieldAccess {
+                base: values::local(scrut),
+                field_name: Arc::from(disc_field),
+                field_ty: MirType::Bool,
+            },
+        );
+
+        let ok_block = builder.create_block();
+        let fail_block = builder.create_block();
+        let cont_block = builder.create_block();
+        builder.branch(values::local(disc), ok_block, fail_block);
+
+        // Success: read the payload from the typed slot.
+        builder.switch_to_block(ok_block);
+        let unwrapped = builder.create_local(payload_ty.clone());
+        builder.assign(
+            unwrapped,
+            MirRValue::FieldAccess {
+                base: values::local(scrut),
+                field_name: Arc::from(payload_field),
+                field_ty: payload_ty,
+            },
+        );
+        builder.goto(cont_block);
+
+        // Failure: return the whole value to propagate Err/None unchanged.
+        builder.switch_to_block(fail_block);
+        builder.ret(Some(values::local(scrut)));
+
+        // An unreachable block separates the early return from the continuation.
+        let _unreachable = builder.create_block();
+        builder.switch_to_block(cont_block);
+        Ok(values::local(unwrapped))
     }
 
     fn lower_break(

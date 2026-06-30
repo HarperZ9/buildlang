@@ -10,6 +10,17 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Stdlib (`?` try operator): `expr?` on a runtime `Result`/`Option` now unwraps
+  the success payload as the expression value and early-returns the whole value
+  to propagate `Err`/`None`. Previously `?` was a silent no-op for the runtime
+  sum types (it only handled user-defined tagged enums), so `let v = parse(s)?;`
+  bound `v` to the entire `Result` struct and a later `v * 2` multiplied a struct
+  (a C compile error). `lower_try` now branches on the `is_ok` / `has_value`
+  discriminant, reads the payload from the typed slot (threading- and
+  boxing-aware), and returns the scrutinee unchanged on the failure arm. Verified
+  end-to-end under MSVC: `Result` `?` chain prints `ok 10` / `err neg`; `Option`
+  `?` chain prints `some 8` / `none 0`. Covered by
+  `try_operator_unwraps_result_ok_and_propagates_err`.
 - Stdlib (sum-type large payloads): `Option<T>` and `Result<T, E>` now carry
   payloads that do not fit the 8-byte union slot (e.g. `String`/`BuildString`,
   24 bytes). `Some(s)` / `Ok(s)` box the payload (`malloc` + copy, pointer stored
