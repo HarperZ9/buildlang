@@ -10,6 +10,15 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Stdlib (nested sum types): `Ok(None)` / `Some(None)` in a function returning a
+  nested type like `Result<Option<i32>, String>` now box the inner `Option`
+  payload correctly. `None` is a non-local constant, so the construction handler
+  did not detect it as an aggregate and cast the 16-byte `Option` struct into the
+  8-byte scalar slot (a C error and a mismatch with the boxed read). A shared
+  `sumtype_arg_type` helper now resolves the `None` value to `Option`, so all
+  three constructors (`Ok`/`Err`/`Some`) box it. Verified end-to-end under MSVC: a
+  `Result<Option<i32>, String>` matched through both layers prints `some 5` /
+  `none 0` / `err neg`. Covered by `nested_result_of_option_boxes_a_none_payload`.
 - Stdlib (`Vec<struct>`): a vector of a user struct (or other aggregate element)
   now constructs, pushes, indexes, and pops correctly. `Vec<P>::new()` /
   `v.push(P { .. })` previously dispatched to the `i32` element family
