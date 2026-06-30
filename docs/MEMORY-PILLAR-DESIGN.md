@@ -86,6 +86,41 @@ Insert drops for the clearest sound case and grow coverage from there:
 - The pillar is only "done" when a long-running allocation loop has bounded peak
   memory under ASan, not merely when the corpus passes.
 
+## Concrete implementation findings (2026-06-30)
+
+Investigated the MIR surface to scope the first increment precisely:
+
+- There is no liveness or scope infrastructure to lean on. `MirTerminator::Drop`,
+  `MirStmtKind::StorageLive`, and `MirStmtKind::StorageDead` are all defined and
+  have builder helpers, but the lowering never emits them. So drop placement
+  must be computed fresh, not read off the MIR.
+- Heap allocation is a `Call` terminator: `L = build_string_new(...)` is
+  `MirTerminator::Call { dest: Some(L), .. }`. The runtime `build_string_free`
+  is self-guarding (`if (cap > 0) free(...)`), so freeing a literal-backed or
+  non-heap BuildString is a safe no-op. This narrows the real hazard to two
+  cases: freeing a moved-from local (double-free) or an uninitialized local.
+- A function-exit free (free at each `Return`) avoids per-scope liveness: it
+  needs only a whole-function escape scan, not a CFG dataflow.
+
+### First increment (narrow, sound, opt-in)
+
+Free a `BuildString` local at every `Return` iff: it is non-parameter; it is the
+`dest` of an allocating `Call` in the entry block (block 0, so definitely
+initialized); and it is never referenced anywhere else in the function (so it is
+not moved, aliased, returned, or read). Such a local uniquely owns a buffer
+nothing else touches.
+
+The soundness of this rests entirely on the local-use scan being COMPLETE: it
+must report a reference if the local appears in ANY `MirValue::Local`,
+`MirPlace.local`, or projection across every statement and terminator. A single
+missed variant frees a live value. Because that scan is miss-intolerant, the
+first increment ships behind an opt-in flag (default off) so the verified
+baseline (corpus c-execution 8/8, all current programs) stays on the existing
+no-free path while the opt-in path is proven with `cl /fsanitize=address` on a
+growing test set. Coverage then broadens (allow uses that are only field reads
+flowing to known non-retaining functions like `printf`/`build_print_*`; then
+block-scoped drops with definite-init flags) one ASan-verified step at a time.
+
 ## Why this is documented rather than already implemented
 
 The transpiler/effects/receipts pillars were bounded, TDD-verifiable bricks and
