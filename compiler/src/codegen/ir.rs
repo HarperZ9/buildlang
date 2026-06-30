@@ -274,6 +274,11 @@ pub struct MirFunction {
     /// serialization when absent so non-FFI MIR stays backward compatible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_lib: Option<Arc<str>>,
+    /// Whether this function is a C-ABI export (an `extern "C" fn` definition).
+    /// Exports get external linkage and are declared in the generated C header
+    /// so other languages can call them. Skipped when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_c_export: bool,
 }
 
 impl MirFunction {
@@ -290,6 +295,7 @@ impl MirFunction {
             bindings: Vec::new(),
             link_header: None,
             link_lib: None,
+            is_c_export: false,
         }
     }
 
@@ -306,6 +312,7 @@ impl MirFunction {
             bindings: Vec::new(),
             link_header: None,
             link_lib: None,
+            is_c_export: false,
         }
     }
 
