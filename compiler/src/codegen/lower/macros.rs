@@ -1977,6 +1977,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 init: &terminal_args[0],
                 closure: &terminal_args[1],
             },
+            "sum" if terminal_args.is_empty() => IterTerminal::Sum,
             _ => return None,
         };
 
@@ -2122,6 +2123,17 @@ impl<'ctx> MirLowerer<'ctx> {
                 builder.assign(acc, MirRValue::Use(init_val));
                 (acc, false)
             }
+            IterTerminal::Sum => {
+                // Accumulator of the output element type, initialized to zero.
+                let zero = match &output_elem_ty {
+                    MirType::Float(_) => MirConst::Float(0.0, output_elem_ty.clone()),
+                    _ => MirConst::Int(0, output_elem_ty.clone()),
+                };
+                let builder = self.current_fn.as_mut().unwrap();
+                let acc = builder.create_local(output_elem_ty.clone());
+                builder.assign(acc, MirRValue::Use(MirValue::Const(zero)));
+                (acc, false)
+            }
         };
 
         // 6. Create the loop: for i in 0..len { ... }
@@ -2220,6 +2232,14 @@ impl<'ctx> MirLowerer<'ctx> {
                     self.lower_iter_fold_inline(closure, values::local(result_local), current_val)?;
                 let builder = self.current_fn.as_mut().unwrap();
                 builder.assign(result_local, MirRValue::Use(new_acc));
+            }
+            IterTerminal::Sum => {
+                // acc = acc + current_val
+                let val_ty = self.type_of_value(&current_val);
+                let builder = self.current_fn.as_mut().unwrap();
+                let next = builder.create_local(val_ty);
+                builder.binary_op(next, BinOp::Add, values::local(result_local), current_val);
+                builder.assign(result_local, MirRValue::Use(values::local(next)));
             }
         }
 

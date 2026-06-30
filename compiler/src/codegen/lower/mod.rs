@@ -155,6 +155,8 @@ pub(crate) enum IterTerminal<'a> {
         init: &'a ast::Expr,
         closure: &'a ast::Expr,
     }, // fields accessible via match pattern
+    /// `.sum()` - add all elements, starting from a zero accumulator.
+    Sum,
 }
 
 /// A fully parsed iterator chain: `source.iter().<steps>.<terminal>`.
