@@ -610,6 +610,56 @@ impl<'ctx> TypeChecker<'ctx> {
         }
     }
 
+    /// Register the trait bounds declared by a set of generics (both inline
+    /// `<T: Trait>` bounds and `where T: Trait` predicates) so that method
+    /// resolution can find trait methods on those type parameters. Bounds
+    /// accumulate onto whatever is already registered (see
+    /// `TypeContext::register_param_bounds`), so an enclosing impl's bounds and
+    /// a method's own bounds compose rather than clobber each other.
+    fn register_generic_param_bounds(&mut self, generics: &ast::Generics) {
+        for param in &generics.params {
+            if let ast::GenericParamKind::Type { ref bounds, .. } = &param.kind {
+                if !bounds.is_empty() {
+                    let trait_names = Self::bound_trait_names(bounds);
+                    if !trait_names.is_empty() {
+                        self.ctx
+                            .register_param_bounds(param.ident.name.clone(), trait_names);
+                    }
+                }
+            }
+        }
+
+        for pred in generics.where_clause.iter().flat_map(|wc| &wc.predicates) {
+            if let ast::TypeKind::Path(ref path) = pred.ty.kind {
+                if let Some(seg) = path.segments.last() {
+                    let trait_names = Self::bound_trait_names(&pred.bounds);
+                    if !trait_names.is_empty() {
+                        self.ctx
+                            .register_param_bounds(seg.ident.name.clone(), trait_names);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Extract the trait names from a list of bounds, dropping `?Sized`-style
+    /// maybe bounds (the last path segment is used as the trait's name).
+    fn bound_trait_names(bounds: &[ast::TypeBound]) -> Vec<Arc<str>> {
+        bounds
+            .iter()
+            .filter(|b| !b.is_maybe)
+            .map(|b| {
+                Arc::from(
+                    b.path
+                        .segments
+                        .last()
+                        .map(|s| s.ident.name.as_ref())
+                        .unwrap_or(""),
+                )
+            })
+            .collect()
+    }
+
     fn check_function(&mut self, f: &ast::FnDef, span: Span) {
         if let Some(body) = &f.body {
             // Generic functions are checked per-instantiation at
@@ -622,61 +672,23 @@ impl<'ctx> TypeChecker<'ctx> {
                 .any(|p| matches!(p.kind, ast::GenericParamKind::Type { .. }));
             self.ctx.push_scope(ScopeKind::Function);
 
-            // Add generic parameters and register their trait bounds
-            self.ctx.clear_param_bounds();
+            // Layer this function's own type-parameter bounds on top of any
+            // bounds already in scope (e.g. from an enclosing `impl<T: Bound>`),
+            // and restore the prior set when the function is done so sibling
+            // items are not affected. Without preserving the enclosing bounds, a
+            // trait-impl method body could not resolve trait methods on the
+            // impl's type parameters (e.g. `self[i].cmp(..)` in `impl<T: Ord>
+            // Ord for [T]`).
+            let saved_param_bounds = self.ctx.param_bounds_snapshot();
+
+            // Add generic parameters and register their trait bounds.
             for (idx, param) in f.generics.params.iter().enumerate() {
-                if let ast::GenericParamKind::Type { ref bounds, .. } = &param.kind {
+                if let ast::GenericParamKind::Type { .. } = &param.kind {
                     let ty = Ty::param(param.ident.name.clone(), idx as u32);
                     self.ctx.define_type_param(param.ident.name.clone(), ty);
-
-                    // Collect trait bound names for this type parameter
-                    if !bounds.is_empty() {
-                        let trait_names: Vec<Arc<str>> = bounds
-                            .iter()
-                            .filter(|b| !b.is_maybe)
-                            .map(|b| {
-                                // Extract the last segment of the trait path as the name
-                                Arc::from(
-                                    b.path
-                                        .segments
-                                        .last()
-                                        .map(|s| s.ident.name.as_ref())
-                                        .unwrap_or(""),
-                                )
-                            })
-                            .collect();
-                        self.ctx
-                            .register_param_bounds(param.ident.name.clone(), trait_names);
-                    }
                 }
             }
-
-            // Also register bounds from where clauses
-            for pred in f.generics.where_clause.iter().flat_map(|wc| &wc.predicates) {
-                // Extract the type parameter name from the type
-                if let ast::TypeKind::Path(ref path) = pred.ty.kind {
-                    if let Some(seg) = path.segments.last() {
-                        let param_name = seg.ident.name.clone();
-                        let trait_names: Vec<Arc<str>> = pred
-                            .bounds
-                            .iter()
-                            .filter(|b| !b.is_maybe)
-                            .map(|b| {
-                                Arc::from(
-                                    b.path
-                                        .segments
-                                        .last()
-                                        .map(|s| s.ident.name.as_ref())
-                                        .unwrap_or(""),
-                                )
-                            })
-                            .collect();
-                        if !trait_names.is_empty() {
-                            self.ctx.register_param_bounds(param_name, trait_names);
-                        }
-                    }
-                }
-            }
+            self.register_generic_param_bounds(&f.generics);
 
             // Add function parameters
             for param in &f.sig.params {
@@ -873,6 +885,10 @@ impl<'ctx> TypeChecker<'ctx> {
                 self.errors.extend(infer_errors);
             }
 
+            // Restore the type-parameter bounds that were in scope on entry,
+            // dropping this function's own bounds.
+            self.ctx.restore_param_bounds(saved_param_bounds);
+
             self.ctx.pop_scope();
         }
     }
@@ -904,6 +920,14 @@ impl<'ctx> TypeChecker<'ctx> {
             }
         }
 
+        // Register the impl's type-parameter trait bounds so method bodies can
+        // resolve trait methods on the impl's type parameters. For
+        // `impl<T: Ord> Ord for [T]`, this makes `self[i].cmp(..)` (where
+        // `self[i]: T`) resolve `cmp` through the `Ord` bound. The bounds are
+        // restored on exit so sibling items are unaffected.
+        let saved_param_bounds = self.ctx.param_bounds_snapshot();
+        self.register_generic_param_bounds(&impl_.generics);
+
         let self_ty = self.lower_type(&impl_.self_ty);
 
         // Set the Self type for type resolution within the impl block
@@ -919,6 +943,7 @@ impl<'ctx> TypeChecker<'ctx> {
 
         // Clear the Self type when leaving the impl block
         self.ctx.set_self_ty(None);
+        self.ctx.restore_param_bounds(saved_param_bounds);
         self.ctx.pop_scope();
     }
 
@@ -2385,5 +2410,159 @@ mod tests {
         );
 
         assert!(errors.is_empty(), "expected no errors, got {errors:#?}");
+    }
+
+    // ── Trait-method resolution on a generic type parameter via its bound ──
+    //
+    // These tests cover self-hosting brick 2: a call `x.method()` where `x: T`
+    // and `T` carries a trait bound providing `method` (inline, where-clause, or
+    // from an enclosing `impl<T: Trait>`) must resolve through that bound.
+    //
+    // Known remaining gaps (intentionally NOT addressed by this brick):
+    //   1. Generic *inherent*-impl method bodies are deferred and never
+    //      type-checked (see `check_inherent_impl`, the `impl_is_generic`
+    //      skip). Method calls on `T` there are not checked at all, so they
+    //      neither resolve nor error until monomorphization.
+    //   2. Method resolution on an array slice `self[..]` typed as the concrete
+    //      slice `[T]` inside `impl Ord for [T; N]` (stdlib `core::cmp`,
+    //      `self[..].cmp(&other[..])`) still fails with `[T] has no method cmp`.
+    //      That is concrete-slice-type resolution, distinct from the
+    //      type-parameter-bound resolution fixed here.
+
+    #[test]
+    fn impl_method_resolves_trait_method_on_bounded_type_param() {
+        // Inside `impl<T: Foo> Foo for Wrap<T>`, a call `inner.bar()` where
+        // `inner: T` must resolve `bar` through the impl-level bound `T: Foo`.
+        let errors = check_source(
+            r#"
+            trait Foo {
+                fn bar(&self) -> i32;
+            }
+
+            struct Wrap<T>(T);
+
+            impl<T: Foo> Foo for Wrap<T> {
+                fn bar(&self) -> i32 {
+                    let inner: T = make();
+                    inner.bar()
+                }
+            }
+
+            fn make<T>() -> T {
+                make()
+            }
+            "#,
+        );
+
+        assert!(
+            !errors.iter().any(|err| matches!(
+                &err.error,
+                TypeError::UndefinedMethod { method, .. } if method == "bar"
+            )),
+            "expected `bar` to resolve through impl bound `T: Foo`, got {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn impl_method_resolves_trait_method_on_slice_element() {
+        // Inside `impl<T: Foo> Foo for [T]`, indexing yields a `T`; calling a
+        // bound trait method on it must resolve through `T: Foo`.
+        let errors = check_source(
+            r#"
+            trait Foo {
+                fn bar(&self) -> i32;
+            }
+
+            impl<T: Foo> Foo for [T] {
+                fn bar(&self) -> i32 {
+                    self[0].bar()
+                }
+            }
+            "#,
+        );
+
+        assert!(
+            !errors.iter().any(|err| matches!(
+                &err.error,
+                TypeError::UndefinedMethod { method, .. } if method == "bar"
+            )),
+            "expected `bar` to resolve on `[T]` element through bound `T: Foo`, got {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn impl_method_resolves_trait_method_via_where_clause_bound() {
+        // The bound is supplied through a where-clause instead of inline.
+        let errors = check_source(
+            r#"
+            trait Foo {
+                fn bar(&self) -> i32;
+            }
+
+            struct Wrap<T>(T);
+
+            impl<T> Foo for Wrap<T>
+            where
+                T: Foo,
+            {
+                fn bar(&self) -> i32 {
+                    let inner: T = make();
+                    inner.bar()
+                }
+            }
+
+            fn make<T>() -> T {
+                make()
+            }
+            "#,
+        );
+
+        assert!(
+            !errors.iter().any(|err| matches!(
+                &err.error,
+                TypeError::UndefinedMethod { method, .. } if method == "bar"
+            )),
+            "expected `bar` to resolve through where-clause bound `T: Foo`, got {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn unbounded_type_param_method_call_still_errors() {
+        // Negative case in a CHECKED context: a trait-impl method body (which
+        // is type-checked, unlike deferred generic-function bodies) calls a
+        // method that none of `T`'s bounds provide. `T: Other` exists but does
+        // not supply `missing`, so resolution must still reject the call.
+        let errors = check_source(
+            r#"
+            trait Foo {
+                fn bar(&self) -> i32;
+            }
+
+            trait Other {
+                fn other(&self) -> i32;
+            }
+
+            struct Wrap<T>(T);
+
+            impl<T: Other> Foo for Wrap<T> {
+                fn bar(&self) -> i32 {
+                    let inner: T = make();
+                    inner.missing()
+                }
+            }
+
+            fn make<T>() -> T {
+                make()
+            }
+            "#,
+        );
+
+        assert!(
+            errors.iter().any(|err| matches!(
+                &err.error,
+                TypeError::UndefinedMethod { method, .. } if method == "missing"
+            )),
+            "expected `missing` to be unresolved when no bound provides it, got {errors:#?}"
+        );
     }
 }
