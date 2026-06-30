@@ -311,45 +311,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 expr: scrutinee,
                 then_branch,
                 else_branch,
-            } => {
-                // Evaluate scrutinee, bind pattern variable, then take branch.
-                let scrut_val = self.lower_expr(scrutinee)?;
-                let scrut_ty = self.type_of_value(&scrut_val);
-
-                // Bind inner pattern variable (Some(x) → bind x)
-                // Use tracked Option inner type when available.
-                let if_let_binding_ty = if let MirValue::Local(id) = &scrut_val {
-                    self.option_inner_types
-                        .get(id)
-                        .cloned()
-                        .unwrap_or_else(|| scrut_ty.clone())
-                } else {
-                    scrut_ty.clone()
-                };
-                if let ast::PatternKind::TupleStruct { patterns, .. } = &pattern.kind {
-                    for pat in patterns.iter() {
-                        if let ast::PatternKind::Ident { name, .. } = &pat.kind {
-                            let builder = self.current_fn.as_mut().ok_or_else(|| {
-                                CodegenError::Internal("No current function".to_string())
-                            })?;
-                            let local = builder
-                                .create_named_local(name.name.clone(), if_let_binding_ty.clone());
-                            builder.assign(local, MirRValue::Use(scrut_val.clone()));
-                            self.var_map.insert(name.name.clone(), local);
-                        }
-                    }
-                } else if let ast::PatternKind::Ident { name, .. } = &pattern.kind {
-                    let builder = self
-                        .current_fn
-                        .as_mut()
-                        .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-                    let local = builder.create_named_local(name.name.clone(), scrut_ty.clone());
-                    builder.assign(local, MirRValue::Use(scrut_val.clone()));
-                    self.var_map.insert(name.name.clone(), local);
-                }
-
-                self.lower_if_unconditional(then_branch, else_branch.as_deref())
-            }
+            } => self.lower_if_let(pattern, scrutinee, then_branch, else_branch.as_deref()),
             ExprKind::Match { scrutinee, arms } => self.lower_match(scrutinee, arms),
 
             ExprKind::Loop { body, label } => self.lower_loop(body, label.as_ref()),
@@ -3149,6 +3111,137 @@ impl<'ctx> MirLowerer<'ctx> {
         builder.call(func, arg_vals, Some(result), cont);
         builder.switch_to_block(cont);
         Ok(values::local(result))
+    }
+
+    /// Lower `if let PATTERN = SCRUTINEE { then } else { else }`.
+    /// For a runtime Option/Result scrutinee this tests the discriminant
+    /// (has_value / is_ok, negated for None / Err), binds the payload from the
+    /// typed union slot in the matched branch, and runs the unmatched branch
+    /// otherwise. Falls back to a plain binding for other scrutinees.
+    fn lower_if_let(
+        &mut self,
+        pattern: &ast::Pattern,
+        scrutinee: &ast::Expr,
+        then_branch: &ast::Block,
+        else_branch: Option<&ast::Expr>,
+    ) -> CodegenResult<MirValue> {
+        let scrut_val = self.lower_expr(scrutinee)?;
+        let scrut_ty = self.type_of_value(&scrut_val);
+        let is_option = matches!(&scrut_ty, MirType::Struct(n) if n.as_ref() == "Option");
+        let is_result = matches!(&scrut_ty, MirType::Struct(n) if n.as_ref() == "Result");
+
+        // Variant name and the (optional) bound payload identifier.
+        let (variant, bind_name): (Option<Arc<str>>, Option<Arc<str>>) = match &pattern.kind {
+            ast::PatternKind::TupleStruct { path, patterns } => {
+                let v = path.segments.last().map(|s| s.ident.name.clone());
+                let b = patterns.first().and_then(|p| match &p.kind {
+                    ast::PatternKind::Ident { name, .. } => Some(name.name.clone()),
+                    _ => None,
+                });
+                (v, b)
+            }
+            ast::PatternKind::Ident { name, .. } => (Some(name.name.clone()), None),
+            _ => (None, None),
+        };
+        let variant_str = variant.as_deref();
+
+        if is_option || is_result {
+            // Resolve the payload type and the union field for the bound value.
+            let (payload_ty, payload_field) = if is_option {
+                (
+                    self.option_inner_type_for(scrutinee, &scrut_val)
+                        .unwrap_or_else(MirType::i32),
+                    "value",
+                )
+            } else if variant_str == Some("Err") {
+                (self.result_err_type_for(scrutinee, &scrut_val), "err")
+            } else {
+                (self.result_ok_type_for(scrutinee, &scrut_val), "ok")
+            };
+            let disc_field = if is_option { "has_value" } else { "is_ok" };
+            // None / Err match when the discriminant is FALSE.
+            let negate = matches!(variant_str, Some("None") | Some("Err"));
+
+            let builder = self.current_fn.as_mut().unwrap();
+            let scrut_local = builder.create_local(scrut_ty.clone());
+            builder.assign(scrut_local, MirRValue::Use(scrut_val));
+            let disc = builder.create_local(MirType::Bool);
+            builder.assign(
+                disc,
+                MirRValue::FieldAccess {
+                    base: values::local(scrut_local),
+                    field_name: Arc::from(disc_field),
+                    field_ty: MirType::Bool,
+                },
+            );
+            let cond = if negate {
+                let neg = builder.create_local(MirType::Bool);
+                builder.unary_op(neg, UnaryOp::Not, values::local(disc));
+                values::local(neg)
+            } else {
+                values::local(disc)
+            };
+
+            let then_block = builder.create_block();
+            let else_block = builder.create_block();
+            let merge_block = builder.create_block();
+            builder.branch(cond, then_block, else_block);
+
+            // Matched branch: bind the payload (when the pattern binds one).
+            builder.switch_to_block(then_block);
+            let saved_vars = self.var_map.clone();
+            if let Some(name) = bind_name {
+                let builder = self.current_fn.as_mut().unwrap();
+                let bound = builder.create_named_local(name.clone(), payload_ty.clone());
+                builder.assign(
+                    bound,
+                    MirRValue::FieldAccess {
+                        base: values::local(scrut_local),
+                        field_name: Arc::from(payload_field),
+                        field_ty: payload_ty,
+                    },
+                );
+                self.var_map.insert(name, bound);
+            }
+            let then_val = self.lower_block(then_branch)?;
+            self.var_map = saved_vars.clone();
+            let result_ty = then_val
+                .as_ref()
+                .map(|v| self.type_of_value(v))
+                .unwrap_or(MirType::Void);
+            let builder = self.current_fn.as_mut().unwrap();
+            let result = builder.create_local(result_ty);
+            if let Some(v) = then_val {
+                builder.assign(result, MirRValue::Use(v));
+            }
+            builder.goto(merge_block);
+
+            // Unmatched branch.
+            let builder = self.current_fn.as_mut().unwrap();
+            builder.switch_to_block(else_block);
+            if let Some(else_expr) = else_branch {
+                let else_val = self.lower_expr(else_expr)?;
+                self.var_map = saved_vars;
+                let builder = self.current_fn.as_mut().unwrap();
+                if !matches!(else_val, MirValue::Const(MirConst::Unit)) {
+                    builder.assign(result, MirRValue::Use(else_val));
+                }
+            }
+            let builder = self.current_fn.as_mut().unwrap();
+            builder.goto(merge_block);
+            builder.switch_to_block(merge_block);
+            return Ok(values::local(result));
+        }
+
+        // Fallback (non-sum-type scrutinee): bind the whole value and run the
+        // then-branch. Rare; preserves the previous best-effort behavior.
+        if let Some(name) = bind_name.or(variant) {
+            let builder = self.current_fn.as_mut().unwrap();
+            let local = builder.create_named_local(name.clone(), scrut_ty.clone());
+            builder.assign(local, MirRValue::Use(scrut_val));
+            self.var_map.insert(name, local);
+        }
+        self.lower_if_unconditional(then_branch, else_branch)
     }
 
     fn lower_if(
