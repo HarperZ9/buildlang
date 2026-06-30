@@ -3678,7 +3678,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn test_c_backend_includes() {
         let module_builder = MirModuleBuilder::new("test");
         let module = module_builder.build();
