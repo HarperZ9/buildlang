@@ -311,7 +311,22 @@ lifted to block/scope-scoped drops so a loop has bounded peak memory (the third
 increment). Until then the flag stays off by default; the verified baseline is
 untouched.
 
-### Third increment: block-scoped drops (MIR-grounded design, 2026-06-30)
+### Third increment: block-scoped drops (SHIPPED 2026-06-30, opt-in)
+
+STATUS: shipped in commit b0b9f35 (behind `BUILDLANG_EXPERIMENTAL_FREE`, default
+off). The bounded-first-sub-step described below is implemented
+(`block_scoped_freeable`, `live_range_confined_to_block`, `sound_owned_candidates`,
+`move_source_chain` in the C backend) and verified: the free lands after the use
+inside the loop body; a 1,000,000-iteration allocating loop is ASan-clean
+(`cl /fsanitize=address`); peak working set drops from 983 MB (leaking) to 3.3 MB
+(block-scoped), a 265x reduction at identical output; full lib suite green; corpus
+c-execution 8/8 with the flag on and off; the function-exit path is unchanged. A
+six-lens adversarial pass found one latent gap (a `.ptr` borrow off a MOVE SOURCE,
+not source-reachable today) which is now closed by also scanning the move-source
+chain in `live_range_confined_to_block`. The default stays OFF: coverage is the
+narrow single-block-confined case (multi-block live ranges still leak, awaiting the
+real-liveness sub-step), and a fresh adversarial pass should run in an ISOLATED
+worktree (the first run reverted the working tree mid-implementation).
 
 The remaining gate. Function-exit drops do not bound a loop that allocates per
 iteration, because the frees land at the `Return`, not at end-of-iteration. The
