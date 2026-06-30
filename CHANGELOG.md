@@ -10,6 +10,12 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Stdlib (`Vec::contains`): `v.contains(x)` now works (previously an undefined
+  symbol). It dispatches to an element-typed runtime linear scan
+  (`build_hvec_contains_{i32,i64,f64,str}`); the string variant compares with
+  `build_string_eq`. Verified end-to-end under MSVC: `Vec<i32>` contains check is
+  `true`; `Vec<String>` contains `banana` -> `true`, `cherry` -> `false`. Covered
+  by `vec_contains_dispatches_to_runtime_scan`.
 - Stdlib (`Result<T,E>` methods): `is_ok()`, `is_err()`, `unwrap()`,
   `unwrap_err()`, and `unwrap_or(default)` now work (previously undefined symbols).
   `is_ok`/`is_err` read the `is_ok` discriminant; `unwrap` reads the typed `ok`
