@@ -102,6 +102,26 @@ Investigated the MIR surface to scope the first increment precisely:
 - A function-exit free (free at each `Return`) avoids per-scope liveness: it
   needs only a whole-function escape scan, not a CFG dataflow.
 
+### Status: first increment SHIPPED (2026-06-30, opt-in)
+
+The drop-insertion framework is implemented in the C backend behind the
+`BUILDLANG_EXPERIMENTAL_FREE` flag (default off): `freeable_owned_string_locals`
+(the conservative analysis), `local_is_referenced` (the complete use scan, with
+the rvalue/statement matches compiler-verified exhaustive and the `Assert`
+terminator covered), and emission of `build_string_free` before each `Return`.
+Verified: 3 analysis unit tests; full Rust suite green; and the semantic corpus
+c-execution stays 8/8 with the flag ENABLED (so the drops it does emit are sound
+on real programs). Coverage is intentionally narrow for now (see below) and
+reclaims little in practice yet; the value is a sound framework + verification
+loop to broaden incrementally.
+
+Two follow-ups surfaced: (a) broaden coverage - the entry-block-only definite-init
+rule frees at most the first heap local (each allocating `Call` splits the
+block), so the next step is dominance-based definite-init plus the
+known-non-retaining-call whitelist; (b) `String::from(...)` lowers to an
+undefined `String_from` symbol, so owned-`String` programs do not link - a
+separate pre-existing gap to fix before owned strings can be reclaimed.
+
 ### First increment (narrow, sound, opt-in)
 
 Free a `BuildString` local at every `Return` iff: it is non-parameter; it is the
