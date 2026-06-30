@@ -20,9 +20,22 @@ fn parses(source: &str) -> bool {
     parse(source).is_ok()
 }
 
-/// Helper to check parsing fails.
+/// Helper to check parsing fails (rejects malformed input).
+///
+/// The parser does error recovery: a malformed program still yields
+/// `Ok(Module)` with the errors recorded separately, so checking `is_err()`
+/// alone would miss them. "Fails" therefore means the lexer errored, the parser
+/// returned `Err`, or the parser recorded at least one error.
 fn fails(source: &str) -> bool {
-    parse(source).is_err()
+    let source_file = SourceFile::new("test.bld", source.to_string());
+    let mut lexer = Lexer::new(&source_file);
+    let tokens = match lexer.tokenize() {
+        Ok(tokens) => tokens,
+        Err(_) => return true,
+    };
+    let mut parser = Parser::new(&source_file, tokens);
+    let parsed = parser.parse();
+    parsed.is_err() || !parser.errors().is_empty()
 }
 
 // =============================================================================
