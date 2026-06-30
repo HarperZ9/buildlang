@@ -977,6 +977,33 @@ mod tests {
     }
 
     #[test]
+    fn hashmap_string_value_insert_get_dispatch_to_boxed_wrappers() {
+        // HashMap<String,String> must dispatch insert/get through the value-typed
+        // wrappers (which box >8-byte values), not the str->f64 family that bit-
+        // casts a 24-byte BuildString through an 8-byte double slot (corrupting it
+        // and failing to compile: BuildString -> double).
+        let code = source_to_c(
+            "fn main() { let mut m: HashMap<String, String> = HashMap::new(); \
+             m.insert(String::from(\"k\"), String::from(\"v\")); \
+             let r = m.get(String::from(\"k\")); }",
+        );
+        assert!(
+            code.contains("build_hmap_insert_val_BuildString("),
+            "insert must dispatch to the value-typed wrapper:\n{code}"
+        );
+        assert!(
+            code.contains("build_hmap_get_val_BuildString("),
+            "get must dispatch to the value-typed wrapper:\n{code}"
+        );
+        // The value wrapper must box (malloc) the BuildString rather than memcpy it
+        // into the 8-byte double slot.
+        assert!(
+            code.contains("malloc(sizeof(BuildString))"),
+            "the BuildString value wrapper must box the value (malloc), not bit-cast it:\n{code}"
+        );
+    }
+
+    #[test]
     fn vec_new_dispatches_to_element_typed_constructor() {
         // `Vec::new()` must lower to the element-typed runtime constructor
         // (build_hvec_new_str for Vec<String>), not an undefined `Vec_new`.
