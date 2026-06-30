@@ -228,14 +228,30 @@ fn response_kind(response: Option<&str>) -> &'static str {
 
 fn digest_response(response: Option<&Value>) -> Result<LspDispatchDigest, String> {
     let bytes = match response {
-        Some(value) => serde_json::to_vec(value)
-            .map_err(|err| format!("lsp dispatch failed to normalize response JSON: {err}"))?,
+        Some(value) => {
+            let normalized = normalize_for_digest(value);
+            serde_json::to_vec(&normalized)
+                .map_err(|err| format!("lsp dispatch failed to normalize response JSON: {err}"))?
+        }
         None => b"none".to_vec(),
     };
     Ok(LspDispatchDigest {
         algorithm: "sha256".to_string(),
         hex: digest_hex(&bytes),
     })
+}
+
+/// Normalize a captured response before digesting so the receipt is stable
+/// across benign metadata that is not a property of the dispatch behavior. The
+/// `initialize` result carries the compiler version (`serverInfo.version` =
+/// CARGO_PKG_VERSION); pinning it in the digest would break the receipt on every
+/// version bump, so it is redacted here (the dispatch behavior is unchanged).
+fn normalize_for_digest(value: &Value) -> Value {
+    let mut normalized = value.clone();
+    if let Some(version) = normalized.pointer_mut("/result/serverInfo/version") {
+        *version = Value::String("<redacted>".to_string());
+    }
+    normalized
 }
 
 fn digest_hex(bytes: &[u8]) -> String {
