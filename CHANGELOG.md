@@ -10,6 +10,14 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Native FFI: extern blocks accept an optional `header "..."` clause naming the
+  backing C header. The C backend emits the matching `#include` (angle-bracket
+  form for `"<sqlite3.h>"`, quoted form for `"mylib.h"`), de-duplicated and
+  sorted for reproducible output, and no longer synthesizes a prototype for a
+  header-backed function, so the header's real declaration is authoritative.
+  This is the native, embedded integration path for any C-ABI library. Covered
+  by parser, lowering, and C-backend tests (`extern_block_header_*`,
+  `extern_header_clause_lowers_to_mir_link_header`, `c_backend_*header*`).
 - Presentation pass: README hero and brand assets under `docs/brand/`, Build ecosystem navigation, and Current status / Operator surface blocks.
 - Documented the operator surface across the `buildc` CLI and the bundled LSP server.
 - Relicensed to the BuildLang Fair-Source License v1.0 under the operator's umbrella.

@@ -461,6 +461,14 @@ pub struct ExternBlockDef {
     pub is_unsafe: bool,
     /// ABI.
     pub abi: Option<String>,
+    /// Backing C header named by an optional `header "..."` clause.
+    ///
+    /// When present, the C backend emits an `#include` for this header and
+    /// trusts it for the prototypes of the block's functions instead of
+    /// synthesizing its own `extern` declarations. The string is stored
+    /// verbatim: a value wrapped in `<...>` selects an angle-bracket include
+    /// (system/library headers), anything else selects a quoted include.
+    pub header: Option<String>,
     /// Items.
     pub items: Vec<ForeignItem>,
 }
