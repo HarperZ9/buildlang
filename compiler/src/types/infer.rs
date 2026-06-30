@@ -2837,7 +2837,7 @@ impl<'ctx> TypeInfer<'ctx> {
 
     fn infer_literal(&mut self, lit: &AstLiteral) -> Ty {
         match lit {
-            AstLiteral::Int { suffix, .. } => {
+            AstLiteral::Int { suffix, value, .. } => {
                 if let Some(suffix) = suffix {
                     match suffix {
                         ast::IntSuffix::I8 => Ty::int(IntTy::I8),
@@ -2853,8 +2853,15 @@ impl<'ctx> TypeInfer<'ctx> {
                         ast::IntSuffix::U128 => Ty::int(IntTy::U128),
                         ast::IntSuffix::Usize => Ty::int(IntTy::Usize),
                     }
+                } else if *value > i64::MAX as u128 {
+                    // Exceeds i64 -> must be i128 (would silently truncate otherwise).
+                    Ty::int(IntTy::I128)
+                } else if *value > i32::MAX as u128 {
+                    // Exceeds i32 -> widen to i64 instead of defaulting to i32,
+                    // which would silently truncate (money in cents, 64-bit hashes).
+                    Ty::int(IntTy::I64)
                 } else {
-                    // Integer literal without suffix - create inference variable
+                    // Fits i32 - keep the integer inference variable (default i32).
                     Ty::new(TyKind::Infer(InferTy {
                         var: TyVarId::fresh(),
                         kind: InferKind::Int,
@@ -6554,6 +6561,54 @@ mod tests {
     // =====================================================================
     // 5. Effect inference
     // =====================================================================
+
+    #[test]
+    fn large_unsuffixed_int_literal_widens_to_i64() {
+        // A literal that exceeds i32 range must NOT default to i32 (which would
+        // silently truncate, e.g. money in cents or a 64-bit hash).
+        let mut ctx = TypeContext::new();
+        let mut infer = TypeInfer::new(&mut ctx);
+        let lit = AstLiteral::Int {
+            value: 9223372036854775000,
+            suffix: None,
+            base: crate::lexer::IntBase::Decimal,
+        };
+        assert_eq!(
+            infer.infer_literal(&lit),
+            Ty::int(IntTy::I64),
+            "a literal exceeding i32 must widen (no silent truncation)"
+        );
+    }
+
+    #[test]
+    fn huge_unsuffixed_int_literal_widens_to_i128() {
+        // A literal that exceeds i64 range widens further to i128.
+        let mut ctx = TypeContext::new();
+        let mut infer = TypeInfer::new(&mut ctx);
+        let lit = AstLiteral::Int {
+            value: 18446744073709551615, // u64::MAX, > i64::MAX
+            suffix: None,
+            base: crate::lexer::IntBase::Decimal,
+        };
+        assert_eq!(infer.infer_literal(&lit), Ty::int(IntTy::I128));
+    }
+
+    #[test]
+    fn small_unsuffixed_int_literal_stays_inferred() {
+        // Values that fit i32 keep the existing inference behavior (default i32).
+        let mut ctx = TypeContext::new();
+        let mut infer = TypeInfer::new(&mut ctx);
+        let lit = AstLiteral::Int {
+            value: 100000,
+            suffix: None,
+            base: crate::lexer::IntBase::Decimal,
+        };
+        let ty = infer.infer_literal(&lit);
+        assert!(
+            matches!(ty.kind, TyKind::Infer(_)),
+            "small literals stay inferred, got {ty:?}"
+        );
+    }
 
     #[test]
     fn pure_function_has_empty_effects() {
