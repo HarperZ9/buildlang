@@ -1032,6 +1032,64 @@ mod tests {
     }
 
     #[test]
+    fn ok_err_construct_result_struct_not_bare_call() {
+        // Ok(x)/Err(e) must construct the Result struct (is_ok + typed ok slot /
+        // err BuildString), not undefined `Ok(x)`/`Err(e)` calls into a mistyped
+        // i32 dest (the same C2440 class the Option fix closed).
+        let code = source_to_c(
+            "fn parse(b: i32) -> Result<i32, String> { \
+               if b == 0 { return Err(String::from(\"bad\")); } \
+               return Ok(b); \
+             }\n\
+             fn main() { let _r = parse(1); }",
+        );
+        assert!(
+            !code.contains("= Ok(") && !code.contains("= Err("),
+            "Ok/Err must not lower to undefined `Ok`/`Err` calls:\n{code}"
+        );
+        assert!(
+            code.contains(".is_ok = true") && code.contains(".ok.ok_i ="),
+            "Ok must construct the Result with is_ok=true and a typed ok slot:\n{code}"
+        );
+        assert!(
+            code.contains(".is_ok = false") && code.contains(".err ="),
+            "Err must construct the Result with is_ok=false and the err BuildString:\n{code}"
+        );
+    }
+
+    #[test]
+    fn result_match_tests_is_ok_and_binds_typed_slots() {
+        // `match r { Ok(n) => ..., Err(e) => ... }` must branch on `is_ok`, read
+        // the Ok payload from the typed union slot, and bind Err from the err
+        // BuildString. Without this it emitted `if (true)` + whole-struct binds
+        // (silent-wrong: both arms read garbage).
+        let code = source_to_c(
+            "fn parse(b: i32) -> Result<i32, String> { \
+               if b == 0 { return Err(String::from(\"bad\")); } \
+               return Ok(b); \
+             }\n\
+             fn main() { \
+               match parse(1) { \
+                 Ok(n) => { println!(\"ok {}\", n); } \
+                 Err(e) => { println!(\"err {}\", e); } \
+               } \
+             }",
+        );
+        assert!(
+            code.contains(".is_ok"),
+            "Result match must branch on the is_ok discriminant:\n{code}"
+        );
+        assert!(
+            code.contains(".ok.ok_i"),
+            "Ok arm must read the payload from the typed ok union slot:\n{code}"
+        );
+        assert!(
+            code.contains(".err"),
+            "Err arm must bind from the err BuildString field:\n{code}"
+        );
+    }
+
+    #[test]
     fn for_over_vec_emits_a_runtime_length_loop() {
         // `for x in v` over a Vec must emit a real index loop bounded by
         // build_hvec_len, not the silent no-op that previously dropped the body.
