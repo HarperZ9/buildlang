@@ -112,6 +112,12 @@ pub struct MirLowerer<'ctx> {
     /// intervening let-binding annotation. Keyed by the declared (unmangled)
     /// function name.
     pub(crate) fn_result_ok_types: HashMap<Arc<str>, MirType>,
+    /// Maps a function name to the inner payload type T of its `Option<T>`
+    /// return type, captured during the collection pass. Lets a `match call() {
+    /// Some(x) => ... }` on a direct call read the correct union slot even with
+    /// no intervening let annotation (symmetric to fn_result_ok_types). Keyed by
+    /// the declared (unmangled) function name.
+    pub(crate) fn_option_inner_types: HashMap<Arc<str>, MirType>,
     /// Const name -> evaluated literal value, collected in a pre-pass so
     /// that const identifiers used as array lengths (`[T; MAX_DIMS]`) resolve.
     pub(crate) const_values: HashMap<Arc<str>, MirConst>,
@@ -184,6 +190,7 @@ impl<'ctx> MirLowerer<'ctx> {
             option_inner_types: HashMap::new(),
             result_ok_types: HashMap::new(),
             fn_result_ok_types: HashMap::new(),
+            fn_option_inner_types: HashMap::new(),
             const_values: HashMap::new(),
         }
     }
@@ -219,6 +226,7 @@ impl<'ctx> MirLowerer<'ctx> {
             option_inner_types: HashMap::new(),
             result_ok_types: HashMap::new(),
             fn_result_ok_types: HashMap::new(),
+            fn_option_inner_types: HashMap::new(),
             const_values: HashMap::new(),
         }
     }
@@ -1181,6 +1189,12 @@ impl<'ctx> MirLowerer<'ctx> {
                 if let Some(ok_ty) = self.result_ok_inner_from_ast(ret_ty) {
                     self.fn_result_ok_types.insert(f.name.name.clone(), ok_ty);
                 }
+                // Same threading for `-> Option<T>` so a direct-call Some match
+                // reads the correct slot (symmetric to the Result Ok case).
+                if let Some(inner_ty) = self.option_inner_from_ast(ret_ty) {
+                    self.fn_option_inner_types
+                        .insert(f.name.name.clone(), inner_ty);
+                }
             }
         }
 
@@ -1191,12 +1205,24 @@ impl<'ctx> MirLowerer<'ctx> {
     /// type. Returns None for any non-Result type. Used to thread the Ok type
     /// from a function signature to its match sites.
     pub(crate) fn result_ok_inner_from_ast(&self, ty: &ast::Type) -> Option<MirType> {
+        self.generic_first_arg_from_ast(ty, "Result")
+    }
+
+    /// If the AST type is `Option<T>`, lower and return the `T` payload type.
+    /// Returns None for any non-Option type.
+    pub(crate) fn option_inner_from_ast(&self, ty: &ast::Type) -> Option<MirType> {
+        self.generic_first_arg_from_ast(ty, "Option")
+    }
+
+    /// If the AST type is `Wrapper<First, ...>`, lower and return `First`.
+    /// Returns None when the type head doesn't match `wrapper` or has no args.
+    fn generic_first_arg_from_ast(&self, ty: &ast::Type, wrapper: &str) -> Option<MirType> {
         if let ast::TypeKind::Path(ref path) = ty.kind {
-            let is_result = path
+            let matches_head = path
                 .last_ident()
-                .map(|i| i.name.as_ref() == "Result")
+                .map(|i| i.name.as_ref() == wrapper)
                 .unwrap_or(false);
-            if is_result {
+            if matches_head {
                 if let Some(args) = path.last_generics() {
                     if let Some(ast::GenericArg::Type(ref inner_ast_ty)) = args.first() {
                         return Some(self.lower_type_from_ast(inner_ast_ty));

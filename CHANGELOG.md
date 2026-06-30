@@ -10,6 +10,16 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Stdlib (`Option<T>` payload threading): `match call() { Some(x) => ... }` on a
+  direct call to a `-> Option<T>` function now reads the correct union slot for a
+  non-`i32` scalar payload. Previously the match defaulted the payload type to
+  `i32` and read `.value.i` even when construction wrote `.value.f` (e.g.
+  `Option<f64>`), so the float bits were reinterpreted as an int (silent-wrong).
+  A per-function side-table (`fn_option_inner_types`), captured in the collection
+  pass from `-> Option<T>`, threads the payload type to the match site (symmetric
+  to the `Result` Ok threading). Verified end-to-end under MSVC: `Option<f64>`
+  prints `some 2.5`. Covered by
+  `option_match_on_direct_call_reads_the_threaded_payload_slot`.
 - Stdlib (`Result<T, E>`): `Ok(x)` / `Err(e)` now construct the runtime
   `Result` struct and `match r { Ok(x) => ..., Err(e) => ... }` branches on the
   `is_ok` discriminant, reading the Ok payload from the typed `ok` union slot

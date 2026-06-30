@@ -1058,6 +1058,39 @@ mod tests {
     }
 
     #[test]
+    fn option_match_on_direct_call_reads_the_threaded_payload_slot() {
+        // `match returns_option_f64() { Some(x) => ... }` must read the float
+        // union slot (.value.f), not the i32 slot. Construction writes .value.f;
+        // without threading the function's `-> Option<f64>` return type, the
+        // match defaulted the inner type to i32 and read .value.i (silent-wrong:
+        // float bits reinterpreted as an int).
+        let code = source_to_c(
+            "fn maybe(n: i32) -> Option<f64> { \
+               if n == 1 { return Some(2.5); } \
+               return None; \
+             }\n\
+             fn main() { \
+               match maybe(1) { \
+                 Some(x) => { let _y = x; } \
+                 None => {} \
+               } \
+             }",
+        );
+        assert!(
+            code.contains(".value.f = "),
+            "Some(2.5) must construct into the float slot:\n{code}"
+        );
+        assert!(
+            !code.contains("(int32_t)") || !code.contains(".value.i"),
+            "the Option<f64> match must not read the payload via the i32 slot:\n{code}"
+        );
+        assert!(
+            code.contains(".value.f"),
+            "the Option<f64> match must read the payload from the float slot:\n{code}"
+        );
+    }
+
+    #[test]
     fn result_match_tests_is_ok_and_binds_typed_slots() {
         // `match r { Ok(n) => ..., Err(e) => ... }` must branch on `is_ok`, read
         // the Ok payload from the typed union slot, and bind Err from the err
