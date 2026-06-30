@@ -1059,6 +1059,30 @@ mod tests {
     }
 
     #[test]
+    fn format_macro_builds_a_string_from_args_not_a_bare_template() {
+        // `format!("{} is {}", name, age)` must build an owned BuildString via
+        // build_sprintf with the args, not return the raw template string (the
+        // old stub dropped the args and yielded a `const char*`, so the result
+        // printed as a pointer).
+        let code = source_to_c(
+            "fn main() { \
+               let name = String::from(\"Bob\"); \
+               let age = 30; \
+               let _msg = format!(\"{} is {}\", name, age); \
+             }",
+        );
+        assert!(
+            code.contains("build_sprintf("),
+            "format! must build the string via build_sprintf:\n{code}"
+        );
+        // The result must be a BuildString local, not a raw char pointer.
+        assert!(
+            code.contains("BuildString _msg") || code.contains("BuildString msg"),
+            "the format! result must be a BuildString:\n{code}"
+        );
+    }
+
+    #[test]
     fn iterator_count_terminal_counts_elements() {
         // `v.iter().filter-less count()` desugars to a +1 accumulator loop, not
         // an undefined `iter`/`count` call.

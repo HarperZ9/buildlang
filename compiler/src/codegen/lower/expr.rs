@@ -452,9 +452,9 @@ impl<'ctx> MirLowerer<'ctx> {
                         Ok(values::unit())
                     }
                     "format" => {
-                        // format! returns a string - for now return a string constant
-                        let s = self.extract_string_from_tokens(tokens);
-                        Ok(MirValue::Const(MirConst::Str(self.module.intern_string(s))))
+                        // format! builds an owned BuildString from the template
+                        // and arguments (was a stub that dropped the arguments).
+                        self.lower_format_macro(tokens)
                     }
                     "vec" => self.lower_vec_macro(tokens),
                     _ => {
