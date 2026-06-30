@@ -222,6 +222,14 @@ impl<'ctx> MirLowerer<'ctx> {
             None
         };
 
+        // Track Result<Ok, Err> Ok payload type from the annotation so a later
+        // `match r { Ok(x) => ... }` reads the correct union slot.
+        let result_ok = if let Some(ref ast_ty) = local.ty {
+            self.result_ok_inner_from_ast(ast_ty)
+        } else {
+            None
+        };
+
         // Now borrow current_fn and use it
         let builder = self
             .current_fn
@@ -236,6 +244,10 @@ impl<'ctx> MirLowerer<'ctx> {
             // Record the Option inner type if extracted from annotation
             if let Some(inner_ty) = option_inner {
                 self.option_inner_types.insert(local_id, inner_ty);
+            }
+            // Record the Result Ok payload type if extracted from annotation
+            if let Some(ok_ty) = result_ok {
+                self.result_ok_types.insert(local_id, ok_ty);
             }
 
             // Initialize if there's an init expression
@@ -1868,6 +1880,10 @@ impl<'ctx> MirLowerer<'ctx> {
                 // Some(x) constructs an Option; without this the dest fell back to
                 // i32 and the Option struct was never built (a real C2440).
                 "Some" => return MirType::Struct(Arc::from("Option")),
+                // Ok(x)/Err(e) construct a Result; without this the dest fell
+                // back to i32 and the Result struct was never built (the same
+                // C2440 class the Option fix closed).
+                "Ok" | "Err" => return MirType::Struct(Arc::from("Result")),
                 // Both String constructors yield an owned heap string. Without
                 // `String_from` here the dest local fell back to i32, so
                 // `let s = String::from(x)` emitted `int32_t s = build_string_new(...)`,
@@ -3240,6 +3256,140 @@ impl<'ctx> MirLowerer<'ctx> {
         Ok(values::local(result))
     }
 
+    /// Lower `match res { Ok(x) => body1, Err(e) => body2 }` for runtime Result.
+    /// The runtime Result struct has `is_ok: bool`, `ok: union { i64 ok_i;
+    /// double ok_f; void* ok_p; }`, and `err: BuildString`. The Ok payload type
+    /// is threaded in (`ok_ty`) so the union slot is read with the correct type
+    /// rather than defaulting to i32 (which would silently mis-read f64/pointer
+    /// Ok payloads). The Err payload is always a BuildString in the current
+    /// runtime.
+    fn lower_runtime_result_match(
+        &mut self,
+        scrutinee_val: MirValue,
+        scrutinee_ty: &MirType,
+        arms: &[ast::MatchArm],
+        ok_ty: MirType,
+    ) -> CodegenResult<MirValue> {
+        let builder = self
+            .current_fn
+            .as_mut()
+            .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+
+        let scrut_local = builder.create_local(scrutinee_ty.clone());
+        builder.assign(scrut_local, MirRValue::Use(scrutinee_val));
+
+        // Discriminant: is_ok.
+        let is_ok = builder.create_local(MirType::Bool);
+        builder.assign(
+            is_ok,
+            MirRValue::FieldAccess {
+                base: values::local(scrut_local),
+                field_name: Arc::from("is_ok"),
+                field_ty: MirType::Bool,
+            },
+        );
+
+        let merge_block = builder.create_block();
+        let ok_block = builder.create_block();
+        let err_block = builder.create_block();
+
+        // Result type for the match expression value.
+        let ret_ty = builder.return_type().clone();
+        let result_ty = if ret_ty == MirType::Void {
+            MirType::i32()
+        } else {
+            ret_ty
+        };
+        let result = builder.create_local(result_ty);
+
+        builder.branch(values::local(is_ok), ok_block, err_block);
+
+        let err_string_ty = MirType::Struct(Arc::from("BuildString"));
+
+        for arm in arms {
+            let variant = match &arm.pattern.kind {
+                ast::PatternKind::TupleStruct { path, .. } => {
+                    path.segments.last().map(|s| s.ident.name.as_ref())
+                }
+                _ => None,
+            };
+            let is_ok_arm = variant == Some("Ok");
+            let is_err_arm = variant == Some("Err");
+
+            // Choose the arm's block, the bound field name, and the bound type.
+            let (block, field_name, bind_ty) = if is_ok_arm {
+                (ok_block, "ok", ok_ty.clone())
+            } else if is_err_arm {
+                (err_block, "err", err_string_ty.clone())
+            } else {
+                // Wildcard / binding arm: treat as the Err fall-through so a
+                // catch-all still produces a value.
+                (err_block, "err", err_string_ty.clone())
+            };
+
+            let builder = self.current_fn.as_mut().unwrap();
+            builder.switch_to_block(block);
+
+            // Bind the inner pattern variable from the typed field.
+            if let ast::PatternKind::TupleStruct { patterns, .. } = &arm.pattern.kind {
+                for pat in patterns.iter() {
+                    if let ast::PatternKind::Ident { name, .. } = &pat.kind {
+                        let builder = self.current_fn.as_mut().unwrap();
+                        let inner_local =
+                            builder.create_named_local(name.name.clone(), bind_ty.clone());
+                        builder.assign(
+                            inner_local,
+                            MirRValue::FieldAccess {
+                                base: values::local(scrut_local),
+                                field_name: Arc::from(field_name),
+                                field_ty: bind_ty.clone(),
+                            },
+                        );
+                        self.var_map.insert(name.name.clone(), inner_local);
+                    }
+                }
+            }
+
+            let body_val = self.lower_expr(&arm.body)?;
+            let builder = self.current_fn.as_mut().unwrap();
+            if !matches!(body_val, MirValue::Const(MirConst::Unit)) {
+                builder.assign(result, MirRValue::Use(body_val));
+            }
+            builder.goto(merge_block);
+        }
+
+        let builder = self.current_fn.as_mut().unwrap();
+        builder.switch_to_block(merge_block);
+        Ok(values::local(result))
+    }
+
+    /// Determine the Ok payload type of a Result-valued match scrutinee.
+    /// Priority: a let-binding annotation tracked per-local, then the return
+    /// signature of a directly-matched call, then i32. The Err payload is
+    /// always a BuildString in the current runtime.
+    fn result_ok_type_for(&self, scrutinee: &ast::Expr, scrutinee_val: &MirValue) -> MirType {
+        // Local tracked from a `let r: Result<Ok, Err> = ...` annotation.
+        if let MirValue::Local(id) = scrutinee_val {
+            if let Some(ty) = self.result_ok_types.get(id) {
+                return ty.clone();
+            }
+        }
+        // Direct `match call() { Ok(x) => ... }`: recover from the callee sig.
+        if let ExprKind::Call { func, .. } = &scrutinee.kind {
+            let name = match &func.kind {
+                ExprKind::Ident(ident) => Some(ident.name.clone()),
+                ExprKind::Path(path) => path.last_ident().map(|i| i.name.clone()),
+                _ => None,
+            };
+            if let Some(name) = name {
+                if let Some(ty) = self.fn_result_ok_types.get(&name) {
+                    return ty.clone();
+                }
+            }
+        }
+        MirType::i32()
+    }
+
     fn lower_match(
         &mut self,
         scrutinee: &ast::Expr,
@@ -3248,6 +3398,17 @@ impl<'ctx> MirLowerer<'ctx> {
         // Evaluate the scrutinee once and store in a temporary.
         let scrutinee_val = self.lower_expr(scrutinee)?;
         let scrutinee_ty = self.type_of_value(&scrutinee_val);
+
+        // Runtime Result match: `match res { Ok(x) => ..., Err(e) => ... }`
+        // The runtime Result struct has `is_ok: bool`, an `ok` union, and an
+        // `err: BuildString`. The Ok payload type is threaded from the binding
+        // annotation or callee signature so the union slot is read correctly.
+        let is_runtime_result =
+            matches!(&scrutinee_ty, MirType::Struct(n) if n.as_ref() == "Result");
+        if is_runtime_result {
+            let ok_ty = self.result_ok_type_for(scrutinee, &scrutinee_val);
+            return self.lower_runtime_result_match(scrutinee_val, &scrutinee_ty, arms, ok_ty);
+        }
 
         // Runtime Option match: `match opt { Some(x) => ..., None => ... }`
         // The runtime Option struct has fields `has_value: bool` and `value: union`.
