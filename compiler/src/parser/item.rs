@@ -248,14 +248,36 @@ impl<'a> Parser<'a> {
                         span,
                     ))
                 } else {
-                    let extern_block = self.parse_extern_block(is_unsafe)?;
-                    let span = start.merge(&self.tokens[self.pos.saturating_sub(1)].span);
-                    Ok(Item::new(
-                        ItemKind::ExternBlock(Box::new(extern_block)),
-                        vis,
-                        attrs,
-                        span,
-                    ))
+                    // Optional ABI string after `extern`, consumed here so we can
+                    // tell `extern "C" fn ...` (a C-ABI function definition, i.e.
+                    // an export) apart from `extern "C" { ... }` (an extern block).
+                    let abi = if let TokenKind::Literal { .. } = self.current_kind() {
+                        let token_span = self.advance().span;
+                        Some(self.source.slice(token_span).trim_matches('"').to_string())
+                    } else {
+                        None
+                    };
+
+                    if self.check_keyword(Keyword::Fn) {
+                        let mut fn_def = self.parse_fn(is_unsafe, false, false)?;
+                        fn_def.sig.abi = abi;
+                        let span = start.merge(&self.tokens[self.pos.saturating_sub(1)].span);
+                        Ok(Item::new(
+                            ItemKind::Function(Box::new(fn_def)),
+                            vis,
+                            attrs,
+                            span,
+                        ))
+                    } else {
+                        let extern_block = self.parse_extern_block(is_unsafe, abi)?;
+                        let span = start.merge(&self.tokens[self.pos.saturating_sub(1)].span);
+                        Ok(Item::new(
+                            ItemKind::ExternBlock(Box::new(extern_block)),
+                            vis,
+                            attrs,
+                            span,
+                        ))
+                    }
                 }
             }
 
@@ -1375,15 +1397,13 @@ impl<'a> Parser<'a> {
         Ok(ExternCrateDef { name, rename })
     }
 
-    /// Parse extern block.
-    fn parse_extern_block(&mut self, is_unsafe: bool) -> ParseResult<ExternBlockDef> {
-        let abi = if let TokenKind::Literal { .. } = self.current_kind() {
-            let token_span = self.advance().span;
-            Some(self.source.slice(token_span).trim_matches('"').to_string())
-        } else {
-            None
-        };
-
+    /// Parse extern block. The optional ABI string is parsed by the caller (so
+    /// it can disambiguate `extern "C" fn ...` from a block) and passed in.
+    fn parse_extern_block(
+        &mut self,
+        is_unsafe: bool,
+        abi: Option<String>,
+    ) -> ParseResult<ExternBlockDef> {
         // Optional `link "lib"` and `header "path"` clauses, in any order,
         // naming the library to link and the C header that backs the block.
         // Both are contextual keywords: unambiguous here because an extern
@@ -1769,6 +1789,37 @@ mod tests {
         let item = parse_item_str("extern \"C\" { fn foo(); }").unwrap();
         match &item.kind {
             ItemKind::ExternBlock(eb) => assert_eq!(eb.link, None),
+            other => panic!("expected ExternBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extern_c_fn_definition_parses_as_function() {
+        // `extern "C" fn ... { ... }` is a function definition (a C-ABI export),
+        // not an extern block.
+        let item =
+            parse_item_str("extern \"C\" fn exported_add(a: i32, b: i32) -> i32 { a + b }")
+                .unwrap();
+        match &item.kind {
+            ItemKind::Function(f) => {
+                assert_eq!(f.name.as_str(), "exported_add");
+                assert_eq!(f.sig.abi.as_deref(), Some("C"));
+                assert!(f.body.is_some());
+            }
+            other => panic!("expected Function, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extern_block_still_parses_after_extern_fn_support() {
+        // Regression: `extern "C" { ... }` (with clauses) must still parse as a
+        // block, not be mistaken for a function definition.
+        let item = parse_item_str("extern \"C\" header \"<m.h>\" { fn f() -> i32; }").unwrap();
+        match &item.kind {
+            ItemKind::ExternBlock(eb) => {
+                assert_eq!(eb.header.as_deref(), Some("<m.h>"));
+                assert_eq!(eb.items.len(), 1);
+            }
             other => panic!("expected ExternBlock, got {:?}", other),
         }
     }

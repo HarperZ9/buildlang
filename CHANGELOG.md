@@ -10,6 +10,14 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Native FFI (export): `extern "C" fn` is now accepted as a function
+  *definition*, not only inside extern blocks. A C-ABI function definition gets
+  external linkage and a stable, unmangled name, so it compiles to a
+  non-`static` C function callable from C and any C-ABI language. Ordinary
+  functions stay internal (`static`). This is the reciprocal of header-backed
+  extern blocks. Covered by `extern_c_fn_definition_parses_as_function`,
+  `extern_c_fn_definition_emits_non_static_export`, and
+  `regular_fn_keeps_internal_static_linkage`.
 - Native FFI: extern blocks accept an optional `header "..."` clause naming the
   backing C header. The C backend emits the matching `#include` (angle-bracket
   form for `"<sqlite3.h>"`, quoted form for `"mylib.h"`), de-duplicated and

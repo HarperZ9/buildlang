@@ -859,6 +859,30 @@ mod tests {
     }
 
     #[test]
+    fn extern_c_fn_definition_emits_non_static_export() {
+        let code = source_to_c("extern \"C\" fn exported_add(a: i32, b: i32) -> i32 { a + b }");
+        assert!(
+            code.contains("int32_t exported_add("),
+            "exported function signature should be present:\n{code}"
+        );
+        // A C-ABI export must have external linkage so C code can call it.
+        assert!(
+            !code.contains("static int32_t exported_add"),
+            "a C-ABI export must not be emitted static:\n{code}"
+        );
+    }
+
+    #[test]
+    fn regular_fn_keeps_internal_static_linkage() {
+        // Regression: a non-exported function keeps internal (static) linkage.
+        let code = source_to_c("fn helper(a: i32) -> i32 { a + 1 }");
+        assert!(
+            code.contains("static int32_t helper("),
+            "non-exported function should stay static:\n{code}"
+        );
+    }
+
+    #[test]
     fn c_backend_still_synthesizes_extern_without_header() {
         // Regression guard: an extern block with no header keeps the existing
         // behavior of synthesizing a prototype for non-standard functions.

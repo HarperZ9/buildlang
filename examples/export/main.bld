@@ -1,0 +1,24 @@
+// Exporting BuildLang to C (and any C-ABI language)
+// =================================================
+//
+// `extern "C" fn` defines a function with C linkage and a stable, unmangled
+// symbol name. It compiles to a non-`static` C function, so a C program (or
+// Rust, Zig, Python via ctypes, and so on) can call it directly:
+//
+//     // in C:
+//     extern int buildlang_square(int n);
+//     int r = buildlang_square(7);   // -> 49
+//
+// This is the reciprocal of header-backed extern blocks: those let BuildLang
+// call into C libraries; this lets C call into BuildLang.
+//
+// Emit the C with:
+//     buildc build examples/export --emit c
+
+extern "C" fn buildlang_square(n: i32) -> i32 {
+    n * n
+}
+
+fn main() {
+    let _ = buildlang_square(7);
+}
