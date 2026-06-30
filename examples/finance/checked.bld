@@ -1,45 +1,35 @@
 // Deterministic, overflow-SAFE checked arithmetic (fin-sec foundation).
 //
 // Money math must never silently wrap. This detects overflow BEFORE it happens
-// (no reliance on the unspecified-overflow gap) and returns a result struct:
-// ok = 1 with the sum, or ok = 0 (overflow, rejected -- never a wrapped value).
+// (no reliance on the unspecified-overflow gap) and returns `Option<i64>`:
+// `Some(sum)`, or `None` when the add would overflow (rejected, never wrapped).
 //
-// Expressible TODAY with existing primitives. The compiler brick is to make
-// `checked_add` / `wrapping_*` / `saturating_*` native (lowered to C overflow
-// intrinsics) and to return `Option<i64>` directly (an Option<i64>-return +
-// match currently miscompiles the 64-bit payload -- see docs/FINSEC-BLOCKCHAIN-HOST.md).
-
-struct Checked {
-    ok: i64,     // 1 = success, 0 = overflow
-    value: i64,
-}
+// Expressible TODAY with existing primitives. The remaining compiler brick is to
+// make `checked_add` / `wrapping_*` / `saturating_*` native (lowered to C
+// overflow intrinsics) for ergonomics and speed.
 
 // Checked addition for non-negative amounts (e.g. money in cents).
 // `max - a` does not overflow because a >= 0, so the guard is itself safe.
-fn checked_add(a: i64, b: i64) -> Checked {
+fn checked_add(a: i64, b: i64) -> Option<i64> {
     let max = 9223372036854775807;
     if b > max - a {
-        Checked { ok: 0, value: 0 }
+        None
     } else {
-        Checked { ok: 1, value: a + b }
+        Some(a + b)
     }
 }
 
 fn main() ~ Console {
     // Normal money: $1,000.00 + $25.99 = $1,025.99 -> 102599 cents, exact.
-    let r1 = checked_add(100000, 2599);
-    if r1.ok == 1 {
-        println("ok cents {}", r1.value);
-    } else {
-        println("OVERFLOW rejected flag {}", 0);
+    match checked_add(100000, 2599) {
+        Some(v) => println("ok cents {}", v),
+        None => println("OVERFLOW rejected flag {}", 0),
     }
 
     // Near the i64 ceiling: adding would overflow -> rejected, NOT wrapped.
     let near_max = 9223372036854775000;
-    let r2 = checked_add(near_max, 1000);
-    if r2.ok == 1 {
-        println("ok cents {}", r2.value);
-    } else {
-        println("OVERFLOW rejected (not wrapped) flag {}", 1);
+    match checked_add(near_max, 1000) {
+        Some(v) => println("ok cents {}", v),
+        None => println("OVERFLOW rejected (not wrapped) flag {}", 1),
     }
 }
