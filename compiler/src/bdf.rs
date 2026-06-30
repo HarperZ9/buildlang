@@ -35,6 +35,14 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
+pub mod flagship;
+pub mod json;
+
+pub use flagship::{
+    bdf_to_flagship_action, bdf_to_flagship_action_pretty, flagship_action_to_bdf,
+    FLAGSHIP_ACTION_SCHEMA,
+};
+
 /// Schema id for a standalone BDF value stream's binary header.
 pub const BDF_VALUE_SCHEMA: &str = "buildlang.bdf/v0";
 

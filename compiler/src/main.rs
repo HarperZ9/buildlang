@@ -311,6 +311,28 @@ enum BdfCommands {
         /// Input file (auto-detected: binary if it starts with the BDF magic)
         file: PathBuf,
     },
+
+    /// Bridge a `project-telos.flagship-action/v1` JSON envelope into a
+    /// canonical-binary BDF message (lossless)
+    FromFlagshipAction {
+        /// Input flagship-action/v1 JSON file
+        input: PathBuf,
+
+        /// Output binary `.bdf` message file (defaults to stdout as raw bytes)
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+    },
+
+    /// Reconstruct a `project-telos.flagship-action/v1` JSON envelope from a
+    /// canonical-binary BDF message (lossless)
+    ToFlagshipAction {
+        /// Input binary `.bdf` message written by `from-flagship-action`
+        input: PathBuf,
+
+        /// Output JSON file (defaults to stdout)
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3126,6 +3148,12 @@ fn cmd_bdf(command: BdfCommands) -> Result<(), i32> {
         BdfCommands::Encode { input, output } => cmd_bdf_encode(&input, output.as_deref()),
         BdfCommands::Decode { input, output } => cmd_bdf_decode(&input, output.as_deref()),
         BdfCommands::Validate { file } => cmd_bdf_validate(&file),
+        BdfCommands::FromFlagshipAction { input, output } => {
+            cmd_bdf_from_flagship_action(&input, output.as_deref())
+        }
+        BdfCommands::ToFlagshipAction { input, output } => {
+            cmd_bdf_to_flagship_action(&input, output.as_deref())
+        }
     }
 }
 
@@ -3232,6 +3260,69 @@ fn cmd_bdf_validate(file: &Path) -> Result<(), i32> {
     println!("canonical_bytes: {}", value.to_bytes().len());
     println!("payload_digest: sha256:{digest}");
     println!("status: valid");
+    Ok(())
+}
+
+fn cmd_bdf_from_flagship_action(input: &Path, output: Option<&Path>) -> Result<(), i32> {
+    let json = std::fs::read_to_string(input).map_err(|err| {
+        eprintln!("Error reading file '{}': {}", input.display(), err);
+        1
+    })?;
+    let message = buildlang::bdf::flagship_action_to_bdf(&json).map_err(|err| {
+        eprintln!(
+            "Error bridging flagship-action '{}': {}",
+            input.display(),
+            err
+        );
+        1
+    })?;
+    let bytes = message.to_bytes();
+
+    if let Some(path) = output {
+        std::fs::write(path, &bytes).map_err(|err| {
+            eprintln!("Error writing '{}': {}", path.display(), err);
+            1
+        })?;
+        println!(
+            "Wrote {} byte(s) of {} to {} (payload sha256:{})",
+            bytes.len(),
+            buildlang::bdf::BDF_MESSAGE_SCHEMA,
+            path.display(),
+            message.receipt.sha256
+        );
+    } else {
+        write_stdout_bytes(&bytes)?;
+    }
+    Ok(())
+}
+
+fn cmd_bdf_to_flagship_action(input: &Path, output: Option<&Path>) -> Result<(), i32> {
+    let bytes = std::fs::read(input).map_err(|err| {
+        eprintln!("Error reading file '{}': {}", input.display(), err);
+        1
+    })?;
+    let message = buildlang::bdf::BdfMessage::from_bytes(&bytes).map_err(|err| {
+        eprintln!("Error decoding BDF message '{}': {}", input.display(), err);
+        1
+    })?;
+    let json = buildlang::bdf::bdf_to_flagship_action_pretty(&message).map_err(|err| {
+        eprintln!(
+            "Error reconstructing flagship-action JSON from '{}': {}",
+            input.display(),
+            err
+        );
+        1
+    })?;
+
+    if let Some(path) = output {
+        std::fs::write(path, format!("{json}\n")).map_err(|err| {
+            eprintln!("Error writing '{}': {}", path.display(), err);
+            1
+        })?;
+        println!("Wrote flagship-action/v1 JSON to {}", path.display());
+    } else {
+        println!("{json}");
+    }
     Ok(())
 }
 
