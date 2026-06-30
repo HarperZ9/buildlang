@@ -7,13 +7,21 @@ with additional experimental backends.
 
 All commands and flags below are taken from the compiler's actual CLI
 definition (`compiler/src/main.rs`). The worked examples were run against a
-local debug build of `buildc` 1.0.0 on Windows; the captured output is shown
+local debug build of `buildc` 1.0.x on Windows; the captured output is shown
 verbatim. Output captured from an actual run is marked **(verified)**; any
 output that was not run is marked **(illustrative)**.
 
 ## Install / Build
 
-Build the compiler from source with Cargo:
+From crates.io (installs the `buildc` binary):
+
+```bash
+cargo install buildlang
+```
+
+> Formerly published as `quantalang` (deprecated). Use `buildlang` / `buildc`.
+
+Or build the compiler from source with Cargo:
 
 ```bash
 cd compiler
@@ -164,7 +172,7 @@ No errors found in 'examples/quickstart/hello.bld'
 {
   "schema": "buildlang-check-receipt/v1",
   "compiler": "buildc",
-  "compiler_version": "1.0.0",
+  "compiler_version": "1.0.4",
   "language_version": "1.0.0",
   ...
   "status": "passed",

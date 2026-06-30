@@ -12602,6 +12602,84 @@ fn c_backend_run(program_path: &Path) -> RunResult {
     }
 }
 
+/// Foundation: overflow-safe checked + saturating integer arithmetic
+/// (examples/finance/safe_math.bld) runs end-to-end. Exercises the i64-literal,
+/// `Option<i64>`-return, `match`-with-if-arms, `&&`/`else if`, and `0 - MAX - 1`
+/// (i64::MIN) paths together. `saturating_add` must CLAMP to i64::MAX, not wrap.
+#[test]
+fn safe_math_checked_and_saturating_arithmetic_runs() {
+    if !c_backend_ready() {
+        eprintln!("skipping safe_math e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../examples/finance/safe_math.bld");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout,
+        "add ok 102599\nadd overflow 1\nsub ok 60\nsat_add 9223372036854775807\nsat_sub 60\n",
+        "checked/saturating arithmetic must detect overflow and clamp, not wrap"
+    );
+}
+
+/// Regression: an unsuffixed integer literal exceeding i32 range must keep its
+/// full 64-bit value end-to-end. Previously it was silently truncated to 32 bits
+/// in both the type checker (defaulted to an i32 inference var) and the MIR
+/// lowering (`unwrap_or(i32)`), so `9223372036854775000` printed as `-808`.
+#[test]
+fn large_unsuffixed_int_literal_not_truncated_end_to_end() {
+    if !c_backend_ready() {
+        eprintln!("skipping large-literal e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let src = "fn main() ~ Console {\n\
+               let big = 9223372036854775000;\n\
+               let diff = big - 100000;\n\
+               println(\"{}\", big);\n\
+               println(\"{}\", diff);\n\
+               }\n";
+    let dir = std::env::temp_dir().join("buildlang_large_literal_regress");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("large_literal.bld");
+    std::fs::write(&path, src).expect("write large_literal.bld");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout, "9223372036854775000\n9223372036854675000\n",
+        "a 64-bit literal must not be truncated to 32 bits"
+    );
+}
+
+/// Regression: an `Option<i64>`-returning function whose result is matched must
+/// compile and run end-to-end. Previously the if-expression result local was
+/// typed `int32_t` (the `None` branch defaulted to i32), so the 64-bit Option
+/// payload miscompiled (MSVC C2440 "cannot convert from 'Option' to int32_t").
+/// `lower_if` now retypes the result local to the aggregate branch type.
+#[test]
+fn option_i64_return_and_match_runs_end_to_end() {
+    if !c_backend_ready() {
+        eprintln!("skipping option_i64 e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let src = "fn checked_add(a: i64, b: i64) -> Option<i64> {\n\
+               let max = 9223372036854775807;\n\
+               if b > max - a { None } else { Some(a + b) }\n\
+               }\n\
+               fn main() ~ Console {\n\
+               match checked_add(100000, 2599) { Some(v) => println(\"ok {}\", v), None => println(\"of {}\", 0) }\n\
+               let big = 9223372036854775000;\n\
+               match checked_add(big, 1000) { Some(v) => println(\"ok {}\", v), None => println(\"rej {}\", 1) }\n\
+               }\n";
+    let dir = std::env::temp_dir().join("buildlang_option_i64_regress");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("option_i64.bld");
+    std::fs::write(&path, src).expect("write option_i64.bld");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout, "ok 102599\nrej 1\n",
+        "Option<i64> return + match must run end-to-end with the 64-bit payload intact"
+    );
+}
+
 /// Executable witness of the transpile-preservation criterion: for every
 /// Rust-supported corpus program, lowering the same source through the C
 /// backend and through the Rust backend must produce byte-identical stdout and

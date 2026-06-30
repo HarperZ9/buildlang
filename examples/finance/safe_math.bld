@@ -1,0 +1,71 @@
+// Overflow-SAFE integer arithmetic for the fin-sec / blockchain foundation.
+//
+// Every operation detects overflow BEFORE it happens (no reliance on the
+// unspecified-overflow gap) and either returns `Option<i64>` (checked: None on
+// overflow) or clamps (saturating). i64::MIN is written `0 - MAX - 1` because the
+// positive literal 9223372036854775808 does not fit i64.
+//
+// The native compiler brick (lowered to C overflow intrinsics, plus `wrapping_*`)
+// is the next step; this proves the foundation is usable TODAY.
+
+fn checked_add(a: i64, b: i64) -> Option<i64> {
+    let max = 9223372036854775807;
+    let min = 0 - 9223372036854775807 - 1;
+    if b > 0 && a > max - b {
+        None
+    } else if b < 0 && a < min - b {
+        None
+    } else {
+        Some(a + b)
+    }
+}
+
+fn checked_sub(a: i64, b: i64) -> Option<i64> {
+    let max = 9223372036854775807;
+    let min = 0 - 9223372036854775807 - 1;
+    if b < 0 && a > max + b {
+        None
+    } else if b > 0 && a < min + b {
+        None
+    } else {
+        Some(a - b)
+    }
+}
+
+fn saturating_add(a: i64, b: i64) -> i64 {
+    let max = 9223372036854775807;
+    let min = 0 - 9223372036854775807 - 1;
+    match checked_add(a, b) {
+        Some(v) => v,
+        None => if b > 0 { max } else { min },
+    }
+}
+
+fn saturating_sub(a: i64, b: i64) -> i64 {
+    let max = 9223372036854775807;
+    let min = 0 - 9223372036854775807 - 1;
+    match checked_sub(a, b) {
+        Some(v) => v,
+        None => if b > 0 { min } else { max },
+    }
+}
+
+fn main() ~ Console {
+    // checked_add: normal money, then overflow.
+    match checked_add(100000, 2599) {
+        Some(v) => println("add ok {}", v),
+        None => println("add overflow {}", 0),
+    }
+    match checked_add(9223372036854775000, 1000) {
+        Some(v) => println("add ok {}", v),
+        None => println("add overflow {}", 1),
+    }
+    // checked_sub: normal, then underflow.
+    match checked_sub(100, 40) {
+        Some(v) => println("sub ok {}", v),
+        None => println("sub underflow {}", 0),
+    }
+    // saturating: clamps instead of wrapping.
+    println("sat_add {}", saturating_add(9223372036854775000, 1000));
+    println("sat_sub {}", saturating_sub(100, 40));
+}

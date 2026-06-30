@@ -1,7 +1,7 @@
 // ===============================================================================
 // BUILDLANG COMPILER - LOSSLESS FLOAT SERDE
 // ===============================================================================
-// Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
+// Copyright (c) 2022-2026 Zain Dana Harper. BuildLang Fair-Source License v1.0 (see LICENSE).
 // ===============================================================================
 
 //! Lossless `f64` serde: store the raw IEEE-754 bit pattern as a `u64`.

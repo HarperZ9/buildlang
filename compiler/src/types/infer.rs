@@ -1,7 +1,7 @@
 // ===============================================================================
 // BUILDLANG TYPE SYSTEM - TYPE INFERENCE
 // ===============================================================================
-// Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
+// Copyright (c) 2022-2026 Zain Dana Harper. BuildLang Fair-Source License v1.0 (see LICENSE).
 // ===============================================================================
 
 //! Type inference engine.
@@ -9,7 +9,7 @@
 //! This module implements bidirectional type inference for expressions.
 //! It combines inference (synthesizing types) with checking (verifying against expected types).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use crate::ast::{self, AssignOp, BinOp, ExprKind, Literal as AstLiteral, UnaryOp};
@@ -90,6 +90,38 @@ pub struct TypeInfer<'ctx> {
     source_text: Option<Arc<str>>,
     /// Source ID associated with `source_text`.
     source_id: Option<SourceId>,
+    /// Per-binding linear-resource state for `#[linear]`-typed locals/params
+    /// (no-cloning / no-double-spend / resource-handle tracking).
+    linear_slots: HashMap<String, LinearSlot>,
+    /// Active borrow-context depth. When `> 0`, a use of a value is a borrow
+    /// (`&x`) and must NOT consume a linear value; when `0`, it is a move.
+    borrow_depth: u32,
+    /// Number of enclosing loop scopes. Consuming a linear value declared
+    /// outside the current loop is a potential double-use (the loop may repeat).
+    loop_depth: u32,
+    /// Parallel marker stack: whether each pushed scope is a loop, so the
+    /// scope-pop path can keep `loop_depth` balanced.
+    linear_loop_markers: Vec<bool>,
+    /// Per-scope record of linear slots shadowed by inner bindings: name ->
+    /// the slot value that existed before the inner binding (None if absent).
+    /// On scope exit these are restored, so an inner shadow cannot revive or
+    /// alter the outer binding's consumed state.
+    linear_shadow_stack: Vec<HashMap<String, Option<LinearSlot>>>,
+}
+
+/// Tracking state for a single `#[linear]`-typed binding.
+#[derive(Debug, Clone)]
+struct LinearSlot {
+    status: LinearStatus,
+    /// `loop_depth` in effect where this binding was introduced.
+    decl_loop_depth: u32,
+}
+
+/// Whether a linear binding is still usable or has been consumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinearStatus {
+    Live,
+    Consumed,
 }
 
 struct BreakSourceFrame {
@@ -258,6 +290,11 @@ impl<'ctx> TypeInfer<'ctx> {
             borrow_state: super::ty::BorrowState::new(),
             source_text: None,
             source_id: None,
+            linear_slots: HashMap::new(),
+            borrow_depth: 0,
+            loop_depth: 0,
+            linear_loop_markers: Vec::new(),
+            linear_shadow_stack: Vec::new(),
         }
     }
 
@@ -297,6 +334,11 @@ impl<'ctx> TypeInfer<'ctx> {
             borrow_state: super::ty::BorrowState::new(),
             source_text: None,
             source_id: None,
+            linear_slots: HashMap::new(),
+            borrow_depth: 0,
+            loop_depth: 0,
+            linear_loop_markers: Vec::new(),
+            linear_shadow_stack: Vec::new(),
         }
     }
 
@@ -501,6 +543,12 @@ impl<'ctx> TypeInfer<'ctx> {
     fn push_scope(&mut self, kind: ScopeKind) {
         self.ctx.push_scope(kind);
         self.source_bindings.push(BTreeMap::new());
+        let is_loop = matches!(kind, ScopeKind::Loop);
+        self.linear_loop_markers.push(is_loop);
+        if is_loop {
+            self.loop_depth += 1;
+        }
+        self.linear_shadow_stack.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
@@ -508,6 +556,142 @@ impl<'ctx> TypeInfer<'ctx> {
         if self.source_bindings.len() > 1 {
             self.source_bindings.pop();
         }
+        if let Some(true) = self.linear_loop_markers.pop() {
+            self.loop_depth = self.loop_depth.saturating_sub(1);
+        }
+        // Restore linear slots shadowed by bindings in the scope being popped,
+        // so an inner shadow cannot revive/alter an outer binding's state.
+        if let Some(frame) = self.linear_shadow_stack.pop() {
+            for (name, prev) in frame {
+                match prev {
+                    Some(slot) => {
+                        self.linear_slots.insert(name, slot);
+                    }
+                    None => {
+                        self.linear_slots.remove(&name);
+                    }
+                }
+            }
+        }
+    }
+
+    // =========================================================================
+    // LINEAR RESOURCE TRACKING (no-cloning / no-double-spend)
+    //
+    // A binding whose nominal type is marked `#[linear]` may be moved/consumed
+    // at most once. Borrows (`&x`) do not consume. Ordinary (non-linear) types
+    // are untracked and keep copy-like reuse. The analysis is intentionally
+    // conservative: it favors soundness (never let a linear value be used
+    // twice) over completeness (it may reject some safe programs, e.g. a
+    // by-value field read of a linear local, or a consume inside a loop).
+    // =========================================================================
+
+    /// If `ty` resolves to a `#[linear]` nominal type, return its `DefId`.
+    fn linear_def_of(&self, ty: &Ty) -> Option<DefId> {
+        match self.apply(ty).kind {
+            TyKind::Adt(def_id, _) if self.ctx.is_linear_def(def_id) => Some(def_id),
+            _ => None,
+        }
+    }
+
+    /// Register a function parameter (bound into the context by the checker,
+    /// not via this inferer's `bind_pattern`) for linear resource tracking.
+    /// Without this, a function consuming its own linear parameter twice would
+    /// escape no-cloning enforcement.
+    pub fn register_linear_param(&mut self, name: &str, ty: &Ty) {
+        self.register_linear_local(name, ty);
+    }
+
+    /// Register a freshly-bound local/param. If its type is linear it becomes a
+    /// tracked, live linear slot; otherwise any prior tracking for that name is
+    /// cleared (a non-linear shadow is not resource-tracked).
+    fn register_linear_local(&mut self, name: &str, ty: &Ty) {
+        // Record what this name's slot was BEFORE this (re)binding, so the
+        // enclosing scope can restore it on exit (shadowing must not leak out).
+        let prev = self.linear_slots.get(name).cloned();
+        if let Some(frame) = self.linear_shadow_stack.last_mut() {
+            frame.entry(name.to_string()).or_insert(prev);
+        }
+        if self.linear_def_of(ty).is_some() {
+            self.linear_slots.insert(
+                name.to_string(),
+                LinearSlot {
+                    status: LinearStatus::Live,
+                    decl_loop_depth: self.loop_depth,
+                },
+            );
+        } else {
+            self.linear_slots.remove(name);
+        }
+    }
+
+    /// Record a by-value use (move) of `name`. Errors if the value was already
+    /// consumed, or if it is consumed inside a loop deeper than its declaration
+    /// (the loop body may run more than once -> potential double-use).
+    fn consume_linear(&mut self, name: &str, span: Span) {
+        let Some(slot) = self.linear_slots.get(name).cloned() else {
+            return;
+        };
+        match slot.status {
+            LinearStatus::Consumed => {
+                self.error(
+                    TypeError::LinearUseAfterMove {
+                        name: name.to_string(),
+                    },
+                    span,
+                );
+            }
+            LinearStatus::Live => {
+                if self.loop_depth > slot.decl_loop_depth {
+                    self.error(
+                        TypeError::LinearUseAfterMove {
+                            name: name.to_string(),
+                        },
+                        span,
+                    );
+                }
+                if let Some(s) = self.linear_slots.get_mut(name) {
+                    s.status = LinearStatus::Consumed;
+                }
+            }
+        }
+    }
+
+    /// Reject a linear-typed value appearing in a position the move-analysis
+    /// cannot follow (a tuple/array element, a generic argument, a closure
+    /// capture, a value moved out of a reference, ...), where it could be
+    /// silently duplicated. Conservative: favors soundness over completeness.
+    /// Returns true if it rejected.
+    fn reject_linear_escape(&mut self, ty: &Ty, span: Span, context: &str) -> bool {
+        if self.linear_def_of(ty).is_some() {
+            self.error(
+                TypeError::LinearInUnsupportedPosition {
+                    context: context.to_string(),
+                },
+                span,
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Merge linear slot snapshots from mutually-exclusive control-flow paths.
+    /// A binding is Consumed after the join if it was consumed on ANY path
+    /// (conservative: a later use must then be rejected).
+    fn merge_linear_snapshots(
+        snaps: &[HashMap<String, LinearSlot>],
+    ) -> HashMap<String, LinearSlot> {
+        let mut out: HashMap<String, LinearSlot> = HashMap::new();
+        for snap in snaps {
+            for (name, slot) in snap {
+                let entry = out.entry(name.clone()).or_insert_with(|| slot.clone());
+                if slot.status == LinearStatus::Consumed {
+                    entry.status = LinearStatus::Consumed;
+                }
+            }
+        }
+        out
     }
 
     fn bind_call_sources(&mut self, name: &str, sources: Vec<String>) {
@@ -2653,7 +2837,7 @@ impl<'ctx> TypeInfer<'ctx> {
 
     fn infer_literal(&mut self, lit: &AstLiteral) -> Ty {
         match lit {
-            AstLiteral::Int { suffix, .. } => {
+            AstLiteral::Int { suffix, value, .. } => {
                 if let Some(suffix) = suffix {
                     match suffix {
                         ast::IntSuffix::I8 => Ty::int(IntTy::I8),
@@ -2669,8 +2853,15 @@ impl<'ctx> TypeInfer<'ctx> {
                         ast::IntSuffix::U128 => Ty::int(IntTy::U128),
                         ast::IntSuffix::Usize => Ty::int(IntTy::Usize),
                     }
+                } else if *value > i64::MAX as u128 {
+                    // Exceeds i64 -> must be i128 (would silently truncate otherwise).
+                    Ty::int(IntTy::I128)
+                } else if *value > i32::MAX as u128 {
+                    // Exceeds i32 -> widen to i64 instead of defaulting to i32,
+                    // which would silently truncate (money in cents, 64-bit hashes).
+                    Ty::int(IntTy::I64)
                 } else {
-                    // Integer literal without suffix - create inference variable
+                    // Fits i32 - keep the integer inference variable (default i32).
                     Ty::new(TyKind::Infer(InferTy {
                         var: TyVarId::fresh(),
                         kind: InferKind::Int,
@@ -2724,6 +2915,11 @@ impl<'ctx> TypeInfer<'ctx> {
                 self.current_effects
                     .add(super::effects::Effect::new(super::capabilities::FOREIGN));
                 self.record_capability_source(super::capabilities::FOREIGN, name);
+            }
+            // No-cloning: a by-value use (borrow_depth == 0) of a linear local
+            // consumes it; a second consume is an error.
+            if self.borrow_depth == 0 {
+                self.consume_linear(name, span);
             }
             ty
         } else {
@@ -2986,6 +3182,9 @@ impl<'ctx> TypeInfer<'ctx> {
 
     fn infer_tuple(&mut self, elems: &[ast::Expr]) -> Ty {
         let elem_tys: Vec<_> = elems.iter().map(|e| self.infer_expr(e)).collect();
+        for (elem, ty) in elems.iter().zip(elem_tys.iter()) {
+            self.reject_linear_escape(ty, elem.span, "a tuple");
+        }
         Ty::tuple(elem_tys)
     }
 
@@ -2997,9 +3196,11 @@ impl<'ctx> TypeInfer<'ctx> {
         }
 
         let first_ty = self.infer_expr(&elems[0]);
+        self.reject_linear_escape(&first_ty, elems[0].span, "an array");
         for elem in &elems[1..] {
             let elem_ty = self.infer_expr(elem);
             let _ = self.unify(&first_ty, &elem_ty, span);
+            self.reject_linear_escape(&elem_ty, elem.span, "an array");
         }
 
         Ty::array(self.apply(&first_ty), elems.len())
@@ -3007,6 +3208,8 @@ impl<'ctx> TypeInfer<'ctx> {
 
     fn infer_array_repeat(&mut self, element: &ast::Expr, count: &ast::Expr, span: Span) -> Ty {
         let elem_ty = self.infer_expr(element);
+        // An array-repeat `[x; n]` duplicates `x` into n slots: a literal clone.
+        self.reject_linear_escape(&elem_ty, element.span, "a repeated array");
 
         // Evaluate count as const expression
         let size = self.eval_const_expr(count).unwrap_or_else(|| {
@@ -3024,7 +3227,15 @@ impl<'ctx> TypeInfer<'ctx> {
     // =========================================================================
 
     fn infer_unary(&mut self, op: UnaryOp, expr: &ast::Expr) -> Ty {
+        // `&x` / `&mut x` borrow their operand: it must not consume a linear value.
+        let is_borrow = matches!(op, UnaryOp::Ref | UnaryOp::RefMut);
+        if is_borrow {
+            self.borrow_depth += 1;
+        }
         let inner_ty = self.infer_expr(expr);
+        if is_borrow {
+            self.borrow_depth = self.borrow_depth.saturating_sub(1);
+        }
 
         match op {
             UnaryOp::Neg => {
@@ -3042,7 +3253,7 @@ impl<'ctx> TypeInfer<'ctx> {
             UnaryOp::Deref => {
                 // Dereference: *ref → T (strip one reference layer)
                 let resolved = self.apply(&inner_ty);
-                match &resolved.kind {
+                let result = match &resolved.kind {
                     TyKind::Ref(_, _, pointee) => (**pointee).clone(),
                     TyKind::Ptr(_, pointee) => (**pointee).clone(),
                     // If the type is an unresolved variable, return a fresh var
@@ -3058,7 +3269,16 @@ impl<'ctx> TypeInfer<'ctx> {
                         );
                         Ty::error()
                     }
+                };
+                // No-cloning: moving a linear value out of a reference clones it.
+                if self.borrow_depth == 0 {
+                    self.reject_linear_escape(
+                        &result,
+                        expr.span,
+                        "a value moved out of a reference",
+                    );
                 }
+                result
             }
             UnaryOp::Ref => {
                 // Reference: &expr → &T where T = typeof(expr)
@@ -3296,7 +3516,12 @@ impl<'ctx> TypeInfer<'ctx> {
             }
             TyKind::Ref(_, _, inner) => {
                 // Auto-deref for field access on references
-                self.infer_field_on_type(inner, field, span)
+                let result = self.infer_field_on_type(inner, field, span);
+                // No-cloning: a linear value cannot be moved out from behind a
+                // reference (`w.coin` where `w: &Wrap` borrows `w`, so the field
+                // read does not consume it and could be repeated).
+                self.reject_linear_escape(&result, span, "a field read through a reference");
+                result
             }
             // Inference variables - allow field access, return fresh var
             TyKind::Var(_) | TyKind::Infer(_) => Ty::fresh_var(),
@@ -3512,7 +3737,25 @@ impl<'ctx> TypeInfer<'ctx> {
                 for (param, arg) in fn_ty.params.iter().zip(args.iter()) {
                     let arg_sources = self.call_sources(arg);
                     let arg_ty = self.infer_expr(arg);
+                    // No-cloning: a linear value may be passed only to a parameter
+                    // whose type is exactly that linear type. Resolve the param
+                    // BEFORE coercion unifies a generic param to the linear type
+                    // (which would mask the escape). A generic/mismatched param
+                    // would erase tracking, so reject it.
+                    let linear_arg = self.linear_def_of(&arg_ty);
+                    let param_pre = self.apply(param);
                     let _ = self.coerce_arg(param, &arg_ty, span);
+                    if let Some(d) = linear_arg {
+                        let param_ok = matches!(&param_pre.kind, TyKind::Adt(pd, _) if *pd == d);
+                        if !param_ok {
+                            self.error(
+                                TypeError::LinearInUnsupportedPosition {
+                                    context: "a generic or mismatched parameter".to_string(),
+                                },
+                                arg.span,
+                            );
+                        }
+                    }
                     self.record_effectful_argument_sources(param, &arg_sources, &fn_ty.effects);
                 }
 
@@ -3603,6 +3846,16 @@ impl<'ctx> TypeInfer<'ctx> {
                 }
                 // Unknown function type - create fresh types for params and return
                 let param_tys: Vec<_> = args.iter().map(|a| self.infer_expr(a)).collect();
+                // No-cloning: a linear value passed to an unresolved/generic callee
+                // (e.g. the `Some`/`Ok` constructors, whose payload type is generic)
+                // escapes tracking. Reject it.
+                for (arg, ty) in args.iter().zip(param_tys.iter()) {
+                    self.reject_linear_escape(
+                        ty,
+                        arg.span,
+                        "a generic constructor or unresolved call (e.g. Some/Ok)",
+                    );
+                }
                 let ret_ty = Ty::fresh_var();
                 let fn_ty = Ty::function(param_tys, ret_ty.clone());
                 let _ = self.unify(&func_ty, &fn_ty, span);
@@ -3612,8 +3865,12 @@ impl<'ctx> TypeInfer<'ctx> {
                 for source in &call_sources {
                     self.record_call_capability(source);
                 }
+                // Builtins (vec_push, map_insert, ...) resolve to `Error` here and
+                // are dispatched by codegen. A linear value passed to such an
+                // untracked builtin (e.g. stored into a Vec) escapes no-cloning.
                 for arg in args {
-                    let _ = self.infer_expr(arg);
+                    let ty = self.infer_expr(arg);
+                    self.reject_linear_escape(&ty, arg.span, "a builtin call (e.g. a collection)");
                 }
                 Ty::fresh_var()
             }
@@ -3623,7 +3880,14 @@ impl<'ctx> TypeInfer<'ctx> {
             // `F: Fn(...)`) is callable; the bound signature is not tracked here so
             // check leniently and let monomorphization supply the concrete closure.
             TyKind::Param(..) => {
-                let _: Vec<_> = args.iter().map(|a| self.infer_expr(a)).collect();
+                let arg_tys: Vec<_> = args.iter().map(|a| self.infer_expr(a)).collect();
+                for (arg, ty) in args.iter().zip(arg_tys.iter()) {
+                    self.reject_linear_escape(
+                        ty,
+                        arg.span,
+                        "a call through a generic function parameter",
+                    );
+                }
                 Ty::fresh_var()
             }
             TyKind::Ref(_, _, ref inner)
@@ -3632,7 +3896,14 @@ impl<'ctx> TypeInfer<'ctx> {
                     TyKind::Param(..) | TyKind::Var(_) | TyKind::Infer(_)
                 ) =>
             {
-                let _: Vec<_> = args.iter().map(|a| self.infer_expr(a)).collect();
+                let arg_tys: Vec<_> = args.iter().map(|a| self.infer_expr(a)).collect();
+                for (arg, ty) in args.iter().zip(arg_tys.iter()) {
+                    self.reject_linear_escape(
+                        ty,
+                        arg.span,
+                        "a call through a generic function parameter",
+                    );
+                }
                 Ty::fresh_var()
             }
             _ => {
@@ -3832,6 +4103,17 @@ impl<'ctx> TypeInfer<'ctx> {
     ) -> Ty {
         let receiver_ty = self.infer_expr(receiver);
         let receiver_ty = self.apply(&receiver_ty);
+        // No-cloning: a method whose `self` is by-value would move the linear
+        // value out of a borrowed receiver (`(&coin).burn()`), and the self-kind
+        // is not visible here. Conservatively reject calling a method on a
+        // borrowed linear value (a plain linear receiver is consumed as usual).
+        if let TyKind::Ref(_, _, inner) = &receiver_ty.kind {
+            self.reject_linear_escape(
+                inner,
+                span,
+                "a method call on a borrowed linear value",
+            );
+        }
         let method_source = self.method_call_source(&receiver_ty, method.name.as_ref());
 
         // Infer argument types
@@ -4237,21 +4519,27 @@ impl<'ctx> TypeInfer<'ctx> {
         let cond_ty = self.infer_expr(condition);
         let _ = self.unify(&cond_ty, &Ty::bool(), span);
         let pre_branch_sources = self.source_bindings.clone();
+        let pre_branch_linear = self.linear_slots.clone();
 
         let then_ty = self.infer_block(then_branch);
         let then_sources = self.source_bindings.clone();
+        let then_linear = self.linear_slots.clone();
 
         if let Some(else_expr) = else_branch {
             self.source_bindings = pre_branch_sources.clone();
+            self.linear_slots = pre_branch_linear.clone();
             let else_ty = self.infer_expr(else_expr);
             let else_sources = self.source_bindings.clone();
+            let else_linear = self.linear_slots.clone();
             let _ = self.unify(&then_ty, &else_ty, span);
             self.source_bindings =
                 Self::merge_source_binding_snapshots(&[then_sources, else_sources]);
+            self.linear_slots = Self::merge_linear_snapshots(&[then_linear, else_linear]);
             self.merge_future_effect_annotations(&then_ty, &else_ty)
         } else {
             self.source_bindings =
                 Self::merge_source_binding_snapshots(&[pre_branch_sources, then_sources]);
+            self.linear_slots = Self::merge_linear_snapshots(&[pre_branch_linear, then_linear]);
             // if without else returns unit
             let _ = self.unify(&then_ty, &Ty::unit(), span);
             Ty::unit()
@@ -4269,24 +4557,30 @@ impl<'ctx> TypeInfer<'ctx> {
         let scrutinee_ty = self.infer_expr(scrutinee);
         let pre_branch_sources = self.source_bindings.clone();
 
+        let pre_branch_linear = self.linear_slots.clone();
         self.check_pattern(pattern, &scrutinee_ty);
         self.source_bindings.push(BTreeMap::new());
         self.bind_pattern_call_sources(pattern, scrutinee);
         let then_ty = self.infer_block(then_branch);
         self.source_bindings.pop();
         let then_sources = self.source_bindings.clone();
+        let then_linear = self.linear_slots.clone();
 
         if let Some(else_expr) = else_branch {
             self.source_bindings = pre_branch_sources.clone();
+            self.linear_slots = pre_branch_linear.clone();
             let else_ty = self.infer_expr(else_expr);
             let else_sources = self.source_bindings.clone();
+            let else_linear = self.linear_slots.clone();
             let _ = self.unify(&then_ty, &else_ty, span);
             self.source_bindings =
                 Self::merge_source_binding_snapshots(&[then_sources, else_sources]);
+            self.linear_slots = Self::merge_linear_snapshots(&[then_linear, else_linear]);
             self.merge_future_effect_annotations(&then_ty, &else_ty)
         } else {
             self.source_bindings =
                 Self::merge_source_binding_snapshots(&[pre_branch_sources, then_sources]);
+            self.linear_slots = Self::merge_linear_snapshots(&[pre_branch_linear, then_linear]);
             Ty::unit()
         }
     }
@@ -4294,12 +4588,15 @@ impl<'ctx> TypeInfer<'ctx> {
     fn infer_match(&mut self, scrutinee: &ast::Expr, arms: &[ast::MatchArm], span: Span) -> Ty {
         let scrutinee_ty = self.infer_expr(scrutinee);
         let pre_match_sources = self.source_bindings.clone();
+        let pre_match_linear = self.linear_slots.clone();
         let mut arm_source_snapshots = Vec::new();
+        let mut arm_linear_snapshots: Vec<HashMap<String, LinearSlot>> = Vec::new();
 
         let mut result_ty = Ty::fresh_var();
 
         for arm in arms {
             self.source_bindings = pre_match_sources.clone();
+            self.linear_slots = pre_match_linear.clone();
 
             // Type check pattern against scrutinee
             self.check_pattern(&arm.pattern, &scrutinee_ty);
@@ -4319,15 +4616,19 @@ impl<'ctx> TypeInfer<'ctx> {
 
             self.source_bindings.pop();
             arm_source_snapshots.push(self.source_bindings.clone());
+            arm_linear_snapshots.push(self.linear_slots.clone());
         }
 
         if arm_source_snapshots.is_empty() {
             self.source_bindings = pre_match_sources;
+            self.linear_slots = pre_match_linear;
         } else {
             if arms.iter().any(|arm| arm.guard.is_some()) {
                 arm_source_snapshots.push(pre_match_sources);
+                arm_linear_snapshots.push(pre_match_linear.clone());
             }
             self.source_bindings = Self::merge_source_binding_snapshots(&arm_source_snapshots);
+            self.linear_slots = Self::merge_linear_snapshots(&arm_linear_snapshots);
         }
 
         // Exhaustiveness checking: determine the enum type from either
@@ -4442,7 +4743,11 @@ impl<'ctx> TypeInfer<'ctx> {
     }
 
     fn infer_while(&mut self, condition: &ast::Expr, body: &ast::Block) -> Ty {
+        // The condition is re-evaluated every iteration, so consuming an outer
+        // linear value there is a potential repeat-consume: treat it as in-loop.
+        self.loop_depth += 1;
         let cond_ty = self.infer_expr(condition);
+        self.loop_depth = self.loop_depth.saturating_sub(1);
         let _ = self.unify(&cond_ty, &Ty::bool(), condition.span);
         let pre_loop_sources = self.source_bindings.clone();
 
@@ -4489,7 +4794,11 @@ impl<'ctx> TypeInfer<'ctx> {
         expr: &ast::Expr,
         body: &ast::Block,
     ) -> Ty {
+        // The scrutinee is re-evaluated every iteration, so consuming an outer
+        // linear value there is a potential repeat-consume: treat it as in-loop.
+        self.loop_depth += 1;
         let expr_ty = self.infer_expr(expr);
+        self.loop_depth = self.loop_depth.saturating_sub(1);
         let pre_loop_sources = self.source_bindings.clone();
 
         self.push_scope(ScopeKind::Loop);
@@ -4805,6 +5114,16 @@ impl<'ctx> TypeInfer<'ctx> {
         body: &ast::Expr,
         _span: Span,
     ) -> Ty {
+        // Snapshot outer linear locals that are still Live, before binding the
+        // closure's own params, so we can detect a capture-consume: a closure
+        // may be invoked many times, so consuming a captured linear is unsound.
+        let pre_linear_live: Vec<String> = self
+            .linear_slots
+            .iter()
+            .filter(|(_, s)| s.status == LinearStatus::Live)
+            .map(|(k, _)| k.clone())
+            .collect();
+
         self.push_scope(ScopeKind::Function);
 
         let param_tys: Vec<Ty> = params
@@ -4833,6 +5152,23 @@ impl<'ctx> TypeInfer<'ctx> {
 
         let body_ty = self.infer_expr(body);
         let closure_effects = self.current_effects.clone();
+
+        // No-cloning: if the closure body consumed any outer linear local that
+        // was Live before, that is a captured consume -> reject (the closure may
+        // be called more than once, duplicating the consume).
+        for name in &pre_linear_live {
+            if matches!(
+                self.linear_slots.get(name),
+                Some(s) if s.status == LinearStatus::Consumed
+            ) {
+                self.error(
+                    TypeError::LinearInUnsupportedPosition {
+                        context: format!("a closure (it captures and consumes linear `{name}`)"),
+                    },
+                    body.span,
+                );
+            }
+        }
 
         if let Some(expected) = &expected_ret {
             let _ = self.unify(&body_ty, expected, body.span);
@@ -4868,7 +5204,10 @@ impl<'ctx> TypeInfer<'ctx> {
     }
 
     fn infer_ref(&mut self, mutability: ast::Mutability, expr: &ast::Expr) -> Ty {
+        // A reference borrows its operand: it must not consume a linear value.
+        self.borrow_depth += 1;
         let inner_ty = self.infer_expr(expr);
+        self.borrow_depth = self.borrow_depth.saturating_sub(1);
         // Borrow checking happens at the let-binding site (infer_local),
         // not here. Temporary references (&x passed directly to a function)
         // are consumed immediately and don't need tracking.
@@ -5042,7 +5381,7 @@ impl<'ctx> TypeInfer<'ctx> {
         let expr_ty = self.infer_expr(expr);
         let expr_ty = self.apply(&expr_ty);
 
-        match &expr_ty.kind {
+        let result = match &expr_ty.kind {
             TyKind::Ref(_, _, inner) | TyKind::Ptr(_, inner) => (**inner).clone(),
             // Inference variables - allow deref, return fresh var
             TyKind::Var(_) | TyKind::Infer(_) => Ty::fresh_var(),
@@ -5057,7 +5396,12 @@ impl<'ctx> TypeInfer<'ctx> {
                 self.error(TypeError::NotDereferenceable { ty: expr_ty }, span);
                 Ty::error()
             }
+        };
+        // No-cloning: moving a linear value out of a reference clones it.
+        if self.borrow_depth == 0 {
+            self.reject_linear_escape(&result, span, "a value moved out of a reference");
         }
+        result
     }
 
     // =========================================================================
@@ -5175,6 +5519,11 @@ impl<'ctx> TypeInfer<'ctx> {
                 } else {
                     // Shorthand field: `field` means `field: field`
                     if let Some(var_ty) = self.ctx.lookup_var(field_name) {
+                        // A shorthand field moves the variable by value, so it
+                        // consumes a linear local just like `field: field` would.
+                        if self.borrow_depth == 0 {
+                            self.consume_linear(field_name, span);
+                        }
                         var_ty
                     } else {
                         self.error(
@@ -5191,6 +5540,22 @@ impl<'ctx> TypeInfer<'ctx> {
                 if let Some((_, expected_ty)) =
                     struct_fields.iter().find(|(n, _)| n.as_ref() == field_name)
                 {
+                    // No-cloning: a linear value may be stored only in a field
+                    // whose declared type is exactly that linear type (a linear
+                    // aggregate). A generic/other field would erase tracking.
+                    // Check the DECLARED field type before unification masks it.
+                    if let Some(d) = self.linear_def_of(&value_ty) {
+                        let field_ok =
+                            matches!(&self.apply(expected_ty).kind, TyKind::Adt(pd, _) if *pd == d);
+                        if !field_ok {
+                            self.error(
+                                TypeError::LinearInUnsupportedPosition {
+                                    context: "a generic or non-linear struct field".to_string(),
+                                },
+                                span,
+                            );
+                        }
+                    }
                     let _ = self.unify(expected_ty, &value_ty, span);
                 } else {
                     self.error(
@@ -5283,6 +5648,9 @@ impl<'ctx> TypeInfer<'ctx> {
             ast::PatternKind::Wildcard => {}
             ast::PatternKind::Ident { name, .. } => {
                 self.ctx.define_var(name.name.clone(), ty.clone());
+                // Track `#[linear]` bindings (lets, params, destructured fields)
+                // for no-cloning enforcement.
+                self.register_linear_local(name.name.as_ref(), ty);
             }
             ast::PatternKind::Tuple(patterns) => {
                 match &ty.kind {
@@ -6193,6 +6561,54 @@ mod tests {
     // =====================================================================
     // 5. Effect inference
     // =====================================================================
+
+    #[test]
+    fn large_unsuffixed_int_literal_widens_to_i64() {
+        // A literal that exceeds i32 range must NOT default to i32 (which would
+        // silently truncate, e.g. money in cents or a 64-bit hash).
+        let mut ctx = TypeContext::new();
+        let mut infer = TypeInfer::new(&mut ctx);
+        let lit = AstLiteral::Int {
+            value: 9223372036854775000,
+            suffix: None,
+            base: crate::lexer::IntBase::Decimal,
+        };
+        assert_eq!(
+            infer.infer_literal(&lit),
+            Ty::int(IntTy::I64),
+            "a literal exceeding i32 must widen (no silent truncation)"
+        );
+    }
+
+    #[test]
+    fn huge_unsuffixed_int_literal_widens_to_i128() {
+        // A literal that exceeds i64 range widens further to i128.
+        let mut ctx = TypeContext::new();
+        let mut infer = TypeInfer::new(&mut ctx);
+        let lit = AstLiteral::Int {
+            value: 18446744073709551615, // u64::MAX, > i64::MAX
+            suffix: None,
+            base: crate::lexer::IntBase::Decimal,
+        };
+        assert_eq!(infer.infer_literal(&lit), Ty::int(IntTy::I128));
+    }
+
+    #[test]
+    fn small_unsuffixed_int_literal_stays_inferred() {
+        // Values that fit i32 keep the existing inference behavior (default i32).
+        let mut ctx = TypeContext::new();
+        let mut infer = TypeInfer::new(&mut ctx);
+        let lit = AstLiteral::Int {
+            value: 100000,
+            suffix: None,
+            base: crate::lexer::IntBase::Decimal,
+        };
+        let ty = infer.infer_literal(&lit);
+        assert!(
+            matches!(ty.kind, TyKind::Infer(_)),
+            "small literals stay inferred, got {ty:?}"
+        );
+    }
 
     #[test]
     fn pure_function_has_empty_effects() {

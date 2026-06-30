@@ -8,7 +8,74 @@ tracked in `STATUS.md`, `README.md`, and
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
 `108/108` or `132/132` are not the current release gate.
 
+## 1.0.5 - 2026-06-30
+
+Documentation + packaging accuracy pass (no code change):
+
+- README License section corrected from "MIT License" to the BuildLang
+  Fair-Source License v1.0 (the published crate's crates.io page no longer
+  misstates the license).
+- Refreshed the test-count baselines across README / STATUS / TEST_RESULTS to
+  lib 872 / bin 44 / cli 263 / lexer 51 / parser 83 (2026-06-30).
+- Added `cargo install buildlang` to the install sections of README, USAGE, and
+  the getting-started guide; refreshed the `compiler_version` example to 1.0.4.
+
+## 1.0.4 - 2026-06-30
+
+First public crates.io release under the **BuildLang** name. Headline changes
+this cycle (granular entries follow):
+
+- **Published to crates.io as [`buildlang`](https://crates.io/crates/buildlang)**
+  (binary `buildc`): `cargo install buildlang`. Renamed from `quantalang`, which
+  is deprecated and points here. The crate is licensed under the **BuildLang
+  Fair-Source License v1.0** (source-available, not open source) — corrected from
+  an earlier mislabel as MIT, including all source-file headers.
+- **Linear types (`#[linear]`, experimental no-cloning)** — see the detailed
+  entry below; the shared keystone for quantum / fin-sec / blockchain.
+- **Integer literal widening**: an unsuffixed integer literal exceeding i32 range
+  now widens to i64 / i128 instead of silently truncating to 32 bits (it used to
+  print `9223372036854775000` as `-808`), in both the type checker and the MIR
+  lowering.
+- **Codegen (`Option<i64>`)**: an `Option<i64>`-returning function whose result is
+  matched no longer miscompiles the 64-bit payload as `int32_t`; `lower_if`
+  types the if-expression result by the aggregate branch.
+- **Foundation direction**: `docs/QUANTUM-HOST.md`, `docs/FINSEC-BLOCKCHAIN-HOST.md`,
+  and `docs/LINEAR-TYPES.md` document buildc as a base for quantum, fin-sec, and
+  blockchain work, with runnable spikes (`examples/quantum/bell.bld`,
+  `examples/finance/ledger.bld`, `checked.bld`, `safe_math.bld` — overflow-safe
+  checked + saturating arithmetic).
+- **LSP**: the `initialize` dispatch receipt digest is desensitized to the
+  compiler version, so version bumps no longer churn the corpus receipt.
+
 ## Unreleased
+
+- Type system (linear types / no-cloning): an opt-in `#[linear]` attribute on a
+  struct or enum marks its values as a tracked resource that may be moved /
+  consumed **at most once**. The type checker now rejects use-after-consume
+  (`use of linear value 'q' after it was consumed`), which is the no-cloning rule
+  for quantum qubits, the no-double-spend rule for on-chain assets, and
+  resource-handle safety for fin-sec settlement obligations - one type-system
+  feature for all three foundations. Borrows (`&q`) do not consume; ordinary
+  (non-`#[linear]`) types keep copy-like reuse, so the change is backward
+  compatible (full suite stays green). Coverage: let-bound locals, function
+  parameters, branch joins (`if`/`if let`/`match`, conservative union-of-consumed
+  so a value consumed on any path is poisoned afterward), and a loop guard
+  (consuming an outer linear value inside a loop is a potential double-use and is
+  rejected). A containment rule rejects a non-`#[linear]` aggregate that holds a
+  linear field (`non-linear type 'Wallet' cannot contain linear field
+  'coin: Coin'`), preventing the resource from being laundered out of an
+  untracked wrapper. Built on the existing move/borrow analysis; 10 type-checker
+  tests (`linear_*`, `nonlinear_struct_with_linear_field_is_rejected`); verified
+  end-to-end via `buildc check`. Deferred to a follow-up: drop-without-consume
+  ("must use") enforcement and per-path (non-conservative) branch tracking. The
+  analysis is deliberately sound-over-complete - it may reject some safe programs
+  rather than ever permit a clone. **Status: experimental, not yet fully sound.**
+  Three adversarial verification passes closed 14 compositional escape classes
+  (each now a regression test) but a third pass still found a few open classes
+  (pattern-match-through-a-borrow, enum-variant shorthand init, generic
+  deref/result, match-guard fall-through, borrow-after-move). Full no-cloning
+  soundness needs an affine/borrow checker on MIR. What is enforced and what is
+  open: `docs/LINEAR-TYPES.md`. See also `docs/QUANTUM-HOST.md` (brick 1).
 
 - Stdlib (`HashMap::keys`): `m.keys()` now returns a `Vec<String>` handle (so
   `for k in m.keys()`, indexing, and `.len()` work), via a runtime
