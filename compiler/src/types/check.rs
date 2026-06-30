@@ -1928,6 +1928,141 @@ mod tests {
         );
     }
 
+    // -- Soundness: a linear value may not enter a position the move-analysis
+    //    cannot follow (aggregates, generics, closures, deref). These programs
+    //    are the confirmed bypasses from the adversarial soundness pass; each
+    //    must now be REJECTED with some linear error. --
+
+    fn has_any_linear_error(errors: &[TypeErrorWithSpan]) -> bool {
+        errors.iter().any(|e| {
+            matches!(
+                e.error,
+                TypeError::LinearUseAfterMove { .. }
+                    | TypeError::LinearFieldInNonLinearType { .. }
+                    | TypeError::LinearInUnsupportedPosition { .. }
+            )
+        })
+    }
+
+    #[test]
+    fn linear_value_in_tuple_is_rejected() {
+        let errors = check_source(&format!(
+            "{LINEAR_PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+             let t = (q, 0); let a = t.0; let b = t.0; \
+             let x = consume(a); let y = consume(b); println(\"{{}}\", x + y); }}"
+        ));
+        assert!(
+            has_any_linear_error(&errors),
+            "storing a linear value in a tuple must be rejected: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_value_in_array_is_rejected() {
+        let errors = check_source(&format!(
+            "{LINEAR_PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+             let arr = [q]; let a = arr[0]; let b = arr[0]; \
+             let x = consume(a); let y = consume(b); println(\"{{}}\", x + y); }}"
+        ));
+        assert!(
+            has_any_linear_error(&errors),
+            "storing a linear value in an array must be rejected: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_value_in_array_repeat_is_rejected() {
+        let errors = check_source(&format!(
+            "{LINEAR_PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+             let arr = [q; 3]; let a = arr[0]; let b = arr[1]; \
+             let x = consume(a); let y = consume(b); println(\"{{}}\", x + y); }}"
+        ));
+        assert!(
+            has_any_linear_error(&errors),
+            "array-repeat of a linear value (a literal clone) must be rejected: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_value_through_generic_fn_is_rejected() {
+        let errors = check_source(&format!(
+            "{LINEAR_PRELUDE}fn thru<T>(x: T) -> T {{ x }}\n\
+             fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; let c = thru(q); \
+             let a = consume(c); let b = consume(c); println(\"{{}}\", a + b); }}"
+        ));
+        assert!(
+            has_any_linear_error(&errors),
+            "passing a linear value through a generic parameter must be rejected: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_value_moved_out_of_reference_is_rejected() {
+        let errors = check_source(&format!(
+            "{LINEAR_PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+             let r = &q; let a = *r; let b = *r; \
+             let x = consume(a); let y = consume(b); println(\"{{}}\", x + y); }}"
+        ));
+        assert!(
+            has_any_linear_error(&errors),
+            "moving a linear value out of a reference (deref-copy) must be rejected: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_value_in_generic_struct_is_rejected() {
+        let errors = check_source(&format!(
+            "{LINEAR_PRELUDE}struct Holder<T> {{ item: T }}\n\
+             fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+             let h = Holder {{ item: q }}; let a = h.item; let b = h.item; \
+             let x = consume(a); let y = consume(b); println(\"{{}}\", x + y); }}"
+        ));
+        assert!(
+            has_any_linear_error(&errors),
+            "storing a linear value in a generic struct field must be rejected: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_value_in_option_is_rejected() {
+        let errors = check_source(&format!(
+            "{LINEAR_PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+             let opt = Some(q); println(\"made an option\"); }}"
+        ));
+        assert!(
+            has_any_linear_error(&errors),
+            "wrapping a linear value in Option (a generic container) must be rejected: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_consumed_then_revived_by_inner_shadow_errors() {
+        // An inner-block binding that shadows the (already consumed) outer
+        // linear must not revive the outer slot when the block exits.
+        let errors = check_source(&format!(
+            "{LINEAR_PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+             let a = consume(q); \
+             {{ let q = Qubit {{ id: 2 }}; let _ = observe(&q); }} \
+             let b = consume(q); println(\"{{}}\", a + b); }}"
+        ));
+        assert!(
+            has_any_linear_error(&errors),
+            "an inner shadow must not revive a consumed outer linear: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_value_captured_in_closure_is_rejected() {
+        let errors = check_source(&format!(
+            "{LINEAR_PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+             let f = || consume(q); let a = f(); let b = f(); println(\"{{}}\", a + b); }}"
+        ));
+        assert!(
+            has_any_linear_error(&errors),
+            "capturing+consuming a linear value in a closure must be rejected: {errors:#?}"
+        );
+    }
+
     #[test]
     fn capability_ambient_file_call_requires_filesystem_effect() {
         let errors = check_source(r#"fn main() { read_file("ops.txt"); }"#);
