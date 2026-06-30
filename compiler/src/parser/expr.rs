@@ -362,7 +362,21 @@ impl<'a> Parser<'a> {
             // =====================================================================
             // EFFECT SYSTEM
             // =====================================================================
-            TokenKind::Keyword(Keyword::Handle) => self.parse_handle_expr(),
+            TokenKind::Keyword(Keyword::Handle) => {
+                // `handle { ... } with { ... }` is the effect-handler expression,
+                // which always has a `{` after `handle`. But `handle` is also a
+                // common identifier (e.g. a function name); when it is not
+                // followed by `{`, parse it as an identifier so `handle(x)` is a
+                // normal call. Without this, `let r = handle(x);` was parsed as a
+                // handler expression and swallowed the following statements.
+                if matches!(self.peek().kind, TokenKind::OpenDelim(Delimiter::Brace)) {
+                    self.parse_handle_expr()
+                } else {
+                    self.advance();
+                    let ident = Ident::new("handle", start);
+                    Ok(Expr::new(ExprKind::Ident(ident), start))
+                }
+            }
             TokenKind::Keyword(Keyword::Resume) => self.parse_resume_expr(),
             TokenKind::Keyword(Keyword::Perform) => self.parse_perform_expr(),
 
