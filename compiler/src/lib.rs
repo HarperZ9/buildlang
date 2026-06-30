@@ -45,6 +45,7 @@
 //! ```
 
 pub mod ast;
+pub mod bdf;
 pub mod codegen;
 pub mod fmt;
 pub mod lexer;
@@ -53,6 +54,7 @@ pub mod macro_expand;
 pub mod parser;
 pub mod pkg;
 pub mod runtime;
+pub mod serde_float;
 pub mod types;
 
 /// The compiler version
