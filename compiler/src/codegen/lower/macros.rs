@@ -2065,6 +2065,14 @@ impl<'ctx> MirLowerer<'ctx> {
                             steps.push(IterStep::Rev);
                             current = receiver;
                         }
+                        "take" if args.len() == 1 => {
+                            steps.push(IterStep::Take { count: &args[0] });
+                            current = receiver;
+                        }
+                        "skip" if args.len() == 1 => {
+                            steps.push(IterStep::Skip { count: &args[0] });
+                            current = receiver;
+                        }
                         _ => return None, // Unknown intermediate method
                     }
                 }
@@ -2223,6 +2231,30 @@ impl<'ctx> MirLowerer<'ctx> {
             }
         };
 
+        // Per-step counters for take/skip, created before the loop so they
+        // persist across iterations. Indexed by step position; None for steps
+        // that don't need a counter. Counting yielded/skipped elements (rather
+        // than checking the source index) makes take/skip compose correctly with
+        // each other and with filter.
+        let step_counters: Vec<Option<LocalId>> = {
+            let builder = self.current_fn.as_mut().unwrap();
+            chain
+                .steps
+                .iter()
+                .map(|s| match s {
+                    IterStep::Take { .. } | IterStep::Skip { .. } => {
+                        let c = builder.create_local(MirType::i64());
+                        builder.assign(
+                            c,
+                            MirRValue::Use(MirValue::Const(MirConst::Int(0, MirType::i64()))),
+                        );
+                        Some(c)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+
         // 6. Create the loop: for i in 0..len { ... }
         let idx_local = {
             let builder = self.current_fn.as_mut().unwrap();
@@ -2295,7 +2327,7 @@ impl<'ctx> MirLowerer<'ctx> {
 
         // Apply each step transform to produce the final value.
         let mut current_val = values::local(elem_local);
-        for step in &chain.steps {
+        for (step_idx, step) in chain.steps.iter().enumerate() {
             match step {
                 IterStep::Map { closure } => {
                     current_val = self.lower_iter_map_inline(
@@ -2336,6 +2368,54 @@ impl<'ctx> MirLowerer<'ctx> {
                 }
                 IterStep::Rev => {
                     // Direction is handled by the loop bounds; per-element no-op.
+                }
+                IterStep::Skip { count } => {
+                    // skip(n): while the skip counter < n, increment it and drop
+                    // the element (goto increment); afterwards pass through. The
+                    // counter (not the source index) makes this compose with
+                    // filter and other skips.
+                    let n_val = self.lower_expr(count)?;
+                    let ctr = step_counters[step_idx].expect("skip counter");
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let skipping = builder.create_local(MirType::Bool);
+                    builder.binary_op(skipping, BinOp::Lt, values::local(ctr), n_val);
+                    let skip_block = builder.create_block();
+                    let pass_block = builder.create_block();
+                    builder.branch(values::local(skipping), skip_block, pass_block);
+                    // Skip: counter += 1, drop this element.
+                    builder.switch_to_block(skip_block);
+                    let nc = builder.create_local(MirType::i64());
+                    builder.binary_op(
+                        nc,
+                        BinOp::Add,
+                        values::local(ctr),
+                        MirValue::Const(MirConst::Int(1, MirType::i64())),
+                    );
+                    builder.assign(ctr, MirRValue::Use(values::local(nc)));
+                    builder.goto(incr_block);
+                    builder.switch_to_block(pass_block);
+                }
+                IterStep::Take { count } => {
+                    // take(n): once the take counter reaches n, exit the loop;
+                    // otherwise increment it and pass the element through. The
+                    // counter (not the source index) makes this compose.
+                    let n_val = self.lower_expr(count)?;
+                    let ctr = step_counters[step_idx].expect("take counter");
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let done = builder.create_local(MirType::Bool);
+                    builder.binary_op(done, BinOp::Ge, values::local(ctr), n_val);
+                    let take_block = builder.create_block();
+                    builder.branch(values::local(done), exit_block, take_block);
+                    // Within the limit: counter += 1, pass through.
+                    builder.switch_to_block(take_block);
+                    let nc = builder.create_local(MirType::i64());
+                    builder.binary_op(
+                        nc,
+                        BinOp::Add,
+                        values::local(ctr),
+                        MirValue::Const(MirConst::Int(1, MirType::i64())),
+                    );
+                    builder.assign(ctr, MirRValue::Use(values::local(nc)));
                 }
             }
         }
@@ -2671,7 +2751,9 @@ impl<'ctx> MirLowerer<'ctx> {
                 IterStep::Filter { .. }
                 | IterStep::Enumerate
                 | IterStep::Cloned
-                | IterStep::Rev => {
+                | IterStep::Rev
+                | IterStep::Take { .. }
+                | IterStep::Skip { .. } => {
                     // These don't change the element type.
                 }
             }
