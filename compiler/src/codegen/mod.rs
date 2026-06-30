@@ -1052,8 +1052,37 @@ mod tests {
             "Ok must construct the Result with is_ok=true and a typed ok slot:\n{code}"
         );
         assert!(
-            code.contains(".is_ok = false") && code.contains(".err ="),
-            "Err must construct the Result with is_ok=false and the err BuildString:\n{code}"
+            code.contains(".is_ok = false") && code.contains(".err.err_p"),
+            "Err must construct the Result with is_ok=false and box the String err \
+             into the typed err slot:\n{code}"
+        );
+    }
+
+    #[test]
+    fn result_supports_a_non_string_err_payload() {
+        // `Result<i32, i32>` must carry an i32 Err in a typed union slot, not the
+        // hardcoded `BuildString err` field (which made `r.err = 404` assign an
+        // int to a struct - a C error). Construction writes err_i; the match
+        // reads err_i.
+        let code = source_to_c(
+            "fn check(n: i32) -> Result<i32, i32> { \
+               if n < 0 { return Err(404); } \
+               return Ok(n); \
+             }\n\
+             fn main() { \
+               match check(-1) { \
+                 Ok(v) => { let _a = v; } \
+                 Err(code) => { let _b = code; } \
+               } \
+             }",
+        );
+        assert!(
+            code.contains(".err.err_i = "),
+            "Err(404) must construct into the typed i32 err slot:\n{code}"
+        );
+        assert!(
+            code.contains(".err.err_i") && code.contains("(int32_t)"),
+            "the Err arm must read the i32 payload from the typed err slot:\n{code}"
         );
     }
 

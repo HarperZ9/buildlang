@@ -3124,17 +3124,62 @@ impl CBackend {
                     if let Some(dest_local) = dest {
                         let dest_name = self.local_name(*dest_local, locals);
                         let arg = self.value_to_c(&args[0], locals);
-                        // A raw string literal is a `const char*`; wrap it.
-                        // A BuildString-typed local is assigned directly.
-                        let err_expr = match &args[0] {
-                            MirValue::Const(MirConst::Str(_)) => {
-                                format!("build_string_new({})", arg)
-                            }
-                            _ => arg,
-                        };
                         write!(self.output, "{}.is_ok = false;\n", dest_name).unwrap();
                         self.write_indent();
-                        write!(self.output, "{}.err = {};\n", dest_name, err_expr).unwrap();
+                        // A raw string literal is a `const char*`: wrap it into a
+                        // BuildString and box it into the err_p slot.
+                        if let MirValue::Const(MirConst::Str(_)) = &args[0] {
+                            write!(
+                                self.output,
+                                "{{ BuildString* __err_box = (BuildString*)malloc(sizeof(BuildString)); \
+                                 *__err_box = build_string_new({arg}); {dest}.err.err_p = (void*)__err_box; }}\n",
+                                arg = arg,
+                                dest = dest_name
+                            )
+                            .unwrap();
+                        } else {
+                            let arg_ty: Option<MirType> = match &args[0] {
+                                MirValue::Local(id) => {
+                                    locals.get(id.0 as usize).map(|l| l.ty.clone())
+                                }
+                                _ => None,
+                            };
+                            let boxed = arg_ty
+                                .as_ref()
+                                .map(Self::payload_needs_boxing)
+                                .unwrap_or(false);
+                            if boxed {
+                                // Err payload >8 bytes (e.g. String): box it.
+                                let ct = self.type_to_c(arg_ty.as_ref().unwrap());
+                                write!(
+                                    self.output,
+                                    "{{ {ct}* __err_box = ({ct}*)malloc(sizeof({ct})); \
+                                     *__err_box = {arg}; {dest}.err.err_p = (void*)__err_box; }}\n",
+                                    ct = ct,
+                                    arg = arg,
+                                    dest = dest_name
+                                )
+                                .unwrap();
+                            } else {
+                                let (slot, cast) = match &args[0] {
+                                    MirValue::Local(id) => {
+                                        match locals.get(id.0 as usize).map(|l| &l.ty) {
+                                            Some(MirType::Float(_)) => ("err_f", "(double)"),
+                                            Some(MirType::Ptr(_)) => ("err_p", "(void*)"),
+                                            _ => ("err_i", "(int64_t)"),
+                                        }
+                                    }
+                                    MirValue::Const(MirConst::Float(..)) => ("err_f", "(double)"),
+                                    _ => ("err_i", "(int64_t)"),
+                                };
+                                write!(
+                                    self.output,
+                                    "{}.err.{} = {}({});\n",
+                                    dest_name, slot, cast, arg
+                                )
+                                .unwrap();
+                            }
+                        }
                     }
                     if let Some(target) = target {
                         self.write_indent();
@@ -3768,6 +3813,25 @@ impl CBackend {
                     };
                     return Ok(format!(
                         "({}){}.ok.{}",
+                        self.type_to_c(field_ty),
+                        base_str,
+                        slot
+                    ));
+                }
+                // Result Err payload read: `res.err` is a typed union, symmetric
+                // to `ok` (boxed for >8-byte payloads such as String).
+                if base_is_result && field_name.as_ref() == "err" {
+                    if Self::payload_needs_boxing(field_ty) {
+                        let ct = self.type_to_c(field_ty);
+                        return Ok(format!("(*({}*){}.err.err_p)", ct, base_str));
+                    }
+                    let slot = match field_ty {
+                        MirType::Float(_) => "err_f",
+                        MirType::Ptr(_) => "err_p",
+                        _ => "err_i",
+                    };
+                    return Ok(format!(
+                        "({}){}.err.{}",
                         self.type_to_c(field_ty),
                         base_str,
                         slot
