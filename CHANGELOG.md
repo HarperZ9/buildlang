@@ -10,6 +10,16 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Stdlib (iterator `.take(n)` / `.skip(n)`): both are now recognized steps.
+  `.take(n)` yields the first `n` elements then exits the loop; `.skip(n)` drops
+  the first `n`. They use per-iteration counters (not source-index checks), so
+  they compose correctly with each other and with `.filter()` - e.g.
+  `filter(|x| x>1).take(2)` takes the first two that pass, not the first two
+  source positions. Verified end-to-end under MSVC over `[10,20,30,40,50]`:
+  `take(2).sum()`=30, `skip(3).sum()`=90, `skip(1).take(2).sum()`=50; and
+  `filter(|x| x>1).take(2).sum()` over `[1..6]`=5. Covered by
+  `iterator_take_and_skip_steps_desugar`. (`.take()`/`.skip()` combined with
+  `.rev()` use forward counters - reverse-position semantics is a follow-up.)
 - Stdlib (iterator `.rev()`): `v.iter().rev()...` now iterates the source in
   reverse - the loop starts at `len-1`, steps the (signed) index down, and exits
   below 0. Was an unrecognized step, so the chain left `.iter()` undefined.
