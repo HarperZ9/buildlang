@@ -2,11 +2,11 @@
 
 ## Overview
 
-`qdb` is a SQL database engine written in ~4,500 lines of QuantaLang (103 functions, 1 struct). It implements a substantial subset of SQL including DDL, DML, queries with JOIN/GROUP BY/ORDER BY/HAVING, sorted-array indexes with binary search, and transactions with WAL crash recovery. It persists data via a human-readable text file format and includes an interactive REPL.
+`qdb` is a SQL database engine written in ~4,500 lines of BuildLang (103 functions, 1 struct). It implements a substantial subset of SQL including DDL, DML, queries with JOIN/GROUP BY/ORDER BY/HAVING, sorted-array indexes with binary search, and transactions with WAL crash recovery. It persists data via a human-readable text file format and includes an interactive REPL.
 
 ## Why One File?
 
-QuantaLang does not support multi-file compilation or `use` imports between `.quanta` files. All code must reside in a single file. Within the file, strict section boundaries with documentation headers maintain logical modularity. If QuantaLang adds multi-file support in the future, each section maps cleanly to a standalone module.
+BuildLang does not support multi-file compilation or `use` imports between `.bld` files. All code must reside in a single file. Within the file, strict section boundaries with documentation headers maintain logical modularity. If BuildLang adds multi-file support in the future, each section maps cleanly to a standalone module.
 
 ## Section Map
 
@@ -39,7 +39,7 @@ Section                          Lines         Functions   Purpose
 
 ### The DB Struct (139 fields)
 
-All engine state lives in one flat struct. This is a QuantaLang constraint, not a design preference — the C codegen cannot reliably emit struct field assignments on local variables.
+All engine state lives in one flat struct. This is a BuildLang constraint, not a design preference — the C codegen cannot reliably emit struct field assignments on local variables.
 
 The struct fields are grouped into:
 
@@ -58,7 +58,7 @@ The struct fields are grouped into:
 
 ### String Pool Pattern
 
-All strings are interned into a contiguous buffer (`d.pool`). `sp_add(text)` appends to the buffer and returns an integer ID. `sp_get(id)` retrieves text by ID. This avoids `Vec<String>` which has incomplete codegen support in QuantaLang.
+All strings are interned into a contiguous buffer (`d.pool`). `sp_add(text)` appends to the buffer and returns an integer ID. `sp_get(id)` retrieves text by ID. This avoids `Vec<String>` which has incomplete codegen support in BuildLang.
 
 Pool IDs are used everywhere: table names, column names, cell values, parsed tokens, index keys.
 
@@ -150,27 +150,27 @@ Sorted-array indexes with binary search:
 
 | Decision | Rationale |
 |----------|-----------|
-| Single flat struct | QuantaLang codegen limitation — no reliable local struct field assignment |
+| Single flat struct | BuildLang codegen limitation — no reliable local struct field assignment |
 | String pool | `Vec<String>` codegen is incomplete |
 | Text file format | Human-readable, simple parsing, adequate for target scale |
 | Selection sort | O(n^2) but trivial to implement correctly without stdlib sort |
-| Full array rebuilds | No in-place Vec mutation in QuantaLang — must reconstruct |
+| Full array rebuilds | No in-place Vec mutation in BuildLang — must reconstruct |
 | No B-tree | Sorted arrays sufficient; B-tree in flat arrays not justified |
 | Embedded parser state | No separate AST struct; parsed state lives in DB fields |
 
 ## Potential Future Modules
 
-If QuantaLang adds multi-file imports, the sections map directly:
+If BuildLang adds multi-file imports, the sections map directly:
 
 ```
-db_primitives.quanta   -- Section 0: char helpers
-db_model.quanta        -- Section 1: struct DB, constructor, string pool
-db_storage.quanta      -- Section 2: file I/O
-db_wal.quanta          -- Section 3: WAL + transactions
-db_tokenizer.quanta    -- Section 4: SQL lexer
-db_parser.quanta       -- Section 5: SQL parser
-db_executor.quanta     -- Section 6: query execution
-db_helpers.quanta      -- Section 7: WHERE eval, sorting, formatting
-db_index.quanta        -- Section 8: index operations
-db_repl.quanta         -- Sections 9-11: dispatch, REPL, main
+db_primitives.bld   -- Section 0: char helpers
+db_model.bld        -- Section 1: struct DB, constructor, string pool
+db_storage.bld      -- Section 2: file I/O
+db_wal.bld          -- Section 3: WAL + transactions
+db_tokenizer.bld    -- Section 4: SQL lexer
+db_parser.bld       -- Section 5: SQL parser
+db_executor.bld     -- Section 6: query execution
+db_helpers.bld      -- Section 7: WHERE eval, sorting, formatting
+db_index.bld        -- Section 8: index operations
+db_repl.bld         -- Sections 9-11: dispatch, REPL, main
 ```

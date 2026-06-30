@@ -1,5 +1,5 @@
 // =============================================================================
-// qdb — SQL Database Engine written in QuantaLang
+// qdb — SQL Database Engine written in BuildLang
 // =============================================================================
 //
 // Architecture (sections in order of appearance):
@@ -26,11 +26,11 @@
 //
 // Design Decisions:
 //
-//   - Single file: QuantaLang does not support multi-file compilation or
-//     `use` imports between .quanta files. All code must live in one file.
+//   - Single file: BuildLang does not support multi-file compilation or
+//     `use` imports between .bld files. All code must live in one file.
 //     Sections are separated by banner comments to maintain logical modularity.
 //
-//   - Single flat struct (DB): QuantaLang's C codegen does not reliably emit
+//   - Single flat struct (DB): BuildLang's C codegen does not reliably emit
 //     struct field assignments on local variables. All state passes through
 //     &mut DB references to a single top-level struct.
 //
@@ -81,7 +81,7 @@
 // SECTION 0: PRIMITIVES — Character Classification
 // =========================================================================
 // Pure functions for character-class tests. Used by both the SQL tokenizer
-// and the file-format parser. QuantaLang has no char type; single-char
+// and the file-format parser. BuildLang has no char type; single-char
 // strings are compared by value.
 // =========================================================================
 fn is_ws(c: String) -> bool { c == " " || c == "\n" || c == "\r" || c == "\t" }
@@ -99,7 +99,7 @@ fn is_alnum(c: String) -> bool { is_alpha(c) || is_digit(c) || c == "_" }
 // SECTION 1: DATA MODEL — struct DB, Constructor, String Pool
 // =========================================================================
 // ALL engine state lives in one flat struct. This is not a design preference
-// but a constraint: QuantaLang's C codegen cannot reliably emit struct field
+// but a constraint: BuildLang's C codegen cannot reliably emit struct field
 // assignments on local variables, so we pass &mut DB everywhere.
 //
 // The struct is organized into logical groups:
@@ -303,7 +303,7 @@ fn db_new(db_path: String) -> DB {
 // All strings in the engine are interned into a single contiguous buffer
 // (d.pool). sp_add appends text and returns an integer ID. sp_get retrieves
 // text by ID. This avoids Vec<String> which has incomplete codegen in
-// QuantaLang. Pool IDs are used everywhere: table names, column names,
+// BuildLang. Pool IDs are used everywhere: table names, column names,
 // cell values, parsed tokens.
 fn sp_add(d: &mut DB, text: String) -> i32 {
     let id = d.pn;
@@ -3899,7 +3899,7 @@ fn make_dashes(w: i32) -> String {
 }
 
 // --- Numeric / String Conversion ---
-// QuantaLang has limited stdlib for number formatting, so these are
+// BuildLang has limited stdlib for number formatting, so these are
 // hand-rolled: int_to_str, float_to_str, digit_char, int_part_str.
 
 fn int_to_str(n: i32) -> String {
