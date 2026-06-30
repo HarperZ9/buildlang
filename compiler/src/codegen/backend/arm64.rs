@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use std::fmt::Write;
 
 use super::arm64_enc::{Arm64Encoder, Cond, Reg64};
-use super::{Backend, CodegenResult, Target};
+use super::{Backend, CodegenError, CodegenResult, Target};
 use crate::codegen::debug::DwarfGenerator;
 use crate::codegen::ir::*;
 use crate::codegen::{GeneratedCode, OutputFormat};
@@ -259,6 +259,12 @@ impl Arm64Backend {
         match &stmt.kind {
             MirStmtKind::Assign { dest, value } => {
                 self.generate_assign(*dest, value, func)?;
+            }
+            MirStmtKind::GlobalStore { .. } => {
+                return Err(CodegenError::Unsupported(
+                    "store to a module global is not yet supported in the ARM64 backend"
+                        .to_string(),
+                ));
             }
             MirStmtKind::DerefAssign { ptr, .. } => {
                 let offset = self.local_stack_offset(*ptr, func);
@@ -841,8 +847,9 @@ impl Arm64Backend {
             }
             MirStmtKind::DerefAssign { .. }
             | MirStmtKind::FieldDerefAssign { .. }
-            | MirStmtKind::FieldAssign { .. } => {
-                // Pointer/field store in machine code: emit nop placeholder
+            | MirStmtKind::FieldAssign { .. }
+            | MirStmtKind::GlobalStore { .. } => {
+                // Pointer/field/global store in machine code: emit nop placeholder
                 // Full implementation requires register allocator
                 self.enc().nop();
             }
