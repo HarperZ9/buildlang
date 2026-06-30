@@ -124,6 +124,9 @@ pub struct FnSig {
     pub abi: Option<String>,
     /// Parameters.
     pub params: Vec<Param>,
+    /// Whether the function ends with a C-style `...` variadic marker. Only
+    /// meaningful for `extern "C"` functions (e.g. `printf`).
+    pub is_variadic: bool,
     /// Return type (None for unit).
     pub return_ty: Option<Box<Type>>,
     /// Effect annotations.
@@ -138,6 +141,7 @@ impl Default for FnSig {
             is_const: false,
             abi: None,
             params: Vec::new(),
+            is_variadic: false,
             return_ty: None,
             effects: Vec::new(),
         }
