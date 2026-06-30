@@ -311,6 +311,61 @@ lifted to block/scope-scoped drops so a loop has bounded peak memory (the third
 increment). Until then the flag stays off by default; the verified baseline is
 untouched.
 
+### Third increment: block-scoped drops (MIR-grounded design, 2026-06-30)
+
+The remaining gate. Function-exit drops do not bound a loop that allocates per
+iteration, because the frees land at the `Return`, not at end-of-iteration. The
+fix is to free a loop-body owner at the end of its scope so each iteration's buffer
+is reclaimed.
+
+MIR ground truth (`while i < 3 { let a = String::from("ab"); let b = String::from("cd");
+let s = a + b; println!("{}", s); i = i + 1; }`):
+
+- bb1 is the loop header (`if i < 3 -> body / exit`); the body is bb2..bb9 with a
+  single back-edge bb9 -> bb1.
+- The only heap allocation is `_9 = build_string_concat(_5, _8)` in bb7 (everything
+  else is a `cap = 0` literal wrapper). `s` (`_10`) move-acquires it in bb8
+  (`_10 = Use(_9)`), is last used in bb8 (`_11 = _10.ptr; printf(fmt, _11)`), and is
+  dead across the back-edge (not used in bb9, not live-in to bb1).
+- The function-exit pass cannot free `_10`: its defining block bb8 does not dominate
+  the return (bb3). So `_10` leaks one buffer per iteration today.
+
+Freeing `_10` at the END of bb8 (after its statements, before the terminator)
+reclaims it every iteration -> bounded peak memory.
+
+Tightest provably-sound first sub-step (ADDITIVE; does NOT touch the verified
+function-exit path, so no buffer can be freed twice). Free an owned heap local `L`
+at the end of block `B` iff:
+
+1. `L` passes ALL the second-increment ownership/escape/move/taint/one-def gates
+   (the same `sound owned` predicate), and `L` is NOT in the function-exit free set
+   (disjointness -> no double free).
+2. `L` is DEFINED in `B` (its single definition's dest is in `B`).
+3. Every USE of `L` in the whole function is inside `B`'s STATEMENTS - never in
+   another block and never in `B`'s terminator. (Restricting the def and all uses to
+   the same block makes "dead after the last use" hold without a full liveness
+   pass: any path that returns to the use re-executes the def at `B`'s start first,
+   so `L` is dead on every out-edge of `B`. Requiring the uses to be in statements,
+   not the terminator, lets the free sit after the statements and before the
+   terminator's control transfer.)
+
+Then the free goes at the end of `B`'s statements. Coverage is intentionally narrow
+(single-block def-and-use); it already captures the dominant loop pattern
+(allocate, read once via `.ptr` into a print, discard). Later sub-steps add real
+per-local liveness (live_out via backward dataflow over the candidates) to free
+locals whose use spans blocks, and drop flags for conditional ownership - each
+ASan-verified.
+
+Verification bar (all required before the flag default may flip): golden unit tests
+that place the free inside the loop-body block for the print-temp and place NONE for
+a local that is used after the block / moved out / carried across the back-edge; an
+ASan run of a million-iteration allocating loop showing zero use-after-free, zero
+double-free, AND bounded peak working set (the free is structurally inside the loop
+body); corpus c-execution stays 8/8 with the flag on; and a fresh adversarial pass
+(the second increment passed unit + self-battery + ASan yet still had a real
+double-free that ONLY the six-lens adversarial workflow caught - block-scoped drops
+has a larger soundness surface and must clear the same bar, not a smaller one).
+
 ## Why this is documented rather than already implemented
 
 The transpiler/effects/receipts pillars were bounded, TDD-verifiable bricks and
