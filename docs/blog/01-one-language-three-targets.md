@@ -231,7 +231,7 @@ The key insight is that the frontend (lexer, parser, type checker) is shared. On
 ## Try It
 
 ```bash
-git clone https://github.com/HarperZ9/buildlang.git
+git clone https://github.com/HarperZ9/quantalang.git
 cd buildlang
 cargo build --release
 
@@ -248,4 +248,4 @@ One language. Three shader targets. Zero rewrites.
 
 ---
 
-*BuildLang is open source under the MIT license. GitHub: [HarperZ9/buildlang](https://github.com/HarperZ9/buildlang)*
+*BuildLang is open source under the MIT license. GitHub: [BuildLang compiler repo](https://github.com/HarperZ9/quantalang)*
