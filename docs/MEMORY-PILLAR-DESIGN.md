@@ -20,7 +20,23 @@ Compiled programs allocate heap memory and never free it.
   backend's Drop arm is literally `// No explicit drop in C` followed by a
   `goto` to the target block; the dropped place is ignored.
 - Empirical check (2026-06-30): a program that creates three `String`s lowers to
-  C with 9 `build_string_new` allocation sites and 0 `build_string_free` calls.
+  C with 9 `build_string_new` calls and 0 `build_string_free` calls. CORRECTION
+  (2026-06-30, verified by reading `runtime.rs`): `build_string_new` does NOT
+  allocate. It wraps the input pointer with `cap = 0` ("literal, not owned"), and
+  `build_string_free` only frees when `cap > 0`. So string literals and
+  `String::from(<literal>)` (which lowers to `build_string_new(arg.ptr)`) are
+  zero-cap wrappers: they do not leak and are no-ops to free. The earlier framing
+  that counted `build_string_new` sites as leaks was wrong. The genuine heap
+  allocations (cap > 0, returned by `malloc`) come from DERIVED strings:
+  `build_string_concat`, `build_format_str`/`build_format_i32`/`build_format_f64`
+  (and `build_i32_to_string`/`build_f64_to_string`), `build_read_file`/`_bytes`,
+  the `build_string_to_upper`/`_lower`/`_trim`/`_substring`/`_replace`/`_repeat`/
+  `_char_at`/`_from_cstr` transforms, and `build_args_get`/`build_read_line`/
+  `build_read_all`/`build_tcp_recv`/`build_getenv`. Two BuildString-returning
+  runtime functions return an ALIAS into a container, not a fresh buffer
+  (`build_hvec_get_str` returns `*(BuildString*)build_vec_get(...)`, and
+  `build_hmap_get_str_str`); these must never be in the freeable set or they
+  double-free the container's buffer.
 - The GC at `compiler/src/runtime/gc.rs` (refcounting + cycle detection) is a
   Rust model used by the compiler's own analysis. It is not C, so it is not
   what runs inside compiled programs. It is a design reference, not a drop-in
@@ -192,10 +208,16 @@ owning BuildString local `L` at every `Return` iff ALL hold:
 
 1. `L` is non-parameter and typed `BuildString`.
 2. `L` is OWNING: it is the `dest` of a Call to a known ALLOCATING runtime
-   function (allocates a fresh heap buffer: `build_string_new`, `String_new`,
-   `String_from`, `read_file`/`read_line`/`read_all`/`getenv`, `to_string_*`,
-   `build_string_concat`, ...), OR it is move-acquired by `Assign { dest: L,
-   value: Use(src) }` where `src` is itself an owning BuildString.
+   function that returns a FRESH, solely-owned `cap > 0` buffer
+   (`build_string_concat`, `build_format_str`/`_i32`/`_f64`,
+   `build_i32_to_string`/`build_f64_to_string`, `build_read_file`/`_bytes`, the
+   `build_string_*` transforms, `build_args_get`/`build_read_line`/`build_read_all`/
+   `build_tcp_recv`/`build_getenv`), OR it is move-acquired by `Assign { dest: L,
+   value: Use(src) }` where `src` is itself an owning BuildString. NOTE the
+   allocating set deliberately EXCLUDES `build_string_new` and `String_from` (they
+   return `cap = 0` wrappers, so there is nothing to free) and the container-alias
+   getters `build_hvec_get_str`/`build_hmap_get_str_str` (freeing them would
+   double-free the container).
 3. Definite init: `L`'s defining block dominates every `Return` block (so `L` is
    initialized on every path to a free; this matters because `build_string_free`
    only self-guards on `cap`, and an uninitialized BuildString has garbage `cap`).
@@ -218,6 +240,14 @@ sole freer. The borrow whitelist in (5) is the ONLY trust surface - every functi
 on it must be audited to read-but-never-retain-or-free its BuildString/`.ptr`
 argument; when in doubt, leave it off (the local then leaks, which is safe).
 
+SCOPE of this increment: freeing at `Return` reclaims heap strings in STRAIGHT-LINE
+code (e.g. a function that builds a formatted/concatenated string and prints it).
+It does NOT bound a loop that allocates per iteration, because the frees land at
+function exit, not at end-of-iteration. Bounding loop memory is the THIRD increment
+(block/scope-scoped drops with definite-init flags), which builds on the same
+owning/move/escape machinery. This increment is the sound foundation for that, not
+the finish line for the "bounded peak memory under a loop" done-criterion.
+
 Verification bar for this increment (must all pass before the flag default flips):
 golden unit tests that FREE the simple owned case and do NOT free each unsound
 case (moved-out/returned, stored-into-Vec, aliased, escaping `.ptr`); an ASan
@@ -225,6 +255,54 @@ battery (`cl /fsanitize=address`) over those same programs asserting zero
 use-after-free and zero double-free AND that a long allocation loop has bounded
 peak memory; corpus c-execution stays 8/8 with the flag on; and an adversarial
 pass that actively tries to construct a program the rule mis-frees.
+
+### Adversarial audit of the second increment (2026-06-30)
+
+A six-lens adversarial pass (move-aliasing, container-aliasing, borrow-whitelist
+trust, field-read taint, control-flow/dominance, string-method aliasing) attacked
+the implemented analysis, each lens trying to construct a program that emits an
+unsound free. It found one runtime-confirmed double-free and three latent issues;
+all are now fixed or guarded, each with a regression test:
+
+1. MULTI-MOVE-ACQUIRER DOUBLE-FREE (real, ASan-confirmed; FIXED). The move alias
+   guard assumed each move source has exactly one acquirer. `let p = c; let q = c;`
+   (a use-after-move the front end does not reject at codegen) moves `c` into two
+   destinations that alias one buffer; both were freed. Fix: a source moved into
+   more than one destination taints all its acquirers (propagated along move
+   edges); tainted owners are never freed. Verified: both counterexamples now emit
+   zero frees and run ASan-clean, while the single-move case still frees once.
+
+2. STATIC-MUT STASH (latent UAF; GUARDED). Storing an owner or its `.ptr` into a
+   `static mut` global escapes, but that store is currently DROPPED by a separate
+   lowering gap, so the per-function scan cannot see it - "sound by accident."
+   Fix: if the module declares any mutable global whose type could hold a heap
+   string alias (pointer, struct, Vec, Map, tuple, ...), the drop analysis is
+   disabled module-wide. Sound by construction, independent of the lowering gap.
+
+3. DOMINATOR OVER-CONSERVATISM (fail-safe; FIXED). `compute_dominators` intersected
+   over unreachable predecessors, erasing real dominators and suppressing most
+   sound frees (the lowering routinely emits unreachable blocks). This only ever
+   caused spurious leaks, never an unsound free, but it gutted reclamation. Fix:
+   intersect only reachable predecessors. Verified: an early-return program that
+   previously freed nothing now frees its entry-block owner at both returns,
+   ASan-clean.
+
+4. BORROW-WHITELIST WILDCARD (hardening). `borrows_string_arg` trusted any name
+   matching `build_print*` by prefix. Replaced with a closed, line-by-line-audited
+   list (no wildcard); adding a runtime function no longer auto-trusts it.
+
+The container-aliasing, borrow-whitelist-trust, and string-method lenses produced
+NO constructible unsound free: container get-back aliases are excluded from the
+owner set, container insert callees are non-borrows (so the owner escapes), the
+whole-function escape scan is order-insensitive, and every string method mallocs a
+fresh buffer (never aliases its receiver) and is absent from the allocating set.
+
+Remaining HARD GATES before the flag default may flip: (a) the `static mut` store
+lowering gap is fixed AND `owned_string_escapes` is extended to treat a
+global-target store as an escape (then the module-wide guard can be narrowed);
+(b) the function-exit scope is lifted to block/scope-scoped drops so a loop has
+bounded peak memory (the third increment). Until then the flag stays off by
+default; the verified baseline is untouched.
 
 ## Why this is documented rather than already implemented
 
