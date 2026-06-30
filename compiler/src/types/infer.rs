@@ -102,6 +102,11 @@ pub struct TypeInfer<'ctx> {
     /// Parallel marker stack: whether each pushed scope is a loop, so the
     /// scope-pop path can keep `loop_depth` balanced.
     linear_loop_markers: Vec<bool>,
+    /// Per-scope record of linear slots shadowed by inner bindings: name ->
+    /// the slot value that existed before the inner binding (None if absent).
+    /// On scope exit these are restored, so an inner shadow cannot revive or
+    /// alter the outer binding's consumed state.
+    linear_shadow_stack: Vec<HashMap<String, Option<LinearSlot>>>,
 }
 
 /// Tracking state for a single `#[linear]`-typed binding.
@@ -289,6 +294,7 @@ impl<'ctx> TypeInfer<'ctx> {
             borrow_depth: 0,
             loop_depth: 0,
             linear_loop_markers: Vec::new(),
+            linear_shadow_stack: Vec::new(),
         }
     }
 
@@ -332,6 +338,7 @@ impl<'ctx> TypeInfer<'ctx> {
             borrow_depth: 0,
             loop_depth: 0,
             linear_loop_markers: Vec::new(),
+            linear_shadow_stack: Vec::new(),
         }
     }
 
@@ -541,6 +548,7 @@ impl<'ctx> TypeInfer<'ctx> {
         if is_loop {
             self.loop_depth += 1;
         }
+        self.linear_shadow_stack.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
@@ -550,6 +558,20 @@ impl<'ctx> TypeInfer<'ctx> {
         }
         if let Some(true) = self.linear_loop_markers.pop() {
             self.loop_depth = self.loop_depth.saturating_sub(1);
+        }
+        // Restore linear slots shadowed by bindings in the scope being popped,
+        // so an inner shadow cannot revive/alter an outer binding's state.
+        if let Some(frame) = self.linear_shadow_stack.pop() {
+            for (name, prev) in frame {
+                match prev {
+                    Some(slot) => {
+                        self.linear_slots.insert(name, slot);
+                    }
+                    None => {
+                        self.linear_slots.remove(&name);
+                    }
+                }
+            }
         }
     }
 
@@ -584,6 +606,12 @@ impl<'ctx> TypeInfer<'ctx> {
     /// tracked, live linear slot; otherwise any prior tracking for that name is
     /// cleared (a non-linear shadow is not resource-tracked).
     fn register_linear_local(&mut self, name: &str, ty: &Ty) {
+        // Record what this name's slot was BEFORE this (re)binding, so the
+        // enclosing scope can restore it on exit (shadowing must not leak out).
+        let prev = self.linear_slots.get(name).cloned();
+        if let Some(frame) = self.linear_shadow_stack.last_mut() {
+            frame.entry(name.to_string()).or_insert(prev);
+        }
         if self.linear_def_of(ty).is_some() {
             self.linear_slots.insert(
                 name.to_string(),
@@ -626,6 +654,25 @@ impl<'ctx> TypeInfer<'ctx> {
                     s.status = LinearStatus::Consumed;
                 }
             }
+        }
+    }
+
+    /// Reject a linear-typed value appearing in a position the move-analysis
+    /// cannot follow (a tuple/array element, a generic argument, a closure
+    /// capture, a value moved out of a reference, ...), where it could be
+    /// silently duplicated. Conservative: favors soundness over completeness.
+    /// Returns true if it rejected.
+    fn reject_linear_escape(&mut self, ty: &Ty, span: Span, context: &str) -> bool {
+        if self.linear_def_of(ty).is_some() {
+            self.error(
+                TypeError::LinearInUnsupportedPosition {
+                    context: context.to_string(),
+                },
+                span,
+            );
+            true
+        } else {
+            false
         }
     }
 
@@ -3128,6 +3175,9 @@ impl<'ctx> TypeInfer<'ctx> {
 
     fn infer_tuple(&mut self, elems: &[ast::Expr]) -> Ty {
         let elem_tys: Vec<_> = elems.iter().map(|e| self.infer_expr(e)).collect();
+        for (elem, ty) in elems.iter().zip(elem_tys.iter()) {
+            self.reject_linear_escape(ty, elem.span, "a tuple");
+        }
         Ty::tuple(elem_tys)
     }
 
@@ -3139,9 +3189,11 @@ impl<'ctx> TypeInfer<'ctx> {
         }
 
         let first_ty = self.infer_expr(&elems[0]);
+        self.reject_linear_escape(&first_ty, elems[0].span, "an array");
         for elem in &elems[1..] {
             let elem_ty = self.infer_expr(elem);
             let _ = self.unify(&first_ty, &elem_ty, span);
+            self.reject_linear_escape(&elem_ty, elem.span, "an array");
         }
 
         Ty::array(self.apply(&first_ty), elems.len())
@@ -3149,6 +3201,8 @@ impl<'ctx> TypeInfer<'ctx> {
 
     fn infer_array_repeat(&mut self, element: &ast::Expr, count: &ast::Expr, span: Span) -> Ty {
         let elem_ty = self.infer_expr(element);
+        // An array-repeat `[x; n]` duplicates `x` into n slots: a literal clone.
+        self.reject_linear_escape(&elem_ty, element.span, "a repeated array");
 
         // Evaluate count as const expression
         let size = self.eval_const_expr(count).unwrap_or_else(|| {
@@ -3192,7 +3246,7 @@ impl<'ctx> TypeInfer<'ctx> {
             UnaryOp::Deref => {
                 // Dereference: *ref → T (strip one reference layer)
                 let resolved = self.apply(&inner_ty);
-                match &resolved.kind {
+                let result = match &resolved.kind {
                     TyKind::Ref(_, _, pointee) => (**pointee).clone(),
                     TyKind::Ptr(_, pointee) => (**pointee).clone(),
                     // If the type is an unresolved variable, return a fresh var
@@ -3208,7 +3262,16 @@ impl<'ctx> TypeInfer<'ctx> {
                         );
                         Ty::error()
                     }
+                };
+                // No-cloning: moving a linear value out of a reference clones it.
+                if self.borrow_depth == 0 {
+                    self.reject_linear_escape(
+                        &result,
+                        expr.span,
+                        "a value moved out of a reference",
+                    );
                 }
+                result
             }
             UnaryOp::Ref => {
                 // Reference: &expr → &T where T = typeof(expr)
@@ -3662,7 +3725,25 @@ impl<'ctx> TypeInfer<'ctx> {
                 for (param, arg) in fn_ty.params.iter().zip(args.iter()) {
                     let arg_sources = self.call_sources(arg);
                     let arg_ty = self.infer_expr(arg);
+                    // No-cloning: a linear value may be passed only to a parameter
+                    // whose type is exactly that linear type. Resolve the param
+                    // BEFORE coercion unifies a generic param to the linear type
+                    // (which would mask the escape). A generic/mismatched param
+                    // would erase tracking, so reject it.
+                    let linear_arg = self.linear_def_of(&arg_ty);
+                    let param_pre = self.apply(param);
                     let _ = self.coerce_arg(param, &arg_ty, span);
+                    if let Some(d) = linear_arg {
+                        let param_ok = matches!(&param_pre.kind, TyKind::Adt(pd, _) if *pd == d);
+                        if !param_ok {
+                            self.error(
+                                TypeError::LinearInUnsupportedPosition {
+                                    context: "a generic or mismatched parameter".to_string(),
+                                },
+                                arg.span,
+                            );
+                        }
+                    }
                     self.record_effectful_argument_sources(param, &arg_sources, &fn_ty.effects);
                 }
 
@@ -3753,6 +3834,16 @@ impl<'ctx> TypeInfer<'ctx> {
                 }
                 // Unknown function type - create fresh types for params and return
                 let param_tys: Vec<_> = args.iter().map(|a| self.infer_expr(a)).collect();
+                // No-cloning: a linear value passed to an unresolved/generic callee
+                // (e.g. the `Some`/`Ok` constructors, whose payload type is generic)
+                // escapes tracking. Reject it.
+                for (arg, ty) in args.iter().zip(param_tys.iter()) {
+                    self.reject_linear_escape(
+                        ty,
+                        arg.span,
+                        "a generic constructor or unresolved call (e.g. Some/Ok)",
+                    );
+                }
                 let ret_ty = Ty::fresh_var();
                 let fn_ty = Ty::function(param_tys, ret_ty.clone());
                 let _ = self.unify(&func_ty, &fn_ty, span);
@@ -3773,7 +3864,14 @@ impl<'ctx> TypeInfer<'ctx> {
             // `F: Fn(...)`) is callable; the bound signature is not tracked here so
             // check leniently and let monomorphization supply the concrete closure.
             TyKind::Param(..) => {
-                let _: Vec<_> = args.iter().map(|a| self.infer_expr(a)).collect();
+                let arg_tys: Vec<_> = args.iter().map(|a| self.infer_expr(a)).collect();
+                for (arg, ty) in args.iter().zip(arg_tys.iter()) {
+                    self.reject_linear_escape(
+                        ty,
+                        arg.span,
+                        "a call through a generic function parameter",
+                    );
+                }
                 Ty::fresh_var()
             }
             TyKind::Ref(_, _, ref inner)
@@ -3782,7 +3880,14 @@ impl<'ctx> TypeInfer<'ctx> {
                     TyKind::Param(..) | TyKind::Var(_) | TyKind::Infer(_)
                 ) =>
             {
-                let _: Vec<_> = args.iter().map(|a| self.infer_expr(a)).collect();
+                let arg_tys: Vec<_> = args.iter().map(|a| self.infer_expr(a)).collect();
+                for (arg, ty) in args.iter().zip(arg_tys.iter()) {
+                    self.reject_linear_escape(
+                        ty,
+                        arg.span,
+                        "a call through a generic function parameter",
+                    );
+                }
                 Ty::fresh_var()
             }
             _ => {
@@ -4974,6 +5079,16 @@ impl<'ctx> TypeInfer<'ctx> {
         body: &ast::Expr,
         _span: Span,
     ) -> Ty {
+        // Snapshot outer linear locals that are still Live, before binding the
+        // closure's own params, so we can detect a capture-consume: a closure
+        // may be invoked many times, so consuming a captured linear is unsound.
+        let pre_linear_live: Vec<String> = self
+            .linear_slots
+            .iter()
+            .filter(|(_, s)| s.status == LinearStatus::Live)
+            .map(|(k, _)| k.clone())
+            .collect();
+
         self.push_scope(ScopeKind::Function);
 
         let param_tys: Vec<Ty> = params
@@ -5002,6 +5117,23 @@ impl<'ctx> TypeInfer<'ctx> {
 
         let body_ty = self.infer_expr(body);
         let closure_effects = self.current_effects.clone();
+
+        // No-cloning: if the closure body consumed any outer linear local that
+        // was Live before, that is a captured consume -> reject (the closure may
+        // be called more than once, duplicating the consume).
+        for name in &pre_linear_live {
+            if matches!(
+                self.linear_slots.get(name),
+                Some(s) if s.status == LinearStatus::Consumed
+            ) {
+                self.error(
+                    TypeError::LinearInUnsupportedPosition {
+                        context: format!("a closure (it captures and consumes linear `{name}`)"),
+                    },
+                    body.span,
+                );
+            }
+        }
 
         if let Some(expected) = &expected_ret {
             let _ = self.unify(&body_ty, expected, body.span);
@@ -5214,7 +5346,7 @@ impl<'ctx> TypeInfer<'ctx> {
         let expr_ty = self.infer_expr(expr);
         let expr_ty = self.apply(&expr_ty);
 
-        match &expr_ty.kind {
+        let result = match &expr_ty.kind {
             TyKind::Ref(_, _, inner) | TyKind::Ptr(_, inner) => (**inner).clone(),
             // Inference variables - allow deref, return fresh var
             TyKind::Var(_) | TyKind::Infer(_) => Ty::fresh_var(),
@@ -5229,7 +5361,12 @@ impl<'ctx> TypeInfer<'ctx> {
                 self.error(TypeError::NotDereferenceable { ty: expr_ty }, span);
                 Ty::error()
             }
+        };
+        // No-cloning: moving a linear value out of a reference clones it.
+        if self.borrow_depth == 0 {
+            self.reject_linear_escape(&result, span, "a value moved out of a reference");
         }
+        result
     }
 
     // =========================================================================
@@ -5363,6 +5500,22 @@ impl<'ctx> TypeInfer<'ctx> {
                 if let Some((_, expected_ty)) =
                     struct_fields.iter().find(|(n, _)| n.as_ref() == field_name)
                 {
+                    // No-cloning: a linear value may be stored only in a field
+                    // whose declared type is exactly that linear type (a linear
+                    // aggregate). A generic/other field would erase tracking.
+                    // Check the DECLARED field type before unification masks it.
+                    if let Some(d) = self.linear_def_of(&value_ty) {
+                        let field_ok =
+                            matches!(&self.apply(expected_ty).kind, TyKind::Adt(pd, _) if *pd == d);
+                        if !field_ok {
+                            self.error(
+                                TypeError::LinearInUnsupportedPosition {
+                                    context: "a generic or non-linear struct field".to_string(),
+                                },
+                                span,
+                            );
+                        }
+                    }
                     let _ = self.unify(expected_ty, &value_ty, span);
                 } else {
                     self.error(

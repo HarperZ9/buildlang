@@ -201,6 +201,13 @@ pub enum TypeError {
         field_type: String,
     },
 
+    /// A `#[linear]` value appeared in a position the move-analysis cannot
+    /// track (a tuple/array element, a generic argument, a closure capture, a
+    /// value moved out of a reference, ...), where it could be silently
+    /// duplicated. Conservatively rejected to preserve no-cloning.
+    #[error("linear value cannot be used in {context}: it could be duplicated there (linear values must stay in tracked positions: a local, a parameter, a borrow, or a by-value argument of its own type)")]
+    LinearInUnsupportedPosition { context: String },
+
     /// Invalid binary operation.
     #[error("cannot apply binary operator `{op}` to types `{left}` and `{right}`")]
     InvalidBinaryOp { op: String, left: Ty, right: Ty },
