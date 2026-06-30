@@ -1474,11 +1474,16 @@ impl<'ctx> MirLowerer<'ctx> {
         false
     }
 
-    pub(crate) fn lower_print_macro(
+    /// Shared format-macro processing for `print!`/`println!`/`format!`: parse
+    /// the format string and arguments, convert `{}`/`{:?}`/`{:.N}` placeholders
+    /// to C printf specifiers, intern the C format string, and return its string
+    /// index plus the lowered argument values (BuildString args reduced to their
+    /// `.ptr`, trimmed to the placeholder count).
+    fn prepare_format_call(
         &mut self,
         tokens: &[ast::TokenTree],
         newline: bool,
-    ) -> CodegenResult<()> {
+    ) -> CodegenResult<(u32, Vec<MirValue>)> {
         // Extract the format string from the macro tokens.
         let format_str = self.extract_string_from_tokens(tokens);
 
@@ -1615,32 +1620,60 @@ impl<'ctx> MirLowerer<'ctx> {
 
         // Trim arg_values to the number of placeholders we actually found.
         let arg_values: Vec<MirValue> = arg_values.into_iter().take(placeholder_count).collect();
+        Ok((str_idx, arg_values))
+    }
 
+    /// `print!`/`println!`/`eprint!`/`dbg!`: format the arguments and write the
+    /// result to stdout via printf.
+    pub(crate) fn lower_print_macro(
+        &mut self,
+        tokens: &[ast::TokenTree],
+        newline: bool,
+    ) -> CodegenResult<()> {
+        let (str_idx, arg_values) = self.prepare_format_call(tokens, newline)?;
         let builder = self
             .current_fn
             .as_mut()
             .ok_or_else(|| CodegenError::Internal("No current function for macro".into()))?;
-
-        // Create a local for the format string pointer
         let fmt_local = builder.create_local(MirType::Ptr(Box::new(MirType::i8())));
         builder.assign(
             fmt_local,
             MirRValue::Use(MirValue::Const(MirConst::Str(str_idx))),
         );
-
-        // Create a continuation block for after the call
         let continue_block = builder.create_block();
-
-        // Call printf with format string + arguments
         let printf_fn = MirValue::Function(Arc::from("printf"));
         let mut call_args = vec![MirValue::Local(fmt_local)];
         call_args.extend(arg_values);
         builder.call(printf_fn, call_args, None, continue_block);
-
-        // Switch to the continuation block
         builder.switch_to_block(continue_block);
-
         Ok(())
+    }
+
+    /// `format!`: build an owned `BuildString` from the format string and
+    /// arguments via the variadic `build_sprintf` runtime function (no trailing
+    /// newline; returns the string instead of printing it).
+    pub(crate) fn lower_format_macro(
+        &mut self,
+        tokens: &[ast::TokenTree],
+    ) -> CodegenResult<MirValue> {
+        let (str_idx, arg_values) = self.prepare_format_call(tokens, false)?;
+        let builder = self
+            .current_fn
+            .as_mut()
+            .ok_or_else(|| CodegenError::Internal("No current function for macro".into()))?;
+        let fmt_local = builder.create_local(MirType::Ptr(Box::new(MirType::i8())));
+        builder.assign(
+            fmt_local,
+            MirRValue::Use(MirValue::Const(MirConst::Str(str_idx))),
+        );
+        let result = builder.create_local(MirType::Struct(Arc::from("BuildString")));
+        let continue_block = builder.create_block();
+        let sprintf_fn = MirValue::Function(Arc::from("build_sprintf"));
+        let mut call_args = vec![MirValue::Local(fmt_local)];
+        call_args.extend(arg_values);
+        builder.call(sprintf_fn, call_args, Some(result), continue_block);
+        builder.switch_to_block(continue_block);
+        Ok(values::local(result))
     }
 
     /// Extract the source text of each argument expression in a macro call,
