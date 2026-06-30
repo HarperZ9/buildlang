@@ -227,6 +227,18 @@ static int32_t build_hvec_pop_i32(BuildVecHandle h) {
     return *(int32_t*)((char*)h.inner->ptr + h.inner->len * h.inner->elem_size);
 }
 static void build_hvec_free(BuildVecHandle h) { build_vec_free(h.inner); free(h.inner); }
+static void build_hvec_set_i32(BuildVecHandle h, size_t i, int32_t val) {
+    if (i < h.inner->len) *(int32_t*)build_vec_get(h.inner, i) = val;
+}
+static void build_hvec_set_i64(BuildVecHandle h, size_t i, int64_t val) {
+    if (i < h.inner->len) *(int64_t*)build_vec_get(h.inner, i) = val;
+}
+static void build_hvec_set_f64(BuildVecHandle h, size_t i, double val) {
+    if (i < h.inner->len) *(double*)build_vec_get(h.inner, i) = val;
+}
+static void build_hvec_set_str(BuildVecHandle h, size_t i, BuildString val) {
+    if (i < h.inner->len) *(BuildString*)build_vec_get(h.inner, i) = val;
+}
 static bool build_hvec_contains_i32(BuildVecHandle h, int32_t val) {
     for (size_t i = 0; i < h.inner->len; i++) {
         if (*(int32_t*)build_vec_get(h.inner, i) == val) return true;

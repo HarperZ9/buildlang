@@ -1202,6 +1202,19 @@ mod tests {
     }
 
     #[test]
+    fn vec_indexed_assignment_stores_through_a_setter() {
+        // `v[i] = x` must store into the Vec (was silently dropped - the write
+        // matched no assignment-target arm, so the element kept its old value).
+        let code = source_to_c(
+            "fn main() { let mut v: Vec<i32> = vec![10, 20, 30]; v[1] = 99; let _x = v[1]; }",
+        );
+        assert!(
+            code.contains("build_hvec_set_i32("),
+            "v[i] = x must dispatch to the typed Vec setter:\n{code}"
+        );
+    }
+
+    #[test]
     fn vec_contains_dispatches_to_runtime_scan() {
         // `v.contains(x)` must dispatch to the element-typed runtime scan, not an
         // undefined `contains` call.

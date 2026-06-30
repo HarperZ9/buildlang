@@ -1106,6 +1106,64 @@ impl<'ctx> MirLowerer<'ctx> {
             return Ok(values::unit());
         }
 
+        // Handle indexed assignment into a Vec: `v[i] = value`. Without this the
+        // write fell through every target arm and was silently dropped (the
+        // element kept its old value). Dispatches to a typed runtime setter.
+        if let ExprKind::Index { expr: arr, index } = &target.kind {
+            let recv_val = self.lower_expr(arr)?;
+            let recv_ty = self.type_of_value(&recv_val);
+            if let MirType::Vec(ref elem_ty) = recv_ty {
+                let suffix = match elem_ty.as_ref() {
+                    MirType::Float(_) => "f64",
+                    MirType::Int(IntSize::I64, _) => "i64",
+                    MirType::Struct(n) if n.as_ref() == "BuildString" => "str",
+                    _ => "i32",
+                };
+                let idx_val = self.lower_expr(index)?;
+                // For a compound assignment, read the current element, apply the
+                // op, then store; a plain `=` stores the value directly.
+                let store_val = if op == ast::AssignOp::Assign {
+                    val
+                } else {
+                    let get_fn =
+                        MirValue::Function(Arc::from(format!("build_hvec_get_{}", suffix)));
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let cur = builder.create_local((**elem_ty).clone());
+                    let cont = builder.create_block();
+                    builder.call(
+                        get_fn,
+                        vec![recv_val.clone(), idx_val.clone()],
+                        Some(cur),
+                        cont,
+                    );
+                    builder.switch_to_block(cont);
+                    let bin_op = match op {
+                        ast::AssignOp::AddAssign => BinOp::Add,
+                        ast::AssignOp::SubAssign => BinOp::Sub,
+                        ast::AssignOp::MulAssign => BinOp::Mul,
+                        ast::AssignOp::DivAssign => BinOp::Div,
+                        ast::AssignOp::RemAssign => BinOp::Rem,
+                        ast::AssignOp::BitAndAssign => BinOp::BitAnd,
+                        ast::AssignOp::BitOrAssign => BinOp::BitOr,
+                        ast::AssignOp::BitXorAssign => BinOp::BitXor,
+                        ast::AssignOp::ShlAssign => BinOp::Shl,
+                        ast::AssignOp::ShrAssign => BinOp::Shr,
+                        _ => BinOp::Add,
+                    };
+                    let combined = builder.create_local((**elem_ty).clone());
+                    builder.binary_op(combined, bin_op, values::local(cur), val);
+                    values::local(combined)
+                };
+                let set_fn =
+                    MirValue::Function(Arc::from(format!("build_hvec_set_{}", suffix)));
+                let builder = self.current_fn.as_mut().unwrap();
+                let cont = builder.create_block();
+                builder.call(set_fn, vec![recv_val, idx_val, store_val], None, cont);
+                builder.switch_to_block(cont);
+                return Ok(values::unit());
+            }
+        }
+
         // Get the target local
         let target_local = match &target.kind {
             ExprKind::Ident(ident) => self.var_map.get(&ident.name).copied(),
