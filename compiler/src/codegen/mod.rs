@@ -1202,6 +1202,29 @@ mod tests {
     }
 
     #[test]
+    fn result_methods_is_ok_and_unwrap_or() {
+        // `res.is_ok()` reads is_ok; `res.unwrap_or(d)` reads the ok slot when
+        // ok else the default. Neither must lower to an undefined call.
+        let code = source_to_c(
+            "fn div(a: i32, b: i32) -> Result<i32, String> { \
+               if b == 0 { return Err(String::from(\"z\")); } return Ok(a / b); }\n\
+             fn main() { \
+               let r = div(10, 2); \
+               let _v = r.unwrap_or(0); \
+               let _ok = div(1, 0).is_ok(); \
+             }",
+        );
+        assert!(
+            !code.contains("= unwrap_or(") && !code.contains("= is_ok("),
+            "Result methods must not lower to undefined calls:\n{code}"
+        );
+        assert!(
+            code.contains(".is_ok"),
+            "Result methods must read the is_ok discriminant:\n{code}"
+        );
+    }
+
+    #[test]
     fn option_methods_is_some_and_unwrap_or() {
         // `opt.is_some()` reads has_value; `opt.unwrap_or(d)` reads the payload
         // slot when present else the default. Neither must lower to an undefined
