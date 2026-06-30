@@ -1153,6 +1153,26 @@ mod tests {
     }
 
     #[test]
+    fn function_named_handle_is_callable_not_a_handler_expr() {
+        // `handle` is the effect-handler keyword, but `let r = handle(x);` is a
+        // plain call. The parser previously treated `handle(...)` as a handler
+        // expression and swallowed the following statements, so `r` was unbound
+        // and the rest of the block was dropped (silently emptying the function).
+        let code = source_to_c(
+            "fn handle(n: i32) -> i32 { return n + 1; }\n\
+             fn main() { let r = handle(5); let _z = r + 1; }",
+        );
+        assert!(
+            code.contains("handle(5)"),
+            "`handle(5)` must lower to a call:\n{code}"
+        );
+        assert!(
+            code.contains("+ 1"),
+            "the statement after the handle call must not be swallowed:\n{code}"
+        );
+    }
+
+    #[test]
     fn user_function_named_like_c_stdlib_is_escaped() {
         // A user function named `div` (a C stdlib function) must be emitted with
         // a leading underscore at the definition AND every call site, or the C

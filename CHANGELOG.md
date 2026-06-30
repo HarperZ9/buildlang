@@ -10,6 +10,18 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Parser (`handle` as an identifier): a function named `handle` is now callable.
+  `handle` is the effect-handler keyword (`handle { ... } with { ... }`), and the
+  parser unconditionally parsed `handle(...)` as a handler expression - swallowing
+  the rest of the block. So `let r = handle(x); <more> ` dropped every following
+  statement: the binding `r` became "undefined variable" and, inline,
+  `println("{}", handle(...))` silently emptied the whole function body (compiled
+  and ran, printing nothing). The parser now only takes the handler path when
+  `handle` is followed by `{`; otherwise it parses `handle` as an identifier.
+  Verified end-to-end under MSVC: `fn handle(n) { ... }` called as `handle(5)`
+  works, and `println("{}", handle(Msg::Move(3,4)))` prints `r 7` (previously
+  empty). A real `handle { ... } with { ... }` handler still parses. Covered by
+  `function_named_handle_is_callable_not_a_handler_expr`.
 - Stdlib (iterator `enumerate().map(|(i, x)| ...)`): a map closure with a single
   tuple parameter `|(i, x)|` after `.enumerate()` now binds both the index and the
   element. Previously only `|i, x|` (two separate params) was handled; the tuple
