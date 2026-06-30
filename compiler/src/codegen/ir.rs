@@ -261,6 +261,13 @@ pub struct MirFunction {
     pub shader_stage: Option<ShaderStage>,
     /// Shader resource bindings (uniform buffers, textures, samplers).
     pub bindings: Vec<ShaderBinding>,
+    /// Backing C header for a foreign declaration, from an extern block's
+    /// `header "..."` clause. When set, the C backend emits an `#include` for
+    /// this header and trusts it for the prototype instead of synthesizing an
+    /// `extern` declaration. Skipped during serialization when absent so MIR
+    /// for non-FFI functions is unchanged and remains backward compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_header: Option<Arc<str>>,
 }
 
 impl MirFunction {
@@ -275,6 +282,7 @@ impl MirFunction {
             linkage: Linkage::Internal,
             shader_stage: None,
             bindings: Vec::new(),
+            link_header: None,
         }
     }
 
@@ -289,6 +297,7 @@ impl MirFunction {
             linkage: Linkage::External,
             shader_stage: None,
             bindings: Vec::new(),
+            link_header: None,
         }
     }
 

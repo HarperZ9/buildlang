@@ -609,6 +609,119 @@ mod tests {
     }
 
     #[test]
+    fn extern_header_clause_lowers_to_mir_link_header() {
+        // A `header` clause on an extern block must survive lowering so the
+        // backend knows which foreign declarations are backed by a real header.
+        let module = crate::parser::parse_source(
+            "test.bld",
+            "extern \"C\" header \"sqlite3.h\" { fn sqlite3_libversion() -> i32; }",
+        )
+        .expect("source should parse");
+
+        let ctx = TypeContext::new();
+        let mut codegen = CodeGenerator::new(&ctx, Target::C);
+        codegen.generate(&module).expect("codegen should succeed");
+
+        let mir = codegen.mir().expect("mir should be present");
+        let decl = mir
+            .functions
+            .iter()
+            .find(|f| &*f.name == "sqlite3_libversion")
+            .expect("foreign declaration should be lowered");
+        assert_eq!(decl.link_header.as_deref(), Some("sqlite3.h"));
+    }
+
+    #[test]
+    fn extern_without_header_has_no_link_header() {
+        let module = crate::parser::parse_source(
+            "test.bld",
+            "extern \"C\" { fn puts(s: &str) -> i32; }",
+        )
+        .expect("source should parse");
+
+        let ctx = TypeContext::new();
+        let mut codegen = CodeGenerator::new(&ctx, Target::C);
+        codegen.generate(&module).expect("codegen should succeed");
+
+        let mir = codegen.mir().expect("mir should be present");
+        let decl = mir
+            .functions
+            .iter()
+            .find(|f| &*f.name == "puts")
+            .expect("foreign declaration should be lowered");
+        assert_eq!(decl.link_header, None);
+    }
+
+    /// Compile BuildLang source to C text through the full lowering pipeline.
+    fn source_to_c(src: &str) -> String {
+        let module = crate::parser::parse_source("test.bld", src).expect("source should parse");
+        let ctx = TypeContext::new();
+        let mut codegen = CodeGenerator::new(&ctx, Target::C);
+        let out = codegen.generate(&module).expect("codegen should succeed");
+        out.as_string().expect("C output should be text")
+    }
+
+    #[test]
+    fn c_backend_emits_angle_include_for_header_backed_extern() {
+        let code = source_to_c(
+            "extern \"C\" header \"<sqlite3.h>\" { fn sqlite3_libversion() -> i32; }",
+        );
+        assert!(
+            code.contains("#include <sqlite3.h>"),
+            "expected angle-bracket include for header-backed extern:\n{code}"
+        );
+        // The header is authoritative for the prototype, so the backend must not
+        // synthesize its own declaration (which could conflict with the real one).
+        assert!(
+            !code.contains("sqlite3_libversion"),
+            "must not synthesize a prototype for a header-backed fn:\n{code}"
+        );
+    }
+
+    #[test]
+    fn c_backend_emits_quoted_include_for_local_header() {
+        let code = source_to_c("extern \"C\" header \"mylib.h\" { fn my_thing() -> i32; }");
+        assert!(
+            code.contains("#include \"mylib.h\""),
+            "expected quoted include for a local header:\n{code}"
+        );
+        assert!(
+            !code.contains("my_thing"),
+            "must not synthesize a prototype for a header-backed fn:\n{code}"
+        );
+    }
+
+    #[test]
+    fn c_backend_dedups_and_sorts_ffi_headers() {
+        let code = source_to_c(
+            "extern \"C\" header \"<zlib.h>\" { fn zfn() -> i32; }\n\
+             extern \"C\" header \"<sqlite3.h>\" { fn s1() -> i32; fn s2() -> i32; }",
+        );
+        // A header shared by several functions is included exactly once.
+        assert_eq!(
+            code.matches("#include <sqlite3.h>").count(),
+            1,
+            "shared header should be included once:\n{code}"
+        );
+        assert_eq!(code.matches("#include <zlib.h>").count(), 1);
+        // Deterministic (sorted) order keeps output reproducible for receipts.
+        let i_sqlite = code.find("#include <sqlite3.h>").unwrap();
+        let i_zlib = code.find("#include <zlib.h>").unwrap();
+        assert!(i_sqlite < i_zlib, "FFI headers should be emitted in sorted order:\n{code}");
+    }
+
+    #[test]
+    fn c_backend_still_synthesizes_extern_without_header() {
+        // Regression guard: an extern block with no header keeps the existing
+        // behavior of synthesizing a prototype for non-standard functions.
+        let code = source_to_c("extern \"C\" { fn my_custom_fn() -> i32; }");
+        assert!(
+            code.contains("my_custom_fn"),
+            "extern without header should still synthesize a declaration:\n{code}"
+        );
+    }
+
+    #[test]
     fn test_full_pipeline_c_backend() {
         let ctx = TypeContext::new();
         let mut codegen = CodeGenerator::new(&ctx, Target::C);

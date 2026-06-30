@@ -1384,6 +1384,23 @@ impl<'a> Parser<'a> {
             None
         };
 
+        // Optional `header "path"` clause naming the backing C header. `header`
+        // is a contextual keyword: it is unambiguous here because an extern
+        // block body is opened by `{`, never a bare identifier.
+        let header = if self.check_ident()
+            && self.source.slice(self.current_span()) == "header"
+        {
+            self.advance(); // consume `header`
+            if let TokenKind::Literal { .. } = self.current_kind() {
+                let token_span = self.advance().span;
+                Some(self.source.slice(token_span).trim_matches('"').to_string())
+            } else {
+                return Err(self.error_expected("header path string literal"));
+            }
+        } else {
+            None
+        };
+
         self.expect(&TokenKind::OpenDelim(Delimiter::Brace))?;
 
         let mut items = Vec::new();
@@ -1396,6 +1413,7 @@ impl<'a> Parser<'a> {
         Ok(ExternBlockDef {
             is_unsafe,
             abi,
+            header,
             items,
         })
     }
@@ -1642,6 +1660,53 @@ mod tests {
                 }
             }
             other => panic!("expected Struct, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extern_block_header_clause() {
+        // `header "path"` after the ABI names the backing C header for native FFI.
+        let item =
+            parse_item_str("extern \"C\" header \"sqlite3.h\" { fn sqlite3_libversion() -> i32; }")
+                .unwrap();
+        match &item.kind {
+            ItemKind::ExternBlock(eb) => {
+                assert_eq!(eb.header.as_deref(), Some("sqlite3.h"));
+                assert_eq!(eb.abi.as_deref(), Some("C"));
+            }
+            other => panic!("expected ExternBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extern_block_header_angle_form_preserved() {
+        // The angle-bracket form is kept verbatim so the backend can emit `<...>`.
+        let item =
+            parse_item_str("extern \"C\" header \"<sqlite3.h>\" { fn f() -> i32; }").unwrap();
+        match &item.kind {
+            ItemKind::ExternBlock(eb) => assert_eq!(eb.header.as_deref(), Some("<sqlite3.h>")),
+            other => panic!("expected ExternBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extern_block_without_header_is_none() {
+        let item = parse_item_str("extern \"C\" { fn foo(); }").unwrap();
+        match &item.kind {
+            ItemKind::ExternBlock(eb) => assert_eq!(eb.header, None),
+            other => panic!("expected ExternBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extern_block_header_without_abi() {
+        let item = parse_item_str("extern header \"mylib.h\" { fn g(); }").unwrap();
+        match &item.kind {
+            ItemKind::ExternBlock(eb) => {
+                assert_eq!(eb.header.as_deref(), Some("mylib.h"));
+                assert_eq!(eb.abi, None);
+            }
+            other => panic!("expected ExternBlock, got {:?}", other),
         }
     }
 

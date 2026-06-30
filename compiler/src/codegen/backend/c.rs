@@ -117,6 +117,33 @@ impl CBackend {
         self.output.push_str("#include <assert.h>\n");
         self.output.push('\n');
 
+        // FFI headers named by extern blocks' `header "..."` clauses. These let
+        // BuildLang call into any C-ABI library natively: the header supplies
+        // the authoritative prototypes, types, and macros. Emitted sorted and
+        // de-duplicated so the output stays reproducible for receipts.
+        let mut ffi_headers: Vec<&str> = module
+            .functions
+            .iter()
+            .filter_map(|f| f.link_header.as_deref())
+            .collect();
+        ffi_headers.sort_unstable();
+        ffi_headers.dedup();
+        if !ffi_headers.is_empty() {
+            self.output.push_str("// Foreign library headers\n");
+            for header in ffi_headers {
+                if header.starts_with('<') {
+                    // Verbatim angle-bracket form, e.g. <sqlite3.h>.
+                    self.output
+                        .push_str(&format!("#include {header}\n"));
+                } else {
+                    // Quoted form for local/relative headers, e.g. "mylib.h".
+                    self.output
+                        .push_str(&format!("#include \"{header}\"\n"));
+                }
+            }
+            self.output.push('\n');
+        }
+
         // Undefine known Windows API macros that collide with common type names
         self.output.push_str("#ifdef _WIN32\n");
         self.output.push_str("#undef DeviceCapabilities\n");
@@ -957,7 +984,11 @@ impl CBackend {
 
             let non_std: Vec<_> = extern_fns
                 .iter()
-                .filter(|f| !std_c_fns.contains(&f.name.as_ref()))
+                // Skip standard-library functions (provided by the standard
+                // includes) and header-backed functions (provided by their
+                // declared `header "..."` include), so we never synthesize a
+                // prototype that could conflict with the real one.
+                .filter(|f| !std_c_fns.contains(&f.name.as_ref()) && f.link_header.is_none())
                 .collect();
 
             if !non_std.is_empty() {

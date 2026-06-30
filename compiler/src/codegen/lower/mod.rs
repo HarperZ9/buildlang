@@ -479,6 +479,10 @@ impl<'ctx> MirLowerer<'ctx> {
 
                 let mut func = MirFunction::declaration(f.name.name.clone(), sig);
                 func.is_public = true;
+                // Carry the extern block's `header "..."` clause onto each
+                // declaration so the C backend can emit the right `#include`
+                // and skip synthesizing a prototype for it.
+                func.link_header = eb.header.as_deref().map(Arc::from);
 
                 // Set parameter names on the declaration so the C backend can
                 // emit readable prototypes.
