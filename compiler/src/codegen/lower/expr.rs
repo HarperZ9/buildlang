@@ -1833,7 +1833,11 @@ impl<'ctx> MirLowerer<'ctx> {
                     )
                 }
                 "HashSet_new" => return MirType::Struct(Arc::from("HashSet")),
-                "String_new" => return MirType::Struct(Arc::from("BuildString")),
+                // Both String constructors yield an owned heap string. Without
+                // `String_from` here the dest local fell back to i32, so
+                // `let s = String::from(x)` emitted `int32_t s = build_string_new(...)`,
+                // a real C2440 (BuildString -> int32_t) under a C compiler.
+                "String_new" | "String_from" => return MirType::Struct(Arc::from("BuildString")),
                 "VecDeque_new" => return MirType::Struct(Arc::from("VecDeque")),
                 "map_new" => {
                     return MirType::Map(

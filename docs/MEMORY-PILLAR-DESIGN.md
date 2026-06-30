@@ -118,9 +118,37 @@ loop to broaden incrementally.
 Two follow-ups surfaced: (a) broaden coverage - the entry-block-only definite-init
 rule frees at most the first heap local (each allocating `Call` splits the
 block), so the next step is dominance-based definite-init plus the
-known-non-retaining-call whitelist; (b) `String::from(...)` lowers to an
-undefined `String_from` symbol, so owned-`String` programs do not link - a
-separate pre-existing gap to fix before owned strings can be reclaimed.
+known-non-retaining-call whitelist; (b) owned-`String` programs did not compile -
+RESOLVED 2026-06-30 (see below).
+
+### Owned-String compile gap: RESOLVED 2026-06-30
+
+`let s = String::from(x)` had two distinct defects, both now fixed:
+
+1. Codegen emitted an undefined `String_from` symbol. Fixed in 915752f by
+   special-casing `String_from` in the C backend to `build_string_new(<arg>.ptr)`,
+   exactly like `String_new`.
+2. The dest local was still typed `int32_t`, because `resolve_call_return_type`
+   (the lowering name->MIR-type map in `codegen/lower/expr.rs`) had a `String_new`
+   arm but no `String_from` arm, so it fell through to the `i32` fallback. The
+   emitted C was therefore `int32_t s; s = build_string_new(...)` - a real C2440
+   (`cannot convert from 'BuildString' to 'int32_t'`) under a C compiler. Fixed by
+   adding `String_from` to that arm so the dest is typed `BuildString`.
+
+Correction to the 915752f commit note: that note attributed the still-failing
+`cl` compile to a "sandbox overlay-FS view mismatch (stale binary)". That was a
+misdiagnosis. The C2440 was defect (2) above - a genuine remaining
+lowering-type-inference gap, not a stale binary. 915752f was a correct but partial
+fix; the type-inference arm completes it.
+
+Verified end-to-end: a `String::from` + `println!` program now emits
+`BuildString s;`, compiles under `cl` with exit 0 (only benign C4090 const-qualifier
+warnings on the printf-arg copy), and prints `hello`. The semantic corpus
+c-execution stays 8/8 both with and without `BUILDLANG_EXPERIMENTAL_FREE`. A
+golden test (`string_from_dest_is_typed_buildstring_not_int`) asserts every
+`build_string_new` dest is declared `BuildString`, never `int32_t`, so the
+regression cannot silently return. Owned strings can now be the subject of future
+drop-insertion coverage.
 
 ### First increment (narrow, sound, opt-in)
 

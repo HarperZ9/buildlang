@@ -957,6 +957,47 @@ mod tests {
     }
 
     #[test]
+    fn string_from_dest_is_typed_buildstring_not_int() {
+        // EVERY dest of `build_string_new(...)` must be declared `BuildString`,
+        // not `int32_t`. `String::from(...)` lowers to `build_string_new(...)`
+        // (returning a BuildString), so a mistyped `int32_t` dest produces a real
+        // C2440 `cannot convert from 'BuildString' to 'int32_t'` under a C
+        // compiler. The earlier symbol-absence test missed this because the FIRST
+        // build_string_new in the output is the (correctly-typed) str literal; the
+        // String::from dest is a later one.
+        let code = source_to_c("fn main() { let s = String::from(\"hi\"); }");
+        let dests: Vec<String> = code
+            .lines()
+            .filter(|l| l.contains("= build_string_new("))
+            .map(|l| {
+                l.trim()
+                    .split('=')
+                    .next()
+                    .unwrap()
+                    .trim()
+                    .rsplit(|c: char| c.is_whitespace())
+                    .next()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert!(
+            !dests.is_empty(),
+            "expected at least one build_string_new assignment:\n{code}"
+        );
+        for lhs in &dests {
+            assert!(
+                code.contains(&format!("BuildString {lhs}")),
+                "build_string_new dest `{lhs}` must be declared BuildString:\n{code}"
+            );
+            assert!(
+                !code.contains(&format!("int32_t {lhs}")),
+                "build_string_new dest `{lhs}` must NOT be declared int32_t (C2440):\n{code}"
+            );
+        }
+    }
+
+    #[test]
     fn variadic_extern_emits_ellipsis_in_c() {
         // A non-standard variadic extern is synthesized with a trailing `, ...`.
         let code = source_to_c("extern \"C\" { fn my_printf(fmt: &str, ...) -> i32; }");
