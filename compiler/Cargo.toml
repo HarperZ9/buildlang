@@ -11,12 +11,12 @@ version = "1.0.0"
 edition = "2021"
 rust-version = "1.70"
 authors = ["Zain Dana Harper"]
-description = "Effects-oriented compiler with a verified C path, shader output, and experimental backend research"
-license-file = "../LICENSE"
+description = "BuildLang (buildc): an effects-oriented compiler with a verified C path, shader output, experimental backends, and opt-in linear types"
+license = "MIT"
 repository = "https://github.com/HarperZ9/quantalang"
 homepage = "https://harperz9.github.io/buildlang.html"
-documentation = "https://github.com/HarperZ9/quantalang#readme"
-readme = "../README.md"
+documentation = "https://docs.rs/buildlang"
+readme = "README.md"
 keywords = ["compiler", "language", "effects", "shaders", "systems"]
 categories = ["compilers", "development-tools", "graphics"]
 
