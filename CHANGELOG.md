@@ -10,6 +10,13 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Stdlib (`String::push_str`): `s.push_str(x)` now appends in place. It was
+  unimplemented (lowered to an undefined `push_str` symbol that failed to link).
+  It now reassigns the receiver local to `build_string_concat(s, x)` (string
+  literals already lower to `BuildString`, so the argument needs no coercion) and
+  returns unit. Verified end-to-end under MSVC: `String::from("Hello")` then
+  `push_str(", World")` prints `Hello, World`. Covered by
+  `string_push_str_appends_in_place_via_concat`.
 - Codegen (trait vtable wrappers): a trait method taking `&self` / `&mut self`
   now compiles. The generated vtable wrapper always dereferenced `void* __self`
   to a value before calling the concrete method, so a `&self` method (which takes
