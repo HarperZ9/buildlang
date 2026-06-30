@@ -1313,6 +1313,20 @@ pub struct MirGlobal {
     pub is_mut: bool,
     /// Linkage.
     pub linkage: Linkage,
+    /// Whether this global is only an external declaration (a foreign
+    /// `static` from an extern block). Such globals are referenced, never
+    /// defined: the C backend either relies on the declared `header` or emits
+    /// a bare `extern` declaration instead of a definition.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_extern_decl: bool,
+    /// Backing C header for a foreign static, from the extern block's
+    /// `header "..."` clause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_header: Option<Arc<str>>,
+    /// Library to link for a foreign static, from the extern block's
+    /// `link "..."` clause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_lib: Option<Arc<str>>,
 }
 
 impl MirGlobal {
@@ -1324,6 +1338,9 @@ impl MirGlobal {
             init: None,
             is_mut: false,
             linkage: Linkage::Internal,
+            is_extern_decl: false,
+            link_header: None,
+            link_lib: None,
         }
     }
 }

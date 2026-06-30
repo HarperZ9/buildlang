@@ -504,6 +504,23 @@ impl<'ctx> MirLowerer<'ctx> {
                 }
 
                 self.module.add_function(func);
+            } else if let ast::ForeignItemKind::Static {
+                name,
+                mutability,
+                ty,
+            } = &foreign_item.kind
+            {
+                // A foreign `static` lowers to an external-declaration global:
+                // it is referenced, never defined. It carries the block's
+                // header/link so the C backend includes the header (or emits a
+                // bare `extern` declaration) and links the library.
+                let mut global = MirGlobal::new(name.name.clone(), self.lower_ffi_type(ty));
+                global.is_extern_decl = true;
+                global.is_mut = matches!(mutability, ast::Mutability::Mutable);
+                global.linkage = Linkage::External;
+                global.link_header = eb.header.as_deref().map(Arc::from);
+                global.link_lib = eb.link.as_deref().map(Arc::from);
+                self.module.add_global(global);
             }
         }
         Ok(())

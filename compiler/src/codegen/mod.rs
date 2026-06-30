@@ -667,6 +667,30 @@ mod tests {
     }
 
     #[test]
+    fn extern_static_lowers_to_external_global_with_header() {
+        // A foreign `static` must lower to an external-declaration global that
+        // carries the block's header, so the backend includes it instead of
+        // emitting a conflicting definition.
+        let module = crate::parser::parse_source(
+            "test.bld",
+            "extern \"C\" header \"<errno.h>\" link \"c\" { static errno: i32; }",
+        )
+        .expect("source should parse");
+        let ctx = TypeContext::new();
+        let mut codegen = CodeGenerator::new(&ctx, Target::C);
+        codegen.generate(&module).expect("codegen should succeed");
+        let mir = codegen.mir().expect("mir should be present");
+        let g = mir
+            .globals
+            .iter()
+            .find(|g| &*g.name == "errno")
+            .expect("foreign static should be lowered to a global");
+        assert!(g.is_extern_decl, "foreign static should be an external declaration");
+        assert_eq!(g.link_header.as_deref(), Some("<errno.h>"));
+        assert_eq!(g.link_lib.as_deref(), Some("c"));
+    }
+
+    #[test]
     fn extern_without_header_has_no_link_header() {
         let module = crate::parser::parse_source(
             "test.bld",
@@ -786,6 +810,51 @@ mod tests {
         assert!(
             code.contains("buildc-link: sqlite3"),
             "generated C should note the required link library:\n{code}"
+        );
+    }
+
+    #[test]
+    fn c_backend_foreign_static_uses_header_no_definition() {
+        let code = source_to_c("extern \"C\" header \"<errno.h>\" { static errno: i32; }");
+        assert!(
+            code.contains("#include <errno.h>"),
+            "header backing a foreign static should be included:\n{code}"
+        );
+        // The header declares errno; we must not define or re-declare it.
+        assert!(
+            !code.contains("int32_t errno"),
+            "must not define/declare a header-backed static:\n{code}"
+        );
+    }
+
+    #[test]
+    fn c_backend_foreign_static_without_header_emits_extern_decl() {
+        let code = source_to_c("extern \"C\" { static my_global: i32; }");
+        assert!(
+            code.contains("extern int32_t my_global;"),
+            "a foreign static without a header should get an extern declaration:\n{code}"
+        );
+        assert!(
+            !code.contains("const int32_t my_global ="),
+            "a foreign static is a declaration, never a definition:\n{code}"
+        );
+    }
+
+    #[test]
+    fn c_backend_foreign_static_contributes_link_library() {
+        let module = crate::parser::parse_source(
+            "test.bld",
+            "extern \"C\" link \"c\" { static errno: i32; }",
+        )
+        .expect("source should parse");
+        let ctx = TypeContext::new();
+        let mut cg = CodeGenerator::new(&ctx, Target::C);
+        let out = cg.generate(&module).expect("codegen should succeed");
+        assert_eq!(out.link_libraries, vec!["c".to_string()]);
+        let code = out.as_string().expect("C output should be text");
+        assert!(
+            code.contains("buildc-link: c"),
+            "a static's link library should be noted:\n{code}"
         );
     }
 
