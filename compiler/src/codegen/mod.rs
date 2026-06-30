@@ -997,6 +997,24 @@ mod tests {
     }
 
     #[test]
+    fn split_returns_a_vec_handle_so_len_dispatches() {
+        // s.split(",") must yield a Vec<String> handle so `.len()` dispatches to
+        // build_hvec_len, not an undefined bare `len` call.
+        let code = source_to_c(
+            "fn main() { let s = String::from(\"a,b\"); let p = s.split(\",\"); \
+             let _n = p.len(); }",
+        );
+        assert!(
+            code.contains("build_string_split_h("),
+            "split must return a Vec handle (build_string_split_h):\n{code}"
+        );
+        assert!(
+            !code.contains("= len("),
+            "len() on the split result must not be an undefined bare `len` call:\n{code}"
+        );
+    }
+
+    #[test]
     fn some_constructs_option_struct_not_bare_call() {
         // Some(x) must construct an Option (has_value + typed union slot), not an
         // undefined `Some(x)` call into a mistyped i32 dest (the old C2440).

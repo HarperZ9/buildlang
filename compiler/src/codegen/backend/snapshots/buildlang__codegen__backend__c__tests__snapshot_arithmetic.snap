@@ -1145,6 +1145,22 @@ static BuildVec build_string_lines(BuildString s) {
     return build_string_split(s, delim);
 }
 
+// Handle-returning split variants: box the BuildVec so the result is a proper
+// Vec<String> (BuildVecHandle), integrating with build_hvec_len / build_hvec_get_str
+// / for-loop iteration / indexing.
+static BuildVecHandle build_string_split_h(BuildString s, BuildString delim) {
+    BuildVecHandle h; h.inner = (BuildVec*)malloc(sizeof(BuildVec));
+    *h.inner = build_string_split(s, delim); return h;
+}
+static BuildVecHandle build_string_split_ws_h(BuildString s) {
+    BuildVecHandle h; h.inner = (BuildVec*)malloc(sizeof(BuildVec));
+    *h.inner = build_string_split_ws(s); return h;
+}
+static BuildVecHandle build_string_lines_h(BuildString s) {
+    BuildVecHandle h; h.inner = (BuildVec*)malloc(sizeof(BuildVec));
+    *h.inner = build_string_lines(s); return h;
+}
+
 // --- Command-line arguments ---
 
 #ifdef _WIN32
