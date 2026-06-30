@@ -1328,6 +1328,24 @@ mod tests {
     }
 
     #[test]
+    fn enumerate_map_binds_a_tuple_param() {
+        // `v.iter().enumerate().map(|(i, x)| i + x)` must bind both i (index) and
+        // x (element) from the single tuple param - previously neither was bound
+        // (C2065 'i' undeclared).
+        let code = source_to_c(
+            "fn main() { let v: Vec<i32> = vec![10, 20]; \
+             let _s: i32 = v.iter().enumerate().map(|(i, x)| i + x).sum(); }",
+        );
+        // The body `i + x` lowers to an add of the two bound locals; the chain
+        // emits the element loop. A successful lowering (no panic) plus the loop
+        // markers is the signal here.
+        assert!(
+            code.contains("build_hvec_get_i32(") && code.contains("build_hvec_len("),
+            "the enumerate+map chain must lower to an element loop:\n{code}"
+        );
+    }
+
+    #[test]
     fn iterator_any_all_predicate_terminals_desugar() {
         // `v.iter().any(|x| pred)` and `.all(|x| pred)` desugar to a boolean
         // accumulator loop, not undefined `iter`/`any`/`all` calls.
