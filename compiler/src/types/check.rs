@@ -2104,6 +2104,41 @@ mod tests {
     }
 
     #[test]
+    fn linear_method_call_on_borrowed_receiver_is_rejected() {
+        // `(&coin).burn()` where `burn(self)` would move the linear out of a
+        // borrow; the self-kind isn't visible, so it is conservatively rejected.
+        let errors = check_source(
+            "#[linear]\nstruct Coin { value: i64 }\n\
+             trait Burnable { fn burn(self) -> i64; }\n\
+             impl Burnable for Coin { fn burn(self) -> i64 { self.value } }\n\
+             fn spend(c: Coin) -> i64 { c.value }\n\
+             fn main() ~ Console { let coin = Coin { value: 1 }; \
+             let a = (&coin).burn(); let b = spend(coin); println(\"{} {}\", a, b); }",
+        );
+        assert!(
+            has_any_linear_error(&errors),
+            "a method call on a borrowed linear receiver must be rejected: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn linear_value_in_builtin_collection_is_rejected() {
+        // Moving a linear value into a builtin Vec lets it be read out twice.
+        let errors = check_source(
+            "#[linear]\nstruct Coin { value: i64 }\n\
+             fn spend(c: Coin) -> i64 { c.value }\n\
+             fn main() ~ Console { let coin = Coin { value: 1 }; \
+             let v = vec_new(); vec_push(v, coin); \
+             let a = spend(vec_get(v, 0)); let b = spend(vec_get(v, 0)); \
+             println(\"{} {}\", a, b); }",
+        );
+        assert!(
+            has_any_linear_error(&errors),
+            "storing a linear value in a builtin collection must be rejected: {errors:#?}"
+        );
+    }
+
+    #[test]
     fn linear_value_captured_in_closure_is_rejected() {
         let errors = check_source(&format!(
             "{LINEAR_PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
