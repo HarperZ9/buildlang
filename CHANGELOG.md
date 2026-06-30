@@ -10,6 +10,16 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Stdlib (`format!`): now actually formats. It was a stub that returned the raw
+  template string and dropped every argument (so `format!("{} is {}", name, age)`
+  yielded a bare `const char*` that printed as a pointer). `format!` now reuses
+  the same format-string + argument processing as `println!` (extracted into a
+  shared `prepare_format_call`) and builds an owned `BuildString` via a new
+  variadic `build_sprintf` runtime function (vsnprintf into a heap buffer).
+  Placeholders, precision (`{:.2}`), and mixed int/float/String arguments all
+  work. Verified end-to-end under MSVC: `format!("{} is {}", name, 30)` →
+  `Bob is 30`; `format!("{:.2} pi, {} {}", 3.14159, 42, "items")` → `3.14 pi, 42
+  items`. Covered by `format_macro_builds_a_string_from_args_not_a_bare_template`.
 - Stdlib (iterator `.count()` / `.product()`): both join `.sum()` as recognized
   accumulator terminals. `.count()` lowers to a `+1`-per-element i64 counter;
   `.product()` to an `acc = acc * elem` loop from one. Without them a chain

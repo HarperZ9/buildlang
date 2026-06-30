@@ -1046,6 +1046,7 @@ impl CBackend {
         self.output.push_str("#include <ctype.h>\n");
         self.output.push_str("#include <time.h>\n");
         self.output.push_str("#include <assert.h>\n");
+        self.output.push_str("#include <stdarg.h>\n");
         self.output.push('\n');
 
         // FFI headers named by extern blocks' `header "..."` clauses. These let

@@ -273,6 +273,22 @@ static BuildString build_i64_to_string(int64_t v) {
 }
 static BuildString build_f64_to_string(double v) { return build_format_f64("%g", v); }
 
+// Variadic sprintf into a heap-owned BuildString. Backs the `format!` macro:
+// the lowering builds a C printf-style format string and passes the same
+// arguments it would to printf, but the result is captured as an owned string.
+static BuildString build_sprintf(const char* fmt, ...) {
+    va_list args; va_start(args, fmt);
+    va_list args2; va_copy(args2, args);
+    int n = vsnprintf(NULL, 0, fmt, args);
+    va_end(args);
+    if (n < 0) { va_end(args2); return build_string_new(""); }
+    char* heap = (char*)malloc((size_t)n + 1);
+    vsnprintf(heap, (size_t)n + 1, fmt, args2);
+    va_end(args2);
+    BuildString qs; qs.ptr = heap; qs.len = (size_t)n; qs.cap = (size_t)n + 1;
+    return qs;
+}
+
 // --- Math constants ---
 static const double BUILD_PI = 3.14159265358979323846;
 static const double BUILD_E = 2.71828182845904523536;
