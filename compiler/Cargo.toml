@@ -63,6 +63,12 @@ insta = { version = "1.34", features = ["json"] }
 name = "lexer_benchmark"
 harness = false
 
+# Integration test suites that live in subdirectories of tests/ are not
+# auto-discovered by Cargo, so wire them explicitly.
+[[test]]
+name = "parser"
+path = "tests/parser/mod.rs"
+
 [profile.release]
 lto = true
 codegen-units = 1
