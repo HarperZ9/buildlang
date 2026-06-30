@@ -1,0 +1,54 @@
+// Fin-sec + blockchain foundation spike.
+//
+// Demonstrates, with ONLY existing primitives, the two cores BuildLang must host:
+//   - fin-sec:   exact money as integer minor units (cents). NEVER float for money.
+//   - blockchain: a tamper-evident chain of blocks linked by a deterministic hash.
+//
+// Honest gaps this motivates (the brick plan in docs/FINSEC-BLOCKCHAIN-HOST.md):
+//   - native decimal / fixed-point (here money is hand-rolled integer cents)
+//   - deterministic checked/wrapping/saturating arithmetic (overflow is currently
+//     unspecified; this spike stays inside safe magnitudes on purpose)
+//   - u256 / big integers (EVM word size)
+//   - a CRYPTOGRAPHIC hash (keccak256/sha256) via the C-ABI FFI; the mix below is a
+//     deterministic NON-cryptographic stand-in, sound only for illustrating linkage.
+
+// Deterministic mix step (Lehmer/LCG-style) with explicit modular reduction, so it
+// does NOT rely on integer overflow. m = 2^31 - 1 (a Mersenne prime).
+fn mix(acc: i64, x: i64) -> i64 {
+    let m = 2147483647;
+    let a = 1103515245;
+    let xr = x % m;
+    let s = (acc + xr) % m;
+    let h = (s * a + 12345) % m;
+    h
+}
+
+// Hash a block from (previous hash, amount in cents, nonce).
+fn block_hash(prev: i64, amount_cents: i64, nonce: i64) -> i64 {
+    let seed = 2166136261 % 2147483647;
+    let h1 = mix(seed, prev);
+    let h2 = mix(h1, amount_cents);
+    let h3 = mix(h2, nonce);
+    h3
+}
+
+fn main() ~ Console {
+    // --- fin-sec core: exact money in integer cents ---
+    let opening_cents = 100000;   // $1,000.00
+    let debit_cents = 2599;       // $25.99
+    let balance_cents = opening_cents - debit_cents;
+    println("balance cents {}", balance_cents);   // 97401
+
+    // --- blockchain core: a 3-block chain linked by deterministic hashes ---
+    let genesis = block_hash(0, opening_cents, 1);
+    let b1 = block_hash(genesis, debit_cents, 2);
+    let b2 = block_hash(b1, balance_cents, 3);
+    println("genesis {}", genesis);
+    println("b1 {}", b1);
+    println("b2 {}", b2);
+
+    // --- tamper-evidence: change one amount, the linked hash diverges ---
+    let tampered = block_hash(genesis, 9999, 2);
+    let evident = if tampered == b1 { 0 } else { 1 };
+    println("tamper-evident (1=yes, changing an amount changes the hash) {}", evident);
+}

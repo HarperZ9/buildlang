@@ -1,0 +1,39 @@
+// Linear types: no-cloning / no-double-spend.
+//
+// `#[linear]` marks a type whose values may be moved (consumed) at most once.
+// This is the same type-system feature behind quantum no-cloning, on-chain
+// no-double-spend, and fin-sec resource-handle safety.
+//
+//   buildc check examples/linear/coin.bld   # type-checks: each coin spent once
+//
+// Uncomment the marked line to see the checker reject a double-spend:
+//   use of linear value `coin` after it was consumed
+
+#[linear]
+struct Coin {
+    value: i64,
+}
+
+// Consumes the coin (takes it by value) and returns its worth.
+fn spend(c: Coin) -> i64 {
+    c.value
+}
+
+// Reads a coin's value without consuming it (borrow).
+fn peek(c: &Coin) -> i64 {
+    0
+}
+
+fn main() ~ Console {
+    let coin = Coin { value: 100 };
+
+    // Borrowing does not consume: we can inspect it any number of times.
+    let _ = peek(&coin);
+    let _ = peek(&coin);
+
+    // Spending consumes the coin exactly once.
+    let received = spend(coin);
+    println("received {}", received);
+
+    // let again = spend(coin);   // <- uncomment: rejected (no double-spend)
+}
