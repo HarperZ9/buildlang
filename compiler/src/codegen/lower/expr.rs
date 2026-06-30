@@ -454,7 +454,18 @@ impl<'ctx> MirLowerer<'ctx> {
                         ast::IntSuffix::U128 => (MirType::Int(IntSize::I128, false), false),
                         ast::IntSuffix::Usize => (MirType::usize(), false),
                     })
-                    .unwrap_or((MirType::i32(), true));
+                    .unwrap_or_else(|| {
+                        // Unsuffixed: default to i32, but widen for values that
+                        // exceed it so the literal is not silently truncated
+                        // (mirrors the type checker's literal widening).
+                        if *value > i64::MAX as u128 {
+                            (MirType::Int(IntSize::I128, true), true)
+                        } else if *value > i32::MAX as u128 {
+                            (MirType::i64(), true)
+                        } else {
+                            (MirType::i32(), true)
+                        }
+                    });
 
                 if signed {
                     Ok(MirValue::Const(MirConst::Int(*value as i128, ty)))
