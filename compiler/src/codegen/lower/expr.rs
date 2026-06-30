@@ -4027,6 +4027,13 @@ impl<'ctx> MirLowerer<'ctx> {
         // Determine if this is an array type and extract element type + length
         let (elem_ty, arr_len) = match &iter_ty {
             MirType::Array(elem, len) => (elem.as_ref().clone(), *len),
+            // `for x in v` over a Vec<T>: a runtime-length index loop. Previously
+            // this fell through to the no-op loop below, silently dropping the
+            // iteration (the body never ran).
+            MirType::Vec(elem) => {
+                let elem_ty = elem.as_ref().clone();
+                return self.lower_for_vec(pattern, iter_val, elem_ty, body);
+            }
             _ => {
                 // Not an array - try iterator protocol: call .next() in a loop.
                 // Requires the type to have a `next` method registered in impl_methods
@@ -4109,6 +4116,102 @@ impl<'ctx> MirLowerer<'ctx> {
         builder.goto(incr_block);
 
         // Increment: __idx = __idx + 1
+        builder.switch_to_block(incr_block);
+        let one = MirValue::Const(MirConst::Int(1, MirType::i64()));
+        let next_idx = builder.create_local(MirType::i64());
+        builder.binary_op(next_idx, BinOp::Add, values::local(idx_local), one);
+        builder.assign(idx_local, MirRValue::Use(values::local(next_idx)));
+        builder.goto(cond_block);
+
+        self.loop_stack.pop();
+
+        let builder = self.current_fn.as_mut().unwrap();
+        builder.switch_to_block(exit_block);
+
+        Ok(values::unit())
+    }
+
+    /// Lower `for x in v { body }` over a `Vec<T>` to a runtime-length index loop:
+    /// `len = build_hvec_len(v); for idx in 0..len { x = v[idx]; body }`. Element
+    /// access uses `IndexAccess`, which the C backend lowers to the typed
+    /// `build_hvec_get_<suffix>` accessor.
+    fn lower_for_vec(
+        &mut self,
+        pattern: &ast::Pattern,
+        iter_val: MirValue,
+        elem_ty: MirType,
+        body: &ast::Block,
+    ) -> CodegenResult<MirValue> {
+        let builder = self
+            .current_fn
+            .as_mut()
+            .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+
+        // Hold the vec handle in a local.
+        let arr_local = builder.create_local(MirType::Vec(Box::new(elem_ty.clone())));
+        builder.assign(arr_local, MirRValue::Use(iter_val));
+
+        // Read the length once before the loop: `len = build_hvec_len(v)`.
+        // `Call` is a terminator, so it splits into a continuation block.
+        let len_local = builder.create_local(MirType::i64());
+        let after_len = builder.create_block();
+        builder.call(
+            MirValue::Function(Arc::from("build_hvec_len")),
+            vec![values::local(arr_local)],
+            Some(len_local),
+            after_len,
+        );
+        builder.switch_to_block(after_len);
+
+        // `let mut __idx = 0;`
+        let idx_local = builder.create_local(MirType::i64());
+        builder.assign(
+            idx_local,
+            MirRValue::Use(MirValue::Const(MirConst::Int(0, MirType::i64()))),
+        );
+
+        let cond_block = builder.create_block();
+        let body_block = builder.create_block();
+        let incr_block = builder.create_block();
+        let exit_block = builder.create_block();
+
+        self.loop_stack.push((incr_block, exit_block));
+
+        let builder = self.current_fn.as_mut().unwrap();
+        builder.goto(cond_block);
+        builder.switch_to_block(cond_block);
+
+        // `if __idx < len { body } else { exit }`
+        let cmp = builder.create_local(MirType::Bool);
+        builder.binary_op(
+            cmp,
+            BinOp::Lt,
+            values::local(idx_local),
+            values::local(len_local),
+        );
+        builder.branch(values::local(cmp), body_block, exit_block);
+
+        // Body: `x = v[__idx];`
+        builder.switch_to_block(body_block);
+        let elem_local = builder.create_local(elem_ty.clone());
+        builder.assign(
+            elem_local,
+            MirRValue::IndexAccess {
+                base: values::local(arr_local),
+                index: values::local(idx_local),
+                elem_ty: elem_ty.clone(),
+            },
+        );
+
+        let saved_vars = self.var_map.clone();
+        self.bind_for_pattern(pattern, elem_local, &elem_ty)?;
+        self.lower_block(body)?;
+        self.var_map = saved_vars;
+
+        let builder = self.current_fn.as_mut().unwrap();
+        builder.goto(incr_block);
+
+        // `__idx = __idx + 1;`
         builder.switch_to_block(incr_block);
         let one = MirValue::Const(MirConst::Int(1, MirType::i64()));
         let next_idx = builder.create_local(MirType::i64());
