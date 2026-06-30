@@ -10,6 +10,16 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Stdlib (`Result<T,E>` methods): `is_ok()`, `is_err()`, `unwrap()`,
+  `unwrap_err()`, and `unwrap_or(default)` now work (previously undefined symbols).
+  `is_ok`/`is_err` read the `is_ok` discriminant; `unwrap` reads the typed `ok`
+  slot, `unwrap_err` the `err` slot; `unwrap_or` branches on `is_ok`, reading the
+  ok payload when present and the default otherwise. Ok/Err slot types use the
+  threaded `result_ok_types`/`result_err_types` (default i32 / BuildString).
+  Parallel to the Option methods. Verified end-to-end under MSVC:
+  `safediv(10,2).unwrap_or(-1)`=5, `safediv(10,0).unwrap_or(-1)`=-1,
+  `is_ok()`/`is_err()` return the right booleans. Covered by
+  `result_methods_is_ok_and_unwrap_or`.
 - Codegen (C stdlib name collisions): a user function named like a C standard
   library function (e.g. `div`, `remove`, `system`, `rand`, `qsort`) is now
   emitted with a leading underscore at its definition, forward declaration, AND

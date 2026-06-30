@@ -2825,6 +2825,106 @@ impl<'ctx> MirLowerer<'ctx> {
             }
         }
 
+        // Result<T,E> method dispatch: is_ok/is_err read the is_ok discriminant;
+        // unwrap/unwrap_or read the typed ok slot; unwrap_err reads the err slot.
+        if matches!(&receiver_ty, MirType::Struct(n) if n.as_ref() == "Result") {
+            let method_name = method.name.as_ref();
+            let ok_ty = match &receiver_val {
+                MirValue::Local(id) => self
+                    .result_ok_types
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(MirType::i32),
+                _ => MirType::i32(),
+            };
+            let err_ty = match &receiver_val {
+                MirValue::Local(id) => self
+                    .result_err_types
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| MirType::Struct(Arc::from("BuildString"))),
+                _ => MirType::Struct(Arc::from("BuildString")),
+            };
+            match method_name {
+                "is_ok" | "is_err" => {
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let scrut = builder.create_local(MirType::Struct(Arc::from("Result")));
+                    builder.assign(scrut, MirRValue::Use(receiver_val));
+                    let ok = builder.create_local(MirType::Bool);
+                    builder.assign(
+                        ok,
+                        MirRValue::FieldAccess {
+                            base: values::local(scrut),
+                            field_name: Arc::from("is_ok"),
+                            field_ty: MirType::Bool,
+                        },
+                    );
+                    if method_name == "is_err" {
+                        let neg = builder.create_local(MirType::Bool);
+                        builder.unary_op(neg, UnaryOp::Not, values::local(ok));
+                        return Ok(values::local(neg));
+                    }
+                    return Ok(values::local(ok));
+                }
+                "unwrap" | "unwrap_err" => {
+                    let (field, ty) = if method_name == "unwrap_err" {
+                        ("err", err_ty)
+                    } else {
+                        ("ok", ok_ty)
+                    };
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let scrut = builder.create_local(MirType::Struct(Arc::from("Result")));
+                    builder.assign(scrut, MirRValue::Use(receiver_val));
+                    let val = builder.create_local(ty.clone());
+                    builder.assign(
+                        val,
+                        MirRValue::FieldAccess {
+                            base: values::local(scrut),
+                            field_name: Arc::from(field),
+                            field_ty: ty,
+                        },
+                    );
+                    return Ok(values::local(val));
+                }
+                "unwrap_or" if args.len() == 1 => {
+                    let default_val = self.lower_expr(&args[0])?;
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let scrut = builder.create_local(MirType::Struct(Arc::from("Result")));
+                    builder.assign(scrut, MirRValue::Use(receiver_val));
+                    let ok = builder.create_local(MirType::Bool);
+                    builder.assign(
+                        ok,
+                        MirRValue::FieldAccess {
+                            base: values::local(scrut),
+                            field_name: Arc::from("is_ok"),
+                            field_ty: MirType::Bool,
+                        },
+                    );
+                    let result = builder.create_local(ok_ty.clone());
+                    let ok_block = builder.create_block();
+                    let err_block = builder.create_block();
+                    let merge_block = builder.create_block();
+                    builder.branch(values::local(ok), ok_block, err_block);
+                    builder.switch_to_block(ok_block);
+                    builder.assign(
+                        result,
+                        MirRValue::FieldAccess {
+                            base: values::local(scrut),
+                            field_name: Arc::from("ok"),
+                            field_ty: ok_ty,
+                        },
+                    );
+                    builder.goto(merge_block);
+                    builder.switch_to_block(err_block);
+                    builder.assign(result, MirRValue::Use(default_val));
+                    builder.goto(merge_block);
+                    builder.switch_to_block(merge_block);
+                    return Ok(values::local(result));
+                }
+                _ => {}
+            }
+        }
+
         // Vec<T> method dispatch: map .push/.len/.get/.pop/.is_empty/.clear
         // to typed runtime functions (build_hvec_*).
         if let MirType::Vec(ref elem_ty) = receiver_ty {
