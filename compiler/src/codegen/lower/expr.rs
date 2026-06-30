@@ -2075,7 +2075,7 @@ impl<'ctx> MirLowerer<'ctx> {
         let method_name = method.name.as_ref();
         if matches!(
             method_name,
-            "collect" | "fold" | "sum" | "count" | "product"
+            "collect" | "fold" | "sum" | "count" | "product" | "any" | "all"
         ) {
             if let Some(chain) = Self::try_parse_iter_chain(receiver, method_name, args) {
                 return self.lower_iter_chain(&chain);

@@ -2013,6 +2013,12 @@ impl<'ctx> MirLowerer<'ctx> {
             "sum" if terminal_args.is_empty() => IterTerminal::Sum,
             "count" if terminal_args.is_empty() => IterTerminal::Count,
             "product" if terminal_args.is_empty() => IterTerminal::Product,
+            "any" if terminal_args.len() == 1 => IterTerminal::Any {
+                closure: &terminal_args[0],
+            },
+            "all" if terminal_args.len() == 1 => IterTerminal::All {
+                closure: &terminal_args[0],
+            },
             _ => return None,
         };
 
@@ -2194,6 +2200,20 @@ impl<'ctx> MirLowerer<'ctx> {
                 builder.assign(acc, MirRValue::Use(MirValue::Const(one)));
                 (acc, false)
             }
+            IterTerminal::Any { .. } => {
+                // bool accumulator, false until a matching element is seen.
+                let builder = self.current_fn.as_mut().unwrap();
+                let acc = builder.create_local(MirType::Bool);
+                builder.assign(acc, MirRValue::Use(MirValue::Const(MirConst::Bool(false))));
+                (acc, false)
+            }
+            IterTerminal::All { .. } => {
+                // bool accumulator, true until a non-matching element is seen.
+                let builder = self.current_fn.as_mut().unwrap();
+                let acc = builder.create_local(MirType::Bool);
+                builder.assign(acc, MirRValue::Use(MirValue::Const(MirConst::Bool(true))));
+                (acc, false)
+            }
         };
 
         // 6. Create the loop: for i in 0..len { ... }
@@ -2337,6 +2357,38 @@ impl<'ctx> MirLowerer<'ctx> {
                 let builder = self.current_fn.as_mut().unwrap();
                 let next = builder.create_local(val_ty);
                 builder.binary_op(next, BinOp::Mul, values::local(result_local), current_val);
+                builder.assign(result_local, MirRValue::Use(values::local(next)));
+            }
+            IterTerminal::Any { closure } => {
+                // acc = acc || pred(elem)  (bitwise-or on bool is correct here)
+                let pred = self.lower_iter_map_inline(
+                    closure,
+                    current_val,
+                    if has_enumerate {
+                        Some(values::local(idx_local))
+                    } else {
+                        None
+                    },
+                )?;
+                let builder = self.current_fn.as_mut().unwrap();
+                let next = builder.create_local(MirType::Bool);
+                builder.binary_op(next, BinOp::BitOr, values::local(result_local), pred);
+                builder.assign(result_local, MirRValue::Use(values::local(next)));
+            }
+            IterTerminal::All { closure } => {
+                // acc = acc && pred(elem)  (bitwise-and on bool is correct here)
+                let pred = self.lower_iter_map_inline(
+                    closure,
+                    current_val,
+                    if has_enumerate {
+                        Some(values::local(idx_local))
+                    } else {
+                        None
+                    },
+                )?;
+                let builder = self.current_fn.as_mut().unwrap();
+                let next = builder.create_local(MirType::Bool);
+                builder.binary_op(next, BinOp::BitAnd, values::local(result_local), pred);
                 builder.assign(result_local, MirRValue::Use(values::local(next)));
             }
         }

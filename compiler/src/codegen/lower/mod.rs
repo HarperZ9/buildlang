@@ -163,6 +163,10 @@ pub(crate) enum IterTerminal<'a> {
     Count,
     /// `.product()` - multiply all elements, starting from one.
     Product,
+    /// `.any(|x| pred)` - true if the predicate holds for any element.
+    Any { closure: &'a ast::Expr },
+    /// `.all(|x| pred)` - true if the predicate holds for every element.
+    All { closure: &'a ast::Expr },
 }
 
 /// A fully parsed iterator chain: `source.iter().<steps>.<terminal>`.
