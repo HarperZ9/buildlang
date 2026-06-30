@@ -6,9 +6,9 @@
 
 //! Comprehensive tests for the BuildLang parser.
 
-use buildlang::lexer::{Lexer, SourceFile};
-use buildlang::parser::{Parser, parse_source, ParseResult};
 use buildlang::ast::*;
+use buildlang::lexer::{Lexer, SourceFile};
+use buildlang::parser::{parse_source, ParseResult, Parser};
 
 /// Helper to parse source code and return the AST.
 fn parse(source: &str) -> ParseResult<Module> {
@@ -59,9 +59,9 @@ mod expressions {
 
     #[test]
     fn test_integer_bases() {
-        assert!(parses("fn main() { 0x1a; }"));      // hex
-        assert!(parses("fn main() { 0o17; }"));      // octal
-        assert!(parses("fn main() { 0b1010; }"));    // binary
+        assert!(parses("fn main() { 0x1a; }")); // hex
+        assert!(parses("fn main() { 0o17; }")); // octal
+        assert!(parses("fn main() { 0b1010; }")); // binary
         assert!(parses("fn main() { 1_000_000; }")); // with underscores
     }
 
@@ -77,7 +77,7 @@ mod expressions {
         assert!(parses("fn main() { x; }"));
         assert!(parses("fn main() { foo_bar; }"));
         assert!(parses("fn main() { _unused; }"));
-        assert!(parses("fn main() { r#type; }"));  // raw identifier
+        assert!(parses("fn main() { r#type; }")); // raw identifier
     }
 
     #[test]
@@ -96,8 +96,8 @@ mod expressions {
         assert!(parses("fn main() { *ptr; }"));
         assert!(parses("fn main() { &x; }"));
         assert!(parses("fn main() { &mut x; }"));
-        assert!(parses("fn main() { --x; }"));  // double negation
-        assert!(parses("fn main() { &&x; }"));  // double reference
+        assert!(parses("fn main() { --x; }")); // double negation
+        assert!(parses("fn main() { &&x; }")); // double reference
     }
 
     #[test]
@@ -124,8 +124,8 @@ mod expressions {
 
     #[test]
     fn test_operator_precedence() {
-        assert!(parses("fn main() { a + b * c; }"));    // * binds tighter
-        assert!(parses("fn main() { a || b && c; }"));  // && binds tighter
+        assert!(parses("fn main() { a + b * c; }")); // * binds tighter
+        assert!(parses("fn main() { a || b && c; }")); // && binds tighter
         assert!(parses("fn main() { a == b && c < d; }"));
     }
 
@@ -149,21 +149,21 @@ mod expressions {
         assert!(parses("fn main() { f(); }"));
         assert!(parses("fn main() { f(1); }"));
         assert!(parses("fn main() { f(1, 2, 3); }"));
-        assert!(parses("fn main() { f(g(1)); }"));  // nested
+        assert!(parses("fn main() { f(g(1)); }")); // nested
     }
 
     #[test]
     fn test_method_calls() {
         assert!(parses("fn main() { x.foo(); }"));
         assert!(parses("fn main() { x.foo(1, 2); }"));
-        assert!(parses("fn main() { x.foo().bar(); }"));  // chained
+        assert!(parses("fn main() { x.foo().bar(); }")); // chained
     }
 
     #[test]
     fn test_field_access() {
         assert!(parses("fn main() { x.field; }"));
         assert!(parses("fn main() { x.a.b.c; }"));
-        assert!(parses("fn main() { tuple.0; }"));  // tuple field
+        assert!(parses("fn main() { tuple.0; }")); // tuple field
         assert!(parses("fn main() { tuple.1; }"));
     }
 
@@ -186,7 +186,7 @@ mod expressions {
         assert!(parses("fn main() { 0..; }"));
         assert!(parses("fn main() { ..10; }"));
         assert!(parses("fn main() { 0..10; }"));
-        assert!(parses("fn main() { 0..=10; }"));  // inclusive
+        assert!(parses("fn main() { 0..=10; }")); // inclusive
     }
 
     #[test]
@@ -206,13 +206,13 @@ mod expressions {
         assert!(parses("fn main() { []; }"));
         assert!(parses("fn main() { [1]; }"));
         assert!(parses("fn main() { [1, 2, 3]; }"));
-        assert!(parses("fn main() { [0; 10]; }"));  // repeat
+        assert!(parses("fn main() { [0; 10]; }")); // repeat
     }
 
     #[test]
     fn test_tuples() {
-        assert!(parses("fn main() { (); }"));       // unit
-        assert!(parses("fn main() { (1,); }"));     // single element
+        assert!(parses("fn main() { (); }")); // unit
+        assert!(parses("fn main() { (1,); }")); // single element
         assert!(parses("fn main() { (1, 2); }"));
         assert!(parses("fn main() { (1, 2, 3); }"));
     }
@@ -220,8 +220,8 @@ mod expressions {
     #[test]
     fn test_struct_literals() {
         assert!(parses("fn main() { Point { x: 1, y: 2 }; }"));
-        assert!(parses("fn main() { Point { x, y }; }"));  // shorthand
-        assert!(parses("fn main() { Point { x: 1, ..base }; }"));  // ..rest
+        assert!(parses("fn main() { Point { x, y }; }")); // shorthand
+        assert!(parses("fn main() { Point { x: 1, ..base }; }")); // ..rest
     }
 
     #[test]
@@ -240,7 +240,9 @@ mod expressions {
     fn test_if_expression() {
         assert!(parses("fn main() { if true { 1 } }"));
         assert!(parses("fn main() { if true { 1 } else { 2 } }"));
-        assert!(parses("fn main() { if a { 1 } else if b { 2 } else { 3 } }"));
+        assert!(parses(
+            "fn main() { if a { 1 } else if b { 2 } else { 3 } }"
+        ));
     }
 
     #[test]
@@ -248,7 +250,7 @@ mod expressions {
         assert!(parses("fn main() { match x { _ => 1 } }"));
         assert!(parses("fn main() { match x { 0 => a, 1 => b, _ => c } }"));
         assert!(parses("fn main() { match x { Some(v) => v, None => 0 } }"));
-        assert!(parses("fn main() { match x { n if n > 0 => n, _ => 0 } }"));  // guard
+        assert!(parses("fn main() { match x { n if n > 0 => n, _ => 0 } }")); // guard
     }
 
     #[test]
@@ -461,7 +463,7 @@ mod statements {
     fn test_let_statements() {
         assert!(parses("fn main() { let x = 1; }"));
         assert!(parses("fn main() { let x: i32 = 1; }"));
-        assert!(parses("fn main() { let x: i32; }"));  // uninitialized
+        assert!(parses("fn main() { let x: i32; }")); // uninitialized
         assert!(parses("fn main() { let (a, b) = (1, 2); }"));
     }
 
@@ -550,12 +552,12 @@ mod items {
     fn test_trait() {
         assert!(parses("trait Foo { }"));
         assert!(parses("trait Foo { fn bar(); }"));
-        assert!(parses("trait Foo { fn bar() { } }"));  // default impl
+        assert!(parses("trait Foo { fn bar() { } }")); // default impl
         assert!(parses("trait Foo { type Item; }"));
         assert!(parses("trait Foo { type Item: Clone; }"));
-        assert!(parses("trait Foo { type Item = i32; }"));  // default
+        assert!(parses("trait Foo { type Item = i32; }")); // default
         assert!(parses("trait Foo { const N: usize; }"));
-        assert!(parses("trait Foo: Clone { }"));  // supertrait
+        assert!(parses("trait Foo: Clone { }")); // supertrait
         assert!(parses("trait Foo: Clone + Send { }"));
         assert!(parses("trait Foo<T> { }"));
         assert!(parses("unsafe trait Foo { }"));
@@ -595,7 +597,7 @@ mod items {
         assert!(parses("mod foo;"));
         assert!(parses("mod foo { }"));
         assert!(parses("mod foo { fn bar() { } }"));
-        assert!(parses("mod foo { mod bar { } }"));  // nested
+        assert!(parses("mod foo { mod bar { } }")); // nested
         assert!(parses("pub mod foo { }"));
     }
 
@@ -711,8 +713,8 @@ mod visibility {
 
     #[test]
     fn test_visibility_modifiers() {
-        assert!(parses("fn foo() { }"));           // private
-        assert!(parses("pub fn foo() { }"));       // public
+        assert!(parses("fn foo() { }")); // private
+        assert!(parses("pub fn foo() { }")); // public
         assert!(parses("pub(crate) fn foo() { }"));
         assert!(parses("pub(super) fn foo() { }"));
         assert!(parses("pub(self) fn foo() { }"));
@@ -730,7 +732,7 @@ mod errors {
     #[test]
     fn test_missing_semicolon() {
         // Expression statements need semicolons
-        assert!(fails("fn main() { let x = 1 }"));  // missing semicolon
+        assert!(fails("fn main() { let x = 1 }")); // missing semicolon
     }
 
     #[test]
@@ -754,7 +756,7 @@ mod errors {
 
     #[test]
     fn test_missing_type() {
-        assert!(fails("fn main(x) { }"));  // missing type annotation
+        assert!(fails("fn main(x) { }")); // missing type annotation
     }
 }
 
@@ -767,7 +769,9 @@ mod buildlang_extensions {
 
     #[test]
     fn test_effect_definition() {
-        assert!(parses("effect Console { fn print(msg: &str); fn read() -> String; }"));
+        assert!(parses(
+            "effect Console { fn print(msg: &str); fn read() -> String; }"
+        ));
     }
 
     // TODO: Add more BuildLang-specific tests when features are fully implemented

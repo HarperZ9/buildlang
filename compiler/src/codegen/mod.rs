@@ -692,18 +692,19 @@ mod tests {
             .iter()
             .find(|g| &*g.name == "errno")
             .expect("foreign static should be lowered to a global");
-        assert!(g.is_extern_decl, "foreign static should be an external declaration");
+        assert!(
+            g.is_extern_decl,
+            "foreign static should be an external declaration"
+        );
         assert_eq!(g.link_header.as_deref(), Some("<errno.h>"));
         assert_eq!(g.link_lib.as_deref(), Some("c"));
     }
 
     #[test]
     fn extern_without_header_has_no_link_header() {
-        let module = crate::parser::parse_source(
-            "test.bld",
-            "extern \"C\" { fn puts(s: &str) -> i32; }",
-        )
-        .expect("source should parse");
+        let module =
+            crate::parser::parse_source("test.bld", "extern \"C\" { fn puts(s: &str) -> i32; }")
+                .expect("source should parse");
 
         let ctx = TypeContext::new();
         let mut codegen = CodeGenerator::new(&ctx, Target::C);
@@ -729,9 +730,8 @@ mod tests {
 
     #[test]
     fn c_backend_emits_angle_include_for_header_backed_extern() {
-        let code = source_to_c(
-            "extern \"C\" header \"<sqlite3.h>\" { fn sqlite3_libversion() -> i32; }",
-        );
+        let code =
+            source_to_c("extern \"C\" header \"<sqlite3.h>\" { fn sqlite3_libversion() -> i32; }");
         assert!(
             code.contains("#include <sqlite3.h>"),
             "expected angle-bracket include for header-backed extern:\n{code}"
@@ -773,7 +773,10 @@ mod tests {
         // Deterministic (sorted) order keeps output reproducible for receipts.
         let i_sqlite = code.find("#include <sqlite3.h>").unwrap();
         let i_zlib = code.find("#include <zlib.h>").unwrap();
-        assert!(i_sqlite < i_zlib, "FFI headers should be emitted in sorted order:\n{code}");
+        assert!(
+            i_sqlite < i_zlib,
+            "FFI headers should be emitted in sorted order:\n{code}"
+        );
     }
 
     #[test]
@@ -811,9 +814,8 @@ mod tests {
     fn c_backend_notes_required_link_libraries_in_source() {
         // The link requirement is consumed at compile time, so surface it as a
         // greppable note in the emitted C for anyone inspecting `--emit c`.
-        let code = source_to_c(
-            "extern \"C\" link \"sqlite3\" header \"<sqlite3.h>\" { fn s() -> i32; }",
-        );
+        let code =
+            source_to_c("extern \"C\" link \"sqlite3\" header \"<sqlite3.h>\" { fn s() -> i32; }");
         assert!(
             code.contains("buildc-link: sqlite3"),
             "generated C should note the required link library:\n{code}"
@@ -893,11 +895,15 @@ mod tests {
         // Lowering adds a forward-declaration entry plus the definition entry,
         // so check across all entries: the export's definition carries the flag.
         assert!(
-            mir.functions.iter().any(|f| &*f.name == "ex" && f.is_c_export),
+            mir.functions
+                .iter()
+                .any(|f| &*f.name == "ex" && f.is_c_export),
             "an extern \"C\" fn should be marked a C export"
         );
         assert!(
-            !mir.functions.iter().any(|f| &*f.name == "internal" && f.is_c_export),
+            !mir.functions
+                .iter()
+                .any(|f| &*f.name == "internal" && f.is_c_export),
             "a regular fn should not be a C export"
         );
     }
@@ -916,7 +922,10 @@ mod tests {
         cg.generate(&module).expect("codegen should succeed");
         let header = cg.c_export_header().expect("a module was generated");
 
-        assert!(header.contains("#pragma once"), "missing include guard:\n{header}");
+        assert!(
+            header.contains("#pragma once"),
+            "missing include guard:\n{header}"
+        );
         assert!(
             header.contains("extern \"C\""),
             "missing C++ linkage guard:\n{header}"
@@ -1219,9 +1228,7 @@ mod tests {
     fn vec_sort_dispatches_to_runtime_qsort() {
         // `v.sort()` must dispatch to the element-typed runtime sort, not an
         // undefined `sort` call.
-        let code = source_to_c(
-            "fn main() { let mut v: Vec<i32> = vec![3, 1, 2]; v.sort(); }",
-        );
+        let code = source_to_c("fn main() { let mut v: Vec<i32> = vec![3, 1, 2]; v.sort(); }");
         assert!(
             !code.contains("= sort(") && !code.contains(" sort(v"),
             "sort must not lower to an undefined call:\n{code}"
@@ -1268,9 +1275,8 @@ mod tests {
     fn vec_contains_dispatches_to_runtime_scan() {
         // `v.contains(x)` must dispatch to the element-typed runtime scan, not an
         // undefined `contains` call.
-        let code = source_to_c(
-            "fn main() { let v: Vec<i32> = vec![3, 1, 2]; let _h = v.contains(2); }",
-        );
+        let code =
+            source_to_c("fn main() { let v: Vec<i32> = vec![3, 1, 2]; let _h = v.contains(2); }");
         assert!(
             !code.contains("= contains(") && !code.contains(" contains("),
             "contains must not lower to an undefined call:\n{code}"
@@ -1758,7 +1764,10 @@ mod tests {
     fn variadic_extern_emits_ellipsis_in_c() {
         // A non-standard variadic extern is synthesized with a trailing `, ...`.
         let code = source_to_c("extern \"C\" { fn my_printf(fmt: &str, ...) -> i32; }");
-        assert!(code.contains("my_printf"), "declaration should be present:\n{code}");
+        assert!(
+            code.contains("my_printf"),
+            "declaration should be present:\n{code}"
+        );
         assert!(
             code.contains(", ...)"),
             "a variadic extern should emit a trailing `, ...`:\n{code}"
