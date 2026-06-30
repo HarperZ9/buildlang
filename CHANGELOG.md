@@ -10,6 +10,20 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Stdlib (`Result<T, E>`): `Ok(x)` / `Err(e)` now construct the runtime
+  `Result` struct and `match r { Ok(x) => ..., Err(e) => ... }` branches on the
+  `is_ok` discriminant, reading the Ok payload from the typed `ok` union slot
+  (`.ok_i` / `.ok_f` / `.ok_p`) and the Err payload from the `err` `BuildString`.
+  The Ok payload type is threaded from the binding annotation
+  (`let r: Result<i32, String> = ...`) or the matched call's return signature, so
+  a non-`i32` Ok payload reads the correct slot instead of silently defaulting to
+  `i32`. Previously `Ok`/`Err` lowered to undefined calls into an `i32` dest (a
+  C2440) and the match emitted `if (true)` with whole-struct binds (silent-wrong).
+  Covered by `ok_err_construct_result_struct_not_bare_call` and
+  `result_match_tests_is_ok_and_binds_typed_slots`; verified end-to-end under MSVC
+  for `i32` and `f64` Ok payloads across direct-call and let-bound matches. (Err is
+  always `BuildString` and Ok payloads >8 bytes, e.g. `Result<String, _>`, still
+  need boxing - tracked separately.)
 - Native FFI (variadic): extern functions accept a trailing C-style `...`
   (e.g. `fn printf(fmt: &str, ...) -> i32`). The parser records it on
   `FnSig.is_variadic`, lowering carries it to the MIR signature so the C backend

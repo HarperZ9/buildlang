@@ -100,6 +100,18 @@ pub struct MirLowerer<'ctx> {
     /// and from Some(value) construction. Used by lower_runtime_option_match
     /// to bind pattern variables with the correct type instead of i32.
     pub(crate) option_inner_types: HashMap<LocalId, MirType>,
+    /// Tracks the Ok payload type T for locals holding runtime Result<T, E> values.
+    /// Populated from let-binding type annotations (`let r: Result<i32, String> = ...`).
+    /// Used by lower_runtime_result_match to read the Ok union slot with the
+    /// correct type instead of defaulting to i32 (which would silently mis-read
+    /// f64/pointer Ok payloads).
+    pub(crate) result_ok_types: HashMap<LocalId, MirType>,
+    /// Maps a function name to the Ok payload type of its `Result<Ok, Err>`
+    /// return type, captured during the collection pass. Lets a `match call() {
+    /// Ok(x) => ... }` on a direct call recover the Ok type even with no
+    /// intervening let-binding annotation. Keyed by the declared (unmangled)
+    /// function name.
+    pub(crate) fn_result_ok_types: HashMap<Arc<str>, MirType>,
     /// Const name -> evaluated literal value, collected in a pre-pass so
     /// that const identifiers used as array lengths (`[T; MAX_DIMS]`) resolve.
     pub(crate) const_values: HashMap<Arc<str>, MirConst>,
@@ -170,6 +182,8 @@ impl<'ctx> MirLowerer<'ctx> {
             tuple_type_defs: HashSet::new(),
             expected_type: None,
             option_inner_types: HashMap::new(),
+            result_ok_types: HashMap::new(),
+            fn_result_ok_types: HashMap::new(),
             const_values: HashMap::new(),
         }
     }
@@ -203,6 +217,8 @@ impl<'ctx> MirLowerer<'ctx> {
             tuple_type_defs: HashSet::new(),
             expected_type: None,
             option_inner_types: HashMap::new(),
+            result_ok_types: HashMap::new(),
+            fn_result_ok_types: HashMap::new(),
             const_values: HashMap::new(),
         }
     }
@@ -1157,9 +1173,38 @@ impl<'ctx> MirLowerer<'ctx> {
                 .unwrap_or(MirType::Void);
             let sig = MirFnSig::new(params, ret);
             self.module.declare_function(f.name.name.clone(), sig);
+
+            // Capture the Ok payload type for `-> Result<Ok, Err>` returns so a
+            // `match call() { Ok(x) => ... }` on a direct call can read the
+            // correct union slot without an intervening let annotation.
+            if let Some(ref ret_ty) = f.sig.return_ty {
+                if let Some(ok_ty) = self.result_ok_inner_from_ast(ret_ty) {
+                    self.fn_result_ok_types.insert(f.name.name.clone(), ok_ty);
+                }
+            }
         }
 
         Ok(())
+    }
+
+    /// If the AST type is `Result<Ok, Err>`, lower and return the `Ok` payload
+    /// type. Returns None for any non-Result type. Used to thread the Ok type
+    /// from a function signature to its match sites.
+    pub(crate) fn result_ok_inner_from_ast(&self, ty: &ast::Type) -> Option<MirType> {
+        if let ast::TypeKind::Path(ref path) = ty.kind {
+            let is_result = path
+                .last_ident()
+                .map(|i| i.name.as_ref() == "Result")
+                .unwrap_or(false);
+            if is_result {
+                if let Some(args) = path.last_generics() {
+                    if let Some(ast::GenericArg::Type(ref inner_ast_ty)) = args.first() {
+                        return Some(self.lower_type_from_ast(inner_ast_ty));
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Collect impl block methods, registering them as `TypeName_methodName` functions.

@@ -3032,6 +3032,63 @@ impl CBackend {
                     return Ok(());
                 }
 
+                // Runtime Ok(x): construct a Result with is_ok=true and the
+                // payload in the typed 8-byte ok union slot (`.ok.ok_i`/`.ok_f`/
+                // `.ok_p`). Mirrors the Some(x) Option construction. Previously
+                // Ok lowered to an undefined `Ok(x)` call into an i32 dest.
+                if func_str == "Ok" && args.len() == 1 {
+                    if let Some(dest_local) = dest {
+                        let dest_name = self.local_name(*dest_local, locals);
+                        let arg = self.value_to_c(&args[0], locals);
+                        let (slot, cast) = match &args[0] {
+                            MirValue::Local(id) => match locals.get(id.0 as usize).map(|l| &l.ty) {
+                                Some(MirType::Float(_)) => ("ok_f", "(double)"),
+                                Some(MirType::Ptr(_)) => ("ok_p", "(void*)"),
+                                _ => ("ok_i", "(int64_t)"),
+                            },
+                            MirValue::Const(MirConst::Float(..)) => ("ok_f", "(double)"),
+                            _ => ("ok_i", "(int64_t)"),
+                        };
+                        write!(self.output, "{}.is_ok = true;\n", dest_name).unwrap();
+                        self.write_indent();
+                        write!(self.output, "{}.ok.{} = {}({});\n", dest_name, slot, cast, arg)
+                            .unwrap();
+                    }
+                    if let Some(target) = target {
+                        self.write_indent();
+                        write!(self.output, "goto bb{};\n", target.0).unwrap();
+                    }
+                    return Ok(());
+                }
+
+                // Runtime Err(e): construct a Result with is_ok=false and the
+                // error message in the `err` BuildString field. The common Err
+                // payload is a String/BuildString; a bare string literal is
+                // wrapped into a BuildString. Previously Err lowered to an
+                // undefined `Err(e)` call into an i32 dest.
+                if func_str == "Err" && args.len() == 1 {
+                    if let Some(dest_local) = dest {
+                        let dest_name = self.local_name(*dest_local, locals);
+                        let arg = self.value_to_c(&args[0], locals);
+                        // A raw string literal is a `const char*`; wrap it.
+                        // A BuildString-typed local is assigned directly.
+                        let err_expr = match &args[0] {
+                            MirValue::Const(MirConst::Str(_)) => {
+                                format!("build_string_new({})", arg)
+                            }
+                            _ => arg,
+                        };
+                        write!(self.output, "{}.is_ok = false;\n", dest_name).unwrap();
+                        self.write_indent();
+                        write!(self.output, "{}.err = {};\n", dest_name, err_expr).unwrap();
+                    }
+                    if let Some(target) = target {
+                        self.write_indent();
+                        write!(self.output, "goto bb{};\n", target.0).unwrap();
+                    }
+                    return Ok(());
+                }
+
                 // Unit struct constructors: Stdin, Stdout, Stderr - emit zero-init.
                 const UNIT_STRUCTS: &[(&str, &str)] = &[
                     ("Stdin", "io_Stdin"),
@@ -3607,6 +3664,26 @@ impl CBackend {
                     };
                     return Ok(format!(
                         "({}){}.value.{}",
+                        self.type_to_c(field_ty),
+                        base_str,
+                        slot
+                    ));
+                }
+                // Result Ok payload read: `res.ok` is an 8-byte union; read the
+                // typed slot (`.ok_i`/`.ok_f`/`.ok_p`) and cast to the payload
+                // type. (`.err` is a plain BuildString field handled below.)
+                let base_is_result = matches!(base, MirValue::Local(id)
+                    if locals.get(id.0 as usize)
+                        .map(|l| matches!(&l.ty, MirType::Struct(n) if n.as_ref() == "Result"))
+                        .unwrap_or(false));
+                if base_is_result && field_name.as_ref() == "ok" {
+                    let slot = match field_ty {
+                        MirType::Float(_) => "ok_f",
+                        MirType::Ptr(_) => "ok_p",
+                        _ => "ok_i",
+                    };
+                    return Ok(format!(
+                        "({}){}.ok.{}",
                         self.type_to_c(field_ty),
                         base_str,
                         slot
