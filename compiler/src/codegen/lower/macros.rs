@@ -2466,6 +2466,31 @@ impl<'ctx> MirLowerer<'ctx> {
                     builder.assign(local, MirRValue::Use(elem_val));
                     self.var_map.insert(name.name.clone(), local);
                 }
+            } else if params.len() == 1
+                && index_val.is_some()
+                && matches!(&params[0].pattern.kind, ast::PatternKind::Tuple(t) if t.len() == 2)
+            {
+                // enumerate-style with a tuple param: |(i, x)| body.
+                // First tuple element = index, second = element.
+                if let ast::PatternKind::Tuple(elems) = &params[0].pattern.kind {
+                    if let ast::PatternKind::Ident { name, .. } = &elems[0].kind {
+                        let old = self.var_map.get(&name.name).copied();
+                        saved.push((name.name.clone(), old));
+                        let builder = self.current_fn.as_mut().unwrap();
+                        let local = builder.create_local(MirType::i64());
+                        builder.assign(local, MirRValue::Use(index_val.clone().unwrap()));
+                        self.var_map.insert(name.name.clone(), local);
+                    }
+                    if let ast::PatternKind::Ident { name, .. } = &elems[1].kind {
+                        let old = self.var_map.get(&name.name).copied();
+                        saved.push((name.name.clone(), old));
+                        let elem_ty = self.type_of_value(&elem_val);
+                        let builder = self.current_fn.as_mut().unwrap();
+                        let local = builder.create_local(elem_ty);
+                        builder.assign(local, MirRValue::Use(elem_val));
+                        self.var_map.insert(name.name.clone(), local);
+                    }
+                }
             } else if let Some(first_param) = params.first() {
                 // Single-param: |x| body
                 if let ast::PatternKind::Ident { name, .. } = &first_param.pattern.kind {
