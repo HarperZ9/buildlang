@@ -10,6 +10,14 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Codegen (Vec indexed assignment): `v[i] = x` now stores into the vector. It
+  was silently dropped - `lower_assign` handled deref/field/identifier targets
+  but not an `Index` target, so the write matched no arm and the element kept its
+  old value. It now dispatches to a typed runtime setter
+  (`build_hvec_set_{i32,i64,f64,str}`); compound forms (`v[i] += x`, `*=`, ...)
+  read-modify-write. Verified end-to-end under MSVC: `v[1] = 99` then read is
+  `99`; `v[0]=5; v[1]+=100; v[2]*=2` over `[10,20,30]` yields `5 / 120 / 60`.
+  Covered by `vec_indexed_assignment_stores_through_a_setter`.
 - Stdlib (`Vec::contains`): `v.contains(x)` now works (previously an undefined
   symbol). It dispatches to an element-typed runtime linear scan
   (`build_hvec_contains_{i32,i64,f64,str}`); the string variant compares with
