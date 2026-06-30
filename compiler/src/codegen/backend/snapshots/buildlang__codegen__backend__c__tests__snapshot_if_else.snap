@@ -227,6 +227,27 @@ static int32_t build_hvec_pop_i32(BuildVecHandle h) {
     return *(int32_t*)((char*)h.inner->ptr + h.inner->len * h.inner->elem_size);
 }
 static void build_hvec_free(BuildVecHandle h) { build_vec_free(h.inner); free(h.inner); }
+static int __build_cmp_i32(const void* a, const void* b) {
+    int32_t x = *(const int32_t*)a, y = *(const int32_t*)b;
+    return (x > y) - (x < y);
+}
+static int __build_cmp_i64(const void* a, const void* b) {
+    int64_t x = *(const int64_t*)a, y = *(const int64_t*)b;
+    return (x > y) - (x < y);
+}
+static int __build_cmp_f64(const void* a, const void* b) {
+    double x = *(const double*)a, y = *(const double*)b;
+    return (x > y) - (x < y);
+}
+static void build_hvec_sort_i32(BuildVecHandle h) {
+    if (h.inner->len > 1) qsort(h.inner->ptr, h.inner->len, sizeof(int32_t), __build_cmp_i32);
+}
+static void build_hvec_sort_i64(BuildVecHandle h) {
+    if (h.inner->len > 1) qsort(h.inner->ptr, h.inner->len, sizeof(int64_t), __build_cmp_i64);
+}
+static void build_hvec_sort_f64(BuildVecHandle h) {
+    if (h.inner->len > 1) qsort(h.inner->ptr, h.inner->len, sizeof(double), __build_cmp_f64);
+}
 static void build_hvec_set_i32(BuildVecHandle h, size_t i, int32_t val) {
     if (i < h.inner->len) *(int32_t*)build_vec_get(h.inner, i) = val;
 }
