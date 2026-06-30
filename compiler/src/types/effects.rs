@@ -1,7 +1,7 @@
 // ===============================================================================
 // BUILDLANG TYPE SYSTEM - EFFECT SYSTEM
 // ===============================================================================
-// Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
+// Copyright (c) 2022-2026 Zain Dana Harper. BuildLang Fair-Source License v1.0 (see LICENSE).
 // ===============================================================================
 
 //! Effect system for tracking and controlling side effects.

@@ -1,7 +1,7 @@
 // ===============================================================================
 // BUILDLANG COMPILER - BUILD DATA FORMAT (BDF) v0
 // ===============================================================================
-// Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
+// Copyright (c) 2022-2026 Zain Dana Harper. BuildLang Fair-Source License v1.0 (see LICENSE).
 // ===============================================================================
 
 //! Build Data Format (BDF) v0 - the native, effect-typed interchange format.

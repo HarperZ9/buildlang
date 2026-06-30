@@ -1,7 +1,7 @@
 // ===============================================================================
 // BUILDLANG TYPE SYSTEM - TYPE REPRESENTATION
 // ===============================================================================
-// Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
+// Copyright (c) 2022-2026 Zain Dana Harper. BuildLang Fair-Source License v1.0 (see LICENSE).
 // ===============================================================================
 
 //! Core type representation for the type system.

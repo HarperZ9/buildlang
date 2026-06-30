@@ -1,7 +1,7 @@
 // ===============================================================================
 // BUILDLANG CODE GENERATOR - X86-64 BACKEND
 // ===============================================================================
-// Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
+// Copyright (c) 2022-2026 Zain Dana Harper. BuildLang Fair-Source License v1.0 (see LICENSE).
 // ===============================================================================
 
 //! x86-64 native code generation backend.

@@ -1,7 +1,7 @@
 // =============================================================================
 // std-math: Standard math functions for BuildLang
 // =============================================================================
-// Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
+// Copyright (c) 2022-2026 Zain Dana Harper. BuildLang Fair-Source License v1.0 (see LICENSE).
 // =============================================================================
 
 /// Mathematical constant: ratio of a circle's circumference to its diameter.

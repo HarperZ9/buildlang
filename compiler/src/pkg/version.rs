@@ -1,7 +1,7 @@
 // ===============================================================================
 // BUILDLANG SEMANTIC VERSIONING
 // ===============================================================================
-// Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
+// Copyright (c) 2022-2026 Zain Dana Harper. BuildLang Fair-Source License v1.0 (see LICENSE).
 // ===============================================================================
 
 //! Semantic versioning implementation (SemVer 2.0.0).

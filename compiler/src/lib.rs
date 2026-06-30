@@ -2,7 +2,7 @@
 // BUILDLANG COMPILER
 // "The Language That Evolves"
 // ===============================================================================
-// Copyright (c) 2022-2026 Zain Dana Harper. MIT License.
+// Copyright (c) 2022-2026 Zain Dana Harper. BuildLang Fair-Source License v1.0 (see LICENSE).
 // ===============================================================================
 //
 // BuildLang is a multi-paradigm systems programming language featuring:
@@ -67,7 +67,7 @@ pub const LANGUAGE_VERSION: (u32, u32, u32) = (1, 0, 0);
 pub const AUTHOR: &str = "Zain Dana Harper";
 
 /// Copyright notice
-pub const COPYRIGHT: &str = "Copyright (c) 2022-2026 Zain Dana Harper. MIT License.";
+pub const COPYRIGHT: &str = "Copyright (c) 2022-2026 Zain Dana Harper. BuildLang Fair-Source License v1.0 (see LICENSE).";
 
 // Re-export commonly used types
 pub use codegen::{CodeGenerator, GeneratedCode, OutputFormat, Target};
