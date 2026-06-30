@@ -130,6 +130,18 @@ impl CBackend {
         )
     }
 
+    /// The runtime suffix for an element-typed `Vec` handle (`build_hvec_*_<suffix>`
+    /// and `build_hvec_new_<suffix>`), chosen from the Vec's element type.
+    fn hvec_elem_suffix(elem: &MirType) -> &'static str {
+        match elem {
+            MirType::Struct(n) if n.as_ref() == "BuildString" => "str",
+            MirType::Int(IntSize::I64, _) => "i64",
+            MirType::Int(..) => "i32",
+            MirType::Float(..) => "f64",
+            _ => "i32",
+        }
+    }
+
     /// The directly-named callee of a `Call`, if any.
     fn callee_name(func: &MirValue) -> Option<&str> {
         match func {
@@ -2507,6 +2519,30 @@ impl CBackend {
                     "println" | "print" | "eprintln" | "eprint"
                 ) {
                     self.emit_print_call(func_str.as_str(), args, *target, blocks, locals)?;
+                    return Ok(());
+                }
+
+                // Vec::new() → element-typed runtime constructor. The element
+                // type lives on the dest local's MIR `Vec<Elem>` type (the C type
+                // name erases it to BuildVecHandle, but MIR preserves it). Without
+                // this, Vec::new lowered to an undefined `Vec_new` symbol.
+                if func_str == "Vec_new" && args.is_empty() {
+                    if let Some(dest_local) = dest {
+                        let suffix = locals
+                            .get(dest_local.0 as usize)
+                            .and_then(|l| match &l.ty {
+                                MirType::Vec(elem) => Some(Self::hvec_elem_suffix(elem)),
+                                _ => None,
+                            })
+                            .unwrap_or("i32");
+                        let dest_name = self.local_name(*dest_local, locals);
+                        write!(self.output, "{} = build_hvec_new_{}();\n", dest_name, suffix)
+                            .unwrap();
+                    }
+                    if let Some(target) = target {
+                        self.write_indent();
+                        write!(self.output, "goto bb{};\n", target.0).unwrap();
+                    }
                     return Ok(());
                 }
 
