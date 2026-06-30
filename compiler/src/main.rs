@@ -273,8 +273,44 @@ enum Commands {
         command: MirCommands,
     },
 
+    /// Build Data Format (BDF): convert between the canonical JSON projection
+    /// and the canonical binary form, or validate a file
+    Bdf {
+        #[command(subcommand)]
+        command: BdfCommands,
+    },
+
     /// Print version information
     Version,
+}
+
+#[derive(Subcommand)]
+enum BdfCommands {
+    /// Encode a canonical-JSON BDF value into the canonical binary form
+    Encode {
+        /// Input JSON file (the BDF JSON projection)
+        input: PathBuf,
+
+        /// Output binary file (defaults to stdout as raw bytes)
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+    },
+
+    /// Decode a canonical-binary BDF value into the canonical JSON projection
+    Decode {
+        /// Input binary file written by `buildc bdf encode`
+        input: PathBuf,
+
+        /// Output JSON file (defaults to stdout)
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+    },
+
+    /// Validate a BDF file (binary `.bdf` or JSON) and print its digest/summary
+    Validate {
+        /// Input file (auto-detected: binary if it starts with the BDF magic)
+        file: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -423,6 +459,7 @@ fn main() -> ExitCode {
         Some(Commands::Lint { file }) => cmd_lint(&file),
         Some(Commands::Doctor) => cmd_doctor(),
         Some(Commands::Mir { command }) => cmd_mir(command),
+        Some(Commands::Bdf { command }) => cmd_bdf(command),
         Some(Commands::Test {
             directory,
             filter,
@@ -3081,6 +3118,143 @@ fn cmd_mir_load(file: &Path) -> Result<(), i32> {
     println!("globals: {}", module.globals.len());
     println!("strings: {}", module.strings.len());
     println!("externals: {}", module.externals.len());
+    Ok(())
+}
+
+fn cmd_bdf(command: BdfCommands) -> Result<(), i32> {
+    match command {
+        BdfCommands::Encode { input, output } => cmd_bdf_encode(&input, output.as_deref()),
+        BdfCommands::Decode { input, output } => cmd_bdf_decode(&input, output.as_deref()),
+        BdfCommands::Validate { file } => cmd_bdf_validate(&file),
+    }
+}
+
+fn cmd_bdf_encode(input: &Path, output: Option<&Path>) -> Result<(), i32> {
+    use buildlang::bdf::BdfValue;
+
+    let json = std::fs::read_to_string(input).map_err(|err| {
+        eprintln!("Error reading file '{}': {}", input.display(), err);
+        1
+    })?;
+    let value = BdfValue::from_json(&json).map_err(|err| {
+        eprintln!("Error parsing BDF JSON '{}': {}", input.display(), err);
+        1
+    })?;
+    let bytes = value.to_bytes();
+
+    if let Some(path) = output {
+        std::fs::write(path, &bytes).map_err(|err| {
+            eprintln!("Error writing '{}': {}", path.display(), err);
+            1
+        })?;
+        let digest = buildlang::bdf::payload_digest_hex(&value);
+        println!(
+            "Wrote {} byte(s) of {} to {} (sha256:{})",
+            bytes.len(),
+            buildlang::bdf::BDF_VALUE_SCHEMA,
+            path.display(),
+            digest
+        );
+    } else {
+        write_stdout_bytes(&bytes)?;
+    }
+    Ok(())
+}
+
+fn cmd_bdf_decode(input: &Path, output: Option<&Path>) -> Result<(), i32> {
+    use buildlang::bdf::BdfValue;
+
+    let bytes = std::fs::read(input).map_err(|err| {
+        eprintln!("Error reading file '{}': {}", input.display(), err);
+        1
+    })?;
+    let value = BdfValue::from_bytes(&bytes).map_err(|err| {
+        eprintln!("Error decoding BDF binary '{}': {}", input.display(), err);
+        1
+    })?;
+    let json = value.to_json_pretty().map_err(|err| {
+        eprintln!("Error serializing BDF JSON: {}", err);
+        1
+    })?;
+
+    if let Some(path) = output {
+        std::fs::write(path, format!("{json}\n")).map_err(|err| {
+            eprintln!("Error writing '{}': {}", path.display(), err);
+            1
+        })?;
+        println!("Wrote BDF JSON projection to {}", path.display());
+    } else {
+        println!("{json}");
+    }
+    Ok(())
+}
+
+fn cmd_bdf_validate(file: &Path) -> Result<(), i32> {
+    use buildlang::bdf::{BdfValue, BDF_MAGIC, BDF_VALUE_SCHEMA};
+
+    let bytes = std::fs::read(file).map_err(|err| {
+        eprintln!("Error reading file '{}': {}", file.display(), err);
+        1
+    })?;
+
+    // Auto-detect: a binary value stream begins with the BDF magic; otherwise
+    // treat the file as the JSON projection.
+    let is_binary = bytes.len() >= BDF_MAGIC.len() && bytes[..BDF_MAGIC.len()] == BDF_MAGIC;
+    let (form, value) = if is_binary {
+        let value = BdfValue::from_bytes(&bytes).map_err(|err| {
+            eprintln!(
+                "Error: '{}' is not valid BDF binary: {}",
+                file.display(),
+                err
+            );
+            1
+        })?;
+        ("binary", value)
+    } else {
+        let text = std::str::from_utf8(&bytes).map_err(|_| {
+            eprintln!(
+                "Error: '{}' is neither BDF binary nor UTF-8 JSON",
+                file.display()
+            );
+            1
+        })?;
+        let value = BdfValue::from_json(text).map_err(|err| {
+            eprintln!("Error: '{}' is not valid BDF JSON: {}", file.display(), err);
+            1
+        })?;
+        ("json", value)
+    };
+
+    let digest = buildlang::bdf::payload_digest_hex(&value);
+    println!("schema: {BDF_VALUE_SCHEMA}");
+    println!("form: {form}");
+    println!("kind: {}", bdf_value_kind(&value));
+    println!("canonical_bytes: {}", value.to_bytes().len());
+    println!("payload_digest: sha256:{digest}");
+    println!("status: valid");
+    Ok(())
+}
+
+fn bdf_value_kind(value: &buildlang::bdf::BdfValue) -> &'static str {
+    use buildlang::bdf::BdfValue;
+    match value {
+        BdfValue::Null => "null",
+        BdfValue::Bool(_) => "bool",
+        BdfValue::Int(_) => "int",
+        BdfValue::Float(_) => "float",
+        BdfValue::Str(_) => "str",
+        BdfValue::Bytes(_) => "bytes",
+        BdfValue::Array(_) => "array",
+        BdfValue::Map(_) => "map",
+    }
+}
+
+fn write_stdout_bytes(bytes: &[u8]) -> Result<(), i32> {
+    use std::io::Write as _;
+    std::io::stdout().write_all(bytes).map_err(|err| {
+        eprintln!("Error writing to stdout: {}", err);
+        1
+    })?;
     Ok(())
 }
 
