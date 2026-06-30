@@ -12602,6 +12602,33 @@ fn c_backend_run(program_path: &Path) -> RunResult {
     }
 }
 
+/// Regression: an unsuffixed integer literal exceeding i32 range must keep its
+/// full 64-bit value end-to-end. Previously it was silently truncated to 32 bits
+/// in both the type checker (defaulted to an i32 inference var) and the MIR
+/// lowering (`unwrap_or(i32)`), so `9223372036854775000` printed as `-808`.
+#[test]
+fn large_unsuffixed_int_literal_not_truncated_end_to_end() {
+    if !c_backend_ready() {
+        eprintln!("skipping large-literal e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let src = "fn main() ~ Console {\n\
+               let big = 9223372036854775000;\n\
+               let diff = big - 100000;\n\
+               println(\"{}\", big);\n\
+               println(\"{}\", diff);\n\
+               }\n";
+    let dir = std::env::temp_dir().join("buildlang_large_literal_regress");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("large_literal.bld");
+    std::fs::write(&path, src).expect("write large_literal.bld");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout, "9223372036854775000\n9223372036854675000\n",
+        "a 64-bit literal must not be truncated to 32 bits"
+    );
+}
+
 /// Regression: an `Option<i64>`-returning function whose result is matched must
 /// compile and run end-to-end. Previously the if-expression result local was
 /// typed `int32_t` (the `None` branch defaulted to i32), so the 64-bit Option
