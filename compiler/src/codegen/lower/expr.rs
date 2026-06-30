@@ -3040,6 +3040,12 @@ impl<'ctx> MirLowerer<'ctx> {
                     Some(format!("build_hvec_contains_{}", type_suffix)),
                     MirType::Bool,
                 ),
+                // sort() in place (ascending); string element sort is a
+                // follow-up - only the numeric families have comparators.
+                "sort" if matches!(type_suffix.as_str(), "i32" | "i64" | "f64") => (
+                    Some(format!("build_hvec_sort_{}", type_suffix)),
+                    MirType::Void,
+                ),
                 _ => (None, MirType::Void),
             };
 

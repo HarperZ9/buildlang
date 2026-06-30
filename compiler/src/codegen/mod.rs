@@ -1202,6 +1202,23 @@ mod tests {
     }
 
     #[test]
+    fn vec_sort_dispatches_to_runtime_qsort() {
+        // `v.sort()` must dispatch to the element-typed runtime sort, not an
+        // undefined `sort` call.
+        let code = source_to_c(
+            "fn main() { let mut v: Vec<i32> = vec![3, 1, 2]; v.sort(); }",
+        );
+        assert!(
+            !code.contains("= sort(") && !code.contains(" sort(v"),
+            "sort must not lower to an undefined call:\n{code}"
+        );
+        assert!(
+            code.contains("build_hvec_sort_i32("),
+            "Vec<i32>.sort must call the i32 runtime sort:\n{code}"
+        );
+    }
+
+    #[test]
     fn vec_indexed_assignment_stores_through_a_setter() {
         // `v[i] = x` must store into the Vec (was silently dropped - the write
         // matched no assignment-target arm, so the element kept its old value).

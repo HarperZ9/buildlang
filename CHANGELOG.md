@@ -10,6 +10,12 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Stdlib (`Vec::sort`): `v.sort()` now sorts the vector in place (ascending) via
+  the runtime `build_hvec_sort_{i32,i64,f64}` (qsort with a numeric comparator).
+  Was an undefined symbol. Verified end-to-end under MSVC: sorting
+  `[3,1,4,1,5,9,2,6]` gives first `1`, last `9`. Covered by
+  `vec_sort_dispatches_to_runtime_qsort`. (String/struct element sort and
+  `sort_by` remain follow-ups.)
 - Codegen (Vec indexed assignment): `v[i] = x` now stores into the vector. It
   was silently dropped - `lower_assign` handled deref/field/identifier targets
   but not an `Index` target, so the write matched no arm and the element kept its
