@@ -3359,6 +3359,53 @@ impl<'ctx> TypeInfer<'ctx> {
         }
 
         match op {
+            // Broadcasting operators (I4): elementwise over fixed-size `Array<T,N>`.
+            // Both arrays must share an element type and length; scalar broadcast
+            // unifies the scalar with the array element type. Length mismatch is a
+            // compile-time error. Handled BEFORE the scalar arithmetic arm so scalar
+            // broadcast (`arr .* 2.0`) is not rejected by the left==right unify.
+            BinOp::DotAdd | BinOp::DotSub | BinOp::DotMul | BinOp::DotDiv => {
+                let left_applied = self.apply(&left_ty);
+                let right_applied = self.apply(&right_ty);
+                match (&left_applied.kind, &right_applied.kind) {
+                    (TyKind::Array(l_elem, l_len), TyKind::Array(r_elem, r_len)) => {
+                        if l_len != r_len {
+                            self.error(
+                                TypeError::ArrayLengthMismatch {
+                                    expected: *l_len,
+                                    found: *r_len,
+                                },
+                                span,
+                            );
+                            return Ty::error();
+                        }
+                        let _ = self.unify(l_elem, r_elem, span);
+                        Ty::array(self.apply(l_elem), *l_len)
+                    }
+                    (TyKind::Array(elem, len), _) => {
+                        // array `.` scalar: broadcast the scalar over each element.
+                        let _ = self.unify(elem, &right_applied, span);
+                        Ty::array(self.apply(elem), *len)
+                    }
+                    (_, TyKind::Array(elem, len)) => {
+                        // scalar `.` array: broadcast the scalar over each element.
+                        let _ = self.unify(&left_applied, elem, span);
+                        Ty::array(self.apply(elem), *len)
+                    }
+                    _ => {
+                        self.error(
+                            TypeError::InvalidBinaryOp {
+                                op: op.as_str().to_string(),
+                                left: left_applied,
+                                right: right_applied,
+                            },
+                            span,
+                        );
+                        Ty::error()
+                    }
+                }
+            }
+
             // Arithmetic operators
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
                 let _ = self.unify(&left_ty, &right_ty, span);
