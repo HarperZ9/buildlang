@@ -820,7 +820,26 @@ impl TypeContext {
     /// Append a dispatch candidate for `name` (multiple-dispatch registry).
     /// Called once per function definition at collection time.
     pub fn register_method_candidate(&mut self, name: Arc<str>, candidate: MethodCandidate) {
-        self.multi_methods.entry(name).or_default().push(candidate);
+        let candidates = self.multi_methods.entry(name).or_default();
+        // Multiple dispatch selects a method by the tuple of argument types, so
+        // two candidates with an identical parameter-type signature are
+        // indistinguishable and can never form a legitimate overload set. Such an
+        // exact duplicate is a redundant re-registration (most commonly an
+        // external `mod foo;` module, which the type checker loads and registers
+        // in BOTH the collect pass and the check pass), not a new method. Keeping
+        // it would make every call to that name a spurious "equally-specific
+        // candidates" ambiguity. Drop the duplicate; keep the first. Genuine
+        // overloads differ in parameter types and are unaffected. (Before
+        // multiple dispatch a second same-signature definition silently
+        // overwrote the first, so this preserves the historical single-method
+        // behavior for that case.)
+        if candidates
+            .iter()
+            .any(|c| c.param_tys == candidate.param_tys)
+        {
+            return;
+        }
+        candidates.push(candidate);
     }
 
     /// All dispatch candidates registered under `name`, if any.
