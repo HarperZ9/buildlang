@@ -21,7 +21,7 @@ This tutorial walks you through installation, your first program, the language f
 ### Build from Source
 
 ```bash
-git clone https://github.com/HarperZ9/quantalang.git
+git clone https://github.com/HarperZ9/buildlang.git
 cd buildlang
 cd compiler
 cargo build --release
@@ -51,7 +51,7 @@ buildc version
 
 Expected output:
 ```
-BuildLang compiler v1.0.0
+BuildLang compiler v1.0.x
 ```
 
 You are ready to go.

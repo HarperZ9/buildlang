@@ -81,7 +81,7 @@ scoop install buildlang
 ### From Source
 
 ```bash
-git clone https://github.com/buildlang/buildlang.git
+git clone https://github.com/HarperZ9/buildlang.git
 cd buildlang
 ./build.sh release
 ./install.sh
@@ -330,7 +330,7 @@ We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 ### Development Setup
 
 ```bash
-git clone https://github.com/buildlang/buildlang.git
+git clone https://github.com/HarperZ9/buildlang.git
 cd buildlang
 ./build.sh debug
 ./test.sh

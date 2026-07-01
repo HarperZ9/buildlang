@@ -109,7 +109,7 @@ build run
 
 - **Website**: https://buildlang.org
 - **Documentation**: https://docs.buildlang.org
-- **GitHub**: https://github.com/buildlang/buildlang
+- **GitHub**: https://github.com/HarperZ9/buildlang
 - **Discord**: https://discord.gg/buildlang
 
 ## What's Next?

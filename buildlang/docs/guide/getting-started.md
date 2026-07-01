@@ -29,7 +29,7 @@ wget -qO- https://buildlang.org/install.sh | sh
 
 ```bash
 # Clone the repository
-git clone https://github.com/buildlang/buildlang.git
+git clone https://github.com/HarperZ9/buildlang.git
 cd buildlang
 
 # Build the compiler
@@ -370,7 +370,7 @@ Now that you have the basics, explore these topics:
 - **Documentation**: https://docs.buildlang.org
 - **Forum**: https://forum.buildlang.org
 - **Discord**: https://discord.gg/buildlang
-- **GitHub**: https://github.com/buildlang/buildlang
+- **GitHub**: https://github.com/HarperZ9/buildlang
 
 ### Getting Help
 
