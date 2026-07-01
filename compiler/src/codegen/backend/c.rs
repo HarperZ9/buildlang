@@ -162,10 +162,7 @@ impl CBackend {
 
     /// The directly-named callee of a `Call`, if any.
     fn callee_name(func: &MirValue) -> Option<&str> {
-        match func {
-            MirValue::Function(n) | MirValue::Global(n) => Some(n.as_ref()),
-            _ => None,
-        }
+        crate::codegen::analysis::cfg::callee_name(func)
     }
 
     /// Whether a type could hold (or embed) a heap string buffer or a pointer
@@ -509,32 +506,7 @@ impl CBackend {
     /// before `id` is block-scoped freed. Closes the move-source borrow gap the
     /// adversarial audit flagged (latent: not currently source-reachable).
     fn move_source_chain(id: LocalId, blocks: &[MirBlock]) -> Vec<LocalId> {
-        let mut chain = Vec::new();
-        let mut cur = id;
-        loop {
-            let mut next = None;
-            for block in blocks {
-                for stmt in &block.stmts {
-                    if let MirStmtKind::Assign {
-                        dest,
-                        value: MirRValue::Use(MirValue::Local(src)),
-                    } = &stmt.kind
-                    {
-                        if *dest == cur {
-                            next = Some(*src);
-                        }
-                    }
-                }
-            }
-            match next {
-                Some(s) if !chain.contains(&s) && s != id => {
-                    chain.push(s);
-                    cur = s;
-                }
-                _ => break,
-            }
-        }
-        chain
+        crate::codegen::analysis::cfg::move_source_chain(id, blocks)
     }
 
     /// Owned heap locals to free at the START of a block (block-scoped drops),
@@ -660,66 +632,23 @@ impl CBackend {
     /// True if statement `kind` USES `x` (reads it). The `Assign` dest is a
     /// definition, not a use, so it is excluded.
     fn stmt_uses_local(kind: &MirStmtKind, x: LocalId) -> bool {
-        match kind {
-            MirStmtKind::Assign { value, .. } => Self::rvalue_mentions(value, x),
-            MirStmtKind::DerefAssign { ptr, value } => *ptr == x || Self::rvalue_mentions(value, x),
-            MirStmtKind::FieldDerefAssign { ptr, value, .. } => {
-                *ptr == x || Self::rvalue_mentions(value, x)
-            }
-            MirStmtKind::FieldAssign { base, value, .. } => {
-                *base == x || Self::rvalue_mentions(value, x)
-            }
-            MirStmtKind::GlobalStore { value, .. } => Self::rvalue_mentions(value, x),
-            MirStmtKind::StorageLive(_) | MirStmtKind::StorageDead(_) | MirStmtKind::Nop => false,
-        }
+        crate::codegen::analysis::cfg::stmt_uses_local(kind, x)
     }
 
     /// True if a terminator USES `x` (any appearance as a value or place). A
     /// `Call` dest is a definition and is not represented here.
     fn terminator_uses_local(term: &Option<MirTerminator>, x: LocalId) -> bool {
-        let is = |v: &MirValue| matches!(v, MirValue::Local(l) if *l == x);
-        match term {
-            Some(MirTerminator::If { cond, .. }) => is(cond),
-            Some(MirTerminator::Switch { value, .. }) => is(value),
-            Some(MirTerminator::Call { func, args, .. }) => is(func) || args.iter().any(is),
-            Some(MirTerminator::Return(Some(v))) => is(v),
-            Some(MirTerminator::Assert { cond, .. }) => is(cond),
-            Some(MirTerminator::Drop { place, .. }) => {
-                place.local == x
-                    || place
-                        .projections
-                        .iter()
-                        .any(|p| matches!(p, PlaceProjection::Index(l) if *l == x))
-            }
-            _ => false,
-        }
+        crate::codegen::analysis::cfg::terminator_uses_local(term, x)
     }
 
     /// Blocks reachable from the entry (`BlockId(0)` if present, else index 0).
     fn reachable_blocks(blocks: &[MirBlock]) -> Vec<bool> {
-        let id_to_index = Self::block_id_index(blocks);
-        let entry = id_to_index.get(&0).copied().unwrap_or(0);
-        let mut seen = vec![false; blocks.len()];
-        let mut stack = vec![entry];
-        while let Some(i) = stack.pop() {
-            if i >= blocks.len() || seen[i] {
-                continue;
-            }
-            seen[i] = true;
-            for s in Self::terminator_successors(&blocks[i].terminator, &id_to_index) {
-                stack.push(s);
-            }
-        }
-        seen
+        crate::codegen::analysis::cfg::reachable_blocks(blocks)
     }
 
     /// Map each block's `BlockId` value to its index in `blocks`.
     fn block_id_index(blocks: &[MirBlock]) -> std::collections::HashMap<u32, usize> {
-        blocks
-            .iter()
-            .enumerate()
-            .map(|(i, b)| (b.id.0, i))
-            .collect()
+        crate::codegen::analysis::cfg::block_id_index(blocks)
     }
 
     /// Successor block indices of a terminator, resolved through `id_to_index`.
@@ -727,42 +656,7 @@ impl CBackend {
         term: &Option<MirTerminator>,
         id_to_index: &std::collections::HashMap<u32, usize>,
     ) -> Vec<usize> {
-        let resolve = |b: &BlockId| id_to_index.get(&b.0).copied();
-        let mut out = Vec::new();
-        match term {
-            Some(MirTerminator::Goto(t)) => out.extend(resolve(t)),
-            Some(MirTerminator::If {
-                then_block,
-                else_block,
-                ..
-            }) => {
-                out.extend(resolve(then_block));
-                out.extend(resolve(else_block));
-            }
-            Some(MirTerminator::Switch {
-                targets, default, ..
-            }) => {
-                for (_, t) in targets {
-                    out.extend(resolve(t));
-                }
-                out.extend(resolve(default));
-            }
-            Some(MirTerminator::Call { target, unwind, .. }) => {
-                out.extend(target.as_ref().and_then(&resolve));
-                out.extend(unwind.as_ref().and_then(&resolve));
-            }
-            Some(MirTerminator::Drop { target, unwind, .. }) => {
-                out.extend(resolve(target));
-                out.extend(unwind.as_ref().and_then(&resolve));
-            }
-            Some(MirTerminator::Assert { target, unwind, .. }) => {
-                out.extend(resolve(target));
-                out.extend(unwind.as_ref().and_then(&resolve));
-            }
-            // Return, Unreachable, Resume, Abort, and None have no successors.
-            _ => {}
-        }
-        out
+        crate::codegen::analysis::cfg::terminator_successors(term, id_to_index)
     }
 
     /// Iterative dominator sets: `dom[i]` is the set of block indices that
@@ -774,45 +668,7 @@ impl CBackend {
     /// spuriously hold), but it silently suppresses most sound frees, so it is
     /// fixed here.
     fn compute_dominators(blocks: &[MirBlock]) -> Vec<std::collections::HashSet<usize>> {
-        let n = blocks.len();
-        let id_to_index = Self::block_id_index(blocks);
-        let entry = id_to_index.get(&0).copied().unwrap_or(0);
-        let reachable = Self::reachable_blocks(blocks);
-        let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n];
-        for (i, b) in blocks.iter().enumerate() {
-            if !reachable[i] {
-                continue;
-            }
-            for s in Self::terminator_successors(&b.terminator, &id_to_index) {
-                preds[s].push(i);
-            }
-        }
-        let all: std::collections::HashSet<usize> = (0..n).collect();
-        let mut dom: Vec<std::collections::HashSet<usize>> = vec![all; n];
-        dom[entry] = std::iter::once(entry).collect();
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for i in 0..n {
-                if i == entry || !reachable[i] {
-                    continue;
-                }
-                let mut new_set: Option<std::collections::HashSet<usize>> = None;
-                for &p in &preds[i] {
-                    new_set = Some(match new_set {
-                        None => dom[p].clone(),
-                        Some(acc) => acc.intersection(&dom[p]).copied().collect(),
-                    });
-                }
-                let mut new_set = new_set.unwrap_or_default();
-                new_set.insert(i);
-                if new_set != dom[i] {
-                    dom[i] = new_set;
-                    changed = true;
-                }
-            }
-        }
-        dom
+        crate::codegen::analysis::cfg::compute_dominators(blocks)
     }
 
     /// True if owned `BuildString` local `id` ESCAPES, i.e. appears anywhere
@@ -956,34 +812,7 @@ impl CBackend {
     /// The exhaustive match makes the compiler enforce completeness: a new
     /// `MirRValue` variant will not compile until handled here.
     fn rvalue_mentions(r: &MirRValue, id: LocalId) -> bool {
-        let v = |val: &MirValue| matches!(val, MirValue::Local(l) if *l == id);
-        let p = |pl: &MirPlace| {
-            pl.local == id
-                || pl
-                    .projections
-                    .iter()
-                    .any(|pr| matches!(pr, PlaceProjection::Index(l) if *l == id))
-        };
-        match r {
-            MirRValue::Use(x) => v(x),
-            MirRValue::BinaryOp { left, right, .. } => v(left) || v(right),
-            MirRValue::UnaryOp { operand, .. } => v(operand),
-            MirRValue::Ref { place, .. } | MirRValue::AddressOf { place, .. } => p(place),
-            MirRValue::Cast { value, .. } => v(value),
-            MirRValue::Aggregate { operands, .. } => operands.iter().any(v),
-            MirRValue::Repeat { value, .. } => v(value),
-            MirRValue::Discriminant(place) | MirRValue::Len(place) => p(place),
-            MirRValue::NullaryOp(..) => false,
-            MirRValue::FieldAccess { base, .. } => v(base),
-            MirRValue::VariantField { base, .. } => v(base),
-            MirRValue::IndexAccess { base, index, .. } => v(base) || v(index),
-            MirRValue::Deref { ptr, .. } => v(ptr),
-            MirRValue::TextureSample {
-                texture,
-                sampler,
-                coords,
-            } => v(texture) || v(sampler) || v(coords),
-        }
+        crate::codegen::analysis::cfg::rvalue_mentions(r, id)
     }
 
     /// Write indentation.
@@ -2077,6 +1906,34 @@ impl CBackend {
         } else {
             std::collections::HashMap::new()
         };
+        if Self::experimental_free_enabled() {
+            // Increment 4: multi-block live ranges the block-scoped (single-block)
+            // rule declines. Disjoint from both prior sets.
+            let fn_exit_set: std::collections::HashSet<LocalId> =
+                self.current_fn_freeable.iter().copied().collect();
+            let block_scoped_set: std::collections::HashSet<LocalId> = self
+                .current_fn_block_frees
+                .values()
+                .flatten()
+                .copied()
+                .collect();
+            let candidates = self.sound_owned_candidates(func);
+            let extra = crate::codegen::analysis::drops::multi_block_freeable(
+                func,
+                &candidates,
+                &fn_exit_set,
+                &block_scoped_set,
+            );
+            for (bb, ids) in extra {
+                let slot = self.current_fn_block_frees.entry(bb).or_default();
+                for id in ids {
+                    if !slot.contains(&id) {
+                        slot.push(id);
+                    }
+                }
+                slot.sort_by_key(|id| id.0);
+            }
+        }
         self.generate_function_signature(func)?;
         self.output.push_str(" {\n");
         self.indent += 1;
@@ -5443,6 +5300,173 @@ mod tests {
         assert!(
             backend.freeable_owned_string_locals(&func).is_empty(),
             "a conditionally-allocated string is not definitely initialized at return"
+        );
+    }
+
+    // Shape exercising increment 4 specifically (disjoint from increments 1-3
+    // through the REAL backend helpers, not just the standalone analysis call):
+    // bb0: if c -> bb1 else bb4
+    // bb1: _0 = alloc() -> bb2                    (owner defined bb1, NOT bb0)
+    // bb2: _1 = _0.ptr ; printf(_1) -> bb3         (owner used bb2, not bb1)
+    // bb3: return
+    // bb4: return                                  (a return NOT dominated by bb1)
+    //
+    // fn_exit (increments 1-2) declines `_0`: bb4 is a sibling return not
+    // dominated by bb1, so `_0` is not definite-init at every return.
+    // block-scoped (increment 3) declines `_0` too: `live_range_confined_to_block`
+    // requires the `.ptr` borrow confined to the DEFINING block (bb1), but the
+    // borrow happens in bb2, so confinement fails.
+    // Only increment 4 catches it: the buffer dies at bb3's entry, bb2 is the
+    // sole (terminal) predecessor of bb3, and bb1 (the def block) dominates bb3
+    // -> free `_0` at the start of bb3.
+    fn multi_block_owner_func() -> MirFunction {
+        let mut func = MirFunction::new("f", MirFnSig::new(vec![], MirType::Void));
+        func.locals.push(MirLocal {
+            id: LocalId(9),
+            name: Some(Arc::from("c")),
+            ty: MirType::Bool,
+            is_mut: false,
+            is_param: true,
+            annotations: Vec::new(),
+        });
+        func.locals.push(bs(0, "_0"));
+        func.locals.push(i64_local(1, "_1"));
+        let mut b0 = MirBlock::new(BlockId(0));
+        b0.terminator = Some(MirTerminator::If {
+            cond: MirValue::Local(LocalId(9)),
+            then_block: BlockId(1),
+            else_block: BlockId(4),
+        });
+        let mut b1 = MirBlock::new(BlockId(1));
+        b1.terminator = Some(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("build_string_concat")),
+            args: Vec::new(),
+            dest: Some(LocalId(0)),
+            target: Some(BlockId(2)),
+            unwind: None,
+        });
+        let mut b2 = MirBlock::new(BlockId(2));
+        b2.stmts.push(MirStmt::assign(
+            LocalId(1),
+            MirRValue::FieldAccess {
+                base: MirValue::Local(LocalId(0)),
+                field_name: Arc::from("ptr"),
+                field_ty: MirType::i64(),
+            },
+        ));
+        b2.terminator = Some(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("printf")),
+            args: vec![MirValue::Local(LocalId(1))],
+            dest: None,
+            target: Some(BlockId(3)),
+            unwind: None,
+        });
+        let mut b3 = MirBlock::new(BlockId(3));
+        b3.terminator = Some(MirTerminator::Return(None));
+        let mut b4 = MirBlock::new(BlockId(4));
+        b4.terminator = Some(MirTerminator::Return(None));
+        func.blocks = Some(vec![b0, b1, b2, b3, b4]);
+        func
+    }
+
+    #[test]
+    fn increment4_multi_block_owner_is_scheduled_for_free() {
+        let backend = CBackend::new();
+        let func = multi_block_owner_func();
+        let fn_exit_vec = backend.freeable_owned_string_locals(&func);
+        assert!(
+            !fn_exit_vec.contains(&LocalId(0)),
+            "_0 must NOT be fn-exit freeable: bb1 does not dominate the sibling return bb4: {fn_exit_vec:?}"
+        );
+        let fn_exit: std::collections::HashSet<LocalId> = fn_exit_vec.into_iter().collect();
+        let bscoped_map =
+            backend.block_scoped_freeable(&func, &backend.freeable_owned_string_locals(&func));
+        let bscoped: std::collections::HashSet<LocalId> =
+            bscoped_map.values().flatten().copied().collect();
+        assert!(
+            !bscoped.contains(&LocalId(0)),
+            "_0 must NOT be block-scoped freeable either, so increment 4 is what claims it: {bscoped_map:?}"
+        );
+        let candidates = backend.sound_owned_candidates(&func);
+        let extra = crate::codegen::analysis::drops::multi_block_freeable(
+            &func,
+            &candidates,
+            &fn_exit,
+            &bscoped,
+        );
+        assert_eq!(
+            extra.get(&3).map(|v| v.as_slice()),
+            Some(&[LocalId(0)][..]),
+            "increment-4 must schedule _0 to be freed at the start of bb3: {extra:?}"
+        );
+    }
+
+    // Multi-hop escape guard: owner `_0` is allocated, then its `.ptr` is copied
+    // multi-hop (`_1 = _0.ptr; _2 = _1;`), re-mentioning `_1` outside a direct
+    // borrow-call argument position. `owned_string_escapes` must reject `_0` via
+    // `ptr_temp_escapes` (the `_2 = _1` assign mentions `_1`), so
+    // `sound_owned_candidates` must NOT include `_0`, and therefore
+    // `multi_block_freeable` must never schedule it for a free. This is the
+    // end-to-end proof that a multi-hop-aliased owner is never freed.
+    fn multi_hop_escaping_owner_func() -> MirFunction {
+        let mut func = MirFunction::new("f", MirFnSig::new(vec![], MirType::Void));
+        func.locals.push(bs(0, "_0"));
+        func.locals.push(i64_local(1, "_1"));
+        func.locals.push(i64_local(2, "_2"));
+        let mut b0 = MirBlock::new(BlockId(0));
+        b0.terminator = Some(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("build_string_concat")),
+            args: Vec::new(),
+            dest: Some(LocalId(0)),
+            target: Some(BlockId(1)),
+            unwind: None,
+        });
+        let mut b1 = MirBlock::new(BlockId(1));
+        b1.stmts.push(MirStmt::assign(
+            LocalId(1),
+            MirRValue::FieldAccess {
+                base: MirValue::Local(LocalId(0)),
+                field_name: Arc::from("ptr"),
+                field_ty: MirType::i64(),
+            },
+        ));
+        // Multi-hop copy: `_2 = _1`. `_1` is re-mentioned by this rvalue, so
+        // `ptr_temp_escapes(_1, ..)` is true, so `_0` escapes.
+        b1.stmts.push(MirStmt::assign(
+            LocalId(2),
+            MirRValue::Use(MirValue::Local(LocalId(1))),
+        ));
+        b1.terminator = Some(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("printf")),
+            args: vec![MirValue::Local(LocalId(2))],
+            dest: None,
+            target: Some(BlockId(2)),
+            unwind: None,
+        });
+        let mut b2 = MirBlock::new(BlockId(2));
+        b2.terminator = Some(MirTerminator::Return(None));
+        func.blocks = Some(vec![b0, b1, b2]);
+        func
+    }
+
+    #[test]
+    fn multi_hop_ptr_copy_owner_is_excluded_from_sound_candidates_and_never_freed() {
+        let backend = CBackend::new();
+        let func = multi_hop_escaping_owner_func();
+        let candidates = backend.sound_owned_candidates(&func);
+        assert!(
+            !candidates.iter().any(|(id, _)| *id == LocalId(0)),
+            "a multi-hop-aliased owner must be excluded from sound_owned_candidates: {candidates:?}"
+        );
+        let extra = crate::codegen::analysis::drops::multi_block_freeable(
+            &func,
+            &candidates,
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+        );
+        assert!(
+            extra.is_empty(),
+            "a multi-hop-aliased owner must never be scheduled for a free: {extra:?}"
         );
     }
 
