@@ -1,8 +1,12 @@
+> **Superseded 2026-06-30** by `docs/UNIVERSAL_SUBSTRATE_DIRECTIVE_2026-06-30.md`, which
+> lifts the native/GPU backend deferral and returns the project to full-speed, sequenced
+> development. This document is preserved unedited below (except this banner and the
+> status line) for the provenance trail; it no longer governs posture.
+
 # Universal Substrate Directive - 2026-06-29
 
-Status: in force. This is the named source of truth for the project's posture and
-direction. Where any in-tree document disagrees with this directive, this directive
-governs until a later dated successor replaces it.
+Status: superseded 2026-06-30. Preserved for provenance. See the successor directive for
+the governing posture.
 
 ## Supersession Notice
 
