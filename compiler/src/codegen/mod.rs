@@ -62,7 +62,7 @@ pub use lower::*;
 use std::sync::Arc;
 
 use crate::ast;
-use crate::types::TypeContext;
+use crate::types::{TypeContext, TypeErrorWithSpan};
 
 /// The main code generator.
 pub struct CodeGenerator<'ctx> {
@@ -76,6 +76,14 @@ pub struct CodeGenerator<'ctx> {
     source: Option<Arc<str>>,
     /// Generate ReShade .fx boilerplate for HLSL target.
     pub reshade: bool,
+    /// Errors from the MIR `#[linear]` checker (`codegen::analysis::linear`),
+    /// populated by `generate()` right after `lower_module`. Non-empty means
+    /// the program is linearity-invalid: callers must treat this as a compile
+    /// failure and must NOT trust `generate()`'s `Ok(GeneratedCode)` as a
+    /// green light (codegen still runs on the lowered MIR so `buildc build`
+    /// can lower once and reuse the same MIR, but the output must be
+    /// discarded when this is non-empty).
+    linear_errors: Vec<TypeErrorWithSpan>,
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -87,6 +95,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             mir: None,
             source: None,
             reshade: false,
+            linear_errors: Vec::new(),
         }
     }
 
@@ -98,10 +107,29 @@ impl<'ctx> CodeGenerator<'ctx> {
             mir: None,
             source: Some(source),
             reshade: false,
+            linear_errors: Vec::new(),
         }
     }
 
+    /// Errors from the MIR `#[linear]` checker, if `generate()` has run.
+    /// Callers MUST check this after a successful `generate()` call and
+    /// reject the compile (no executable, non-zero exit) if non-empty --
+    /// `generate()`'s `Ok` result alone does not mean the program is
+    /// linear-valid.
+    pub fn linear_errors(&self) -> &[TypeErrorWithSpan] {
+        &self.linear_errors
+    }
+
     /// Generate code from a type-checked module.
+    ///
+    /// Lowers AST to MIR exactly once, runs the `#[linear]` MIR checker
+    /// (`codegen::analysis::linear::check`) on every function, and stashes
+    /// any errors in `linear_errors()`. Codegen still proceeds on the
+    /// lowered MIR so a caller that only needs the MIR (or that will check
+    /// `linear_errors()` before trusting the output) does not pay for a
+    /// second lowering pass; callers that produce an executable (`buildc
+    /// build`) MUST check `linear_errors()` and refuse to emit/link when it
+    /// is non-empty.
     pub fn generate(&mut self, module: &ast::Module) -> CodegenResult<GeneratedCode> {
         // Lower AST to MIR
         let lowerer = if let Some(ref source) = self.source {
@@ -114,6 +142,17 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Select backend and generate
         let mir = self.mir.as_ref().unwrap();
+
+        // Run the MIR `#[linear]` affine/borrow checker on every function
+        // now that MIR exists, before handing off to a backend. This is the
+        // first MIR-phase user diagnostic; errors are collected (not
+        // returned as `CodegenError`, which has no span) so the driver can
+        // print them with source spans and fail the compile.
+        self.linear_errors = mir
+            .functions
+            .iter()
+            .flat_map(analysis::linear::check)
+            .collect();
 
         match self.target {
             Target::C => {
