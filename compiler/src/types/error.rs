@@ -148,6 +148,36 @@ pub enum TypeError {
     #[error("type `{ty}` is not callable")]
     NotCallable { ty: Ty },
 
+    /// No overloaded method matches the argument-type tuple (after arity
+    /// filter). Lists the argument types and the available candidate signatures.
+    #[error("no method `{name}` matches argument types ({arg_tys}); candidates:\n{candidates}")]
+    NoMatchingMethod {
+        name: String,
+        arg_tys: String,
+        candidates: String,
+    },
+
+    /// Two or more equally-most-specific overloaded methods match; the call is
+    /// ambiguous. Lists the tied candidate signatures (Julia-style).
+    #[error(
+        "call to `{name}` is ambiguous for argument types ({arg_tys}); \
+         equally-specific candidates:\n{candidates}"
+    )]
+    AmbiguousMethod {
+        name: String,
+        arg_tys: String,
+        candidates: String,
+    },
+
+    /// An overloaded name referenced as a bare value (not called). Multiple
+    /// dispatch requires a call with arguments to select a method.
+    #[error(
+        "`{name}` is an overloaded function ({count} definitions); \
+         referencing it as a value is ambiguous. Call it with arguments so \
+         multiple dispatch can select a method"
+    )]
+    AmbiguousFunctionReference { name: String, count: usize },
+
     /// Cannot index non-array type.
     #[error("type `{ty}` cannot be indexed")]
     NotIndexable { ty: Ty },
