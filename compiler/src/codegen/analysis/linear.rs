@@ -418,19 +418,40 @@ fn escaping_params_fixpoint(functions: &[MirFunction]) -> HashMap<Arc<str>, Hash
                 else {
                     continue;
                 };
-                let Some(callee_name) = call_target_name(callee) else {
-                    continue;
-                };
-                let Some(callee_escaping) = escaping.get(callee_name) else {
-                    continue;
-                };
-                for (i, a) in args.iter().enumerate() {
-                    // The arg is one of MY reference parameters, passed into an
-                    // ALREADY-escaping position of the callee -> MY param escapes.
-                    if let MirValue::Local(p) = a {
-                        if let Some(&my_idx) = my_ref_params.get(p) {
-                            if callee_escaping.contains(&i) {
-                                newly_escaping.push(my_idx);
+                match call_target_name(callee) {
+                    // DIRECT named call: MY `&`-param escapes iff it is passed
+                    // into an ALREADY-escaping position of the resolvable callee.
+                    Some(callee_name) => {
+                        let Some(callee_escaping) = escaping.get(callee_name) else {
+                            continue;
+                        };
+                        for (i, a) in args.iter().enumerate() {
+                            if let MirValue::Local(p) = a {
+                                if let Some(&my_idx) = my_ref_params.get(p) {
+                                    if callee_escaping.contains(&i) {
+                                        newly_escaping.push(my_idx);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // INDIRECT call (`call_target_name` is `None`): the callee is
+                    // a fn-pointer local, a struct-field fn-pointer, or otherwise
+                    // not a resolvable named function, so its body is OPAQUE — we
+                    // cannot see whether it derefs-and-escapes the borrow.
+                    // Conservative-sound: ANY of MY `&`-params forwarded as an
+                    // argument to it is marked borrow-escaping. This over-
+                    // approximates (a fn-pointer that does NOT escape is still
+                    // flagged), which is acceptable: passing a `&linear` into a
+                    // fn-pointer-consuming function is rare, and missing the
+                    // escape would be UNSOUND (a double-spend clone). Closes the
+                    // higher-order fn-pointer hole (`apply(deref_any, &coin)`).
+                    None => {
+                        for a in args {
+                            if let MirValue::Local(p) = a {
+                                if let Some(&my_idx) = my_ref_params.get(p) {
+                                    newly_escaping.push(my_idx);
+                                }
                             }
                         }
                     }
@@ -2539,6 +2560,265 @@ mod tests {
             )),
             0,
             "reading a non-linear field through a shared borrow is the legal case: {errors:?}"
+        );
+    }
+
+    // ===================================================================
+    // FIX 2 (higher-order fn-pointer escape): a `&`-param FORWARDED into an
+    // INDIRECT call (a `Call` whose `func` is not a resolvable named function —
+    // a fn-pointer local or a struct-field fn-pointer) must be marked
+    // borrow-escaping. The callee body is opaque, so we must assume it may
+    // deref-escape the borrow. Otherwise `apply(f: fn(&Coin)->Coin, r: &Coin) {
+    // f(r) }` never marks `r` escaping and `apply(deref_any, &coin)` twice
+    // clones the linear. Conservative-sound over-approximation.
+    // ===================================================================
+
+    /// An `apply`-shaped function: `fn NAME(f: fn(&Qubit)->Qubit, r: &Qubit) ->
+    /// Qubit { f(r) }`. Param 0 is the fn-pointer `f`; param 1 is the `&`-param
+    /// `r`, forwarded into an INDIRECT call `Call { func: Local(f), args: [r] }`.
+    /// `call_target_name(Local(f))` is `None`, so the direct rule never sees it;
+    /// the new indirect rule must mark param 1 escaping.
+    ///   bb0: call (Local f)(r) -> dest _2 ; bb1: return _2
+    fn apply_indirect_call(name: &str, fn_ptr_param: u32, ref_param: u32) -> MirFunction {
+        let mut f = MirFunction::new(name, MirFnSig::new(vec![], MirType::Void));
+        // Param 0: the fn-pointer `f` (modeled as a pointer-typed param so it is
+        // a leading param local; it is used as the callee `func`, never an arg).
+        f.locals.push(ref_param_local(fn_ptr_param, "f"));
+        // Param 1: the `&Qubit` `r` (the borrow that is forwarded into `f`).
+        f.locals.push(ref_param_local(ref_param, "r"));
+        f.locals.push(linear_anon(2)); // call dest (the returned value)
+        let mut b0 = MirBlock::new(BlockId(0));
+        b0.terminator = Some(MirTerminator::Call {
+            func: MirValue::Local(LocalId(fn_ptr_param)), // INDIRECT: fn-ptr local
+            args: vec![MirValue::Local(LocalId(ref_param))],
+            dest: Some(LocalId(2)),
+            target: Some(BlockId(1)),
+            unwind: None,
+        });
+        let mut b1 = MirBlock::new(BlockId(1));
+        b1.terminator = Some(MirTerminator::Return(Some(MirValue::Local(LocalId(2)))));
+        f.blocks = Some(vec![b0, b1]);
+        f
+    }
+
+    // F2-1. FIX 2 (direct): `apply`'s `&`-param (index 1) is forwarded into an
+    //       indirect fn-pointer call and must be marked borrow-escaping.
+    #[test]
+    fn fix2_apply_ref_param_forwarded_into_fn_pointer_is_escaping() {
+        let apply = apply_indirect_call("apply", 0, 1);
+        let escaping = escaping_params_fixpoint(std::slice::from_ref(&apply));
+        assert_eq!(
+            escaping.get("apply"),
+            Some(&HashSet::from([1])),
+            "a &-param forwarded into an indirect fn-pointer call is escaping: {escaping:?}"
+        );
+    }
+
+    // F2-2. FIX 2 end-to-end (direct): passing `&coin` into `apply`'s escaping
+    //       `&`-param (index 1) moves the linear out of the shared borrow.
+    //       caller: r = &coin ; apply(_, r) — arg 0 is a fn-ptr, arg 1 is `r`.
+    #[test]
+    fn fix2_pass_shared_borrow_into_apply_reports() {
+        let apply = apply_indirect_call("apply", 0, 1);
+
+        // Caller: r = &coin ; apply(fptr, r). Distinct dest local.
+        let mut caller = MirFunction::new("main", MirFnSig::new(vec![], MirType::Void));
+        caller.locals.push(linear_local(0, "coin"));
+        caller.locals.push(untagged_ptr_local(1, "r")); // r = &coin
+        caller.locals.push(untagged_ptr_local(2, "fptr")); // the fn-pointer value
+        caller.locals.push(linear_anon(3)); // call dest
+        let mut mb0 = MirBlock::new(BlockId(0));
+        mb0.stmts.push(MirStmt::assign(
+            LocalId(1),
+            MirRValue::Ref {
+                is_mut: false,
+                place: MirPlace::local(LocalId(0)),
+            },
+        ));
+        mb0.terminator = Some(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("apply")),
+            // arg 0: the fn-pointer (a non-linear value); arg 1: the borrow `r`.
+            args: vec![MirValue::Local(LocalId(2)), MirValue::Local(LocalId(1))],
+            dest: Some(LocalId(3)),
+            target: Some(BlockId(1)),
+            unwind: None,
+        });
+        let mut mb1 = MirBlock::new(BlockId(1));
+        mb1.terminator = Some(MirTerminator::Return(None));
+        caller.blocks = Some(vec![mb0, mb1]);
+
+        let errors = check_module(&[apply, caller]);
+        assert_eq!(
+            count(&errors, |e| matches!(
+                e,
+                TypeError::LinearMoveOutOfBorrow { .. }
+            )),
+            1,
+            "passing `&coin` into apply's fn-pointer-forwarded &-param is a move-out: {errors:?}"
+        );
+    }
+
+    // F2-3. FIX 2 (2-level): `apply2` forwards its `&`-param into `apply` (a
+    //       NAMED callee whose param 1 is escaping via the indirect rule). The
+    //       existing call-graph fixpoint must then propagate escaping up to
+    //       `apply2` param 1. Proves the indirect base composes with the
+    //       transitive (named-forwarding) case.
+    //       fn apply2(f, r) { apply(f, r) }  (r forwarded into apply's param 1)
+    #[test]
+    fn fix2_two_level_apply_over_fn_pointer_reports() {
+        let apply = apply_indirect_call("apply", 0, 1);
+
+        // apply2(f: param0, r: param1) { apply(f, r) } — a NAMED call to apply,
+        // forwarding r into apply's escaping param-1 position.
+        let mut apply2 = MirFunction::new("apply2", MirFnSig::new(vec![], MirType::Void));
+        apply2.locals.push(ref_param_local(0, "f"));
+        apply2.locals.push(ref_param_local(1, "r"));
+        apply2.locals.push(linear_anon(2)); // call dest
+        let mut b0 = MirBlock::new(BlockId(0));
+        b0.terminator = Some(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("apply")),
+            args: vec![MirValue::Local(LocalId(0)), MirValue::Local(LocalId(1))],
+            dest: Some(LocalId(2)),
+            target: Some(BlockId(1)),
+            unwind: None,
+        });
+        let mut b1 = MirBlock::new(BlockId(1));
+        b1.terminator = Some(MirTerminator::Return(Some(MirValue::Local(LocalId(2)))));
+        apply2.blocks = Some(vec![b0, b1]);
+
+        let escaping = escaping_params_fixpoint(&[apply.clone(), apply2.clone()]);
+        assert_eq!(
+            escaping.get("apply2"),
+            Some(&HashSet::from([1])),
+            "escaping must propagate up from the fn-pointer base to apply2: {escaping:?}"
+        );
+
+        // Caller: r = &coin ; apply2(fptr, r) — must reject.
+        let mut caller = MirFunction::new("main", MirFnSig::new(vec![], MirType::Void));
+        caller.locals.push(linear_local(0, "coin"));
+        caller.locals.push(untagged_ptr_local(1, "r"));
+        caller.locals.push(untagged_ptr_local(2, "fptr"));
+        caller.locals.push(linear_anon(3));
+        let mut mb0 = MirBlock::new(BlockId(0));
+        mb0.stmts.push(MirStmt::assign(
+            LocalId(1),
+            MirRValue::Ref {
+                is_mut: false,
+                place: MirPlace::local(LocalId(0)),
+            },
+        ));
+        mb0.terminator = Some(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("apply2")),
+            args: vec![MirValue::Local(LocalId(2)), MirValue::Local(LocalId(1))],
+            dest: Some(LocalId(3)),
+            target: Some(BlockId(1)),
+            unwind: None,
+        });
+        let mut mb1 = MirBlock::new(BlockId(1));
+        mb1.terminator = Some(MirTerminator::Return(None));
+        caller.blocks = Some(vec![mb0, mb1]);
+
+        let errors = check_module(&[apply, apply2, caller]);
+        assert_eq!(
+            count(&errors, |e| matches!(
+                e,
+                TypeError::LinearMoveOutOfBorrow { .. }
+            )),
+            1,
+            "passing `&coin` into a 2-level fn-pointer wrapper is a move-out: {errors:?}"
+        );
+    }
+
+    // F2-4. FIX 2 (struct-field fn-pointer): a call whose `func` is a `Local`
+    //       loaded from a struct field (`ops.extract`) is ALSO an indirect call
+    //       (`call_target_name` is `None`), so `run`'s `&`-param forwarded into
+    //       it is escaping. Modeled the same as the fn-pointer local: the callee
+    //       is a `Local` the checker cannot resolve to a name.
+    //       fn run(ops_extract: fn, r: &Qubit) { ops_extract(r) }
+    #[test]
+    fn fix2_struct_field_fn_pointer_is_escaping_and_reports() {
+        // Same MIR shape as apply: an indirect `Call { func: Local(..) }`. The
+        // struct-field load that produced the fn-pointer local is upstream; what
+        // matters to the checker is that the callee is an unresolvable `Local`.
+        let run = apply_indirect_call("run", 0, 1);
+        let escaping = escaping_params_fixpoint(std::slice::from_ref(&run));
+        assert_eq!(
+            escaping.get("run"),
+            Some(&HashSet::from([1])),
+            "a &-param forwarded into a struct-field fn-pointer call is escaping: {escaping:?}"
+        );
+
+        let main = {
+            let mut caller = MirFunction::new("main", MirFnSig::new(vec![], MirType::Void));
+            caller.locals.push(linear_local(0, "coin"));
+            caller.locals.push(untagged_ptr_local(1, "r"));
+            caller.locals.push(untagged_ptr_local(2, "fptr"));
+            caller.locals.push(linear_anon(3));
+            let mut mb0 = MirBlock::new(BlockId(0));
+            mb0.stmts.push(MirStmt::assign(
+                LocalId(1),
+                MirRValue::Ref {
+                    is_mut: false,
+                    place: MirPlace::local(LocalId(0)),
+                },
+            ));
+            mb0.terminator = Some(MirTerminator::Call {
+                func: MirValue::Function(Arc::from("run")),
+                args: vec![MirValue::Local(LocalId(2)), MirValue::Local(LocalId(1))],
+                dest: Some(LocalId(3)),
+                target: Some(BlockId(1)),
+                unwind: None,
+            });
+            let mut mb1 = MirBlock::new(BlockId(1));
+            mb1.terminator = Some(MirTerminator::Return(None));
+            caller.blocks = Some(vec![mb0, mb1]);
+            caller
+        };
+        let errors = check_module(&[run, main]);
+        assert_eq!(
+            count(&errors, |e| matches!(
+                e,
+                TypeError::LinearMoveOutOfBorrow { .. }
+            )),
+            1,
+            "passing `&coin` into a struct-field fn-pointer consumer is a move-out: {errors:?}"
+        );
+    }
+
+    // F2-5. FIX 2 PRECISION: a function that makes an INDIRECT call but does NOT
+    //       forward any `&`-param into it must NOT become escaping. `g` has a
+    //       `&`-param `r` it never passes to the fn-pointer (it calls `f()` with
+    //       no args), so `g` stays clean and passing `&coin` into `g` is legal.
+    //       fn g(f: fn()->(), r: &Qubit) { f() }   (r not forwarded)
+    #[test]
+    fn fix2_indirect_call_not_forwarding_ref_param_stays_clean() {
+        let mut g = MirFunction::new("g", MirFnSig::new(vec![], MirType::Void));
+        g.locals.push(ref_param_local(0, "f")); // fn-pointer param
+        g.locals.push(ref_param_local(1, "r")); // &-param, NOT forwarded
+        g.locals.push(i64_local(2, "res"));
+        let mut b0 = MirBlock::new(BlockId(0));
+        b0.terminator = Some(MirTerminator::Call {
+            func: MirValue::Local(LocalId(0)), // indirect call
+            args: vec![],                      // no args: r is not forwarded
+            dest: Some(LocalId(2)),
+            target: Some(BlockId(1)),
+            unwind: None,
+        });
+        let mut b1 = MirBlock::new(BlockId(1));
+        b1.terminator = Some(MirTerminator::Return(None));
+        g.blocks = Some(vec![b0, b1]);
+
+        let escaping = escaping_params_fixpoint(std::slice::from_ref(&g));
+        assert!(
+            escaping.get("g").is_none(),
+            "an indirect call not forwarding a &-param is not escaping: {escaping:?}"
+        );
+
+        let main = caller_passing_shared_borrow("g");
+        let errors = check_module(&[g, main]);
+        assert!(
+            errors.is_empty(),
+            "passing `&coin` into a fn that does not forward it is the legal case: {errors:?}"
         );
     }
 }
