@@ -196,6 +196,14 @@ pub enum TokenKind {
     Percent,
     /// `^`
     Caret,
+    /// `.+` (elementwise broadcast add over `Array<T,N>`)
+    DotPlus,
+    /// `.-` (elementwise broadcast subtract over `Array<T,N>`)
+    DotMinus,
+    /// `.*` (elementwise broadcast multiply over `Array<T,N>`)
+    DotStar,
+    /// `./` (elementwise broadcast divide over `Array<T,N>`)
+    DotSlash,
 
     // =========================================================================
     // OPERATORS - BITWISE
@@ -395,6 +403,10 @@ impl fmt::Display for TokenKind {
             TokenKind::Slash => write!(f, "`/`"),
             TokenKind::Percent => write!(f, "`%`"),
             TokenKind::Caret => write!(f, "`^`"),
+            TokenKind::DotPlus => write!(f, "`.+`"),
+            TokenKind::DotMinus => write!(f, "`.-`"),
+            TokenKind::DotStar => write!(f, "`.*`"),
+            TokenKind::DotSlash => write!(f, "`./`"),
             TokenKind::And => write!(f, "`&`"),
             TokenKind::Or => write!(f, "`|`"),
             TokenKind::Tilde => write!(f, "`~`"),
