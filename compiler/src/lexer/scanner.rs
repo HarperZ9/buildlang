@@ -399,6 +399,12 @@ impl<'a> Lexer<'a> {
                 return self.scan_format_string();
             }
 
+            // Unicode arithmetic-operator aliases (Julia-flavored math syntax).
+            // Each maps to an existing ASCII operator kind; no new semantics.
+            '\u{00D7}' | '\u{00B7}' | '\u{2219}' => TokenKind::Star, // × · ∙
+            '\u{00F7}' => TokenKind::Slash,                          // ÷
+            '\u{2212}' => TokenKind::Minus, // − (minus sign, not ASCII hyphen)
+
             // Regular identifiers
             c if is_id_start(c) => return self.scan_identifier(c),
 
@@ -437,7 +443,11 @@ impl<'a> Lexer<'a> {
     }
 
     fn scan_star(&mut self) -> TokenKind {
-        if self.cursor.eat('=') {
+        // Check `**` before `*=` so `**` lexes as one StarStar token. There is
+        // no `**=` operator (out of scope); `**=` lexes as `StarStar` + `Eq`.
+        if self.cursor.eat('*') {
+            TokenKind::StarStar
+        } else if self.cursor.eat('=') {
             TokenKind::StarEq
         } else {
             TokenKind::Star
@@ -561,6 +571,19 @@ impl<'a> Lexer<'a> {
             } else {
                 Ok(TokenKind::DotDot)
             }
+        } else if self.cursor.eat('+') {
+            // `.+` elementwise broadcast add (I4). `.`-then-operator is never
+            // valid today, so this only promotes a current parse error.
+            Ok(TokenKind::DotPlus)
+        } else if self.cursor.eat('-') {
+            // `.-` elementwise broadcast subtract (I4).
+            Ok(TokenKind::DotMinus)
+        } else if self.cursor.eat('*') {
+            // `.*` elementwise broadcast multiply (I4).
+            Ok(TokenKind::DotStar)
+        } else if self.cursor.eat('/') {
+            // `./` elementwise broadcast divide (I4).
+            Ok(TokenKind::DotSlash)
         } else if is_digit(self.cursor.first()) {
             // Could be a float like .5 - treat as Dot for now, parser handles
             Ok(TokenKind::Dot)
