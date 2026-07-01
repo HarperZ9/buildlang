@@ -188,6 +188,8 @@ pub enum TokenKind {
     Minus,
     /// `*`
     Star,
+    /// `**` (power operator; also prefix double-deref)
+    StarStar,
     /// `/`
     Slash,
     /// `%`
@@ -389,6 +391,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Plus => write!(f, "`+`"),
             TokenKind::Minus => write!(f, "`-`"),
             TokenKind::Star => write!(f, "`*`"),
+            TokenKind::StarStar => write!(f, "`**`"),
             TokenKind::Slash => write!(f, "`/`"),
             TokenKind::Percent => write!(f, "`%`"),
             TokenKind::Caret => write!(f, "`^`"),

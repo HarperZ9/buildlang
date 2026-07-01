@@ -12708,6 +12708,58 @@ fn unicode_math_operators_run_end_to_end() {
     );
 }
 
+/// I2: the `**` power operator runs end-to-end through the C backend.
+/// `2 ** 10 == 1024` exercises the new `StarStar` token -> `BinOp::Pow` wiring
+/// (Pow was already typed and lowered to `pow(l, r)`; I2 only wires lexer +
+/// parser). `2 ** 3 ** 2` must be `512` (right-associative `2 ** (3 ** 2)`),
+/// NOT `64` (`(2 ** 3) ** 2`), proving right-associativity end-to-end.
+#[test]
+fn power_operator_runs_end_to_end() {
+    if !c_backend_ready() {
+        eprintln!("skipping power-operator e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let src = "fn main() ~ Console {\n\
+               println(\"{}\", 2 ** 10);\n\
+               println(\"{}\", 2 ** 3 ** 2);\n\
+               }\n";
+    let dir = std::env::temp_dir().join("buildlang_power_operator");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("power.bld");
+    std::fs::write(&path, src).expect("write power.bld");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout, "1024\n512\n",
+        "`**` must compute power and be right-associative (2 ** 3 ** 2 == 512)"
+    );
+}
+
+/// I2 documented semantics: unary minus binds LOOSER than `**`, so `-2 ** 2`
+/// means `-(2 ** 2) == -4`, NOT `(-2) ** 2 == 4`. This matches the
+/// Julia/Python convention `-a**b == -(a**b)`. The binding power `bp::POWER`
+/// is set equal to `bp::PREFIX` so the power operator binds inside a leading
+/// unary minus; the parser-level test `neg_double_star_binds_power_inside_neg`
+/// asserts the corresponding AST shape (`Neg(Pow(2, 2))`).
+#[test]
+fn neg_power_semantics() {
+    if !c_backend_ready() {
+        eprintln!("skipping neg-power e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let src = "fn main() ~ Console {\n\
+               println(\"{}\", -2 ** 2);\n\
+               }\n";
+    let dir = std::env::temp_dir().join("buildlang_neg_power");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("neg_power.bld");
+    std::fs::write(&path, src).expect("write neg_power.bld");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout, "-4\n",
+        "-2 ** 2 must be -(2 ** 2) == -4 (unary minus binds looser than **)"
+    );
+}
+
 /// Executable witness of the transpile-preservation criterion: for every
 /// Rust-supported corpus program, lowering the same source through the C
 /// backend and through the Rust backend must produce byte-identical stdout and

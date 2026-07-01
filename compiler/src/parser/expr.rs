@@ -44,6 +44,14 @@ mod bp {
     pub const CAST: u8 = 13;
     /// Prefix operators
     pub const PREFIX: u8 = 14;
+    /// Power `**` (right-associative). Deliberately equal to `PREFIX` so that
+    /// power binds INSIDE a leading unary minus: `-2 ** 2` parses as
+    /// `-(2 ** 2) == -4`, matching the Julia/Python convention `-a**b ==
+    /// -(a**b)`. (If `POWER < PREFIX` it would instead give `(-2) ** 2 == 4`.)
+    /// Prefix `**x` is dispatched by leading token in `parse_prefix_expr`
+    /// before any binding-power comparison, so it always means double-deref and
+    /// never collides with this infix power binding.
+    pub const POWER: u8 = 14;
     /// Postfix operators (highest)
     pub const POSTFIX: u8 = 15;
 }
@@ -290,6 +298,19 @@ impl<'a> Parser<'a> {
                 let expr = self.parse_expr_with_bp(bp::PREFIX)?;
                 let span = start.merge(&expr.span);
                 Ok(Expr::new(ExprKind::Deref(Box::new(expr)), span))
+            }
+
+            // Prefix `**x` = double dereference `*(*x)`. Before I2, `**` lexed
+            // as two `Star` tokens, so `**ptr` was two nested prefix derefs;
+            // now that `**` is a single `StarStar` token we must reproduce that
+            // meaning in prefix position (infix `a ** b` is power). This split
+            // is what keeps the change backward compatible.
+            TokenKind::StarStar => {
+                self.advance();
+                let expr = self.parse_expr_with_bp(bp::PREFIX)?;
+                let span = start.merge(&expr.span);
+                let inner = Expr::new(ExprKind::Deref(Box::new(expr)), span);
+                Ok(Expr::new(ExprKind::Deref(Box::new(inner)), span))
             }
 
             TokenKind::And => {
@@ -777,6 +798,10 @@ impl<'a> Parser<'a> {
                 Some((bp::PRODUCT, bp::PRODUCT + 1))
             }
 
+            // Power (right-associative: (bp, bp) instead of the left-assoc
+            // (bp, bp+1) convention). Binds tighter than product.
+            TokenKind::StarStar => Some((bp::POWER, bp::POWER)),
+
             // Type cast
             TokenKind::Keyword(Keyword::As) => Some((bp::CAST, bp::CAST + 1)),
 
@@ -810,6 +835,7 @@ impl<'a> Parser<'a> {
             TokenKind::Plus => BinOp::Add,
             TokenKind::Minus => BinOp::Sub,
             TokenKind::Star => BinOp::Mul,
+            TokenKind::StarStar => BinOp::Pow,
             TokenKind::Slash => BinOp::Div,
             TokenKind::Percent => BinOp::Rem,
             TokenKind::And => BinOp::BitAnd,
@@ -843,6 +869,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::Minus
                 | TokenKind::Not
                 | TokenKind::Star
+                | TokenKind::StarStar
                 | TokenKind::And
                 | TokenKind::AndAnd
                 | TokenKind::Or

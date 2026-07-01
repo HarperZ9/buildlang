@@ -443,7 +443,11 @@ impl<'a> Lexer<'a> {
     }
 
     fn scan_star(&mut self) -> TokenKind {
-        if self.cursor.eat('=') {
+        // Check `**` before `*=` so `**` lexes as one StarStar token. There is
+        // no `**=` operator (out of scope); `**=` lexes as `StarStar` + `Eq`.
+        if self.cursor.eat('*') {
+            TokenKind::StarStar
+        } else if self.cursor.eat('=') {
             TokenKind::StarEq
         } else {
             TokenKind::Star
