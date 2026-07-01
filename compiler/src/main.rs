@@ -12,6 +12,7 @@ mod lsp_dispatch;
 mod memory_layout;
 mod mir_representation;
 mod module_graph;
+mod scientific_runtime;
 mod symbol_graph;
 
 use clap::{Parser as ClapParser, Subcommand};
@@ -36,6 +37,11 @@ use mir_representation::{
     verify_mir_representation_receipt, MirRepresentationReceipt, MIR_REPRESENTATION_RECEIPT,
 };
 use module_graph::{verify_module_graph_receipt, ModuleGraphReceipt, MODULE_GRAPH_RECEIPT};
+#[allow(unused_imports)]
+use scientific_runtime::{
+    build_scientific_runtime_receipt, parse_numeric_series, ScientificDigest,
+    ScientificReceiptInputs, ScientificRuntimeReceipt, SCIENTIFIC_RUNTIME_SCHEMA,
+};
 use symbol_graph::{verify_symbol_graph_receipt, SymbolGraphReceipt, SYMBOL_GRAPH_RECEIPT};
 
 fn parse_codegen_target(target: &str) -> Result<Target, String> {
@@ -179,6 +185,32 @@ enum Commands {
     Run {
         /// Input file
         file: PathBuf,
+
+        /// Emit a sealed scientific-runtime receipt to PATH ('-' = stdout).
+        /// When set, buildc captures the program's numeric stdout as a
+        /// measurement series, checks the invariant, and writes the receipt.
+        /// Without this flag, `run` behavior is byte-identical to before.
+        #[arg(long, value_name = "PATH")]
+        emit_receipt: Option<PathBuf>,
+
+        /// Invariant to check over the captured series (v0: only
+        /// `energy-monotone`). Ignored unless `--emit-receipt` is set.
+        #[arg(long, default_value = "energy-monotone")]
+        invariant: String,
+
+        /// Measurement metric name recorded in the receipt.
+        #[arg(long, default_value = "series")]
+        metric: String,
+
+        /// Free-text problem label recorded in the receipt (e.g.
+        /// "1d-heat-equation-energy").
+        #[arg(long)]
+        problem: Option<String>,
+
+        /// Declare this run a negative fixture: an invariant FAIL is EXPECTED
+        /// and yields receipt_status FAIL_EXPECTED instead of FAIL_UNEXPECTED.
+        #[arg(long)]
+        negative_fixture: bool,
 
         /// Arguments to pass to the program
         #[arg(trailing_var_arg = true)]
@@ -470,7 +502,23 @@ fn main() -> ExitCode {
             keep_c,
             target,
         }) => cmd_build(&path, release, &emit, keep_c, &target),
-        Some(Commands::Run { file, args }) => cmd_run(&file, &args),
+        Some(Commands::Run {
+            file,
+            emit_receipt,
+            invariant,
+            metric,
+            problem,
+            negative_fixture,
+            args,
+        }) => cmd_run(
+            &file,
+            &args,
+            emit_receipt.as_deref(),
+            &invariant,
+            &metric,
+            problem.as_deref(),
+            negative_fixture,
+        ),
         Some(Commands::Repl) => cmd_repl(),
         Some(Commands::Lsp) => cmd_lsp(),
         Some(Commands::Watch { path, target }) => cmd_watch(&path, &target),
@@ -5489,7 +5537,23 @@ fn run_temp_build_dir(file: &Path) -> PathBuf {
     ))
 }
 
-fn cmd_run(file: &PathBuf, args: &[String]) -> Result<(), i32> {
+#[allow(clippy::too_many_arguments)]
+fn cmd_run(
+    file: &PathBuf,
+    args: &[String],
+    emit_receipt: Option<&Path>,
+    invariant: &str,
+    metric: &str,
+    problem: Option<&str>,
+    negative_fixture: bool,
+) -> Result<(), i32> {
+    // v0 implements only the energy-monotone invariant. Reject unknown names
+    // early (before compiling) so the error is clear and no work is wasted.
+    if emit_receipt.is_some() && invariant != "energy-monotone" {
+        eprintln!("Unknown --invariant '{invariant}'. Supported in v0: energy-monotone");
+        return Err(1);
+    }
+
     // Read source file
     let source = std::fs::read_to_string(file).map_err(|e| {
         eprintln!("Error reading file '{}': {}", file.display(), e);
@@ -5606,22 +5670,133 @@ fn cmd_run(file: &PathBuf, args: &[String]) -> Result<(), i32> {
 
     // Run the compiled program directly (Win32 WriteFile in the runtime
     // ensures output works even under MinTTY/git-bash).
-    let status = {
+    //
+    // Default path (no --emit-receipt): inherit stdout via `.status()`, exactly
+    // as before -- byte-identical output and exit-code semantics. Receipt path:
+    // capture stdout via `.output()`, echo it (so `run` still shows output),
+    // parse the numeric series, check the invariant, seal, and write.
+    let Some(receipt_path) = emit_receipt else {
+        let status = {
+            let mut run_cmd = std::process::Command::new(&exe_file);
+            run_cmd.args(args);
+            run_cmd.status().map_err(|e| {
+                eprintln!("Failed to run program: {}", e);
+                1i32
+            })?
+        };
+
+        // Clean up temp files
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        return if status.success() {
+            Ok(())
+        } else {
+            Err(status.code().unwrap_or(1))
+        };
+    };
+
+    // --emit-receipt path: capture stdout so we can parse the measured series.
+    let run_output = {
         let mut run_cmd = std::process::Command::new(&exe_file);
         run_cmd.args(args);
-        run_cmd.status().map_err(|e| {
+        run_cmd.output().map_err(|e| {
             eprintln!("Failed to run program: {}", e);
+            let _ = std::fs::remove_dir_all(&temp_dir);
             1i32
         })?
     };
 
-    // Clean up temp files
+    // Clean up temp files.
     let _ = std::fs::remove_dir_all(&temp_dir);
 
-    if status.success() {
+    // Echo the captured streams so `run --emit-receipt` still shows program
+    // output. stdout goes to the real stdout ONLY when the receipt is written
+    // to a file; when the receipt itself is written to stdout ('-') we route
+    // the echoed program output to stderr to keep stdout pure JSON.
+    let captured_stdout = String::from_utf8_lossy(&run_output.stdout).into_owned();
+    let receipt_to_stdout = receipt_path == Path::new("-");
+    {
+        use std::io::Write as _;
+        if receipt_to_stdout {
+            let _ = std::io::stderr().write_all(&run_output.stdout);
+        } else {
+            let _ = std::io::stdout().write_all(&run_output.stdout);
+        }
+        let _ = std::io::stderr().write_all(&run_output.stderr);
+    }
+
+    let exit_code = run_output.status.code().unwrap_or(-1);
+
+    // Parse the captured stdout into an f64 series. `token.parse::<f64>()`
+    // accepts BOTH the C `%g` plain-decimal (`0.530827`) and scientific
+    // (`1.59908e+28`) forms the backend emits.
+    let (series, series_parsed) = parse_numeric_series(&captured_stdout);
+
+    // Re-derive source + input-graph digests from the same check pipeline the
+    // check-receipt path uses, so the two digests agree byte-for-byte.
+    let outcome = run_check(file)?;
+
+    let os = std::env::consts::OS.to_string();
+    let mut flags = vec![format!("invariant={invariant}"), format!("metric={metric}")];
+    if negative_fixture {
+        flags.push("negative-fixture".to_string());
+    }
+
+    let inputs = ScientificReceiptInputs {
+        source_path: file,
+        compiler_version: buildlang::VERSION,
+        language_version: outcome.language_version.clone(),
+        source_digest: ScientificDigest {
+            algorithm: outcome.source_digest.algorithm.to_string(),
+            hex: outcome.source_digest.hex.clone(),
+        },
+        input_graph_digest: ScientificDigest {
+            algorithm: outcome.input_graph_digest.algorithm.to_string(),
+            hex: outcome.input_graph_digest.hex.clone(),
+        },
+        target: "c",
+        os: &os,
+        exit_code,
+        series,
+        series_parsed,
+        metric: metric.to_string(),
+        units: None,
+        problem_label: problem.map(str::to_string),
+        negative_fixture,
+        flags,
+    };
+
+    let receipt = build_scientific_runtime_receipt(inputs);
+    write_scientific_runtime_receipt(receipt_path, &receipt)?;
+
+    // Exit-code semantics: emitting the receipt is the success signal. A
+    // program may exit nonzero (or, as a negative fixture, exit 0 while
+    // printing an increasing series); either way the receipt is written and
+    // records the observed exit_code and verdict. We return Ok so the emit
+    // succeeds; the receipt's receipt_status carries the PASS/FAIL verdict.
+    Ok(())
+}
+
+fn write_scientific_runtime_receipt(
+    path: &Path,
+    receipt: &ScientificRuntimeReceipt,
+) -> Result<(), i32> {
+    let json = serde_json::to_string_pretty(receipt).map_err(|err| {
+        eprintln!("Error serializing scientific-runtime receipt: {}", err);
+        1
+    })?;
+    if path == Path::new("-") {
+        println!("{}", json);
         Ok(())
     } else {
-        Err(status.code().unwrap_or(1))
+        std::fs::write(path, format!("{}\n", json)).map_err(|err| {
+            eprintln!(
+                "Error writing scientific-runtime receipt '{}': {}",
+                path.display(),
+                err
+            );
+            1
+        })
     }
 }
 
