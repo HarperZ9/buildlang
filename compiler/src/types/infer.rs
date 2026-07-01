@@ -269,6 +269,29 @@ fn extract_covered_variants(pattern: &ast::Pattern) -> Vec<String> {
     }
 }
 
+/// Whether an array element type may participate in elementwise broadcasting
+/// (`.+ .- .* ./`). Broadcasting is defined only for numeric elements
+/// (integer/float): the C backend lowers each element to a scalar arithmetic op,
+/// which is meaningful for numbers only. Non-numeric elements (`str`, `bool`,
+/// aggregates, ...) are rejected at the type level so they never reach codegen
+/// as a raw C error.
+///
+/// Still-unresolved element kinds pass through so we do not over-reject during
+/// inference: a bare type variable / inference var / generic `Param` may yet
+/// resolve to a number, and `Error` passes through to avoid cascading a second
+/// diagnostic on top of an already-reported error.
+fn is_broadcastable_elem(k: &TyKind) -> bool {
+    matches!(
+        k,
+        TyKind::Int(_)
+            | TyKind::Float(_)
+            | TyKind::Var(_)
+            | TyKind::Infer(_)
+            | TyKind::Param(_, _)
+            | TyKind::Error
+    )
+}
+
 impl<'ctx> TypeInfer<'ctx> {
     /// Create a new type inference engine.
     pub fn new(ctx: &'ctx mut TypeContext) -> Self {
@@ -3379,18 +3402,70 @@ impl<'ctx> TypeInfer<'ctx> {
                             );
                             return Ty::error();
                         }
+                        // Reject zero-length broadcast: there is no element to
+                        // operate on, and lowering it would dead-end inference or
+                        // emit an empty `double w[0]` declaration.
+                        if *l_len == 0 {
+                            self.error(
+                                TypeError::InvalidBinaryOp {
+                                    op: op.as_str().to_string(),
+                                    left: left_applied.clone(),
+                                    right: right_applied.clone(),
+                                },
+                                span,
+                            );
+                            return Ty::error();
+                        }
                         let _ = self.unify(l_elem, r_elem, span);
-                        Ty::array(self.apply(l_elem), *l_len)
+                        let elem_applied = self.apply(l_elem);
+                        if !is_broadcastable_elem(&elem_applied.kind) {
+                            self.error(
+                                TypeError::InvalidBinaryOp {
+                                    op: op.as_str().to_string(),
+                                    left: left_applied.clone(),
+                                    right: right_applied.clone(),
+                                },
+                                span,
+                            );
+                            return Ty::error();
+                        }
+                        Ty::array(elem_applied, *l_len)
                     }
                     (TyKind::Array(elem, len), _) => {
                         // array `.` scalar: broadcast the scalar over each element.
+                        let len = *len;
                         let _ = self.unify(elem, &right_applied, span);
-                        Ty::array(self.apply(elem), *len)
+                        let elem_applied = self.apply(elem);
+                        if !is_broadcastable_elem(&elem_applied.kind) {
+                            self.error(
+                                TypeError::InvalidBinaryOp {
+                                    op: op.as_str().to_string(),
+                                    left: left_applied.clone(),
+                                    right: right_applied.clone(),
+                                },
+                                span,
+                            );
+                            return Ty::error();
+                        }
+                        Ty::array(elem_applied, len)
                     }
                     (_, TyKind::Array(elem, len)) => {
                         // scalar `.` array: broadcast the scalar over each element.
+                        let len = *len;
                         let _ = self.unify(&left_applied, elem, span);
-                        Ty::array(self.apply(elem), *len)
+                        let elem_applied = self.apply(elem);
+                        if !is_broadcastable_elem(&elem_applied.kind) {
+                            self.error(
+                                TypeError::InvalidBinaryOp {
+                                    op: op.as_str().to_string(),
+                                    left: left_applied.clone(),
+                                    right: right_applied.clone(),
+                                },
+                                span,
+                            );
+                            return Ty::error();
+                        }
+                        Ty::array(elem_applied, len)
                     }
                     _ => {
                         self.error(
