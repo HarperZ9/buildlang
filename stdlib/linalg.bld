@@ -1,0 +1,121 @@
+// BuildLang Standard Library - Linear Algebra Module
+// Free functions for numeric vector algebra over the dynamic Vec<f64>.
+//
+// Built entirely on the f64 vector builtins (vec_new_f64, vec_push_f64,
+// vec_get_f64, vec_len) plus `sqrt` from the math builtins. Free functions
+// only: stdlib module merges prefix-mangle free functions and make them
+// callable by bare name after `mod linalg;`. No structs, impls, or generics.
+//
+// Distinct names (vec_add / vec_sub / ... / vec_dot / vec_sum / vec_norm)
+// avoid clashing with the graphics-vec builtins (dot / length / normalize).
+//
+// Length policy for binary elementwise ops: the loop iterates from 0 up to
+// `a`'s length and reads BOTH operands at every index with NO bounds checking
+// (the vec_get_f64 runtime does not bounds-check). Passing a `b` shorter than
+// `a` therefore reads past the end of `b`'s buffer: an out-of-bounds heap
+// over-read, which is undefined behavior. Callers MUST guarantee that `a` and
+// `b` have equal length. (No runtime length check is performed here.)
+
+// ---------------------------------------------------------------------------
+// Elementwise binary operations
+// ---------------------------------------------------------------------------
+
+fn vec_add(a: Vec<f64>, b: Vec<f64>) -> Vec<f64> {
+    let len = vec_len(a);
+    let mut result = vec_new_f64();
+    let mut i: i32 = 0;
+    while i < len {
+        vec_push_f64(result, vec_get_f64(a, i) + vec_get_f64(b, i));
+        i = i + 1;
+    }
+    result
+}
+
+fn vec_sub(a: Vec<f64>, b: Vec<f64>) -> Vec<f64> {
+    let len = vec_len(a);
+    let mut result = vec_new_f64();
+    let mut i: i32 = 0;
+    while i < len {
+        vec_push_f64(result, vec_get_f64(a, i) - vec_get_f64(b, i));
+        i = i + 1;
+    }
+    result
+}
+
+fn vec_mul(a: Vec<f64>, b: Vec<f64>) -> Vec<f64> {
+    let len = vec_len(a);
+    let mut result = vec_new_f64();
+    let mut i: i32 = 0;
+    while i < len {
+        vec_push_f64(result, vec_get_f64(a, i) * vec_get_f64(b, i));
+        i = i + 1;
+    }
+    result
+}
+
+fn vec_div(a: Vec<f64>, b: Vec<f64>) -> Vec<f64> {
+    let len = vec_len(a);
+    let mut result = vec_new_f64();
+    let mut i: i32 = 0;
+    while i < len {
+        vec_push_f64(result, vec_get_f64(a, i) / vec_get_f64(b, i));
+        i = i + 1;
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Scalar broadcast operations
+// ---------------------------------------------------------------------------
+
+fn vec_scale(v: Vec<f64>, s: f64) -> Vec<f64> {
+    let len = vec_len(v);
+    let mut result = vec_new_f64();
+    let mut i: i32 = 0;
+    while i < len {
+        vec_push_f64(result, vec_get_f64(v, i) * s);
+        i = i + 1;
+    }
+    result
+}
+
+fn vec_scalar_add(v: Vec<f64>, s: f64) -> Vec<f64> {
+    let len = vec_len(v);
+    let mut result = vec_new_f64();
+    let mut i: i32 = 0;
+    while i < len {
+        vec_push_f64(result, vec_get_f64(v, i) + s);
+        i = i + 1;
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Reductions
+// ---------------------------------------------------------------------------
+
+fn vec_dot(a: Vec<f64>, b: Vec<f64>) -> f64 {
+    let len = vec_len(a);
+    let mut total: f64 = 0.0;
+    let mut i: i32 = 0;
+    while i < len {
+        total = total + vec_get_f64(a, i) * vec_get_f64(b, i);
+        i = i + 1;
+    }
+    total
+}
+
+fn vec_sum(v: Vec<f64>) -> f64 {
+    let len = vec_len(v);
+    let mut total: f64 = 0.0;
+    let mut i: i32 = 0;
+    while i < len {
+        total = total + vec_get_f64(v, i);
+        i = i + 1;
+    }
+    total
+}
+
+fn vec_norm(v: Vec<f64>) -> f64 {
+    sqrt(vec_dot(v, v))
+}
