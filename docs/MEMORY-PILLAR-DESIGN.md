@@ -399,6 +399,161 @@ body); corpus c-execution stays 8/8 with the flag on; and a fresh adversarial pa
 double-free that ONLY the six-lens adversarial workflow caught - block-scoped drops
 has a larger soundness surface and must clear the same bar, not a smaller one).
 
+### Increment 4 (multi-block reclamation) — ASan verification
+
+Increment 4 (`multi_block_freeable` in `compiler/src/codegen/analysis/drops.rs`,
+merged into `current_fn_block_frees` in `compiler/src/codegen/backend/c.rs`,
+commit fc982e8) is wired behind `BUILDLANG_EXPERIMENTAL_FREE` and claims owners
+whose live range SPANS blocks — exactly the case increment 3
+(`live_range_confined_to_block`) declines, because that rule requires every
+`.ptr`/field borrow of the owner to occur in the SAME block as the owner's
+definition. This section is the empirical proof that increment 4's frees are
+sound and reclaim heap on such a program.
+
+**Fixture** (`compiler/tests/mem/multi_block_loop.bld`):
+
+```
+fn main() ~ Console {
+    let mut i = 0;
+    while i < 1000000 {
+        let s = i.to_string() + "!";
+        if i % 2 == 0 {
+            println!("even");
+        }
+        println!("{}", s);
+        i = i + 1;
+    }
+}
+```
+
+The `if i % 2 == 0 { ... }` splits the loop body into distinct basic blocks
+between the allocation (`i.to_string() + "!"`, a `build_string_concat` call)
+and the use (`println!("{}", s)`), so `s`'s definition and its `.ptr` borrow
+land in different blocks by construction.
+
+**Confirming increment 4, not increment 3, is the reclaimer.** Generating C
+with the flag off and on and diffing:
+
+```
+buildc compiler/tests/mem/multi_block_loop.bld --target c -o off.c   # BUILDLANG_EXPERIMENTAL_FREE unset
+BUILDLANG_EXPERIMENTAL_FREE=1 buildc compiler/tests/mem/multi_block_loop.bld --target c -o on.c
+diff off.c on.c
+```
+
+```
+1691a1692
+>     build_string_free(s);
+```
+
+The generated `main()` (identical between the two files apart from that one
+line) lowers to:
+
+```
+bb4:
+    _4 = build_string_new(__str0);
+    _5 = build_string_concat(_3, _4);   // s's buffer allocated HERE (bb4)
+    s = _5;
+    _7 = (i % 2);
+    _8 = (_7 == 0);
+    if (_8) goto bb7; else goto bb8;
+bb7:
+    _9 = __str1; printf(_9); goto bb10;
+bb8:
+bb9:
+    _11 = s.ptr;                         // s's ONLY borrow, in bb9 - a DIFFERENT
+    _12 = __str2; printf(_12, _11);      // block than bb4 where s was defined
+    goto bb11;
+bb10:
+    goto bb9;
+bb11:
+    build_string_free(s);                // the extra free, after the printf use
+    _13 = (i + 1); i = _13;
+    goto bb1;
+```
+
+Reasoning that this is increment 4's free, not increment 3's: `s` is defined
+in bb4 and its only `.ptr` borrow is read in bb9. `live_range_confined_to_block`
+(increment 3) scans every block other than the defining block for a use of the
+owner or its borrow temps and returns `false` on the first hit outside the
+def block — the borrow in bb9 (`bi != b`, since bb9's index differs from
+bb4's) trips that check immediately, so increment 3 declines `s` by
+construction. Increment 4's `multi_block_freeable` instead runs backward
+per-local liveness (`buffer_live_in`/`buffer_live_out`) and places the free at
+the start of bb11, the block where every backward path from a "buffer is
+live and dies here" block (bb9, via the isolated bb9->bb11 edge through the
+back-edge merge bb10) is anchored — i.e. exactly the multi-block liveness
+placement the increment implements. Since the free appears ONLY with the flag
+on, and increment 3's rule provably rejects `s`, this free is increment 4's.
+
+**ASan run** (MSVC BuildTools 2022, `vcvars64.bat` loaded so the ASan runtime
+DLL resolves):
+
+```
+call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+cl.exe /nologo /std:c11 /fsanitize=address /Fe:on.exe on.c
+on.exe
+```
+
+Result: exit code 0, zero `AddressSanitizer:` lines on stderr (checked across
+two independent runs), and complete correct output — 1,500,000 lines
+(1,000,000 `"{i}!"` lines + 500,000 `"even"` lines, matching the `i % 2 == 0`
+predicate over 1,000,000 iterations), ending on `999999!`. The flag-off build
+(`off.c` compiled the same way) is likewise ASan-clean, as expected (a leak
+alone does not trip ASan's UAF/double-free detectors). No heap-use-after-free,
+no double-free.
+
+**Peak memory.** Two measurements were taken, and they disagree, which is
+itself the finding:
+
+1. *Under ASan* (`cl /fsanitize=address`), sampling `Process.PeakWorkingSet64`
+   on the running child (Start-Process + a polling loop, PID-scoped, output
+   redirected to a file to avoid pipe backpressure): `on.exe` (freeing) peaked
+   at **99.8-101.1 MB** across two runs; `off.exe` (leaking) peaked at
+   **92.3-92.6 MB** across two runs. The freeing build is NOT smaller under
+   ASan — it is marginally larger. This is consistent with ASan's documented
+   quarantine behavior (moderate confidence, reasoned from ASan's known design
+   rather than inspected in this session): `/fsanitize=address` intercepts
+   `free()` and holds freed blocks in a poisoned quarantine (to catch
+   use-after-free) rather than returning them to the OS immediately, so
+   process-level peak working set under ASan does not reflect the
+   allocator-level effect of the extra `build_string_free` call. ASan is the
+   right tool for the soundness claim (no UAF/double-free) and the wrong tool
+   for the peak-memory claim.
+2. *Without ASan* (`cl /nologo /std:c11 /O2`, same `on.c`/`off.c`, same
+   measurement method): `on.exe` peaked at **18.79-18.80 MB** across three
+   runs; `off.exe` peaked at **34.25 MB** across two runs (a third run's
+   overall polling command timed out after collecting consistent samples;
+   individual per-run readings were reproducible). This is a real, consistent
+   ~1.8x reduction, in the expected direction. It is far more modest than
+   increment 3's previously recorded 265x (983 MB -> 3.3 MB): that entry does
+   not state its measurement tool, and per-iteration allocation size and
+   count were not necessarily identical to this fixture's small
+   `i.to_string() + "!"` buffers (a few bytes of payload each), so process
+   baseline memory (loaded DLLs, stack, CRT/heap bookkeeping) is a larger
+   fraction of the total here, compressing the visible ratio. The direction
+   (freeing bounds better than leaking) and the soundness (ASan-clean) are
+   the load-bearing claims; the exact multiplier is fixture-dependent and
+   should not be read as a general bound.
+
+**Commands used** (measurement methodology, for reproducibility): each `.exe`
+was launched via a tiny `.bat` wrapper that redirects stdout/stderr to files
+(pipe-based redirection from `Start-Process -RedirectStandardOutput`
+deadlocked once output exceeded the pipe buffer for this 1.5M-line program —
+worth knowing if this is reproduced), then polled every ~15 ms with
+`Get-Process -Name <procname> | Refresh(); .PeakWorkingSet64` until the
+process exited, taking the running maximum. Output completeness (exact line
+counts and content) was checked after every run to rule out a killed/timed-out
+process masquerading as a valid low-memory sample.
+
+**Conclusion.** Increment 4 reclaims a genuinely multi-block-live owner
+(verified by direct MIR/CFG reasoning against `live_range_confined_to_block`,
+not merely by the C diff) with zero use-after-free and zero double-free under
+two independent ASan runs of a 1,000,000-iteration loop. The bounded-peak-memory
+claim holds without ASan (freeing peaks ~1.8x lower than leaking, reproducibly)
+but does NOT hold as a peak-working-set measurement while ASan's quarantine is
+active — that is a limitation of the measurement tool for this specific
+metric, not evidence against the free's correctness or effect.
+
 ## Why this is documented rather than already implemented
 
 The transpiler/effects/receipts pillars were bounded, TDD-verifiable bricks and
