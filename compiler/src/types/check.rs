@@ -374,12 +374,7 @@ impl<'ctx> TypeChecker<'ctx> {
     }
 
     /// Report any field of `fields` whose type resolves to a `#[linear]` type.
-    fn check_fields_not_linear(
-        &mut self,
-        container: &str,
-        fields: &ast::StructFields,
-        span: Span,
-    ) {
+    fn check_fields_not_linear(&mut self, container: &str, fields: &ast::StructFields, span: Span) {
         let raw: Vec<(String, &ast::Type)> = match fields {
             StructFields::Named(fs) => fs
                 .iter()

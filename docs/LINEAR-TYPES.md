@@ -1,7 +1,11 @@
 # Linear Types (`#[linear]`) — Status & Honest Scope
 
-> Status: **experimental, not yet production-sound** (2026-06-30).
-> Opt-in. Off by default. No effect unless you write `#[linear]`.
+> Status: **experimental — a best-effort no-cloning LINT, not a proven-sound checker** (2026-07-01).
+> Opt-in. Off by default. No effect unless you write `#[linear]`. It catches the
+> common cloning mistakes and every class listed under "What is enforced" below,
+> but it is NOT a soundness guarantee: known residual holes remain (see "Known
+> residual"). Do not rely on it as a safety guarantee for no-cloning-critical use
+> until it is proven sound (a tracked, multi-iteration effort).
 
 `#[linear]` marks a struct or enum whose values are a tracked **resource**: a
 value of that type may be **moved/consumed at most once** (no-cloning). This one
@@ -22,75 +26,82 @@ fn main() ~ Console {
 Ordinary (non-`#[linear]`) types are entirely unaffected: they keep copy-like
 reuse. Borrows (`&q`) never consume.
 
-## Design: sound-over-complete by conservative rejection
+## Design: two layers (conservative AST gate + additive MIR lint)
 
-The analysis tracks consumption of **directly named** linear locals and
-parameters (a live/consumed slot per binding, with `if`/`match` branch merges and
-a loop guard). Because a value can appear in many compositional positions the
-slot-tracker cannot follow (aggregates, generics, closures, deref, ...), the
-checker takes the conservative stance: **a linear value is rejected anywhere it
-could escape tracking**, even if a particular use would have been safe. It favors
-never permitting a clone over accepting every safe program.
+The checker is two cooperating layers:
 
-## What is enforced (verified across adversarial passes)
+1. **AST conservative gate** (`types/infer.rs`, `types/check.rs`). Tracks
+   consumption of **directly named** linear locals/parameters (a live/consumed
+   slot per binding, with `if`/`match` branch merges and a loop guard), plus the
+   declaration-time **containment rule**. It is *sound-over-complete*: a linear
+   value is rejected anywhere it could escape the name-based tracker (aggregates,
+   generics, closures, deref, ...), even when a particular use would be safe. This
+   layer is imprecise (it over-rejects some safe compositional code) but that is a
+   usability cost, not a soundness cost.
 
-Each item below was a confirmed exploit that is now rejected, with a regression
-test in `compiler/src/types/check.rs` (`linear_*`):
+2. **MIR affine/borrow checker** (`codegen/analysis/linear.rs`, brick 2, 2026-07-01),
+   built on the reusable `codegen::analysis` dataflow substrate (liveness,
+   move-chains, dominators, CFG — the same substrate that powers drop insertion).
+   It runs post-lowering as an **additive** gate and closes classes the name-based
+   AST tracker structurally cannot follow, using place-based move/init dataflow,
+   borrow-provenance tracking, an interprocedural borrow-escape fixpoint (extended
+   through aggregates and indirect/fn-pointer calls), and match-idiom recognition.
+   Its errors surface as compile errors with spans.
 
-- Direct double-use of a local or **parameter** (`spend(coin); spend(coin)`).
-- Move via `let` then reuse; use in a branch then after (conservative union).
-- Storing a linear in a **tuple / array / array-repeat** (`(coin, _)`, `[coin; n]`).
-- Passing a linear to a **generic / mismatched parameter** (`id<T>(coin)`).
-- Storing a linear in a **generic or non-`#[linear]` struct field** (`Holder<T>{item:coin}`),
-  and the declaration-time **containment rule** (a non-linear aggregate may not
-  declare a linear field).
-- A **generic constructor / `Some`/`Ok`** payload, and a **builtin** arg (`vec_push`).
-- **Deref** out of a reference (`let a = *r`).
-- A **closure** that captures and consumes an outer linear.
-- An inner-block **shadow** reviving a consumed outer binding.
-- A **field read through a reference** (`w.coin` where `w: &Wrap`).
-- A **struct shorthand** field init (`Wallet { coin }`) consumes the moved local.
-- A **`while`/`while let` condition** that consumes an outer linear (re-evaluated).
-- A **method call on a borrowed linear receiver** (`(&coin).burn()`).
+## What is enforced (verified empirically via `buildc check`)
 
-## Known-open (NOT yet sound — do not rely on no-cloning here)
+Every item is a confirmed exploit that is now rejected, with a regression test.
+The AST gate and the MIR checker together cover:
 
-A third adversarial pass (2026-06-30) found these still-open classes. They are
-the reason this feature is labeled experimental:
+- Direct double-use of a local or **parameter**; move via `let` then reuse;
+  branch-consume-then-use (conservative union); loop-body consume.
+- Storing a linear in a **tuple / array / repeat**, a **generic / non-`#[linear]`
+  field**, a **generic constructor / `Some`/`Ok`**, a **builtin** collection; the
+  declaration-time **containment rule**.
+- **Move out of a shared borrow** (`let a = *r`), including when the borrow is
+  **laundered** through a tuple/array/struct/enum aggregate or a function return
+  (the interprocedural escape fixpoint follows aggregates), and through
+  **higher-order fn-pointer** forwarding (`apply(deref_any, &coin)`).
+- **Field read/move out of a `&`-borrowed aggregate** (`match &w { W{coin:c} => .. }`
+  for both struct and enum variants, and `w.coin` through `&Wrap`).
+- **Extracting a linear field twice** from an owned `#[linear]` struct
+  (`let a = w.coin; let b = w.coin`).
+- **Generic deref-and-return** through any path (`f<T>(r:&T)->T` laundering `*r`
+  through a struct/tuple/enum, incl. multi-level generic wrapper chains).
+- **Closure** capturing+consuming an outer linear; inner-block **shadow** revival;
+  **`while`/`while let` condition** consume; **method on a borrowed linear receiver**.
 
-1. **Pattern-match binding through a borrow** — `match &w { Wallet { coin: c } => spend(c) }`
-   mints a fresh owned linear `c` from a `&Wallet` without consuming `w`.
-   (`bind_pattern` ignores that the scrutinee is a reference.)
-2. **Enum-variant shorthand field init** — `Wrap::Has { item }` neither consumes
-   nor rejects the moved linear (the enum-literal path lacks the guard the
-   struct-literal path has).
-3. **Generic deref / generic-call result** — `fn deref_any<T>(r: &T) -> T { *r }`
-   launders a linear out of a borrow inside a generic body; more generally, a
-   generic call whose *result* unifies to a linear type is not tracked at the
-   bind site (the bind-time type is an unresolved var).
-4. **Match-guard fall-through** — a guard that consumes a linear, then a later arm
-   body consumes it again on the same runtime path (guards run even when the arm
-   is not taken).
-5. **Borrow-after-move** — reading `&q` after `q` was moved (use-after-move of
-   borrowed data; severity is contract-dependent — borrows are defined as
-   non-consuming, so this is arguably a separate borrow-lifetime concern).
+## Known residual (NOT yet closed — this is why it is a lint, not a guarantee)
+
+After brick 2 the residual is small but real. Do not rely on no-cloning for these:
+
+1. **`&mut`-match payload move** — `match b { Box::A(c) => c }` where `b: &mut` of a
+   linear enum, then the container `b` is used again: the payload is moved out of
+   the `&mut` and the container is reused, double-consuming the one resource. The
+   MIR checker deliberately excludes `&mut` from the move-out-of-borrow rule (a
+   sound fix needs container-reused-after-`&mut`-extract dataflow with real
+   over-rejection risk); left for the next hardening pass.
+2. **Un-enumerated advanced corners.** Adversarial testing keeps surfacing new
+   narrow root causes (this is expected: a complete affine checker is a
+   research-grade, multi-iteration effort — cf. Rust's borrow checker, Linear
+   Haskell). Treat any un-listed advanced composition (exotic higher-order,
+   trait-object dispatch, deep alias/reborrow chains) as **not yet guaranteed**.
 
 ## Path to true soundness
 
-The slot-tracker on the AST type checker has gone about as far as conservative
-rejection can cheaply reach. Full no-cloning soundness wants a proper
-**affine/linear move-and-borrow checker**, most naturally on **MIR** (where
-projections, moves, and borrows are explicit) rather than on the AST. That is a
-deliberate, multi-iteration piece of work (cf. Rust's borrow checker, Linear
-Haskell) and is the correct home for: move-out-of-borrow (covers cases 1, 3, 5),
-per-path guard/arm tracking (case 4), enum-literal moves (case 2), and the
-deferred **drop-without-consume** ("must use") half of linearity.
+The MIR affine/borrow checker is the right foundation and has closed the bulk of
+the documented open classes, but *completeness* is a deliberate, multi-brick
+effort. Remaining work: `&mut` move-out-with-reuse tracking, the
+**drop-without-consume** ("must use") half of linearity, and continued adversarial
+hardening until an adversarial sweep finds no constructible clone. Only then
+should the "sound no-cloning" claim be made.
 
 ## Methodology note
 
-This status is the product of three **adversarial verification passes** (a
-fan-out of attack agents by lens + independent per-finding verifiers, each
-running `buildc check` against the built compiler). Every "enforced" item above
-is a confirmed-and-fixed exploit; every "known-open" item is a confirmed,
-independently-verified live exploit. The honest takeaway: ship the verifier with
-the feature, and do not claim soundness the verifier has not earned.
+This status is the product of repeated **adversarial verification** — fan-outs of
+attack agents by lens, each constructing `.bld` programs and running the real
+`buildc check` binary, with confirmed clones executed (`buildc run`) to prove they
+are true double-consumes, not artifacts. Every "enforced" item is a
+confirmed-and-fixed exploit; every "known residual" item is a confirmed live
+exploit. The honest takeaway, unchanged: ship the verifier with the feature, and
+**do not claim soundness the verifier has not earned.**

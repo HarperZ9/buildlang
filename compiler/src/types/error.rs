@@ -189,6 +189,26 @@ pub enum TypeError {
     #[error("use of linear value `{name}` after it was consumed (linear values cannot be cloned or used twice)")]
     LinearUseAfterMove { name: String },
 
+    /// A `#[linear]` value was borrowed (read) after it was already consumed.
+    ///
+    /// A borrow reads the value without consuming it, but the value is already
+    /// gone: whatever consumed it took ownership, so there is nothing left to
+    /// read. Reported within this statement (MIR spans are statement-level).
+    /// Move the borrow before the consuming use, or restructure so the value is
+    /// consumed on exactly one path after every read.
+    #[error("borrow of linear value `{name}` after it was consumed within this statement (nothing remains to read once a linear value is moved)")]
+    LinearBorrowAfterMove { name: String },
+
+    /// A `#[linear]` value was moved out of a shared (`&`) borrow.
+    ///
+    /// A shared borrow grants read-only access; moving the referent out would
+    /// consume a value the borrow does not own, duplicating or invalidating it
+    /// past no-cloning. Reported within this statement (MIR spans are
+    /// statement-level). Take the value by `&mut`/by value, or read it through
+    /// the shared borrow without moving.
+    #[error("cannot move linear value `{name}` out of a shared borrow within this statement (a `&` borrow does not own its referent; moving it would violate no-cloning)")]
+    LinearMoveOutOfBorrow { name: String },
+
     /// A non-`#[linear]` aggregate has a field whose type is `#[linear]`.
     ///
     /// A linear value placed in an untracked aggregate could be read out

@@ -308,7 +308,11 @@ impl<'ctx> MirLowerer<'ctx> {
         let saved_fn = self.current_fn.take();
         let saved_vars = std::mem::take(&mut self.var_map);
 
-        let mut closure_builder = MirBuilder::new(closure_name.clone(), sig);
+        let mut closure_builder = MirBuilder::with_linear_type_names(
+            closure_name.clone(),
+            sig,
+            Arc::new(self.linear_type_names.clone()),
+        );
 
         // Map declared params
         for (i, param) in params.iter().enumerate() {
