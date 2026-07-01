@@ -6794,124 +6794,210 @@ fn resolve_modules_with_prefix(
 
 /// Rewrite calls to module-local functions within a function body.
 fn rewrite_intra_module_calls(body: &mut ast::Block, mod_defined: &HashSet<String>, prefix: &str) {
-    for stmt in &mut body.stmts {
+    walk_calls_in_block(body, &mut |ident: &mut ast::Ident| {
+        if mod_defined.contains(ident.name.as_ref()) {
+            ident.name = Arc::from(format!("{}_{}", prefix, ident.name));
+        }
+    });
+}
+
+/// Walk EVERY call expression reachable from a block and apply `rename` to each
+/// call's callee identifier. This is the single, EXHAUSTIVE structural walk
+/// shared by both intra-module prefixing and main-program imported-call
+/// rewriting. Using one exhaustive walker (rather than two ad-hoc walkers that
+/// each descended into only a handful of contexts and drifted apart) is what
+/// fixes bare module calls failing to resolve inside loop bodies, match arms,
+/// method-call arguments, and other previously un-walked contexts. The match is
+/// exhaustive on purpose: a new `ExprKind` variant forces this walker to be
+/// updated instead of silently regressing. NOTE: calls inside a `macro!(...)`
+/// invocation's argument tokens are NOT rewritten - macro args are unstructured
+/// tokens, so `println!("{}", vec_dot(a, b))` still needs the let-bind idiom.
+fn walk_calls_in_block(block: &mut ast::Block, rename: &mut dyn FnMut(&mut ast::Ident)) {
+    for stmt in &mut block.stmts {
         match &mut stmt.kind {
             ast::StmtKind::Expr(expr) | ast::StmtKind::Semi(expr) => {
-                rewrite_expr_node(expr, mod_defined, prefix);
+                walk_calls_in_expr(expr, rename);
             }
             ast::StmtKind::Local(local) => {
                 if let Some(ref mut init) = local.init {
-                    rewrite_expr_node(&mut init.expr, mod_defined, prefix);
+                    walk_calls_in_expr(&mut init.expr, rename);
                 }
             }
-            _ => {}
+            ast::StmtKind::Item(_) | ast::StmtKind::Empty | ast::StmtKind::Macro { .. } => {}
         }
     }
 }
 
-fn rewrite_expr_node(expr: &mut ast::Expr, mod_defined: &HashSet<String>, prefix: &str) {
+fn walk_calls_in_expr(expr: &mut ast::Expr, rename: &mut dyn FnMut(&mut ast::Ident)) {
+    use ast::ExprKind as E;
     match &mut expr.kind {
-        ast::ExprKind::Call { func, args } => {
-            if let ast::ExprKind::Ident(ref mut ident) = func.kind {
-                if mod_defined.contains(ident.name.as_ref()) {
-                    ident.name = Arc::from(format!("{}_{}", prefix, ident.name));
+        E::Call { func, args } => {
+            if let E::Ident(ref mut ident) = func.kind {
+                rename(ident);
+            }
+            walk_calls_in_expr(func, rename);
+            for arg in args {
+                walk_calls_in_expr(arg, rename);
+            }
+        }
+        E::MethodCall { receiver, args, .. } => {
+            walk_calls_in_expr(receiver, rename);
+            for arg in args {
+                walk_calls_in_expr(arg, rename);
+            }
+        }
+        E::Binary { left, right, .. } => {
+            walk_calls_in_expr(left, rename);
+            walk_calls_in_expr(right, rename);
+        }
+        E::Assign { target, value, .. } => {
+            walk_calls_in_expr(target, rename);
+            walk_calls_in_expr(value, rename);
+        }
+        E::Index { expr: e, index } => {
+            walk_calls_in_expr(e, rename);
+            walk_calls_in_expr(index, rename);
+        }
+        E::Unary { expr: e, .. }
+        | E::Deref(e)
+        | E::Ref { expr: e, .. }
+        | E::Field { expr: e, .. }
+        | E::TupleField { expr: e, .. }
+        | E::Cast { expr: e, .. }
+        | E::TypeAscription { expr: e, .. }
+        | E::AIInfer { expr: e, .. }
+        | E::Try(e)
+        | E::Await(e)
+        | E::Paren(e)
+        | E::Closure { body: e, .. } => {
+            walk_calls_in_expr(e, rename);
+        }
+        E::Array(items) | E::Tuple(items) => {
+            for it in items {
+                walk_calls_in_expr(it, rename);
+            }
+        }
+        E::ArrayRepeat { element, count } => {
+            walk_calls_in_expr(element, rename);
+            walk_calls_in_expr(count, rename);
+        }
+        E::Struct { fields, rest, .. } => {
+            for f in fields {
+                if let Some(ref mut v) = f.value {
+                    walk_calls_in_expr(v, rename);
                 }
             }
-            rewrite_expr_node(func, mod_defined, prefix);
-            for arg in args {
-                rewrite_expr_node(arg, mod_defined, prefix);
+            if let Some(ref mut r) = rest {
+                walk_calls_in_expr(r, rename);
             }
         }
-        ast::ExprKind::Binary { left, right, .. } => {
-            rewrite_expr_node(left, mod_defined, prefix);
-            rewrite_expr_node(right, mod_defined, prefix);
-        }
-        ast::ExprKind::Unary { expr: inner, .. } => {
-            rewrite_expr_node(inner, mod_defined, prefix);
-        }
-        ast::ExprKind::If {
+        E::If {
             condition,
+            then_branch,
+            else_branch,
+        } => {
+            walk_calls_in_expr(condition, rename);
+            walk_calls_in_block(then_branch, rename);
+            if let Some(ref mut eb) = else_branch {
+                walk_calls_in_expr(eb, rename);
+            }
+        }
+        E::IfLet {
+            expr: e,
             then_branch,
             else_branch,
             ..
         } => {
-            rewrite_expr_node(condition, mod_defined, prefix);
-            rewrite_intra_module_calls(then_branch, mod_defined, prefix);
+            walk_calls_in_expr(e, rename);
+            walk_calls_in_block(then_branch, rename);
             if let Some(ref mut eb) = else_branch {
-                rewrite_expr_node(eb, mod_defined, prefix);
+                walk_calls_in_expr(eb, rename);
             }
         }
-        ast::ExprKind::Block(block) => {
-            rewrite_intra_module_calls(block, mod_defined, prefix);
+        E::Match { scrutinee, arms } => {
+            walk_calls_in_expr(scrutinee, rename);
+            for arm in arms {
+                if let Some(ref mut g) = arm.guard {
+                    walk_calls_in_expr(g, rename);
+                }
+                walk_calls_in_expr(&mut arm.body, rename);
+            }
         }
-        ast::ExprKind::Return(Some(ref mut inner)) => {
-            rewrite_expr_node(inner, mod_defined, prefix);
+        E::While {
+            condition, body, ..
+        } => {
+            walk_calls_in_expr(condition, rename);
+            walk_calls_in_block(body, rename);
         }
-        _ => {}
+        E::WhileLet { expr: e, body, .. } => {
+            walk_calls_in_expr(e, rename);
+            walk_calls_in_block(body, rename);
+        }
+        E::For { iter, body, .. } => {
+            walk_calls_in_expr(iter, rename);
+            walk_calls_in_block(body, rename);
+        }
+        E::Loop { body, .. } | E::Unsafe(body) | E::Async { body, .. } => {
+            walk_calls_in_block(body, rename);
+        }
+        E::Handle { handlers, body, .. } => {
+            for h in handlers {
+                walk_calls_in_expr(&mut h.body, rename);
+            }
+            walk_calls_in_block(body, rename);
+        }
+        E::Block(block) => {
+            walk_calls_in_block(block, rename);
+        }
+        E::Return(opt) | E::Resume(opt) => {
+            if let Some(ref mut e) = opt {
+                walk_calls_in_expr(e, rename);
+            }
+        }
+        E::Break { value, .. } => {
+            if let Some(ref mut e) = value {
+                walk_calls_in_expr(e, rename);
+            }
+        }
+        E::Range { start, end, .. } => {
+            if let Some(ref mut s) = start {
+                walk_calls_in_expr(s, rename);
+            }
+            if let Some(ref mut en) = end {
+                walk_calls_in_expr(en, rename);
+            }
+        }
+        E::AIQuery { prompt, options } => {
+            walk_calls_in_expr(prompt, rename);
+            for (_, e) in options {
+                walk_calls_in_expr(e, rename);
+            }
+        }
+        E::Perform { args, .. } => {
+            for arg in args {
+                walk_calls_in_expr(arg, rename);
+            }
+        }
+        // Leaves and un-rewritable contexts: identifiers/paths/literals hold no
+        // nested calls; `break`/`continue` labels are not exprs; macro argument
+        // tokens are unstructured and cannot be structurally rewritten here.
+        E::Literal(_)
+        | E::Ident(_)
+        | E::Path(_)
+        | E::Continue { .. }
+        | E::Macro { .. }
+        | E::Error => {}
     }
 }
 
 /// Rewrite bare function calls in the main program to use module-prefixed names.
 /// E.g., `i32_min(a, b)` → `core_i32_min(a, b)` when `core.bld` defines `i32_min`.
 fn rewrite_imported_calls(body: &mut ast::Block, imported: &HashMap<String, String>) {
-    for stmt in &mut body.stmts {
-        match &mut stmt.kind {
-            ast::StmtKind::Expr(expr) | ast::StmtKind::Semi(expr) => {
-                rewrite_imported_expr(expr, imported);
-            }
-            ast::StmtKind::Local(local) => {
-                if let Some(ref mut init) = local.init {
-                    rewrite_imported_expr(&mut init.expr, imported);
-                }
-            }
-            _ => {}
+    walk_calls_in_block(body, &mut |ident: &mut ast::Ident| {
+        if let Some(prefixed) = imported.get(ident.name.as_ref()) {
+            ident.name = Arc::from(prefixed.as_str());
         }
-    }
-}
-
-fn rewrite_imported_expr(expr: &mut ast::Expr, imported: &HashMap<String, String>) {
-    match &mut expr.kind {
-        ast::ExprKind::Call { func, args } => {
-            if let ast::ExprKind::Ident(ref mut ident) = func.kind {
-                if let Some(prefixed) = imported.get(ident.name.as_ref()) {
-                    ident.name = Arc::from(prefixed.as_str());
-                }
-            }
-            rewrite_imported_expr(func, imported);
-            for arg in args {
-                rewrite_imported_expr(arg, imported);
-            }
-        }
-        ast::ExprKind::Binary { left, right, .. } => {
-            rewrite_imported_expr(left, imported);
-            rewrite_imported_expr(right, imported);
-        }
-        ast::ExprKind::Unary { expr: inner, .. } => {
-            rewrite_imported_expr(inner, imported);
-        }
-        ast::ExprKind::If {
-            condition,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            rewrite_imported_expr(condition, imported);
-            rewrite_imported_calls(then_branch, imported);
-            if let Some(ref mut eb) = else_branch {
-                rewrite_imported_expr(eb, imported);
-            }
-        }
-        ast::ExprKind::Block(block) => {
-            rewrite_imported_calls(block, imported);
-        }
-        ast::ExprKind::Return(Some(ref mut inner)) => {
-            rewrite_imported_expr(inner, imported);
-        }
-        ast::ExprKind::Assign { value, .. } => {
-            rewrite_imported_expr(value, imported);
-        }
-        _ => {}
-    }
+    });
 }
 
 fn cmd_compile(
