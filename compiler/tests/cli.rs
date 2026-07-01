@@ -10951,6 +10951,146 @@ fn corpus_verify_checks_lsp_dispatch_receipt() {
     );
 }
 
+// -- C/Rust execution receipts: negative fixtures. These were the ONLY corpus
+//    receipt family with zero tamper coverage; a verifier never demonstrated
+//    failing is indistinguishable from a decorative one. --
+
+/// Transform the C execution receipt in a corpus copy.
+fn write_c_execution_receipt_copy(
+    corpus_root: &Path,
+    transform: impl FnOnce(serde_json::Value) -> serde_json::Value,
+) {
+    let receipt_path = corpus_root
+        .join("receipts")
+        .join("c-execution-2026-06-13.json");
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt_path).expect("read c execution receipt"))
+            .expect("parse c execution receipt");
+    let rendered = serde_json::to_string_pretty(&transform(receipt))
+        .expect("render modified c execution receipt");
+    fs::write(&receipt_path, format!("{rendered}\n")).expect("write modified c execution receipt");
+}
+
+#[test]
+fn corpus_verify_rejects_manifest_stdout_tamper() {
+    // Tamper the expected stdout CONSISTENTLY in both the manifest and the C
+    // execution receipt, so the receipt/manifest cross-check passes and the
+    // failure can only come from the LIVE re-run comparing real program
+    // output. This proves verify_c_corpus_stdout is a verifier that can fail,
+    // not a bookkeeping echo.
+    let corpus_root = temp_semantic_corpus("manifest_stdout_tamper");
+    let manifest_path = corpus_root.join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("read manifest"))
+            .expect("parse manifest");
+    manifest["programs"][0]["expected_stdout"] =
+        serde_json::Value::String("tampered-stdout\n".to_string());
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).expect("render manifest"),
+    )
+    .expect("write tampered manifest");
+    // BOTH execution receipts bind expected_stdout to the manifest, so both
+    // must carry the same tampered value for the bookkeeping cross-checks to
+    // pass and the live re-run to be the check that fires.
+    write_c_execution_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["programs"][0]["expected_stdout"] =
+            serde_json::Value::String("tampered-stdout\n".to_string());
+        receipt
+    });
+    let rust_receipt_path = corpus_root
+        .join("receipts")
+        .join("rust-execution-2026-06-13.json");
+    let mut rust_receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&rust_receipt_path).expect("read rust execution receipt"))
+            .expect("parse rust execution receipt");
+    rust_receipt["programs"][0]["expected_stdout"] =
+        serde_json::Value::String("tampered-stdout\n".to_string());
+    fs::write(
+        &rust_receipt_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&rust_receipt).expect("render rust execution receipt")
+        ),
+    )
+    .expect("write tampered rust execution receipt");
+
+    assert_corpus_verify_rejects(&corpus_root, "semantic corpus stdout drift");
+}
+
+#[test]
+fn corpus_verify_rejects_c_execution_pass_count_tamper() {
+    let corpus_root = temp_semantic_corpus("c_exec_pass_count");
+    write_c_execution_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["result"]["passed"] = serde_json::Value::from(3);
+        receipt
+    });
+
+    assert_corpus_verify_rejects(&corpus_root, "c receipt pass count mismatch");
+}
+
+#[test]
+fn corpus_verify_rejects_c_execution_program_list_truncation() {
+    let corpus_root = temp_semantic_corpus("c_exec_program_truncation");
+    write_c_execution_receipt_copy(&corpus_root, |mut receipt| {
+        let programs = receipt["programs"].as_array_mut().expect("programs array");
+        programs.pop();
+        receipt
+    });
+
+    assert_corpus_verify_rejects(&corpus_root, "c receipt program count mismatch");
+}
+
+#[test]
+fn corpus_verify_rejects_capability_metadata_tamper() {
+    // The stored capability facts must match a FRESH derivation from program
+    // source through the type checker. A receipt claiming an extra capability
+    // (or a missing one) must be rejected, not string-compared into a pass.
+    let corpus_root = temp_semantic_corpus("capability_metadata_tamper");
+    write_c_execution_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["observed_capabilities"]
+            .as_array_mut()
+            .expect("observed_capabilities array")
+            .push(serde_json::Value::String("Network".to_string()));
+        receipt
+    });
+
+    assert_corpus_verify_rejects(&corpus_root, "c receipt capability metadata drift");
+}
+
+#[test]
+fn corpus_verify_rejects_capability_gate_stamp_tamper() {
+    // The gate verdict itself is checked; a receipt with the gate blanked out
+    // (or altered) must fail even when all counts and program lists match.
+    let corpus_root = temp_semantic_corpus("capability_gate_tamper");
+    write_c_execution_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["capability_gate"] = serde_json::Value::String("skipped".to_string());
+        receipt
+    });
+
+    assert_corpus_verify_rejects(&corpus_root, "c receipt capability metadata drift");
+}
+
+#[test]
+fn corpus_verify_rejects_per_program_surface_tamper() {
+    // Deleting ONE program's stdout surface while seven other programs still
+    // contribute Console defeated a union-level cross-check; the per-program
+    // check must catch it (the review's confirmed escape).
+    let corpus_root = temp_semantic_corpus("per_program_surface_tamper");
+    let manifest_path = corpus_root.join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("read manifest"))
+            .expect("parse manifest");
+    manifest["programs"][0]["surfaces"] = serde_json::Value::Array(Vec::new());
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).expect("render manifest"),
+    )
+    .expect("write tampered manifest");
+
+    assert_corpus_verify_rejects(&corpus_root, "corpus manifest surface drift for program");
+}
+
 #[test]
 fn corpus_verify_rejects_module_graph_schema_drift() {
     let corpus_root = temp_semantic_corpus("module_graph_schema");
@@ -13969,7 +14109,8 @@ fn scientific_runtime_receipt_emit_and_verify_round_trip() {
     );
 
     // 3) Tamper the sealed receipt (flip the stored invariant verdict PASS -> FAIL).
-    //    The re-run recomputes PASS, so verification must reject the disagreement.
+    //    The re-run recomputes PASS, so verification must reject the disagreement
+    //    with the SPECIFIC failure class, not just "anything failed".
     let mut tampered: serde_json::Value = emitted.clone();
     tampered["invariant"]["status"] = serde_json::Value::String("FAIL".to_string());
     fs::write(&receipt, serde_json::to_string_pretty(&tampered).unwrap())
@@ -13984,6 +14125,39 @@ fn scientific_runtime_receipt_emit_and_verify_round_trip() {
         "a tampered receipt must fail verification\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&verify_tampered.stdout),
         String::from_utf8_lossy(&verify_tampered.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&verify_tampered.stderr)
+            .contains("failure_class: INVARIANT_STATUS_DRIFT"),
+        "the failure must carry its machine-readable class\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_tampered.stderr)
+    );
+
+    // 3b) A receipt with a DUPLICATED key is rejected at load: serde_json is
+    //     last-duplicate-wins, so a duplicated verdict key is a seal-forgery
+    //     vector (hasher sees one value, permissive reader the other). The
+    //     strict loader must refuse it outright.
+    let pretty = serde_json::to_string_pretty(&emitted).unwrap();
+    let with_dup = pretty.replacen(
+        "\"receipt_status\":",
+        "\"receipt_status\": \"PASS\",\n  \"receipt_status\":",
+        1,
+    );
+    assert_ne!(pretty, with_dup, "duplication must have been injected");
+    fs::write(&receipt, with_dup).expect("write duplicate-key receipt");
+    let verify_dup = buildc()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .output()
+        .expect("verify duplicate-key receipt");
+    assert!(
+        !verify_dup.status.success(),
+        "a duplicate-key receipt must be rejected"
+    );
+    assert!(
+        String::from_utf8_lossy(&verify_dup.stderr).contains("duplicate object key"),
+        "rejection must name the duplicate key\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_dup.stderr)
     );
 
     let _ = fs::remove_dir_all(&dir);
