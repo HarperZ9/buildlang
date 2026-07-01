@@ -1,6 +1,12 @@
 # Design: MIR Affine/Ownership Foundation
 
-Status: draft for review (2026-06-30). Governed by
+Status: first brick IMPLEMENTED (2026-06-30) on branch `feat/mir-affine-foundation`
+(commits `bf5709f..ca6ab59`) — see `STATUS.md` memory-pillar bullet and
+`docs/MEMORY-PILLAR-DESIGN.md` for verification evidence. The algorithm description
+below has been reconciled against the shipped implementation (a planning-time
+placement rule was found unsound and replaced during implementation; see the
+note in "First brick" below). Bricks 2 (linear-on-MIR) and 3 (drop flags +
+default-on) remain open, scoped but not built. Governed by
 `docs/UNIVERSAL_SUBSTRATE_DIRECTIVE_2026-06-30.md` (foundation pillar, first brick).
 
 ## Summary
@@ -92,21 +98,67 @@ Generalize the shipped block-scoped drops to multi-block live ranges using real 
 
 **What it adds.** Today a local is freed only if its whole live range (including borrow
 temps) is confined to one block on an isolated edge. Increment 4 frees an owned heap local
-`L` at the true end of its live range even when that range spans blocks, by placing the
-free at the start of the unique block `S` where `L` and all its borrow temps are provably
-dead and which is reached after the last use on every path (once per iteration for a loop
-body, reclaiming each iteration's buffer).
+`L` at the start of a block `S` where `L`'s buffer is provably dead on entry and every path
+into `S` passed through a real death of the buffer, even when `L`'s live range spans
+multiple blocks (once per iteration for a loop body, reclaiming each iteration's buffer).
 
-**Soundness rule (non-negotiable, unchanged from the project standard).** Free `L` only
-when it is provably owned, provably dead, and provably non-escaping. Concretely, all must
-hold: `L` passes the ownership/move/escape/taint/one-def gates of the second increment;
-`L`'s effective live range (self plus borrow temps, from `liveness.rs`) ends before `S`;
-`S` post-dominates every use of `L` and is dominated by `L`'s def (so the free runs on
-every path, after every use, exactly once); and placing the free at `S`'s start lands
-*after* any terminator that consumes a `.ptr` borrow (the use-after-free hazard the third
-increment documented: a `.ptr` borrow flowing into a `printf` terminator must be freed
-after the terminator, never before). When placement is ambiguous or would require a drop
-flag (conditional ownership, non-isolated merge edges), **decline and leak** (safe).
+**Reconciliation note (read before the rule below).** This section originally specified a
+different placement rule: free at "the unique block `S` where the buffer dies on every
+incoming edge," gated by "every predecessor has the buffer live at exit" (`buf_out[P]`
+true for all `P`). During implementation that rule was found **unsound** and was
+**replaced**, not merely refined:
+
+- Block-level `buf_out[P]` is a union over *all* of `P`'s successors, so requiring it true
+  for every predecessor of `S` is both **not necessary** (a predecessor that consumes the
+  buffer via a real use inside itself — e.g. the block containing the last `.ptr` borrow's
+  consuming call — has `buf_out` false, a false negative that would wrongly decline a sound
+  free) and **not sufficient** (a predecessor's `buf_out` can be true purely because of a
+  sibling successor that still needs the buffer, a false positive that would place an
+  unsound free on a split frontier).
+- A second issue surfaced only after unit + ASan passed: a death block that is also a
+  **loop header** (reached via a back-edge) has its START re-executed once per iteration,
+  so freeing there double-frees on every iteration after the first. A fresh adversarial
+  review pass caught this; it is now an explicit exclusion (see below), the same pattern
+  by which the second free increment's real double-free was caught — the adversarial gate
+  keeps finding what unit tests and ASan alone miss.
+
+**Soundness rule as actually shipped** (`multi_block_freeable` in
+`compiler/src/codegen/analysis/drops.rs`; non-negotiable, unchanged from the project
+standard that a free must be provably owned, provably dead, and provably non-escaping).
+Free owner `L` (defined at block `def`) at the **start** of block `S` iff `S` is the
+**exactly one** reachable, non-entry block satisfying all of:
+
+1. `L`'s buffer is **dead at `S`'s entry** (`buf_in[S]` false).
+2. `S` is **not a loop header**: no predecessor `P` of `S` is reached via a back-edge, i.e.
+   no `P` with `S` dominating `P`. (Without this exclusion, `S`'s start re-executes per
+   iteration and a once-allocated buffer would double-free — the bug the adversarial pass
+   caught and commit `9f8b866` fixed.)
+3. `def` **dominates** `S` (the free only runs on paths where `L` was actually allocated).
+4. At least one predecessor `P` of `S` is **terminal**: the buffer is live somewhere inside
+   `P` and dies by `P`'s exit (`buf_in[P]` true, `buf_out[P]` false) — a real death
+   happened in `P`, so there is something to free.
+5. **Every** predecessor of `S` is either terminal (per #4) or **clean** (`buf_in[P]` and
+   `buf_out[P]` both false — the buffer was never live in `P` at all), and every clean
+   predecessor's own predecessors recursively satisfy the same terminal-or-clean property
+   back toward `def` (`clean_chain_ok`, a bounded backward walk memoized per owner). A
+   clean block that descends from a block where the buffer *was* live is a branch that
+   skipped the buffer's only use on that path — the signature of a **split death
+   frontier** (e.g. an `if`/`else` where one arm uses the buffer and the other doesn't) —
+   and voids `S` as a candidate.
+
+If zero or more than one block `S` satisfies all five conditions, **decline and leak**
+(safe): the buffer's death frontier is ambiguous or split, and closing it soundly needs a
+drop flag (deferred to brick 3). This rule uses only per-block liveness facts (`buf_in`/
+`buf_out`, already sound) plus dominance — no new dataflow beyond what `liveness.rs`
+already computes.
+
+**Load-bearing precondition, unchanged from the plan.** `candidates` must be
+escape-filtered before reaching this function — production candidates come exclusively
+from `CBackend::sound_owned_candidates`, which runs `owned_string_escapes` (rejecting
+multi-hop `.ptr` copies and `Ref`/`AddressOf` aliasing) first. The buffer-liveness overlay
+this rule consumes is a one-hop view and is blind to multi-hop `.ptr` copies and
+`Ref`/`AddressOf`; passing it unfiltered owners would be unsound. `multi_block_freeable`
+trusts its `candidates` input and does not re-verify non-escape itself.
 
 **Disjointness.** Increment-4 frees are disjoint from the increment 1-3 free sets: a local
 is claimed by exactly one increment's logic. This is the same discipline that made
