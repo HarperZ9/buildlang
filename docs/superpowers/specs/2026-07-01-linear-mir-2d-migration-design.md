@@ -1,3 +1,14 @@
+> **OUTCOME (2026-07-01, reconciled): the migration in this spec was ATTEMPTED and REVERTED.**
+> Removing the AST tracker (commit b6bdf71) was reverted (600868a) after adversarial
+> testing proved the MIR checker was not a sound superset: a *precise* MIR affine
+> checker has many soundness holes around aggregates, interprocedural returns, and
+> higher-order flows, and closing them all is a research-grade multi-brick effort. The
+> shipped outcome is the SOUNDNESS-FIRST posture: the AST conservative gate stays as the
+> sound-over-complete gate, and the MIR affine/borrow checker runs ADDITIVELY (a
+> best-effort lint that closes the documented open classes + aggregate/generic/fn-pointer
+> laundering). Full replacement of the AST tracker by a complete, sound, precise MIR
+> checker is deferred to a future brick. See `docs/LINEAR-TYPES.md` for the honest scope.
+
 # Design: Linear-on-MIR 2d — Migration off the AST tracker + adversarial verification
 
 Status: draft for execution (2026-07-01), branch `feat/linear-mir-checker`. Fourth of four
