@@ -776,3 +776,124 @@ mod buildlang_extensions {
 
     // TODO: Add more BuildLang-specific tests when features are fully implemented
 }
+
+// =============================================================================
+// POWER OPERATOR (`**`) TESTS  (Task I2)
+// =============================================================================
+
+mod power_operator {
+    use super::*;
+
+    /// Parse a single expression from the body of `fn main() { <expr>; }` and
+    /// return it. Panics if the source does not parse or the body does not hold
+    /// exactly one expression statement.
+    fn expr_in_main(body: &str) -> Expr {
+        let src = format!("fn main() {{ {body}; }}");
+        let module = parse(&src).expect("source must parse");
+        let func = match &module.items[0].kind {
+            ItemKind::Function(f) => f,
+            other => panic!("expected function item, got {other:?}"),
+        };
+        let block = func.body.as_ref().expect("main must have a body");
+        assert_eq!(block.stmts.len(), 1, "expected exactly one statement");
+        match &block.stmts[0].kind {
+            StmtKind::Semi(e) | StmtKind::Expr(e) => (**e).clone(),
+            other => panic!("expected expression statement, got {other:?}"),
+        }
+    }
+
+    /// LOAD-BEARING: prefix `**x` must remain a double dereference
+    /// (`*(*x)`), NOT a power operation. `Star` was already a prefix deref
+    /// operator, so `**ptr` lexed as two `Star`s before I2; the new `StarStar`
+    /// token must reproduce that meaning in prefix position via two nested
+    /// `Deref` nodes. This is what keeps I2 backward compatible.
+    #[test]
+    fn prefix_double_star_is_double_deref() {
+        let expr = expr_in_main("**x");
+        match &expr.kind {
+            ExprKind::Deref(inner) => match &inner.kind {
+                ExprKind::Deref(innermost) => match &innermost.kind {
+                    ExprKind::Ident(id) => assert_eq!(&*id.name, "x"),
+                    other => panic!("innermost must be `x`, got {other:?}"),
+                },
+                other => panic!("prefix `**x` must be Deref(Deref(_)), inner was {other:?}"),
+            },
+            other => panic!("prefix `**x` must be a Deref, got {other:?}"),
+        }
+    }
+
+    /// Infix `a ** b` must parse to `BinOp::Pow` (not two derefs, not Mul).
+    #[test]
+    fn infix_double_star_is_pow() {
+        let expr = expr_in_main("a ** b");
+        match &expr.kind {
+            ExprKind::Binary { op, .. } => assert_eq!(*op, BinOp::Pow),
+            other => panic!("`a ** b` must be BinOp::Pow, got {other:?}"),
+        }
+    }
+
+    /// `**` is right-associative: `2 ** 3 ** 2` parses as `2 ** (3 ** 2)`,
+    /// so the right operand is itself a `Pow`, and the left is the literal 2.
+    #[test]
+    fn double_star_is_right_associative() {
+        let expr = expr_in_main("2 ** 3 ** 2");
+        match &expr.kind {
+            ExprKind::Binary {
+                op: BinOp::Pow,
+                left,
+                right,
+            } => {
+                assert!(
+                    matches!(&left.kind, ExprKind::Literal(_)),
+                    "left of outer ** must be the literal 2, got {:?}",
+                    left.kind
+                );
+                assert!(
+                    matches!(&right.kind, ExprKind::Binary { op: BinOp::Pow, .. }),
+                    "right of outer ** must itself be a Pow (right-assoc), got {:?}",
+                    right.kind
+                );
+            }
+            other => panic!("`2 ** 3 ** 2` must be a Pow, got {other:?}"),
+        }
+    }
+
+    /// `**` binds tighter than `*`: `2 * 3 ** 2` parses as `2 * (3 ** 2)`,
+    /// so the top node is Mul whose right operand is a Pow.
+    #[test]
+    fn double_star_binds_tighter_than_product() {
+        let expr = expr_in_main("2 * 3 ** 2");
+        match &expr.kind {
+            ExprKind::Binary {
+                op: BinOp::Mul,
+                right,
+                ..
+            } => assert!(
+                matches!(&right.kind, ExprKind::Binary { op: BinOp::Pow, .. }),
+                "right of `*` must be a Pow, got {:?}",
+                right.kind
+            ),
+            other => panic!("`2 * 3 ** 2` must be Mul at the top, got {other:?}"),
+        }
+    }
+
+    /// Documented semantics: unary minus binds LOOSER than `**`, so
+    /// `-2 ** 2` parses as `-(2 ** 2)` (the Neg wraps the Pow). This matches
+    /// the Julia/Python convention `-a**b == -(a**b)`. At runtime that is
+    /// `-(2**2) == -4` (see the `neg_power_semantics` e2e test in cli.rs).
+    #[test]
+    fn neg_double_star_binds_power_inside_neg() {
+        let expr = expr_in_main("-2 ** 2");
+        match &expr.kind {
+            ExprKind::Unary {
+                op: UnaryOp::Neg,
+                expr: inner,
+            } => assert!(
+                matches!(&inner.kind, ExprKind::Binary { op: BinOp::Pow, .. }),
+                "operand of unary minus must be a Pow, got {:?}",
+                inner.kind
+            ),
+            other => panic!("`-2 ** 2` must be Neg(Pow(..)), got {other:?}"),
+        }
+    }
+}
