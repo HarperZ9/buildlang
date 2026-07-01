@@ -26,7 +26,7 @@
 //! direct single-move / loop-rebind / borrow-only cases are pinned precise by
 //! the unit tests so this conservatism does not regress safe code.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::codegen::ir::{
     LocalId, MirBlock, MirFunction, MirPlace, MirRValue, MirStmtKind, MirTerminator, MirValue,
@@ -68,52 +68,69 @@ fn local_name(func: &MirFunction, id: LocalId) -> String {
         .unwrap_or_else(|| format!("_{}", id.0))
 }
 
-/// The pointee of a `Deref`/leading-`Deref` place: the local behind a
-/// reference. `MirValue::Local(r)` where `r` is a shared `&Linear` referent.
-/// A deref moves the referent out; if the referent is linear and reached via a
-/// SHARED borrow, that is a move-out-of-shared-borrow.
+/// Build the set of pointer locals that are SHARED (`&`, `is_mut == false`)
+/// borrows OF A LINEAR local, by scanning statement provenance. We do NOT rely
+/// on any annotation on the pointer local: real 2a lowering tags only linear
+/// ADT `Struct` locals, never a `&Coin` binding (whose type is
+/// `Ptr(Struct("Coin"))`). Instead we recover the borrow from its defining
+/// statement:
 ///
-/// We determine "referent is linear via a shared borrow" from the pointer
-/// local: if the pointer local is `#[linear]` itself, or the pointer is a
-/// non-`&mut` reference to a linear value. In MIR at this stage the borrow's
-/// mutability lives on the local's `is_mut`: a `&mut` binding has `is_mut ==
-/// true`, a shared `&` binding has `is_mut == false`. We treat a deref of a
-/// non-mut pointer to a linear referent as the illegal shared move-out.
-fn shared_ref_to_linear(func: &MirFunction, ptr: LocalId) -> bool {
-    let Some(local) = func.locals.iter().find(|l| l.id == ptr) else {
-        return false;
+///   `dest = &referent`      (`Ref { is_mut: false, place }`)
+///   `dest = addr_of referent` (`AddressOf { is_mut: false, place }`)
+///
+/// where `place.local` is a linear local. Each such `dest` is a shared ref to a
+/// linear value; a `Deref` of it is the illegal move-out-of-shared-borrow.
+///
+/// SCOPE: only a DIRECT borrow of a linear BASE local (`place.local` linear).
+/// Borrowing a linear FIELD (`&obj.coin`) or a reborrow leaves `dest` out of
+/// the set (its base local is not linear), which is correct for 2b: those are
+/// 2c and are simply not flagged here.
+fn shared_linear_ref_set(func: &MirFunction) -> HashSet<LocalId> {
+    let mut set = HashSet::new();
+    let Some(blocks) = &func.blocks else {
+        return set;
     };
-    // A `&mut` borrow is a mutable pointer; moving out of it is a different
-    // (2c) question. Only shared (`is_mut == false`) references are the
-    // categorical move-out-of-borrow violation closed here.
-    if local.is_mut {
-        return false;
+    for block in blocks {
+        for stmt in &block.stmts {
+            if let MirStmtKind::Assign { dest, value } = &stmt.kind {
+                let place = match value {
+                    MirRValue::Ref {
+                        is_mut: false,
+                        place,
+                    }
+                    | MirRValue::AddressOf {
+                        is_mut: false,
+                        place,
+                    } => place,
+                    _ => continue,
+                };
+                // Only a borrow of the linear local itself (base, no
+                // projections into a linear field) is the direct 2b case.
+                if place.projections.is_empty() && is_linear_local(func, place.local) {
+                    set.insert(*dest);
+                }
+            }
+        }
     }
-    // The referent is linear when the pointer local carries the linear marker
-    // (2a annotates the borrowed local's referent linearity onto the pointer),
-    // or its pointee type resolves to a linear struct. Both reduce to the
-    // `"linear"` annotation on the pointer local at this MONOMORPHIZED stage.
-    local.annotations.iter().any(|a| a.as_ref() == "linear")
+    set
 }
 
 /// Whether an rvalue is a MOVE-OUT-OF-SHARED-BORROW of a linear referent:
-/// a `Deref { ptr }` (or a `Use` of a place with a leading `Deref`
-/// projection) whose pointer is a shared reference to a linear value.
-/// Returns the offending referent-name-carrying pointer local.
-fn move_out_of_shared_borrow(func: &MirFunction, value: &MirRValue) -> Option<LocalId> {
+/// a `Deref { ptr }` (or a place with a leading `Deref` projection) whose
+/// pointer local is a known shared borrow of a linear value (`shared_refs`,
+/// built from borrow provenance). Returns the offending pointer local.
+fn move_out_of_shared_borrow(value: &MirRValue, shared_refs: &HashSet<LocalId>) -> Option<LocalId> {
     match value {
         MirRValue::Deref {
             ptr: MirValue::Local(p),
             ..
-        } if shared_ref_to_linear(func, *p) => Some(*p),
-        // A `Ref`/`AddressOf`/`Discriminant`/`Len` of a place with a leading
-        // `Deref` projection is a place read through a borrow; a `Use` cannot
-        // carry a place, so the projection form arrives via these place-holding
-        // rvalues. A leading `Deref` of a shared linear ref is the same
-        // move-out shape.
+        } if shared_refs.contains(p) => Some(*p),
+        // A `Discriminant`/`Len` of a place with a leading `Deref` projection
+        // is a place read through a borrow; a leading `Deref` of a shared
+        // linear ref is the same move-out shape.
         MirRValue::Discriminant(place) | MirRValue::Len(place) => {
             if matches!(place.projections.first(), Some(PlaceProjection::Deref))
-                && shared_ref_to_linear(func, place.local)
+                && shared_refs.contains(&place.local)
             {
                 Some(place.local)
             } else {
@@ -249,6 +266,10 @@ pub(crate) fn check(func: &MirFunction) -> Vec<TypeErrorWithSpan> {
     let id_to_index = block_id_index(blocks);
     let reachable = reachable_blocks(blocks);
 
+    // Borrow-provenance pre-pass: which pointer locals are shared borrows of a
+    // linear value. Computed once; used by move-out-of-shared-borrow detection.
+    let shared_refs = shared_linear_ref_set(func);
+
     // Predecessor lists over reachable blocks only (an unreachable predecessor
     // contributes no real dataflow and would spuriously mark values moved).
     let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n];
@@ -293,7 +314,7 @@ pub(crate) fn check(func: &MirFunction) -> Vec<TypeErrorWithSpan> {
             }
             // Transfer through the block (no diagnostics on the fixpoint pass).
             let mut state = entry[i].clone();
-            transfer_block(func, &blocks[i], &mut state, None);
+            transfer_block(func, &blocks[i], &shared_refs, &mut state, None);
             if state != exit[i] {
                 exit[i] = state;
                 changed = true;
@@ -310,7 +331,13 @@ pub(crate) fn check(func: &MirFunction) -> Vec<TypeErrorWithSpan> {
             continue;
         }
         let mut state = entry[i].clone();
-        transfer_block(func, &blocks[i], &mut state, Some(&mut errors));
+        transfer_block(
+            func,
+            &blocks[i],
+            &shared_refs,
+            &mut state,
+            Some(&mut errors),
+        );
     }
     errors
 }
@@ -321,13 +348,21 @@ pub(crate) fn check(func: &MirFunction) -> Vec<TypeErrorWithSpan> {
 fn transfer_block(
     func: &MirFunction,
     block: &MirBlock,
+    shared_refs: &HashSet<LocalId>,
     state: &mut BlockState,
     mut errors: Option<&mut Vec<TypeErrorWithSpan>>,
 ) {
     let block_id = block.id.0;
     for (idx, stmt) in block.stmts.iter().enumerate() {
         let span = stmt_span(func, block_id, idx);
-        apply_stmt(func, &stmt.kind, state, span, errors.as_deref_mut());
+        apply_stmt(
+            func,
+            &stmt.kind,
+            shared_refs,
+            state,
+            span,
+            errors.as_deref_mut(),
+        );
     }
     let span = term_span(func, block_id);
     apply_terminator(func, &block.terminator, state, span, errors.as_deref_mut());
@@ -342,13 +377,14 @@ fn transfer_block(
 fn apply_stmt(
     func: &MirFunction,
     kind: &MirStmtKind,
+    shared_refs: &HashSet<LocalId>,
     state: &mut BlockState,
     span: Span,
     mut errors: Option<&mut Vec<TypeErrorWithSpan>>,
 ) {
     if let MirStmtKind::Assign { dest, value } = kind {
         // (1) move-out-of-shared-borrow: `dest = *shared_ref_to_linear`.
-        if let Some(ptr) = move_out_of_shared_borrow(func, value) {
+        if let Some(ptr) = move_out_of_shared_borrow(value, shared_refs) {
             if let Some(errs) = errors.as_deref_mut() {
                 errs.push(TypeErrorWithSpan::new(
                     TypeError::LinearMoveOutOfBorrow {
@@ -389,45 +425,52 @@ fn apply_stmt(
         return;
     }
 
-    // Non-Assign statements that touch a linear (through a pointer/base, or a
-    // by-value operand consumed into the store) can still be borrow-after-move.
-    // We collect every linear the statement touches and, since a store target
-    // is not a linear rebind we track, guard them all with the
-    // borrow-after-move check WITHOUT resetting state. This never misses a use
-    // of an already-moved linear (sound); `moved_by_rvalue` catches by-value
-    // operands, `read_by_rvalue` catches borrows/reads.
+    // Non-Assign statements that touch a linear. A store's `value` can either
+    // BORROW/READ a linear (borrow-after-move if already `Moved`) or CONSUME a
+    // linear BY VALUE (a real move: `Use`/aggregate/cast/repeat operand). The
+    // store target (`ptr`/`base`) is itself a borrow-position read of the
+    // pointer/base local. We split the two:
+    //   - `reads`: borrow-only touches -> borrow-after-move check, NO state
+    //     change.
+    //   - `moves`: by-value operands consumed into the store -> `apply_move`
+    //     (use-after-move + `Init -> Moved`), so a linear moved through a store
+    //     is a real consume (a subsequent use is then use-after-move, not a
+    //     borrow-after-move).
+    // A store target is not a linear rebind we track, so it never resets state.
     let mut reads = Vec::new();
+    let mut moves = Vec::new();
     match kind {
         MirStmtKind::DerefAssign { ptr, value } => {
             if is_linear_local(func, *ptr) {
                 reads.push(*ptr);
             }
             read_by_rvalue(func, value, &mut reads);
-            moved_by_rvalue(func, value, &mut reads);
+            moved_by_rvalue(func, value, &mut moves);
         }
         MirStmtKind::FieldDerefAssign { ptr, value, .. } => {
             if is_linear_local(func, *ptr) {
                 reads.push(*ptr);
             }
             read_by_rvalue(func, value, &mut reads);
-            moved_by_rvalue(func, value, &mut reads);
+            moved_by_rvalue(func, value, &mut moves);
         }
         MirStmtKind::FieldAssign { base, value, .. } => {
             if is_linear_local(func, *base) {
                 reads.push(*base);
             }
             read_by_rvalue(func, value, &mut reads);
-            moved_by_rvalue(func, value, &mut reads);
+            moved_by_rvalue(func, value, &mut moves);
         }
         MirStmtKind::GlobalStore { value, .. } => {
             read_by_rvalue(func, value, &mut reads);
-            moved_by_rvalue(func, value, &mut reads);
+            moved_by_rvalue(func, value, &mut moves);
         }
         MirStmtKind::Assign { .. }
         | MirStmtKind::StorageLive(_)
         | MirStmtKind::StorageDead(_)
         | MirStmtKind::Nop => {}
     }
+    // Borrow-after-move on the current (pre-move) state for borrow-only touches.
     for l in reads {
         if state.get(&l) == Some(&MoveState::Moved) {
             if let Some(errs) = errors.as_deref_mut() {
@@ -439,6 +482,10 @@ fn apply_stmt(
                 ));
             }
         }
+    }
+    // Then apply the by-value consumes (use-after-move + `Init -> Moved`).
+    for l in moves {
+        apply_move(func, l, state, span, errors.as_deref_mut());
     }
 }
 
@@ -568,16 +615,19 @@ mod tests {
         }
     }
 
-    /// A shared (`is_mut == false`) `&Qubit` pointer local carrying the linear
-    /// referent marker, for the move-out-of-shared-borrow test.
-    fn shared_linear_ref(id: u32, name: &str) -> MirLocal {
+    /// An UNTAGGED `&Qubit` pointer local: type `Ptr(Struct("Qubit"))`, EMPTY
+    /// annotations, exactly as real 2a lowering produces for a `&coin` binding
+    /// (2a tags only linear-ADT `Struct` locals, never a reference-to-linear).
+    /// The move-out-of-shared-borrow detector must recover the borrow from
+    /// provenance (`r = &coin`), not from any marker on `r`.
+    fn untagged_ptr_local(id: u32, name: &str) -> MirLocal {
         MirLocal {
             id: LocalId(id),
             name: Some(Arc::from(name)),
             ty: MirType::Ptr(Box::new(MirType::Struct(Arc::from("Qubit")))),
             is_mut: false,
             is_param: false,
-            annotations: vec![Arc::from("linear")],
+            annotations: Vec::new(),
         }
     }
 
@@ -660,15 +710,28 @@ mod tests {
         );
     }
 
-    // 3. Linear moved out of `*r` where `r` is a shared `&Qubit` ->
-    //    LinearMoveOutOfBorrow.
-    //    bb0: _2 = Deref(_1) ; return       (_1: shared &Qubit)
+    // 3. Linear moved out of `*r` where `r` is a REAL shared `&Qubit` (empty
+    //    annotations, as 2a lowering produces) -> LinearMoveOutOfBorrow. The
+    //    detector keys off the borrow provenance `r = &coin`, not a marker on
+    //    `r` (which real lowering never stamps).
+    //    bb0: _1 = &_0 (shared) ; _2 = Deref(_1) ; return   (_0 linear)
     #[test]
     fn move_out_of_shared_borrow_reports() {
         let mut func = MirFunction::new("f", MirFnSig::new(vec![], MirType::Void));
-        func.locals.push(shared_linear_ref(1, "r"));
+        func.locals.push(linear_local(0, "coin"));
+        // `r`: a real `&Qubit` binding -> Ptr(Struct), NO "linear" annotation.
+        func.locals.push(untagged_ptr_local(1, "r"));
         func.locals.push(i64_local(2, "_2"));
         let mut b0 = MirBlock::new(BlockId(0));
+        // r = &coin  (shared borrow of a linear local -> provenance set)
+        b0.stmts.push(MirStmt::assign(
+            LocalId(1),
+            MirRValue::Ref {
+                is_mut: false,
+                place: MirPlace::local(LocalId(0)),
+            },
+        ));
+        // _2 = *r  (move out of the shared borrow)
         b0.stmts.push(MirStmt::assign(
             LocalId(2),
             MirRValue::Deref {
@@ -686,7 +749,7 @@ mod tests {
                 TypeError::LinearMoveOutOfBorrow { .. }
             )),
             1,
-            "moving `*r` out of a shared borrow must be flagged: {errors:?}"
+            "moving `*r` out of a real shared borrow must be flagged: {errors:?}"
         );
     }
 
@@ -873,6 +936,92 @@ mod tests {
         assert!(
             errors.is_empty(),
             "non-linear locals are not move-checked: {errors:?}"
+        );
+    }
+
+    // 9. Linear moved BY VALUE into a store statement (`FieldAssign`), then used
+    //    again -> exactly one LinearUseAfterMove. The store consumes the linear,
+    //    so the later `Use` is a double-consume, NOT a borrow-after-move.
+    //    bb0: _1.field = Use(_0) ; _2 = Use(_0) ; return   (_0 linear)
+    #[test]
+    fn store_by_value_move_is_consumed() {
+        let mut func = MirFunction::new("f", MirFnSig::new(vec![], MirType::Void));
+        func.locals.push(linear_local(0, "coin"));
+        func.locals.push(i64_local(1, "obj"));
+        func.locals.push(i64_local(2, "_2"));
+        let mut b0 = MirBlock::new(BlockId(0));
+        // obj.field = coin  (FieldAssign; value = Use(coin): consumes `coin`)
+        b0.stmts.push(MirStmt::new(MirStmtKind::FieldAssign {
+            base: LocalId(1),
+            field_name: Arc::from("field"),
+            value: MirRValue::Use(MirValue::Local(LocalId(0))),
+        }));
+        // _2 = Use(coin)  (coin already Moved -> use-after-move)
+        b0.stmts.push(MirStmt::assign(
+            LocalId(2),
+            MirRValue::Use(MirValue::Local(LocalId(0))),
+        ));
+        b0.terminator = Some(MirTerminator::Return(None));
+        func.blocks = Some(vec![b0]);
+
+        let errors = check(&func);
+        assert_eq!(
+            count(&errors, |e| matches!(
+                e,
+                TypeError::LinearUseAfterMove { .. }
+            )),
+            1,
+            "the store consumes `coin`; the later use is a use-after-move: {errors:?}"
+        );
+        assert_eq!(
+            count(&errors, |e| matches!(
+                e,
+                TypeError::LinearBorrowAfterMove { .. }
+            )),
+            0,
+            "the store is a by-value move, not a borrow-after-move: {errors:?}"
+        );
+        assert_eq!(errors.len(), 1, "no other diagnostics: {errors:?}");
+    }
+
+    // 10. Negative: a `&mut` borrow of a linear, then a deref-move, must NOT emit
+    //     LinearMoveOutOfBorrow. Mutable-borrow move-out is a different (allowed
+    //     for now) case; only SHARED borrows are the categorical violation.
+    //     bb0: r = &mut coin ; a = Deref(r) ; return
+    #[test]
+    fn move_out_of_mut_borrow_is_not_flagged() {
+        let mut func = MirFunction::new("f", MirFnSig::new(vec![], MirType::Void));
+        func.locals.push(linear_local(0, "coin"));
+        func.locals.push(untagged_ptr_local(1, "r"));
+        func.locals.push(i64_local(2, "a"));
+        let mut b0 = MirBlock::new(BlockId(0));
+        // r = &mut coin  (mutable borrow: not the shared move-out shape)
+        b0.stmts.push(MirStmt::assign(
+            LocalId(1),
+            MirRValue::Ref {
+                is_mut: true,
+                place: MirPlace::local(LocalId(0)),
+            },
+        ));
+        // a = *r
+        b0.stmts.push(MirStmt::assign(
+            LocalId(2),
+            MirRValue::Deref {
+                ptr: MirValue::Local(LocalId(1)),
+                pointee_ty: MirType::Struct(Arc::from("Coin")),
+            },
+        ));
+        b0.terminator = Some(MirTerminator::Return(None));
+        func.blocks = Some(vec![b0]);
+
+        let errors = check(&func);
+        assert_eq!(
+            count(&errors, |e| matches!(
+                e,
+                TypeError::LinearMoveOutOfBorrow { .. }
+            )),
+            0,
+            "a `&mut` deref-move is not a shared move-out-of-borrow: {errors:?}"
         );
     }
 }
