@@ -1906,6 +1906,34 @@ impl CBackend {
         } else {
             std::collections::HashMap::new()
         };
+        if Self::experimental_free_enabled() {
+            // Increment 4: multi-block live ranges the block-scoped (single-block)
+            // rule declines. Disjoint from both prior sets.
+            let fn_exit_set: std::collections::HashSet<LocalId> =
+                self.current_fn_freeable.iter().copied().collect();
+            let block_scoped_set: std::collections::HashSet<LocalId> = self
+                .current_fn_block_frees
+                .values()
+                .flatten()
+                .copied()
+                .collect();
+            let candidates = self.sound_owned_candidates(func);
+            let extra = crate::codegen::analysis::drops::multi_block_freeable(
+                func,
+                &candidates,
+                &fn_exit_set,
+                &block_scoped_set,
+            );
+            for (bb, ids) in extra {
+                let slot = self.current_fn_block_frees.entry(bb).or_default();
+                for id in ids {
+                    if !slot.contains(&id) {
+                        slot.push(id);
+                    }
+                }
+                slot.sort_by_key(|id| id.0);
+            }
+        }
         self.generate_function_signature(func)?;
         self.output.push_str(" {\n");
         self.indent += 1;
@@ -5272,6 +5300,173 @@ mod tests {
         assert!(
             backend.freeable_owned_string_locals(&func).is_empty(),
             "a conditionally-allocated string is not definitely initialized at return"
+        );
+    }
+
+    // Shape exercising increment 4 specifically (disjoint from increments 1-3
+    // through the REAL backend helpers, not just the standalone analysis call):
+    // bb0: if c -> bb1 else bb4
+    // bb1: _0 = alloc() -> bb2                    (owner defined bb1, NOT bb0)
+    // bb2: _1 = _0.ptr ; printf(_1) -> bb3         (owner used bb2, not bb1)
+    // bb3: return
+    // bb4: return                                  (a return NOT dominated by bb1)
+    //
+    // fn_exit (increments 1-2) declines `_0`: bb4 is a sibling return not
+    // dominated by bb1, so `_0` is not definite-init at every return.
+    // block-scoped (increment 3) declines `_0` too: `live_range_confined_to_block`
+    // requires the `.ptr` borrow confined to the DEFINING block (bb1), but the
+    // borrow happens in bb2, so confinement fails.
+    // Only increment 4 catches it: the buffer dies at bb3's entry, bb2 is the
+    // sole (terminal) predecessor of bb3, and bb1 (the def block) dominates bb3
+    // -> free `_0` at the start of bb3.
+    fn multi_block_owner_func() -> MirFunction {
+        let mut func = MirFunction::new("f", MirFnSig::new(vec![], MirType::Void));
+        func.locals.push(MirLocal {
+            id: LocalId(9),
+            name: Some(Arc::from("c")),
+            ty: MirType::Bool,
+            is_mut: false,
+            is_param: true,
+            annotations: Vec::new(),
+        });
+        func.locals.push(bs(0, "_0"));
+        func.locals.push(i64_local(1, "_1"));
+        let mut b0 = MirBlock::new(BlockId(0));
+        b0.terminator = Some(MirTerminator::If {
+            cond: MirValue::Local(LocalId(9)),
+            then_block: BlockId(1),
+            else_block: BlockId(4),
+        });
+        let mut b1 = MirBlock::new(BlockId(1));
+        b1.terminator = Some(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("build_string_concat")),
+            args: Vec::new(),
+            dest: Some(LocalId(0)),
+            target: Some(BlockId(2)),
+            unwind: None,
+        });
+        let mut b2 = MirBlock::new(BlockId(2));
+        b2.stmts.push(MirStmt::assign(
+            LocalId(1),
+            MirRValue::FieldAccess {
+                base: MirValue::Local(LocalId(0)),
+                field_name: Arc::from("ptr"),
+                field_ty: MirType::i64(),
+            },
+        ));
+        b2.terminator = Some(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("printf")),
+            args: vec![MirValue::Local(LocalId(1))],
+            dest: None,
+            target: Some(BlockId(3)),
+            unwind: None,
+        });
+        let mut b3 = MirBlock::new(BlockId(3));
+        b3.terminator = Some(MirTerminator::Return(None));
+        let mut b4 = MirBlock::new(BlockId(4));
+        b4.terminator = Some(MirTerminator::Return(None));
+        func.blocks = Some(vec![b0, b1, b2, b3, b4]);
+        func
+    }
+
+    #[test]
+    fn increment4_multi_block_owner_is_scheduled_for_free() {
+        let backend = CBackend::new();
+        let func = multi_block_owner_func();
+        let fn_exit_vec = backend.freeable_owned_string_locals(&func);
+        assert!(
+            !fn_exit_vec.contains(&LocalId(0)),
+            "_0 must NOT be fn-exit freeable: bb1 does not dominate the sibling return bb4: {fn_exit_vec:?}"
+        );
+        let fn_exit: std::collections::HashSet<LocalId> = fn_exit_vec.into_iter().collect();
+        let bscoped_map =
+            backend.block_scoped_freeable(&func, &backend.freeable_owned_string_locals(&func));
+        let bscoped: std::collections::HashSet<LocalId> =
+            bscoped_map.values().flatten().copied().collect();
+        assert!(
+            !bscoped.contains(&LocalId(0)),
+            "_0 must NOT be block-scoped freeable either, so increment 4 is what claims it: {bscoped_map:?}"
+        );
+        let candidates = backend.sound_owned_candidates(&func);
+        let extra = crate::codegen::analysis::drops::multi_block_freeable(
+            &func,
+            &candidates,
+            &fn_exit,
+            &bscoped,
+        );
+        assert_eq!(
+            extra.get(&3).map(|v| v.as_slice()),
+            Some(&[LocalId(0)][..]),
+            "increment-4 must schedule _0 to be freed at the start of bb3: {extra:?}"
+        );
+    }
+
+    // Multi-hop escape guard: owner `_0` is allocated, then its `.ptr` is copied
+    // multi-hop (`_1 = _0.ptr; _2 = _1;`), re-mentioning `_1` outside a direct
+    // borrow-call argument position. `owned_string_escapes` must reject `_0` via
+    // `ptr_temp_escapes` (the `_2 = _1` assign mentions `_1`), so
+    // `sound_owned_candidates` must NOT include `_0`, and therefore
+    // `multi_block_freeable` must never schedule it for a free. This is the
+    // end-to-end proof that a multi-hop-aliased owner is never freed.
+    fn multi_hop_escaping_owner_func() -> MirFunction {
+        let mut func = MirFunction::new("f", MirFnSig::new(vec![], MirType::Void));
+        func.locals.push(bs(0, "_0"));
+        func.locals.push(i64_local(1, "_1"));
+        func.locals.push(i64_local(2, "_2"));
+        let mut b0 = MirBlock::new(BlockId(0));
+        b0.terminator = Some(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("build_string_concat")),
+            args: Vec::new(),
+            dest: Some(LocalId(0)),
+            target: Some(BlockId(1)),
+            unwind: None,
+        });
+        let mut b1 = MirBlock::new(BlockId(1));
+        b1.stmts.push(MirStmt::assign(
+            LocalId(1),
+            MirRValue::FieldAccess {
+                base: MirValue::Local(LocalId(0)),
+                field_name: Arc::from("ptr"),
+                field_ty: MirType::i64(),
+            },
+        ));
+        // Multi-hop copy: `_2 = _1`. `_1` is re-mentioned by this rvalue, so
+        // `ptr_temp_escapes(_1, ..)` is true, so `_0` escapes.
+        b1.stmts.push(MirStmt::assign(
+            LocalId(2),
+            MirRValue::Use(MirValue::Local(LocalId(1))),
+        ));
+        b1.terminator = Some(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("printf")),
+            args: vec![MirValue::Local(LocalId(2))],
+            dest: None,
+            target: Some(BlockId(2)),
+            unwind: None,
+        });
+        let mut b2 = MirBlock::new(BlockId(2));
+        b2.terminator = Some(MirTerminator::Return(None));
+        func.blocks = Some(vec![b0, b1, b2]);
+        func
+    }
+
+    #[test]
+    fn multi_hop_ptr_copy_owner_is_excluded_from_sound_candidates_and_never_freed() {
+        let backend = CBackend::new();
+        let func = multi_hop_escaping_owner_func();
+        let candidates = backend.sound_owned_candidates(&func);
+        assert!(
+            !candidates.iter().any(|(id, _)| *id == LocalId(0)),
+            "a multi-hop-aliased owner must be excluded from sound_owned_candidates: {candidates:?}"
+        );
+        let extra = crate::codegen::analysis::drops::multi_block_freeable(
+            &func,
+            &candidates,
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+        );
+        assert!(
+            extra.is_empty(),
+            "a multi-hop-aliased owner must never be scheduled for a free: {extra:?}"
         );
     }
 
