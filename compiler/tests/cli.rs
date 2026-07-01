@@ -12879,6 +12879,37 @@ fn array_broadcast_sub_div_run_end_to_end() {
     );
 }
 
+/// Regression: function-style `println(...)` had its argument count fixed by the
+/// FIRST `println` in a function body (its shared type-var binding was
+/// monomorphized to that call's arity), so a later `println` with a different
+/// placeholder count failed to type-check with a spurious `ArityMismatch`
+/// ("expected 4 arguments, found 3"). All three differing counts must now compile
+/// and run in one function body, and the Console effect stays required.
+#[test]
+fn println_varying_placeholder_counts_run_end_to_end() {
+    if !c_backend_ready() {
+        eprintln!("skipping println-arity e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let src = "fn main() ~ Console {\n\
+               let a = 1;\n\
+               let b = 2;\n\
+               let c = 3;\n\
+               println(\"{} {} {}\", a, b, c);\n\
+               println(\"{} {}\", a, b);\n\
+               println(\"{}\", c);\n\
+               }\n";
+    let dir = std::env::temp_dir().join("buildlang_println_arity");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("println_arity.bld");
+    std::fs::write(&path, src).expect("write println_arity.bld");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout, "1 2 3\n1 2\n3\n",
+        "function-style println must accept any placeholder count across one function body"
+    );
+}
+
 /// I4 (review FIX A): broadcasting arrays whose element type is NOT numeric is a
 /// compile-time type error. Broadcasting is defined only for integer/float
 /// elements; `["a", "b"] .+ ["c", "d"]` (string elements) must be REJECTED by
