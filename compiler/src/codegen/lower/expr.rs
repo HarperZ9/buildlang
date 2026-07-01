@@ -1311,6 +1311,46 @@ impl<'ctx> MirLowerer<'ctx> {
             }
         }
 
+        // Multiple dispatch: a name with 2+ definitions is emitted as distinct
+        // mangled functions. Resolve the selected definition from the argument
+        // types (the SAME resolver the type checker used) and emit a direct call
+        // to its mangled name. Single-def names skip this and keep plain names.
+        if let Some(callee_name) = self.extract_call_name(func) {
+            let resolved = self.resolve_fn_name(callee_name);
+            if self.is_overloaded_fn(resolved.as_ref()) {
+                let arg_tys: Vec<MirType> =
+                    args.iter().map(|a| self.infer_single_arg_type(a)).collect();
+                if let Some(mangled) =
+                    self.resolve_overloaded_call_name(resolved.as_ref(), &arg_tys)
+                {
+                    let ret_ty = self
+                        .module
+                        .find_function(mangled.as_ref())
+                        .map(|f| f.sig.ret.clone())
+                        .unwrap_or(MirType::i32());
+                    let arg_vals: Vec<_> = args
+                        .iter()
+                        .map(|a| self.lower_expr(a))
+                        .collect::<CodegenResult<_>>()?;
+                    let builder = self
+                        .current_fn
+                        .as_mut()
+                        .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                    let cont = builder.create_block();
+                    if matches!(ret_ty, MirType::Void) {
+                        builder.call(MirValue::Function(mangled), arg_vals, None, cont);
+                        builder.switch_to_block(cont);
+                        return Ok(values::unit());
+                    } else {
+                        let result = builder.create_local(ret_ty);
+                        builder.call(MirValue::Function(mangled), arg_vals, Some(result), cont);
+                        builder.switch_to_block(cont);
+                        return Ok(values::local(result));
+                    }
+                }
+            }
+        }
+
         // Check for math built-in functions and rewrite the call target to the
         // corresponding C / runtime function name - but only if there is no
         // user-defined function with the same name in the module.

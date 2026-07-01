@@ -67,6 +67,31 @@ pub struct TypeContext {
 
     /// Foreign static names declared by extern blocks.
     foreign_statics: HashSet<Arc<str>>,
+
+    /// Multiple-dispatch registry: function name -> all candidate methods that
+    /// share it. Populated at `collect_function`. A name with exactly one
+    /// candidate behaves identically to today (single dispatch, plain binding);
+    /// a name with two or more is resolved by the argument-type tuple in
+    /// `infer_call` via the shared `resolve_overload`.
+    multi_methods: HashMap<Arc<str>, Vec<MethodCandidate>>,
+}
+
+/// One candidate method for an overloaded (or singly-defined) function name.
+///
+/// Recorded per definition so `infer_call` can rank candidates by the argument
+/// tuple and hand codegen the selected definition. Codegen reconstructs the
+/// same candidate set from the AST and runs the identical resolver, so the two
+/// sides agree on the winner without a fragile side-channel.
+#[derive(Debug, Clone)]
+pub struct MethodCandidate {
+    /// The definition id (also the key in `functions`).
+    pub def_id: DefId,
+    /// Parameter types (positional), used for arity + specificity ranking.
+    pub param_tys: Vec<Ty>,
+    /// Return type of this candidate.
+    pub ret: Ty,
+    /// The full signature (generics, effects, lifetimes).
+    pub sig: FnSig,
 }
 
 /// A scope containing variable bindings.
@@ -304,6 +329,7 @@ impl TypeContext {
             module_bindings: HashMap::new(),
             foreign_functions: HashSet::new(),
             foreign_statics: HashSet::new(),
+            multi_methods: HashMap::new(),
         };
         ctx.init_builtins();
         ctx
@@ -789,6 +815,17 @@ impl TypeContext {
     /// Look up a function signature.
     pub fn lookup_function(&self, def_id: DefId) -> Option<&FnSig> {
         self.functions.get(&def_id)
+    }
+
+    /// Append a dispatch candidate for `name` (multiple-dispatch registry).
+    /// Called once per function definition at collection time.
+    pub fn register_method_candidate(&mut self, name: Arc<str>, candidate: MethodCandidate) {
+        self.multi_methods.entry(name).or_default().push(candidate);
+    }
+
+    /// All dispatch candidates registered under `name`, if any.
+    pub fn method_candidates(&self, name: &str) -> Option<&[MethodCandidate]> {
+        self.multi_methods.get(name).map(|v| v.as_slice())
     }
 
     // =========================================================================
