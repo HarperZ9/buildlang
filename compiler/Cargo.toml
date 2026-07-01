@@ -50,7 +50,11 @@ clap = { version = "4.4", features = ["derive"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive", "rc"] }
-serde_json = "1.0"
+# `float_roundtrip`: parse f64 back to the EXACT bits the shortest-form serializer
+# emitted. Without it serde_json's fast parser is up to 1 ULP off, so a receipt
+# sealed over its in-memory f64 series does not re-seal after a disk round-trip
+# (breaking `receipt verify` for large-magnitude scientific-runtime series).
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
 sha2 = "0.11"
 
 [dev-dependencies]

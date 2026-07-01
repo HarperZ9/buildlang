@@ -14022,3 +14022,154 @@ fn scientific_runtime_receipt_emit_and_verify_round_trip() {
         "the negative fixture must be labelled NEGATIVE_FIXTURE"
     );
 }
+
+/// Regression: a large-magnitude series must RE-SEAL after a disk round-trip.
+/// The unstable kernel's energy blows up to ~1e28; without `float_roundtrip`
+/// serde_json re-parsed those f64 values ~1 ULP off, so the receipt (sealed over
+/// its in-memory series) failed its own seal re-check at verify. A legitimately
+/// emitted FAIL_EXPECTED receipt must verify clean.
+#[test]
+fn scientific_receipt_large_value_series_reseals_and_verifies() {
+    if !c_backend_ready() {
+        eprintln!("skipping scientific_receipt_large_value_series_reseals: C backend not ready");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("buildlang_sci_largeval_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create large-value fixture dir");
+    let staged = dir.join("heat_equation_energy_unstable.bld");
+    fs::copy(repo_example("heat_equation_energy_unstable.bld"), &staged)
+        .expect("copy unstable kernel");
+    let receipt = dir.join("receipt.json");
+    let emit = buildc()
+        .arg("run")
+        .arg(&staged)
+        .arg("--emit-receipt")
+        .arg(&receipt)
+        .arg("--negative-fixture")
+        .output()
+        .expect("emit large-value receipt");
+    assert!(
+        emit.status.success(),
+        "emitting the unstable receipt should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&emit.stderr)
+    );
+    let verify = buildc()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .output()
+        .expect("verify large-value receipt");
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        verify.status.success(),
+        "a large-value FAIL_EXPECTED receipt must re-seal and verify clean\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+}
+
+/// Regression: `receipt verify` on a faithful receipt that RECORDS an unexpected
+/// invariant violation (FAIL_UNEXPECTED) must exit NONZERO, so `verify && deploy`
+/// does not deploy on a recorded failure. The receipt reproduces exactly (it is
+/// faithful); the exit code reflects the verdict, not just faithfulness.
+#[test]
+fn scientific_receipt_verify_fails_on_unexpected_invariant_violation() {
+    if !c_backend_ready() {
+        eprintln!("skipping scientific_receipt_verify_fails_unexpected: C backend not ready");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("buildlang_sci_unexpected_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create unexpected fixture dir");
+    let staged = dir.join("heat_equation_energy_unstable.bld");
+    fs::copy(repo_example("heat_equation_energy_unstable.bld"), &staged)
+        .expect("copy unstable kernel");
+    let receipt = dir.join("receipt.json");
+    // NO --negative-fixture: an unstable run is an UNEXPECTED violation.
+    let emit = buildc()
+        .arg("run")
+        .arg(&staged)
+        .arg("--emit-receipt")
+        .arg(&receipt)
+        .output()
+        .expect("emit FAIL_UNEXPECTED receipt");
+    assert!(emit.status.success(), "emit should succeed");
+    let value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt).expect("read receipt")).expect("parse receipt");
+    assert_eq!(value["receipt_status"], "FAIL_UNEXPECTED");
+    let verify = buildc()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .output()
+        .expect("verify FAIL_UNEXPECTED receipt");
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        !verify.status.success(),
+        "verify must exit nonzero on a faithful FAIL_UNEXPECTED receipt\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+}
+
+/// Regression: a program that diverges to a non-finite value must NOT be sealed
+/// as a false PASS. It is UNVERIFIABLE (labelled NONFINITE_OBSERVED), only the
+/// finite prefix is stored (no JSON `null`), and verify does not exit 0.
+#[test]
+fn scientific_receipt_nonfinite_run_is_unverifiable() {
+    if !c_backend_ready() {
+        eprintln!("skipping scientific_receipt_nonfinite_run_is_unverifiable: C backend not ready");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("buildlang_sci_nonfinite_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create nonfinite fixture dir");
+    let src = dir.join("diverge.bld");
+    // Prints a monotone finite prefix then a NaN (0.0/0.0) -> divergence.
+    fs::write(
+        &src,
+        "fn main() ~ Console {\n    \
+         println(\"{}\", 4.0);\n    println(\"{}\", 3.0);\n    \
+         let z = 0.0;\n    let bad = z / z;\n    println(\"{}\", bad);\n}\n",
+    )
+    .expect("write diverging kernel");
+    let receipt = dir.join("receipt.json");
+    let emit = buildc()
+        .arg("run")
+        .arg(&src)
+        .arg("--emit-receipt")
+        .arg(&receipt)
+        .output()
+        .expect("emit diverging receipt");
+    assert!(emit.status.success(), "emit should succeed");
+    let bytes = fs::read(&receipt).expect("read receipt");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(
+        !text.contains("null"),
+        "observed_values must be finite (no JSON null):\n{text}"
+    );
+    let value: serde_json::Value = serde_json::from_slice(&bytes).expect("parse receipt");
+    assert_eq!(
+        value["receipt_status"], "UNVERIFIABLE",
+        "a diverged run must be UNVERIFIABLE, not a false PASS"
+    );
+    assert!(
+        value["labels"]
+            .as_array()
+            .expect("labels array")
+            .iter()
+            .any(|label| label == "NONFINITE_OBSERVED"),
+        "a diverged receipt must be labelled NONFINITE_OBSERVED"
+    );
+    let verify = buildc()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .output()
+        .expect("verify diverging receipt");
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        !verify.status.success(),
+        "a diverged (UNVERIFIABLE) receipt must not verify as a pass\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+}

@@ -41,10 +41,23 @@ buildc run examples/heat_equation_energy.bld --emit-receipt receipt.json \
 ```
 
 buildc compiles the program to C, runs it, and captures stdout. Every whitespace- or
-newline-separated token that parses as an `f64` becomes one entry in the measurement series
-(both plain-decimal `0.530827` and scientific `1.59908e+28` are accepted). buildc then runs
-the invariant checker, builds the receipt, seals it, and writes it to the given path (`-`
-writes the receipt to stdout).
+newline-separated token that parses as a finite `f64` becomes one entry in the measurement
+series (both plain-decimal `0.530827` and scientific `1.59908e+28` are accepted). buildc then
+runs the invariant checker, builds the receipt, seals it, and writes it to the given path
+(`-` writes the receipt to stdout).
+
+**Non-finite values mean divergence.** If the program prints an `inf` or NaN value (in any
+C-runtime spelling, including Windows forms like `-nan(ind)` and `1.#INF`), the run is
+treated as numerically diverged: parsing stops at that token, only the finite prefix is
+stored (so the receipt always serializes and re-verifies cleanly), the receipt is
+`UNVERIFIABLE`, and it is labelled `NONFINITE_OBSERVED`. A diverged run is never a PASS,
+even when its finite prefix happens to look monotone: the invariant could not be honestly
+evaluated over a blown-up computation.
+
+Trailing program arguments (`buildc run prog.bld --emit-receipt r.json -- <args>`) are
+recorded in the receipt's `args` field, and `receipt verify` re-runs the program with
+exactly those arguments, so an argv-parameterized kernel is re-derived under the same
+conditions it was emitted under.
 
 Flags on the `run` subcommand (all additive; absent `--emit-receipt`, none of them run):
 
@@ -74,13 +87,15 @@ The receipt is a single JSON object. Its layers, outermost meaning first:
   `input_graph_digest` (sha256 over the resolved module graph).
 - `build_state`: `{ target: "c", compiler_status: "compiled_and_executed", flags: [...] }`.
 - `runtime_state`: `{ os, exit_code }`.
+- `args`: the trailing program arguments the run was invoked with; `receipt verify` re-runs
+  with exactly these.
 - `problem`: `{ label }` from `--problem` (optional).
 - `measurement`: `{ metric, observed_values: [f64], count, units? }`, the parsed stdout
-  series.
+  series (always finite values; see the non-finite rule in section 1).
 - `invariant`: the checked criterion and its verdict (see below).
 - `negative_fixture`: whether `--negative-fixture` was set.
 - `labels`: always includes `"NOT_A_NEW_PHYSICAL_LAW"`; adds `"NEGATIVE_FIXTURE"` when the
-  fixture flag is set.
+  fixture flag is set and `"NONFINITE_OBSERVED"` when the run diverged.
 - `receipt_status`: `PASS` | `FAIL_EXPECTED` | `FAIL_UNEXPECTED` | `UNVERIFIABLE`.
 - `seal`: `{algorithm: "sha256", hex}` over the canonical receipt with the seal hex blanked.
 - `provenance`: `{ research_source_hash }`, a reference to the Telos research (see
@@ -97,6 +112,7 @@ The `invariant.status` (`PASS`/`FAIL`) is the raw verdict over the observed seri
 | invariant FAIL, `--negative-fixture` set | `FAIL_EXPECTED` |
 | invariant FAIL, no `--negative-fixture` | `FAIL_UNEXPECTED` |
 | empty or unparseable series | `UNVERIFIABLE` |
+| non-finite value observed (diverged) | `UNVERIFIABLE` + `NONFINITE_OBSERVED` label |
 
 ### The seal
 
@@ -173,18 +189,46 @@ buildc receipt verify receipt.json --json    # machine-readable report
 1. **Re-derive the source digest** from the source referenced by the receipt (the same
    pipeline that produced the stored digests) and compare both the source and input-graph
    digests. A change to the source file since sealing shows up here as a mismatch.
-2. **Re-run the program**, re-parse the series, and **recompute the verdict** with the exact
-   same status rule. The recomputed `invariant.status`, `increase_count`, and
-   `receipt_status` must match the stored values; any drift is a verification failure with a
-   clear `... drift: receipt X, re-run Y` diagnostic. This checks the *verdict*, not exact
-   floats, so it is robust to platform float non-reproducibility (the same principle
-   `buildc corpus verify` uses when it re-runs C stdout).
-3. **Recompute the seal** over the stored receipt and compare to `seal.hex`. This catches
-   tampering of any field that does not change the re-run verdict (for example
+2. **Re-run the program with the receipt's recorded `args`**, re-parse the series, and
+   **re-check the measurement count**: the re-run must produce exactly
+   `measurement.count` values (the count is deterministic, unlike the exact floats), so an
+   edited `observed_values` array of the wrong length is caught here.
+3. **Recompute the verdict** with the exact same status rule. The recomputed
+   `invariant.status`, `increase_count`, and `receipt_status` must match the stored values;
+   any drift is a verification failure with a clear `... drift: receipt X, re-run Y`
+   diagnostic. This checks the *verdict*, not exact floats, so it is robust to platform
+   float non-reproducibility (the same principle `buildc corpus verify` uses when it
+   re-runs C stdout).
+4. **Recompute the seal** over the stored receipt and compare to `seal.hex`. This catches
+   accidental corruption of any field that does not change the re-run verdict (for example
    `runtime_state.os`), giving layered integrity.
 
-On success: human output reports `MATCH: scientific-runtime receipt re-runs and re-checks
-clean (<status>, increase_count=N)`; `--json` emits a `{"status": "match", ...}` object.
+### Exit-code semantics (safe as a CI gate)
+
+A receipt that passes all four checks is **faithful**: it reproduces. But a faithful
+receipt that *records* a failure is not a pass, so the exit code reflects the verdict too:
+
+| outcome | exit code |
+|---|---|
+| faithful, `PASS` or `FAIL_EXPECTED` | `0` (human output: `MATCH: ...`) |
+| faithful, `FAIL_UNEXPECTED` or `UNVERIFIABLE` | `3` (human output: `FAIL: ... invariant did not hold`) |
+| did not reproduce (digest, count, verdict, or seal drift) | `1` |
+
+This makes `buildc receipt verify r.json && deploy` safe: it will not deploy on a receipt
+that records an unexpected invariant violation or a diverged/unverifiable run. A negative
+fixture reproducing its *expected* failure is a legitimate pass (the checker demonstrably
+catches violations), so `FAIL_EXPECTED` exits `0`. With `--json`, the report carries
+`"faithful"` and `"invariant_held"` fields alongside the verdict.
+
+### What the seal does and does not witness
+
+The re-run re-derives the source digests, the measurement count, and the verdict triple.
+The remaining descriptive fields (`observed_values` element bytes, `os`, `exit_code`,
+`flags`, `labels`) are covered by the seal, which is an **unkeyed** SHA-256: it detects
+accidental corruption, but anyone can recompute it after editing those fields. Integrity
+for the claim that matters (the verdict over this exact source) comes from the re-run, not
+from trusting stored bytes. Do not read the seal as cryptographic tamper-proofing of the
+descriptive metadata.
 
 **Version drift is a warning, not a failure.** If `compiler_version` or `language_version`
 differs from the current build, verify prints a `Warning:` and continues. A scientific
@@ -215,6 +259,9 @@ v0 is one invariant over one series, sealed and re-derivable. Explicitly out of 
 - **In-place `Vec` update (`vec_set_f64`).** The kernel double-buffers a fresh `u_next` each
   step because `vec_set_f64` is not yet exposed; wiring it is a deferred optimization, not a
   correctness change.
-- **Exact-float sealing.** The seal is a byte-exact hash of buildc's canonical JSON, but the
-  *verdict* is what re-verification checks, deliberately, so platform float differences do
-  not break verify. An exact-float re-derivation guarantee is a separate, harder effort.
+- **Exact-float sealing.** The seal is a byte-exact hash of buildc's canonical JSON, and the
+  on-disk receipt re-seals exactly after a read-back (buildc enables serde_json's
+  `float_roundtrip` so parsing reproduces the serialized f64 bits). But the *verdict* is what
+  re-verification checks, deliberately, so platform float differences in a fresh re-run do
+  not break verify. An exact-float re-derivation guarantee for the re-run series itself is a
+  separate, harder effort.
