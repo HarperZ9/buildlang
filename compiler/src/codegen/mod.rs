@@ -46,6 +46,7 @@
 //! let output = codegen.generate(&module)?;
 //! ```
 
+pub(crate) mod analysis;
 pub mod backend;
 pub mod builder;
 pub mod debug;

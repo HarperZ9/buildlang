@@ -1,0 +1,25 @@
+// ASan battery fixture for increment-4 (multi-block drop reclamation).
+//
+// `s` is allocated by `build_string_concat` in one basic block (the `+`
+// concat), then its `.ptr` is borrowed for the `println!` in a LATER block:
+// the `if i % 2 == 0 { ... }` splits the loop body into distinct blocks, so
+// `s`'s definition and its `.ptr` read land in different basic blocks. This
+// is precisely the shape increment 3 (`live_range_confined_to_block`)
+// declines, because that rule requires every borrow of the owner to occur in
+// the SAME block as the owner's definition. Only increment 4 (multi-block
+// liveness-based placement) can reclaim `s` here, at the loop-body merge
+// block after the `println!` that consumes its `.ptr`.
+//
+// See docs/MEMORY-PILLAR-DESIGN.md, "Increment 4 (multi-block reclamation)
+// -- ASan verification" for the exact commands and results.
+fn main() ~ Console {
+    let mut i = 0;
+    while i < 1000000 {
+        let s = i.to_string() + "!";
+        if i % 2 == 0 {
+            println!("even");
+        }
+        println!("{}", s);
+        i = i + 1;
+    }
+}
