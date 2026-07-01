@@ -65,6 +65,17 @@ API `rvalue_mentions`/`stmt_uses_local`/`terminator_uses_local`, `owned_string_e
 what unblocks reuse by the linear checker and by non-C backends; keeping the analyses in
 `c.rs` (rejected Approach B) would re-entrench the coupling.
 
+**Shipped-vs-diagram reconciliation (2026-07-01).** The four-file diagram above is the
+DESTINATION substrate. Brick 1 as actually shipped created only `cfg.rs` (the extracted
+CFG/use-def/move primitives), `liveness.rs` (backward liveness + the borrow-aware
+buffer-liveness overlay), and `drops.rs` (the increment-4 placement consumer). The
+`ownership.rs`, `move_graph.rs`, and `borrow_flow.rs` files are NOT yet created: for
+brick 1 that logic stayed where it already lived and works — ownership/escape in
+`backend/c.rs` (`sound_owned_candidates`, `owned_string_escapes`/`ptr_temp_escapes`),
+move tracking in `cfg.rs` (`move_source_chain`), and one-hop borrow-flow folded into
+`liveness.rs`'s buffer-liveness. Extracting those into the named files is part of brick 2
+(linear-on-MIR), which needs them reusable outside the C backend.
+
 ## Substrate: components and API
 
 Inputs: a `&MirFunction` with its `blocks: Vec<MirBlock>` (CFG via terminators), and
