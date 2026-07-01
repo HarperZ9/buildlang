@@ -1770,7 +1770,7 @@ fn verify_scientific_receipt_dispatch(
         },
         |source_path, args| {
             let captured = compile_and_capture_run(source_path, args)?;
-            Ok(parse_numeric_series(&captured.stdout))
+            Ok((parse_numeric_series(&captured.stdout), captured.exit_code))
         },
     )
 }
@@ -1791,8 +1791,10 @@ fn cmd_receipt_verify(
         );
     }
 
-    let receipt: serde_json::Value = read_json(receipt_path)?;
-    let schema = receipt_field_str(&receipt, "/schema", "schema")?;
+    let receipt: serde_json::Value =
+        read_json(receipt_path).map_err(|code| receipt_load_failure(false, "MALFORMED", code))?;
+    let schema = receipt_field_str(&receipt, "/schema", "schema")
+        .map_err(|code| receipt_load_failure(false, "SCHEMA_UNSUPPORTED", code))?;
     if schema == SCIENTIFIC_RUNTIME_SCHEMA {
         return verify_scientific_receipt_dispatch(&receipt, source_override, false);
     }
@@ -1890,18 +1892,41 @@ fn cmd_receipt_verify(
     Ok(())
 }
 
+/// Classify a LOAD-stage receipt-verify failure (unreadable file, invalid or
+/// duplicate-key JSON, missing `/schema`) with a machine-readable class. Fires
+/// before schema dispatch, so the report is schema-agnostic: no schema tag is
+/// claimed for a document whose schema could not be established. Verdict-stage
+/// classes live in `scientific_runtime::verify_failure_class`.
+fn receipt_load_failure(json: bool, failure_class: &str, code: i32) -> i32 {
+    eprintln!("failure_class: {failure_class}");
+    if json {
+        let report = serde_json::json!({
+            "status": "failed",
+            "failure_class": failure_class,
+        });
+        if let Ok(text) = serde_json::to_string_pretty(&report) {
+            println!("{text}");
+        }
+    }
+    code
+}
+
 fn cmd_receipt_verify_json(
     receipt_path: &Path,
     source_override: Option<&Path>,
     expected_profile: Option<&str>,
     expected_policy_digest: Option<&str>,
 ) -> Result<(), i32> {
-    let receipt: serde_json::Value = read_json(receipt_path)?;
+    let receipt: serde_json::Value =
+        read_json(receipt_path).map_err(|code| receipt_load_failure(true, "MALFORMED", code))?;
 
     // Route the scientific-runtime schema to its own re-run verifier BEFORE the
     // check-receipt schema guard, so the existing check-receipt path stays
     // byte-identical.
-    if receipt_field_str(&receipt, "/schema", "schema")? == SCIENTIFIC_RUNTIME_SCHEMA {
+    if receipt_field_str(&receipt, "/schema", "schema")
+        .map_err(|code| receipt_load_failure(true, "SCHEMA_UNSUPPORTED", code))?
+        == SCIENTIFIC_RUNTIME_SCHEMA
+    {
         return verify_scientific_receipt_dispatch(&receipt, source_override, true);
     }
 
@@ -2133,8 +2158,10 @@ fn cmd_corpus_verify(root: Option<&Path>, write: bool) -> Result<(), i32> {
     verify_symbol_graph_receipt(&corpus_root, &symbol_receipt, &manifest)?;
     verify_lsp_dispatch_receipt(&corpus_root, &lsp_receipt, &manifest)?;
     // Re-derive the capability facts from program source ONCE per run; both
-    // execution receipts are then verified against this fresh derivation.
+    // execution receipts are then verified against this fresh derivation, and
+    // the manifest's per-program surfaces must agree with the derivation.
     let derived_capabilities = derive_corpus_capabilities(&corpus_root, &manifest)?;
+    verify_manifest_surfaces_match_derivation(&manifest, &derived_capabilities)?;
 
     let c_passed = if write {
         let rust_receipt: CorpusExecutionReceipt = read_json(&rust_receipt_path)?;
@@ -2150,6 +2177,11 @@ fn cmd_corpus_verify(root: Option<&Path>, write: bool) -> Result<(), i32> {
         let c_receipt: CorpusExecutionReceipt = read_json(&c_receipt_path)?;
         let c_receipt =
             refresh_c_receipt_from_manifest(c_receipt, &manifest, &derived_capabilities, c_passed);
+        // Verify the refreshed receipt IN MEMORY before persisting: a failing
+        // verifier run must not mutate the artifact it just rejected. Only a
+        // receipt that verifies is written, then read back and re-verified as
+        // a serialization round-trip check.
+        verify_receipt("c", &c_receipt, &manifest, &derived_capabilities, c_passed)?;
         write_json(&c_receipt_path, &c_receipt)?;
 
         let c_receipt: CorpusExecutionReceipt = read_json(&c_receipt_path)?;
@@ -2448,16 +2480,23 @@ fn receipt_has_stdout_validator(receipt: &CorpusExecutionReceipt) -> bool {
         .any(|entry| entry.eq_ignore_ascii_case("stdout assertion"))
 }
 
-fn expected_receipt_capabilities(manifest: &SemanticCorpusManifest) -> Vec<String> {
-    let mut capabilities = BTreeSet::new();
-    for program in &manifest.programs {
-        for surface in &program.surfaces {
-            if surface == "stdout" {
-                capabilities.insert("Console".to_string());
-            }
-        }
+/// Map a manifest `surfaces` entry to the capability it implies. This is the
+/// full vocabulary (mirroring `types/capabilities.rs`), so growing the corpus
+/// beyond Console programs is a manifest DATA change, not a compiler edit.
+/// Surfaces with no capability implication (e.g. structural tags used by the
+/// representation receipts) map to None.
+fn surface_capability(surface: &str) -> Option<&'static str> {
+    match surface {
+        "stdout" | "stdin" | "console" => Some("Console"),
+        "filesystem" => Some("FileSystem"),
+        "network" => Some("Network"),
+        "process" => Some("Process"),
+        "environment" => Some("Environment"),
+        "clock" => Some("Clock"),
+        "foreign" => Some("Foreign"),
+        "gpu" => Some("Gpu"),
+        _ => None,
     }
-    capabilities.into_iter().collect()
 }
 
 /// The capability facts RE-DERIVED from corpus program SOURCE through the real
@@ -2471,6 +2510,11 @@ struct DerivedCorpusCapabilities {
     declared: Vec<String>,
     /// Union of checker-observed capability names across every corpus program.
     observed: Vec<String>,
+    /// Checker-observed capability set PER PROGRAM (id, capabilities). Kept
+    /// alongside the unions so the manifest cross-check can be per-program: a
+    /// union-only comparison cannot see one program's surface entry deleted
+    /// while another program still contributes the same capability.
+    per_program: Vec<(String, BTreeSet<String>)>,
 }
 
 /// Run the actual check pipeline over every corpus program and union the
@@ -2483,6 +2527,7 @@ fn derive_corpus_capabilities(
 ) -> Result<DerivedCorpusCapabilities, i32> {
     let mut declared = BTreeSet::new();
     let mut observed = BTreeSet::new();
+    let mut per_program = Vec::new();
     for program in &manifest.programs {
         let path = corpus_root.join(&program.path);
         let outcome = run_check(&path)?;
@@ -2493,19 +2538,53 @@ fn derive_corpus_capabilities(
             );
             return Err(1);
         }
+        let mut program_observed = BTreeSet::new();
         for summary in &outcome.function_summaries {
             for effect in &summary.declared_effects {
                 declared.insert(effect.clone());
             }
             for capability in summary.observed_capabilities.keys() {
                 observed.insert(capability.clone());
+                program_observed.insert(capability.clone());
             }
         }
+        per_program.push((program.id.clone(), program_observed));
     }
     Ok(DerivedCorpusCapabilities {
         declared: declared.into_iter().collect(),
         observed: observed.into_iter().collect(),
+        per_program,
     })
+}
+
+/// Cross-check the checker derivation against the manifest's declared surfaces
+/// PER PROGRAM: every capability a program's source observes must be declared
+/// by one of that program's manifest surfaces, and every capability-bearing
+/// surface must be backed by the source actually observing that capability.
+/// Runs once per corpus-verify invocation (it relates the manifest to the
+/// derivation, not to any single receipt).
+fn verify_manifest_surfaces_match_derivation(
+    manifest: &SemanticCorpusManifest,
+    derived: &DerivedCorpusCapabilities,
+) -> Result<(), i32> {
+    for (program, (derived_id, program_observed)) in
+        manifest.programs.iter().zip(derived.per_program.iter())
+    {
+        debug_assert_eq!(&program.id, derived_id);
+        let surface_caps: BTreeSet<String> = program
+            .surfaces
+            .iter()
+            .filter_map(|surface| surface_capability(surface).map(str::to_string))
+            .collect();
+        if surface_caps != *program_observed {
+            eprintln!(
+                "corpus manifest surface drift for program '{}': manifest surfaces imply capabilities {:?}, checker derives {:?} (the surface->capability map lives in surface_capability(); extend it when a new capability class joins the corpus)",
+                program.id, surface_caps, program_observed
+            );
+            return Err(1);
+        }
+    }
+    Ok(())
 }
 
 fn apply_capability_receipt_metadata(
@@ -2618,18 +2697,15 @@ fn verify_receipt(
             derived.declared,
             derived.observed
         );
-        return Err(1);
-    }
-
-    // Cross-check the derivation against the manifest's declared surfaces: a
-    // program whose source observes Console while its manifest entry lacks the
-    // stdout surface (or vice versa) is manifest drift, reported distinctly.
-    let manifest_capabilities = expected_receipt_capabilities(manifest);
-    if derived.observed != manifest_capabilities {
-        eprintln!(
-            "{} corpus manifest surface drift: manifest surfaces expect capabilities {:?}, checker derives {:?}",
-            label, manifest_capabilities, derived.observed
-        );
+        if label == "rust" {
+            // The rust execution receipt has NO tool-supported writer: it is
+            // hand-maintained, and its capability fields are additionally
+            // pinned by unit tests. Say so, or a legitimate capability-surface
+            // change dead-ends here with no path forward.
+            eprintln!(
+                "note: the rust execution receipt is hand-maintained (semantic-corpus/receipts/rust-execution-*.json); update it and the pinned assertions in compiler/src/codegen/backend/rust.rs alongside any legitimate capability change"
+            );
+        }
         return Err(1);
     }
 
@@ -4118,6 +4194,15 @@ fn load_check_policy(path: &Path) -> Result<LoadedCheckPolicy, i32> {
         algorithm: "sha256",
         hex: source_digest_hex(&bytes),
     };
+    // The policy's source_digest seals the RAW bytes while the profile is the
+    // PARSED view; with a last-duplicate-wins parser those can disagree (two
+    // allowlist keys where the hasher sees both and the reader keeps one), so
+    // policies get the same strict duplicate-key rejection as receipts.
+    let text = String::from_utf8_lossy(&bytes);
+    assert_no_duplicate_json_keys(&text).map_err(|err| {
+        eprintln!("Error parsing policy '{}': {}", path.display(), err);
+        1
+    })?;
     let profile: CheckPolicyProfile = serde_json::from_slice(&bytes).map_err(|err| {
         eprintln!("Error parsing policy '{}': {}", path.display(), err);
         1

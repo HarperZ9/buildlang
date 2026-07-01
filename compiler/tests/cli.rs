@@ -11072,6 +11072,26 @@ fn corpus_verify_rejects_capability_gate_stamp_tamper() {
 }
 
 #[test]
+fn corpus_verify_rejects_per_program_surface_tamper() {
+    // Deleting ONE program's stdout surface while seven other programs still
+    // contribute Console defeated a union-level cross-check; the per-program
+    // check must catch it (the review's confirmed escape).
+    let corpus_root = temp_semantic_corpus("per_program_surface_tamper");
+    let manifest_path = corpus_root.join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("read manifest"))
+            .expect("parse manifest");
+    manifest["programs"][0]["surfaces"] = serde_json::Value::Array(Vec::new());
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).expect("render manifest"),
+    )
+    .expect("write tampered manifest");
+
+    assert_corpus_verify_rejects(&corpus_root, "corpus manifest surface drift for program");
+}
+
+#[test]
 fn corpus_verify_rejects_module_graph_schema_drift() {
     let corpus_root = temp_semantic_corpus("module_graph_schema");
     write_module_graph_receipt_copy(&corpus_root, |mut receipt| {
