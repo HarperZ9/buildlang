@@ -28,13 +28,19 @@
 //!   linearity (a `deref_any::<Coin>` specializes to `deref_any_i32` with
 //!   `r: &i32`), so the concrete linear never appears as a linear local inside
 //!   the callee. The move-out is invisible per-function. We close it
-//!   interprocedurally: a module pre-pass finds every function that DEREFERENCES
-//!   a by-reference parameter and RETURNS the dereferenced value (a
-//!   "borrow-escaping" parameter); a call that passes a shared borrow of a
-//!   linear (`&coin`) into such a parameter moves the referent out of the shared
-//!   borrow -> `LinearMoveOutOfBorrow`. A callee that only READS through the
-//!   borrow (never derefs-and-returns it, e.g. `peek(c: &Coin) -> i64 { 0 }`) is
-//!   not borrow-escaping, so the legal borrow-read case is not flagged.
+//!   interprocedurally: a module pre-pass finds every function whose
+//!   by-reference parameter's referent leaves the borrow by value — either
+//!   DIRECTLY (the body derefs it and returns the dereferenced value) or
+//!   TRANSITIVELY (the body passes it into an already-borrow-escaping parameter
+//!   of a callee). This "borrow-escaping" set is computed as a FIXPOINT over the
+//!   call graph, so a one-level wrapper `wrap(r) { deref_any(r) }` is caught
+//!   even though `wrap` never derefs `r` itself (closing the transitive class-3
+//!   hole). A call that passes a shared borrow of a linear (`&coin`) into such a
+//!   parameter moves the referent out of the shared borrow ->
+//!   `LinearMoveOutOfBorrow`. A callee that only READS through the borrow (never
+//!   derefs-and-returns it and never hands it to an escaping callee position,
+//!   e.g. `peek(c: &Coin) -> i64 { 0 }`) is not borrow-escaping, so the legal
+//!   borrow-read case is not flagged.
 //!
 //! Pure function of MIR (`super::cfg` / `super::liveness` substrate + the 2a
 //! linearity annotations and span side-table). No `TypeContext`.
@@ -82,11 +88,16 @@ type BlockState = HashMap<LocalId, MoveState>;
 struct LinearContext {
     /// For each function NAME, the set of parameter INDICES that are
     /// "borrow-escaping": the parameter arrives by reference (`Ptr`) and the
-    /// body DEREFERENCES it by value and RETURNS the dereferenced value. Passing
-    /// a shared borrow of a linear into such a parameter moves the referent OUT
-    /// of the borrow (class 3). A parameter that is only READ through (never
-    /// deref-and-returned) is absent, so the legal borrow-read case is not
-    /// flagged.
+    /// referent leaves the borrow by value out of the function — either DIRECTLY
+    /// (the body derefs it and returns the dereferenced value) or TRANSITIVELY
+    /// (the body passes it into an already-borrow-escaping parameter of a
+    /// callee). Computed as a FIXPOINT over the call graph
+    /// (`escaping_params_fixpoint`), so a one-level wrapper `wrap(r) {
+    /// deref_any(r) }` is included even though `wrap` never derefs `r` itself.
+    /// Passing a shared borrow of a linear into such a parameter moves the
+    /// referent OUT of the borrow (class 3). A parameter that is only READ
+    /// through (never deref-and-returned, never handed to an escaping callee
+    /// position) is absent, so the legal borrow-read case is not flagged.
     borrow_escaping_params: HashMap<Arc<str>, HashSet<usize>>,
 }
 
@@ -165,7 +176,22 @@ fn call_target_name(func_val: &MirValue) -> Option<&Arc<str>> {
     }
 }
 
-/// The set of parameter indices of `func` that are "borrow-escaping": a
+/// Map each by-reference (`Ptr`) parameter LOCAL of `func` to its parameter
+/// INDEX. Param index == LocalId enumeration order (builder invariant: params
+/// are the leading locals `0..N` in declaration order). Only pointer params are
+/// candidates for borrow-escaping (a by-value param cannot leak a borrow it does
+/// not hold). Shared by the direct (`borrow_escaping_params_of`) and the
+/// inductive (call-graph fixpoint) escape rules.
+fn ref_param_index_of(func: &MirFunction) -> HashMap<LocalId, usize> {
+    func.locals
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.is_param && matches!(l.ty, crate::codegen::ir::MirType::Ptr(_)))
+        .map(|(idx, l)| (l.id, idx))
+        .collect()
+}
+
+/// The set of parameter indices of `func` that are DIRECTLY "borrow-escaping": a
 /// by-reference (`Ptr`) parameter whose referent is DEREFERENCED by value and
 /// RETURNED. This is the structural signature of a `fn deref_any<T>(r: &T) -> T
 /// { *r }` after monomorphization (`r: &i32`, body `t = *r; return t`) — the
@@ -178,6 +204,11 @@ fn call_target_name(func_val: &MirValue) -> Option<&Arc<str>> {
 ///      local stays tainted).
 ///   4. `Return(Some(t))` where `t` is tainted marks the ORIGINATING parameter
 ///      as borrow-escaping.
+///
+/// This is the BASE case of the module-level fixpoint (`escaping_params_fixpoint`):
+/// a param that escapes WITHOUT delegating through a callee. The INDUCTIVE case
+/// (a param passed into an already-escaping callee param) is added by the
+/// fixpoint, which closes the transitive one-level-wrapper hole (`wrap` -> `deref_any`).
 ///
 /// SOUNDNESS DISPOSITION: this over-approximates "the callee moves the referent
 /// out of the borrow and hands it back". It is deliberately NARROW (deref +
@@ -195,13 +226,7 @@ fn borrow_escaping_params_of(func: &MirFunction) -> HashSet<usize> {
     // Candidate reference parameters: leading locals with `is_param` and a
     // pointer type. Param index == LocalId index (builder invariant: params are
     // locals 0..N in declaration order).
-    let ref_param_index: HashMap<LocalId, usize> = func
-        .locals
-        .iter()
-        .enumerate()
-        .filter(|(_, l)| l.is_param && matches!(l.ty, crate::codegen::ir::MirType::Ptr(_)))
-        .map(|(idx, l)| (l.id, idx))
-        .collect();
+    let ref_param_index = ref_param_index_of(func);
     if ref_param_index.is_empty() {
         return escaping;
     }
@@ -251,6 +276,110 @@ fn borrow_escaping_params_of(func: &MirFunction) -> HashSet<usize> {
             }
         }
     }
+    escaping
+}
+
+/// Compute, for EVERY function in the module, the set of borrow-escaping
+/// parameter indices, as a FIXPOINT over the call graph. This is what closes the
+/// transitive class-3 hole: a one-level wrapper `fn wrap<T>(r: &T) -> T {
+/// deref_any(r) }` does not deref-and-return `r` itself (its body is a single
+/// `Call`), so the DIRECT rule (`borrow_escaping_params_of`) misses it — yet
+/// passing `&coin` into `wrap` still moves the referent out of the borrow,
+/// because `wrap` hands `r` straight to `deref_any`'s already-escaping param.
+///
+/// - BASE case: `borrow_escaping_params_of(F)` (deref-and-return, per function).
+/// - INDUCTIVE case: param `pi` of `F` is escaping if `F` contains a call
+///   `G(.., arg_i, ..)` where `arg_i == Local(p)`, `p` is the reference-param
+///   local at index `pi` of `F`, and position `i` of the callee `G` is ALREADY
+///   in `G`'s escaping set. Callees are matched by MIR function name
+///   (monomorphized/mangled: `wrap_i32` calls `deref_any_i32`); a callee's param
+///   set is looked up in the growing map, defaulting to empty for unknown/extern
+///   callees.
+///
+/// TERMINATION: the escaping sets only GROW (monotone) and are bounded by the
+/// parameter count of each function; a `changed` flag stops the loop once no set
+/// grows. Direct recursion (`F` calls `F`) and mutual recursion (`F` <-> `G`)
+/// are handled by construction — a recursive call just reads the current set and
+/// contributes monotonically, so the fixpoint still converges.
+///
+/// PRECISION: the inductive step only fires when the arg is EXACTLY the
+/// reference parameter local passed into an escaping position. A wrapper that
+/// passes `r` into a NON-escaping param (`fn w2(r:&T){ peek(r) }`, `peek` not
+/// escaping) contributes nothing, so `w2` stays clean. Read-only field access
+/// through the borrow never reaches an escaping callee position either.
+fn escaping_params_fixpoint(functions: &[MirFunction]) -> HashMap<Arc<str>, HashSet<usize>> {
+    // Seed with the direct (base-case) escaping set for every named function.
+    let mut escaping: HashMap<Arc<str>, HashSet<usize>> = functions
+        .iter()
+        .map(|f| (f.name.clone(), borrow_escaping_params_of(f)))
+        .collect();
+
+    // Per-function: the reference-parameter local -> param index map, precomputed
+    // once (the call-graph iteration reuses it every round).
+    let ref_params: HashMap<Arc<str>, HashMap<LocalId, usize>> = functions
+        .iter()
+        .map(|f| (f.name.clone(), ref_param_index_of(f)))
+        .collect();
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for f in functions {
+            // A function with no reference parameters can never become escaping
+            // via the inductive rule (nothing to leak through a callee).
+            let Some(my_ref_params) = ref_params.get(&f.name) else {
+                continue;
+            };
+            if my_ref_params.is_empty() {
+                continue;
+            }
+            let Some(blocks) = &f.blocks else {
+                continue;
+            };
+
+            // Collect the new escaping indices this round without holding a
+            // mutable borrow of `escaping` while reading callee sets.
+            let mut newly_escaping: Vec<usize> = Vec::new();
+            for block in blocks {
+                let Some(MirTerminator::Call {
+                    func: callee, args, ..
+                }) = &block.terminator
+                else {
+                    continue;
+                };
+                let Some(callee_name) = call_target_name(callee) else {
+                    continue;
+                };
+                let Some(callee_escaping) = escaping.get(callee_name) else {
+                    continue;
+                };
+                for (i, a) in args.iter().enumerate() {
+                    // The arg is one of MY reference parameters, passed into an
+                    // ALREADY-escaping position of the callee -> MY param escapes.
+                    if let MirValue::Local(p) = a {
+                        if let Some(&my_idx) = my_ref_params.get(p) {
+                            if callee_escaping.contains(&i) {
+                                newly_escaping.push(my_idx);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !newly_escaping.is_empty() {
+                let my_set = escaping.entry(f.name.clone()).or_default();
+                for idx in newly_escaping {
+                    if my_set.insert(idx) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // Drop empty sets: the call-site rule only consults present entries, and an
+    // empty set is indistinguishable from absent. Keeps the context minimal.
+    escaping.retain(|_, set| !set.is_empty());
     escaping
 }
 
@@ -397,13 +526,12 @@ fn term_span(func: &MirFunction, block_id: u32) -> Span {
 /// uses; `check(func)` remains for direct per-function checks (unit tests) and
 /// is exactly `check_module` with an empty context.
 pub(crate) fn check_module(functions: &[MirFunction]) -> Vec<TypeErrorWithSpan> {
-    let mut ctx = LinearContext::default();
-    for f in functions {
-        let escaping = borrow_escaping_params_of(f);
-        if !escaping.is_empty() {
-            ctx.borrow_escaping_params.insert(f.name.clone(), escaping);
-        }
-    }
+    // Borrow-escaping parameters, computed as a FIXPOINT over the call graph so
+    // a transitive wrapper (`wrap(&coin)` delegating to `deref_any`) is caught,
+    // not just the direct deref-and-return shape.
+    let ctx = LinearContext {
+        borrow_escaping_params: escaping_params_fixpoint(functions),
+    };
     functions
         .iter()
         .flat_map(|f| check_with_context(f, &ctx))
@@ -1660,6 +1788,256 @@ mod tests {
         assert!(
             errors.is_empty(),
             "a closure capturing a linear by value once is safe: {errors:?}"
+        );
+    }
+
+    // ===================================================================
+    // 2c FIXPOINT (transitive class-3 hole): the borrow-escaping-parameter
+    // analysis must close over the CALL GRAPH. A one-level wrapper that hands
+    // its `&` param to an escaping callee is ALSO borrow-escaping, so passing
+    // `&linear` into the wrapper is a move-out-of-borrow. Precision is
+    // preserved: a wrapper delegating to a NON-escaping callee is not flagged.
+    // ===================================================================
+
+    /// Build a `deref_any`-shaped callee: `fn NAME(r: &Qubit) -> Qubit { *r }`
+    /// (param 0 is directly borrow-escaping — derefs and returns the referent).
+    fn deref_and_return_callee(name: &str) -> MirFunction {
+        let mut f = MirFunction::new(name, MirFnSig::new(vec![], MirType::Void));
+        f.locals.push(ref_param_local(0, "r")); // param 0: &Qubit
+        f.locals.push(linear_anon(1)); // t = *r
+        let mut b0 = MirBlock::new(BlockId(0));
+        b0.stmts.push(MirStmt::assign(
+            LocalId(1),
+            MirRValue::Deref {
+                ptr: MirValue::Local(LocalId(0)),
+                pointee_ty: MirType::Struct(Arc::from("Qubit")),
+            },
+        ));
+        b0.terminator = Some(MirTerminator::Return(Some(MirValue::Local(LocalId(1)))));
+        f.blocks = Some(vec![b0]);
+        f
+    }
+
+    /// Build a `peek`-shaped read-only callee: `fn NAME(r: &Qubit) -> i64 { 0 }`
+    /// (never derefs r; NOT borrow-escaping).
+    fn read_only_callee(name: &str) -> MirFunction {
+        let mut f = MirFunction::new(name, MirFnSig::new(vec![], MirType::Void));
+        f.locals.push(ref_param_local(0, "r"));
+        let mut b0 = MirBlock::new(BlockId(0));
+        b0.terminator = Some(MirTerminator::Return(Some(MirValue::Const(MirConst::Int(
+            0,
+            MirType::i64(),
+        )))));
+        f.blocks = Some(vec![b0]);
+        f
+    }
+
+    /// Build a wrapper `fn NAME(r: &Qubit) -> Qubit { CALLEE(r) }`: its param 0
+    /// (a `&`) is forwarded straight into arg-position 0 of `callee`. It NEVER
+    /// derefs `r` itself, so the direct escape rule misses it; the fixpoint must
+    /// mark it escaping iff `callee`'s param 0 is escaping.
+    ///   bb0: call CALLEE(r) -> dest _1 ; bb1: return _1
+    fn forwarding_wrapper(name: &str, callee: &str) -> MirFunction {
+        let mut f = MirFunction::new(name, MirFnSig::new(vec![], MirType::Void));
+        f.locals.push(ref_param_local(0, "r")); // param 0: &Qubit
+        f.locals.push(linear_anon(1)); // call dest (the returned value)
+        let mut b0 = MirBlock::new(BlockId(0));
+        b0.terminator = Some(MirTerminator::Call {
+            func: MirValue::Function(Arc::from(callee)),
+            args: vec![MirValue::Local(LocalId(0))],
+            dest: Some(LocalId(1)),
+            target: Some(BlockId(1)),
+            unwind: None,
+        });
+        let mut b1 = MirBlock::new(BlockId(1));
+        b1.terminator = Some(MirTerminator::Return(Some(MirValue::Local(LocalId(1)))));
+        f.blocks = Some(vec![b0, b1]);
+        f
+    }
+
+    /// Build a `main` that does `r = &coin ; NAME(r)` (a single call passing a
+    /// shared borrow of a linear into `callee`'s param 0). Distinct dest local.
+    fn caller_passing_shared_borrow(callee: &str) -> MirFunction {
+        let mut caller = MirFunction::new("main", MirFnSig::new(vec![], MirType::Void));
+        caller.locals.push(linear_local(0, "coin"));
+        caller.locals.push(untagged_ptr_local(1, "r")); // r = &coin
+        caller.locals.push(linear_anon(2)); // call dest
+        let mut mb0 = MirBlock::new(BlockId(0));
+        mb0.stmts.push(MirStmt::assign(
+            LocalId(1),
+            MirRValue::Ref {
+                is_mut: false,
+                place: MirPlace::local(LocalId(0)),
+            },
+        ));
+        mb0.terminator = Some(MirTerminator::Call {
+            func: MirValue::Function(Arc::from(callee)),
+            args: vec![MirValue::Local(LocalId(1))],
+            dest: Some(LocalId(2)),
+            target: Some(BlockId(1)),
+            unwind: None,
+        });
+        let mut mb1 = MirBlock::new(BlockId(1));
+        mb1.terminator = Some(MirTerminator::Return(None));
+        caller.blocks = Some(vec![mb0, mb1]);
+        caller
+    }
+
+    // 20. FIXPOINT (the fix): a wrapper `wrap` that FORWARDS its `&` param to
+    //     `deref_any` (an escaping callee) must be computed borrow-escaping by
+    //     the module fixpoint, even though `wrap` never derefs `r` itself.
+    #[test]
+    fn fixpoint_forwarding_wrapper_param_is_borrow_escaping() {
+        let deref_any = deref_and_return_callee("deref_any");
+        let wrap = forwarding_wrapper("wrap", "deref_any");
+        let escaping = escaping_params_fixpoint(&[deref_any, wrap]);
+
+        assert_eq!(
+            escaping.get("deref_any"),
+            Some(&HashSet::from([0])),
+            "the direct deref-and-return param is the base case: {escaping:?}"
+        );
+        assert_eq!(
+            escaping.get("wrap"),
+            Some(&HashSet::from([0])),
+            "the wrapper forwarding into an escaping callee must be escaping too: {escaping:?}"
+        );
+    }
+
+    // 21. FIXPOINT end-to-end: passing `&coin` into the wrapper `wrap` (which
+    //     delegates to `deref_any`) moves the referent out of the shared borrow.
+    //     This is the transitive class-3 double-spend hole, now closed.
+    #[test]
+    fn fixpoint_pass_shared_borrow_into_wrapper_reports() {
+        let deref_any = deref_and_return_callee("deref_any");
+        let wrap = forwarding_wrapper("wrap", "deref_any");
+        let main = caller_passing_shared_borrow("wrap");
+
+        let errors = check_module(&[deref_any, wrap, main]);
+        assert_eq!(
+            count(&errors, |e| matches!(
+                e,
+                TypeError::LinearMoveOutOfBorrow { .. }
+            )),
+            1,
+            "passing `&coin` into a transitive wrapper moves it out of the borrow: {errors:?}"
+        );
+    }
+
+    // 22. PRECISION: a wrapper `w2` that forwards its `&` param to a NON-escaping
+    //     callee (`peek`, read-only) must NOT become borrow-escaping, and passing
+    //     `&coin` into `w2` must stay CLEAN.
+    #[test]
+    fn fixpoint_wrapper_over_non_escaping_callee_stays_clean() {
+        let peek = read_only_callee("peek");
+        let w2 = forwarding_wrapper("w2", "peek");
+        let main = caller_passing_shared_borrow("w2");
+
+        let escaping = escaping_params_fixpoint(&[peek.clone(), w2.clone()]);
+        assert!(
+            escaping.get("peek").is_none(),
+            "a read-only borrow param is not escaping: {escaping:?}"
+        );
+        assert!(
+            escaping.get("w2").is_none(),
+            "a wrapper over a non-escaping callee is not escaping: {escaping:?}"
+        );
+
+        let errors = check_module(&[peek, w2, main]);
+        assert!(
+            errors.is_empty(),
+            "passing `&coin` into a non-escaping wrapper is the legal borrow case: {errors:?}"
+        );
+    }
+
+    // 23. FIXPOINT depth: a two-level wrapper chain `wrap2 -> wrap -> deref_any`
+    //     must propagate escaping all the way up (proves the fixpoint iterates,
+    //     not just one hop), so passing `&coin` into `wrap2` is rejected.
+    #[test]
+    fn fixpoint_two_level_wrapper_reports() {
+        let deref_any = deref_and_return_callee("deref_any");
+        let wrap = forwarding_wrapper("wrap", "deref_any");
+        let wrap2 = forwarding_wrapper("wrap2", "wrap");
+
+        let escaping = escaping_params_fixpoint(&[deref_any.clone(), wrap.clone(), wrap2.clone()]);
+        assert_eq!(
+            escaping.get("wrap2"),
+            Some(&HashSet::from([0])),
+            "escaping must propagate two hops up the wrapper chain: {escaping:?}"
+        );
+
+        let main = caller_passing_shared_borrow("wrap2");
+        let errors = check_module(&[deref_any, wrap, wrap2, main]);
+        assert_eq!(
+            count(&errors, |e| matches!(
+                e,
+                TypeError::LinearMoveOutOfBorrow { .. }
+            )),
+            1,
+            "passing `&coin` into a two-level wrapper moves it out of the borrow: {errors:?}"
+        );
+    }
+
+    // 24. FIXPOINT termination: a self-recursive wrapper (`rec` calls `rec` with
+    //     its own `&` param, and also forwards to `deref_any`) must converge (no
+    //     infinite loop) and be marked escaping. Guards against a call-graph
+    //     cycle diverging the fixpoint.
+    //     fn rec(r: &Qubit) -> Qubit { if _ { rec(r) } else { deref_any(r) } }
+    #[test]
+    fn fixpoint_recursive_wrapper_terminates_and_reports() {
+        let deref_any = deref_and_return_callee("deref_any");
+
+        let mut rec = MirFunction::new("rec", MirFnSig::new(vec![], MirType::Void));
+        rec.locals.push(ref_param_local(0, "r")); // param 0: &Qubit
+        rec.locals.push(i64_local(9, "cond"));
+        rec.locals.push(linear_anon(1)); // dest of the recursive call
+        rec.locals.push(linear_anon(2)); // dest of the deref_any call
+        let mut rb0 = MirBlock::new(BlockId(0));
+        rb0.terminator = Some(MirTerminator::If {
+            cond: MirValue::Local(LocalId(9)),
+            then_block: BlockId(1),
+            else_block: BlockId(2),
+        });
+        // then: t = rec(r) ; return t   (direct recursion on the &-param)
+        let mut rb1 = MirBlock::new(BlockId(1));
+        rb1.terminator = Some(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("rec")),
+            args: vec![MirValue::Local(LocalId(0))],
+            dest: Some(LocalId(1)),
+            target: Some(BlockId(3)),
+            unwind: None,
+        });
+        // else: t = deref_any(r) ; return t
+        let mut rb2 = MirBlock::new(BlockId(2));
+        rb2.terminator = Some(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("deref_any")),
+            args: vec![MirValue::Local(LocalId(0))],
+            dest: Some(LocalId(2)),
+            target: Some(BlockId(3)),
+            unwind: None,
+        });
+        let mut rb3 = MirBlock::new(BlockId(3));
+        rb3.terminator = Some(MirTerminator::Return(Some(MirValue::Local(LocalId(1)))));
+        rec.blocks = Some(vec![rb0, rb1, rb2, rb3]);
+
+        // Terminates (monotone growth + `changed` flag), and `rec` param 0 is
+        // escaping via the `deref_any(r)` arm.
+        let escaping = escaping_params_fixpoint(&[deref_any.clone(), rec.clone()]);
+        assert_eq!(
+            escaping.get("rec"),
+            Some(&HashSet::from([0])),
+            "a recursive wrapper forwarding to an escaping callee is escaping: {escaping:?}"
+        );
+
+        let main = caller_passing_shared_borrow("rec");
+        let errors = check_module(&[deref_any, rec, main]);
+        assert_eq!(
+            count(&errors, |e| matches!(
+                e,
+                TypeError::LinearMoveOutOfBorrow { .. }
+            )),
+            1,
+            "passing `&coin` into the recursive wrapper is rejected: {errors:?}"
         );
     }
 }
