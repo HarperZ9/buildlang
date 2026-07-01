@@ -523,8 +523,11 @@ pub fn recompute_verdict(
 /// because it replays effect/capability facts that ARE version-sensitive; this
 /// numerical receipt is not.)
 ///
-/// `rerun_series` is called with the receipt's recorded args and returns a
-/// [`ParsedSeries`].
+/// `rerun_series` is called with the receipt's recorded args and returns the
+/// re-run's [`ParsedSeries`] plus its process exit code, which is re-checked
+/// against the sealed `runtime_state.exit_code` (a crashed or
+/// differently-exiting re-run is `RERUN_EXIT_MISMATCH`, not a tamper-flavored
+/// count drift).
 pub fn verify_scientific_runtime_receipt(
     receipt_json: &serde_json::Value,
     source_override: Option<&Path>,
@@ -532,12 +535,12 @@ pub fn verify_scientific_runtime_receipt(
     current_compiler_version: &str,
     current_language_version: &str,
     rederive_digests: impl FnOnce(&Path) -> Result<(ScientificDigest, ScientificDigest), i32>,
-    rerun_series: impl FnOnce(&Path, &[String]) -> Result<ParsedSeries, i32>,
+    rerun_series: impl FnOnce(&Path, &[String]) -> Result<(ParsedSeries, i32), i32>,
 ) -> Result<(), i32> {
     let receipt: ScientificRuntimeReceipt =
         serde_json::from_value(receipt_json.clone()).map_err(|err| {
             eprintln!("Error: scientific-runtime receipt is malformed: {}", err);
-            1
+            verify_failure_class(json, "MALFORMED", 1)
         })?;
 
     if receipt.schema != SCIENTIFIC_RUNTIME_SCHEMA {
@@ -545,14 +548,14 @@ pub fn verify_scientific_runtime_receipt(
             "Error: unsupported scientific-runtime receipt schema `{}`",
             receipt.schema
         );
-        return Err(1);
+        return Err(verify_failure_class(json, "SCHEMA_UNSUPPORTED", 1));
     }
     if receipt.compiler != "buildc" {
         eprintln!(
             "Error: receipt compiler mismatch: expected buildc, got {}",
             receipt.compiler
         );
-        return Err(1);
+        return Err(verify_failure_class(json, "COMPILER_MISMATCH", 1));
     }
 
     // Version drift WARNs, does not fail (see the doc comment above).
@@ -578,7 +581,8 @@ pub fn verify_scientific_runtime_receipt(
 
     // (2) Re-derive the source + input-graph digests and compare. A source-file
     // change since sealing shows up as a digest mismatch here.
-    let (source_digest, input_graph_digest) = rederive_digests(&source_path)?;
+    let (source_digest, input_graph_digest) = rederive_digests(&source_path)
+        .map_err(|code| verify_failure_class(json, "REDERIVATION_FAILED", code))?;
     if !digests_match(&source_digest, &receipt.source_digest) {
         eprintln!(
             "Error: source digest mismatch: receipt {}:{}, actual {}:{}",
@@ -587,7 +591,7 @@ pub fn verify_scientific_runtime_receipt(
             source_digest.algorithm,
             source_digest.hex
         );
-        return Err(1);
+        return Err(verify_failure_class(json, "SOURCE_DIGEST_MISMATCH", 1));
     }
     if !digests_match(&input_graph_digest, &receipt.input_graph_digest) {
         eprintln!(
@@ -597,13 +601,26 @@ pub fn verify_scientific_runtime_receipt(
             input_graph_digest.algorithm,
             input_graph_digest.hex
         );
-        return Err(1);
+        return Err(verify_failure_class(json, "INPUT_GRAPH_DIGEST_MISMATCH", 1));
     }
 
     // (3) Re-run the program WITH THE STORED ARGS and re-parse its stdout, so an
     // argv-parameterized kernel is reproduced under the same conditions it was
     // emitted under.
-    let parsed = rerun_series(&source_path, &receipt.args)?;
+    let (parsed, rerun_exit_code) = rerun_series(&source_path, &receipt.args)
+        .map_err(|code| verify_failure_class(json, "RERUN_FAILED", code))?;
+
+    // (3a) The process exit code is sealed and deterministic; a re-run that
+    // exits differently (including a crash) is its own failure class, checked
+    // BEFORE the series comparisons so a crashed re-run is not misreported as
+    // a tamper-flavored count drift.
+    if rerun_exit_code != receipt.runtime_state.exit_code {
+        eprintln!(
+            "Error: exit code drift: receipt {}, re-run {}",
+            receipt.runtime_state.exit_code, rerun_exit_code
+        );
+        return Err(verify_failure_class(json, "RERUN_EXIT_MISMATCH", 1));
+    }
 
     // For a DIVERGED run the finite-prefix length (and hence increase_count
     // over that prefix) is the step index of the first non-finite value: a
@@ -616,7 +633,7 @@ pub fn verify_scientific_runtime_receipt(
     // through to the strict checks and fails as non-reproduction.
     let both_diverged = receipt.diverged && parsed.diverged;
 
-    // (3a) For non-diverged runs the observed-value count IS deterministic
+    // (3b) For non-diverged runs the observed-value count IS deterministic
     // (it is the number of values the program prints, independent of float
     // jitter), so a re-run with a different count means the stored measurement
     // was tampered with (or the program is non-deterministic in a way that
@@ -629,7 +646,7 @@ pub fn verify_scientific_runtime_receipt(
             receipt.measurement.count,
             parsed.series.len()
         );
-        return Err(1);
+        return Err(verify_failure_class(json, "MEASUREMENT_COUNT_DRIFT", 1));
     }
 
     // (4) Recompute the verdict and compare against the stored one.
@@ -646,7 +663,7 @@ pub fn verify_scientific_runtime_receipt(
             "Error: invariant status drift: receipt {}, re-run {}",
             receipt.invariant.status, recomputed.invariant_status
         );
-        return Err(1);
+        return Err(verify_failure_class(json, "INVARIANT_STATUS_DRIFT", 1));
     }
     // Prefix-derived like the count: skipped when both runs diverged (the
     // increase count over a platform-dependent finite prefix is itself
@@ -656,14 +673,14 @@ pub fn verify_scientific_runtime_receipt(
             "Error: increase_count drift: receipt {}, re-run {}",
             stored_increase, recomputed.increase_count
         );
-        return Err(1);
+        return Err(verify_failure_class(json, "INCREASE_COUNT_DRIFT", 1));
     }
     if recomputed.receipt_status != receipt.receipt_status {
         eprintln!(
             "Error: receipt_status drift: receipt {}, re-run {}",
             receipt.receipt_status, recomputed.receipt_status
         );
-        return Err(1);
+        return Err(verify_failure_class(json, "RECEIPT_STATUS_DRIFT", 1));
     }
 
     // (5) Recompute the seal over the stored receipt and confirm integrity.
@@ -673,7 +690,7 @@ pub fn verify_scientific_runtime_receipt(
             "Error: seal mismatch: receipt sha256:{}, recomputed sha256:{}",
             receipt.seal.hex, recomputed_seal
         );
-        return Err(1);
+        return Err(verify_failure_class(json, "SEAL_MISMATCH", 1));
     }
 
     // The receipt is faithful (digests, count, verdict, and seal all re-check).
@@ -685,7 +702,7 @@ pub fn verify_scientific_runtime_receipt(
     let invariant_held = matches!(recomputed.receipt_status, "PASS" | "FAIL_EXPECTED");
 
     if json {
-        let report = serde_json::json!({
+        let mut report = serde_json::json!({
             "schema": SCIENTIFIC_RUNTIME_SCHEMA,
             "status": if invariant_held { "match" } else { "invariant_not_held" },
             "faithful": true,
@@ -696,6 +713,9 @@ pub fn verify_scientific_runtime_receipt(
             "receipt_status": recomputed.receipt_status,
             "seal": { "algorithm": "sha256", "hex": receipt.seal.hex },
         });
+        if !invariant_held {
+            report["failure_class"] = serde_json::Value::String("INVARIANT_NOT_HELD".to_string());
+        }
         let text = serde_json::to_string_pretty(&report).map_err(|err| {
             eprintln!(
                 "Error serializing scientific-runtime verification report: {}",
@@ -719,6 +739,9 @@ pub fn verify_scientific_runtime_receipt(
     if invariant_held {
         Ok(())
     } else {
+        // The class line goes to stderr in both modes (the json report above
+        // already carries the field; the human FAIL line is prose).
+        eprintln!("failure_class: INVARIANT_NOT_HELD");
         Err(3)
     }
 }
@@ -727,6 +750,42 @@ pub fn verify_scientific_runtime_receipt(
 fn digests_match(actual: &ScientificDigest, expected: &ScientificDigest) -> bool {
     actual.algorithm.eq_ignore_ascii_case(&expected.algorithm)
         && actual.hex.eq_ignore_ascii_case(&expected.hex)
+}
+
+/// Report a stable machine-readable `failure_class` for a verify failure and
+/// return the exit code to propagate. Emitted on stderr always (a line of the
+/// form `failure_class: <CODE>`) and, in `--json` mode, as a JSON failure
+/// report on stdout, so negative fixtures and CI consumers can pin
+/// (failure_class, exit_code) pairs instead of accepting "anything failed".
+///
+/// The class vocabulary (stable within schema v0):
+/// - `MALFORMED`, `SCHEMA_UNSUPPORTED`, `COMPILER_MISMATCH`: the receipt could
+///   not be interpreted.
+/// - `REDERIVATION_FAILED`, `RERUN_FAILED`: the source could not be re-checked
+///   or re-run (missing file, toolchain failure), distinct from drift.
+/// - `SOURCE_DIGEST_MISMATCH`, `INPUT_GRAPH_DIGEST_MISMATCH`: the source
+///   changed since sealing.
+/// - `RERUN_EXIT_MISMATCH`: the re-run's process exit code differs from the
+///   sealed `runtime_state.exit_code` (covers a crashing re-run).
+/// - `MEASUREMENT_COUNT_DRIFT`, `INVARIANT_STATUS_DRIFT`,
+///   `INCREASE_COUNT_DRIFT`, `RECEIPT_STATUS_DRIFT`: the re-run disagrees with
+///   the stored verdict facts.
+/// - `SEAL_MISMATCH`: the stored receipt body does not re-seal.
+/// - `INVARIANT_NOT_HELD` (exit 3): the receipt is FAITHFUL but records
+///   FAIL_UNEXPECTED / UNVERIFIABLE (emitted at the verdict tail, not here).
+fn verify_failure_class(json: bool, failure_class: &str, exit_code: i32) -> i32 {
+    eprintln!("failure_class: {failure_class}");
+    if json {
+        let report = serde_json::json!({
+            "schema": SCIENTIFIC_RUNTIME_SCHEMA,
+            "status": "failed",
+            "failure_class": failure_class,
+        });
+        if let Ok(text) = serde_json::to_string_pretty(&report) {
+            println!("{text}");
+        }
+    }
+    exit_code
 }
 
 #[cfg(test)]
@@ -1052,13 +1111,16 @@ mod tests {
         assert_eq!(verdict.invariant_status, "FAIL");
     }
 
-    /// Build a `ParsedSeries` for a re-run callback in tests.
-    fn rerun(series: Vec<f64>) -> ParsedSeries {
-        ParsedSeries {
-            any_parsed: !series.is_empty(),
-            diverged: false,
-            series,
-        }
+    /// Build a re-run callback result (finite series, exit code 0) for tests.
+    fn rerun(series: Vec<f64>) -> (ParsedSeries, i32) {
+        (
+            ParsedSeries {
+                any_parsed: !series.is_empty(),
+                diverged: false,
+                series,
+            },
+            0,
+        )
     }
 
     #[test]
@@ -1243,13 +1305,16 @@ mod tests {
             &receipt.language_version,
             |_| Ok((src_digest.clone(), graph_digest.clone())),
             |_, _| {
-                Ok(ParsedSeries {
-                    // Three finite values instead of two: the divergence step
-                    // shifted by one on the re-run platform.
-                    series: vec![4.0, 3.0, 2.5],
-                    any_parsed: true,
-                    diverged: true,
-                })
+                Ok((
+                    ParsedSeries {
+                        // Three finite values instead of two: the divergence
+                        // step shifted by one on the re-run platform.
+                        series: vec![4.0, 3.0, 2.5],
+                        any_parsed: true,
+                        diverged: true,
+                    },
+                    0,
+                ))
             },
         );
         assert_eq!(
@@ -1257,6 +1322,35 @@ mod tests {
             Err(3),
             "a faithful diverged receipt must exit 3 even when the platform-dependent prefix length shifts"
         );
+    }
+
+    #[test]
+    fn verify_rejects_an_exit_code_drift() {
+        // The sealed exit code is deterministic; a re-run exiting differently
+        // (including a crash) is non-reproduction with its own class, checked
+        // before any series comparison.
+        let path = Path::new("k.bld");
+        let receipt =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        assert_eq!(receipt.runtime_state.exit_code, 0);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src_digest = receipt.source_digest.clone();
+        let graph_digest = receipt.input_graph_digest.clone();
+
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            |_| Ok((src_digest.clone(), graph_digest.clone())),
+            // Same series, but the process exited 9 instead of the sealed 0.
+            |_, _| {
+                let (parsed, _) = rerun(vec![4.0, 3.0, 2.0]);
+                Ok((parsed, 9))
+            },
+        );
+        assert_eq!(result, Err(1), "an exit-code drift must fail verify");
     }
 
     #[test]
