@@ -32,6 +32,18 @@ pub enum BinOp {
     Pow,
 
     // =========================================================================
+    // BROADCASTING OPERATORS (BuildLang extension, I4)
+    // =========================================================================
+    /// Elementwise broadcast add: `.+` over `Array<T,N>`
+    DotAdd,
+    /// Elementwise broadcast subtract: `.-` over `Array<T,N>`
+    DotSub,
+    /// Elementwise broadcast multiply: `.*` over `Array<T,N>`
+    DotMul,
+    /// Elementwise broadcast divide: `./` over `Array<T,N>`
+    DotDiv,
+
+    // =========================================================================
     // BITWISE OPERATORS
     // =========================================================================
     /// Bitwise AND: `&`
@@ -118,11 +130,11 @@ impl BinOp {
             // Pipe and compose (special operators)
             BinOp::Pipe | BinOp::Compose => 9,
 
-            // Addition and subtraction
-            BinOp::Add | BinOp::Sub => 10,
+            // Addition and subtraction (and their elementwise broadcasts)
+            BinOp::Add | BinOp::Sub | BinOp::DotAdd | BinOp::DotSub => 10,
 
-            // Multiplication, division, remainder
-            BinOp::Mul | BinOp::Div | BinOp::Rem => 11,
+            // Multiplication, division, remainder (and elementwise broadcasts)
+            BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::DotMul | BinOp::DotDiv => 11,
 
             // Power (highest arithmetic precedence)
             BinOp::Pow => 12,
@@ -161,6 +173,10 @@ impl BinOp {
             BinOp::Div => "/",
             BinOp::Rem => "%",
             BinOp::Pow => "**",
+            BinOp::DotAdd => ".+",
+            BinOp::DotSub => ".-",
+            BinOp::DotMul => ".*",
+            BinOp::DotDiv => "./",
             BinOp::BitAnd => "&",
             BinOp::BitOr => "|",
             BinOp::BitXor => "^",
@@ -198,7 +214,16 @@ impl BinOp {
     pub fn is_arithmetic(&self) -> bool {
         matches!(
             self,
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Pow
+            BinOp::Add
+                | BinOp::Sub
+                | BinOp::Mul
+                | BinOp::Div
+                | BinOp::Rem
+                | BinOp::Pow
+                | BinOp::DotAdd
+                | BinOp::DotSub
+                | BinOp::DotMul
+                | BinOp::DotDiv
         )
     }
 

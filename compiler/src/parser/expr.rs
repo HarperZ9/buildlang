@@ -790,13 +790,17 @@ impl<'a> Parser<'a> {
             // Pipe
             TokenKind::Pipe => Some((bp::PIPE, bp::PIPE + 1)),
 
-            // Addition/Subtraction
-            TokenKind::Plus | TokenKind::Minus => Some((bp::SUM, bp::SUM + 1)),
-
-            // Multiplication/Division
-            TokenKind::Star | TokenKind::Slash | TokenKind::Percent => {
-                Some((bp::PRODUCT, bp::PRODUCT + 1))
+            // Addition/Subtraction (and elementwise broadcasts, same level)
+            TokenKind::Plus | TokenKind::Minus | TokenKind::DotPlus | TokenKind::DotMinus => {
+                Some((bp::SUM, bp::SUM + 1))
             }
+
+            // Multiplication/Division (and elementwise broadcasts, same level)
+            TokenKind::Star
+            | TokenKind::Slash
+            | TokenKind::Percent
+            | TokenKind::DotStar
+            | TokenKind::DotSlash => Some((bp::PRODUCT, bp::PRODUCT + 1)),
 
             // Power (right-associative: (bp, bp) instead of the left-assoc
             // (bp, bp+1) convention). Binds tighter than product.
@@ -838,6 +842,10 @@ impl<'a> Parser<'a> {
             TokenKind::StarStar => BinOp::Pow,
             TokenKind::Slash => BinOp::Div,
             TokenKind::Percent => BinOp::Rem,
+            TokenKind::DotPlus => BinOp::DotAdd,
+            TokenKind::DotMinus => BinOp::DotSub,
+            TokenKind::DotStar => BinOp::DotMul,
+            TokenKind::DotSlash => BinOp::DotDiv,
             TokenKind::And => BinOp::BitAnd,
             TokenKind::Or => BinOp::BitOr,
             TokenKind::Caret => BinOp::BitXor,

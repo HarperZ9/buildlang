@@ -12760,6 +12760,80 @@ fn neg_power_semantics() {
     );
 }
 
+/// I4: elementwise broadcasting operators `.+ .- .* ./` over fixed-size
+/// `Array<T,N>` run end-to-end through the C backend. Array-array `a .+ b`
+/// desugars to per-element scalar adds; scalar broadcast on the right
+/// (`a .* 2.0`) and the left (`2.0 .+ a`) reuse the scalar for every element.
+/// f64 prints via C `%g`, so `11.0` prints as `11`.
+#[test]
+fn array_broadcast_runs_end_to_end() {
+    if !c_backend_ready() {
+        eprintln!("skipping array-broadcast e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let src = "fn main() ~ Console {\n\
+               let a = [1.0, 2.0, 3.0];\n\
+               let b = [10.0, 20.0, 30.0];\n\
+               let sum = a .+ b;\n\
+               println(\"{} {} {}\", sum[0], sum[1], sum[2]);\n\
+               let scaled = a .* 2.0;\n\
+               println(\"{} {} {}\", scaled[0], scaled[1], scaled[2]);\n\
+               let shifted = 2.0 .+ a;\n\
+               println(\"{} {} {}\", shifted[0], shifted[1], shifted[2]);\n\
+               }\n";
+    let dir = std::env::temp_dir().join("buildlang_array_broadcast");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("array_broadcast.bld");
+    std::fs::write(&path, src).expect("write array_broadcast.bld");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout, "11 22 33\n2 4 6\n3 4 5\n",
+        "`.+` must add elementwise, `.* 2.0` scale each element, `2.0 .+ a` broadcast scalar-left"
+    );
+}
+
+/// I4: broadcasting two arrays of DIFFERENT compile-time lengths is a
+/// compile-time type error. `[1.0, 2.0] .+ [1.0, 2.0, 3.0]` (lengths 2 vs 3)
+/// must be REJECTED by `buildc check` with a length-related diagnostic; the
+/// length is carried in the `Array<T,N>` type so the mismatch is caught before
+/// codegen.
+#[test]
+fn array_broadcast_length_mismatch_is_rejected() {
+    let fixture = std::env::temp_dir().join(format!(
+        "buildlang_array_broadcast_mismatch_{}.bld",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        "fn main() ~ Console {\n\
+         let a = [1.0, 2.0];\n\
+         let b = [1.0, 2.0, 3.0];\n\
+         let c = a .+ b;\n\
+         println(\"{}\", c[0]);\n\
+         }\n",
+    )
+    .expect("write array-broadcast mismatch fixture");
+
+    let output = buildc()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run buildc check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "broadcasting arrays of different lengths must fail buildc check"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.to_lowercase().contains("length"),
+        "diagnostic should mention the length mismatch:\n{}",
+        stderr
+    );
+}
+
 /// Executable witness of the transpile-preservation criterion: for every
 /// Rust-supported corpus program, lowering the same source through the C
 /// backend and through the Rust backend must produce byte-identical stdout and

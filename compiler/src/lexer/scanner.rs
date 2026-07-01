@@ -571,6 +571,19 @@ impl<'a> Lexer<'a> {
             } else {
                 Ok(TokenKind::DotDot)
             }
+        } else if self.cursor.eat('+') {
+            // `.+` elementwise broadcast add (I4). `.`-then-operator is never
+            // valid today, so this only promotes a current parse error.
+            Ok(TokenKind::DotPlus)
+        } else if self.cursor.eat('-') {
+            // `.-` elementwise broadcast subtract (I4).
+            Ok(TokenKind::DotMinus)
+        } else if self.cursor.eat('*') {
+            // `.*` elementwise broadcast multiply (I4).
+            Ok(TokenKind::DotStar)
+        } else if self.cursor.eat('/') {
+            // `./` elementwise broadcast divide (I4).
+            Ok(TokenKind::DotSlash)
         } else if is_digit(self.cursor.first()) {
             // Could be a float like .5 - treat as Dot for now, parser handles
             Ok(TokenKind::Dot)

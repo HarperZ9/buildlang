@@ -784,6 +784,18 @@ impl<'ctx> MirLowerer<'ctx> {
             return Ok(values::local(neg_result));
         }
 
+        // Broadcasting operators (I4): `.+ .- .* ./` over fixed-size `Array<T,N>`.
+        // These desugar to per-element scalar MIR ops and NEVER become MIR ops or
+        // reach a backend, so they must be intercepted here (before the `match op`
+        // that would hit `unreachable!`). Length agreement is already guaranteed by
+        // the type checker; here we only need one array operand's compile-time N.
+        if matches!(
+            op,
+            AstBinOp::DotAdd | AstBinOp::DotSub | AstBinOp::DotMul | AstBinOp::DotDiv
+        ) {
+            return self.lower_broadcast(op, left_val, right_val);
+        }
+
         // Vector arithmetic: +, -, * on build_vecN types
         if let MirType::Struct(ref name) = left_ty {
             if let Some(n) = Self::vec_component_count(name) {
@@ -914,6 +926,96 @@ impl<'ctx> MirLowerer<'ctx> {
         let result = builder.create_local(result_ty);
         builder.binary_op(result, mir_op, left_val, right_val);
         Ok(values::local(result))
+    }
+
+    /// Lower an elementwise broadcasting operator (`.+ .- .* ./`) over a
+    /// fixed-size `Array<T,N>` into an unrolled aggregate of per-element scalar
+    /// MIR ops. At least one operand is `MirType::Array(elem, N)` (guaranteed by
+    /// the type checker); the other is either the same-length array or a scalar
+    /// broadcast over every element. The `Dot*` op maps to the scalar MIR op and
+    /// never reaches a backend.
+    fn lower_broadcast(
+        &mut self,
+        op: AstBinOp,
+        left_val: MirValue,
+        right_val: MirValue,
+    ) -> CodegenResult<MirValue> {
+        let mir_op = match op {
+            AstBinOp::DotAdd => BinOp::Add,
+            AstBinOp::DotSub => BinOp::Sub,
+            AstBinOp::DotMul => BinOp::Mul,
+            AstBinOp::DotDiv => BinOp::Div,
+            _ => unreachable!("lower_broadcast only handles Dot* operators"),
+        };
+
+        let left_ty = self.type_of_value(&left_val);
+        let right_ty = self.type_of_value(&right_val);
+        let left_arr = matches!(left_ty, MirType::Array(_, _));
+        let right_arr = matches!(right_ty, MirType::Array(_, _));
+
+        // Recover the compile-time length N and element type from whichever
+        // operand is an array. The type checker has already required matching
+        // lengths for array-array broadcasts.
+        let (n, elem_ty) = match (&left_ty, &right_ty) {
+            (MirType::Array(elem, n), _) => (*n, (**elem).clone()),
+            (_, MirType::Array(elem, n)) => (*n, (**elem).clone()),
+            _ => {
+                return Err(CodegenError::Internal(
+                    "broadcast operator applied to non-array operands".to_string(),
+                ))
+            }
+        };
+
+        let mut elem_vals = Vec::with_capacity(n as usize);
+        for k in 0..n {
+            let idx = MirValue::Const(MirConst::Int(k as i128, MirType::i64()));
+            let lhs = self.broadcast_operand(&left_val, left_arr, &idx, &elem_ty);
+            let rhs = self.broadcast_operand(&right_val, right_arr, &idx, &elem_ty);
+            let builder = self
+                .current_fn
+                .as_mut()
+                .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+            let elem = builder.create_local(elem_ty.clone());
+            builder.binary_op(elem, mir_op, lhs, rhs);
+            elem_vals.push(values::local(elem));
+        }
+
+        let builder = self
+            .current_fn
+            .as_mut()
+            .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+        let result = builder.create_local(MirType::Array(Box::new(elem_ty.clone()), n));
+        builder.aggregate(result, AggregateKind::Array(elem_ty), elem_vals);
+        Ok(values::local(result))
+    }
+
+    /// Produce the per-element value for one operand of a broadcast at index
+    /// `idx`: an `IndexAccess` read for an array operand, or the scalar itself
+    /// (reused for every element) for a scalar operand.
+    fn broadcast_operand(
+        &mut self,
+        operand: &MirValue,
+        is_array: bool,
+        idx: &MirValue,
+        elem_ty: &MirType,
+    ) -> MirValue {
+        if !is_array {
+            return operand.clone();
+        }
+        let builder = self
+            .current_fn
+            .as_mut()
+            .expect("broadcast_operand requires a current function");
+        let slot = builder.create_local(elem_ty.clone());
+        builder.assign(
+            slot,
+            MirRValue::IndexAccess {
+                base: operand.clone(),
+                index: idx.clone(),
+                elem_ty: elem_ty.clone(),
+            },
+        );
+        values::local(slot)
     }
 
     fn lower_logical_op(
