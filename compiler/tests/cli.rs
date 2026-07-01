@@ -12922,3 +12922,95 @@ fn main() ~ Console {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn dispatch_generic_and_concrete_overload_compose() {
+    // Regression: a name that mixes a GENERIC def and a CONCRETE def of the same
+    // name must have the checker and codegen agree on the selected overload.
+    // Previously codegen skipped generic siblings when counting overloads, so the
+    // multi-dispatch path was dead and it emitted the concrete C symbol for BOTH
+    // calls -> a `h(i32)` vs `h(BuildString)` name collision (invalid C, C2440).
+    //
+    //   h(3)       -> concrete `h(i32)` wins (concrete beats generic) -> "3"
+    //   h("hello") -> only the generic `h<T>` matches -> monomorphized -> "hello"
+    if !c_backend_ready() {
+        eprintln!("skipping generic+concrete dispatch run test: no C backend available");
+        return;
+    }
+    let src = r#"
+fn h<T>(a: T) -> T { a }
+fn h(a: i32) -> i32 { a }
+
+fn main() ~ Console {
+    let x: i32 = h(3);
+    let y: str = h("hello");
+    println!("{}", x);
+    println!("{}", y);
+}
+"#;
+    let fixture = write_dispatch_fixture("generic_concrete", src);
+
+    let output = buildc()
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("run buildc run on generic+concrete dispatch fixture");
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "generic+concrete overload program should compile and run\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    // Concrete `h(i32)` returns 3; generic `h<T>` monomorphized for str returns
+    // "hello". Both must print, proving each call selected the correct sibling.
+    assert!(
+        stdout.contains("3\n") && stdout.contains("hello"),
+        "each call should select the correct overload (concrete `3`, generic `hello`); got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn dispatch_generic_only_call_still_monomorphizes() {
+    // Guard the reordered call-lowering path: a generic-ONLY name (no concrete
+    // sibling, so NOT overloaded) must still monomorphize normally. This exercises
+    // the fall-through from the multi-dispatch check to the plain generic path.
+    if !c_backend_ready() {
+        eprintln!("skipping generic-only dispatch run test: no C backend available");
+        return;
+    }
+    let src = r#"
+fn identity<T>(a: T) -> T { a }
+
+fn main() ~ Console {
+    let x: i32 = identity(42);
+    let z: i32 = identity(7);
+    println!("{}", x);
+    println!("{}", z);
+}
+"#;
+    let fixture = write_dispatch_fixture("generic_only", src);
+
+    let output = buildc()
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("run buildc run on generic-only fixture");
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "generic-only program should compile and run\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    assert!(
+        stdout.contains("42\n") && stdout.contains("7\n"),
+        "generic-only monomorphization should print both results; got:\n{}",
+        stdout
+    );
+}

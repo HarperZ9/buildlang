@@ -3744,6 +3744,17 @@ impl<'ctx> TypeInfer<'ctx> {
     /// Exact when the applied types are structurally equal; Coercion when the
     /// argument is coercible via the same subtype/reborrow rules used at call
     /// sites; Generic when the parameter is a type parameter (matches anything).
+    ///
+    /// DIVERGENCE TRAP: this is a hand-maintained copy of codegen's
+    /// `mir_position_match` (`codegen::lower::MirLowerer::mir_position_match`),
+    /// over `Ty` instead of `MirType`/`ParamSlot`. Both feed the SAME shared
+    /// `resolve_overload`, so the two MUST agree on the per-position ordering
+    /// (generic slot -> Generic, exact match -> Exact, numeric literal -> Coercion)
+    /// or the checker and codegen will select different overloads (miscompile).
+    /// Change one, change the other. One subtlety kept intentionally different:
+    /// the `Var`/`Error`-arg -> `Coercion` fallback below exists only on the
+    /// checker side (to avoid a spurious NoMatch masking the real per-arg type
+    /// error); codegen only runs after the checker has accepted the program.
     fn dispatch_position_match(
         &self,
         param: &Ty,
