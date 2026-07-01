@@ -1,8 +1,11 @@
 use std::collections::HashSet;
 
-use crate::codegen::ir::{LocalId, MirFunction, MirStmtKind, MirTerminator};
+use crate::codegen::ir::{LocalId, MirFunction, MirRValue, MirStmtKind, MirTerminator, MirValue};
 
-use super::cfg::{block_id_index, stmt_uses_local, terminator_successors, terminator_uses_local};
+use super::cfg::{
+    block_id_index, move_source_chain, stmt_uses_local, terminator_successors,
+    terminator_uses_local,
+};
 
 /// Per-block liveness. `live_in[i]` / `live_out[i]` are indexed by block position
 /// (the same index space `cfg::terminator_successors` returns), NOT by `BlockId`.
@@ -87,6 +90,52 @@ pub(crate) fn compute(func: &MirFunction) -> Liveness {
     }
 
     Liveness { live_in, live_out }
+}
+
+/// Locals that alias `owner`'s heap buffer: `owner`, its move sources, and every
+/// one-hop borrow temp `T = <alias>.ptr`. Move sources are moved-from (dead after
+/// the move) so only their borrows can still point into the buffer; including them
+/// is conservative-correct.
+fn buffer_aliases(func: &MirFunction, owner: LocalId) -> Vec<LocalId> {
+    let blocks = func.blocks.as_deref().unwrap_or(&[]);
+    let mut aliases = vec![owner];
+    aliases.extend(move_source_chain(owner, blocks));
+    let mut borrows = Vec::new();
+    for block in blocks {
+        for stmt in &block.stmts {
+            if let MirStmtKind::Assign {
+                dest,
+                value:
+                    MirRValue::FieldAccess {
+                        base: MirValue::Local(b),
+                        ..
+                    },
+            } = &stmt.kind
+            {
+                if aliases.contains(b) {
+                    borrows.push(*dest);
+                }
+            }
+        }
+    }
+    aliases.extend(borrows);
+    aliases
+}
+
+fn buffer_live(sets: &[HashSet<LocalId>], aliases: &[LocalId]) -> Vec<bool> {
+    sets.iter()
+        .map(|s| aliases.iter().any(|a| s.contains(a)))
+        .collect()
+}
+
+/// Whether `owner`'s buffer is live at each block's ENTRY (indexed by block position).
+pub(crate) fn buffer_live_in(func: &MirFunction, live: &Liveness, owner: LocalId) -> Vec<bool> {
+    buffer_live(&live.live_in, &buffer_aliases(func, owner))
+}
+
+/// Whether `owner`'s buffer is live at each block's EXIT (indexed by block position).
+pub(crate) fn buffer_live_out(func: &MirFunction, live: &Liveness, owner: LocalId) -> Vec<bool> {
+    buffer_live(&live.live_out, &buffer_aliases(func, owner))
 }
 
 #[cfg(test)]
@@ -185,5 +234,62 @@ mod tests {
         // is not live out of bb2 and not live into the header from the body.
         assert!(!live.live_out[2].contains(&LocalId(2)));
         assert!(!live.live_in[1].contains(&LocalId(2)));
+    }
+
+    // bb0: _0 = call alloc() -> bb1
+    // bb1: _1 = _0.ptr ; call print(_1) -> bb2      (borrow of the buffer, used here)
+    // bb2: return
+    // The buffer is live in bb0(out) and bb1, dead at bb2 entry.
+    #[test]
+    fn buffer_stays_live_through_ptr_borrow() {
+        use crate::codegen::ir::MirLocal;
+        let mut func = MirFunction::new("f", MirFnSig::new(vec![], MirType::Void));
+        func.locals.push(MirLocal {
+            id: LocalId(0),
+            name: Some(Arc::from("_0")),
+            ty: MirType::Struct(Arc::from("BuildString")),
+            is_mut: false,
+            is_param: false,
+            annotations: Vec::new(),
+        });
+        func.locals.push(i64_local(1, "_1")); // the .ptr borrow temp
+        let mut b0 = MirBlock::new(BlockId(0));
+        b0.terminator = Some(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("build_string_concat")),
+            args: Vec::new(),
+            dest: Some(LocalId(0)),
+            target: Some(BlockId(1)),
+            unwind: None,
+        });
+        let mut b1 = MirBlock::new(BlockId(1));
+        b1.stmts.push(MirStmt::assign(
+            LocalId(1),
+            MirRValue::FieldAccess {
+                base: MirValue::Local(LocalId(0)),
+                field_name: Arc::from("ptr"),
+                field_ty: MirType::i64(),
+            },
+        ));
+        b1.terminator = Some(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("printf")),
+            args: vec![MirValue::Local(LocalId(1))],
+            dest: None,
+            target: Some(BlockId(2)),
+            unwind: None,
+        });
+        let mut b2 = MirBlock::new(BlockId(2));
+        b2.terminator = Some(MirTerminator::Return(None));
+        func.blocks = Some(vec![b0, b1, b2]);
+
+        let live = compute(&func);
+        let bin = buffer_live_in(&func, &live, LocalId(0));
+        let bout = buffer_live_out(&func, &live, LocalId(0));
+        // Buffer live leaving bb0 and entering bb1 (via the .ptr borrow), dead at bb2.
+        assert!(bout[0], "buffer live out of bb0");
+        assert!(bin[1], "buffer live into bb1 via _0 or its .ptr borrow");
+        assert!(
+            !bin[2],
+            "buffer dead at bb2 entry (borrow consumed by bb1 printf)"
+        );
     }
 }
