@@ -37,10 +37,9 @@ use mir_representation::{
     verify_mir_representation_receipt, MirRepresentationReceipt, MIR_REPRESENTATION_RECEIPT,
 };
 use module_graph::{verify_module_graph_receipt, ModuleGraphReceipt, MODULE_GRAPH_RECEIPT};
-#[allow(unused_imports)]
 use scientific_runtime::{
-    build_scientific_runtime_receipt, parse_numeric_series, ScientificDigest,
-    ScientificReceiptInputs, ScientificRuntimeReceipt, SCIENTIFIC_RUNTIME_SCHEMA,
+    build_scientific_runtime_receipt, parse_numeric_series, verify_scientific_runtime_receipt,
+    ScientificDigest, ScientificReceiptInputs, ScientificRuntimeReceipt, SCIENTIFIC_RUNTIME_SCHEMA,
 };
 use symbol_graph::{verify_symbol_graph_receipt, SymbolGraphReceipt, SYMBOL_GRAPH_RECEIPT};
 
@@ -1746,6 +1745,36 @@ fn push_receipt_replay_checks(
     }
 }
 
+/// Dispatch a scientific-runtime receipt to its verifier, supplying the two
+/// re-derivation callbacks the module needs. `run_check` re-derives the source +
+/// input-graph digests through the exact check pipeline that produced them, and
+/// `compile_and_capture_run` re-runs the program so the invariant is re-checked
+/// (not trusted). Shared by the human and `--json` verify paths.
+fn verify_scientific_receipt_dispatch(
+    receipt: &serde_json::Value,
+    source_override: Option<&Path>,
+    json: bool,
+) -> Result<(), i32> {
+    verify_scientific_runtime_receipt(
+        receipt,
+        source_override,
+        json,
+        env!("CARGO_PKG_VERSION"),
+        &language_version_string(),
+        |source_path| {
+            let outcome = run_check(source_path)?;
+            Ok((
+                ScientificDigest::from(&outcome.source_digest),
+                ScientificDigest::from(&outcome.input_graph_digest),
+            ))
+        },
+        |source_path| {
+            let captured = compile_and_capture_run(source_path, &[])?;
+            Ok(parse_numeric_series(&captured.stdout))
+        },
+    )
+}
+
 fn cmd_receipt_verify(
     receipt_path: &Path,
     source_override: Option<&Path>,
@@ -1764,6 +1793,9 @@ fn cmd_receipt_verify(
 
     let receipt: serde_json::Value = read_json(receipt_path)?;
     let schema = receipt_field_str(&receipt, "/schema", "schema")?;
+    if schema == SCIENTIFIC_RUNTIME_SCHEMA {
+        return verify_scientific_receipt_dispatch(&receipt, source_override, false);
+    }
     if schema != "buildlang-check-receipt/v1" {
         eprintln!("Error: unsupported check receipt schema `{}`", schema);
         return Err(1);
@@ -1865,6 +1897,14 @@ fn cmd_receipt_verify_json(
     expected_policy_digest: Option<&str>,
 ) -> Result<(), i32> {
     let receipt: serde_json::Value = read_json(receipt_path)?;
+
+    // Route the scientific-runtime schema to its own re-run verifier BEFORE the
+    // check-receipt schema guard, so the existing check-receipt path stays
+    // byte-identical.
+    if receipt_field_str(&receipt, "/schema", "schema")? == SCIENTIFIC_RUNTIME_SCHEMA {
+        return verify_scientific_receipt_dispatch(&receipt, source_override, true);
+    }
+
     let mut checks = Vec::new();
 
     let schema = receipt_field_str(&receipt, "/schema", "schema")?;
@@ -5538,22 +5578,42 @@ fn run_temp_build_dir(file: &Path) -> PathBuf {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn cmd_run(
-    file: &PathBuf,
-    args: &[String],
-    emit_receipt: Option<&Path>,
-    invariant: &str,
-    metric: &str,
-    problem: Option<&str>,
-    negative_fixture: bool,
-) -> Result<(), i32> {
-    // v0 implements only the energy-monotone invariant. Reject unknown names
-    // early (before compiling) so the error is clear and no work is wasted.
-    if emit_receipt.is_some() && invariant != "energy-monotone" {
-        eprintln!("Unknown --invariant '{invariant}'. Supported in v0: energy-monotone");
-        return Err(1);
-    }
+/// A compiled BuildLang program: the temp build directory and the produced
+/// executable. The caller owns the temp dir and is responsible for removing it
+/// once the program has been run.
+struct CompiledProgram {
+    temp_dir: PathBuf,
+    exe_file: PathBuf,
+}
 
+/// Captured result of running a compiled program with `.output()`.
+///
+/// Used by both `run --emit-receipt` and `receipt verify` for the
+/// scientific-runtime schema: both need the program's numeric stdout and its
+/// exit code, and both re-run through the exact same compile+run path so the
+/// verifier re-derives (never trusts) the emitted receipt.
+struct CapturedRun {
+    /// Program stdout decoded lossily as UTF-8 (the numeric measurement series).
+    stdout: String,
+    /// Raw stdout bytes, for byte-faithful echoing by `run --emit-receipt`.
+    stdout_bytes: Vec<u8>,
+    /// Raw stderr bytes, for echoing by `run --emit-receipt`.
+    stderr_bytes: Vec<u8>,
+    /// The program's process exit code (`-1` if terminated by a signal).
+    exit_code: i32,
+}
+
+/// Compile a `.bld` program to a native executable via the C backend.
+///
+/// This is the compile pipeline shared by every `run` variant
+/// (read/resolve-imports/preprocess/lex/parse/resolve-modules/type-check/
+/// codegen/C-compile). It is byte-identical to the pipeline that previously
+/// lived inline in `cmd_run`; factoring it lets `run --emit-receipt` and
+/// `receipt verify` (scientific schema) compile through the exact same path.
+///
+/// Returns the temp build dir and the produced exe path. The caller MUST remove
+/// the temp dir after running (both call sites do).
+fn compile_program_to_exe(file: &Path) -> Result<CompiledProgram, i32> {
     // Read source file
     let source = std::fs::read_to_string(file).map_err(|e| {
         eprintln!("Error reading file '{}': {}", file.display(), e);
@@ -5668,14 +5728,69 @@ fn cmd_run(
         }
     }
 
-    // Run the compiled program directly (Win32 WriteFile in the runtime
-    // ensures output works even under MinTTY/git-bash).
-    //
+    Ok(CompiledProgram { temp_dir, exe_file })
+}
+
+/// Compile `file`, run the produced executable with `args`, and capture its
+/// stdout/stderr and exit code with `.output()`. Cleans up the temp build dir.
+///
+/// This is the single compile+run+capture path shared by `run --emit-receipt`
+/// (which parses the captured stdout into a measurement series) and
+/// `receipt verify` for the scientific-runtime schema (which RE-RUNS the program
+/// and re-parses the series to re-check the invariant, rather than trusting the
+/// stored values). Keeping one path means verify observes exactly what emit
+/// observed.
+fn compile_and_capture_run(file: &Path, args: &[String]) -> Result<CapturedRun, i32> {
+    let CompiledProgram { temp_dir, exe_file } = compile_program_to_exe(file)?;
+
+    // Run the compiled program, capturing stdout so we can parse the series.
+    let run_output = {
+        let mut run_cmd = std::process::Command::new(&exe_file);
+        run_cmd.args(args);
+        run_cmd.output().map_err(|e| {
+            eprintln!("Failed to run program: {}", e);
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            1i32
+        })?
+    };
+
+    // Clean up temp files.
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    let stdout = String::from_utf8_lossy(&run_output.stdout).into_owned();
+    let exit_code = run_output.status.code().unwrap_or(-1);
+    Ok(CapturedRun {
+        stdout,
+        stdout_bytes: run_output.stdout,
+        stderr_bytes: run_output.stderr,
+        exit_code,
+    })
+}
+
+fn cmd_run(
+    file: &PathBuf,
+    args: &[String],
+    emit_receipt: Option<&Path>,
+    invariant: &str,
+    metric: &str,
+    problem: Option<&str>,
+    negative_fixture: bool,
+) -> Result<(), i32> {
+    // v0 implements only the energy-monotone invariant. Reject unknown names
+    // early (before compiling) so the error is clear and no work is wasted.
+    if emit_receipt.is_some() && invariant != "energy-monotone" {
+        eprintln!("Unknown --invariant '{invariant}'. Supported in v0: energy-monotone");
+        return Err(1);
+    }
+
     // Default path (no --emit-receipt): inherit stdout via `.status()`, exactly
     // as before -- byte-identical output and exit-code semantics. Receipt path:
-    // capture stdout via `.output()`, echo it (so `run` still shows output),
-    // parse the numeric series, check the invariant, seal, and write.
+    // capture stdout via `.output()` (shared `compile_and_capture_run` helper),
+    // echo it (so `run` still shows output), parse the numeric series, check the
+    // invariant, seal, and write.
     let Some(receipt_path) = emit_receipt else {
+        // No receipt: compile, then run with inherited stdout via `.status()`.
+        let CompiledProgram { temp_dir, exe_file } = compile_program_to_exe(file)?;
         let status = {
             let mut run_cmd = std::process::Command::new(&exe_file);
             run_cmd.args(args);
@@ -5695,37 +5810,27 @@ fn cmd_run(
         };
     };
 
-    // --emit-receipt path: capture stdout so we can parse the measured series.
-    let run_output = {
-        let mut run_cmd = std::process::Command::new(&exe_file);
-        run_cmd.args(args);
-        run_cmd.output().map_err(|e| {
-            eprintln!("Failed to run program: {}", e);
-            let _ = std::fs::remove_dir_all(&temp_dir);
-            1i32
-        })?
-    };
-
-    // Clean up temp files.
-    let _ = std::fs::remove_dir_all(&temp_dir);
+    // --emit-receipt path: compile + run + capture via the shared helper so the
+    // emitted series is observed through the exact path `receipt verify` re-runs.
+    let captured = compile_and_capture_run(file, args)?;
 
     // Echo the captured streams so `run --emit-receipt` still shows program
     // output. stdout goes to the real stdout ONLY when the receipt is written
     // to a file; when the receipt itself is written to stdout ('-') we route
     // the echoed program output to stderr to keep stdout pure JSON.
-    let captured_stdout = String::from_utf8_lossy(&run_output.stdout).into_owned();
+    let captured_stdout = captured.stdout;
     let receipt_to_stdout = receipt_path == Path::new("-");
     {
         use std::io::Write as _;
         if receipt_to_stdout {
-            let _ = std::io::stderr().write_all(&run_output.stdout);
+            let _ = std::io::stderr().write_all(&captured.stdout_bytes);
         } else {
-            let _ = std::io::stdout().write_all(&run_output.stdout);
+            let _ = std::io::stdout().write_all(&captured.stdout_bytes);
         }
-        let _ = std::io::stderr().write_all(&run_output.stderr);
+        let _ = std::io::stderr().write_all(&captured.stderr_bytes);
     }
 
-    let exit_code = run_output.status.code().unwrap_or(-1);
+    let exit_code = captured.exit_code;
 
     // Parse the captured stdout into an f64 series. `token.parse::<f64>()`
     // accepts BOTH the C `%g` plain-decimal (`0.530827`) and scientific
