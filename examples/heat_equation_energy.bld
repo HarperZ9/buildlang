@@ -1,0 +1,103 @@
+// Heat-equation discrete-energy kernel (STABLE).
+//
+// Simulates the 1-D heat equation u_t = alpha * u_xx on [0,1] with fixed
+// zero endpoints, by the explicit forward-time centered-space (FTCS) finite
+// difference scheme:
+//
+//     u_next[i] = u[i] + r * (u[i-1] - 2*u[i] + u[i+1]),   r = alpha*dt/dx^2
+//
+// Each timestep it prints the discrete energy
+//
+//     E_k = dx * sum_i u_i^2   (== dx * vec_dot(u, u))
+//
+// one value per line. FTCS is stable when r <= 0.5; under a stable r the
+// discrete energy is monotone NON-INCREASING (a discrete analogue of the
+// continuous energy dissipation d/dt integral(u^2) = -2*alpha*integral(u_x^2)).
+// Here r = 0.45 (stable). The companion file heat_equation_energy_unstable.bld
+// uses r = 0.55 (unstable) and the energy grows instead.
+//
+// Dogfoods the shipped scientific math: the dynamic Vec<f64> builtins, the
+// `linalg::vec_dot` reduction, the `**` power operator, and runtime Vec loops.
+// No `.+ .- .* ./` broadcasting: the stencil is a runtime 129-point Vec, not a
+// fixed-N compile-time Array.
+//
+// NOTE (compiler quirk, worked around here without a Rust change): a
+// `mod`-merged stdlib free function (e.g. `vec_dot`, `vec_sum`, even `pi()`)
+// is NOT resolvable when called directly from inside a loop body: the type
+// checker reports `undefined variable`. Builtins (vec_get_f64, vec_len, sin)
+// and SAME-FILE user functions resolve fine inside loops. So the per-step
+// energy is taken through a one-line same-file wrapper `energy()` that calls
+// `linalg::vec_dot`, and `pi()` is read once before the stepping loop.
+
+mod core;
+mod linalg;
+
+// Discrete energy density reduction E/dx = sum_i v_i^2 = vec_dot(v, v).
+// Same-file wrapper so the stdlib `vec_dot` can be invoked from the step loop
+// (a merged stdlib call placed directly in a loop body fails to resolve).
+fn energy(v: Vec<f64>) -> f64 {
+    vec_dot(v, v)
+}
+
+fn main() ~ Console {
+    // Grid: N = 129 points on [0,1], so dx = 1 / (N-1) = 1/128.
+    let n: i32 = 129;
+    let dx: f64 = 1.0 / 128.0;
+
+    // Dogfood the `**` operator on a real dx computation. dx_squared is the
+    // denominator of the diffusion number r = alpha*dt/dx^2, so `dx ** 2` is a
+    // physically meaningful use (right-associative, binds tighter than `*`).
+    // We then recover the stable r = 0.45 as (alpha*dt) / dx^2, exercising the
+    // full relation rather than hard-coding the literal in isolation.
+    let dx_squared: f64 = dx ** 2;
+    let alpha_dt: f64 = 0.45 * dx_squared;
+    let r: f64 = alpha_dt / dx_squared;
+
+    // Initial condition: smooth profile, zero at both endpoints.
+    //   u_i = sin(pi*x_i) + 0.25*sin(3*pi*x_i)
+    // sin is a shipped math builtin, so we use the research-preferred profile.
+    // sin(0) and sin(pi) are ~0, and the first u_next below pins the endpoints
+    // to exact 0.0 via the boundary pushes, so Dirichlet conditions hold.
+    // pi() is read once here (a merged stdlib call in the loop would not
+    // resolve; see the note above).
+    let pi_val: f64 = pi();
+    let mut u = vec_new_f64();
+    let mut i: i32 = 0;
+    while i < n {
+        let x: f64 = (i as f64) * dx;
+        let val: f64 = sin(pi_val * x) + 0.25 * sin(3.0 * pi_val * x);
+        vec_push_f64(u, val);
+        i = i + 1;
+    }
+
+    // Time stepping: 400 steps, double-buffered (vec_set_f64 is not exposed,
+    // so each step builds a fresh u_next with vec_new_f64 + vec_push_f64).
+    let steps: i32 = 400;
+    let mut step: i32 = 0;
+    while step < steps {
+        let mut u_next = vec_new_f64();
+        // Left boundary: u_next[0] = 0.
+        vec_push_f64(u_next, 0.0);
+        // Interior: i in 1 .. N-1.
+        let mut j: i32 = 1;
+        while j < n - 1 {
+            let left: f64 = vec_get_f64(u, j - 1);
+            let center: f64 = vec_get_f64(u, j);
+            let right: f64 = vec_get_f64(u, j + 1);
+            let laplacian: f64 = left - 2.0 * center + right;
+            vec_push_f64(u_next, center + r * laplacian);
+            j = j + 1;
+        }
+        // Right boundary: u_next[N-1] = 0.
+        vec_push_f64(u_next, 0.0);
+
+        // Discrete energy E = dx * sum_i u_next_i^2 = dx * vec_dot(u_next,u_next),
+        // taken via the same-file wrapper so the stdlib reduction is reachable.
+        let e: f64 = dx * energy(u_next);
+        println!("{}", e);
+
+        // Advance: u = u_next.
+        u = u_next;
+        step = step + 1;
+    }
+}
