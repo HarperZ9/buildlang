@@ -228,6 +228,32 @@ fixture reproducing its *expected* failure is a legitimate pass (the checker dem
 catches violations), so `FAIL_EXPECTED` exits `0`. With `--json`, the report carries
 `"faithful"` and `"invariant_held"` fields alongside the verdict.
 
+### Failure classes (stable within schema v0)
+
+Every verification failure prints `failure_class: <CODE>` on stderr, and `--json` emits a
+`{"status": "failed", "failure_class": ...}` report (schema-agnostic for load-stage
+failures, where the document's schema could not be established). This lets negative
+fixtures and CI pin the *specific* failure instead of accepting "anything failed":
+
+| class | meaning | exit |
+|---|---|---|
+| `MALFORMED` | unreadable file, invalid JSON, duplicate object key, or fields that do not deserialize | 1 |
+| `SCHEMA_UNSUPPORTED` | missing or unrecognized `schema` | 1 |
+| `COMPILER_MISMATCH` | `compiler` is not `buildc` | 1 |
+| `REDERIVATION_FAILED` | the source could not be re-checked (missing file, check failure) | inner code |
+| `RERUN_FAILED` | the program could not be re-compiled or re-run | inner code |
+| `RERUN_EXIT_MISMATCH` | the re-run's process exit code differs from the sealed one (covers a crashing re-run) | 1 |
+| `SOURCE_DIGEST_MISMATCH`, `INPUT_GRAPH_DIGEST_MISMATCH` | the source changed since sealing | 1 |
+| `MEASUREMENT_COUNT_DRIFT`, `INVARIANT_STATUS_DRIFT`, `INCREASE_COUNT_DRIFT`, `RECEIPT_STATUS_DRIFT` | the re-run disagrees with a stored verdict fact | 1 |
+| `SEAL_MISMATCH` | the stored receipt body does not re-seal | 1 |
+| `INVARIANT_NOT_HELD` | faithful receipt, but the recorded verdict is `FAIL_UNEXPECTED` or `UNVERIFIABLE` | 3 |
+
+Receipts are loaded through a strict parser that rejects duplicate object keys at any
+depth: with a permissive last-duplicate-wins reader, a document carrying two
+`receipt_status` keys can show one value to a hasher and another to a reader, which is a
+seal-forgery vector. Non-finite JSON literals (`NaN`, `Infinity`) are likewise rejected at
+parse time.
+
 ### What the seal does and does not witness
 
 The re-run re-derives the source digests, the measurement count, and the verdict triple.
