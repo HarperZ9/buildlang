@@ -4,5 +4,5 @@
 //! function of MIR (`codegen::ir`); nothing mutates.
 
 pub(crate) mod cfg;
+pub(crate) mod drops;
 pub(crate) mod liveness;
-// pub(crate) mod drops;    // Task 4
