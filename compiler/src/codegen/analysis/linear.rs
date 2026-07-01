@@ -200,10 +200,26 @@ fn ref_param_index_of(func: &MirFunction) -> HashMap<LocalId, usize> {
 /// The analysis is intraprocedural and purely structural (no types needed):
 ///   1. A parameter local `p` (`is_param`, `Ptr` type) is a candidate.
 ///   2. A statement `t = Deref(p)` (a by-value move-out of `*p`) taints `t`.
-///   3. Tainting propagates through `t2 = Use(t)` (a by-value copy of a tainted
-///      local stays tainted).
+///   3. Tainting propagates by-value through:
+///        - `t2 = Use(t)` / `Cast(t)` (a copy of a tainted local),
+///        - `t2 = Aggregate { .., t, .. }` (laundering the referent into a
+///          struct/tuple/enum-variant/array; field-INSENSITIVE — ANY tainted
+///          operand taints the whole aggregate),
+///        - `t2 = t.field` / `t.Variant._i` / `t[i]`
+///          (`FieldAccess`/`VariantField`/`IndexAccess` projecting the referent
+///          back out of a tainted aggregate; keyed off the BASE's taint).
+///      So laundering `*r` through a struct/tuple/enum and unboxing it again
+///      (`fn deref_boxed<T>(r:&T)->T { let b = Box{item:*r}; b.item }`, or the
+///      tuple/enum/multi-level-wrapper variants) stays tainted end to end.
 ///   4. `Return(Some(t))` where `t` is tainted marks the ORIGINATING parameter
 ///      as borrow-escaping.
+///
+/// PRECISION: the taint only reaches the ORIGINATING param through `Return`. A
+/// function that derefs `*r` into an aggregate but stores it LOCALLY and returns
+/// a scalar / nothing (a `peek`-like fn) never returns a tainted local, so its
+/// param is NOT flagged. The aggregate over-approximation (a returned aggregate
+/// whose tainted field is not the returned one) still only fires on `Return`, so
+/// it cannot flag a non-returning function.
 ///
 /// This is the BASE case of the module-level fixpoint (`escaping_params_fixpoint`):
 /// a param that escapes WITHOUT delegating through a callee. The INDUCTIVE case
@@ -237,6 +253,14 @@ fn borrow_escaping_params_of(func: &MirFunction) -> HashSet<usize> {
     // emits (a monomorphized `*r; return` is straight-line), but we do a simple
     // multi-pass to be robust to block ordering / a copy chain across blocks.
     let mut tainted: HashMap<LocalId, usize> = HashMap::new();
+    // Taint of a single operand `MirValue`: the origin param index if it is a
+    // tainted local, else `None`. Used by the aggregate-operand scan.
+    let taint_of = |tainted: &HashMap<LocalId, usize>, v: &MirValue| -> Option<usize> {
+        match v {
+            MirValue::Local(l) => tainted.get(l).copied(),
+            _ => None,
+        }
+    };
     let mut changed = true;
     while changed {
         changed = false;
@@ -256,6 +280,25 @@ fn borrow_escaping_params_of(func: &MirFunction) -> HashSet<usize> {
                             value: MirValue::Local(s),
                             ..
                         } => tainted.get(s).copied(),
+                        // t2 = Aggregate { .., t, .. } : laundering `*r` through
+                        // a struct/tuple/enum-variant/array carries the taint to
+                        // the aggregate. Field-INSENSITIVE and conservative: ANY
+                        // tainted operand taints the WHOLE aggregate (we do not
+                        // track which field holds it). If the aggregate is later
+                        // returned, the param escapes — even if the returned
+                        // field is not the tainted one. Over-approximates in the
+                        // sound direction (see the module doc).
+                        MirRValue::Aggregate { operands, .. } => {
+                            operands.iter().find_map(|op| taint_of(&tainted, op))
+                        }
+                        // t2 = base.field / base.Variant._i / base[i] : projecting
+                        // a field/variant-payload/element back OUT of a tainted
+                        // aggregate re-exposes the laundered referent. Keyed off
+                        // the BASE's taint (field-insensitive), so unboxing the
+                        // struct in `deref_boxed` (`b.item`) stays tainted.
+                        MirRValue::FieldAccess { base, .. }
+                        | MirRValue::VariantField { base, .. }
+                        | MirRValue::IndexAccess { base, .. } => taint_of(&tainted, base),
                         _ => None,
                     };
                     if let Some(idx) = origin {
@@ -2038,6 +2081,276 @@ mod tests {
             )),
             1,
             "passing `&coin` into the recursive wrapper is rejected: {errors:?}"
+        );
+    }
+
+    // ===================================================================
+    // FIX A (aggregate-launder class 3): the borrow-escape taint must follow
+    // `*r` through an Aggregate (struct/tuple/enum-variant) and back out through
+    // a FieldAccess / VariantField / IndexAccess projection. Otherwise a generic
+    // `deref_boxed<T>(r:&T)->T { let b = Box{item:*r}; b.item }` launders the
+    // referent past the deref-and-return signature and clones a linear. Precision
+    // preserved: a fn that boxes `*r` locally but returns a scalar stays clean.
+    // ===================================================================
+
+    /// A struct-aggregate operand of `Box_i32` over one operand local.
+    fn box_aggregate(operand: LocalId) -> MirRValue {
+        MirRValue::Aggregate {
+            kind: crate::codegen::ir::AggregateKind::Struct(Arc::from("Box_i32")),
+            operands: vec![MirValue::Local(operand)],
+        }
+    }
+
+    /// `fn deref_boxed(r:&Qubit) -> Qubit { let b = Box{item:*r}; b.item }`,
+    /// exactly the monomorphized MIR the compiler emits (verified via `mir emit`):
+    ///   _2 = *r ; _3 = Aggregate{Box}(_2) ; _4 = Use(_3) ; _5 = _4.item ; ret _5
+    /// The deref taints `_2`, the aggregate carries taint to `_3`, `Use` to `_4`,
+    /// the field-access re-exposes it in `_5`, and the return escapes param 0.
+    fn deref_boxed_struct_callee(name: &str) -> MirFunction {
+        let mut f = MirFunction::new(name, MirFnSig::new(vec![], MirType::Void));
+        f.locals.push(ref_param_local(0, "r")); // param 0: &Qubit
+        f.locals.push(linear_anon(2)); // _2 = *r
+        f.locals.push(i64_local(3, "box")); // _3 = Box { item: _2 }
+        f.locals.push(i64_local(4, "b")); // _4 = Use(_3)
+        f.locals.push(linear_anon(5)); // _5 = _4.item
+        let mut b0 = MirBlock::new(BlockId(0));
+        b0.stmts.push(MirStmt::assign(
+            LocalId(2),
+            MirRValue::Deref {
+                ptr: MirValue::Local(LocalId(0)),
+                pointee_ty: MirType::Struct(Arc::from("Qubit")),
+            },
+        ));
+        b0.stmts
+            .push(MirStmt::assign(LocalId(3), box_aggregate(LocalId(2))));
+        b0.stmts.push(MirStmt::assign(
+            LocalId(4),
+            MirRValue::Use(MirValue::Local(LocalId(3))),
+        ));
+        b0.stmts.push(MirStmt::assign(
+            LocalId(5),
+            MirRValue::FieldAccess {
+                base: MirValue::Local(LocalId(4)),
+                field_name: Arc::from("item"),
+                field_ty: MirType::Struct(Arc::from("Qubit")),
+            },
+        ));
+        b0.terminator = Some(MirTerminator::Return(Some(MirValue::Local(LocalId(5)))));
+        f.blocks = Some(vec![b0]);
+        f
+    }
+
+    // A1. FIX A: the struct-launder callee `deref_boxed` must be detected
+    //     borrow-escaping (taint follows `*r` into the aggregate and back out
+    //     through the field access).
+    #[test]
+    fn fixa_deref_boxed_struct_is_borrow_escaping() {
+        let f = deref_boxed_struct_callee("deref_boxed");
+        let escaping = escaping_params_fixpoint(&[f]);
+        assert_eq!(
+            escaping.get("deref_boxed"),
+            Some(&HashSet::from([0])),
+            "taint must follow *r through the struct aggregate and field-access: {escaping:?}"
+        );
+    }
+
+    // A2. FIX A end-to-end: `deref_boxed(&coin)` (struct launder) rejects.
+    #[test]
+    fn fixa_pass_shared_borrow_into_struct_launder_reports() {
+        let f = deref_boxed_struct_callee("deref_boxed");
+        let main = caller_passing_shared_borrow("deref_boxed");
+        let errors = check_module(&[f, main]);
+        assert_eq!(
+            count(&errors, |e| matches!(
+                e,
+                TypeError::LinearMoveOutOfBorrow { .. }
+            )),
+            1,
+            "passing `&coin` into a struct-laundering deref-return clones the linear: {errors:?}"
+        );
+    }
+
+    // A3. FIX A (tuple): `fn deref_tup(r:&T)->T { let t=(*r,); t.0 }` launders
+    //     through a tuple Aggregate + IndexAccess-shaped/field projection. Model
+    //     the payload extract as a FieldAccess of tuple field 0 (same base-taint
+    //     path); the essential edge is Aggregate + projection.
+    #[test]
+    fn fixa_deref_tuple_is_borrow_escaping_and_reports() {
+        let mut f = MirFunction::new("deref_tup", MirFnSig::new(vec![], MirType::Void));
+        f.locals.push(ref_param_local(0, "r"));
+        f.locals.push(linear_anon(1)); // _1 = *r
+        f.locals.push(i64_local(2, "tup")); // _2 = (*r,) tuple aggregate
+        f.locals.push(linear_anon(3)); // _3 = tup.0
+        let mut b0 = MirBlock::new(BlockId(0));
+        b0.stmts.push(MirStmt::assign(
+            LocalId(1),
+            MirRValue::Deref {
+                ptr: MirValue::Local(LocalId(0)),
+                pointee_ty: MirType::Struct(Arc::from("Qubit")),
+            },
+        ));
+        b0.stmts.push(MirStmt::assign(
+            LocalId(2),
+            MirRValue::Aggregate {
+                kind: crate::codegen::ir::AggregateKind::Tuple,
+                operands: vec![MirValue::Local(LocalId(1))],
+            },
+        ));
+        b0.stmts.push(MirStmt::assign(
+            LocalId(3),
+            MirRValue::FieldAccess {
+                base: MirValue::Local(LocalId(2)),
+                field_name: Arc::from("0"),
+                field_ty: MirType::Struct(Arc::from("Qubit")),
+            },
+        ));
+        b0.terminator = Some(MirTerminator::Return(Some(MirValue::Local(LocalId(3)))));
+        f.blocks = Some(vec![b0]);
+
+        let escaping = escaping_params_fixpoint(std::slice::from_ref(&f));
+        assert_eq!(
+            escaping.get("deref_tup"),
+            Some(&HashSet::from([0])),
+            "taint must follow *r through a tuple aggregate and projection: {escaping:?}"
+        );
+        let main = caller_passing_shared_borrow("deref_tup");
+        let errors = check_module(&[f, main]);
+        assert_eq!(
+            count(&errors, |e| matches!(
+                e,
+                TypeError::LinearMoveOutOfBorrow { .. }
+            )),
+            1,
+            "the tuple launder clones the linear: {errors:?}"
+        );
+    }
+
+    // A4. FIX A (enum): `fn deref_enum(r:&T)->T { let e=Some(*r); match e {..} }`
+    //     launders through an enum-variant Aggregate and extracts it back with a
+    //     VariantField bind. The variant-field projection must carry the taint.
+    #[test]
+    fn fixa_deref_enum_is_borrow_escaping_and_reports() {
+        let mut f = MirFunction::new("deref_enum", MirFnSig::new(vec![], MirType::Void));
+        f.locals.push(ref_param_local(0, "r"));
+        f.locals.push(linear_anon(1)); // _1 = *r
+        f.locals.push(linear_anon(2)); // _2 = Some(*r) enum-variant aggregate
+        f.locals.push(linear_anon(3)); // _3 = VariantField(_2)
+        let mut b0 = MirBlock::new(BlockId(0));
+        b0.stmts.push(MirStmt::assign(
+            LocalId(1),
+            MirRValue::Deref {
+                ptr: MirValue::Local(LocalId(0)),
+                pointee_ty: MirType::Struct(Arc::from("Qubit")),
+            },
+        ));
+        b0.stmts.push(MirStmt::assign(
+            LocalId(2),
+            MirRValue::Aggregate {
+                kind: crate::codegen::ir::AggregateKind::Variant(
+                    Arc::from("Option"),
+                    0,
+                    Arc::from("Some"),
+                ),
+                operands: vec![MirValue::Local(LocalId(1))],
+            },
+        ));
+        b0.stmts
+            .push(MirStmt::assign(LocalId(3), variant_field(LocalId(2))));
+        b0.terminator = Some(MirTerminator::Return(Some(MirValue::Local(LocalId(3)))));
+        f.blocks = Some(vec![b0]);
+
+        let escaping = escaping_params_fixpoint(std::slice::from_ref(&f));
+        assert_eq!(
+            escaping.get("deref_enum"),
+            Some(&HashSet::from([0])),
+            "taint must follow *r through an enum-variant aggregate and VariantField: {escaping:?}"
+        );
+        let main = caller_passing_shared_borrow("deref_enum");
+        let errors = check_module(&[f, main]);
+        assert_eq!(
+            count(&errors, |e| matches!(
+                e,
+                TypeError::LinearMoveOutOfBorrow { .. }
+            )),
+            1,
+            "the enum launder clones the linear: {errors:?}"
+        );
+    }
+
+    // A5. FIX A (3-level wrapper chain): `w2 -> w1 -> launder`, where `launder`
+    //     is the struct-launder callee. The fixpoint over the call graph must
+    //     propagate escaping from the aggregate-launder base all the way up two
+    //     forwarding hops, so passing `&coin` into `w2` is rejected. This proves
+    //     FIX A (aggregate base case) composes with the existing call-graph
+    //     fixpoint (transitive case).
+    #[test]
+    fn fixa_three_level_wrapper_over_launder_reports() {
+        let launder = deref_boxed_struct_callee("launder");
+        let w1 = forwarding_wrapper("w1", "launder");
+        let w2 = forwarding_wrapper("w2", "w1");
+
+        let escaping = escaping_params_fixpoint(&[launder.clone(), w1.clone(), w2.clone()]);
+        assert_eq!(
+            escaping.get("launder"),
+            Some(&HashSet::from([0])),
+            "the aggregate-launder base case is escaping: {escaping:?}"
+        );
+        assert_eq!(
+            escaping.get("w2"),
+            Some(&HashSet::from([0])),
+            "escaping must propagate two hops up over an aggregate-launder base: {escaping:?}"
+        );
+        let main = caller_passing_shared_borrow("w2");
+        let errors = check_module(&[launder, w1, w2, main]);
+        assert_eq!(
+            count(&errors, |e| matches!(
+                e,
+                TypeError::LinearMoveOutOfBorrow { .. }
+            )),
+            1,
+            "passing `&coin` into a 3-level wrapper over a launder clones the linear: {errors:?}"
+        );
+    }
+
+    // A6. FIX A PRECISION: a `peek`-like fn that derefs `*r` into a LOCAL
+    //     aggregate but RETURNS A SCALAR (never returns the tainted aggregate)
+    //     must NOT be flagged borrow-escaping. The taint reaches the param only
+    //     through `Return`; a scalar return leaves it clean.
+    //     fn inspect(r:&T) -> i64 { let b = Box{item:*r}; 0 }
+    #[test]
+    fn fixa_deref_into_local_aggregate_returning_scalar_stays_clean() {
+        let mut f = MirFunction::new("inspect", MirFnSig::new(vec![], MirType::Void));
+        f.locals.push(ref_param_local(0, "r"));
+        f.locals.push(linear_anon(1)); // _1 = *r
+        f.locals.push(i64_local(2, "box")); // _2 = Box { item: _1 } (local, unreturned)
+        let mut b0 = MirBlock::new(BlockId(0));
+        b0.stmts.push(MirStmt::assign(
+            LocalId(1),
+            MirRValue::Deref {
+                ptr: MirValue::Local(LocalId(0)),
+                pointee_ty: MirType::Struct(Arc::from("Qubit")),
+            },
+        ));
+        b0.stmts
+            .push(MirStmt::assign(LocalId(2), box_aggregate(LocalId(1))));
+        // returns a SCALAR const, not the tainted aggregate.
+        b0.terminator = Some(MirTerminator::Return(Some(MirValue::Const(MirConst::Int(
+            0,
+            MirType::i64(),
+        )))));
+        f.blocks = Some(vec![b0]);
+
+        let escaping = escaping_params_fixpoint(std::slice::from_ref(&f));
+        assert!(
+            escaping.get("inspect").is_none(),
+            "boxing *r locally but returning a scalar is not borrow-escaping: {escaping:?}"
+        );
+        // And passing `&coin` into it is the legal borrow-read case.
+        let main = caller_passing_shared_borrow("inspect");
+        let errors = check_module(&[f, main]);
+        assert!(
+            errors.is_empty(),
+            "a fn that boxes *r locally and returns a scalar is clean: {errors:?}"
         );
     }
 }
