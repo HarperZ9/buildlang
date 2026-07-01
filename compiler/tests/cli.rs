@@ -13454,3 +13454,204 @@ fn main() ~ Console {
         stdout
     );
 }
+
+// =============================================================================
+// SCIENTIFIC-RUNTIME RECEIPT (buildlang-scientific-runtime-receipt/v0)
+// =============================================================================
+
+fn repo_example(name: &str) -> PathBuf {
+    repo_root().join("examples").join(name)
+}
+
+#[test]
+fn run_emit_receipt_stable_kernel_is_pass() {
+    if !c_backend_ready() {
+        eprintln!("skipping run_emit_receipt_stable_kernel_is_pass: C backend not ready");
+        return;
+    }
+
+    let output = buildc()
+        .arg("run")
+        .arg(repo_example("heat_equation_energy.bld"))
+        .arg("--emit-receipt")
+        .arg("-")
+        .arg("--problem")
+        .arg("1d-heat-equation-energy")
+        .output()
+        .expect("run buildc run --emit-receipt - on stable kernel");
+
+    assert!(
+        output.status.success(),
+        "emitting a receipt for the stable kernel should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(receipt["schema"], "buildlang-scientific-runtime-receipt/v0");
+    assert_eq!(receipt["compiler"], "buildc");
+    assert_eq!(receipt["receipt_status"], "PASS");
+    assert_eq!(receipt["invariant"]["status"], "PASS");
+    assert_eq!(receipt["invariant"]["observed"]["increase_count"], 0);
+    assert_eq!(receipt["problem"]["label"], "1d-heat-equation-energy");
+    assert_eq!(receipt["measurement"]["count"], 400);
+
+    let seal = receipt["seal"]["hex"].as_str().expect("seal hex string");
+    assert_eq!(seal.len(), 64, "seal must be 64 hex chars");
+    assert!(
+        seal.chars()
+            .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()),
+        "seal must be lowercase hex: {seal}"
+    );
+
+    let labels = receipt["labels"].as_array().expect("labels array");
+    assert!(
+        labels.iter().any(|label| label == "NOT_A_NEW_PHYSICAL_LAW"),
+        "every receipt must carry NOT_A_NEW_PHYSICAL_LAW; got {labels:?}"
+    );
+
+    // The source digest is a 64-hex sha256.
+    let digest = receipt["source_digest"]["hex"]
+        .as_str()
+        .expect("source digest hex");
+    assert_eq!(digest.len(), 64);
+}
+
+#[test]
+fn run_emit_receipt_unstable_negative_fixture_is_fail_expected() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping run_emit_receipt_unstable_negative_fixture_is_fail_expected: C backend not ready"
+        );
+        return;
+    }
+
+    let output = buildc()
+        .arg("run")
+        .arg(repo_example("heat_equation_energy_unstable.bld"))
+        .arg("--emit-receipt")
+        .arg("-")
+        .arg("--negative-fixture")
+        .output()
+        .expect("run buildc run --emit-receipt - --negative-fixture on unstable kernel");
+
+    assert!(
+        output.status.success(),
+        "emitting a negative-fixture receipt should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(receipt["receipt_status"], "FAIL_EXPECTED");
+    assert_eq!(receipt["invariant"]["status"], "FAIL");
+    assert_eq!(receipt["negative_fixture"], true);
+    assert!(
+        receipt["invariant"]["observed"]["increase_count"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0,
+        "the unstable kernel must record at least one energy increase"
+    );
+
+    let labels = receipt["labels"].as_array().expect("labels array");
+    assert!(labels.iter().any(|label| label == "NOT_A_NEW_PHYSICAL_LAW"));
+    assert!(labels.iter().any(|label| label == "NEGATIVE_FIXTURE"));
+}
+
+#[test]
+fn run_emit_receipt_unstable_without_fixture_is_fail_unexpected() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping run_emit_receipt_unstable_without_fixture_is_fail_unexpected: C backend not ready"
+        );
+        return;
+    }
+
+    let output = buildc()
+        .arg("run")
+        .arg(repo_example("heat_equation_energy_unstable.bld"))
+        .arg("--emit-receipt")
+        .arg("-")
+        .output()
+        .expect("run buildc run --emit-receipt - on unstable kernel (no fixture)");
+
+    assert!(output.status.success());
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(receipt["receipt_status"], "FAIL_UNEXPECTED");
+    assert_eq!(receipt["invariant"]["status"], "FAIL");
+    assert_eq!(receipt["negative_fixture"], false);
+}
+
+#[test]
+fn run_emit_receipt_unknown_invariant_errors() {
+    let output = buildc()
+        .arg("run")
+        .arg(repo_example("heat_equation_energy.bld"))
+        .arg("--emit-receipt")
+        .arg("-")
+        .arg("--invariant")
+        .arg("does-not-exist")
+        .output()
+        .expect("run buildc run --emit-receipt - --invariant does-not-exist");
+
+    assert!(
+        !output.status.success(),
+        "an unknown --invariant must fail before compiling"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Unknown --invariant"),
+        "error should name the unknown invariant; got:\n{stderr}"
+    );
+}
+
+#[test]
+fn run_emit_receipt_to_file_still_echoes_program_stdout() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping run_emit_receipt_to_file_still_echoes_program_stdout: C backend not ready"
+        );
+        return;
+    }
+
+    let kernel = repo_example("heat_equation_energy.bld");
+
+    // Baseline: plain `run` stdout with no --emit-receipt.
+    let baseline = buildc()
+        .arg("run")
+        .arg(&kernel)
+        .output()
+        .expect("baseline buildc run");
+    assert!(baseline.status.success());
+    let baseline_stdout = String::from_utf8_lossy(&baseline.stdout).replace("\r\n", "\n");
+
+    // With --emit-receipt to a FILE, the program's stdout must still appear on
+    // real stdout byte-for-byte (the receipt goes to the file, not stdout).
+    let receipt_path =
+        std::env::temp_dir().join(format!("buildlang_sci_receipt_{}.json", std::process::id()));
+    let emitted = buildc()
+        .arg("run")
+        .arg(&kernel)
+        .arg("--emit-receipt")
+        .arg(&receipt_path)
+        .output()
+        .expect("buildc run --emit-receipt <file>");
+    assert!(
+        emitted.status.success(),
+        "emit-to-file run should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&emitted.stderr)
+    );
+    let emitted_stdout = String::from_utf8_lossy(&emitted.stdout).replace("\r\n", "\n");
+
+    assert_eq!(
+        emitted_stdout, baseline_stdout,
+        "emit-to-file must echo the program stdout identically to plain run"
+    );
+
+    // The receipt file parses and re-verifies its own seal shape.
+    let bytes = fs::read(&receipt_path).expect("read emitted receipt file");
+    let _ = fs::remove_file(&receipt_path);
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("receipt file is valid JSON");
+    assert_eq!(receipt["receipt_status"], "PASS");
+    assert_eq!(receipt["seal"]["hex"].as_str().map(str::len), Some(64));
+}
