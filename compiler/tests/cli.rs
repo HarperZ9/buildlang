@@ -13094,3 +13094,74 @@ fn main() ~ Console {
         stdout
     );
 }
+
+#[test]
+fn linalg_module_runs_end_to_end() {
+    // I3: the `linalg` stdlib module provides free functions over the dynamic
+    // Vec<f64> (vec_dot / vec_sum / vec_norm). This exercises the full pipeline:
+    // `mod linalg;` resolves from the repo-root stdlib, its free functions are
+    // prefix-mangled and callable by bare name, and the f64 vector builtins plus
+    // `sqrt` lower to the C backend. Floats print via C `printf("%g", ...)`, so
+    // whole-number f64 values render without a decimal point (32.0 -> "32").
+    if !c_backend_ready() {
+        eprintln!("skipping linalg module e2e test because no C backend is available");
+        return;
+    }
+    // Bind each result to a `let` before printing: this is the standard
+    // buildlang idiom for stdlib-imported calls (see 100_inline_modules.bld /
+    // 101_calibrate_pipeline.bld). The import rewriter mangles bare imported
+    // calls in statement/binding position, and `println!("{}", var)` prints
+    // the already-computed value.
+    let src = r#"
+mod core;
+mod math;
+mod linalg;
+
+fn main() ~ Console {
+    let mut a = vec_new_f64();
+    vec_push_f64(a, 1.0);
+    vec_push_f64(a, 2.0);
+    vec_push_f64(a, 3.0);
+
+    let mut b = vec_new_f64();
+    vec_push_f64(b, 4.0);
+    vec_push_f64(b, 5.0);
+    vec_push_f64(b, 6.0);
+
+    let dot = vec_dot(a, b);
+    let sum = vec_sum(a);
+
+    let mut c = vec_new_f64();
+    vec_push_f64(c, 3.0);
+    vec_push_f64(c, 4.0);
+    let norm = vec_norm(c);
+
+    println!("{}", dot);
+    println!("{}", sum);
+    println!("{}", norm);
+}
+"#;
+    let fixture = write_dispatch_fixture("linalg_module", src);
+
+    let output = buildc()
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("run buildc run on linalg module fixture");
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "linalg module program should compile and run\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    // vec_dot([1,2,3],[4,5,6]) = 4+10+18 = 32; vec_sum([1,2,3]) = 6;
+    // vec_norm([3,4]) = sqrt(9+16) = sqrt(25) = 5. `%g` drops the trailing `.0`.
+    assert_eq!(
+        stdout, "32\n6\n5\n",
+        "linalg dot/sum/norm should print 32, 6, 5; got:\n{}",
+        stdout
+    );
+}
