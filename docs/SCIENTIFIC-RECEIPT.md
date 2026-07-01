@@ -94,6 +94,8 @@ The receipt is a single JSON object. Its layers, outermost meaning first:
   series (always finite values; see the non-finite rule in section 1).
 - `invariant`: the checked criterion and its verdict (see below).
 - `negative_fixture`: whether `--negative-fixture` was set.
+- `diverged`: whether the run produced a non-finite value (sealed in-band, not just as a
+  label, because verify's re-check rules branch on it; see section 6).
 - `labels`: always includes `"NOT_A_NEW_PHYSICAL_LAW"`; adds `"NEGATIVE_FIXTURE"` when the
   fixture flag is set and `"NONFINITE_OBSERVED"` when the run diverged.
 - `receipt_status`: `PASS` | `FAIL_EXPECTED` | `FAIL_UNEXPECTED` | `UNVERIFIABLE`.
@@ -191,8 +193,14 @@ buildc receipt verify receipt.json --json    # machine-readable report
    digests. A change to the source file since sealing shows up here as a mismatch.
 2. **Re-run the program with the receipt's recorded `args`**, re-parse the series, and
    **re-check the measurement count**: the re-run must produce exactly
-   `measurement.count` values (the count is deterministic, unlike the exact floats), so an
-   edited `observed_values` array of the wrong length is caught here.
+   `measurement.count` values (for a non-diverged run the count is deterministic, unlike
+   the exact floats), so an edited `observed_values` array of the wrong length is caught
+   here. **Diverged runs are the exception**: there the finite-prefix length is the index
+   of the first non-finite value, a platform-dependent quantity (a 1-ULP libm difference
+   can shift the divergence step), so when the receipt records divergence AND the re-run
+   also diverges, the count and increase-count checks are skipped and the reproduced
+   divergence itself is the faithfulness signal. A recorded divergence that does NOT
+   reproduce (or a divergence the receipt never recorded) fails as non-reproduction.
 3. **Recompute the verdict** with the exact same status rule. The recomputed
    `invariant.status`, `increase_count`, and `receipt_status` must match the stored values;
    any drift is a verification failure with a clear `... drift: receipt X, re-run Y`

@@ -5363,6 +5363,23 @@ impl<'ctx> TypeInfer<'ctx> {
         };
 
         if let Some(init) = &local.init {
+            // let-else (`let PAT = expr else { ... }`) parses, but its diverge
+            // block is neither type-checked nor lowered: codegen would silently
+            // DISCARD the else path (a silent miscompile). Reject loudly until
+            // the construct is supported end-to-end.
+            if init.diverge.is_some() {
+                self.error(
+                    TypeError::UnsupportedConstruct {
+                        construct: "let-else".to_string(),
+                        detail: "the `else { ... }` block is parsed but not yet \
+                                 type-checked or lowered; it would be silently \
+                                 discarded at codegen. Use `match` or `if let` \
+                                 instead"
+                            .to_string(),
+                    },
+                    local.span,
+                );
+            }
             let init_ty = self.infer_expr(&init.expr);
             let _ = self.unify(&ty, &init_ty, local.span);
 
