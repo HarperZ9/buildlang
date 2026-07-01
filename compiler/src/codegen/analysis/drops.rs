@@ -53,10 +53,16 @@ use super::liveness::{self, buffer_live_in, buffer_live_out};
 /// (`buf_in`/`buf_out`, which are already sound) plus dominance, so it stays a
 /// pure function of the same liveness substrate without needing new dataflow.
 ///
+/// `S` is additionally required to be NON-RE-ENTRANT: any block reached via a
+/// back-edge (a loop header, or a self-loop block — a predecessor `P` that `S`
+/// dominates) is declined, because `S`'s START re-executes once per iteration and
+/// freeing a once-allocated buffer there would double-free on every subsequent
+/// iteration. With that exclusion the free at `S` runs at most once per allocation.
+///
 /// Then freeing at `S`'s start runs after every use (buffer dead at entry means no
 /// use at/after `S`; every path into `S` passed through a terminal block that
-/// consumed the buffer), on every path reaching `S`, exactly once per reach, and
-/// only when `L` was allocated (def dominates `S`). Zero or >1 such `S`, or any
+/// consumed the buffer), on every acyclic path reaching `S`, and only when `L` was
+/// allocated (def dominates `S`). Zero or >1 such `S`, a re-entrant `S`, or any
 /// predecessor chain that fails the terminal/clean property (a split frontier
 /// needing a drop flag), declines: the buffer leaks, which is safe.
 pub(crate) fn multi_block_freeable(
@@ -153,6 +159,15 @@ pub(crate) fn multi_block_freeable(
             }
             if !dom[s].contains(&def_bi) {
                 continue; // def must dominate the free site
+            }
+            // A loop header (a predecessor reached via a back-edge into S) executes
+            // once per iteration; freeing at its START would double-free a
+            // once-allocated buffer. Decline; the buffer leaks, which is safe.
+            // (Legitimate loop-body frees land on non-header blocks and are
+            // unaffected.) S is a loop header iff some predecessor P has a back-edge
+            // P -> S, i.e. S dominates P.
+            if preds[s].iter().any(|&p| dom[p].contains(&s)) {
+                continue;
             }
             if !preds[s].iter().any(|&p| terminal[p]) {
                 continue; // no real death anywhere upstream: nothing to free
@@ -361,6 +376,137 @@ mod tests {
         assert!(
             map.is_empty(),
             "split death frontier needs a drop flag; must decline (leak, safe): {map:?}"
+        );
+    }
+
+    // Loop-header death block: the buffer dies in bb1, and bb2 is a loop header
+    // (bb3 is a body block with a back-edge bb3 -> bb2). bb2's block START executes
+    // once per iteration, so freeing a once-allocated buffer there would double-free
+    // on every subsequent iteration. Rule must DECLINE (leak, safe).
+    // bb0: _0 = alloc() -> bb1
+    // bb1: _1 = _0.ptr ; printf(_1) -> bb2        (buffer dies in bb1)
+    // bb2 (header): if cond -> bb3 else bb4
+    // bb3 (body): Goto bb2                          (back-edge bb3 -> bb2)
+    // bb4: return
+    #[test]
+    fn declines_loop_header_death_block() {
+        let mut func = MirFunction::new("f", MirFnSig::new(vec![], MirType::Void));
+        func.locals.push(bs(0, "_0"));
+        func.locals.push(i64_local(1, "_1"));
+        func.locals.push(i64_local(9, "cond"));
+
+        let mut b0 = MirBlock::new(BlockId(0));
+        b0.terminator = Some(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("build_string_concat")),
+            args: Vec::new(),
+            dest: Some(LocalId(0)),
+            target: Some(BlockId(1)),
+            unwind: None,
+        });
+
+        let mut b1 = MirBlock::new(BlockId(1));
+        b1.stmts.push(MirStmt::assign(
+            LocalId(1),
+            MirRValue::FieldAccess {
+                base: MirValue::Local(LocalId(0)),
+                field_name: Arc::from("ptr"),
+                field_ty: MirType::i64(),
+            },
+        ));
+        b1.terminator = Some(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("printf")),
+            args: vec![MirValue::Local(LocalId(1))],
+            dest: None,
+            target: Some(BlockId(2)),
+            unwind: None,
+        });
+
+        // bb2 is the loop header: reached from bb1 (entry) and from bb3 (back-edge).
+        let mut b2 = MirBlock::new(BlockId(2));
+        b2.terminator = Some(MirTerminator::If {
+            cond: MirValue::Local(LocalId(9)),
+            then_block: BlockId(3),
+            else_block: BlockId(4),
+        });
+
+        // bb3 is the loop body; its Goto back to bb2 forms the back-edge.
+        let mut b3 = MirBlock::new(BlockId(3));
+        b3.terminator = Some(MirTerminator::Goto(BlockId(2)));
+
+        let mut b4 = MirBlock::new(BlockId(4));
+        b4.terminator = Some(MirTerminator::Return(None));
+
+        func.blocks = Some(vec![b0, b1, b2, b3, b4]);
+
+        let candidates = vec![(LocalId(0), 0usize)];
+        let map = multi_block_freeable(&func, &candidates, &HashSet::new(), &HashSet::new());
+        assert!(
+            map.get(&2).is_none(),
+            "bb2 is a loop header; freeing there double-frees per iteration — must decline: {map:?}"
+        );
+        assert!(
+            map.is_empty(),
+            "no valid free site for a buffer that dies before a loop header: {map:?}"
+        );
+    }
+
+    // Self-loop death block: bb2 branches to itself (back-edge bb2 -> bb2), so its
+    // START re-executes each iteration. Same double-free hazard as a loop header.
+    // bb0: _0 = alloc() -> bb1
+    // bb1: _1 = _0.ptr ; printf(_1) -> bb2        (buffer dies in bb1)
+    // bb2: if cond -> bb2 else bb3                  (self-loop back-edge bb2 -> bb2)
+    // bb3: return
+    #[test]
+    fn declines_self_loop_death_block() {
+        let mut func = MirFunction::new("f", MirFnSig::new(vec![], MirType::Void));
+        func.locals.push(bs(0, "_0"));
+        func.locals.push(i64_local(1, "_1"));
+        func.locals.push(i64_local(9, "cond"));
+
+        let mut b0 = MirBlock::new(BlockId(0));
+        b0.terminator = Some(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("build_string_concat")),
+            args: Vec::new(),
+            dest: Some(LocalId(0)),
+            target: Some(BlockId(1)),
+            unwind: None,
+        });
+
+        let mut b1 = MirBlock::new(BlockId(1));
+        b1.stmts.push(MirStmt::assign(
+            LocalId(1),
+            MirRValue::FieldAccess {
+                base: MirValue::Local(LocalId(0)),
+                field_name: Arc::from("ptr"),
+                field_ty: MirType::i64(),
+            },
+        ));
+        b1.terminator = Some(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("printf")),
+            args: vec![MirValue::Local(LocalId(1))],
+            dest: None,
+            target: Some(BlockId(2)),
+            unwind: None,
+        });
+
+        // bb2 self-loops: reached from bb1 and from itself (back-edge bb2 -> bb2).
+        let mut b2 = MirBlock::new(BlockId(2));
+        b2.terminator = Some(MirTerminator::If {
+            cond: MirValue::Local(LocalId(9)),
+            then_block: BlockId(2),
+            else_block: BlockId(3),
+        });
+
+        let mut b3 = MirBlock::new(BlockId(3));
+        b3.terminator = Some(MirTerminator::Return(None));
+
+        func.blocks = Some(vec![b0, b1, b2, b3]);
+
+        let candidates = vec![(LocalId(0), 0usize)];
+        let map = multi_block_freeable(&func, &candidates, &HashSet::new(), &HashSet::new());
+        assert!(
+            map.get(&2).is_none(),
+            "bb2 self-loops; freeing there double-frees per iteration — must decline: {map:?}"
         );
     }
 }
