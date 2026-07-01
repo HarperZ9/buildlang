@@ -99,6 +99,16 @@ struct LinearContext {
     /// through (never deref-and-returned, never handed to an escaping callee
     /// position) is absent, so the legal borrow-read case is not flagged.
     borrow_escaping_params: HashMap<Arc<str>, HashSet<usize>>,
+    /// For each function NAME, the set of parameter INDICES that take their
+    /// argument BY VALUE (the parameter local is NOT a `Ptr`). Passing a shared
+    /// borrow of a linear (`&coin`) into a by-value parameter moves the referent
+    /// OUT of the borrow, because the callee takes ownership of the value —
+    /// exactly what a by-value method receiver (`fn burn(self)`) called on
+    /// `(&coin)` does. A by-REFERENCE parameter (`&Coin`, a `Ptr`) is absent, so
+    /// the legal borrow-read (`observe(&q)` where `observe(q: &Qubit)`) is not
+    /// flagged. Unknown/extern callees (no MIR) are absent and thus not flagged
+    /// here (their borrow-escape, if any, is out of scope for this pass).
+    by_value_params: HashMap<Arc<str>, HashSet<usize>>,
 }
 
 /// True iff local `id` is `#[linear]` (2a annotation: the `"linear"` marker in
@@ -108,6 +118,17 @@ fn is_linear_local(func: &MirFunction, id: LocalId) -> bool {
         .iter()
         .find(|l| l.id == id)
         .is_some_and(|l| l.annotations.iter().any(|a| a.as_ref() == "linear"))
+}
+
+/// True iff local `id`'s type is a raw pointer/reference (`Ptr`). A pointer base
+/// is a BORROW position (deref / borrow-escape rules handle it), never an
+/// owned-aggregate launder; used to exclude borrows from the aggregate-launder
+/// rule.
+fn is_ptr_local(func: &MirFunction, id: LocalId) -> bool {
+    func.locals
+        .iter()
+        .find(|l| l.id == id)
+        .is_some_and(|l| matches!(l.ty, crate::codegen::ir::MirType::Ptr(_)))
 }
 
 /// The `MirLocal.name` of `id`, best-effort, for diagnostics (`_N` fallback).
@@ -164,6 +185,35 @@ fn shared_linear_ref_set(func: &MirFunction) -> HashSet<LocalId> {
             }
         }
     }
+    // Propagate the shared-ref taint through by-value COPIES of the pointer
+    // (`r = Use(temp)` / `r2 = Cast(r)`). buildlang lowers `let r = &q` to a
+    // temporary `_t = &q` followed by `r = Use(_t)`, so the named binding `r`
+    // is a copy of the borrow temp; a `*r` deref must still count as a
+    // move-out-of-shared-borrow. A simple monotone fixpoint over the CFG
+    // carries the taint across such copies (and any copy chain / block order).
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in blocks {
+            for stmt in &block.stmts {
+                if let MirStmtKind::Assign { dest, value } = &stmt.kind {
+                    let src = match value {
+                        MirRValue::Use(MirValue::Local(s))
+                        | MirRValue::Cast {
+                            value: MirValue::Local(s),
+                            ..
+                        } => Some(*s),
+                        _ => None,
+                    };
+                    if let Some(s) = src {
+                        if set.contains(&s) && set.insert(*dest) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
     set
 }
 
@@ -188,6 +238,21 @@ fn ref_param_index_of(func: &MirFunction) -> HashMap<LocalId, usize> {
         .enumerate()
         .filter(|(_, l)| l.is_param && matches!(l.ty, crate::codegen::ir::MirType::Ptr(_)))
         .map(|(idx, l)| (l.id, idx))
+        .collect()
+}
+
+/// The set of parameter INDICES of `func` that take their argument BY VALUE (the
+/// parameter local is NOT a `Ptr`). Param index == leading-local enumeration
+/// order (builder invariant). Used by the call-site rule: a shared borrow of a
+/// linear passed into a by-value parameter is moved out of the borrow (the
+/// callee takes ownership). A by-value method receiver (`fn burn(self)`) is the
+/// canonical case: `(&coin).burn()` passes `&coin` into a by-value `self`.
+fn by_value_param_indices(func: &MirFunction) -> HashSet<usize> {
+    func.locals
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.is_param && !matches!(l.ty, crate::codegen::ir::MirType::Ptr(_)))
+        .map(|(idx, _)| idx)
         .collect()
 }
 
@@ -249,6 +314,23 @@ fn borrow_escaping_params_of(func: &MirFunction) -> HashSet<usize> {
                             ptr: MirValue::Local(p),
                             ..
                         } => ref_param_index.get(p).copied(),
+                        // t = p.field / p[i] : move a LINEAR FIELD/ELEMENT out
+                        // of the borrowed aggregate `*p` and (eventually) return
+                        // it. `take(w: &Wrap) -> Coin { w.coin }` lowers to
+                        // `t = FieldAccess{ base: p }; return t`, moving the
+                        // linear `coin` out of the borrow `w` without owning it
+                        // — the same escape shape as a deref-and-return. Gated on
+                        // the extracted DEST being linear so a legal non-linear
+                        // read-through-borrow (`peek(c: &Coin) -> i64 { c.value
+                        // }`, dest is i64) is NOT treated as escaping.
+                        MirRValue::FieldAccess {
+                            base: MirValue::Local(p),
+                            ..
+                        }
+                        | MirRValue::IndexAccess {
+                            base: MirValue::Local(p),
+                            ..
+                        } if is_linear_local(func, *dest) => ref_param_index.get(p).copied(),
                         // t2 = Use(t) / Cast(t) : a by-value copy of a tainted
                         // local carries the taint forward.
                         MirRValue::Use(MirValue::Local(s))
@@ -409,6 +491,41 @@ fn move_out_of_shared_borrow(value: &MirRValue, shared_refs: &HashSet<LocalId>) 
     }
 }
 
+/// Whether an rvalue LAUNDERS a linear value out of a NON-linear owned
+/// aggregate: a `FieldAccess`/`IndexAccess` whose extracted DEST is linear but
+/// whose BASE local is a non-linear, non-pointer local (a tuple / array /
+/// generic-struct / builtin-collection wrapper the linear was stored into).
+/// Reading a linear out of an untracked container can be repeated, duplicating
+/// the value past no-cloning. Returns the offending base local.
+///
+/// A base that is ITSELF linear (`w.coin` where `w: Wrap` is `#[linear]`) is NOT
+/// laundering: that base is move-tracked, so the FIRST read moves it (see
+/// `moved_by_rvalue`'s aggregate handling / the field-of-linear paths) and a
+/// SECOND is a use-after-move. A pointer base is a borrow (handled by the deref
+/// / borrow-escape rules), never an owned launder.
+fn launder_out_of_nonlinear_aggregate(
+    func: &MirFunction,
+    value: &MirRValue,
+    dest: LocalId,
+) -> Option<LocalId> {
+    let base = match value {
+        MirRValue::FieldAccess {
+            base: MirValue::Local(b),
+            ..
+        }
+        | MirRValue::IndexAccess {
+            base: MirValue::Local(b),
+            ..
+        } => *b,
+        _ => return None,
+    };
+    if is_linear_local(func, dest) && !is_linear_local(func, base) && !is_ptr_local(func, base) {
+        Some(base)
+    } else {
+        None
+    }
+}
+
 /// Collect every linear local MOVED by an rvalue in an `Assign`. A move of
 /// linear `L` = the rvalue transfers `L`'s value out: `Use(Local(L))`, or `L`
 /// as an aggregate operand / cast / repeat operand (by-value composition), or a
@@ -531,6 +648,11 @@ pub(crate) fn check_module(functions: &[MirFunction]) -> Vec<TypeErrorWithSpan> 
     // not just the direct deref-and-return shape.
     let ctx = LinearContext {
         borrow_escaping_params: escaping_params_fixpoint(functions),
+        by_value_params: functions
+            .iter()
+            .map(|f| (f.name.clone(), by_value_param_indices(f)))
+            .filter(|(_, s)| !s.is_empty())
+            .collect(),
     };
     functions
         .iter()
@@ -712,6 +834,32 @@ fn apply_stmt(
             }
         }
 
+        // (1b) aggregate-launder: extracting a LINEAR value out of a NON-linear,
+        // owned (non-pointer) aggregate base. A linear placed in a tuple / array
+        // / generic-struct field / builtin collection is moved into an untracked
+        // container; a `FieldAccess`/`IndexAccess` then reads a fresh linear
+        // value out, and can do so REPEATEDLY (the container is not
+        // move-tracked), laundering the value past no-cloning. The extracted
+        // DEST is linear but the BASE local is not (`is_linear_local(base) ==
+        // false`) and is not a borrow (`Ptr` bases go through the deref /
+        // borrow-escape rules). Reported at every read-out so the program is
+        // rejected. A read out of a LINEAR base (`w.coin` where `w: Wrap` is
+        // `#[linear]`) is NOT laundering — the base is move-tracked, so a second
+        // read is a use-after-move on the base instead.
+        if let Some(base) = launder_out_of_nonlinear_aggregate(func, value, *dest) {
+            if let Some(errs) = errors.as_deref_mut() {
+                errs.push(TypeErrorWithSpan::new(
+                    TypeError::LinearInUnsupportedPosition {
+                        context: format!(
+                            "a non-linear container `{}` (a linear value cannot be laundered through an untracked aggregate)",
+                            local_name(func, base)
+                        ),
+                    },
+                    span,
+                ));
+            }
+        }
+
         // (2) reads: borrow-after-move on the current state.
         let mut reads = Vec::new();
         read_by_rvalue(func, value, &mut reads);
@@ -831,20 +979,27 @@ fn apply_terminator(
             ..
         }) => {
             // Class 3: a shared borrow of a linear passed into a borrow-escaping
-            // parameter is moved out of the borrow by the callee.
+            // parameter is moved out of the borrow by the callee. ALSO: a shared
+            // borrow of a linear passed into a BY-VALUE parameter is moved out of
+            // the borrow, because the callee takes ownership of the value (a
+            // by-value method receiver `fn burn(self)` invoked on `(&coin)` is
+            // the canonical case). A by-REFERENCE parameter (`&Coin`) is neither,
+            // so a legal borrow-read (`observe(&q)`) is not flagged.
             if let Some(name) = call_target_name(callee) {
-                if let Some(escaping) = ctx.borrow_escaping_params.get(name) {
-                    for (i, a) in args.iter().enumerate() {
-                        if let MirValue::Local(p) = a {
-                            if escaping.contains(&i) && shared_refs.contains(p) {
-                                if let Some(errs) = errors.as_deref_mut() {
-                                    errs.push(TypeErrorWithSpan::new(
-                                        TypeError::LinearMoveOutOfBorrow {
-                                            name: local_name(func, *p),
-                                        },
-                                        span,
-                                    ));
-                                }
+                let escaping = ctx.borrow_escaping_params.get(name);
+                let by_value = ctx.by_value_params.get(name);
+                for (i, a) in args.iter().enumerate() {
+                    if let MirValue::Local(p) = a {
+                        let escapes = escaping.is_some_and(|e| e.contains(&i));
+                        let consumed_by_value = by_value.is_some_and(|b| b.contains(&i));
+                        if (escapes || consumed_by_value) && shared_refs.contains(p) {
+                            if let Some(errs) = errors.as_deref_mut() {
+                                errs.push(TypeErrorWithSpan::new(
+                                    TypeError::LinearMoveOutOfBorrow {
+                                        name: local_name(func, *p),
+                                    },
+                                    span,
+                                ));
                             }
                         }
                     }
@@ -2038,6 +2193,371 @@ mod tests {
             )),
             1,
             "passing `&coin` into the recursive wrapper is rejected: {errors:?}"
+        );
+    }
+}
+
+// =============================================================================
+// SUPERSET GATE (2d migration, TEMPORARY): prove the MIR checker catches every
+// UNSAFE program the AST flow-tracker historically rejected, BEFORE the AST
+// tracker is removed. This lowers each historical `.bld` case through the real
+// front end and runs `check_module` DIRECTLY on the lowered MIR — bypassing the
+// `run_check` gate that would otherwise stop lowering when the AST tracker
+// errors. If any unsafe case is NOT caught here, removal would regress
+// soundness and Step 2 must not proceed.
+//
+// This module is deleted after the gate is proven and the AST tracker is gone;
+// the re-homed end-to-end tests in `check.rs` are the durable coverage.
+// =============================================================================
+#[cfg(test)]
+mod superset_gate {
+    use super::check_module;
+    use crate::codegen::CodeGenerator;
+    use crate::codegen::Target;
+    use crate::lexer::{Lexer, SourceFile};
+    use crate::parser::Parser;
+    use crate::types::{TypeChecker, TypeContext, TypeError};
+    use std::sync::Arc;
+
+    const PRELUDE: &str = "#[linear]\nstruct Qubit { id: i64 }\n\
+         fn consume(q: Qubit) -> i64 { q.id }\n\
+         fn observe(q: &Qubit) -> i64 { 0 }\n";
+
+    /// Lower `source` through the REAL pipeline (lexer -> parser -> type check ->
+    /// MIR) and return the UNION of the two linear-diagnostic sources exactly as
+    /// `main::run_check` folds them: the type-phase DECLARATION-level linear
+    /// errors (the generic/mismatched-parameter positional rule, which the MIR
+    /// checker structurally cannot see because monomorphization erases the
+    /// referent's linearity) PLUS the MIR affine/borrow checker's errors (every
+    /// flow-sensitive move/borrow violation). This is the true "sole linear gate"
+    /// after 2d: no single phase catches everything, but their union does.
+    /// Panics on parse failure.
+    fn mir_linear_errors(source: &str) -> Vec<crate::types::TypeErrorWithSpan> {
+        let source_file = SourceFile::new("superset.bld", source);
+        let mut lexer = Lexer::new(&source_file);
+        let tokens = lexer.tokenize().expect("tokenize superset fixture");
+        let mut parser = Parser::new(&source_file, tokens);
+        let module = parser.parse().expect("parse superset fixture");
+
+        let mut ctx = TypeContext::new();
+        let mut checker = TypeChecker::new(&mut ctx);
+        checker.set_source_file(&source_file);
+        checker.check_module(&module);
+        let mut errors = checker.take_errors();
+
+        let src: Arc<str> = Arc::from(source_file.source());
+        let mut codegen = CodeGenerator::with_source(&ctx, Target::C, src);
+        // `generate()` lowers to MIR and populates `linear_errors()`. A lowering
+        // error would mean an unrelated bug; surface it by panicking so the gate
+        // does not silently pass.
+        codegen
+            .generate(&module)
+            .expect("lower superset fixture to MIR");
+        let mir = codegen.mir().expect("MIR present after generate");
+        errors.extend(check_module(&mir.functions));
+        errors
+    }
+
+    fn any_linear_error(errors: &[crate::types::TypeErrorWithSpan]) -> bool {
+        errors.iter().any(|e| {
+            matches!(
+                e.error,
+                TypeError::LinearUseAfterMove { .. }
+                    | TypeError::LinearMoveOutOfBorrow { .. }
+                    | TypeError::LinearBorrowAfterMove { .. }
+                    | TypeError::LinearInUnsupportedPosition { .. }
+            )
+        })
+    }
+
+    /// Assert the MIR checker FLAGS an unsafe program.
+    fn assert_caught(label: &str, source: &str) {
+        let errors = mir_linear_errors(source);
+        assert!(
+            any_linear_error(&errors),
+            "SUPERSET GATE FAIL [{label}]: MIR checker did not catch an unsafe \
+             program the AST tracker rejected. errors: {errors:#?}"
+        );
+    }
+
+    /// Assert the MIR checker ACCEPTS a safe program (precision; these were
+    /// AST-tracker over-rejections).
+    fn assert_accepted(label: &str, source: &str) {
+        let errors = mir_linear_errors(source);
+        assert!(
+            !any_linear_error(&errors),
+            "PRECISION FAIL [{label}]: MIR checker rejected a SAFE program. \
+             errors: {errors:#?}"
+        );
+    }
+
+    // ---- ENFORCED cases (must be CAUGHT by the MIR checker) ----
+
+    #[test]
+    fn gate_double_use_via_call() {
+        assert_caught(
+            "double-use via call",
+            &format!(
+                "{PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+                 let a = consume(q); let b = consume(q); println(\"{{}}\", a + b); }}"
+            ),
+        );
+    }
+
+    #[test]
+    fn gate_generic_fn_passthrough_then_double_use() {
+        assert_caught(
+            "linear through a generic fn, then double-consume",
+            &format!(
+                "{PRELUDE}fn thru<T>(x: T) -> T {{ x }}\n\
+                 fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; let c = thru(q); \
+                 let a = consume(c); let b = consume(c); println(\"{{}}\", a + b); }}"
+            ),
+        );
+    }
+
+    #[test]
+    fn gate_array_repeat_is_a_clone() {
+        assert_caught(
+            "array-repeat of a linear is a literal clone",
+            &format!(
+                "{PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+                 let arr = [q; 3]; let a = arr[0]; let b = arr[1]; \
+                 let x = consume(a); let y = consume(b); println(\"{{}}\", x + y); }}"
+            ),
+        );
+    }
+
+    #[test]
+    fn gate_move_via_let_then_use() {
+        assert_caught(
+            "move-then-reuse via let",
+            &format!(
+                "{PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+                 let q2 = q; let a = consume(q); println(\"{{}}\", a); }}"
+            ),
+        );
+    }
+
+    #[test]
+    fn gate_consumed_in_branch_then_used_after() {
+        assert_caught(
+            "consume-in-branch then use-after (dataflow join)",
+            &format!(
+                "{PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+                 let cond = true; if cond {{ let a = consume(q); println(\"{{}}\", a); }} \
+                 let b = consume(q); println(\"{{}}\", b); }}"
+            ),
+        );
+    }
+
+    #[test]
+    fn gate_consumed_in_loop_body() {
+        assert_caught(
+            "consume in loop body (repeat)",
+            &format!(
+                "{PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+                 let mut i = 0; while i < 2 {{ let a = consume(q); i = i + 1; }} }}"
+            ),
+        );
+    }
+
+    #[test]
+    fn gate_param_consumed_twice() {
+        assert_caught(
+            "linear parameter consumed twice",
+            &format!(
+                "{PRELUDE}fn waste(q: Qubit) -> i64 {{ let a = consume(q); \
+                 let b = consume(q); a + b }}\n\
+                 fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; println(\"{{}}\", waste(q)); }}"
+            ),
+        );
+    }
+
+    #[test]
+    fn gate_tuple_store_then_double_read() {
+        assert_caught(
+            "linear stored in tuple, read twice",
+            &format!(
+                "{PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+                 let t = (q, 0); let a = t.0; let b = t.0; \
+                 let x = consume(a); let y = consume(b); println(\"{{}}\", x + y); }}"
+            ),
+        );
+    }
+
+    #[test]
+    fn gate_array_store_then_double_read() {
+        assert_caught(
+            "linear stored in array, read twice",
+            &format!(
+                "{PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+                 let arr = [q]; let a = arr[0]; let b = arr[0]; \
+                 let x = consume(a); let y = consume(b); println(\"{{}}\", x + y); }}"
+            ),
+        );
+    }
+
+    #[test]
+    fn gate_generic_struct_store_then_double_read() {
+        assert_caught(
+            "linear in generic struct field, read twice",
+            &format!(
+                "{PRELUDE}struct Holder<T> {{ item: T }}\n\
+                 fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+                 let h = Holder {{ item: q }}; let a = h.item; let b = h.item; \
+                 let x = consume(a); let y = consume(b); println(\"{{}}\", x + y); }}"
+            ),
+        );
+    }
+
+    #[test]
+    fn gate_move_out_of_reference() {
+        assert_caught(
+            "deref-copy out of a shared reference",
+            &format!(
+                "{PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+                 let r = &q; let a = *r; let b = *r; \
+                 let x = consume(a); let y = consume(b); println(\"{{}}\", x + y); }}"
+            ),
+        );
+    }
+
+    #[test]
+    fn gate_field_read_through_reference() {
+        assert_caught(
+            "linear field moved out through a borrow",
+            "#[linear]\nstruct Coin { value: i64 }\n\
+             #[linear]\nstruct Wrap { coin: Coin }\n\
+             fn take(w: &Wrap) -> Coin { w.coin }\n\
+             fn spend(c: Coin) -> i64 { c.value }\n\
+             fn main() ~ Console { let coin = Coin { value: 1 }; \
+             let w = Wrap { coin: coin }; \
+             let a = spend(take(&w)); let b = spend(take(&w)); \
+             println(\"{} {}\", a, b); }",
+        );
+    }
+
+    #[test]
+    fn gate_shorthand_field_init_consumes() {
+        assert_caught(
+            "shorthand field init moves the local, then reuse",
+            "#[linear]\nstruct Coin { value: i64 }\n\
+             #[linear]\nstruct Wallet { coin: Coin }\n\
+             fn spend(c: Coin) -> i64 { c.value }\n\
+             fn main() ~ Console { let coin = Coin { value: 1 }; \
+             let w = Wallet { coin }; let a = spend(coin); println(\"{}\", a); }",
+        );
+    }
+
+    #[test]
+    fn gate_consumed_in_while_condition() {
+        assert_caught(
+            "consume in while condition (re-evaluated)",
+            "#[linear]\nstruct Coin { value: i64 }\n\
+             fn drain(c: Coin) -> bool { c.value > 0 }\n\
+             fn main() ~ Console { let coin = Coin { value: 1 }; \
+             while drain(coin) { println(\"loop\"); } }",
+        );
+    }
+
+    #[test]
+    fn gate_builtin_collection_store_then_double_read() {
+        assert_caught(
+            "linear stored in a builtin Vec, read out twice (monomorph erases linearity)",
+            "#[linear]\nstruct Coin { value: i64 }\n\
+             fn spend(c: Coin) -> i64 { c.value }\n\
+             fn main() ~ Console { let coin = Coin { value: 1 }; \
+             let v = vec_new(); vec_push(v, coin); \
+             let a = spend(vec_get(v, 0)); let b = spend(vec_get(v, 0)); \
+             println(\"{} {}\", a, b); }",
+        );
+    }
+
+    #[test]
+    fn gate_method_call_on_borrowed_receiver() {
+        assert_caught(
+            "method-move-out through a borrowed receiver, then reuse",
+            "#[linear]\nstruct Coin { value: i64 }\n\
+             trait Burnable { fn burn(self) -> i64; }\n\
+             impl Burnable for Coin { fn burn(self) -> i64 { self.value } }\n\
+             fn spend(c: Coin) -> i64 { c.value }\n\
+             fn main() ~ Console { let coin = Coin { value: 1 }; \
+             let a = (&coin).burn(); let b = spend(coin); println(\"{} {}\", a, b); }",
+        );
+    }
+
+    #[test]
+    fn gate_closure_capture_consume() {
+        assert_caught(
+            "closure captures and consumes a linear, invoked twice",
+            &format!(
+                "{PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+                 let f = || consume(q); let a = f(); let b = f(); println(\"{{}}\", a + b); }}"
+            ),
+        );
+    }
+
+    #[test]
+    fn gate_inner_shadow_does_not_revive() {
+        assert_caught(
+            "inner shadow must not revive a consumed outer linear",
+            &format!(
+                "{PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+                 let a = consume(q); \
+                 {{ let q = Qubit {{ id: 2 }}; let _ = observe(&q); }} \
+                 let b = consume(q); println(\"{{}}\", a + b); }}"
+            ),
+        );
+    }
+
+    // ---- SAFE-PRECISION cases (AST-tracker OVER-rejections; MIR ACCEPTS) ----
+
+    #[test]
+    fn precision_single_use_ok() {
+        assert_accepted(
+            "single use is clean",
+            &format!(
+                "{PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+                 let a = consume(q); println(\"{{}}\", a); }}"
+            ),
+        );
+    }
+
+    #[test]
+    fn precision_borrow_does_not_consume() {
+        assert_accepted(
+            "borrow then consume is clean",
+            &format!(
+                "{PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+                 let a = observe(&q); let b = observe(&q); let c = consume(q); \
+                 println(\"{{}}\", a + b + c); }}"
+            ),
+        );
+    }
+
+    #[test]
+    fn precision_param_single_use_ok() {
+        assert_accepted(
+            "linear parameter used once",
+            &format!(
+                "{PRELUDE}fn forward(q: Qubit) -> i64 {{ consume(q) }}\n\
+                 fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; println(\"{{}}\", forward(q)); }}"
+            ),
+        );
+    }
+
+    #[test]
+    fn precision_option_wrap_once_ok() {
+        // Wrapping a linear in `Some(q)` exactly once (never extracted twice) is
+        // a single move -> safe. The old AST tracker over-rejected any linear in
+        // a generic constructor; the union now accepts it.
+        assert_accepted(
+            "linear wrapped in Option exactly once",
+            &format!(
+                "{PRELUDE}fn main() ~ Console {{ let q = Qubit {{ id: 1 }}; \
+                 let opt = Some(q); println(\"made an option\"); }}"
+            ),
         );
     }
 }
