@@ -12943,6 +12943,40 @@ fn local_module_self_recursive_fn_no_false_ambiguity() {
     );
 }
 
+/// Regression: a function imported via `mod foo;` failed to resolve with
+/// "undefined variable" when CALLED inside a loop body (while/for), match arm,
+/// method-call argument, or other context the import call-rewriter did not
+/// descend into. The rewriter now walks ALL expression contexts, so a bare
+/// imported call is rewritten to its prefixed name everywhere.
+#[test]
+fn imported_module_fn_resolves_inside_loop_body() {
+    if !c_backend_ready() {
+        eprintln!("skipping imported-fn-in-loop e2e: no C backend available");
+        return;
+    }
+    let dir = std::env::temp_dir().join("buildlang_imported_fn_in_loop");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    std::fs::write(
+        dir.join("helper.bld"),
+        "fn square(n: i32) -> i32 { n * n }\n",
+    )
+    .expect("write helper.bld");
+    let main_path = dir.join("main.bld");
+    std::fs::write(
+        &main_path,
+        "mod helper;\nfn main() ~ Console {\n    \
+         let mut i: i32 = 1;\n    let mut acc: i32 = 0;\n    \
+         while i <= 3 {\n        acc = acc + square(i);\n        i = i + 1;\n    }\n    \
+         println(\"{}\", acc);\n}\n",
+    )
+    .expect("write main.bld");
+    let result = c_backend_run(&main_path);
+    assert_eq!(
+        result.stdout, "14\n",
+        "an imported module fn must resolve when called inside a loop body"
+    );
+}
+
 /// I4 (review FIX A): broadcasting arrays whose element type is NOT numeric is a
 /// compile-time type error. Broadcasting is defined only for integer/float
 /// elements; `["a", "b"] .+ ["c", "d"]` (string elements) must be REJECTED by
