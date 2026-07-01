@@ -1,20 +1,20 @@
 <p align="center">
-  <img src="docs/brand/buildlang-hero.png" alt="BuildLang, the Effects Language compiler in the Build ecosystem">
+  <img src="https://raw.githubusercontent.com/HarperZ9/buildlang/main/docs/brand/buildlang-hero.png" alt="BuildLang, the Effects Language compiler in the Build ecosystem">
 </p>
-<!-- Project mark: docs/brand/buildlang-mark.svg -->
+<!-- Project mark: https://raw.githubusercontent.com/HarperZ9/buildlang/main/docs/brand/buildlang-mark.svg -->
 
 # BuildLang
 
 > The Effects Language: a Rust-built compiler for typed effects, systems experiments, and shader-oriented code generation.
 
-[Build ecosystem](https://github.com/HarperZ9/quanta-universe) | [buildlang](https://github.com/HarperZ9/buildlang) | [build-universe](https://github.com/HarperZ9/quanta-universe) | [VS Code extension](https://github.com/HarperZ9/buildlang-vscode) | [grammar](https://github.com/HarperZ9/buildlang-tmLanguage)
+[Build ecosystem](https://github.com/HarperZ9/build-universe) | [buildlang](https://github.com/HarperZ9/buildlang) | [build-universe](https://github.com/HarperZ9/build-universe) | [VS Code extension](https://github.com/HarperZ9/buildlang-vscode) | [grammar](https://github.com/HarperZ9/buildlang-tmLanguage)
 
 [![license: fair-source](https://img.shields.io/badge/license-fair--source-blue.svg)](LICENSE)
 ![rust](https://img.shields.io/badge/rust-edition_2021-orange.svg)
 [![crates.io](https://img.shields.io/badge/crates.io-buildlang-blue.svg)](https://crates.io/crates/buildlang)
 ![version](https://img.shields.io/badge/version-1.0.x-informational.svg)
 [![CI](https://github.com/HarperZ9/buildlang/actions/workflows/ci.yml/badge.svg)](https://github.com/HarperZ9/buildlang/actions/workflows/ci.yml)
-[![part of: Build ecosystem](https://img.shields.io/badge/part_of-Build_ecosystem-00b3a4.svg)](https://github.com/HarperZ9/quanta-universe)
+[![part of: Build ecosystem](https://img.shields.io/badge/part_of-Build_ecosystem-00b3a4.svg)](https://github.com/HarperZ9/build-universe)
 
 **The Effects Language** - a Rust-built compiler for typed effects, systems
 experiments, and shader-oriented code generation.
