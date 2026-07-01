@@ -1,4 +1,4 @@
-//! Increment 2b: the MIR affine/borrow checker core.
+//! Increment 2b/2c: the MIR affine/borrow checker.
 //!
 //! A forward move/init dataflow over `#[linear]` locals, run to a fixpoint over
 //! the CFG. It flags the SOUNDNESS-critical linear-resource violations that the
@@ -9,8 +9,32 @@
 //! - **borrow-after-move**: a linear local READ (`Ref`/`AddressOf`/deref/field)
 //!   while `Moved` (closes class 5).
 //! - **move-out-of-shared-borrow**: a linear referent moved out through a
-//!   `Deref` of a shared (`&`, `is_mut == false`) reference (closes classes 1
-//!   direct form + 3 monomorphized).
+//!   `Deref` of a shared (`&`, `is_mut == false`) reference (closes class 1
+//!   direct form), OR by passing a shared borrow of a linear into a callee
+//!   parameter that moves the referent out and returns it (closes class 3,
+//!   interprocedurally).
+//!
+//! # 2c additions
+//!
+//! - **Match-idiom / class 1 match form.** buildlang does not lower `match` to a
+//!   `Switch`; it emits a `tag`-read + `Eq` + `If`-chain, and binds a variant
+//!   payload with `MirRValue::VariantField { base, .. }`. A `VariantField` bind
+//!   is a MOVE of its `base` (a partial move of the scrutinee, tracked
+//!   conservatively as the WHOLE base moving). Matching a linear enum through a
+//!   shared `&` first materializes `let s = *r` (`Deref` of the shared borrow),
+//!   which the 2b move-out-of-shared-borrow rule already flags.
+//! - **Class 3 (generic deref through a borrow parameter).** buildlang
+//!   monomorphizes generics, but the monomorphization can erase the referent's
+//!   linearity (a `deref_any::<Coin>` specializes to `deref_any_i32` with
+//!   `r: &i32`), so the concrete linear never appears as a linear local inside
+//!   the callee. The move-out is invisible per-function. We close it
+//!   interprocedurally: a module pre-pass finds every function that DEREFERENCES
+//!   a by-reference parameter and RETURNS the dereferenced value (a
+//!   "borrow-escaping" parameter); a call that passes a shared borrow of a
+//!   linear (`&coin`) into such a parameter moves the referent out of the shared
+//!   borrow -> `LinearMoveOutOfBorrow`. A callee that only READS through the
+//!   borrow (never derefs-and-returns it, e.g. `peek(c: &Coin) -> i64 { 0 }`) is
+//!   not borrow-escaping, so the legal borrow-read case is not flagged.
 //!
 //! Pure function of MIR (`super::cfg` / `super::liveness` substrate + the 2a
 //! linearity annotations and span side-table). No `TypeContext`.
@@ -27,6 +51,7 @@
 //! the unit tests so this conservatism does not regress safe code.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::codegen::ir::{
     LocalId, MirBlock, MirFunction, MirPlace, MirRValue, MirStmtKind, MirTerminator, MirValue,
@@ -48,6 +73,22 @@ enum MoveState {
 
 /// Per-block move/init lattice: `state[block][local]`. Missing = `Init`.
 type BlockState = HashMap<LocalId, MoveState>;
+
+/// Interprocedural context threaded into the per-function check. Computed once
+/// per module by `check_module`; empty for the standalone `check(func)` entry
+/// point (which is then exactly the 2b per-function behavior plus the local 2c
+/// idiom handling).
+#[derive(Debug, Default, Clone)]
+struct LinearContext {
+    /// For each function NAME, the set of parameter INDICES that are
+    /// "borrow-escaping": the parameter arrives by reference (`Ptr`) and the
+    /// body DEREFERENCES it by value and RETURNS the dereferenced value. Passing
+    /// a shared borrow of a linear into such a parameter moves the referent OUT
+    /// of the borrow (class 3). A parameter that is only READ through (never
+    /// deref-and-returned) is absent, so the legal borrow-read case is not
+    /// flagged.
+    borrow_escaping_params: HashMap<Arc<str>, HashSet<usize>>,
+}
 
 /// True iff local `id` is `#[linear]` (2a annotation: the `"linear"` marker in
 /// `MirLocal.annotations`).
@@ -115,6 +156,104 @@ fn shared_linear_ref_set(func: &MirFunction) -> HashSet<LocalId> {
     set
 }
 
+/// The name a `Call` terminator dispatches to, if it is a direct named call
+/// (`Global` for a regular function, `Function` for a monomorphized generic).
+fn call_target_name(func_val: &MirValue) -> Option<&Arc<str>> {
+    match func_val {
+        MirValue::Global(n) | MirValue::Function(n) => Some(n),
+        _ => None,
+    }
+}
+
+/// The set of parameter indices of `func` that are "borrow-escaping": a
+/// by-reference (`Ptr`) parameter whose referent is DEREFERENCED by value and
+/// RETURNED. This is the structural signature of a `fn deref_any<T>(r: &T) -> T
+/// { *r }` after monomorphization (`r: &i32`, body `t = *r; return t`) — the
+/// callee takes ownership of the referent out of a borrow it does not own.
+///
+/// The analysis is intraprocedural and purely structural (no types needed):
+///   1. A parameter local `p` (`is_param`, `Ptr` type) is a candidate.
+///   2. A statement `t = Deref(p)` (a by-value move-out of `*p`) taints `t`.
+///   3. Tainting propagates through `t2 = Use(t)` (a by-value copy of a tainted
+///      local stays tainted).
+///   4. `Return(Some(t))` where `t` is tainted marks the ORIGINATING parameter
+///      as borrow-escaping.
+///
+/// SOUNDNESS DISPOSITION: this over-approximates "the callee moves the referent
+/// out of the borrow and hands it back". It is deliberately NARROW (deref +
+/// return), so a callee that only READS through the borrow (`peek(c: &Coin) ->
+/// i64 { 0 }`, never derefs it) is NOT flagged — the legal borrow-read case is
+/// preserved. A callee that derefs-and-returns but is called with a NON-linear,
+/// NON-borrowed argument is harmless (the call-site rule only fires when the arg
+/// is a shared borrow of a linear).
+fn borrow_escaping_params_of(func: &MirFunction) -> HashSet<usize> {
+    let mut escaping = HashSet::new();
+    let Some(blocks) = &func.blocks else {
+        return escaping;
+    };
+
+    // Candidate reference parameters: leading locals with `is_param` and a
+    // pointer type. Param index == LocalId index (builder invariant: params are
+    // locals 0..N in declaration order).
+    let ref_param_index: HashMap<LocalId, usize> = func
+        .locals
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.is_param && matches!(l.ty, crate::codegen::ir::MirType::Ptr(_)))
+        .map(|(idx, l)| (l.id, idx))
+        .collect();
+    if ref_param_index.is_empty() {
+        return escaping;
+    }
+
+    // `tainted[local] = originating param index`: `local` currently holds the
+    // dereferenced referent of that reference parameter (moved out of the
+    // borrow). A fixpoint over the CFG is unnecessary for the shapes buildlang
+    // emits (a monomorphized `*r; return` is straight-line), but we do a simple
+    // multi-pass to be robust to block ordering / a copy chain across blocks.
+    let mut tainted: HashMap<LocalId, usize> = HashMap::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in blocks {
+            for stmt in &block.stmts {
+                if let MirStmtKind::Assign { dest, value } = &stmt.kind {
+                    let origin = match value {
+                        // t = *p : move the referent of ref-param `p` out.
+                        MirRValue::Deref {
+                            ptr: MirValue::Local(p),
+                            ..
+                        } => ref_param_index.get(p).copied(),
+                        // t2 = Use(t) / Cast(t) : a by-value copy of a tainted
+                        // local carries the taint forward.
+                        MirRValue::Use(MirValue::Local(s))
+                        | MirRValue::Cast {
+                            value: MirValue::Local(s),
+                            ..
+                        } => tainted.get(s).copied(),
+                        _ => None,
+                    };
+                    if let Some(idx) = origin {
+                        if tainted.insert(*dest, idx) != Some(idx) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // A `Return(Some(local))` of a tainted local escapes its origin parameter.
+    for block in blocks {
+        if let Some(MirTerminator::Return(Some(MirValue::Local(l)))) = &block.terminator {
+            if let Some(&idx) = tainted.get(l) {
+                escaping.insert(idx);
+            }
+        }
+    }
+    escaping
+}
+
 /// Whether an rvalue is a MOVE-OUT-OF-SHARED-BORROW of a linear referent:
 /// a `Deref { ptr }` (or a place with a leading `Deref` projection) whose
 /// pointer local is a known shared borrow of a linear value (`shared_refs`,
@@ -143,7 +282,9 @@ fn move_out_of_shared_borrow(value: &MirRValue, shared_refs: &HashSet<LocalId>) 
 
 /// Collect every linear local MOVED by an rvalue in an `Assign`. A move of
 /// linear `L` = the rvalue transfers `L`'s value out: `Use(Local(L))`, or `L`
-/// as an aggregate operand / cast / repeat operand (by-value composition). A
+/// as an aggregate operand / cast / repeat operand (by-value composition), or a
+/// `VariantField` bind that destructures a payload OUT of `L` (a partial move,
+/// tracked conservatively as the whole scrutinee moving — 2c match idiom). A
 /// `Ref`/`AddressOf`/`FieldAccess`/`Deref` READS but does not move.
 fn moved_by_rvalue(func: &MirFunction, value: &MirRValue, out: &mut Vec<LocalId>) {
     let mut push_if_linear = |v: &MirValue| {
@@ -160,11 +301,20 @@ fn moved_by_rvalue(func: &MirFunction, value: &MirRValue, out: &mut Vec<LocalId>
         MirRValue::Aggregate { operands, .. } => operands.iter().for_each(&mut push_if_linear),
         MirRValue::Repeat { value: v, .. } => push_if_linear(v),
         MirRValue::Cast { value: v, .. } => push_if_linear(v),
+        // 2c match idiom: `dest = VariantField { base }` binds a variant payload
+        // out of `base`. buildlang lowers a `match` arm's payload bind to this,
+        // so extracting the payload CONSUMES the scrutinee. Moving one variant
+        // field out of an owned scrutinee is a partial move; we conservatively
+        // treat the WHOLE `base` as moved (sound: a later use of a DIFFERENT
+        // field is over-rejected, but no unsound program passes). This makes the
+        // owned-match-payload case a move of the scrutinee; the match-through-`&`
+        // case additionally trips the `Deref`-of-shared-borrow rule at the
+        // `let s = *r` statement lowering emits before the bind.
+        MirRValue::VariantField { base, .. } => push_if_linear(base),
         // Borrows and reads do NOT move.
         MirRValue::Ref { .. }
         | MirRValue::AddressOf { .. }
         | MirRValue::FieldAccess { .. }
-        | MirRValue::VariantField { .. }
         | MirRValue::IndexAccess { .. }
         | MirRValue::Deref { .. }
         | MirRValue::Discriminant(_)
@@ -198,9 +348,9 @@ fn read_by_rvalue(func: &MirFunction, value: &MirRValue, out: &mut Vec<LocalId>)
             push_place(func, place, out)
         }
         MirRValue::Discriminant(place) | MirRValue::Len(place) => push_place(func, place, out),
-        MirRValue::FieldAccess { base, .. } | MirRValue::VariantField { base, .. } => {
-            push_val(func, base, out)
-        }
+        MirRValue::FieldAccess { base, .. } => push_val(func, base, out),
+        // `VariantField` is a MOVE of its base (`moved_by_rvalue`), not a
+        // non-consuming read, so it is intentionally absent here.
         MirRValue::IndexAccess { base, index, .. } => {
             push_val(func, base, out);
             push_val(func, index, out);
@@ -211,12 +361,13 @@ fn read_by_rvalue(func: &MirFunction, value: &MirRValue, out: &mut Vec<LocalId>)
             push_val(func, right, out);
         }
         MirRValue::UnaryOp { operand, .. } => push_val(func, operand, out),
-        // A plain `Use`/aggregate/cast/repeat is a MOVE (handled by
-        // `moved_by_rvalue`), not a non-consuming read.
+        // A plain `Use`/aggregate/cast/repeat/variant-field is a MOVE (handled
+        // by `moved_by_rvalue`), not a non-consuming read.
         MirRValue::Use(_)
         | MirRValue::Aggregate { .. }
         | MirRValue::Repeat { .. }
         | MirRValue::Cast { .. }
+        | MirRValue::VariantField { .. }
         | MirRValue::NullaryOp(..)
         | MirRValue::TextureSample { .. } => {}
     }
@@ -240,8 +391,36 @@ fn term_span(func: &MirFunction, block_id: u32) -> Span {
         .unwrap_or_else(Span::dummy)
 }
 
-/// Run the affine/borrow check over one MIR function. Pure: no mutation, no
-/// side effects. Returns every violation with its statement-level span.
+/// Run the whole-module affine/borrow check. Computes the interprocedural
+/// context (borrow-escaping parameters, for class 3) once, then runs the
+/// per-function check with it. This is the entry point the compile pipeline
+/// uses; `check(func)` remains for direct per-function checks (unit tests) and
+/// is exactly `check_module` with an empty context.
+pub(crate) fn check_module(functions: &[MirFunction]) -> Vec<TypeErrorWithSpan> {
+    let mut ctx = LinearContext::default();
+    for f in functions {
+        let escaping = borrow_escaping_params_of(f);
+        if !escaping.is_empty() {
+            ctx.borrow_escaping_params.insert(f.name.clone(), escaping);
+        }
+    }
+    functions
+        .iter()
+        .flat_map(|f| check_with_context(f, &ctx))
+        .collect()
+}
+
+/// Run the affine/borrow check over one MIR function with no interprocedural
+/// context. Pure per-function entry point (unit tests, direct callers). Class 3
+/// (borrow-escaping-parameter) detection needs `check_module`; without context
+/// this is the 2b behavior plus the local 2c match idiom.
+pub(crate) fn check(func: &MirFunction) -> Vec<TypeErrorWithSpan> {
+    check_with_context(func, &LinearContext::default())
+}
+
+/// Run the affine/borrow check over one MIR function, given the module context.
+/// Pure: no mutation, no side effects. Returns every violation with its
+/// statement-level span.
 ///
 /// The transfer function walks each block forward from a per-block entry state
 /// (the join of predecessor exit states). For every statement/terminator, in
@@ -251,7 +430,7 @@ fn term_span(func: &MirFunction, block_id: u32) -> Span {
 /// across back-edges and merges. Diagnostics are collected on a final,
 /// deterministic forward pass over the converged entry states so each site is
 /// reported at most once in stable order.
-pub(crate) fn check(func: &MirFunction) -> Vec<TypeErrorWithSpan> {
+fn check_with_context(func: &MirFunction, ctx: &LinearContext) -> Vec<TypeErrorWithSpan> {
     let blocks = match &func.blocks {
         Some(b) if !b.is_empty() => b.as_slice(),
         _ => return Vec::new(),
@@ -314,7 +493,7 @@ pub(crate) fn check(func: &MirFunction) -> Vec<TypeErrorWithSpan> {
             }
             // Transfer through the block (no diagnostics on the fixpoint pass).
             let mut state = entry[i].clone();
-            transfer_block(func, &blocks[i], &shared_refs, &mut state, None);
+            transfer_block(func, ctx, &blocks[i], &shared_refs, &mut state, None);
             if state != exit[i] {
                 exit[i] = state;
                 changed = true;
@@ -333,6 +512,7 @@ pub(crate) fn check(func: &MirFunction) -> Vec<TypeErrorWithSpan> {
         let mut state = entry[i].clone();
         transfer_block(
             func,
+            ctx,
             &blocks[i],
             &shared_refs,
             &mut state,
@@ -347,6 +527,7 @@ pub(crate) fn check(func: &MirFunction) -> Vec<TypeErrorWithSpan> {
 /// move-out-of-shared-borrow); when `None`, run silently (fixpoint pass).
 fn transfer_block(
     func: &MirFunction,
+    ctx: &LinearContext,
     block: &MirBlock,
     shared_refs: &HashSet<LocalId>,
     state: &mut BlockState,
@@ -365,7 +546,15 @@ fn transfer_block(
         );
     }
     let span = term_span(func, block_id);
-    apply_terminator(func, &block.terminator, state, span, errors.as_deref_mut());
+    apply_terminator(
+        func,
+        ctx,
+        &block.terminator,
+        shared_refs,
+        state,
+        span,
+        errors.as_deref_mut(),
+    );
 }
 
 /// Transfer for one statement. Order within a statement:
@@ -492,9 +681,16 @@ fn apply_stmt(
 /// Transfer for a terminator. `Call` args passed BY VALUE move their linear
 /// operands; `Return(Some(Local(L)))` moves `L`; the `Call` dest (re)binds.
 /// `If`/`Switch`/`Assert` conditions READ their linear operand.
+///
+/// Class 3 (interprocedural, needs `ctx`): if an arg is a shared borrow of a
+/// linear (`p in shared_refs`) and the callee's corresponding parameter is
+/// BORROW-ESCAPING (it derefs-and-returns the referent), the call moves the
+/// linear OUT of the shared borrow -> `LinearMoveOutOfBorrow`.
 fn apply_terminator(
     func: &MirFunction,
+    ctx: &LinearContext,
     term: &Option<MirTerminator>,
+    shared_refs: &HashSet<LocalId>,
     state: &mut BlockState,
     span: Span,
     mut errors: Option<&mut Vec<TypeErrorWithSpan>>,
@@ -506,6 +702,26 @@ fn apply_terminator(
             func: callee,
             ..
         }) => {
+            // Class 3: a shared borrow of a linear passed into a borrow-escaping
+            // parameter is moved out of the borrow by the callee.
+            if let Some(name) = call_target_name(callee) {
+                if let Some(escaping) = ctx.borrow_escaping_params.get(name) {
+                    for (i, a) in args.iter().enumerate() {
+                        if let MirValue::Local(p) = a {
+                            if escaping.contains(&i) && shared_refs.contains(p) {
+                                if let Some(errs) = errors.as_deref_mut() {
+                                    errs.push(TypeErrorWithSpan::new(
+                                        TypeError::LinearMoveOutOfBorrow {
+                                            name: local_name(func, *p),
+                                        },
+                                        span,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             // The callee value itself is never a linear by-value move (it is a
             // function/global reference), but guard defensively for a Local.
             if let MirValue::Local(l) = callee {
@@ -586,7 +802,7 @@ fn apply_move(
 mod tests {
     use super::*;
     use crate::codegen::ir::{
-        BlockId, LocalId, MirBlock, MirFnSig, MirFunction, MirLocal, MirRValue, MirStmt,
+        BlockId, LocalId, MirBlock, MirConst, MirFnSig, MirFunction, MirLocal, MirRValue, MirStmt,
         MirTerminator, MirType, MirValue,
     };
     use std::sync::Arc;
@@ -633,6 +849,43 @@ mod tests {
 
     fn count(errors: &[TypeErrorWithSpan], pred: impl Fn(&TypeError) -> bool) -> usize {
         errors.iter().filter(|e| pred(&e.error)).count()
+    }
+
+    /// A `#[linear]` local named `_N` (anonymous), struct type `Qubit`. Used for
+    /// the compiler-generated scrutinee copies a `match` produces.
+    fn linear_anon(id: u32) -> MirLocal {
+        MirLocal {
+            id: LocalId(id),
+            name: None,
+            ty: MirType::Struct(Arc::from("Qubit")),
+            is_mut: false,
+            is_param: false,
+            annotations: vec![Arc::from("linear")],
+        }
+    }
+
+    /// A by-REFERENCE parameter local (`is_param`, `Ptr(Struct("Qubit"))`, empty
+    /// annotations) — the `r: &T` a monomorphized generic like `deref_any`
+    /// receives. Param index == its LocalId (builder invariant).
+    fn ref_param_local(id: u32, name: &str) -> MirLocal {
+        MirLocal {
+            id: LocalId(id),
+            name: Some(Arc::from(name)),
+            ty: MirType::Ptr(Box::new(MirType::Struct(Arc::from("Qubit")))),
+            is_mut: false,
+            is_param: true,
+            annotations: Vec::new(),
+        }
+    }
+
+    /// A `VariantField` bind of variant `Full` field 0 out of `base`.
+    fn variant_field(base: LocalId) -> MirRValue {
+        MirRValue::VariantField {
+            base: MirValue::Local(base),
+            variant_name: Arc::from("Full"),
+            field_index: 0,
+            field_ty: MirType::Struct(Arc::from("Coin")),
+        }
     }
 
     // 1. Linear moved twice in a single straight-line block -> exactly one
@@ -1022,6 +1275,391 @@ mod tests {
             )),
             0,
             "a `&mut` deref-move is not a shared move-out-of-borrow: {errors:?}"
+        );
+    }
+
+    // ===================================================================
+    // 2c: match idiom, class 1/3, and precision.
+    // ===================================================================
+
+    // 11. MATCH IDIOM (owned): a `VariantField` bind out of an OWNED linear
+    //     scrutinee copy MOVES the scrutinee; a later use of the scrutinee is a
+    //     use-after-move. This is the `match w { Full(c) => ... }` shape: the
+    //     scrutinee `_4 = Use(w)` is copied, then `c = VariantField(_4)` extracts
+    //     the payload (consuming `_4`), and a second `VariantField(_4)` is a
+    //     double-consume.
+    //     bb0: _1 = Use(_0) ; _2 = VariantField(_1) ; _3 = VariantField(_1) ; ret
+    #[test]
+    fn owned_variant_field_bind_moves_scrutinee() {
+        let mut func = MirFunction::new("f", MirFnSig::new(vec![], MirType::Void));
+        func.locals.push(linear_local(0, "w")); // owned linear scrutinee
+        func.locals.push(linear_anon(1)); // scrutinee copy `_1 = Use(w)`
+        func.locals.push(i64_local(2, "c1"));
+        func.locals.push(i64_local(3, "c2"));
+        let mut b0 = MirBlock::new(BlockId(0));
+        b0.stmts.push(MirStmt::assign(
+            LocalId(1),
+            MirRValue::Use(MirValue::Local(LocalId(0))),
+        ));
+        // first payload bind out of the scrutinee copy (legal: moves _1 once)
+        b0.stmts
+            .push(MirStmt::assign(LocalId(2), variant_field(LocalId(1))));
+        // second payload bind out of the SAME scrutinee copy -> use-after-move
+        b0.stmts
+            .push(MirStmt::assign(LocalId(3), variant_field(LocalId(1))));
+        b0.terminator = Some(MirTerminator::Return(None));
+        func.blocks = Some(vec![b0]);
+
+        let errors = check(&func);
+        assert_eq!(
+            count(&errors, |e| matches!(
+                e,
+                TypeError::LinearUseAfterMove { .. }
+            )),
+            1,
+            "the second VariantField bind double-consumes the scrutinee: {errors:?}"
+        );
+    }
+
+    // 12. MATCH IDIOM (owned) is CLEAN when the payload is bound exactly once.
+    //     A single `VariantField` bind is a legal (first) move of the scrutinee.
+    //     bb0: _1 = Use(_0) ; _2 = VariantField(_1) ; return
+    #[test]
+    fn owned_variant_field_bind_once_is_clean() {
+        let mut func = MirFunction::new("f", MirFnSig::new(vec![], MirType::Void));
+        func.locals.push(linear_local(0, "w"));
+        func.locals.push(linear_anon(1));
+        func.locals.push(i64_local(2, "c"));
+        let mut b0 = MirBlock::new(BlockId(0));
+        b0.stmts.push(MirStmt::assign(
+            LocalId(1),
+            MirRValue::Use(MirValue::Local(LocalId(0))),
+        ));
+        b0.stmts
+            .push(MirStmt::assign(LocalId(2), variant_field(LocalId(1))));
+        b0.terminator = Some(MirTerminator::Return(None));
+        func.blocks = Some(vec![b0]);
+
+        let errors = check(&func);
+        assert!(
+            errors.is_empty(),
+            "a single payload bind is a legal move of the scrutinee: {errors:?}"
+        );
+    }
+
+    // 13. MATCH-THROUGH-`&` (class 1 match form): buildlang lowers `match &w`
+    //     (linear enum) to `r = &w ; s = *r ; ... VariantField(s)`. The `s = *r`
+    //     Deref of a shared borrow of a linear is the move-out-of-shared-borrow,
+    //     flagged at that statement — even before the VariantField bind. This is
+    //     the exact MIR the compiler emits (see the class1 repro).
+    //     bb0: r = &coin ; s = Deref(r) ; c = VariantField(s) ; return
+    #[test]
+    fn match_through_shared_borrow_reports_move_out_of_borrow() {
+        let mut func = MirFunction::new("f", MirFnSig::new(vec![], MirType::Void));
+        func.locals.push(linear_local(0, "w")); // linear enum scrutinee
+        func.locals.push(untagged_ptr_local(1, "r")); // r = &w
+        func.locals.push(linear_anon(2)); // s = *r (derefed copy)
+        func.locals.push(i64_local(3, "c"));
+        let mut b0 = MirBlock::new(BlockId(0));
+        // r = &w (shared borrow of a linear -> provenance set)
+        b0.stmts.push(MirStmt::assign(
+            LocalId(1),
+            MirRValue::Ref {
+                is_mut: false,
+                place: MirPlace::local(LocalId(0)),
+            },
+        ));
+        // s = *r (move out of the shared borrow)
+        b0.stmts.push(MirStmt::assign(
+            LocalId(2),
+            MirRValue::Deref {
+                ptr: MirValue::Local(LocalId(1)),
+                pointee_ty: MirType::Struct(Arc::from("Qubit")),
+            },
+        ));
+        // c = VariantField(s) (payload bind out of the derefed copy)
+        b0.stmts
+            .push(MirStmt::assign(LocalId(3), variant_field(LocalId(2))));
+        b0.terminator = Some(MirTerminator::Return(None));
+        func.blocks = Some(vec![b0]);
+
+        let errors = check(&func);
+        assert_eq!(
+            count(&errors, |e| matches!(
+                e,
+                TypeError::LinearMoveOutOfBorrow { .. }
+            )),
+            1,
+            "matching a linear through a shared borrow moves it out of the borrow: {errors:?}"
+        );
+    }
+
+    // 14. CLASS 3 (interprocedural): passing a shared borrow of a linear into a
+    //     BORROW-ESCAPING parameter (a callee that derefs-and-returns its `&`
+    //     param) moves the referent out of the borrow.
+    //     callee `deref_any`: r:&Qubit (param0) ; t = *r ; return t
+    //     caller `main`: r = &coin ; deref_any(r) -> LinearMoveOutOfBorrow
+    #[test]
+    fn class3_pass_shared_borrow_into_borrow_escaping_param_reports() {
+        // Callee: fn deref_any(r: &Qubit) -> Qubit { *r }
+        let mut callee = MirFunction::new("deref_any", MirFnSig::new(vec![], MirType::Void));
+        callee.locals.push(ref_param_local(0, "r")); // param 0: &Qubit
+        callee.locals.push(linear_anon(1)); // t = *r
+        let mut cb0 = MirBlock::new(BlockId(0));
+        cb0.stmts.push(MirStmt::assign(
+            LocalId(1),
+            MirRValue::Deref {
+                ptr: MirValue::Local(LocalId(0)),
+                pointee_ty: MirType::Struct(Arc::from("Qubit")),
+            },
+        ));
+        cb0.terminator = Some(MirTerminator::Return(Some(MirValue::Local(LocalId(1)))));
+        callee.blocks = Some(vec![cb0]);
+
+        // Caller: r = &coin ; deref_any(r)
+        let mut caller = MirFunction::new("main", MirFnSig::new(vec![], MirType::Void));
+        caller.locals.push(linear_local(0, "coin"));
+        caller.locals.push(untagged_ptr_local(1, "r")); // r = &coin
+        caller.locals.push(linear_anon(2)); // call dest
+        let mut mb0 = MirBlock::new(BlockId(0));
+        mb0.stmts.push(MirStmt::assign(
+            LocalId(1),
+            MirRValue::Ref {
+                is_mut: false,
+                place: MirPlace::local(LocalId(0)),
+            },
+        ));
+        mb0.terminator = Some(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("deref_any")),
+            args: vec![MirValue::Local(LocalId(1))],
+            dest: Some(LocalId(2)),
+            target: Some(BlockId(1)),
+            unwind: None,
+        });
+        let mut mb1 = MirBlock::new(BlockId(1));
+        mb1.terminator = Some(MirTerminator::Return(None));
+        caller.blocks = Some(vec![mb0, mb1]);
+
+        let errors = check_module(&[callee, caller]);
+        assert_eq!(
+            count(&errors, |e| matches!(
+                e,
+                TypeError::LinearMoveOutOfBorrow { .. }
+            )),
+            1,
+            "passing `&coin` into a deref-and-return param moves it out of the borrow: {errors:?}"
+        );
+    }
+
+    // 15. CLASS 3 negative: a callee that only READS through its `&` parameter
+    //     (never derefs-and-returns it) is NOT borrow-escaping, so passing
+    //     `&coin` to it is the LEGAL borrow-read case and is not flagged.
+    //     callee `peek`: r:&Qubit (param0) ; return 0
+    //     caller: r = &coin ; peek(r) -> clean
+    #[test]
+    fn class3_read_only_borrow_param_is_clean() {
+        // Callee: fn peek(r: &Qubit) -> i64 { 0 }  (never derefs r)
+        let mut callee = MirFunction::new("peek", MirFnSig::new(vec![], MirType::Void));
+        callee.locals.push(ref_param_local(0, "r"));
+        let mut cb0 = MirBlock::new(BlockId(0));
+        cb0.terminator = Some(MirTerminator::Return(Some(MirValue::Const(MirConst::Int(
+            0,
+            MirType::i64(),
+        )))));
+        callee.blocks = Some(vec![cb0]);
+
+        // Caller: r = &coin ; peek(r)
+        let mut caller = MirFunction::new("main", MirFnSig::new(vec![], MirType::Void));
+        caller.locals.push(linear_local(0, "coin"));
+        caller.locals.push(untagged_ptr_local(1, "r"));
+        caller.locals.push(i64_local(2, "res"));
+        let mut mb0 = MirBlock::new(BlockId(0));
+        mb0.stmts.push(MirStmt::assign(
+            LocalId(1),
+            MirRValue::Ref {
+                is_mut: false,
+                place: MirPlace::local(LocalId(0)),
+            },
+        ));
+        mb0.terminator = Some(MirTerminator::Call {
+            func: MirValue::Global(Arc::from("peek")),
+            args: vec![MirValue::Local(LocalId(1))],
+            dest: Some(LocalId(2)),
+            target: Some(BlockId(1)),
+            unwind: None,
+        });
+        let mut mb1 = MirBlock::new(BlockId(1));
+        mb1.terminator = Some(MirTerminator::Return(None));
+        caller.blocks = Some(vec![mb0, mb1]);
+
+        let errors = check_module(&[callee, caller]);
+        assert!(
+            errors.is_empty(),
+            "a read-only borrow parameter is the legal borrow case; not flagged: {errors:?}"
+        );
+    }
+
+    // ===================================================================
+    // 2c PRECISION (the payoff): safe compositional shapes the name-keyed AST
+    // tracker over-rejects must CHECK CLEAN on the MIR checker (zero errors).
+    // The AST tracker is still active at the CLI (2d removes it), so these are
+    // proven here directly against `check`.
+    // ===================================================================
+
+    // 16. SAFE: a linear in a TUPLE, used once.
+    //     `let t = (coin, 7) ; spend(t.0)` lowers to a tuple Aggregate then a
+    //     field read + move of the linear operand. Consumed exactly once.
+    //     bb0: _1 = coin ; _2 = Aggregate(_1, 7) ; call spend(_1) ; return
+    #[test]
+    fn precision_linear_in_tuple_used_once_is_clean() {
+        let mut func = MirFunction::new("f", MirFnSig::new(vec![], MirType::Void));
+        func.locals.push(linear_local(0, "coin"));
+        func.locals.push(i64_local(1, "seven"));
+        func.locals.push(i64_local(2, "tuple")); // the tuple aggregate
+        let mut b0 = MirBlock::new(BlockId(0));
+        // t = (coin, 7): the linear operand is moved into the tuple once.
+        b0.stmts.push(MirStmt::assign(
+            LocalId(2),
+            MirRValue::Aggregate {
+                kind: crate::codegen::ir::AggregateKind::Tuple,
+                operands: vec![MirValue::Local(LocalId(0)), MirValue::Local(LocalId(1))],
+            },
+        ));
+        b0.terminator = Some(MirTerminator::Return(None));
+        func.blocks = Some(vec![b0]);
+
+        let errors = check(&func);
+        assert!(
+            errors.is_empty(),
+            "a linear moved into a tuple exactly once is safe: {errors:?}"
+        );
+    }
+
+    // 17. SAFE: `Option<Linear>` / `Ok(q)` constructed and consumed once.
+    //     `let o = Some(coin) ; consume(o)` lowers to an enum-variant Aggregate
+    //     (moving the linear in once) then a by-value consume of the option.
+    //     bb0: _1 = coin ; _2 = Aggregate::Variant(Some, _1) ; call consume(_2)
+    #[test]
+    fn precision_option_of_linear_once_is_clean() {
+        let mut func = MirFunction::new("f", MirFnSig::new(vec![], MirType::Void));
+        func.locals.push(linear_local(0, "coin"));
+        func.locals.push(linear_anon(1)); // the Option<Coin> value (still linear)
+        func.locals.push(i64_local(2, "res"));
+        let mut b0 = MirBlock::new(BlockId(0));
+        // o = Some(coin): the linear is moved into the variant payload once.
+        b0.stmts.push(MirStmt::assign(
+            LocalId(1),
+            MirRValue::Aggregate {
+                kind: crate::codegen::ir::AggregateKind::Variant(
+                    Arc::from("Option"),
+                    0,
+                    Arc::from("Some"),
+                ),
+                operands: vec![MirValue::Local(LocalId(0))],
+            },
+        ));
+        // consume(o): by-value consume of the option once.
+        b0.terminator = Some(MirTerminator::Call {
+            func: MirValue::Global(Arc::from("consume")),
+            args: vec![MirValue::Local(LocalId(1))],
+            dest: Some(LocalId(2)),
+            target: Some(BlockId(1)),
+            unwind: None,
+        });
+        let mut b1 = MirBlock::new(BlockId(1));
+        b1.terminator = Some(MirTerminator::Return(None));
+        func.blocks = Some(vec![b0, b1]);
+
+        let errors = check(&func);
+        assert!(
+            errors.is_empty(),
+            "constructing Some(coin) and consuming it once is safe: {errors:?}"
+        );
+    }
+
+    // 18. SAFE: `fn id<T>(x: T) -> T { x }` applied to a linear, then consumed.
+    //     After monomorphization `id_Coin(coin)` returns a fresh owned linear
+    //     bound to `c2`; the call MOVES `coin` once (arg by value) and REBINDS
+    //     `c2` (call dest); `spend(c2)` consumes `c2` once. `id` is NOT
+    //     borrow-escaping (it takes `x: T` by value, not `&T`), so no class-3
+    //     flag.
+    //     bb0: _0 = coin ; call id(_0) -> dest _1 ; bb1: call spend(_1) ; return
+    #[test]
+    fn precision_generic_identity_over_linear_is_clean() {
+        // Callee: fn id(x: Qubit) -> Qubit { x }  (by-VALUE param, not a ref)
+        let mut callee = MirFunction::new("id", MirFnSig::new(vec![], MirType::Void));
+        callee.locals.push(linear_local(0, "x")); // by-value linear param
+        let mut cb0 = MirBlock::new(BlockId(0));
+        cb0.terminator = Some(MirTerminator::Return(Some(MirValue::Local(LocalId(0)))));
+        callee.blocks = Some(vec![cb0]);
+
+        // Caller: c2 = id(coin) ; spend(c2)
+        let mut caller = MirFunction::new("main", MirFnSig::new(vec![], MirType::Void));
+        caller.locals.push(linear_local(0, "coin"));
+        caller.locals.push(linear_anon(1)); // c2 (call dest, fresh)
+        caller.locals.push(i64_local(2, "r"));
+        let mut mb0 = MirBlock::new(BlockId(0));
+        mb0.terminator = Some(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("id")),
+            args: vec![MirValue::Local(LocalId(0))],
+            dest: Some(LocalId(1)),
+            target: Some(BlockId(1)),
+            unwind: None,
+        });
+        let mut mb1 = MirBlock::new(BlockId(1));
+        mb1.terminator = Some(MirTerminator::Call {
+            func: MirValue::Global(Arc::from("spend")),
+            args: vec![MirValue::Local(LocalId(1))],
+            dest: Some(LocalId(2)),
+            target: Some(BlockId(2)),
+            unwind: None,
+        });
+        let mut mb2 = MirBlock::new(BlockId(2));
+        mb2.terminator = Some(MirTerminator::Return(None));
+        caller.blocks = Some(vec![mb0, mb1, mb2]);
+
+        let errors = check_module(&[callee, caller]);
+        assert!(
+            errors.is_empty(),
+            "generic identity over a linear, consumed once, is safe: {errors:?}"
+        );
+    }
+
+    // 19. SAFE: a closure that moves a linear once. The linear is captured by
+    //     value into a closure Aggregate (moved once), and the closure is called
+    //     once. No double-consume.
+    //     bb0: _0 = coin ; _1 = Aggregate::Closure(_0) ; call _1 ; return
+    #[test]
+    fn precision_closure_moving_linear_once_is_clean() {
+        let mut func = MirFunction::new("f", MirFnSig::new(vec![], MirType::Void));
+        func.locals.push(linear_local(0, "coin"));
+        func.locals.push(i64_local(1, "clos")); // the closure environment value
+        func.locals.push(i64_local(2, "res"));
+        let mut b0 = MirBlock::new(BlockId(0));
+        // clos = move |...| { ... coin ... }: capture the linear by value once.
+        b0.stmts.push(MirStmt::assign(
+            LocalId(1),
+            MirRValue::Aggregate {
+                kind: crate::codegen::ir::AggregateKind::Closure(Arc::from("closure_0")),
+                operands: vec![MirValue::Local(LocalId(0))],
+            },
+        ));
+        // call the closure once.
+        b0.terminator = Some(MirTerminator::Call {
+            func: MirValue::Local(LocalId(1)),
+            args: vec![],
+            dest: Some(LocalId(2)),
+            target: Some(BlockId(1)),
+            unwind: None,
+        });
+        let mut b1 = MirBlock::new(BlockId(1));
+        b1.terminator = Some(MirTerminator::Return(None));
+        func.blocks = Some(vec![b0, b1]);
+
+        let errors = check(&func);
+        assert!(
+            errors.is_empty(),
+            "a closure capturing a linear by value once is safe: {errors:?}"
         );
     }
 }
