@@ -4157,6 +4157,10 @@ impl<'ctx> MirLowerer<'ctx> {
                     let local = builder.create_local(scrutinee_ty.clone());
                     builder.assign(local, MirRValue::Use(values::local(scrutinee_local)));
                     self.var_map.insert(name.name.clone(), local);
+                } else if matches!(&arm.pattern.kind, ast::PatternKind::Struct { .. }) {
+                    // Bind record-pattern fields before the guard so a guard
+                    // expression can reference them (`Point { x } if x < 0`).
+                    self.bind_struct_pattern_vars(&arm.pattern, scrutinee_local, &scrutinee_ty)?;
                 }
 
                 let guard_expr = arm.guard.as_ref().unwrap();
@@ -4210,6 +4214,12 @@ impl<'ctx> MirLowerer<'ctx> {
                             self.var_map.insert(name.name.clone(), local);
                         }
                     }
+                } else if matches!(&arm.pattern.kind, ast::PatternKind::Struct { .. }) {
+                    // Record pattern `Point { x: a, y: b }` / `Wrap { coin: c }`:
+                    // bind each field by NAME to a projection of the scrutinee.
+                    // (Non-enum struct match; enum struct-variants go through
+                    // `bind_enum_pattern_vars` above.)
+                    self.bind_struct_pattern_vars(&arm.pattern, scrutinee_local, &scrutinee_ty)?;
                 }
             }
 
@@ -4405,6 +4415,85 @@ impl<'ctx> MirLowerer<'ctx> {
             }
 
             _ => {}
+        }
+
+        Ok(())
+    }
+
+    /// Bind variables from a STRUCT RECORD pattern: `Point { x: a, y: b }` or the
+    /// shorthand `Point { x, y }`. Each field pattern binds its sub-pattern to a
+    /// FIELD PROJECTION of the scrutinee (keyed by field NAME, not position —
+    /// this is the record-pattern analogue of the positional `TupleStruct`
+    /// binding in `bind_enum_pattern_vars`). Without this, record-pattern fields
+    /// were dropped by the `_ => {}` catch-all and their names lowered to a
+    /// dangling `Global("<name>")`, silently corrupting the arm body (a general
+    /// correctness bug for ANY record pattern in `match`, and a soundness hole
+    /// for linear matches: `match &w { Wrap { coin: c } => spend(c) }` moved the
+    /// linear out of a shared borrow without being tracked).
+    ///
+    /// The scrutinee local may be the struct itself OR a `Ptr` to it (matching
+    /// through a `&` borrow, `match &w`). `FieldAccess` on a pointer-typed base
+    /// is the established auto-deref field-read idiom (see `lower_field`); the
+    /// field type is looked up through the pointee. The resulting binding
+    /// (`c = FieldAccess(*scrutinee)`) is a field READ through the borrowed
+    /// scrutinee, which the linear checker tracks.
+    fn bind_struct_pattern_vars(
+        &mut self,
+        pattern: &ast::Pattern,
+        scrutinee_local: LocalId,
+        scrutinee_ty: &MirType,
+    ) -> CodegenResult<()> {
+        let ast::PatternKind::Struct { fields, .. } = &pattern.kind else {
+            return Ok(());
+        };
+
+        // The struct name to look up field types through, auto-dereferencing a
+        // pointer scrutinee (matching a struct through a `&` borrow).
+        let struct_name = match scrutinee_ty {
+            MirType::Struct(name) => name.clone(),
+            MirType::Ptr(inner) => match inner.as_ref() {
+                MirType::Struct(name) => name.clone(),
+                _ => return Ok(()),
+            },
+            _ => return Ok(()),
+        };
+
+        for fp in fields.iter() {
+            // The bound name: the sub-pattern if it is an `Ident` (`x: a` binds
+            // `a`), else the field name itself (shorthand `x` binds `x`). Skip a
+            // wildcard sub-pattern (`x: _`) — it binds nothing.
+            let bind_name = match &fp.pattern.kind {
+                ast::PatternKind::Ident { name, .. } => {
+                    if name.name.as_ref() == "_" {
+                        continue;
+                    }
+                    name.name.clone()
+                }
+                ast::PatternKind::Wildcard => continue,
+                // Nested destructuring sub-patterns are not yet supported here;
+                // bind under the field name conservatively so at least the field
+                // is projected (matches the shorthand behavior).
+                _ => fp.name.name.clone(),
+            };
+
+            let field_ty = self
+                .lookup_struct_field_type(&struct_name, &fp.name.name)
+                .unwrap_or(MirType::i32());
+
+            let builder = self
+                .current_fn
+                .as_mut()
+                .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+            let local = builder.create_named_local(bind_name.clone(), field_ty.clone());
+            builder.assign(
+                local,
+                MirRValue::FieldAccess {
+                    base: values::local(scrutinee_local),
+                    field_name: fp.name.name.clone(),
+                    field_ty,
+                },
+            );
+            self.var_map.insert(bind_name, local);
         }
 
         Ok(())
