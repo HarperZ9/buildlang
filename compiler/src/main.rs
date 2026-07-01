@@ -1768,8 +1768,8 @@ fn verify_scientific_receipt_dispatch(
                 ScientificDigest::from(&outcome.input_graph_digest),
             ))
         },
-        |source_path| {
-            let captured = compile_and_capture_run(source_path, &[])?;
+        |source_path, args| {
+            let captured = compile_and_capture_run(source_path, args)?;
             Ok(parse_numeric_series(&captured.stdout))
         },
     )
@@ -5834,8 +5834,10 @@ fn cmd_run(
 
     // Parse the captured stdout into an f64 series. `token.parse::<f64>()`
     // accepts BOTH the C `%g` plain-decimal (`0.530827`) and scientific
-    // (`1.59908e+28`) forms the backend emits.
-    let (series, series_parsed) = parse_numeric_series(&captured_stdout);
+    // (`1.59908e+28`) forms the backend emits. A non-finite (inf/NaN) value
+    // marks the run as diverged -> UNVERIFIABLE, and only the finite prefix is
+    // retained so the receipt always serializes cleanly.
+    let parsed = parse_numeric_series(&captured_stdout);
 
     // Re-derive source + input-graph digests from the same check pipeline the
     // check-receipt path uses, so the two digests agree byte-for-byte.
@@ -5862,8 +5864,10 @@ fn cmd_run(
         target: "c",
         os: &os,
         exit_code,
-        series,
-        series_parsed,
+        series: parsed.series,
+        series_parsed: parsed.any_parsed,
+        diverged: parsed.diverged,
+        args: args.to_vec(),
         metric: metric.to_string(),
         units: None,
         problem_label: problem.map(str::to_string),

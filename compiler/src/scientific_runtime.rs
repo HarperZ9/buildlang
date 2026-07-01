@@ -127,6 +127,13 @@ pub struct ScientificRuntimeReceipt {
     pub input_graph_digest: ScientificDigest,
     pub build_state: ScientificBuildState,
     pub runtime_state: ScientificRuntimeState,
+    /// The program arguments the receipt was emitted with. `receipt verify`
+    /// re-runs the program with EXACTLY these args, so an argv-parameterized
+    /// kernel is faithfully re-derived instead of re-run argless. Sealed like
+    /// every other field. `#[serde(default)]` keeps receipts emitted before args
+    /// were recorded deserializable (as an empty arg list).
+    #[serde(default)]
+    pub args: Vec<String>,
     pub problem: ScientificProblem,
     pub measurement: ScientificMeasurement,
     pub invariant: ScientificInvariant,
@@ -183,6 +190,12 @@ pub struct ScientificReceiptInputs<'a> {
     /// Whether the raw stdout produced at least one parseable numeric token.
     /// When false, the series is empty because nothing parsed -> UNVERIFIABLE.
     pub series_parsed: bool,
+    /// Whether the program emitted a non-finite value (inf / NaN). A diverged
+    /// run is UNVERIFIABLE: the invariant could not be honestly evaluated.
+    pub diverged: bool,
+    /// The program arguments the run was invoked with (recorded so verify can
+    /// re-run identically).
+    pub args: Vec<String>,
     pub metric: String,
     pub units: Option<String>,
     pub problem_label: Option<String>,
@@ -214,6 +227,8 @@ pub fn build_scientific_runtime_receipt(
         exit_code,
         series,
         series_parsed,
+        diverged,
+        args,
         metric,
         units,
         problem_label,
@@ -223,14 +238,16 @@ pub fn build_scientific_runtime_receipt(
 
     let observed = energy_monotone_nonincreasing(&series, ENERGY_MONOTONE_TOLERANCE);
     let has_series = series_parsed && !series.is_empty();
-    let passes = has_series && invariant_passes(series.len(), &observed);
+    // A diverged run (non-finite value observed) cannot witness the invariant,
+    // even if its finite prefix looks monotone, so it never PASSes.
+    let passes = has_series && !diverged && invariant_passes(series.len(), &observed);
 
     // Invariant status is PASS/FAIL over the observed series. When there is no
-    // series at all the invariant could not be evaluated, so it is FAIL and the
-    // receipt_status is UNVERIFIABLE (below).
+    // series at all, or the run diverged, the invariant could not be evaluated,
+    // so it is FAIL and the receipt_status is UNVERIFIABLE (below).
     let invariant_status = if passes { "PASS" } else { "FAIL" };
 
-    let receipt_status = if !has_series {
+    let receipt_status = if !has_series || diverged {
         "UNVERIFIABLE"
     } else if passes {
         "PASS"
@@ -243,6 +260,12 @@ pub fn build_scientific_runtime_receipt(
     let mut labels = vec!["NOT_A_NEW_PHYSICAL_LAW".to_string()];
     if negative_fixture {
         labels.push("NEGATIVE_FIXTURE".to_string());
+    }
+    if diverged {
+        // Records WHY an UNVERIFIABLE receipt is unverifiable: the program
+        // produced a non-finite (inf/NaN) value, distinct from "no numeric
+        // output at all".
+        labels.push("NONFINITE_OBSERVED".to_string());
     }
 
     let count = series.len();
@@ -263,6 +286,7 @@ pub fn build_scientific_runtime_receipt(
             os: os.to_string(),
             exit_code,
         },
+        args,
         problem: ScientificProblem {
             label: problem_label,
         },
@@ -323,22 +347,81 @@ pub fn recompute_seal_hex(receipt: &ScientificRuntimeReceipt) -> String {
     source_digest_hex(&canonical)
 }
 
+/// The outcome of parsing a program's numeric stdout into a measurement series.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ParsedSeries {
+    /// The finite f64 values, in order, up to (but not including) the first
+    /// non-finite token. Always finite, so it round-trips through JSON cleanly
+    /// (a non-finite f64 would serialize to `null` and break re-verification).
+    pub series: Vec<f64>,
+    /// Whether at least one numeric OR non-finite token was seen. False means
+    /// the program emitted no parseable numbers -> UNVERIFIABLE upstream.
+    pub any_parsed: bool,
+    /// Whether the program emitted a non-finite value (inf / NaN, in any C
+    /// runtime spelling). A numerical blow-up means the invariant could not be
+    /// honestly evaluated, so the receipt is UNVERIFIABLE regardless of the
+    /// finite prefix's shape (which would otherwise look monotone and PASS).
+    pub diverged: bool,
+}
+
+/// Whether a token that Rust's f64 parser REJECTS is nonetheless a platform
+/// C-runtime spelling of a non-finite value: Windows UCRT `nan(ind)`,
+/// `-nan(ind)`, `nan(snan)`; legacy MSVCRT `1.#INF`, `-1.#IND`, `1.#QNAN`,
+/// `1.#SNAN`. A word like `information` is NOT flagged (it matches none of
+/// these). The Rust-parseable non-finite forms (`inf`, `nan`, `infinity`, ...)
+/// are caught at the parse site, not here.
+fn is_nonfinite_spelling(token: &str) -> bool {
+    let t = token.trim_start_matches(['+', '-']).to_ascii_lowercase();
+    t.starts_with("nan(")
+        || t.contains("#inf")
+        || t.contains("#ind")
+        || t.contains("#qnan")
+        || t.contains("#snan")
+}
+
 /// Parse whitespace/newline-separated f64 tokens from captured program stdout.
 ///
 /// Accepts BOTH the plain-decimal (`0.530827`) and scientific (`1.59908e+28`,
 /// `6.10352e-05`) forms the C `%g` backend emits, via `str::parse::<f64>`.
-/// Non-numeric tokens (blank lines, labels) are skipped. Returns the parsed
-/// series and whether at least one token parsed (false -> UNVERIFIABLE upstream).
-pub fn parse_numeric_series(stdout: &str) -> (Vec<f64>, bool) {
+/// Non-numeric tokens (blank lines, labels) are skipped. A non-finite token
+/// (inf / NaN, any spelling) signals a numerical blow-up: parsing STOPS at that
+/// point (so `series` holds only the finite prefix and always serializes
+/// cleanly) and `diverged` is set, which routes the receipt to UNVERIFIABLE
+/// rather than sealing a diverged run as a false PASS.
+pub fn parse_numeric_series(stdout: &str) -> ParsedSeries {
     let mut series = Vec::new();
     let mut any_parsed = false;
+    let mut diverged = false;
     for token in stdout.split_whitespace() {
-        if let Ok(value) = token.parse::<f64>() {
-            series.push(value);
-            any_parsed = true;
+        match token.parse::<f64>() {
+            Ok(value) if value.is_finite() => {
+                series.push(value);
+                any_parsed = true;
+            }
+            Ok(_) => {
+                // Parsed as a non-finite float: `inf`, `-inf`, `nan`, `-nan`,
+                // `infinity` (glibc / macOS `%g`). Divergence.
+                any_parsed = true;
+                diverged = true;
+                break;
+            }
+            Err(_) => {
+                // Not Rust-parseable. It may still be a platform C-runtime
+                // non-finite spelling (UCRT `nan(ind)`, MSVCRT `1.#INF`), which
+                // is a divergence signal; otherwise it's a label/blank -> skip.
+                if is_nonfinite_spelling(token) {
+                    any_parsed = true;
+                    diverged = true;
+                    break;
+                }
+            }
         }
     }
-    (series, any_parsed)
+    ParsedSeries {
+        series,
+        any_parsed,
+        diverged,
+    }
 }
 
 /// The re-derived verdict triple used by `receipt verify` to compare against a
@@ -364,14 +447,15 @@ pub struct RecomputedVerdict {
 pub fn recompute_verdict(
     series: &[f64],
     series_parsed: bool,
+    diverged: bool,
     negative_fixture: bool,
 ) -> RecomputedVerdict {
     let observed = energy_monotone_nonincreasing(series, ENERGY_MONOTONE_TOLERANCE);
     let has_series = series_parsed && !series.is_empty();
-    let passes = has_series && invariant_passes(series.len(), &observed);
+    let passes = has_series && !diverged && invariant_passes(series.len(), &observed);
 
     let invariant_status = if passes { "PASS" } else { "FAIL" };
-    let receipt_status = if !has_series {
+    let receipt_status = if !has_series || diverged {
         "UNVERIFIABLE"
     } else if passes {
         "PASS"
@@ -395,13 +479,25 @@ pub fn recompute_verdict(
 /// 2. Re-derive the source + input-graph digests from the file on disk (via the
 ///    `rederive_digests` callback, which runs the same check pipeline that
 ///    produced the stored digests) and compare. A source change fails here.
-/// 3. Re-run the program (via `rerun_series`, the shared compile+run+capture
-///    path) and re-parse its numeric stdout into a fresh series.
+/// 3. Re-run the program WITH THE STORED ARGS (via `rerun_series`, the shared
+///    compile+run+capture path) and re-parse its numeric stdout into a fresh
+///    series. The observed-value COUNT is re-checked against the stored
+///    `measurement.count` (a deterministic quantity); a mismatch fails.
 /// 4. Recompute the invariant + receipt-status verdict from that fresh series
 ///    and compare the recomputed `invariant.status`, `increase_count`, and
 ///    `receipt_status` against the stored ones. Any disagreement is a failure.
+///    Individual float VALUES are deliberately NOT re-compared: exact floats
+///    need not reproduce across platforms, which is precisely why the verdict
+///    (monotonicity + count), not the raw series, is the re-checked quantity.
 /// 5. Recompute the seal over the stored receipt bytes and confirm it matches
 ///    the stored `seal.hex` (integrity of the receipt itself).
+///
+/// A receipt that passes all five checks is FAITHFUL. The exit code additionally
+/// reflects the invariant verdict: `Ok(())` for PASS and FAIL_EXPECTED (a
+/// negative fixture reproducing its expected failure), and `Err(3)` for
+/// FAIL_UNEXPECTED / UNVERIFIABLE. This keeps a bare `receipt verify r.json`
+/// safe as a CI pass/fail gate (it does not exit 0 on a recorded invariant
+/// violation), distinct from `Err(1)` which means the receipt did NOT reproduce.
 ///
 /// The digest/re-run callbacks are supplied by `main.rs` (which owns `run_check`
 /// and `compile_and_capture_run`); the verdict logic and comparisons live here.
@@ -413,7 +509,8 @@ pub fn recompute_verdict(
 /// because it replays effect/capability facts that ARE version-sensitive; this
 /// numerical receipt is not.)
 ///
-/// `rerun_series` returns `(series, series_parsed)`.
+/// `rerun_series` is called with the receipt's recorded args and returns a
+/// [`ParsedSeries`].
 pub fn verify_scientific_runtime_receipt(
     receipt_json: &serde_json::Value,
     source_override: Option<&Path>,
@@ -421,7 +518,7 @@ pub fn verify_scientific_runtime_receipt(
     current_compiler_version: &str,
     current_language_version: &str,
     rederive_digests: impl FnOnce(&Path) -> Result<(ScientificDigest, ScientificDigest), i32>,
-    rerun_series: impl FnOnce(&Path) -> Result<(Vec<f64>, bool), i32>,
+    rerun_series: impl FnOnce(&Path, &[String]) -> Result<ParsedSeries, i32>,
 ) -> Result<(), i32> {
     let receipt: ScientificRuntimeReceipt =
         serde_json::from_value(receipt_json.clone()).map_err(|err| {
@@ -489,11 +586,33 @@ pub fn verify_scientific_runtime_receipt(
         return Err(1);
     }
 
-    // (3) Re-run the program and re-parse its numeric stdout.
-    let (series, series_parsed) = rerun_series(&source_path)?;
+    // (3) Re-run the program WITH THE STORED ARGS and re-parse its stdout, so an
+    // argv-parameterized kernel is reproduced under the same conditions it was
+    // emitted under.
+    let parsed = rerun_series(&source_path, &receipt.args)?;
+
+    // (3a) The observed-value count is deterministic (independent of platform
+    // float jitter), so a re-run that yields a different count means the stored
+    // measurement was tampered with (or the program is non-deterministic in a
+    // way that breaks re-derivation). Element values are NOT re-compared: exact
+    // floats need not reproduce across platforms (see the doc comment), so the
+    // verdict is the re-checked quantity, with count guarding series length.
+    if parsed.series.len() != receipt.measurement.count {
+        eprintln!(
+            "Error: measurement count drift: receipt {}, re-run {}",
+            receipt.measurement.count,
+            parsed.series.len()
+        );
+        return Err(1);
+    }
 
     // (4) Recompute the verdict and compare against the stored one.
-    let recomputed = recompute_verdict(&series, series_parsed, receipt.negative_fixture);
+    let recomputed = recompute_verdict(
+        &parsed.series,
+        parsed.any_parsed,
+        parsed.diverged,
+        receipt.negative_fixture,
+    );
     let stored_increase = receipt.invariant.observed.increase_count;
 
     if recomputed.invariant_status != receipt.invariant.status {
@@ -528,10 +647,20 @@ pub fn verify_scientific_runtime_receipt(
         return Err(1);
     }
 
+    // The receipt is faithful (digests, count, verdict, and seal all re-check).
+    // But a faithful receipt that RECORDS a failure is not a pass: an operator
+    // running `receipt verify r.json && deploy` must not deploy on a
+    // FAIL_UNEXPECTED or UNVERIFIABLE verdict. So the exit code reflects the
+    // invariant verdict -- PASS and FAIL_EXPECTED succeed; everything else fails
+    // with a distinct code (3, vs 1 for "did not reproduce").
+    let invariant_held = matches!(recomputed.receipt_status, "PASS" | "FAIL_EXPECTED");
+
     if json {
         let report = serde_json::json!({
             "schema": SCIENTIFIC_RUNTIME_SCHEMA,
-            "status": "match",
+            "status": if invariant_held { "match" } else { "invariant_not_held" },
+            "faithful": true,
+            "invariant_held": invariant_held,
             "source": source_path.to_string_lossy(),
             "invariant_status": recomputed.invariant_status,
             "increase_count": recomputed.increase_count,
@@ -546,13 +675,23 @@ pub fn verify_scientific_runtime_receipt(
             1
         })?;
         println!("{}", text);
-    } else {
+    } else if invariant_held {
         println!(
             "MATCH: scientific-runtime receipt re-runs and re-checks clean ({}, increase_count={})",
             recomputed.receipt_status, recomputed.increase_count
         );
+    } else {
+        eprintln!(
+            "FAIL: scientific-runtime receipt faithfully reproduces, but the invariant did not hold ({}, increase_count={}). `receipt verify` exits nonzero so it is safe as a pass/fail gate.",
+            recomputed.receipt_status, recomputed.increase_count
+        );
     }
-    Ok(())
+
+    if invariant_held {
+        Ok(())
+    } else {
+        Err(3)
+    }
 }
 
 /// Two digests match iff their algorithm and (case-insensitive) hex agree.
@@ -589,6 +728,8 @@ mod tests {
             exit_code: 0,
             series,
             series_parsed: parsed,
+            diverged: false,
+            args: Vec::new(),
             metric: "series".to_string(),
             units: None,
             problem_label: None,
@@ -757,19 +898,73 @@ mod tests {
     #[test]
     fn parse_series_accepts_plain_and_scientific() {
         let stdout = "0.530827\n0.530404\n1.59908e+28\n6.10352e-05\n";
-        let (series, parsed) = parse_numeric_series(stdout);
-        assert!(parsed);
-        assert_eq!(series.len(), 4);
-        assert!((series[0] - 0.530827).abs() < 1e-9);
-        assert!(series[2] > 1e28);
-        assert!(series[3] > 0.0 && series[3] < 1e-3);
+        let parsed = parse_numeric_series(stdout);
+        assert!(parsed.any_parsed);
+        assert!(!parsed.diverged);
+        assert_eq!(parsed.series.len(), 4);
+        assert!((parsed.series[0] - 0.530827).abs() < 1e-9);
+        assert!(parsed.series[2] > 1e28);
+        assert!(parsed.series[3] > 0.0 && parsed.series[3] < 1e-3);
     }
 
     #[test]
     fn parse_series_reports_no_parse_for_non_numeric() {
-        let (series, parsed) = parse_numeric_series("no numbers here\n");
-        assert!(!parsed);
-        assert!(series.is_empty());
+        let parsed = parse_numeric_series("no numbers here\n");
+        assert!(!parsed.any_parsed);
+        assert!(!parsed.diverged);
+        assert!(parsed.series.is_empty());
+    }
+
+    #[test]
+    fn parse_series_flags_divergence_and_keeps_finite_prefix() {
+        // Rust-parseable non-finite forms (glibc/macOS `%g`).
+        for tail in ["inf", "-inf", "nan", "-nan", "infinity"] {
+            let parsed = parse_numeric_series(&format!("4.0\n3.0\n{tail}\n{tail}\n"));
+            assert!(parsed.diverged, "`{tail}` must signal divergence");
+            assert!(parsed.any_parsed);
+            // Only the finite prefix is kept, so it always serializes cleanly.
+            assert_eq!(parsed.series, vec![4.0, 3.0], "tail={tail}");
+            assert!(parsed.series.iter().all(|v| v.is_finite()));
+        }
+    }
+
+    #[test]
+    fn parse_series_flags_platform_nonfinite_spellings() {
+        // Windows UCRT / legacy MSVCRT spellings Rust's f64 parser rejects.
+        for tail in ["-nan(ind)", "nan(ind)", "1.#INF", "-1.#IND", "1.#QNAN"] {
+            let parsed = parse_numeric_series(&format!("4.0\n3.0\n{tail}\n"));
+            assert!(parsed.diverged, "`{tail}` must signal divergence");
+            assert_eq!(parsed.series, vec![4.0, 3.0], "tail={tail}");
+        }
+    }
+
+    #[test]
+    fn parse_series_does_not_flag_ordinary_words() {
+        // A label starting with `inf`/`nan` must not be mistaken for a blow-up.
+        let parsed = parse_numeric_series("information: 4.0 nanometers 3.0\n");
+        assert!(!parsed.diverged);
+        assert_eq!(parsed.series, vec![4.0, 3.0]);
+    }
+
+    #[test]
+    fn diverged_run_is_unverifiable_not_a_false_pass() {
+        // A monotone-looking finite prefix followed by a blow-up is UNVERIFIABLE,
+        // never PASS: the invariant could not be honestly evaluated.
+        let path = Path::new("k.bld");
+        let mut inputs = base_inputs(path, vec![4.0, 3.0], true, false);
+        inputs.diverged = true;
+        let receipt = build_scientific_runtime_receipt(inputs);
+        assert_eq!(receipt.receipt_status, "UNVERIFIABLE");
+        assert_eq!(receipt.invariant.status, "FAIL");
+        assert!(receipt.labels.contains(&"NONFINITE_OBSERVED".to_string()));
+        // The finite prefix is preserved and round-trips (no JSON `null`).
+        let json = serde_json::to_string(&receipt).expect("serialize");
+        assert!(
+            !json.contains("null"),
+            "observed_values must be finite: {json}"
+        );
+        let back: ScientificRuntimeReceipt = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.measurement.observed_values, vec![4.0, 3.0]);
     }
 
     // --- receipt verify (T3) verdict recomputation ---------------------------
@@ -778,7 +973,7 @@ mod tests {
     fn recompute_verdict_matches_builder_for_monotone_series() {
         // A monotone series recomputes PASS/PASS with zero increases, exactly
         // as `build_scientific_runtime_receipt` would have recorded it.
-        let verdict = recompute_verdict(&[4.0, 3.0, 2.0], true, false);
+        let verdict = recompute_verdict(&[4.0, 3.0, 2.0], true, false, false);
         assert_eq!(verdict.invariant_status, "PASS");
         assert_eq!(verdict.receipt_status, "PASS");
         assert_eq!(verdict.increase_count, 0);
@@ -788,20 +983,38 @@ mod tests {
     fn recompute_verdict_distinguishes_expected_from_unexpected_failure() {
         // The negative-fixture flag (read back from the stored receipt) is what
         // separates FAIL_EXPECTED from FAIL_UNEXPECTED on a re-run.
-        let expected = recompute_verdict(&[1.0, 2.0, 3.0], true, true);
+        let expected = recompute_verdict(&[1.0, 2.0, 3.0], true, false, true);
         assert_eq!(expected.invariant_status, "FAIL");
         assert_eq!(expected.receipt_status, "FAIL_EXPECTED");
         assert_eq!(expected.increase_count, 2);
 
-        let unexpected = recompute_verdict(&[1.0, 2.0, 3.0], true, false);
+        let unexpected = recompute_verdict(&[1.0, 2.0, 3.0], true, false, false);
         assert_eq!(unexpected.receipt_status, "FAIL_UNEXPECTED");
     }
 
     #[test]
     fn recompute_verdict_is_unverifiable_when_nothing_parsed() {
-        let verdict = recompute_verdict(&[], false, false);
+        let verdict = recompute_verdict(&[], false, false, false);
         assert_eq!(verdict.receipt_status, "UNVERIFIABLE");
         assert_eq!(verdict.invariant_status, "FAIL");
+    }
+
+    #[test]
+    fn recompute_verdict_is_unverifiable_when_diverged() {
+        // A monotone finite prefix that diverged is UNVERIFIABLE, not PASS, so a
+        // re-run of a diverged program re-derives the same UNVERIFIABLE verdict.
+        let verdict = recompute_verdict(&[4.0, 3.0], true, true, false);
+        assert_eq!(verdict.receipt_status, "UNVERIFIABLE");
+        assert_eq!(verdict.invariant_status, "FAIL");
+    }
+
+    /// Build a `ParsedSeries` for a re-run callback in tests.
+    fn rerun(series: Vec<f64>) -> ParsedSeries {
+        ParsedSeries {
+            any_parsed: !series.is_empty(),
+            diverged: false,
+            series,
+        }
     }
 
     #[test]
@@ -822,7 +1035,7 @@ mod tests {
             &receipt.compiler_version,
             &receipt.language_version,
             |_| Ok((src_digest.clone(), graph_digest.clone())),
-            |_| Ok((vec![4.0, 3.0, 2.0], true)),
+            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert!(result.is_ok(), "a faithful re-run must verify");
     }
@@ -847,7 +1060,7 @@ mod tests {
             &receipt.compiler_version,
             &receipt.language_version,
             |_| Ok((wrong.clone(), graph_digest.clone())),
-            |_| Ok((vec![4.0, 3.0, 2.0], true)),
+            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(result, Err(1), "a source-digest mismatch must fail verify");
     }
@@ -870,8 +1083,157 @@ mod tests {
             &receipt.compiler_version,
             &receipt.language_version,
             |_| Ok((src_digest.clone(), graph_digest.clone())),
-            |_| Ok((vec![1.0, 2.0, 3.0], true)),
+            |_, _| Ok(rerun(vec![1.0, 2.0, 3.0])),
         );
         assert_eq!(result, Err(1), "an invariant drift must fail verify");
+    }
+
+    #[test]
+    fn verify_rejects_measurement_count_drift() {
+        // The re-run reproduces a PASSing (monotone) series, but with a DIFFERENT
+        // number of points than the stored receipt. The verdict alone would match
+        // (PASS/PASS, 0 increases); the count re-check is what catches it.
+        let path = Path::new("k.bld");
+        let receipt =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        assert_eq!(receipt.measurement.count, 3);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src_digest = receipt.source_digest.clone();
+        let graph_digest = receipt.input_graph_digest.clone();
+
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            |_| Ok((src_digest.clone(), graph_digest.clone())),
+            // Two points instead of three; still monotone (PASS), so only the
+            // count check can reject this.
+            |_, _| Ok(rerun(vec![4.0, 3.0])),
+        );
+        assert_eq!(result, Err(1), "a measurement count drift must fail verify");
+    }
+
+    #[test]
+    fn verify_fails_a_faithful_but_unexpected_failure() {
+        // A receipt that faithfully reproduces but records FAIL_UNEXPECTED must
+        // NOT exit 0: `receipt verify && deploy` must not deploy on it. Exit 3
+        // distinguishes "faithful, invariant not held" from "did not reproduce".
+        let path = Path::new("k.bld");
+        let receipt =
+            build_scientific_runtime_receipt(base_inputs(path, vec![1.0, 2.0, 3.0], true, false));
+        assert_eq!(receipt.receipt_status, "FAIL_UNEXPECTED");
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src_digest = receipt.source_digest.clone();
+        let graph_digest = receipt.input_graph_digest.clone();
+
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            |_| Ok((src_digest.clone(), graph_digest.clone())),
+            |_, _| Ok(rerun(vec![1.0, 2.0, 3.0])),
+        );
+        assert_eq!(
+            result,
+            Err(3),
+            "a faithful FAIL_UNEXPECTED receipt must fail verify with exit 3"
+        );
+    }
+
+    #[test]
+    fn verify_passes_a_faithful_negative_fixture() {
+        // A negative fixture that reproduces its EXPECTED failure is a pass: the
+        // receipt is FAIL_EXPECTED and verify returns Ok.
+        let path = Path::new("k.bld");
+        let receipt =
+            build_scientific_runtime_receipt(base_inputs(path, vec![1.0, 2.0, 3.0], true, true));
+        assert_eq!(receipt.receipt_status, "FAIL_EXPECTED");
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src_digest = receipt.source_digest.clone();
+        let graph_digest = receipt.input_graph_digest.clone();
+
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            |_| Ok((src_digest.clone(), graph_digest.clone())),
+            |_, _| Ok(rerun(vec![1.0, 2.0, 3.0])),
+        );
+        assert!(
+            result.is_ok(),
+            "a faithful FAIL_EXPECTED receipt must verify"
+        );
+    }
+
+    #[test]
+    fn verify_fails_a_faithful_diverged_receipt() {
+        // A diverged (UNVERIFIABLE) receipt whose re-run reproduces the same
+        // divergence is faithful, but UNVERIFIABLE is not a pass -> Err(3).
+        let path = Path::new("k.bld");
+        let mut inputs = base_inputs(path, vec![4.0, 3.0], true, false);
+        inputs.diverged = true;
+        let receipt = build_scientific_runtime_receipt(inputs);
+        assert_eq!(receipt.receipt_status, "UNVERIFIABLE");
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src_digest = receipt.source_digest.clone();
+        let graph_digest = receipt.input_graph_digest.clone();
+
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            |_| Ok((src_digest.clone(), graph_digest.clone())),
+            |_, _| {
+                Ok(ParsedSeries {
+                    series: vec![4.0, 3.0],
+                    any_parsed: true,
+                    diverged: true,
+                })
+            },
+        );
+        assert_eq!(
+            result,
+            Err(3),
+            "a faithful UNVERIFIABLE receipt must fail verify with exit 3"
+        );
+    }
+
+    #[test]
+    fn verify_reruns_with_the_recorded_args() {
+        // The re-run must receive the receipt's stored args, so an argv-dependent
+        // kernel is reproduced under the same conditions it was emitted with.
+        let path = Path::new("k.bld");
+        let mut inputs = base_inputs(path, vec![4.0, 3.0, 2.0], true, false);
+        inputs.args = vec!["--mode".to_string(), "stable".to_string()];
+        let receipt = build_scientific_runtime_receipt(inputs);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src_digest = receipt.source_digest.clone();
+        let graph_digest = receipt.input_graph_digest.clone();
+
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            |_| Ok((src_digest.clone(), graph_digest.clone())),
+            |_, args| {
+                assert_eq!(
+                    args,
+                    ["--mode".to_string(), "stable".to_string()],
+                    "verify must re-run with the receipt's recorded args"
+                );
+                Ok(rerun(vec![4.0, 3.0, 2.0]))
+            },
+        );
+        assert!(result.is_ok(), "recorded-args re-run must verify");
     }
 }
