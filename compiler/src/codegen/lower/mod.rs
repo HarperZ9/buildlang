@@ -871,6 +871,21 @@ impl<'ctx> MirLowerer<'ctx> {
         let full_name = e.name.name.clone();
         if is_linear {
             self.linear_type_names.insert(full_name.clone());
+            // A struct-like variant (`Has { item: Coin }`) is lowered by
+            // `lower_struct_expr` to an aggregate whose local is typed
+            // `MirType::Struct(<variant name>)` (e.g. `Struct("Has")`), NOT
+            // `Struct(<enum name>)`. Without tagging the variant's synthetic
+            // struct name, that local is invisible to the MIR linear checker,
+            // so `match &w { Wrap::Has { item } => .. }` extracting the linear
+            // payload out of a shared borrow is not flagged and the enum can be
+            // cloned. Tag every variant's name of a `#[linear]` enum so a local
+            // typed with a variant struct name is recognized as linear. (A
+            // payload-less variant name is harmless to include: no local is
+            // typed `Struct(<that name>)` unless it is a variant construct,
+            // which is exactly the linear case.)
+            for v in &e.variants {
+                self.linear_type_names.insert(v.name.name.clone());
+            }
         }
         self.module
             .create_enum(full_name.clone(), MirType::i32(), variants);
@@ -2198,7 +2213,15 @@ impl<'ctx> MirLowerer<'ctx> {
                 }
             }
         }
-        None
+        // A struct-like enum variant (`Has { item: Coin }`) is NOT registered as
+        // a `Struct` type; its name is the synthetic variant struct name. Fall
+        // back to searching every enum's variants for a variant whose name is
+        // `struct_name`, returning its matching field type. This is what lets a
+        // record-pattern bind through a `match` on a struct-like enum variant
+        // recover the true (possibly `#[linear]`) field type instead of the
+        // `i32` default — required for the MIR linear checker to see the field
+        // extract as a move of a linear payload out of a shared borrow.
+        self.module.find_variant_field_type(struct_name, field_name)
     }
 
     /// Look up an enum variant by enum name and variant name.

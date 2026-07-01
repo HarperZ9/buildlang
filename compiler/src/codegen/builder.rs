@@ -540,6 +540,29 @@ impl MirModuleBuilder {
             .find(|t| t.name.ends_with(&pattern))
             .map(|t| t.name.to_string())
     }
+
+    /// Find the type of field `field_name` of a struct-like enum VARIANT named
+    /// `variant_name`, searching every enum's variants. A struct-like variant
+    /// (`Has { item: Coin }`) is not registered as a `Struct` type; its name is
+    /// the synthetic variant struct name a record-pattern binding sees. This
+    /// recovers the true field type (e.g. a `#[linear]` payload) that a plain
+    /// struct-field lookup on the variant name would miss.
+    pub fn find_variant_field_type(&self, variant_name: &str, field_name: &str) -> Option<MirType> {
+        for type_def in &self.module.types {
+            if let crate::codegen::ir::TypeDefKind::Enum { variants, .. } = &type_def.kind {
+                for v in variants {
+                    if v.name.as_ref() == variant_name {
+                        for (fname, fty) in &v.fields {
+                            if fname.as_deref() == Some(field_name) {
+                                return Some(fty.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 /// Helper to create common MIR values.
