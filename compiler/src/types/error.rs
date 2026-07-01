@@ -338,6 +338,13 @@ pub enum TypeError {
     #[error("internal error: {0}")]
     InternalError(String),
 
+    /// A parsed language construct the downstream pipeline (checker/codegen)
+    /// does not yet support. Rejecting loudly here prevents a silent
+    /// miscompile: parse-only constructs must never reach codegen and be
+    /// silently discarded.
+    #[error("`{construct}` is not yet supported: {detail}")]
+    UnsupportedConstruct { construct: String, detail: String },
+
     // =========================================================================
     // GENERICS ERRORS
     // =========================================================================

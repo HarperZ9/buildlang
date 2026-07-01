@@ -12,6 +12,7 @@ mod lsp_dispatch;
 mod memory_layout;
 mod mir_representation;
 mod module_graph;
+mod scientific_runtime;
 mod symbol_graph;
 
 use clap::{Parser as ClapParser, Subcommand};
@@ -36,6 +37,10 @@ use mir_representation::{
     verify_mir_representation_receipt, MirRepresentationReceipt, MIR_REPRESENTATION_RECEIPT,
 };
 use module_graph::{verify_module_graph_receipt, ModuleGraphReceipt, MODULE_GRAPH_RECEIPT};
+use scientific_runtime::{
+    build_scientific_runtime_receipt, parse_numeric_series, verify_scientific_runtime_receipt,
+    ScientificDigest, ScientificReceiptInputs, ScientificRuntimeReceipt, SCIENTIFIC_RUNTIME_SCHEMA,
+};
 use symbol_graph::{verify_symbol_graph_receipt, SymbolGraphReceipt, SYMBOL_GRAPH_RECEIPT};
 
 fn parse_codegen_target(target: &str) -> Result<Target, String> {
@@ -179,6 +184,32 @@ enum Commands {
     Run {
         /// Input file
         file: PathBuf,
+
+        /// Emit a sealed scientific-runtime receipt to PATH ('-' = stdout).
+        /// When set, buildc captures the program's numeric stdout as a
+        /// measurement series, checks the invariant, and writes the receipt.
+        /// Without this flag, `run` behavior is byte-identical to before.
+        #[arg(long, value_name = "PATH")]
+        emit_receipt: Option<PathBuf>,
+
+        /// Invariant to check over the captured series (v0: only
+        /// `energy-monotone`). Ignored unless `--emit-receipt` is set.
+        #[arg(long, default_value = "energy-monotone")]
+        invariant: String,
+
+        /// Measurement metric name recorded in the receipt.
+        #[arg(long, default_value = "series")]
+        metric: String,
+
+        /// Free-text problem label recorded in the receipt (e.g.
+        /// "1d-heat-equation-energy").
+        #[arg(long)]
+        problem: Option<String>,
+
+        /// Declare this run a negative fixture: an invariant FAIL is EXPECTED
+        /// and yields receipt_status FAIL_EXPECTED instead of FAIL_UNEXPECTED.
+        #[arg(long)]
+        negative_fixture: bool,
 
         /// Arguments to pass to the program
         #[arg(trailing_var_arg = true)]
@@ -470,7 +501,23 @@ fn main() -> ExitCode {
             keep_c,
             target,
         }) => cmd_build(&path, release, &emit, keep_c, &target),
-        Some(Commands::Run { file, args }) => cmd_run(&file, &args),
+        Some(Commands::Run {
+            file,
+            emit_receipt,
+            invariant,
+            metric,
+            problem,
+            negative_fixture,
+            args,
+        }) => cmd_run(
+            &file,
+            &args,
+            emit_receipt.as_deref(),
+            &invariant,
+            &metric,
+            problem.as_deref(),
+            negative_fixture,
+        ),
         Some(Commands::Repl) => cmd_repl(),
         Some(Commands::Lsp) => cmd_lsp(),
         Some(Commands::Watch { path, target }) => cmd_watch(&path, &target),
@@ -1698,6 +1745,36 @@ fn push_receipt_replay_checks(
     }
 }
 
+/// Dispatch a scientific-runtime receipt to its verifier, supplying the two
+/// re-derivation callbacks the module needs. `run_check` re-derives the source +
+/// input-graph digests through the exact check pipeline that produced them, and
+/// `compile_and_capture_run` re-runs the program so the invariant is re-checked
+/// (not trusted). Shared by the human and `--json` verify paths.
+fn verify_scientific_receipt_dispatch(
+    receipt: &serde_json::Value,
+    source_override: Option<&Path>,
+    json: bool,
+) -> Result<(), i32> {
+    verify_scientific_runtime_receipt(
+        receipt,
+        source_override,
+        json,
+        env!("CARGO_PKG_VERSION"),
+        &language_version_string(),
+        |source_path| {
+            let outcome = run_check(source_path)?;
+            Ok((
+                ScientificDigest::from(&outcome.source_digest),
+                ScientificDigest::from(&outcome.input_graph_digest),
+            ))
+        },
+        |source_path, args| {
+            let captured = compile_and_capture_run(source_path, args)?;
+            Ok(parse_numeric_series(&captured.stdout))
+        },
+    )
+}
+
 fn cmd_receipt_verify(
     receipt_path: &Path,
     source_override: Option<&Path>,
@@ -1716,6 +1793,9 @@ fn cmd_receipt_verify(
 
     let receipt: serde_json::Value = read_json(receipt_path)?;
     let schema = receipt_field_str(&receipt, "/schema", "schema")?;
+    if schema == SCIENTIFIC_RUNTIME_SCHEMA {
+        return verify_scientific_receipt_dispatch(&receipt, source_override, false);
+    }
     if schema != "buildlang-check-receipt/v1" {
         eprintln!("Error: unsupported check receipt schema `{}`", schema);
         return Err(1);
@@ -1817,6 +1897,14 @@ fn cmd_receipt_verify_json(
     expected_policy_digest: Option<&str>,
 ) -> Result<(), i32> {
     let receipt: serde_json::Value = read_json(receipt_path)?;
+
+    // Route the scientific-runtime schema to its own re-run verifier BEFORE the
+    // check-receipt schema guard, so the existing check-receipt path stays
+    // byte-identical.
+    if receipt_field_str(&receipt, "/schema", "schema")? == SCIENTIFIC_RUNTIME_SCHEMA {
+        return verify_scientific_receipt_dispatch(&receipt, source_override, true);
+    }
+
     let mut checks = Vec::new();
 
     let schema = receipt_field_str(&receipt, "/schema", "schema")?;
@@ -5489,7 +5577,43 @@ fn run_temp_build_dir(file: &Path) -> PathBuf {
     ))
 }
 
-fn cmd_run(file: &PathBuf, args: &[String]) -> Result<(), i32> {
+#[allow(clippy::too_many_arguments)]
+/// A compiled BuildLang program: the temp build directory and the produced
+/// executable. The caller owns the temp dir and is responsible for removing it
+/// once the program has been run.
+struct CompiledProgram {
+    temp_dir: PathBuf,
+    exe_file: PathBuf,
+}
+
+/// Captured result of running a compiled program with `.output()`.
+///
+/// Used by both `run --emit-receipt` and `receipt verify` for the
+/// scientific-runtime schema: both need the program's numeric stdout and its
+/// exit code, and both re-run through the exact same compile+run path so the
+/// verifier re-derives (never trusts) the emitted receipt.
+struct CapturedRun {
+    /// Program stdout decoded lossily as UTF-8 (the numeric measurement series).
+    stdout: String,
+    /// Raw stdout bytes, for byte-faithful echoing by `run --emit-receipt`.
+    stdout_bytes: Vec<u8>,
+    /// Raw stderr bytes, for echoing by `run --emit-receipt`.
+    stderr_bytes: Vec<u8>,
+    /// The program's process exit code (`-1` if terminated by a signal).
+    exit_code: i32,
+}
+
+/// Compile a `.bld` program to a native executable via the C backend.
+///
+/// This is the compile pipeline shared by every `run` variant
+/// (read/resolve-imports/preprocess/lex/parse/resolve-modules/type-check/
+/// codegen/C-compile). It is byte-identical to the pipeline that previously
+/// lived inline in `cmd_run`; factoring it lets `run --emit-receipt` and
+/// `receipt verify` (scientific schema) compile through the exact same path.
+///
+/// Returns the temp build dir and the produced exe path. The caller MUST remove
+/// the temp dir after running (both call sites do).
+fn compile_program_to_exe(file: &Path) -> Result<CompiledProgram, i32> {
     // Read source file
     let source = std::fs::read_to_string(file).map_err(|e| {
         eprintln!("Error reading file '{}': {}", file.display(), e);
@@ -5604,24 +5728,184 @@ fn cmd_run(file: &PathBuf, args: &[String]) -> Result<(), i32> {
         }
     }
 
-    // Run the compiled program directly (Win32 WriteFile in the runtime
-    // ensures output works even under MinTTY/git-bash).
-    let status = {
+    Ok(CompiledProgram { temp_dir, exe_file })
+}
+
+/// Compile `file`, run the produced executable with `args`, and capture its
+/// stdout/stderr and exit code with `.output()`. Cleans up the temp build dir.
+///
+/// This is the single compile+run+capture path shared by `run --emit-receipt`
+/// (which parses the captured stdout into a measurement series) and
+/// `receipt verify` for the scientific-runtime schema (which RE-RUNS the program
+/// and re-parses the series to re-check the invariant, rather than trusting the
+/// stored values). Keeping one path means verify observes exactly what emit
+/// observed.
+fn compile_and_capture_run(file: &Path, args: &[String]) -> Result<CapturedRun, i32> {
+    let CompiledProgram { temp_dir, exe_file } = compile_program_to_exe(file)?;
+
+    // Run the compiled program, capturing stdout so we can parse the series.
+    let run_output = {
         let mut run_cmd = std::process::Command::new(&exe_file);
         run_cmd.args(args);
-        run_cmd.status().map_err(|e| {
+        run_cmd.output().map_err(|e| {
             eprintln!("Failed to run program: {}", e);
+            let _ = std::fs::remove_dir_all(&temp_dir);
             1i32
         })?
     };
 
-    // Clean up temp files
+    // Clean up temp files.
     let _ = std::fs::remove_dir_all(&temp_dir);
 
-    if status.success() {
+    let stdout = String::from_utf8_lossy(&run_output.stdout).into_owned();
+    let exit_code = run_output.status.code().unwrap_or(-1);
+    Ok(CapturedRun {
+        stdout,
+        stdout_bytes: run_output.stdout,
+        stderr_bytes: run_output.stderr,
+        exit_code,
+    })
+}
+
+fn cmd_run(
+    file: &PathBuf,
+    args: &[String],
+    emit_receipt: Option<&Path>,
+    invariant: &str,
+    metric: &str,
+    problem: Option<&str>,
+    negative_fixture: bool,
+) -> Result<(), i32> {
+    // v0 implements only the energy-monotone invariant. Reject unknown names
+    // early (before compiling) so the error is clear and no work is wasted.
+    if emit_receipt.is_some() && invariant != "energy-monotone" {
+        eprintln!("Unknown --invariant '{invariant}'. Supported in v0: energy-monotone");
+        return Err(1);
+    }
+
+    // Default path (no --emit-receipt): inherit stdout via `.status()`, exactly
+    // as before -- byte-identical output and exit-code semantics. Receipt path:
+    // capture stdout via `.output()` (shared `compile_and_capture_run` helper),
+    // echo it (so `run` still shows output), parse the numeric series, check the
+    // invariant, seal, and write.
+    let Some(receipt_path) = emit_receipt else {
+        // No receipt: compile, then run with inherited stdout via `.status()`.
+        let CompiledProgram { temp_dir, exe_file } = compile_program_to_exe(file)?;
+        let status = {
+            let mut run_cmd = std::process::Command::new(&exe_file);
+            run_cmd.args(args);
+            run_cmd.status().map_err(|e| {
+                eprintln!("Failed to run program: {}", e);
+                1i32
+            })?
+        };
+
+        // Clean up temp files
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        return if status.success() {
+            Ok(())
+        } else {
+            Err(status.code().unwrap_or(1))
+        };
+    };
+
+    // --emit-receipt path: compile + run + capture via the shared helper so the
+    // emitted series is observed through the exact path `receipt verify` re-runs.
+    let captured = compile_and_capture_run(file, args)?;
+
+    // Echo the captured streams so `run --emit-receipt` still shows program
+    // output. stdout goes to the real stdout ONLY when the receipt is written
+    // to a file; when the receipt itself is written to stdout ('-') we route
+    // the echoed program output to stderr to keep stdout pure JSON.
+    let captured_stdout = captured.stdout;
+    let receipt_to_stdout = receipt_path == Path::new("-");
+    {
+        use std::io::Write as _;
+        if receipt_to_stdout {
+            let _ = std::io::stderr().write_all(&captured.stdout_bytes);
+        } else {
+            let _ = std::io::stdout().write_all(&captured.stdout_bytes);
+        }
+        let _ = std::io::stderr().write_all(&captured.stderr_bytes);
+    }
+
+    let exit_code = captured.exit_code;
+
+    // Parse the captured stdout into an f64 series. `token.parse::<f64>()`
+    // accepts BOTH the C `%g` plain-decimal (`0.530827`) and scientific
+    // (`1.59908e+28`) forms the backend emits. A non-finite (inf/NaN) value
+    // marks the run as diverged -> UNVERIFIABLE, and only the finite prefix is
+    // retained so the receipt always serializes cleanly.
+    let parsed = parse_numeric_series(&captured_stdout);
+
+    // Re-derive source + input-graph digests from the same check pipeline the
+    // check-receipt path uses, so the two digests agree byte-for-byte.
+    let outcome = run_check(file)?;
+
+    let os = std::env::consts::OS.to_string();
+    let mut flags = vec![format!("invariant={invariant}"), format!("metric={metric}")];
+    if negative_fixture {
+        flags.push("negative-fixture".to_string());
+    }
+
+    let inputs = ScientificReceiptInputs {
+        source_path: file,
+        compiler_version: buildlang::VERSION,
+        language_version: outcome.language_version.clone(),
+        source_digest: ScientificDigest {
+            algorithm: outcome.source_digest.algorithm.to_string(),
+            hex: outcome.source_digest.hex.clone(),
+        },
+        input_graph_digest: ScientificDigest {
+            algorithm: outcome.input_graph_digest.algorithm.to_string(),
+            hex: outcome.input_graph_digest.hex.clone(),
+        },
+        target: "c",
+        os: &os,
+        exit_code,
+        series: parsed.series,
+        series_parsed: parsed.any_parsed,
+        diverged: parsed.diverged,
+        args: args.to_vec(),
+        metric: metric.to_string(),
+        units: None,
+        problem_label: problem.map(str::to_string),
+        negative_fixture,
+        flags,
+    };
+
+    let receipt = build_scientific_runtime_receipt(inputs);
+    write_scientific_runtime_receipt(receipt_path, &receipt)?;
+
+    // Exit-code semantics: emitting the receipt is the success signal. A
+    // program may exit nonzero (or, as a negative fixture, exit 0 while
+    // printing an increasing series); either way the receipt is written and
+    // records the observed exit_code and verdict. We return Ok so the emit
+    // succeeds; the receipt's receipt_status carries the PASS/FAIL verdict.
+    Ok(())
+}
+
+fn write_scientific_runtime_receipt(
+    path: &Path,
+    receipt: &ScientificRuntimeReceipt,
+) -> Result<(), i32> {
+    let json = serde_json::to_string_pretty(receipt).map_err(|err| {
+        eprintln!("Error serializing scientific-runtime receipt: {}", err);
+        1
+    })?;
+    if path == Path::new("-") {
+        println!("{}", json);
         Ok(())
     } else {
-        Err(status.code().unwrap_or(1))
+        std::fs::write(path, format!("{}\n", json)).map_err(|err| {
+            eprintln!(
+                "Error writing scientific-runtime receipt '{}': {}",
+                path.display(),
+                err
+            );
+            1
+        })
     }
 }
 
@@ -6559,8 +6843,15 @@ fn resolve_modules_with_prefix(
                     // Rewrite intra-module calls in the function body:
                     // if this function calls `helper()` and `helper` is defined
                     // in the same module, rewrite to `math_helpers_helper()`.
+                    // Seed the shadow scope with this function's parameter names
+                    // first so a parameter shadowing a sibling module function is
+                    // not rewritten.
+                    let mut param_names = HashSet::new();
+                    for p in &prefixed_fn.sig.params {
+                        collect_pattern_names(&p.pattern, &mut param_names);
+                    }
                     if let Some(ref mut body) = prefixed_fn.body {
-                        rewrite_intra_module_calls(body, &mod_defined, &full_prefix);
+                        rewrite_intra_module_calls(body, &mod_defined, &full_prefix, param_names);
                     }
                     new_items.push(ast::Item::new(
                         ItemKind::Function(Box::new(prefixed_fn)),
@@ -6607,8 +6898,12 @@ fn resolve_modules_with_prefix(
     if !imported_fns.is_empty() {
         for item in &mut ast.items {
             if let ItemKind::Function(f) = &mut item.kind {
+                let mut param_names = HashSet::new();
+                for p in &f.sig.params {
+                    collect_pattern_names(&p.pattern, &mut param_names);
+                }
                 if let Some(ref mut body) = f.body {
-                    rewrite_imported_calls(body, &imported_fns);
+                    rewrite_imported_calls(body, &imported_fns, param_names);
                 }
             }
         }
@@ -6617,126 +6912,394 @@ fn resolve_modules_with_prefix(
     Ok(())
 }
 
-/// Rewrite calls to module-local functions within a function body.
-fn rewrite_intra_module_calls(body: &mut ast::Block, mod_defined: &HashSet<String>, prefix: &str) {
-    for stmt in &mut body.stmts {
-        match &mut stmt.kind {
-            ast::StmtKind::Expr(expr) | ast::StmtKind::Semi(expr) => {
-                rewrite_expr_node(expr, mod_defined, prefix);
+/// Names bound by a pattern (function params, `let`, closure params, loop and
+/// match patterns). Used by the module-call rewriter to detect when a callee
+/// identifier is actually a shadowing local/parameter rather than a free
+/// reference to a module function. Over-collecting is the safe direction (it
+/// only ever suppresses a rewrite, turning a would-be silent miscompile into
+/// either correct resolution or a loud name error); under-collecting is the
+/// dangerous direction, so every binding pattern kind is covered.
+fn collect_pattern_names(pat: &ast::Pattern, out: &mut HashSet<Arc<str>>) {
+    use ast::PatternKind as P;
+    match &pat.kind {
+        P::Ident {
+            name, subpattern, ..
+        } => {
+            out.insert(name.name.clone());
+            if let Some(sub) = subpattern {
+                collect_pattern_names(sub, out);
             }
-            ast::StmtKind::Local(local) => {
-                if let Some(ref mut init) = local.init {
-                    rewrite_expr_node(&mut init.expr, mod_defined, prefix);
-                }
-            }
-            _ => {}
         }
+        P::Tuple(pats) | P::Slice(pats) | P::Or(pats) => {
+            for p in pats {
+                collect_pattern_names(p, out);
+            }
+        }
+        P::TupleStruct { patterns, .. } => {
+            for p in patterns {
+                collect_pattern_names(p, out);
+            }
+        }
+        P::Struct { fields, .. } => {
+            for f in fields {
+                collect_pattern_names(&f.pattern, out);
+            }
+        }
+        P::Ref { pattern, .. } | P::Box(pattern) | P::Paren(pattern) => {
+            collect_pattern_names(pattern, out);
+        }
+        P::Wildcard
+        | P::Rest
+        | P::Literal(_)
+        | P::Path(_)
+        | P::Range { .. }
+        | P::Macro { .. }
+        | P::Error => {}
     }
 }
 
-fn rewrite_expr_node(expr: &mut ast::Expr, mod_defined: &HashSet<String>, prefix: &str) {
-    match &mut expr.kind {
-        ast::ExprKind::Call { func, args } => {
-            if let ast::ExprKind::Ident(ref mut ident) = func.kind {
-                if mod_defined.contains(ident.name.as_ref()) {
-                    ident.name = Arc::from(format!("{}_{}", prefix, ident.name));
+/// A lexical shadow tracker for the module-call rewriter: a stack of scope
+/// frames, each holding the names bound in that scope. A callee identifier that
+/// is bound in ANY live frame is a local/parameter shadowing a module function
+/// of the same name, so it must NOT be prefix-rewritten. Without this, the
+/// rewriter renamed a call purely by name-set membership and silently
+/// retargeted a fn-pointer parameter (e.g. `fn run(square: fn(i32)->i32) {
+/// square(x) }`) to a same-named module function -- a wrong-callee miscompile.
+#[derive(Default)]
+struct ShadowScope {
+    frames: Vec<HashSet<Arc<str>>>,
+}
+
+impl ShadowScope {
+    fn push(&mut self, names: HashSet<Arc<str>>) {
+        self.frames.push(names);
+    }
+
+    fn push_empty(&mut self) {
+        self.frames.push(HashSet::new());
+    }
+
+    fn pop(&mut self) {
+        self.frames.pop();
+    }
+
+    /// Add a name to the current (innermost) frame, e.g. for a `let` binding as
+    /// the walk passes it.
+    fn bind(&mut self, name: Arc<str>) {
+        if let Some(top) = self.frames.last_mut() {
+            top.insert(name);
+        }
+    }
+
+    fn is_bound(&self, name: &str) -> bool {
+        self.frames.iter().any(|frame| frame.contains(name))
+    }
+}
+
+/// Collect the names a pattern binds into a fresh scope frame.
+fn scope_frame_for_pattern(pat: &ast::Pattern) -> HashSet<Arc<str>> {
+    let mut names = HashSet::new();
+    collect_pattern_names(pat, &mut names);
+    names
+}
+
+/// Rewrite calls to module-local functions within a function body. `param_names`
+/// seeds the shadow scope with the function's parameter names so a parameter
+/// that shadows a sibling module function is left as the parameter reference.
+fn rewrite_intra_module_calls(
+    body: &mut ast::Block,
+    mod_defined: &HashSet<String>,
+    prefix: &str,
+    param_names: HashSet<Arc<str>>,
+) {
+    let mut scope = ShadowScope::default();
+    scope.push(param_names);
+    walk_calls_in_block(body, &mut scope, &mut |ident: &mut ast::Ident| {
+        if mod_defined.contains(ident.name.as_ref()) {
+            ident.name = Arc::from(format!("{}_{}", prefix, ident.name));
+        }
+    });
+}
+
+/// Walk EVERY call expression reachable from a block and apply `rename` to each
+/// call's callee identifier that is NOT shadowed by a local/parameter binding.
+/// This is the single, EXHAUSTIVE structural walk shared by both intra-module
+/// prefixing and main-program imported-call rewriting. Using one exhaustive
+/// walker (rather than two ad-hoc walkers that each descended into only a
+/// handful of contexts and drifted apart) is what fixes bare module calls
+/// failing to resolve inside loop bodies, match arms, method-call arguments,
+/// and other previously un-walked contexts. The match is exhaustive on purpose:
+/// a new `ExprKind` variant forces this walker to be updated instead of
+/// silently regressing.
+///
+/// `scope` tracks the lexical bindings in force at each call site (function
+/// params, `let`, closure params, and loop/match patterns), so a callee that
+/// names a parameter or local is never mistaken for a free module-function
+/// reference and mis-rewritten. NOTE: calls inside a `macro!(...)` invocation's
+/// argument tokens are NOT rewritten - macro args are unstructured tokens, so
+/// `println!("{}", vec_dot(a, b))` still needs the let-bind idiom.
+fn walk_calls_in_block(
+    block: &mut ast::Block,
+    scope: &mut ShadowScope,
+    rename: &mut dyn FnMut(&mut ast::Ident),
+) {
+    scope.push_empty();
+    for stmt in &mut block.stmts {
+        match &mut stmt.kind {
+            ast::StmtKind::Expr(expr) | ast::StmtKind::Semi(expr) => {
+                walk_calls_in_expr(expr, scope, rename);
+            }
+            ast::StmtKind::Local(local) => {
+                // The RHS is evaluated in the OUTER scope (the binding is not yet
+                // in force), so walk it before binding the pattern's names. The
+                // let-else diverge block is also walked here, also pre-binding
+                // (the let-else bindings are not in force in the else block).
+                // NOTE: let-else is currently REJECTED by the type checker
+                // (UnsupportedConstruct) because codegen cannot lower it; the
+                // walk keeps the rewriter exhaustive so module calls in the
+                // else block resolve correctly once lowering lands.
+                if let Some(ref mut init) = local.init {
+                    walk_calls_in_expr(&mut init.expr, scope, rename);
+                    if let Some(ref mut diverge) = init.diverge {
+                        walk_calls_in_expr(diverge, scope, rename);
+                    }
+                }
+                let mut names = HashSet::new();
+                collect_pattern_names(&local.pattern, &mut names);
+                for n in names {
+                    scope.bind(n);
                 }
             }
-            rewrite_expr_node(func, mod_defined, prefix);
+            ast::StmtKind::Item(_) | ast::StmtKind::Empty | ast::StmtKind::Macro { .. } => {}
+        }
+    }
+    scope.pop();
+}
+
+fn walk_calls_in_expr(
+    expr: &mut ast::Expr,
+    scope: &mut ShadowScope,
+    rename: &mut dyn FnMut(&mut ast::Ident),
+) {
+    use ast::ExprKind as E;
+    match &mut expr.kind {
+        E::Call { func, args } => {
+            if let E::Ident(ref mut ident) = func.kind {
+                // Only rewrite a free reference to a module function. A callee
+                // that names a bound local/parameter shadows the module function
+                // and must be left alone (else a fn-pointer param call silently
+                // retargets to the module function).
+                if !scope.is_bound(ident.name.as_ref()) {
+                    rename(ident);
+                }
+            }
+            walk_calls_in_expr(func, scope, rename);
             for arg in args {
-                rewrite_expr_node(arg, mod_defined, prefix);
+                walk_calls_in_expr(arg, scope, rename);
             }
         }
-        ast::ExprKind::Binary { left, right, .. } => {
-            rewrite_expr_node(left, mod_defined, prefix);
-            rewrite_expr_node(right, mod_defined, prefix);
+        E::MethodCall { receiver, args, .. } => {
+            walk_calls_in_expr(receiver, scope, rename);
+            for arg in args {
+                walk_calls_in_expr(arg, scope, rename);
+            }
         }
-        ast::ExprKind::Unary { expr: inner, .. } => {
-            rewrite_expr_node(inner, mod_defined, prefix);
+        E::Binary { left, right, .. } => {
+            walk_calls_in_expr(left, scope, rename);
+            walk_calls_in_expr(right, scope, rename);
         }
-        ast::ExprKind::If {
+        E::Assign { target, value, .. } => {
+            walk_calls_in_expr(target, scope, rename);
+            walk_calls_in_expr(value, scope, rename);
+        }
+        E::Index { expr: e, index } => {
+            walk_calls_in_expr(e, scope, rename);
+            walk_calls_in_expr(index, scope, rename);
+        }
+        E::Unary { expr: e, .. }
+        | E::Deref(e)
+        | E::Ref { expr: e, .. }
+        | E::Field { expr: e, .. }
+        | E::TupleField { expr: e, .. }
+        | E::Cast { expr: e, .. }
+        | E::TypeAscription { expr: e, .. }
+        | E::AIInfer { expr: e, .. }
+        | E::Try(e)
+        | E::Await(e)
+        | E::Paren(e) => {
+            walk_calls_in_expr(e, scope, rename);
+        }
+        E::Closure { params, body, .. } => {
+            // Closure parameters shadow within the closure body only.
+            let mut names = HashSet::new();
+            for p in params {
+                collect_pattern_names(&p.pattern, &mut names);
+            }
+            scope.push(names);
+            walk_calls_in_expr(body, scope, rename);
+            scope.pop();
+        }
+        E::Array(items) | E::Tuple(items) => {
+            for it in items {
+                walk_calls_in_expr(it, scope, rename);
+            }
+        }
+        E::ArrayRepeat { element, count } => {
+            walk_calls_in_expr(element, scope, rename);
+            walk_calls_in_expr(count, scope, rename);
+        }
+        E::Struct { fields, rest, .. } => {
+            for f in fields {
+                if let Some(ref mut v) = f.value {
+                    walk_calls_in_expr(v, scope, rename);
+                }
+            }
+            if let Some(ref mut r) = rest {
+                walk_calls_in_expr(r, scope, rename);
+            }
+        }
+        E::If {
             condition,
             then_branch,
             else_branch,
-            ..
         } => {
-            rewrite_expr_node(condition, mod_defined, prefix);
-            rewrite_intra_module_calls(then_branch, mod_defined, prefix);
+            walk_calls_in_expr(condition, scope, rename);
+            walk_calls_in_block(then_branch, scope, rename);
             if let Some(ref mut eb) = else_branch {
-                rewrite_expr_node(eb, mod_defined, prefix);
+                walk_calls_in_expr(eb, scope, rename);
             }
         }
-        ast::ExprKind::Block(block) => {
-            rewrite_intra_module_calls(block, mod_defined, prefix);
+        E::IfLet {
+            pattern,
+            expr: e,
+            then_branch,
+            else_branch,
+        } => {
+            walk_calls_in_expr(e, scope, rename);
+            // Pattern bindings are in force only in the `then` branch.
+            scope.push(scope_frame_for_pattern(pattern));
+            walk_calls_in_block(then_branch, scope, rename);
+            scope.pop();
+            if let Some(ref mut eb) = else_branch {
+                walk_calls_in_expr(eb, scope, rename);
+            }
         }
-        ast::ExprKind::Return(Some(ref mut inner)) => {
-            rewrite_expr_node(inner, mod_defined, prefix);
+        E::Match { scrutinee, arms } => {
+            walk_calls_in_expr(scrutinee, scope, rename);
+            for arm in arms {
+                // Arm-pattern bindings are in force in the guard and body.
+                scope.push(scope_frame_for_pattern(&arm.pattern));
+                if let Some(ref mut g) = arm.guard {
+                    walk_calls_in_expr(g, scope, rename);
+                }
+                walk_calls_in_expr(&mut arm.body, scope, rename);
+                scope.pop();
+            }
         }
-        _ => {}
+        E::While {
+            condition, body, ..
+        } => {
+            walk_calls_in_expr(condition, scope, rename);
+            walk_calls_in_block(body, scope, rename);
+        }
+        E::WhileLet {
+            pattern,
+            expr: e,
+            body,
+            ..
+        } => {
+            walk_calls_in_expr(e, scope, rename);
+            scope.push(scope_frame_for_pattern(pattern));
+            walk_calls_in_block(body, scope, rename);
+            scope.pop();
+        }
+        E::For {
+            pattern,
+            iter,
+            body,
+            ..
+        } => {
+            walk_calls_in_expr(iter, scope, rename);
+            scope.push(scope_frame_for_pattern(pattern));
+            walk_calls_in_block(body, scope, rename);
+            scope.pop();
+        }
+        E::Loop { body, .. } | E::Unsafe(body) | E::Async { body, .. } => {
+            walk_calls_in_block(body, scope, rename);
+        }
+        E::Handle { handlers, body, .. } => {
+            for h in handlers {
+                // Handler operation params shadow within that handler body.
+                let mut names = HashSet::new();
+                for p in &h.params {
+                    collect_pattern_names(&p.pattern, &mut names);
+                }
+                scope.push(names);
+                walk_calls_in_expr(&mut h.body, scope, rename);
+                scope.pop();
+            }
+            walk_calls_in_block(body, scope, rename);
+        }
+        E::Block(block) => {
+            walk_calls_in_block(block, scope, rename);
+        }
+        E::Return(opt) | E::Resume(opt) => {
+            if let Some(ref mut e) = opt {
+                walk_calls_in_expr(e, scope, rename);
+            }
+        }
+        E::Break { value, .. } => {
+            if let Some(ref mut e) = value {
+                walk_calls_in_expr(e, scope, rename);
+            }
+        }
+        E::Range { start, end, .. } => {
+            if let Some(ref mut s) = start {
+                walk_calls_in_expr(s, scope, rename);
+            }
+            if let Some(ref mut en) = end {
+                walk_calls_in_expr(en, scope, rename);
+            }
+        }
+        E::AIQuery { prompt, options } => {
+            walk_calls_in_expr(prompt, scope, rename);
+            for (_, e) in options {
+                walk_calls_in_expr(e, scope, rename);
+            }
+        }
+        E::Perform { args, .. } => {
+            for arg in args {
+                walk_calls_in_expr(arg, scope, rename);
+            }
+        }
+        // Leaves and un-rewritable contexts: identifiers/paths/literals hold no
+        // nested calls; `break`/`continue` labels are not exprs; macro argument
+        // tokens are unstructured and cannot be structurally rewritten here.
+        E::Literal(_)
+        | E::Ident(_)
+        | E::Path(_)
+        | E::Continue { .. }
+        | E::Macro { .. }
+        | E::Error => {}
     }
 }
 
 /// Rewrite bare function calls in the main program to use module-prefixed names.
 /// E.g., `i32_min(a, b)` → `core_i32_min(a, b)` when `core.bld` defines `i32_min`.
-fn rewrite_imported_calls(body: &mut ast::Block, imported: &HashMap<String, String>) {
-    for stmt in &mut body.stmts {
-        match &mut stmt.kind {
-            ast::StmtKind::Expr(expr) | ast::StmtKind::Semi(expr) => {
-                rewrite_imported_expr(expr, imported);
-            }
-            ast::StmtKind::Local(local) => {
-                if let Some(ref mut init) = local.init {
-                    rewrite_imported_expr(&mut init.expr, imported);
-                }
-            }
-            _ => {}
+/// `param_names` seeds the shadow scope so a fn-pointer parameter that shadows an
+/// imported function name stays a reference to the parameter.
+fn rewrite_imported_calls(
+    body: &mut ast::Block,
+    imported: &HashMap<String, String>,
+    param_names: HashSet<Arc<str>>,
+) {
+    let mut scope = ShadowScope::default();
+    scope.push(param_names);
+    walk_calls_in_block(body, &mut scope, &mut |ident: &mut ast::Ident| {
+        if let Some(prefixed) = imported.get(ident.name.as_ref()) {
+            ident.name = Arc::from(prefixed.as_str());
         }
-    }
-}
-
-fn rewrite_imported_expr(expr: &mut ast::Expr, imported: &HashMap<String, String>) {
-    match &mut expr.kind {
-        ast::ExprKind::Call { func, args } => {
-            if let ast::ExprKind::Ident(ref mut ident) = func.kind {
-                if let Some(prefixed) = imported.get(ident.name.as_ref()) {
-                    ident.name = Arc::from(prefixed.as_str());
-                }
-            }
-            rewrite_imported_expr(func, imported);
-            for arg in args {
-                rewrite_imported_expr(arg, imported);
-            }
-        }
-        ast::ExprKind::Binary { left, right, .. } => {
-            rewrite_imported_expr(left, imported);
-            rewrite_imported_expr(right, imported);
-        }
-        ast::ExprKind::Unary { expr: inner, .. } => {
-            rewrite_imported_expr(inner, imported);
-        }
-        ast::ExprKind::If {
-            condition,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            rewrite_imported_expr(condition, imported);
-            rewrite_imported_calls(then_branch, imported);
-            if let Some(ref mut eb) = else_branch {
-                rewrite_imported_expr(eb, imported);
-            }
-        }
-        ast::ExprKind::Block(block) => {
-            rewrite_imported_calls(block, imported);
-        }
-        ast::ExprKind::Return(Some(ref mut inner)) => {
-            rewrite_imported_expr(inner, imported);
-        }
-        ast::ExprKind::Assign { value, .. } => {
-            rewrite_imported_expr(value, imported);
-        }
-        _ => {}
-    }
+    });
 }
 
 fn cmd_compile(

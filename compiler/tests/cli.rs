@@ -12943,6 +12943,79 @@ fn local_module_self_recursive_fn_no_false_ambiguity() {
     );
 }
 
+/// Regression: a function imported via `mod foo;` failed to resolve with
+/// "undefined variable" when CALLED inside a loop body (while/for), match arm,
+/// method-call argument, or other context the import call-rewriter did not
+/// descend into. The rewriter now walks ALL expression contexts, so a bare
+/// imported call is rewritten to its prefixed name everywhere.
+#[test]
+fn imported_module_fn_resolves_inside_loop_body() {
+    if !c_backend_ready() {
+        eprintln!("skipping imported-fn-in-loop e2e: no C backend available");
+        return;
+    }
+    let dir = std::env::temp_dir().join("buildlang_imported_fn_in_loop");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    std::fs::write(
+        dir.join("helper.bld"),
+        "fn square(n: i32) -> i32 { n * n }\n",
+    )
+    .expect("write helper.bld");
+    let main_path = dir.join("main.bld");
+    std::fs::write(
+        &main_path,
+        "mod helper;\nfn main() ~ Console {\n    \
+         let mut i: i32 = 1;\n    let mut acc: i32 = 0;\n    \
+         while i <= 3 {\n        acc = acc + square(i);\n        i = i + 1;\n    }\n    \
+         println(\"{}\", acc);\n}\n",
+    )
+    .expect("write main.bld");
+    let result = c_backend_run(&main_path);
+    assert_eq!(
+        result.stdout, "14\n",
+        "an imported module fn must resolve when called inside a loop body"
+    );
+}
+
+/// Regression: the module-call rewriter must be scope-aware. A fn-pointer
+/// PARAMETER named identically to an imported module function, called inside a
+/// loop body, must resolve to the PARAMETER -- not be silently rewritten to the
+/// module function (a wrong-callee miscompile). Here `square` is a fn-pointer
+/// param bound to `triple`; the module `helper` also exports `square`. Applying
+/// the param twice to 2 gives triple(triple(2)) = 18; the pre-fix bug rewrote
+/// `square(acc)` to `helper_square(acc)` and produced 16.
+#[test]
+fn shadowing_fn_pointer_param_is_not_rewritten_to_module_fn() {
+    if !c_backend_ready() {
+        eprintln!("skipping shadow-rewrite e2e: no C backend available");
+        return;
+    }
+    let dir = std::env::temp_dir().join("buildlang_shadow_fn_ptr_param");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    std::fs::write(
+        dir.join("helper.bld"),
+        "pub fn square(x: i32) -> i32 { x * x }\n",
+    )
+    .expect("write helper.bld");
+    let main_path = dir.join("main.bld");
+    std::fs::write(
+        &main_path,
+        "mod helper;\n\
+         fn triple(x: i32) -> i32 { x + x + x }\n\
+         fn run(square: fn(i32) -> i32, x: i32) -> i32 {\n    \
+         let mut acc = x;\n    let mut i = 0;\n    \
+         while i < 2 {\n        acc = square(acc);\n        i = i + 1;\n    }\n    \
+         acc\n}\n\
+         fn main() ~ Console {\n    println(\"{}\", run(triple, 2));\n}\n",
+    )
+    .expect("write main.bld");
+    let result = c_backend_run(&main_path);
+    assert_eq!(
+        result.stdout, "18\n",
+        "a fn-pointer parameter shadowing an imported fn must call the parameter, not the module fn"
+    );
+}
+
 /// I4 (review FIX A): broadcasting arrays whose element type is NOT numeric is a
 /// compile-time type error. Broadcasting is defined only for integer/float
 /// elements; `["a", "b"] .+ ["c", "d"]` (string elements) must be REJECTED by
@@ -13452,5 +13525,651 @@ fn main() ~ Console {
         stdout, "4 6\n10 20\n",
         "linalg vec_add/vec_scale should print `4 6` then `10 20`; got:\n{}",
         stdout
+    );
+}
+
+// =============================================================================
+// SCIENTIFIC-RUNTIME RECEIPT (buildlang-scientific-runtime-receipt/v0)
+// =============================================================================
+
+fn repo_example(name: &str) -> PathBuf {
+    repo_root().join("examples").join(name)
+}
+
+#[test]
+fn run_emit_receipt_stable_kernel_is_pass() {
+    if !c_backend_ready() {
+        eprintln!("skipping run_emit_receipt_stable_kernel_is_pass: C backend not ready");
+        return;
+    }
+
+    let output = buildc()
+        .arg("run")
+        .arg(repo_example("heat_equation_energy.bld"))
+        .arg("--emit-receipt")
+        .arg("-")
+        .arg("--problem")
+        .arg("1d-heat-equation-energy")
+        .output()
+        .expect("run buildc run --emit-receipt - on stable kernel");
+
+    assert!(
+        output.status.success(),
+        "emitting a receipt for the stable kernel should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(receipt["schema"], "buildlang-scientific-runtime-receipt/v0");
+    assert_eq!(receipt["compiler"], "buildc");
+    assert_eq!(receipt["receipt_status"], "PASS");
+    assert_eq!(receipt["invariant"]["status"], "PASS");
+    assert_eq!(receipt["invariant"]["observed"]["increase_count"], 0);
+    assert_eq!(receipt["problem"]["label"], "1d-heat-equation-energy");
+    assert_eq!(receipt["measurement"]["count"], 400);
+
+    let seal = receipt["seal"]["hex"].as_str().expect("seal hex string");
+    assert_eq!(seal.len(), 64, "seal must be 64 hex chars");
+    assert!(
+        seal.chars()
+            .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()),
+        "seal must be lowercase hex: {seal}"
+    );
+
+    let labels = receipt["labels"].as_array().expect("labels array");
+    assert!(
+        labels.iter().any(|label| label == "NOT_A_NEW_PHYSICAL_LAW"),
+        "every receipt must carry NOT_A_NEW_PHYSICAL_LAW; got {labels:?}"
+    );
+
+    // The source digest is a 64-hex sha256.
+    let digest = receipt["source_digest"]["hex"]
+        .as_str()
+        .expect("source digest hex");
+    assert_eq!(digest.len(), 64);
+}
+
+#[test]
+fn run_emit_receipt_unstable_negative_fixture_is_fail_expected() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping run_emit_receipt_unstable_negative_fixture_is_fail_expected: C backend not ready"
+        );
+        return;
+    }
+
+    let output = buildc()
+        .arg("run")
+        .arg(repo_example("heat_equation_energy_unstable.bld"))
+        .arg("--emit-receipt")
+        .arg("-")
+        .arg("--negative-fixture")
+        .output()
+        .expect("run buildc run --emit-receipt - --negative-fixture on unstable kernel");
+
+    assert!(
+        output.status.success(),
+        "emitting a negative-fixture receipt should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(receipt["receipt_status"], "FAIL_EXPECTED");
+    assert_eq!(receipt["invariant"]["status"], "FAIL");
+    assert_eq!(receipt["negative_fixture"], true);
+    assert!(
+        receipt["invariant"]["observed"]["increase_count"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0,
+        "the unstable kernel must record at least one energy increase"
+    );
+
+    let labels = receipt["labels"].as_array().expect("labels array");
+    assert!(labels.iter().any(|label| label == "NOT_A_NEW_PHYSICAL_LAW"));
+    assert!(labels.iter().any(|label| label == "NEGATIVE_FIXTURE"));
+}
+
+#[test]
+fn run_emit_receipt_unstable_without_fixture_is_fail_unexpected() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping run_emit_receipt_unstable_without_fixture_is_fail_unexpected: C backend not ready"
+        );
+        return;
+    }
+
+    let output = buildc()
+        .arg("run")
+        .arg(repo_example("heat_equation_energy_unstable.bld"))
+        .arg("--emit-receipt")
+        .arg("-")
+        .output()
+        .expect("run buildc run --emit-receipt - on unstable kernel (no fixture)");
+
+    assert!(output.status.success());
+    let receipt = receipt_from_stdout(&output);
+    assert_eq!(receipt["receipt_status"], "FAIL_UNEXPECTED");
+    assert_eq!(receipt["invariant"]["status"], "FAIL");
+    assert_eq!(receipt["negative_fixture"], false);
+}
+
+#[test]
+fn run_emit_receipt_unknown_invariant_errors() {
+    let output = buildc()
+        .arg("run")
+        .arg(repo_example("heat_equation_energy.bld"))
+        .arg("--emit-receipt")
+        .arg("-")
+        .arg("--invariant")
+        .arg("does-not-exist")
+        .output()
+        .expect("run buildc run --emit-receipt - --invariant does-not-exist");
+
+    assert!(
+        !output.status.success(),
+        "an unknown --invariant must fail before compiling"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Unknown --invariant"),
+        "error should name the unknown invariant; got:\n{stderr}"
+    );
+}
+
+#[test]
+fn run_emit_receipt_to_file_still_echoes_program_stdout() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping run_emit_receipt_to_file_still_echoes_program_stdout: C backend not ready"
+        );
+        return;
+    }
+
+    let kernel = repo_example("heat_equation_energy.bld");
+
+    // Baseline: plain `run` stdout with no --emit-receipt.
+    let baseline = buildc()
+        .arg("run")
+        .arg(&kernel)
+        .output()
+        .expect("baseline buildc run");
+    assert!(baseline.status.success());
+    let baseline_stdout = String::from_utf8_lossy(&baseline.stdout).replace("\r\n", "\n");
+
+    // With --emit-receipt to a FILE, the program's stdout must still appear on
+    // real stdout byte-for-byte (the receipt goes to the file, not stdout).
+    let receipt_path =
+        std::env::temp_dir().join(format!("buildlang_sci_receipt_{}.json", std::process::id()));
+    let emitted = buildc()
+        .arg("run")
+        .arg(&kernel)
+        .arg("--emit-receipt")
+        .arg(&receipt_path)
+        .output()
+        .expect("buildc run --emit-receipt <file>");
+    assert!(
+        emitted.status.success(),
+        "emit-to-file run should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&emitted.stderr)
+    );
+    let emitted_stdout = String::from_utf8_lossy(&emitted.stdout).replace("\r\n", "\n");
+
+    assert_eq!(
+        emitted_stdout, baseline_stdout,
+        "emit-to-file must echo the program stdout identically to plain run"
+    );
+
+    // The receipt file parses and re-verifies its own seal shape.
+    let bytes = fs::read(&receipt_path).expect("read emitted receipt file");
+    let _ = fs::remove_file(&receipt_path);
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("receipt file is valid JSON");
+    assert_eq!(receipt["receipt_status"], "PASS");
+    assert_eq!(receipt["seal"]["hex"].as_str().map(str::len), Some(64));
+}
+
+// =============================================================================
+// SCIENTIFIC-RUNTIME RECEIPT VERIFY (T3): re-run + re-check round trip
+// =============================================================================
+
+/// Copy the stable heat-equation kernel into a fresh temp dir so a test can
+/// tamper the source file without disturbing the shared example. Returns the
+/// temp dir and the copied `.bld` path.
+fn stage_stable_kernel(label: &str) -> (PathBuf, PathBuf) {
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang_sci_verify_{}_{}",
+        label,
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create scientific verify fixture dir");
+    let src = repo_example("heat_equation_energy.bld");
+    let staged = dir.join("heat_equation_energy.bld");
+    fs::copy(&src, &staged).expect("copy stable kernel into fixture dir");
+    (dir, staged)
+}
+
+/// Emit a stable scientific-runtime receipt for the staged kernel to `receipt`.
+fn emit_stable_receipt(staged: &Path, receipt: &Path) {
+    let emitted = buildc()
+        .arg("run")
+        .arg(staged)
+        .arg("--emit-receipt")
+        .arg(receipt)
+        .arg("--problem")
+        .arg("1d-heat-equation-energy")
+        .output()
+        .expect("emit stable scientific receipt");
+    assert!(
+        emitted.status.success(),
+        "emitting the stable receipt should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&emitted.stderr)
+    );
+}
+
+#[test]
+fn receipt_verify_scientific_stable_receipt_matches() {
+    if !c_backend_ready() {
+        eprintln!("skipping receipt_verify_scientific_stable_receipt_matches: C backend not ready");
+        return;
+    }
+
+    let (dir, staged) = stage_stable_kernel("match");
+    let receipt = dir.join("receipt.json");
+    emit_stable_receipt(&staged, &receipt);
+
+    let verify = buildc()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .output()
+        .expect("verify stable scientific receipt");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        verify.status.success(),
+        "a valid stable scientific receipt must verify\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&verify.stdout);
+    assert!(
+        stdout.contains("MATCH"),
+        "human output should report MATCH:\n{stdout}"
+    );
+}
+
+#[test]
+fn receipt_verify_scientific_json_reports_match() {
+    if !c_backend_ready() {
+        eprintln!("skipping receipt_verify_scientific_json_reports_match: C backend not ready");
+        return;
+    }
+
+    let (dir, staged) = stage_stable_kernel("json");
+    let receipt = dir.join("receipt.json");
+    emit_stable_receipt(&staged, &receipt);
+
+    let verify = buildc()
+        .args(["receipt", "verify", "--json"])
+        .arg(&receipt)
+        .output()
+        .expect("verify stable scientific receipt (--json)");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        verify.status.success(),
+        "valid scientific receipt must verify (--json)\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&verify.stdout).expect("json verify output is JSON");
+    assert_eq!(report["status"], "match");
+    assert_eq!(report["schema"], "buildlang-scientific-runtime-receipt/v0");
+}
+
+#[test]
+fn receipt_verify_scientific_detects_invariant_status_tamper() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping receipt_verify_scientific_detects_invariant_status_tamper: C backend not ready"
+        );
+        return;
+    }
+
+    let (dir, staged) = stage_stable_kernel("invtamper");
+    let receipt = dir.join("receipt.json");
+    emit_stable_receipt(&staged, &receipt);
+
+    // Tamper the stored invariant verdict: flip PASS -> FAIL. The re-run will
+    // recompute PASS and must reject the disagreement.
+    let raw = fs::read_to_string(&receipt).expect("read emitted receipt");
+    let mut value: serde_json::Value = serde_json::from_str(&raw).expect("parse receipt");
+    assert_eq!(value["invariant"]["status"], "PASS");
+    value["invariant"]["status"] = serde_json::Value::String("FAIL".to_string());
+    fs::write(&receipt, serde_json::to_string_pretty(&value).unwrap())
+        .expect("write tampered receipt");
+
+    let verify = buildc()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .output()
+        .expect("verify tampered scientific receipt");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        !verify.status.success(),
+        "an invariant-status tamper must fail verification\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+}
+
+#[test]
+fn receipt_verify_scientific_detects_source_tamper() {
+    if !c_backend_ready() {
+        eprintln!("skipping receipt_verify_scientific_detects_source_tamper: C backend not ready");
+        return;
+    }
+
+    let (dir, staged) = stage_stable_kernel("srctamper");
+    let receipt = dir.join("receipt.json");
+    emit_stable_receipt(&staged, &receipt);
+
+    // Tamper the SOURCE file after sealing. The re-derived source digest must
+    // no longer match the stored one, so verification fails.
+    let original = fs::read_to_string(&staged).expect("read staged kernel");
+    let tampered = format!("{original}\n// tamper: appended after sealing\n");
+    fs::write(&staged, tampered).expect("write tampered source");
+
+    let verify = buildc()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .output()
+        .expect("verify receipt against tampered source");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        !verify.status.success(),
+        "a source-file tamper must fail verification\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+}
+
+// =============================================================================
+// SCIENTIFIC-RUNTIME RECEIPT: consolidated emit -> verify -> tamper ->
+// negative-fixture round trip (T4). One runnable witness of the whole arc.
+// The individual legs are also covered by the focused tests above; this test
+// exists so the end-to-end story is a single readable proof, not scattered.
+// =============================================================================
+
+#[test]
+fn scientific_runtime_receipt_emit_and_verify_round_trip() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping scientific_runtime_receipt_emit_and_verify_round_trip: C backend not ready"
+        );
+        return;
+    }
+
+    // 1) Emit a receipt from the STABLE kernel. The invariant holds, so the
+    //    receipt is PASS, carries a valid 64-hex seal, and is labelled
+    //    NOT_A_NEW_PHYSICAL_LAW (honest scope: an observed-series invariant,
+    //    never a physical law).
+    let (dir, staged) = stage_stable_kernel("roundtrip");
+    let receipt = dir.join("receipt.json");
+    emit_stable_receipt(&staged, &receipt);
+
+    let emitted: serde_json::Value = {
+        let bytes = fs::read(&receipt).expect("read emitted round-trip receipt");
+        serde_json::from_slice(&bytes).expect("emitted receipt is valid JSON")
+    };
+    assert_eq!(emitted["schema"], "buildlang-scientific-runtime-receipt/v0");
+    assert_eq!(emitted["receipt_status"], "PASS");
+    assert_eq!(emitted["invariant"]["status"], "PASS");
+    assert_eq!(emitted["invariant"]["observed"]["increase_count"], 0);
+    let seal = emitted["seal"]["hex"].as_str().expect("seal hex string");
+    assert_eq!(seal.len(), 64, "seal must be 64 hex chars");
+    assert!(
+        seal.chars()
+            .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()),
+        "seal must be lowercase hex: {seal}"
+    );
+    assert!(
+        emitted["labels"]
+            .as_array()
+            .expect("labels array")
+            .iter()
+            .any(|label| label == "NOT_A_NEW_PHYSICAL_LAW"),
+        "every receipt must carry NOT_A_NEW_PHYSICAL_LAW"
+    );
+
+    // 2) `receipt verify` on the untouched receipt re-runs the program, re-derives
+    //    the source digest, re-checks the invariant, and confirms a clean MATCH.
+    let verify_ok = buildc()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .output()
+        .expect("verify untouched round-trip receipt");
+    assert!(
+        verify_ok.status.success(),
+        "the untouched receipt must verify\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_ok.stdout),
+        String::from_utf8_lossy(&verify_ok.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&verify_ok.stdout).contains("MATCH"),
+        "human verify output should report MATCH"
+    );
+
+    // 3) Tamper the sealed receipt (flip the stored invariant verdict PASS -> FAIL).
+    //    The re-run recomputes PASS, so verification must reject the disagreement.
+    let mut tampered: serde_json::Value = emitted.clone();
+    tampered["invariant"]["status"] = serde_json::Value::String("FAIL".to_string());
+    fs::write(&receipt, serde_json::to_string_pretty(&tampered).unwrap())
+        .expect("write tampered round-trip receipt");
+    let verify_tampered = buildc()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .output()
+        .expect("verify tampered round-trip receipt");
+    assert!(
+        !verify_tampered.status.success(),
+        "a tampered receipt must fail verification\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_tampered.stdout),
+        String::from_utf8_lossy(&verify_tampered.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+
+    // 4) The UNSTABLE kernel with --negative-fixture: the invariant is expected to
+    //    fail, so the receipt is FAIL_EXPECTED (an expected violation, still an
+    //    honest witness), and is additionally labelled NEGATIVE_FIXTURE.
+    let negative = buildc()
+        .arg("run")
+        .arg(repo_example("heat_equation_energy_unstable.bld"))
+        .arg("--emit-receipt")
+        .arg("-")
+        .arg("--negative-fixture")
+        .output()
+        .expect("emit negative-fixture receipt for the unstable kernel");
+    assert!(
+        negative.status.success(),
+        "emitting a negative-fixture receipt should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&negative.stderr)
+    );
+    let negative_receipt = receipt_from_stdout(&negative);
+    assert_eq!(negative_receipt["receipt_status"], "FAIL_EXPECTED");
+    assert_eq!(negative_receipt["invariant"]["status"], "FAIL");
+    assert_eq!(negative_receipt["negative_fixture"], true);
+    let negative_labels = negative_receipt["labels"].as_array().expect("labels array");
+    assert!(
+        negative_labels
+            .iter()
+            .any(|label| label == "NOT_A_NEW_PHYSICAL_LAW"),
+        "the negative fixture is still labelled NOT_A_NEW_PHYSICAL_LAW"
+    );
+    assert!(
+        negative_labels
+            .iter()
+            .any(|label| label == "NEGATIVE_FIXTURE"),
+        "the negative fixture must be labelled NEGATIVE_FIXTURE"
+    );
+}
+
+/// Regression: a large-magnitude series must RE-SEAL after a disk round-trip.
+/// The unstable kernel's energy blows up to ~1e28; without `float_roundtrip`
+/// serde_json re-parsed those f64 values ~1 ULP off, so the receipt (sealed over
+/// its in-memory series) failed its own seal re-check at verify. A legitimately
+/// emitted FAIL_EXPECTED receipt must verify clean.
+#[test]
+fn scientific_receipt_large_value_series_reseals_and_verifies() {
+    if !c_backend_ready() {
+        eprintln!("skipping scientific_receipt_large_value_series_reseals: C backend not ready");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("buildlang_sci_largeval_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create large-value fixture dir");
+    let staged = dir.join("heat_equation_energy_unstable.bld");
+    fs::copy(repo_example("heat_equation_energy_unstable.bld"), &staged)
+        .expect("copy unstable kernel");
+    let receipt = dir.join("receipt.json");
+    let emit = buildc()
+        .arg("run")
+        .arg(&staged)
+        .arg("--emit-receipt")
+        .arg(&receipt)
+        .arg("--negative-fixture")
+        .output()
+        .expect("emit large-value receipt");
+    assert!(
+        emit.status.success(),
+        "emitting the unstable receipt should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&emit.stderr)
+    );
+    let verify = buildc()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .output()
+        .expect("verify large-value receipt");
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        verify.status.success(),
+        "a large-value FAIL_EXPECTED receipt must re-seal and verify clean\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+}
+
+/// Regression: `receipt verify` on a faithful receipt that RECORDS an unexpected
+/// invariant violation (FAIL_UNEXPECTED) must exit NONZERO, so `verify && deploy`
+/// does not deploy on a recorded failure. The receipt reproduces exactly (it is
+/// faithful); the exit code reflects the verdict, not just faithfulness.
+#[test]
+fn scientific_receipt_verify_fails_on_unexpected_invariant_violation() {
+    if !c_backend_ready() {
+        eprintln!("skipping scientific_receipt_verify_fails_unexpected: C backend not ready");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("buildlang_sci_unexpected_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create unexpected fixture dir");
+    let staged = dir.join("heat_equation_energy_unstable.bld");
+    fs::copy(repo_example("heat_equation_energy_unstable.bld"), &staged)
+        .expect("copy unstable kernel");
+    let receipt = dir.join("receipt.json");
+    // NO --negative-fixture: an unstable run is an UNEXPECTED violation.
+    let emit = buildc()
+        .arg("run")
+        .arg(&staged)
+        .arg("--emit-receipt")
+        .arg(&receipt)
+        .output()
+        .expect("emit FAIL_UNEXPECTED receipt");
+    assert!(emit.status.success(), "emit should succeed");
+    let value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt).expect("read receipt")).expect("parse receipt");
+    assert_eq!(value["receipt_status"], "FAIL_UNEXPECTED");
+    let verify = buildc()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .output()
+        .expect("verify FAIL_UNEXPECTED receipt");
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        !verify.status.success(),
+        "verify must exit nonzero on a faithful FAIL_UNEXPECTED receipt\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+}
+
+/// Regression: a program that diverges to a non-finite value must NOT be sealed
+/// as a false PASS. It is UNVERIFIABLE (labelled NONFINITE_OBSERVED), only the
+/// finite prefix is stored (no JSON `null`), and verify does not exit 0.
+#[test]
+fn scientific_receipt_nonfinite_run_is_unverifiable() {
+    if !c_backend_ready() {
+        eprintln!("skipping scientific_receipt_nonfinite_run_is_unverifiable: C backend not ready");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("buildlang_sci_nonfinite_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create nonfinite fixture dir");
+    let src = dir.join("diverge.bld");
+    // Prints a monotone finite prefix then a NaN (0.0/0.0) -> divergence.
+    fs::write(
+        &src,
+        "fn main() ~ Console {\n    \
+         println(\"{}\", 4.0);\n    println(\"{}\", 3.0);\n    \
+         let z = 0.0;\n    let bad = z / z;\n    println(\"{}\", bad);\n}\n",
+    )
+    .expect("write diverging kernel");
+    let receipt = dir.join("receipt.json");
+    let emit = buildc()
+        .arg("run")
+        .arg(&src)
+        .arg("--emit-receipt")
+        .arg(&receipt)
+        .output()
+        .expect("emit diverging receipt");
+    assert!(emit.status.success(), "emit should succeed");
+    let bytes = fs::read(&receipt).expect("read receipt");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(
+        !text.contains("null"),
+        "observed_values must be finite (no JSON null):\n{text}"
+    );
+    let value: serde_json::Value = serde_json::from_slice(&bytes).expect("parse receipt");
+    assert_eq!(
+        value["receipt_status"], "UNVERIFIABLE",
+        "a diverged run must be UNVERIFIABLE, not a false PASS"
+    );
+    assert!(
+        value["labels"]
+            .as_array()
+            .expect("labels array")
+            .iter()
+            .any(|label| label == "NONFINITE_OBSERVED"),
+        "a diverged receipt must be labelled NONFINITE_OBSERVED"
+    );
+    let verify = buildc()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .output()
+        .expect("verify diverging receipt");
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        !verify.status.success(),
+        "a diverged (UNVERIFIABLE) receipt must not verify as a pass\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
     );
 }
