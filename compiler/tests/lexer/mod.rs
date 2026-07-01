@@ -72,6 +72,16 @@ fn test_arithmetic_operators() {
     expect_single_token("^", TokenKind::Caret);
 }
 
+// I1: Unicode arithmetic-operator aliases lex to their ASCII TokenKind.
+#[test]
+fn test_unicode_arithmetic_operator_aliases() {
+    expect_single_token("\u{00D7}", TokenKind::Star); // ×
+    expect_single_token("\u{00B7}", TokenKind::Star); // ·
+    expect_single_token("\u{2219}", TokenKind::Star); // ∙
+    expect_single_token("\u{00F7}", TokenKind::Slash); // ÷
+    expect_single_token("\u{2212}", TokenKind::Minus); // − (minus sign, not ASCII hyphen)
+}
+
 #[test]
 fn test_comparison_operators() {
     expect_single_token("==", TokenKind::EqEq);

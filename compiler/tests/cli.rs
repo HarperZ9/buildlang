@@ -12680,6 +12680,34 @@ fn option_i64_return_and_match_runs_end_to_end() {
     );
 }
 
+/// I1: Unicode arithmetic-operator aliases lex to their ASCII counterparts and
+/// run end-to-end. `×` (U+00D7), `·` (U+00B7), `∙` (U+2219) alias `*`; `÷`
+/// (U+00F7) aliases `/`; `−` (U+2212, the minus sign, NOT ASCII hyphen) aliases
+/// `-`. Previously these raised `LexerErrorKind::UnexpectedChar`. Computes
+/// `6 × 7 = 42`, `84 ÷ 2 = 42`, `10 − 3 = 7`.
+#[test]
+fn unicode_math_operators_run_end_to_end() {
+    if !c_backend_ready() {
+        eprintln!("skipping unicode-math e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let src = "fn main() ~ Console {\n\
+               let a = 6 \u{00D7} 7;\n\
+               let b = 84 \u{00F7} 2;\n\
+               let c = 10 \u{2212} 3;\n\
+               println(\"{} {} {}\", a, b, c);\n\
+               }\n";
+    let dir = std::env::temp_dir().join("buildlang_unicode_math_ops");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("unicode_math.bld");
+    std::fs::write(&path, src).expect("write unicode_math.bld");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout, "42 42 7\n",
+        "Unicode math operators must alias to * / - and run end-to-end"
+    );
+}
+
 /// Executable witness of the transpile-preservation criterion: for every
 /// Rust-supported corpus program, lowering the same source through the C
 /// backend and through the Rust backend must produce byte-identical stdout and

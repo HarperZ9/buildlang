@@ -399,6 +399,12 @@ impl<'a> Lexer<'a> {
                 return self.scan_format_string();
             }
 
+            // Unicode arithmetic-operator aliases (Julia-flavored math syntax).
+            // Each maps to an existing ASCII operator kind; no new semantics.
+            '\u{00D7}' | '\u{00B7}' | '\u{2219}' => TokenKind::Star, // × · ∙
+            '\u{00F7}' => TokenKind::Slash,                          // ÷
+            '\u{2212}' => TokenKind::Minus, // − (minus sign, not ASCII hyphen)
+
             // Regular identifiers
             c if is_id_start(c) => return self.scan_identifier(c),
 
