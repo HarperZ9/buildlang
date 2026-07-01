@@ -22,6 +22,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
+use crate::lexer::Span;
+
 // ============================================================================
 // SERIALIZATION: VERSIONED INTERLINGUA ENVELOPE
 // ============================================================================
@@ -243,7 +245,11 @@ pub struct ShaderBinding {
 }
 
 /// A MIR function.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// `PartialEq` is implemented manually (see below) rather than derived: it
+/// excludes `spans`, which is in-memory-only debug/diagnostic data and must
+/// not affect structural/serialization-round-trip equality.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MirFunction {
     /// Function name.
     pub name: Arc<str>,
@@ -279,6 +285,46 @@ pub struct MirFunction {
     /// so other languages can call them. Skipped when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_c_export: bool,
+    /// Source spans for statements/terminators, keyed by (block position,
+    /// index). In-memory only: populated at lowering, consumed by the MIR
+    /// linear checker immediately after, and NOT serialized (the linear
+    /// check runs before any MIR serialization, so the serializable-MIR
+    /// contract is untouched). Excluded from `PartialEq` for the same reason.
+    #[serde(skip, default)]
+    pub spans: MirSpanTable,
+}
+
+impl PartialEq for MirFunction {
+    fn eq(&self, other: &Self) -> bool {
+        // Deliberately excludes `spans`: an in-memory-only diagnostic
+        // side-table that must not affect structural/round-trip equality
+        // (e.g. a module deserialized from JSON has an empty `spans` table
+        // by construction and must still compare equal to the original).
+        self.name == other.name
+            && self.sig == other.sig
+            && self.blocks == other.blocks
+            && self.locals == other.locals
+            && self.is_public == other.is_public
+            && self.linkage == other.linkage
+            && self.shader_stage == other.shader_stage
+            && self.bindings == other.bindings
+            && self.link_header == other.link_header
+            && self.link_lib == other.link_lib
+            && self.is_c_export == other.is_c_export
+    }
+}
+
+/// Source spans for MIR statements/terminators, keyed by block/position.
+///
+/// In-memory only (see [`MirFunction::spans`]): populated at lowering and
+/// consumed by the MIR-phase linear checker for diagnostics. Never
+/// serialized and never affects [`MirFunction`] equality.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MirSpanTable {
+    /// Span of the statement at `(block id, statement index)` in its block.
+    pub stmt: HashMap<(u32, usize), Span>,
+    /// Span of the terminator of the block with this id.
+    pub terminator: HashMap<u32, Span>,
 }
 
 impl MirFunction {
@@ -296,6 +342,7 @@ impl MirFunction {
             link_header: None,
             link_lib: None,
             is_c_export: false,
+            spans: MirSpanTable::default(),
         }
     }
 
@@ -313,6 +360,7 @@ impl MirFunction {
             link_header: None,
             link_lib: None,
             is_c_export: false,
+            spans: MirSpanTable::default(),
         }
     }
 
