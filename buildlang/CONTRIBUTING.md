@@ -32,9 +32,9 @@ We welcome many types of contributions:
 
 ### Finding Issues to Work On
 
-- Look for issues labeled [`good first issue`](https://github.com/buildlang/buildlang/labels/good%20first%20issue) for beginner-friendly tasks
-- [`help wanted`](https://github.com/buildlang/buildlang/labels/help%20wanted) issues need community help
-- Check the [project board](https://github.com/buildlang/buildlang/projects) for planned work
+- Look for issues labeled [`good first issue`](https://github.com/HarperZ9/buildlang/labels/good%20first%20issue) for beginner-friendly tasks
+- [`help wanted`](https://github.com/HarperZ9/buildlang/labels/help%20wanted) issues need community help
+- Check the [project board](https://github.com/HarperZ9/buildlang/projects) for planned work
 
 ## Development Setup
 
@@ -49,7 +49,7 @@ We welcome many types of contributions:
 
 ```bash
 # Clone the repository
-git clone https://github.com/buildlang/buildlang.git
+git clone https://github.com/HarperZ9/buildlang.git
 cd buildlang
 
 # Install dependencies

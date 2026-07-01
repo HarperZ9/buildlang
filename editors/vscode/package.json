@@ -2,13 +2,13 @@
   "name": "buildlang",
   "displayName": "BuildLang",
   "description": "BuildLang language support - syntax highlighting, snippets, and bracket matching",
-  "version": "1.0.0",
+  "version": "1.0.5",
   "publisher": "HarperZ9",
   "repository": {
     "type": "git",
     "url": "https://github.com/HarperZ9/buildlang"
   },
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "engines": {
     "vscode": "^1.80.0"
   },
