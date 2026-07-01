@@ -292,6 +292,14 @@ fn is_broadcastable_elem(k: &TyKind) -> bool {
     )
 }
 
+/// Function-style diagnostic builtins that take a format string plus ANY number
+/// of arguments and return unit (`println("{} {}", a, b)`). They must not be
+/// arity-checked, and their shared binding must not be monomorphized by the
+/// first call in a scope.
+fn is_variadic_print_call(name: &str) -> bool {
+    matches!(name, "println" | "print" | "eprintln" | "eprint")
+}
+
 impl<'ctx> TypeInfer<'ctx> {
     /// Create a new type inference engine.
     pub fn new(ctx: &'ctx mut TypeContext) -> Self {
@@ -4208,6 +4216,18 @@ impl<'ctx> TypeInfer<'ctx> {
                         arg.span,
                         "a generic constructor or unresolved call (e.g. Some/Ok)",
                     );
+                }
+                // Variadic diagnostic builtins (`println`, ...) accept a format
+                // string plus any number of args and return unit. Their capability
+                // is already recorded above and their args already inferred; do NOT
+                // unify the shared binding with this call's fixed arity, or the
+                // first call would monomorphize it and the next `println(...)` with
+                // a different argument count would fail a spurious `ArityMismatch`.
+                if call_sources
+                    .iter()
+                    .any(|s| is_variadic_print_call(s.rsplit("::").next().unwrap_or(s)))
+                {
+                    return Ty::unit();
                 }
                 let ret_ty = Ty::fresh_var();
                 let fn_ty = Ty::function(param_tys, ret_ty.clone());
