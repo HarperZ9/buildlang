@@ -28,6 +28,17 @@ impl<'ctx> MirLowerer<'ctx> {
 
         for (i, stmt) in block.stmts.iter().enumerate() {
             let is_last = i == block.stmts.len() - 1;
+            // Set the span cursor so every MIR statement/terminator this
+            // top-level AST statement lowers to (there may be several, e.g.
+            // a `let x = f(a, b);` lowers to argument temps plus the final
+            // assign) is attributed to this statement's source range. This
+            // is a coarser granularity than per-MIR-statement spans, but it
+            // is the single choke point every statement passes through, so
+            // it covers the whole function without touching the ~240
+            // individual `builder.assign`/`push_*` call sites in lowering.
+            if let Some(builder) = self.current_fn.as_mut() {
+                builder.set_current_span(stmt.span);
+            }
             result = self.lower_stmt(stmt, is_last)?;
         }
 
