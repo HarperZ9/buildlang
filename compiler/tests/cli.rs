@@ -12834,6 +12834,94 @@ fn array_broadcast_length_mismatch_is_rejected() {
     );
 }
 
+/// I4: the subtraction and division broadcasting operators `.-` and `./` run
+/// end-to-end alongside the array-array and scalar-broadcast forms already
+/// covered by `array_broadcast_runs_end_to_end`. `[10,20,30] .- [1,2,3]` yields
+/// `9 18 27`; `[10,20] ./ [2,4]` yields `5 5`; scalar-right `[10,20] ./ 2.0`
+/// yields `5 10`. f64 prints via C `%g`, so whole numbers render without `.0`.
+#[test]
+fn array_broadcast_sub_div_run_end_to_end() {
+    if !c_backend_ready() {
+        eprintln!("skipping array-broadcast sub/div e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    // Each result is printed from its own helper: buildlang's println
+    // format-arg checker fixes the placeholder count from the first println in
+    // a function body, so a 3-placeholder and a 2-placeholder println cannot
+    // share one function. Separate helpers keep the counts independent and also
+    // exercise passing a broadcast-result array into a function by value.
+    let src = "fn print3(a: [f64; 3]) ~ Console {\n\
+               println(\"{} {} {}\", a[0], a[1], a[2]);\n\
+               }\n\
+               fn print2(p: [f64; 2]) ~ Console {\n\
+               println(\"{} {}\", p[0], p[1]);\n\
+               }\n\
+               fn main() ~ Console {\n\
+               let a = [10.0, 20.0, 30.0];\n\
+               let b = [1.0, 2.0, 3.0];\n\
+               let diff = a .- b;\n\
+               print3(diff);\n\
+               let p = [10.0, 20.0];\n\
+               let q = [2.0, 4.0];\n\
+               let quot = p ./ q;\n\
+               print2(quot);\n\
+               let half = p ./ 2.0;\n\
+               print2(half);\n\
+               }\n";
+    let dir = std::env::temp_dir().join("buildlang_array_broadcast_subdiv");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("array_broadcast_subdiv.bld");
+    std::fs::write(&path, src).expect("write array_broadcast_subdiv.bld");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout, "9 18 27\n5 5\n5 10\n",
+        "`.-` must subtract elementwise, `./` divide elementwise, `./ 2.0` broadcast scalar-right"
+    );
+}
+
+/// I4 (review FIX A): broadcasting arrays whose element type is NOT numeric is a
+/// compile-time type error. Broadcasting is defined only for integer/float
+/// elements; `["a", "b"] .+ ["c", "d"]` (string elements) must be REJECTED by
+/// `buildc check` with a type diagnostic, not accepted and then leaked as a raw
+/// C backend error (`error C2088: ... operator '+' cannot be applied to ...
+/// BuildString`) at codegen.
+#[test]
+fn array_broadcast_nonnumeric_element_is_rejected() {
+    let fixture = std::env::temp_dir().join(format!(
+        "buildlang_array_broadcast_nonnumeric_{}.bld",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        "fn main() ~ Console {\n\
+         let a = [\"a\", \"b\"];\n\
+         let b = [\"c\", \"d\"];\n\
+         let c = a .+ b;\n\
+         println(\"{}\", c[0]);\n\
+         }\n",
+    )
+    .expect("write array-broadcast non-numeric fixture");
+
+    let output = buildc()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run buildc check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "broadcasting non-numeric (string) element arrays must fail buildc check"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("C2088") && !stderr.to_lowercase().contains("c compilation"),
+        "rejection must be a clean type diagnostic, not a leaked C compiler error:\n{}",
+        stderr
+    );
+}
+
 /// Executable witness of the transpile-preservation criterion: for every
 /// Rust-supported corpus program, lowering the same source through the C
 /// backend and through the Rust backend must produce byte-identical stdout and
@@ -13236,6 +13324,69 @@ fn main() ~ Console {
     assert_eq!(
         stdout, "32\n6\n5\n",
         "linalg dot/sum/norm should print 32, 6, 5; got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn linalg_elementwise_and_scalar_builders_run_end_to_end() {
+    // I3 (review FIX C): the `linalg` stdlib module's elementwise builder
+    // (vec_add) and scalar-broadcast builder (vec_scale) return a Vec<f64>
+    // whose elements are read back with vec_get_f64. vec_add([1,2],[3,4]) ->
+    // [4, 6]; vec_scale([1,2], 10.0) -> [10, 20]. Results are bound to a `let`
+    // before printing because the import rewriter does not descend into
+    // `println!` macro args. Floats print via `%g`, so whole numbers render
+    // without a trailing `.0`.
+    if !c_backend_ready() {
+        eprintln!("skipping linalg elementwise/scalar builders e2e: no C backend available");
+        return;
+    }
+    let src = r#"
+mod core;
+mod math;
+mod linalg;
+
+fn main() ~ Console {
+    let mut a = vec_new_f64();
+    vec_push_f64(a, 1.0);
+    vec_push_f64(a, 2.0);
+
+    let mut b = vec_new_f64();
+    vec_push_f64(b, 3.0);
+    vec_push_f64(b, 4.0);
+
+    let sum = vec_add(a, b);
+    let sum0 = vec_get_f64(sum, 0);
+    let sum1 = vec_get_f64(sum, 1);
+
+    let scaled = vec_scale(a, 10.0);
+    let scaled0 = vec_get_f64(scaled, 0);
+    let scaled1 = vec_get_f64(scaled, 1);
+
+    println!("{} {}", sum0, sum1);
+    println!("{} {}", scaled0, scaled1);
+}
+"#;
+    let fixture = write_dispatch_fixture("linalg_builders", src);
+
+    let output = buildc()
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("run buildc run on linalg builders fixture");
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "linalg elementwise/scalar builders should compile and run\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    // vec_add([1,2],[3,4]) = [4,6]; vec_scale([1,2],10) = [10,20]. `%g` drops `.0`.
+    assert_eq!(
+        stdout, "4 6\n10 20\n",
+        "linalg vec_add/vec_scale should print `4 6` then `10 20`; got:\n{}",
         stdout
     );
 }

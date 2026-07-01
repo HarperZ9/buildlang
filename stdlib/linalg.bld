@@ -9,9 +9,12 @@
 // Distinct names (vec_add / vec_sub / ... / vec_dot / vec_sum / vec_norm)
 // avoid clashing with the graphics-vec builtins (dot / length / normalize).
 //
-// Length policy for binary elementwise ops: iterate to the FIRST operand's
-// length. Callers are expected to pass equal-length vectors; unequal lengths
-// simply use `a`'s length (no error-handling machinery, by design).
+// Length policy for binary elementwise ops: the loop iterates from 0 up to
+// `a`'s length and reads BOTH operands at every index with NO bounds checking
+// (the vec_get_f64 runtime does not bounds-check). Passing a `b` shorter than
+// `a` therefore reads past the end of `b`'s buffer: an out-of-bounds heap
+// over-read, which is undefined behavior. Callers MUST guarantee that `a` and
+// `b` have equal length. (No runtime length check is performed here.)
 
 // ---------------------------------------------------------------------------
 // Elementwise binary operations
