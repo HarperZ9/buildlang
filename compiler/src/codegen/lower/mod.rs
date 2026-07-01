@@ -15,6 +15,8 @@
 
 mod expr;
 mod macros;
+#[cfg(test)]
+mod tests;
 mod types;
 
 use std::collections::{HashMap, HashSet};
@@ -130,6 +132,14 @@ pub struct MirLowerer<'ctx> {
     /// Const name -> evaluated literal value, collected in a pre-pass so
     /// that const identifiers used as array lengths (`[T; MAX_DIMS]`) resolve.
     pub(crate) const_values: HashMap<Arc<str>, MirConst>,
+    /// MIR-level names (as they appear in `MirType::Struct`, i.e. already
+    /// module-prefixed for items inside inline `mod` blocks) of every
+    /// non-generic `#[linear]` struct/enum, populated during the collection
+    /// pass (`collect_struct`/`collect_enum`). Passed to each function's
+    /// `MirBuilder` so every local-creation site tags `"linear"` locals
+    /// uniformly. Generic/monomorphized linear ADTs are intentionally out of
+    /// scope here (deferred to the 2b checker, which sees monomorphized MIR).
+    pub(crate) linear_type_names: HashSet<Arc<str>>,
 }
 
 // =============================================================================
@@ -221,6 +231,7 @@ impl<'ctx> MirLowerer<'ctx> {
             fn_result_err_types: HashMap::new(),
             fn_option_inner_types: HashMap::new(),
             const_values: HashMap::new(),
+            linear_type_names: HashSet::new(),
         }
     }
 
@@ -259,6 +270,7 @@ impl<'ctx> MirLowerer<'ctx> {
             fn_result_err_types: HashMap::new(),
             fn_option_inner_types: HashMap::new(),
             const_values: HashMap::new(),
+            linear_type_names: HashSet::new(),
         }
     }
 
@@ -387,12 +399,12 @@ impl<'ctx> MirLowerer<'ctx> {
     fn collect_item(&mut self, item: &ast::Item) -> CodegenResult<()> {
         match &item.kind {
             ItemKind::Struct(s) => {
-                self.collect_struct(s)?;
+                self.collect_struct(s, Self::has_attribute(&item.attrs, "linear"))?;
                 // Check for #[derive(...)] attributes and auto-generate impls
                 self.process_derive_attrs(&item.attrs, &s.name, s);
                 Ok(())
             }
-            ItemKind::Enum(e) => self.collect_enum(e),
+            ItemKind::Enum(e) => self.collect_enum(e, Self::has_attribute(&item.attrs, "linear")),
             ItemKind::Function(f) => self.collect_function(f),
             ItemKind::Impl(impl_def) => self.collect_impl(impl_def),
             // Effect declarations: collect operation signatures so handler
@@ -706,7 +718,7 @@ impl<'ctx> MirLowerer<'ctx> {
         }
     }
 
-    fn collect_struct(&mut self, s: &ast::StructDef) -> CodegenResult<()> {
+    fn collect_struct(&mut self, s: &ast::StructDef, is_linear: bool) -> CodegenResult<()> {
         // If the struct has generic type parameters, store for later monomorphization
         let has_generics = s
             .generics
@@ -715,6 +727,11 @@ impl<'ctx> MirLowerer<'ctx> {
             .any(|p| matches!(p.kind, ast::GenericParamKind::Type { .. }));
 
         if has_generics {
+            // Generic linear ADTs are out of scope for the 2a groundwork:
+            // the 2b checker consumes monomorphized MIR, where the concrete
+            // instantiation's name would need to be tagged instead. Not
+            // tagging here is conservative (an untagged local is simply
+            // invisible to 2b), matching the spec's error-handling note.
             self.generic_structs.insert(s.name.name.clone(), s.clone());
             return Ok(());
         }
@@ -738,6 +755,9 @@ impl<'ctx> MirLowerer<'ctx> {
         };
 
         let full_name = s.name.name.clone();
+        if is_linear {
+            self.linear_type_names.insert(full_name.clone());
+        }
         self.module.create_struct(full_name.clone(), fields);
 
         // Register the bare→prefixed mapping so cross-module type
@@ -808,7 +828,7 @@ impl<'ctx> MirLowerer<'ctx> {
         false
     }
 
-    fn collect_enum(&mut self, e: &ast::EnumDef) -> CodegenResult<()> {
+    fn collect_enum(&mut self, e: &ast::EnumDef, is_linear: bool) -> CodegenResult<()> {
         // If the enum has generic type parameters, store for later monomorphization
         let has_generics = e
             .generics
@@ -817,6 +837,8 @@ impl<'ctx> MirLowerer<'ctx> {
             .any(|p| matches!(p.kind, ast::GenericParamKind::Type { .. }));
 
         if has_generics {
+            // See the matching comment in collect_struct: generic linear
+            // ADTs are deferred to the 2b checker via monomorphized MIR.
             self.generic_enums.insert(e.name.name.clone(), e.clone());
             return Ok(());
         }
@@ -847,6 +869,9 @@ impl<'ctx> MirLowerer<'ctx> {
             .collect();
 
         let full_name = e.name.name.clone();
+        if is_linear {
+            self.linear_type_names.insert(full_name.clone());
+        }
         self.module
             .create_enum(full_name.clone(), MirType::i32(), variants);
 
@@ -1663,7 +1688,11 @@ impl<'ctx> MirLowerer<'ctx> {
             let saved_vars = std::mem::take(&mut self.var_map);
 
             // Create function builder
-            let mut builder = MirBuilder::new(f.name.name.clone(), sig);
+            let mut builder = MirBuilder::with_linear_type_names(
+                f.name.name.clone(),
+                sig,
+                Arc::new(self.linear_type_names.clone()),
+            );
 
             // Map parameters to locals and set their names + annotations
             for (i, param) in f.sig.params.iter().enumerate() {
@@ -1686,6 +1715,10 @@ impl<'ctx> MirLowerer<'ctx> {
 
             // Add return if needed
             let mut builder = self.current_fn.take().unwrap();
+            // Attribute the (possibly synthesized) implicit return to the
+            // whole body's span; individual `return` expressions inside the
+            // body already carry their own statement's span via lower_block.
+            builder.set_current_span(body.span);
             if is_main && !has_shader_stage {
                 // main returns 0 (success) in C - but not for shader entry points
                 let zero = MirValue::Const(MirConst::Int(0, MirType::i32()));
@@ -1916,7 +1949,11 @@ impl<'ctx> MirLowerer<'ctx> {
             let saved_fn = self.current_fn.take();
             let saved_vars = std::mem::take(&mut self.var_map);
 
-            let mut builder = MirBuilder::new(mangled_name.clone(), sig);
+            let mut builder = MirBuilder::with_linear_type_names(
+                mangled_name.clone(),
+                sig,
+                Arc::new(self.linear_type_names.clone()),
+            );
 
             // Map parameters (including self) to locals
             for (i, param) in f.sig.params.iter().enumerate() {
@@ -1993,7 +2030,11 @@ impl<'ctx> MirLowerer<'ctx> {
             let saved_fn = self.current_fn.take();
             let saved_vars = std::mem::take(&mut self.var_map);
 
-            let mut builder = MirBuilder::new(fn_name.clone(), sig);
+            let mut builder = MirBuilder::with_linear_type_names(
+                fn_name.clone(),
+                sig,
+                Arc::new(self.linear_type_names.clone()),
+            );
 
             for (i, param) in f.sig.params.iter().enumerate() {
                 if let ast::PatternKind::Ident { name, .. } = &param.pattern.kind {
@@ -2049,7 +2090,11 @@ impl<'ctx> MirLowerer<'ctx> {
             // Generate: fn TypeName_clone(self: TypeName) -> TypeName { return self; }
             let struct_ty = MirType::Struct(type_name.clone());
             let sig = MirFnSig::new(vec![struct_ty.clone()], struct_ty.clone());
-            let mut builder = MirBuilder::new(fn_name, sig);
+            let mut builder = MirBuilder::with_linear_type_names(
+                fn_name,
+                sig,
+                Arc::new(self.linear_type_names.clone()),
+            );
 
             let self_local = builder.param_local(0);
             builder.set_param_name(0, Arc::from("self"));

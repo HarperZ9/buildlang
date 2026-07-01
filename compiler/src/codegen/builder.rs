@@ -6,6 +6,7 @@
 
 //! MIR builder for constructing MIR code programmatically.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::ir::*;
@@ -18,11 +19,35 @@ pub struct MirBuilder {
     current_block: BlockId,
     /// Next local ID.
     next_local: u32,
+    /// MIR-level struct/enum type names (as they appear in `MirType::Struct`)
+    /// that are `#[linear]`. Checked by `create_local`/`create_named_local`
+    /// (and the parameter/return-local setup below) so every local-creation
+    /// path is tagged from one place instead of touching each of the ~240
+    /// call sites across the lowerer. Empty for builder users that don't
+    /// care about linearity (backends' own tests, hand-built MIR, etc.).
+    linear_type_names: Arc<HashSet<Arc<str>>>,
+    /// Source span to attach to the next statement/terminator emitted.
+    /// Set by the lowerer (via `set_current_span`) before each
+    /// statement/terminator-producing call so that `push_stmt`/
+    /// `set_terminator` can record it into `func.spans` without a new
+    /// parameter at every one of the ~240 emission call sites.
+    current_span: Option<crate::lexer::Span>,
 }
 
 impl MirBuilder {
     /// Create a new MIR builder.
     pub fn new(name: impl Into<Arc<str>>, sig: MirFnSig) -> Self {
+        Self::with_linear_type_names(name, sig, Arc::new(HashSet::new()))
+    }
+
+    /// Create a new MIR builder that tags locals whose type is one of
+    /// `linear_type_names` (MIR-level struct names, e.g. `"Qubit"` or a
+    /// module-prefixed `"mod_Qubit"`) with the `"linear"` annotation.
+    pub fn with_linear_type_names(
+        name: impl Into<Arc<str>>,
+        sig: MirFnSig,
+        linear_type_names: Arc<HashSet<Arc<str>>>,
+    ) -> Self {
         let mut func = MirFunction::new(name, sig.clone());
 
         // Create entry block
@@ -36,6 +61,9 @@ impl MirBuilder {
             let mut local = MirLocal::new(local_id, param_ty.clone());
             local.is_param = true;
             local.name = Some(Arc::from(format!("arg{}", i)));
+            if Self::type_is_linear(&local.ty, &linear_type_names) {
+                local.annotations.push(Arc::from("linear"));
+            }
             func.locals.push(local);
             next_local += 1;
         }
@@ -45,6 +73,9 @@ impl MirBuilder {
             let local_id = LocalId(next_local);
             let mut local = MirLocal::new(local_id, sig.ret.clone());
             local.name = Some(Arc::from("_ret"));
+            if Self::type_is_linear(&local.ty, &linear_type_names) {
+                local.annotations.push(Arc::from("linear"));
+            }
             func.locals.push(local);
             next_local += 1;
         }
@@ -53,7 +84,27 @@ impl MirBuilder {
             func,
             current_block: BlockId::ENTRY,
             next_local,
+            linear_type_names,
+            current_span: None,
         }
+    }
+
+    /// Whether `ty` is a `#[linear]` ADT, per the MIR-level type name set
+    /// this builder was constructed with. Only `MirType::Struct`/enum-backed
+    /// names are checked (linearity is a nominal-ADT property); anything
+    /// else (generics not yet monomorphized, primitives, etc.) is
+    /// conservatively not tagged -- correct per the 2a groundwork spec,
+    /// since an untagged local is simply invisible to the 2b checker.
+    fn type_is_linear(ty: &MirType, linear_type_names: &HashSet<Arc<str>>) -> bool {
+        matches!(ty, MirType::Struct(name) if linear_type_names.contains(name))
+    }
+
+    /// Set the source span to attach to the next statement or terminator
+    /// recorded by this builder. Cleared implicitly by nothing -- callers
+    /// (the lowerer) set it immediately before each emission so stale spans
+    /// don't leak onto unrelated statements.
+    pub fn set_current_span(&mut self, span: crate::lexer::Span) {
+        self.current_span = Some(span);
     }
 
     /// Finish building and return the function.
@@ -91,7 +142,10 @@ impl MirBuilder {
     pub fn create_local(&mut self, ty: MirType) -> LocalId {
         let id = LocalId(self.next_local);
         self.next_local += 1;
-        let local = MirLocal::new(id, ty);
+        let mut local = MirLocal::new(id, ty);
+        if Self::type_is_linear(&local.ty, &self.linear_type_names) {
+            local.annotations.push(Arc::from("linear"));
+        }
         self.func.add_local(local);
         id
     }
@@ -100,7 +154,10 @@ impl MirBuilder {
     pub fn create_named_local(&mut self, name: impl Into<Arc<str>>, ty: MirType) -> LocalId {
         let id = LocalId(self.next_local);
         self.next_local += 1;
-        let local = MirLocal::named(id, name, ty);
+        let mut local = MirLocal::named(id, name, ty);
+        if Self::type_is_linear(&local.ty, &self.linear_type_names) {
+            local.annotations.push(Arc::from("linear"));
+        }
         self.func.add_local(local);
         id
     }
@@ -166,10 +223,16 @@ impl MirBuilder {
     // STATEMENTS
     // =========================================================================
 
-    /// Add a statement to the current block.
+    /// Add a statement to the current block. Records `current_span` (if set)
+    /// into `func.spans.stmt` keyed by this statement's `(block, index)`.
     fn push_stmt(&mut self, kind: MirStmtKind) {
-        if let Some(block) = self.func.block_mut(self.current_block) {
+        let block_id = self.current_block;
+        if let Some(block) = self.func.block_mut(block_id) {
+            let idx = block.stmts.len();
             block.push_stmt(MirStmt::new(kind));
+            if let Some(span) = self.current_span {
+                self.func.spans.stmt.insert((block_id.0, idx), span);
+            }
         }
     }
 
@@ -269,10 +332,15 @@ impl MirBuilder {
     // TERMINATORS
     // =========================================================================
 
-    /// Set the terminator for the current block.
+    /// Set the terminator for the current block. Records `current_span` (if
+    /// set) into `func.spans.terminator` keyed by this block's id.
     fn set_terminator(&mut self, term: MirTerminator) {
-        if let Some(block) = self.func.block_mut(self.current_block) {
+        let block_id = self.current_block;
+        if let Some(block) = self.func.block_mut(block_id) {
             block.set_terminator(term);
+            if let Some(span) = self.current_span {
+                self.func.spans.terminator.insert(block_id.0, span);
+            }
         }
     }
 
