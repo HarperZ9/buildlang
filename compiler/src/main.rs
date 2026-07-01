@@ -4459,6 +4459,30 @@ fn run_check(file: &Path) -> Result<CheckOutcome, i32> {
     checker.set_source_dir(chk_base.to_path_buf());
     checker.check_module(&ast);
 
+    let mut type_errors = checker.errors().to_vec();
+    let function_summaries = checker.function_effect_summaries().to_vec();
+
+    // MIR `#[linear]` checker (2b-wire): only lower + run it when the AST
+    // tracker (and parsing) found nothing. The AST tracker blocks lowering
+    // on its own errors -- lowering a linear-invalid-per-AST-tracker program
+    // is not guaranteed sound -- so the MIR checker only ever sees programs
+    // the AST tracker already PASSED. That is exactly the "no double
+    // reporting" interaction the design spec calls for: this pass's job is
+    // to catch what the AST tracker's name-keyed tracking cannot (the open
+    // classes: move-out-of-borrow, borrow-after-move, dataflow joins), never
+    // to re-report what the AST tracker already rejected.
+    if parse_errors.is_empty() && type_errors.is_empty() {
+        let codegen_source: Arc<str> = Arc::from(source_file.source());
+        let mut codegen = CodeGenerator::with_source(&ctx, Target::C, codegen_source);
+        // `generate()`'s `Err` here means a lowering/backend bug unrelated to
+        // linearity (e.g. invalid MIR); `buildc check` treats that the same
+        // way it always has -- surfaced separately, not folded into
+        // `type_errors` -- by simply not adding linear diagnostics.
+        if let Ok(()) = codegen.generate(&ast).map(|_| ()) {
+            type_errors.extend(codegen.linear_errors().to_vec());
+        }
+    }
+
     let input_digests = input_digest_ledger.into_sorted_records();
     let input_graph_digest = input_graph_digest(&input_digests);
 
@@ -4472,8 +4496,8 @@ fn run_check(file: &Path) -> Result<CheckOutcome, i32> {
         items: item_count,
         tokens: token_count,
         parse_errors,
-        type_errors: checker.errors().to_vec(),
-        function_summaries: checker.function_effect_summaries().to_vec(),
+        type_errors,
+        function_summaries,
     })
 }
 
@@ -5087,6 +5111,13 @@ fn cmd_build(
         eprintln!("Code generation error: {}", e);
         1
     })?;
+    if !codegen.linear_errors().is_empty() {
+        eprintln!("Linear type errors found:");
+        for err in codegen.linear_errors() {
+            eprintln!("  {}", err);
+        }
+        return Err(1);
+    }
     println!(
         "[4/{}] Code generation ({})... OK ({} bytes)",
         total_steps,
@@ -5515,6 +5546,13 @@ fn cmd_run(file: &PathBuf, args: &[String]) -> Result<(), i32> {
         eprintln!("Code generation error: {}", e);
         1
     })?;
+    if !codegen.linear_errors().is_empty() {
+        eprintln!("Linear type errors found:");
+        for err in codegen.linear_errors() {
+            eprintln!("  {}", err);
+        }
+        return Err(1);
+    }
 
     // Write to temp file
     let temp_dir = run_temp_build_dir(file);
@@ -5695,6 +5733,14 @@ fn cmd_test(
             let output = codegen
                 .generate(&ast)
                 .map_err(|e| format!("codegen: {}", e))?;
+            if !codegen.linear_errors().is_empty() {
+                let errs: Vec<_> = codegen
+                    .linear_errors()
+                    .iter()
+                    .map(|e| e.to_string())
+                    .collect();
+                return Err(format!("linear: {}", errs.join("; ")));
+            }
 
             // Use a unique temp directory per test to avoid MSVC bat conflicts
             let test_dir = std::env::temp_dir().join(format!("buildtest_{}", name));
@@ -6809,6 +6855,13 @@ fn cmd_compile(
         eprintln!("Code generation error: {}", e);
         1
     })?;
+    if !codegen.linear_errors().is_empty() {
+        eprintln!("Linear type errors found:");
+        for err in codegen.linear_errors() {
+            eprintln!("  {}", err);
+        }
+        return Err(1);
+    }
 
     // Write output
     std::fs::write(&output_path, &generated.data).map_err(|e| {
@@ -7161,6 +7214,14 @@ fn compile_single_file(input: &Path, output: &Path) -> Result<(), String> {
     let generated = codegen
         .generate(&ast)
         .map_err(|e| format!("codegen error: {}", e))?;
+    if !codegen.linear_errors().is_empty() {
+        let errs: Vec<String> = codegen
+            .linear_errors()
+            .iter()
+            .map(|e| format!("{}", e))
+            .collect();
+        return Err(format!("linear type errors:\n  {}", errs.join("\n  ")));
+    }
 
     std::fs::write(output, &generated.data).map_err(|e| format!("write error: {}", e))?;
 
