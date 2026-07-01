@@ -4108,11 +4108,7 @@ impl<'ctx> TypeInfer<'ctx> {
         // is not visible here. Conservatively reject calling a method on a
         // borrowed linear value (a plain linear receiver is consumed as usual).
         if let TyKind::Ref(_, _, inner) = &receiver_ty.kind {
-            self.reject_linear_escape(
-                inner,
-                span,
-                "a method call on a borrowed linear value",
-            );
+            self.reject_linear_escape(inner, span, "a method call on a borrowed linear value");
         }
         let method_source = self.method_call_source(&receiver_ty, method.name.as_ref());
 

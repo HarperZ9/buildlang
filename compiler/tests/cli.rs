@@ -12612,8 +12612,8 @@ fn safe_math_checked_and_saturating_arithmetic_runs() {
         eprintln!("skipping safe_math e2e: no C backend available (buildc doctor)");
         return;
     }
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../examples/finance/safe_math.bld");
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/finance/safe_math.bld");
     let result = c_backend_run(&path);
     assert_eq!(
         result.stdout,
