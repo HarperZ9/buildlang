@@ -130,14 +130,23 @@ pub struct ScientificRuntimeReceipt {
     /// The program arguments the receipt was emitted with. `receipt verify`
     /// re-runs the program with EXACTLY these args, so an argv-parameterized
     /// kernel is faithfully re-derived instead of re-run argless. Sealed like
-    /// every other field. `#[serde(default)]` keeps receipts emitted before args
-    /// were recorded deserializable (as an empty arg list).
-    #[serde(default)]
+    /// every other field. REQUIRED: a receipt without this field is malformed
+    /// (schema v0 shipped with it; a serde default here would be parse-leniency
+    /// only, since the recomputed seal always covers the field and a receipt
+    /// sealed without it could never verify anyway).
     pub args: Vec<String>,
     pub problem: ScientificProblem,
     pub measurement: ScientificMeasurement,
     pub invariant: ScientificInvariant,
     pub negative_fixture: bool,
+    /// Whether the run diverged (a non-finite value was observed and the series
+    /// was truncated to its finite prefix). Load-bearing for verify: for a
+    /// diverged run the finite-prefix LENGTH is the index of the first
+    /// non-finite value, a function of the exact float trajectory, which the
+    /// design declares non-reproducible across toolchains. Verify therefore
+    /// gates the prefix-derived checks (count, increase_count) on this field
+    /// and instead requires the re-run to reproduce the divergence itself.
+    pub diverged: bool,
     pub labels: Vec<String>,
     pub receipt_status: String,
     pub seal: ScientificDigest,
@@ -304,6 +313,7 @@ pub fn build_scientific_runtime_receipt(
             status: invariant_status.to_string(),
         },
         negative_fixture,
+        diverged,
         labels,
         receipt_status: receipt_status.to_string(),
         // Placeholder; overwritten by `seal_receipt` below.
@@ -367,16 +377,20 @@ pub struct ParsedSeries {
 /// Whether a token that Rust's f64 parser REJECTS is nonetheless a platform
 /// C-runtime spelling of a non-finite value: Windows UCRT `nan(ind)`,
 /// `-nan(ind)`, `nan(snan)`; legacy MSVCRT `1.#INF`, `-1.#IND`, `1.#QNAN`,
-/// `1.#SNAN`. A word like `information` is NOT flagged (it matches none of
-/// these). The Rust-parseable non-finite forms (`inf`, `nan`, `infinity`, ...)
-/// are caught at the parse site, not here.
+/// `1.#SNAN` (possibly with trailing padding digits under precision
+/// formatting). The match is ANCHORED to those exact token shapes, not
+/// substring containment: an ordinary stdout label like `step#info:` or
+/// `cell#index=3` must NOT flag the run as diverged (substring matching on
+/// `#inf`/`#ind` did exactly that). A word like `information` is also not
+/// flagged. The Rust-parseable non-finite forms (`inf`, `nan`, `infinity`,
+/// ...) are caught at the parse site, not here.
 fn is_nonfinite_spelling(token: &str) -> bool {
     let t = token.trim_start_matches(['+', '-']).to_ascii_lowercase();
     t.starts_with("nan(")
-        || t.contains("#inf")
-        || t.contains("#ind")
-        || t.contains("#qnan")
-        || t.contains("#snan")
+        || t.starts_with("1.#inf")
+        || t.starts_with("1.#ind")
+        || t.starts_with("1.#qnan")
+        || t.starts_with("1.#snan")
 }
 
 /// Parse whitespace/newline-separated f64 tokens from captured program stdout.
@@ -591,13 +605,25 @@ pub fn verify_scientific_runtime_receipt(
     // emitted under.
     let parsed = rerun_series(&source_path, &receipt.args)?;
 
-    // (3a) The observed-value count is deterministic (independent of platform
-    // float jitter), so a re-run that yields a different count means the stored
-    // measurement was tampered with (or the program is non-deterministic in a
-    // way that breaks re-derivation). Element values are NOT re-compared: exact
-    // floats need not reproduce across platforms (see the doc comment), so the
+    // For a DIVERGED run the finite-prefix length (and hence increase_count
+    // over that prefix) is the step index of the first non-finite value: a
+    // function of the exact float trajectory, which the design declares
+    // non-reproducible across toolchains (a 1-ULP libm difference can shift
+    // the divergence step). So when the receipt records divergence AND the
+    // re-run also diverges, the prefix-derived checks are skipped and the
+    // reproduced divergence itself is the faithfulness signal. A re-run that
+    // does NOT diverge when the receipt says it did (or vice versa) falls
+    // through to the strict checks and fails as non-reproduction.
+    let both_diverged = receipt.diverged && parsed.diverged;
+
+    // (3a) For non-diverged runs the observed-value count IS deterministic
+    // (it is the number of values the program prints, independent of float
+    // jitter), so a re-run with a different count means the stored measurement
+    // was tampered with (or the program is non-deterministic in a way that
+    // breaks re-derivation). Element values are NOT re-compared: exact floats
+    // need not reproduce across platforms (see the doc comment), so the
     // verdict is the re-checked quantity, with count guarding series length.
-    if parsed.series.len() != receipt.measurement.count {
+    if !both_diverged && parsed.series.len() != receipt.measurement.count {
         eprintln!(
             "Error: measurement count drift: receipt {}, re-run {}",
             receipt.measurement.count,
@@ -622,7 +648,10 @@ pub fn verify_scientific_runtime_receipt(
         );
         return Err(1);
     }
-    if recomputed.increase_count != stored_increase {
+    // Prefix-derived like the count: skipped when both runs diverged (the
+    // increase count over a platform-dependent finite prefix is itself
+    // platform-dependent).
+    if !both_diverged && recomputed.increase_count != stored_increase {
         eprintln!(
             "Error: increase_count drift: receipt {}, re-run {}",
             stored_increase, recomputed.increase_count
@@ -947,6 +976,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_series_does_not_flag_hash_labels() {
+        // Ordinary labels containing `#inf`/`#ind` substrings must NOT flag
+        // divergence: the MSVCRT match is anchored to the full token shapes
+        // (`1.#INF` etc.), not substring containment. Regression for the
+        // substring version, where `step#info:` diverged a healthy run.
+        for label in ["step#info:", "cell#index=3", "grid#index", "x#snapshot"] {
+            let parsed = parse_numeric_series(&format!("{label} 4.0\n3.0\n2.0\n"));
+            assert!(!parsed.diverged, "`{label}` must not flag divergence");
+            assert_eq!(parsed.series, vec![4.0, 3.0, 2.0], "label={label}");
+        }
+    }
+
+    #[test]
     fn diverged_run_is_unverifiable_not_a_false_pass() {
         // A monotone-looking finite prefix followed by a blow-up is UNVERIFIABLE,
         // never PASS: the invariant could not be honestly evaluated.
@@ -956,6 +998,7 @@ mod tests {
         let receipt = build_scientific_runtime_receipt(inputs);
         assert_eq!(receipt.receipt_status, "UNVERIFIABLE");
         assert_eq!(receipt.invariant.status, "FAIL");
+        assert!(receipt.diverged, "the diverged flag must be sealed in-band");
         assert!(receipt.labels.contains(&"NONFINITE_OBSERVED".to_string()));
         // The finite prefix is preserved and round-trips (no JSON `null`).
         let json = serde_json::to_string(&receipt).expect("serialize");
@@ -965,6 +1008,7 @@ mod tests {
         );
         let back: ScientificRuntimeReceipt = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.measurement.observed_values, vec![4.0, 3.0]);
+        assert!(back.diverged);
     }
 
     // --- receipt verify (T3) verdict recomputation ---------------------------
@@ -1175,6 +1219,51 @@ mod tests {
     fn verify_fails_a_faithful_diverged_receipt() {
         // A diverged (UNVERIFIABLE) receipt whose re-run reproduces the same
         // divergence is faithful, but UNVERIFIABLE is not a pass -> Err(3).
+        // The re-run's finite prefix is deliberately a DIFFERENT length than
+        // the stored one: for a diverged run the prefix length is the index of
+        // the first non-finite value, a platform-dependent quantity, so the
+        // count / increase_count checks must be skipped when both runs
+        // diverged (a 1-ULP libm difference can shift the divergence step and
+        // must not misclassify an honest receipt as tampering, Err(1)).
+        let path = Path::new("k.bld");
+        let mut inputs = base_inputs(path, vec![4.0, 3.0], true, false);
+        inputs.diverged = true;
+        let receipt = build_scientific_runtime_receipt(inputs);
+        assert_eq!(receipt.receipt_status, "UNVERIFIABLE");
+        assert_eq!(receipt.measurement.count, 2);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src_digest = receipt.source_digest.clone();
+        let graph_digest = receipt.input_graph_digest.clone();
+
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            |_| Ok((src_digest.clone(), graph_digest.clone())),
+            |_, _| {
+                Ok(ParsedSeries {
+                    // Three finite values instead of two: the divergence step
+                    // shifted by one on the re-run platform.
+                    series: vec![4.0, 3.0, 2.5],
+                    any_parsed: true,
+                    diverged: true,
+                })
+            },
+        );
+        assert_eq!(
+            result,
+            Err(3),
+            "a faithful diverged receipt must exit 3 even when the platform-dependent prefix length shifts"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_a_receipt_whose_divergence_does_not_reproduce() {
+        // The receipt records divergence, but the re-run completes finite:
+        // the recorded blow-up did NOT reproduce, which is genuine
+        // non-reproduction -> Err(1), not the faithful-UNVERIFIABLE Err(3).
         let path = Path::new("k.bld");
         let mut inputs = base_inputs(path, vec![4.0, 3.0], true, false);
         inputs.diverged = true;
@@ -1191,18 +1280,13 @@ mod tests {
             &receipt.compiler_version,
             &receipt.language_version,
             |_| Ok((src_digest.clone(), graph_digest.clone())),
-            |_, _| {
-                Ok(ParsedSeries {
-                    series: vec![4.0, 3.0],
-                    any_parsed: true,
-                    diverged: true,
-                })
-            },
+            // Finite, monotone re-run: no divergence reproduced.
+            |_, _| Ok(rerun(vec![4.0, 3.0])),
         );
         assert_eq!(
             result,
-            Err(3),
-            "a faithful UNVERIFIABLE receipt must fail verify with exit 3"
+            Err(1),
+            "a recorded divergence that does not reproduce is non-reproduction"
         );
     }
 

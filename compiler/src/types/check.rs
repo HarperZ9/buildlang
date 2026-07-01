@@ -1943,6 +1943,32 @@ mod tests {
         );
     }
 
+    // -- Soundness: parse-only constructs must be rejected loudly, never
+    //    silently discarded downstream. --
+
+    #[test]
+    fn let_else_is_rejected_not_silently_discarded() {
+        // let-else parses, but neither the checker nor codegen handles the
+        // diverge block: codegen would silently DROP the else path (a silent
+        // miscompile). The checker must reject it with UnsupportedConstruct.
+        let errors = check_source("fn main() { let Some(x) = opt else { return; }; }");
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e.error, TypeError::UnsupportedConstruct { .. })),
+            "let-else must be rejected loudly, not silently miscompiled: {errors:#?}"
+        );
+
+        // A plain let (no diverge block) is unaffected.
+        let errors = check_source("fn main() { let x = 1; }");
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e.error, TypeError::UnsupportedConstruct { .. })),
+            "a plain let must not trip the let-else rejection: {errors:#?}"
+        );
+    }
+
     // -- Soundness: a linear value may not enter a position the move-analysis
     //    cannot follow (aggregates, generics, closures, deref). These programs
     //    are the confirmed bypasses from the adversarial soundness pass; each

@@ -28,6 +28,21 @@
 //! Round-trip equality is judged as *semantic* JSON equality (two
 //! `serde_json::Value`s compare equal), which is the standard meaning of
 //! "canonical JSON equality" and is insensitive to incidental whitespace.
+//!
+//! ## Codec behavior note: float parse discipline (correctly rounded)
+//!
+//! Since the crate enabled serde_json's `float_roundtrip` feature, plain-JSON
+//! float ingestion here is CORRECTLY ROUNDED: a float literal parses to the
+//! nearest f64. Builds without the feature parsed a minority of shortest-form
+//! literals up to 1 ULP off, so a `bdf-canonical-sha256` payload digest
+//! computed by such a build over plain-JSON text containing an affected
+//! literal may not match the digest this build computes over the same text.
+//! Existing `.bdf` binaries are unaffected (floats are stored as raw bit
+//! patterns and the tagged canonical form round-trips them bit-exactly);
+//! only externally recorded digests from re-ingesting the same plain-JSON
+//! text across the feature boundary can diverge. When comparing digests
+//! cross-version, re-ingest from the source JSON rather than trusting a
+//! recorded pre-feature digest.
 
 use std::fmt;
 

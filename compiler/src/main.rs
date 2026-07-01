@@ -7051,9 +7051,18 @@ fn walk_calls_in_block(
             }
             ast::StmtKind::Local(local) => {
                 // The RHS is evaluated in the OUTER scope (the binding is not yet
-                // in force), so walk it before binding the pattern's names.
+                // in force), so walk it before binding the pattern's names. The
+                // let-else diverge block is also walked here, also pre-binding
+                // (the let-else bindings are not in force in the else block).
+                // NOTE: let-else is currently REJECTED by the type checker
+                // (UnsupportedConstruct) because codegen cannot lower it; the
+                // walk keeps the rewriter exhaustive so module calls in the
+                // else block resolve correctly once lowering lands.
                 if let Some(ref mut init) = local.init {
                     walk_calls_in_expr(&mut init.expr, scope, rename);
+                    if let Some(ref mut diverge) = init.diverge {
+                        walk_calls_in_expr(diverge, scope, rename);
+                    }
                 }
                 let mut names = HashSet::new();
                 collect_pattern_names(&local.pattern, &mut names);
