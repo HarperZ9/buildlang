@@ -13862,3 +13862,124 @@ fn receipt_verify_scientific_detects_source_tamper() {
         String::from_utf8_lossy(&verify.stderr)
     );
 }
+
+// =============================================================================
+// SCIENTIFIC-RUNTIME RECEIPT: consolidated emit -> verify -> tamper ->
+// negative-fixture round trip (T4). One runnable witness of the whole arc.
+// The individual legs are also covered by the focused tests above; this test
+// exists so the end-to-end story is a single readable proof, not scattered.
+// =============================================================================
+
+#[test]
+fn scientific_runtime_receipt_emit_and_verify_round_trip() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping scientific_runtime_receipt_emit_and_verify_round_trip: C backend not ready"
+        );
+        return;
+    }
+
+    // 1) Emit a receipt from the STABLE kernel. The invariant holds, so the
+    //    receipt is PASS, carries a valid 64-hex seal, and is labelled
+    //    NOT_A_NEW_PHYSICAL_LAW (honest scope: an observed-series invariant,
+    //    never a physical law).
+    let (dir, staged) = stage_stable_kernel("roundtrip");
+    let receipt = dir.join("receipt.json");
+    emit_stable_receipt(&staged, &receipt);
+
+    let emitted: serde_json::Value = {
+        let bytes = fs::read(&receipt).expect("read emitted round-trip receipt");
+        serde_json::from_slice(&bytes).expect("emitted receipt is valid JSON")
+    };
+    assert_eq!(emitted["schema"], "buildlang-scientific-runtime-receipt/v0");
+    assert_eq!(emitted["receipt_status"], "PASS");
+    assert_eq!(emitted["invariant"]["status"], "PASS");
+    assert_eq!(emitted["invariant"]["observed"]["increase_count"], 0);
+    let seal = emitted["seal"]["hex"].as_str().expect("seal hex string");
+    assert_eq!(seal.len(), 64, "seal must be 64 hex chars");
+    assert!(
+        seal.chars()
+            .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()),
+        "seal must be lowercase hex: {seal}"
+    );
+    assert!(
+        emitted["labels"]
+            .as_array()
+            .expect("labels array")
+            .iter()
+            .any(|label| label == "NOT_A_NEW_PHYSICAL_LAW"),
+        "every receipt must carry NOT_A_NEW_PHYSICAL_LAW"
+    );
+
+    // 2) `receipt verify` on the untouched receipt re-runs the program, re-derives
+    //    the source digest, re-checks the invariant, and confirms a clean MATCH.
+    let verify_ok = buildc()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .output()
+        .expect("verify untouched round-trip receipt");
+    assert!(
+        verify_ok.status.success(),
+        "the untouched receipt must verify\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_ok.stdout),
+        String::from_utf8_lossy(&verify_ok.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&verify_ok.stdout).contains("MATCH"),
+        "human verify output should report MATCH"
+    );
+
+    // 3) Tamper the sealed receipt (flip the stored invariant verdict PASS -> FAIL).
+    //    The re-run recomputes PASS, so verification must reject the disagreement.
+    let mut tampered: serde_json::Value = emitted.clone();
+    tampered["invariant"]["status"] = serde_json::Value::String("FAIL".to_string());
+    fs::write(&receipt, serde_json::to_string_pretty(&tampered).unwrap())
+        .expect("write tampered round-trip receipt");
+    let verify_tampered = buildc()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .output()
+        .expect("verify tampered round-trip receipt");
+    assert!(
+        !verify_tampered.status.success(),
+        "a tampered receipt must fail verification\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_tampered.stdout),
+        String::from_utf8_lossy(&verify_tampered.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+
+    // 4) The UNSTABLE kernel with --negative-fixture: the invariant is expected to
+    //    fail, so the receipt is FAIL_EXPECTED (an expected violation, still an
+    //    honest witness), and is additionally labelled NEGATIVE_FIXTURE.
+    let negative = buildc()
+        .arg("run")
+        .arg(repo_example("heat_equation_energy_unstable.bld"))
+        .arg("--emit-receipt")
+        .arg("-")
+        .arg("--negative-fixture")
+        .output()
+        .expect("emit negative-fixture receipt for the unstable kernel");
+    assert!(
+        negative.status.success(),
+        "emitting a negative-fixture receipt should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&negative.stderr)
+    );
+    let negative_receipt = receipt_from_stdout(&negative);
+    assert_eq!(negative_receipt["receipt_status"], "FAIL_EXPECTED");
+    assert_eq!(negative_receipt["invariant"]["status"], "FAIL");
+    assert_eq!(negative_receipt["negative_fixture"], true);
+    let negative_labels = negative_receipt["labels"].as_array().expect("labels array");
+    assert!(
+        negative_labels
+            .iter()
+            .any(|label| label == "NOT_A_NEW_PHYSICAL_LAW"),
+        "the negative fixture is still labelled NOT_A_NEW_PHYSICAL_LAW"
+    );
+    assert!(
+        negative_labels
+            .iter()
+            .any(|label| label == "NEGATIVE_FIXTURE"),
+        "the negative fixture must be labelled NEGATIVE_FIXTURE"
+    );
+}
