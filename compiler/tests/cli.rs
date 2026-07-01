@@ -12910,6 +12910,39 @@ fn println_varying_placeholder_counts_run_end_to_end() {
     );
 }
 
+/// Regression: the type checker loaded and registered an external `mod foo;`
+/// module in BOTH its collect pass and its check pass, so a self-recursive (or
+/// intra-module-calling) function in a LOCAL module registered duplicate dispatch
+/// candidates and multiple dispatch reported a false "equally-specific candidates"
+/// ambiguity on every call to it. Registering an identical parameter-type
+/// signature is now deduped in the multi-method registry. This program has a
+/// local `helper.bld` with a self-recursive `fact`; it must compile and run.
+#[test]
+fn local_module_self_recursive_fn_no_false_ambiguity() {
+    if !c_backend_ready() {
+        eprintln!("skipping local-module self-recursion e2e: no C backend available");
+        return;
+    }
+    let dir = std::env::temp_dir().join("buildlang_local_mod_selfrec");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    std::fs::write(
+        dir.join("helper.bld"),
+        "fn fact(n: i32) -> i32 { if n <= 1 { 1 } else { n * fact(n - 1) } }\n",
+    )
+    .expect("write helper.bld");
+    let main_path = dir.join("main.bld");
+    std::fs::write(
+        &main_path,
+        "mod helper;\nfn main() ~ Console { let x = fact(5); println(\"{}\", x); }\n",
+    )
+    .expect("write main.bld");
+    let result = c_backend_run(&main_path);
+    assert_eq!(
+        result.stdout, "120\n",
+        "a self-recursive fn in a local module must not be a false dispatch ambiguity"
+    );
+}
+
 /// I4 (review FIX A): broadcasting arrays whose element type is NOT numeric is a
 /// compile-time type error. Broadcasting is defined only for integer/float
 /// elements; `["a", "b"] .+ ["c", "d"]` (string elements) must be REJECTED by
