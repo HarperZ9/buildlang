@@ -5,4 +5,5 @@
 
 pub(crate) mod cfg;
 pub(crate) mod drops;
+pub(crate) mod linear;
 pub(crate) mod liveness;
