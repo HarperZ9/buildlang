@@ -148,11 +148,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // first MIR-phase user diagnostic; errors are collected (not
         // returned as `CodegenError`, which has no span) so the driver can
         // print them with source spans and fail the compile.
-        self.linear_errors = mir
-            .functions
-            .iter()
-            .flat_map(analysis::linear::check)
-            .collect();
+        self.linear_errors = analysis::linear::check_module(&mir.functions);
 
         match self.target {
             Target::C => {
