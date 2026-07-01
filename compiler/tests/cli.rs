@@ -12748,3 +12748,269 @@ fn transpile_preservation_c_and_rust_backends_agree_on_stdout() {
          for {cross_checked} corpus program(s)"
     );
 }
+
+// =============================================================================
+// STATIC MULTIPLE DISPATCH (Pillar A)
+// =============================================================================
+
+/// Write a `.bld` fixture to a unique temp path (labelled) and return it.
+fn write_dispatch_fixture(label: &str, src: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "buildlang_dispatch_{}_{}.bld",
+        label,
+        std::process::id()
+    ));
+    fs::write(&path, src).unwrap_or_else(|e| panic!("write dispatch fixture {label}: {e}"));
+    path
+}
+
+#[test]
+fn dispatch_selects_overload_by_argument_type_tuple() {
+    if !c_backend_ready() {
+        eprintln!("skipping multiple-dispatch run test because no C backend is available");
+        return;
+    }
+
+    // Three same-name `add` overloads whose bodies differ so the printed
+    // result reveals which method was selected: i32 adds, f64 multiplies.
+    // Plus a two-argument `combo` that dispatches on the SECOND argument's
+    // type (i32,i32) vs (i32,f64), proving dispatch is not receiver-only.
+    let src = r#"
+fn add(a: i32, b: i32) -> i32 { a + b }
+fn add(a: f64, b: f64) -> f64 { a * b }
+
+fn combo(a: i32, b: i32) -> i32 { a + b }
+fn combo(a: i32, b: f64) -> i32 { a * 100 }
+
+fn main() ~ Console {
+    let w: i32 = add(3, 5);
+    let x: f64 = add(2.5, 4.0);
+    let y: i32 = combo(7, 9);
+    let z: i32 = combo(7, 9.0);
+    println!("{}", w);
+    println!("{}", x);
+    println!("{}", y);
+    println!("{}", z);
+}
+"#;
+    let fixture = write_dispatch_fixture("run_select", src);
+
+    let output = buildc()
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("run buildc run on dispatch fixture");
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "dispatch program should run successfully\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    // add(3,5) -> i32 (a+b) = 8 ; add(2.5,4.0) -> f64 (a*b) = 10 ;
+    // combo(7,9) -> (i32,i32) (a+b) = 16 ; combo(7,9.0) -> (i32,f64) (a*100) = 700
+    let want = "8\n10\n16\n700\n";
+    assert!(
+        stdout.contains(want),
+        "dispatch stdout should show each overload's result; want to contain {want:?}, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn dispatch_reports_no_matching_method() {
+    // add(i32,i32) and add(f64,f64) but the call passes strings: no candidate
+    // matches the argument tuple, so `check` fails with NoMatchingMethod.
+    let src = r#"
+fn add(a: i32, b: i32) -> i32 { a + b }
+fn add(a: f64, b: f64) -> f64 { a * b }
+
+fn main() {
+    let s: str = "x";
+    add(s, s);
+}
+"#;
+    let fixture = write_dispatch_fixture("no_match", src);
+
+    let output = buildc()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run buildc check on no-match fixture");
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "a call with no matching overload should fail type checking"
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("no method `add` matches"),
+        "check should report NoMatchingMethod:\n{}",
+        combined
+    );
+}
+
+#[test]
+fn dispatch_reports_ambiguous_method() {
+    // add(i32, T) vs add(T, i32) with a call add(i32, i32): both candidates are
+    // equally specific (one exact + one generic each) and incomparable, so the
+    // call is ambiguous.
+    let src = r#"
+fn add<T>(a: i32, b: T) -> i32 { a }
+fn add<T>(a: T, b: i32) -> i32 { b }
+
+fn main() {
+    add(1, 2);
+}
+"#;
+    let fixture = write_dispatch_fixture("ambiguous", src);
+
+    let output = buildc()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run buildc check on ambiguous fixture");
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "an equally-specific overload pair should fail type checking as ambiguous"
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("is ambiguous"),
+        "check should report AmbiguousMethod:\n{}",
+        combined
+    );
+}
+
+#[test]
+fn dispatch_single_definition_names_are_unaffected() {
+    // A non-overloaded program still checks cleanly: the single-candidate fast
+    // path must behave exactly as before (backward compatibility).
+    let src = r#"
+fn double(x: i32) -> i32 { x * 2 }
+
+fn main() ~ Console {
+    println!("{}", double(21));
+}
+"#;
+    let fixture = write_dispatch_fixture("single_def", src);
+
+    let output = buildc()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run buildc check on single-def fixture");
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "a non-overloaded program should check cleanly\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn dispatch_generic_and_concrete_overload_compose() {
+    // Regression: a name that mixes a GENERIC def and a CONCRETE def of the same
+    // name must have the checker and codegen agree on the selected overload.
+    // Previously codegen skipped generic siblings when counting overloads, so the
+    // multi-dispatch path was dead and it emitted the concrete C symbol for BOTH
+    // calls -> a `h(i32)` vs `h(BuildString)` name collision (invalid C, C2440).
+    //
+    //   h(3)       -> concrete `h(i32)` wins (concrete beats generic) -> "3"
+    //   h("hello") -> only the generic `h<T>` matches -> monomorphized -> "hello"
+    if !c_backend_ready() {
+        eprintln!("skipping generic+concrete dispatch run test: no C backend available");
+        return;
+    }
+    let src = r#"
+fn h<T>(a: T) -> T { a }
+fn h(a: i32) -> i32 { a }
+
+fn main() ~ Console {
+    let x: i32 = h(3);
+    let y: str = h("hello");
+    println!("{}", x);
+    println!("{}", y);
+}
+"#;
+    let fixture = write_dispatch_fixture("generic_concrete", src);
+
+    let output = buildc()
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("run buildc run on generic+concrete dispatch fixture");
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "generic+concrete overload program should compile and run\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    // Concrete `h(i32)` returns 3; generic `h<T>` monomorphized for str returns
+    // "hello". Both must print, proving each call selected the correct sibling.
+    assert!(
+        stdout.contains("3\n") && stdout.contains("hello"),
+        "each call should select the correct overload (concrete `3`, generic `hello`); got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn dispatch_generic_only_call_still_monomorphizes() {
+    // Guard the reordered call-lowering path: a generic-ONLY name (no concrete
+    // sibling, so NOT overloaded) must still monomorphize normally. This exercises
+    // the fall-through from the multi-dispatch check to the plain generic path.
+    if !c_backend_ready() {
+        eprintln!("skipping generic-only dispatch run test: no C backend available");
+        return;
+    }
+    let src = r#"
+fn identity<T>(a: T) -> T { a }
+
+fn main() ~ Console {
+    let x: i32 = identity(42);
+    let z: i32 = identity(7);
+    println!("{}", x);
+    println!("{}", z);
+}
+"#;
+    let fixture = write_dispatch_fixture("generic_only", src);
+
+    let output = buildc()
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("run buildc run on generic-only fixture");
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        output.status.success(),
+        "generic-only program should compile and run\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    assert!(
+        stdout.contains("42\n") && stdout.contains("7\n"),
+        "generic-only monomorphization should print both results; got:\n{}",
+        stdout
+    );
+}

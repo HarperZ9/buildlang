@@ -2910,6 +2910,22 @@ impl<'ctx> TypeInfer<'ctx> {
 
     fn infer_ident(&mut self, ident: &ast::Ident, span: Span) -> Ty {
         let name = ident.name.as_ref();
+        // A name with 2+ overloaded definitions cannot be used as a bare value:
+        // multiple dispatch needs a call with arguments to pick a method. (Call
+        // sites go through `infer_call` before reaching here, so this only fires
+        // for genuine value-position references.)
+        if let Some(count) = self.ctx.method_candidates(name).map(|c| c.len()) {
+            if count > 1 {
+                self.error(
+                    TypeError::AmbiguousFunctionReference {
+                        name: ident.name.to_string(),
+                        count,
+                    },
+                    span,
+                );
+                return Ty::error();
+            }
+        }
         if let Some(ty) = self.ctx.lookup_var(name) {
             if self.ctx.is_foreign_static(name) {
                 self.current_effects
@@ -3710,7 +3726,222 @@ impl<'ctx> TypeInfer<'ctx> {
     // CALL INFERENCE
     // =========================================================================
 
+    /// Extract the simple callee name for multiple-dispatch resolution: a bare
+    /// identifier or a single-segment path. Returns `None` for anything else
+    /// (field/method/complex expression), which then follows the normal path.
+    fn simple_call_name(func: &ast::Expr) -> Option<Arc<str>> {
+        match &func.kind {
+            ExprKind::Ident(ident) => Some(ident.name.clone()),
+            ExprKind::Path(path) if path.segments.len() == 1 => {
+                Some(path.segments[0].ident.name.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// Classify how well an argument type matches a parameter type for
+    /// dispatch specificity. `None` rules the candidate out at this position.
+    /// Exact when the applied types are structurally equal; Coercion when the
+    /// argument is coercible via the same subtype/reborrow rules used at call
+    /// sites; Generic when the parameter is a type parameter (matches anything).
+    ///
+    /// DIVERGENCE TRAP: this is a hand-maintained copy of codegen's
+    /// `mir_position_match` (`codegen::lower::MirLowerer::mir_position_match`),
+    /// over `Ty` instead of `MirType`/`ParamSlot`. Both feed the SAME shared
+    /// `resolve_overload`, so the two MUST agree on the per-position ordering
+    /// (generic slot -> Generic, exact match -> Exact, numeric literal -> Coercion)
+    /// or the checker and codegen will select different overloads (miscompile).
+    /// Change one, change the other. One subtlety kept intentionally different:
+    /// the `Var`/`Error`-arg -> `Coercion` fallback below exists only on the
+    /// checker side (to avoid a spurious NoMatch masking the real per-arg type
+    /// error); codegen only runs after the checker has accepted the program.
+    fn dispatch_position_match(
+        &self,
+        param: &Ty,
+        arg: &Ty,
+    ) -> Option<super::dispatch::PositionMatch> {
+        use super::dispatch::PositionMatch;
+        let p = self.apply(param);
+        let a = self.apply(arg);
+        // A generic type parameter matches any argument (least specific). A
+        // generic slot appears either as an explicit `Param` or, once a generic
+        // signature is lowered, as an unbound type variable (`Var` / general
+        // `Infer(Type)`); all of these accept any argument type.
+        let is_generic_slot = matches!(
+            p.kind,
+            TyKind::Param(..)
+                | TyKind::Var(_)
+                | TyKind::Infer(InferTy {
+                    kind: InferKind::Type,
+                    ..
+                })
+        );
+        if is_generic_slot {
+            return Some(PositionMatch::Generic);
+        }
+        // Exact structural match is most specific.
+        if p == a {
+            return Some(PositionMatch::Exact);
+        }
+        // Numeric literal defaulting: an unsuffixed integer literal is an
+        // `Infer(Int)` variable (defaults to i32) and coerces to any integer
+        // parameter but NOT to a float / non-numeric one; symmetrically for
+        // float literals. This pins dispatch to buildlang's actual literal
+        // behavior (e.g. `add(3,5)` picks the i32 overload, not f64/str).
+        match &a.kind {
+            TyKind::Infer(it) if it.kind == InferKind::Int => {
+                return matches!(p.kind, TyKind::Int(_)).then_some(PositionMatch::Coercion);
+            }
+            TyKind::Infer(it) if it.kind == InferKind::Float => {
+                return matches!(p.kind, TyKind::Float(_)).then_some(PositionMatch::Coercion);
+            }
+            // A general unconstrained variable or an error arg matches concretely
+            // so a single unrelated failure doesn't spuriously report NoMatch;
+            // the real type error is reported by the per-arg coercion check.
+            TyKind::Error | TyKind::Var(_) | TyKind::Infer(_) => {
+                return Some(PositionMatch::Coercion);
+            }
+            _ => {}
+        }
+        // `&mut T` argument satisfying a `&T` parameter (outermost reborrow),
+        // mirroring `coerce_arg`.
+        if let (
+            TyKind::Ref(_, Mutability::Immutable, p_inner),
+            TyKind::Ref(_, Mutability::Mutable, a_inner),
+        ) = (&p.kind, &a.kind)
+        {
+            if self.apply(p_inner) == self.apply(a_inner) {
+                return Some(PositionMatch::Coercion);
+            }
+        }
+        None
+    }
+
+    /// Attempt to resolve an overloaded call by the argument-type tuple.
+    ///
+    /// Returns `Some(ret_ty)` when `func` names a function with two or more
+    /// candidates (the multiple-dispatch path): the args are inferred, the
+    /// shared resolver picks the unique most-specific candidate, the args are
+    /// checked against the selected signature, and its return type is returned.
+    /// Returns `None` for names with zero or one candidate, so the caller falls
+    /// through to the existing single-dispatch behavior unchanged.
+    fn try_infer_multi_dispatch(
+        &mut self,
+        func: &ast::Expr,
+        args: &[ast::Expr],
+        span: Span,
+    ) -> Option<Ty> {
+        let name = Self::simple_call_name(func)?;
+        // Only intercept genuinely overloaded names. Zero or one candidate =>
+        // untouched legacy path (byte-identical behavior for non-overloaded
+        // names, which is the load-bearing backward-compat guarantee).
+        let candidate_count = self.ctx.method_candidates(name.as_ref())?.len();
+        if candidate_count < 2 {
+            return None;
+        }
+
+        // Infer the argument-type tuple once.
+        let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_expr(a)).collect();
+        let applied_args: Vec<Ty> = arg_tys.iter().map(|t| self.apply(t)).collect();
+
+        // Snapshot the candidate param/return types (clone out to drop the
+        // borrow on `self.ctx` before matching, which borrows `self`).
+        let candidates: Vec<(Vec<Ty>, Ty)> = self
+            .ctx
+            .method_candidates(name.as_ref())
+            .map(|cs| {
+                cs.iter()
+                    .map(|c| (c.param_tys.clone(), c.ret.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Adapter so the shared resolver sees each candidate's arity.
+        struct Cand<'a>(&'a [Ty]);
+        impl super::dispatch::DispatchCandidate for Cand<'_> {
+            fn arity(&self) -> usize {
+                self.0.len()
+            }
+        }
+        let cand_views: Vec<Cand<'_>> = candidates.iter().map(|(p, _)| Cand(p)).collect();
+
+        let result =
+            super::dispatch::resolve_overload(&cand_views, applied_args.len(), |ci, pos| {
+                self.dispatch_position_match(&candidates[ci].0[pos], &applied_args[pos])
+            });
+
+        let arg_tys_str = || {
+            applied_args
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let candidates_str = || {
+            candidates
+                .iter()
+                .map(|(p, r)| {
+                    let ps = p
+                        .iter()
+                        .map(|t| t.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("  {}({}) -> {}", name, ps, r)
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        match result {
+            Ok(idx) => {
+                let (params, ret) = &candidates[idx];
+                // Type-check each argument against the selected signature so a
+                // dispatched call still enforces argument types (and records
+                // coercions / effects) exactly like a direct call would.
+                for (param, arg) in params.iter().zip(args.iter()) {
+                    let arg_ty = self.infer_expr(arg);
+                    let _ = self.coerce_arg(param, &arg_ty, span);
+                }
+                Some(self.apply(ret))
+            }
+            Err(super::dispatch::DispatchError::NoMatchingMethod) => {
+                self.error(
+                    TypeError::NoMatchingMethod {
+                        name: name.to_string(),
+                        arg_tys: arg_tys_str(),
+                        candidates: candidates_str(),
+                    },
+                    span,
+                );
+                Some(Ty::error())
+            }
+            Err(super::dispatch::DispatchError::AmbiguousMethod(_tied)) => {
+                self.error(
+                    TypeError::AmbiguousMethod {
+                        name: name.to_string(),
+                        arg_tys: arg_tys_str(),
+                        candidates: candidates_str(),
+                    },
+                    span,
+                );
+                Some(Ty::error())
+            }
+        }
+    }
+
     fn infer_call(&mut self, func: &ast::Expr, args: &[ast::Expr], span: Span) -> Ty {
+        // Multiple dispatch: a name with 2+ candidate definitions is resolved by
+        // the argument-type tuple here, before the normal callee-type path. Zero
+        // or one candidate falls through unchanged.
+        if let Some(ret) = self.try_infer_multi_dispatch(func, args, span) {
+            let call_sources = self.call_sources(func);
+            self.record_effectful_callee_sources(
+                &call_sources,
+                &super::effects::EffectRow::empty(),
+            );
+            return ret;
+        }
+
         let call_sources = self.call_sources(func);
         let func_ty = self.infer_expr(func);
         let func_ty = self.apply(&func_ty);

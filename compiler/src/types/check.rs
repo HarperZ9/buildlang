@@ -603,12 +603,32 @@ impl<'ctx> TypeChecker<'ctx> {
         let param_tys: Vec<_> = sig.params.iter().map(|(_, ty)| ty.clone()).collect();
         let effects = self.lower_effect_annotations(&f.sig.effects);
         let fn_ty = Ty::function_with_effects_and_lifetimes(
-            param_tys,
+            param_tys.clone(),
             sig.ret.clone(),
             effects,
             sig.lifetime_params.clone(),
         );
-        self.ctx.define_var(f.name.name.clone(), fn_ty);
+
+        // Multiple dispatch: append this definition to the name's candidate set.
+        // The FIRST definition of a name is also bound as a plain variable so a
+        // bare value reference (fn pointer) still resolves and the single-def
+        // fast path in `infer_call` is byte-for-byte identical to before.
+        // Subsequent same-name definitions do NOT overwrite that binding (which
+        // is what silently clobbered overloads previously); they only extend the
+        // candidate set, and the call site resolves by the argument-type tuple.
+        let is_first = self.ctx.method_candidates(f.name.name.as_ref()).is_none();
+        self.ctx.register_method_candidate(
+            f.name.name.clone(),
+            MethodCandidate {
+                def_id,
+                param_tys,
+                ret: sig.ret.clone(),
+                sig,
+            },
+        );
+        if is_first {
+            self.ctx.define_var(f.name.name.clone(), fn_ty);
+        }
     }
 
     /// Collect extern block declarations. Foreign functions and statics are
