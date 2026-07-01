@@ -142,6 +142,7 @@ fn shared_linear_ref_set(func: &MirFunction) -> HashSet<LocalId> {
     let Some(blocks) = &func.blocks else {
         return set;
     };
+    // Seed: a direct shared borrow `dest = &linear`.
     for block in blocks {
         for stmt in &block.stmts {
             if let MirStmtKind::Assign { dest, value } = &stmt.kind {
@@ -160,6 +161,33 @@ fn shared_linear_ref_set(func: &MirFunction) -> HashSet<LocalId> {
                 // projections into a linear field) is the direct 2b case.
                 if place.projections.is_empty() && is_linear_local(func, place.local) {
                     set.insert(*dest);
+                }
+            }
+        }
+    }
+    // Propagate the shared-ref taint through by-value copies of the pointer:
+    // `dest = Use(src)` / `Cast(src)` where `src` is a shared linear ref makes
+    // `dest` one too. buildlang copies the borrow into a scrutinee temp before a
+    // `match &w` (`_5 = Use(_4)`); without this the field-extract at the copy
+    // would not be seen as going through the borrow. A small fixpoint handles a
+    // copy chain regardless of block order.
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in blocks {
+            for stmt in &block.stmts {
+                if let MirStmtKind::Assign { dest, value } = &stmt.kind {
+                    let src = match value {
+                        MirRValue::Use(MirValue::Local(s))
+                        | MirRValue::Cast {
+                            value: MirValue::Local(s),
+                            ..
+                        } => *s,
+                        _ => continue,
+                    };
+                    if set.contains(&src) && set.insert(*dest) {
+                        changed = true;
+                    }
                 }
             }
         }
@@ -448,6 +476,44 @@ fn move_out_of_shared_borrow(value: &MirRValue, shared_refs: &HashSet<LocalId>) 
                 None
             }
         }
+        _ => None,
+    }
+}
+
+/// Whether `dest = value` EXTRACTS a LINEAR value out of a shared borrow via a
+/// field / variant-payload / element projection: `dest = base.field` (or
+/// `.Variant._i` / `base[i]`) where `base` is a known shared borrow of a linear
+/// (`shared_refs`) and `dest` is itself a linear local. Returns the offending
+/// borrow local.
+///
+/// This is the record-/tuple-/slice-pattern-through-`&` move-out. buildlang
+/// lowers `match &w { Wrap { coin: c } => .. }` to `c = base.coin` where `base`
+/// is the shared-borrowed scrutinee and `c` is linear; extracting the linear
+/// field BY VALUE out of a `&` duplicates it (the borrow does not own it).
+///
+/// PRECISION: guarded on `dest` being a LINEAR local. Reading a NON-linear field
+/// through the borrow (`w.value: i64`, or the read-only `peek` case) has a
+/// non-linear `dest` and is not flagged, preserving the legal borrow-read. The
+/// `VariantField` case here is the through-`&` enum destructure (the base is a
+/// shared borrow); the owned-scrutinee `VariantField` move is handled separately
+/// by `moved_by_rvalue`.
+fn field_extract_of_linear_out_of_borrow(
+    func: &MirFunction,
+    dest: &LocalId,
+    value: &MirRValue,
+    shared_refs: &HashSet<LocalId>,
+) -> Option<LocalId> {
+    if !is_linear_local(func, *dest) {
+        return None;
+    }
+    let base = match value {
+        MirRValue::FieldAccess { base, .. }
+        | MirRValue::VariantField { base, .. }
+        | MirRValue::IndexAccess { base, .. } => base,
+        _ => return None,
+    };
+    match base {
+        MirValue::Local(p) if shared_refs.contains(p) => Some(*p),
         _ => None,
     }
 }
@@ -745,6 +811,25 @@ fn apply_stmt(
     if let MirStmtKind::Assign { dest, value } = kind {
         // (1) move-out-of-shared-borrow: `dest = *shared_ref_to_linear`.
         if let Some(ptr) = move_out_of_shared_borrow(value, shared_refs) {
+            if let Some(errs) = errors.as_deref_mut() {
+                errs.push(TypeErrorWithSpan::new(
+                    TypeError::LinearMoveOutOfBorrow {
+                        name: local_name(func, ptr),
+                    },
+                    span,
+                ));
+            }
+        }
+
+        // (1b) field/variant/index EXTRACT of a LINEAR value out of a shared
+        // borrow: `dest = base.field` (or `.Variant._i` / `[i]`) where `base` is
+        // a shared borrow of a linear and `dest` is itself a linear local. This
+        // is the record-/tuple-/slice-pattern-through-`&` move-out: buildlang
+        // lowers `match &w { Wrap { coin: c } => .. }` to `c = (*w_ref).coin`, a
+        // by-value extract of the linear `coin` field out of the shared-borrowed
+        // `w`. Guarded on `dest` being linear so reading a NON-linear field
+        // through the borrow (`w.value: i64`, the legal `peek` case) stays clean.
+        if let Some(ptr) = field_extract_of_linear_out_of_borrow(func, dest, value, shared_refs) {
             if let Some(errs) = errors.as_deref_mut() {
                 errs.push(TypeErrorWithSpan::new(
                     TypeError::LinearMoveOutOfBorrow {
@@ -2351,6 +2436,109 @@ mod tests {
         assert!(
             errors.is_empty(),
             "a fn that boxes *r locally and returns a scalar is clean: {errors:?}"
+        );
+    }
+
+    // ===================================================================
+    // FIX B (record-pattern-through-`&` move-out): after the lowering binds a
+    // record-pattern field to a real projection of the shared-borrowed
+    // scrutinee, the checker must reject extracting a LINEAR field by value out
+    // of the borrow. `shared_linear_ref_set` propagates through the scrutinee
+    // COPY (`_5 = Use(_4)`); the field-extract rule fires on a linear `dest`.
+    // Precision: extracting a NON-linear field through the borrow stays clean.
+    // ===================================================================
+
+    // B1. FIX B: `match &w { Wrap { coin: c } => spend(c) }` — the exact MIR the
+    //     lowering now emits: `_4 = &w ; _5 = Use(_4) ; c = _5.coin ; spend(c)`.
+    //     Extracting the linear `coin` field out of the shared-borrowed `w`
+    //     (through the scrutinee copy `_5`) is a move-out-of-borrow.
+    #[test]
+    fn fixb_record_pattern_field_extract_through_borrow_reports() {
+        let mut func = MirFunction::new("main", MirFnSig::new(vec![], MirType::Void));
+        func.locals.push(linear_local(0, "w")); // linear struct scrutinee
+        func.locals.push(untagged_ptr_local(1, "_4")); // _4 = &w
+        func.locals.push(untagged_ptr_local(2, "_5")); // _5 = Use(_4) (scrutinee copy)
+        func.locals.push(linear_anon(3)); // c = _5.coin (linear field extract)
+        let mut b0 = MirBlock::new(BlockId(0));
+        // _4 = &w  (shared borrow of the linear -> provenance seed)
+        b0.stmts.push(MirStmt::assign(
+            LocalId(1),
+            MirRValue::Ref {
+                is_mut: false,
+                place: MirPlace::local(LocalId(0)),
+            },
+        ));
+        // _5 = Use(_4)  (buildlang copies the borrow into the scrutinee temp)
+        b0.stmts.push(MirStmt::assign(
+            LocalId(2),
+            MirRValue::Use(MirValue::Local(LocalId(1))),
+        ));
+        // c = _5.coin  (extract the LINEAR field out of the borrowed scrutinee)
+        b0.stmts.push(MirStmt::assign(
+            LocalId(3),
+            MirRValue::FieldAccess {
+                base: MirValue::Local(LocalId(2)),
+                field_name: Arc::from("coin"),
+                field_ty: MirType::Struct(Arc::from("Qubit")),
+            },
+        ));
+        b0.terminator = Some(MirTerminator::Return(None));
+        func.blocks = Some(vec![b0]);
+
+        let errors = check(&func);
+        assert_eq!(
+            count(&errors, |e| matches!(
+                e,
+                TypeError::LinearMoveOutOfBorrow { .. }
+            )),
+            1,
+            "extracting a linear field out of a shared borrow (record pattern) is a move-out: {errors:?}"
+        );
+    }
+
+    // B2. FIX B PRECISION: extracting a NON-linear field through the shared
+    //     borrow (`Point { x: v }` reading `v: i64`) must NOT be flagged — the
+    //     rule is guarded on the `dest` being linear.
+    //     _1 = &p ; _2 = Use(_1) ; v = _2.x (v NON-linear) ; return
+    #[test]
+    fn fixb_nonlinear_field_extract_through_borrow_is_clean() {
+        let mut func = MirFunction::new("main", MirFnSig::new(vec![], MirType::Void));
+        func.locals.push(linear_local(0, "p")); // linear scrutinee (has a non-linear field)
+        func.locals.push(untagged_ptr_local(1, "r")); // r = &p
+        func.locals.push(untagged_ptr_local(2, "s")); // s = Use(r)
+        func.locals.push(i64_local(3, "v")); // v = s.x  (NON-linear dest)
+        let mut b0 = MirBlock::new(BlockId(0));
+        b0.stmts.push(MirStmt::assign(
+            LocalId(1),
+            MirRValue::Ref {
+                is_mut: false,
+                place: MirPlace::local(LocalId(0)),
+            },
+        ));
+        b0.stmts.push(MirStmt::assign(
+            LocalId(2),
+            MirRValue::Use(MirValue::Local(LocalId(1))),
+        ));
+        // v = s.x  (NON-linear field extract: not flagged)
+        b0.stmts.push(MirStmt::assign(
+            LocalId(3),
+            MirRValue::FieldAccess {
+                base: MirValue::Local(LocalId(2)),
+                field_name: Arc::from("x"),
+                field_ty: MirType::i64(),
+            },
+        ));
+        b0.terminator = Some(MirTerminator::Return(None));
+        func.blocks = Some(vec![b0]);
+
+        let errors = check(&func);
+        assert_eq!(
+            count(&errors, |e| matches!(
+                e,
+                TypeError::LinearMoveOutOfBorrow { .. }
+            )),
+            0,
+            "reading a non-linear field through a shared borrow is the legal case: {errors:?}"
         );
     }
 }
