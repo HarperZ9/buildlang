@@ -29,6 +29,42 @@ use super::backend::CodegenResult;
 use super::builder::{values, MirBuilder, MirModuleBuilder};
 use super::ir::*;
 
+/// One parameter position of an overloaded definition, as seen by codegen's
+/// dispatch resolver. Either a concrete lowered type or a generic type-parameter
+/// slot (`T`), which matches any argument (least specific). Mirrors the checker's
+/// distinction between a concrete `Ty` and a `TyKind::Param` in
+/// `dispatch_position_match` (see `types::infer::dispatch_position_match`); the
+/// two must stay in agreement so both sides pick the same winner.
+#[derive(Debug, Clone)]
+pub(crate) enum ParamSlot {
+    /// A concrete parameter type (ranked by structural match / numeric coercion).
+    Concrete(MirType),
+    /// A generic type-parameter slot; matches any argument as `Generic`.
+    Generic,
+}
+
+/// One candidate definition of an overloaded name in the codegen dispatch
+/// registry. `is_generic` records whether the definition itself is generic (so a
+/// selected generic winner is monomorphized via `lower_generic_call`, not emitted
+/// as a mangled concrete function).
+#[derive(Debug, Clone)]
+pub(crate) struct MultiFnSig {
+    /// Parameter slots in declaration order (concrete or generic).
+    pub(crate) slots: Vec<ParamSlot>,
+    /// Whether this definition has type generics (routes to monomorphization).
+    pub(crate) is_generic: bool,
+}
+
+/// The definition a call site resolves to, once the shared resolver has picked
+/// the unique most-specific candidate among an overloaded name's siblings.
+pub(crate) enum OverloadTarget {
+    /// A concrete definition, emitted under this mangled `name_<param-tuple>`.
+    Concrete(Arc<str>),
+    /// A generic definition; the call must be lowered through
+    /// `lower_generic_call` (monomorphized on demand), not called directly.
+    Generic,
+}
+
 /// AST to MIR lowerer.
 pub struct MirLowerer<'ctx> {
     /// Type context.
@@ -140,6 +176,18 @@ pub struct MirLowerer<'ctx> {
     /// uniformly. Generic/monomorphized linear ADTs are intentionally out of
     /// scope here (deferred to the 2b checker, which sees monomorphized MIR).
     pub(crate) linear_type_names: HashSet<Arc<str>>,
+    /// Multiple-dispatch registry (codegen mirror of the checker's
+    /// `multi_methods`): resolved function name -> a candidate signature per
+    /// definition sharing that name, in declaration order. GENERIC definitions
+    /// are recorded here too (with generic parameter positions marked as
+    /// `ParamSlot::Generic`) so a name that mixes generic and concrete defs is
+    /// counted as overloaded and resolved through the SAME `resolve_overload` the
+    /// checker uses; this is what keeps the checker and codegen in agreement on
+    /// the winner. A name with a single entry keeps its PLAIN C name (backward
+    /// compat + extern "C"/FFI untouched); a name with 2+ entries dispatches by
+    /// the argument-type tuple (concrete winners are emitted under a mangled
+    /// `name_<param-tuple>`, a generic winner is monomorphized).
+    pub(crate) multi_fns: HashMap<Arc<str>, Vec<MultiFnSig>>,
 }
 
 // =============================================================================
@@ -232,6 +280,7 @@ impl<'ctx> MirLowerer<'ctx> {
             fn_option_inner_types: HashMap::new(),
             const_values: HashMap::new(),
             linear_type_names: HashSet::new(),
+            multi_fns: HashMap::new(),
         }
     }
 
@@ -271,6 +320,7 @@ impl<'ctx> MirLowerer<'ctx> {
             fn_option_inner_types: HashMap::new(),
             const_values: HashMap::new(),
             linear_type_names: HashSet::new(),
+            multi_fns: HashMap::new(),
         }
     }
 
@@ -354,6 +404,13 @@ impl<'ctx> MirLowerer<'ctx> {
         // lengths (e.g. `[T; MAX_DIMS]`) resolve during type lowering below.
         for item in &module.items {
             self.collect_const_values(item);
+        }
+
+        // Pre-pass: build the multiple-dispatch registry so the collection and
+        // lowering passes both know which names are overloaded (and mangle
+        // their definitions) while leaving single-def names on their plain name.
+        for item in &module.items {
+            self.collect_multi_fn_signatures(item);
         }
 
         // First pass: collect type definitions and function signatures
@@ -1225,6 +1282,214 @@ impl<'ctx> MirLowerer<'ctx> {
         Ok(())
     }
 
+    /// Pre-pass: build the multiple-dispatch registry (`multi_fns`) before any
+    /// collection or lowering, so both passes agree on which names are
+    /// overloaded and on the mangled name of each definition. Walks inline
+    /// modules with the same prefix tracking used elsewhere, so the recorded
+    /// names match the module-prefixed function names in the MIR module.
+    fn collect_multi_fn_signatures(&mut self, item: &ast::Item) {
+        match &item.kind {
+            ItemKind::Function(f) => {
+                // Record EVERY definition, generic or concrete. Generic defs are
+                // still monomorphized per call site (they are never emitted as a
+                // plain overloaded C symbol), but they must appear in the
+                // registry so a name that mixes a generic and a concrete def is
+                // counted as overloaded and routed through the shared resolver;
+                // otherwise codegen would run the plain generic-call path while
+                // the checker resolved a concrete def -> miscompile.
+                let name = self.prefixed_name(&f.name.name);
+                let sig = self.multi_fn_sig_of(f);
+                self.multi_fns.entry(name).or_default().push(sig);
+            }
+            ItemKind::Mod(m) => {
+                if let Some(ref content) = m.content {
+                    self.module_prefix.push(m.name.name.clone());
+                    for it in &content.items {
+                        self.collect_multi_fn_signatures(it);
+                    }
+                    self.module_prefix.pop();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Build the dispatch signature for one definition: a `ParamSlot` per
+    /// parameter (generic type-parameter positions become `ParamSlot::Generic`,
+    /// everything else `Concrete(lowered_ty)`), plus whether the definition is
+    /// generic overall. A parameter is generic when its type is a bare reference
+    /// to one of the function's own declared type parameters (`fn h<T>(a: T)`);
+    /// this is the codegen counterpart of the checker seeing a `TyKind::Param`.
+    fn multi_fn_sig_of(&self, f: &ast::FnDef) -> MultiFnSig {
+        let type_param_names: Vec<&str> = f
+            .generics
+            .params
+            .iter()
+            .filter_map(|p| match &p.kind {
+                ast::GenericParamKind::Type { .. } => Some(p.ident.name.as_ref()),
+                _ => None,
+            })
+            .collect();
+        let is_type_param = |ty: &ast::Type| -> bool {
+            if let ast::TypeKind::Path(path) = &ty.kind {
+                if path.segments.len() == 1 {
+                    let seg = path.segments[0].ident.name.as_ref();
+                    return type_param_names.contains(&seg);
+                }
+            }
+            false
+        };
+        let slots: Vec<ParamSlot> = f
+            .sig
+            .params
+            .iter()
+            .map(|p| {
+                if is_type_param(&p.ty) {
+                    ParamSlot::Generic
+                } else {
+                    ParamSlot::Concrete(self.lower_type_from_ast(&p.ty))
+                }
+            })
+            .collect();
+        MultiFnSig {
+            slots,
+            is_generic: !type_param_names.is_empty(),
+        }
+    }
+
+    /// The C name a function definition is emitted under. For an overloaded
+    /// name this is the mangled `name_<param-tuple>`; otherwise it is the
+    /// function's own (already module-prefixed) name, unchanged. Called at both
+    /// the forward-declaration and body-lowering sites so the two agree.
+    ///
+    /// Note: `f.name.name` is already the resolved (module-prefixed) name by the
+    /// time collection/lowering runs (see `rewrite_item_with_prefix`), which is
+    /// exactly the key used in `multi_fns`.
+    pub(crate) fn emitted_fn_name(&self, f: &ast::FnDef) -> Arc<str> {
+        if self.is_overloaded_fn(f.name.name.as_ref()) {
+            let param_tys: Vec<MirType> = f
+                .sig
+                .params
+                .iter()
+                .map(|p| self.lower_type_from_ast(&p.ty))
+                .collect();
+            Self::mangle_multi_fn_name(f.name.name.as_ref(), &param_tys)
+        } else {
+            f.name.name.clone()
+        }
+    }
+
+    /// Whether `resolved_name` has two or more definitions (is overloaded).
+    pub(crate) fn is_overloaded_fn(&self, resolved_name: &str) -> bool {
+        self.multi_fns
+            .get(resolved_name)
+            .map(|v| v.len() >= 2)
+            .unwrap_or(false)
+    }
+
+    /// Mangled C name for the definition of `resolved_name` whose parameter
+    /// tuple is `param_tys`. Only meaningful for overloaded names; single-def
+    /// names keep their plain name. Deterministic: `name_<ty0>_<ty1>...`.
+    pub(crate) fn mangle_multi_fn_name(resolved_name: &str, param_tys: &[MirType]) -> Arc<str> {
+        let mut parts = vec![resolved_name.to_string()];
+        for ty in param_tys {
+            parts.push(Self::mangle_type(ty));
+        }
+        Arc::from(parts.join("_"))
+    }
+
+    /// If `resolved_name` is overloaded, resolve the call's selected definition
+    /// from the lowered argument types (running the SAME `resolve_overload` the
+    /// type checker used) and return the target to emit: a concrete mangled name
+    /// or a signal to monomorphize the selected generic definition. Returns
+    /// `None` for non-overloaded names (they keep their plain name) or when
+    /// resolution fails (the checker already reported the error; fall back to the
+    /// plain / generic path to avoid a second cascading failure).
+    ///
+    /// This resolver and the checker's `try_infer_multi_dispatch` both feed the
+    /// SAME `resolve_overload` with a matching per-position specificity function
+    /// (`mir_position_match` here, `dispatch_position_match` there). Keeping the
+    /// two match functions in sync is what guarantees checker and codegen select
+    /// the same winner for the generic+concrete case; see the note on
+    /// `mir_position_match`.
+    pub(crate) fn resolve_overloaded_call_name(
+        &self,
+        resolved_name: &str,
+        arg_tys: &[MirType],
+    ) -> Option<OverloadTarget> {
+        let candidates = self.multi_fns.get(resolved_name)?;
+        if candidates.len() < 2 {
+            return None;
+        }
+
+        struct Cand<'a>(&'a [ParamSlot]);
+        impl crate::types::DispatchCandidate for Cand<'_> {
+            fn arity(&self) -> usize {
+                self.0.len()
+            }
+        }
+        let views: Vec<Cand<'_>> = candidates.iter().map(|c| Cand(&c.slots)).collect();
+
+        let selected = crate::types::resolve_overload(&views, arg_tys.len(), |ci, pos| {
+            Self::mir_position_match(&candidates[ci].slots[pos], &arg_tys[pos])
+        })
+        .ok()?;
+
+        let winner = &candidates[selected];
+        if winner.is_generic {
+            // A generic winner is not a plain C symbol; the caller lowers it
+            // through `lower_generic_call`, which monomorphizes on demand.
+            return Some(OverloadTarget::Generic);
+        }
+        // A concrete winner is emitted under its mangled per-signature name. All
+        // slots of a concrete def are `Concrete(..)`, so this is well-defined.
+        let param_tys: Vec<MirType> = winner
+            .slots
+            .iter()
+            .map(|s| match s {
+                ParamSlot::Concrete(t) => t.clone(),
+                // Unreachable for a non-generic def, but degrade safely.
+                ParamSlot::Generic => MirType::i32(),
+            })
+            .collect();
+        Some(OverloadTarget::Concrete(Self::mangle_multi_fn_name(
+            resolved_name,
+            &param_tys,
+        )))
+    }
+
+    /// Codegen-side specificity match for one position. Mirrors the checker's
+    /// `dispatch_position_match` (`types::infer`) so both sides pick the same
+    /// method; the two are hand-maintained copies over different type
+    /// representations (`ParamSlot`/`MirType` here vs `Ty` there) and MUST agree
+    /// on the ordering, or checker and codegen diverge on the winner.
+    ///
+    /// - A generic slot matches any argument as `Generic` (least specific).
+    /// - A concrete param equal to the arg is `Exact`.
+    /// - Int/float args coerce to a matching numeric param (`Coercion`), matching
+    ///   the checker's literal-defaulting rule (`add(3,5)` -> i32, `add(3.0)`
+    ///   -> f64).
+    /// - Otherwise `None` (the concrete parameter rules the candidate out).
+    fn mir_position_match(param: &ParamSlot, arg: &MirType) -> Option<crate::types::PositionMatch> {
+        use crate::types::PositionMatch;
+        let param = match param {
+            ParamSlot::Generic => return Some(PositionMatch::Generic),
+            ParamSlot::Concrete(t) => t,
+        };
+        if param == arg {
+            return Some(PositionMatch::Exact);
+        }
+        // Integer-literal args default to i32 in `infer_single_arg_type`; treat
+        // any integer arg as coercible to any integer param, and likewise for
+        // floats, so `add(3,5)` selects the i32 overload while `add(3.0,5.0)`
+        // selects the f64 one (matching the checker's literal-defaulting rule).
+        match (param, arg) {
+            (MirType::Int(..), MirType::Int(..)) => Some(PositionMatch::Coercion),
+            (MirType::Float(..), MirType::Float(..)) => Some(PositionMatch::Coercion),
+            _ => None,
+        }
+    }
+
     fn collect_function(&mut self, f: &ast::FnDef) -> CodegenResult<()> {
         // If the function has generic type parameters, store it for later
         // monomorphization instead of lowering it immediately.
@@ -1238,6 +1503,9 @@ impl<'ctx> MirLowerer<'ctx> {
         // can find the function's return type even before its body is lowered.
         // Skip `main` since its return type is special-cased during lowering.
         if f.name.name.as_ref() != "main" {
+            // Overloaded definitions are emitted under a mangled, per-signature
+            // name; single-def names keep their plain name (backward compat).
+            let emitted = self.emitted_fn_name(f);
             let params: Vec<MirType> = f
                 .sig
                 .params
@@ -1251,23 +1519,22 @@ impl<'ctx> MirLowerer<'ctx> {
                 .map(|t| self.lower_type_from_ast(t))
                 .unwrap_or(MirType::Void);
             let sig = MirFnSig::new(params, ret);
-            self.module.declare_function(f.name.name.clone(), sig);
+            self.module.declare_function(emitted.clone(), sig);
 
             // Capture the Ok payload type for `-> Result<Ok, Err>` returns so a
             // `match call() { Ok(x) => ... }` on a direct call can read the
             // correct union slot without an intervening let annotation.
             if let Some(ref ret_ty) = f.sig.return_ty {
                 if let Some(ok_ty) = self.result_ok_inner_from_ast(ret_ty) {
-                    self.fn_result_ok_types.insert(f.name.name.clone(), ok_ty);
+                    self.fn_result_ok_types.insert(emitted.clone(), ok_ty);
                 }
                 if let Some(err_ty) = self.result_err_inner_from_ast(ret_ty) {
-                    self.fn_result_err_types.insert(f.name.name.clone(), err_ty);
+                    self.fn_result_err_types.insert(emitted.clone(), err_ty);
                 }
                 // Same threading for `-> Option<T>` so a direct-call Some match
                 // reads the correct slot (symmetric to the Result Ok case).
                 if let Some(inner_ty) = self.option_inner_from_ast(ret_ty) {
-                    self.fn_option_inner_types
-                        .insert(f.name.name.clone(), inner_ty);
+                    self.fn_option_inner_types.insert(emitted.clone(), inner_ty);
                 }
             }
         }
@@ -1675,6 +1942,9 @@ impl<'ctx> MirLowerer<'ctx> {
 
         let is_main = f.name.name.as_ref() == "main";
         let has_shader_stage = Self::extract_shader_stage(attrs).is_some();
+        // Overloaded definitions are emitted under a mangled per-signature name;
+        // single-def names keep their plain name (backward compat / FFI).
+        let emitted_name = self.emitted_fn_name(f);
 
         let ret = if is_main && f.sig.return_ty.is_none() && !has_shader_stage {
             // C requires main to return int (but not shader main)
@@ -1704,7 +1974,7 @@ impl<'ctx> MirLowerer<'ctx> {
 
             // Create function builder
             let mut builder = MirBuilder::with_linear_type_names(
-                f.name.name.clone(),
+                emitted_name.clone(),
                 sig,
                 Arc::new(self.linear_type_names.clone()),
             );

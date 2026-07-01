@@ -590,24 +590,42 @@ impl<'ctx> MirLowerer<'ctx> {
 
     /// Map a MirType to the BuildLang source-level type name used for AST
     /// substitution (e.g. MirType::i32() -> "i32", MirType::f64() -> "f64").
-    fn mir_type_to_build_name(ty: &MirType) -> &'static str {
+    ///
+    /// Struct types must map back to a source name that `lower_type_path`
+    /// re-lowers to the SAME MirType, so a monomorphized generic parameter keeps
+    /// its real type. In particular `Struct("BuildString")` maps to `str` (the
+    /// source spelling `lower_type_path` turns back into `BuildString`); without
+    /// this, a generic instantiated with a string arg (`fn h<T>(a: T)` called as
+    /// `h("x")`) collapsed to the `i32` fallback and emitted an `int32_t`
+    /// parameter under a `_BuildString` mangled name -> invalid C.
+    fn mir_type_to_build_name(ty: &MirType) -> String {
         match ty {
-            MirType::Bool => "bool",
-            MirType::Int(IntSize::I8, true) => "i8",
-            MirType::Int(IntSize::I16, true) => "i16",
-            MirType::Int(IntSize::I32, true) => "i32",
-            MirType::Int(IntSize::I64, true) => "i64",
-            MirType::Int(IntSize::I128, true) => "i128",
-            MirType::Int(IntSize::ISize, true) => "isize",
-            MirType::Int(IntSize::I8, false) => "u8",
-            MirType::Int(IntSize::I16, false) => "u16",
-            MirType::Int(IntSize::I32, false) => "u32",
-            MirType::Int(IntSize::I64, false) => "u64",
-            MirType::Int(IntSize::I128, false) => "u128",
-            MirType::Int(IntSize::ISize, false) => "usize",
-            MirType::Float(FloatSize::F32) => "f32",
-            MirType::Float(FloatSize::F64) => "f64",
-            _ => "i32", // Fallback for complex types
+            MirType::Bool => "bool".to_string(),
+            MirType::Int(IntSize::I8, true) => "i8".to_string(),
+            MirType::Int(IntSize::I16, true) => "i16".to_string(),
+            MirType::Int(IntSize::I32, true) => "i32".to_string(),
+            MirType::Int(IntSize::I64, true) => "i64".to_string(),
+            MirType::Int(IntSize::I128, true) => "i128".to_string(),
+            MirType::Int(IntSize::ISize, true) => "isize".to_string(),
+            MirType::Int(IntSize::I8, false) => "u8".to_string(),
+            MirType::Int(IntSize::I16, false) => "u16".to_string(),
+            MirType::Int(IntSize::I32, false) => "u32".to_string(),
+            MirType::Int(IntSize::I64, false) => "u64".to_string(),
+            MirType::Int(IntSize::I128, false) => "u128".to_string(),
+            MirType::Int(IntSize::ISize, false) => "usize".to_string(),
+            MirType::Float(FloatSize::F32) => "f32".to_string(),
+            MirType::Float(FloatSize::F64) => "f64".to_string(),
+            // A struct type substitutes back to a source name that re-lowers to
+            // the same struct. `BuildString` is spelled `str` in source; every
+            // other struct keeps its own name (already the emitted C type name).
+            MirType::Struct(name) => {
+                if name.as_ref() == "BuildString" {
+                    "str".to_string()
+                } else {
+                    name.to_string()
+                }
+            }
+            _ => "i32".to_string(), // Fallback for complex types (ptr/slice/vec/...)
         }
     }
 

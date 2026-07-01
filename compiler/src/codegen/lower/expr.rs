@@ -16,7 +16,7 @@ use crate::codegen::builder::values;
 use crate::codegen::ir::*;
 use crate::codegen::runtime;
 
-use super::MirLowerer;
+use super::{MirLowerer, OverloadTarget};
 
 impl<'ctx> MirLowerer<'ctx> {
     // =========================================================================
@@ -1291,8 +1291,63 @@ impl<'ctx> MirLowerer<'ctx> {
             }
         }
 
+        // Multiple dispatch FIRST: a name with 2+ definitions (generic and/or
+        // concrete) is resolved by the argument-type tuple through the SAME
+        // resolver the type checker used. This MUST run before the plain
+        // generic-call path below: a name that mixes a generic def and a
+        // concrete def is overloaded, and the checker may pick EITHER sibling
+        // (concrete-beats-generic when it fits, generic otherwise). Running the
+        // generic path first would always monomorphize the generic def and
+        // ignore the concrete winner -> checker/codegen divergence (miscompile).
+        // - Concrete winner: emit a direct call to its mangled name.
+        // - Generic winner: fall through to `lower_generic_call` (monomorphized).
+        if let Some(callee_name) = self.extract_call_name(func) {
+            let resolved = self.resolve_fn_name(callee_name);
+            if self.is_overloaded_fn(resolved.as_ref()) {
+                let arg_tys: Vec<MirType> =
+                    args.iter().map(|a| self.infer_single_arg_type(a)).collect();
+                match self.resolve_overloaded_call_name(resolved.as_ref(), &arg_tys) {
+                    Some(OverloadTarget::Concrete(mangled)) => {
+                        let ret_ty = self
+                            .module
+                            .find_function(mangled.as_ref())
+                            .map(|f| f.sig.ret.clone())
+                            .unwrap_or(MirType::i32());
+                        let arg_vals: Vec<_> = args
+                            .iter()
+                            .map(|a| self.lower_expr(a))
+                            .collect::<CodegenResult<_>>()?;
+                        let builder = self.current_fn.as_mut().ok_or_else(|| {
+                            CodegenError::Internal("No current function".to_string())
+                        })?;
+                        let cont = builder.create_block();
+                        if matches!(ret_ty, MirType::Void) {
+                            builder.call(MirValue::Function(mangled), arg_vals, None, cont);
+                            builder.switch_to_block(cont);
+                            return Ok(values::unit());
+                        } else {
+                            let result = builder.create_local(ret_ty);
+                            builder.call(MirValue::Function(mangled), arg_vals, Some(result), cont);
+                            builder.switch_to_block(cont);
+                            return Ok(values::local(result));
+                        }
+                    }
+                    Some(OverloadTarget::Generic) => {
+                        // The selected sibling is the generic def; monomorphize it
+                        // on demand via the shared generic-call path.
+                        return self.lower_generic_call(func, args);
+                    }
+                    // Resolution failed (checker already reported it): fall through
+                    // to the generic / normal path to avoid a cascading error.
+                    None => {}
+                }
+            }
+        }
+
         // Check for generic function call - monomorphize if needed.
-        // Inside inline modules, also check the prefixed name.
+        // Inside inline modules, also check the prefixed name. This handles
+        // generic-ONLY names (no concrete sibling); overloaded names that select
+        // the generic def already routed here via the multi-dispatch block above.
         if let Some(fn_name) = self.extract_call_name(func) {
             let resolved = self.resolve_fn_name(fn_name);
             if self.generic_functions.contains_key(fn_name)
