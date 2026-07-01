@@ -6839,8 +6839,15 @@ fn resolve_modules_with_prefix(
                     // Rewrite intra-module calls in the function body:
                     // if this function calls `helper()` and `helper` is defined
                     // in the same module, rewrite to `math_helpers_helper()`.
+                    // Seed the shadow scope with this function's parameter names
+                    // first so a parameter shadowing a sibling module function is
+                    // not rewritten.
+                    let mut param_names = HashSet::new();
+                    for p in &prefixed_fn.sig.params {
+                        collect_pattern_names(&p.pattern, &mut param_names);
+                    }
                     if let Some(ref mut body) = prefixed_fn.body {
-                        rewrite_intra_module_calls(body, &mod_defined, &full_prefix);
+                        rewrite_intra_module_calls(body, &mod_defined, &full_prefix, param_names);
                     }
                     new_items.push(ast::Item::new(
                         ItemKind::Function(Box::new(prefixed_fn)),
@@ -6887,8 +6894,12 @@ fn resolve_modules_with_prefix(
     if !imported_fns.is_empty() {
         for item in &mut ast.items {
             if let ItemKind::Function(f) = &mut item.kind {
+                let mut param_names = HashSet::new();
+                for p in &f.sig.params {
+                    collect_pattern_names(&p.pattern, &mut param_names);
+                }
                 if let Some(ref mut body) = f.body {
-                    rewrite_imported_calls(body, &imported_fns);
+                    rewrite_imported_calls(body, &imported_fns, param_names);
                 }
             }
         }
@@ -6897,9 +6908,109 @@ fn resolve_modules_with_prefix(
     Ok(())
 }
 
-/// Rewrite calls to module-local functions within a function body.
-fn rewrite_intra_module_calls(body: &mut ast::Block, mod_defined: &HashSet<String>, prefix: &str) {
-    walk_calls_in_block(body, &mut |ident: &mut ast::Ident| {
+/// Names bound by a pattern (function params, `let`, closure params, loop and
+/// match patterns). Used by the module-call rewriter to detect when a callee
+/// identifier is actually a shadowing local/parameter rather than a free
+/// reference to a module function. Over-collecting is the safe direction (it
+/// only ever suppresses a rewrite, turning a would-be silent miscompile into
+/// either correct resolution or a loud name error); under-collecting is the
+/// dangerous direction, so every binding pattern kind is covered.
+fn collect_pattern_names(pat: &ast::Pattern, out: &mut HashSet<Arc<str>>) {
+    use ast::PatternKind as P;
+    match &pat.kind {
+        P::Ident {
+            name, subpattern, ..
+        } => {
+            out.insert(name.name.clone());
+            if let Some(sub) = subpattern {
+                collect_pattern_names(sub, out);
+            }
+        }
+        P::Tuple(pats) | P::Slice(pats) | P::Or(pats) => {
+            for p in pats {
+                collect_pattern_names(p, out);
+            }
+        }
+        P::TupleStruct { patterns, .. } => {
+            for p in patterns {
+                collect_pattern_names(p, out);
+            }
+        }
+        P::Struct { fields, .. } => {
+            for f in fields {
+                collect_pattern_names(&f.pattern, out);
+            }
+        }
+        P::Ref { pattern, .. } | P::Box(pattern) | P::Paren(pattern) => {
+            collect_pattern_names(pattern, out);
+        }
+        P::Wildcard
+        | P::Rest
+        | P::Literal(_)
+        | P::Path(_)
+        | P::Range { .. }
+        | P::Macro { .. }
+        | P::Error => {}
+    }
+}
+
+/// A lexical shadow tracker for the module-call rewriter: a stack of scope
+/// frames, each holding the names bound in that scope. A callee identifier that
+/// is bound in ANY live frame is a local/parameter shadowing a module function
+/// of the same name, so it must NOT be prefix-rewritten. Without this, the
+/// rewriter renamed a call purely by name-set membership and silently
+/// retargeted a fn-pointer parameter (e.g. `fn run(square: fn(i32)->i32) {
+/// square(x) }`) to a same-named module function -- a wrong-callee miscompile.
+#[derive(Default)]
+struct ShadowScope {
+    frames: Vec<HashSet<Arc<str>>>,
+}
+
+impl ShadowScope {
+    fn push(&mut self, names: HashSet<Arc<str>>) {
+        self.frames.push(names);
+    }
+
+    fn push_empty(&mut self) {
+        self.frames.push(HashSet::new());
+    }
+
+    fn pop(&mut self) {
+        self.frames.pop();
+    }
+
+    /// Add a name to the current (innermost) frame, e.g. for a `let` binding as
+    /// the walk passes it.
+    fn bind(&mut self, name: Arc<str>) {
+        if let Some(top) = self.frames.last_mut() {
+            top.insert(name);
+        }
+    }
+
+    fn is_bound(&self, name: &str) -> bool {
+        self.frames.iter().any(|frame| frame.contains(name))
+    }
+}
+
+/// Collect the names a pattern binds into a fresh scope frame.
+fn scope_frame_for_pattern(pat: &ast::Pattern) -> HashSet<Arc<str>> {
+    let mut names = HashSet::new();
+    collect_pattern_names(pat, &mut names);
+    names
+}
+
+/// Rewrite calls to module-local functions within a function body. `param_names`
+/// seeds the shadow scope with the function's parameter names so a parameter
+/// that shadows a sibling module function is left as the parameter reference.
+fn rewrite_intra_module_calls(
+    body: &mut ast::Block,
+    mod_defined: &HashSet<String>,
+    prefix: &str,
+    param_names: HashSet<Arc<str>>,
+) {
+    let mut scope = ShadowScope::default();
+    scope.push(param_names);
+    walk_calls_in_block(body, &mut scope, &mut |ident: &mut ast::Ident| {
         if mod_defined.contains(ident.name.as_ref()) {
             ident.name = Arc::from(format!("{}_{}", prefix, ident.name));
         }
@@ -6907,61 +7018,90 @@ fn rewrite_intra_module_calls(body: &mut ast::Block, mod_defined: &HashSet<Strin
 }
 
 /// Walk EVERY call expression reachable from a block and apply `rename` to each
-/// call's callee identifier. This is the single, EXHAUSTIVE structural walk
-/// shared by both intra-module prefixing and main-program imported-call
-/// rewriting. Using one exhaustive walker (rather than two ad-hoc walkers that
-/// each descended into only a handful of contexts and drifted apart) is what
-/// fixes bare module calls failing to resolve inside loop bodies, match arms,
-/// method-call arguments, and other previously un-walked contexts. The match is
-/// exhaustive on purpose: a new `ExprKind` variant forces this walker to be
-/// updated instead of silently regressing. NOTE: calls inside a `macro!(...)`
-/// invocation's argument tokens are NOT rewritten - macro args are unstructured
-/// tokens, so `println!("{}", vec_dot(a, b))` still needs the let-bind idiom.
-fn walk_calls_in_block(block: &mut ast::Block, rename: &mut dyn FnMut(&mut ast::Ident)) {
+/// call's callee identifier that is NOT shadowed by a local/parameter binding.
+/// This is the single, EXHAUSTIVE structural walk shared by both intra-module
+/// prefixing and main-program imported-call rewriting. Using one exhaustive
+/// walker (rather than two ad-hoc walkers that each descended into only a
+/// handful of contexts and drifted apart) is what fixes bare module calls
+/// failing to resolve inside loop bodies, match arms, method-call arguments,
+/// and other previously un-walked contexts. The match is exhaustive on purpose:
+/// a new `ExprKind` variant forces this walker to be updated instead of
+/// silently regressing.
+///
+/// `scope` tracks the lexical bindings in force at each call site (function
+/// params, `let`, closure params, and loop/match patterns), so a callee that
+/// names a parameter or local is never mistaken for a free module-function
+/// reference and mis-rewritten. NOTE: calls inside a `macro!(...)` invocation's
+/// argument tokens are NOT rewritten - macro args are unstructured tokens, so
+/// `println!("{}", vec_dot(a, b))` still needs the let-bind idiom.
+fn walk_calls_in_block(
+    block: &mut ast::Block,
+    scope: &mut ShadowScope,
+    rename: &mut dyn FnMut(&mut ast::Ident),
+) {
+    scope.push_empty();
     for stmt in &mut block.stmts {
         match &mut stmt.kind {
             ast::StmtKind::Expr(expr) | ast::StmtKind::Semi(expr) => {
-                walk_calls_in_expr(expr, rename);
+                walk_calls_in_expr(expr, scope, rename);
             }
             ast::StmtKind::Local(local) => {
+                // The RHS is evaluated in the OUTER scope (the binding is not yet
+                // in force), so walk it before binding the pattern's names.
                 if let Some(ref mut init) = local.init {
-                    walk_calls_in_expr(&mut init.expr, rename);
+                    walk_calls_in_expr(&mut init.expr, scope, rename);
+                }
+                let mut names = HashSet::new();
+                collect_pattern_names(&local.pattern, &mut names);
+                for n in names {
+                    scope.bind(n);
                 }
             }
             ast::StmtKind::Item(_) | ast::StmtKind::Empty | ast::StmtKind::Macro { .. } => {}
         }
     }
+    scope.pop();
 }
 
-fn walk_calls_in_expr(expr: &mut ast::Expr, rename: &mut dyn FnMut(&mut ast::Ident)) {
+fn walk_calls_in_expr(
+    expr: &mut ast::Expr,
+    scope: &mut ShadowScope,
+    rename: &mut dyn FnMut(&mut ast::Ident),
+) {
     use ast::ExprKind as E;
     match &mut expr.kind {
         E::Call { func, args } => {
             if let E::Ident(ref mut ident) = func.kind {
-                rename(ident);
+                // Only rewrite a free reference to a module function. A callee
+                // that names a bound local/parameter shadows the module function
+                // and must be left alone (else a fn-pointer param call silently
+                // retargets to the module function).
+                if !scope.is_bound(ident.name.as_ref()) {
+                    rename(ident);
+                }
             }
-            walk_calls_in_expr(func, rename);
+            walk_calls_in_expr(func, scope, rename);
             for arg in args {
-                walk_calls_in_expr(arg, rename);
+                walk_calls_in_expr(arg, scope, rename);
             }
         }
         E::MethodCall { receiver, args, .. } => {
-            walk_calls_in_expr(receiver, rename);
+            walk_calls_in_expr(receiver, scope, rename);
             for arg in args {
-                walk_calls_in_expr(arg, rename);
+                walk_calls_in_expr(arg, scope, rename);
             }
         }
         E::Binary { left, right, .. } => {
-            walk_calls_in_expr(left, rename);
-            walk_calls_in_expr(right, rename);
+            walk_calls_in_expr(left, scope, rename);
+            walk_calls_in_expr(right, scope, rename);
         }
         E::Assign { target, value, .. } => {
-            walk_calls_in_expr(target, rename);
-            walk_calls_in_expr(value, rename);
+            walk_calls_in_expr(target, scope, rename);
+            walk_calls_in_expr(value, scope, rename);
         }
         E::Index { expr: e, index } => {
-            walk_calls_in_expr(e, rename);
-            walk_calls_in_expr(index, rename);
+            walk_calls_in_expr(e, scope, rename);
+            walk_calls_in_expr(index, scope, rename);
         }
         E::Unary { expr: e, .. }
         | E::Deref(e)
@@ -6973,27 +7113,36 @@ fn walk_calls_in_expr(expr: &mut ast::Expr, rename: &mut dyn FnMut(&mut ast::Ide
         | E::AIInfer { expr: e, .. }
         | E::Try(e)
         | E::Await(e)
-        | E::Paren(e)
-        | E::Closure { body: e, .. } => {
-            walk_calls_in_expr(e, rename);
+        | E::Paren(e) => {
+            walk_calls_in_expr(e, scope, rename);
+        }
+        E::Closure { params, body, .. } => {
+            // Closure parameters shadow within the closure body only.
+            let mut names = HashSet::new();
+            for p in params {
+                collect_pattern_names(&p.pattern, &mut names);
+            }
+            scope.push(names);
+            walk_calls_in_expr(body, scope, rename);
+            scope.pop();
         }
         E::Array(items) | E::Tuple(items) => {
             for it in items {
-                walk_calls_in_expr(it, rename);
+                walk_calls_in_expr(it, scope, rename);
             }
         }
         E::ArrayRepeat { element, count } => {
-            walk_calls_in_expr(element, rename);
-            walk_calls_in_expr(count, rename);
+            walk_calls_in_expr(element, scope, rename);
+            walk_calls_in_expr(count, scope, rename);
         }
         E::Struct { fields, rest, .. } => {
             for f in fields {
                 if let Some(ref mut v) = f.value {
-                    walk_calls_in_expr(v, rename);
+                    walk_calls_in_expr(v, scope, rename);
                 }
             }
             if let Some(ref mut r) = rest {
-                walk_calls_in_expr(r, rename);
+                walk_calls_in_expr(r, scope, rename);
             }
         }
         E::If {
@@ -7001,86 +7150,113 @@ fn walk_calls_in_expr(expr: &mut ast::Expr, rename: &mut dyn FnMut(&mut ast::Ide
             then_branch,
             else_branch,
         } => {
-            walk_calls_in_expr(condition, rename);
-            walk_calls_in_block(then_branch, rename);
+            walk_calls_in_expr(condition, scope, rename);
+            walk_calls_in_block(then_branch, scope, rename);
             if let Some(ref mut eb) = else_branch {
-                walk_calls_in_expr(eb, rename);
+                walk_calls_in_expr(eb, scope, rename);
             }
         }
         E::IfLet {
+            pattern,
             expr: e,
             then_branch,
             else_branch,
-            ..
         } => {
-            walk_calls_in_expr(e, rename);
-            walk_calls_in_block(then_branch, rename);
+            walk_calls_in_expr(e, scope, rename);
+            // Pattern bindings are in force only in the `then` branch.
+            scope.push(scope_frame_for_pattern(pattern));
+            walk_calls_in_block(then_branch, scope, rename);
+            scope.pop();
             if let Some(ref mut eb) = else_branch {
-                walk_calls_in_expr(eb, rename);
+                walk_calls_in_expr(eb, scope, rename);
             }
         }
         E::Match { scrutinee, arms } => {
-            walk_calls_in_expr(scrutinee, rename);
+            walk_calls_in_expr(scrutinee, scope, rename);
             for arm in arms {
+                // Arm-pattern bindings are in force in the guard and body.
+                scope.push(scope_frame_for_pattern(&arm.pattern));
                 if let Some(ref mut g) = arm.guard {
-                    walk_calls_in_expr(g, rename);
+                    walk_calls_in_expr(g, scope, rename);
                 }
-                walk_calls_in_expr(&mut arm.body, rename);
+                walk_calls_in_expr(&mut arm.body, scope, rename);
+                scope.pop();
             }
         }
         E::While {
             condition, body, ..
         } => {
-            walk_calls_in_expr(condition, rename);
-            walk_calls_in_block(body, rename);
+            walk_calls_in_expr(condition, scope, rename);
+            walk_calls_in_block(body, scope, rename);
         }
-        E::WhileLet { expr: e, body, .. } => {
-            walk_calls_in_expr(e, rename);
-            walk_calls_in_block(body, rename);
+        E::WhileLet {
+            pattern,
+            expr: e,
+            body,
+            ..
+        } => {
+            walk_calls_in_expr(e, scope, rename);
+            scope.push(scope_frame_for_pattern(pattern));
+            walk_calls_in_block(body, scope, rename);
+            scope.pop();
         }
-        E::For { iter, body, .. } => {
-            walk_calls_in_expr(iter, rename);
-            walk_calls_in_block(body, rename);
+        E::For {
+            pattern,
+            iter,
+            body,
+            ..
+        } => {
+            walk_calls_in_expr(iter, scope, rename);
+            scope.push(scope_frame_for_pattern(pattern));
+            walk_calls_in_block(body, scope, rename);
+            scope.pop();
         }
         E::Loop { body, .. } | E::Unsafe(body) | E::Async { body, .. } => {
-            walk_calls_in_block(body, rename);
+            walk_calls_in_block(body, scope, rename);
         }
         E::Handle { handlers, body, .. } => {
             for h in handlers {
-                walk_calls_in_expr(&mut h.body, rename);
+                // Handler operation params shadow within that handler body.
+                let mut names = HashSet::new();
+                for p in &h.params {
+                    collect_pattern_names(&p.pattern, &mut names);
+                }
+                scope.push(names);
+                walk_calls_in_expr(&mut h.body, scope, rename);
+                scope.pop();
             }
-            walk_calls_in_block(body, rename);
+            walk_calls_in_block(body, scope, rename);
         }
         E::Block(block) => {
-            walk_calls_in_block(block, rename);
+            walk_calls_in_block(block, scope, rename);
         }
         E::Return(opt) | E::Resume(opt) => {
             if let Some(ref mut e) = opt {
-                walk_calls_in_expr(e, rename);
+                walk_calls_in_expr(e, scope, rename);
             }
         }
         E::Break { value, .. } => {
             if let Some(ref mut e) = value {
-                walk_calls_in_expr(e, rename);
+                walk_calls_in_expr(e, scope, rename);
             }
         }
         E::Range { start, end, .. } => {
             if let Some(ref mut s) = start {
-                walk_calls_in_expr(s, rename);
+                walk_calls_in_expr(s, scope, rename);
             }
             if let Some(ref mut en) = end {
-                walk_calls_in_expr(en, rename);
+                walk_calls_in_expr(en, scope, rename);
             }
         }
         E::AIQuery { prompt, options } => {
-            walk_calls_in_expr(prompt, rename);
+            walk_calls_in_expr(prompt, scope, rename);
             for (_, e) in options {
-                walk_calls_in_expr(e, rename);
+                walk_calls_in_expr(e, scope, rename);
             }
         }
         E::Perform { args, .. } => {
             for arg in args {
-                walk_calls_in_expr(arg, rename);
+                walk_calls_in_expr(arg, scope, rename);
             }
         }
         // Leaves and un-rewritable contexts: identifiers/paths/literals hold no
@@ -7097,8 +7273,16 @@ fn walk_calls_in_expr(expr: &mut ast::Expr, rename: &mut dyn FnMut(&mut ast::Ide
 
 /// Rewrite bare function calls in the main program to use module-prefixed names.
 /// E.g., `i32_min(a, b)` → `core_i32_min(a, b)` when `core.bld` defines `i32_min`.
-fn rewrite_imported_calls(body: &mut ast::Block, imported: &HashMap<String, String>) {
-    walk_calls_in_block(body, &mut |ident: &mut ast::Ident| {
+/// `param_names` seeds the shadow scope so a fn-pointer parameter that shadows an
+/// imported function name stays a reference to the parameter.
+fn rewrite_imported_calls(
+    body: &mut ast::Block,
+    imported: &HashMap<String, String>,
+    param_names: HashSet<Arc<str>>,
+) {
+    let mut scope = ShadowScope::default();
+    scope.push(param_names);
+    walk_calls_in_block(body, &mut scope, &mut |ident: &mut ast::Ident| {
         if let Some(prefixed) = imported.get(ident.name.as_ref()) {
             ident.name = Arc::from(prefixed.as_str());
         }

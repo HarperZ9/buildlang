@@ -12977,6 +12977,45 @@ fn imported_module_fn_resolves_inside_loop_body() {
     );
 }
 
+/// Regression: the module-call rewriter must be scope-aware. A fn-pointer
+/// PARAMETER named identically to an imported module function, called inside a
+/// loop body, must resolve to the PARAMETER -- not be silently rewritten to the
+/// module function (a wrong-callee miscompile). Here `square` is a fn-pointer
+/// param bound to `triple`; the module `helper` also exports `square`. Applying
+/// the param twice to 2 gives triple(triple(2)) = 18; the pre-fix bug rewrote
+/// `square(acc)` to `helper_square(acc)` and produced 16.
+#[test]
+fn shadowing_fn_pointer_param_is_not_rewritten_to_module_fn() {
+    if !c_backend_ready() {
+        eprintln!("skipping shadow-rewrite e2e: no C backend available");
+        return;
+    }
+    let dir = std::env::temp_dir().join("buildlang_shadow_fn_ptr_param");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    std::fs::write(
+        dir.join("helper.bld"),
+        "pub fn square(x: i32) -> i32 { x * x }\n",
+    )
+    .expect("write helper.bld");
+    let main_path = dir.join("main.bld");
+    std::fs::write(
+        &main_path,
+        "mod helper;\n\
+         fn triple(x: i32) -> i32 { x + x + x }\n\
+         fn run(square: fn(i32) -> i32, x: i32) -> i32 {\n    \
+         let mut acc = x;\n    let mut i = 0;\n    \
+         while i < 2 {\n        acc = square(acc);\n        i = i + 1;\n    }\n    \
+         acc\n}\n\
+         fn main() ~ Console {\n    println(\"{}\", run(triple, 2));\n}\n",
+    )
+    .expect("write main.bld");
+    let result = c_backend_run(&main_path);
+    assert_eq!(
+        result.stdout, "18\n",
+        "a fn-pointer parameter shadowing an imported fn must call the parameter, not the module fn"
+    );
+}
+
 /// I4 (review FIX A): broadcasting arrays whose element type is NOT numeric is a
 /// compile-time type error. Broadcasting is defined only for integer/float
 /// elements; `["a", "b"] .+ ["c", "d"]` (string elements) must be REJECTED by
