@@ -13689,3 +13689,176 @@ fn run_emit_receipt_to_file_still_echoes_program_stdout() {
     assert_eq!(receipt["receipt_status"], "PASS");
     assert_eq!(receipt["seal"]["hex"].as_str().map(str::len), Some(64));
 }
+
+// =============================================================================
+// SCIENTIFIC-RUNTIME RECEIPT VERIFY (T3): re-run + re-check round trip
+// =============================================================================
+
+/// Copy the stable heat-equation kernel into a fresh temp dir so a test can
+/// tamper the source file without disturbing the shared example. Returns the
+/// temp dir and the copied `.bld` path.
+fn stage_stable_kernel(label: &str) -> (PathBuf, PathBuf) {
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang_sci_verify_{}_{}",
+        label,
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create scientific verify fixture dir");
+    let src = repo_example("heat_equation_energy.bld");
+    let staged = dir.join("heat_equation_energy.bld");
+    fs::copy(&src, &staged).expect("copy stable kernel into fixture dir");
+    (dir, staged)
+}
+
+/// Emit a stable scientific-runtime receipt for the staged kernel to `receipt`.
+fn emit_stable_receipt(staged: &Path, receipt: &Path) {
+    let emitted = buildc()
+        .arg("run")
+        .arg(staged)
+        .arg("--emit-receipt")
+        .arg(receipt)
+        .arg("--problem")
+        .arg("1d-heat-equation-energy")
+        .output()
+        .expect("emit stable scientific receipt");
+    assert!(
+        emitted.status.success(),
+        "emitting the stable receipt should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&emitted.stderr)
+    );
+}
+
+#[test]
+fn receipt_verify_scientific_stable_receipt_matches() {
+    if !c_backend_ready() {
+        eprintln!("skipping receipt_verify_scientific_stable_receipt_matches: C backend not ready");
+        return;
+    }
+
+    let (dir, staged) = stage_stable_kernel("match");
+    let receipt = dir.join("receipt.json");
+    emit_stable_receipt(&staged, &receipt);
+
+    let verify = buildc()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .output()
+        .expect("verify stable scientific receipt");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        verify.status.success(),
+        "a valid stable scientific receipt must verify\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&verify.stdout);
+    assert!(
+        stdout.contains("MATCH"),
+        "human output should report MATCH:\n{stdout}"
+    );
+}
+
+#[test]
+fn receipt_verify_scientific_json_reports_match() {
+    if !c_backend_ready() {
+        eprintln!("skipping receipt_verify_scientific_json_reports_match: C backend not ready");
+        return;
+    }
+
+    let (dir, staged) = stage_stable_kernel("json");
+    let receipt = dir.join("receipt.json");
+    emit_stable_receipt(&staged, &receipt);
+
+    let verify = buildc()
+        .args(["receipt", "verify", "--json"])
+        .arg(&receipt)
+        .output()
+        .expect("verify stable scientific receipt (--json)");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        verify.status.success(),
+        "valid scientific receipt must verify (--json)\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&verify.stdout).expect("json verify output is JSON");
+    assert_eq!(report["status"], "match");
+    assert_eq!(report["schema"], "buildlang-scientific-runtime-receipt/v0");
+}
+
+#[test]
+fn receipt_verify_scientific_detects_invariant_status_tamper() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping receipt_verify_scientific_detects_invariant_status_tamper: C backend not ready"
+        );
+        return;
+    }
+
+    let (dir, staged) = stage_stable_kernel("invtamper");
+    let receipt = dir.join("receipt.json");
+    emit_stable_receipt(&staged, &receipt);
+
+    // Tamper the stored invariant verdict: flip PASS -> FAIL. The re-run will
+    // recompute PASS and must reject the disagreement.
+    let raw = fs::read_to_string(&receipt).expect("read emitted receipt");
+    let mut value: serde_json::Value = serde_json::from_str(&raw).expect("parse receipt");
+    assert_eq!(value["invariant"]["status"], "PASS");
+    value["invariant"]["status"] = serde_json::Value::String("FAIL".to_string());
+    fs::write(&receipt, serde_json::to_string_pretty(&value).unwrap())
+        .expect("write tampered receipt");
+
+    let verify = buildc()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .output()
+        .expect("verify tampered scientific receipt");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        !verify.status.success(),
+        "an invariant-status tamper must fail verification\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+}
+
+#[test]
+fn receipt_verify_scientific_detects_source_tamper() {
+    if !c_backend_ready() {
+        eprintln!("skipping receipt_verify_scientific_detects_source_tamper: C backend not ready");
+        return;
+    }
+
+    let (dir, staged) = stage_stable_kernel("srctamper");
+    let receipt = dir.join("receipt.json");
+    emit_stable_receipt(&staged, &receipt);
+
+    // Tamper the SOURCE file after sealing. The re-derived source digest must
+    // no longer match the stored one, so verification fails.
+    let original = fs::read_to_string(&staged).expect("read staged kernel");
+    let tampered = format!("{original}\n// tamper: appended after sealing\n");
+    fs::write(&staged, tampered).expect("write tampered source");
+
+    let verify = buildc()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .output()
+        .expect("verify receipt against tampered source");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        !verify.status.success(),
+        "a source-file tamper must fail verification\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+}

@@ -313,10 +313,8 @@ pub fn seal_receipt(receipt: &mut ScientificRuntimeReceipt) {
 }
 
 /// Re-derive the seal from a receipt read back from disk and compare against the
-/// stored `seal.hex`. Used by `receipt verify` (T3). Returns the recomputed hex.
-// Exercised by unit tests; the external caller (the `receipt verify` schema
-// branch) lands in T3, so the bin build sees it as unused for now.
-#[allow(dead_code)]
+/// stored `seal.hex`. Used by `receipt verify` ([`verify_scientific_runtime_receipt`]).
+/// Returns the recomputed hex.
 pub fn recompute_seal_hex(receipt: &ScientificRuntimeReceipt) -> String {
     let mut probe = receipt.clone();
     probe.seal.algorithm = "sha256".to_string();
@@ -341,6 +339,226 @@ pub fn parse_numeric_series(stdout: &str) -> (Vec<f64>, bool) {
         }
     }
     (series, any_parsed)
+}
+
+/// The re-derived verdict triple used by `receipt verify` to compare against a
+/// stored receipt. Deriving it from the SAME rules `build_scientific_runtime_receipt`
+/// applies (via [`energy_monotone_nonincreasing`] / [`invariant_passes`]) is what
+/// makes verify re-check the invariant instead of trusting the stored values.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecomputedVerdict {
+    /// `PASS` | `FAIL` over the re-run series.
+    pub invariant_status: &'static str,
+    /// Number of energy-increasing steps in the re-run series.
+    pub increase_count: usize,
+    /// `PASS` | `FAIL_EXPECTED` | `FAIL_UNEXPECTED` | `UNVERIFIABLE`.
+    pub receipt_status: &'static str,
+}
+
+/// Recompute the invariant + receipt-status verdict from a freshly re-run
+/// series, applying the exact same status rule as
+/// [`build_scientific_runtime_receipt`]. `negative_fixture` is read back from the
+/// stored receipt so the FAIL_EXPECTED / FAIL_UNEXPECTED distinction is
+/// reproduced. This checks the VERDICT (monotonicity + increase count), not the
+/// exact float values, so it is robust to platform float non-reproducibility.
+pub fn recompute_verdict(
+    series: &[f64],
+    series_parsed: bool,
+    negative_fixture: bool,
+) -> RecomputedVerdict {
+    let observed = energy_monotone_nonincreasing(series, ENERGY_MONOTONE_TOLERANCE);
+    let has_series = series_parsed && !series.is_empty();
+    let passes = has_series && invariant_passes(series.len(), &observed);
+
+    let invariant_status = if passes { "PASS" } else { "FAIL" };
+    let receipt_status = if !has_series {
+        "UNVERIFIABLE"
+    } else if passes {
+        "PASS"
+    } else if negative_fixture {
+        "FAIL_EXPECTED"
+    } else {
+        "FAIL_UNEXPECTED"
+    };
+
+    RecomputedVerdict {
+        invariant_status,
+        increase_count: observed.increase_count,
+        receipt_status,
+    }
+}
+
+/// Verify a `buildlang-scientific-runtime-receipt/v0` receipt by RE-DERIVING,
+/// never trusting the stored values (mirrors `corpus verify`'s discipline):
+///
+/// 1. Deserialize the receipt and confirm its schema.
+/// 2. Re-derive the source + input-graph digests from the file on disk (via the
+///    `rederive_digests` callback, which runs the same check pipeline that
+///    produced the stored digests) and compare. A source change fails here.
+/// 3. Re-run the program (via `rerun_series`, the shared compile+run+capture
+///    path) and re-parse its numeric stdout into a fresh series.
+/// 4. Recompute the invariant + receipt-status verdict from that fresh series
+///    and compare the recomputed `invariant.status`, `increase_count`, and
+///    `receipt_status` against the stored ones. Any disagreement is a failure.
+/// 5. Recompute the seal over the stored receipt bytes and confirm it matches
+///    the stored `seal.hex` (integrity of the receipt itself).
+///
+/// The digest/re-run callbacks are supplied by `main.rs` (which owns `run_check`
+/// and `compile_and_capture_run`); the verdict logic and comparisons live here.
+///
+/// `compiler_version` / `language_version` mismatches WARN (to stderr) rather
+/// than hard-fail: a scientific receipt records a numerical verdict that a later
+/// compiler build can still legitimately reproduce, so a version bump alone must
+/// not be treated as tampering. (The check-receipt verifier pins versions
+/// because it replays effect/capability facts that ARE version-sensitive; this
+/// numerical receipt is not.)
+///
+/// `rerun_series` returns `(series, series_parsed)`.
+pub fn verify_scientific_runtime_receipt(
+    receipt_json: &serde_json::Value,
+    source_override: Option<&Path>,
+    json: bool,
+    current_compiler_version: &str,
+    current_language_version: &str,
+    rederive_digests: impl FnOnce(&Path) -> Result<(ScientificDigest, ScientificDigest), i32>,
+    rerun_series: impl FnOnce(&Path) -> Result<(Vec<f64>, bool), i32>,
+) -> Result<(), i32> {
+    let receipt: ScientificRuntimeReceipt =
+        serde_json::from_value(receipt_json.clone()).map_err(|err| {
+            eprintln!("Error: scientific-runtime receipt is malformed: {}", err);
+            1
+        })?;
+
+    if receipt.schema != SCIENTIFIC_RUNTIME_SCHEMA {
+        eprintln!(
+            "Error: unsupported scientific-runtime receipt schema `{}`",
+            receipt.schema
+        );
+        return Err(1);
+    }
+    if receipt.compiler != "buildc" {
+        eprintln!(
+            "Error: receipt compiler mismatch: expected buildc, got {}",
+            receipt.compiler
+        );
+        return Err(1);
+    }
+
+    // Version drift WARNs, does not fail (see the doc comment above).
+    if receipt.compiler_version != current_compiler_version {
+        eprintln!(
+            "Warning: compiler version differs: receipt {}, current {} (re-checking the verdict anyway)",
+            receipt.compiler_version, current_compiler_version
+        );
+    }
+    if receipt.language_version != current_language_version {
+        eprintln!(
+            "Warning: language version differs: receipt {}, current {} (re-checking the verdict anyway)",
+            receipt.language_version, current_language_version
+        );
+    }
+
+    // Resolve the source path: an explicit --source override, else the embedded
+    // `source` field.
+    let source_path = match source_override {
+        Some(path) => path.to_path_buf(),
+        None => Path::new(&receipt.source).to_path_buf(),
+    };
+
+    // (2) Re-derive the source + input-graph digests and compare. A source-file
+    // change since sealing shows up as a digest mismatch here.
+    let (source_digest, input_graph_digest) = rederive_digests(&source_path)?;
+    if !digests_match(&source_digest, &receipt.source_digest) {
+        eprintln!(
+            "Error: source digest mismatch: receipt {}:{}, actual {}:{}",
+            receipt.source_digest.algorithm,
+            receipt.source_digest.hex,
+            source_digest.algorithm,
+            source_digest.hex
+        );
+        return Err(1);
+    }
+    if !digests_match(&input_graph_digest, &receipt.input_graph_digest) {
+        eprintln!(
+            "Error: input graph digest mismatch: receipt {}:{}, actual {}:{}",
+            receipt.input_graph_digest.algorithm,
+            receipt.input_graph_digest.hex,
+            input_graph_digest.algorithm,
+            input_graph_digest.hex
+        );
+        return Err(1);
+    }
+
+    // (3) Re-run the program and re-parse its numeric stdout.
+    let (series, series_parsed) = rerun_series(&source_path)?;
+
+    // (4) Recompute the verdict and compare against the stored one.
+    let recomputed = recompute_verdict(&series, series_parsed, receipt.negative_fixture);
+    let stored_increase = receipt.invariant.observed.increase_count;
+
+    if recomputed.invariant_status != receipt.invariant.status {
+        eprintln!(
+            "Error: invariant status drift: receipt {}, re-run {}",
+            receipt.invariant.status, recomputed.invariant_status
+        );
+        return Err(1);
+    }
+    if recomputed.increase_count != stored_increase {
+        eprintln!(
+            "Error: increase_count drift: receipt {}, re-run {}",
+            stored_increase, recomputed.increase_count
+        );
+        return Err(1);
+    }
+    if recomputed.receipt_status != receipt.receipt_status {
+        eprintln!(
+            "Error: receipt_status drift: receipt {}, re-run {}",
+            receipt.receipt_status, recomputed.receipt_status
+        );
+        return Err(1);
+    }
+
+    // (5) Recompute the seal over the stored receipt and confirm integrity.
+    let recomputed_seal = recompute_seal_hex(&receipt);
+    if !recomputed_seal.eq_ignore_ascii_case(&receipt.seal.hex) {
+        eprintln!(
+            "Error: seal mismatch: receipt sha256:{}, recomputed sha256:{}",
+            receipt.seal.hex, recomputed_seal
+        );
+        return Err(1);
+    }
+
+    if json {
+        let report = serde_json::json!({
+            "schema": SCIENTIFIC_RUNTIME_SCHEMA,
+            "status": "match",
+            "source": source_path.to_string_lossy(),
+            "invariant_status": recomputed.invariant_status,
+            "increase_count": recomputed.increase_count,
+            "receipt_status": recomputed.receipt_status,
+            "seal": { "algorithm": "sha256", "hex": receipt.seal.hex },
+        });
+        let text = serde_json::to_string_pretty(&report).map_err(|err| {
+            eprintln!(
+                "Error serializing scientific-runtime verification report: {}",
+                err
+            );
+            1
+        })?;
+        println!("{}", text);
+    } else {
+        println!(
+            "MATCH: scientific-runtime receipt re-runs and re-checks clean ({}, increase_count={})",
+            recomputed.receipt_status, recomputed.increase_count
+        );
+    }
+    Ok(())
+}
+
+/// Two digests match iff their algorithm and (case-insensitive) hex agree.
+fn digests_match(actual: &ScientificDigest, expected: &ScientificDigest) -> bool {
+    actual.algorithm.eq_ignore_ascii_case(&expected.algorithm)
+        && actual.hex.eq_ignore_ascii_case(&expected.hex)
 }
 
 #[cfg(test)]
@@ -552,5 +770,108 @@ mod tests {
         let (series, parsed) = parse_numeric_series("no numbers here\n");
         assert!(!parsed);
         assert!(series.is_empty());
+    }
+
+    // --- receipt verify (T3) verdict recomputation ---------------------------
+
+    #[test]
+    fn recompute_verdict_matches_builder_for_monotone_series() {
+        // A monotone series recomputes PASS/PASS with zero increases, exactly
+        // as `build_scientific_runtime_receipt` would have recorded it.
+        let verdict = recompute_verdict(&[4.0, 3.0, 2.0], true, false);
+        assert_eq!(verdict.invariant_status, "PASS");
+        assert_eq!(verdict.receipt_status, "PASS");
+        assert_eq!(verdict.increase_count, 0);
+    }
+
+    #[test]
+    fn recompute_verdict_distinguishes_expected_from_unexpected_failure() {
+        // The negative-fixture flag (read back from the stored receipt) is what
+        // separates FAIL_EXPECTED from FAIL_UNEXPECTED on a re-run.
+        let expected = recompute_verdict(&[1.0, 2.0, 3.0], true, true);
+        assert_eq!(expected.invariant_status, "FAIL");
+        assert_eq!(expected.receipt_status, "FAIL_EXPECTED");
+        assert_eq!(expected.increase_count, 2);
+
+        let unexpected = recompute_verdict(&[1.0, 2.0, 3.0], true, false);
+        assert_eq!(unexpected.receipt_status, "FAIL_UNEXPECTED");
+    }
+
+    #[test]
+    fn recompute_verdict_is_unverifiable_when_nothing_parsed() {
+        let verdict = recompute_verdict(&[], false, false);
+        assert_eq!(verdict.receipt_status, "UNVERIFIABLE");
+        assert_eq!(verdict.invariant_status, "FAIL");
+    }
+
+    #[test]
+    fn verify_matches_a_freshly_built_receipt() {
+        // Round trip: build a receipt, serialize it, then verify it with
+        // callbacks that reproduce the same digests and series. Verify passes.
+        let path = Path::new("k.bld");
+        let receipt =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src_digest = receipt.source_digest.clone();
+        let graph_digest = receipt.input_graph_digest.clone();
+
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            |_| Ok((src_digest.clone(), graph_digest.clone())),
+            |_| Ok((vec![4.0, 3.0, 2.0], true)),
+        );
+        assert!(result.is_ok(), "a faithful re-run must verify");
+    }
+
+    #[test]
+    fn verify_rejects_a_source_digest_mismatch() {
+        let path = Path::new("k.bld");
+        let receipt =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let graph_digest = receipt.input_graph_digest.clone();
+
+        // The re-derived source digest disagrees with the stored one.
+        let wrong = ScientificDigest {
+            algorithm: "sha256".to_string(),
+            hex: "c".repeat(64),
+        };
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            |_| Ok((wrong.clone(), graph_digest.clone())),
+            |_| Ok((vec![4.0, 3.0, 2.0], true)),
+        );
+        assert_eq!(result, Err(1), "a source-digest mismatch must fail verify");
+    }
+
+    #[test]
+    fn verify_rejects_a_verdict_drift() {
+        // The stored receipt says PASS, but the re-run produces an increasing
+        // series (FAIL). The verdict comparison must reject it.
+        let path = Path::new("k.bld");
+        let receipt =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src_digest = receipt.source_digest.clone();
+        let graph_digest = receipt.input_graph_digest.clone();
+
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            |_| Ok((src_digest.clone(), graph_digest.clone())),
+            |_| Ok((vec![1.0, 2.0, 3.0], true)),
+        );
+        assert_eq!(result, Err(1), "an invariant drift must fail verify");
     }
 }
