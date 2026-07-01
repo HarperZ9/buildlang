@@ -2132,32 +2132,45 @@ fn cmd_corpus_verify(root: Option<&Path>, write: bool) -> Result<(), i32> {
     verify_module_graph_receipt(&corpus_root, &module_receipt, &manifest)?;
     verify_symbol_graph_receipt(&corpus_root, &symbol_receipt, &manifest)?;
     verify_lsp_dispatch_receipt(&corpus_root, &lsp_receipt, &manifest)?;
+    // Re-derive the capability facts from program source ONCE per run; both
+    // execution receipts are then verified against this fresh derivation.
+    let derived_capabilities = derive_corpus_capabilities(&corpus_root, &manifest)?;
+
     let c_passed = if write {
         let rust_receipt: CorpusExecutionReceipt = read_json(&rust_receipt_path)?;
         verify_receipt(
             "rust",
             &rust_receipt,
             &manifest,
+            &derived_capabilities,
             manifest.programs.len() + 1,
         )?;
 
         let c_passed = verify_c_corpus_stdout(&corpus_root, &manifest)?;
         let c_receipt: CorpusExecutionReceipt = read_json(&c_receipt_path)?;
-        let c_receipt = refresh_c_receipt_from_manifest(c_receipt, &manifest, c_passed);
+        let c_receipt =
+            refresh_c_receipt_from_manifest(c_receipt, &manifest, &derived_capabilities, c_passed);
         write_json(&c_receipt_path, &c_receipt)?;
 
         let c_receipt: CorpusExecutionReceipt = read_json(&c_receipt_path)?;
-        verify_receipt("c", &c_receipt, &manifest, c_passed)?;
+        verify_receipt("c", &c_receipt, &manifest, &derived_capabilities, c_passed)?;
         c_passed
     } else {
         let c_receipt: CorpusExecutionReceipt = read_json(&c_receipt_path)?;
         let rust_receipt: CorpusExecutionReceipt = read_json(&rust_receipt_path)?;
 
-        verify_receipt("c", &c_receipt, &manifest, manifest.programs.len())?;
+        verify_receipt(
+            "c",
+            &c_receipt,
+            &manifest,
+            &derived_capabilities,
+            manifest.programs.len(),
+        )?;
         verify_receipt(
             "rust",
             &rust_receipt,
             &manifest,
+            &derived_capabilities,
             manifest.programs.len() + 1,
         )?;
         verify_c_corpus_stdout(&corpus_root, &manifest)?
@@ -2253,9 +2266,92 @@ fn find_semantic_corpus_root() -> Option<PathBuf> {
         .find(|path| path.join("manifest.json").is_file())
 }
 
+/// Reject JSON text containing a duplicate object key anywhere in the tree.
+///
+/// serde_json's default map handling is last-duplicate-wins, which is a
+/// seal-forgery vector for receipts: a document with two `receipt_status`
+/// keys can show one value to a hasher and another to a reader depending on
+/// which parse discipline each uses. Receipts (and every other JSON artifact
+/// buildc verifies) must therefore be loaded through this strict probe first.
+/// Non-finite literals (`NaN`, `Infinity`) are already invalid JSON to
+/// serde_json's parser and need no extra handling here.
+fn assert_no_duplicate_json_keys(text: &str) -> Result<(), String> {
+    use serde::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
+    use std::fmt;
+
+    struct Probe;
+
+    impl<'de> DeserializeSeed<'de> for Probe {
+        type Value = ();
+        fn deserialize<D>(self, deserializer: D) -> Result<(), D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            deserializer.deserialize_any(Probe)
+        }
+    }
+
+    impl<'de> Visitor<'de> for Probe {
+        type Value = ();
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("any JSON value without duplicate object keys")
+        }
+
+        fn visit_bool<E>(self, _: bool) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_i64<E>(self, _: i64) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_u64<E>(self, _: u64) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_f64<E>(self, _: f64) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_str<E>(self, _: &str) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_unit<E>(self) -> Result<(), E> {
+            Ok(())
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<(), A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            while seq.next_element_seed(Probe)?.is_some() {}
+            Ok(())
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<(), A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let mut seen: HashSet<String> = HashSet::new();
+            while let Some(key) = map.next_key::<String>()? {
+                if !seen.insert(key.clone()) {
+                    return Err(serde::de::Error::custom(format!(
+                        "duplicate object key `{key}`"
+                    )));
+                }
+                map.next_value_seed(Probe)?;
+            }
+            Ok(())
+        }
+    }
+
+    let mut de = serde_json::Deserializer::from_str(text);
+    Probe.deserialize(&mut de).map_err(|err| err.to_string())?;
+    de.end().map_err(|err| err.to_string())
+}
+
 fn read_json_quiet<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|err| format!("failed to read {}: {}", path.display(), err))?;
+    assert_no_duplicate_json_keys(&content)
+        .map_err(|err| format!("failed to parse {}: {}", path.display(), err))?;
     serde_json::from_str(&content)
         .map_err(|err| format!("failed to parse {}: {}", path.display(), err))
 }
@@ -2364,13 +2460,63 @@ fn expected_receipt_capabilities(manifest: &SemanticCorpusManifest) -> Vec<Strin
     capabilities.into_iter().collect()
 }
 
+/// The capability facts RE-DERIVED from corpus program SOURCE through the real
+/// type checker. This is what makes the corpus capability gate a verifier that
+/// can FAIL: the stored `declared_effects` / `observed_capabilities` /
+/// `capability_gate` fields are compared against a fresh derivation, not merely
+/// echoed back from the manifest (an author-supplied "passed" stamp that verify
+/// only string-compares is a self-confirming loop and proves nothing).
+struct DerivedCorpusCapabilities {
+    /// Union of `~ Effect` declarations across every corpus program function.
+    declared: Vec<String>,
+    /// Union of checker-observed capability names across every corpus program.
+    observed: Vec<String>,
+}
+
+/// Run the actual check pipeline over every corpus program and union the
+/// resulting effect/capability facts. Fails when any program no longer checks
+/// cleanly (a program whose capability surface cannot be derived cannot back a
+/// capability claim).
+fn derive_corpus_capabilities(
+    corpus_root: &Path,
+    manifest: &SemanticCorpusManifest,
+) -> Result<DerivedCorpusCapabilities, i32> {
+    let mut declared = BTreeSet::new();
+    let mut observed = BTreeSet::new();
+    for program in &manifest.programs {
+        let path = corpus_root.join(&program.path);
+        let outcome = run_check(&path)?;
+        if !outcome.parse_errors.is_empty() || !outcome.type_errors.is_empty() {
+            eprintln!(
+                "corpus capability derivation failed: program '{}' does not check cleanly",
+                program.id
+            );
+            return Err(1);
+        }
+        for summary in &outcome.function_summaries {
+            for effect in &summary.declared_effects {
+                declared.insert(effect.clone());
+            }
+            for capability in summary.observed_capabilities.keys() {
+                observed.insert(capability.clone());
+            }
+        }
+    }
+    Ok(DerivedCorpusCapabilities {
+        declared: declared.into_iter().collect(),
+        observed: observed.into_iter().collect(),
+    })
+}
+
 fn apply_capability_receipt_metadata(
     receipt: &mut CorpusExecutionReceipt,
-    manifest: &SemanticCorpusManifest,
+    derived: &DerivedCorpusCapabilities,
 ) {
-    let capabilities = expected_receipt_capabilities(manifest);
-    receipt.declared_effects = capabilities.clone();
-    receipt.observed_capabilities = capabilities;
+    // Stamp the DERIVED facts (from the checker over program source), not a
+    // manifest echo. The gate is "passed" only on this path, which is reached
+    // only after `derive_corpus_capabilities` succeeded.
+    receipt.declared_effects = derived.declared.clone();
+    receipt.observed_capabilities = derived.observed.clone();
     receipt.capability_gate = Some("passed".to_string());
     receipt.capability_gate_test =
         Some("cargo test --manifest-path compiler/Cargo.toml capability --quiet".to_string());
@@ -2379,6 +2525,7 @@ fn apply_capability_receipt_metadata(
 fn refresh_c_receipt_from_manifest(
     mut receipt: CorpusExecutionReceipt,
     manifest: &SemanticCorpusManifest,
+    derived: &DerivedCorpusCapabilities,
     passed: usize,
 ) -> CorpusExecutionReceipt {
     receipt.result.passed = passed;
@@ -2393,7 +2540,7 @@ fn refresh_c_receipt_from_manifest(
             expected_stdout: program.expected_stdout.clone(),
         })
         .collect();
-    apply_capability_receipt_metadata(&mut receipt, manifest);
+    apply_capability_receipt_metadata(&mut receipt, derived);
     receipt
 }
 
@@ -2401,6 +2548,7 @@ fn verify_receipt(
     label: &str,
     receipt: &CorpusExecutionReceipt,
     manifest: &SemanticCorpusManifest,
+    derived: &DerivedCorpusCapabilities,
     expected_passed: usize,
 ) -> Result<(), i32> {
     if receipt.backend != label {
@@ -2449,14 +2597,39 @@ fn verify_receipt(
         }
     }
 
-    let expected_capabilities = expected_receipt_capabilities(manifest);
-    if receipt.declared_effects != expected_capabilities
-        || receipt.observed_capabilities != expected_capabilities
+    // The stored capability facts must match a FRESH derivation from program
+    // source through the type checker (computed once per corpus-verify run by
+    // `derive_corpus_capabilities`). This is genuine re-derivation: editing the
+    // stored fields OR changing a program's capability surface makes it fail.
+    // Previously this block compared the stored fields against a manifest echo
+    // and an unconditional "passed" stamp, which could not fail for a receipt
+    // produced by the writer: a self-confirming loop.
+    if receipt.declared_effects != derived.declared
+        || receipt.observed_capabilities != derived.observed
         || receipt.capability_gate.as_deref() != Some("passed")
         || receipt.capability_gate_test.as_deref()
             != Some("cargo test --manifest-path compiler/Cargo.toml capability --quiet")
     {
-        eprintln!("{} receipt capability metadata drift", label);
+        eprintln!(
+            "{} receipt capability metadata drift: stored declared={:?} observed={:?}, checker-derived declared={:?} observed={:?}",
+            label,
+            receipt.declared_effects,
+            receipt.observed_capabilities,
+            derived.declared,
+            derived.observed
+        );
+        return Err(1);
+    }
+
+    // Cross-check the derivation against the manifest's declared surfaces: a
+    // program whose source observes Console while its manifest entry lacks the
+    // stdout surface (or vice versa) is manifest drift, reported distinctly.
+    let manifest_capabilities = expected_receipt_capabilities(manifest);
+    if derived.observed != manifest_capabilities {
+        eprintln!(
+            "{} corpus manifest surface drift: manifest surfaces expect capabilities {:?}, checker derives {:?}",
+            label, manifest_capabilities, derived.observed
+        );
         return Err(1);
     }
 
@@ -7794,6 +7967,109 @@ fn compile_single_file(input: &Path, output: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The corpus capability gate must be LIVE: the derivation runs the real
+    /// type checker over program source, so a program whose capability surface
+    /// changes changes the derived set. Without this, the gate is an
+    /// author-supplied stamp that verify merely string-compares, i.e. a
+    /// verifier that cannot fail.
+    #[test]
+    fn corpus_capability_derivation_observes_source_not_manifest() {
+        let dir = std::env::temp_dir().join(format!(
+            "buildlang_capability_derivation_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("programs")).expect("create mini corpus");
+
+        // One Console program and one program that ALSO touches the Clock
+        // capability: the derived union must include both, regardless of what
+        // any manifest surface strings claim.
+        std::fs::write(
+            dir.join("programs/console.bld"),
+            "fn main() ~ Console {\n    println(\"{}\", 1);\n}\n",
+        )
+        .expect("write console program");
+        std::fs::write(
+            dir.join("programs/clock.bld"),
+            "fn main() ~ Console + Clock {\n    let t = clock_ms();\n    println(\"{}\", t);\n}\n",
+        )
+        .expect("write clock program");
+
+        let manifest = SemanticCorpusManifest {
+            schema: "test".to_string(),
+            programs: vec![
+                SemanticCorpusProgram {
+                    id: "console".to_string(),
+                    path: "programs/console.bld".to_string(),
+                    surfaces: vec!["stdout".to_string()],
+                    expected_stdout: "1\n".to_string(),
+                },
+                SemanticCorpusProgram {
+                    id: "clock".to_string(),
+                    path: "programs/clock.bld".to_string(),
+                    surfaces: vec!["stdout".to_string()],
+                    expected_stdout: String::new(),
+                },
+            ],
+        };
+
+        let derived =
+            derive_corpus_capabilities(&dir, &manifest).expect("derivation over checking programs");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(
+            derived.observed.contains(&"Console".to_string()),
+            "derived observed capabilities must include Console: {:?}",
+            derived.observed
+        );
+        assert!(
+            derived.observed.contains(&"Clock".to_string()),
+            "derived observed capabilities must include Clock (proving the \
+             derivation reads SOURCE, not manifest surfaces): {:?}",
+            derived.observed
+        );
+        assert!(
+            derived.declared.contains(&"Clock".to_string()),
+            "derived declared effects must include Clock: {:?}",
+            derived.declared
+        );
+    }
+
+    #[test]
+    fn duplicate_json_keys_are_rejected_at_any_depth() {
+        // Top-level duplicate.
+        assert!(
+            assert_no_duplicate_json_keys(r#"{"a": 1, "a": 2}"#).is_err(),
+            "top-level duplicate key must be rejected"
+        );
+        // Nested duplicate (the seal-forgery shape: two verdict keys where the
+        // hasher sees one and a permissive reader the other).
+        assert!(
+            assert_no_duplicate_json_keys(
+                r#"{"receipt": {"receipt_status": "PASS", "receipt_status": "FAIL_UNEXPECTED"}}"#
+            )
+            .is_err(),
+            "nested duplicate key must be rejected"
+        );
+        // Duplicate inside an array element.
+        assert!(
+            assert_no_duplicate_json_keys(r#"[{"k": 1}, {"x": 1, "x": 2}]"#).is_err(),
+            "duplicate key inside an array element must be rejected"
+        );
+        // Clean documents pass, including repeated keys in DIFFERENT objects.
+        assert!(assert_no_duplicate_json_keys(r#"{"a": {"k": 1}, "b": {"k": 2}}"#).is_ok());
+        assert!(assert_no_duplicate_json_keys(r#"[1, "x", null, true, 2.5]"#).is_ok());
+    }
+
+    #[test]
+    fn nonfinite_json_literals_are_rejected_by_the_parser() {
+        // serde_json's parser treats bare NaN/Infinity as invalid JSON; this
+        // pins that assumption (the strict loader relies on it).
+        assert!(serde_json::from_str::<serde_json::Value>(r#"{"v": NaN}"#).is_err());
+        assert!(serde_json::from_str::<serde_json::Value>(r#"{"v": Infinity}"#).is_err());
+        assert!(serde_json::from_str::<serde_json::Value>(r#"{"v": -Infinity}"#).is_err());
+    }
 
     #[test]
     fn parses_rust_codegen_target_aliases() {
