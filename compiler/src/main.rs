@@ -8,6 +8,12 @@
 //!
 //! This is the main entry point for the BuildLang compiler command-line tool.
 
+#[cfg(feature = "gpu")]
+mod gpu;
+// GPU cross-check receipt (Layer C): emit + verify. Verification is pure JSON +
+// SHA-256, so it is ALWAYS compiled (even without the `gpu` feature) so
+// `receipt verify` works on a gpu receipt in the default build.
+mod gpu_receipt;
 mod lsp_dispatch;
 mod memory_layout;
 mod mir_representation;
@@ -230,6 +236,12 @@ enum Commands {
         /// and yields receipt_status FAIL_EXPECTED instead of FAIL_UNEXPECTED.
         #[arg(long)]
         negative_fixture: bool,
+
+        /// Execute a `#[compute]` kernel on the physical GPU (Vulkan) and
+        /// cross-check the readback against the CPU-C scalar loop within
+        /// tolerance. Requires a build with `--features gpu` and a Vulkan device.
+        #[arg(long)]
+        gpu: bool,
 
         /// Arguments to pass to the program
         #[arg(trailing_var_arg = true)]
@@ -592,18 +604,25 @@ fn main() -> ExitCode {
             problem,
             method,
             negative_fixture,
+            gpu,
             args,
-        }) => cmd_run(
-            &file,
-            &args,
-            emit_receipt.as_deref(),
-            &invariant,
-            &metric,
-            columns,
-            problem.as_deref(),
-            method.as_deref(),
-            negative_fixture,
-        ),
+        }) => {
+            if gpu {
+                cmd_run_gpu(&file, emit_receipt.as_deref())
+            } else {
+                cmd_run(
+                    &file,
+                    &args,
+                    emit_receipt.as_deref(),
+                    &invariant,
+                    &metric,
+                    columns,
+                    problem.as_deref(),
+                    method.as_deref(),
+                    negative_fixture,
+                )
+            }
+        }
         Some(Commands::Repl) => cmd_repl(),
         Some(Commands::Lsp) => cmd_lsp(),
         Some(Commands::Watch { path, target }) => cmd_watch(&path, &target),
@@ -2515,6 +2534,13 @@ fn verify_scientific_receipt_dispatch(
     )
 }
 
+/// Verify a GPU cross-check receipt (Layer C). Delegates to the always-compiled
+/// `gpu_receipt` module: recompute the seal over the body and re-check the
+/// gpu-cpu agreement invariant against the recorded series.
+fn gpu_receipt_verify(receipt_path: &Path) -> Result<(), String> {
+    gpu_receipt::verify_gpu_receipt(receipt_path)
+}
+
 fn cmd_receipt_verify(
     receipt_path: &Path,
     source_override: Option<&Path>,
@@ -2533,6 +2559,25 @@ fn cmd_receipt_verify(
 
     let receipt: serde_json::Value =
         read_json(receipt_path).map_err(|code| receipt_load_failure(false, "MALFORMED", code))?;
+
+    // GPU cross-check receipts (Layer C) nest their schema under `/body/schema`
+    // and carry a top-level seal. Verification is pure JSON + SHA-256 (no
+    // Vulkan), so it works in the default build. Detect and route before the
+    // flat-schema lookup below.
+    if receipt.pointer("/body/schema").and_then(|v| v.as_str()) == Some("buildlang.gpu-receipt/v0")
+    {
+        return match gpu_receipt_verify(receipt_path) {
+            Ok(()) => {
+                println!("gpu receipt: VERIFIED (seal intact, gpu-cpu agreement re-checked PASS)");
+                Ok(())
+            }
+            Err(msg) => {
+                eprintln!("gpu receipt: FAILED\n  {msg}");
+                Err(1)
+            }
+        };
+    }
+
     let schema = receipt_field_str(&receipt, "/schema", "schema")
         .map_err(|code| receipt_load_failure(false, "SCHEMA_UNSUPPORTED", code))?;
     if schema == SCIENTIFIC_RUNTIME_SCHEMA {
@@ -6976,6 +7021,26 @@ fn compile_and_capture_run(
         exit_code,
         executable_digest,
     })
+}
+
+/// `buildc run <kernel> --gpu`: execute a `#[compute]` kernel on the physical
+/// Vulkan device and cross-check the readback against the CPU-C scalar loop over
+/// the same grid within tolerance (default 1e-6). Exits non-zero on mismatch.
+///
+/// Without the `gpu` feature this prints a rebuild hint and exits non-zero (the
+/// default build carries no Vulkan dependency).
+#[cfg(not(feature = "gpu"))]
+fn cmd_run_gpu(_file: &Path, _emit_receipt: Option<&Path>) -> Result<(), i32> {
+    eprintln!(
+        "buildc run --gpu requires a build with the `gpu` feature.\n\
+         Rebuild with: cargo build --features gpu --manifest-path compiler/Cargo.toml"
+    );
+    Err(1)
+}
+
+#[cfg(feature = "gpu")]
+fn cmd_run_gpu(file: &Path, emit_receipt: Option<&Path>) -> Result<(), i32> {
+    gpu::run_gpu_cross_check(file, emit_receipt)
 }
 
 #[allow(clippy::too_many_arguments)]
