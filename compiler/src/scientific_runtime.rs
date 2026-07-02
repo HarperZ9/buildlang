@@ -660,6 +660,21 @@ pub fn is_known_invariant(name: &str) -> bool {
     KNOWN_INVARIANTS.contains(&name)
 }
 
+/// The column-count contract for an invariant: the `relation` invariant reads
+/// ACROSS a row's columns and needs at least two; every single-scalar invariant
+/// reads one value per step and requires exactly one column. Emit enforces this
+/// before compiling; verify RE-CHECKS it (FIELD_CONTRACT_VIOLATION) so a
+/// resealed receipt cannot present a column structure the invariant's contract
+/// forbids, keeping the structural contract symmetric across emit and verify
+/// like every other sealed field.
+pub fn column_count_matches_invariant(name: &str, column_count: usize) -> bool {
+    if name == RELATION_INVARIANT {
+        column_count >= 2
+    } else {
+        column_count == 1
+    }
+}
+
 /// The FIXED tolerance for a named invariant. Tolerance is a property of the
 /// invariant, not an author-tunable knob: pinning it here (and re-checking the
 /// sealed value against it at verify) stops a receipt from weakening its own
@@ -1404,6 +1419,20 @@ pub fn evaluate_scientific_runtime_receipt(
         eprintln!(
             "Error: invariant tolerance mismatch: receipt {}, canonical {} for `{}`",
             receipt.invariant.tolerance, canonical_tolerance, receipt.invariant.name
+        );
+        return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+    }
+
+    // Re-check the column-count contract emit enforced (relation needs >= 2
+    // columns, every single-scalar invariant needs exactly 1), so a resealed
+    // receipt cannot present a column structure the invariant forbids. The
+    // field is inert for the single-scalar invariants' verdict, but leaving the
+    // contract unenforced at verify would let emit and verify disagree on what
+    // a well-formed receipt is.
+    if !column_count_matches_invariant(&receipt.invariant.name, receipt.measurement.column_count) {
+        eprintln!(
+            "Error: column_count {} violates the contract for invariant `{}` (relation requires >= 2, every single-scalar invariant requires exactly 1)",
+            receipt.measurement.column_count, receipt.invariant.name
         );
         return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
     }
@@ -3150,6 +3179,73 @@ mod tests {
             |_, _| Ok(rerun(vec![1.0, 1.002, 0.998])),
         );
         assert_eq!(result, Err(1), "a non-canonical tolerance must be rejected");
+    }
+
+    #[test]
+    fn verify_rejects_a_column_count_that_violates_the_invariant_contract() {
+        // Emit rejects a single-scalar invariant with column_count != 1; verify
+        // RE-CHECKS the same contract, so a resealed conserved-band receipt with
+        // column_count = 2 is rejected (FIELD_CONTRACT_VIOLATION) rather than
+        // silently accepted. (Regression for the D1 review finding: the
+        // structural column contract had no verify-side counterpart.)
+        let path = Path::new("k.bld");
+        let mut receipt = build_scientific_runtime_receipt(base_inputs_for(
+            CONSERVED_BAND_INVARIANT,
+            path,
+            vec![1.0, 1.002, 0.998],
+            true,
+            false,
+        ));
+        assert_eq!(receipt.measurement.column_count, 1);
+        receipt.measurement.column_count = 2;
+        seal_receipt(&mut receipt);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let sd = receipt.source_digest.clone();
+        let gd = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+            |_, _| Ok(rerun(vec![1.0, 1.002, 0.998])),
+        );
+        assert_eq!(
+            result,
+            Err(1),
+            "a single-scalar invariant with column_count != 1 must be rejected"
+        );
+
+        // The mirror case: a relation receipt resealed to column_count 1 (below
+        // the >= 2 contract) is also rejected.
+        let mut relation = build_scientific_runtime_receipt(relation_inputs(
+            path,
+            vec![1.0, 1.0, 2.0, 2.0],
+            true,
+            false,
+        ));
+        relation.measurement.column_count = 1;
+        seal_receipt(&mut relation);
+        let value = serde_json::to_value(&relation).expect("to_value");
+        let sd = relation.source_digest.clone();
+        let gd = relation.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &relation.compiler_version,
+            &relation.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+            |_, _| Ok(rerun(vec![1.0, 1.0, 2.0, 2.0])),
+        );
+        assert_eq!(
+            result,
+            Err(1),
+            "a relation invariant with column_count < 2 must be rejected"
+        );
     }
 
     /// Build a faithful re-run observation (finite series, exit 0, raw and
