@@ -28,6 +28,24 @@ pub fn is_capability_effect(name: &str) -> bool {
     CAPABILITY_EFFECTS.contains(&name)
 }
 
+/// The `Console` sub-sources that READ stdin (external input), as opposed to
+/// the stdout/stderr sources that only write. The scientific receipt's
+/// `input_dataset` / determinism derivation needs this distinction: a program
+/// that only prints reads no dataset and is deterministic, but one that reads
+/// stdin does neither. Kept beside the `Console` call mapping above so the two
+/// stay in sync when the builtin set changes.
+pub fn is_stdin_source(name: &str) -> bool {
+    matches!(
+        name,
+        "read_line"
+            | "read_all"
+            | "stdin_is_pipe"
+            | "build_read_line"
+            | "build_read_all"
+            | "build_stdin_is_pipe"
+    )
+}
+
 pub fn capability_effect_for_call(name: &str) -> Option<&'static str> {
     match name {
         "println"
