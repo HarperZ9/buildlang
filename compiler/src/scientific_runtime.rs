@@ -1280,6 +1280,45 @@ pub fn build_receipt_chain(members: &[(String, String, String)]) -> ReceiptChain
     }
 }
 
+/// Schema tag for a scientific-receipt corpus manifest (see
+/// [`ScientificCorpusManifest`]).
+pub const RECEIPT_CORPUS_SCHEMA: &str = "buildlang-scientific-receipt-corpus/v0";
+
+fn default_corpus_columns() -> u32 {
+    1
+}
+
+/// One member of a scientific-receipt corpus: an example kernel with the
+/// invariant it is run under and the receipt status it is DECLARED to produce.
+/// `receipt corpus` emits and verifies each member and asserts reality matches
+/// this declaration, so a kernel that silently changes verdict fails the corpus.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ScientificCorpusMember {
+    /// Path to the kernel source, relative to the corpus run's working directory.
+    pub source: String,
+    /// The invariant name (kebab-case CLI form, e.g. `energy-monotone`).
+    pub invariant: String,
+    /// Columns to capture (default 1); >1 for cross-column invariants.
+    #[serde(default = "default_corpus_columns")]
+    pub columns: u32,
+    /// Whether to emit under `--negative-fixture` (the member is expected to fail
+    /// its invariant).
+    #[serde(default)]
+    pub negative_fixture: bool,
+    /// The declared receipt status: `PASS`, `FAIL_EXPECTED`, or `FAIL_UNEXPECTED`.
+    pub expected_status: String,
+}
+
+/// A scientific-receipt corpus manifest: the declared classification of every
+/// example kernel. Unlike a receipt, this manifest is author-written input and
+/// is not sealed; its members' expected statuses are the ground truth the
+/// `receipt corpus` command checks reality against.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ScientificCorpusManifest {
+    pub schema: String,
+    pub members: Vec<ScientificCorpusMember>,
+}
+
 /// The outcome of parsing a program's numeric stdout into a measurement series.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParsedSeries {
@@ -2588,6 +2627,29 @@ mod tests {
         assert_eq!(manifest.schema, RECEIPT_CHAIN_SCHEMA);
         assert_eq!(manifest.chain_seal.hex, seal);
         assert_eq!(manifest.links[1].index, 1);
+    }
+
+    #[test]
+    fn corpus_manifest_parses_with_column_and_fixture_defaults() {
+        let json = r#"{
+            "schema": "buildlang-scientific-receipt-corpus/v0",
+            "members": [
+                {"source": "examples/a.bld", "invariant": "conservation", "expected_status": "PASS"},
+                {"source": "examples/b.bld", "invariant": "relation", "columns": 2,
+                 "negative_fixture": true, "expected_status": "FAIL_EXPECTED"}
+            ]
+        }"#;
+        let manifest: ScientificCorpusManifest = serde_json::from_str(json).expect("parse corpus");
+        assert_eq!(manifest.schema, RECEIPT_CORPUS_SCHEMA);
+        assert_eq!(manifest.members.len(), 2);
+        // Defaults: the first member omits columns/negative_fixture.
+        assert_eq!(manifest.members[0].columns, 1);
+        assert!(!manifest.members[0].negative_fixture);
+        assert_eq!(manifest.members[0].expected_status, "PASS");
+        // The second member sets them explicitly.
+        assert_eq!(manifest.members[1].columns, 2);
+        assert!(manifest.members[1].negative_fixture);
+        assert_eq!(manifest.members[1].expected_status, "FAIL_EXPECTED");
     }
 
     #[test]

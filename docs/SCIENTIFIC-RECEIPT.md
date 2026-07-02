@@ -493,6 +493,25 @@ member file is gone), and `CHAIN_LINK_UNVERIFIED` (a member no longer re-verifie
 re-runs each member, `chain verify` needs the C toolchain and the member sources, exactly like
 `receipt verify`.
 
+### The example corpus (`receipt corpus`)
+
+The example kernels come in positive/negative pairs, each declared to PASS or to FAIL_EXPECTED
+under a named invariant. `examples/scientific-corpus.json` records that ground truth for all ten
+pairs, and one command checks reality against it:
+
+```
+buildc receipt corpus examples/scientific-corpus.json
+```
+
+For every member it emits the receipt under the declared invariant and flags, asserts the emitted
+`receipt_status` equals the declared one, and re-verifies the receipt through the real `receipt
+verify` path. It exits 0 only when every member classifies and re-verifies exactly as declared,
+printing `corpus: N/N members classified and re-verified as declared`. A kernel whose verdict
+silently changes (a PASS that starts failing, or a negative fixture that stops failing) breaks the
+corpus with a `declared X, emitted Y` line and a non-zero exit, so the corpus is a gate that can
+fail, not a rubber stamp. The manifest is author-written input and is not sealed; its declared
+statuses are the ground truth the command checks against.
+
 ### What the seal does and does not witness
 
 The re-run re-derives the source digests, the measurement count, and the verdict triple.

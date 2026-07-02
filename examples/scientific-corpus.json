@@ -1,0 +1,25 @@
+{
+  "schema": "buildlang-scientific-receipt-corpus/v0",
+  "members": [
+    {"source": "examples/heat_equation_energy.bld", "invariant": "energy-monotone", "expected_status": "PASS"},
+    {"source": "examples/heat_equation_energy_unstable.bld", "invariant": "energy-monotone", "negative_fixture": true, "expected_status": "FAIL_EXPECTED"},
+    {"source": "examples/conservation_rotation.bld", "invariant": "conservation", "expected_status": "PASS"},
+    {"source": "examples/conservation_decay.bld", "invariant": "conservation", "negative_fixture": true, "expected_status": "FAIL_EXPECTED"},
+    {"source": "examples/bounded_oscillation.bld", "invariant": "bounded", "expected_status": "PASS"},
+    {"source": "examples/bounded_overshoot.bld", "invariant": "bounded", "negative_fixture": true, "expected_status": "FAIL_EXPECTED"},
+    {"source": "examples/energy_identity.bld", "invariant": "energy-identity", "expected_status": "PASS"},
+    {"source": "examples/energy_identity_broken.bld", "invariant": "energy-identity", "negative_fixture": true, "expected_status": "FAIL_EXPECTED"},
+    {"source": "examples/relation_double_angle.bld", "invariant": "relation", "columns": 2, "expected_status": "PASS"},
+    {"source": "examples/relation_double_angle_broken.bld", "invariant": "relation", "columns": 2, "negative_fixture": true, "expected_status": "FAIL_EXPECTED"},
+    {"source": "examples/symplectic_oscillator.bld", "invariant": "conserved-band", "expected_status": "PASS"},
+    {"source": "examples/euler_oscillator.bld", "invariant": "conserved-band", "negative_fixture": true, "expected_status": "FAIL_EXPECTED"},
+    {"source": "examples/search_bound_binary.bld", "invariant": "non-negative", "expected_status": "PASS"},
+    {"source": "examples/search_bound_linear.bld", "invariant": "non-negative", "negative_fixture": true, "expected_status": "FAIL_EXPECTED"},
+    {"source": "examples/reaction_atom_balance.bld", "invariant": "conservation", "expected_status": "PASS"},
+    {"source": "examples/reaction_atom_balance_broken.bld", "invariant": "conservation", "negative_fixture": true, "expected_status": "FAIL_EXPECTED"},
+    {"source": "examples/born_rule_normalization.bld", "invariant": "conservation", "expected_status": "PASS"},
+    {"source": "examples/born_rule_leaky.bld", "invariant": "conservation", "negative_fixture": true, "expected_status": "FAIL_EXPECTED"},
+    {"source": "examples/funnel_probe.bld", "invariant": "non-negative", "expected_status": "PASS"},
+    {"source": "examples/funnel_probe_linear.bld", "invariant": "non-negative", "negative_fixture": true, "expected_status": "FAIL_EXPECTED"}
+  ]
+}
