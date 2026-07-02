@@ -65,8 +65,10 @@ Flags on the `run` subcommand (all additive; absent `--emit-receipt`, none of th
 - `--emit-receipt <PATH>` writes the receipt to `PATH` (`-` = stdout).
 - `--invariant <NAME>` selects the invariant to check over the series:
   `energy-monotone` (the default; the observed scalar never increases beyond
-  tolerance) or `conservation` (the observed scalar stays within tolerance of
-  its initial value). Any other value is an error reported **before** compiling.
+  tolerance), `conservation` (the observed scalar stays within tolerance of its
+  initial value), or `bounded` (the observed scalar never rises above its
+  initial value: the discrete maximum principle). Any other value is an error
+  reported **before** compiling.
 - `--metric <NAME>` labels the captured series (default `series`).
 - `--problem <LABEL>` records a free-text problem label (optional).
 - `--negative-fixture` marks that the invariant is *expected* to fail (see
@@ -185,11 +187,17 @@ a receipt cannot weaken its own check.
 |---|---|---|---|
 | `energy-monotone` | `energy_monotone_nonincreasing` | `s[k+1] > s[k] + tol` (energy rose) | `1e-12` |
 | `conservation` | `conserved_quantity_constant` | `abs(s[k] - s[0]) > tol` (drifted from the initial value) | `1e-9` |
+| `bounded` | `bounded_by_initial_maximum` | `s[k] > s[0] + tol` (rose above the initial value) | `1e-9` |
 
-The conservation reference is `s[0]` (the initial value), not the mean, so a re-run that
-reproduces a different-length prefix cannot shift the reference. The looser conservation
-tolerance reflects that a genuinely conserved discrete quantity still accumulates roundoff
-over many steps, while a real leak drifts by an O(1) amount the bound still catches.
+The `conservation` and `bounded` references are both `s[0]` (the initial value), not the mean,
+so a re-run that reproduces a different-length prefix cannot shift the reference. The three
+checks are genuinely distinct: `conservation` fences BOTH sides of `s[0]`, `bounded` fences
+only the UPPER side (the discrete maximum principle: the quantity may decay freely but never
+overshoot its start), and `energy-monotone` forbids any step-wise rise. A series that dips and
+returns to its initial value PASSes `bounded` while FAILing both of the others. The looser
+`1e-9` tolerance (vs the `1e-12` monotone bound) reflects that a genuinely conserved or bounded
+discrete quantity still accumulates roundoff over many steps, while a real leak or overshoot
+drifts by an O(1) amount the bound still catches.
 
 Checking a *violation-count verdict* rather than exact float values is deliberate: the verdict
 is robust to platform float differences and codegen reassociation, so a receipt emitted on one
@@ -214,8 +222,11 @@ Every invariant ships with a paired positive/negative kernel: `energy-monotone` 
 and unstable heat kernels above; `conservation` has `examples/conservation_rotation.bld` (a
 rotation preserves the squared radius `r^2 = x^2 + y^2` to roundoff, so it PASSes) and
 `examples/conservation_decay.bld` (a lossy scheme leaks 0.5% per step, so `r^2`/`q` drifts and
-it FAILs). Run the leak with `--invariant conservation --negative-fixture` for a
-`FAIL_EXPECTED` receipt.
+it FAILs); `bounded` has `examples/bounded_oscillation.bld` (an undamped oscillator's `x^2`
+dips to 0 and returns to its initial `1.0` without ever exceeding it, so it PASSes) and
+`examples/bounded_overshoot.bld` (an explicit-Euler oscillator injects energy, so `E = x^2 +
+v^2` grows past its initial value and it FAILs). Run either negative kernel with
+`--negative-fixture` for a `FAIL_EXPECTED` receipt.
 
 ## 5. The heat-equation kernel example
 
@@ -429,8 +440,8 @@ byte-for-byte. The provenance link records where the idea came from, nothing str
 v0 checks one invariant over one scalar series, sealed and re-derivable. Explicitly out of
 scope for v0:
 
-- **More invariants and multi-column series.** `energy-monotone` and `conservation` ship.
-  Boundedness (a discrete max principle), energy-identity residuals, and cross-series relation
+- **More invariants and multi-column series.** `energy-monotone`, `conservation`, and
+  `bounded` (a discrete max principle) ship. Energy-identity residuals and cross-series relation
   invariants (which need multi-column capture, not one scalar per line) are separate follow-ons.
 - **The full 7-layer receipt richness.** The research schema carries more layers than buildc
   can honestly fill today; v0 fills the subset buildc actually derives.

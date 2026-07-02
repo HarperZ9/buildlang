@@ -13778,6 +13778,134 @@ fn conservation_invariant_round_trips_positive_and_negative() {
 }
 
 #[test]
+fn bounded_invariant_round_trips_positive_negative_and_is_distinct() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping bounded_invariant_round_trips_positive_negative_and_is_distinct: C backend not ready"
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("buildlang_sci_bounded_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create bounded fixture dir");
+
+    // POSITIVE: the undamped oscillator's x^2 never rises above its initial
+    // 1.0, so `--invariant bounded` yields a PASS receipt that re-checks clean.
+    let pass_receipt = dir.join("oscillation.json");
+    let emit_pass = buildc()
+        .arg("run")
+        .arg(repo_example("bounded_oscillation.bld"))
+        .args(["--emit-receipt"])
+        .arg(&pass_receipt)
+        .args([
+            "--invariant",
+            "bounded",
+            "--metric",
+            "x2",
+            "--problem",
+            "undamped-oscillator",
+        ])
+        .output()
+        .expect("emit bounded PASS receipt");
+    assert!(
+        emit_pass.status.success(),
+        "emitting the bounded PASS receipt should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&emit_pass.stderr)
+    );
+    let pass: serde_json::Value =
+        serde_json::from_slice(&fs::read(&pass_receipt).expect("read PASS receipt")).unwrap();
+    assert_eq!(pass["invariant"]["name"], "bounded_by_initial_maximum");
+    assert_eq!(pass["oracle"]["name"], "bounded_by_initial_maximum");
+    assert_eq!(pass["receipt_status"], "PASS");
+    assert_eq!(pass["invariant"]["observed"]["violation_count"], 0);
+
+    let verify_pass = buildc()
+        .args(["receipt", "verify"])
+        .arg(&pass_receipt)
+        .output()
+        .expect("verify bounded PASS receipt");
+    assert!(
+        verify_pass.status.success(),
+        "the bounded PASS receipt must verify\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_pass.stderr)
+    );
+
+    // DISTINCTNESS end-to-end: the SAME oscillation kernel, checked under
+    // `--invariant energy-monotone`, FAILs (x^2 rises after each dip). This is
+    // the binary-level witness that bounded is not an alias of monotone.
+    let mono_receipt = dir.join("oscillation_mono.json");
+    let emit_mono = buildc()
+        .arg("run")
+        .arg(repo_example("bounded_oscillation.bld"))
+        .args(["--emit-receipt"])
+        .arg(&mono_receipt)
+        .args([
+            "--invariant",
+            "energy-monotone",
+            "--metric",
+            "x2",
+            "--problem",
+            "undamped-oscillator",
+        ])
+        .output()
+        .expect("emit monotone receipt from the oscillation kernel");
+    assert!(emit_mono.status.success());
+    let mono: serde_json::Value =
+        serde_json::from_slice(&fs::read(&mono_receipt).expect("read monotone receipt")).unwrap();
+    assert_eq!(
+        mono["receipt_status"], "FAIL_UNEXPECTED",
+        "the oscillation that PASSES bounded must FAIL monotone"
+    );
+
+    // NEGATIVE fixture: the explicit-Euler oscillator injects energy, so its
+    // tracked quantity overshoots. With `--negative-fixture` it is a
+    // FAIL_EXPECTED receipt that STILL verifies (exit 0).
+    let fail_receipt = dir.join("overshoot.json");
+    let emit_fail = buildc()
+        .arg("run")
+        .arg(repo_example("bounded_overshoot.bld"))
+        .args(["--emit-receipt"])
+        .arg(&fail_receipt)
+        .args([
+            "--invariant",
+            "bounded",
+            "--negative-fixture",
+            "--metric",
+            "energy",
+            "--problem",
+            "explicit-euler-oscillator",
+        ])
+        .output()
+        .expect("emit bounded negative fixture");
+    assert!(
+        emit_fail.status.success(),
+        "emitting the negative fixture should succeed"
+    );
+    let fail: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fail_receipt).expect("read FAIL receipt")).unwrap();
+    assert_eq!(fail["receipt_status"], "FAIL_EXPECTED");
+    assert!(
+        fail["invariant"]["observed"]["violation_count"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+
+    let verify_fail = buildc()
+        .args(["receipt", "verify"])
+        .arg(&fail_receipt)
+        .output()
+        .expect("verify bounded negative fixture");
+    assert!(
+        verify_fail.status.success(),
+        "a faithfully reproduced FAIL_EXPECTED must verify (exit 0)\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_fail.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn run_emit_receipt_stable_kernel_is_pass() {
     if !c_backend_ready() {
         eprintln!("skipping run_emit_receipt_stable_kernel_is_pass: C backend not ready");
