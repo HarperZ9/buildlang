@@ -66,9 +66,10 @@ Flags on the `run` subcommand (all additive; absent `--emit-receipt`, none of th
 - `--invariant <NAME>` selects the invariant to check over the series:
   `energy-monotone` (the default; the observed scalar never increases beyond
   tolerance), `conservation` (the observed scalar stays within tolerance of its
-  initial value), or `bounded` (the observed scalar never rises above its
-  initial value: the discrete maximum principle). Any other value is an error
-  reported **before** compiling.
+  initial value), `bounded` (the observed scalar never rises above its initial
+  value: the discrete maximum principle), or `energy-identity` (each value is a
+  per-step energy-balance residual that stays within tolerance of zero). Any
+  other value is an error reported **before** compiling.
 - `--metric <NAME>` labels the captured series (default `series`).
 - `--problem <LABEL>` records a free-text problem label (optional).
 - `--negative-fixture` marks that the invariant is *expected* to fail (see
@@ -188,16 +189,31 @@ a receipt cannot weaken its own check.
 | `energy-monotone` | `energy_monotone_nonincreasing` | `s[k+1] > s[k] + tol` (energy rose) | `1e-12` |
 | `conservation` | `conserved_quantity_constant` | `abs(s[k] - s[0]) > tol` (drifted from the initial value) | `1e-9` |
 | `bounded` | `bounded_by_initial_maximum` | `s[k] > s[0] + tol` (rose above the initial value) | `1e-9` |
+| `energy-identity` | `energy_identity_residual` | `abs(s[k]) > tol` (energy-balance residual is not zero) | `1e-9` |
 
 The `conservation` and `bounded` references are both `s[0]` (the initial value), not the mean,
-so a re-run that reproduces a different-length prefix cannot shift the reference. The three
-checks are genuinely distinct: `conservation` fences BOTH sides of `s[0]`, `bounded` fences
-only the UPPER side (the discrete maximum principle: the quantity may decay freely but never
-overshoot its start), and `energy-monotone` forbids any step-wise rise. A series that dips and
-returns to its initial value PASSes `bounded` while FAILing both of the others. The looser
-`1e-9` tolerance (vs the `1e-12` monotone bound) reflects that a genuinely conserved or bounded
-discrete quantity still accumulates roundoff over many steps, while a real leak or overshoot
-drifts by an O(1) amount the bound still catches.
+so a re-run that reproduces a different-length prefix cannot shift the reference. The checks
+are genuinely distinct: `conservation` fences BOTH sides of `s[0]`, `bounded` fences only the
+UPPER side (the discrete maximum principle: the quantity may decay freely but never overshoot
+its start), and `energy-monotone` forbids any step-wise rise. A series that dips and returns to
+its initial value PASSes `bounded` while FAILing both of the others. `energy-identity` is the
+odd one out: its reference is **zero** (an absolute bound), so **every** step is checked
+including step 0, and its series is not a physical trajectory but a per-step energy-balance
+*residual* that a faithful scheme keeps at roundoff. The same series `[0.1, 0, 0]` gives three
+different verdicts across the family, which is exactly why they are separate invariants. The
+looser `1e-9` tolerance (vs the `1e-12` monotone bound) reflects that a genuinely conserved,
+bounded, or balanced discrete quantity still accumulates roundoff over many steps, while a real
+leak, overshoot, or dropped balance term drifts by an amount the bound still catches decisively.
+
+`energy-identity` is the family's first **quantitative** invariant. The 1-D heat equation's
+continuous energy law `d/dt integral(u^2) = -2*alpha*integral(u_x^2)` has an exact discrete
+analogue for the FTCS scheme: `E_next - E = -2*r*Du2 + r**2 * Lu2`, where `E = sum_i u_i^2`,
+`Du2 = sum_i (u_{i+1}-u_i)^2`, and `Lu2 = sum_i (Lu_i)^2`. The reference kernel
+(`examples/energy_identity.bld`) prints the per-step residual `(E_next - E) + 2*r*Du2 -
+r**2 * Lu2`, which is zero to roundoff (measured max ~2e-14), so it PASSes; the negative fixture
+(`examples/energy_identity_broken.bld`) drops the `r**2 * Lu2` correction, leaving an `O(r^2)`
+residual (~1e-5) that FAILs from step 0. The tolerance sits ~5 orders above the faithful
+roundoff and ~4 orders below the broken residual.
 
 Checking a *violation-count verdict* rather than exact float values is deliberate: the verdict
 is robust to platform float differences and codegen reassociation, so a receipt emitted on one
@@ -225,8 +241,11 @@ rotation preserves the squared radius `r^2 = x^2 + y^2` to roundoff, so it PASSe
 it FAILs); `bounded` has `examples/bounded_oscillation.bld` (an undamped oscillator's `x^2`
 dips to 0 and returns to its initial `1.0` without ever exceeding it, so it PASSes) and
 `examples/bounded_overshoot.bld` (an explicit-Euler oscillator injects energy, so `E = x^2 +
-v^2` grows past its initial value and it FAILs). Run either negative kernel with
-`--negative-fixture` for a `FAIL_EXPECTED` receipt.
+v^2` grows past its initial value and it FAILs); `energy-identity` has
+`examples/energy_identity.bld` (the FTCS kernel computes the exact discrete energy balance, so
+its residual is roundoff and it PASSes) and `examples/energy_identity_broken.bld` (the same
+kernel with the `r**2 * Lu2` correction dropped, so its residual is O(r^2) and it FAILs). Run
+any negative kernel with `--negative-fixture` for a `FAIL_EXPECTED` receipt.
 
 ## 5. The heat-equation kernel example
 
@@ -440,9 +459,10 @@ byte-for-byte. The provenance link records where the idea came from, nothing str
 v0 checks one invariant over one scalar series, sealed and re-derivable. Explicitly out of
 scope for v0:
 
-- **More invariants and multi-column series.** `energy-monotone`, `conservation`, and
-  `bounded` (a discrete max principle) ship. Energy-identity residuals and cross-series relation
-  invariants (which need multi-column capture, not one scalar per line) are separate follow-ons.
+- **More invariants and multi-column series.** `energy-monotone`, `conservation`, `bounded` (a
+  discrete max principle), and `energy-identity` (a quantitative energy-balance residual) ship.
+  Cross-series relation invariants (which need multi-column capture, not one scalar per line)
+  are the remaining follow-on.
 - **The full 7-layer receipt richness.** The research schema carries more layers than buildc
   can honestly fill today; v0 fills the subset buildc actually derives.
 - **Crucible-at-emit-time.** v0 checks the invariant and seals; it does not run a Crucible
