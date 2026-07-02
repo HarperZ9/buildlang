@@ -493,6 +493,13 @@ enum ReceiptCommands {
         /// sha256 of the bound claim's canonical form (same binding note)
         #[arg(long, value_name = "HEX", default_value = "")]
         claim_sha256: String,
+        /// The bound claim PREDICTS the invariant failure (valid only for a
+        /// negative-fixture receipt): deviation becomes claim-relative, so a
+        /// fixture failing as predicted measures 0 and an unexpected pass
+        /// measures 1. Without this, Crucible's pure margin math would read
+        /// every expected failure as DRIFT (there is no thesis-side reframe).
+        #[arg(long)]
+        claim_expects_failure: bool,
     },
 }
 
@@ -1506,7 +1513,14 @@ fn cmd_receipt(command: ReceiptCommands) -> Result<(), i32> {
             output,
             claim_id,
             claim_sha256,
-        } => cmd_receipt_export(&receipt, &output, &claim_id, &claim_sha256),
+            claim_expects_failure,
+        } => cmd_receipt_export(
+            &receipt,
+            &output,
+            &claim_id,
+            &claim_sha256,
+            claim_expects_failure,
+        ),
     }
 }
 
@@ -1523,20 +1537,44 @@ fn cmd_receipt_export(
     output: &Path,
     claim_id: &str,
     claim_sha256: &str,
+    claim_expects_failure: bool,
 ) -> Result<(), i32> {
-    // The raw file bytes are hashed into the recheck descriptor so a replayer
-    // can confirm it re-verified the same artifact.
+    // Read ONCE and both hash and parse the same buffer: the hash sealed into
+    // recheck.receipt_sha256 must attest exactly the bytes that were verified
+    // and exported (re-reading the file would open a hash-vs-parse TOCTOU).
     let receipt_bytes = std::fs::read(receipt_path).map_err(|err| {
         eprintln!(
             "Error reading receipt '{}': {}",
             receipt_path.display(),
             err
         );
-        1
+        receipt_load_failure(false, "MALFORMED", 1)
     })?;
     let receipt_file_sha256 = source_digest_hex(&receipt_bytes);
-    let receipt: serde_json::Value =
-        read_json(receipt_path).map_err(|code| receipt_load_failure(false, "MALFORMED", code))?;
+    let receipt_text = std::str::from_utf8(&receipt_bytes).map_err(|err| {
+        eprintln!(
+            "Error: receipt '{}' is not UTF-8: {}",
+            receipt_path.display(),
+            err
+        );
+        receipt_load_failure(false, "MALFORMED", 1)
+    })?;
+    assert_no_duplicate_json_keys(receipt_text).map_err(|err| {
+        eprintln!(
+            "Error parsing receipt '{}': {}",
+            receipt_path.display(),
+            err
+        );
+        receipt_load_failure(false, "MALFORMED", 1)
+    })?;
+    let receipt: serde_json::Value = serde_json::from_str(receipt_text).map_err(|err| {
+        eprintln!(
+            "Error parsing receipt '{}': {}",
+            receipt_path.display(),
+            err
+        );
+        receipt_load_failure(false, "MALFORMED", 1)
+    })?;
     let schema = receipt_field_str(&receipt, "/schema", "schema")
         .map_err(|code| receipt_load_failure(false, "SCHEMA_UNSUPPORTED", code))?;
     if schema != SCIENTIFIC_RUNTIME_SCHEMA {
@@ -1544,7 +1582,7 @@ fn cmd_receipt_export(
             "Error: receipt export supports `{}` only (got `{}`); the check-receipt and corpus surfaces are documented follow-ons",
             SCIENTIFIC_RUNTIME_SCHEMA, schema
         );
-        return Err(1);
+        return Err(receipt_load_failure(false, "SCHEMA_UNSUPPORTED", 1));
     }
 
     // Re-verify through the same evaluation path `receipt verify` uses.
@@ -1582,6 +1620,17 @@ fn cmd_receipt_export(
         },
     )?;
 
+    // The expected-failure binding is claim semantics, so it is valid only
+    // when the receipt actually IS a declared negative fixture; applying it
+    // to an ordinary receipt would let a plain failure masquerade as a
+    // predicted one.
+    if claim_expects_failure && !report.negative_fixture {
+        eprintln!(
+            "Error: --claim-expects-failure requires a negative-fixture receipt (this receipt was not emitted with --negative-fixture)"
+        );
+        return Err(1);
+    }
+
     let measured_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
@@ -1590,6 +1639,7 @@ fn cmd_receipt_export(
         &report,
         claim_id,
         claim_sha256,
+        claim_expects_failure,
         &receipt_path.to_string_lossy(),
         &receipt_file_sha256,
         measured_at,
@@ -1614,12 +1664,26 @@ fn cmd_receipt_export(
     if output == Path::new("-") {
         println!("{}", text);
     } else {
-        std::fs::write(output, format!("{}\n", text)).map_err(|err| {
+        // Atomic write: a failed export must never destroy or truncate a
+        // previously good measurement at the same path. Write a sibling temp
+        // file, then rename over the target (atomic on the same volume).
+        let tmp = output.with_extension("tmp");
+        std::fs::write(&tmp, format!("{}\n", text)).map_err(|err| {
             eprintln!(
                 "Error writing measurement export '{}': {}",
+                tmp.display(),
+                err
+            );
+            let _ = std::fs::remove_file(&tmp);
+            1
+        })?;
+        std::fs::rename(&tmp, output).map_err(|err| {
+            eprintln!(
+                "Error finalizing measurement export '{}': {}",
                 output.display(),
                 err
             );
+            let _ = std::fs::remove_file(&tmp);
             1
         })?;
         eprintln!(

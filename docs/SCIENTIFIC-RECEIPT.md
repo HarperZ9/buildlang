@@ -332,8 +332,34 @@ measured_at, evidence, recheck`) inside a versioned envelope
 
 Claim binding (`--claim-id` / `--claim-sha256`) belongs to the thesis side;
 when omitted the envelope carries a binding note, and Crucible fails closed
-(UNVERIFIABLE) on an unbound measurement. Exporting the check-receipt and
-corpus surfaces are documented follow-ons of this bridge.
+(UNVERIFIABLE) on an unbound measurement.
+
+Three refinements the mapping enforces:
+
+- **Expected failure is bound explicitly, never assumed.** Crucible's verdict
+  is pure margin arithmetic; there is no thesis-side reframe for an expected
+  failure. `--claim-expects-failure` (valid only for a negative-fixture
+  receipt) makes the deviation claim-relative: a fixture that failed as
+  predicted measures 0 (MATCH), one that unexpectedly passed measures 1
+  (DRIFT against the failure-predicting claim).
+- **Diverged receipts never seal a platform-dependent replay expectation.**
+  A diverged run's increase count is prefix-derived and legitimately differs
+  across toolchains (the verifier's own rule), so `recheck.expected.
+  increase_count` is null and `recheck.diverged` is true: a replayer matches
+  on receipt_status, not on a number that cannot reproduce. The expected exit
+  code of the sealed replay command is also carried (0 faithful-held, 3
+  faithful-not-held).
+- **Reproduction signals ride outside `evidence`.** The witnessing re-run's
+  `toolchain_matched` / `raw_stdout_reproduced` / `executable_reproduced`
+  flags are a top-level `reproduction` object (auditable, but excluded from
+  Crucible's evidence-stability comparison, since they legitimately differ
+  per replay environment); the sealed-time stdout digest in evidence is
+  labeled `sealed_raw_stdout` so it cannot be mistaken for the re-run's
+  bytes.
+
+Exports write atomically (temp file + rename), so a failed export never
+destroys a previous good measurement. Exporting the check-receipt and corpus
+surfaces are documented follow-ons of this bridge.
 
 ## Provenance
 
