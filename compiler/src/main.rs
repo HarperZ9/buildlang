@@ -40,8 +40,9 @@ use module_graph::{verify_module_graph_receipt, ModuleGraphReceipt, MODULE_GRAPH
 use scientific_runtime::{
     build_scientific_runtime_receipt, crucible_measurement_from_report,
     evaluate_scientific_runtime_receipt, parse_numeric_series, verify_scientific_runtime_receipt,
-    RerunObservation, ScientificDigest, ScientificReceiptInputs, ScientificRuntimeReceipt,
-    ScientificToolchain, CRUCIBLE_MEASUREMENT_EXPORT_SCHEMA, SCIENTIFIC_RUNTIME_SCHEMA,
+    RederivedFacts, RerunObservation, ScientificDigest, ScientificEffectPolicy,
+    ScientificReceiptInputs, ScientificRuntimeReceipt, ScientificToolchain,
+    CRUCIBLE_MEASUREMENT_EXPORT_SCHEMA, SCIENTIFIC_RUNTIME_SCHEMA,
 };
 use symbol_graph::{verify_symbol_graph_receipt, SymbolGraphReceipt, SYMBOL_GRAPH_RECEIPT};
 
@@ -207,6 +208,11 @@ enum Commands {
         /// "1d-heat-equation-energy").
         #[arg(long)]
         problem: Option<String>,
+
+        /// Declare the numerical method (recorded as author-DECLARED; buildc
+        /// cannot derive scheme semantics from source).
+        #[arg(long, value_name = "DESCRIPTION")]
+        method: Option<String>,
 
         /// Declare this run a negative fixture: an invariant FAIL is EXPECTED
         /// and yields receipt_status FAIL_EXPECTED instead of FAIL_UNEXPECTED.
@@ -535,6 +541,7 @@ fn main() -> ExitCode {
             invariant,
             metric,
             problem,
+            method,
             negative_fixture,
             args,
         }) => cmd_run(
@@ -544,6 +551,7 @@ fn main() -> ExitCode {
             &invariant,
             &metric,
             problem.as_deref(),
+            method.as_deref(),
             negative_fixture,
         ),
         Some(Commands::Repl) => cmd_repl(),
@@ -1596,10 +1604,11 @@ fn cmd_receipt_export(
         probed_toolchain.as_ref(),
         |source_path| {
             let outcome = run_check(source_path)?;
-            Ok((
-                ScientificDigest::from(&outcome.source_digest),
-                ScientificDigest::from(&outcome.input_graph_digest),
-            ))
+            Ok(RederivedFacts {
+                source_digest: ScientificDigest::from(&outcome.source_digest),
+                input_graph_digest: ScientificDigest::from(&outcome.input_graph_digest),
+                effect_policy: derive_effect_policy(&outcome),
+            })
         },
         |source_path, args| {
             let captured = compile_and_capture_run(
@@ -1981,10 +1990,11 @@ fn verify_scientific_receipt_dispatch(
         probed_toolchain.as_ref(),
         |source_path| {
             let outcome = run_check(source_path)?;
-            Ok((
-                ScientificDigest::from(&outcome.source_digest),
-                ScientificDigest::from(&outcome.input_graph_digest),
-            ))
+            Ok(RederivedFacts {
+                source_digest: ScientificDigest::from(&outcome.source_digest),
+                input_graph_digest: ScientificDigest::from(&outcome.input_graph_digest),
+                effect_policy: derive_effect_policy(&outcome),
+            })
         },
         |source_path, args| {
             let captured = compile_and_capture_run(
@@ -6100,6 +6110,47 @@ struct CapturedRun {
     executable_digest: ScientificDigest,
 }
 
+/// Derive the scientific receipt's effect_policy block from a check outcome:
+/// a canonical, sorted rendering of every function's declared effects and
+/// observed capability facts, hashed, plus the observed capability union.
+/// Deterministic by construction (BTree iteration order + explicit sorts), so
+/// emit and verify derive identical facts from identical source.
+fn derive_effect_policy(outcome: &CheckOutcome) -> ScientificEffectPolicy {
+    let mut lines: Vec<String> = Vec::new();
+    let mut union: BTreeSet<String> = BTreeSet::new();
+    for summary in &outcome.function_summaries {
+        let mut declared = summary.declared_effects.clone();
+        declared.sort();
+        let observed: Vec<String> = summary
+            .observed_capabilities
+            .iter()
+            .map(|(capability, sources)| {
+                union.insert(capability.clone());
+                let sources: Vec<&str> = sources.iter().map(String::as_str).collect();
+                format!("{}[{}]", capability, sources.join(","))
+            })
+            .collect();
+        lines.push(format!(
+            "fn {} declared({}) observed({})",
+            summary.function,
+            declared.join(","),
+            observed.join(";")
+        ));
+    }
+    lines.sort();
+    let canonical = lines.join(
+        "
+",
+    );
+    ScientificEffectPolicy {
+        facts_digest: ScientificDigest {
+            algorithm: "sha256".to_string(),
+            hex: source_digest_hex(canonical.as_bytes()),
+        },
+        observed_capabilities: union.into_iter().collect(),
+    }
+}
+
 /// Probe the local C toolchain for the scientific receipt's compiler_branch
 /// block (the pass-0122 contract). Returns `None` when no C compiler is
 /// available.
@@ -6361,6 +6412,7 @@ fn compile_and_capture_run(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_run(
     file: &PathBuf,
     args: &[String],
@@ -6368,6 +6420,7 @@ fn cmd_run(
     invariant: &str,
     metric: &str,
     problem: Option<&str>,
+    method: Option<&str>,
     negative_fixture: bool,
 ) -> Result<(), i32> {
     // v0 implements only the energy-monotone invariant. Reject unknown names
@@ -6477,6 +6530,8 @@ fn cmd_run(
         os: &os,
         exit_code,
         toolchain,
+        effect_policy: derive_effect_policy(&outcome),
+        method_description: method.map(str::to_string),
         raw_stdout_digest,
         series: parsed.series,
         series_parsed: parsed.any_parsed,
