@@ -43,7 +43,7 @@ Two models were considered:
 ## Determinism decision
 
 buildc checks and seals the **invariant verdict** (monotone non-increasing within tolerance
-`1e-12`; `increase_count`), NOT exact float values. The stable run yields `increase_count == 0`;
+`1e-12`; `violation_count`), NOT exact float values. The stable run yields `violation_count == 0`;
 the unstable run blows up (`~1.6e28`), so the verdict is robust to platform float differences and
 codegen reassociation. buildc computes its OWN deterministic SHA-256 seal over its canonical
 receipt form via the existing `source_digest_hex` (`main.rs:3798`); the research's Python-probe
@@ -69,7 +69,7 @@ using the layers buildc can actually fill):
 - `measurement`: `{ metric (from --metric, default "series"), observed_values: [f64], count,
   units (optional) }` (the parsed stdout series).
 - `invariant`: `{ name: "energy_monotone_nonincreasing", expectation: "no step increases energy
-  beyond tolerance", tolerance: 1e-12, observed: { increase_count, first_increase_step (opt),
+  beyond tolerance", tolerance: 1e-12, observed: { violation_count, first_violation_step (opt),
   initial_value, final_value }, status: "PASS"|"FAIL" }`.
 - `negative_fixture`: bool (from `--negative-fixture`).
 - `labels`: `["NOT_A_NEW_PHYSICAL_LAW"]` (+ `"NEGATIVE_FIXTURE"` when applicable).
@@ -83,8 +83,8 @@ Status rule: invariant PASS -> `receipt_status = PASS`. Invariant FAIL with `--n
 
 ### The invariant checker
 
-`energy_monotone_nonincreasing(series: &[f64], tol) -> { increase_count, first_increase_step,
-initial, final }`: count steps where `series[k+1] > series[k] + tol`. PASS iff `increase_count ==
+`energy_monotone_nonincreasing(series: &[f64], tol) -> { violation_count, first_violation_step,
+initial, final }`: count steps where `series[k+1] > series[k] + tol`. PASS iff `violation_count ==
 0` and `series.len() >= 2`.
 
 ### CLI + capture (`compiler/src/main.rs`)
@@ -106,7 +106,7 @@ reading `/schema`, branch `buildlang-scientific-runtime-receipt/v0` to a verifie
 re-derives the source digest from the embedded `/source` via `source_text_digest_hex` and compares
 with `verify_receipt_digest` (`main.rs:1385`); (2) re-runs the program (compile + `.output()`),
 re-parses the series, re-runs the invariant checker, and compares the recomputed
-`invariant.status` + `increase_count` + `receipt_status` against the stored ones. A drift is a
+`invariant.status` + `violation_count` + `receipt_status` against the stored ones. A drift is a
 verification failure. (Re-run, not stored-value trust, matches `corpus verify`.)
 
 ### The kernel program (`examples/heat_equation_energy.bld`)
@@ -140,7 +140,7 @@ the existing `buildlang-check-receipt/v1` path is unchanged. serde/serde_json/sh
 - **Kernel:** `buildc run examples/heat_equation_energy.bld` prints a strictly non-increasing
   energy series (stable). The unstable variant prints an increasing/blowing-up series.
 - **Emit (e2e, cli.rs):** `run --emit-receipt -` on the stable kernel yields a receipt with
-  `receipt_status == "PASS"`, `invariant.status == "PASS"`, `invariant.observed.increase_count ==
+  `receipt_status == "PASS"`, `invariant.status == "PASS"`, `invariant.observed.violation_count ==
   0`, a valid `seal`, and `labels` containing `NOT_A_NEW_PHYSICAL_LAW`. The unstable kernel with
   `--negative-fixture` yields `receipt_status == "FAIL_EXPECTED"`; without it, `FAIL_UNEXPECTED`.
 - **Verify (e2e):** `receipt verify` on the emitted stable receipt -> success; a receipt whose

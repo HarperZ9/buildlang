@@ -30,8 +30,9 @@ convergent, the scheme is consistent, the parameters are physical, or the result
 reference solution. Those are the program author's responsibility, and the receipt makes no
 statement about them.
 
-v0 is deliberately **one invariant over one series**. See [Deferred](#deferred-tracked-follow-ons)
-for what is out of scope.
+v0 checks **one invariant over one scalar series** per receipt (from a small invariant family;
+see [The invariant family](#3-the-invariant-family)). Multi-column series and cross-series
+relation invariants are out of scope; see [Deferred](#deferred-tracked-follow-ons).
 
 ## 1. Emitting a receipt (`buildc run --emit-receipt`)
 
@@ -62,8 +63,10 @@ conditions it was emitted under.
 Flags on the `run` subcommand (all additive; absent `--emit-receipt`, none of them run):
 
 - `--emit-receipt <PATH>` writes the receipt to `PATH` (`-` = stdout).
-- `--invariant <NAME>` selects the invariant. v0 supports only `energy-monotone` (the
-  default). Any other value is an error reported **before** compiling.
+- `--invariant <NAME>` selects the invariant to check over the series:
+  `energy-monotone` (the default; the observed scalar never increases beyond
+  tolerance) or `conservation` (the observed scalar stays within tolerance of
+  its initial value). Any other value is an error reported **before** compiling.
 - `--metric <NAME>` labels the captured series (default `series`).
 - `--problem <LABEL>` records a free-text problem label (optional).
 - `--negative-fixture` marks that the invariant is *expected* to fail (see
@@ -167,20 +170,31 @@ changing any field changes the seal. `receipt verify` re-derives it and compares
 is buildc's own deterministic hash of its canonical form; integrity for the *numeric* verdict
 comes from the re-run (below), not from trusting the stored series byte-for-byte.
 
-## 3. The energy-monotone invariant
+## 3. The invariant family
 
-v0 ships one invariant, `energy_monotone_nonincreasing`: over the observed series
-`s[0], s[1], ...`, count every step `k` where `s[k+1] > s[k] + tol` (tolerance `1e-12`). The
-verdict is **PASS** iff `increase_count == 0` **and** the series has at least two points; a
-single point or an empty series does not pass (there is no step to check). The `observed`
-block records `increase_count`, `first_increase_step` (when any), `initial_value`, and
-`final_value`.
+Each invariant reduces the observed series to a **violation count**, and the verdict rule is
+uniform across the family: **PASS** iff `violation_count == 0` **and** the series has at least
+two points (a single point or an empty series cannot witness anything). The `observed` block
+records `violation_count`, `first_violation_step` (when any), `initial_value`, and
+`final_value`. The tolerance is a **fixed property of the invariant**, not an author knob:
+verify re-checks the sealed `invariant.tolerance` against the canonical value for the named
+invariant and rejects a receipt that resealed a different one (`FIELD_CONTRACT_VIOLATION`), so
+a receipt cannot weaken its own check.
 
-The tolerance absorbs floating-point jitter (a step that rises by less than `1e-12` is not
-counted as an increase) without absorbing real growth. Checking a *monotonicity verdict*
-rather than exact float values is deliberate: the verdict is robust to platform float
-differences and codegen reassociation, so a receipt emitted on one machine re-verifies on
-another even though the exact printed floats may differ in the last bits.
+| `--invariant` | sealed name | a step is a violation when | tolerance |
+|---|---|---|---|
+| `energy-monotone` | `energy_monotone_nonincreasing` | `s[k+1] > s[k] + tol` (energy rose) | `1e-12` |
+| `conservation` | `conserved_quantity_constant` | `abs(s[k] - s[0]) > tol` (drifted from the initial value) | `1e-9` |
+
+The conservation reference is `s[0]` (the initial value), not the mean, so a re-run that
+reproduces a different-length prefix cannot shift the reference. The looser conservation
+tolerance reflects that a genuinely conserved discrete quantity still accumulates roundoff
+over many steps, while a real leak drifts by an O(1) amount the bound still catches.
+
+Checking a *violation-count verdict* rather than exact float values is deliberate: the verdict
+is robust to platform float differences and codegen reassociation, so a receipt emitted on one
+machine re-verifies on another even though the exact printed floats may differ in the last
+bits.
 
 ## 4. Negative fixtures
 
@@ -195,6 +209,13 @@ The unstable kernel's energy grows, so `invariant.status` is `FAIL`. With
 `--negative-fixture` the `receipt_status` is `FAIL_EXPECTED` and the receipt is additionally
 labelled `NEGATIVE_FIXTURE`. **Without** the flag the same failing run is `FAIL_UNEXPECTED`,
 because an unexpected invariant violation is a genuine red flag, not a demo of the checker.
+
+Every invariant ships with a paired positive/negative kernel: `energy-monotone` has the stable
+and unstable heat kernels above; `conservation` has `examples/conservation_rotation.bld` (a
+rotation preserves the squared radius `r^2 = x^2 + y^2` to roundoff, so it PASSes) and
+`examples/conservation_decay.bld` (a lossy scheme leaks 0.5% per step, so `r^2`/`q` drifts and
+it FAILs). Run the leak with `--invariant conservation --negative-fixture` for a
+`FAIL_EXPECTED` receipt.
 
 ## 5. The heat-equation kernel example
 
@@ -253,7 +274,7 @@ buildc receipt verify receipt.json --json    # machine-readable report
    divergence itself is the faithfulness signal. A recorded divergence that does NOT
    reproduce (or a divergence the receipt never recorded) fails as non-reproduction.
 4. **Recompute the verdict** with the exact same status rule. The recomputed
-   `invariant.status`, `increase_count`, and `receipt_status` must match the stored values;
+   `invariant.status`, `violation_count`, and `receipt_status` must match the stored values;
    any drift is a verification failure with a clear `... drift: receipt X, re-run Y`
    diagnostic. This checks the *verdict*, not exact floats, so it is robust to platform
    float non-reproducibility (the same principle `buildc corpus verify` uses when it
@@ -302,14 +323,14 @@ fixtures and CI pin the *specific* failure instead of accepting "anything failed
 | `DIGEST_MALFORMED` | a sealed digest field is not a real sha256 (64 hex chars); an absent hash cannot masquerade as witnessed provenance | 1 |
 | `ORACLE_KIND_UNSUPPORTED`, `ORACLE_STATUS_UNSUPPORTED`, `ORACLE_BINDING_MISMATCH`, `INVARIANT_UNSUPPORTED` | the oracle/invariant block names a kind, status, or criterion this verifier does not implement; binding is pinned to the implementation, never to another sealed field | 1 |
 | `FENCE_STATUS_UNEXPECTED` | a telemetry/lineage fence was edited to claim availability v0 does not produce | 1 |
-| `FIELD_CONTRACT_VIOLATION` | a sealed field claims something the language version cannot express (a seed with no RNG builtin) or is internally inconsistent (DECLARED method, no description) | 1 |
+| `FIELD_CONTRACT_VIOLATION` | a sealed field claims something the language version cannot express (a seed with no RNG builtin), is internally inconsistent (DECLARED method, no description), or resealed a non-canonical `invariant.tolerance` | 1 |
 | `EFFECT_POLICY_DRIFT` | the sealed effect/capability facts, or the witnessed fields derived from them, do not re-derive from the source | 1 |
 | `TOOL_UNAVAILABLE` | no C compiler available for the re-run | 4 |
 | `REDERIVATION_FAILED` | the source could not be re-checked (missing file, check failure) | inner code |
 | `RERUN_FAILED` | the program could not be re-compiled or re-run | inner code |
 | `RERUN_EXIT_MISMATCH` | the re-run's process exit code differs from the sealed one (covers a crashing re-run) | 1 |
 | `SOURCE_DIGEST_MISMATCH`, `INPUT_GRAPH_DIGEST_MISMATCH` | the source changed since sealing | 1 |
-| `MEASUREMENT_COUNT_DRIFT`, `INVARIANT_STATUS_DRIFT`, `INCREASE_COUNT_DRIFT`, `RECEIPT_STATUS_DRIFT` | the re-run disagrees with a stored verdict fact | 1 |
+| `MEASUREMENT_COUNT_DRIFT`, `INVARIANT_STATUS_DRIFT`, `VIOLATION_COUNT_DRIFT`, `RECEIPT_STATUS_DRIFT` | the re-run disagrees with a stored verdict fact | 1 |
 | `SEAL_MISMATCH` | the stored receipt body does not re-seal | 1 |
 | `INVARIANT_NOT_HELD` | faithful receipt, but the recorded verdict is `FAIL_UNEXPECTED` or `UNVERIFIABLE` | 3 |
 
@@ -378,7 +399,7 @@ Three refinements the mapping enforces:
 - **Diverged receipts never seal a platform-dependent replay expectation.**
   A diverged run's increase count is prefix-derived and legitimately differs
   across toolchains (the verifier's own rule), so `recheck.expected.
-  increase_count` is null and `recheck.diverged` is true: a replayer matches
+  violation_count` is null and `recheck.diverged` is true: a replayer matches
   on receipt_status, not on a number that cannot reproduce. The expected exit
   code of the sealed replay command is also carried (0 faithful-held, 3
   faithful-not-held).
@@ -405,10 +426,12 @@ byte-for-byte. The provenance link records where the idea came from, nothing str
 
 ## Deferred (tracked follow-ons)
 
-v0 is one invariant over one series, sealed and re-derivable. Explicitly out of scope for v0:
+v0 checks one invariant over one scalar series, sealed and re-derivable. Explicitly out of
+scope for v0:
 
-- **Other invariants.** Only `energy-monotone` ships. Additional invariants (conservation,
-  boundedness, convergence-rate checks) are separate follow-ons.
+- **More invariants and multi-column series.** `energy-monotone` and `conservation` ship.
+  Boundedness (a discrete max principle), energy-identity residuals, and cross-series relation
+  invariants (which need multi-column capture, not one scalar per line) are separate follow-ons.
 - **The full 7-layer receipt richness.** The research schema carries more layers than buildc
   can honestly fill today; v0 fills the subset buildc actually derives.
 - **Crucible-at-emit-time.** v0 checks the invariant and seals; it does not run a Crucible
