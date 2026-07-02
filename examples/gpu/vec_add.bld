@@ -1,0 +1,16 @@
+// ============================================================================
+// BUILDLANG COMPUTE SHADER - Vector add (saxpy-family), the canonical kernel
+// ============================================================================
+// The simplest GPU kernel with a checkable numeric result: out[i] = a[i] + b[i].
+//
+// Layer A: `buildc build examples/gpu/vec_add.bld --target spirv -o vec_add.spv`
+//          emits VALID dispatchable compute SPIR-V (validated by spirv-val).
+// Layer B: `buildc run examples/gpu/vec_add.bld --gpu` dispatches on the
+//          physical device and cross-checks against the CPU-C scalar loop.
+// ============================================================================
+
+#[compute]
+fn vec_add(a: &[f32], b: &[f32], out: &mut [f32]) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    out[i] = a[i] + b[i];
+}

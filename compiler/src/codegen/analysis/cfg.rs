@@ -57,6 +57,13 @@ pub(crate) fn stmt_uses_local(kind: &MirStmtKind, x: LocalId) -> bool {
         MirStmtKind::DerefAssign { ptr, value } => *ptr == x || rvalue_mentions(value, x),
         MirStmtKind::FieldDerefAssign { ptr, value, .. } => *ptr == x || rvalue_mentions(value, x),
         MirStmtKind::FieldAssign { base, value, .. } => *base == x || rvalue_mentions(value, x),
+        MirStmtKind::IndexStore {
+            base, index, value, ..
+        } => {
+            matches!(base, MirValue::Local(l) if *l == x)
+                || matches!(index, MirValue::Local(l) if *l == x)
+                || rvalue_mentions(value, x)
+        }
         MirStmtKind::GlobalStore { value, .. } => rvalue_mentions(value, x),
         MirStmtKind::StorageLive(_) | MirStmtKind::StorageDead(_) | MirStmtKind::Nop => false,
     }

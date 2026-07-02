@@ -662,6 +662,21 @@ pub enum MirStmtKind {
         value: MirRValue,
     },
 
+    /// Indexed store into a slice/array/pointer base: `base[index] = value`.
+    /// `base` is the collection value (a slice/array parameter lowers to
+    /// `Ptr(Slice/Array)`), `index` selects the element, `elem_ty` is the element
+    /// type. Added for GPU compute kernels writing `out[i] = ...` into a
+    /// StorageBuffer; the C backend lowers it to `base[index] = value;` and the
+    /// SPIR-V backend to `OpAccessChain` + `OpStore` into the runtime array.
+    /// Without this, an indexed write to a slice parameter fell through every
+    /// `lower_assign` arm and was silently dropped.
+    IndexStore {
+        base: MirValue,
+        index: MirValue,
+        elem_ty: MirType,
+        value: MirRValue,
+    },
+
     /// Store to a module global / mutable static: `GLOBAL = value`.
     /// MIR `Assign` targets only locals, so a write to a module-level global is
     /// represented here. Lowered from `lower_assign` when the assignment target
@@ -903,6 +918,12 @@ pub enum NullaryOp {
     SizeOf,
     /// Alignment of type.
     AlignOf,
+    /// GPU compute built-in global thread index component (`gl_GlobalInvocationID`).
+    /// The `u32` selects the component: 0 = x, 1 = y, 2 = z. On the SPIR-V
+    /// backend this reads the `GlobalInvocationId` built-in; on the C backend
+    /// (the CPU cross-check path) it reads the ambient per-thread index the
+    /// dispatch driver supplies.
+    ThreadIndex(u32),
 }
 
 // ============================================================================

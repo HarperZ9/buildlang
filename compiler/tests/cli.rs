@@ -14356,7 +14356,12 @@ fn born_rule_normalization_round_trips_conservation() {
         .arg(repo_example("born_rule_normalization.bld"))
         .args(["--emit-receipt"])
         .arg(&pass_receipt)
-        .args(["--invariant", "conservation", "--problem", "born-rule-normalization"])
+        .args([
+            "--invariant",
+            "conservation",
+            "--problem",
+            "born-rule-normalization",
+        ])
         .output()
         .expect("emit born-rule PASS receipt");
     assert!(
@@ -14390,14 +14395,28 @@ fn born_rule_normalization_round_trips_conservation() {
         .arg(repo_example("born_rule_leaky.bld"))
         .args(["--emit-receipt"])
         .arg(&fail_receipt)
-        .args(["--invariant", "conservation", "--negative-fixture", "--problem", "born-rule-leaky"])
+        .args([
+            "--invariant",
+            "conservation",
+            "--negative-fixture",
+            "--problem",
+            "born-rule-leaky",
+        ])
         .output()
         .expect("emit born-rule negative fixture");
-    assert!(emit_fail.status.success(), "emitting the negative fixture should succeed");
+    assert!(
+        emit_fail.status.success(),
+        "emitting the negative fixture should succeed"
+    );
     let fail: serde_json::Value =
         serde_json::from_slice(&fs::read(&fail_receipt).expect("read FAIL receipt")).unwrap();
     assert_eq!(fail["receipt_status"], "FAIL_EXPECTED");
-    assert!(fail["invariant"]["observed"]["violation_count"].as_u64().unwrap() > 0);
+    assert!(
+        fail["invariant"]["observed"]["violation_count"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
 
     let verify_fail = buildc()
         .args(["receipt", "verify"])
@@ -14484,11 +14503,19 @@ fn funnel_hashing_round_trips_a_probe_bound() {
         ])
         .output()
         .expect("emit funnel negative fixture");
-    assert!(emit_fail.status.success(), "emitting the negative fixture should succeed");
+    assert!(
+        emit_fail.status.success(),
+        "emitting the negative fixture should succeed"
+    );
     let fail: serde_json::Value =
         serde_json::from_slice(&fs::read(&fail_receipt).expect("read FAIL receipt")).unwrap();
     assert_eq!(fail["receipt_status"], "FAIL_EXPECTED");
-    assert!(fail["invariant"]["observed"]["violation_count"].as_u64().unwrap() > 0);
+    assert!(
+        fail["invariant"]["observed"]["violation_count"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
 
     let verify_fail = buildc()
         .args(["receipt", "verify"])
@@ -14507,7 +14534,9 @@ fn funnel_hashing_round_trips_a_probe_bound() {
 #[test]
 fn receipt_verify_self_test_proves_the_verifier_can_fail() {
     if !c_backend_ready() {
-        eprintln!("skipping receipt_verify_self_test_proves_the_verifier_can_fail: C backend not ready");
+        eprintln!(
+            "skipping receipt_verify_self_test_proves_the_verifier_can_fail: C backend not ready"
+        );
         return;
     }
     let dir = std::env::temp_dir().join(format!("buildlang_sci_selftest_{}", std::process::id()));
@@ -14522,7 +14551,14 @@ fn receipt_verify_self_test_proves_the_verifier_can_fail() {
         .arg(repo_example("funnel_probe.bld"))
         .args(["--emit-receipt"])
         .arg(&receipt)
-        .args(["--invariant", "non-negative", "--metric", "slack", "--problem", "p"])
+        .args([
+            "--invariant",
+            "non-negative",
+            "--metric",
+            "slack",
+            "--problem",
+            "p",
+        ])
         .output()
         .expect("emit receipt for self-test");
     assert!(emit.status.success(), "emitting the receipt should succeed");
@@ -14579,7 +14615,14 @@ fn receipt_chain_build_and_verify_is_tamper_evident() {
             .arg(repo_example(src))
             .args(["--emit-receipt"])
             .arg(out)
-            .args(["--invariant", "non-negative", "--metric", "slack", "--problem", problem])
+            .args([
+                "--invariant",
+                "non-negative",
+                "--metric",
+                "slack",
+                "--problem",
+                problem,
+            ])
             .output()
             .expect("emit member receipt");
         assert!(status.status.success(), "emitting {src} should succeed");
@@ -14629,7 +14672,10 @@ fn receipt_chain_build_and_verify_is_tamper_evident() {
         .arg(&reordered)
         .output()
         .expect("verify reordered chain");
-    assert!(!verify_reorder.status.success(), "a reordered chain must fail");
+    assert!(
+        !verify_reorder.status.success(),
+        "a reordered chain must fail"
+    );
     assert!(
         String::from_utf8_lossy(&verify_reorder.stderr).contains("CHAIN_SEAL_MISMATCH"),
         "reordering must report CHAIN_SEAL_MISMATCH\nstderr:\n{}",
@@ -14641,7 +14687,9 @@ fn receipt_chain_build_and_verify_is_tamper_evident() {
     // WITHOUT touching seal.hex: step 2 (pinned seal) passes, but `receipt verify`
     // on the member recomputes the seal over the edited body and rejects it.
     let mut body: serde_json::Value = serde_json::from_slice(&b_original).unwrap();
-    let vc = body["invariant"]["observed"]["violation_count"].as_i64().unwrap_or(0);
+    let vc = body["invariant"]["observed"]["violation_count"]
+        .as_i64()
+        .unwrap_or(0);
     body["invariant"]["observed"]["violation_count"] = serde_json::Value::from(vc + 1);
     fs::write(&b, serde_json::to_vec_pretty(&body).unwrap()).unwrap();
     let verify_unverified = buildc()
@@ -14649,7 +14697,10 @@ fn receipt_chain_build_and_verify_is_tamper_evident() {
         .arg(&chain)
         .output()
         .expect("verify unverifiable-member chain");
-    assert!(!verify_unverified.status.success(), "an unverifiable member must fail");
+    assert!(
+        !verify_unverified.status.success(),
+        "an unverifiable member must fail"
+    );
     assert!(
         String::from_utf8_lossy(&verify_unverified.stderr).contains("CHAIN_LINK_UNVERIFIED"),
         "a member that does not re-verify must report CHAIN_LINK_UNVERIFIED\nstderr:\n{}",
@@ -14667,7 +14718,10 @@ fn receipt_chain_build_and_verify_is_tamper_evident() {
         .arg(&chain)
         .output()
         .expect("verify tampered-member chain");
-    assert!(!verify_tampered.status.success(), "a tampered member must fail");
+    assert!(
+        !verify_tampered.status.success(),
+        "a tampered member must fail"
+    );
     assert!(
         String::from_utf8_lossy(&verify_tampered.stderr).contains("CHAIN_LINK_TAMPERED"),
         "a substituted member must report CHAIN_LINK_TAMPERED\nstderr:\n{}",
@@ -14681,7 +14735,10 @@ fn receipt_chain_build_and_verify_is_tamper_evident() {
         .arg(&chain)
         .output()
         .expect("verify missing-member chain");
-    assert!(!verify_missing.status.success(), "a missing member must fail");
+    assert!(
+        !verify_missing.status.success(),
+        "a missing member must fail"
+    );
     assert!(
         String::from_utf8_lossy(&verify_missing.stderr).contains("CHAIN_LINK_MISSING"),
         "a deleted member must report CHAIN_LINK_MISSING\nstderr:\n{}",
@@ -14702,9 +14759,10 @@ fn receipt_corpus_asserts_declared_classifications() {
     fs::create_dir_all(&dir).expect("create corpus fixture dir");
 
     // The shipped corpus manifest stays well-formed and covers every kernel pair.
-    let shipped: serde_json::Value =
-        serde_json::from_slice(&fs::read(repo_example("scientific-corpus.json")).expect("read shipped corpus"))
-            .expect("shipped corpus parses");
+    let shipped: serde_json::Value = serde_json::from_slice(
+        &fs::read(repo_example("scientific-corpus.json")).expect("read shipped corpus"),
+    )
+    .expect("shipped corpus parses");
     assert_eq!(shipped["schema"], "buildlang-scientific-receipt-corpus/v0");
     assert_eq!(
         shipped["members"].as_array().unwrap().len(),
@@ -14753,9 +14811,13 @@ fn receipt_corpus_asserts_declared_classifications() {
         .arg(&wrong_path)
         .output()
         .expect("run corpus (wrong)");
-    assert!(!run_wrong.status.success(), "a mis-declared corpus must fail");
     assert!(
-        String::from_utf8_lossy(&run_wrong.stderr).contains("did NOT match their declared classification"),
+        !run_wrong.status.success(),
+        "a mis-declared corpus must fail"
+    );
+    assert!(
+        String::from_utf8_lossy(&run_wrong.stderr)
+            .contains("did NOT match their declared classification"),
         "a mis-declared corpus must report the mismatch\nstderr:\n{}",
         String::from_utf8_lossy(&run_wrong.stderr)
     );

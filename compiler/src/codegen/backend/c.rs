@@ -721,6 +721,18 @@ impl CBackend {
                             return true;
                         }
                     }
+                    // Storing `id` into a slice/buffer element lets it outlive
+                    // the function through the referenced storage: a hard escape.
+                    MirStmtKind::IndexStore {
+                        base, index, value, ..
+                    } => {
+                        if matches!(base, MirValue::Local(l) if *l == id)
+                            || matches!(index, MirValue::Local(l) if *l == id)
+                            || Self::rvalue_mentions(value, id)
+                        {
+                            return true;
+                        }
+                    }
                     MirStmtKind::StorageLive(_)
                     | MirStmtKind::StorageDead(_)
                     | MirStmtKind::Nop => {}
@@ -762,6 +774,16 @@ impl CBackend {
                     }
                     MirStmtKind::GlobalStore { value, .. } => {
                         if Self::rvalue_mentions(value, t) {
+                            return true;
+                        }
+                    }
+                    MirStmtKind::IndexStore {
+                        base, index, value, ..
+                    } => {
+                        if matches!(base, MirValue::Local(l) if *l == t)
+                            || matches!(index, MirValue::Local(l) if *l == t)
+                            || Self::rvalue_mentions(value, t)
+                        {
                             return true;
                         }
                     }
@@ -2622,6 +2644,42 @@ impl CBackend {
                 let rvalue = self.rvalue_to_c(value, locals)?;
                 write!(self.output, "{} = {};\n", name, rvalue).unwrap();
             }
+            MirStmtKind::IndexStore {
+                base,
+                index,
+                elem_ty,
+                value,
+            } => {
+                let base_str = self.value_to_c(base, locals);
+                let index_str = self.value_to_c(index, locals);
+                self.write_indent();
+                let rvalue = self.rvalue_to_c(value, locals)?;
+                // Heap Vec elements go through the typed setter; a slice/array/
+                // pointer base (the GPU compute case) is a plain C subscript.
+                let base_is_vec = match base {
+                    MirValue::Local(id) => locals
+                        .get(id.0 as usize)
+                        .map(|l| matches!(l.ty, MirType::Vec(_)))
+                        .unwrap_or(false),
+                    _ => false,
+                };
+                if base_is_vec {
+                    let suffix = match elem_ty {
+                        MirType::Float(_) => "f64",
+                        MirType::Int(IntSize::I64, _) => "i64",
+                        MirType::Struct(n) if n.as_ref() == "BuildString" => "str",
+                        _ => "i32",
+                    };
+                    write!(
+                        self.output,
+                        "build_hvec_set_{}({}, {}, {});\n",
+                        suffix, base_str, index_str, rvalue
+                    )
+                    .unwrap();
+                } else {
+                    write!(self.output, "{}[{}] = {};\n", base_str, index_str, rvalue).unwrap();
+                }
+            }
             MirStmtKind::StorageLive(_) | MirStmtKind::StorageDead(_) => {
                 // No-op in C
             }
@@ -3684,6 +3742,18 @@ impl CBackend {
             MirRValue::NullaryOp(op, ty) => match op {
                 NullaryOp::SizeOf => format!("sizeof({})", self.type_to_c(ty)),
                 NullaryOp::AlignOf => format!("_Alignof({})", self.type_to_c(ty)),
+                // The GPU compute thread index reads an ambient per-invocation
+                // variable. On the CPU cross-check path the dispatch driver
+                // defines `buildc_gl_global_invocation_{x,y,z}` as it loops over
+                // the grid; on GPU the SPIR-V backend wires GlobalInvocationId.
+                NullaryOp::ThreadIndex(component) => {
+                    let axis = match component {
+                        0 => "x",
+                        1 => "y",
+                        _ => "z",
+                    };
+                    format!("buildc_gl_global_invocation_{}", axis)
+                }
             },
             MirRValue::FieldAccess {
                 base,
