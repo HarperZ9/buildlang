@@ -31,6 +31,7 @@ experimental research surfaces.
 - **Release:** BuildLang 1.0.x; compiler binary `buildc`; built with Rust (edition 2021). C is the production-grade verified backend; HLSL and GLSL ship for shader work; SPIR-V, LLVM IR, WebAssembly, Rust, x86-64, and ARM64 stay labeled experimental.
 - **Type system:** Hindley-Milner inference with typed algebraic effects, plus an **experimental** opt-in `#[linear]` attribute toward **no-cloning** — a `#[linear]` struct/enum value should be moved/consumed at most once (the foundation shared by quantum qubits, on-chain no-double-spend, and resource handles). It conservatively rejects a large, regression-tested set of compositional escapes, but it is **not yet fully sound** (a few known-open classes remain; full soundness needs an affine/borrow checker on MIR). Borrows do not consume; ordinary types keep copy-like reuse. Honest scope, what's enforced, and what's open: [docs/LINEAR-TYPES.md](docs/LINEAR-TYPES.md); also `examples/linear/`, [CHANGELOG.md](CHANGELOG.md), `docs/QUANTUM-HOST.md`.
 - **Operator surface:** the `buildc` CLI exposes `lex`, `parse`, `check` (with `--receipt` / `--policy`), `build`, `run`, `test`, `repl`, `fmt`, `pkg`, `watch`, `doctor`, `corpus`, `policy`, `receipt`, and an `lsp` subcommand that starts a bundled LSP server (completion, hover, diagnostics, go-to-definition, semantic tokens). The CLI and the LSP server are the two integration surfaces; accountability receipts (`buildlang-receipt-verification/v1`) carry SHA-256 source digests for re-checkable codegen.
+- **Accountable scientific compute:** a second receipt family (`buildlang-scientific-runtime-receipt/v0`) seals a re-checkable proof that a numeric kernel's output series satisfies a stated invariant, verified by RE-RUNNING the program. Six invariants ship (energy-monotone, conservation, bounded, energy-identity, relation, conserved-band), each with a paired negative-fixture kernel; `buildc receipt export` emits witnessed measurement rows. Honest scope: it witnesses the observed series, not the model or any physical law. See [Accountable scientific compute](#accountable-scientific-compute) and [docs/SCIENTIFIC-RECEIPT.md](docs/SCIENTIFIC-RECEIPT.md).
 - **Umbrella:** part of the operator's Build ecosystem alongside `build-universe`, the VS Code extension, and the TextMate grammar; standalone and not dependent on any single host.
 - **Repository naming:** public product names are BuildLang, `buildc`, and `.bld`; the crate is [`buildlang`](https://crates.io/crates/buildlang) on crates.io and the repo is [`HarperZ9/buildlang`](https://github.com/HarperZ9/buildlang) on GitHub. The former `quantalang` crate is deprecated and points here.
 - **Housekeeping:** ground-truth release evidence lives in `STATUS.md`; [CHANGELOG.md](CHANGELOG.md) tracks the current presentation pass under Unreleased.
@@ -174,10 +175,47 @@ buildc vignette.bld --target glsl -o vignette.glsl
 | `buildc check <file> [--receipt PATH|-] [--policy policy.json|--profile NAME]` | Type-check, optionally evaluate policy, and optionally emit a JSON accountability receipt |
 | `buildc build` | Build a project                      |
 | `buildc run`   | Compile and run a `.bld` file     |
+| `buildc run <file> --emit-receipt <path> --invariant <NAME> [--columns N]` | Run a numeric kernel and seal a re-checkable **scientific-runtime** receipt over a stated invariant (see [Accountable scientific compute](#accountable-scientific-compute)) |
+| `buildc receipt export <receipt.json>` | Re-verify a scientific-runtime receipt and emit witnessed measurement rows |
 | `buildc doctor` | Diagnose local toolchain readiness  |
 | `buildc policy list [--json]` / `buildc policy print <name>` / `buildc policy scaffold <receipt.json>` | List, emit, or scaffold check policy profiles |
 | `buildc receipt verify <receipt.json> [--source PATH] [--expect-profile NAME] [--expect-policy-digest HEX] [--json]` | Re-check a saved accountability receipt against current source inputs and optional policy expectations |
 | `buildc corpus verify [--root DIR] [--write]` | Verify semantic corpus receipts and C stdout; optionally refresh the C receipt |
+
+## Accountable scientific compute
+
+Beyond the capability (check) receipts described below, `buildc` emits a second,
+independent receipt family for **numeric** programs: a **scientific-runtime
+receipt** (`buildlang-scientific-runtime-receipt/v0`).
+
+`buildc run --emit-receipt <path>` compiles and runs a `.bld` kernel, captures
+its numeric stdout as a measurement series, checks a stated **invariant** over
+that series, and seals a re-checkable JSON receipt. `buildc receipt verify`
+RE-RUNS the program and re-derives the verdict, so drift, tamper, or a source
+change fails with a typed `failure_class` and a verdict-gated exit code. A
+verifier that cannot fail proves nothing, so every invariant ships a paired
+negative-fixture kernel that must fail for the right reason. `buildc receipt
+export` re-verifies and emits witnessed measurement rows for downstream
+ingestion.
+
+The invariant family (each a fixed, re-checked tolerance with a paired
+positive/negative kernel):
+
+| `--invariant` | checks | example kernel |
+|---|---|---|
+| `energy-monotone` | the series never increases beyond tolerance | heat-equation discrete energy (stable FTCS) |
+| `conservation` | stays within roundoff of its initial value | a rotation preserving `r^2` |
+| `bounded` | never exceeds its initial value (the discrete maximum principle) | an undamped oscillator's `x^2` |
+| `energy-identity` | a quantitative per-step energy-balance residual held at roundoff | the FTCS discrete energy identity |
+| `relation` (`--columns N`) | a row's columns agree (the VERIFIER compares them) | `sin(2t)` computed two ways |
+| `conserved-band` | stays within a fixed error budget of its initial value (approximate conservation) | a symplectic leapfrog oscillator's energy |
+
+Honest scope: the receipt witnesses that the compiled program's OBSERVED OUTPUT
+SERIES satisfies (or expectedly violates) the invariant. It does **not** prove
+the underlying model correct and does **not** claim a physical law (every
+receipt carries a `NOT_A_NEW_PHYSICAL_LAW` label). Full field reference,
+exit-code semantics, and the failure-class vocabulary:
+[docs/SCIENTIFIC-RECEIPT.md](docs/SCIENTIFIC-RECEIPT.md).
 
 ## Capability Effects
 
@@ -689,9 +727,10 @@ call into any C-ABI library and be called by any C-ABI consumer.
 
 ## Status
 
-The current release-shaped proof is the Cargo baseline above: `cargo test
---quiet` from `compiler/` on 2026-06-30 produced lib 872, bin 44, cli 263, lexer
-51, parser 83 passing tests (0 failing). [TEST_RESULTS.md](TEST_RESULTS.md) is retained as a
+The current release-shaped proof is the Cargo baseline above: `cargo test`
+from `compiler/` on 2026-07-02 produced lib 940, bin 135, cli 307, lexer
+52, parser 88 passing tests (0 failing), with `buildc corpus verify` 8/8.
+[TEST_RESULTS.md](TEST_RESULTS.md) is retained as a
 historical C-backend output record, not the current release gate; the legacy
 `buildc test` fixture runner now needs a Console-capability annotation pass
 before it can be used as a public green-corpus claim again.
@@ -720,11 +759,11 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 - **Warning gate**: local `RUSTFLAGS=-Dwarnings cargo build --manifest-path compiler/Cargo.toml` is clean as of 2026-06-30; re-run before making a current warning-clean claim
 - **Error handling**: Parser uses `expect()` with messages, lexer has 30+ error variants for recovery, pkg layer uses full `Result<T, E>` propagation
 - **Codegen unwraps**: Intentional assertions on validated AST (documented policy in `codegen/mod.rs`)
-- **Tests**: lib 872, bin 44, cli 263, lexer 51, parser 83 passing (0 failing) in local `cargo test --quiet` from `compiler/` on 2026-06-30
-  - Library (872): type inference + effects + linear-type no-cloning, lexer/parser units, MIR + codegen across backends, the semantic-corpus receipt builders, and LSP dispatch
-  - Lexer: 51 integration tests (token types, spans, Unicode, edge cases, error recovery)
-  - Parser: 83 integration tests (all expression/item/pattern forms, malformed programs)
-  - CLI (263): binary-level smoke tests over help/`doctor`/`corpus verify`/`receipt verify`, capability diagnostics, runnable quickstart examples, and end-to-end C-backend execution checks (including the Option<i64>, 64-bit-literal, and overflow-safe-arithmetic regressions)
+- **Tests**: lib 940, bin 135, cli 307, lexer 52, parser 88 passing (0 failing) in local `cargo test` from `compiler/` on 2026-07-02
+  - Library (940): type inference + effects + linear-type no-cloning, lexer/parser units, MIR + codegen across backends, the semantic-corpus receipt builders, and LSP dispatch
+  - Lexer: 52 integration tests (token types, spans, Unicode, edge cases, error recovery)
+  - Parser: 88 integration tests (all expression/item/pattern forms, malformed programs)
+  - CLI (307): binary-level smoke tests over help/`doctor`/`corpus verify`/`receipt verify`, capability diagnostics, the scientific-runtime receipt round trips (six invariants, each with a positive and negative kernel), runnable quickstart examples, and end-to-end C-backend execution checks (including the Option<i64>, 64-bit-literal, and overflow-safe-arithmetic regressions)
   - Codegen: tests across the C/Rust/HLSL/GLSL/SPIR-V/LLVM/WASM/x86-64/ARM64 backends, with the C path verified end-to-end against the semantic corpus
 
 ## License
