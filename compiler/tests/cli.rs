@@ -14013,6 +14013,129 @@ fn energy_identity_invariant_round_trips_positive_and_negative() {
 }
 
 #[test]
+fn relation_invariant_round_trips_positive_negative_and_validates_columns() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping relation_invariant_round_trips_positive_negative_and_validates_columns: C backend not ready"
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("buildlang_sci_relation_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create relation fixture dir");
+
+    // POSITIVE: sin(2t) computed two ways (direct vs the double-angle identity)
+    // agree, so `--invariant relation --columns 2` PASSes. The VERIFIER computes
+    // the agreement across the two columns.
+    let pass_receipt = dir.join("double_angle.json");
+    let emit_pass = buildc()
+        .arg("run")
+        .arg(repo_example("relation_double_angle.bld"))
+        .args(["--emit-receipt"])
+        .arg(&pass_receipt)
+        .args([
+            "--invariant",
+            "relation",
+            "--columns",
+            "2",
+            "--metric",
+            "sin2t",
+            "--problem",
+            "double-angle",
+        ])
+        .output()
+        .expect("emit relation PASS receipt");
+    assert!(
+        emit_pass.status.success(),
+        "emitting the relation PASS receipt should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&emit_pass.stderr)
+    );
+    let pass: serde_json::Value =
+        serde_json::from_slice(&fs::read(&pass_receipt).expect("read PASS receipt")).unwrap();
+    assert_eq!(pass["invariant"]["name"], "relation_columns_agree");
+    assert_eq!(pass["oracle"]["name"], "relation_columns_agree");
+    assert_eq!(pass["measurement"]["column_count"], 2);
+    assert_eq!(pass["receipt_status"], "PASS");
+    assert_eq!(pass["invariant"]["observed"]["violation_count"], 0);
+
+    let verify_pass = buildc()
+        .args(["receipt", "verify"])
+        .arg(&pass_receipt)
+        .output()
+        .expect("verify relation PASS receipt");
+    assert!(
+        verify_pass.status.success(),
+        "the relation PASS receipt must verify\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_pass.stderr)
+    );
+
+    // NEGATIVE fixture: the broken kernel drops the factor of 2, so the two
+    // columns disagree by |col0|/2. With `--negative-fixture` it is a
+    // FAIL_EXPECTED receipt that STILL verifies.
+    let fail_receipt = dir.join("broken.json");
+    let emit_fail = buildc()
+        .arg("run")
+        .arg(repo_example("relation_double_angle_broken.bld"))
+        .args(["--emit-receipt"])
+        .arg(&fail_receipt)
+        .args([
+            "--invariant",
+            "relation",
+            "--columns",
+            "2",
+            "--negative-fixture",
+            "--metric",
+            "sin2t",
+            "--problem",
+            "broken",
+        ])
+        .output()
+        .expect("emit relation negative fixture");
+    assert!(
+        emit_fail.status.success(),
+        "emitting the negative fixture should succeed"
+    );
+    let fail: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fail_receipt).expect("read FAIL receipt")).unwrap();
+    assert_eq!(fail["receipt_status"], "FAIL_EXPECTED");
+    assert!(
+        fail["invariant"]["observed"]["violation_count"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+
+    let verify_fail = buildc()
+        .args(["receipt", "verify"])
+        .arg(&fail_receipt)
+        .output()
+        .expect("verify relation negative fixture");
+    assert!(
+        verify_fail.status.success(),
+        "a faithfully reproduced FAIL_EXPECTED must verify (exit 0)\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_fail.stderr)
+    );
+
+    // VALIDATION: `--invariant relation` without `--columns >= 2` is rejected
+    // before compiling (each row must hold the columns to compare).
+    let bad = buildc()
+        .arg("run")
+        .arg(repo_example("relation_double_angle.bld"))
+        .args(["--emit-receipt"])
+        .arg(dir.join("bad.json"))
+        .args(["--invariant", "relation"])
+        .output()
+        .expect("emit relation without columns");
+    assert!(
+        !bad.status.success(),
+        "relation without --columns >= 2 must be rejected"
+    );
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("--columns >= 2"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn run_emit_receipt_stable_kernel_is_pass() {
     if !c_backend_ready() {
         eprintln!("skipping run_emit_receipt_stable_kernel_is_pass: C backend not ready");

@@ -43,7 +43,7 @@ use scientific_runtime::{
     RederivedFacts, RerunObservation, ScientificDigest, ScientificEffectPolicy,
     ScientificReceiptInputs, ScientificRuntimeReceipt, ScientificToolchain, BOUNDED_INVARIANT,
     CONSERVATION_INVARIANT, CRUCIBLE_MEASUREMENT_EXPORT_SCHEMA, ENERGY_IDENTITY_INVARIANT,
-    ENERGY_MONOTONE_INVARIANT, SCIENTIFIC_RUNTIME_SCHEMA,
+    ENERGY_MONOTONE_INVARIANT, RELATION_INVARIANT, SCIENTIFIC_RUNTIME_SCHEMA,
 };
 use symbol_graph::{verify_symbol_graph_receipt, SymbolGraphReceipt, SYMBOL_GRAPH_RECEIPT};
 
@@ -204,6 +204,12 @@ enum Commands {
         /// Measurement metric name recorded in the receipt.
         #[arg(long, default_value = "series")]
         metric: String,
+
+        /// Columns per row of the captured series (row-major). `1` (default)
+        /// for the single-scalar invariants; `>= 2` for `--invariant relation`,
+        /// whose verifier compares the columns of each row.
+        #[arg(long, default_value = "1")]
+        columns: usize,
 
         /// Free-text problem label recorded in the receipt (e.g.
         /// "1d-heat-equation-energy").
@@ -541,6 +547,7 @@ fn main() -> ExitCode {
             emit_receipt,
             invariant,
             metric,
+            columns,
             problem,
             method,
             negative_fixture,
@@ -551,6 +558,7 @@ fn main() -> ExitCode {
             emit_receipt.as_deref(),
             &invariant,
             &metric,
+            columns,
             problem.as_deref(),
             method.as_deref(),
             negative_fixture,
@@ -6429,6 +6437,7 @@ fn cmd_run(
     emit_receipt: Option<&Path>,
     invariant: &str,
     metric: &str,
+    columns: usize,
     problem: Option<&str>,
     method: Option<&str>,
     negative_fixture: bool,
@@ -6441,10 +6450,11 @@ fn cmd_run(
         "conservation" => CONSERVATION_INVARIANT,
         "bounded" => BOUNDED_INVARIANT,
         "energy-identity" => ENERGY_IDENTITY_INVARIANT,
+        "relation" => RELATION_INVARIANT,
         other => {
             if emit_receipt.is_some() {
                 eprintln!(
-                    "Unknown --invariant '{other}'. Supported: energy-monotone, conservation, bounded, energy-identity"
+                    "Unknown --invariant '{other}'. Supported: energy-monotone, conservation, bounded, energy-identity, relation"
                 );
                 return Err(1);
             }
@@ -6453,6 +6463,25 @@ fn cmd_run(
             ENERGY_MONOTONE_INVARIANT
         }
     };
+
+    // Column structure validation (only meaningful when emitting a receipt): the
+    // `relation` invariant reads across columns and needs at least two; every
+    // single-scalar invariant reads one value per step and rejects a multi-column
+    // request rather than silently ignoring it.
+    if emit_receipt.is_some() {
+        if invariant_name == RELATION_INVARIANT && columns < 2 {
+            eprintln!(
+                "--invariant relation needs --columns >= 2 (each row must hold the columns to compare)"
+            );
+            return Err(1);
+        }
+        if invariant_name != RELATION_INVARIANT && columns != 1 {
+            eprintln!(
+                "--columns {columns} is only valid with --invariant relation; the single-scalar invariants read one value per step"
+            );
+            return Err(1);
+        }
+    }
 
     // Default path (no --emit-receipt): inherit stdout via `.status()`, exactly
     // as before -- byte-identical output and exit-code semantics. Receipt path:
@@ -6564,6 +6593,7 @@ fn cmd_run(
         invariant_name: invariant_name.to_string(),
         metric: metric.to_string(),
         units: None,
+        column_count: columns,
         problem_label: problem.map(str::to_string),
         negative_fixture,
         flags,
