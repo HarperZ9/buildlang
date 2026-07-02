@@ -57,6 +57,22 @@ pub const BOUNDED_INVARIANT: &str = "bounded_by_initial_maximum";
 /// an O(1) amount this bound catches decisively.
 pub const BOUNDED_TOLERANCE: f64 = 1e-9;
 
+/// The invariant name emitted for the discrete energy-identity check: the
+/// measured scalar is a per-step energy-BALANCE residual that must stay within
+/// tolerance of ZERO (an absolute bound, unlike conservation/bounded which
+/// reference the initial value). This is the family's first QUANTITATIVE
+/// invariant: it checks a computed numerical identity holds, not just a
+/// monotonicity or bound pattern.
+pub const ENERGY_IDENTITY_INVARIANT: &str = "energy_identity_residual";
+
+/// Tolerance used by the energy-identity check. The exact discrete energy
+/// balance holds to roundoff (measured max residual ~2e-14 for the reference
+/// FTCS kernel), so `1e-9` clears it by ~5 orders (absorbing cross-platform
+/// variation in a residual formed by cancelling O(1) quantities) while a real
+/// dropped-term error leaves an O(r^2) residual ~1e-5 that this bound catches
+/// by ~4 orders. Reference is 0, so every step (including step 0) is checked.
+pub const ENERGY_IDENTITY_TOLERANCE: f64 = 1e-9;
+
 /// Provenance reference to the Telos pass-0009 research probe (reference only;
 /// never matched byte-wise, per the determinism decision in the design).
 pub const RESEARCH_SOURCE_HASH: &str =
@@ -535,6 +551,37 @@ pub fn bounded_by_initial_maximum(series: &[f64], tol: f64) -> InvariantObserved
     }
 }
 
+/// Discrete energy-identity invariant over a measured series: each value is a
+/// per-step energy-BALANCE residual that must stay within `tol` of ZERO. A
+/// "violation" is a step whose `abs(value) > tol`.
+///
+/// Unlike conservation and bounded, the reference is 0 (an absolute bound), so
+/// EVERY step is checked, including step 0 (its residual is a real residual
+/// too, not a self-reference). This is the family's quantitative member: the
+/// series is not a physical trajectory but the residual of a computed identity,
+/// which a faithful scheme keeps at roundoff and a broken one does not. Records
+/// the first offending step and the initial/final values; the verdict is
+/// derived in [`invariant_passes`] (PASS requires at least two points AND zero
+/// violations).
+pub fn energy_identity_residual(series: &[f64], tol: f64) -> InvariantObserved {
+    let mut violation_count = 0usize;
+    let mut first_violation_step = None;
+    for (k, &value) in series.iter().enumerate() {
+        if value.abs() > tol {
+            violation_count += 1;
+            if first_violation_step.is_none() {
+                first_violation_step = Some(k);
+            }
+        }
+    }
+    InvariantObserved {
+        violation_count,
+        first_violation_step,
+        initial_value: series.first().copied(),
+        final_value: series.last().copied(),
+    }
+}
+
 /// The invariant PASSes iff the series has at least two points and no step
 /// violated the invariant beyond tolerance. Uniform across the family: an
 /// invariant's whole verdict is "enough points to witness it, and zero
@@ -553,6 +600,7 @@ pub const KNOWN_INVARIANTS: &[&str] = &[
     ENERGY_MONOTONE_INVARIANT,
     CONSERVATION_INVARIANT,
     BOUNDED_INVARIANT,
+    ENERGY_IDENTITY_INVARIANT,
 ];
 
 /// Whether `name` is an invariant this build implements (and can therefore
@@ -571,6 +619,7 @@ pub fn invariant_tolerance(name: &str) -> f64 {
     match name {
         CONSERVATION_INVARIANT => CONSERVATION_TOLERANCE,
         BOUNDED_INVARIANT => BOUNDED_TOLERANCE,
+        ENERGY_IDENTITY_INVARIANT => ENERGY_IDENTITY_TOLERANCE,
         _ => ENERGY_MONOTONE_TOLERANCE,
     }
 }
@@ -580,6 +629,9 @@ pub fn invariant_expectation(name: &str) -> &'static str {
     match name {
         CONSERVATION_INVARIANT => "no step deviates the conserved quantity beyond tolerance",
         BOUNDED_INVARIANT => "no step exceeds the initial value beyond tolerance",
+        ENERGY_IDENTITY_INVARIANT => {
+            "every step's energy-balance residual stays within tolerance of zero"
+        }
         _ => "no step increases energy beyond tolerance",
     }
 }
@@ -591,6 +643,7 @@ pub fn evaluate_invariant(name: &str, series: &[f64], tol: f64) -> InvariantObse
     match name {
         CONSERVATION_INVARIANT => conserved_quantity_constant(series, tol),
         BOUNDED_INVARIANT => bounded_by_initial_maximum(series, tol),
+        ENERGY_IDENTITY_INVARIANT => energy_identity_residual(series, tol),
         _ => energy_monotone_nonincreasing(series, tol),
     }
 }
@@ -2472,6 +2525,137 @@ mod tests {
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
             |_, _| Ok(rerun(vec![1.0, 0.5, 1.0])),
+        );
+        assert_eq!(result, Err(1), "a non-canonical tolerance must be rejected");
+    }
+
+    #[test]
+    fn energy_identity_holds_for_near_zero_residuals() {
+        // Residuals at the roundoff scale are all within tolerance of zero.
+        let obs = energy_identity_residual(&[1e-12, -5e-13, 2e-14, 0.0], ENERGY_IDENTITY_TOLERANCE);
+        assert_eq!(obs.violation_count, 0);
+        assert!(invariant_passes(4, &obs));
+    }
+
+    #[test]
+    fn energy_identity_flags_a_large_residual() {
+        // Residuals above tolerance (a broken balance) are violations, and the
+        // reference is ZERO so step 0 is checked like any other.
+        let obs = energy_identity_residual(&[1e-3, -1e-3, 0.0], ENERGY_IDENTITY_TOLERANCE);
+        assert_eq!(obs.violation_count, 2);
+        assert_eq!(obs.first_violation_step, Some(0));
+        assert!(!invariant_passes(3, &obs));
+    }
+
+    #[test]
+    fn energy_identity_references_zero_not_the_initial_value() {
+        // The witness that energy-identity's reference is 0, not series[0]:
+        // the SAME series [0.1, 0.0, 0.0] yields three different verdicts.
+        // energy-identity flags step 0 (0.1 is far from 0); conservation
+        // references 0.1 and flags the LATER steps (they deviate from 0.1);
+        // bounded references 0.1 and PASSes (nothing exceeds it).
+        let s = [0.1, 0.0, 0.0];
+        let ei = evaluate_invariant(ENERGY_IDENTITY_INVARIANT, &s, ENERGY_IDENTITY_TOLERANCE);
+        assert_eq!(ei.violation_count, 1);
+        assert_eq!(ei.first_violation_step, Some(0));
+        let cons = evaluate_invariant(CONSERVATION_INVARIANT, &s, CONSERVATION_TOLERANCE);
+        assert_eq!(cons.violation_count, 2);
+        assert_eq!(cons.first_violation_step, Some(1));
+        let bounded = evaluate_invariant(BOUNDED_INVARIANT, &s, BOUNDED_TOLERANCE);
+        assert_eq!(bounded.violation_count, 0);
+    }
+
+    #[test]
+    fn verify_round_trips_an_energy_identity_receipt() {
+        let path = Path::new("k.bld");
+        let receipt = build_scientific_runtime_receipt(base_inputs_for(
+            ENERGY_IDENTITY_INVARIANT,
+            path,
+            vec![1e-12, -1e-13, 2e-14],
+            true,
+            false,
+        ));
+        assert_eq!(receipt.invariant.name, ENERGY_IDENTITY_INVARIANT);
+        assert_eq!(receipt.oracle.name, ENERGY_IDENTITY_INVARIANT);
+        assert_eq!(receipt.invariant.tolerance, ENERGY_IDENTITY_TOLERANCE);
+        assert_eq!(receipt.receipt_status, "PASS");
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let sd = receipt.source_digest.clone();
+        let gd = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+            |_, _| Ok(rerun(vec![1e-12, -1e-13, 2e-14])),
+        );
+        assert!(
+            result.is_ok(),
+            "a faithful energy-identity receipt must verify: {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_fails_a_faithful_energy_identity_breakage() {
+        // A residual series that stays large (a dropped-term balance) faithfully
+        // reproduces a FAIL_UNEXPECTED, so `receipt verify` exits 3.
+        let path = Path::new("k.bld");
+        let receipt = build_scientific_runtime_receipt(base_inputs_for(
+            ENERGY_IDENTITY_INVARIANT,
+            path,
+            vec![1e-3, 1e-3, 1e-3],
+            true,
+            false,
+        ));
+        assert_eq!(receipt.receipt_status, "FAIL_UNEXPECTED");
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let sd = receipt.source_digest.clone();
+        let gd = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+            |_, _| Ok(rerun(vec![1e-3, 1e-3, 1e-3])),
+        );
+        assert_eq!(
+            result,
+            Err(3),
+            "a faithful energy-identity breakage must exit 3 (FAIL_UNEXPECTED)"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_a_non_canonical_energy_identity_tolerance() {
+        // Energy-identity's tolerance is pinned like every family member's.
+        let path = Path::new("k.bld");
+        let mut receipt = build_scientific_runtime_receipt(base_inputs_for(
+            ENERGY_IDENTITY_INVARIANT,
+            path,
+            vec![1e-12, -1e-13, 2e-14],
+            true,
+            false,
+        ));
+        receipt.invariant.tolerance = 1e6;
+        seal_receipt(&mut receipt);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let sd = receipt.source_digest.clone();
+        let gd = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+            |_, _| Ok(rerun(vec![1e-12, -1e-13, 2e-14])),
         );
         assert_eq!(result, Err(1), "a non-canonical tolerance must be rejected");
     }
