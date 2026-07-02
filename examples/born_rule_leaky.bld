@@ -1,0 +1,38 @@
+// Born-rule normalization NEGATIVE fixture (NON-UNITARY GATE).
+//
+// Identical to born_rule_normalization.bld EXCEPT a small gain g = 1.001 is
+// applied to every amplitude each step. That gate is not unitary (its
+// determinant is g^2 != 1), so it is a physically forbidden evolution: the
+// total Born probability grows by g^2 each step and drifts away from 1 (reaching
+// roughly 1.5 over the run), far beyond the 1e-9 tolerance. So `--invariant
+// conservation` FAILs: the receipt catches a gate that violates the
+// probability-conservation law unitarity guarantees.
+//
+// Paired negative fixture for born_rule_normalization.bld; run with
+// `--negative-fixture` for FAIL_EXPECTED.
+
+fn main() ~ Console {
+    let t: f64 = 0.05;
+    let c: f64 = cos(t);
+    let s: f64 = sin(t);
+    let g: f64 = 1.001;
+    let mut a0: f64 = 1.0;
+    let mut b0: f64 = 0.0;
+    let mut a1: f64 = 0.0;
+    let mut b1: f64 = 0.0;
+    let mut step: i32 = 0;
+    while step < 200 {
+        let prob: f64 = a0 ** 2 + b0 ** 2 + a1 ** 2 + b1 ** 2;
+        println!("{}", prob);
+        // Unitary rotation, then a NON-UNITARY gain that breaks conservation.
+        let a0n: f64 = g * (c * a0 + s * b1);
+        let b0n: f64 = g * (c * b0 - s * a1);
+        let a1n: f64 = g * (c * a1 + s * b0);
+        let b1n: f64 = g * (c * b1 - s * a0);
+        a0 = a0n;
+        b0 = b0n;
+        a1 = a1n;
+        b1 = b1n;
+        step = step + 1;
+    }
+}
