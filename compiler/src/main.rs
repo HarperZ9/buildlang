@@ -38,7 +38,7 @@ use mir_representation::{
 };
 use module_graph::{verify_module_graph_receipt, ModuleGraphReceipt, MODULE_GRAPH_RECEIPT};
 use scientific_runtime::{
-    build_scientific_runtime_receipt, column_count_matches_invariant,
+    build_scientific_runtime_receipt, build_self_test_cases, column_count_matches_invariant,
     crucible_measurement_from_report, evaluate_scientific_runtime_receipt, parse_numeric_series,
     verify_scientific_runtime_receipt, RederivedFacts, RerunObservation, ScientificDigest,
     ScientificEffectPolicy, ScientificReceiptInputs, ScientificRuntimeReceipt, ScientificToolchain,
@@ -488,6 +488,11 @@ enum ReceiptCommands {
         /// Emit a machine-readable verification report
         #[arg(long)]
         json: bool,
+        /// Instead of verifying, prove the verifier can FAIL: tamper each sealed
+        /// field of this (scientific-runtime) receipt and assert each tamper is
+        /// rejected with its expected failure_class
+        #[arg(long)]
+        self_test: bool,
     },
     /// Export a scientific-runtime receipt as a Crucible-ingestible measurement
     /// (the Telos bridge). The receipt is RE-VERIFIED first and the measurement's
@@ -1519,13 +1524,20 @@ fn cmd_receipt(command: ReceiptCommands) -> Result<(), i32> {
             expect_profile,
             expect_policy_digest,
             json,
-        } => cmd_receipt_verify(
-            &receipt,
-            source.as_deref(),
-            expect_profile.as_deref(),
-            expect_policy_digest.as_deref(),
-            json,
-        ),
+            self_test,
+        } => {
+            if self_test {
+                cmd_receipt_verify_self_test(&receipt)
+            } else {
+                cmd_receipt_verify(
+                    &receipt,
+                    source.as_deref(),
+                    expect_profile.as_deref(),
+                    expect_policy_digest.as_deref(),
+                    json,
+                )
+            }
+        }
         ReceiptCommands::Export {
             receipt,
             output,
@@ -1539,6 +1551,93 @@ fn cmd_receipt(command: ReceiptCommands) -> Result<(), i32> {
             &claim_sha256,
             claim_expects_failure,
         ),
+    }
+}
+
+/// `receipt verify --self-test`: prove the verifier can FAIL. Take a valid
+/// scientific-runtime receipt, tamper each of several sealed fields, and assert
+/// that each tamper is rejected by the real `receipt verify` path with its
+/// expected `failure_class`. A verifier that cannot distinguish these tampers
+/// would report a class it did not actually derive, so this closes the same
+/// can-it-FAIL gap on the verifier that the negative-fixture kernels close on
+/// the invariants. All tamper cases are rejected before any program re-run, so
+/// this needs no toolchain.
+fn cmd_receipt_verify_self_test(receipt_path: &Path) -> Result<(), i32> {
+    let receipt: serde_json::Value = read_json(receipt_path).map_err(|code| {
+        eprintln!("Error: could not read receipt for self-test");
+        code
+    })?;
+    let cases = build_self_test_cases(&receipt).map_err(|err| {
+        eprintln!("Error: {err}");
+        1
+    })?;
+
+    let exe = std::env::current_exe().map_err(|err| {
+        eprintln!("Error: cannot locate the buildc binary for self-test: {err}");
+        1
+    })?;
+    let tmp_dir = std::env::temp_dir().join(format!("buildc_selftest_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).map_err(|err| {
+        eprintln!("Error: cannot create self-test scratch dir: {err}");
+        1
+    })?;
+
+    let total = cases.len();
+    let mut failures = 0usize;
+    for (i, case) in cases.iter().enumerate() {
+        let path = tmp_dir.join(format!("case_{i}.json"));
+        let bytes = serde_json::to_vec_pretty(&case.tampered).expect("serialize tamper case");
+        if std::fs::write(&path, &bytes).is_err() {
+            eprintln!("  FAIL {} (could not write case file)", case.label);
+            failures += 1;
+            continue;
+        }
+        let output = match std::process::Command::new(&exe)
+            .args(["receipt", "verify"])
+            .arg(&path)
+            .arg("--json")
+            .output()
+        {
+            Ok(output) => output,
+            Err(err) => {
+                eprintln!("  FAIL {} (verify subprocess failed to run: {err})", case.label);
+                failures += 1;
+                continue;
+            }
+        };
+        // A tamper MUST be rejected (non-zero exit) with the expected class.
+        let rejected = !output.status.success();
+        let actual_class = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("failure_class")
+                    .and_then(|c| c.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "(none)".to_string());
+        if rejected && actual_class == case.expected_class {
+            println!("  ok   {} => {}", case.label, actual_class);
+        } else {
+            eprintln!(
+                "  FAIL {} => expected {} (rejected), got {} (rejected={})",
+                case.label, case.expected_class, actual_class, rejected
+            );
+            failures += 1;
+        }
+    }
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    if failures == 0 {
+        println!("self-test: {total}/{total} tampers rejected with the expected failure_class");
+        Ok(())
+    } else {
+        eprintln!(
+            "self-test: {}/{} tampers did NOT produce the expected failure_class",
+            failures, total
+        );
+        Err(1)
     }
 }
 
