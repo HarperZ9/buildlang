@@ -361,12 +361,6 @@ pub struct ScientificProblem {
     pub label: Option<String>,
 }
 
-/// serde default for `ScientificMeasurement::column_count`: a receipt without
-/// the field predates the relation invariant and is single-column.
-fn one_column() -> usize {
-    1
-}
-
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ScientificMeasurement {
     pub metric: String,
@@ -378,7 +372,12 @@ pub struct ScientificMeasurement {
     /// and checks a relation ACROSS them. Sealed (a tamper is SEAL_MISMATCH);
     /// `count` remains the total token count, so a re-run's token-count drift
     /// is still caught independently of the column structure.
-    #[serde(default = "one_column")]
+    ///
+    /// REQUIRED (no serde default): the recomputed seal always covers this
+    /// field, so a receipt sealed without it could never re-verify anyway. A
+    /// default would only convert an honest `MALFORMED: missing column_count`
+    /// into a misleading `SEAL_MISMATCH` (the same reasoning the `args` field
+    /// records for rejecting a default on a sealed field).
     pub column_count: usize,
     /// sha256 over the EXACT raw stdout bytes captured at emit. The parse into
     /// `observed_values` is a lossy transform; sealing the raw payload keeps
@@ -621,8 +620,11 @@ pub fn invariant_passes(series_len: usize, observed: &InvariantObserved) -> bool
 /// truth for the family: `is_known_invariant` and the verify-side "unsupported
 /// invariant" diagnostic both read it, so adding an invariant here cannot leave
 /// a hardcoded list stale (the failure mode the C1 review caught in the export
-/// evidence). Each name here MUST have arms in `invariant_tolerance`,
-/// `invariant_expectation`, and `evaluate_invariant`.
+/// evidence). Each name here MUST have arms in `invariant_tolerance` and
+/// `invariant_expectation`, and MUST be scored by `evaluate_measurement`: the
+/// single-scalar invariants through its `evaluate_invariant` delegate, the
+/// relation invariant through its own multi-column arm. Do NOT add the relation
+/// name to `evaluate_invariant` (it lacks the `column_count` it needs).
 pub const KNOWN_INVARIANTS: &[&str] = &[
     ENERGY_MONOTONE_INVARIANT,
     CONSERVATION_INVARIANT,
@@ -2952,6 +2954,38 @@ mod tests {
             |_, _| Ok(rerun(vec![1.0, 1.0, 2.0, 2.0])),
         );
         assert_eq!(result, Err(1), "a non-canonical tolerance must be rejected");
+    }
+
+    #[test]
+    fn verify_rejects_a_receipt_missing_column_count() {
+        // column_count is a REQUIRED sealed field (no serde default): a receipt
+        // lacking it is MALFORMED at load, caught BEFORE any re-derivation or
+        // re-run, rather than deserializing to a default and then misreporting
+        // as SEAL_MISMATCH. (Regression for the C4 review finding.)
+        let path = Path::new("k.bld");
+        let receipt =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        let mut value = serde_json::to_value(&receipt).expect("to_value");
+        value["measurement"]
+            .as_object_mut()
+            .expect("measurement object")
+            .remove("column_count")
+            .expect("column_count was present");
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| panic!("a malformed receipt must be rejected before re-derivation"),
+            |_, _| panic!("a malformed receipt must be rejected before the re-run"),
+        );
+        assert_eq!(
+            result,
+            Err(1),
+            "a receipt missing the required column_count must be rejected as malformed"
+        );
     }
 
     /// Build a faithful re-run observation (finite series, exit 0, raw and
