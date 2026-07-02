@@ -473,6 +473,26 @@ any program re-run, so `--self-test` needs no C toolchain. It exits 0 only if ev
 produced its expected class, and prints `self-test: N/N tampers rejected with the expected
 failure_class`.
 
+### Chaining receipts (`receipt chain`)
+
+A multi-stage computation produces several receipts. A receipt chain binds them into one
+ordered, tamper-evident bundle without changing the receipt schema:
+
+```
+buildc receipt chain build stage1.json stage2.json stage3.json -o chain.json
+buildc receipt chain verify chain.json
+```
+
+`chain build` records each member's `seal.hex` in order and computes a chain seal over the
+ordered list of member seals. `chain verify` then (1) recomputes the chain seal and compares it,
+(2) checks each member receipt's current seal against the seal pinned in the chain, and (3)
+re-verifies each member receipt through the real `receipt verify` path. Each break has a stable
+`failure_class`: `CHAIN_SEAL_MISMATCH` (a member was reordered, added, or dropped),
+`CHAIN_LINK_TAMPERED` (a member file was substituted or its seal edited), `CHAIN_LINK_MISSING` (a
+member file is gone), and `CHAIN_LINK_UNVERIFIED` (a member no longer re-verifies). Because step 3
+re-runs each member, `chain verify` needs the C toolchain and the member sources, exactly like
+`receipt verify`.
+
 ### What the seal does and does not witness
 
 The re-run re-derives the source digests, the measurement count, and the verdict triple.

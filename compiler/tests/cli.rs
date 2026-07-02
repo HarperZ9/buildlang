@@ -14563,6 +14563,135 @@ fn receipt_verify_self_test_proves_the_verifier_can_fail() {
 }
 
 #[test]
+fn receipt_chain_build_and_verify_is_tamper_evident() {
+    if !c_backend_ready() {
+        eprintln!("skipping receipt_chain_build_and_verify_is_tamper_evident: C backend not ready");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("buildlang_sci_chain_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create chain fixture dir");
+
+    // Two member receipts from different kernels.
+    let emit = |src: &str, out: &std::path::Path, problem: &str| {
+        let status = buildc()
+            .arg("run")
+            .arg(repo_example(src))
+            .args(["--emit-receipt"])
+            .arg(out)
+            .args(["--invariant", "non-negative", "--metric", "slack", "--problem", problem])
+            .output()
+            .expect("emit member receipt");
+        assert!(status.status.success(), "emitting {src} should succeed");
+    };
+    let a = dir.join("a.json");
+    let b = dir.join("b.json");
+    emit("funnel_probe.bld", &a, "a");
+    emit("search_bound_binary.bld", &b, "b");
+    // Snapshot member b's exact bytes so negative scenarios can restore it
+    // (receipt emit is not byte-reproducible: it seals the compiled program's
+    // executable digest, which varies across builds, so a re-emit would not
+    // reproduce the pinned seal).
+    let b_original = fs::read(&b).expect("snapshot member b");
+
+    // Build the chain and verify the clean chain.
+    let chain = dir.join("chain.json");
+    let build = buildc()
+        .args(["receipt", "chain", "build"])
+        .arg(&a)
+        .arg(&b)
+        .arg("-o")
+        .arg(&chain)
+        .output()
+        .expect("build chain");
+    assert!(build.status.success(), "chain build should succeed");
+
+    let verify = buildc()
+        .args(["receipt", "chain", "verify"])
+        .arg(&chain)
+        .output()
+        .expect("verify chain");
+    assert!(
+        verify.status.success(),
+        "the clean chain must verify\nstderr:\n{}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+
+    // Reordering the members breaks the chain seal.
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&chain).expect("read chain")).unwrap();
+    let links = manifest["links"].as_array().unwrap().clone();
+    manifest["links"] = serde_json::Value::Array(vec![links[1].clone(), links[0].clone()]);
+    let reordered = dir.join("reorder.json");
+    fs::write(&reordered, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    let verify_reorder = buildc()
+        .args(["receipt", "chain", "verify"])
+        .arg(&reordered)
+        .output()
+        .expect("verify reordered chain");
+    assert!(!verify_reorder.status.success(), "a reordered chain must fail");
+    assert!(
+        String::from_utf8_lossy(&verify_reorder.stderr).contains("CHAIN_SEAL_MISMATCH"),
+        "reordering must report CHAIN_SEAL_MISMATCH\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_reorder.stderr)
+    );
+
+    // A member whose seal still matches the pin but whose body no longer
+    // re-verifies is caught as CHAIN_LINK_UNVERIFIED. Edit a witnessed field
+    // WITHOUT touching seal.hex: step 2 (pinned seal) passes, but `receipt verify`
+    // on the member recomputes the seal over the edited body and rejects it.
+    let mut body: serde_json::Value = serde_json::from_slice(&b_original).unwrap();
+    let vc = body["invariant"]["observed"]["violation_count"].as_i64().unwrap_or(0);
+    body["invariant"]["observed"]["violation_count"] = serde_json::Value::from(vc + 1);
+    fs::write(&b, serde_json::to_vec_pretty(&body).unwrap()).unwrap();
+    let verify_unverified = buildc()
+        .args(["receipt", "chain", "verify"])
+        .arg(&chain)
+        .output()
+        .expect("verify unverifiable-member chain");
+    assert!(!verify_unverified.status.success(), "an unverifiable member must fail");
+    assert!(
+        String::from_utf8_lossy(&verify_unverified.stderr).contains("CHAIN_LINK_UNVERIFIED"),
+        "a member that does not re-verify must report CHAIN_LINK_UNVERIFIED\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_unverified.stderr)
+    );
+
+    // Substituting a member (its seal no longer matches the pinned seal) is
+    // caught as CHAIN_LINK_TAMPERED. Restore b from its snapshot, then edit its
+    // seal.hex so it no longer matches the pin.
+    let mut member: serde_json::Value = serde_json::from_slice(&b_original).unwrap();
+    member["seal"]["hex"] = serde_json::Value::String("0".repeat(64));
+    fs::write(&b, serde_json::to_vec_pretty(&member).unwrap()).unwrap();
+    let verify_tampered = buildc()
+        .args(["receipt", "chain", "verify"])
+        .arg(&chain)
+        .output()
+        .expect("verify tampered-member chain");
+    assert!(!verify_tampered.status.success(), "a tampered member must fail");
+    assert!(
+        String::from_utf8_lossy(&verify_tampered.stderr).contains("CHAIN_LINK_TAMPERED"),
+        "a substituted member must report CHAIN_LINK_TAMPERED\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_tampered.stderr)
+    );
+
+    // A missing member file is caught as CHAIN_LINK_MISSING.
+    fs::remove_file(&b).expect("delete member");
+    let verify_missing = buildc()
+        .args(["receipt", "chain", "verify"])
+        .arg(&chain)
+        .output()
+        .expect("verify missing-member chain");
+    assert!(!verify_missing.status.success(), "a missing member must fail");
+    assert!(
+        String::from_utf8_lossy(&verify_missing.stderr).contains("CHAIN_LINK_MISSING"),
+        "a deleted member must report CHAIN_LINK_MISSING\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_missing.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn conserved_band_invariant_round_trips_and_is_distinct() {
     if !c_backend_ready() {
         eprintln!(
