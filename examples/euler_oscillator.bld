@@ -1,0 +1,28 @@
+// Explicit-Euler harmonic-oscillator NEGATIVE fixture (energy drift).
+//
+// The same oscillator q'' = -q integrated with FORWARD (explicit) Euler is NOT
+// symplectic: it injects energy every step, so H = 0.5*(p^2 + q^2) grows by a
+// factor (1 + dt^2) per step and drifts secularly away from H_0, leaving any
+// fixed error band. `--invariant conserved-band` FAILs.
+//
+// This is the textbook contrast with the symplectic scheme: same physics, same
+// step size, but a non-symplectic update that cannot conserve energy over long
+// times. Paired negative fixture for symplectic_oscillator.bld; run with
+// `--negative-fixture` for FAIL_EXPECTED.
+
+fn main() ~ Console {
+    let dt: f64 = 0.1;
+    let mut q: f64 = 1.0;
+    let mut p: f64 = 1.0;
+    let mut step: i32 = 0;
+    while step < 2000 {
+        let h: f64 = 0.5 * (p ** 2 + q ** 2);
+        println!("{}", h);
+        // Explicit-Euler update (energy-injecting): both use the OLD state.
+        let q_new: f64 = q + p * dt;
+        let p_new: f64 = p - q * dt;
+        q = q_new;
+        p = p_new;
+        step = step + 1;
+    }
+}

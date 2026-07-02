@@ -38,12 +38,13 @@ use mir_representation::{
 };
 use module_graph::{verify_module_graph_receipt, ModuleGraphReceipt, MODULE_GRAPH_RECEIPT};
 use scientific_runtime::{
-    build_scientific_runtime_receipt, crucible_measurement_from_report,
-    evaluate_scientific_runtime_receipt, parse_numeric_series, verify_scientific_runtime_receipt,
-    RederivedFacts, RerunObservation, ScientificDigest, ScientificEffectPolicy,
-    ScientificReceiptInputs, ScientificRuntimeReceipt, ScientificToolchain, BOUNDED_INVARIANT,
-    CONSERVATION_INVARIANT, CRUCIBLE_MEASUREMENT_EXPORT_SCHEMA, ENERGY_IDENTITY_INVARIANT,
-    ENERGY_MONOTONE_INVARIANT, RELATION_INVARIANT, SCIENTIFIC_RUNTIME_SCHEMA,
+    build_scientific_runtime_receipt, column_count_matches_invariant,
+    crucible_measurement_from_report, evaluate_scientific_runtime_receipt, parse_numeric_series,
+    verify_scientific_runtime_receipt, RederivedFacts, RerunObservation, ScientificDigest,
+    ScientificEffectPolicy, ScientificReceiptInputs, ScientificRuntimeReceipt, ScientificToolchain,
+    BOUNDED_INVARIANT, CONSERVATION_INVARIANT, CONSERVED_BAND_INVARIANT,
+    CRUCIBLE_MEASUREMENT_EXPORT_SCHEMA, ENERGY_IDENTITY_INVARIANT, ENERGY_MONOTONE_INVARIANT,
+    RELATION_INVARIANT, SCIENTIFIC_RUNTIME_SCHEMA,
 };
 use symbol_graph::{verify_symbol_graph_receipt, SymbolGraphReceipt, SYMBOL_GRAPH_RECEIPT};
 
@@ -6451,10 +6452,11 @@ fn cmd_run(
         "bounded" => BOUNDED_INVARIANT,
         "energy-identity" => ENERGY_IDENTITY_INVARIANT,
         "relation" => RELATION_INVARIANT,
+        "conserved-band" => CONSERVED_BAND_INVARIANT,
         other => {
             if emit_receipt.is_some() {
                 eprintln!(
-                    "Unknown --invariant '{other}'. Supported: energy-monotone, conservation, bounded, energy-identity, relation"
+                    "Unknown --invariant '{other}'. Supported: energy-monotone, conservation, bounded, energy-identity, relation, conserved-band"
                 );
                 return Err(1);
             }
@@ -6464,23 +6466,22 @@ fn cmd_run(
         }
     };
 
-    // Column structure validation (only meaningful when emitting a receipt): the
-    // `relation` invariant reads across columns and needs at least two; every
-    // single-scalar invariant reads one value per step and rejects a multi-column
-    // request rather than silently ignoring it.
-    if emit_receipt.is_some() {
-        if invariant_name == RELATION_INVARIANT && columns < 2 {
+    // Column structure validation (only meaningful when emitting a receipt),
+    // gated on the SAME contract verify re-checks (column_count_matches_invariant)
+    // so the two can never drift: the `relation` invariant reads across columns
+    // and needs at least two; every single-scalar invariant reads one value per
+    // step and rejects a multi-column request rather than silently ignoring it.
+    if emit_receipt.is_some() && !column_count_matches_invariant(invariant_name, columns) {
+        if invariant_name == RELATION_INVARIANT {
             eprintln!(
                 "--invariant relation needs --columns >= 2 (each row must hold the columns to compare)"
             );
-            return Err(1);
-        }
-        if invariant_name != RELATION_INVARIANT && columns != 1 {
+        } else {
             eprintln!(
                 "--columns {columns} is only valid with --invariant relation; the single-scalar invariants read one value per step"
             );
-            return Err(1);
         }
+        return Err(1);
     }
 
     // Default path (no --emit-receipt): inherit stdout via `.status()`, exactly
