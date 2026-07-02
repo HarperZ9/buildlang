@@ -38,6 +38,88 @@ pub const ENERGY_MONOTONE_TOLERANCE: f64 = 1e-12;
 pub const RESEARCH_SOURCE_HASH: &str =
     "b3021c14b0e5dc8adeddadf0d22e2780dbf259c349caf5cbc2ba255b591fd7d5";
 
+/// The machine-readable claims boundary every scientific-runtime receipt
+/// carries (the pass-0122 `non_promotion_boundary` field as sealed data): what
+/// a verdict does NOT witness. Verify rejects a receipt whose boundary omits
+/// "physical_law" (an emitter or hand-builder that dropped the boundary is
+/// overclaiming by omission).
+pub const NOT_CLAIMED_BOUNDARY: &[&str] = &[
+    "numerical_correctness",
+    "convergence",
+    "pde_accuracy",
+    "physical_law",
+];
+
+/// The versioned series-extraction policy: how raw stdout bytes become the
+/// numeric series. Sealed in the receipt so a policy change is visible as a
+/// different receipt, and byte-level drift stays distinguishable from
+/// extraction-policy tolerance.
+pub const SERIES_EXTRACTION_POLICY: &str =
+    "whitespace-f64/v1: whitespace-split tokens parsed as finite f64; a non-finite token truncates the series and marks the run diverged; other tokens are skipped";
+
+/// The criterion the verdict is measured against (the pass-0122 `oracle`
+/// field). v0 supports one kind, `declared_invariant`: the named invariant IS
+/// the criterion, declared rather than derived from an executed reference.
+/// Future kinds (`reference_implementation`, `exact_proof`) get their own
+/// status vocabulary when an oracle actually executes; the kind/status split
+/// keeps "what the criterion is" separate from "how it was established".
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ScientificOracle {
+    /// `declared_invariant` (v0).
+    pub kind: String,
+    /// The criterion's name; for `declared_invariant` this MUST equal
+    /// `invariant.name` (verify checks the binding).
+    pub name: String,
+    /// `DECLARED` (v0): the criterion was stated, not independently executed.
+    pub status: String,
+}
+
+/// The pass-0122 `compiler_branch` contract: the toolchain that produced (and
+/// re-produces) the run. Sealed at emit; verify re-probes the local toolchain
+/// and treats a mismatch as environmental CONTEXT (a receipt may legitimately
+/// re-verify under a different toolchain because the re-checked quantity is
+/// the verdict, not bytes), and a missing toolchain as its own
+/// `TOOL_UNAVAILABLE` verdict.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ScientificToolchain {
+    /// The resolved C compiler command (e.g. `cl.exe`, `gcc`).
+    pub c_compiler: String,
+    /// First line of the compiler's version banner (human triage).
+    pub c_compiler_version: String,
+    /// sha256 over the compiler's full version-probe output bytes.
+    pub version_output_digest: ScientificDigest,
+    /// The os/arch the emitting buildc binary was BUILT FOR (compile-time
+    /// constants, e.g. `windows/x86_64`); equals the host in every supported
+    /// configuration, but is not a runtime host probe.
+    pub target: String,
+    /// sha256 of the buildc binary that emitted the receipt.
+    pub buildc_binary_digest: ScientificDigest,
+    /// sha256 of the compiled program executable BEFORE it ran. REPORTED at
+    /// verify (`executable_reproduced`), never required: C compiler output is
+    /// not byte-stable across compiler versions, and requiring it would
+    /// contradict the verdict-level determinism rule.
+    pub program_executable_digest: ScientificDigest,
+}
+
+/// An explicitly fenced receipt branch (the corpus's UNAVAILABLE_FENCED
+/// discipline): the pass-0122 contract names `telemetry_branch` and
+/// `lineage_branch`; buildc does not produce either, and says so in-band
+/// rather than omitting the fields (absence of evidence is witnessed, not
+/// implied).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ScientificFencedBranch {
+    /// `UNAVAILABLE_FENCED`.
+    pub status: String,
+}
+
+impl ScientificFencedBranch {
+    pub fn fenced() -> Self {
+        ScientificFencedBranch {
+            status: "UNAVAILABLE_FENCED".to_string(),
+        }
+    }
+}
+
 // `{algorithm:"sha256", hex}` digest shape. We re-declare a local, owned,
 // serde-round-trippable copy so the receipt deserializes back cleanly; it is
 // structurally compatible with `super::CheckReceiptSourceDigest` (which is
@@ -62,6 +144,8 @@ pub struct ScientificBuildState {
     pub target: String,
     pub compiler_status: String,
     pub flags: Vec<String>,
+    /// The pass-0122 `compiler_branch` block (see [`ScientificToolchain`]).
+    pub toolchain: ScientificToolchain,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -81,6 +165,18 @@ pub struct ScientificMeasurement {
     pub metric: String,
     pub observed_values: Vec<f64>,
     pub count: usize,
+    /// sha256 over the EXACT raw stdout bytes captured at emit. The parse into
+    /// `observed_values` is a lossy transform; sealing the raw payload keeps
+    /// byte drift distinguishable from semantic drift. Verify recomputes this
+    /// over the re-run's bytes and REPORTS whether it reproduced
+    /// (`raw_stdout_reproduced`); a raw mismatch with a matching verdict is
+    /// still faithful (exact bytes are platform-dependent by design).
+    pub raw_stdout_digest: ScientificDigest,
+    /// The versioned extraction policy that produced `observed_values` from
+    /// the raw bytes (see [`SERIES_EXTRACTION_POLICY`]). Hard-checked at
+    /// verify: a receipt extracted under a different policy cannot be
+    /// faithfully re-checked by this build's parser.
+    pub series_extraction_policy: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub units: Option<String>,
 }
@@ -136,8 +232,14 @@ pub struct ScientificRuntimeReceipt {
     /// sealed without it could never verify anyway).
     pub args: Vec<String>,
     pub problem: ScientificProblem,
+    /// The criterion the verdict is measured against (pass-0122 `oracle`).
+    pub oracle: ScientificOracle,
     pub measurement: ScientificMeasurement,
     pub invariant: ScientificInvariant,
+    /// Explicitly fenced pass-0122 branches buildc does not produce: absence
+    /// is witnessed in-band, never implied by omission.
+    pub telemetry_branch: ScientificFencedBranch,
+    pub lineage_branch: ScientificFencedBranch,
     pub negative_fixture: bool,
     /// Whether the run diverged (a non-finite value was observed and the series
     /// was truncated to its finite prefix). Load-bearing for verify: for a
@@ -147,6 +249,10 @@ pub struct ScientificRuntimeReceipt {
     /// gates the prefix-derived checks (count, increase_count) on this field
     /// and instead requires the re-run to reproduce the divergence itself.
     pub diverged: bool,
+    /// The machine-readable claims boundary (pass-0122 `non_promotion_boundary`
+    /// as sealed data; see [`NOT_CLAIMED_BOUNDARY`]). Verify rejects a receipt
+    /// whose boundary omits "physical_law".
+    pub not_claimed: Vec<String>,
     pub labels: Vec<String>,
     pub receipt_status: String,
     pub seal: ScientificDigest,
@@ -195,6 +301,10 @@ pub struct ScientificReceiptInputs<'a> {
     pub target: &'a str,
     pub os: &'a str,
     pub exit_code: i32,
+    /// The pass-0122 `compiler_branch` facts probed at emit.
+    pub toolchain: ScientificToolchain,
+    /// sha256 over the exact raw stdout bytes the run produced.
+    pub raw_stdout_digest: ScientificDigest,
     pub series: Vec<f64>,
     /// Whether the raw stdout produced at least one parseable numeric token.
     /// When false, the series is empty because nothing parsed -> UNVERIFIABLE.
@@ -234,6 +344,8 @@ pub fn build_scientific_runtime_receipt(
         target,
         os,
         exit_code,
+        toolchain,
+        raw_stdout_digest,
         series,
         series_parsed,
         diverged,
@@ -290,6 +402,7 @@ pub fn build_scientific_runtime_receipt(
             target: target.to_string(),
             compiler_status: "compiled_and_executed".to_string(),
             flags,
+            toolchain,
         },
         runtime_state: ScientificRuntimeState {
             os: os.to_string(),
@@ -299,10 +412,17 @@ pub fn build_scientific_runtime_receipt(
         problem: ScientificProblem {
             label: problem_label,
         },
+        oracle: ScientificOracle {
+            kind: "declared_invariant".to_string(),
+            name: ENERGY_MONOTONE_INVARIANT.to_string(),
+            status: "DECLARED".to_string(),
+        },
         measurement: ScientificMeasurement {
             metric,
             observed_values: series,
             count,
+            raw_stdout_digest,
+            series_extraction_policy: SERIES_EXTRACTION_POLICY.to_string(),
             units,
         },
         invariant: ScientificInvariant {
@@ -312,8 +432,11 @@ pub fn build_scientific_runtime_receipt(
             observed,
             status: invariant_status.to_string(),
         },
+        telemetry_branch: ScientificFencedBranch::fenced(),
+        lineage_branch: ScientificFencedBranch::fenced(),
         negative_fixture,
         diverged,
+        not_claimed: NOT_CLAIMED_BOUNDARY.iter().map(|s| s.to_string()).collect(),
         labels,
         receipt_status: receipt_status.to_string(),
         // Placeholder; overwritten by `seal_receipt` below.
@@ -486,6 +609,22 @@ pub fn recompute_verdict(
     }
 }
 
+/// What a verify re-run observes, returned by the `rerun_series` callback.
+pub struct RerunObservation {
+    /// The re-run's parsed numeric stdout.
+    pub parsed: ParsedSeries,
+    /// The re-run's process exit code (re-checked against the sealed
+    /// `runtime_state.exit_code`; drift is `RERUN_EXIT_MISMATCH`).
+    pub exit_code: i32,
+    /// sha256 of the re-run's RAW stdout bytes (REPORTED as
+    /// `raw_stdout_reproduced`; never a failure by itself).
+    pub raw_stdout_digest: ScientificDigest,
+    /// sha256 of the re-compiled program executable (REPORTED as
+    /// `executable_reproduced`; never a failure by itself, since C compiler
+    /// output is not byte-stable across compiler versions).
+    pub executable_digest: ScientificDigest,
+}
+
 /// Verify a `buildlang-scientific-runtime-receipt/v0` receipt by RE-DERIVING,
 /// never trusting the stored values (mirrors `corpus verify`'s discipline):
 ///
@@ -523,19 +662,28 @@ pub fn recompute_verdict(
 /// because it replays effect/capability facts that ARE version-sensitive; this
 /// numerical receipt is not.)
 ///
-/// `rerun_series` is called with the receipt's recorded args and returns the
-/// re-run's [`ParsedSeries`] plus its process exit code, which is re-checked
-/// against the sealed `runtime_state.exit_code` (a crashed or
-/// differently-exiting re-run is `RERUN_EXIT_MISMATCH`, not a tamper-flavored
-/// count drift).
+/// `probed_toolchain` is the LOCAL C toolchain probed by the caller before
+/// dispatch: `None` means no C compiler is available, which is its own
+/// `TOOL_UNAVAILABLE` verdict (exit 4) rather than a generic re-run failure.
+/// A present-but-different toolchain WARNs (the verdict is the re-checked
+/// quantity, so cross-toolchain re-verification is legitimate) and marks any
+/// subsequent drift failure as possibly environmental.
+///
+/// `rerun_series` is called with the receipt's recorded args and returns a
+/// [`RerunObservation`]: the parsed series, the process exit code (re-checked
+/// against the sealed `runtime_state.exit_code`; drift is
+/// `RERUN_EXIT_MISMATCH`, not a tamper-flavored count drift), and the raw
+/// stdout + executable digests (REPORTED as reproduced / not reproduced,
+/// never failures by themselves).
 pub fn verify_scientific_runtime_receipt(
     receipt_json: &serde_json::Value,
     source_override: Option<&Path>,
     json: bool,
     current_compiler_version: &str,
     current_language_version: &str,
+    probed_toolchain: Option<&ScientificToolchain>,
     rederive_digests: impl FnOnce(&Path) -> Result<(ScientificDigest, ScientificDigest), i32>,
-    rerun_series: impl FnOnce(&Path, &[String]) -> Result<(ParsedSeries, i32), i32>,
+    rerun_series: impl FnOnce(&Path, &[String]) -> Result<RerunObservation, i32>,
 ) -> Result<(), i32> {
     let receipt: ScientificRuntimeReceipt =
         serde_json::from_value(receipt_json.clone()).map_err(|err| {
@@ -556,6 +704,118 @@ pub fn verify_scientific_runtime_receipt(
             receipt.compiler
         );
         return Err(verify_failure_class(json, "COMPILER_MISMATCH", 1));
+    }
+
+    // The claims boundary is load-bearing honesty (pass-0122
+    // non_promotion_boundary): a receipt whose not_claimed omits
+    // "physical_law" is overclaiming by omission and is rejected outright.
+    if !receipt.not_claimed.iter().any(|c| c == "physical_law") {
+        eprintln!(
+            "Error: receipt claims boundary missing: not_claimed must include `physical_law`, got {:?}",
+            receipt.not_claimed
+        );
+        return Err(verify_failure_class(json, "OVERCLAIM_BOUNDARY_MISSING", 1));
+    }
+
+    // The verifier's series-extraction policy must match the sealed one BY
+    // VERSION TAG (the part before the first `:`): a receipt extracted under
+    // a different policy family/version cannot be faithfully re-checked by
+    // this build's parser, but a prose re-wording of the same versioned
+    // policy must not read as tampering.
+    let sealed_policy_tag = receipt
+        .measurement
+        .series_extraction_policy
+        .split(':')
+        .next()
+        .unwrap_or("");
+    let verifier_policy_tag = SERIES_EXTRACTION_POLICY.split(':').next().unwrap_or("");
+    if sealed_policy_tag != verifier_policy_tag {
+        eprintln!(
+            "Error: series extraction policy mismatch: receipt `{}`, this verifier `{}`",
+            receipt.measurement.series_extraction_policy, SERIES_EXTRACTION_POLICY
+        );
+        return Err(verify_failure_class(json, "EXTRACTION_POLICY_MISMATCH", 1));
+    }
+
+    // Every sealed digest must be a real sha256 (64 hex chars): an empty or
+    // malformed digest inside a sealed receipt would let "hash unavailable"
+    // masquerade as witnessed provenance.
+    for (field, digest) in [
+        ("source_digest", &receipt.source_digest),
+        ("input_graph_digest", &receipt.input_graph_digest),
+        (
+            "build_state.toolchain.version_output_digest",
+            &receipt.build_state.toolchain.version_output_digest,
+        ),
+        (
+            "build_state.toolchain.buildc_binary_digest",
+            &receipt.build_state.toolchain.buildc_binary_digest,
+        ),
+        (
+            "build_state.toolchain.program_executable_digest",
+            &receipt.build_state.toolchain.program_executable_digest,
+        ),
+        (
+            "measurement.raw_stdout_digest",
+            &receipt.measurement.raw_stdout_digest,
+        ),
+    ] {
+        if !digest_is_well_formed(digest) {
+            eprintln!(
+                "Error: malformed digest in `{}`: algorithm `{}`, hex `{}` (must be sha256 with 64 hex chars)",
+                field, digest.algorithm, digest.hex
+            );
+            return Err(verify_failure_class(json, "DIGEST_MALFORMED", 1));
+        }
+    }
+
+    // Oracle binding, pinned to the IMPLEMENTATION rather than to another
+    // sealed field: this verifier implements exactly one invariant, so both
+    // the invariant name and the oracle name must equal it. Comparing
+    // oracle.name against invariant.name alone would be self-referential
+    // (both are author-controlled sealed strings that a resealed receipt can
+    // set to any equal pair).
+    if receipt.oracle.kind != "declared_invariant" {
+        eprintln!(
+            "Error: unsupported oracle kind `{}` (this verifier re-checks `declared_invariant` only)",
+            receipt.oracle.kind
+        );
+        return Err(verify_failure_class(json, "ORACLE_KIND_UNSUPPORTED", 1));
+    }
+    if receipt.oracle.status != "DECLARED" {
+        eprintln!(
+            "Error: unsupported oracle status `{}` for kind `declared_invariant` (a declared oracle cannot claim an executed status)",
+            receipt.oracle.status
+        );
+        return Err(verify_failure_class(json, "ORACLE_STATUS_UNSUPPORTED", 1));
+    }
+    if receipt.invariant.name != ENERGY_MONOTONE_INVARIANT {
+        eprintln!(
+            "Error: unsupported invariant `{}` (this verifier implements `{}` only)",
+            receipt.invariant.name, ENERGY_MONOTONE_INVARIANT
+        );
+        return Err(verify_failure_class(json, "INVARIANT_UNSUPPORTED", 1));
+    }
+    if receipt.oracle.name != ENERGY_MONOTONE_INVARIANT {
+        eprintln!(
+            "Error: oracle binding mismatch: oracle names `{}`, this verifier's invariant is `{}`",
+            receipt.oracle.name, ENERGY_MONOTONE_INVARIANT
+        );
+        return Err(verify_failure_class(json, "ORACLE_BINDING_MISMATCH", 1));
+    }
+
+    // The fenced branches are load-bearing honesty: v0 produces neither
+    // telemetry nor lineage, so the only valid sealed value is the explicit
+    // fence. A branch edited (and resealed) to claim availability must be
+    // rejected, or the fence would be decorative.
+    if receipt.telemetry_branch.status != "UNAVAILABLE_FENCED"
+        || receipt.lineage_branch.status != "UNAVAILABLE_FENCED"
+    {
+        eprintln!(
+            "Error: unexpected fence status: telemetry `{}`, lineage `{}` (v0 produces neither; the only valid value is UNAVAILABLE_FENCED)",
+            receipt.telemetry_branch.status, receipt.lineage_branch.status
+        );
+        return Err(verify_failure_class(json, "FENCE_STATUS_UNEXPECTED", 1));
     }
 
     // Version drift WARNs, does not fail (see the doc comment above).
@@ -604,23 +864,70 @@ pub fn verify_scientific_runtime_receipt(
         return Err(verify_failure_class(json, "INPUT_GRAPH_DIGEST_MISMATCH", 1));
     }
 
+    // Toolchain preflight: no C compiler at all is its own verdict (exit 4),
+    // distinct from both drift (1) and faithful-fail (3); a DIFFERENT
+    // toolchain warns, and the verdict re-check proceeds (cross-toolchain
+    // re-verification is legitimate by design).
+    let toolchain_matched = match probed_toolchain {
+        None => {
+            eprintln!(
+                "Error: no C compiler available to re-run the program (receipt was sealed under `{}`)",
+                receipt.build_state.toolchain.c_compiler
+            );
+            return Err(verify_failure_class(json, "TOOL_UNAVAILABLE", 4));
+        }
+        Some(probed) => {
+            let matched = probed.c_compiler == receipt.build_state.toolchain.c_compiler
+                && probed.version_output_digest
+                    == receipt.build_state.toolchain.version_output_digest
+                && probed.target == receipt.build_state.toolchain.target;
+            if !matched {
+                eprintln!(
+                    "Warning: toolchain differs: receipt `{}` ({}) on {}, local `{}` ({}) on {} (re-checking the verdict anyway; any drift below may be environmental)",
+                    receipt.build_state.toolchain.c_compiler,
+                    receipt.build_state.toolchain.c_compiler_version,
+                    receipt.build_state.toolchain.target,
+                    probed.c_compiler,
+                    probed.c_compiler_version,
+                    probed.target
+                );
+            }
+            matched
+        }
+    };
+
     // (3) Re-run the program WITH THE STORED ARGS and re-parse its stdout, so an
     // argv-parameterized kernel is reproduced under the same conditions it was
     // emitted under.
-    let (parsed, rerun_exit_code) = rerun_series(&source_path, &receipt.args)
+    let observation = rerun_series(&source_path, &receipt.args)
         .map_err(|code| verify_failure_class(json, "RERUN_FAILED", code))?;
+    let parsed = observation.parsed;
 
     // (3a) The process exit code is sealed and deterministic; a re-run that
     // exits differently (including a crash) is its own failure class, checked
     // BEFORE the series comparisons so a crashed re-run is not misreported as
     // a tamper-flavored count drift.
-    if rerun_exit_code != receipt.runtime_state.exit_code {
+    if observation.exit_code != receipt.runtime_state.exit_code {
         eprintln!(
             "Error: exit code drift: receipt {}, re-run {}",
-            receipt.runtime_state.exit_code, rerun_exit_code
+            receipt.runtime_state.exit_code, observation.exit_code
         );
         return Err(verify_failure_class(json, "RERUN_EXIT_MISMATCH", 1));
     }
+
+    // Raw-byte and executable reproduction are REPORTED, never required:
+    // exact stdout bytes and C compiler output are platform-dependent by
+    // design (the verdict is the re-checked quantity). A match is the
+    // strongest reproduction signal; a mismatch with a matching verdict is
+    // still faithful.
+    let raw_stdout_reproduced = digests_match(
+        &observation.raw_stdout_digest,
+        &receipt.measurement.raw_stdout_digest,
+    );
+    let executable_reproduced = digests_match(
+        &observation.executable_digest,
+        &receipt.build_state.toolchain.program_executable_digest,
+    );
 
     // For a DIVERGED run the finite-prefix length (and hence increase_count
     // over that prefix) is the step index of the first non-finite value: a
@@ -711,6 +1018,9 @@ pub fn verify_scientific_runtime_receipt(
             "invariant_status": recomputed.invariant_status,
             "increase_count": recomputed.increase_count,
             "receipt_status": recomputed.receipt_status,
+            "toolchain_matched": toolchain_matched,
+            "raw_stdout_reproduced": raw_stdout_reproduced,
+            "executable_reproduced": executable_reproduced,
             "seal": { "algorithm": "sha256", "hex": receipt.seal.hex },
         });
         if !invariant_held {
@@ -726,8 +1036,12 @@ pub fn verify_scientific_runtime_receipt(
         println!("{}", text);
     } else if invariant_held {
         println!(
-            "MATCH: scientific-runtime receipt re-runs and re-checks clean ({}, increase_count={})",
-            recomputed.receipt_status, recomputed.increase_count
+            "MATCH: scientific-runtime receipt re-runs and re-checks clean ({}, increase_count={}; toolchain_matched={}, raw_stdout_reproduced={}, executable_reproduced={})",
+            recomputed.receipt_status,
+            recomputed.increase_count,
+            toolchain_matched,
+            raw_stdout_reproduced,
+            executable_reproduced
         );
     } else {
         eprintln!(
@@ -746,10 +1060,24 @@ pub fn verify_scientific_runtime_receipt(
     }
 }
 
-/// Two digests match iff their algorithm and (case-insensitive) hex agree.
+/// Two digests match iff their algorithm and (case-insensitive) hex agree AND
+/// both carry a real hex value. Two EMPTY digests never match: an absent hash
+/// must not report as the strongest reproduction signal (a vacuous
+/// `reproduced=true` from two failed reads would fabricate provenance).
 fn digests_match(actual: &ScientificDigest, expected: &ScientificDigest) -> bool {
-    actual.algorithm.eq_ignore_ascii_case(&expected.algorithm)
+    !actual.hex.is_empty()
+        && actual.algorithm.eq_ignore_ascii_case(&expected.algorithm)
         && actual.hex.eq_ignore_ascii_case(&expected.hex)
+}
+
+/// A sealed digest field must be a real sha256: exactly 64 hex chars. A
+/// receipt carrying an empty or malformed digest is rejected outright
+/// (`DIGEST_MALFORMED`), so "digest unavailable" can never masquerade as a
+/// witnessed hash inside a sealed receipt.
+fn digest_is_well_formed(digest: &ScientificDigest) -> bool {
+    digest.algorithm.eq_ignore_ascii_case("sha256")
+        && digest.hex.len() == 64
+        && digest.hex.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
 /// Report a stable machine-readable `failure_class` for a verify failure and
@@ -761,6 +1089,19 @@ fn digests_match(actual: &ScientificDigest, expected: &ScientificDigest) -> bool
 /// The class vocabulary (stable within schema v0):
 /// - `MALFORMED`, `SCHEMA_UNSUPPORTED`, `COMPILER_MISMATCH`: the receipt could
 ///   not be interpreted.
+/// - `OVERCLAIM_BOUNDARY_MISSING`: `not_claimed` omits "physical_law".
+/// - `EXTRACTION_POLICY_MISMATCH`: the sealed series-extraction policy's
+///   version tag is not the one this verifier implements.
+/// - `DIGEST_MALFORMED`: a sealed digest field is not a real sha256 (64 hex
+///   chars), so "hash unavailable" cannot masquerade as witnessed provenance.
+/// - `ORACLE_KIND_UNSUPPORTED`, `ORACLE_STATUS_UNSUPPORTED`,
+///   `ORACLE_BINDING_MISMATCH`, `INVARIANT_UNSUPPORTED`: the oracle/invariant
+///   block names a kind, status, or criterion this verifier does not
+///   implement, or the oracle does not bind to the implemented invariant
+///   (binding is pinned to the implementation, never to another sealed field).
+/// - `FENCE_STATUS_UNEXPECTED`: a telemetry/lineage fence was edited to claim
+///   availability v0 does not produce.
+/// - `TOOL_UNAVAILABLE` (exit 4): no C compiler is available for the re-run.
 /// - `REDERIVATION_FAILED`, `RERUN_FAILED`: the source could not be re-checked
 ///   or re-run (missing file, toolchain failure), distinct from drift.
 /// - `SOURCE_DIGEST_MISMATCH`, `INPUT_GRAPH_DIGEST_MISMATCH`: the source
@@ -793,6 +1134,26 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    fn hex_digest(fill: char) -> ScientificDigest {
+        ScientificDigest {
+            algorithm: "sha256".to_string(),
+            hex: fill.to_string().repeat(64),
+        }
+    }
+
+    /// The toolchain fixture sealed into test receipts; also what tests pass
+    /// as the verify-time probe (matching by default).
+    fn test_toolchain() -> ScientificToolchain {
+        ScientificToolchain {
+            c_compiler: "test-cc".to_string(),
+            c_compiler_version: "test-cc 1.0".to_string(),
+            version_output_digest: hex_digest('d'),
+            target: "test-os/test-arch".to_string(),
+            buildc_binary_digest: hex_digest('e'),
+            program_executable_digest: hex_digest('f'),
+        }
+    }
+
     fn base_inputs<'a>(
         path: &'a Path,
         series: Vec<f64>,
@@ -803,17 +1164,13 @@ mod tests {
             source_path: path,
             compiler_version: "0.0.0",
             language_version: "1.0.0".to_string(),
-            source_digest: ScientificDigest {
-                algorithm: "sha256".to_string(),
-                hex: "a".repeat(64),
-            },
-            input_graph_digest: ScientificDigest {
-                algorithm: "sha256".to_string(),
-                hex: "b".repeat(64),
-            },
+            source_digest: hex_digest('a'),
+            input_graph_digest: hex_digest('b'),
             target: "c",
             os: "test-os",
             exit_code: 0,
+            toolchain: test_toolchain(),
+            raw_stdout_digest: hex_digest('c'),
             series,
             series_parsed: parsed,
             diverged: false,
@@ -1111,16 +1468,19 @@ mod tests {
         assert_eq!(verdict.invariant_status, "FAIL");
     }
 
-    /// Build a re-run callback result (finite series, exit code 0) for tests.
-    fn rerun(series: Vec<f64>) -> (ParsedSeries, i32) {
-        (
-            ParsedSeries {
+    /// Build a faithful re-run observation (finite series, exit 0, raw and
+    /// executable digests matching the test receipt) for verify callbacks.
+    fn rerun(series: Vec<f64>) -> RerunObservation {
+        RerunObservation {
+            parsed: ParsedSeries {
                 any_parsed: !series.is_empty(),
                 diverged: false,
                 series,
             },
-            0,
-        )
+            exit_code: 0,
+            raw_stdout_digest: hex_digest('c'),
+            executable_digest: hex_digest('f'),
+        }
     }
 
     #[test]
@@ -1140,6 +1500,7 @@ mod tests {
             true,
             &receipt.compiler_version,
             &receipt.language_version,
+            Some(&test_toolchain()),
             |_| Ok((src_digest.clone(), graph_digest.clone())),
             |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
@@ -1165,6 +1526,7 @@ mod tests {
             true,
             &receipt.compiler_version,
             &receipt.language_version,
+            Some(&test_toolchain()),
             |_| Ok((wrong.clone(), graph_digest.clone())),
             |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
@@ -1188,6 +1550,7 @@ mod tests {
             true,
             &receipt.compiler_version,
             &receipt.language_version,
+            Some(&test_toolchain()),
             |_| Ok((src_digest.clone(), graph_digest.clone())),
             |_, _| Ok(rerun(vec![1.0, 2.0, 3.0])),
         );
@@ -1213,6 +1576,7 @@ mod tests {
             true,
             &receipt.compiler_version,
             &receipt.language_version,
+            Some(&test_toolchain()),
             |_| Ok((src_digest.clone(), graph_digest.clone())),
             // Two points instead of three; still monotone (PASS), so only the
             // count check can reject this.
@@ -1240,6 +1604,7 @@ mod tests {
             true,
             &receipt.compiler_version,
             &receipt.language_version,
+            Some(&test_toolchain()),
             |_| Ok((src_digest.clone(), graph_digest.clone())),
             |_, _| Ok(rerun(vec![1.0, 2.0, 3.0])),
         );
@@ -1268,6 +1633,7 @@ mod tests {
             true,
             &receipt.compiler_version,
             &receipt.language_version,
+            Some(&test_toolchain()),
             |_| Ok((src_digest.clone(), graph_digest.clone())),
             |_, _| Ok(rerun(vec![1.0, 2.0, 3.0])),
         );
@@ -1303,24 +1669,342 @@ mod tests {
             true,
             &receipt.compiler_version,
             &receipt.language_version,
+            Some(&test_toolchain()),
             |_| Ok((src_digest.clone(), graph_digest.clone())),
             |_, _| {
-                Ok((
-                    ParsedSeries {
-                        // Three finite values instead of two: the divergence
-                        // step shifted by one on the re-run platform.
-                        series: vec![4.0, 3.0, 2.5],
-                        any_parsed: true,
-                        diverged: true,
-                    },
-                    0,
-                ))
+                let mut observation = rerun(vec![4.0, 3.0, 2.5]);
+                // Three finite values instead of two: the divergence step
+                // shifted by one on the re-run platform.
+                observation.parsed.diverged = true;
+                Ok(observation)
             },
         );
         assert_eq!(
             result,
             Err(3),
             "a faithful diverged receipt must exit 3 even when the platform-dependent prefix length shifts"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_a_missing_claims_boundary() {
+        // A receipt whose not_claimed omits "physical_law" is overclaiming by
+        // omission and must be rejected before any expensive work.
+        let path = Path::new("k.bld");
+        let mut receipt =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        receipt.not_claimed = vec!["convergence".to_string()];
+        seal_receipt(&mut receipt);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src_digest = receipt.source_digest.clone();
+        let graph_digest = receipt.input_graph_digest.clone();
+
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok((src_digest.clone(), graph_digest.clone())),
+            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+        );
+        assert_eq!(
+            result,
+            Err(1),
+            "a receipt without the physical_law boundary must be rejected"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_an_extraction_policy_mismatch() {
+        // A receipt extracted under a different policy cannot be faithfully
+        // re-checked by this build's parser.
+        let path = Path::new("k.bld");
+        let mut receipt =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        receipt.measurement.series_extraction_policy = "whitespace-f64/v99".to_string();
+        seal_receipt(&mut receipt);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src_digest = receipt.source_digest.clone();
+        let graph_digest = receipt.input_graph_digest.clone();
+
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok((src_digest.clone(), graph_digest.clone())),
+            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+        );
+        assert_eq!(
+            result,
+            Err(1),
+            "an unknown extraction policy must be rejected"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_an_unbound_oracle() {
+        // The declared oracle must bind to the invariant actually checked; an
+        // unknown oracle kind cannot be re-checked by this verifier at all.
+        let path = Path::new("k.bld");
+        let mut receipt =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        receipt.oracle.name = "some_other_criterion".to_string();
+        seal_receipt(&mut receipt);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src_digest = receipt.source_digest.clone();
+        let graph_digest = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok((src_digest.clone(), graph_digest.clone())),
+            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+        );
+        assert_eq!(result, Err(1), "an unbound oracle must be rejected");
+
+        let mut receipt =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        receipt.oracle.kind = "reference_implementation".to_string();
+        seal_receipt(&mut receipt);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src_digest = receipt.source_digest.clone();
+        let graph_digest = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok((src_digest.clone(), graph_digest.clone())),
+            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+        );
+        assert_eq!(
+            result,
+            Err(1),
+            "an oracle kind this verifier cannot re-check must be rejected"
+        );
+    }
+
+    #[test]
+    fn empty_digests_never_match() {
+        // Two absent hashes must not report as the strongest reproduction
+        // signal: a vacuous reproduced=true would fabricate provenance.
+        let empty = ScientificDigest {
+            algorithm: "sha256".to_string(),
+            hex: String::new(),
+        };
+        assert!(!digests_match(&empty, &empty));
+        assert!(digests_match(&hex_digest('a'), &hex_digest('a')));
+    }
+
+    #[test]
+    fn verify_rejects_a_malformed_digest() {
+        // A sealed digest that is not a real sha256 (here: empty hex) is
+        // rejected outright, so "hash unavailable" cannot masquerade as a
+        // witnessed hash inside a sealed receipt.
+        let path = Path::new("k.bld");
+        let mut receipt =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        receipt.build_state.toolchain.program_executable_digest.hex = String::new();
+        seal_receipt(&mut receipt);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src_digest = receipt.source_digest.clone();
+        let graph_digest = receipt.input_graph_digest.clone();
+
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok((src_digest.clone(), graph_digest.clone())),
+            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+        );
+        assert_eq!(result, Err(1), "an empty sealed digest must be rejected");
+    }
+
+    #[test]
+    fn verify_rejects_a_self_consistent_but_unimplemented_oracle() {
+        // The oracle binding is pinned to the IMPLEMENTATION: a receipt whose
+        // oracle.name and invariant.name agree with EACH OTHER but name a
+        // criterion this verifier does not implement must be rejected
+        // (comparing the two sealed fields against each other alone is
+        // self-referential and re-sealable to any equal pair).
+        let path = Path::new("k.bld");
+        let mut receipt =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        receipt.oracle.name = "custom_criterion".to_string();
+        receipt.invariant.name = "custom_criterion".to_string();
+        seal_receipt(&mut receipt);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src_digest = receipt.source_digest.clone();
+        let graph_digest = receipt.input_graph_digest.clone();
+
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok((src_digest.clone(), graph_digest.clone())),
+            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+        );
+        assert_eq!(
+            result,
+            Err(1),
+            "a self-consistent but unimplemented oracle/invariant pair must be rejected"
+        );
+
+        // An oracle claiming an EXECUTED status on a declared kind is also
+        // rejected: a declared criterion cannot claim execution provenance.
+        let mut receipt =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        receipt.oracle.status = "EXECUTED".to_string();
+        seal_receipt(&mut receipt);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src_digest = receipt.source_digest.clone();
+        let graph_digest = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok((src_digest.clone(), graph_digest.clone())),
+            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+        );
+        assert_eq!(
+            result,
+            Err(1),
+            "an executed status on a declared oracle must be rejected"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_an_edited_fence() {
+        // A fence edited (and resealed) to claim availability v0 does not
+        // produce must be rejected, or the fence would be decorative.
+        let path = Path::new("k.bld");
+        let mut receipt =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        receipt.telemetry_branch.status = "AVAILABLE".to_string();
+        seal_receipt(&mut receipt);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src_digest = receipt.source_digest.clone();
+        let graph_digest = receipt.input_graph_digest.clone();
+
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok((src_digest.clone(), graph_digest.clone())),
+            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+        );
+        assert_eq!(
+            result,
+            Err(1),
+            "a fence claiming availability must be rejected"
+        );
+    }
+
+    #[test]
+    fn extraction_policy_matches_by_version_tag_not_prose() {
+        // A prose re-wording of the SAME versioned policy must verify (the
+        // tag is the contract; the description is display text)...
+        let path = Path::new("k.bld");
+        let mut receipt =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        receipt.measurement.series_extraction_policy =
+            "whitespace-f64/v1: same discipline, different wording".to_string();
+        seal_receipt(&mut receipt);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src_digest = receipt.source_digest.clone();
+        let graph_digest = receipt.input_graph_digest.clone();
+
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok((src_digest.clone(), graph_digest.clone())),
+            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+        );
+        assert!(
+            result.is_ok(),
+            "same policy tag with different prose must verify: {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_fails_with_exit_4_when_no_toolchain_is_available() {
+        // No C compiler is its own verdict (TOOL_UNAVAILABLE, exit 4),
+        // distinct from drift (1) and faithful-fail (3), checked BEFORE any
+        // re-run attempt.
+        let path = Path::new("k.bld");
+        let receipt =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src_digest = receipt.source_digest.clone();
+        let graph_digest = receipt.input_graph_digest.clone();
+
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            None,
+            |_| Ok((src_digest.clone(), graph_digest.clone())),
+            |_, _| panic!("the re-run must never be attempted without a toolchain"),
+        );
+        assert_eq!(result, Err(4), "a missing toolchain must exit 4");
+    }
+
+    #[test]
+    fn verify_warns_but_proceeds_on_a_different_toolchain() {
+        // Cross-toolchain re-verification is legitimate by design: a
+        // different-but-present toolchain WARNs and the verdict re-check
+        // proceeds to a faithful pass.
+        let path = Path::new("k.bld");
+        let receipt =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src_digest = receipt.source_digest.clone();
+        let graph_digest = receipt.input_graph_digest.clone();
+
+        let mut other = test_toolchain();
+        other.c_compiler = "other-cc".to_string();
+        other.version_output_digest = hex_digest('9');
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&other),
+            |_| Ok((src_digest.clone(), graph_digest.clone())),
+            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+        );
+        assert!(
+            result.is_ok(),
+            "a different toolchain must warn, not fail: {result:?}"
         );
     }
 
@@ -1343,11 +2027,13 @@ mod tests {
             true,
             &receipt.compiler_version,
             &receipt.language_version,
+            Some(&test_toolchain()),
             |_| Ok((src_digest.clone(), graph_digest.clone())),
             // Same series, but the process exited 9 instead of the sealed 0.
             |_, _| {
-                let (parsed, _) = rerun(vec![4.0, 3.0, 2.0]);
-                Ok((parsed, 9))
+                let mut observation = rerun(vec![4.0, 3.0, 2.0]);
+                observation.exit_code = 9;
+                Ok(observation)
             },
         );
         assert_eq!(result, Err(1), "an exit-code drift must fail verify");
@@ -1373,6 +2059,7 @@ mod tests {
             true,
             &receipt.compiler_version,
             &receipt.language_version,
+            Some(&test_toolchain()),
             |_| Ok((src_digest.clone(), graph_digest.clone())),
             // Finite, monotone re-run: no divergence reproduced.
             |_, _| Ok(rerun(vec![4.0, 3.0])),
@@ -1402,6 +2089,7 @@ mod tests {
             true,
             &receipt.compiler_version,
             &receipt.language_version,
+            Some(&test_toolchain()),
             |_| Ok((src_digest.clone(), graph_digest.clone())),
             |_, args| {
                 assert_eq!(
