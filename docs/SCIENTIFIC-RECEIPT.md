@@ -99,6 +99,23 @@ The receipt is a single JSON object. Its layers, outermost meaning first:
   emits `kind: "declared_invariant"` with `status: "DECLARED"`: the named invariant IS the
   criterion, stated rather than derived from an executed reference. Verify rejects an
   oracle whose kind it cannot re-check or whose name does not bind to the invariant.
+- `effect_policy`: `{ facts_digest, observed_capabilities }`, the type/effect policy as
+  WITNESSED facts: a sha256 over the canonical rendering of every function's declared
+  effects and observed capabilities, plus the capability union. Verify re-derives both
+  through the check pipeline and fails with `EFFECT_POLICY_DRIFT` on any disagreement.
+- `input_dataset`, `seed`: `{ status, grounds }` fields whose values are honest evidence
+  statements derived from the capability facts. A program whose capabilities exclude
+  FileSystem and Network PROVABLY consumed no external dataset (`NONE_WITNESSED`); one
+  that includes them is fenced (`POSSIBLE_UNWITNESSED`). `seed` is `NOT_APPLICABLE` in v0
+  (the language has no RNG builtin). These are the master plan's "input dataset" and
+  "seed" receipt fields, filled by the typed-effect system rather than by assertion.
+- `determinism`: `{ deterministic_modulo_args, grounds }`, derived from whether the
+  capability union includes any nondeterminism source the language exposes (Clock,
+  Environment, FileSystem, Network). Verify re-derives all three capability-derived
+  fields; edits that do not re-derive fail as `EFFECT_POLICY_DRIFT`.
+- `numerical_method`: `{ description?, status }`, author-DECLARED via `--method` (buildc
+  cannot derive scheme semantics from source and does not pretend to); an inconsistent
+  status/description pair is rejected (`FIELD_CONTRACT_VIOLATION`).
 - `measurement`: `{ metric, observed_values: [f64], count, raw_stdout_digest,
   series_extraction_policy, units? }`. `raw_stdout_digest` seals the EXACT captured stdout
   bytes (the parse into `observed_values` is a lossy transform, so byte drift stays
@@ -271,6 +288,8 @@ fixtures and CI pin the *specific* failure instead of accepting "anything failed
 | `DIGEST_MALFORMED` | a sealed digest field is not a real sha256 (64 hex chars); an absent hash cannot masquerade as witnessed provenance | 1 |
 | `ORACLE_KIND_UNSUPPORTED`, `ORACLE_STATUS_UNSUPPORTED`, `ORACLE_BINDING_MISMATCH`, `INVARIANT_UNSUPPORTED` | the oracle/invariant block names a kind, status, or criterion this verifier does not implement; binding is pinned to the implementation, never to another sealed field | 1 |
 | `FENCE_STATUS_UNEXPECTED` | a telemetry/lineage fence was edited to claim availability v0 does not produce | 1 |
+| `FIELD_CONTRACT_VIOLATION` | a sealed field claims something the language version cannot express (a seed with no RNG builtin) or is internally inconsistent (DECLARED method, no description) | 1 |
+| `EFFECT_POLICY_DRIFT` | the sealed effect/capability facts, or the witnessed fields derived from them, do not re-derive from the source | 1 |
 | `TOOL_UNAVAILABLE` | no C compiler available for the re-run | 4 |
 | `REDERIVATION_FAILED` | the source could not be re-checked (missing file, check failure) | inner code |
 | `RERUN_FAILED` | the program could not be re-compiled or re-run | inner code |
