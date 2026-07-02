@@ -1086,6 +1086,129 @@ pub fn recompute_seal_hex(receipt: &ScientificRuntimeReceipt) -> String {
     source_digest_hex(&canonical)
 }
 
+/// A single tamper case for `receipt verify --self-test`: a mutated copy of a
+/// valid receipt that the verifier MUST reject with a specific `failure_class`.
+/// This extends the can-it-FAIL discipline from the kernels to the verifier
+/// itself. A verifier whose failure taxonomy cannot actually distinguish these
+/// tampers proves nothing when it reports one. Cases that keep the body
+/// well-formed are re-sealed so they pass the integrity gate and reach the
+/// specific field-contract check under test; the seal-mismatch case is
+/// deliberately left unsealed so it trips the integrity gate itself.
+#[derive(Clone, Debug)]
+pub struct SelfTestCase {
+    /// Human-readable description of what was tampered.
+    pub label: String,
+    /// The tampered receipt JSON to feed back to `receipt verify`.
+    pub tampered: serde_json::Value,
+    /// The `failure_class` the verifier must report for this tamper.
+    pub expected_class: String,
+    /// True if the case was re-sealed (so the tamper reaches a post-seal check),
+    /// false if it is meant to trip the seal gate itself.
+    pub resealed: bool,
+}
+
+/// Re-seal a mutated receipt JSON so its stored seal matches its (tampered)
+/// body. Fails if the mutation left the body unparseable as a scientific-runtime
+/// receipt.
+fn reseal_json(value: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let mut receipt: ScientificRuntimeReceipt = serde_json::from_value(value.clone())
+        .map_err(|e| format!("re-seal target is not a scientific-runtime receipt: {e}"))?;
+    seal_receipt(&mut receipt);
+    serde_json::to_value(&receipt).map_err(|e| format!("re-serialize after re-seal failed: {e}"))
+}
+
+/// Build the tamper table for `receipt verify --self-test`. Each case is a
+/// distinct sealed-field tamper paired with the `failure_class` the verifier
+/// must report, chosen so that a passing self-test exercises several separate
+/// arms of the failure taxonomy (integrity gate, structural gate, and two
+/// field-contract gates). The input must be a valid scientific-runtime receipt.
+pub fn build_self_test_cases(
+    receipt_json: &serde_json::Value,
+) -> Result<Vec<SelfTestCase>, String> {
+    // The pristine receipt must parse as a scientific-runtime receipt.
+    let _: ScientificRuntimeReceipt = serde_json::from_value(receipt_json.clone())
+        .map_err(|e| format!("self-test input is not a scientific-runtime receipt: {e}"))?;
+
+    let mut cases = Vec::new();
+
+    // 1. COMPILER_MISMATCH: a foreign compiler tag, rejected before the seal is
+    //    even recomputed (the applicability gate).
+    {
+        let mut v = receipt_json.clone();
+        v["compiler"] = serde_json::Value::String("gcc".to_string());
+        cases.push(SelfTestCase {
+            label: "compiler tag changed to a foreign compiler".to_string(),
+            tampered: v,
+            expected_class: "COMPILER_MISMATCH".to_string(),
+            resealed: false,
+        });
+    }
+
+    // 2. SEAL_MISMATCH: a witnessed value edited without re-sealing, so the
+    //    integrity gate catches the unsealed edit.
+    {
+        let mut v = receipt_json.clone();
+        let cur = v["invariant"]["observed"]["violation_count"]
+            .as_i64()
+            .unwrap_or(0);
+        v["invariant"]["observed"]["violation_count"] = serde_json::Value::from(cur + 7);
+        cases.push(SelfTestCase {
+            label: "observed violation_count edited without re-sealing".to_string(),
+            tampered: v,
+            expected_class: "SEAL_MISMATCH".to_string(),
+            resealed: false,
+        });
+    }
+
+    // 3. MALFORMED: a required top-level field removed, so the body no longer
+    //    deserializes into the receipt schema.
+    {
+        let mut v = receipt_json.clone();
+        if let Some(obj) = v.as_object_mut() {
+            obj.remove("args");
+        }
+        cases.push(SelfTestCase {
+            label: "required `args` field removed".to_string(),
+            tampered: v,
+            expected_class: "MALFORMED".to_string(),
+            resealed: false,
+        });
+    }
+
+    // 4. FIELD_CONTRACT_VIOLATION: the sealed tolerance changed to a value the
+    //    invariant forbids, then re-sealed so it passes the integrity gate and
+    //    reaches the tolerance contract re-check.
+    {
+        let mut v = receipt_json.clone();
+        let tol = v["invariant"]["tolerance"].as_f64().unwrap_or(1e-9);
+        v["invariant"]["tolerance"] = serde_json::Value::from(tol * 10.0 + 1.0);
+        let v = reseal_json(&v)?;
+        cases.push(SelfTestCase {
+            label: "sealed tolerance loosened then re-sealed".to_string(),
+            tampered: v,
+            expected_class: "FIELD_CONTRACT_VIOLATION".to_string(),
+            resealed: true,
+        });
+    }
+
+    // 5. INVARIANT_UNSUPPORTED: an unknown invariant name, re-sealed, so the
+    //    verifier rejects it at the invariant-registry gate.
+    {
+        let mut v = receipt_json.clone();
+        v["invariant"]["name"] =
+            serde_json::Value::String("not_a_real_invariant".to_string());
+        let v = reseal_json(&v)?;
+        cases.push(SelfTestCase {
+            label: "invariant name replaced with an unknown invariant".to_string(),
+            tampered: v,
+            expected_class: "INVARIANT_UNSUPPORTED".to_string(),
+            resealed: true,
+        });
+    }
+
+    Ok(cases)
+}
+
 /// The outcome of parsing a program's numeric stdout into a measurement series.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParsedSeries {
@@ -2306,6 +2429,54 @@ mod tests {
         // Tamper with a witnessed field; the recomputed seal must diverge.
         receipt.invariant.observed.violation_count = 99;
         assert_ne!(recompute_seal_hex(&receipt), original);
+    }
+
+    #[test]
+    fn self_test_cases_cover_distinct_failure_classes_and_seal_states() {
+        let path = Path::new("k.bld");
+        let receipt =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        let json = serde_json::to_value(&receipt).expect("serialize receipt");
+        let cases = build_self_test_cases(&json).expect("build self-test cases");
+
+        // The table exercises five separate arms of the failure taxonomy.
+        let classes: Vec<&str> = cases.iter().map(|c| c.expected_class.as_str()).collect();
+        assert_eq!(
+            classes,
+            vec![
+                "COMPILER_MISMATCH",
+                "SEAL_MISMATCH",
+                "MALFORMED",
+                "FIELD_CONTRACT_VIOLATION",
+                "INVARIANT_UNSUPPORTED",
+            ]
+        );
+
+        // A re-sealed case must carry a valid seal, so its tamper reaches the
+        // intended post-seal contract check instead of tripping SEAL_MISMATCH.
+        for case in cases.iter().filter(|c| c.resealed) {
+            let r: ScientificRuntimeReceipt =
+                serde_json::from_value(case.tampered.clone()).expect("resealed case parses");
+            assert_eq!(
+                recompute_seal_hex(&r),
+                r.seal.hex,
+                "re-sealed case `{}` must carry a valid seal",
+                case.label
+            );
+        }
+
+        // The seal-mismatch case must carry a STALE seal (that is its whole point).
+        let seal_case = cases
+            .iter()
+            .find(|c| c.expected_class == "SEAL_MISMATCH")
+            .expect("seal-mismatch case present");
+        let r: ScientificRuntimeReceipt =
+            serde_json::from_value(seal_case.tampered.clone()).expect("seal case parses");
+        assert_ne!(
+            recompute_seal_hex(&r),
+            r.seal.hex,
+            "the seal-mismatch case must carry a stale seal"
+        );
     }
 
     #[test]
