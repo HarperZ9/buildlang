@@ -303,6 +303,38 @@ reproduce, so a version bump alone is not tampering. (This differs from
 `buildlang-check-receipt/v1`, which hard-pins versions because it replays version-sensitive
 effect and capability facts. This receipt does not.)
 
+## 7. Exporting into Crucible/Telos (`buildc receipt export`)
+
+```
+buildc receipt export receipt.json -o measurement.json \
+    --claim-id heat-energy-monotone --claim-sha256 <hex>
+```
+
+The bridge into the proof-packet system: exports the receipt as ONE Crucible
+measurement row (`claim_id, claim_sha256, deviation, tolerance, method,
+measured_at, evidence, recheck`) inside a versioned envelope
+(`buildlang-crucible-measurement-export/v0`). The honesty discipline:
+
+- **The receipt is re-verified first**, through the exact evaluation path
+  `receipt verify` uses. A receipt that does not reproduce exports nothing
+  (the exit codes propagate). Only faithfulness earns a measurement.
+- **The deviation is derived from the fresh re-run**, never copied from stored
+  values: the recomputed increase count for measurable verdicts, JSON `null`
+  for UNVERIFIABLE (Crucible reads an unmeasurable deviation as UNVERIFIABLE,
+  fail-closed). Failing receipts export their real count; the receipt_status
+  travels in `evidence` so a thesis can frame an expected failure.
+- **The `recheck` descriptor makes the row witnessed, not asserted**: it seals
+  the replay oracle (`buildc.receipt.verify`), the hash of the exact receipt
+  file, the source digest, the recorded args, the full replay command, and the
+  expected verdict triple. An independent replayer can re-run buildc and
+  rebuild the row; a measurement without such a descriptor is exactly the
+  author-supplied pattern Crucible's MATCH-provenance gate exists to catch.
+
+Claim binding (`--claim-id` / `--claim-sha256`) belongs to the thesis side;
+when omitted the envelope carries a binding note, and Crucible fails closed
+(UNVERIFIABLE) on an unbound measurement. Exporting the check-receipt and
+corpus surfaces are documented follow-ons of this bridge.
+
 ## Provenance
 
 The receipt's `provenance.research_source_hash` references the Telos dogfood research (pass
