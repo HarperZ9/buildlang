@@ -14136,6 +14136,107 @@ fn relation_invariant_round_trips_positive_negative_and_validates_columns() {
 }
 
 #[test]
+fn reaction_atom_balance_round_trips_positive_and_negative() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping reaction_atom_balance_round_trips_positive_and_negative: C backend not ready"
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("buildlang_sci_reaction_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create reaction fixture dir");
+
+    // POSITIVE: the reaction A + B <=> C conserves the atom count [A] + [C]
+    // exactly under a balanced update, so `--invariant conservation` PASSes even
+    // as the reaction proceeds. The family applied to a reaction network.
+    let pass_receipt = dir.join("reaction.json");
+    let emit_pass = buildc()
+        .arg("run")
+        .arg(repo_example("reaction_atom_balance.bld"))
+        .args(["--emit-receipt"])
+        .arg(&pass_receipt)
+        .args([
+            "--invariant",
+            "conservation",
+            "--metric",
+            "atom-balance",
+            "--problem",
+            "reaction-A-B-C",
+        ])
+        .output()
+        .expect("emit reaction PASS receipt");
+    assert!(
+        emit_pass.status.success(),
+        "emitting the reaction PASS receipt should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&emit_pass.stderr)
+    );
+    let pass: serde_json::Value =
+        serde_json::from_slice(&fs::read(&pass_receipt).expect("read PASS receipt")).unwrap();
+    assert_eq!(pass["invariant"]["name"], "conserved_quantity_constant");
+    assert_eq!(pass["receipt_status"], "PASS");
+    assert_eq!(pass["invariant"]["observed"]["violation_count"], 0);
+
+    let verify_pass = buildc()
+        .args(["receipt", "verify"])
+        .arg(&pass_receipt)
+        .output()
+        .expect("verify reaction PASS receipt");
+    assert!(
+        verify_pass.status.success(),
+        "the reaction PASS receipt must verify\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_pass.stderr)
+    );
+
+    // NEGATIVE fixture: a stoichiometry bug (two C produced per event) drifts the
+    // atom balance. With `--negative-fixture` it is a FAIL_EXPECTED receipt that
+    // STILL verifies.
+    let fail_receipt = dir.join("reaction_broken.json");
+    let emit_fail = buildc()
+        .arg("run")
+        .arg(repo_example("reaction_atom_balance_broken.bld"))
+        .args(["--emit-receipt"])
+        .arg(&fail_receipt)
+        .args([
+            "--invariant",
+            "conservation",
+            "--negative-fixture",
+            "--metric",
+            "atom-balance",
+            "--problem",
+            "reaction-broken",
+        ])
+        .output()
+        .expect("emit reaction negative fixture");
+    assert!(
+        emit_fail.status.success(),
+        "emitting the negative fixture should succeed"
+    );
+    let fail: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fail_receipt).expect("read FAIL receipt")).unwrap();
+    assert_eq!(fail["receipt_status"], "FAIL_EXPECTED");
+    assert!(
+        fail["invariant"]["observed"]["violation_count"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+
+    let verify_fail = buildc()
+        .args(["receipt", "verify"])
+        .arg(&fail_receipt)
+        .output()
+        .expect("verify reaction negative fixture");
+    assert!(
+        verify_fail.status.success(),
+        "a faithfully reproduced FAIL_EXPECTED must verify (exit 0)\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_fail.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn non_negative_invariant_round_trips_a_result_bearing_bound() {
     if !c_backend_ready() {
         eprintln!("skipping non_negative_invariant_round_trips_a_result_bearing_bound: C backend not ready");

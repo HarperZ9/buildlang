@@ -291,7 +291,11 @@ Every invariant ships with a paired positive/negative kernel: `energy-monotone` 
 and unstable heat kernels above; `conservation` has `examples/conservation_rotation.bld` (a
 rotation preserves the squared radius `r^2 = x^2 + y^2` to roundoff, so it PASSes) and
 `examples/conservation_decay.bld` (a lossy scheme leaks 0.5% per step, so `r^2`/`q` drifts and
-it FAILs); `bounded` has `examples/bounded_oscillation.bld` (an undamped oscillator's `x^2`
+it FAILs), and the same invariant applied to a REACTION NETWORK in
+`examples/reaction_atom_balance.bld` (the reversible reaction `A + B <=> C` conserves the atom
+count `[A] + [C]` to roundoff as it proceeds, so it PASSes) with
+`examples/reaction_atom_balance_broken.bld` (a stoichiometry bug that produces two `C` per event
+drifts the balance and FAILs); `bounded` has `examples/bounded_oscillation.bld` (an undamped oscillator's `x^2`
 dips to 0 and returns to its initial `1.0` without ever exceeding it, so it PASSes) and
 `examples/bounded_overshoot.bld` (an explicit-Euler oscillator injects energy, so `E = x^2 +
 v^2` grows past its initial value and it FAILs); `energy-identity` has
