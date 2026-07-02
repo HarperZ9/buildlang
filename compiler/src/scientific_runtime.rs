@@ -675,7 +675,15 @@ pub struct RerunObservation {
 /// `RERUN_EXIT_MISMATCH`, not a tamper-flavored count drift), and the raw
 /// stdout + executable digests (REPORTED as reproduced / not reproduced,
 /// never failures by themselves).
-pub fn verify_scientific_runtime_receipt(
+///
+/// Returns Ok(report) for every FAITHFUL receipt regardless of its recorded
+/// verdict (PASS, FAIL_EXPECTED, FAIL_UNEXPECTED, UNVERIFIABLE alike); the
+/// callers decide what a faithful-but-failed verdict means for THEM
+/// (`verify` maps it to exit 3, the export bridge maps it to a DRIFT or
+/// unmeasurable Crucible measurement). Err(1) = did not reproduce; Err(4) =
+/// no toolchain.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_scientific_runtime_receipt(
     receipt_json: &serde_json::Value,
     source_override: Option<&Path>,
     json: bool,
@@ -684,7 +692,7 @@ pub fn verify_scientific_runtime_receipt(
     probed_toolchain: Option<&ScientificToolchain>,
     rederive_digests: impl FnOnce(&Path) -> Result<(ScientificDigest, ScientificDigest), i32>,
     rerun_series: impl FnOnce(&Path, &[String]) -> Result<RerunObservation, i32>,
-) -> Result<(), i32> {
+) -> Result<ScientificVerifyReport, i32> {
     let receipt: ScientificRuntimeReceipt =
         serde_json::from_value(receipt_json.clone()).map_err(|err| {
             eprintln!("Error: scientific-runtime receipt is malformed: {}", err);
@@ -1000,33 +1008,223 @@ pub fn verify_scientific_runtime_receipt(
         return Err(verify_failure_class(json, "SEAL_MISMATCH", 1));
     }
 
-    // The receipt is faithful (digests, count, verdict, and seal all re-check).
-    // But a faithful receipt that RECORDS a failure is not a pass: an operator
-    // running `receipt verify r.json && deploy` must not deploy on a
-    // FAIL_UNEXPECTED or UNVERIFIABLE verdict. So the exit code reflects the
-    // invariant verdict -- PASS and FAIL_EXPECTED succeed; everything else fails
-    // with a distinct code (3, vs 1 for "did not reproduce").
-    let invariant_held = matches!(recomputed.receipt_status, "PASS" | "FAIL_EXPECTED");
+    // The receipt is FAITHFUL (digests, count, verdict, and seal all
+    // re-check). Whether the recorded verdict is a PASS is a separate
+    // question the report carries; the printing wrapper (and the export
+    // bridge) decide what to do with it.
+    Ok(ScientificVerifyReport {
+        invariant_status: recomputed.invariant_status,
+        increase_count: recomputed.increase_count,
+        receipt_status: recomputed.receipt_status,
+        invariant_held: matches!(recomputed.receipt_status, "PASS" | "FAIL_EXPECTED"),
+        toolchain_matched,
+        raw_stdout_reproduced,
+        executable_reproduced,
+        tolerance: receipt.invariant.tolerance,
+        negative_fixture: receipt.negative_fixture,
+        diverged: receipt.diverged,
+        source: source_path.to_string_lossy().to_string(),
+        source_digest_hex: receipt.source_digest.hex.clone(),
+        raw_stdout_digest_hex: receipt.measurement.raw_stdout_digest.hex.clone(),
+        args: receipt.args.clone(),
+        seal_hex: receipt.seal.hex.clone(),
+    })
+}
+
+/// Everything a FAITHFUL re-verification established, for consumers beyond
+/// the human/`--json` printer: the export bridge derives Crucible
+/// measurements from this report (never from stored receipt values alone).
+/// Faithful does NOT mean the invariant held: `invariant_held` carries that.
+pub struct ScientificVerifyReport {
+    pub invariant_status: &'static str,
+    pub increase_count: usize,
+    pub receipt_status: &'static str,
+    pub invariant_held: bool,
+    pub toolchain_matched: bool,
+    pub raw_stdout_reproduced: bool,
+    pub executable_reproduced: bool,
+    pub tolerance: f64,
+    pub negative_fixture: bool,
+    pub diverged: bool,
+    pub source: String,
+    pub source_digest_hex: String,
+    pub raw_stdout_digest_hex: String,
+    pub args: Vec<String>,
+    pub seal_hex: String,
+}
+
+/// Schema id for the Crucible-measurement export envelope (the Telos bridge).
+pub const CRUCIBLE_MEASUREMENT_EXPORT_SCHEMA: &str = "buildlang-crucible-measurement-export/v0";
+
+/// The versioned `method` string carried by exported measurements: names the
+/// discipline (re-executed verification, never stored-value copying) so a
+/// consumer can distinguish these rows from author-typed ones.
+pub const CRUCIBLE_EXPORT_METHOD: &str = "buildc-receipt-verify/reexecuted-v1";
+
+/// Map a FAITHFUL re-verification report into one Crucible measurement row
+/// (the shape `crucible assess --measurements` ingests: claim_id,
+/// claim_sha256, deviation, tolerance, method, measured_at, evidence,
+/// recheck). PURE and total over reports, so the mapping rules are unit
+/// tested without IO.
+///
+/// The honesty rules of the mapping:
+/// - `deviation` is DERIVED from the fresh re-run (the report), never copied
+///   from stored receipt values. UNVERIFIABLE receipts export deviation null
+///   (Crucible reads unmeasurable as UNVERIFIABLE, fail-closed); everything
+///   else exports the recomputed increase_count.
+/// - `tolerance` is 0.5: increase_count is integral, so 0.5 cleanly separates
+///   "no increases" (MATCH) from "any increase" (DRIFT). A FAIL_EXPECTED
+///   receipt therefore exports a row that reads DRIFT against a
+///   holds-everywhere claim; binding it to a claim whose falsification
+///   expects the failure is the thesis side's job, and the receipt_status is
+///   carried in evidence so that side can frame it.
+/// - `recheck` seals everything an independent replayer needs to re-run
+///   buildc and rebuild this row: the measurement is WITNESSED, not asserted
+///   (a measurement without a recheck descriptor is exactly the
+///   author-supplied pattern the provenance gate exists to catch).
+pub fn crucible_measurement_from_report(
+    report: &ScientificVerifyReport,
+    claim_id: &str,
+    claim_sha256: &str,
+    claim_expects_failure: bool,
+    receipt_path: &str,
+    receipt_file_sha256: &str,
+    measured_at: f64,
+) -> serde_json::Value {
+    // Deviation semantics, claim-relative when the binding declares an
+    // expected failure (Crucible's verdict math is pure margin arithmetic;
+    // there is no thesis-side escape hatch, so the expectation must be bound
+    // HERE): a negative-fixture receipt that failed as predicted deviates 0
+    // from its claim; one that unexpectedly PASSed deviates 1. Without the
+    // expectation the deviation is the recomputed increase count, and an
+    // UNVERIFIABLE receipt is unmeasurable (null; Crucible fails closed).
+    let deviation = if report.receipt_status == "UNVERIFIABLE" {
+        serde_json::Value::Null
+    } else if claim_expects_failure {
+        if report.receipt_status == "FAIL_EXPECTED" {
+            serde_json::json!(0.0)
+        } else {
+            // The claim predicted failure; the run did not fail.
+            serde_json::json!(1.0)
+        }
+    } else {
+        serde_json::json!(report.increase_count as f64)
+    };
+
+    // For a DIVERGED receipt the increase count is prefix-derived and
+    // platform-dependent (the verifier's own both_diverged rule skips it);
+    // sealing a concrete expectation would make an independent replayer
+    // wrongly conclude non-reproduction of a faithful receipt.
+    let expected_increase_count = if report.diverged {
+        serde_json::Value::Null
+    } else {
+        serde_json::json!(report.increase_count)
+    };
+
+    let mut evidence = vec![
+        format!("receipt_seal:sha256:{}", report.seal_hex),
+        format!("source:sha256:{}", report.source_digest_hex),
+        // The digest sealed AT EMISSION, not the re-run's bytes (which are
+        // platform-dependent); the reproduction object below says whether
+        // the witnessing re-run reproduced it.
+        format!("sealed_raw_stdout:sha256:{}", report.raw_stdout_digest_hex),
+        format!("receipt_status:{}", report.receipt_status),
+        format!("invariant:{}", ENERGY_MONOTONE_INVARIANT),
+        format!("negative_fixture:{}", report.negative_fixture),
+    ];
+    if claim_expects_failure {
+        evidence.push("claim_expectation:expects_failure".to_string());
+    }
+
+    serde_json::json!({
+        "claim_id": claim_id,
+        "claim_sha256": claim_sha256,
+        "deviation": deviation,
+        "tolerance": 0.5,
+        "method": CRUCIBLE_EXPORT_METHOD,
+        "measured_at": measured_at,
+        "evidence": evidence,
+        // What the witnessing re-run observed about reproduction. Kept OUT of
+        // `evidence` deliberately: Crucible's recheck compares the evidence
+        // list for stability, and these flags legitimately differ per replay
+        // environment. A top-level key is outside the fixed measurement-seal
+        // field list, so it stays visible to auditors without destabilizing
+        // recheck.
+        "reproduction": {
+            "toolchain_matched": report.toolchain_matched,
+            "raw_stdout_reproduced": report.raw_stdout_reproduced,
+            "executable_reproduced": report.executable_reproduced,
+        },
+        "recheck": {
+            "oracle": "buildc.receipt.verify",
+            "receipt_path": receipt_path,
+            "receipt_sha256": receipt_file_sha256,
+            "source": report.source,
+            "source_sha256": report.source_digest_hex,
+            "args": report.args,
+            "command": ["buildc", "receipt", "verify", receipt_path, "--json"],
+            "diverged": report.diverged,
+            "expected": {
+                "receipt_status": report.receipt_status,
+                "invariant_status": report.invariant_status,
+                // Null for diverged receipts: reproduced divergence (same
+                // receipt_status) is the faithfulness signal, mirroring the
+                // verifier's both_diverged rule.
+                "increase_count": expected_increase_count,
+                // The exit code the sealed replay command must yield: 0 for
+                // faithful PASS/FAIL_EXPECTED, 3 for faithful
+                // FAIL_UNEXPECTED/UNVERIFIABLE.
+                "exit_code": if report.invariant_held { 0 } else { 3 },
+            },
+        },
+    })
+}
+
+/// The `receipt verify` entry point: evaluate, print (human or `--json`),
+/// and map the report to the exit-code contract (Ok for faithful
+/// PASS/FAIL_EXPECTED; Err(3) for faithful FAIL_UNEXPECTED/UNVERIFIABLE;
+/// Err(1)/Err(4) propagate from evaluation).
+#[allow(clippy::too_many_arguments)]
+pub fn verify_scientific_runtime_receipt(
+    receipt_json: &serde_json::Value,
+    source_override: Option<&Path>,
+    json: bool,
+    current_compiler_version: &str,
+    current_language_version: &str,
+    probed_toolchain: Option<&ScientificToolchain>,
+    rederive_digests: impl FnOnce(&Path) -> Result<(ScientificDigest, ScientificDigest), i32>,
+    rerun_series: impl FnOnce(&Path, &[String]) -> Result<RerunObservation, i32>,
+) -> Result<(), i32> {
+    let report = evaluate_scientific_runtime_receipt(
+        receipt_json,
+        source_override,
+        json,
+        current_compiler_version,
+        current_language_version,
+        probed_toolchain,
+        rederive_digests,
+        rerun_series,
+    )?;
 
     if json {
-        let mut report = serde_json::json!({
+        let mut out = serde_json::json!({
             "schema": SCIENTIFIC_RUNTIME_SCHEMA,
-            "status": if invariant_held { "match" } else { "invariant_not_held" },
+            "status": if report.invariant_held { "match" } else { "invariant_not_held" },
             "faithful": true,
-            "invariant_held": invariant_held,
-            "source": source_path.to_string_lossy(),
-            "invariant_status": recomputed.invariant_status,
-            "increase_count": recomputed.increase_count,
-            "receipt_status": recomputed.receipt_status,
-            "toolchain_matched": toolchain_matched,
-            "raw_stdout_reproduced": raw_stdout_reproduced,
-            "executable_reproduced": executable_reproduced,
-            "seal": { "algorithm": "sha256", "hex": receipt.seal.hex },
+            "invariant_held": report.invariant_held,
+            "source": report.source,
+            "invariant_status": report.invariant_status,
+            "increase_count": report.increase_count,
+            "receipt_status": report.receipt_status,
+            "toolchain_matched": report.toolchain_matched,
+            "raw_stdout_reproduced": report.raw_stdout_reproduced,
+            "executable_reproduced": report.executable_reproduced,
+            "seal": { "algorithm": "sha256", "hex": report.seal_hex },
         });
-        if !invariant_held {
-            report["failure_class"] = serde_json::Value::String("INVARIANT_NOT_HELD".to_string());
+        if !report.invariant_held {
+            out["failure_class"] = serde_json::Value::String("INVARIANT_NOT_HELD".to_string());
         }
-        let text = serde_json::to_string_pretty(&report).map_err(|err| {
+        let text = serde_json::to_string_pretty(&out).map_err(|err| {
             eprintln!(
                 "Error serializing scientific-runtime verification report: {}",
                 err
@@ -1034,23 +1232,23 @@ pub fn verify_scientific_runtime_receipt(
             1
         })?;
         println!("{}", text);
-    } else if invariant_held {
+    } else if report.invariant_held {
         println!(
             "MATCH: scientific-runtime receipt re-runs and re-checks clean ({}, increase_count={}; toolchain_matched={}, raw_stdout_reproduced={}, executable_reproduced={})",
-            recomputed.receipt_status,
-            recomputed.increase_count,
-            toolchain_matched,
-            raw_stdout_reproduced,
-            executable_reproduced
+            report.receipt_status,
+            report.increase_count,
+            report.toolchain_matched,
+            report.raw_stdout_reproduced,
+            report.executable_reproduced
         );
     } else {
         eprintln!(
             "FAIL: scientific-runtime receipt faithfully reproduces, but the invariant did not hold ({}, increase_count={}). `receipt verify` exits nonzero so it is safe as a pass/fail gate.",
-            recomputed.receipt_status, recomputed.increase_count
+            report.receipt_status, report.increase_count
         );
     }
 
-    if invariant_held {
+    if report.invariant_held {
         Ok(())
     } else {
         // The class line goes to stderr in both modes (the json report above
@@ -1950,6 +2148,191 @@ mod tests {
             result.is_ok(),
             "same policy tag with different prose must verify: {result:?}"
         );
+    }
+
+    // --- Crucible export mapping (the Telos bridge) ---------------------------
+
+    fn report_fixture(
+        receipt_status: &'static str,
+        increase_count: usize,
+    ) -> ScientificVerifyReport {
+        ScientificVerifyReport {
+            invariant_status: if increase_count == 0 { "PASS" } else { "FAIL" },
+            increase_count,
+            receipt_status,
+            invariant_held: matches!(receipt_status, "PASS" | "FAIL_EXPECTED"),
+            toolchain_matched: true,
+            raw_stdout_reproduced: true,
+            executable_reproduced: false,
+            tolerance: ENERGY_MONOTONE_TOLERANCE,
+            negative_fixture: receipt_status == "FAIL_EXPECTED",
+            diverged: false,
+            source: "k.bld".to_string(),
+            source_digest_hex: "a".repeat(64),
+            raw_stdout_digest_hex: "c".repeat(64),
+            args: vec!["--mode".to_string()],
+            seal_hex: "e".repeat(64),
+        }
+    }
+
+    #[test]
+    fn export_derives_deviation_from_the_rerun_and_seals_the_replay() {
+        // A PASS report exports deviation 0.0 against tolerance 0.5 (MATCH in
+        // Crucible's margin math), with a recheck descriptor carrying the
+        // full replay command: witnessed, never asserted.
+        let row = crucible_measurement_from_report(
+            &report_fixture("PASS", 0),
+            "claim-1",
+            &"b".repeat(64),
+            false,
+            "r.json",
+            &"f".repeat(64),
+            1000.0,
+        );
+        assert_eq!(row["deviation"], 0.0);
+        assert_eq!(row["tolerance"], 0.5);
+        assert_eq!(row["method"], CRUCIBLE_EXPORT_METHOD);
+        assert_eq!(row["recheck"]["oracle"], "buildc.receipt.verify");
+        assert_eq!(row["recheck"]["command"][0], "buildc");
+        assert_eq!(row["recheck"]["expected"]["increase_count"], 0);
+        assert!(row["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e == "receipt_status:PASS"));
+    }
+
+    #[test]
+    fn export_maps_unverifiable_to_null_deviation() {
+        // An UNVERIFIABLE receipt exports deviation null: Crucible reads an
+        // unmeasurable deviation as UNVERIFIABLE, fail-closed. It must NOT
+        // export 0.0 (that would read as a witnessed MATCH).
+        let row = crucible_measurement_from_report(
+            &report_fixture("UNVERIFIABLE", 0),
+            "claim-1",
+            &"b".repeat(64),
+            false,
+            "r.json",
+            &"f".repeat(64),
+            1000.0,
+        );
+        assert!(row["deviation"].is_null());
+    }
+
+    #[test]
+    fn export_reports_a_failing_receipt_honestly() {
+        // FAIL_UNEXPECTED and FAIL_EXPECTED both export the REAL recomputed
+        // increase count (which reads DRIFT against a holds-everywhere claim);
+        // the receipt_status in evidence lets the thesis side frame an
+        // expected failure. The exporter never launders a failure into 0.0.
+        for status in ["FAIL_UNEXPECTED", "FAIL_EXPECTED"] {
+            let row = crucible_measurement_from_report(
+                &report_fixture(status, 199),
+                "claim-1",
+                &"b".repeat(64),
+                false,
+                "r.json",
+                &"f".repeat(64),
+                1000.0,
+            );
+            assert_eq!(row["deviation"], 199.0, "status={status}");
+            assert!(row["evidence"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e.as_str().unwrap() == format!("receipt_status:{status}")));
+        }
+    }
+
+    #[test]
+    fn export_expected_failure_binding_is_claim_relative() {
+        // With --claim-expects-failure, deviation measures the claim's
+        // PREDICTION: a fixture failing as predicted deviates 0 (MATCH in
+        // Crucible's margin math); a fixture that unexpectedly PASSes
+        // deviates 1 (DRIFT: the prediction was violated). The binding is
+        // recorded in evidence.
+        let row = crucible_measurement_from_report(
+            &report_fixture("FAIL_EXPECTED", 199),
+            "claim-1",
+            &"b".repeat(64),
+            true,
+            "r.json",
+            &"f".repeat(64),
+            1000.0,
+        );
+        assert_eq!(row["deviation"], 0.0);
+        assert!(row["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e == "claim_expectation:expects_failure"));
+
+        let mut passed = report_fixture("PASS", 0);
+        passed.negative_fixture = true;
+        let row = crucible_measurement_from_report(
+            &passed,
+            "claim-1",
+            &"b".repeat(64),
+            true,
+            "r.json",
+            &"f".repeat(64),
+            1000.0,
+        );
+        assert_eq!(
+            row["deviation"], 1.0,
+            "a fixture that unexpectedly passes violates the failure-predicting claim"
+        );
+    }
+
+    #[test]
+    fn export_never_seals_a_platform_dependent_expectation_for_diverged_receipts() {
+        // A diverged receipt's increase count is prefix-derived and
+        // platform-dependent (the verifier's own both_diverged rule skips
+        // comparing it); the recheck expectation must be null so an
+        // independent replayer matches on receipt_status, not on a number
+        // that legitimately differs across toolchains.
+        let mut report = report_fixture("UNVERIFIABLE", 1957);
+        report.diverged = true;
+        let row = crucible_measurement_from_report(
+            &report,
+            "claim-1",
+            &"b".repeat(64),
+            false,
+            "r.json",
+            &"f".repeat(64),
+            1000.0,
+        );
+        assert!(row["recheck"]["expected"]["increase_count"].is_null());
+        assert_eq!(row["recheck"]["diverged"], true);
+        assert!(row["deviation"].is_null());
+        assert_eq!(row["recheck"]["expected"]["exit_code"], 3);
+    }
+
+    #[test]
+    fn export_carries_the_reproduction_flags_outside_evidence() {
+        // The witnessing re-run's reproduction signals are visible to
+        // auditors as a top-level object, deliberately NOT inside evidence
+        // (Crucible's recheck compares evidence for stability, and these
+        // flags legitimately differ per replay environment).
+        let row = crucible_measurement_from_report(
+            &report_fixture("PASS", 0),
+            "claim-1",
+            &"b".repeat(64),
+            false,
+            "r.json",
+            &"f".repeat(64),
+            1000.0,
+        );
+        assert_eq!(row["reproduction"]["toolchain_matched"], true);
+        assert_eq!(row["reproduction"]["raw_stdout_reproduced"], true);
+        assert_eq!(row["reproduction"]["executable_reproduced"], false);
+        assert_eq!(row["recheck"]["expected"]["exit_code"], 0);
+        // The sealed-time digest is labeled as such.
+        assert!(row["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e.as_str().unwrap().starts_with("sealed_raw_stdout:sha256:")));
     }
 
     #[test]

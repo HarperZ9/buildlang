@@ -303,6 +303,64 @@ reproduce, so a version bump alone is not tampering. (This differs from
 `buildlang-check-receipt/v1`, which hard-pins versions because it replays version-sensitive
 effect and capability facts. This receipt does not.)
 
+## 7. Exporting into Crucible/Telos (`buildc receipt export`)
+
+```
+buildc receipt export receipt.json -o measurement.json \
+    --claim-id heat-energy-monotone --claim-sha256 <hex>
+```
+
+The bridge into the proof-packet system: exports the receipt as ONE Crucible
+measurement row (`claim_id, claim_sha256, deviation, tolerance, method,
+measured_at, evidence, recheck`) inside a versioned envelope
+(`buildlang-crucible-measurement-export/v0`). The honesty discipline:
+
+- **The receipt is re-verified first**, through the exact evaluation path
+  `receipt verify` uses. A receipt that does not reproduce exports nothing
+  (the exit codes propagate). Only faithfulness earns a measurement.
+- **The deviation is derived from the fresh re-run**, never copied from stored
+  values: the recomputed increase count for measurable verdicts, JSON `null`
+  for UNVERIFIABLE (Crucible reads an unmeasurable deviation as UNVERIFIABLE,
+  fail-closed). Failing receipts export their real count; the receipt_status
+  travels in `evidence` so a thesis can frame an expected failure.
+- **The `recheck` descriptor makes the row witnessed, not asserted**: it seals
+  the replay oracle (`buildc.receipt.verify`), the hash of the exact receipt
+  file, the source digest, the recorded args, the full replay command, and the
+  expected verdict triple. An independent replayer can re-run buildc and
+  rebuild the row; a measurement without such a descriptor is exactly the
+  author-supplied pattern Crucible's MATCH-provenance gate exists to catch.
+
+Claim binding (`--claim-id` / `--claim-sha256`) belongs to the thesis side;
+when omitted the envelope carries a binding note, and Crucible fails closed
+(UNVERIFIABLE) on an unbound measurement.
+
+Three refinements the mapping enforces:
+
+- **Expected failure is bound explicitly, never assumed.** Crucible's verdict
+  is pure margin arithmetic; there is no thesis-side reframe for an expected
+  failure. `--claim-expects-failure` (valid only for a negative-fixture
+  receipt) makes the deviation claim-relative: a fixture that failed as
+  predicted measures 0 (MATCH), one that unexpectedly passed measures 1
+  (DRIFT against the failure-predicting claim).
+- **Diverged receipts never seal a platform-dependent replay expectation.**
+  A diverged run's increase count is prefix-derived and legitimately differs
+  across toolchains (the verifier's own rule), so `recheck.expected.
+  increase_count` is null and `recheck.diverged` is true: a replayer matches
+  on receipt_status, not on a number that cannot reproduce. The expected exit
+  code of the sealed replay command is also carried (0 faithful-held, 3
+  faithful-not-held).
+- **Reproduction signals ride outside `evidence`.** The witnessing re-run's
+  `toolchain_matched` / `raw_stdout_reproduced` / `executable_reproduced`
+  flags are a top-level `reproduction` object (auditable, but excluded from
+  Crucible's evidence-stability comparison, since they legitimately differ
+  per replay environment); the sealed-time stdout digest in evidence is
+  labeled `sealed_raw_stdout` so it cannot be mistaken for the re-run's
+  bytes.
+
+Exports write atomically (temp file + rename), so a failed export never
+destroys a previous good measurement. Exporting the check-receipt and corpus
+surfaces are documented follow-ons of this bridge.
+
 ## Provenance
 
 The receipt's `provenance.research_source_hash` references the Telos dogfood research (pass

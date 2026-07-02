@@ -38,9 +38,10 @@ use mir_representation::{
 };
 use module_graph::{verify_module_graph_receipt, ModuleGraphReceipt, MODULE_GRAPH_RECEIPT};
 use scientific_runtime::{
-    build_scientific_runtime_receipt, parse_numeric_series, verify_scientific_runtime_receipt,
+    build_scientific_runtime_receipt, crucible_measurement_from_report,
+    evaluate_scientific_runtime_receipt, parse_numeric_series, verify_scientific_runtime_receipt,
     RerunObservation, ScientificDigest, ScientificReceiptInputs, ScientificRuntimeReceipt,
-    ScientificToolchain, SCIENTIFIC_RUNTIME_SCHEMA,
+    ScientificToolchain, CRUCIBLE_MEASUREMENT_EXPORT_SCHEMA, SCIENTIFIC_RUNTIME_SCHEMA,
 };
 use symbol_graph::{verify_symbol_graph_receipt, SymbolGraphReceipt, SYMBOL_GRAPH_RECEIPT};
 
@@ -473,6 +474,32 @@ enum ReceiptCommands {
         /// Emit a machine-readable verification report
         #[arg(long)]
         json: bool,
+    },
+    /// Export a scientific-runtime receipt as a Crucible-ingestible measurement
+    /// (the Telos bridge). The receipt is RE-VERIFIED first and the measurement's
+    /// deviation is derived from the fresh re-run, never copied from stored
+    /// values; the replay command is sealed in a `recheck` descriptor so the
+    /// measurement is witnessed, not asserted.
+    Export {
+        /// Scientific-runtime receipt JSON written by `buildc run --emit-receipt`
+        receipt: PathBuf,
+        /// Output path for the measurement JSON (`-` = stdout)
+        #[arg(short, long, value_name = "PATH", default_value = "-")]
+        output: PathBuf,
+        /// Crucible claim id to bind the measurement to (the thesis side owns
+        /// claim identity; without it the ingester must bind before assessment)
+        #[arg(long, value_name = "ID", default_value = "")]
+        claim_id: String,
+        /// sha256 of the bound claim's canonical form (same binding note)
+        #[arg(long, value_name = "HEX", default_value = "")]
+        claim_sha256: String,
+        /// The bound claim PREDICTS the invariant failure (valid only for a
+        /// negative-fixture receipt): deviation becomes claim-relative, so a
+        /// fixture failing as predicted measures 0 and an unexpected pass
+        /// measures 1. Without this, Crucible's pure margin math would read
+        /// every expected failure as DRIFT (there is no thesis-side reframe).
+        #[arg(long)]
+        claim_expects_failure: bool,
     },
 }
 
@@ -1481,7 +1508,192 @@ fn cmd_receipt(command: ReceiptCommands) -> Result<(), i32> {
             expect_policy_digest.as_deref(),
             json,
         ),
+        ReceiptCommands::Export {
+            receipt,
+            output,
+            claim_id,
+            claim_sha256,
+            claim_expects_failure,
+        } => cmd_receipt_export(
+            &receipt,
+            &output,
+            &claim_id,
+            &claim_sha256,
+            claim_expects_failure,
+        ),
     }
+}
+
+/// The Telos/Crucible bridge: export a scientific-runtime receipt as one
+/// Crucible-ingestible measurement row inside a versioned envelope.
+///
+/// The receipt is RE-VERIFIED first through the exact evaluation path
+/// `receipt verify` uses; a receipt that does not reproduce exports NOTHING
+/// (exit 1/4 propagate). The measurement's deviation comes from the fresh
+/// re-run, and the sealed `recheck` descriptor carries the full replay
+/// command, so the exported row is witnessed rather than asserted.
+fn cmd_receipt_export(
+    receipt_path: &Path,
+    output: &Path,
+    claim_id: &str,
+    claim_sha256: &str,
+    claim_expects_failure: bool,
+) -> Result<(), i32> {
+    // Read ONCE and both hash and parse the same buffer: the hash sealed into
+    // recheck.receipt_sha256 must attest exactly the bytes that were verified
+    // and exported (re-reading the file would open a hash-vs-parse TOCTOU).
+    let receipt_bytes = std::fs::read(receipt_path).map_err(|err| {
+        eprintln!(
+            "Error reading receipt '{}': {}",
+            receipt_path.display(),
+            err
+        );
+        receipt_load_failure(false, "MALFORMED", 1)
+    })?;
+    let receipt_file_sha256 = source_digest_hex(&receipt_bytes);
+    let receipt_text = std::str::from_utf8(&receipt_bytes).map_err(|err| {
+        eprintln!(
+            "Error: receipt '{}' is not UTF-8: {}",
+            receipt_path.display(),
+            err
+        );
+        receipt_load_failure(false, "MALFORMED", 1)
+    })?;
+    assert_no_duplicate_json_keys(receipt_text).map_err(|err| {
+        eprintln!(
+            "Error parsing receipt '{}': {}",
+            receipt_path.display(),
+            err
+        );
+        receipt_load_failure(false, "MALFORMED", 1)
+    })?;
+    let receipt: serde_json::Value = serde_json::from_str(receipt_text).map_err(|err| {
+        eprintln!(
+            "Error parsing receipt '{}': {}",
+            receipt_path.display(),
+            err
+        );
+        receipt_load_failure(false, "MALFORMED", 1)
+    })?;
+    let schema = receipt_field_str(&receipt, "/schema", "schema")
+        .map_err(|code| receipt_load_failure(false, "SCHEMA_UNSUPPORTED", code))?;
+    if schema != SCIENTIFIC_RUNTIME_SCHEMA {
+        eprintln!(
+            "Error: receipt export supports `{}` only (got `{}`); the check-receipt and corpus surfaces are documented follow-ons",
+            SCIENTIFIC_RUNTIME_SCHEMA, schema
+        );
+        return Err(receipt_load_failure(false, "SCHEMA_UNSUPPORTED", 1));
+    }
+
+    // Re-verify through the same evaluation path `receipt verify` uses.
+    let probed_toolchain = probe_c_toolchain(false);
+    let report = evaluate_scientific_runtime_receipt(
+        &receipt,
+        None,
+        false,
+        env!("CARGO_PKG_VERSION"),
+        &language_version_string(),
+        probed_toolchain.as_ref(),
+        |source_path| {
+            let outcome = run_check(source_path)?;
+            Ok((
+                ScientificDigest::from(&outcome.source_digest),
+                ScientificDigest::from(&outcome.input_graph_digest),
+            ))
+        },
+        |source_path, args| {
+            let captured = compile_and_capture_run(
+                source_path,
+                args,
+                probed_toolchain.as_ref().map(|t| t.c_compiler.as_str()),
+            )?;
+            let raw_stdout_digest = ScientificDigest {
+                algorithm: "sha256".to_string(),
+                hex: source_digest_hex(&captured.stdout_bytes),
+            };
+            Ok(RerunObservation {
+                parsed: parse_numeric_series(&captured.stdout),
+                exit_code: captured.exit_code,
+                raw_stdout_digest,
+                executable_digest: captured.executable_digest,
+            })
+        },
+    )?;
+
+    // The expected-failure binding is claim semantics, so it is valid only
+    // when the receipt actually IS a declared negative fixture; applying it
+    // to an ordinary receipt would let a plain failure masquerade as a
+    // predicted one.
+    if claim_expects_failure && !report.negative_fixture {
+        eprintln!(
+            "Error: --claim-expects-failure requires a negative-fixture receipt (this receipt was not emitted with --negative-fixture)"
+        );
+        return Err(1);
+    }
+
+    let measured_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    let measurement = crucible_measurement_from_report(
+        &report,
+        claim_id,
+        claim_sha256,
+        claim_expects_failure,
+        &receipt_path.to_string_lossy(),
+        &receipt_file_sha256,
+        measured_at,
+    );
+
+    let mut envelope = serde_json::json!({
+        "schema": CRUCIBLE_MEASUREMENT_EXPORT_SCHEMA,
+        "generated_by": format!("buildc {}", env!("CARGO_PKG_VERSION")),
+        "faithful": true,
+        "invariant_held": report.invariant_held,
+        "measurements": [measurement],
+    });
+    if claim_id.is_empty() || claim_sha256.is_empty() {
+        envelope["binding_note"] = serde_json::Value::String(
+            "claim_id/claim_sha256 are empty: bind this measurement to a thesis claim before assessment (Crucible UNVERIFIABLEs an unbound measurement, fail-closed)".to_string(),
+        );
+    }
+    let text = serde_json::to_string_pretty(&envelope).map_err(|err| {
+        eprintln!("Error serializing measurement export: {}", err);
+        1
+    })?;
+    if output == Path::new("-") {
+        println!("{}", text);
+    } else {
+        // Atomic write: a failed export must never destroy or truncate a
+        // previously good measurement at the same path. Write a sibling temp
+        // file, then rename over the target (atomic on the same volume).
+        let tmp = output.with_extension("tmp");
+        std::fs::write(&tmp, format!("{}\n", text)).map_err(|err| {
+            eprintln!(
+                "Error writing measurement export '{}': {}",
+                tmp.display(),
+                err
+            );
+            let _ = std::fs::remove_file(&tmp);
+            1
+        })?;
+        std::fs::rename(&tmp, output).map_err(|err| {
+            eprintln!(
+                "Error finalizing measurement export '{}': {}",
+                output.display(),
+                err
+            );
+            let _ = std::fs::remove_file(&tmp);
+            1
+        })?;
+        eprintln!(
+            "exported: 1 witnessed measurement ({}, increase_count={}) -> {}",
+            report.receipt_status,
+            report.increase_count,
+            output.display()
+        );
+    }
+    Ok(())
 }
 
 fn digest_label(digest: &CheckReceiptSourceDigest) -> String {
