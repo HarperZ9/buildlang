@@ -1285,6 +1285,58 @@ impl<'ctx> MirLowerer<'ctx> {
                 builder.switch_to_block(cont);
                 return Ok(values::unit());
             }
+
+            // Indexed store into a slice / array / pointer base: `base[i] = v`.
+            // A slice/array *parameter* has type `Ptr(Slice/Array(elem))`
+            // (references pass as pointers); unwrap to the element type. Without
+            // this arm the write fell through to the bare-ident logic below and
+            // was silently dropped for slice parameters (e.g. a GPU kernel's
+            // `out[i] = ...`).
+            let elem_ty = match &recv_ty {
+                MirType::Slice(elem) | MirType::Array(elem, _) => Some((**elem).clone()),
+                MirType::Ptr(inner) => match inner.as_ref() {
+                    MirType::Slice(elem) | MirType::Array(elem, _) => Some((**elem).clone()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(elem_ty) = elem_ty {
+                let idx_val = self.lower_expr(index)?;
+                // Compound assignment reads the current element first.
+                let store_val = if op == ast::AssignOp::Assign {
+                    MirRValue::Use(val)
+                } else {
+                    let bin_op = match op {
+                        ast::AssignOp::AddAssign => BinOp::Add,
+                        ast::AssignOp::SubAssign => BinOp::Sub,
+                        ast::AssignOp::MulAssign => BinOp::Mul,
+                        ast::AssignOp::DivAssign => BinOp::Div,
+                        ast::AssignOp::RemAssign => BinOp::Rem,
+                        ast::AssignOp::BitAndAssign => BinOp::BitAnd,
+                        ast::AssignOp::BitOrAssign => BinOp::BitOr,
+                        ast::AssignOp::BitXorAssign => BinOp::BitXor,
+                        ast::AssignOp::ShlAssign => BinOp::Shl,
+                        ast::AssignOp::ShrAssign => BinOp::Shr,
+                        _ => BinOp::Add,
+                    };
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let cur = builder.create_local(elem_ty.clone());
+                    builder.assign(
+                        cur,
+                        MirRValue::IndexAccess {
+                            base: recv_val.clone(),
+                            index: idx_val.clone(),
+                            elem_ty: elem_ty.clone(),
+                        },
+                    );
+                    let combined = builder.create_local(elem_ty.clone());
+                    builder.binary_op(combined, bin_op, values::local(cur), val);
+                    MirRValue::Use(values::local(combined))
+                };
+                let builder = self.current_fn.as_mut().unwrap();
+                builder.push_index_store(recv_val, idx_val, elem_ty, store_val);
+                return Ok(values::unit());
+            }
         }
 
         // Get the target local
@@ -6074,11 +6126,20 @@ impl<'ctx> MirLowerer<'ctx> {
 
         // Derive element type: if the array value has type Array(elem, _)
         // then the result is of type elem; otherwise fall back to i32.
+        // A slice/array *parameter* lowers to `Ptr(Slice(elem))` /
+        // `Ptr(Array(elem, _))` (references pass as pointers), so unwrap the
+        // pointer THEN the collection to reach the true element type. Without
+        // the double-unwrap, indexing `&[f32]` yielded `Slice<f32>` and the
+        // backend mis-typed the load.
         let elem_ty = match self.type_of_value(&arr_val) {
             MirType::Array(elem, _) => *elem,
             MirType::Slice(elem) => *elem,
             MirType::Vec(elem) => *elem,
-            MirType::Ptr(inner) => *inner,
+            MirType::Ptr(inner) => match *inner {
+                MirType::Slice(elem) => *elem,
+                MirType::Array(elem, _) => *elem,
+                other => other,
+            },
             _ => MirType::i32(),
         };
 
@@ -6128,6 +6189,38 @@ impl<'ctx> MirLowerer<'ctx> {
     }
 
     fn lower_field(&mut self, obj: &ast::Expr, field: &ast::Ident) -> CodegenResult<MirValue> {
+        // GPU compute built-in thread index: `gl_GlobalInvocationID.x/.y/.z`.
+        // Intercept before lowering `obj` (which is not a real local/global) and
+        // emit a `ThreadIndex` nullary op the backends recognize. The result is a
+        // u32 index (coerced to i32 for array indexing by the surrounding code).
+        if let ExprKind::Ident(base_ident) = &obj.kind {
+            if base_ident.name.as_ref() == "gl_GlobalInvocationID"
+                && !self.var_map.contains_key(&base_ident.name)
+            {
+                let component = match field.name.as_ref() {
+                    "x" => 0u32,
+                    "y" => 1,
+                    "z" => 2,
+                    other => {
+                        return Err(CodegenError::Internal(format!(
+                            "gl_GlobalInvocationID has no component `.{}`",
+                            other
+                        )))
+                    }
+                };
+                let builder = self
+                    .current_fn
+                    .as_mut()
+                    .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                let result = builder.create_local(MirType::u32());
+                builder.assign(
+                    result,
+                    MirRValue::NullaryOp(NullaryOp::ThreadIndex(component), MirType::u32()),
+                );
+                return Ok(values::local(result));
+            }
+        }
+
         let obj_val = self.lower_expr(obj)?;
 
         // Determine the struct type of the object so we can look up the field.

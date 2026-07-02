@@ -323,6 +323,22 @@ impl MirBuilder {
         self.push_stmt(MirStmtKind::GlobalStore { name, value });
     }
 
+    /// Indexed store into a slice/array/pointer base: `base[index] = value`.
+    pub fn push_index_store(
+        &mut self,
+        base: MirValue,
+        index: MirValue,
+        elem_ty: MirType,
+        value: MirRValue,
+    ) {
+        self.push_stmt(MirStmtKind::IndexStore {
+            base,
+            index,
+            elem_ty,
+            value,
+        });
+    }
+
     /// Create an aggregate (tuple, struct, array).
     pub fn aggregate(&mut self, dest: LocalId, kind: AggregateKind, operands: Vec<MirValue>) {
         self.assign(dest, MirRValue::Aggregate { kind, operands });
