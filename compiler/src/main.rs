@@ -1759,7 +1759,7 @@ fn verify_scientific_receipt_dispatch(
 ) -> Result<(), i32> {
     // Probe once; None routes to TOOL_UNAVAILABLE (exit 4) inside the module,
     // BEFORE any re-run is attempted.
-    let probed_toolchain = probe_c_toolchain();
+    let probed_toolchain = probe_c_toolchain(false);
     verify_scientific_runtime_receipt(
         receipt,
         source_override,
@@ -1775,7 +1775,11 @@ fn verify_scientific_receipt_dispatch(
             ))
         },
         |source_path, args| {
-            let captured = compile_and_capture_run(source_path, args)?;
+            let captured = compile_and_capture_run(
+                source_path,
+                args,
+                probed_toolchain.as_ref().map(|t| t.c_compiler.as_str()),
+            )?;
             let raw_stdout_digest = ScientificDigest {
                 algorithm: "sha256".to_string(),
                 hex: source_digest_hex(&captured.stdout_bytes),
@@ -5031,7 +5035,11 @@ fn find_c_compiler() -> Option<String> {
             .status();
 
         let ok = match probe {
-            Ok(status) => status.success(),
+            // cl.exe has no `--version`: it prints its banner and exits 2, so
+            // for the cl family a successful SPAWN proves presence (requiring
+            // exit 0 wrongly skipped a functional PATH cl and fell through to
+            // gcc/clang or the hardcoded VS-root fallback).
+            Ok(status) => status.success() || compiler.starts_with("cl"),
             Err(_) if compiler.starts_with("cl") => std::process::Command::new(compiler)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
@@ -5882,10 +5890,22 @@ struct CapturedRun {
 
 /// Probe the local C toolchain for the scientific receipt's compiler_branch
 /// block (the pass-0122 contract). Returns `None` when no C compiler is
-/// available. The `program_executable_digest` field is a placeholder here
-/// (filled per compiled artifact by the caller); toolchain identity at verify
-/// compares only c_compiler + version digest + target.
-fn probe_c_toolchain() -> Option<ScientificToolchain> {
+/// available.
+///
+/// `hash_own_binary` is true on the EMIT path only: the buildc binary digest
+/// is sealed into the receipt, so a failed self-read FAILS CLOSED (None; no
+/// receipt with fabricated toolchain facts). Verify passes false: its probe
+/// exists to establish availability and identity for `toolchain_matched`
+/// (which compares only c_compiler + version digest + target), so hashing the
+/// verifier's own multi-megabyte binary would be pure waste; the local
+/// buildc_binary_digest stays empty and is never compared or sealed.
+///
+/// The `program_executable_digest` field is a placeholder here (filled per
+/// compiled artifact by the emit caller). The `target` field records the
+/// os/arch the buildc binary was BUILT FOR (compile-time constants), which
+/// equals the host for every supported configuration; it is not a runtime
+/// host probe.
+fn probe_c_toolchain(hash_own_binary: bool) -> Option<ScientificToolchain> {
     let compiler = find_c_compiler()?;
     // Capture the version banner. `cl` has no `--version`; it prints its
     // banner (to stderr) on the attempt anyway, so one probe serves both
@@ -5902,11 +5922,15 @@ fn probe_c_toolchain() -> Option<ScientificToolchain> {
         .unwrap_or("unknown")
         .trim()
         .to_string();
-    let buildc_binary_hex = std::env::current_exe()
-        .ok()
-        .and_then(|path| std::fs::read(&path).ok())
-        .map(|bytes| source_digest_hex(&bytes))
-        .unwrap_or_default();
+    let buildc_binary_hex = if hash_own_binary {
+        // Sealed into the receipt: fail closed rather than seal an absent hash.
+        let bytes = std::env::current_exe()
+            .ok()
+            .and_then(|path| std::fs::read(&path).ok())?;
+        source_digest_hex(&bytes)
+    } else {
+        String::new()
+    };
     Some(ScientificToolchain {
         c_compiler: compiler,
         c_compiler_version: version_line,
@@ -5936,7 +5960,10 @@ fn probe_c_toolchain() -> Option<ScientificToolchain> {
 ///
 /// Returns the temp build dir and the produced exe path. The caller MUST remove
 /// the temp dir after running (both call sites do).
-fn compile_program_to_exe(file: &Path) -> Result<CompiledProgram, i32> {
+fn compile_program_to_exe(
+    file: &Path,
+    compiler_override: Option<&str>,
+) -> Result<CompiledProgram, i32> {
     // Read source file
     let source = std::fs::read_to_string(file).map_err(|e| {
         eprintln!("Error reading file '{}': {}", file.display(), e);
@@ -6020,18 +6047,24 @@ fn compile_program_to_exe(file: &Path) -> Result<CompiledProgram, i32> {
         1
     })?;
 
-    // Find and invoke C compiler
-    let compiler = find_c_compiler().ok_or_else(|| {
-        eprintln!("Error: No C compiler found on the system.");
-        eprintln!("BuildLang needs a C compiler to compile and run programs.");
-        eprintln!();
-        if cfg!(windows) {
-            eprintln!("Install one of: cl.exe (MSVC), gcc (MinGW), or clang");
-        } else {
-            eprintln!("Install one of: cc, gcc, or clang");
-        }
-        1
-    })?;
+    // Invoke the C compiler: the caller's already-resolved compiler when one
+    // was probed (the receipt paths, so the SEALED toolchain identity is the
+    // compiler that actually built the executable, no re-resolution TOCTOU),
+    // else resolve here (the plain `run` path).
+    let compiler = match compiler_override {
+        Some(compiler) => compiler.to_string(),
+        None => find_c_compiler().ok_or_else(|| {
+            eprintln!("Error: No C compiler found on the system.");
+            eprintln!("BuildLang needs a C compiler to compile and run programs.");
+            eprintln!();
+            if cfg!(windows) {
+                eprintln!("Install one of: cl.exe (MSVC), gcc (MinGW), or clang");
+            } else {
+                eprintln!("Install one of: cc, gcc, or clang");
+            }
+            1
+        })?,
+    };
 
     invoke_c_compiler(&compiler, &c_file, &exe_file, false, &output.link_libraries)?;
 
@@ -6063,16 +6096,32 @@ fn compile_program_to_exe(file: &Path) -> Result<CompiledProgram, i32> {
 /// and re-parses the series to re-check the invariant, rather than trusting the
 /// stored values). Keeping one path means verify observes exactly what emit
 /// observed.
-fn compile_and_capture_run(file: &Path, args: &[String]) -> Result<CapturedRun, i32> {
-    let CompiledProgram { temp_dir, exe_file } = compile_program_to_exe(file)?;
+fn compile_and_capture_run(
+    file: &Path,
+    args: &[String],
+    compiler_override: Option<&str>,
+) -> Result<CapturedRun, i32> {
+    let CompiledProgram { temp_dir, exe_file } = compile_program_to_exe(file, compiler_override)?;
 
     // Hash the produced executable BEFORE running (the temp dir is removed
-    // after the run). Reported in the receipt's compiler_branch block.
+    // after the run). FAIL CLOSED on a read failure: a receipt must never
+    // seal an absent hash as if it were witnessed provenance (an empty-hex
+    // digest that "matches" another empty-hex digest would fabricate the
+    // strongest reproduction signal).
     let executable_digest = ScientificDigest {
         algorithm: "sha256".to_string(),
-        hex: std::fs::read(&exe_file)
-            .map(|bytes| source_digest_hex(&bytes))
-            .unwrap_or_default(),
+        hex: match std::fs::read(&exe_file) {
+            Ok(bytes) => source_digest_hex(&bytes),
+            Err(err) => {
+                eprintln!(
+                    "Error: could not hash the compiled executable '{}': {}",
+                    exe_file.display(),
+                    err
+                );
+                let _ = std::fs::remove_dir_all(&temp_dir);
+                return Err(1);
+            }
+        },
     };
 
     // Run the compiled program, capturing stdout so we can parse the series.
@@ -6123,7 +6172,7 @@ fn cmd_run(
     // invariant, seal, and write.
     let Some(receipt_path) = emit_receipt else {
         // No receipt: compile, then run with inherited stdout via `.status()`.
-        let CompiledProgram { temp_dir, exe_file } = compile_program_to_exe(file)?;
+        let CompiledProgram { temp_dir, exe_file } = compile_program_to_exe(file, None)?;
         let status = {
             let mut run_cmd = std::process::Command::new(&exe_file);
             run_cmd.args(args);
@@ -6149,11 +6198,13 @@ fn cmd_run(
     // with fabricated toolchain facts), then compile + run + capture via the
     // shared helper so the emitted series is observed through the exact path
     // `receipt verify` re-runs.
-    let Some(mut toolchain) = probe_c_toolchain() else {
-        eprintln!("Error: no C compiler available; cannot emit a scientific-runtime receipt");
+    let Some(mut toolchain) = probe_c_toolchain(true) else {
+        eprintln!(
+            "Error: could not establish toolchain facts (no C compiler available, or the buildc binary could not be hashed); cannot emit a scientific-runtime receipt"
+        );
         return Err(1);
     };
-    let captured = compile_and_capture_run(file, args)?;
+    let captured = compile_and_capture_run(file, args, Some(&toolchain.c_compiler))?;
     toolchain.program_executable_digest = captured.executable_digest.clone();
 
     // Seal the raw stdout bytes (the pass-0122 runtime_branch output hash):

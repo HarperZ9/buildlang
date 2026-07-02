@@ -88,7 +88,9 @@ pub struct ScientificToolchain {
     pub c_compiler_version: String,
     /// sha256 over the compiler's full version-probe output bytes.
     pub version_output_digest: ScientificDigest,
-    /// Host target the run was produced on, `os/arch` (e.g. `windows/x86_64`).
+    /// The os/arch the emitting buildc binary was BUILT FOR (compile-time
+    /// constants, e.g. `windows/x86_64`); equals the host in every supported
+    /// configuration, but is not a runtime host probe.
     pub target: String,
     /// sha256 of the buildc binary that emitted the receipt.
     pub buildc_binary_digest: ScientificDigest,
@@ -715,10 +717,19 @@ pub fn verify_scientific_runtime_receipt(
         return Err(verify_failure_class(json, "OVERCLAIM_BOUNDARY_MISSING", 1));
     }
 
-    // The verifier's series-extraction policy must match the sealed one: a
-    // receipt extracted under a different policy cannot be faithfully
-    // re-checked by this build's parser.
-    if receipt.measurement.series_extraction_policy != SERIES_EXTRACTION_POLICY {
+    // The verifier's series-extraction policy must match the sealed one BY
+    // VERSION TAG (the part before the first `:`): a receipt extracted under
+    // a different policy family/version cannot be faithfully re-checked by
+    // this build's parser, but a prose re-wording of the same versioned
+    // policy must not read as tampering.
+    let sealed_policy_tag = receipt
+        .measurement
+        .series_extraction_policy
+        .split(':')
+        .next()
+        .unwrap_or("");
+    let verifier_policy_tag = SERIES_EXTRACTION_POLICY.split(':').next().unwrap_or("");
+    if sealed_policy_tag != verifier_policy_tag {
         eprintln!(
             "Error: series extraction policy mismatch: receipt `{}`, this verifier `{}`",
             receipt.measurement.series_extraction_policy, SERIES_EXTRACTION_POLICY
@@ -726,9 +737,44 @@ pub fn verify_scientific_runtime_receipt(
         return Err(verify_failure_class(json, "EXTRACTION_POLICY_MISMATCH", 1));
     }
 
-    // Oracle binding: v0 supports declared_invariant only, and its name must
-    // bind to the invariant actually checked. An oracle kind this verifier
-    // does not know cannot be re-checked by it.
+    // Every sealed digest must be a real sha256 (64 hex chars): an empty or
+    // malformed digest inside a sealed receipt would let "hash unavailable"
+    // masquerade as witnessed provenance.
+    for (field, digest) in [
+        ("source_digest", &receipt.source_digest),
+        ("input_graph_digest", &receipt.input_graph_digest),
+        (
+            "build_state.toolchain.version_output_digest",
+            &receipt.build_state.toolchain.version_output_digest,
+        ),
+        (
+            "build_state.toolchain.buildc_binary_digest",
+            &receipt.build_state.toolchain.buildc_binary_digest,
+        ),
+        (
+            "build_state.toolchain.program_executable_digest",
+            &receipt.build_state.toolchain.program_executable_digest,
+        ),
+        (
+            "measurement.raw_stdout_digest",
+            &receipt.measurement.raw_stdout_digest,
+        ),
+    ] {
+        if !digest_is_well_formed(digest) {
+            eprintln!(
+                "Error: malformed digest in `{}`: algorithm `{}`, hex `{}` (must be sha256 with 64 hex chars)",
+                field, digest.algorithm, digest.hex
+            );
+            return Err(verify_failure_class(json, "DIGEST_MALFORMED", 1));
+        }
+    }
+
+    // Oracle binding, pinned to the IMPLEMENTATION rather than to another
+    // sealed field: this verifier implements exactly one invariant, so both
+    // the invariant name and the oracle name must equal it. Comparing
+    // oracle.name against invariant.name alone would be self-referential
+    // (both are author-controlled sealed strings that a resealed receipt can
+    // set to any equal pair).
     if receipt.oracle.kind != "declared_invariant" {
         eprintln!(
             "Error: unsupported oracle kind `{}` (this verifier re-checks `declared_invariant` only)",
@@ -736,12 +782,40 @@ pub fn verify_scientific_runtime_receipt(
         );
         return Err(verify_failure_class(json, "ORACLE_KIND_UNSUPPORTED", 1));
     }
-    if receipt.oracle.name != receipt.invariant.name {
+    if receipt.oracle.status != "DECLARED" {
         eprintln!(
-            "Error: oracle binding mismatch: oracle names `{}`, invariant is `{}`",
-            receipt.oracle.name, receipt.invariant.name
+            "Error: unsupported oracle status `{}` for kind `declared_invariant` (a declared oracle cannot claim an executed status)",
+            receipt.oracle.status
+        );
+        return Err(verify_failure_class(json, "ORACLE_STATUS_UNSUPPORTED", 1));
+    }
+    if receipt.invariant.name != ENERGY_MONOTONE_INVARIANT {
+        eprintln!(
+            "Error: unsupported invariant `{}` (this verifier implements `{}` only)",
+            receipt.invariant.name, ENERGY_MONOTONE_INVARIANT
+        );
+        return Err(verify_failure_class(json, "INVARIANT_UNSUPPORTED", 1));
+    }
+    if receipt.oracle.name != ENERGY_MONOTONE_INVARIANT {
+        eprintln!(
+            "Error: oracle binding mismatch: oracle names `{}`, this verifier's invariant is `{}`",
+            receipt.oracle.name, ENERGY_MONOTONE_INVARIANT
         );
         return Err(verify_failure_class(json, "ORACLE_BINDING_MISMATCH", 1));
+    }
+
+    // The fenced branches are load-bearing honesty: v0 produces neither
+    // telemetry nor lineage, so the only valid sealed value is the explicit
+    // fence. A branch edited (and resealed) to claim availability must be
+    // rejected, or the fence would be decorative.
+    if receipt.telemetry_branch.status != "UNAVAILABLE_FENCED"
+        || receipt.lineage_branch.status != "UNAVAILABLE_FENCED"
+    {
+        eprintln!(
+            "Error: unexpected fence status: telemetry `{}`, lineage `{}` (v0 produces neither; the only valid value is UNAVAILABLE_FENCED)",
+            receipt.telemetry_branch.status, receipt.lineage_branch.status
+        );
+        return Err(verify_failure_class(json, "FENCE_STATUS_UNEXPECTED", 1));
     }
 
     // Version drift WARNs, does not fail (see the doc comment above).
@@ -986,10 +1060,24 @@ pub fn verify_scientific_runtime_receipt(
     }
 }
 
-/// Two digests match iff their algorithm and (case-insensitive) hex agree.
+/// Two digests match iff their algorithm and (case-insensitive) hex agree AND
+/// both carry a real hex value. Two EMPTY digests never match: an absent hash
+/// must not report as the strongest reproduction signal (a vacuous
+/// `reproduced=true` from two failed reads would fabricate provenance).
 fn digests_match(actual: &ScientificDigest, expected: &ScientificDigest) -> bool {
-    actual.algorithm.eq_ignore_ascii_case(&expected.algorithm)
+    !actual.hex.is_empty()
+        && actual.algorithm.eq_ignore_ascii_case(&expected.algorithm)
         && actual.hex.eq_ignore_ascii_case(&expected.hex)
+}
+
+/// A sealed digest field must be a real sha256: exactly 64 hex chars. A
+/// receipt carrying an empty or malformed digest is rejected outright
+/// (`DIGEST_MALFORMED`), so "digest unavailable" can never masquerade as a
+/// witnessed hash inside a sealed receipt.
+fn digest_is_well_formed(digest: &ScientificDigest) -> bool {
+    digest.algorithm.eq_ignore_ascii_case("sha256")
+        && digest.hex.len() == 64
+        && digest.hex.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
 /// Report a stable machine-readable `failure_class` for a verify failure and
@@ -1002,11 +1090,17 @@ fn digests_match(actual: &ScientificDigest, expected: &ScientificDigest) -> bool
 /// - `MALFORMED`, `SCHEMA_UNSUPPORTED`, `COMPILER_MISMATCH`: the receipt could
 ///   not be interpreted.
 /// - `OVERCLAIM_BOUNDARY_MISSING`: `not_claimed` omits "physical_law".
-/// - `EXTRACTION_POLICY_MISMATCH`: the sealed series-extraction policy is not
-///   the one this verifier implements.
-/// - `ORACLE_KIND_UNSUPPORTED`, `ORACLE_BINDING_MISMATCH`: the oracle block
-///   names a kind this verifier cannot re-check, or does not bind to the
-///   invariant actually checked.
+/// - `EXTRACTION_POLICY_MISMATCH`: the sealed series-extraction policy's
+///   version tag is not the one this verifier implements.
+/// - `DIGEST_MALFORMED`: a sealed digest field is not a real sha256 (64 hex
+///   chars), so "hash unavailable" cannot masquerade as witnessed provenance.
+/// - `ORACLE_KIND_UNSUPPORTED`, `ORACLE_STATUS_UNSUPPORTED`,
+///   `ORACLE_BINDING_MISMATCH`, `INVARIANT_UNSUPPORTED`: the oracle/invariant
+///   block names a kind, status, or criterion this verifier does not
+///   implement, or the oracle does not bind to the implemented invariant
+///   (binding is pinned to the implementation, never to another sealed field).
+/// - `FENCE_STATUS_UNEXPECTED`: a telemetry/lineage fence was edited to claim
+///   availability v0 does not produce.
 /// - `TOOL_UNAVAILABLE` (exit 4): no C compiler is available for the re-run.
 /// - `REDERIVATION_FAILED`, `RERUN_FAILED`: the source could not be re-checked
 ///   or re-run (missing file, toolchain failure), distinct from drift.
@@ -1697,6 +1791,164 @@ mod tests {
             result,
             Err(1),
             "an oracle kind this verifier cannot re-check must be rejected"
+        );
+    }
+
+    #[test]
+    fn empty_digests_never_match() {
+        // Two absent hashes must not report as the strongest reproduction
+        // signal: a vacuous reproduced=true would fabricate provenance.
+        let empty = ScientificDigest {
+            algorithm: "sha256".to_string(),
+            hex: String::new(),
+        };
+        assert!(!digests_match(&empty, &empty));
+        assert!(digests_match(&hex_digest('a'), &hex_digest('a')));
+    }
+
+    #[test]
+    fn verify_rejects_a_malformed_digest() {
+        // A sealed digest that is not a real sha256 (here: empty hex) is
+        // rejected outright, so "hash unavailable" cannot masquerade as a
+        // witnessed hash inside a sealed receipt.
+        let path = Path::new("k.bld");
+        let mut receipt =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        receipt.build_state.toolchain.program_executable_digest.hex = String::new();
+        seal_receipt(&mut receipt);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src_digest = receipt.source_digest.clone();
+        let graph_digest = receipt.input_graph_digest.clone();
+
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok((src_digest.clone(), graph_digest.clone())),
+            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+        );
+        assert_eq!(result, Err(1), "an empty sealed digest must be rejected");
+    }
+
+    #[test]
+    fn verify_rejects_a_self_consistent_but_unimplemented_oracle() {
+        // The oracle binding is pinned to the IMPLEMENTATION: a receipt whose
+        // oracle.name and invariant.name agree with EACH OTHER but name a
+        // criterion this verifier does not implement must be rejected
+        // (comparing the two sealed fields against each other alone is
+        // self-referential and re-sealable to any equal pair).
+        let path = Path::new("k.bld");
+        let mut receipt =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        receipt.oracle.name = "custom_criterion".to_string();
+        receipt.invariant.name = "custom_criterion".to_string();
+        seal_receipt(&mut receipt);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src_digest = receipt.source_digest.clone();
+        let graph_digest = receipt.input_graph_digest.clone();
+
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok((src_digest.clone(), graph_digest.clone())),
+            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+        );
+        assert_eq!(
+            result,
+            Err(1),
+            "a self-consistent but unimplemented oracle/invariant pair must be rejected"
+        );
+
+        // An oracle claiming an EXECUTED status on a declared kind is also
+        // rejected: a declared criterion cannot claim execution provenance.
+        let mut receipt =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        receipt.oracle.status = "EXECUTED".to_string();
+        seal_receipt(&mut receipt);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src_digest = receipt.source_digest.clone();
+        let graph_digest = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok((src_digest.clone(), graph_digest.clone())),
+            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+        );
+        assert_eq!(
+            result,
+            Err(1),
+            "an executed status on a declared oracle must be rejected"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_an_edited_fence() {
+        // A fence edited (and resealed) to claim availability v0 does not
+        // produce must be rejected, or the fence would be decorative.
+        let path = Path::new("k.bld");
+        let mut receipt =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        receipt.telemetry_branch.status = "AVAILABLE".to_string();
+        seal_receipt(&mut receipt);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src_digest = receipt.source_digest.clone();
+        let graph_digest = receipt.input_graph_digest.clone();
+
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok((src_digest.clone(), graph_digest.clone())),
+            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+        );
+        assert_eq!(
+            result,
+            Err(1),
+            "a fence claiming availability must be rejected"
+        );
+    }
+
+    #[test]
+    fn extraction_policy_matches_by_version_tag_not_prose() {
+        // A prose re-wording of the SAME versioned policy must verify (the
+        // tag is the contract; the description is display text)...
+        let path = Path::new("k.bld");
+        let mut receipt =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        receipt.measurement.series_extraction_policy =
+            "whitespace-f64/v1: same discipline, different wording".to_string();
+        seal_receipt(&mut receipt);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src_digest = receipt.source_digest.clone();
+        let graph_digest = receipt.input_graph_digest.clone();
+
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok((src_digest.clone(), graph_digest.clone())),
+            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+        );
+        assert!(
+            result.is_ok(),
+            "same policy tag with different prose must verify: {result:?}"
         );
     }
 
