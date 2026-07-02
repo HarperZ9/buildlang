@@ -13906,6 +13906,113 @@ fn bounded_invariant_round_trips_positive_negative_and_is_distinct() {
 }
 
 #[test]
+fn energy_identity_invariant_round_trips_positive_and_negative() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping energy_identity_invariant_round_trips_positive_and_negative: C backend not ready"
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang_sci_energy_identity_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create energy-identity fixture dir");
+
+    // POSITIVE: the FTCS kernel computes the EXACT discrete energy balance, so
+    // its per-step residual stays at roundoff and `--invariant energy-identity`
+    // PASSes.
+    let pass_receipt = dir.join("balance.json");
+    let emit_pass = buildc()
+        .arg("run")
+        .arg(repo_example("energy_identity.bld"))
+        .args(["--emit-receipt"])
+        .arg(&pass_receipt)
+        .args([
+            "--invariant",
+            "energy-identity",
+            "--metric",
+            "residual",
+            "--problem",
+            "heat-energy-balance",
+        ])
+        .output()
+        .expect("emit energy-identity PASS receipt");
+    assert!(
+        emit_pass.status.success(),
+        "emitting the energy-identity PASS receipt should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&emit_pass.stderr)
+    );
+    let pass: serde_json::Value =
+        serde_json::from_slice(&fs::read(&pass_receipt).expect("read PASS receipt")).unwrap();
+    assert_eq!(pass["invariant"]["name"], "energy_identity_residual");
+    assert_eq!(pass["oracle"]["name"], "energy_identity_residual");
+    assert_eq!(pass["receipt_status"], "PASS");
+    assert_eq!(pass["invariant"]["observed"]["violation_count"], 0);
+
+    let verify_pass = buildc()
+        .args(["receipt", "verify"])
+        .arg(&pass_receipt)
+        .output()
+        .expect("verify energy-identity PASS receipt");
+    assert!(
+        verify_pass.status.success(),
+        "the energy-identity PASS receipt must verify\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_pass.stderr)
+    );
+
+    // NEGATIVE fixture: the broken kernel drops the r^2 correction term, so its
+    // residual is O(r^2) (~1e-5), far above the 1e-9 tolerance. With
+    // `--negative-fixture` it is a FAIL_EXPECTED receipt that STILL verifies.
+    let fail_receipt = dir.join("broken.json");
+    let emit_fail = buildc()
+        .arg("run")
+        .arg(repo_example("energy_identity_broken.bld"))
+        .args(["--emit-receipt"])
+        .arg(&fail_receipt)
+        .args([
+            "--invariant",
+            "energy-identity",
+            "--negative-fixture",
+            "--metric",
+            "residual",
+            "--problem",
+            "broken-balance",
+        ])
+        .output()
+        .expect("emit energy-identity negative fixture");
+    assert!(
+        emit_fail.status.success(),
+        "emitting the negative fixture should succeed"
+    );
+    let fail: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fail_receipt).expect("read FAIL receipt")).unwrap();
+    assert_eq!(fail["receipt_status"], "FAIL_EXPECTED");
+    // The reference is zero, so the very first step already violates.
+    assert_eq!(fail["invariant"]["observed"]["first_violation_step"], 0);
+    assert!(
+        fail["invariant"]["observed"]["violation_count"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+
+    let verify_fail = buildc()
+        .args(["receipt", "verify"])
+        .arg(&fail_receipt)
+        .output()
+        .expect("verify energy-identity negative fixture");
+    assert!(
+        verify_fail.status.success(),
+        "a faithfully reproduced FAIL_EXPECTED must verify (exit 0)\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_fail.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn run_emit_receipt_stable_kernel_is_pass() {
     if !c_backend_ready() {
         eprintln!("skipping run_emit_receipt_stable_kernel_is_pass: C backend not ready");
