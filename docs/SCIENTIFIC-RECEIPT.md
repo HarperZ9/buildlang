@@ -319,8 +319,14 @@ so the two columns disagree and it FAILs); `conserved-band` has
 band, so it PASSes) and `examples/euler_oscillator.bld` (explicit Euler, whose energy drifts out
 of the band, so it FAILs); `non-negative` has `examples/search_bound_binary.bld` (binary
 search's probe slack stays non-negative, so it PASSes) and `examples/search_bound_linear.bld`
-(a linear scan exceeds the bound, so the slack goes negative and it FAILs). Run any negative
-kernel with `--negative-fixture` for a `FAIL_EXPECTED` receipt.
+(a linear scan exceeds the bound, so the slack goes negative and it FAILs), and a DATA-STRUCTURE
+instance in `examples/funnel_probe.bld` (funnel hashing, arXiv 2501.02305: a leveled
+open-addressing scheme whose worst-case probe count stays under a calibrated bound of 20 at 75%
+load, its measured worst being 14 probes, so it PASSes) with `examples/funnel_probe_linear.bld`
+(naive single-level linear probing on the same keys clusters to 85 probes and exceeds the bound,
+so it FAILs; this is a faithful-in-spirit funnel that exhibits the sub-linear worst-case probe
+bound, not a bit-exact reproduction of the paper's optimal constant). Run any negative kernel
+with `--negative-fixture` for a `FAIL_EXPECTED` receipt.
 
 ## 5. The heat-equation kernel example
 
@@ -537,10 +543,12 @@ scope for v0:
 - **Richer relations and analytics.** `energy-monotone`, `conservation`, `bounded` (a discrete
   max principle), `energy-identity` (a quantitative energy-balance residual), `relation`
   (cross-column agreement over `--columns N`), `conserved-band` (approximate conservation), and
-  `non-negative` (an absolute lower floor, used for a result-bearing complexity slack) ship.
+  `non-negative` (an absolute lower floor, used for a result-bearing complexity slack, shipped
+  with both a binary-search bound and a funnel-hashing (arXiv 2501.02305) probe bound) ship.
   Relations beyond per-row agreement (named physical identities across columns, header-named
-  columns), and a full funnel-hashing (arXiv 2501.02305) probe-complexity kernel beyond the
-  binary-search slack demo, are follow-ons.
+  columns) are follow-ons. The Born-rule kernel ships the roundoff-crisp normalization-conservation
+  form; the deeper Carcassi and Aidala entropy equivalence (AoP Brief 003) would need a calibrated
+  tolerance or a seeded-RNG frequency-convergence demo and stays a follow-on.
 - **The full 7-layer receipt richness.** The research schema carries more layers than buildc
   can honestly fill today; v0 fills the subset buildc actually derives.
 - **Crucible-at-emit-time.** v0 checks the invariant and seals; it does not run a Crucible
