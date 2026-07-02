@@ -14505,6 +14505,64 @@ fn funnel_hashing_round_trips_a_probe_bound() {
 }
 
 #[test]
+fn receipt_verify_self_test_proves_the_verifier_can_fail() {
+    if !c_backend_ready() {
+        eprintln!("skipping receipt_verify_self_test_proves_the_verifier_can_fail: C backend not ready");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("buildlang_sci_selftest_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create self-test fixture dir");
+
+    // Emit a valid receipt, then run the verifier's own can-it-FAIL check: each
+    // sealed-field tamper must be rejected with its expected failure_class.
+    let receipt = dir.join("funnel.json");
+    let emit = buildc()
+        .arg("run")
+        .arg(repo_example("funnel_probe.bld"))
+        .args(["--emit-receipt"])
+        .arg(&receipt)
+        .args(["--invariant", "non-negative", "--metric", "slack", "--problem", "p"])
+        .output()
+        .expect("emit receipt for self-test");
+    assert!(emit.status.success(), "emitting the receipt should succeed");
+
+    let self_test = buildc()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .arg("--self-test")
+        .output()
+        .expect("run receipt verify --self-test");
+    assert!(
+        self_test.status.success(),
+        "self-test must pass (every tamper rejected with its expected class)\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&self_test.stdout),
+        String::from_utf8_lossy(&self_test.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&self_test.stdout);
+    assert!(
+        stdout.contains("5/5 tampers rejected with the expected failure_class"),
+        "self-test should report all five tampers rejected\nstdout:\n{}",
+        stdout
+    );
+    // The taxonomy arms actually exercised must appear in the report.
+    for class in [
+        "COMPILER_MISMATCH",
+        "SEAL_MISMATCH",
+        "MALFORMED",
+        "FIELD_CONTRACT_VIOLATION",
+        "INVARIANT_UNSUPPORTED",
+    ] {
+        assert!(
+            stdout.contains(class),
+            "self-test report must exercise {class}\nstdout:\n{stdout}"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn conserved_band_invariant_round_trips_and_is_distinct() {
     if !c_backend_ready() {
         eprintln!(
