@@ -1,0 +1,34 @@
+// Rotational invariant kernel (CONSERVING).
+//
+// Rotating a 2-D vector (x, y) by a fixed angle theta each step preserves its
+// squared radius r^2 = x^2 + y^2 exactly (to floating-point roundoff): a
+// rotation is an orthogonal transform, so |v| is invariant. This is the
+// discrete analogue of a conserved quantity in a Hamiltonian flow (here the
+// "energy" is the squared radius, constant along the orbit).
+//
+// The kernel prints r^2 once per step. Over 200 steps r^2 drifts from its
+// initial 1.0 only at the ~1e-15 roundoff scale, well inside the conserved-
+// quantity tolerance (1e-9), so a `--invariant conservation` receipt PASSes.
+//
+// Companion negative fixture: conservation_decay.bld (a lossy scheme whose
+// quantity drifts away from its initial value and FAILs conservation).
+
+fn main() ~ Console {
+    let theta: f64 = 0.1;
+    let c: f64 = cos(theta);
+    let s: f64 = sin(theta);
+    let mut x: f64 = 1.0;
+    let mut y: f64 = 0.0;
+    let mut step: i32 = 0;
+    while step < 200 {
+        // Conserved quantity: the squared radius (dogfoods the `**` operator).
+        let r2: f64 = x ** 2 + y ** 2;
+        println!("{}", r2);
+        // Rotate: (x, y) -> (x cos - y sin, x sin + y cos).
+        let xn: f64 = x * c - y * s;
+        let yn: f64 = x * s + y * c;
+        x = xn;
+        y = yn;
+        step = step + 1;
+    }
+}

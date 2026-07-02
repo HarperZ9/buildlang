@@ -13677,6 +13677,107 @@ fn repo_example(name: &str) -> PathBuf {
 }
 
 #[test]
+fn conservation_invariant_round_trips_positive_and_negative() {
+    if !c_backend_ready() {
+        eprintln!("skipping conservation_invariant_round_trips_positive_and_negative: C backend not ready");
+        return;
+    }
+    let dir =
+        std::env::temp_dir().join(format!("buildlang_sci_conservation_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create conservation fixture dir");
+
+    // POSITIVE: the rotation kernel conserves r^2, so `--invariant conservation`
+    // yields a PASS receipt that re-runs and re-checks clean.
+    let pass_receipt = dir.join("rotation.json");
+    let emit_pass = buildc()
+        .arg("run")
+        .arg(repo_example("conservation_rotation.bld"))
+        .args(["--emit-receipt"])
+        .arg(&pass_receipt)
+        .args([
+            "--invariant",
+            "conservation",
+            "--metric",
+            "r2",
+            "--problem",
+            "rotational-radius",
+        ])
+        .output()
+        .expect("emit conservation PASS receipt");
+    assert!(
+        emit_pass.status.success(),
+        "emitting the conservation PASS receipt should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&emit_pass.stderr)
+    );
+    let pass: serde_json::Value =
+        serde_json::from_slice(&fs::read(&pass_receipt).expect("read PASS receipt")).unwrap();
+    assert_eq!(pass["invariant"]["name"], "conserved_quantity_constant");
+    assert_eq!(pass["oracle"]["name"], "conserved_quantity_constant");
+    assert_eq!(pass["receipt_status"], "PASS");
+    assert_eq!(pass["invariant"]["observed"]["violation_count"], 0);
+
+    let verify_pass = buildc()
+        .args(["receipt", "verify"])
+        .arg(&pass_receipt)
+        .output()
+        .expect("verify conservation PASS receipt");
+    assert!(
+        verify_pass.status.success(),
+        "the conservation PASS receipt must verify\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_pass.stdout),
+        String::from_utf8_lossy(&verify_pass.stderr)
+    );
+
+    // NEGATIVE fixture: the decay kernel leaks, so with `--negative-fixture` it
+    // is a FAIL_EXPECTED receipt that STILL verifies (it faithfully reproduces
+    // its declared, expected failure -> exit 0).
+    let fail_receipt = dir.join("decay.json");
+    let emit_fail = buildc()
+        .arg("run")
+        .arg(repo_example("conservation_decay.bld"))
+        .args(["--emit-receipt"])
+        .arg(&fail_receipt)
+        .args([
+            "--invariant",
+            "conservation",
+            "--negative-fixture",
+            "--metric",
+            "q",
+            "--problem",
+            "leak",
+        ])
+        .output()
+        .expect("emit conservation negative fixture");
+    assert!(
+        emit_fail.status.success(),
+        "emitting the negative fixture should succeed"
+    );
+    let fail: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fail_receipt).expect("read FAIL receipt")).unwrap();
+    assert_eq!(fail["receipt_status"], "FAIL_EXPECTED");
+    assert!(
+        fail["invariant"]["observed"]["violation_count"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+
+    let verify_fail = buildc()
+        .args(["receipt", "verify"])
+        .arg(&fail_receipt)
+        .output()
+        .expect("verify conservation negative fixture");
+    assert!(
+        verify_fail.status.success(),
+        "a faithfully reproduced FAIL_EXPECTED must verify (exit 0)\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_fail.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn run_emit_receipt_stable_kernel_is_pass() {
     if !c_backend_ready() {
         eprintln!("skipping run_emit_receipt_stable_kernel_is_pass: C backend not ready");
@@ -13704,7 +13805,7 @@ fn run_emit_receipt_stable_kernel_is_pass() {
     assert_eq!(receipt["compiler"], "buildc");
     assert_eq!(receipt["receipt_status"], "PASS");
     assert_eq!(receipt["invariant"]["status"], "PASS");
-    assert_eq!(receipt["invariant"]["observed"]["increase_count"], 0);
+    assert_eq!(receipt["invariant"]["observed"]["violation_count"], 0);
     assert_eq!(receipt["problem"]["label"], "1d-heat-equation-energy");
     assert_eq!(receipt["measurement"]["count"], 400);
 
@@ -13758,7 +13859,7 @@ fn run_emit_receipt_unstable_negative_fixture_is_fail_expected() {
     assert_eq!(receipt["invariant"]["status"], "FAIL");
     assert_eq!(receipt["negative_fixture"], true);
     assert!(
-        receipt["invariant"]["observed"]["increase_count"]
+        receipt["invariant"]["observed"]["violation_count"]
             .as_u64()
             .unwrap_or(0)
             > 0,
@@ -14073,7 +14174,7 @@ fn scientific_runtime_receipt_emit_and_verify_round_trip() {
     assert_eq!(emitted["schema"], "buildlang-scientific-runtime-receipt/v0");
     assert_eq!(emitted["receipt_status"], "PASS");
     assert_eq!(emitted["invariant"]["status"], "PASS");
-    assert_eq!(emitted["invariant"]["observed"]["increase_count"], 0);
+    assert_eq!(emitted["invariant"]["observed"]["violation_count"], 0);
     let seal = emitted["seal"]["hex"].as_str().expect("seal hex string");
     assert_eq!(seal.len(), 64, "seal must be 64 hex chars");
     assert!(
