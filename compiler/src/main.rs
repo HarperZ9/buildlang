@@ -6118,6 +6118,11 @@ struct CapturedRun {
 fn derive_effect_policy(outcome: &CheckOutcome) -> ScientificEffectPolicy {
     let mut lines: Vec<String> = Vec::new();
     let mut union: BTreeSet<String> = BTreeSet::new();
+    // `Console` covers both stdout writes and stdin reads; the witnessed-field
+    // derivation needs the stdin distinction the capability NAME loses. This
+    // reads from the same sealed source set (the sources are already hashed
+    // into `facts_digest`), so a tampered flag also drifts the digest.
+    let mut reads_stdin = false;
     for summary in &outcome.function_summaries {
         let mut declared = summary.declared_effects.clone();
         declared.sort();
@@ -6126,6 +6131,9 @@ fn derive_effect_policy(outcome: &CheckOutcome) -> ScientificEffectPolicy {
             .iter()
             .map(|(capability, sources)| {
                 union.insert(capability.clone());
+                if sources.iter().any(|s| buildlang::types::is_stdin_source(s)) {
+                    reads_stdin = true;
+                }
                 let sources: Vec<&str> = sources.iter().map(String::as_str).collect();
                 format!("{}[{}]", capability, sources.join(","))
             })
@@ -6148,6 +6156,7 @@ fn derive_effect_policy(outcome: &CheckOutcome) -> ScientificEffectPolicy {
             hex: source_digest_hex(canonical.as_bytes()),
         },
         observed_capabilities: union.into_iter().collect(),
+        reads_stdin,
     }
 }
 

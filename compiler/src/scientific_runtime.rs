@@ -114,6 +114,12 @@ pub struct ScientificEffectPolicy {
     pub facts_digest: ScientificDigest,
     /// Sorted union of capability names observed across the program.
     pub observed_capabilities: Vec<String>,
+    /// Whether any function reads stdin. `Console` covers BOTH stdout writes
+    /// (safe) and stdin reads (an external input that breaks the dataset and
+    /// determinism absences), so the capability NAME alone cannot decide
+    /// those fields; this flag disambiguates. Re-derived at verify, so a
+    /// tampered flag is caught by `EFFECT_POLICY_DRIFT`.
+    pub reads_stdin: bool,
 }
 
 /// A field whose VALUE is an honest statement about evidence: either a
@@ -152,35 +158,70 @@ pub struct ScientificNumericalMethod {
 }
 
 /// Derive the witnessed-absence fields from the observed capability union
-/// (PURE, unit-tested): the typed-effect system doing receipt work. A
-/// program whose capabilities exclude FileSystem and Network provably
-/// consumed no external dataset; one that also excludes Clock and
-/// Environment is deterministic modulo its sealed args. `seed` is
+/// (PURE, unit-tested): the typed-effect system doing receipt work.
+///
+/// FAIL CLOSED. Each capability is treated as a hazard for a claim UNLESS it
+/// is provably incapable of undermining it. Two claims are derived:
+///
+/// * `input_dataset` (NONE_WITNESSED only if the program provably read no
+///   external data): every capability that opens a data channel
+///   (FileSystem, Network, Environment, Foreign, Gpu, and `Console` when it
+///   reads stdin) is a hazard. `Process` (exit) and `Clock` are not: exiting
+///   reads nothing, and the wall clock is a scalar nondeterminism source, not
+///   a dataset channel.
+/// * `determinism` (deterministic modulo sealed args only if nothing varies
+///   between runs): every capability above PLUS `Clock` is a hazard;
+///   `Process` alone is not.
+///
+/// `Console` is the one capability whose character depends on HOW it is used
+/// (stdout writes are safe, stdin reads are not), which `reads_stdin`
+/// disambiguates. Every capability not explicitly recognised as safe counts
+/// as a hazard for BOTH claims, so a capability added to the type checker
+/// later cannot silently widen a witnessed-absence claim. `seed` is
 /// NOT_APPLICABLE in v0 because the language has no RNG builtin at all.
 pub fn witnessed_fields_from_capabilities(
     observed_capabilities: &[String],
+    reads_stdin: bool,
 ) -> (
     ScientificWitnessedField,
     ScientificWitnessedField,
     ScientificDeterminism,
 ) {
-    let has = |name: &str| observed_capabilities.iter().any(|c| c == name);
+    let mut dataset_hazards: Vec<String> = Vec::new();
+    let mut determinism_hazards: Vec<String> = Vec::new();
+    for cap in observed_capabilities {
+        let (feeds_dataset, varies) = match cap.as_str() {
+            "Console" => (reads_stdin, reads_stdin),
+            "Process" => (false, false),
+            "Clock" => (false, true),
+            // FileSystem, Network, Environment, Foreign, Gpu, and any
+            // capability this build does not recognise: assume it can do both.
+            _ => (true, true),
+        };
+        let label = if cap == "Console" && reads_stdin {
+            "stdin".to_string()
+        } else {
+            cap.clone()
+        };
+        if feeds_dataset {
+            dataset_hazards.push(label.clone());
+        }
+        if varies {
+            determinism_hazards.push(label);
+        }
+    }
 
-    let io_caps: Vec<&str> = ["FileSystem", "Network"]
-        .into_iter()
-        .filter(|c| has(c))
-        .collect();
-    let input_dataset = if io_caps.is_empty() {
+    let input_dataset = if dataset_hazards.is_empty() {
         ScientificWitnessedField {
             status: "NONE_WITNESSED".to_string(),
-            grounds: "observed capabilities exclude FileSystem and Network, so the program cannot have read an external dataset".to_string(),
+            grounds: "no observed capability can feed an external dataset (no FileSystem, Network, stdin, Environment, Foreign, or GPU access), so the program provably consumed none".to_string(),
         }
     } else {
         ScientificWitnessedField {
             status: "POSSIBLE_UNWITNESSED".to_string(),
             grounds: format!(
-                "observed capabilities include {}; buildc does not track which resources were touched",
-                io_caps.join(", ")
+                "observed capabilities include {}, which can feed an external dataset; buildc does not track which resources were touched",
+                dataset_hazards.join(", ")
             ),
         }
     };
@@ -190,21 +231,17 @@ pub fn witnessed_fields_from_capabilities(
         grounds: "the language has no RNG builtin; there is no seed to record".to_string(),
     };
 
-    let nondet_caps: Vec<&str> = ["Clock", "Environment", "FileSystem", "Network"]
-        .into_iter()
-        .filter(|c| has(c))
-        .collect();
-    let determinism = if nondet_caps.is_empty() {
+    let determinism = if determinism_hazards.is_empty() {
         ScientificDeterminism {
             deterministic_modulo_args: true,
-            grounds: "observed capabilities exclude Clock, Environment, FileSystem, and Network, the nondeterminism sources the language exposes".to_string(),
+            grounds: "no observed capability varies between runs (no Clock, Environment, FileSystem, Network, stdin, Foreign, or GPU access)".to_string(),
         }
     } else {
         ScientificDeterminism {
             deterministic_modulo_args: false,
             grounds: format!(
                 "observed capabilities include {}, which can vary between runs",
-                nondet_caps.join(", ")
+                determinism_hazards.join(", ")
             ),
         }
     };
@@ -519,8 +556,10 @@ pub fn build_scientific_runtime_receipt(
 
     // The typed-effect system doing receipt work: witnessed absences and the
     // determinism statement derive from the observed capability union.
-    let (input_dataset, seed, determinism) =
-        witnessed_fields_from_capabilities(&effect_policy.observed_capabilities);
+    let (input_dataset, seed, determinism) = witnessed_fields_from_capabilities(
+        &effect_policy.observed_capabilities,
+        effect_policy.reads_stdin,
+    );
 
     let count = series.len();
     let mut receipt = ScientificRuntimeReceipt {
@@ -783,22 +822,26 @@ pub struct RerunObservation {
 /// Verify a `buildlang-scientific-runtime-receipt/v0` receipt by RE-DERIVING,
 /// never trusting the stored values (mirrors `corpus verify`'s discipline):
 ///
-/// 1. Deserialize the receipt and confirm its schema.
-/// 2. Re-derive the source + input-graph digests from the file on disk (via the
-///    `rederive_digests` callback, which runs the same check pipeline that
-///    produced the stored digests) and compare. A source change fails here.
-/// 3. Re-run the program WITH THE STORED ARGS (via `rerun_series`, the shared
+/// 1. Deserialize the receipt and confirm its schema and compiler.
+/// 2. Recompute the seal over the stored receipt body and confirm it matches
+///    the stored `seal.hex` (integrity of the receipt itself). This runs
+///    BEFORE any sealed field is interpreted, so an unsealed edit is reported
+///    as tampering rather than as whichever field-level contradiction it
+///    happens to trip first.
+/// 3. Re-derive the source + input-graph digests and the effect/capability
+///    policy from the file on disk (via the `rederive_digests` callback, which
+///    runs the same check pipeline that produced the stored facts) and
+///    compare. A source change fails here.
+/// 4. Re-run the program WITH THE STORED ARGS (via `rerun_series`, the shared
 ///    compile+run+capture path) and re-parse its numeric stdout into a fresh
 ///    series. The observed-value COUNT is re-checked against the stored
 ///    `measurement.count` (a deterministic quantity); a mismatch fails.
-/// 4. Recompute the invariant + receipt-status verdict from that fresh series
+/// 5. Recompute the invariant + receipt-status verdict from that fresh series
 ///    and compare the recomputed `invariant.status`, `increase_count`, and
 ///    `receipt_status` against the stored ones. Any disagreement is a failure.
 ///    Individual float VALUES are deliberately NOT re-compared: exact floats
 ///    need not reproduce across platforms, which is precisely why the verdict
 ///    (monotonicity + count), not the raw series, is the re-checked quantity.
-/// 5. Recompute the seal over the stored receipt bytes and confirm it matches
-///    the stored `seal.hex` (integrity of the receipt itself).
 ///
 /// A receipt that passes all five checks is FAITHFUL. The exit code additionally
 /// reflects the invariant verdict: `Ok(())` for PASS and FAIL_EXPECTED (a
@@ -867,6 +910,23 @@ pub fn evaluate_scientific_runtime_receipt(
             receipt.compiler
         );
         return Err(verify_failure_class(json, "COMPILER_MISMATCH", 1));
+    }
+
+    // Integrity gate: recompute the seal over the stored receipt body BEFORE
+    // interpreting any sealed field. Schema and compiler are the applicability
+    // gate (they decide whether this verifier's seal is even comparable); once
+    // past them, the very next question is whether the body was tampered with.
+    // Checking the seal first means every field-level rejection below
+    // (OVERCLAIM_BOUNDARY_MISSING, FIELD_CONTRACT_VIOLATION, ORACLE_*, ...)
+    // reports a genuinely author-sealed invalid VALUE rather than misreporting
+    // an unsealed edit as an internal contradiction.
+    let recomputed_seal = recompute_seal_hex(&receipt);
+    if !recomputed_seal.eq_ignore_ascii_case(&receipt.seal.hex) {
+        eprintln!(
+            "Error: seal mismatch: receipt sha256:{}, recomputed sha256:{}",
+            receipt.seal.hex, recomputed_seal
+        );
+        return Err(verify_failure_class(json, "SEAL_MISMATCH", 1));
     }
 
     // The claims boundary is load-bearing honesty (pass-0122
@@ -1063,18 +1123,24 @@ pub fn evaluate_scientific_runtime_receipt(
         &receipt.effect_policy.facts_digest,
     ) || rederived.effect_policy.observed_capabilities
         != receipt.effect_policy.observed_capabilities
+        || rederived.effect_policy.reads_stdin != receipt.effect_policy.reads_stdin
     {
         eprintln!(
-            "Error: effect policy drift: receipt capabilities {:?} (facts sha256:{}), re-derived {:?} (facts sha256:{})",
+            "Error: effect policy drift: receipt capabilities {:?} reads_stdin={} (facts sha256:{}), re-derived {:?} reads_stdin={} (facts sha256:{})",
             receipt.effect_policy.observed_capabilities,
+            receipt.effect_policy.reads_stdin,
             receipt.effect_policy.facts_digest.hex,
             rederived.effect_policy.observed_capabilities,
+            rederived.effect_policy.reads_stdin,
             rederived.effect_policy.facts_digest.hex
         );
         return Err(verify_failure_class(json, "EFFECT_POLICY_DRIFT", 1));
     }
     let (expected_input_dataset, expected_seed, expected_determinism) =
-        witnessed_fields_from_capabilities(&rederived.effect_policy.observed_capabilities);
+        witnessed_fields_from_capabilities(
+            &rederived.effect_policy.observed_capabilities,
+            rederived.effect_policy.reads_stdin,
+        );
     if receipt.input_dataset != expected_input_dataset
         || receipt.seed != expected_seed
         || receipt.determinism != expected_determinism
@@ -1211,17 +1277,7 @@ pub fn evaluate_scientific_runtime_receipt(
         return Err(verify_failure_class(json, "RECEIPT_STATUS_DRIFT", 1));
     }
 
-    // (5) Recompute the seal over the stored receipt and confirm integrity.
-    let recomputed_seal = recompute_seal_hex(&receipt);
-    if !recomputed_seal.eq_ignore_ascii_case(&receipt.seal.hex) {
-        eprintln!(
-            "Error: seal mismatch: receipt sha256:{}, recomputed sha256:{}",
-            receipt.seal.hex, recomputed_seal
-        );
-        return Err(verify_failure_class(json, "SEAL_MISMATCH", 1));
-    }
-
-    // The receipt is FAITHFUL (digests, count, verdict, and seal all
+    // The receipt is FAITHFUL (seal, digests, count, and verdict all
     // re-check). Whether the recorded verdict is a PASS is a separate
     // question the report carries; the printing wrapper (and the export
     // bridge) decide what to do with it.
@@ -1576,6 +1632,7 @@ mod tests {
         ScientificEffectPolicy {
             facts_digest: hex_digest('7'),
             observed_capabilities: vec!["Console".to_string()],
+            reads_stdin: false,
         }
     }
 
@@ -2577,28 +2634,75 @@ mod tests {
 
     #[test]
     fn witnessed_fields_derive_from_capabilities() {
-        // Console-only: no external dataset POSSIBLE, deterministic modulo
-        // args - the effect system proving absences.
+        // Console writing stdout only (reads_stdin=false): no external dataset
+        // POSSIBLE, deterministic modulo args - the effect system proving
+        // absences. This is the pure-println flagship kernel; it MUST keep its
+        // true absence claims.
         let (dataset, seed, determinism) =
-            witnessed_fields_from_capabilities(&["Console".to_string()]);
+            witnessed_fields_from_capabilities(&["Console".to_string()], false);
         assert_eq!(dataset.status, "NONE_WITNESSED");
         assert_eq!(seed.status, "NOT_APPLICABLE");
         assert!(determinism.deterministic_modulo_args);
 
+        // Console READING stdin: stdin is an external input, so both absences
+        // collapse (the Console NAME alone would have missed this).
+        let (dataset, _, determinism) =
+            witnessed_fields_from_capabilities(&["Console".to_string()], true);
+        assert_eq!(dataset.status, "POSSIBLE_UNWITNESSED");
+        assert!(dataset.grounds.contains("stdin"));
+        assert!(!determinism.deterministic_modulo_args);
+        assert!(determinism.grounds.contains("stdin"));
+
         // FileSystem present: the dataset field fences honestly, and
         // determinism cannot be claimed.
         let caps = vec!["Console".to_string(), "FileSystem".to_string()];
-        let (dataset, _, determinism) = witnessed_fields_from_capabilities(&caps);
+        let (dataset, _, determinism) = witnessed_fields_from_capabilities(&caps, false);
         assert_eq!(dataset.status, "POSSIBLE_UNWITNESSED");
         assert!(dataset.grounds.contains("FileSystem"));
         assert!(!determinism.deterministic_modulo_args);
 
-        // Clock alone breaks determinism but not the dataset absence.
+        // Clock alone breaks determinism but not the dataset absence (the wall
+        // clock is a scalar nondeterminism source, not a data channel).
         let caps = vec!["Clock".to_string(), "Console".to_string()];
-        let (dataset, _, determinism) = witnessed_fields_from_capabilities(&caps);
+        let (dataset, _, determinism) = witnessed_fields_from_capabilities(&caps, false);
         assert_eq!(dataset.status, "NONE_WITNESSED");
         assert!(!determinism.deterministic_modulo_args);
         assert!(determinism.grounds.contains("Clock"));
+
+        // Foreign (extern C) can do arbitrary IO: hazard for BOTH claims.
+        let caps = vec!["Console".to_string(), "Foreign".to_string()];
+        let (dataset, _, determinism) = witnessed_fields_from_capabilities(&caps, false);
+        assert_eq!(dataset.status, "POSSIBLE_UNWITNESSED");
+        assert!(dataset.grounds.contains("Foreign"));
+        assert!(!determinism.deterministic_modulo_args);
+
+        // Gpu: hazard for BOTH claims.
+        let caps = vec!["Console".to_string(), "Gpu".to_string()];
+        let (dataset, _, determinism) = witnessed_fields_from_capabilities(&caps, false);
+        assert_eq!(dataset.status, "POSSIBLE_UNWITNESSED");
+        assert!(dataset.grounds.contains("Gpu"));
+        assert!(!determinism.deterministic_modulo_args);
+
+        // Environment (getenv / argv): hazard for BOTH claims.
+        let caps = vec!["Console".to_string(), "Environment".to_string()];
+        let (dataset, _, determinism) = witnessed_fields_from_capabilities(&caps, false);
+        assert_eq!(dataset.status, "POSSIBLE_UNWITNESSED");
+        assert!(!determinism.deterministic_modulo_args);
+
+        // Process (exit) reads nothing and is deterministic: safe for BOTH.
+        let caps = vec!["Console".to_string(), "Process".to_string()];
+        let (dataset, _, determinism) = witnessed_fields_from_capabilities(&caps, false);
+        assert_eq!(dataset.status, "NONE_WITNESSED");
+        assert!(determinism.deterministic_modulo_args);
+
+        // An unrecognised capability is default-unsafe (fail closed): a
+        // capability added to the checker later cannot silently widen either
+        // absence claim.
+        let caps = vec!["Console".to_string(), "Bluetooth".to_string()];
+        let (dataset, _, determinism) = witnessed_fields_from_capabilities(&caps, false);
+        assert_eq!(dataset.status, "POSSIBLE_UNWITNESSED");
+        assert!(dataset.grounds.contains("Bluetooth"));
+        assert!(!determinism.deterministic_modulo_args);
     }
 
     #[test]
@@ -2720,6 +2824,38 @@ mod tests {
             Err(1),
             "an inconsistent numerical_method must be rejected"
         );
+    }
+
+    #[test]
+    fn verify_checks_the_seal_before_interpreting_fields() {
+        // The C5 ordering contract: an UNSEALED edit to a field is caught by
+        // the integrity gate (SEAL_MISMATCH) rather than by whichever
+        // field-level contradiction it happens to trip first. Here the seed
+        // status is edited to an inexpressible value WITHOUT resealing: the
+        // receipt no longer re-seals, so it is rejected as tampering, not as a
+        // FIELD_CONTRACT_VIOLATION. (The validly-sealed contradiction is the
+        // separate `verify_rejects_field_contract_violations` case, which
+        // reseals and therefore reaches the field-contract check - proving
+        // that check stays reachable after the seal gate.)
+        let path = Path::new("k.bld");
+        let mut receipt =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        receipt.seed.status = "RECORDED".to_string();
+        // Deliberately do NOT reseal.
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src_digest = receipt.source_digest.clone();
+        let graph_digest = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
+            |_, _| panic!("an unsealed receipt must be rejected before any re-run"),
+        );
+        assert_eq!(result, Err(1), "an unsealed field edit must be rejected");
     }
 
     #[test]
