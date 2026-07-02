@@ -1,0 +1,23 @@
+// Non-conserving (LEAKING) kernel: the NEGATIVE fixture for the conserved-
+// quantity invariant.
+//
+// A lossy scheme multiplies the tracked quantity by 0.995 each step, so it
+// decays geometrically away from its initial value of 1.0. By step ~10 the
+// deviation already exceeds the conserved-quantity tolerance (1e-9), so a
+// `--invariant conservation` receipt FAILs: FAIL_EXPECTED with
+// `--negative-fixture`, FAIL_UNEXPECTED without. This is the paired wrong-
+// system fixture for conservation_rotation.bld (a real conserved quantity),
+// exactly as the unstable heat kernel is the negative fixture for the stable
+// energy-monotone kernel.
+
+fn main() ~ Console {
+    let mut q: f64 = 1.0;
+    let mut step: i32 = 0;
+    while step < 200 {
+        println!("{}", q);
+        // A conserved quantity would keep q fixed; this scheme leaks 0.5% per
+        // step, so q drifts steadily below its initial value.
+        q = q * 0.995;
+        step = step + 1;
+    }
+}

@@ -41,8 +41,8 @@ use scientific_runtime::{
     build_scientific_runtime_receipt, crucible_measurement_from_report,
     evaluate_scientific_runtime_receipt, parse_numeric_series, verify_scientific_runtime_receipt,
     RederivedFacts, RerunObservation, ScientificDigest, ScientificEffectPolicy,
-    ScientificReceiptInputs, ScientificRuntimeReceipt, ScientificToolchain,
-    CRUCIBLE_MEASUREMENT_EXPORT_SCHEMA, SCIENTIFIC_RUNTIME_SCHEMA,
+    ScientificReceiptInputs, ScientificRuntimeReceipt, ScientificToolchain, CONSERVATION_INVARIANT,
+    CRUCIBLE_MEASUREMENT_EXPORT_SCHEMA, ENERGY_MONOTONE_INVARIANT, SCIENTIFIC_RUNTIME_SCHEMA,
 };
 use symbol_graph::{verify_symbol_graph_receipt, SymbolGraphReceipt, SYMBOL_GRAPH_RECEIPT};
 
@@ -1696,9 +1696,9 @@ fn cmd_receipt_export(
             1
         })?;
         eprintln!(
-            "exported: 1 witnessed measurement ({}, increase_count={}) -> {}",
+            "exported: 1 witnessed measurement ({}, violation_count={}) -> {}",
             report.receipt_status,
-            report.increase_count,
+            report.violation_count,
             output.display()
         );
     }
@@ -6432,12 +6432,24 @@ fn cmd_run(
     method: Option<&str>,
     negative_fixture: bool,
 ) -> Result<(), i32> {
-    // v0 implements only the energy-monotone invariant. Reject unknown names
-    // early (before compiling) so the error is clear and no work is wasted.
-    if emit_receipt.is_some() && invariant != "energy-monotone" {
-        eprintln!("Unknown --invariant '{invariant}'. Supported in v0: energy-monotone");
-        return Err(1);
-    }
+    // Map the CLI invariant name (kebab-case) to the registry invariant the
+    // receipt seals and verify re-checks. Reject unknown names early (before
+    // compiling) so the error is clear and no work is wasted.
+    let invariant_name = match invariant {
+        "energy-monotone" => ENERGY_MONOTONE_INVARIANT,
+        "conservation" => CONSERVATION_INVARIANT,
+        other => {
+            if emit_receipt.is_some() {
+                eprintln!(
+                    "Unknown --invariant '{other}'. Supported: energy-monotone, conservation"
+                );
+                return Err(1);
+            }
+            // Without --emit-receipt the invariant is unused; keep a harmless
+            // default so the no-receipt run path is unaffected.
+            ENERGY_MONOTONE_INVARIANT
+        }
+    };
 
     // Default path (no --emit-receipt): inherit stdout via `.status()`, exactly
     // as before -- byte-identical output and exit-code semantics. Receipt path:
@@ -6546,6 +6558,7 @@ fn cmd_run(
         series_parsed: parsed.any_parsed,
         diverged: parsed.diverged,
         args: args.to_vec(),
+        invariant_name: invariant_name.to_string(),
         metric: metric.to_string(),
         units: None,
         problem_label: problem.map(str::to_string),

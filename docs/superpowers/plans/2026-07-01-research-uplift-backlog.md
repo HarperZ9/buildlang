@@ -44,7 +44,7 @@ The anti-self-confirming sweep. Every item makes an existing green light falsifi
   invariant family lands. [item 79: adjudicated, deferred residual]
 - **W1.4 Typed failure codes.** `receipt verify` failures currently collapse into
   exit 1 + prose. Add a stable `failure_class` enum (SOURCE_DIGEST_MISMATCH,
-  MEASUREMENT_COUNT_DRIFT, INVARIANT_STATUS_DRIFT, INCREASE_COUNT_DRIFT,
+  MEASUREMENT_COUNT_DRIFT, INVARIANT_STATUS_DRIFT, VIOLATION_COUNT_DRIFT,
   RECEIPT_STATUS_DRIFT, SEAL_MISMATCH, DIVERGENCE_NOT_REPRODUCED, MALFORMED, ...)
   emitted on stderr and in the `--json` failure report, so negative fixtures can
   pin (code, verdict) pairs instead of "anything failed". [items 43, 21, 88, 108]
