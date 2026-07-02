@@ -1195,8 +1195,7 @@ pub fn build_self_test_cases(
     //    verifier rejects it at the invariant-registry gate.
     {
         let mut v = receipt_json.clone();
-        v["invariant"]["name"] =
-            serde_json::Value::String("not_a_real_invariant".to_string());
+        v["invariant"]["name"] = serde_json::Value::String("not_a_real_invariant".to_string());
         let v = reseal_json(&v)?;
         cases.push(SelfTestCase {
             label: "invariant name replaced with an unknown invariant".to_string(),

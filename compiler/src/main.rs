@@ -38,6 +38,10 @@ use mir_representation::{
 };
 use module_graph::{verify_module_graph_receipt, ModuleGraphReceipt, MODULE_GRAPH_RECEIPT};
 use scientific_runtime::{
+    build_receipt_chain, receipt_chain_seal_hex, ReceiptChainManifest, ScientificCorpusManifest,
+    RECEIPT_CHAIN_SCHEMA, RECEIPT_CORPUS_SCHEMA,
+};
+use scientific_runtime::{
     build_scientific_runtime_receipt, build_self_test_cases, column_count_matches_invariant,
     crucible_measurement_from_report, evaluate_scientific_runtime_receipt, parse_numeric_series,
     verify_scientific_runtime_receipt, RederivedFacts, RerunObservation, ScientificDigest,
@@ -45,10 +49,6 @@ use scientific_runtime::{
     BOUNDED_INVARIANT, CONSERVATION_INVARIANT, CONSERVED_BAND_INVARIANT,
     CRUCIBLE_MEASUREMENT_EXPORT_SCHEMA, ENERGY_IDENTITY_INVARIANT, ENERGY_MONOTONE_INVARIANT,
     NON_NEGATIVE_INVARIANT, RELATION_INVARIANT, SCIENTIFIC_RUNTIME_SCHEMA,
-};
-use scientific_runtime::{
-    build_receipt_chain, receipt_chain_seal_hex, ReceiptChainManifest, ScientificCorpusManifest,
-    RECEIPT_CHAIN_SCHEMA, RECEIPT_CORPUS_SCHEMA,
 };
 use symbol_graph::{verify_symbol_graph_receipt, SymbolGraphReceipt, SYMBOL_GRAPH_RECEIPT};
 
@@ -686,6 +686,49 @@ fn print_tool_probe(label: &str, command: &str, args: &[&str]) {
     }
 }
 
+/// Probe and print the GPU-path readiness row(s) for `buildc doctor`.
+///
+/// Layer A only needs `spirv-val` (valid compute SPIR-V emission). Layer B
+/// (device dispatch) additionally needs the `gpu` cargo feature and a real
+/// Vulkan device. The row prints exactly what was probed and never overclaims:
+/// without the feature it says the device path is not compiled in even if a GPU
+/// is present.
+fn print_gpu_probe() {
+    println!("GPU path:");
+
+    let spirv_val = find_spirv_val();
+    match &spirv_val {
+        Some(tool) => println!("  spirv-val    found    {} (Layer A emission gate)", tool),
+        None => println!("  spirv-val    missing  install Vulkan SDK for the Layer A gate"),
+    }
+
+    let _ = &spirv_val;
+
+    #[cfg(feature = "gpu")]
+    {
+        match crate::gpu::vulkan_host::probe_device() {
+            Some(name) => println!("  gpu      ready    Vulkan compute device: {}", name),
+            None => println!(
+                "  gpu      absent   `gpu` feature built, but no Vulkan compute device enumerated"
+            ),
+        }
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        // vulkaninfo presence is a cheap, dependency-free device signal.
+        let vulkaninfo = command_version("vulkaninfo", &["--summary"])
+            .or_else(|| command_version("vulkaninfo", &[]));
+        match vulkaninfo {
+            Some(_) => println!(
+                "  gpu      off      Vulkan present, but device dispatch needs `--features gpu` (Layer B)"
+            ),
+            None => println!(
+                "  gpu      off      device dispatch (Layer B) needs `--features gpu` + a Vulkan device"
+            ),
+        }
+    }
+}
+
 fn print_substrate_evidence(corpus_root: Option<&Path>) {
     println!();
     println!("Substrate evidence:");
@@ -743,6 +786,12 @@ fn cmd_doctor() -> Result<(), i32> {
     println!("  spirv    experimental  SPIR-V output; validate with spirv-val");
     println!("  x86-64   experimental  assembly/object output; linker integration is partial");
     println!("  arm64    experimental  assembly/object output; linker integration is partial");
+
+    // GPU row: report exactly what was probed for the real GPU path. Layer A
+    // (valid compute SPIR-V) needs only spirv-val; Layer B (device dispatch)
+    // additionally needs the `gpu` cargo feature AND a Vulkan device.
+    println!();
+    print_gpu_probe();
 
     let corpus_root = find_semantic_corpus_root();
     print_substrate_evidence(corpus_root.as_deref());
@@ -1643,7 +1692,10 @@ fn cmd_receipt_verify_self_test(receipt_path: &Path) -> Result<(), i32> {
         {
             Ok(output) => output,
             Err(err) => {
-                eprintln!("  FAIL {} (verify subprocess failed to run: {err})", case.label);
+                eprintln!(
+                    "  FAIL {} (verify subprocess failed to run: {err})",
+                    case.label
+                );
                 failures += 1;
                 continue;
             }
@@ -1920,7 +1972,10 @@ fn cmd_receipt_corpus(manifest_path: &Path) -> Result<(), i32> {
         let status = match status {
             Some(status) => status,
             None => {
-                eprintln!("  FAIL {} (could not read emitted receipt_status)", member.source);
+                eprintln!(
+                    "  FAIL {} (could not read emitted receipt_status)",
+                    member.source
+                );
                 failures += 1;
                 continue;
             }
@@ -1957,7 +2012,10 @@ fn cmd_receipt_corpus(manifest_path: &Path) -> Result<(), i32> {
             continue;
         }
 
-        println!("  ok   {} [{}] => {}", member.source, member.invariant, status);
+        println!(
+            "  ok   {} [{}] => {}",
+            member.source, member.invariant, status
+        );
     }
     let _ = std::fs::remove_dir_all(&tmp_dir);
 
@@ -5728,6 +5786,64 @@ fn find_c_compiler() -> Option<String> {
     None
 }
 
+/// Locate `spirv-val` (from the Vulkan SDK / SPIRV-Tools). Returns the program
+/// to invoke, preferring one already on PATH; falls back to a known Vulkan SDK
+/// bin path on Windows. `None` means the tool is absent and validation is
+/// skipped gracefully (mirrors `find_c_compiler`'s absence-is-graceful policy).
+fn find_spirv_val() -> Option<String> {
+    let candidates: &[&str] = if cfg!(windows) {
+        &["spirv-val", "spirv-val.exe"]
+    } else {
+        &["spirv-val"]
+    };
+    for &tool in candidates {
+        let ok = std::process::Command::new(tool)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            return Some(tool.to_string());
+        }
+    }
+    #[cfg(windows)]
+    {
+        let sdk = r"C:\VulkanSDK\1.4.341.1\Bin\spirv-val.exe";
+        if std::path::Path::new(sdk).is_file() {
+            return Some(sdk.to_string());
+        }
+    }
+    None
+}
+
+/// Run `spirv-val` on an emitted module. Returns `Ok(())` on validation success,
+/// `Err(stderr)` on a non-zero exit (the caller fails the build), or `Ok(())`
+/// with a printed skip if the tool is absent.
+fn validate_spirv_module(spv_path: &std::path::Path) -> Result<(), String> {
+    let Some(tool) = find_spirv_val() else {
+        println!("  spirv-val: not found on PATH; skipping validation");
+        return Ok(());
+    };
+    match std::process::Command::new(&tool)
+        .arg("--target-env")
+        .arg("vulkan1.0")
+        .arg(spv_path)
+        .output()
+    {
+        Ok(result) if result.status.success() => {
+            println!("  spirv-val: PASSED (Vulkan 1.0)");
+            Ok(())
+        }
+        Ok(result) => {
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            Err(stderr.trim().to_string())
+        }
+        Err(e) => Err(format!("failed to invoke spirv-val: {}", e)),
+    }
+}
+
 /// Find vcvarsall.bat from Visual Studio installation.
 #[cfg(windows)]
 #[allow(dead_code)]
@@ -8596,6 +8712,21 @@ fn cmd_compile(
     }
     if opt_level > 0 {
         println!("Optimization level: O{}", opt_level);
+    }
+
+    // SPIR-V: validate the emitted module with spirv-val (if present) and FAIL
+    // the build on a non-zero exit. Absence of the tool is a graceful skip. This
+    // makes `buildc kernel.bld --target spirv` an honest gate: what it emits is
+    // valid dispatchable SPIR-V, checked by an external validator.
+    if target == Target::SpirV {
+        match validate_spirv_module(&output_path) {
+            Ok(()) => {}
+            Err(msg) => {
+                eprintln!("spirv-val: FAILED");
+                eprintln!("{}", msg);
+                return Err(1);
+            }
+        }
     }
 
     // For LLVM target, try to compile the .ll file to a native executable

@@ -362,6 +362,13 @@ fn collect_stmt(
             collect_rvalue(value, sets, memory);
         }
         MirStmtKind::GlobalStore { value, .. } => collect_rvalue(value, sets, memory),
+        MirStmtKind::IndexStore { value, .. } => {
+            // An indexed store is a memory write; fold into the existing
+            // field-write surface rather than introducing a new surface (the
+            // doctor surface inventory is asserted by exact count in tests).
+            memory.field_writes = true;
+            collect_rvalue(value, sets, memory);
+        }
         MirStmtKind::StorageLive(_) | MirStmtKind::StorageDead(_) | MirStmtKind::Nop => {}
     }
 }
@@ -521,6 +528,7 @@ fn statement_name(stmt: &MirStmtKind) -> &'static str {
         MirStmtKind::FieldDerefAssign { .. } => "FieldDerefAssign",
         MirStmtKind::FieldAssign { .. } => "FieldAssign",
         MirStmtKind::GlobalStore { .. } => "GlobalStore",
+        MirStmtKind::IndexStore { .. } => "IndexStore",
         MirStmtKind::StorageLive(_) => "StorageLive",
         MirStmtKind::StorageDead(_) => "StorageDead",
         MirStmtKind::Nop => "Nop",
@@ -717,6 +725,7 @@ fn nullary_op_name(op: NullaryOp) -> &'static str {
     match op {
         NullaryOp::SizeOf => "SizeOf",
         NullaryOp::AlignOf => "AlignOf",
+        NullaryOp::ThreadIndex(_) => "ThreadIndex",
     }
 }
 
@@ -964,6 +973,9 @@ fn write_mir_rvalue(output: &mut String, label: &str, rvalue: &MirRValue) {
         }
         MirRValue::NullaryOp(op, ty) => {
             push_line(output, format!("{label}.op {}", nullary_op_name(*op)));
+            if let NullaryOp::ThreadIndex(component) = op {
+                push_line(output, format!("{label}.component {component}"));
+            }
             write_mir_type(output, &format!("{label}.type"), ty);
         }
         MirRValue::FieldAccess {
@@ -1085,6 +1097,17 @@ fn write_mir_stmt(output: &mut String, label: &str, stmt: &MirStmtKind) {
                 output,
                 format!("{label}.global {}", json_string(name.as_ref())),
             );
+            write_mir_rvalue(output, &format!("{label}.value"), value);
+        }
+        MirStmtKind::IndexStore {
+            base,
+            index,
+            elem_ty,
+            value,
+        } => {
+            write_mir_value(output, &format!("{label}.base"), base);
+            write_mir_value(output, &format!("{label}.index"), index);
+            write_mir_type(output, &format!("{label}.elem_ty"), elem_ty);
             write_mir_rvalue(output, &format!("{label}.value"), value);
         }
         MirStmtKind::StorageLive(local) | MirStmtKind::StorageDead(local) => {

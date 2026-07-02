@@ -931,6 +931,21 @@ fn apply_stmt(
             read_by_rvalue(func, value, &mut reads);
             moved_by_rvalue(func, value, &mut moves);
         }
+        MirStmtKind::IndexStore {
+            base, index, value, ..
+        } => {
+            // `base[index]` is a borrow of both operands (not a consume), then
+            // the value is stored (its rvalue read/moved as usual).
+            for v in [base, index] {
+                if let MirValue::Local(l) = v {
+                    if is_linear_local(func, *l) {
+                        reads.push(*l);
+                    }
+                }
+            }
+            read_by_rvalue(func, value, &mut reads);
+            moved_by_rvalue(func, value, &mut moves);
+        }
         MirStmtKind::Assign { .. }
         | MirStmtKind::StorageLive(_)
         | MirStmtKind::StorageDead(_)

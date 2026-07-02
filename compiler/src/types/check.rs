@@ -221,6 +221,25 @@ impl<'ctx> TypeChecker<'ctx> {
                 is_tuple: false,
             }),
         });
+
+        // uvec3 { x: u32, y: u32, z: u32 } - the type of GPU compute built-in
+        // thread-index variables (`gl_GlobalInvocationID`, etc.). Components are
+        // unsigned 32-bit so `gl_GlobalInvocationID.x` yields a usable index.
+        let u32_ty = Ty::int(IntTy::U32);
+        let def_id = self.ctx.fresh_def_id();
+        self.ctx.register_type(TypeDef {
+            def_id,
+            name: Arc::from("uvec3"),
+            generics: Vec::new(),
+            kind: TypeDefKind::Struct(StructDef {
+                fields: vec![
+                    (Arc::from("x"), u32_ty.clone()),
+                    (Arc::from("y"), u32_ty.clone()),
+                    (Arc::from("z"), u32_ty.clone()),
+                ],
+                is_tuple: false,
+            }),
+        });
     }
 
     // =========================================================================
