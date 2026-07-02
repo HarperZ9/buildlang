@@ -44,7 +44,7 @@ use scientific_runtime::{
     ScientificEffectPolicy, ScientificReceiptInputs, ScientificRuntimeReceipt, ScientificToolchain,
     BOUNDED_INVARIANT, CONSERVATION_INVARIANT, CONSERVED_BAND_INVARIANT,
     CRUCIBLE_MEASUREMENT_EXPORT_SCHEMA, ENERGY_IDENTITY_INVARIANT, ENERGY_MONOTONE_INVARIANT,
-    RELATION_INVARIANT, SCIENTIFIC_RUNTIME_SCHEMA,
+    NON_NEGATIVE_INVARIANT, RELATION_INVARIANT, SCIENTIFIC_RUNTIME_SCHEMA,
 };
 use symbol_graph::{verify_symbol_graph_receipt, SymbolGraphReceipt, SYMBOL_GRAPH_RECEIPT};
 
@@ -6453,10 +6453,11 @@ fn cmd_run(
         "energy-identity" => ENERGY_IDENTITY_INVARIANT,
         "relation" => RELATION_INVARIANT,
         "conserved-band" => CONSERVED_BAND_INVARIANT,
+        "non-negative" => NON_NEGATIVE_INVARIANT,
         other => {
             if emit_receipt.is_some() {
                 eprintln!(
-                    "Unknown --invariant '{other}'. Supported: energy-monotone, conservation, bounded, energy-identity, relation, conserved-band"
+                    "Unknown --invariant '{other}'. Supported: energy-monotone, conservation, bounded, energy-identity, relation, conserved-band, non-negative"
                 );
                 return Err(1);
             }

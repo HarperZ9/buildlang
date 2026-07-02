@@ -14136,6 +14136,108 @@ fn relation_invariant_round_trips_positive_negative_and_validates_columns() {
 }
 
 #[test]
+fn non_negative_invariant_round_trips_a_result_bearing_bound() {
+    if !c_backend_ready() {
+        eprintln!("skipping non_negative_invariant_round_trips_a_result_bearing_bound: C backend not ready");
+        return;
+    }
+    let dir =
+        std::env::temp_dir().join(format!("buildlang_sci_non_negative_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create non-negative fixture dir");
+
+    // POSITIVE: binary search's measured probe count never exceeds its proven
+    // bound, so the printed slack (bound - probes) stays non-negative and
+    // `--invariant non-negative` PASSes. This is the family's ALGORITHMIC
+    // accountability member: the receipt witnesses a computation's measured
+    // cost, not a physical quantity.
+    let pass_receipt = dir.join("binary.json");
+    let emit_pass = buildc()
+        .arg("run")
+        .arg(repo_example("search_bound_binary.bld"))
+        .args(["--emit-receipt"])
+        .arg(&pass_receipt)
+        .args([
+            "--invariant",
+            "non-negative",
+            "--metric",
+            "slack",
+            "--problem",
+            "binary-search-probe-bound",
+        ])
+        .output()
+        .expect("emit non-negative PASS receipt");
+    assert!(
+        emit_pass.status.success(),
+        "emitting the non-negative PASS receipt should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&emit_pass.stderr)
+    );
+    let pass: serde_json::Value =
+        serde_json::from_slice(&fs::read(&pass_receipt).expect("read PASS receipt")).unwrap();
+    assert_eq!(pass["invariant"]["name"], "non_negative");
+    assert_eq!(pass["receipt_status"], "PASS");
+    assert_eq!(pass["invariant"]["observed"]["violation_count"], 0);
+
+    let verify_pass = buildc()
+        .args(["receipt", "verify"])
+        .arg(&pass_receipt)
+        .output()
+        .expect("verify non-negative PASS receipt");
+    assert!(
+        verify_pass.status.success(),
+        "the non-negative PASS receipt must verify\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_pass.stderr)
+    );
+
+    // NEGATIVE fixture: linear search exceeds the same bound, so the slack goes
+    // negative. With `--negative-fixture` it is a FAIL_EXPECTED receipt that
+    // STILL verifies.
+    let fail_receipt = dir.join("linear.json");
+    let emit_fail = buildc()
+        .arg("run")
+        .arg(repo_example("search_bound_linear.bld"))
+        .args(["--emit-receipt"])
+        .arg(&fail_receipt)
+        .args([
+            "--invariant",
+            "non-negative",
+            "--negative-fixture",
+            "--metric",
+            "slack",
+            "--problem",
+            "linear-search-probe-bound",
+        ])
+        .output()
+        .expect("emit non-negative negative fixture");
+    assert!(
+        emit_fail.status.success(),
+        "emitting the negative fixture should succeed"
+    );
+    let fail: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fail_receipt).expect("read FAIL receipt")).unwrap();
+    assert_eq!(fail["receipt_status"], "FAIL_EXPECTED");
+    assert!(
+        fail["invariant"]["observed"]["violation_count"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+
+    let verify_fail = buildc()
+        .args(["receipt", "verify"])
+        .arg(&fail_receipt)
+        .output()
+        .expect("verify non-negative negative fixture");
+    assert!(
+        verify_fail.status.success(),
+        "a faithfully reproduced FAIL_EXPECTED must verify (exit 0)\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_fail.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn conserved_band_invariant_round_trips_and_is_distinct() {
     if !c_backend_ready() {
         eprintln!(
