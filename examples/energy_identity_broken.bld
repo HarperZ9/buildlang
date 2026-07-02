@@ -1,0 +1,74 @@
+// Discrete energy-identity NEGATIVE fixture (DROPPED CORRECTION TERM).
+//
+// Identical to energy_identity.bld EXCEPT it computes the residual WITHOUT the
+// r^2 * sum_i (Lu_i)^2 correction:
+//
+//     residual = (E_next - E) + 2*r*||Du||^2          // <-- missing -r^2*Lu2
+//
+// From the exact identity E_next - E = -2*r*||Du||^2 + r^2*sum(Lu_i)^2, this
+// leaves residual = r^2 * sum_i (Lu_i)^2, a systematic O(r^2) term that is many
+// orders of magnitude above roundoff. So `--invariant energy-identity` FAILs:
+// the checker catches an incorrectly implemented energy balance (a real dropped
+// term, not a vacuous failure). Paired negative fixture for
+// energy_identity.bld: run with `--negative-fixture` for FAIL_EXPECTED.
+
+fn sumsq(v: Vec<f64>) -> f64 {
+    let mut s: f64 = 0.0;
+    let mut i: i32 = 0;
+    let len: i32 = vec_len(v);
+    while i < len {
+        let x: f64 = vec_get_f64(v, i);
+        s = s + x ** 2;
+        i = i + 1;
+    }
+    s
+}
+
+fn main() ~ Console {
+    let n: i32 = 65;
+    let r: f64 = 0.45;
+
+    let pi_val: f64 = 3.141592653589793;
+    let dx: f64 = 1.0 / 64.0;
+    let mut u = vec_new_f64();
+    let mut i: i32 = 0;
+    while i < n {
+        let x: f64 = (i as f64) * dx;
+        vec_push_f64(u, sin(pi_val * x));
+        i = i + 1;
+    }
+
+    let steps: i32 = 200;
+    let mut step: i32 = 0;
+    while step < steps {
+        let e_before: f64 = sumsq(u);
+
+        let mut du2: f64 = 0.0;
+        let mut a: i32 = 0;
+        while a < n - 1 {
+            let d: f64 = vec_get_f64(u, a + 1) - vec_get_f64(u, a);
+            du2 = du2 + d ** 2;
+            a = a + 1;
+        }
+
+        let mut u_next = vec_new_f64();
+        vec_push_f64(u_next, 0.0);
+        let mut j: i32 = 1;
+        while j < n - 1 {
+            let lu: f64 = vec_get_f64(u, j - 1) - 2.0 * vec_get_f64(u, j) + vec_get_f64(u, j + 1);
+            vec_push_f64(u_next, vec_get_f64(u, j) + r * lu);
+            j = j + 1;
+        }
+        vec_push_f64(u_next, 0.0);
+
+        let e_after: f64 = sumsq(u_next);
+
+        // BROKEN: the r^2 * sum(Lu_i)^2 correction is omitted, so the residual
+        // is the O(r^2) discretization term instead of roundoff.
+        let residual: f64 = (e_after - e_before) + 2.0 * r * du2;
+        println!("{}", residual);
+
+        u = u_next;
+        step = step + 1;
+    }
+}
