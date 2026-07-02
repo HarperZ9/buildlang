@@ -2,21 +2,22 @@
 
 Last audited: 2026-07-01 (wind-down point); broader status audit remains 2026-06-15
 
-> **Development status (2026-07-02): PAUSED at a stable point.** After the
-> 2026-07-01 wind-down was lifted, backlog wave 2 (receipt schema completed
-> against the research corpus's pass-0122
-> `ScientificRuntimeReceiptLayerSpec/v1`: oracle block, fail-closed
-> compiler_branch toolchain facts, raw stdout digest + versioned extraction
-> policy, load-bearing fences, not_claimed boundary,
-> implementation-pinned oracle binding, TOOL_UNAVAILABLE exit 4) shipped
-> through the full cadence, one adversarial review round, 10 confirmed
-> findings all fixed, and merged at main `6790ff0` (pushed). Development is
-> paused there: full suite green (939 lib / 91 bin / 301 cli / 52 lexer /
-> 88 parser, 0 failed), `corpus verify` 8/8, live receipt matrix intact, no
-> open branches, nothing in flight. Next when work resumes: backlog wave 3
-> (the invariant family; design recorded in
-> `docs/superpowers/plans/2026-07-01-research-uplift-backlog.md` plus its
-> delta amendment). The 2026-06-15 wind-down assessment
+> **Development status (2026-07-02, second pause): PAUSED at a stable point.**
+> Main `d6c6e0e` carries everything fully reviewed and shipped: the
+> scientific-runtime receipt, research-uplift waves 1-2, and Phase A of the
+> Telos master-plan mandate (the `receipt export` bridge producing WITNESSED
+> Crucible measurements; one adversarial round, 8 findings, all fixed).
+> **Phase B (effect-policy chain + capability-witnessed input_dataset/seed/
+> determinism fields + declared method) is COMPLETE and gated (full suite
+> 939/101/302/52/88, corpus 8/8, live checks pass) on the pushed branch
+> `feat/receipt-phase-b` (`3379c7a`), deliberately NOT merged: its
+> adversarial review was launched but not adjudicated at the pause.** On
+> resume: read the review findings (or re-run the persisted review script),
+> adjudicate, fix, merge; then Phase C (invariant family feeding the named
+> Hamiltonian/reaction demos). Roadmap:
+> `docs/superpowers/plans/2026-07-01-research-uplift-backlog.md` + the Telos
+> master-plan mandate recorded in the session ledger. The 2026-06-15
+> wind-down assessment
 > (`docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`) still governs backend
 > scope: C is the product anchor, Rust is the validation lane.
 
