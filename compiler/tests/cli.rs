@@ -14339,6 +14339,81 @@ fn non_negative_invariant_round_trips_a_result_bearing_bound() {
 }
 
 #[test]
+fn born_rule_normalization_round_trips_conservation() {
+    if !c_backend_ready() {
+        eprintln!("skipping born_rule_normalization_round_trips_conservation: C backend not ready");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("buildlang_sci_born_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create born-rule fixture dir");
+
+    // POSITIVE: a single qubit evolved by a unitary X-rotation keeps its total
+    // Born probability at 1, so `--invariant conservation` PASSes.
+    let pass_receipt = dir.join("unitary.json");
+    let emit_pass = buildc()
+        .arg("run")
+        .arg(repo_example("born_rule_normalization.bld"))
+        .args(["--emit-receipt"])
+        .arg(&pass_receipt)
+        .args(["--invariant", "conservation", "--problem", "born-rule-normalization"])
+        .output()
+        .expect("emit born-rule PASS receipt");
+    assert!(
+        emit_pass.status.success(),
+        "emitting the born-rule PASS receipt should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&emit_pass.stderr)
+    );
+    let pass: serde_json::Value =
+        serde_json::from_slice(&fs::read(&pass_receipt).expect("read PASS receipt")).unwrap();
+    assert_eq!(pass["invariant"]["name"], "conserved_quantity_constant");
+    assert_eq!(pass["receipt_status"], "PASS");
+    assert_eq!(pass["invariant"]["observed"]["violation_count"], 0);
+
+    let verify_pass = buildc()
+        .args(["receipt", "verify"])
+        .arg(&pass_receipt)
+        .output()
+        .expect("verify born-rule PASS receipt");
+    assert!(
+        verify_pass.status.success(),
+        "the born-rule PASS receipt must verify\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_pass.stderr)
+    );
+
+    // NEGATIVE fixture: a non-unitary gain (g = 1.001 on every amplitude each
+    // step) inflates the total probability past 1, so with `--negative-fixture`
+    // it is a FAIL_EXPECTED receipt that STILL verifies.
+    let fail_receipt = dir.join("leaky.json");
+    let emit_fail = buildc()
+        .arg("run")
+        .arg(repo_example("born_rule_leaky.bld"))
+        .args(["--emit-receipt"])
+        .arg(&fail_receipt)
+        .args(["--invariant", "conservation", "--negative-fixture", "--problem", "born-rule-leaky"])
+        .output()
+        .expect("emit born-rule negative fixture");
+    assert!(emit_fail.status.success(), "emitting the negative fixture should succeed");
+    let fail: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fail_receipt).expect("read FAIL receipt")).unwrap();
+    assert_eq!(fail["receipt_status"], "FAIL_EXPECTED");
+    assert!(fail["invariant"]["observed"]["violation_count"].as_u64().unwrap() > 0);
+
+    let verify_fail = buildc()
+        .args(["receipt", "verify"])
+        .arg(&fail_receipt)
+        .output()
+        .expect("verify born-rule negative fixture");
+    assert!(
+        verify_fail.status.success(),
+        "a faithfully reproduced FAIL_EXPECTED must verify (exit 0)\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_fail.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn conserved_band_invariant_round_trips_and_is_distinct() {
     if !c_backend_ready() {
         eprintln!(

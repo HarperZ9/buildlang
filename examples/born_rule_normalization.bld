@@ -1,0 +1,50 @@
+// Born-rule normalization kernel (CONSERVING): quantum probability under a
+// unitary gate.
+//
+// A single qubit psi = (alpha, beta) with complex amplitudes alpha = a0 + i*b0
+// and beta = a1 + i*b1 is stored as four f64. Evolving it by the unitary
+// X-rotation U = [[cos t, -i sin t], [-i sin t, cos t]] preserves the total
+// Born probability sum_i |psi_i|^2 = a0^2 + b0^2 + a1^2 + b1^2 = 1 for all time:
+// a valid probability distribution stays normalized precisely because the gate
+// is unitary. This is the roundoff-crisp, re-checkable shadow of the Born rule
+// (the deeper Carcassi and Aidala entropy equivalence in AoP Brief 003 is an
+// information-theoretic statement, not a per-step numerical identity).
+//
+// Starting from the equal superposition (|0> + |1>)/sqrt(2), the unitary drives
+// the imaginary parts b0 and b1 nonzero after the first step, so both amplitudes
+// alpha and beta become genuinely complex (each has a nonzero imaginary part
+// that contributes to the Born probability). conservation_rotation.bld, by
+// contrast, is a purely real geometric rotation with no complex amplitude or
+// factor of i. The kernel prints the total probability once per step; it stays
+// at 1.0 to the ~1e-15 roundoff scale, well inside the conserved-quantity
+// tolerance (1e-9), so `--invariant conservation` PASSes. Companion negative
+// fixture: born_rule_leaky.bld (a non-unitary gain that inflates the probability).
+
+fn main() ~ Console {
+    let t: f64 = 0.05;
+    let c: f64 = cos(t);
+    let s: f64 = sin(t);
+    // Initial state (|0> + |1>)/sqrt(2): alpha = beta = 1/sqrt(2), all real. This
+    // activates both amplitudes so the evolution populates all four components.
+    let r: f64 = 0.7071067811865476;
+    let mut a0: f64 = r;
+    let mut b0: f64 = 0.0;
+    let mut a1: f64 = r;
+    let mut b1: f64 = 0.0;
+    let mut step: i32 = 0;
+    while step < 200 {
+        // Total Born probability: sum over basis states of |amplitude|^2.
+        let prob: f64 = a0 ** 2 + b0 ** 2 + a1 ** 2 + b1 ** 2;
+        println!("{}", prob);
+        // Apply the unitary X-rotation to (alpha, beta).
+        let a0n: f64 = c * a0 + s * b1;
+        let b0n: f64 = c * b0 - s * a1;
+        let a1n: f64 = c * a1 + s * b0;
+        let b1n: f64 = c * b1 - s * a0;
+        a0 = a0n;
+        b0 = b0n;
+        a1 = a1n;
+        b1 = b1n;
+        step = step + 1;
+    }
+}
