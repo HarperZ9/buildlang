@@ -13682,7 +13682,8 @@ fn conservation_invariant_round_trips_positive_and_negative() {
         eprintln!("skipping conservation_invariant_round_trips_positive_and_negative: C backend not ready");
         return;
     }
-    let dir = std::env::temp_dir().join(format!("buildlang_sci_conservation_{}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("buildlang_sci_conservation_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create conservation fixture dir");
 
@@ -13694,7 +13695,14 @@ fn conservation_invariant_round_trips_positive_and_negative() {
         .arg(repo_example("conservation_rotation.bld"))
         .args(["--emit-receipt"])
         .arg(&pass_receipt)
-        .args(["--invariant", "conservation", "--metric", "r2", "--problem", "rotational-radius"])
+        .args([
+            "--invariant",
+            "conservation",
+            "--metric",
+            "r2",
+            "--problem",
+            "rotational-radius",
+        ])
         .output()
         .expect("emit conservation PASS receipt");
     assert!(
@@ -13741,11 +13749,19 @@ fn conservation_invariant_round_trips_positive_and_negative() {
         ])
         .output()
         .expect("emit conservation negative fixture");
-    assert!(emit_fail.status.success(), "emitting the negative fixture should succeed");
+    assert!(
+        emit_fail.status.success(),
+        "emitting the negative fixture should succeed"
+    );
     let fail: serde_json::Value =
         serde_json::from_slice(&fs::read(&fail_receipt).expect("read FAIL receipt")).unwrap();
     assert_eq!(fail["receipt_status"], "FAIL_EXPECTED");
-    assert!(fail["invariant"]["observed"]["violation_count"].as_u64().unwrap() > 0);
+    assert!(
+        fail["invariant"]["observed"]["violation_count"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
 
     let verify_fail = buildc()
         .args(["receipt", "verify"])
