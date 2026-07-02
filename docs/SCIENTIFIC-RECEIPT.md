@@ -296,9 +296,11 @@ it FAILs), and the same invariant applied to a REACTION NETWORK in
 count `[A] + [C]` to roundoff as it proceeds, so it PASSes) with
 `examples/reaction_atom_balance_broken.bld` (a stoichiometry bug that produces two `C` per event
 drifts the balance and FAILs), and the same invariant applied to a QUANTUM STATE in
-`examples/born_rule_normalization.bld` (a single qubit evolved by a unitary X-rotation keeps its
-total Born probability `sum |psi_i|^2 = 1` to roundoff, so it PASSes; genuinely complex, its
-imaginary amplitudes carry the state, unlike the real 2D rotation) with
+`examples/born_rule_normalization.bld` (a single qubit starting from the equal superposition
+`(|0> + |1>)/sqrt(2)` and evolved by a unitary X-rotation keeps its total Born probability
+`sum |psi_i|^2 = 1` to roundoff, so it PASSes; the gate drives both amplitudes' imaginary parts
+nonzero, so they are genuinely complex, whereas conservation_rotation.bld is a purely real
+geometric rotation) with
 `examples/born_rule_leaky.bld` (a non-unitary gain inflates the probability, so `conservation`
 FAILs and the receipt catches a gate that breaks the probability-conservation law unitarity
 guarantees); this is the roundoff-crisp shadow of the Born rule, while the deeper Carcassi and

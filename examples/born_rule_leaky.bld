@@ -16,9 +16,11 @@ fn main() ~ Console {
     let c: f64 = cos(t);
     let s: f64 = sin(t);
     let g: f64 = 1.001;
-    let mut a0: f64 = 1.0;
+    // Same initial state as born_rule_normalization.bld: (|0> + |1>)/sqrt(2).
+    let r: f64 = 0.7071067811865476;
+    let mut a0: f64 = r;
     let mut b0: f64 = 0.0;
-    let mut a1: f64 = 0.0;
+    let mut a1: f64 = r;
     let mut b1: f64 = 0.0;
     let mut step: i32 = 0;
     while step < 200 {
