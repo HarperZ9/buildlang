@@ -510,6 +510,36 @@ reproduce, so a version bump alone is not tampering. (This differs from
 `buildlang-check-receipt/v1`, which hard-pins versions because it replays version-sensitive
 effect and capability facts. This receipt does not.)
 
+### Receipt seals are not byte-reproducible (by design)
+
+Two identical runs of the same kernel produce receipts with **different seals**. The receipt
+seals `build_state.toolchain.program_executable_digest`, the SHA-256 of the compiled program
+binary, and that binary is not reproducible across builds: the C compiler and linker embed
+non-deterministic content (image timestamps, temp paths, link order), so the digest, and
+therefore the seal, changes each build. This is the only field that varies between two otherwise
+identical emits.
+
+This is deliberate and consistent with the seal model above, not a defect. The executable digest
+witnesses and tamper-seals the *exact* binary that produced the run, and it is required to be
+present and well-formed (an absent or malformed digest fails `DIGEST_MALFORMED`, so "hash
+unavailable" cannot masquerade as witnessed provenance). But verify never re-checks it for
+*equality*: it re-runs the program and re-checks the *verdict*, and executable reproduction is
+reported, never required (a fresh build with a different binary digest still verifies). So a
+non-reproducible seal never breaks verification, exactly like the exact-float re-derivation
+deferred below. Byte-reproducibility of the receipt artifact is a non-goal here; re-checkability
+of the verdict is the guarantee.
+
+One consequence is worth stating: because `receipt chain` pins each member's seal, a chain
+identifies *specific* receipt artifacts. Re-emitting a member is a new artifact with a new seal,
+so it requires rebuilding the chain. That is correct provenance semantics (the chain fixes the
+exact receipts it was built over), not a limitation to work around.
+
+If byte-reproducible receipts ever become a requirement, two paths (not taken here) exist: make
+the build reproducible with deterministic compile and link flags so the executable digest is
+stable, or stop sealing the executable digest and seal a reproducible proxy instead. Both
+deliberately change the seal-everything, fail-closed model chosen here, so they are gated on an
+explicit decision rather than adopted by default.
+
 ## 7. Exporting into Crucible/Telos (`buildc receipt export`)
 
 ```
