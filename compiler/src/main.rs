@@ -39,7 +39,8 @@ use mir_representation::{
 use module_graph::{verify_module_graph_receipt, ModuleGraphReceipt, MODULE_GRAPH_RECEIPT};
 use scientific_runtime::{
     build_scientific_runtime_receipt, parse_numeric_series, verify_scientific_runtime_receipt,
-    ScientificDigest, ScientificReceiptInputs, ScientificRuntimeReceipt, SCIENTIFIC_RUNTIME_SCHEMA,
+    RerunObservation, ScientificDigest, ScientificReceiptInputs, ScientificRuntimeReceipt,
+    ScientificToolchain, SCIENTIFIC_RUNTIME_SCHEMA,
 };
 use symbol_graph::{verify_symbol_graph_receipt, SymbolGraphReceipt, SYMBOL_GRAPH_RECEIPT};
 
@@ -1745,22 +1746,27 @@ fn push_receipt_replay_checks(
     }
 }
 
-/// Dispatch a scientific-runtime receipt to its verifier, supplying the two
-/// re-derivation callbacks the module needs. `run_check` re-derives the source +
-/// input-graph digests through the exact check pipeline that produced them, and
-/// `compile_and_capture_run` re-runs the program so the invariant is re-checked
-/// (not trusted). Shared by the human and `--json` verify paths.
+/// Dispatch a scientific-runtime receipt to its verifier, supplying the local
+/// toolchain probe plus the two re-derivation callbacks the module needs.
+/// `run_check` re-derives the source + input-graph digests through the exact
+/// check pipeline that produced them, and `compile_and_capture_run` re-runs the
+/// program so the invariant is re-checked (not trusted). Shared by the human
+/// and `--json` verify paths.
 fn verify_scientific_receipt_dispatch(
     receipt: &serde_json::Value,
     source_override: Option<&Path>,
     json: bool,
 ) -> Result<(), i32> {
+    // Probe once; None routes to TOOL_UNAVAILABLE (exit 4) inside the module,
+    // BEFORE any re-run is attempted.
+    let probed_toolchain = probe_c_toolchain();
     verify_scientific_runtime_receipt(
         receipt,
         source_override,
         json,
         env!("CARGO_PKG_VERSION"),
         &language_version_string(),
+        probed_toolchain.as_ref(),
         |source_path| {
             let outcome = run_check(source_path)?;
             Ok((
@@ -1770,7 +1776,16 @@ fn verify_scientific_receipt_dispatch(
         },
         |source_path, args| {
             let captured = compile_and_capture_run(source_path, args)?;
-            Ok((parse_numeric_series(&captured.stdout), captured.exit_code))
+            let raw_stdout_digest = ScientificDigest {
+                algorithm: "sha256".to_string(),
+                hex: source_digest_hex(&captured.stdout_bytes),
+            };
+            Ok(RerunObservation {
+                parsed: parse_numeric_series(&captured.stdout),
+                exit_code: captured.exit_code,
+                raw_stdout_digest,
+                executable_digest: captured.executable_digest,
+            })
         },
     )
 }
@@ -5859,6 +5874,56 @@ struct CapturedRun {
     stderr_bytes: Vec<u8>,
     /// The program's process exit code (`-1` if terminated by a signal).
     exit_code: i32,
+    /// sha256 of the compiled executable, hashed BEFORE the program ran (the
+    /// temp dir is deleted afterwards). Sealed into the receipt's
+    /// compiler_branch block at emit; REPORTED (never required) at verify.
+    executable_digest: ScientificDigest,
+}
+
+/// Probe the local C toolchain for the scientific receipt's compiler_branch
+/// block (the pass-0122 contract). Returns `None` when no C compiler is
+/// available. The `program_executable_digest` field is a placeholder here
+/// (filled per compiled artifact by the caller); toolchain identity at verify
+/// compares only c_compiler + version digest + target.
+fn probe_c_toolchain() -> Option<ScientificToolchain> {
+    let compiler = find_c_compiler()?;
+    // Capture the version banner. `cl` has no `--version`; it prints its
+    // banner (to stderr) on the attempt anyway, so one probe serves both
+    // families. Spawn failure means the compiler vanished since discovery.
+    let output = std::process::Command::new(&compiler)
+        .arg("--version")
+        .output()
+        .ok()?;
+    let mut banner = output.stdout.clone();
+    banner.extend_from_slice(&output.stderr);
+    let version_line = String::from_utf8_lossy(&banner)
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("unknown")
+        .trim()
+        .to_string();
+    let buildc_binary_hex = std::env::current_exe()
+        .ok()
+        .and_then(|path| std::fs::read(&path).ok())
+        .map(|bytes| source_digest_hex(&bytes))
+        .unwrap_or_default();
+    Some(ScientificToolchain {
+        c_compiler: compiler,
+        c_compiler_version: version_line,
+        version_output_digest: ScientificDigest {
+            algorithm: "sha256".to_string(),
+            hex: source_digest_hex(&banner),
+        },
+        target: format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
+        buildc_binary_digest: ScientificDigest {
+            algorithm: "sha256".to_string(),
+            hex: buildc_binary_hex,
+        },
+        program_executable_digest: ScientificDigest {
+            algorithm: "sha256".to_string(),
+            hex: String::new(),
+        },
+    })
 }
 
 /// Compile a `.bld` program to a native executable via the C backend.
@@ -6001,6 +6066,15 @@ fn compile_program_to_exe(file: &Path) -> Result<CompiledProgram, i32> {
 fn compile_and_capture_run(file: &Path, args: &[String]) -> Result<CapturedRun, i32> {
     let CompiledProgram { temp_dir, exe_file } = compile_program_to_exe(file)?;
 
+    // Hash the produced executable BEFORE running (the temp dir is removed
+    // after the run). Reported in the receipt's compiler_branch block.
+    let executable_digest = ScientificDigest {
+        algorithm: "sha256".to_string(),
+        hex: std::fs::read(&exe_file)
+            .map(|bytes| source_digest_hex(&bytes))
+            .unwrap_or_default(),
+    };
+
     // Run the compiled program, capturing stdout so we can parse the series.
     let run_output = {
         let mut run_cmd = std::process::Command::new(&exe_file);
@@ -6022,6 +6096,7 @@ fn compile_and_capture_run(file: &Path, args: &[String]) -> Result<CapturedRun, 
         stdout_bytes: run_output.stdout,
         stderr_bytes: run_output.stderr,
         exit_code,
+        executable_digest,
     })
 }
 
@@ -6068,9 +6143,25 @@ fn cmd_run(
         };
     };
 
-    // --emit-receipt path: compile + run + capture via the shared helper so the
-    // emitted series is observed through the exact path `receipt verify` re-runs.
+    // --emit-receipt path: probe the toolchain FIRST (its identity is sealed
+    // into the receipt's compiler_branch block; without a C compiler the
+    // compile below would fail anyway, but the receipt must not be emitted
+    // with fabricated toolchain facts), then compile + run + capture via the
+    // shared helper so the emitted series is observed through the exact path
+    // `receipt verify` re-runs.
+    let Some(mut toolchain) = probe_c_toolchain() else {
+        eprintln!("Error: no C compiler available; cannot emit a scientific-runtime receipt");
+        return Err(1);
+    };
     let captured = compile_and_capture_run(file, args)?;
+    toolchain.program_executable_digest = captured.executable_digest.clone();
+
+    // Seal the raw stdout bytes (the pass-0122 runtime_branch output hash):
+    // computed over the EXACT captured bytes, before any parsing.
+    let raw_stdout_digest = ScientificDigest {
+        algorithm: "sha256".to_string(),
+        hex: source_digest_hex(&captured.stdout_bytes),
+    };
 
     // Echo the captured streams so `run --emit-receipt` still shows program
     // output. stdout goes to the real stdout ONLY when the receipt is written
@@ -6122,6 +6213,8 @@ fn cmd_run(
         target: "c",
         os: &os,
         exit_code,
+        toolchain,
+        raw_stdout_digest,
         series: parsed.series,
         series_parsed: parsed.any_parsed,
         diverged: parsed.diverged,

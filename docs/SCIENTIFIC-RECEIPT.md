@@ -85,15 +85,32 @@ The receipt is a single JSON object. Its layers, outermost meaning first:
 - `schema`, `compiler` (= `"buildc"`), `compiler_version`, `language_version`.
 - `source` (the path), `source_digest` (`{algorithm: "sha256", hex}` over the source bytes),
   `input_graph_digest` (sha256 over the resolved module graph).
-- `build_state`: `{ target: "c", compiler_status: "compiled_and_executed", flags: [...] }`.
+- `build_state`: `{ target: "c", compiler_status: "compiled_and_executed", flags: [...],
+  toolchain }`. The `toolchain` block is the pass-0122 `compiler_branch` contract: the
+  resolved C compiler command, the first line of its version banner, a sha256 over the full
+  version-probe output, the host `os/arch` target, a sha256 of the buildc binary that
+  emitted the receipt, and a sha256 of the compiled program executable (hashed before it
+  ran).
 - `runtime_state`: `{ os, exit_code }`.
 - `args`: the trailing program arguments the run was invoked with; `receipt verify` re-runs
   with exactly these.
 - `problem`: `{ label }` from `--problem` (optional).
-- `measurement`: `{ metric, observed_values: [f64], count, units? }`, the parsed stdout
-  series (always finite values; see the non-finite rule in section 1).
+- `oracle`: `{ kind, name, status }`, the criterion the verdict is measured against. v0
+  emits `kind: "declared_invariant"` with `status: "DECLARED"`: the named invariant IS the
+  criterion, stated rather than derived from an executed reference. Verify rejects an
+  oracle whose kind it cannot re-check or whose name does not bind to the invariant.
+- `measurement`: `{ metric, observed_values: [f64], count, raw_stdout_digest,
+  series_extraction_policy, units? }`. `raw_stdout_digest` seals the EXACT captured stdout
+  bytes (the parse into `observed_values` is a lossy transform, so byte drift stays
+  distinguishable from semantic drift); `series_extraction_policy` is the versioned parse
+  discipline, hard-checked at verify.
 - `invariant`: the checked criterion and its verdict (see below).
+- `telemetry_branch`, `lineage_branch`: `{ status: "UNAVAILABLE_FENCED" }`. The pass-0122
+  contract names these branches; buildc does not produce them and says so in-band rather
+  than omitting the fields (absence of evidence is witnessed, never implied).
 - `negative_fixture`: whether `--negative-fixture` was set.
+- `not_claimed`: the machine-readable claims boundary (the honest-scope section as sealed
+  data); must include `"physical_law"` or verify rejects the receipt outright.
 - `diverged`: whether the run produced a non-finite value (sealed in-band, not just as a
   label, because verify's re-check rules branch on it; see section 6).
 - `labels`: always includes `"NOT_A_NEW_PHYSICAL_LAW"`; adds `"NEGATIVE_FIXTURE"` when the
@@ -221,6 +238,15 @@ receipt that *records* a failure is not a pass, so the exit code reflects the ve
 | faithful, `PASS` or `FAIL_EXPECTED` | `0` (human output: `MATCH: ...`) |
 | faithful, `FAIL_UNEXPECTED` or `UNVERIFIABLE` | `3` (human output: `FAIL: ... invariant did not hold`) |
 | did not reproduce (digest, count, verdict, or seal drift) | `1` |
+| no C compiler available for the re-run | `4` (`TOOL_UNAVAILABLE`, checked before any re-run attempt) |
+
+Verify additionally REPORTS (never requires) three reproduction signals, in the human MATCH
+line and as `--json` fields: `toolchain_matched` (the local C toolchain equals the sealed
+one; a mismatch warns and marks any drift below as possibly environmental),
+`raw_stdout_reproduced` (the re-run's exact stdout bytes match the sealed digest), and
+`executable_reproduced` (the re-compiled binary matches the sealed digest; commonly false
+even on the same machine, since C compilers embed timestamps, which is exactly why it is
+reported rather than required). The verdict, not these bytes, is the re-checked quantity.
 
 This makes `buildc receipt verify r.json && deploy` safe: it will not deploy on a receipt
 that records an unexpected invariant violation or a diverged/unverifiable run. A negative
@@ -240,6 +266,10 @@ fixtures and CI pin the *specific* failure instead of accepting "anything failed
 | `MALFORMED` | unreadable file, invalid JSON, duplicate object key, or fields that do not deserialize | 1 |
 | `SCHEMA_UNSUPPORTED` | missing or unrecognized `schema` | 1 |
 | `COMPILER_MISMATCH` | `compiler` is not `buildc` | 1 |
+| `OVERCLAIM_BOUNDARY_MISSING` | `not_claimed` omits `physical_law` | 1 |
+| `EXTRACTION_POLICY_MISMATCH` | the sealed series-extraction policy is not the one this verifier implements | 1 |
+| `ORACLE_KIND_UNSUPPORTED`, `ORACLE_BINDING_MISMATCH` | the oracle kind cannot be re-checked, or its name does not bind to the invariant | 1 |
+| `TOOL_UNAVAILABLE` | no C compiler available for the re-run | 4 |
 | `REDERIVATION_FAILED` | the source could not be re-checked (missing file, check failure) | inner code |
 | `RERUN_FAILED` | the program could not be re-compiled or re-run | inner code |
 | `RERUN_EXIT_MISMATCH` | the re-run's process exit code differs from the sealed one (covers a crashing re-run) | 1 |
