@@ -196,28 +196,29 @@ mod device {
         );
     }
 
+    /// CAN-IT-FAIL negative: the cross-check must catch a GPU/CPU divergence.
+    /// The SPIR-V and C paths lower the SAME source, so a wrong *algorithm* makes
+    /// both wrong identically (and they would still agree -- that is correct: the
+    /// tool verifies GPU matches CPU semantics, not that the algorithm is right).
+    /// To prove the tolerance gate discriminates, we inject a real divergence:
+    /// BUILDLANG_GPU_CORRUPT_READBACK perturbs one readback element, and the
+    /// cross-check MUST report a mismatch and exit non-zero.
     #[test]
     fn wrong_gpu_result_is_caught() {
         if !vulkan_device_available() {
             eprintln!("skipping wrong_gpu_result_is_caught: no Vulkan device");
             return;
         }
-        // The deliberately-wrong kernel computes a[i]-b[i] on the GPU but the CPU
-        // reference still computes addition; the cross-check MUST report mismatch
-        // and exit non-zero.
-        let wrong = repo_root()
-            .join("examples")
-            .join("gpu")
-            .join("vec_sub_wrong.bld");
         let output = buildc()
             .arg("run")
-            .arg(&wrong)
+            .arg(vec_add_example())
             .arg("--gpu")
+            .env("BUILDLANG_GPU_CORRUPT_READBACK", "1")
             .output()
-            .expect("run buildc run --gpu on the wrong kernel");
+            .expect("run buildc run --gpu with a corrupted readback");
         assert!(
             !output.status.success(),
-            "a wrong GPU result MUST be caught (non-zero exit)\nstdout:\n{}\nstderr:\n{}",
+            "a divergent GPU readback MUST be caught (non-zero exit); if it passes, the gate does not discriminate\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );
@@ -258,17 +259,15 @@ mod device {
             String::from_utf8_lossy(&verify.stderr),
         );
 
-        // Tamper: mutate one series value; verify MUST fail.
+        // Tamper: mutate one series value inside the sealed body; verify MUST
+        // fail (the seal no longer matches the recomputed body digest).
         let text = std::fs::read_to_string(&receipt).expect("read receipt");
         let mut json: serde_json::Value = serde_json::from_str(&text).expect("receipt is json");
-        if let Some(series) = json
-            .pointer_mut("/measurement/series")
+        let series = json
+            .pointer_mut("/body/measurement/series")
             .and_then(|v| v.as_array_mut())
-        {
-            if let Some(first) = series.first_mut() {
-                *first = serde_json::json!(999999.0);
-            }
-        }
+            .expect("gpu receipt has /body/measurement/series");
+        *series.first_mut().expect("series is non-empty") = serde_json::json!(999999.0);
         std::fs::write(&receipt, serde_json::to_string_pretty(&json).unwrap())
             .expect("write tampered receipt");
         let verify = buildc()

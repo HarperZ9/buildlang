@@ -2676,6 +2676,11 @@ impl CBackend {
                         suffix, base_str, index_str, rvalue
                     )
                     .unwrap();
+                } else if let Some(target) =
+                    Self::slice_element_access(base, &base_str, &index_str, locals)
+                {
+                    // Slice / pointer-to-slice store: `base->ptr[i] = value`.
+                    write!(self.output, "{} = {};\n", target, rvalue).unwrap();
                 } else {
                     write!(self.output, "{}[{}] = {};\n", base_str, index_str, rvalue).unwrap();
                 }
@@ -3606,6 +3611,33 @@ impl CBackend {
         }
     }
 
+    /// If `base` indexes a slice (fat pointer `{ptr, len}`) or a pointer-to-slice
+    /// (`&[T]` -> `Ptr(Slice)`), return the correct element access. A slice value
+    /// is `base.ptr[index]`; a pointer-to-slice (a slice/array *parameter*) is
+    /// `base->ptr[index]`. Returns `None` for non-slice bases (caller emits a
+    /// plain subscript). Without this, indexing a `&[f32]` parameter emitted
+    /// `base[index]`, which subscripts the fat-pointer struct itself (a type
+    /// error), so compute kernels using slice params never compiled on the C
+    /// path.
+    fn slice_element_access(
+        base: &MirValue,
+        base_str: &str,
+        index_str: &str,
+        locals: &[MirLocal],
+    ) -> Option<String> {
+        let ty = match base {
+            MirValue::Local(id) => &locals.get(id.0 as usize)?.ty,
+            _ => return None,
+        };
+        match ty {
+            MirType::Slice(_) => Some(format!("{}.ptr[{}]", base_str, index_str)),
+            MirType::Ptr(inner) if matches!(inner.as_ref(), MirType::Slice(_)) => {
+                Some(format!("{}->ptr[{}]", base_str, index_str))
+            }
+            _ => None,
+        }
+    }
+
     fn rvalue_to_c(&self, rvalue: &MirRValue, locals: &[MirLocal]) -> CodegenResult<String> {
         Ok(match rvalue {
             MirRValue::Use(value) => self.value_to_c(value, locals),
@@ -3904,6 +3936,10 @@ impl CBackend {
                     };
                     if base_is_string {
                         format!("((uint8_t*){}.ptr)[{}]", base_str, index_str)
+                    } else if let Some(access) =
+                        Self::slice_element_access(base, &base_str, &index_str, locals)
+                    {
+                        access
                     } else {
                         format!("{}[{}]", base_str, index_str)
                     }
