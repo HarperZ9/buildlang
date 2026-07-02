@@ -14414,6 +14414,97 @@ fn born_rule_normalization_round_trips_conservation() {
 }
 
 #[test]
+fn funnel_hashing_round_trips_a_probe_bound() {
+    if !c_backend_ready() {
+        eprintln!("skipping funnel_hashing_round_trips_a_probe_bound: C backend not ready");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("buildlang_sci_funnel_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create funnel fixture dir");
+
+    // POSITIVE: the funnel's measured probe count stays under its calibrated
+    // bound, so the printed slack (bound - probes) stays non-negative and
+    // `--invariant non-negative` PASSes.
+    let pass_receipt = dir.join("funnel.json");
+    let emit_pass = buildc()
+        .arg("run")
+        .arg(repo_example("funnel_probe.bld"))
+        .args(["--emit-receipt"])
+        .arg(&pass_receipt)
+        .args([
+            "--invariant",
+            "non-negative",
+            "--metric",
+            "slack",
+            "--problem",
+            "funnel-hashing-probe-bound",
+        ])
+        .output()
+        .expect("emit funnel PASS receipt");
+    assert!(
+        emit_pass.status.success(),
+        "emitting the funnel PASS receipt should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&emit_pass.stderr)
+    );
+    let pass: serde_json::Value =
+        serde_json::from_slice(&fs::read(&pass_receipt).expect("read PASS receipt")).unwrap();
+    assert_eq!(pass["invariant"]["name"], "non_negative");
+    assert_eq!(pass["receipt_status"], "PASS");
+    assert_eq!(pass["invariant"]["observed"]["violation_count"], 0);
+
+    let verify_pass = buildc()
+        .args(["receipt", "verify"])
+        .arg(&pass_receipt)
+        .output()
+        .expect("verify funnel PASS receipt");
+    assert!(
+        verify_pass.status.success(),
+        "the funnel PASS receipt must verify\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_pass.stderr)
+    );
+
+    // NEGATIVE fixture: single-level linear probing exceeds the same bound, so
+    // the slack goes negative. With `--negative-fixture` it is a FAIL_EXPECTED
+    // receipt that STILL verifies.
+    let fail_receipt = dir.join("linear.json");
+    let emit_fail = buildc()
+        .arg("run")
+        .arg(repo_example("funnel_probe_linear.bld"))
+        .args(["--emit-receipt"])
+        .arg(&fail_receipt)
+        .args([
+            "--invariant",
+            "non-negative",
+            "--negative-fixture",
+            "--metric",
+            "slack",
+            "--problem",
+            "linear-probing-probe-bound",
+        ])
+        .output()
+        .expect("emit funnel negative fixture");
+    assert!(emit_fail.status.success(), "emitting the negative fixture should succeed");
+    let fail: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fail_receipt).expect("read FAIL receipt")).unwrap();
+    assert_eq!(fail["receipt_status"], "FAIL_EXPECTED");
+    assert!(fail["invariant"]["observed"]["violation_count"].as_u64().unwrap() > 0);
+
+    let verify_fail = buildc()
+        .args(["receipt", "verify"])
+        .arg(&fail_receipt)
+        .output()
+        .expect("verify funnel negative fixture");
+    assert!(
+        verify_fail.status.success(),
+        "a faithfully reproduced FAIL_EXPECTED must verify (exit 0)\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_fail.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn conserved_band_invariant_round_trips_and_is_distinct() {
     if !c_backend_ready() {
         eprintln!(
