@@ -2,15 +2,13 @@
 
 Last audited: 2026-07-01 (wind-down point); broader status audit remains 2026-06-15
 
-> **Development status (2026-07-01): stable stopping point.** Active feature
-> development is wound down at main `5c952d3`. Everything under "What Works" is
-> shipped, adversarially reviewed, and verified: full suite green (939 lib /
-> 81 bin / 301 cli / 52 lexer / 88 parser, 0 failed), `corpus verify` 8/8, and
-> live scientific-receipt round-trips pass. The vetted future roadmap lives in
-> `docs/superpowers/plans/2026-07-01-research-uplift-backlog.md` (waves 2-4:
-> receipt schema layers, the invariant family, verifier self-tests); none of it
-> is in flight, and a partially-built wave-2 schema draft was deliberately
-> discarded rather than left half-merged. The 2026-06-15 wind-down assessment
+> **Development status (2026-07-02): REOPENED by operator directive.** The
+> 2026-07-01 wind-down (stable stop at `5c952d3`, all shipped work reviewed and
+> verified) was lifted the next day; development resumed with backlog wave 2,
+> now aligned to the research corpus's pass-0122
+> `ScientificRuntimeReceiptLayerSpec/v1` as the schema of record. The roadmap
+> stays `docs/superpowers/plans/2026-07-01-research-uplift-backlog.md`. The
+> 2026-06-15 wind-down assessment
 > (`docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`) still governs backend
 > scope: C is the product anchor, Rust is the validation lane.
 
