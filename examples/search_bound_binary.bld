@@ -1,0 +1,49 @@
+// Result-bearing kernel: an algorithm's measured cost stays under its bound.
+//
+// Binary search on a sorted array of n = 1024 elements does at most
+// floor(log2(n)) + 1 = 11 probes per lookup (the exact worst case for the
+// lo <= hi, mid = (lo+hi)/2 variant). This kernel runs a lookup for every key
+// and prints the SLACK = 11 - probes each time. A faithful binary search never
+// exceeds its bound, so the slack never goes negative and `--invariant
+// non-negative` PASSes.
+//
+// This is the family's ALGORITHMIC accountability member: the receipt witnesses
+// not a physical quantity but a measured property of a computation (its probe
+// complexity stays under a proven bound). Companion negative fixture:
+// search_bound_linear.bld, whose linear scan blows past the bound.
+
+fn main() ~ Console {
+    let n: i32 = 1024;
+    let bound: i32 = 11;
+    let mut arr = vec_new_f64();
+    let mut i: i32 = 0;
+    while i < n {
+        vec_push_f64(arr, i as f64);
+        i = i + 1;
+    }
+
+    let mut t: i32 = 0;
+    while t < n {
+        let target: f64 = t as f64;
+        let mut lo: i32 = 0;
+        let mut hi: i32 = n - 1;
+        let mut probes: i32 = 0;
+        while lo <= hi {
+            let mid: i32 = (lo + hi) / 2;
+            probes = probes + 1;
+            let v: f64 = vec_get_f64(arr, mid);
+            if v < target {
+                lo = mid + 1;
+            } else {
+                if v > target {
+                    hi = mid - 1;
+                } else {
+                    lo = hi + 1;
+                }
+            }
+        }
+        // Slack against the proven bound; non-negative iff the algorithm held.
+        println!("{}", (bound - probes) as f64);
+        t = t + 1;
+    }
+}
