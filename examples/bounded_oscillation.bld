@@ -1,0 +1,25 @@
+// Discrete maximum-principle kernel (BOUNDED).
+//
+// The squared position x^2 of an undamped unit oscillator x(t) = cos(t)
+// oscillates in [0, 1]: it starts at its maximum 1.0, dips to 0 at the
+// quarter-period, and returns to 1.0, never rising ABOVE its initial value.
+// So `--invariant bounded` PASSes: no step exceeds series[0] = 1.0.
+//
+// This kernel is the witness that the maximum principle is a genuinely
+// DISTINCT family member. The same series FAILS the other two invariants:
+//   - monotone: x^2 rises after each zero-crossing (not non-increasing),
+//   - conservation: x^2 swings between 0 and 1 (not constant).
+// Only `bounded` accepts it. Companion negative fixture:
+// bounded_overshoot.bld (an unstable scheme whose quantity grows past 1.0).
+
+fn main() ~ Console {
+    let mut step: i32 = 0;
+    while step < 64 {
+        let t: f64 = 0.1 * (step as f64);
+        let x: f64 = cos(t);
+        // Squared position (dogfoods the `**` operator); bounded above by 1.0.
+        let x2: f64 = x ** 2;
+        println!("{}", x2);
+        step = step + 1;
+    }
+}
