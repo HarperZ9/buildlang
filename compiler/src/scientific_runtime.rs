@@ -76,6 +76,24 @@ pub const CONSERVED_BAND_INVARIANT: &str = "conserved_within_band";
 /// family tolerance: a kernel must be resolved (and scaled) to fit the budget.
 pub const CONSERVED_BAND_TOLERANCE: f64 = 5e-3;
 
+/// The invariant name emitted for the NON-NEGATIVITY check: the measured scalar
+/// must never drop below zero beyond tolerance. The lower-side companion to
+/// `bounded` (which fences the upper side against the initial value); this
+/// fences the lower side against an ABSOLUTE floor of zero, allowing arbitrarily
+/// large positive values. It witnesses that a quantity that must stay
+/// non-negative does: a diffusion concentration that never goes unphysically
+/// negative, or a RESULT-BEARING slack (a proven upper bound minus an algorithm's
+/// measured cost) that never goes negative, i.e. the algorithm never exceeds its
+/// bound. Distinct from every other member (they reference the initial value,
+/// the mean, or agreement; this is an absolute one-sided floor).
+pub const NON_NEGATIVE_INVARIANT: &str = "non_negative";
+
+/// Tolerance for the non-negativity check: a value counts as negative only when
+/// it drops below `-tol`, so roundoff at a true zero does not trip it. A genuine
+/// undershoot (an unphysical negative, or an algorithm exceeding its bound) is
+/// an O(1) amount this bound catches decisively.
+pub const NON_NEGATIVE_TOLERANCE: f64 = 1e-9;
+
 /// The invariant name emitted for the discrete energy-identity check: the
 /// measured scalar is a per-step energy-BALANCE residual that must stay within
 /// tolerance of ZERO (an absolute bound, unlike conservation/bounded which
@@ -627,6 +645,37 @@ pub fn energy_identity_residual(series: &[f64], tol: f64) -> InvariantObserved {
     }
 }
 
+/// Non-negativity invariant over a measured series: no value may drop below zero
+/// by more than `tol`. A "violation" is a step whose `value < -tol`.
+///
+/// The lower-side companion to `bounded`: `bounded` fences the UPPER side
+/// against the initial value, this fences the LOWER side against an ABSOLUTE
+/// floor of zero (arbitrarily large positive values are fine). It witnesses that
+/// a quantity required to stay non-negative does so: a diffusion concentration
+/// that never goes unphysically negative, or a result-bearing SLACK (a proven
+/// bound minus an algorithm's measured cost) that never goes negative. Records
+/// the first offending step and the initial/final values; the verdict is derived
+/// in [`invariant_passes`] (PASS requires at least two points AND zero
+/// violations).
+pub fn non_negative(series: &[f64], tol: f64) -> InvariantObserved {
+    let mut violation_count = 0usize;
+    let mut first_violation_step = None;
+    for (k, &value) in series.iter().enumerate() {
+        if value < -tol {
+            violation_count += 1;
+            if first_violation_step.is_none() {
+                first_violation_step = Some(k);
+            }
+        }
+    }
+    InvariantObserved {
+        violation_count,
+        first_violation_step,
+        initial_value: series.first().copied(),
+        final_value: series.last().copied(),
+    }
+}
+
 /// The invariant PASSes iff the series has at least two points and no step
 /// violated the invariant beyond tolerance. Uniform across the family: an
 /// invariant's whole verdict is "enough points to witness it, and zero
@@ -651,6 +700,7 @@ pub const KNOWN_INVARIANTS: &[&str] = &[
     ENERGY_IDENTITY_INVARIANT,
     RELATION_INVARIANT,
     CONSERVED_BAND_INVARIANT,
+    NON_NEGATIVE_INVARIANT,
 ];
 
 /// Whether `name` is an invariant this build implements (and can therefore
@@ -687,6 +737,7 @@ pub fn invariant_tolerance(name: &str) -> f64 {
         ENERGY_IDENTITY_INVARIANT => ENERGY_IDENTITY_TOLERANCE,
         RELATION_INVARIANT => RELATION_TOLERANCE,
         CONSERVED_BAND_INVARIANT => CONSERVED_BAND_TOLERANCE,
+        NON_NEGATIVE_INVARIANT => NON_NEGATIVE_TOLERANCE,
         _ => ENERGY_MONOTONE_TOLERANCE,
     }
 }
@@ -703,6 +754,7 @@ pub fn invariant_expectation(name: &str) -> &'static str {
         CONSERVED_BAND_INVARIANT => {
             "the quantity stays within the error budget of its initial value"
         }
+        NON_NEGATIVE_INVARIANT => "no value drops below zero beyond tolerance",
         _ => "no step increases energy beyond tolerance",
     }
 }
@@ -721,6 +773,7 @@ pub fn evaluate_invariant(name: &str, series: &[f64], tol: f64) -> InvariantObse
         }
         BOUNDED_INVARIANT => bounded_by_initial_maximum(series, tol),
         ENERGY_IDENTITY_INVARIANT => energy_identity_residual(series, tol),
+        NON_NEGATIVE_INVARIANT => non_negative(series, tol),
         _ => energy_monotone_nonincreasing(series, tol),
     }
 }
@@ -3246,6 +3299,136 @@ mod tests {
             Err(1),
             "a relation invariant with column_count < 2 must be rejected"
         );
+    }
+
+    #[test]
+    fn non_negative_holds_and_flags_undershoot() {
+        // Arbitrarily large positive values are fine; only a value below zero
+        // (beyond roundoff) is a violation.
+        let obs = non_negative(&[0.0, 5.0, 100.0, 0.5], NON_NEGATIVE_TOLERANCE);
+        assert_eq!(obs.violation_count, 0);
+        assert!(invariant_passes(4, &obs));
+        // An undershoot below zero at step 2 is flagged.
+        let obs = non_negative(&[1.0, 0.5, -0.3, 2.0], NON_NEGATIVE_TOLERANCE);
+        assert_eq!(obs.violation_count, 1);
+        assert_eq!(obs.first_violation_step, Some(2));
+    }
+
+    #[test]
+    fn non_negative_is_distinct_from_the_family() {
+        // A quantity that grows far above its start and returns to zero:
+        // non-negative ACCEPTS it, while bounded (rose above s[0]), conservation
+        // (deviated), and monotone (rose) all reject it. Only the absolute
+        // lower floor accepts an unbounded-but-non-negative series.
+        let grow = [1.0, 5.0, 100.0, 0.0];
+        let nn = evaluate_invariant(NON_NEGATIVE_INVARIANT, &grow, NON_NEGATIVE_TOLERANCE);
+        assert_eq!(nn.violation_count, 0, "non-negative accepts the growth");
+        let bounded = evaluate_invariant(BOUNDED_INVARIANT, &grow, BOUNDED_TOLERANCE);
+        assert!(
+            bounded.violation_count > 0,
+            "bounded rejects the rise above s[0]"
+        );
+        let cons = evaluate_invariant(CONSERVATION_INVARIANT, &grow, CONSERVATION_TOLERANCE);
+        assert!(
+            cons.violation_count > 0,
+            "conservation rejects the deviation"
+        );
+        let mono = evaluate_invariant(ENERGY_MONOTONE_INVARIANT, &grow, ENERGY_MONOTONE_TOLERANCE);
+        assert!(mono.violation_count > 0, "monotone rejects the rise");
+    }
+
+    #[test]
+    fn verify_round_trips_a_non_negative_receipt() {
+        let path = Path::new("k.bld");
+        let receipt = build_scientific_runtime_receipt(base_inputs_for(
+            NON_NEGATIVE_INVARIANT,
+            path,
+            vec![0.0, 5.0, 100.0],
+            true,
+            false,
+        ));
+        assert_eq!(receipt.invariant.name, NON_NEGATIVE_INVARIANT);
+        assert_eq!(receipt.oracle.name, NON_NEGATIVE_INVARIANT);
+        assert_eq!(receipt.invariant.tolerance, NON_NEGATIVE_TOLERANCE);
+        assert_eq!(receipt.receipt_status, "PASS");
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let sd = receipt.source_digest.clone();
+        let gd = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+            |_, _| Ok(rerun(vec![0.0, 5.0, 100.0])),
+        );
+        assert!(
+            result.is_ok(),
+            "a faithful non-negative receipt must verify: {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_fails_a_faithful_non_negative_undershoot() {
+        // A series that dips below zero faithfully reproduces a FAIL_UNEXPECTED,
+        // so verify exits 3.
+        let path = Path::new("k.bld");
+        let receipt = build_scientific_runtime_receipt(base_inputs_for(
+            NON_NEGATIVE_INVARIANT,
+            path,
+            vec![1.0, -0.5, 2.0],
+            true,
+            false,
+        ));
+        assert_eq!(receipt.receipt_status, "FAIL_UNEXPECTED");
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let sd = receipt.source_digest.clone();
+        let gd = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+            |_, _| Ok(rerun(vec![1.0, -0.5, 2.0])),
+        );
+        assert_eq!(
+            result,
+            Err(3),
+            "a faithful non-negative undershoot must exit 3 (FAIL_UNEXPECTED)"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_a_non_canonical_non_negative_tolerance() {
+        let path = Path::new("k.bld");
+        let mut receipt = build_scientific_runtime_receipt(base_inputs_for(
+            NON_NEGATIVE_INVARIANT,
+            path,
+            vec![0.0, 5.0, 100.0],
+            true,
+            false,
+        ));
+        receipt.invariant.tolerance = 1e6;
+        seal_receipt(&mut receipt);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let sd = receipt.source_digest.clone();
+        let gd = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+            |_, _| Ok(rerun(vec![0.0, 5.0, 100.0])),
+        );
+        assert_eq!(result, Err(1), "a non-canonical tolerance must be rejected");
     }
 
     /// Build a faithful re-run observation (finite series, exit 0, raw and

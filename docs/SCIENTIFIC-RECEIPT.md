@@ -73,8 +73,10 @@ Flags on the `run` subcommand (all additive; absent `--emit-receipt`, none of th
   per-step energy-balance residual that stays within tolerance of zero), or
   `relation` (the columns of each row must agree; requires `--columns >= 2`), or
   `conserved-band` (the scalar stays within a fixed error budget of its initial
-  value: approximate conservation, e.g. a symplectic integrator's energy). Any
-  other value is an error reported **before** compiling.
+  value: approximate conservation, e.g. a symplectic integrator's energy), or
+  `non-negative` (the scalar never drops below zero: an absolute lower floor,
+  e.g. a result-bearing slack that stays non-negative). Any other value is an
+  error reported **before** compiling.
 - `--columns <N>` sets how many columns each row of the captured series holds
   (default `1`). `>= 2` is required by `--invariant relation` and rejected by
   the single-scalar invariants.
@@ -200,6 +202,7 @@ a receipt cannot weaken its own check.
 | `energy-identity` | `energy_identity_residual` | `abs(s[k]) > tol` (energy-balance residual is not zero) | `1e-9` |
 | `relation` (`--columns N>=2`) | `relation_columns_agree` | a row's columns differ by more than `tol` (the verifier compares them) | `1e-9` |
 | `conserved-band` | `conserved_within_band` | `abs(s[k] - s[0]) > tol` (left a fixed error budget of the initial value) | `5e-3` |
+| `non-negative` | `non_negative` | `s[k] < -tol` (dropped below zero) | `1e-9` |
 
 The `conservation` and `bounded` references are both `s[0]` (the initial value), not the mean,
 so a re-run that reproduces a different-length prefix cannot shift the reference. The checks
@@ -228,6 +231,19 @@ energy rises slightly ABOVE `H_0` and dips below, so the same series FAILs both 
 (it deviates beyond roundoff) and `bounded` (it rises above the start); only `conserved-band`
 accepts it, which is exactly why it is a separate invariant. The tolerance is an ABSOLUTE budget
 (like the whole family): a kernel must be resolved, and scaled, to fit it.
+
+`non-negative` is the lower-side companion to `bounded` and the family's first **algorithmic**
+member. Where `bounded` fences the upper side against `s[0]`, `non-negative` fences the lower
+side against an absolute floor of zero, allowing arbitrarily large positive values (a series
+`[1, 5, 100, 0]` PASSes `non-negative` while FAILing `bounded`, `conservation`, and
+`energy-monotone`). Its motivating use is a RESULT-BEARING kernel: a program runs an algorithm,
+measures a cost, and prints the SLACK (a proven bound minus the measured cost); the receipt
+then witnesses that the slack never goes negative, i.e. the algorithm never exceeds its bound.
+The reference kernel (`examples/search_bound_binary.bld`) runs a binary search on 1024 elements
+(worst case `floor(log2 n) + 1 = 11` probes) and prints `11 - probes` per lookup, which stays
+non-negative, so it PASSes; the negative fixture (`examples/search_bound_linear.bld`) uses a
+linear scan (up to 1024 probes), so the slack drops to about `-1013` and it FAILs. This carries
+the receipt beyond physical simulation to witnessing a computation's measured complexity.
 
 `relation` is the family's first **cross-column** invariant, and the first whose check the
 VERIFIER computes rather than trusting a residual the kernel printed. With `--columns N` the
@@ -287,8 +303,10 @@ so it PASSes) and `examples/relation_double_angle_broken.bld` (column 1 drops th
 so the two columns disagree and it FAILs); `conserved-band` has
 `examples/symplectic_oscillator.bld` (a leapfrog oscillator whose energy stays in an O(dt^2)
 band, so it PASSes) and `examples/euler_oscillator.bld` (explicit Euler, whose energy drifts out
-of the band, so it FAILs). Run any negative kernel with `--negative-fixture` for a
-`FAIL_EXPECTED` receipt.
+of the band, so it FAILs); `non-negative` has `examples/search_bound_binary.bld` (binary
+search's probe slack stays non-negative, so it PASSes) and `examples/search_bound_linear.bld`
+(a linear scan exceeds the bound, so the slack goes negative and it FAILs). Run any negative
+kernel with `--negative-fixture` for a `FAIL_EXPECTED` receipt.
 
 ## 5. The heat-equation kernel example
 
@@ -503,10 +521,12 @@ v0 checks one invariant over one scalar series, sealed and re-derivable. Explici
 scope for v0:
 
 - **Richer relations and analytics.** `energy-monotone`, `conservation`, `bounded` (a discrete
-  max principle), `energy-identity` (a quantitative energy-balance residual), and `relation`
-  (cross-column agreement over `--columns N`) ship. Relations beyond per-row agreement (named
-  physical identities across columns, header-named columns, more than pairwise comparison) are
-  follow-ons.
+  max principle), `energy-identity` (a quantitative energy-balance residual), `relation`
+  (cross-column agreement over `--columns N`), `conserved-band` (approximate conservation), and
+  `non-negative` (an absolute lower floor, used for a result-bearing complexity slack) ship.
+  Relations beyond per-row agreement (named physical identities across columns, header-named
+  columns), and a full funnel-hashing (arXiv 2501.02305) probe-complexity kernel beyond the
+  binary-search slack demo, are follow-ons.
 - **The full 7-layer receipt richness.** The research schema carries more layers than buildc
   can honestly fill today; v0 fills the subset buildc actually derives.
 - **Crucible-at-emit-time.** v0 checks the invariant and seals; it does not run a Crucible
