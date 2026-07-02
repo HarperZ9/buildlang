@@ -41,11 +41,15 @@ fn main() ~ Console {
     let budget: i32 = 4;
 
     // Calibrated bound. The four bounded levels probe at most budget*4 = 16
-    // slots; bound = 20 allows a small catch-all tail on top. Measured at load
-    // 768 (75%): the funnel's worst insertion uses 14 probes (slack 6 to spare),
-    // while single-level linear probing (funnel_probe_linear.bld) reaches 85
-    // probes on the same keys, so its slack goes to -65. The bound sits well
-    // between them: the funnel holds it, linear probing blows past it.
+    // slots. The full-table catch-all is unbounded in the theoretical worst case,
+    // but at this load it fires rarely and adds only a few probes, so bound = 20
+    // (the 16-probe bounded ceiling plus a 4-probe catch-all allowance) holds in
+    // practice. Measured at load 768 (75%): the funnel's worst insertion uses 14
+    // probes (slack 6 to spare, and already inside the 16-probe bounded ceiling,
+    // so the catch-all never dominates), while single-level linear probing
+    // (funnel_probe_linear.bld) reaches 85 probes on the same keys, so its slack
+    // goes to -65. The bound sits well between them: the funnel holds it, linear
+    // probing blows past it.
     let bound: i32 = 20;
     let load: i32 = 768;    // ~75% load.
 
