@@ -8,6 +8,35 @@ tracked in `STATUS.md`, `README.md`, and
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
 `108/108` or `132/132` are not the current release gate.
 
+## Unreleased - accountable scientific compute
+
+A second, independent receipt family beyond the capability (check) receipts:
+the **scientific-runtime receipt** (`buildlang-scientific-runtime-receipt/v0`).
+Not yet published to crates.io (the released crate is 1.0.0); tracked here and
+in `STATUS.md` / `docs/SCIENTIFIC-RECEIPT.md`.
+
+- `buildc run --emit-receipt <path> --invariant <NAME>` runs a numeric `.bld`
+  kernel, captures its output series, checks a stated invariant, and seals a
+  re-checkable JSON receipt. `buildc receipt verify` RE-RUNS the program and
+  re-derives the verdict; drift, tamper, or a source change fail with a typed
+  `failure_class` and a verdict-gated exit code (0 faithful pass, 1 did-not-
+  reproduce, 3 faithful fail, 4 no toolchain).
+- **Invariant family (6 members)**, each a fixed re-checked tolerance with a
+  paired positive/negative kernel: `energy-monotone`, `conservation`, `bounded`
+  (discrete maximum principle), `energy-identity` (a quantitative per-step
+  energy-balance residual), `relation` (`--columns N`, the verifier compares a
+  row's columns), and `conserved-band` (approximate conservation within a fixed
+  error budget, e.g. a symplectic integrator's energy).
+- `buildc receipt export` re-verifies a receipt and emits witnessed
+  Crucible-ingestible measurement rows (deviation derived from the fresh re-run,
+  the replay command sealed as a recheck descriptor).
+- The capability receipt gained the effect-policy chain and capability-derived
+  witnessed-absence fields (input_dataset / seed / determinism, fail-closed).
+- Honest scope preserved: every receipt carries `NOT_A_NEW_PHYSICAL_LAW`; the
+  receipt witnesses the observed output series, not model correctness.
+- Baseline at this work: `cargo test` from `compiler/` lib 940, bin 135, cli
+  307, lexer 52, parser 88 (0 failing); `buildc corpus verify` 8/8.
+
 ## 1.0.5 - 2026-06-30
 
 Documentation + packaging accuracy pass (no code change):
