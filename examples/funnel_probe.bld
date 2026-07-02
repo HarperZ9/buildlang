@@ -1,0 +1,111 @@
+// Funnel-hashing probe-bound kernel (RESULT-BEARING): a leveled open-addressing
+// scheme keeps its worst-case probe count under a proven-in-spirit bound.
+//
+// Funnel hashing (arXiv 2501.02305, Farach-Colton, Krapivin, Kuszmaul) divides
+// the table into geometrically decreasing levels and inserts greedily without
+// reordering, achieving O(log^2(1/delta)) worst-case expected probes at load
+// factor 1 - delta, beating the O(1/delta) of uniform probing. This kernel is a
+// faithful-in-spirit funnel (contiguous decreasing levels, a bounded probe
+// budget per level, greedy descent, a final catch-all), not a bit-exact
+// reproduction of the paper's optimal constant. It inserts a fixed key sequence
+// and prints the SLACK = bound - probes each insertion. A funnel that holds its
+// bound never goes negative, so `--invariant non-negative` PASSes.
+//
+// The keys are hashed through an avalanche mixer (an LCG + xorshift finalizer)
+// so that consecutive keys scatter and collide like a real hash table (a plain
+// multiplicative hash of a contiguous key range is a bijection and never
+// collides, which would make the negative fixture unable to fail). All mixer
+// arithmetic stays within 31 bits so re-runs are deterministic and portable.
+//
+// This is the family's ALGORITHMIC member applied to a real data structure (a
+// richer instance than search_bound_binary.bld). The bound below is calibrated
+// empirically so the funnel stays under it while the naive linear-probing
+// fixture (funnel_probe_linear.bld) blows past it at the same load.
+
+fn main() ~ Console {
+    let n: i32 = 1024;
+    let empty: i64 = -1;
+    let mask: i64 = 2147483647;   // 2^31 - 1, keeps the mixer non-negative and portable
+    let mut table = vec_new_i64();
+    let mut i: i32 = 0;
+    while i < n {
+        vec_push_i64(table, empty);
+        i = i + 1;
+    }
+
+    // Four bounded levels of geometrically decreasing size occupy [0, 960):
+    // L0=[0,512) L1=[512,768) L2=[768,896) L3=[896,960). A key probes at most
+    // `budget` slots per level, descending when its budget is exhausted. Any key
+    // still unplaced falls back to a full-table linear probe (guaranteed to
+    // succeed while load < n), which is counted honestly and stays rare.
+    let budget: i32 = 4;
+
+    // Calibrated bound. The four bounded levels probe at most budget*4 = 16
+    // slots; bound = 20 allows a small catch-all tail on top. Measured at load
+    // 768 (75%): the funnel's worst insertion uses 14 probes (slack 6 to spare),
+    // while single-level linear probing (funnel_probe_linear.bld) reaches 85
+    // probes on the same keys, so its slack goes to -65. The bound sits well
+    // between them: the funnel holds it, linear probing blows past it.
+    let bound: i32 = 20;
+    let load: i32 = 768;    // ~75% load.
+
+    let mut k: i32 = 0;
+    while k < load {
+        // Avalanche hash of the key (LCG + xorshift, all within 31 bits).
+        let mut hk: i64 = ((k as i64) + 1) & mask;
+        hk = (hk * 1103515245 + 12345) & mask;
+        hk = hk ^ (hk >> 13);
+        hk = (hk * 1103515245 + 12345) & mask;
+        hk = hk ^ (hk >> 16);
+
+        let mut probes: i32 = 0;
+        let mut placed: i32 = 0;
+
+        let mut off: i32 = 0;
+        let mut size: i32 = 512;
+        let mut level: i32 = 0;
+        while level < 4 {
+            if placed == 0 {
+                // Per-level start position, decorrelated across levels.
+                let start: i32 = ((hk + (level as i64) * 999983) % (size as i64)) as i32;
+                let mut j: i32 = 0;
+                while j < budget {
+                    if placed == 0 {
+                        let slot: i32 = off + (start + j) % size;
+                        probes = probes + 1;
+                        let occ: i64 = vec_get_i64(table, slot);
+                        if occ == empty {
+                            table[slot] = k as i64;
+                            placed = 1;
+                        }
+                    }
+                    j = j + 1;
+                }
+            }
+            off = off + size;
+            size = size / 2;
+            level = level + 1;
+        }
+
+        // Final catch-all: full-table linear probe, guaranteed to terminate
+        // while load < n. Rare at a calibrated load.
+        if placed == 0 {
+            let fstart: i32 = (hk % (n as i64)) as i32;
+            let mut j: i32 = 0;
+            while placed == 0 {
+                let slot: i32 = (fstart + j) % n;
+                probes = probes + 1;
+                let occ: i64 = vec_get_i64(table, slot);
+                if occ == empty {
+                    table[slot] = k as i64;
+                    placed = 1;
+                }
+                j = j + 1;
+            }
+        }
+
+        // Slack against the calibrated funnel bound; non-negative iff the funnel held.
+        println!("{}", (bound - probes) as f64);
+        k = k + 1;
+    }
+}

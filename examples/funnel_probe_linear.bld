@@ -1,0 +1,55 @@
+// Funnel-hashing NEGATIVE fixture (SINGLE-LEVEL LINEAR PROBING).
+//
+// Identical setup to funnel_probe.bld (same table size, same key sequence, same
+// avalanche hash, same bound) EXCEPT insertion is naive single-level linear
+// probing over the whole table: hash the key, then scan forward one slot at a
+// time until an empty slot is found. At high load linear probing forms long
+// clusters, so the worst-case probe count for some insertion exceeds the funnel
+// bound and the printed slack goes negative. So `--invariant non-negative`
+// FAILs: the receipt catches an open-addressing scheme that does not hold the
+// funnel's sub-linear bound.
+//
+// Paired negative fixture for funnel_probe.bld; run with `--negative-fixture`
+// for FAIL_EXPECTED.
+
+fn main() ~ Console {
+    let n: i32 = 1024;
+    let empty: i64 = -1;
+    let mask: i64 = 2147483647;
+    let mut table = vec_new_i64();
+    let mut i: i32 = 0;
+    while i < n {
+        vec_push_i64(table, empty);
+        i = i + 1;
+    }
+
+    let bound: i32 = 20;    // SAME bound as funnel_probe.bld.
+    let load: i32 = 768;    // SAME load as funnel_probe.bld.
+
+    let mut k: i32 = 0;
+    while k < load {
+        // Same avalanche hash as funnel_probe.bld.
+        let mut hk: i64 = ((k as i64) + 1) & mask;
+        hk = (hk * 1103515245 + 12345) & mask;
+        hk = hk ^ (hk >> 13);
+        hk = (hk * 1103515245 + 12345) & mask;
+        hk = hk ^ (hk >> 16);
+
+        let mut probes: i32 = 0;
+        let start: i32 = (hk % (n as i64)) as i32;
+        let mut j: i32 = 0;
+        let mut placed: i32 = 0;
+        while placed == 0 {
+            let slot: i32 = (start + j) % n;
+            probes = probes + 1;
+            let occ: i64 = vec_get_i64(table, slot);
+            if occ == empty {
+                table[slot] = k as i64;
+                placed = 1;
+            }
+            j = j + 1;
+        }
+        println!("{}", (bound - probes) as f64);
+        k = k + 1;
+    }
+}
