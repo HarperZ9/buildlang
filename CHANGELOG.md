@@ -8,12 +8,12 @@ tracked in `STATUS.md`, `README.md`, and
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
 `108/108` or `132/132` are not the current release gate.
 
-## Unreleased - accountable scientific compute
+## 1.1.0 - 2026-07-02 - accountable scientific compute
 
 A second, independent receipt family beyond the capability (check) receipts:
 the **scientific-runtime receipt** (`buildlang-scientific-runtime-receipt/v0`).
-Not yet published to crates.io (the released crate is 1.0.0); tracked here and
-in `STATUS.md` / `docs/SCIENTIFIC-RECEIPT.md`.
+Minor release (backward-compatible; `run` without `--emit-receipt` is
+byte-identical to 1.0.x). Details in `STATUS.md` / `docs/SCIENTIFIC-RECEIPT.md`.
 
 - `buildc run --emit-receipt <path> --invariant <NAME>` runs a numeric `.bld`
   kernel, captures its output series, checks a stated invariant, and seals a
