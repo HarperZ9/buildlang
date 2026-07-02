@@ -47,7 +47,8 @@ use scientific_runtime::{
     NON_NEGATIVE_INVARIANT, RELATION_INVARIANT, SCIENTIFIC_RUNTIME_SCHEMA,
 };
 use scientific_runtime::{
-    build_receipt_chain, receipt_chain_seal_hex, ReceiptChainManifest, RECEIPT_CHAIN_SCHEMA,
+    build_receipt_chain, receipt_chain_seal_hex, ReceiptChainManifest, ScientificCorpusManifest,
+    RECEIPT_CHAIN_SCHEMA, RECEIPT_CORPUS_SCHEMA,
 };
 use symbol_graph::{verify_symbol_graph_receipt, SymbolGraphReceipt, SYMBOL_GRAPH_RECEIPT};
 
@@ -502,6 +503,12 @@ enum ReceiptCommands {
     Chain {
         #[command(subcommand)]
         command: ChainCommands,
+    },
+    /// Verify a receipt corpus: emit and re-verify every declared example kernel
+    /// and assert each classifies (PASS / FAIL_EXPECTED) exactly as declared
+    Corpus {
+        /// Corpus manifest JSON (schema `buildlang-scientific-receipt-corpus/v0`)
+        manifest: PathBuf,
     },
     /// Export a scientific-runtime receipt as a Crucible-ingestible measurement
     /// (the Telos bridge). The receipt is RE-VERIFIED first and the measurement's
@@ -1585,6 +1592,7 @@ fn cmd_receipt(command: ReceiptCommands) -> Result<(), i32> {
             }
             ChainCommands::Verify { manifest } => cmd_receipt_chain_verify(&manifest),
         },
+        ReceiptCommands::Corpus { manifest } => cmd_receipt_corpus(&manifest),
     }
 }
 
@@ -1829,6 +1837,140 @@ fn cmd_receipt_chain_verify(manifest_path: &Path) -> Result<(), i32> {
         manifest.links.len()
     );
     Ok(())
+}
+
+/// `receipt corpus`: emit and re-verify every declared example kernel and assert
+/// each classifies exactly as the manifest declares. This is the runnable
+/// accountability gate for the whole example suite: a kernel whose verdict
+/// silently changes, or a receipt that stops re-deriving, fails the corpus.
+fn cmd_receipt_corpus(manifest_path: &Path) -> Result<(), i32> {
+    let manifest: ScientificCorpusManifest = read_json(manifest_path).map_err(|code| {
+        eprintln!(
+            "Error: could not read corpus manifest '{}'",
+            manifest_path.display()
+        );
+        code
+    })?;
+    if manifest.schema != RECEIPT_CORPUS_SCHEMA {
+        eprintln!("Error: unsupported corpus schema `{}`", manifest.schema);
+        return Err(1);
+    }
+    if manifest.members.is_empty() {
+        eprintln!("Error: corpus manifest has no members");
+        return Err(1);
+    }
+
+    let exe = std::env::current_exe().map_err(|err| {
+        eprintln!("Error: cannot locate the buildc binary: {err}");
+        1
+    })?;
+    let tmp_dir = std::env::temp_dir().join(format!("buildc_corpus_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).map_err(|err| {
+        eprintln!("Error: cannot create corpus scratch dir: {err}");
+        1
+    })?;
+
+    let total = manifest.members.len();
+    let mut failures = 0usize;
+    for (i, member) in manifest.members.iter().enumerate() {
+        let receipt = tmp_dir.join(format!("member_{i}.json"));
+
+        // Emit the member's receipt under its declared invariant and flags.
+        let mut emit = std::process::Command::new(&exe);
+        emit.arg("run")
+            .arg(&member.source)
+            .args(["--emit-receipt"])
+            .arg(&receipt)
+            .args(["--invariant", &member.invariant]);
+        if member.columns > 1 {
+            emit.args(["--columns", &member.columns.to_string()]);
+        }
+        if member.negative_fixture {
+            emit.arg("--negative-fixture");
+        }
+        let emit_out = match emit.output() {
+            Ok(out) => out,
+            Err(err) => {
+                eprintln!("  FAIL {} (emit failed to run: {err})", member.source);
+                failures += 1;
+                continue;
+            }
+        };
+        if !emit_out.status.success() {
+            eprintln!(
+                "  FAIL {} (emit failed)\n{}",
+                member.source,
+                String::from_utf8_lossy(&emit_out.stderr)
+            );
+            failures += 1;
+            continue;
+        }
+
+        // The emitted receipt must classify exactly as declared.
+        let status = std::fs::read(&receipt)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|value| {
+                value
+                    .get("receipt_status")
+                    .and_then(|s| s.as_str())
+                    .map(str::to_string)
+            });
+        let status = match status {
+            Some(status) => status,
+            None => {
+                eprintln!("  FAIL {} (could not read emitted receipt_status)", member.source);
+                failures += 1;
+                continue;
+            }
+        };
+        if status != member.expected_status {
+            eprintln!(
+                "  FAIL {} => declared {}, emitted {}",
+                member.source, member.expected_status, status
+            );
+            failures += 1;
+            continue;
+        }
+
+        // The receipt must also re-derive clean through the real verify path.
+        let verify_out = match std::process::Command::new(&exe)
+            .args(["receipt", "verify"])
+            .arg(&receipt)
+            .output()
+        {
+            Ok(out) => out,
+            Err(err) => {
+                eprintln!("  FAIL {} (verify failed to run: {err})", member.source);
+                failures += 1;
+                continue;
+            }
+        };
+        if !verify_out.status.success() {
+            eprintln!(
+                "  FAIL {} (receipt did not re-verify)\n{}",
+                member.source,
+                String::from_utf8_lossy(&verify_out.stderr)
+            );
+            failures += 1;
+            continue;
+        }
+
+        println!("  ok   {} [{}] => {}", member.source, member.invariant, status);
+    }
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    if failures == 0 {
+        println!("corpus: {total}/{total} members classified and re-verified as declared");
+        Ok(())
+    } else {
+        eprintln!(
+            "corpus: {}/{} members did NOT match their declared classification",
+            failures, total
+        );
+        Err(1)
+    }
 }
 
 /// The Telos/Crucible bridge: export a scientific-runtime receipt as one
