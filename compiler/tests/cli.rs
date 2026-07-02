@@ -14108,9 +14108,14 @@ fn scientific_runtime_receipt_emit_and_verify_round_trip() {
         "human verify output should report MATCH"
     );
 
-    // 3) Tamper the sealed receipt (flip the stored invariant verdict PASS -> FAIL).
-    //    The re-run recomputes PASS, so verification must reject the disagreement
-    //    with the SPECIFIC failure class, not just "anything failed".
+    // 3) Tamper the sealed receipt (flip the stored invariant verdict PASS -> FAIL)
+    //    WITHOUT resealing. Integrity is checked before any sealed field is
+    //    interpreted, so a hand-forged receipt is rejected as tampering
+    //    (SEAL_MISMATCH) rather than misreported as a verdict "drift": the
+    //    re-run never even happens because the body no longer re-seals. (Genuine
+    //    non-reproduction of a VALIDLY-sealed receipt is what raises
+    //    INVARIANT_STATUS_DRIFT; that path is covered by the unit tests, which
+    //    inject a divergent re-run on an untouched receipt.)
     let mut tampered: serde_json::Value = emitted.clone();
     tampered["invariant"]["status"] = serde_json::Value::String("FAIL".to_string());
     fs::write(&receipt, serde_json::to_string_pretty(&tampered).unwrap())
@@ -14127,9 +14132,8 @@ fn scientific_runtime_receipt_emit_and_verify_round_trip() {
         String::from_utf8_lossy(&verify_tampered.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&verify_tampered.stderr)
-            .contains("failure_class: INVARIANT_STATUS_DRIFT"),
-        "the failure must carry its machine-readable class\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_tampered.stderr).contains("failure_class: SEAL_MISMATCH"),
+        "an unsealed hand-edit must be caught by the integrity gate\nstderr:\n{}",
         String::from_utf8_lossy(&verify_tampered.stderr)
     );
 
