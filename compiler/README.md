@@ -12,7 +12,7 @@
 [![license: fair-source](https://img.shields.io/badge/license-fair--source-blue.svg)](LICENSE)
 ![rust](https://img.shields.io/badge/rust-edition_2021-orange.svg)
 [![crates.io](https://img.shields.io/badge/crates.io-buildlang-blue.svg)](https://crates.io/crates/buildlang)
-![version](https://img.shields.io/badge/version-1.0.x-informational.svg)
+![version](https://img.shields.io/badge/version-1.1.x-informational.svg)
 [![CI](https://github.com/HarperZ9/buildlang/actions/workflows/ci.yml/badge.svg)](https://github.com/HarperZ9/buildlang/actions/workflows/ci.yml)
 [![part of: Build ecosystem](https://img.shields.io/badge/part_of-Build_ecosystem-00b3a4.svg)](https://github.com/HarperZ9/build-universe)
 
@@ -28,7 +28,7 @@ experimental research surfaces.
 
 ## Current status
 
-- **Release:** BuildLang 1.0.x; compiler binary `buildc`; built with Rust (edition 2021). C is the production-grade verified backend; HLSL and GLSL ship for shader work; SPIR-V, LLVM IR, WebAssembly, Rust, x86-64, and ARM64 stay labeled experimental.
+- **Release:** BuildLang 1.1.x; compiler binary `buildc`; built with Rust (edition 2021). C is the production-grade verified backend; HLSL and GLSL ship for shader work; SPIR-V, LLVM IR, WebAssembly, Rust, x86-64, and ARM64 stay labeled experimental.
 - **Type system:** Hindley-Milner inference with typed algebraic effects, plus an **experimental** opt-in `#[linear]` attribute toward **no-cloning** — a `#[linear]` struct/enum value should be moved/consumed at most once (the foundation shared by quantum qubits, on-chain no-double-spend, and resource handles). It conservatively rejects a large, regression-tested set of compositional escapes, but it is **not yet fully sound** (a few known-open classes remain; full soundness needs an affine/borrow checker on MIR). Borrows do not consume; ordinary types keep copy-like reuse. Honest scope, what's enforced, and what's open: [docs/LINEAR-TYPES.md](docs/LINEAR-TYPES.md); also `examples/linear/`, [CHANGELOG.md](CHANGELOG.md), `docs/QUANTUM-HOST.md`.
 - **Operator surface:** the `buildc` CLI exposes `lex`, `parse`, `check` (with `--receipt` / `--policy`), `build`, `run`, `test`, `repl`, `fmt`, `pkg`, `watch`, `doctor`, `corpus`, `policy`, `receipt`, and an `lsp` subcommand that starts a bundled LSP server (completion, hover, diagnostics, go-to-definition, semantic tokens). The CLI and the LSP server are the two integration surfaces; accountability receipts (`buildlang-receipt-verification/v1`) carry SHA-256 source digests for re-checkable codegen.
 - **Accountable scientific compute:** a second receipt family (`buildlang-scientific-runtime-receipt/v0`) seals a re-checkable proof that a numeric kernel's output series satisfies a stated invariant, verified by RE-RUNNING the program. Six invariants ship (energy-monotone, conservation, bounded, energy-identity, relation, conserved-band), each with a paired negative-fixture kernel; `buildc receipt export` emits witnessed measurement rows. Honest scope: it witnesses the observed series, not the model or any physical law. See [Accountable scientific compute](#accountable-scientific-compute) and [docs/SCIENTIFIC-RECEIPT.md](docs/SCIENTIFIC-RECEIPT.md).
