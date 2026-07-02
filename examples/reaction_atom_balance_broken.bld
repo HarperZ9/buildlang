@@ -1,0 +1,33 @@
+// Reaction-invariant NEGATIVE fixture (STOICHIOMETRY BUG).
+//
+// Identical to reaction_atom_balance.bld EXCEPT the C production is doubled:
+// d[C]/dt = +2*r instead of +r (as if the reaction produced two C per event
+// while still consuming one A). This breaks the atom balance: [A] + [C] now
+// changes by (-r + 2*r)*dt = r*dt per step and drifts away from its initial
+// value (by ~0.4 over the run). So `--invariant conservation` FAILs: the
+// receipt catches an unbalanced reaction the physical conservation law forbids.
+//
+// Paired negative fixture for reaction_atom_balance.bld; run with
+// `--negative-fixture` for FAIL_EXPECTED.
+
+fn main() ~ Console {
+    let kf: f64 = 0.4;
+    let kr: f64 = 0.1;
+    let dt: f64 = 0.01;
+    let mut a: f64 = 1.0;
+    let mut b: f64 = 0.8;
+    let mut c: f64 = 0.0;
+    let mut step: i32 = 0;
+    while step < 500 {
+        println!("{}", a + c);
+        let r: f64 = kf * a * b - kr * c;
+        let a_new: f64 = a - dt * r;
+        let b_new: f64 = b - dt * r;
+        // BUG: produces two C per reaction event, so [A] + [C] is not conserved.
+        let c_new: f64 = c + 2.0 * dt * r;
+        a = a_new;
+        b = b_new;
+        c = c_new;
+        step = step + 1;
+    }
+}

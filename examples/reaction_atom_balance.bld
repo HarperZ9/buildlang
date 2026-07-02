@@ -1,0 +1,37 @@
+// Reaction-invariant checker (CONSERVING): a chemical atom balance.
+//
+// The reversible reaction A + B <=> C under mass-action kinetics has rate
+// r = kf*[A]*[B] - kr*[C], so d[A]/dt = d[B]/dt = -r and d[C]/dt = +r. The
+// A-containing atom count [A] + [C] is therefore conserved for all time
+// (its derivative is -r + r = 0), and the forward-Euler update preserves it to
+// floating-point roundoff (well within the 1e-9 tolerance) because the same
+// dt*r term is subtracted from [A] and added to [C].
+//
+// The kernel simulates the reaction to equilibrium and prints [A] + [C] each
+// step. Individual concentrations change (the reaction proceeds), but the atom
+// balance holds to roundoff, so `--invariant conservation` PASSes. This is the
+// family applied to a reaction network: a stoichiometry bug that violated the
+// balance would be caught. Companion negative fixture:
+// reaction_atom_balance_broken.bld (a wrong stoichiometry that produces two C).
+
+fn main() ~ Console {
+    let kf: f64 = 0.4;
+    let kr: f64 = 0.1;
+    let dt: f64 = 0.01;
+    let mut a: f64 = 1.0;
+    let mut b: f64 = 0.8;
+    let mut c: f64 = 0.0;
+    let mut step: i32 = 0;
+    while step < 500 {
+        // Conserved atom count: the A-containing species [A] + [C].
+        println!("{}", a + c);
+        let r: f64 = kf * a * b - kr * c;
+        let a_new: f64 = a - dt * r;
+        let b_new: f64 = b - dt * r;
+        let c_new: f64 = c + dt * r;
+        a = a_new;
+        b = b_new;
+        c = c_new;
+        step = step + 1;
+    }
+}
