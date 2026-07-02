@@ -41,8 +41,9 @@ use scientific_runtime::{
     build_scientific_runtime_receipt, crucible_measurement_from_report,
     evaluate_scientific_runtime_receipt, parse_numeric_series, verify_scientific_runtime_receipt,
     RederivedFacts, RerunObservation, ScientificDigest, ScientificEffectPolicy,
-    ScientificReceiptInputs, ScientificRuntimeReceipt, ScientificToolchain, CONSERVATION_INVARIANT,
-    CRUCIBLE_MEASUREMENT_EXPORT_SCHEMA, ENERGY_MONOTONE_INVARIANT, SCIENTIFIC_RUNTIME_SCHEMA,
+    ScientificReceiptInputs, ScientificRuntimeReceipt, ScientificToolchain, BOUNDED_INVARIANT,
+    CONSERVATION_INVARIANT, CRUCIBLE_MEASUREMENT_EXPORT_SCHEMA, ENERGY_MONOTONE_INVARIANT,
+    SCIENTIFIC_RUNTIME_SCHEMA,
 };
 use symbol_graph::{verify_symbol_graph_receipt, SymbolGraphReceipt, SYMBOL_GRAPH_RECEIPT};
 
@@ -6438,10 +6439,11 @@ fn cmd_run(
     let invariant_name = match invariant {
         "energy-monotone" => ENERGY_MONOTONE_INVARIANT,
         "conservation" => CONSERVATION_INVARIANT,
+        "bounded" => BOUNDED_INVARIANT,
         other => {
             if emit_receipt.is_some() {
                 eprintln!(
-                    "Unknown --invariant '{other}'. Supported: energy-monotone, conservation"
+                    "Unknown --invariant '{other}'. Supported: energy-monotone, conservation, bounded"
                 );
                 return Err(1);
             }

@@ -1,0 +1,32 @@
+// Discrete maximum-principle NEGATIVE fixture (OVERSHOOT).
+//
+// Forward (explicit) Euler on the harmonic oscillator x' = v, v' = -x is NOT
+// symplectic: it injects energy every step, so the invariant E = x^2 + v^2
+// grows by a factor (1 + dt^2) per step instead of staying constant. E starts
+// at 1.0 and rises monotonically above it, so `--invariant bounded` FAILs: the
+// tracked quantity overshoots its initial value (the textbook signature of a
+// CFL/stability violation).
+//
+// The companion rotation kernel (conservation_rotation.bld) uses an orthogonal
+// step that conserves E exactly; this one is its unstable sibling. Paired
+// negative fixture for bounded_oscillation.bld: run with `--negative-fixture`
+// for FAIL_EXPECTED, without it for FAIL_UNEXPECTED.
+
+fn main() ~ Console {
+    let dt: f64 = 0.1;
+    let mut x: f64 = 1.0;
+    let mut v: f64 = 0.0;
+    let mut step: i32 = 0;
+    while step < 64 {
+        // Print the energy BEFORE stepping, so series[0] = 1.0 is the true
+        // initial value the maximum principle references.
+        let e: f64 = x ** 2 + v ** 2;
+        println!("{}", e);
+        // Explicit-Euler update (energy-injecting).
+        let xn: f64 = x + dt * v;
+        let vn: f64 = v - dt * x;
+        x = xn;
+        v = vn;
+        step = step + 1;
+    }
+}

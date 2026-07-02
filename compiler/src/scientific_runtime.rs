@@ -44,6 +44,19 @@ pub const ENERGY_MONOTONE_TOLERANCE: f64 = 1e-12;
 /// scheme) drifts by an O(1) amount that this bound still catches decisively.
 pub const CONSERVATION_TOLERANCE: f64 = 1e-9;
 
+/// The invariant name emitted for the discrete maximum-principle check: the
+/// measured scalar must never RISE above its initial value (a one-sided upper
+/// bound). Distinct from monotone (which forbids any step-wise increase) and
+/// from conservation (which forbids any deviation): a bounded quantity may
+/// oscillate and decay freely, it just may never exceed where it started.
+pub const BOUNDED_INVARIANT: &str = "bounded_by_initial_maximum";
+
+/// Tolerance used by the maximum-principle check. Same scale as conservation:
+/// a genuinely bounded quantity sits at or below its initial value to roundoff,
+/// while a real overshoot (an unstable, energy-injecting scheme) exceeds it by
+/// an O(1) amount this bound catches decisively.
+pub const BOUNDED_TOLERANCE: f64 = 1e-9;
+
 /// Provenance reference to the Telos pass-0009 research probe (reference only;
 /// never matched byte-wise, per the determinism decision in the design).
 pub const RESEARCH_SOURCE_HASH: &str =
@@ -488,6 +501,40 @@ pub fn conserved_quantity_constant(series: &[f64], tol: f64) -> InvariantObserve
     }
 }
 
+/// Discrete maximum-principle invariant over a measured series: the scalar must
+/// never rise above its INITIAL value by more than `tol` (a one-sided upper
+/// bound). A "violation" is a step whose value exceeds `series[0] + tol`.
+///
+/// Like conservation the reference is the FIRST value (stable under prefixing,
+/// so a truncated re-run prefix cannot shift it), but only the UPPER side is
+/// fenced: the quantity may fall arbitrarily far. Step 0 exceeds its own
+/// reference by exactly 0, so it is never a violation. This is the discrete
+/// maximum principle a stable diffusion/oscillation obeys; an unstable
+/// (energy-injecting) scheme overshoots and is caught. Records the first
+/// offending step and the initial/final values; the verdict is derived in
+/// [`invariant_passes`] (PASS requires at least two points AND zero violations).
+pub fn bounded_by_initial_maximum(series: &[f64], tol: f64) -> InvariantObserved {
+    let reference = series.first().copied();
+    let mut violation_count = 0usize;
+    let mut first_violation_step = None;
+    if let Some(ref0) = reference {
+        for (k, &value) in series.iter().enumerate() {
+            if value > ref0 + tol {
+                violation_count += 1;
+                if first_violation_step.is_none() {
+                    first_violation_step = Some(k);
+                }
+            }
+        }
+    }
+    InvariantObserved {
+        violation_count,
+        first_violation_step,
+        initial_value: reference,
+        final_value: series.last().copied(),
+    }
+}
+
 /// The invariant PASSes iff the series has at least two points and no step
 /// violated the invariant beyond tolerance. Uniform across the family: an
 /// invariant's whole verdict is "enough points to witness it, and zero
@@ -496,11 +543,23 @@ pub fn invariant_passes(series_len: usize, observed: &InvariantObserved) -> bool
     series_len >= 2 && observed.violation_count == 0
 }
 
+/// Every invariant this build implements and can re-check. The single source of
+/// truth for the family: `is_known_invariant` and the verify-side "unsupported
+/// invariant" diagnostic both read it, so adding an invariant here cannot leave
+/// a hardcoded list stale (the failure mode the C1 review caught in the export
+/// evidence). Each name here MUST have arms in `invariant_tolerance`,
+/// `invariant_expectation`, and `evaluate_invariant`.
+pub const KNOWN_INVARIANTS: &[&str] = &[
+    ENERGY_MONOTONE_INVARIANT,
+    CONSERVATION_INVARIANT,
+    BOUNDED_INVARIANT,
+];
+
 /// Whether `name` is an invariant this build implements (and can therefore
 /// re-check). The oracle binding is pinned to this: a receipt naming an
 /// invariant not in this set is `INVARIANT_UNSUPPORTED`.
 pub fn is_known_invariant(name: &str) -> bool {
-    name == ENERGY_MONOTONE_INVARIANT || name == CONSERVATION_INVARIANT
+    KNOWN_INVARIANTS.contains(&name)
 }
 
 /// The FIXED tolerance for a named invariant. Tolerance is a property of the
@@ -511,6 +570,7 @@ pub fn is_known_invariant(name: &str) -> bool {
 pub fn invariant_tolerance(name: &str) -> f64 {
     match name {
         CONSERVATION_INVARIANT => CONSERVATION_TOLERANCE,
+        BOUNDED_INVARIANT => BOUNDED_TOLERANCE,
         _ => ENERGY_MONOTONE_TOLERANCE,
     }
 }
@@ -519,6 +579,7 @@ pub fn invariant_tolerance(name: &str) -> f64 {
 pub fn invariant_expectation(name: &str) -> &'static str {
     match name {
         CONSERVATION_INVARIANT => "no step deviates the conserved quantity beyond tolerance",
+        BOUNDED_INVARIANT => "no step exceeds the initial value beyond tolerance",
         _ => "no step increases energy beyond tolerance",
     }
 }
@@ -529,6 +590,7 @@ pub fn invariant_expectation(name: &str) -> &'static str {
 pub fn evaluate_invariant(name: &str, series: &[f64], tol: f64) -> InvariantObserved {
     match name {
         CONSERVATION_INVARIANT => conserved_quantity_constant(series, tol),
+        BOUNDED_INVARIANT => bounded_by_initial_maximum(series, tol),
         _ => energy_monotone_nonincreasing(series, tol),
     }
 }
@@ -1110,8 +1172,9 @@ pub fn evaluate_scientific_runtime_receipt(
     // invariant, but never one the verifier cannot execute.
     if !is_known_invariant(&receipt.invariant.name) {
         eprintln!(
-            "Error: unsupported invariant `{}` (this verifier implements `{}` and `{}`)",
-            receipt.invariant.name, ENERGY_MONOTONE_INVARIANT, CONSERVATION_INVARIANT
+            "Error: unsupported invariant `{}` (this verifier implements {})",
+            receipt.invariant.name,
+            KNOWN_INVARIANTS.join(", ")
         );
         return Err(verify_failure_class(json, "INVARIANT_UNSUPPORTED", 1));
     }
@@ -2138,7 +2201,16 @@ mod tests {
     fn invariant_registry_dispatches_by_name() {
         assert!(is_known_invariant(ENERGY_MONOTONE_INVARIANT));
         assert!(is_known_invariant(CONSERVATION_INVARIANT));
+        assert!(is_known_invariant(BOUNDED_INVARIANT));
         assert!(!is_known_invariant("no_such_invariant"));
+        // Every name the family advertises must have a real tolerance and a
+        // real evaluator arm (the KNOWN_INVARIANTS list is the single source of
+        // truth; this guards against a name being advertised but unimplemented).
+        for name in KNOWN_INVARIANTS {
+            assert!(is_known_invariant(name));
+            let _ = invariant_expectation(name);
+            let _ = evaluate_invariant(name, &[1.0, 1.0], invariant_tolerance(name));
+        }
         assert_eq!(
             invariant_tolerance(CONSERVATION_INVARIANT),
             CONSERVATION_TOLERANCE
@@ -2147,6 +2219,7 @@ mod tests {
             invariant_tolerance(ENERGY_MONOTONE_INVARIANT),
             ENERGY_MONOTONE_TOLERANCE
         );
+        assert_eq!(invariant_tolerance(BOUNDED_INVARIANT), BOUNDED_TOLERANCE);
 
         // A monotone-DECREASING series distinguishes the two evaluators: it has
         // zero monotone violations (non-increasing) but DOES deviate from its
@@ -2256,6 +2329,149 @@ mod tests {
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
             |_, _| Ok(rerun(vec![2.0, 2.0, 2.0])),
+        );
+        assert_eq!(result, Err(1), "a non-canonical tolerance must be rejected");
+    }
+
+    #[test]
+    fn bounded_holds_for_a_capped_series() {
+        // Every value sits at or below the initial 1.0, so the maximum
+        // principle holds even though the series rises and falls (index 3
+        // returns to exactly the reference, which is not an overshoot).
+        let obs = bounded_by_initial_maximum(&[1.0, 0.5, 0.8, 1.0, 0.3], BOUNDED_TOLERANCE);
+        assert_eq!(obs.violation_count, 0);
+        assert!(invariant_passes(5, &obs));
+        // Roundoff-scale rise above the reference is still within bound.
+        let obs = bounded_by_initial_maximum(&[1.0, 1.0 + 1e-12], BOUNDED_TOLERANCE);
+        assert_eq!(obs.violation_count, 0);
+    }
+
+    #[test]
+    fn bounded_flags_an_overshoot() {
+        // Values that exceed the initial 1.0 beyond tolerance: indices 1 and 3
+        // overshoot; the quantity dipping in between does not matter.
+        let obs = bounded_by_initial_maximum(&[1.0, 1.5, 0.5, 2.0], BOUNDED_TOLERANCE);
+        assert_eq!(obs.violation_count, 2);
+        assert_eq!(obs.first_violation_step, Some(1));
+        assert!(!invariant_passes(4, &obs));
+        assert_eq!(obs.initial_value, Some(1.0));
+        assert_eq!(obs.final_value, Some(2.0));
+    }
+
+    #[test]
+    fn bounded_is_distinct_from_the_other_invariants() {
+        // A series that dips and returns to its initial value is the witness
+        // that `bounded` is a genuinely separate check: it exceeds nothing
+        // (bounded PASSes) yet it deviates (conservation flags it) and it rises
+        // (monotone flags it). One series, three different verdicts.
+        let dip_return = [1.0, 0.0, 1.0];
+        let bounded = evaluate_invariant(BOUNDED_INVARIANT, &dip_return, BOUNDED_TOLERANCE);
+        assert_eq!(bounded.violation_count, 0, "bounded accepts the capped dip");
+        let cons = evaluate_invariant(CONSERVATION_INVARIANT, &dip_return, CONSERVATION_TOLERANCE);
+        assert_eq!(cons.violation_count, 1, "conservation flags the deviation");
+        let mono = evaluate_invariant(
+            ENERGY_MONOTONE_INVARIANT,
+            &dip_return,
+            ENERGY_MONOTONE_TOLERANCE,
+        );
+        assert_eq!(
+            mono.violation_count, 1,
+            "monotone flags the rise back to 1.0"
+        );
+    }
+
+    #[test]
+    fn verify_round_trips_a_bounded_receipt() {
+        let path = Path::new("k.bld");
+        let receipt = build_scientific_runtime_receipt(base_inputs_for(
+            BOUNDED_INVARIANT,
+            path,
+            vec![1.0, 0.5, 1.0],
+            true,
+            false,
+        ));
+        assert_eq!(receipt.invariant.name, BOUNDED_INVARIANT);
+        assert_eq!(receipt.oracle.name, BOUNDED_INVARIANT);
+        assert_eq!(receipt.invariant.tolerance, BOUNDED_TOLERANCE);
+        assert_eq!(receipt.receipt_status, "PASS");
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let sd = receipt.source_digest.clone();
+        let gd = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+            |_, _| Ok(rerun(vec![1.0, 0.5, 1.0])),
+        );
+        assert!(
+            result.is_ok(),
+            "a faithful bounded receipt must verify: {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_fails_a_faithful_bounded_overshoot() {
+        // A quantity that overshoots its initial value faithfully reproduces a
+        // FAIL_UNEXPECTED, so `receipt verify` exits 3 (not 0).
+        let path = Path::new("k.bld");
+        let receipt = build_scientific_runtime_receipt(base_inputs_for(
+            BOUNDED_INVARIANT,
+            path,
+            vec![1.0, 2.0, 1.0],
+            true,
+            false,
+        ));
+        assert_eq!(receipt.receipt_status, "FAIL_UNEXPECTED");
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let sd = receipt.source_digest.clone();
+        let gd = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+            |_, _| Ok(rerun(vec![1.0, 2.0, 1.0])),
+        );
+        assert_eq!(
+            result,
+            Err(3),
+            "a faithful bounded overshoot must exit 3 (FAIL_UNEXPECTED)"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_a_non_canonical_bounded_tolerance() {
+        // Bounded's tolerance is pinned like every family member's: a resealed
+        // loosened tolerance is rejected (FIELD_CONTRACT_VIOLATION).
+        let path = Path::new("k.bld");
+        let mut receipt = build_scientific_runtime_receipt(base_inputs_for(
+            BOUNDED_INVARIANT,
+            path,
+            vec![1.0, 0.5, 1.0],
+            true,
+            false,
+        ));
+        receipt.invariant.tolerance = 1e6;
+        seal_receipt(&mut receipt);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let sd = receipt.source_digest.clone();
+        let gd = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+            |_, _| Ok(rerun(vec![1.0, 0.5, 1.0])),
         );
         assert_eq!(result, Err(1), "a non-canonical tolerance must be rejected");
     }
