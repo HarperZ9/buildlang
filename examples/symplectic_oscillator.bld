@@ -1,0 +1,39 @@
+// Symplectic (leapfrog / velocity-Verlet) harmonic-oscillator kernel.
+//
+// The harmonic oscillator q'' = -q (Hamiltonian H = 0.5*(p^2 + q^2)) integrated
+// with velocity Verlet is SYMPLECTIC: its energy does not drift secularly. H
+// oscillates within a bounded O(dt^2) band around its initial value forever, it
+// never grows without bound. This is the defining property that distinguishes a
+// symplectic scheme from a naive one, and it is exactly what `--invariant
+// conserved-band` witnesses: H stays within a fixed error budget of H_0 for all
+// steps.
+//
+// Starting mid-oscillation (q = p = 1, so H_0 = 1.0 is NOT a turning point),
+// H swings both below AND slightly ABOVE H_0 within a ~1.25e-3 band. So this
+// kernel is a three-way distinctness witness: `--invariant conservation`
+// (1e-9) FAILs (H deviates 1.25e-3 from H_0), `--invariant bounded` FAILs (H
+// rises above H_0), and only `--invariant conserved-band`, with its calibrated
+// error budget, PASSes.
+//
+// Companion negative fixture: euler_oscillator.bld (explicit Euler, whose energy
+// grows secularly and leaves the band).
+
+fn main() ~ Console {
+    let dt: f64 = 0.1;
+    let mut q: f64 = 1.0;
+    let mut p: f64 = 1.0;
+    let mut step: i32 = 0;
+    while step < 2000 {
+        // Energy H = 0.5*(p^2 + q^2), printed once per step.
+        let h: f64 = 0.5 * (p ** 2 + q ** 2);
+        println!("{}", h);
+        // Velocity Verlet for q'' = -q (acceleration a = -q).
+        let a: f64 = 0.0 - q;
+        let q_new: f64 = q + p * dt + 0.5 * a * dt ** 2;
+        let a_new: f64 = 0.0 - q_new;
+        let p_new: f64 = p + 0.5 * (a + a_new) * dt;
+        q = q_new;
+        p = p_new;
+        step = step + 1;
+    }
+}

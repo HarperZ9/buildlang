@@ -71,8 +71,10 @@ Flags on the `run` subcommand (all additive; absent `--emit-receipt`, none of th
   initial value), `bounded` (the observed scalar never rises above its initial
   value: the discrete maximum principle), `energy-identity` (each value is a
   per-step energy-balance residual that stays within tolerance of zero), or
-  `relation` (the columns of each row must agree; requires `--columns >= 2`).
-  Any other value is an error reported **before** compiling.
+  `relation` (the columns of each row must agree; requires `--columns >= 2`), or
+  `conserved-band` (the scalar stays within a fixed error budget of its initial
+  value: approximate conservation, e.g. a symplectic integrator's energy). Any
+  other value is an error reported **before** compiling.
 - `--columns <N>` sets how many columns each row of the captured series holds
   (default `1`). `>= 2` is required by `--invariant relation` and rejected by
   the single-scalar invariants.
@@ -197,6 +199,7 @@ a receipt cannot weaken its own check.
 | `bounded` | `bounded_by_initial_maximum` | `s[k] > s[0] + tol` (rose above the initial value) | `1e-9` |
 | `energy-identity` | `energy_identity_residual` | `abs(s[k]) > tol` (energy-balance residual is not zero) | `1e-9` |
 | `relation` (`--columns N>=2`) | `relation_columns_agree` | a row's columns differ by more than `tol` (the verifier compares them) | `1e-9` |
+| `conserved-band` | `conserved_within_band` | `abs(s[k] - s[0]) > tol` (left a fixed error budget of the initial value) | `5e-3` |
 
 The `conservation` and `bounded` references are both `s[0]` (the initial value), not the mean,
 so a re-run that reproduces a different-length prefix cannot shift the reference. The checks
@@ -211,6 +214,20 @@ different verdicts across the family, which is exactly why they are separate inv
 looser `1e-9` tolerance (vs the `1e-12` monotone bound) reflects that a genuinely conserved,
 bounded, or balanced discrete quantity still accumulates roundoff over many steps, while a real
 leak, overshoot, or dropped balance term drifts by an amount the bound still catches decisively.
+
+`conserved-band` is APPROXIMATE conservation: the quantity must stay within a fixed error
+BUDGET (`5e-3`) of its initial value, forever. It reuses conservation's two-sided evaluator with
+a looser, calibrated tolerance, so it accepts a quantity that is only approximately conserved
+while still rejecting one that drifts away. Its motivating case is symplectic integration: the
+reference kernel (`examples/symplectic_oscillator.bld`) is a leapfrog / velocity-Verlet harmonic
+oscillator whose energy `H = 0.5*(p^2 + q^2)` oscillates in a measured ~1.25e-3 band around
+`H_0` forever, with no secular drift, so `5e-3` clears it ~4x; the negative fixture
+(`examples/euler_oscillator.bld`) is explicit Euler, whose energy grows by `(1 + dt^2)` per step
+and leaves the band within two steps. Starting mid-oscillation (`q = p = 1`), the symplectic
+energy rises slightly ABOVE `H_0` and dips below, so the same series FAILs both `conservation`
+(it deviates beyond roundoff) and `bounded` (it rises above the start); only `conserved-band`
+accepts it, which is exactly why it is a separate invariant. The tolerance is an ABSOLUTE budget
+(like the whole family): a kernel must be resolved, and scaled, to fit it.
 
 `relation` is the family's first **cross-column** invariant, and the first whose check the
 VERIFIER computes rather than trusting a residual the kernel printed. With `--columns N` the
@@ -267,8 +284,11 @@ its residual is roundoff and it PASSes) and `examples/energy_identity_broken.bld
 kernel with the `r**2 * Lu2` correction dropped, so its residual is O(r^2) and it FAILs);
 `relation` has `examples/relation_double_angle.bld` (`sin(2t)` computed two ways, which agree,
 so it PASSes) and `examples/relation_double_angle_broken.bld` (column 1 drops the factor of 2,
-so the two columns disagree and it FAILs). Run any negative kernel with `--negative-fixture`
-for a `FAIL_EXPECTED` receipt.
+so the two columns disagree and it FAILs); `conserved-band` has
+`examples/symplectic_oscillator.bld` (a leapfrog oscillator whose energy stays in an O(dt^2)
+band, so it PASSes) and `examples/euler_oscillator.bld` (explicit Euler, whose energy drifts out
+of the band, so it FAILs). Run any negative kernel with `--negative-fixture` for a
+`FAIL_EXPECTED` receipt.
 
 ## 5. The heat-equation kernel example
 
