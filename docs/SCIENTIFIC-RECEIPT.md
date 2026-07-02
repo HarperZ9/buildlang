@@ -295,7 +295,17 @@ it FAILs), and the same invariant applied to a REACTION NETWORK in
 `examples/reaction_atom_balance.bld` (the reversible reaction `A + B <=> C` conserves the atom
 count `[A] + [C]` to roundoff as it proceeds, so it PASSes) with
 `examples/reaction_atom_balance_broken.bld` (a stoichiometry bug that produces two `C` per event
-drifts the balance and FAILs); `bounded` has `examples/bounded_oscillation.bld` (an undamped oscillator's `x^2`
+drifts the balance and FAILs), and the same invariant applied to a QUANTUM STATE in
+`examples/born_rule_normalization.bld` (a single qubit starting from the equal superposition
+`(|0> + |1>)/sqrt(2)` and evolved by a unitary X-rotation keeps its total Born probability
+`sum |psi_i|^2 = 1` to roundoff, so it PASSes; the gate drives both amplitudes' imaginary parts
+nonzero, so they are genuinely complex, whereas conservation_rotation.bld is a purely real
+geometric rotation) with
+`examples/born_rule_leaky.bld` (a non-unitary gain inflates the probability, so `conservation`
+FAILs and the receipt catches a gate that breaks the probability-conservation law unitarity
+guarantees); this is the roundoff-crisp shadow of the Born rule, while the deeper Carcassi and
+Aidala entropy equivalence (AoP Brief 003) is information-theoretic and out of scope for v0;
+`bounded` has `examples/bounded_oscillation.bld` (an undamped oscillator's `x^2`
 dips to 0 and returns to its initial `1.0` without ever exceeding it, so it PASSes) and
 `examples/bounded_overshoot.bld` (an explicit-Euler oscillator injects energy, so `E = x^2 +
 v^2` grows past its initial value and it FAILs); `energy-identity` has
