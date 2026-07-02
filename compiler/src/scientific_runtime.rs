@@ -1217,7 +1217,8 @@ pub const RECEIPT_CHAIN_SCHEMA: &str = "buildlang-scientific-receipt-chain/v0";
 /// substituting a different (even validly-sealed) receipt detectable.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ReceiptChainLink {
-    /// Position in the chain (0-based), for human reading and drift detection.
+    /// Position in the chain (0-based). Bound into the chain seal, so a tampered
+    /// index is caught as a chain seal mismatch.
     pub index: usize,
     /// Path to the member receipt file.
     pub receipt: String,
@@ -1244,7 +1245,13 @@ pub struct ReceiptChainManifest {
 /// Reordering, adding, or dropping a link changes this hash, so the chain is a
 /// tamper-evident ordered bundle independent of each member's own seal.
 pub fn receipt_chain_seal_hex(links: &[ReceiptChainLink]) -> String {
-    let ordered: Vec<&str> = links.iter().map(|l| l.receipt_seal.as_str()).collect();
+    // Bind BOTH the position index and the member seal, in order, so a tampered
+    // index (not just a reordered or swapped member) is caught as a chain seal
+    // mismatch. Index is therefore a witnessed field, not decorative.
+    let ordered: Vec<(usize, &str)> = links
+        .iter()
+        .map(|l| (l.index, l.receipt_seal.as_str()))
+        .collect();
     let canonical = serde_json::to_vec(&ordered).expect("serialize chain seal input");
     source_digest_hex(&canonical)
 }
@@ -2562,6 +2569,11 @@ mod tests {
         // Dropping a member changes the chain seal.
         let dropped = vec![mk(0, "aaa"), mk(1, "bbb")];
         assert_ne!(receipt_chain_seal_hex(&dropped), seal);
+
+        // Tampering an index (same seals, wrong position) changes the chain seal:
+        // index is bound, not decorative.
+        let index_tampered = vec![mk(5, "aaa"), mk(1, "bbb"), mk(2, "ccc")];
+        assert_ne!(receipt_chain_seal_hex(&index_tampered), seal);
 
         // The identical ordered membership reproduces the chain seal.
         let same = vec![mk(0, "aaa"), mk(1, "bbb"), mk(2, "ccc")];
