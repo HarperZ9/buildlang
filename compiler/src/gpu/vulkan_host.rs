@@ -170,7 +170,9 @@ unsafe fn dispatch_inner(
                 .create_shader_module(&sm_ci, None)
                 .map_err(|e| format!("create shader module: {e}"))?;
 
-            let entry_c = std::ffi::CString::new(entry).unwrap();
+            let entry_c = std::ffi::CString::new(entry).map_err(|_| {
+                format!("entry point name contains an interior NUL byte: {entry:?}")
+            })?;
             let stage = vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::COMPUTE)
                 .module(shader)
