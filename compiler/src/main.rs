@@ -46,6 +46,9 @@ use scientific_runtime::{
     CRUCIBLE_MEASUREMENT_EXPORT_SCHEMA, ENERGY_IDENTITY_INVARIANT, ENERGY_MONOTONE_INVARIANT,
     NON_NEGATIVE_INVARIANT, RELATION_INVARIANT, SCIENTIFIC_RUNTIME_SCHEMA,
 };
+use scientific_runtime::{
+    build_receipt_chain, receipt_chain_seal_hex, ReceiptChainManifest, RECEIPT_CHAIN_SCHEMA,
+};
 use symbol_graph::{verify_symbol_graph_receipt, SymbolGraphReceipt, SYMBOL_GRAPH_RECEIPT};
 
 fn parse_codegen_target(target: &str) -> Result<Target, String> {
@@ -494,6 +497,12 @@ enum ReceiptCommands {
         #[arg(long)]
         self_test: bool,
     },
+    /// Build or verify a receipt chain: an ordered, tamper-evident bundle of
+    /// scientific-runtime receipts carrying one re-checkable provenance thread
+    Chain {
+        #[command(subcommand)]
+        command: ChainCommands,
+    },
     /// Export a scientific-runtime receipt as a Crucible-ingestible measurement
     /// (the Telos bridge). The receipt is RE-VERIFIED first and the measurement's
     /// deviation is derived from the fresh re-run, never copied from stored
@@ -519,6 +528,25 @@ enum ReceiptCommands {
         /// every expected failure as DRIFT (there is no thesis-side reframe).
         #[arg(long)]
         claim_expects_failure: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ChainCommands {
+    /// Build a chain manifest over an ordered list of scientific-runtime receipts
+    Build {
+        /// Member receipt files, in chain order (two or more)
+        #[arg(required = true, num_args = 1..)]
+        receipts: Vec<PathBuf>,
+        /// Output path for the chain manifest JSON (`-` = stdout)
+        #[arg(short, long, value_name = "PATH", default_value = "-")]
+        output: PathBuf,
+    },
+    /// Verify a chain manifest: re-check the chain seal, pin each member to its
+    /// recorded seal, and re-verify each member receipt
+    Verify {
+        /// Chain manifest JSON written by `buildc receipt chain build`
+        manifest: PathBuf,
     },
 }
 
@@ -1551,6 +1579,12 @@ fn cmd_receipt(command: ReceiptCommands) -> Result<(), i32> {
             &claim_sha256,
             claim_expects_failure,
         ),
+        ReceiptCommands::Chain { command } => match command {
+            ChainCommands::Build { receipts, output } => {
+                cmd_receipt_chain_build(&receipts, &output)
+            }
+            ChainCommands::Verify { manifest } => cmd_receipt_chain_verify(&manifest),
+        },
     }
 }
 
@@ -1639,6 +1673,162 @@ fn cmd_receipt_verify_self_test(receipt_path: &Path) -> Result<(), i32> {
         );
         Err(1)
     }
+}
+
+/// Report a stable chain `failure_class` on stderr and return the exit code, so
+/// tests and CI can pin the specific break instead of accepting "chain failed".
+fn chain_failure(code: &str, exit: i32) -> i32 {
+    eprintln!("failure_class: {code}");
+    exit
+}
+
+/// `receipt chain build`: assemble an ordered chain manifest over member
+/// scientific-runtime receipts. Each member's seal is pinned into the chain and
+/// the chain seal binds their order and membership.
+fn cmd_receipt_chain_build(receipts: &[PathBuf], output: &Path) -> Result<(), i32> {
+    if receipts.len() < 2 {
+        eprintln!("Error: a receipt chain needs at least two member receipts");
+        return Err(1);
+    }
+    let mut members: Vec<(String, String, String)> = Vec::new();
+    for path in receipts {
+        let receipt: serde_json::Value = read_json(path).map_err(|code| {
+            eprintln!("Error: could not read receipt '{}'", path.display());
+            code
+        })?;
+        let schema = receipt.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+        if schema != SCIENTIFIC_RUNTIME_SCHEMA {
+            eprintln!(
+                "Error: '{}' is not a scientific-runtime receipt (schema `{}`)",
+                path.display(),
+                schema
+            );
+            return Err(1);
+        }
+        let seal = receipt
+            .pointer("/seal/hex")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if seal.is_empty() {
+            eprintln!("Error: receipt '{}' has no seal", path.display());
+            return Err(1);
+        }
+        let source = receipt.get("source").and_then(|v| v.as_str()).unwrap_or("");
+        members.push((
+            path.to_string_lossy().to_string(),
+            source.to_string(),
+            seal.to_string(),
+        ));
+    }
+
+    let manifest = build_receipt_chain(&members);
+    let text = serde_json::to_string_pretty(&manifest).map_err(|err| {
+        eprintln!("Error serializing chain manifest: {err}");
+        1
+    })?;
+    if output == Path::new("-") {
+        println!("{text}");
+    } else {
+        let tmp = output.with_extension("tmp");
+        std::fs::write(&tmp, format!("{text}\n")).map_err(|err| {
+            eprintln!("Error writing chain manifest '{}': {err}", tmp.display());
+            let _ = std::fs::remove_file(&tmp);
+            1
+        })?;
+        std::fs::rename(&tmp, output).map_err(|err| {
+            eprintln!(
+                "Error finalizing chain manifest '{}': {err}",
+                output.display()
+            );
+            1
+        })?;
+    }
+    Ok(())
+}
+
+/// `receipt chain verify`: re-check the chain seal (order and membership), pin
+/// each member to its recorded seal, and re-verify each member receipt through
+/// the real `receipt verify` path. Any break in the ordered bundle fails with a
+/// stable chain `failure_class`.
+fn cmd_receipt_chain_verify(manifest_path: &Path) -> Result<(), i32> {
+    let manifest: ReceiptChainManifest =
+        read_json(manifest_path).map_err(|_| chain_failure("CHAIN_MALFORMED", 1))?;
+    if manifest.schema != RECEIPT_CHAIN_SCHEMA {
+        eprintln!("Error: unsupported chain schema `{}`", manifest.schema);
+        return Err(chain_failure("CHAIN_SCHEMA_UNSUPPORTED", 1));
+    }
+    if manifest.links.len() < 2 {
+        eprintln!("Error: a receipt chain needs at least two links");
+        return Err(chain_failure("CHAIN_MALFORMED", 1));
+    }
+
+    // 1. Chain integrity: the chain seal must bind the exact ordered member seals.
+    let recomputed = receipt_chain_seal_hex(&manifest.links);
+    if !recomputed.eq_ignore_ascii_case(&manifest.chain_seal.hex) {
+        eprintln!(
+            "Error: chain seal mismatch: manifest {}, recomputed {}",
+            manifest.chain_seal.hex, recomputed
+        );
+        return Err(chain_failure("CHAIN_SEAL_MISMATCH", 1));
+    }
+
+    // 2. Each member: pinned seal, then full re-verification of the receipt.
+    let exe = std::env::current_exe().map_err(|err| {
+        eprintln!("Error: cannot locate the buildc binary: {err}");
+        1
+    })?;
+    for link in &manifest.links {
+        let receipt_path = Path::new(&link.receipt);
+        let receipt: serde_json::Value = match read_json(receipt_path) {
+            Ok(value) => value,
+            Err(_) => {
+                eprintln!(
+                    "Error: chain member '{}' is missing or unreadable",
+                    link.receipt
+                );
+                return Err(chain_failure("CHAIN_LINK_MISSING", 1));
+            }
+        };
+        let seal = receipt
+            .pointer("/seal/hex")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !seal.eq_ignore_ascii_case(&link.receipt_seal) {
+            eprintln!(
+                "Error: chain member '{}' seal {} does not match its pinned seal {}",
+                link.receipt, seal, link.receipt_seal
+            );
+            return Err(chain_failure("CHAIN_LINK_TAMPERED", 1));
+        }
+        let output = match std::process::Command::new(&exe)
+            .args(["receipt", "verify"])
+            .arg(receipt_path)
+            .output()
+        {
+            Ok(output) => output,
+            Err(err) => {
+                eprintln!(
+                    "Error: could not re-verify chain member '{}': {err}",
+                    link.receipt
+                );
+                return Err(chain_failure("CHAIN_LINK_UNVERIFIED", 1));
+            }
+        };
+        if !output.status.success() {
+            eprint!("{}", String::from_utf8_lossy(&output.stderr));
+            eprintln!("Error: chain member '{}' did not re-verify", link.receipt);
+            return Err(chain_failure(
+                "CHAIN_LINK_UNVERIFIED",
+                output.status.code().unwrap_or(1),
+            ));
+        }
+    }
+
+    println!(
+        "chain verified: {} members, sealed in order and each receipt re-verified",
+        manifest.links.len()
+    );
+    Ok(())
 }
 
 /// The Telos/Crucible bridge: export a scientific-runtime receipt as one

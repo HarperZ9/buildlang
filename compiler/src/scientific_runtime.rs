@@ -1209,6 +1209,77 @@ pub fn build_self_test_cases(
     Ok(cases)
 }
 
+/// Schema tag for a receipt chain manifest (see [`ReceiptChainManifest`]).
+pub const RECEIPT_CHAIN_SCHEMA: &str = "buildlang-scientific-receipt-chain/v0";
+
+/// One link in a receipt chain: a reference to a member receipt plus the exact
+/// seal that receipt carried when the chain was built. Pinning the seal makes
+/// substituting a different (even validly-sealed) receipt detectable.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ReceiptChainLink {
+    /// Position in the chain (0-based). Bound into the chain seal, so a tampered
+    /// index is caught as a chain seal mismatch.
+    pub index: usize,
+    /// Path to the member receipt file.
+    pub receipt: String,
+    /// The member receipt's sealed `source` field, for human reading.
+    pub source: String,
+    /// The member receipt's `seal.hex` at build time, pinned into the chain.
+    pub receipt_seal: String,
+}
+
+/// A receipt chain manifest: an ordered bundle of scientific-runtime receipts
+/// with a chain seal that binds their order and membership. It carries one
+/// re-checkable provenance thread over a multi-stage computation without
+/// changing the receipt schema itself. `receipt chain verify` re-checks the
+/// chain seal, pins each member to its recorded seal, and re-verifies each
+/// member receipt.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ReceiptChainManifest {
+    pub schema: String,
+    pub links: Vec<ReceiptChainLink>,
+    pub chain_seal: ScientificDigest,
+}
+
+/// Compute the chain seal over the ORDERED list of member receipt seals.
+/// Reordering, adding, or dropping a link changes this hash, so the chain is a
+/// tamper-evident ordered bundle independent of each member's own seal.
+pub fn receipt_chain_seal_hex(links: &[ReceiptChainLink]) -> String {
+    // Bind BOTH the position index and the member seal, in order, so a tampered
+    // index (not just a reordered or swapped member) is caught as a chain seal
+    // mismatch. Index is therefore a witnessed field, not decorative.
+    let ordered: Vec<(usize, &str)> = links
+        .iter()
+        .map(|l| (l.index, l.receipt_seal.as_str()))
+        .collect();
+    let canonical = serde_json::to_vec(&ordered).expect("serialize chain seal input");
+    source_digest_hex(&canonical)
+}
+
+/// Build a chain manifest from `(receipt_path, source, seal_hex)` triples in
+/// order. The chain seal is computed over the ordered member seals.
+pub fn build_receipt_chain(members: &[(String, String, String)]) -> ReceiptChainManifest {
+    let links: Vec<ReceiptChainLink> = members
+        .iter()
+        .enumerate()
+        .map(|(index, (receipt, source, seal))| ReceiptChainLink {
+            index,
+            receipt: receipt.clone(),
+            source: source.clone(),
+            receipt_seal: seal.clone(),
+        })
+        .collect();
+    let hex = receipt_chain_seal_hex(&links);
+    ReceiptChainManifest {
+        schema: RECEIPT_CHAIN_SCHEMA.to_string(),
+        links,
+        chain_seal: ScientificDigest {
+            algorithm: "sha256".to_string(),
+            hex,
+        },
+    }
+}
+
 /// The outcome of parsing a program's numeric stdout into a measurement series.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParsedSeries {
@@ -2477,6 +2548,46 @@ mod tests {
             r.seal.hex,
             "the seal-mismatch case must carry a stale seal"
         );
+    }
+
+    #[test]
+    fn receipt_chain_seal_binds_order_and_membership() {
+        let mk = |i: usize, seal: &str| ReceiptChainLink {
+            index: i,
+            receipt: format!("r{i}.json"),
+            source: format!("s{i}.bld"),
+            receipt_seal: seal.to_string(),
+        };
+        let links = vec![mk(0, "aaa"), mk(1, "bbb"), mk(2, "ccc")];
+        let seal = receipt_chain_seal_hex(&links);
+        assert_eq!(seal.len(), 64);
+
+        // Reordering the members changes the chain seal.
+        let reordered = vec![mk(0, "bbb"), mk(1, "aaa"), mk(2, "ccc")];
+        assert_ne!(receipt_chain_seal_hex(&reordered), seal);
+
+        // Dropping a member changes the chain seal.
+        let dropped = vec![mk(0, "aaa"), mk(1, "bbb")];
+        assert_ne!(receipt_chain_seal_hex(&dropped), seal);
+
+        // Tampering an index (same seals, wrong position) changes the chain seal:
+        // index is bound, not decorative.
+        let index_tampered = vec![mk(5, "aaa"), mk(1, "bbb"), mk(2, "ccc")];
+        assert_ne!(receipt_chain_seal_hex(&index_tampered), seal);
+
+        // The identical ordered membership reproduces the chain seal.
+        let same = vec![mk(0, "aaa"), mk(1, "bbb"), mk(2, "ccc")];
+        assert_eq!(receipt_chain_seal_hex(&same), seal);
+
+        // build_receipt_chain stores a manifest whose seal matches the input order.
+        let manifest = build_receipt_chain(&[
+            ("r0.json".into(), "s0.bld".into(), "aaa".into()),
+            ("r1.json".into(), "s1.bld".into(), "bbb".into()),
+            ("r2.json".into(), "s2.bld".into(), "ccc".into()),
+        ]);
+        assert_eq!(manifest.schema, RECEIPT_CHAIN_SCHEMA);
+        assert_eq!(manifest.chain_seal.hex, seal);
+        assert_eq!(manifest.links[1].index, 1);
     }
 
     #[test]
