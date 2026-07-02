@@ -1392,6 +1392,7 @@ pub fn evaluate_scientific_runtime_receipt(
     // bridge) decide what to do with it.
     Ok(ScientificVerifyReport {
         invariant_status: recomputed.invariant_status,
+        invariant_name: receipt.invariant.name.clone(),
         violation_count: recomputed.violation_count,
         receipt_status: recomputed.receipt_status,
         invariant_held: matches!(recomputed.receipt_status, "PASS" | "FAIL_EXPECTED"),
@@ -1415,6 +1416,10 @@ pub fn evaluate_scientific_runtime_receipt(
 /// Faithful does NOT mean the invariant held: `invariant_held` carries that.
 pub struct ScientificVerifyReport {
     pub invariant_status: &'static str,
+    /// The sealed invariant name (e.g. `conserved_quantity_constant`). Carried
+    /// so the export bridge labels the witnessed Crucible measurement with the
+    /// invariant the receipt ACTUALLY checked, never a hardcoded default.
+    pub invariant_name: String,
     pub violation_count: usize,
     pub receipt_status: &'static str,
     pub invariant_held: bool,
@@ -1507,7 +1512,7 @@ pub fn crucible_measurement_from_report(
         // the witnessing re-run reproduced it.
         format!("sealed_raw_stdout:sha256:{}", report.raw_stdout_digest_hex),
         format!("receipt_status:{}", report.receipt_status),
-        format!("invariant:{}", ENERGY_MONOTONE_INVARIANT),
+        format!("invariant:{}", report.invariant_name),
         format!("negative_fixture:{}", report.negative_fixture),
     ];
     if claim_expects_failure {
@@ -2747,6 +2752,7 @@ mod tests {
     ) -> ScientificVerifyReport {
         ScientificVerifyReport {
             invariant_status: if violation_count == 0 { "PASS" } else { "FAIL" },
+            invariant_name: ENERGY_MONOTONE_INVARIANT.to_string(),
             violation_count,
             receipt_status,
             invariant_held: matches!(receipt_status, "PASS" | "FAIL_EXPECTED"),
@@ -2789,6 +2795,56 @@ mod tests {
             .unwrap()
             .iter()
             .any(|e| e == "receipt_status:PASS"));
+    }
+
+    #[test]
+    fn export_labels_the_invariant_the_receipt_actually_checked() {
+        // The witnessed evidence must name the sealed invariant, not a
+        // hardcoded default: a conservation receipt exported through the bridge
+        // records `invariant:conserved_quantity_constant`, never the monotone
+        // name. (Regression for the C1 review finding: the export string was
+        // hardcoded to ENERGY_MONOTONE_INVARIANT and mislabeled every
+        // non-monotone receipt.)
+        let mut conservation = report_fixture("PASS", 0);
+        conservation.invariant_name = CONSERVATION_INVARIANT.to_string();
+        let row = crucible_measurement_from_report(
+            &conservation,
+            "claim-c",
+            &"b".repeat(64),
+            false,
+            "r.json",
+            &"f".repeat(64),
+            1000.0,
+        );
+        let evidence = row["evidence"].as_array().unwrap();
+        assert!(
+            evidence
+                .iter()
+                .any(|e| e == &format!("invariant:{}", CONSERVATION_INVARIANT)),
+            "conservation export must name conserved_quantity_constant: {evidence:?}"
+        );
+        assert!(
+            !evidence
+                .iter()
+                .any(|e| e == &format!("invariant:{}", ENERGY_MONOTONE_INVARIANT)),
+            "conservation export must NOT carry the monotone name: {evidence:?}"
+        );
+
+        // The monotone default still labels itself correctly.
+        let mono = crucible_measurement_from_report(
+            &report_fixture("PASS", 0),
+            "claim-m",
+            &"b".repeat(64),
+            false,
+            "r.json",
+            &"f".repeat(64),
+            1000.0,
+        );
+        assert!(mono["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e == &format!("invariant:{}", ENERGY_MONOTONE_INVARIANT)));
     }
 
     #[test]
