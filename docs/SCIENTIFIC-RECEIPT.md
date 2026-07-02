@@ -267,8 +267,10 @@ fixtures and CI pin the *specific* failure instead of accepting "anything failed
 | `SCHEMA_UNSUPPORTED` | missing or unrecognized `schema` | 1 |
 | `COMPILER_MISMATCH` | `compiler` is not `buildc` | 1 |
 | `OVERCLAIM_BOUNDARY_MISSING` | `not_claimed` omits `physical_law` | 1 |
-| `EXTRACTION_POLICY_MISMATCH` | the sealed series-extraction policy is not the one this verifier implements | 1 |
-| `ORACLE_KIND_UNSUPPORTED`, `ORACLE_BINDING_MISMATCH` | the oracle kind cannot be re-checked, or its name does not bind to the invariant | 1 |
+| `EXTRACTION_POLICY_MISMATCH` | the sealed series-extraction policy's version tag is not the one this verifier implements (prose after the tag is display text) | 1 |
+| `DIGEST_MALFORMED` | a sealed digest field is not a real sha256 (64 hex chars); an absent hash cannot masquerade as witnessed provenance | 1 |
+| `ORACLE_KIND_UNSUPPORTED`, `ORACLE_STATUS_UNSUPPORTED`, `ORACLE_BINDING_MISMATCH`, `INVARIANT_UNSUPPORTED` | the oracle/invariant block names a kind, status, or criterion this verifier does not implement; binding is pinned to the implementation, never to another sealed field | 1 |
+| `FENCE_STATUS_UNEXPECTED` | a telemetry/lineage fence was edited to claim availability v0 does not produce | 1 |
 | `TOOL_UNAVAILABLE` | no C compiler available for the re-run | 4 |
 | `REDERIVATION_FAILED` | the source could not be re-checked (missing file, check failure) | inner code |
 | `RERUN_FAILED` | the program could not be re-compiled or re-run | inner code |
