@@ -8,8 +8,18 @@
 > x effort. The governing lesson (verified against the sibling Crucible registry,
 > where 872/875 deviations were author-supplied and refutations never executed):
 > **a verifier that cannot fail proves nothing.**
+>
+> **Status at wind-down (2026-07-01): Wave 1 is SHIPPED** (merged to main
+> `5c952d3` after an adversarial review round whose 8 confirmed findings were
+> all fixed, including a per-program surface cross-check that closed a
+> live-reproduced escape). **Waves 2-4 are the vetted FUTURE roadmap: designed
+> and ranked, deliberately NOT in flight.** A partial wave-2 schema draft
+> (toolchain block, raw stdout digest, claims-boundary field) was implemented
+> to ~60% and then intentionally discarded at wind-down rather than left
+> half-merged; this document is its design of record, and re-implementation
+> should start from here, not from memory of that draft.
 
-## Wave 1: verifier falsification (branch `feat/verifier-falsification`)
+## Wave 1: verifier falsification - SHIPPED (main `5c952d3`)
 
 The anti-self-confirming sweep. Every item makes an existing green light falsifiable.
 
