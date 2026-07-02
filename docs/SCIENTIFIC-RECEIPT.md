@@ -451,6 +451,28 @@ depth: with a permissive last-duplicate-wins reader, a document carrying two
 seal-forgery vector. Non-finite JSON literals (`NaN`, `Infinity`) are likewise rejected at
 parse time.
 
+### Proving the verifier can FAIL (`--self-test`)
+
+A failure taxonomy is only worth trusting if the verifier can actually reach each class. The
+negative-fixture kernels close the can-it-FAIL gap on the invariants; `--self-test` closes the
+same gap on the verifier:
+
+```
+buildc receipt verify receipt.json --self-test
+```
+
+Given a valid scientific-runtime receipt, it tampers several distinct sealed fields and asserts
+that each tamper is rejected by the real verify path with its expected `failure_class`. Cases
+that keep the body well-formed are re-sealed (so the tamper passes the integrity gate and reaches
+the specific contract check under test); the seal-mismatch case is deliberately left unsealed.
+The current cases exercise five separate arms of the taxonomy: `COMPILER_MISMATCH` (foreign
+compiler tag), `SEAL_MISMATCH` (a witnessed value edited without re-sealing), `MALFORMED` (a
+required field removed), `FIELD_CONTRACT_VIOLATION` (a sealed tolerance loosened then re-sealed),
+and `INVARIANT_UNSUPPORTED` (an unknown invariant name, re-sealed). Every case is rejected before
+any program re-run, so `--self-test` needs no C toolchain. It exits 0 only if every tamper
+produced its expected class, and prints `self-test: N/N tampers rejected with the expected
+failure_class`.
+
 ### What the seal does and does not witness
 
 The re-run re-derives the source digests, the measurement count, and the verdict triple.
