@@ -30,9 +30,11 @@ convergent, the scheme is consistent, the parameters are physical, or the result
 reference solution. Those are the program author's responsibility, and the receipt makes no
 statement about them.
 
-v0 checks **one invariant over one scalar series** per receipt (from a small invariant family;
-see [The invariant family](#3-the-invariant-family)). Multi-column series and cross-series
-relation invariants are out of scope; see [Deferred](#deferred-tracked-follow-ons).
+v0 checks **one invariant over one captured series** per receipt (from a small invariant
+family; see [The invariant family](#3-the-invariant-family)). Most invariants read one scalar
+per step; the `relation` invariant reads `--columns N` values per row and checks a relation
+across them. Richer multi-column analytics beyond row agreement are out of scope; see
+[Deferred](#deferred-tracked-follow-ons).
 
 ## 1. Emitting a receipt (`buildc run --emit-receipt`)
 
@@ -67,9 +69,13 @@ Flags on the `run` subcommand (all additive; absent `--emit-receipt`, none of th
   `energy-monotone` (the default; the observed scalar never increases beyond
   tolerance), `conservation` (the observed scalar stays within tolerance of its
   initial value), `bounded` (the observed scalar never rises above its initial
-  value: the discrete maximum principle), or `energy-identity` (each value is a
-  per-step energy-balance residual that stays within tolerance of zero). Any
-  other value is an error reported **before** compiling.
+  value: the discrete maximum principle), `energy-identity` (each value is a
+  per-step energy-balance residual that stays within tolerance of zero), or
+  `relation` (the columns of each row must agree; requires `--columns >= 2`).
+  Any other value is an error reported **before** compiling.
+- `--columns <N>` sets how many columns each row of the captured series holds
+  (default `1`). `>= 2` is required by `--invariant relation` and rejected by
+  the single-scalar invariants.
 - `--metric <NAME>` labels the captured series (default `series`).
 - `--problem <LABEL>` records a free-text problem label (optional).
 - `--negative-fixture` marks that the invariant is *expected* to fail (see
@@ -190,6 +196,7 @@ a receipt cannot weaken its own check.
 | `conservation` | `conserved_quantity_constant` | `abs(s[k] - s[0]) > tol` (drifted from the initial value) | `1e-9` |
 | `bounded` | `bounded_by_initial_maximum` | `s[k] > s[0] + tol` (rose above the initial value) | `1e-9` |
 | `energy-identity` | `energy_identity_residual` | `abs(s[k]) > tol` (energy-balance residual is not zero) | `1e-9` |
+| `relation` (`--columns N>=2`) | `relation_columns_agree` | a row's columns differ by more than `tol` (the verifier compares them) | `1e-9` |
 
 The `conservation` and `bounded` references are both `s[0]` (the initial value), not the mean,
 so a re-run that reproduces a different-length prefix cannot shift the reference. The checks
@@ -204,6 +211,19 @@ different verdicts across the family, which is exactly why they are separate inv
 looser `1e-9` tolerance (vs the `1e-12` monotone bound) reflects that a genuinely conserved,
 bounded, or balanced discrete quantity still accumulates roundoff over many steps, while a real
 leak, overshoot, or dropped balance term drifts by an amount the bound still catches decisively.
+
+`relation` is the family's first **cross-column** invariant, and the first whose check the
+VERIFIER computes rather than trusting a residual the kernel printed. With `--columns N` the
+captured token stream is read row-major as `N` columns per row; the relation holds when every
+row's columns agree within tolerance. Because the kernel only prints the raw columns (for
+example two independent computations of the same quantity), it cannot conceal a divergence by
+computing the agreement itself, the way a single-column residual invariant lets it. The
+reference kernel (`examples/relation_double_angle.bld`) prints `sin(2t)` two ways, directly and
+via the double-angle identity `2*sin(t)*cos(t)`, which agree to roundoff (PASS); the negative
+fixture (`examples/relation_double_angle_broken.bld`) drops the factor of 2, so the columns
+differ by `abs(col0)/2` and it FAILs. `count` stays the total token count (`N * rows`), so a
+re-run's token drift is caught independently of the column structure, while the "at least two
+observations" verdict rule counts ROWS.
 
 `energy-identity` is the family's first **quantitative** invariant. The 1-D heat equation's
 continuous energy law `d/dt integral(u^2) = -2*alpha*integral(u_x^2)` has an exact discrete
@@ -244,8 +264,11 @@ dips to 0 and returns to its initial `1.0` without ever exceeding it, so it PASS
 v^2` grows past its initial value and it FAILs); `energy-identity` has
 `examples/energy_identity.bld` (the FTCS kernel computes the exact discrete energy balance, so
 its residual is roundoff and it PASSes) and `examples/energy_identity_broken.bld` (the same
-kernel with the `r**2 * Lu2` correction dropped, so its residual is O(r^2) and it FAILs). Run
-any negative kernel with `--negative-fixture` for a `FAIL_EXPECTED` receipt.
+kernel with the `r**2 * Lu2` correction dropped, so its residual is O(r^2) and it FAILs);
+`relation` has `examples/relation_double_angle.bld` (`sin(2t)` computed two ways, which agree,
+so it PASSes) and `examples/relation_double_angle_broken.bld` (column 1 drops the factor of 2,
+so the two columns disagree and it FAILs). Run any negative kernel with `--negative-fixture`
+for a `FAIL_EXPECTED` receipt.
 
 ## 5. The heat-equation kernel example
 
@@ -459,10 +482,11 @@ byte-for-byte. The provenance link records where the idea came from, nothing str
 v0 checks one invariant over one scalar series, sealed and re-derivable. Explicitly out of
 scope for v0:
 
-- **More invariants and multi-column series.** `energy-monotone`, `conservation`, `bounded` (a
-  discrete max principle), and `energy-identity` (a quantitative energy-balance residual) ship.
-  Cross-series relation invariants (which need multi-column capture, not one scalar per line)
-  are the remaining follow-on.
+- **Richer relations and analytics.** `energy-monotone`, `conservation`, `bounded` (a discrete
+  max principle), `energy-identity` (a quantitative energy-balance residual), and `relation`
+  (cross-column agreement over `--columns N`) ship. Relations beyond per-row agreement (named
+  physical identities across columns, header-named columns, more than pairwise comparison) are
+  follow-ons.
 - **The full 7-layer receipt richness.** The research schema carries more layers than buildc
   can honestly fill today; v0 fills the subset buildc actually derives.
 - **Crucible-at-emit-time.** v0 checks the invariant and seals; it does not run a Crucible

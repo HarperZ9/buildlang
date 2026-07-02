@@ -1,0 +1,28 @@
+// Cross-column RELATION kernel (differential testing of an identity).
+//
+// The double-angle identity sin(2t) = 2*sin(t)*cos(t) is computed TWO
+// independent ways each step: column 0 evaluates sin(2t) directly, column 1
+// evaluates 2*sin(t)*cos(t). The two must agree to roundoff.
+//
+// Crucially, the AGREEMENT is checked by the VERIFIER (`--invariant relation
+// --columns 2`), not by the program: the kernel only prints the two raw
+// values, so it cannot conceal a divergence between them by computing a
+// residual itself. A program that gets one path wrong is caught. This is the
+// family's first invariant whose relation lives in the verifier, not the
+// kernel.
+//
+// Two values are printed per step (column 0 then column 1), so the flat token
+// stream is row-major with two columns. Companion negative fixture:
+// relation_double_angle_broken.bld drops the factor of 2 in column 1.
+
+fn main() ~ Console {
+    let mut step: i32 = 0;
+    while step < 64 {
+        let t: f64 = 0.05 * (step as f64);
+        let direct: f64 = sin(2.0 * t);
+        let identity: f64 = 2.0 * sin(t) * cos(t);
+        println!("{}", direct);
+        println!("{}", identity);
+        step = step + 1;
+    }
+}

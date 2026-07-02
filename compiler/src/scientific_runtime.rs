@@ -73,6 +73,19 @@ pub const ENERGY_IDENTITY_INVARIANT: &str = "energy_identity_residual";
 /// by ~4 orders. Reference is 0, so every step (including step 0) is checked.
 pub const ENERGY_IDENTITY_TOLERANCE: f64 = 1e-9;
 
+/// The invariant name emitted for the cross-column RELATION check: each row of
+/// a multi-column series must AGREE (all columns within tolerance of the row's
+/// first column). This is the family's first invariant the VERIFIER computes
+/// from raw captured columns rather than trusting a residual the kernel printed:
+/// a kernel that emits two independent computations of a quantity cannot hide a
+/// disagreement, because the check happens at verify, not in the program.
+pub const RELATION_INVARIANT: &str = "relation_columns_agree";
+
+/// Tolerance used by the relation check. Two faithful computations of the same
+/// quantity agree to roundoff, while a genuine divergence (a dropped factor, a
+/// wrong formula) differs by an O(1) amount this bound catches decisively.
+pub const RELATION_TOLERANCE: f64 = 1e-9;
+
 /// Provenance reference to the Telos pass-0009 research probe (reference only;
 /// never matched byte-wise, per the determinism decision in the design).
 pub const RESEARCH_SOURCE_HASH: &str =
@@ -348,11 +361,25 @@ pub struct ScientificProblem {
     pub label: Option<String>,
 }
 
+/// serde default for `ScientificMeasurement::column_count`: a receipt without
+/// the field predates the relation invariant and is single-column.
+fn one_column() -> usize {
+    1
+}
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ScientificMeasurement {
     pub metric: String,
     pub observed_values: Vec<f64>,
     pub count: usize,
+    /// How many columns each row of `observed_values` holds (row-major). `1`
+    /// for the single-scalar-per-step invariants; `>= 2` for a relation
+    /// invariant, whose verifier de-interleaves the flat series into columns
+    /// and checks a relation ACROSS them. Sealed (a tamper is SEAL_MISMATCH);
+    /// `count` remains the total token count, so a re-run's token-count drift
+    /// is still caught independently of the column structure.
+    #[serde(default = "one_column")]
+    pub column_count: usize,
     /// sha256 over the EXACT raw stdout bytes captured at emit. The parse into
     /// `observed_values` is a lossy transform; sealing the raw payload keeps
     /// byte drift distinguishable from semantic drift. Verify recomputes this
@@ -601,6 +628,7 @@ pub const KNOWN_INVARIANTS: &[&str] = &[
     CONSERVATION_INVARIANT,
     BOUNDED_INVARIANT,
     ENERGY_IDENTITY_INVARIANT,
+    RELATION_INVARIANT,
 ];
 
 /// Whether `name` is an invariant this build implements (and can therefore
@@ -620,6 +648,7 @@ pub fn invariant_tolerance(name: &str) -> f64 {
         CONSERVATION_INVARIANT => CONSERVATION_TOLERANCE,
         BOUNDED_INVARIANT => BOUNDED_TOLERANCE,
         ENERGY_IDENTITY_INVARIANT => ENERGY_IDENTITY_TOLERANCE,
+        RELATION_INVARIANT => RELATION_TOLERANCE,
         _ => ENERGY_MONOTONE_TOLERANCE,
     }
 }
@@ -632,6 +661,7 @@ pub fn invariant_expectation(name: &str) -> &'static str {
         ENERGY_IDENTITY_INVARIANT => {
             "every step's energy-balance residual stays within tolerance of zero"
         }
+        RELATION_INVARIANT => "every row's columns agree within tolerance",
         _ => "no step increases energy beyond tolerance",
     }
 }
@@ -645,6 +675,86 @@ pub fn evaluate_invariant(name: &str, series: &[f64], tol: f64) -> InvariantObse
         BOUNDED_INVARIANT => bounded_by_initial_maximum(series, tol),
         ENERGY_IDENTITY_INVARIANT => energy_identity_residual(series, tol),
         _ => energy_monotone_nonincreasing(series, tol),
+    }
+}
+
+/// Cross-column relation invariant over a MULTI-COLUMN series (row-major, with
+/// `column_count` values per row): every row must AGREE, i.e. all its columns
+/// lie within `tol` of the row's first column. A "violation" is a disagreeing
+/// row. The verifier computes this from the raw columns, so a program that
+/// prints two independent computations of a quantity cannot conceal a
+/// divergence between them. Returns the observed result AND the ROW count (the
+/// number of observations, which the verdict's "enough points" rule uses, not
+/// the raw token count).
+///
+/// A `column_count` below 2, an empty series, or a series whose length is not a
+/// multiple of `column_count` (ragged rows) yields zero complete rows, which
+/// the verdict rule treats as "cannot witness the relation".
+pub fn relation_columns_agree(
+    series: &[f64],
+    tol: f64,
+    column_count: usize,
+) -> (InvariantObserved, usize) {
+    let ragged = column_count < 2 || series.is_empty() || series.len() % column_count != 0;
+    let rows = if ragged {
+        0
+    } else {
+        series.len() / column_count
+    };
+    let mut violation_count = 0usize;
+    let mut first_violation_step = None;
+    for k in 0..rows {
+        let base = k * column_count;
+        let col0 = series[base];
+        let disagrees = (1..column_count).any(|c| (series[base + c] - col0).abs() > tol);
+        if disagrees {
+            violation_count += 1;
+            if first_violation_step.is_none() {
+                first_violation_step = Some(k);
+            }
+        }
+    }
+    (
+        InvariantObserved {
+            violation_count,
+            first_violation_step,
+            initial_value: series.first().copied(),
+            final_value: series.last().copied(),
+        },
+        rows,
+    )
+}
+
+/// The observed invariant result plus the EFFECTIVE observation count the
+/// verdict's "at least two points" rule uses: `series.len()` for the
+/// single-scalar invariants, but the ROW count for a relation invariant (each
+/// row of `column_count` values is one observation).
+pub struct MeasurementVerdict {
+    pub observed: InvariantObserved,
+    pub effective_len: usize,
+}
+
+/// The SINGLE evaluation dispatch both emit and verify go through, so the two
+/// can never disagree on how a measurement is scored. Single-column invariants
+/// ignore `column_count`; the relation invariant de-interleaves by it.
+pub fn evaluate_measurement(
+    name: &str,
+    series: &[f64],
+    tol: f64,
+    column_count: usize,
+) -> MeasurementVerdict {
+    match name {
+        RELATION_INVARIANT => {
+            let (observed, rows) = relation_columns_agree(series, tol, column_count);
+            MeasurementVerdict {
+                observed,
+                effective_len: rows,
+            }
+        }
+        _ => MeasurementVerdict {
+            observed: evaluate_invariant(name, series, tol),
+            effective_len: series.len(),
+        },
     }
 }
 
@@ -682,6 +792,9 @@ pub struct ScientificReceiptInputs<'a> {
     pub invariant_name: String,
     pub metric: String,
     pub units: Option<String>,
+    /// How many columns each row of the captured series holds (row-major). `1`
+    /// for the single-scalar invariants; `>= 2` for the relation invariant.
+    pub column_count: usize,
     pub problem_label: Option<String>,
     pub negative_fixture: bool,
     pub flags: Vec<String>,
@@ -720,17 +833,21 @@ pub fn build_scientific_runtime_receipt(
         invariant_name,
         metric,
         units,
+        column_count,
         problem_label,
         negative_fixture,
         flags,
     } = inputs;
 
     let tolerance = invariant_tolerance(&invariant_name);
-    let observed = evaluate_invariant(&invariant_name, &series, tolerance);
+    let verdict = evaluate_measurement(&invariant_name, &series, tolerance, column_count);
+    let observed = verdict.observed;
     let has_series = series_parsed && !series.is_empty();
     // A diverged run (non-finite value observed) cannot witness the invariant,
-    // even if its finite prefix looks monotone, so it never PASSes.
-    let passes = has_series && !diverged && invariant_passes(series.len(), &observed);
+    // even if its finite prefix looks monotone, so it never PASSes. The verdict
+    // rule uses the effective observation count (rows for a relation invariant,
+    // series length for the single-scalar ones).
+    let passes = has_series && !diverged && invariant_passes(verdict.effective_len, &observed);
 
     // Invariant status is PASS/FAIL over the observed series. When there is no
     // series at all, or the run diverged, the invariant could not be evaluated,
@@ -809,6 +926,7 @@ pub fn build_scientific_runtime_receipt(
             metric,
             observed_values: series,
             count,
+            column_count,
             raw_stdout_digest,
             series_extraction_policy: SERIES_EXTRACTION_POLICY.to_string(),
             units,
@@ -975,10 +1093,17 @@ pub fn recompute_verdict(
     series_parsed: bool,
     diverged: bool,
     negative_fixture: bool,
+    column_count: usize,
 ) -> RecomputedVerdict {
-    let observed = evaluate_invariant(invariant_name, series, invariant_tolerance(invariant_name));
+    let verdict = evaluate_measurement(
+        invariant_name,
+        series,
+        invariant_tolerance(invariant_name),
+        column_count,
+    );
+    let observed = verdict.observed;
     let has_series = series_parsed && !series.is_empty();
-    let passes = has_series && !diverged && invariant_passes(series.len(), &observed);
+    let passes = has_series && !diverged && invariant_passes(verdict.effective_len, &observed);
 
     let invariant_status = if passes { "PASS" } else { "FAIL" };
     let receipt_status = if !has_series || diverged {
@@ -1474,6 +1599,7 @@ pub fn evaluate_scientific_runtime_receipt(
         parsed.any_parsed,
         parsed.diverged,
         receipt.negative_fixture,
+        receipt.measurement.column_count,
     );
     let stored_increase = receipt.invariant.observed.violation_count;
 
@@ -1903,6 +2029,7 @@ mod tests {
             invariant_name: ENERGY_MONOTONE_INVARIANT.to_string(),
             metric: "series".to_string(),
             units: None,
+            column_count: 1,
             problem_label: None,
             negative_fixture,
             flags: Vec::new(),
@@ -2180,6 +2307,7 @@ mod tests {
             true,
             false,
             false,
+            1,
         );
         assert_eq!(verdict.invariant_status, "PASS");
         assert_eq!(verdict.receipt_status, "PASS");
@@ -2196,6 +2324,7 @@ mod tests {
             true,
             false,
             true,
+            1,
         );
         assert_eq!(expected.invariant_status, "FAIL");
         assert_eq!(expected.receipt_status, "FAIL_EXPECTED");
@@ -2207,13 +2336,14 @@ mod tests {
             true,
             false,
             false,
+            1,
         );
         assert_eq!(unexpected.receipt_status, "FAIL_UNEXPECTED");
     }
 
     #[test]
     fn recompute_verdict_is_unverifiable_when_nothing_parsed() {
-        let verdict = recompute_verdict(ENERGY_MONOTONE_INVARIANT, &[], false, false, false);
+        let verdict = recompute_verdict(ENERGY_MONOTONE_INVARIANT, &[], false, false, false, 1);
         assert_eq!(verdict.receipt_status, "UNVERIFIABLE");
         assert_eq!(verdict.invariant_status, "FAIL");
     }
@@ -2222,7 +2352,8 @@ mod tests {
     fn recompute_verdict_is_unverifiable_when_diverged() {
         // A monotone finite prefix that diverged is UNVERIFIABLE, not PASS, so a
         // re-run of a diverged program re-derives the same UNVERIFIABLE verdict.
-        let verdict = recompute_verdict(ENERGY_MONOTONE_INVARIANT, &[4.0, 3.0], true, true, false);
+        let verdict =
+            recompute_verdict(ENERGY_MONOTONE_INVARIANT, &[4.0, 3.0], true, true, false, 1);
         assert_eq!(verdict.receipt_status, "UNVERIFIABLE");
         assert_eq!(verdict.invariant_status, "FAIL");
     }
@@ -2262,7 +2393,10 @@ mod tests {
         for name in KNOWN_INVARIANTS {
             assert!(is_known_invariant(name));
             let _ = invariant_expectation(name);
-            let _ = evaluate_invariant(name, &[1.0, 1.0], invariant_tolerance(name));
+            // Route through evaluate_measurement (the real dispatch) with a
+            // 2-column series so the relation invariant exercises its own arm,
+            // not evaluate_invariant's single-series fallback.
+            let _ = evaluate_measurement(name, &[1.0, 1.0], invariant_tolerance(name), 2);
         }
         assert_eq!(
             invariant_tolerance(CONSERVATION_INVARIANT),
@@ -2656,6 +2790,166 @@ mod tests {
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
             |_, _| Ok(rerun(vec![1e-12, -1e-13, 2e-14])),
+        );
+        assert_eq!(result, Err(1), "a non-canonical tolerance must be rejected");
+    }
+
+    /// Inputs for a 2-column relation receipt.
+    fn relation_inputs<'a>(
+        path: &'a Path,
+        series: Vec<f64>,
+        parsed: bool,
+        negative_fixture: bool,
+    ) -> ScientificReceiptInputs<'a> {
+        ScientificReceiptInputs {
+            invariant_name: RELATION_INVARIANT.to_string(),
+            column_count: 2,
+            ..base_inputs(path, series, parsed, negative_fixture)
+        }
+    }
+
+    #[test]
+    fn relation_holds_when_every_row_agrees() {
+        // 3 rows of (a, a): the columns agree, so no violations, and the
+        // EFFECTIVE length is the ROW count (3), not the 6 raw tokens.
+        let (obs, rows) =
+            relation_columns_agree(&[1.0, 1.0, 2.0, 2.0, 3.0, 3.0], RELATION_TOLERANCE, 2);
+        assert_eq!(obs.violation_count, 0);
+        assert_eq!(rows, 3);
+        assert!(invariant_passes(rows, &obs));
+    }
+
+    #[test]
+    fn relation_flags_a_disagreeing_row() {
+        // Row 1 is (2.0, 9.0): the columns disagree beyond tolerance.
+        let (obs, rows) =
+            relation_columns_agree(&[1.0, 1.0, 2.0, 9.0, 3.0, 3.0], RELATION_TOLERANCE, 2);
+        assert_eq!(obs.violation_count, 1);
+        assert_eq!(obs.first_violation_step, Some(1));
+        assert_eq!(rows, 3);
+        assert!(!invariant_passes(rows, &obs));
+    }
+
+    #[test]
+    fn relation_reports_zero_rows_for_ragged_or_underwide_data() {
+        // A flat length not divisible by column_count cannot form complete rows.
+        let (_, rows) = relation_columns_agree(&[1.0, 1.0, 2.0], RELATION_TOLERANCE, 2);
+        assert_eq!(rows, 0);
+        // A column_count below 2 has nothing to compare across.
+        let (_, rows) = relation_columns_agree(&[1.0, 2.0], RELATION_TOLERANCE, 1);
+        assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn evaluate_measurement_uses_row_count_for_relations_and_len_otherwise() {
+        // The relation's effective length is rows (2), so a 4-token / 2-column
+        // series is enough to witness (>= 2 rows). A single-scalar invariant on
+        // the same 4 tokens uses the token count (4).
+        let rel = evaluate_measurement(
+            RELATION_INVARIANT,
+            &[1.0, 1.0, 2.0, 2.0],
+            RELATION_TOLERANCE,
+            2,
+        );
+        assert_eq!(rel.effective_len, 2);
+        assert_eq!(rel.observed.violation_count, 0);
+        let mono = evaluate_measurement(
+            ENERGY_MONOTONE_INVARIANT,
+            &[4.0, 3.0, 2.0, 1.0],
+            ENERGY_MONOTONE_TOLERANCE,
+            1,
+        );
+        assert_eq!(mono.effective_len, 4);
+    }
+
+    #[test]
+    fn verify_round_trips_a_relation_receipt() {
+        let path = Path::new("k.bld");
+        let receipt = build_scientific_runtime_receipt(relation_inputs(
+            path,
+            vec![1.0, 1.0, 2.0, 2.0, 3.0, 3.0],
+            true,
+            false,
+        ));
+        assert_eq!(receipt.invariant.name, RELATION_INVARIANT);
+        assert_eq!(receipt.oracle.name, RELATION_INVARIANT);
+        assert_eq!(receipt.measurement.column_count, 2);
+        assert_eq!(receipt.receipt_status, "PASS");
+        assert_eq!(receipt.invariant.observed.violation_count, 0);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let sd = receipt.source_digest.clone();
+        let gd = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+            |_, _| Ok(rerun(vec![1.0, 1.0, 2.0, 2.0, 3.0, 3.0])),
+        );
+        assert!(
+            result.is_ok(),
+            "a faithful relation receipt must verify: {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_fails_a_faithful_relation_disagreement() {
+        // Row 1's columns disagree; the receipt faithfully reproduces a
+        // FAIL_UNEXPECTED, so verify exits 3.
+        let path = Path::new("k.bld");
+        let receipt = build_scientific_runtime_receipt(relation_inputs(
+            path,
+            vec![1.0, 1.0, 2.0, 9.0],
+            true,
+            false,
+        ));
+        assert_eq!(receipt.receipt_status, "FAIL_UNEXPECTED");
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let sd = receipt.source_digest.clone();
+        let gd = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+            |_, _| Ok(rerun(vec![1.0, 1.0, 2.0, 9.0])),
+        );
+        assert_eq!(
+            result,
+            Err(3),
+            "a faithful relation disagreement must exit 3 (FAIL_UNEXPECTED)"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_a_non_canonical_relation_tolerance() {
+        let path = Path::new("k.bld");
+        let mut receipt = build_scientific_runtime_receipt(relation_inputs(
+            path,
+            vec![1.0, 1.0, 2.0, 2.0],
+            true,
+            false,
+        ));
+        receipt.invariant.tolerance = 1e6;
+        seal_receipt(&mut receipt);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let sd = receipt.source_digest.clone();
+        let gd = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+            |_, _| Ok(rerun(vec![1.0, 1.0, 2.0, 2.0])),
         );
         assert_eq!(result, Err(1), "a non-canonical tolerance must be rejected");
     }
