@@ -28,6 +28,34 @@ pub fn is_capability_effect(name: &str) -> bool {
     CAPABILITY_EFFECTS.contains(&name)
 }
 
+/// The `Console` sub-sources that READ stdin (external input), as opposed to
+/// the stdout/stderr sources that only write. The scientific receipt's
+/// `input_dataset` / determinism derivation needs this distinction: a program
+/// that only prints reads no dataset and is deterministic, but one that reads
+/// stdin does neither. Kept beside the `Console` call mapping above so the two
+/// stay in sync when the builtin set changes.
+///
+/// Recorded capability sources are not always the bare builtin name: a
+/// path-form call is stored qualified (`mod::read_line`, joined with `::`) and
+/// a macro source carries a trailing `!`. Normalize both to the bare name the
+/// way the rest of this module resolves callees (`rsplit("::")`) before
+/// matching, so an unusual spelling of a stdin read cannot slip past the
+/// fail-closed witnessed-absence derivation. Every other capability detector
+/// here already strips `::`; this predicate must not be the one exception.
+pub fn is_stdin_source(name: &str) -> bool {
+    let bare = name.rsplit("::").next().unwrap_or(name);
+    let bare = bare.strip_suffix('!').unwrap_or(bare);
+    matches!(
+        bare,
+        "read_line"
+            | "read_all"
+            | "stdin_is_pipe"
+            | "build_read_line"
+            | "build_read_all"
+            | "build_stdin_is_pipe"
+    )
+}
+
 pub fn capability_effect_for_call(name: &str) -> Option<&'static str> {
     match name {
         "println"
@@ -139,6 +167,34 @@ mod tests {
         assert!(capability_effect_names().contains(&"Clock"));
         assert!(capability_effect_names().contains(&"Foreign"));
         assert!(capability_effect_names().contains(&"Gpu"));
+    }
+
+    #[test]
+    fn is_stdin_source_normalizes_qualified_and_macro_spellings() {
+        // Bare stdin builtins (both surface and lowered forms).
+        assert!(is_stdin_source("read_line"));
+        assert!(is_stdin_source("read_all"));
+        assert!(is_stdin_source("stdin_is_pipe"));
+        assert!(is_stdin_source("build_read_line"));
+
+        // Path-qualified sources (the shape ExprKind::Path records, joined
+        // with `::`) must still resolve: a fail-closed derivation cannot let a
+        // qualified spelling of a stdin read claim NONE_WITNESSED.
+        assert!(is_stdin_source("mod::read_line"));
+        assert!(is_stdin_source("std::io::read_all"));
+        assert!(is_stdin_source("a::b::c::stdin_is_pipe"));
+
+        // Macro-recorded sources carry a trailing `!`; normalized away too.
+        assert!(is_stdin_source("read_line!"));
+        assert!(is_stdin_source("mod::read_line!"));
+
+        // Write-only Console sources and non-stdin calls are NOT stdin, in
+        // every spelling.
+        assert!(!is_stdin_source("println"));
+        assert!(!is_stdin_source("mod::println"));
+        assert!(!is_stdin_source("println!"));
+        assert!(!is_stdin_source("read_file"));
+        assert!(!is_stdin_source("std::fs::read_file"));
     }
 
     #[test]
