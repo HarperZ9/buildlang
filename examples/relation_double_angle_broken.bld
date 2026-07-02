@@ -1,0 +1,26 @@
+// Cross-column RELATION NEGATIVE fixture (broken identity).
+//
+// Identical to relation_double_angle.bld EXCEPT column 1 DROPS the factor of 2:
+// it computes sin(t)*cos(t) instead of 2*sin(t)*cos(t). By the double-angle
+// identity the correct value is sin(2t) = 2*sin(t)*cos(t), so column 1 is now
+// exactly half of column 0. The two columns disagree by |col0|/2 (up to 0.5),
+// far above the 1e-9 relation tolerance, so `--invariant relation --columns 2`
+// FAILs.
+//
+// The verifier catches this even though NEITHER column is individually
+// "wrong-looking": only their RELATION reveals the dropped factor. Paired
+// negative fixture for relation_double_angle.bld; run with `--negative-fixture`
+// for FAIL_EXPECTED.
+
+fn main() ~ Console {
+    let mut step: i32 = 0;
+    while step < 64 {
+        let t: f64 = 0.05 * (step as f64);
+        let direct: f64 = sin(2.0 * t);
+        // BROKEN: the factor of 2 is missing, so this is sin(2t)/2, not sin(2t).
+        let identity: f64 = sin(t) * cos(t);
+        println!("{}", direct);
+        println!("{}", identity);
+        step = step + 1;
+    }
+}
