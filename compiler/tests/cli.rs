@@ -14197,6 +14197,85 @@ fn scientific_runtime_receipt_emit_and_verify_round_trip() {
     );
 }
 
+/// The Telos bridge: `receipt export` re-verifies and emits ONE witnessed
+/// Crucible measurement row (deviation derived from the fresh re-run, recheck
+/// descriptor sealing the replay command). A receipt that does not reproduce
+/// exports nothing.
+#[test]
+fn receipt_export_emits_a_witnessed_crucible_measurement() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping receipt_export_emits_a_witnessed_crucible_measurement: C backend not ready"
+        );
+        return;
+    }
+    let (dir, staged) = stage_stable_kernel("export_bridge");
+    let receipt = dir.join("receipt.json");
+    emit_stable_receipt(&staged, &receipt);
+
+    let out = dir.join("measurement.json");
+    let export = buildc()
+        .args(["receipt", "export"])
+        .arg(&receipt)
+        .arg("-o")
+        .arg(&out)
+        .args(["--claim-id", "heat-energy-monotone"])
+        .args(["--claim-sha256", &"a".repeat(64)])
+        .output()
+        .expect("run receipt export");
+    assert!(
+        export.status.success(),
+        "export of a faithful receipt must succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&export.stderr)
+    );
+
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&fs::read(&out).expect("read export")).expect("parse export");
+    assert_eq!(
+        envelope["schema"],
+        "buildlang-crucible-measurement-export/v0"
+    );
+    assert_eq!(envelope["invariant_held"], true);
+    let row = &envelope["measurements"][0];
+    // Witnessed shape: deviation DERIVED (0.0 for the stable kernel), the
+    // Crucible ingestion fields all present, and the recheck descriptor
+    // sealing the replay command + expected verdict.
+    assert_eq!(row["deviation"], 0.0);
+    assert_eq!(row["tolerance"], 0.5);
+    assert_eq!(row["claim_id"], "heat-energy-monotone");
+    assert_eq!(row["method"], "buildc-receipt-verify/reexecuted-v1");
+    assert_eq!(row["recheck"]["oracle"], "buildc.receipt.verify");
+    assert_eq!(row["recheck"]["expected"]["receipt_status"], "PASS");
+    assert!(
+        row["recheck"]["receipt_sha256"].as_str().unwrap().len() == 64,
+        "the replayed artifact must be hash-bound"
+    );
+
+    // Tamper the SOURCE: the receipt no longer reproduces, so export must
+    // fail and write nothing (a non-reproducing receipt cannot become a
+    // witnessed measurement).
+    let source_text = fs::read_to_string(&staged).expect("read staged kernel");
+    fs::write(&staged, format!("{source_text}\n// tamper\n")).expect("tamper staged kernel");
+    let out2 = dir.join("measurement2.json");
+    let export_tampered = buildc()
+        .args(["receipt", "export"])
+        .arg(&receipt)
+        .arg("-o")
+        .arg(&out2)
+        .output()
+        .expect("run receipt export on tampered source");
+    assert!(
+        !export_tampered.status.success(),
+        "a non-reproducing receipt must export nothing"
+    );
+    assert!(
+        !out2.exists(),
+        "no measurement file may be written on failure"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// Regression: a large-magnitude series must RE-SEAL after a disk round-trip.
 /// The unstable kernel's energy blows up to ~1e28; without `float_roundtrip`
 /// serde_json re-parsed those f64 values ~1 ULP off, so the receipt (sealed over
