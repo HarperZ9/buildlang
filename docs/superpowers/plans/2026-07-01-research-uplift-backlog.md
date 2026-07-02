@@ -69,6 +69,22 @@ The anti-self-confirming sweep. Every item makes an existing green light falsifi
   class appears. [118: partially landed]
 - `buildc doctor --json` capability/availability matrix receipt. [122, 86, 52, 104]
 
+> **Delta amendment (2026-07-02, from dogfood passes 0115-0137):** if wave 2
+> reopens, adopt the parallel session's `ScientificRuntimeReceiptLayerSpec/v1`
+> (dogfood `schemas/scientific-runtime-receipt-layer-spec-pass-0122.json`) as
+> the schema of record for the toolchain work above: its `compiler_branch`
+> contract (compiler identity, IR hash, flags, target triple/device, build
+> hash, executable hash, with negative fixtures rejecting claims lacking them)
+> subsumes and sharpens this wave's toolchain block. Ready-made conformance
+> targets now exist on the research side: the pass-0119 exact-rational
+> symplectic oracle with a fenced-and-waiting buildc runtime branch (pass
+> 0120 defines exactly what the branch receipt must carry), and the four
+> executed acceptance fixtures from passes 0127-0128 (Born-rule
+> normalization, odd-sum identity, bounded knapsack, Euler-polynomial
+> counterexample) explicitly intended for the compiled branch. Pass 0132's
+> proposed "BuildLang Conservation Kernel" (compile-time declared preserved
+> quantities) matches wave 3's conservation invariant. Adopt, don't rebuild.
+
 ## Wave 3: the invariant family (needs multi-series capture)
 
 - Multi-column series capture (v0 = one Vec<f64>): the enabler for everything below.
