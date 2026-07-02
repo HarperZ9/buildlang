@@ -721,6 +721,18 @@ impl CBackend {
                             return true;
                         }
                     }
+                    // Storing `id` into a slice/buffer element lets it outlive
+                    // the function through the referenced storage: a hard escape.
+                    MirStmtKind::IndexStore {
+                        base, index, value, ..
+                    } => {
+                        if matches!(base, MirValue::Local(l) if *l == id)
+                            || matches!(index, MirValue::Local(l) if *l == id)
+                            || Self::rvalue_mentions(value, id)
+                        {
+                            return true;
+                        }
+                    }
                     MirStmtKind::StorageLive(_)
                     | MirStmtKind::StorageDead(_)
                     | MirStmtKind::Nop => {}
@@ -762,6 +774,16 @@ impl CBackend {
                     }
                     MirStmtKind::GlobalStore { value, .. } => {
                         if Self::rvalue_mentions(value, t) {
+                            return true;
+                        }
+                    }
+                    MirStmtKind::IndexStore {
+                        base, index, value, ..
+                    } => {
+                        if matches!(base, MirValue::Local(l) if *l == t)
+                            || matches!(index, MirValue::Local(l) if *l == t)
+                            || Self::rvalue_mentions(value, t)
+                        {
                             return true;
                         }
                     }
@@ -2622,6 +2644,47 @@ impl CBackend {
                 let rvalue = self.rvalue_to_c(value, locals)?;
                 write!(self.output, "{} = {};\n", name, rvalue).unwrap();
             }
+            MirStmtKind::IndexStore {
+                base,
+                index,
+                elem_ty,
+                value,
+            } => {
+                let base_str = self.value_to_c(base, locals);
+                let index_str = self.value_to_c(index, locals);
+                self.write_indent();
+                let rvalue = self.rvalue_to_c(value, locals)?;
+                // Heap Vec elements go through the typed setter; a slice/array/
+                // pointer base (the GPU compute case) is a plain C subscript.
+                let base_is_vec = match base {
+                    MirValue::Local(id) => locals
+                        .get(id.0 as usize)
+                        .map(|l| matches!(l.ty, MirType::Vec(_)))
+                        .unwrap_or(false),
+                    _ => false,
+                };
+                if base_is_vec {
+                    let suffix = match elem_ty {
+                        MirType::Float(_) => "f64",
+                        MirType::Int(IntSize::I64, _) => "i64",
+                        MirType::Struct(n) if n.as_ref() == "BuildString" => "str",
+                        _ => "i32",
+                    };
+                    write!(
+                        self.output,
+                        "build_hvec_set_{}({}, {}, {});\n",
+                        suffix, base_str, index_str, rvalue
+                    )
+                    .unwrap();
+                } else if let Some(target) =
+                    Self::slice_element_access(base, &base_str, &index_str, locals)
+                {
+                    // Slice / pointer-to-slice store: `base->ptr[i] = value`.
+                    write!(self.output, "{} = {};\n", target, rvalue).unwrap();
+                } else {
+                    write!(self.output, "{}[{}] = {};\n", base_str, index_str, rvalue).unwrap();
+                }
+            }
             MirStmtKind::StorageLive(_) | MirStmtKind::StorageDead(_) => {
                 // No-op in C
             }
@@ -3548,6 +3611,33 @@ impl CBackend {
         }
     }
 
+    /// If `base` indexes a slice (fat pointer `{ptr, len}`) or a pointer-to-slice
+    /// (`&[T]` -> `Ptr(Slice)`), return the correct element access. A slice value
+    /// is `base.ptr[index]`; a pointer-to-slice (a slice/array *parameter*) is
+    /// `base->ptr[index]`. Returns `None` for non-slice bases (caller emits a
+    /// plain subscript). Without this, indexing a `&[f32]` parameter emitted
+    /// `base[index]`, which subscripts the fat-pointer struct itself (a type
+    /// error), so compute kernels using slice params never compiled on the C
+    /// path.
+    fn slice_element_access(
+        base: &MirValue,
+        base_str: &str,
+        index_str: &str,
+        locals: &[MirLocal],
+    ) -> Option<String> {
+        let ty = match base {
+            MirValue::Local(id) => &locals.get(id.0 as usize)?.ty,
+            _ => return None,
+        };
+        match ty {
+            MirType::Slice(_) => Some(format!("{}.ptr[{}]", base_str, index_str)),
+            MirType::Ptr(inner) if matches!(inner.as_ref(), MirType::Slice(_)) => {
+                Some(format!("{}->ptr[{}]", base_str, index_str))
+            }
+            _ => None,
+        }
+    }
+
     fn rvalue_to_c(&self, rvalue: &MirRValue, locals: &[MirLocal]) -> CodegenResult<String> {
         Ok(match rvalue {
             MirRValue::Use(value) => self.value_to_c(value, locals),
@@ -3684,6 +3774,18 @@ impl CBackend {
             MirRValue::NullaryOp(op, ty) => match op {
                 NullaryOp::SizeOf => format!("sizeof({})", self.type_to_c(ty)),
                 NullaryOp::AlignOf => format!("_Alignof({})", self.type_to_c(ty)),
+                // The GPU compute thread index reads an ambient per-invocation
+                // variable. On the CPU cross-check path the dispatch driver
+                // defines `buildc_gl_global_invocation_{x,y,z}` as it loops over
+                // the grid; on GPU the SPIR-V backend wires GlobalInvocationId.
+                NullaryOp::ThreadIndex(component) => {
+                    let axis = match component {
+                        0 => "x",
+                        1 => "y",
+                        _ => "z",
+                    };
+                    format!("buildc_gl_global_invocation_{}", axis)
+                }
             },
             MirRValue::FieldAccess {
                 base,
@@ -3834,6 +3936,10 @@ impl CBackend {
                     };
                     if base_is_string {
                         format!("((uint8_t*){}.ptr)[{}]", base_str, index_str)
+                    } else if let Some(access) =
+                        Self::slice_element_access(base, &base_str, &index_str, locals)
+                    {
+                        access
                     } else {
                         format!("{}[{}]", base_str, index_str)
                     }

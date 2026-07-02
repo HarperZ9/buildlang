@@ -2981,6 +2981,18 @@ impl<'ctx> TypeInfer<'ctx> {
             if let Some(ty) = Self::ambient_capability_function_type(name) {
                 return ty;
             }
+            // GPU compute built-in thread-index variables resolve to `uvec3`
+            // (x/y/z: u32), registered in `register_builtin_vec_types`. This lets
+            // `gl_GlobalInvocationID.x` type-check to a u32 index; the SPIR-V
+            // backend wires the actual GlobalInvocationId built-in.
+            if matches!(
+                name,
+                "gl_GlobalInvocationID" | "gl_LocalInvocationID" | "gl_WorkGroupID"
+            ) {
+                if let Some(type_def) = self.ctx.lookup_type_by_name("uvec3") {
+                    return Ty::adt(type_def.def_id, Vec::new());
+                }
+            }
             let is_builtin = matches!(
                 name,
                 // Math builtins

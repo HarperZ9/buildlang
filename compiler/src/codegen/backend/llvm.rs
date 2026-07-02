@@ -1260,6 +1260,11 @@ impl LlvmBackend {
             MirStmtKind::Assign { dest, value } => {
                 self.gen_assign(*dest, value, func)?;
             }
+            MirStmtKind::IndexStore { .. } => {
+                return Err(CodegenError::Unsupported(
+                    "indexed store is not yet supported in the LLVM backend".to_string(),
+                ));
+            }
             MirStmtKind::GlobalStore { .. } => {
                 return Err(CodegenError::Unsupported(
                     "store to a module global is not yet supported in the LLVM backend".to_string(),
@@ -1519,6 +1524,9 @@ impl LlvmBackend {
                 let result = match op {
                     NullaryOp::SizeOf => self.type_size(ty),
                     NullaryOp::AlignOf => self.type_align(ty) as u64,
+                    // GPU-only built-in; the LLVM CPU backend has no thread grid,
+                    // so it lowers to 0 (the LLVM path is not a compute target).
+                    NullaryOp::ThreadIndex(_) => 0,
                 };
                 let dest_align = self.type_align(&dest_ty);
                 writeln!(

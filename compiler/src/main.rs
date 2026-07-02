@@ -8,6 +8,12 @@
 //!
 //! This is the main entry point for the BuildLang compiler command-line tool.
 
+#[cfg(feature = "gpu")]
+mod gpu;
+// GPU cross-check receipt (Layer C): emit + verify. Verification is pure JSON +
+// SHA-256, so it is ALWAYS compiled (even without the `gpu` feature) so
+// `receipt verify` works on a gpu receipt in the default build.
+mod gpu_receipt;
 mod lsp_dispatch;
 mod memory_layout;
 mod mir_representation;
@@ -38,6 +44,10 @@ use mir_representation::{
 };
 use module_graph::{verify_module_graph_receipt, ModuleGraphReceipt, MODULE_GRAPH_RECEIPT};
 use scientific_runtime::{
+    build_receipt_chain, receipt_chain_seal_hex, ReceiptChainManifest, ScientificCorpusManifest,
+    RECEIPT_CHAIN_SCHEMA, RECEIPT_CORPUS_SCHEMA,
+};
+use scientific_runtime::{
     build_scientific_runtime_receipt, build_self_test_cases, column_count_matches_invariant,
     crucible_measurement_from_report, evaluate_scientific_runtime_receipt, parse_numeric_series,
     verify_scientific_runtime_receipt, RederivedFacts, RerunObservation, ScientificDigest,
@@ -45,10 +55,6 @@ use scientific_runtime::{
     BOUNDED_INVARIANT, CONSERVATION_INVARIANT, CONSERVED_BAND_INVARIANT,
     CRUCIBLE_MEASUREMENT_EXPORT_SCHEMA, ENERGY_IDENTITY_INVARIANT, ENERGY_MONOTONE_INVARIANT,
     NON_NEGATIVE_INVARIANT, RELATION_INVARIANT, SCIENTIFIC_RUNTIME_SCHEMA,
-};
-use scientific_runtime::{
-    build_receipt_chain, receipt_chain_seal_hex, ReceiptChainManifest, ScientificCorpusManifest,
-    RECEIPT_CHAIN_SCHEMA, RECEIPT_CORPUS_SCHEMA,
 };
 use symbol_graph::{verify_symbol_graph_receipt, SymbolGraphReceipt, SYMBOL_GRAPH_RECEIPT};
 
@@ -230,6 +236,12 @@ enum Commands {
         /// and yields receipt_status FAIL_EXPECTED instead of FAIL_UNEXPECTED.
         #[arg(long)]
         negative_fixture: bool,
+
+        /// Execute a `#[compute]` kernel on the physical GPU (Vulkan) and
+        /// cross-check the readback against the CPU-C scalar loop within
+        /// tolerance. Requires a build with `--features gpu` and a Vulkan device.
+        #[arg(long)]
+        gpu: bool,
 
         /// Arguments to pass to the program
         #[arg(trailing_var_arg = true)]
@@ -592,18 +604,25 @@ fn main() -> ExitCode {
             problem,
             method,
             negative_fixture,
+            gpu,
             args,
-        }) => cmd_run(
-            &file,
-            &args,
-            emit_receipt.as_deref(),
-            &invariant,
-            &metric,
-            columns,
-            problem.as_deref(),
-            method.as_deref(),
-            negative_fixture,
-        ),
+        }) => {
+            if gpu {
+                cmd_run_gpu(&file, emit_receipt.as_deref())
+            } else {
+                cmd_run(
+                    &file,
+                    &args,
+                    emit_receipt.as_deref(),
+                    &invariant,
+                    &metric,
+                    columns,
+                    problem.as_deref(),
+                    method.as_deref(),
+                    negative_fixture,
+                )
+            }
+        }
         Some(Commands::Repl) => cmd_repl(),
         Some(Commands::Lsp) => cmd_lsp(),
         Some(Commands::Watch { path, target }) => cmd_watch(&path, &target),
@@ -686,6 +705,49 @@ fn print_tool_probe(label: &str, command: &str, args: &[&str]) {
     }
 }
 
+/// Probe and print the GPU-path readiness row(s) for `buildc doctor`.
+///
+/// Layer A only needs `spirv-val` (valid compute SPIR-V emission). Layer B
+/// (device dispatch) additionally needs the `gpu` cargo feature and a real
+/// Vulkan device. The row prints exactly what was probed and never overclaims:
+/// without the feature it says the device path is not compiled in even if a GPU
+/// is present.
+fn print_gpu_probe() {
+    println!("GPU path:");
+
+    let spirv_val = find_spirv_val();
+    match &spirv_val {
+        Some(tool) => println!("  spirv-val    found    {} (Layer A emission gate)", tool),
+        None => println!("  spirv-val    missing  install Vulkan SDK for the Layer A gate"),
+    }
+
+    let _ = &spirv_val;
+
+    #[cfg(feature = "gpu")]
+    {
+        match crate::gpu::vulkan_host::probe_device() {
+            Some(name) => println!("  gpu      ready    Vulkan compute device: {}", name),
+            None => println!(
+                "  gpu      absent   `gpu` feature built, but no Vulkan compute device enumerated"
+            ),
+        }
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        // vulkaninfo presence is a cheap, dependency-free device signal.
+        let vulkaninfo = command_version("vulkaninfo", &["--summary"])
+            .or_else(|| command_version("vulkaninfo", &[]));
+        match vulkaninfo {
+            Some(_) => println!(
+                "  gpu      off      Vulkan present, but device dispatch needs `--features gpu` (Layer B)"
+            ),
+            None => println!(
+                "  gpu      off      device dispatch (Layer B) needs `--features gpu` + a Vulkan device"
+            ),
+        }
+    }
+}
+
 fn print_substrate_evidence(corpus_root: Option<&Path>) {
     println!();
     println!("Substrate evidence:");
@@ -743,6 +805,12 @@ fn cmd_doctor() -> Result<(), i32> {
     println!("  spirv    experimental  SPIR-V output; validate with spirv-val");
     println!("  x86-64   experimental  assembly/object output; linker integration is partial");
     println!("  arm64    experimental  assembly/object output; linker integration is partial");
+
+    // GPU row: report exactly what was probed for the real GPU path. Layer A
+    // (valid compute SPIR-V) needs only spirv-val; Layer B (device dispatch)
+    // additionally needs the `gpu` cargo feature AND a Vulkan device.
+    println!();
+    print_gpu_probe();
 
     let corpus_root = find_semantic_corpus_root();
     print_substrate_evidence(corpus_root.as_deref());
@@ -1643,7 +1711,10 @@ fn cmd_receipt_verify_self_test(receipt_path: &Path) -> Result<(), i32> {
         {
             Ok(output) => output,
             Err(err) => {
-                eprintln!("  FAIL {} (verify subprocess failed to run: {err})", case.label);
+                eprintln!(
+                    "  FAIL {} (verify subprocess failed to run: {err})",
+                    case.label
+                );
                 failures += 1;
                 continue;
             }
@@ -1920,7 +1991,10 @@ fn cmd_receipt_corpus(manifest_path: &Path) -> Result<(), i32> {
         let status = match status {
             Some(status) => status,
             None => {
-                eprintln!("  FAIL {} (could not read emitted receipt_status)", member.source);
+                eprintln!(
+                    "  FAIL {} (could not read emitted receipt_status)",
+                    member.source
+                );
                 failures += 1;
                 continue;
             }
@@ -1957,7 +2031,10 @@ fn cmd_receipt_corpus(manifest_path: &Path) -> Result<(), i32> {
             continue;
         }
 
-        println!("  ok   {} [{}] => {}", member.source, member.invariant, status);
+        println!(
+            "  ok   {} [{}] => {}",
+            member.source, member.invariant, status
+        );
     }
     let _ = std::fs::remove_dir_all(&tmp_dir);
 
@@ -2457,6 +2534,13 @@ fn verify_scientific_receipt_dispatch(
     )
 }
 
+/// Verify a GPU cross-check receipt (Layer C). Delegates to the always-compiled
+/// `gpu_receipt` module: recompute the seal over the body and re-check the
+/// gpu-cpu agreement invariant against the recorded series.
+fn gpu_receipt_verify(receipt_path: &Path) -> Result<(), String> {
+    gpu_receipt::verify_gpu_receipt(receipt_path)
+}
+
 fn cmd_receipt_verify(
     receipt_path: &Path,
     source_override: Option<&Path>,
@@ -2475,6 +2559,25 @@ fn cmd_receipt_verify(
 
     let receipt: serde_json::Value =
         read_json(receipt_path).map_err(|code| receipt_load_failure(false, "MALFORMED", code))?;
+
+    // GPU cross-check receipts (Layer C) nest their schema under `/body/schema`
+    // and carry a top-level seal. Verification is pure JSON + SHA-256 (no
+    // Vulkan), so it works in the default build. Detect and route before the
+    // flat-schema lookup below.
+    if receipt.pointer("/body/schema").and_then(|v| v.as_str()) == Some("buildlang.gpu-receipt/v0")
+    {
+        return match gpu_receipt_verify(receipt_path) {
+            Ok(()) => {
+                println!("gpu receipt: VERIFIED (seal intact, gpu-cpu agreement re-checked PASS)");
+                Ok(())
+            }
+            Err(msg) => {
+                eprintln!("gpu receipt: FAILED\n  {msg}");
+                Err(1)
+            }
+        };
+    }
+
     let schema = receipt_field_str(&receipt, "/schema", "schema")
         .map_err(|code| receipt_load_failure(false, "SCHEMA_UNSUPPORTED", code))?;
     if schema == SCIENTIFIC_RUNTIME_SCHEMA {
@@ -5728,6 +5831,64 @@ fn find_c_compiler() -> Option<String> {
     None
 }
 
+/// Locate `spirv-val` (from the Vulkan SDK / SPIRV-Tools). Returns the program
+/// to invoke, preferring one already on PATH; falls back to a known Vulkan SDK
+/// bin path on Windows. `None` means the tool is absent and validation is
+/// skipped gracefully (mirrors `find_c_compiler`'s absence-is-graceful policy).
+fn find_spirv_val() -> Option<String> {
+    let candidates: &[&str] = if cfg!(windows) {
+        &["spirv-val", "spirv-val.exe"]
+    } else {
+        &["spirv-val"]
+    };
+    for &tool in candidates {
+        let ok = std::process::Command::new(tool)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            return Some(tool.to_string());
+        }
+    }
+    #[cfg(windows)]
+    {
+        let sdk = r"C:\VulkanSDK\1.4.341.1\Bin\spirv-val.exe";
+        if std::path::Path::new(sdk).is_file() {
+            return Some(sdk.to_string());
+        }
+    }
+    None
+}
+
+/// Run `spirv-val` on an emitted module. Returns `Ok(())` on validation success,
+/// `Err(stderr)` on a non-zero exit (the caller fails the build), or `Ok(())`
+/// with a printed skip if the tool is absent.
+fn validate_spirv_module(spv_path: &std::path::Path) -> Result<(), String> {
+    let Some(tool) = find_spirv_val() else {
+        println!("  spirv-val: not found on PATH; skipping validation");
+        return Ok(());
+    };
+    match std::process::Command::new(&tool)
+        .arg("--target-env")
+        .arg("vulkan1.0")
+        .arg(spv_path)
+        .output()
+    {
+        Ok(result) if result.status.success() => {
+            println!("  spirv-val: PASSED (Vulkan 1.0)");
+            Ok(())
+        }
+        Ok(result) => {
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            Err(stderr.trim().to_string())
+        }
+        Err(e) => Err(format!("failed to invoke spirv-val: {}", e)),
+    }
+}
+
 /// Find vcvarsall.bat from Visual Studio installation.
 #[cfg(windows)]
 #[allow(dead_code)]
@@ -6860,6 +7021,26 @@ fn compile_and_capture_run(
         exit_code,
         executable_digest,
     })
+}
+
+/// `buildc run <kernel> --gpu`: execute a `#[compute]` kernel on the physical
+/// Vulkan device and cross-check the readback against the CPU-C scalar loop over
+/// the same grid within tolerance (default 1e-6). Exits non-zero on mismatch.
+///
+/// Without the `gpu` feature this prints a rebuild hint and exits non-zero (the
+/// default build carries no Vulkan dependency).
+#[cfg(not(feature = "gpu"))]
+fn cmd_run_gpu(_file: &Path, _emit_receipt: Option<&Path>) -> Result<(), i32> {
+    eprintln!(
+        "buildc run --gpu requires a build with the `gpu` feature.\n\
+         Rebuild with: cargo build --features gpu --manifest-path compiler/Cargo.toml"
+    );
+    Err(1)
+}
+
+#[cfg(feature = "gpu")]
+fn cmd_run_gpu(file: &Path, emit_receipt: Option<&Path>) -> Result<(), i32> {
+    gpu::run_gpu_cross_check(file, emit_receipt)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8596,6 +8777,21 @@ fn cmd_compile(
     }
     if opt_level > 0 {
         println!("Optimization level: O{}", opt_level);
+    }
+
+    // SPIR-V: validate the emitted module with spirv-val (if present) and FAIL
+    // the build on a non-zero exit. Absence of the tool is a graceful skip. This
+    // makes `buildc kernel.bld --target spirv` an honest gate: what it emits is
+    // valid dispatchable SPIR-V, checked by an external validator.
+    if target == Target::SpirV {
+        match validate_spirv_module(&output_path) {
+            Ok(()) => {}
+            Err(msg) => {
+                eprintln!("spirv-val: FAILED");
+                eprintln!("{}", msg);
+                return Err(1);
+            }
+        }
     }
 
     // For LLVM target, try to compile the .ll file to a native executable

@@ -337,6 +337,17 @@ impl RustBackend {
                 let rvalue = self.rvalue_to_rust(value, locals)?;
                 self.writeln(&format!("{} = {};", Self::rust_ident(name), rvalue));
             }
+            MirStmtKind::IndexStore {
+                base, index, value, ..
+            } => {
+                let base_str = self.value_to_rust(base, locals);
+                let index_str = self.value_to_rust(index, locals);
+                let rvalue = self.rvalue_to_rust(value, locals)?;
+                self.writeln(&format!(
+                    "{}[({}) as usize] = {};",
+                    base_str, index_str, rvalue
+                ));
+            }
             MirStmtKind::StorageLive(_) | MirStmtKind::StorageDead(_) | MirStmtKind::Nop => {}
         }
         Ok(())
@@ -617,6 +628,9 @@ impl RustBackend {
             MirRValue::NullaryOp(op, ty) => match op {
                 NullaryOp::SizeOf => format!("std::mem::size_of::<{}>()", self.type_to_rust(ty)),
                 NullaryOp::AlignOf => format!("std::mem::align_of::<{}>()", self.type_to_rust(ty)),
+                // GPU-only built-in; the Rust source backend is not a compute
+                // target, so it lowers to 0.
+                NullaryOp::ThreadIndex(_) => "0".to_string(),
             },
             MirRValue::FieldAccess {
                 base,

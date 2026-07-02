@@ -563,6 +563,17 @@ pub enum SpvMemorySemantics {
 // SPIR-V BACKEND
 // =============================================================================
 
+/// A compute-kernel StorageBuffer binding mapped from a slice/array parameter.
+#[derive(Clone)]
+struct ComputeBuffer {
+    /// The OpVariable id (Uniform storage class, BufferBlock-decorated struct).
+    var_id: u32,
+    /// Element type of the runtime array member.
+    elem_ty: MirType,
+    /// Whether the kernel writes into this buffer (`&mut [_]`).
+    writable: bool,
+}
+
 /// SPIR-V backend for code generation.
 pub struct SpirvBackend {
     /// Output buffer (SPIR-V words).
@@ -606,6 +617,13 @@ pub struct SpirvBackend {
     /// This includes non-entry-point function parameters (OpFunctionParameter results).
     value_locals: std::collections::HashSet<LocalId>,
 
+    /// Compute-kernel buffer parameters: parameter local -> the StorageBuffer
+    /// binding it maps to. `var_id` is the OpVariable, `elem_ty` the element type
+    /// of the runtime array member, `writable` whether the kernel writes it.
+    /// Populated by `setup_shader_io` for GLCompute so that `a[i]` / `out[i]`
+    /// lower to a real OpAccessChain into the buffer's runtime array (member 0).
+    compute_buffers: HashMap<LocalId, ComputeBuffer>,
+
     // == Layout-ordered section buffers (SPIR-V requires strict instruction order) ==
     /// Collected debug instructions (OpName, OpMemberName) -- layout section 7.
     pending_names: Vec<u32>,
@@ -644,6 +662,7 @@ impl SpirvBackend {
             io_var_ids: Vec::new(),
             shader_input_vars: Vec::new(),
             value_locals: std::collections::HashSet::new(),
+            compute_buffers: HashMap::new(),
             pending_names: Vec::new(),
             pending_annotations: Vec::new(),
             pending_globals: Vec::new(),
@@ -699,6 +718,7 @@ impl SpirvBackend {
         self.io_var_ids.clear();
         self.shader_input_vars.clear();
         self.value_locals.clear();
+        self.compute_buffers.clear();
         self.pending_names.clear();
         self.pending_annotations.clear();
         self.pending_globals.clear();
@@ -1824,6 +1844,75 @@ impl SpirvBackend {
         var_id
     }
 
+    /// Byte size/stride of a scalar SPIR-V element type (post f64->f32 coercion).
+    fn scalar_stride(ty: &MirType) -> u32 {
+        match ty {
+            MirType::Float(FloatSize::F64) => 8,
+            MirType::Int(IntSize::I64, _) => 8,
+            _ => 4, // f32, i32, u32, bool
+        }
+    }
+
+    /// Emit a compute StorageBuffer binding in the SPIR-V 1.0 / Vulkan 1.0 legal
+    /// form: a `BufferBlock`-decorated struct wrapping a runtime array, in the
+    /// `Uniform` storage class (the classic SSBO encoding; `StorageBuffer`
+    /// storage class needs SPIR-V >= 1.3 or the storage-buffer extension). The
+    /// runtime array carries an `ArrayStride` and member 0 an `Offset`, as
+    /// Vulkan requires. Returns the OpVariable id.
+    fn emit_compute_ssbo(
+        &mut self,
+        set: u32,
+        binding: u32,
+        elem_ty: &MirType,
+        writable: bool,
+    ) -> u32 {
+        let key = (set, binding);
+        if let Some(&id) = self.buffer_bindings.get(&key) {
+            return id;
+        }
+
+        let elem_id = self.get_type_id(elem_ty);
+        let arr_id = self.alloc_id();
+        self.emit_global(SpvOp::OpTypeRuntimeArray, &[arr_id, elem_id]);
+        // ArrayStride is mandatory for a runtime array in a Vulkan SSBO.
+        self.emit_decoration(
+            arr_id,
+            SpvDecoration::ArrayStride,
+            &[Self::scalar_stride(elem_ty)],
+        );
+
+        let struct_id = self.alloc_id();
+        self.emit_global(SpvOp::OpTypeStruct, &[struct_id, arr_id]);
+        self.emit_decoration(struct_id, SpvDecoration::BufferBlock, &[]);
+        self.emit_member_decoration(struct_id, 0, SpvDecoration::Offset, &[0]);
+
+        let ptr_id = self.alloc_id();
+        self.emit_global(
+            SpvOp::OpTypePointer,
+            &[ptr_id, SpvStorageClass::Uniform as u32, struct_id],
+        );
+
+        let var_id = self.alloc_id();
+        self.emit_global(
+            SpvOp::OpVariable,
+            &[ptr_id, var_id, SpvStorageClass::Uniform as u32],
+        );
+        self.emit_decoration(var_id, SpvDecoration::DescriptorSet, &[set]);
+        self.emit_decoration(var_id, SpvDecoration::Binding, &[binding]);
+        if !writable {
+            self.emit_decoration(var_id, SpvDecoration::NonWritable, &[]);
+        }
+
+        self.buffer_bindings.insert(key, var_id);
+        var_id
+    }
+
+    /// Get (or create) the `Uniform`-class pointer type to `elem_ty`, used as the
+    /// result type of an `OpAccessChain` into a compute SSBO's runtime array.
+    fn uniform_elem_ptr_type(&mut self, elem_ty: &MirType) -> u32 {
+        self.get_ptr_type_id(elem_ty, SpvStorageClass::Uniform)
+    }
+
     // =========================================================================
     // FUNCTION GENERATION
     // =========================================================================
@@ -2070,11 +2159,66 @@ impl SpirvBackend {
                 })?;
                 self.emit(SpvOp::OpStore, &[base_id, val_id]);
             }
+            MirStmtKind::IndexStore {
+                base,
+                index,
+                elem_ty,
+                value,
+            } => {
+                // `base[index] = value`. For a compute-kernel buffer parameter
+                // this is a real OpAccessChain into the StorageBuffer runtime
+                // array (member 0) followed by OpStore -- NOT the zero-constant
+                // fallback. Any other base is unsupported in SPIR-V today.
+                let val_id = self.gen_rvalue(value, func)?;
+                if let MirValue::Local(base_local) = base {
+                    if let Some(chain_id) =
+                        self.gen_buffer_element_ptr(*base_local, index, elem_ty, func)?
+                    {
+                        self.emit(SpvOp::OpStore, &[chain_id, val_id]);
+                        return Ok(());
+                    }
+                }
+                return Err(CodegenError::Unsupported(
+                    "indexed store to a non-buffer base is not supported in the SPIR-V backend"
+                        .to_string(),
+                ));
+            }
             MirStmtKind::StorageLive(_) | MirStmtKind::StorageDead(_) | MirStmtKind::Nop => {
                 // No-op in SPIR-V
             }
         }
         Ok(())
+    }
+
+    /// If `base_local` is a compute-kernel buffer parameter, emit an
+    /// `OpAccessChain` into its runtime array (`buffer.member0[index]`) and
+    /// return the resulting `Uniform`-class element pointer id. Returns `Ok(None)`
+    /// if the local is not a buffer parameter (caller falls back).
+    fn gen_buffer_element_ptr(
+        &mut self,
+        base_local: LocalId,
+        index: &MirValue,
+        elem_ty: &MirType,
+        func: &MirFunction,
+    ) -> CodegenResult<Option<u32>> {
+        let Some(buffer) = self.compute_buffers.get(&base_local).cloned() else {
+            return Ok(None);
+        };
+        let index_id = self.gen_value(index, func)?;
+        // member index 0 selects the runtime array inside the BufferBlock struct.
+        let zero_id = self.get_const_id(&MirConst::Int(0, MirType::Int(IntSize::I32, false)));
+        let elem_ty = if matches!(elem_ty, MirType::Void) {
+            &buffer.elem_ty
+        } else {
+            elem_ty
+        };
+        let ptr_ty_id = self.uniform_elem_ptr_type(elem_ty);
+        let chain_id = self.alloc_id();
+        self.emit(
+            SpvOp::OpAccessChain,
+            &[ptr_ty_id, chain_id, buffer.var_id, zero_id, index_id],
+        );
+        Ok(Some(chain_id))
     }
 
     /// Generate an rvalue.
@@ -2181,6 +2325,20 @@ impl SpirvBackend {
                 index,
                 elem_ty,
             } => {
+                // Compute-kernel buffer read: `a[i]` on a StorageBuffer parameter
+                // lowers to a real OpAccessChain into the runtime array (member 0)
+                // + OpLoad -- NOT the zero-constant fallback.
+                if let MirValue::Local(base_local) = base {
+                    if let Some(chain_id) =
+                        self.gen_buffer_element_ptr(*base_local, index, elem_ty, func)?
+                    {
+                        let elem_ty_id = self.get_type_id(elem_ty);
+                        let result_id = self.alloc_id();
+                        self.emit(SpvOp::OpLoad, &[elem_ty_id, result_id, chain_id]);
+                        return Ok(result_id);
+                    }
+                }
+
                 // Array element access via OpCompositeExtract (constant index)
                 // or OpAccessChain (dynamic index)
                 let base_id = self.gen_value(base, func)?;
@@ -2271,12 +2429,34 @@ impl SpirvBackend {
                 let ids: Vec<u32> = (0..*count).map(|_| val_id).collect();
                 Ok(self.emit_composite_construct(arr_ty_id, &ids))
             }
-            MirRValue::NullaryOp(_op, ty) => {
-                // Operations without operands - typically sizeof or alignof
-                let _ty_id = self.get_type_id(ty);
-                let _result_id = self.alloc_id();
-                // Return zero constant of the appropriate type
-                Ok(self.get_const_id(&MirConst::Int(0, ty.clone())))
+            MirRValue::NullaryOp(op, ty) => {
+                match op {
+                    NullaryOp::ThreadIndex(component) => {
+                        // Read `gl_GlobalInvocationID[component]`: access-chain the
+                        // uvec3 Input builtin and load the requested scalar.
+                        let uvec3 = MirType::Vector(Box::new(MirType::Int(IntSize::I32, false)), 3);
+                        let giid = self.emit_builtin_var(SpvBuiltIn::GlobalInvocationId, &uvec3);
+                        let u32_ty = MirType::Int(IntSize::I32, false);
+                        let u32_ty_id = self.get_type_id(&u32_ty);
+                        let comp_const =
+                            self.get_const_id(&MirConst::Int(*component as i128, u32_ty.clone()));
+                        let ptr_ty_id = self.get_ptr_type_id(&u32_ty, SpvStorageClass::Input);
+                        let chain_id = self.alloc_id();
+                        self.emit(
+                            SpvOp::OpAccessChain,
+                            &[ptr_ty_id, chain_id, giid, comp_const],
+                        );
+                        let result_id = self.alloc_id();
+                        self.emit(SpvOp::OpLoad, &[u32_ty_id, result_id, chain_id]);
+                        Ok(result_id)
+                    }
+                    // sizeof/alignof have no operand-free SPIR-V form here; the
+                    // shader path does not exercise them. Fall back to a zero of
+                    // the requested type.
+                    NullaryOp::SizeOf | NullaryOp::AlignOf => {
+                        Ok(self.get_const_id(&MirConst::Int(0, ty.clone())))
+                    }
+                }
             }
             MirRValue::Deref { ptr, pointee_ty } => {
                 // Dereference a pointer: OpLoad through the pointer value
@@ -4147,6 +4327,58 @@ impl SpirvBackend {
         _func_id: u32,
         exec_model: SpvExecutionModel,
     ) {
+        // Compute kernels: map each slice/array/pointer parameter to a
+        // StorageBuffer binding, and pre-declare the GlobalInvocationId built-in
+        // so `gl_GlobalInvocationID.x` (lowered to a ThreadIndex nullary op) can
+        // read the thread index. This is what makes a `#[compute]` kernel emit
+        // real bindings instead of an entry point with zero interface.
+        if matches!(exec_model, SpvExecutionModel::GLCompute) {
+            self.compute_buffers.clear();
+            for (i, param_ty) in func.sig.params.iter().enumerate() {
+                // A slice/array parameter passes as `Ptr(Slice/Array(elem))`.
+                let (elem_ty, writable) = match param_ty {
+                    MirType::Ptr(inner) => match inner.as_ref() {
+                        MirType::Slice(elem) | MirType::Array(elem, _) => {
+                            // Writability: infer from the parameter local's
+                            // mutability (`&mut [_]`). Default to writable so a
+                            // kernel that only writes still validates.
+                            let is_mut = func
+                                .locals
+                                .iter()
+                                .find(|l| l.is_param && l.id.0 == i as u32)
+                                .map(|l| l.is_mut)
+                                .unwrap_or(true);
+                            ((**elem).clone(), is_mut)
+                        }
+                        other => (other.clone(), true),
+                    },
+                    MirType::Slice(elem) | MirType::Array(elem, _) => ((**elem).clone(), true),
+                    other => (other.clone(), true),
+                };
+                let var_id = self.emit_compute_ssbo(0, i as u32, &elem_ty, writable);
+                if let Some(local) = func
+                    .locals
+                    .iter()
+                    .find(|l| l.is_param && l.id.0 == i as u32)
+                {
+                    self.compute_buffers.insert(
+                        local.id,
+                        ComputeBuffer {
+                            var_id,
+                            elem_ty,
+                            writable,
+                        },
+                    );
+                }
+            }
+            // GlobalInvocationId is a uvec3 Input builtin; declare it now and add
+            // it to the entry-point interface (required for Input vars).
+            let uvec3 = MirType::Vector(Box::new(MirType::Int(IntSize::I32, false)), 3);
+            let giid = self.emit_builtin_var(SpvBuiltIn::GlobalInvocationId, &uvec3);
+            self.io_var_ids.push(giid);
+            return;
+        }
+
         if !matches!(
             exec_model,
             SpvExecutionModel::Vertex | SpvExecutionModel::Fragment

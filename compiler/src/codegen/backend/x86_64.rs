@@ -238,6 +238,11 @@ impl X86_64Backend {
                         .to_string(),
                 ));
             }
+            MirStmtKind::IndexStore { .. } => {
+                return Err(CodegenError::Unsupported(
+                    "indexed store is not yet supported in the x86-64 backend".to_string(),
+                ));
+            }
             MirStmtKind::DerefAssign { ptr, .. } => {
                 let offset = self.local_stack_offset(*ptr, func);
                 self.output.push_str(&format!(
@@ -803,8 +808,9 @@ impl X86_64Backend {
             MirStmtKind::DerefAssign { .. }
             | MirStmtKind::FieldDerefAssign { .. }
             | MirStmtKind::FieldAssign { .. }
+            | MirStmtKind::IndexStore { .. }
             | MirStmtKind::GlobalStore { .. } => {
-                // Pointer/field/global store in machine code: emit nop placeholder
+                // Pointer/field/index/global store in machine code: emit nop placeholder
                 // Full implementation requires register allocator
                 self.enc().nop();
             }

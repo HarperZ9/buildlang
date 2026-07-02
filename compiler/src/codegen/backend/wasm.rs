@@ -851,6 +851,11 @@ impl WasmBackend {
                     "store to a module global is not yet supported in the WASM backend".to_string(),
                 ));
             }
+            MirStmtKind::IndexStore { .. } => {
+                return Err(CodegenError::Unsupported(
+                    "indexed store is not yet supported in the WASM backend".to_string(),
+                ));
+            }
             MirStmtKind::Assign { dest, value } => {
                 self.gen_rvalue(value, func)?;
                 let dest_name = self
@@ -1017,6 +1022,10 @@ impl WasmBackend {
                         // Simplified alignment
                         let align = std::cmp::min(self.type_size(ty), 8);
                         self.emit_line(&format!("i32.const {}", align));
+                    }
+                    NullaryOp::ThreadIndex(_) => {
+                        // GPU-only built-in; WASM is not a compute target -> 0.
+                        self.emit_line("i32.const 0");
                     }
                 }
             }
