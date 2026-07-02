@@ -28,10 +28,21 @@ pub const SCIENTIFIC_RUNTIME_SCHEMA: &str = "buildlang-scientific-runtime-receip
 /// The invariant name emitted for the energy-monotone check.
 pub const ENERGY_MONOTONE_INVARIANT: &str = "energy_monotone_nonincreasing";
 
+/// The invariant name emitted for the conserved-quantity check: the measured
+/// scalar (a conserved quantity such as total mass or a Hamiltonian) must stay
+/// within tolerance of its initial value at every step.
+pub const CONSERVATION_INVARIANT: &str = "conserved_quantity_constant";
+
 /// Tolerance used by the monotone-non-increasing check. A step counts as an
 /// increase only when `series[k+1] > series[k] + TOLERANCE`, so platform float
 /// jitter at the ULP scale does not flip the verdict (design determinism rule).
 pub const ENERGY_MONOTONE_TOLERANCE: f64 = 1e-12;
+
+/// Tolerance used by the conserved-quantity check. Looser than the monotone
+/// tolerance because a genuinely conserved discrete quantity still accumulates
+/// floating-point roundoff over many steps, while a real leak (a non-conserving
+/// scheme) drifts by an O(1) amount that this bound still catches decisively.
+pub const CONSERVATION_TOLERANCE: f64 = 1e-9;
 
 /// Provenance reference to the Telos pass-0009 research probe (reference only;
 /// never matched byte-wise, per the determinism decision in the design).
@@ -333,10 +344,10 @@ pub struct ScientificMeasurement {
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InvariantObserved {
     /// Number of steps `k` where `series[k+1] > series[k] + tolerance`.
-    pub increase_count: usize,
+    pub violation_count: usize,
     /// Zero-based index `k` of the first offending step, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub first_increase_step: Option<usize>,
+    pub first_violation_step: Option<usize>,
     /// First series value (if the series is non-empty).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub initial_value: Option<f64>,
@@ -405,7 +416,7 @@ pub struct ScientificRuntimeReceipt {
     /// diverged run the finite-prefix LENGTH is the index of the first
     /// non-finite value, a function of the exact float trajectory, which the
     /// design declares non-reproducible across toolchains. Verify therefore
-    /// gates the prefix-derived checks (count, increase_count) on this field
+    /// gates the prefix-derived checks (count, violation_count) on this field
     /// and instead requires the re-run to reproduce the divergence itself.
     pub diverged: bool,
     /// The machine-readable claims boundary (pass-0122 `non_promotion_boundary`
@@ -426,28 +437,100 @@ pub struct ScientificRuntimeReceipt {
 /// zero increases. A single-point (or empty) series has nothing to compare, so
 /// it cannot witness monotonicity and is not a PASS.
 pub fn energy_monotone_nonincreasing(series: &[f64], tol: f64) -> InvariantObserved {
-    let mut increase_count = 0usize;
-    let mut first_increase_step = None;
+    let mut violation_count = 0usize;
+    let mut first_violation_step = None;
     for k in 0..series.len().saturating_sub(1) {
         if series[k + 1] > series[k] + tol {
-            increase_count += 1;
-            if first_increase_step.is_none() {
-                first_increase_step = Some(k);
+            violation_count += 1;
+            if first_violation_step.is_none() {
+                first_violation_step = Some(k);
             }
         }
     }
     InvariantObserved {
-        increase_count,
-        first_increase_step,
+        violation_count,
+        first_violation_step,
         initial_value: series.first().copied(),
         final_value: series.last().copied(),
     }
 }
 
+/// Conserved-quantity invariant over a measured series: the scalar must stay
+/// within `tol` of its INITIAL value at every step. A "violation" is a step
+/// whose value deviates from `series[0]` by more than `tol`.
+///
+/// The reference is the FIRST value, not the mean: the mean depends on the
+/// whole series, so a re-run that reproduces a different-length prefix (the
+/// diverged case) would shift the reference and could flip the verdict, whereas
+/// `series[0]` is stable under prefixing. Step 0 always deviates by exactly 0,
+/// so it is never a violation. Records the first offending step and the
+/// initial/final values; the verdict is derived in [`invariant_passes`] (PASS
+/// requires at least two points AND zero violations).
+pub fn conserved_quantity_constant(series: &[f64], tol: f64) -> InvariantObserved {
+    let reference = series.first().copied();
+    let mut violation_count = 0usize;
+    let mut first_violation_step = None;
+    if let Some(ref0) = reference {
+        for (k, &value) in series.iter().enumerate() {
+            if (value - ref0).abs() > tol {
+                violation_count += 1;
+                if first_violation_step.is_none() {
+                    first_violation_step = Some(k);
+                }
+            }
+        }
+    }
+    InvariantObserved {
+        violation_count,
+        first_violation_step,
+        initial_value: reference,
+        final_value: series.last().copied(),
+    }
+}
+
 /// The invariant PASSes iff the series has at least two points and no step
-/// increased the energy beyond tolerance.
+/// violated the invariant beyond tolerance. Uniform across the family: an
+/// invariant's whole verdict is "enough points to witness it, and zero
+/// violations".
 pub fn invariant_passes(series_len: usize, observed: &InvariantObserved) -> bool {
-    series_len >= 2 && observed.increase_count == 0
+    series_len >= 2 && observed.violation_count == 0
+}
+
+/// Whether `name` is an invariant this build implements (and can therefore
+/// re-check). The oracle binding is pinned to this: a receipt naming an
+/// invariant not in this set is `INVARIANT_UNSUPPORTED`.
+pub fn is_known_invariant(name: &str) -> bool {
+    name == ENERGY_MONOTONE_INVARIANT || name == CONSERVATION_INVARIANT
+}
+
+/// The FIXED tolerance for a named invariant. Tolerance is a property of the
+/// invariant, not an author-tunable knob: pinning it here (and re-checking the
+/// sealed value against it at verify) stops a receipt from weakening its own
+/// check by sealing a loose tolerance. Unknown names fall back to the strict
+/// monotone tolerance (they are rejected upstream by `is_known_invariant`).
+pub fn invariant_tolerance(name: &str) -> f64 {
+    match name {
+        CONSERVATION_INVARIANT => CONSERVATION_TOLERANCE,
+        _ => ENERGY_MONOTONE_TOLERANCE,
+    }
+}
+
+/// The human-readable expectation string sealed for a named invariant.
+pub fn invariant_expectation(name: &str) -> &'static str {
+    match name {
+        CONSERVATION_INVARIANT => "no step deviates the conserved quantity beyond tolerance",
+        _ => "no step increases energy beyond tolerance",
+    }
+}
+
+/// Evaluate the named invariant over a series. The single dispatch point both
+/// emit and verify go through, so the two can never disagree on what an
+/// invariant means.
+pub fn evaluate_invariant(name: &str, series: &[f64], tol: f64) -> InvariantObserved {
+    match name {
+        CONSERVATION_INVARIANT => conserved_quantity_constant(series, tol),
+        _ => energy_monotone_nonincreasing(series, tol),
+    }
 }
 
 /// Inputs threaded from `cmd_run` into the receipt builder.
@@ -478,6 +561,10 @@ pub struct ScientificReceiptInputs<'a> {
     /// The program arguments the run was invoked with (recorded so verify can
     /// re-run identically).
     pub args: Vec<String>,
+    /// The invariant to check over the series (a name from the registry;
+    /// `is_known_invariant`). Selects the evaluator, tolerance, expectation,
+    /// and the sealed oracle/invariant binding.
+    pub invariant_name: String,
     pub metric: String,
     pub units: Option<String>,
     pub problem_label: Option<String>,
@@ -515,6 +602,7 @@ pub fn build_scientific_runtime_receipt(
         series_parsed,
         diverged,
         args,
+        invariant_name,
         metric,
         units,
         problem_label,
@@ -522,7 +610,8 @@ pub fn build_scientific_runtime_receipt(
         flags,
     } = inputs;
 
-    let observed = energy_monotone_nonincreasing(&series, ENERGY_MONOTONE_TOLERANCE);
+    let tolerance = invariant_tolerance(&invariant_name);
+    let observed = evaluate_invariant(&invariant_name, &series, tolerance);
     let has_series = series_parsed && !series.is_empty();
     // A diverged run (non-finite value observed) cannot witness the invariant,
     // even if its finite prefix looks monotone, so it never PASSes.
@@ -586,7 +675,7 @@ pub fn build_scientific_runtime_receipt(
         },
         oracle: ScientificOracle {
             kind: "declared_invariant".to_string(),
-            name: ENERGY_MONOTONE_INVARIANT.to_string(),
+            name: invariant_name.clone(),
             status: "DECLARED".to_string(),
         },
         input_dataset,
@@ -610,9 +699,9 @@ pub fn build_scientific_runtime_receipt(
             units,
         },
         invariant: ScientificInvariant {
-            name: ENERGY_MONOTONE_INVARIANT.to_string(),
-            expectation: "no step increases energy beyond tolerance".to_string(),
-            tolerance: ENERGY_MONOTONE_TOLERANCE,
+            name: invariant_name.clone(),
+            expectation: invariant_expectation(&invariant_name).to_string(),
+            tolerance,
             observed,
             status: invariant_status.to_string(),
         },
@@ -754,7 +843,7 @@ pub struct RecomputedVerdict {
     /// `PASS` | `FAIL` over the re-run series.
     pub invariant_status: &'static str,
     /// Number of energy-increasing steps in the re-run series.
-    pub increase_count: usize,
+    pub violation_count: usize,
     /// `PASS` | `FAIL_EXPECTED` | `FAIL_UNEXPECTED` | `UNVERIFIABLE`.
     pub receipt_status: &'static str,
 }
@@ -766,12 +855,13 @@ pub struct RecomputedVerdict {
 /// reproduced. This checks the VERDICT (monotonicity + increase count), not the
 /// exact float values, so it is robust to platform float non-reproducibility.
 pub fn recompute_verdict(
+    invariant_name: &str,
     series: &[f64],
     series_parsed: bool,
     diverged: bool,
     negative_fixture: bool,
 ) -> RecomputedVerdict {
-    let observed = energy_monotone_nonincreasing(series, ENERGY_MONOTONE_TOLERANCE);
+    let observed = evaluate_invariant(invariant_name, series, invariant_tolerance(invariant_name));
     let has_series = series_parsed && !series.is_empty();
     let passes = has_series && !diverged && invariant_passes(series.len(), &observed);
 
@@ -788,7 +878,7 @@ pub fn recompute_verdict(
 
     RecomputedVerdict {
         invariant_status,
-        increase_count: observed.increase_count,
+        violation_count: observed.violation_count,
         receipt_status,
     }
 }
@@ -837,7 +927,7 @@ pub struct RerunObservation {
 ///    series. The observed-value COUNT is re-checked against the stored
 ///    `measurement.count` (a deterministic quantity); a mismatch fails.
 /// 5. Recompute the invariant + receipt-status verdict from that fresh series
-///    and compare the recomputed `invariant.status`, `increase_count`, and
+///    and compare the recomputed `invariant.status`, `violation_count`, and
 ///    `receipt_status` against the stored ones. Any disagreement is a failure.
 ///    Individual float VALUES are deliberately NOT re-compared: exact floats
 ///    need not reproduce across platforms, which is precisely why the verdict
@@ -1012,19 +1102,37 @@ pub fn evaluate_scientific_runtime_receipt(
         );
         return Err(verify_failure_class(json, "ORACLE_STATUS_UNSUPPORTED", 1));
     }
-    if receipt.invariant.name != ENERGY_MONOTONE_INVARIANT {
+    // The invariant is pinned to the IMPLEMENTATION SET, not to another sealed
+    // field: `invariant.name` must be one this build actually re-checks, and
+    // the oracle must bind to that same invariant. Validating `invariant.name`
+    // against `is_known_invariant` (not against `oracle.name`) is what keeps
+    // the binding non-self-referential: a resealed receipt may pick any known
+    // invariant, but never one the verifier cannot execute.
+    if !is_known_invariant(&receipt.invariant.name) {
         eprintln!(
-            "Error: unsupported invariant `{}` (this verifier implements `{}` only)",
-            receipt.invariant.name, ENERGY_MONOTONE_INVARIANT
+            "Error: unsupported invariant `{}` (this verifier implements `{}` and `{}`)",
+            receipt.invariant.name, ENERGY_MONOTONE_INVARIANT, CONSERVATION_INVARIANT
         );
         return Err(verify_failure_class(json, "INVARIANT_UNSUPPORTED", 1));
     }
-    if receipt.oracle.name != ENERGY_MONOTONE_INVARIANT {
+    if receipt.oracle.name != receipt.invariant.name {
         eprintln!(
-            "Error: oracle binding mismatch: oracle names `{}`, this verifier's invariant is `{}`",
-            receipt.oracle.name, ENERGY_MONOTONE_INVARIANT
+            "Error: oracle binding mismatch: oracle names `{}`, invariant is `{}`",
+            receipt.oracle.name, receipt.invariant.name
         );
         return Err(verify_failure_class(json, "ORACLE_BINDING_MISMATCH", 1));
+    }
+    // Tolerance is a FIXED property of the invariant, never an author knob: a
+    // receipt that sealed a different tolerance is trying to redefine (usually
+    // to weaken) its own check, so it is rejected rather than re-checked under
+    // the loosened bound.
+    let canonical_tolerance = invariant_tolerance(&receipt.invariant.name);
+    if receipt.invariant.tolerance != canonical_tolerance {
+        eprintln!(
+            "Error: invariant tolerance mismatch: receipt {}, canonical {} for `{}`",
+            receipt.invariant.tolerance, canonical_tolerance, receipt.invariant.name
+        );
+        return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
     }
 
     // The fenced branches are load-bearing honesty: v0 produces neither
@@ -1216,7 +1324,7 @@ pub fn evaluate_scientific_runtime_receipt(
         &receipt.build_state.toolchain.program_executable_digest,
     );
 
-    // For a DIVERGED run the finite-prefix length (and hence increase_count
+    // For a DIVERGED run the finite-prefix length (and hence violation_count
     // over that prefix) is the step index of the first non-finite value: a
     // function of the exact float trajectory, which the design declares
     // non-reproducible across toolchains (a 1-ULP libm difference can shift
@@ -1245,12 +1353,13 @@ pub fn evaluate_scientific_runtime_receipt(
 
     // (4) Recompute the verdict and compare against the stored one.
     let recomputed = recompute_verdict(
+        &receipt.invariant.name,
         &parsed.series,
         parsed.any_parsed,
         parsed.diverged,
         receipt.negative_fixture,
     );
-    let stored_increase = receipt.invariant.observed.increase_count;
+    let stored_increase = receipt.invariant.observed.violation_count;
 
     if recomputed.invariant_status != receipt.invariant.status {
         eprintln!(
@@ -1262,12 +1371,12 @@ pub fn evaluate_scientific_runtime_receipt(
     // Prefix-derived like the count: skipped when both runs diverged (the
     // increase count over a platform-dependent finite prefix is itself
     // platform-dependent).
-    if !both_diverged && recomputed.increase_count != stored_increase {
+    if !both_diverged && recomputed.violation_count != stored_increase {
         eprintln!(
-            "Error: increase_count drift: receipt {}, re-run {}",
-            stored_increase, recomputed.increase_count
+            "Error: violation_count drift: receipt {}, re-run {}",
+            stored_increase, recomputed.violation_count
         );
-        return Err(verify_failure_class(json, "INCREASE_COUNT_DRIFT", 1));
+        return Err(verify_failure_class(json, "VIOLATION_COUNT_DRIFT", 1));
     }
     if recomputed.receipt_status != receipt.receipt_status {
         eprintln!(
@@ -1283,7 +1392,7 @@ pub fn evaluate_scientific_runtime_receipt(
     // bridge) decide what to do with it.
     Ok(ScientificVerifyReport {
         invariant_status: recomputed.invariant_status,
-        increase_count: recomputed.increase_count,
+        violation_count: recomputed.violation_count,
         receipt_status: recomputed.receipt_status,
         invariant_held: matches!(recomputed.receipt_status, "PASS" | "FAIL_EXPECTED"),
         toolchain_matched,
@@ -1306,7 +1415,7 @@ pub fn evaluate_scientific_runtime_receipt(
 /// Faithful does NOT mean the invariant held: `invariant_held` carries that.
 pub struct ScientificVerifyReport {
     pub invariant_status: &'static str,
-    pub increase_count: usize,
+    pub violation_count: usize,
     pub receipt_status: &'static str,
     pub invariant_held: bool,
     pub toolchain_matched: bool,
@@ -1340,8 +1449,8 @@ pub const CRUCIBLE_EXPORT_METHOD: &str = "buildc-receipt-verify/reexecuted-v1";
 /// - `deviation` is DERIVED from the fresh re-run (the report), never copied
 ///   from stored receipt values. UNVERIFIABLE receipts export deviation null
 ///   (Crucible reads unmeasurable as UNVERIFIABLE, fail-closed); everything
-///   else exports the recomputed increase_count.
-/// - `tolerance` is 0.5: increase_count is integral, so 0.5 cleanly separates
+///   else exports the recomputed violation_count.
+/// - `tolerance` is 0.5: violation_count is integral, so 0.5 cleanly separates
 ///   "no increases" (MATCH) from "any increase" (DRIFT). A FAIL_EXPECTED
 ///   receipt therefore exports a row that reads DRIFT against a
 ///   holds-everywhere claim; binding it to a claim whose falsification
@@ -1377,17 +1486,17 @@ pub fn crucible_measurement_from_report(
             serde_json::json!(1.0)
         }
     } else {
-        serde_json::json!(report.increase_count as f64)
+        serde_json::json!(report.violation_count as f64)
     };
 
     // For a DIVERGED receipt the increase count is prefix-derived and
     // platform-dependent (the verifier's own both_diverged rule skips it);
     // sealing a concrete expectation would make an independent replayer
     // wrongly conclude non-reproduction of a faithful receipt.
-    let expected_increase_count = if report.diverged {
+    let expected_violation_count = if report.diverged {
         serde_json::Value::Null
     } else {
-        serde_json::json!(report.increase_count)
+        serde_json::json!(report.violation_count)
     };
 
     let mut evidence = vec![
@@ -1439,7 +1548,7 @@ pub fn crucible_measurement_from_report(
                 // Null for diverged receipts: reproduced divergence (same
                 // receipt_status) is the faithfulness signal, mirroring the
                 // verifier's both_diverged rule.
-                "increase_count": expected_increase_count,
+                "violation_count": expected_violation_count,
                 // The exit code the sealed replay command must yield: 0 for
                 // faithful PASS/FAIL_EXPECTED, 3 for faithful
                 // FAIL_UNEXPECTED/UNVERIFIABLE.
@@ -1483,7 +1592,7 @@ pub fn verify_scientific_runtime_receipt(
             "invariant_held": report.invariant_held,
             "source": report.source,
             "invariant_status": report.invariant_status,
-            "increase_count": report.increase_count,
+            "violation_count": report.violation_count,
             "receipt_status": report.receipt_status,
             "toolchain_matched": report.toolchain_matched,
             "raw_stdout_reproduced": report.raw_stdout_reproduced,
@@ -1503,17 +1612,17 @@ pub fn verify_scientific_runtime_receipt(
         println!("{}", text);
     } else if report.invariant_held {
         println!(
-            "MATCH: scientific-runtime receipt re-runs and re-checks clean ({}, increase_count={}; toolchain_matched={}, raw_stdout_reproduced={}, executable_reproduced={})",
+            "MATCH: scientific-runtime receipt re-runs and re-checks clean ({}, violation_count={}; toolchain_matched={}, raw_stdout_reproduced={}, executable_reproduced={})",
             report.receipt_status,
-            report.increase_count,
+            report.violation_count,
             report.toolchain_matched,
             report.raw_stdout_reproduced,
             report.executable_reproduced
         );
     } else {
         eprintln!(
-            "FAIL: scientific-runtime receipt faithfully reproduces, but the invariant did not hold ({}, increase_count={}). `receipt verify` exits nonzero so it is safe as a pass/fail gate.",
-            report.receipt_status, report.increase_count
+            "FAIL: scientific-runtime receipt faithfully reproduces, but the invariant did not hold ({}, violation_count={}). `receipt verify` exits nonzero so it is safe as a pass/fail gate.",
+            report.receipt_status, report.violation_count
         );
     }
 
@@ -1581,7 +1690,7 @@ fn digest_is_well_formed(digest: &ScientificDigest) -> bool {
 /// - `RERUN_EXIT_MISMATCH`: the re-run's process exit code differs from the
 ///   sealed `runtime_state.exit_code` (covers a crashing re-run).
 /// - `MEASUREMENT_COUNT_DRIFT`, `INVARIANT_STATUS_DRIFT`,
-///   `INCREASE_COUNT_DRIFT`, `RECEIPT_STATUS_DRIFT`: the re-run disagrees with
+///   `VIOLATION_COUNT_DRIFT`, `RECEIPT_STATUS_DRIFT`: the re-run disagrees with
 ///   the stored verdict facts.
 /// - `SEAL_MISMATCH`: the stored receipt body does not re-seal.
 /// - `INVARIANT_NOT_HELD` (exit 3): the receipt is FAITHFUL but records
@@ -1670,6 +1779,7 @@ mod tests {
             series_parsed: parsed,
             diverged: false,
             args: Vec::new(),
+            invariant_name: ENERGY_MONOTONE_INVARIANT.to_string(),
             metric: "series".to_string(),
             units: None,
             problem_label: None,
@@ -1678,24 +1788,39 @@ mod tests {
         }
     }
 
+    /// A `base_inputs` variant that seals a DIFFERENT invariant, for the
+    /// conservation-family tests.
+    fn base_inputs_for<'a>(
+        invariant_name: &str,
+        path: &'a Path,
+        series: Vec<f64>,
+        parsed: bool,
+        negative_fixture: bool,
+    ) -> ScientificReceiptInputs<'a> {
+        ScientificReceiptInputs {
+            invariant_name: invariant_name.to_string(),
+            ..base_inputs(path, series, parsed, negative_fixture)
+        }
+    }
+
     #[test]
     fn monotone_series_has_zero_increases() {
         let series = [4.0, 3.0, 3.0, 2.5, 1.0];
         let observed = energy_monotone_nonincreasing(&series, ENERGY_MONOTONE_TOLERANCE);
-        assert_eq!(observed.increase_count, 0);
-        assert_eq!(observed.first_increase_step, None);
+        assert_eq!(observed.violation_count, 0);
+        assert_eq!(observed.first_violation_step, None);
         assert_eq!(observed.initial_value, Some(4.0));
         assert_eq!(observed.final_value, Some(1.0));
         assert!(invariant_passes(series.len(), &observed));
     }
 
     #[test]
-    fn one_bump_is_counted_with_first_increase_step() {
+    fn one_bump_is_counted_with_first_violation_step() {
         // Increase happens at k = 2 (index 2 -> index 3: 2.0 -> 5.0).
         let series = [4.0, 3.0, 2.0, 5.0, 1.0];
         let observed = energy_monotone_nonincreasing(&series, ENERGY_MONOTONE_TOLERANCE);
-        assert_eq!(observed.increase_count, 1);
-        assert_eq!(observed.first_increase_step, Some(2));
+        assert_eq!(observed.violation_count, 1);
+        assert_eq!(observed.first_violation_step, Some(2));
         assert!(!invariant_passes(series.len(), &observed));
     }
 
@@ -1704,20 +1829,20 @@ mod tests {
         // A sub-tolerance wiggle up is NOT an increase.
         let jitter = [1.0, 1.0 + 5e-13, 1.0];
         let observed = energy_monotone_nonincreasing(&jitter, ENERGY_MONOTONE_TOLERANCE);
-        assert_eq!(observed.increase_count, 0);
+        assert_eq!(observed.violation_count, 0);
 
         // A supra-tolerance step up IS an increase.
         let growth = [1.0, 1.0 + 1e-9, 1.0 + 2e-9];
         let observed = energy_monotone_nonincreasing(&growth, ENERGY_MONOTONE_TOLERANCE);
-        assert_eq!(observed.increase_count, 2);
-        assert_eq!(observed.first_increase_step, Some(0));
+        assert_eq!(observed.violation_count, 2);
+        assert_eq!(observed.first_violation_step, Some(0));
     }
 
     #[test]
     fn single_point_series_does_not_pass() {
         let series = [1.0];
         let observed = energy_monotone_nonincreasing(&series, ENERGY_MONOTONE_TOLERANCE);
-        assert_eq!(observed.increase_count, 0);
+        assert_eq!(observed.violation_count, 0);
         // Zero increases but only one point: cannot witness monotonicity.
         assert!(!invariant_passes(series.len(), &observed));
     }
@@ -1725,7 +1850,7 @@ mod tests {
     #[test]
     fn empty_series_does_not_pass() {
         let observed = energy_monotone_nonincreasing(&[], ENERGY_MONOTONE_TOLERANCE);
-        assert_eq!(observed.increase_count, 0);
+        assert_eq!(observed.violation_count, 0);
         assert_eq!(observed.initial_value, None);
         assert_eq!(observed.final_value, None);
         assert!(!invariant_passes(0, &observed));
@@ -1738,7 +1863,7 @@ mod tests {
             build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
         assert_eq!(receipt.receipt_status, "PASS");
         assert_eq!(receipt.invariant.status, "PASS");
-        assert_eq!(receipt.invariant.observed.increase_count, 0);
+        assert_eq!(receipt.invariant.observed.violation_count, 0);
         assert!(receipt
             .labels
             .contains(&"NOT_A_NEW_PHYSICAL_LAW".to_string()));
@@ -1752,8 +1877,8 @@ mod tests {
             build_scientific_runtime_receipt(base_inputs(path, vec![1.0, 2.0, 3.0], true, true));
         assert_eq!(receipt.receipt_status, "FAIL_EXPECTED");
         assert_eq!(receipt.invariant.status, "FAIL");
-        assert_eq!(receipt.invariant.observed.increase_count, 2);
-        assert_eq!(receipt.invariant.observed.first_increase_step, Some(0));
+        assert_eq!(receipt.invariant.observed.violation_count, 2);
+        assert_eq!(receipt.invariant.observed.first_violation_step, Some(0));
         assert!(receipt.labels.contains(&"NEGATIVE_FIXTURE".to_string()));
     }
 
@@ -1817,7 +1942,7 @@ mod tests {
             build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
         let original = receipt.seal.hex.clone();
         // Tamper with a witnessed field; the recomputed seal must diverge.
-        receipt.invariant.observed.increase_count = 99;
+        receipt.invariant.observed.violation_count = 99;
         assert_ne!(recompute_seal_hex(&receipt), original);
     }
 
@@ -1928,28 +2053,46 @@ mod tests {
     fn recompute_verdict_matches_builder_for_monotone_series() {
         // A monotone series recomputes PASS/PASS with zero increases, exactly
         // as `build_scientific_runtime_receipt` would have recorded it.
-        let verdict = recompute_verdict(&[4.0, 3.0, 2.0], true, false, false);
+        let verdict = recompute_verdict(
+            ENERGY_MONOTONE_INVARIANT,
+            &[4.0, 3.0, 2.0],
+            true,
+            false,
+            false,
+        );
         assert_eq!(verdict.invariant_status, "PASS");
         assert_eq!(verdict.receipt_status, "PASS");
-        assert_eq!(verdict.increase_count, 0);
+        assert_eq!(verdict.violation_count, 0);
     }
 
     #[test]
     fn recompute_verdict_distinguishes_expected_from_unexpected_failure() {
         // The negative-fixture flag (read back from the stored receipt) is what
         // separates FAIL_EXPECTED from FAIL_UNEXPECTED on a re-run.
-        let expected = recompute_verdict(&[1.0, 2.0, 3.0], true, false, true);
+        let expected = recompute_verdict(
+            ENERGY_MONOTONE_INVARIANT,
+            &[1.0, 2.0, 3.0],
+            true,
+            false,
+            true,
+        );
         assert_eq!(expected.invariant_status, "FAIL");
         assert_eq!(expected.receipt_status, "FAIL_EXPECTED");
-        assert_eq!(expected.increase_count, 2);
+        assert_eq!(expected.violation_count, 2);
 
-        let unexpected = recompute_verdict(&[1.0, 2.0, 3.0], true, false, false);
+        let unexpected = recompute_verdict(
+            ENERGY_MONOTONE_INVARIANT,
+            &[1.0, 2.0, 3.0],
+            true,
+            false,
+            false,
+        );
         assert_eq!(unexpected.receipt_status, "FAIL_UNEXPECTED");
     }
 
     #[test]
     fn recompute_verdict_is_unverifiable_when_nothing_parsed() {
-        let verdict = recompute_verdict(&[], false, false, false);
+        let verdict = recompute_verdict(ENERGY_MONOTONE_INVARIANT, &[], false, false, false);
         assert_eq!(verdict.receipt_status, "UNVERIFIABLE");
         assert_eq!(verdict.invariant_status, "FAIL");
     }
@@ -1958,9 +2101,158 @@ mod tests {
     fn recompute_verdict_is_unverifiable_when_diverged() {
         // A monotone finite prefix that diverged is UNVERIFIABLE, not PASS, so a
         // re-run of a diverged program re-derives the same UNVERIFIABLE verdict.
-        let verdict = recompute_verdict(&[4.0, 3.0], true, true, false);
+        let verdict = recompute_verdict(ENERGY_MONOTONE_INVARIANT, &[4.0, 3.0], true, true, false);
         assert_eq!(verdict.receipt_status, "UNVERIFIABLE");
         assert_eq!(verdict.invariant_status, "FAIL");
+    }
+
+    #[test]
+    fn conservation_holds_for_a_constant_series() {
+        let obs = conserved_quantity_constant(&[2.0, 2.0, 2.0, 2.0], CONSERVATION_TOLERANCE);
+        assert_eq!(obs.violation_count, 0);
+        assert!(invariant_passes(4, &obs));
+        // Roundoff-scale jitter within tolerance is still conserved.
+        let obs =
+            conserved_quantity_constant(&[2.0, 2.0 + 1e-12, 2.0 - 1e-12], CONSERVATION_TOLERANCE);
+        assert_eq!(obs.violation_count, 0);
+    }
+
+    #[test]
+    fn conservation_flags_a_leak() {
+        // A quantity that drifts from its initial value beyond tolerance: steps
+        // 2 and 3 deviate from the reference 2.0.
+        let obs = conserved_quantity_constant(&[2.0, 2.0, 1.5, 1.0], CONSERVATION_TOLERANCE);
+        assert_eq!(obs.violation_count, 2);
+        assert_eq!(obs.first_violation_step, Some(2));
+        assert!(!invariant_passes(4, &obs));
+        assert_eq!(obs.initial_value, Some(2.0));
+        assert_eq!(obs.final_value, Some(1.0));
+    }
+
+    #[test]
+    fn invariant_registry_dispatches_by_name() {
+        assert!(is_known_invariant(ENERGY_MONOTONE_INVARIANT));
+        assert!(is_known_invariant(CONSERVATION_INVARIANT));
+        assert!(!is_known_invariant("no_such_invariant"));
+        assert_eq!(
+            invariant_tolerance(CONSERVATION_INVARIANT),
+            CONSERVATION_TOLERANCE
+        );
+        assert_eq!(
+            invariant_tolerance(ENERGY_MONOTONE_INVARIANT),
+            ENERGY_MONOTONE_TOLERANCE
+        );
+
+        // A monotone-DECREASING series distinguishes the two evaluators: it has
+        // zero monotone violations (non-increasing) but DOES deviate from its
+        // initial value, so conservation flags it. This proves the dispatcher
+        // routes to genuinely different checks, not one aliased to the other.
+        let decreasing = [3.0, 2.0, 1.0];
+        let mono = evaluate_invariant(
+            ENERGY_MONOTONE_INVARIANT,
+            &decreasing,
+            ENERGY_MONOTONE_TOLERANCE,
+        );
+        assert_eq!(mono.violation_count, 0);
+        let cons = evaluate_invariant(CONSERVATION_INVARIANT, &decreasing, CONSERVATION_TOLERANCE);
+        assert_eq!(cons.violation_count, 2);
+    }
+
+    #[test]
+    fn verify_round_trips_a_conservation_receipt() {
+        let path = Path::new("k.bld");
+        let receipt = build_scientific_runtime_receipt(base_inputs_for(
+            CONSERVATION_INVARIANT,
+            path,
+            vec![2.0, 2.0, 2.0],
+            true,
+            false,
+        ));
+        assert_eq!(receipt.invariant.name, CONSERVATION_INVARIANT);
+        assert_eq!(receipt.oracle.name, CONSERVATION_INVARIANT);
+        assert_eq!(receipt.invariant.tolerance, CONSERVATION_TOLERANCE);
+        assert_eq!(receipt.receipt_status, "PASS");
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let sd = receipt.source_digest.clone();
+        let gd = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+            |_, _| Ok(rerun(vec![2.0, 2.0, 2.0])),
+        );
+        assert!(
+            result.is_ok(),
+            "a faithful conservation receipt must verify: {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_fails_a_faithful_conservation_leak() {
+        // A conserved quantity that leaks (drifts past tolerance) faithfully
+        // reproduces a FAIL_UNEXPECTED, so `receipt verify` exits 3 (not 0).
+        let path = Path::new("k.bld");
+        let receipt = build_scientific_runtime_receipt(base_inputs_for(
+            CONSERVATION_INVARIANT,
+            path,
+            vec![2.0, 2.0, 1.0],
+            true,
+            false,
+        ));
+        assert_eq!(receipt.receipt_status, "FAIL_UNEXPECTED");
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let sd = receipt.source_digest.clone();
+        let gd = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+            |_, _| Ok(rerun(vec![2.0, 2.0, 1.0])),
+        );
+        assert_eq!(
+            result,
+            Err(3),
+            "a faithful conservation leak must exit 3 (FAIL_UNEXPECTED)"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_a_non_canonical_invariant_tolerance() {
+        // Tolerance is fixed per invariant; a receipt that resealed a loosened
+        // tolerance is rejected (FIELD_CONTRACT_VIOLATION), never re-checked
+        // under the weaker bound.
+        let path = Path::new("k.bld");
+        let mut receipt = build_scientific_runtime_receipt(base_inputs_for(
+            CONSERVATION_INVARIANT,
+            path,
+            vec![2.0, 2.0, 2.0],
+            true,
+            false,
+        ));
+        receipt.invariant.tolerance = 1e6;
+        seal_receipt(&mut receipt);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let sd = receipt.source_digest.clone();
+        let gd = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+            |_, _| Ok(rerun(vec![2.0, 2.0, 2.0])),
+        );
+        assert_eq!(result, Err(1), "a non-canonical tolerance must be rejected");
     }
 
     /// Build a faithful re-run observation (finite series, exit 0, raw and
@@ -2145,7 +2437,7 @@ mod tests {
         // The re-run's finite prefix is deliberately a DIFFERENT length than
         // the stored one: for a diverged run the prefix length is the index of
         // the first non-finite value, a platform-dependent quantity, so the
-        // count / increase_count checks must be skipped when both runs
+        // count / violation_count checks must be skipped when both runs
         // diverged (a 1-ULP libm difference can shift the divergence step and
         // must not misclassify an honest receipt as tampering, Err(1)).
         let path = Path::new("k.bld");
@@ -2451,11 +2743,11 @@ mod tests {
 
     fn report_fixture(
         receipt_status: &'static str,
-        increase_count: usize,
+        violation_count: usize,
     ) -> ScientificVerifyReport {
         ScientificVerifyReport {
-            invariant_status: if increase_count == 0 { "PASS" } else { "FAIL" },
-            increase_count,
+            invariant_status: if violation_count == 0 { "PASS" } else { "FAIL" },
+            violation_count,
             receipt_status,
             invariant_held: matches!(receipt_status, "PASS" | "FAIL_EXPECTED"),
             toolchain_matched: true,
@@ -2491,7 +2783,7 @@ mod tests {
         assert_eq!(row["method"], CRUCIBLE_EXPORT_METHOD);
         assert_eq!(row["recheck"]["oracle"], "buildc.receipt.verify");
         assert_eq!(row["recheck"]["command"][0], "buildc");
-        assert_eq!(row["recheck"]["expected"]["increase_count"], 0);
+        assert_eq!(row["recheck"]["expected"]["violation_count"], 0);
         assert!(row["evidence"]
             .as_array()
             .unwrap()
@@ -2599,7 +2891,7 @@ mod tests {
             &"f".repeat(64),
             1000.0,
         );
-        assert!(row["recheck"]["expected"]["increase_count"].is_null());
+        assert!(row["recheck"]["expected"]["violation_count"].is_null());
         assert_eq!(row["recheck"]["diverged"], true);
         assert!(row["deviation"].is_null());
         assert_eq!(row["recheck"]["expected"]["exit_code"], 3);
