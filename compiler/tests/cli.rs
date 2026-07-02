@@ -14136,6 +14136,141 @@ fn relation_invariant_round_trips_positive_negative_and_validates_columns() {
 }
 
 #[test]
+fn conserved_band_invariant_round_trips_and_is_distinct() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping conserved_band_invariant_round_trips_and_is_distinct: C backend not ready"
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang_sci_conserved_band_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create conserved-band fixture dir");
+
+    // POSITIVE: the symplectic (leapfrog) oscillator holds its energy within an
+    // O(dt^2) band forever, so `--invariant conserved-band` PASSes.
+    let pass_receipt = dir.join("symplectic.json");
+    let emit_pass = buildc()
+        .arg("run")
+        .arg(repo_example("symplectic_oscillator.bld"))
+        .args(["--emit-receipt"])
+        .arg(&pass_receipt)
+        .args([
+            "--invariant",
+            "conserved-band",
+            "--metric",
+            "energy",
+            "--problem",
+            "leapfrog",
+        ])
+        .output()
+        .expect("emit conserved-band PASS receipt");
+    assert!(
+        emit_pass.status.success(),
+        "emitting the conserved-band PASS receipt should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&emit_pass.stderr)
+    );
+    let pass: serde_json::Value =
+        serde_json::from_slice(&fs::read(&pass_receipt).expect("read PASS receipt")).unwrap();
+    assert_eq!(pass["invariant"]["name"], "conserved_within_band");
+    assert_eq!(pass["receipt_status"], "PASS");
+    assert_eq!(pass["invariant"]["observed"]["violation_count"], 0);
+
+    let verify_pass = buildc()
+        .args(["receipt", "verify"])
+        .arg(&pass_receipt)
+        .output()
+        .expect("verify conserved-band PASS receipt");
+    assert!(
+        verify_pass.status.success(),
+        "the conserved-band PASS receipt must verify\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_pass.stderr)
+    );
+
+    // DISTINCTNESS end-to-end: the SAME symplectic energy series FAILS both
+    // `bounded` (energy rises above H_0) and `conservation` (energy deviates
+    // beyond roundoff). Only conserved-band accepts the O(dt^2) band.
+    for (inv, why) in [
+        ("bounded", "energy rises above H_0"),
+        ("conservation", "energy deviates"),
+    ] {
+        let r = dir.join(format!("symp_{inv}.json"));
+        let emit = buildc()
+            .arg("run")
+            .arg(repo_example("symplectic_oscillator.bld"))
+            .args(["--emit-receipt"])
+            .arg(&r)
+            .args([
+                "--invariant",
+                inv,
+                "--metric",
+                "energy",
+                "--problem",
+                "leapfrog",
+            ])
+            .output()
+            .expect("emit symplectic under a tighter invariant");
+        assert!(emit.status.success());
+        let v: serde_json::Value =
+            serde_json::from_slice(&fs::read(&r).expect("read receipt")).unwrap();
+        assert_eq!(
+            v["receipt_status"], "FAIL_UNEXPECTED",
+            "the symplectic series must FAIL {inv} ({why}), so conserved-band is distinct"
+        );
+    }
+
+    // NEGATIVE fixture: explicit Euler injects energy, so it drifts out of the
+    // band. With `--negative-fixture` it is a FAIL_EXPECTED receipt that STILL
+    // verifies.
+    let fail_receipt = dir.join("euler.json");
+    let emit_fail = buildc()
+        .arg("run")
+        .arg(repo_example("euler_oscillator.bld"))
+        .args(["--emit-receipt"])
+        .arg(&fail_receipt)
+        .args([
+            "--invariant",
+            "conserved-band",
+            "--negative-fixture",
+            "--metric",
+            "energy",
+            "--problem",
+            "euler",
+        ])
+        .output()
+        .expect("emit conserved-band negative fixture");
+    assert!(
+        emit_fail.status.success(),
+        "emitting the negative fixture should succeed"
+    );
+    let fail: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fail_receipt).expect("read FAIL receipt")).unwrap();
+    assert_eq!(fail["receipt_status"], "FAIL_EXPECTED");
+    assert!(
+        fail["invariant"]["observed"]["violation_count"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+
+    let verify_fail = buildc()
+        .args(["receipt", "verify"])
+        .arg(&fail_receipt)
+        .output()
+        .expect("verify conserved-band negative fixture");
+    assert!(
+        verify_fail.status.success(),
+        "a faithfully reproduced FAIL_EXPECTED must verify (exit 0)\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_fail.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn run_emit_receipt_stable_kernel_is_pass() {
     if !c_backend_ready() {
         eprintln!("skipping run_emit_receipt_stable_kernel_is_pass: C backend not ready");
