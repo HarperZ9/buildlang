@@ -14692,6 +14692,78 @@ fn receipt_chain_build_and_verify_is_tamper_evident() {
 }
 
 #[test]
+fn receipt_corpus_asserts_declared_classifications() {
+    if !c_backend_ready() {
+        eprintln!("skipping receipt_corpus_asserts_declared_classifications: C backend not ready");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("buildlang_sci_corpus_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create corpus fixture dir");
+
+    // The shipped corpus manifest stays well-formed and covers every kernel pair.
+    let shipped: serde_json::Value =
+        serde_json::from_slice(&fs::read(repo_example("scientific-corpus.json")).expect("read shipped corpus"))
+            .expect("shipped corpus parses");
+    assert_eq!(shipped["schema"], "buildlang-scientific-receipt-corpus/v0");
+    assert_eq!(
+        shipped["members"].as_array().unwrap().len(),
+        20,
+        "the shipped corpus should cover all ten kernel pairs"
+    );
+
+    // A small correct manifest: the command emits, verifies, and confirms each
+    // member classifies as declared, exiting 0.
+    let bin = repo_example("search_bound_binary.bld");
+    let lin = repo_example("search_bound_linear.bld");
+    let manifest = serde_json::json!({
+        "schema": "buildlang-scientific-receipt-corpus/v0",
+        "members": [
+            {"source": bin.to_string_lossy(), "invariant": "non-negative", "expected_status": "PASS"},
+            {"source": lin.to_string_lossy(), "invariant": "non-negative", "negative_fixture": true, "expected_status": "FAIL_EXPECTED"}
+        ]
+    });
+    let good = dir.join("good.json");
+    fs::write(&good, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    let run_good = buildc()
+        .args(["receipt", "corpus"])
+        .arg(&good)
+        .output()
+        .expect("run corpus (good)");
+    assert!(
+        run_good.status.success(),
+        "a correct corpus must pass\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&run_good.stdout),
+        String::from_utf8_lossy(&run_good.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&run_good.stdout).contains("2/2 members classified"),
+        "corpus should report 2/2\nstdout:\n{}",
+        String::from_utf8_lossy(&run_good.stdout)
+    );
+
+    // A mis-declared member (a PASS kernel declared FAIL_EXPECTED) must fail: the
+    // corpus is a gate that can fail, not a rubber stamp.
+    let mut wrong = manifest.clone();
+    wrong["members"][0]["expected_status"] = serde_json::Value::String("FAIL_EXPECTED".to_string());
+    let wrong_path = dir.join("wrong.json");
+    fs::write(&wrong_path, serde_json::to_vec_pretty(&wrong).unwrap()).unwrap();
+    let run_wrong = buildc()
+        .args(["receipt", "corpus"])
+        .arg(&wrong_path)
+        .output()
+        .expect("run corpus (wrong)");
+    assert!(!run_wrong.status.success(), "a mis-declared corpus must fail");
+    assert!(
+        String::from_utf8_lossy(&run_wrong.stderr).contains("did NOT match their declared classification"),
+        "a mis-declared corpus must report the mismatch\nstderr:\n{}",
+        String::from_utf8_lossy(&run_wrong.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn conserved_band_invariant_round_trips_and_is_distinct() {
     if !c_backend_ready() {
         eprintln!(
