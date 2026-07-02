@@ -57,6 +57,25 @@ pub const BOUNDED_INVARIANT: &str = "bounded_by_initial_maximum";
 /// an O(1) amount this bound catches decisively.
 pub const BOUNDED_TOLERANCE: f64 = 1e-9;
 
+/// The invariant name emitted for the APPROXIMATE-conservation (bounded-drift)
+/// check: the measured scalar must stay within a fixed error BUDGET of its
+/// initial value, forever. It reuses conservation's two-sided evaluator but
+/// with a looser, calibrated tolerance, so it accepts a quantity that is only
+/// APPROXIMATELY conserved (a symplectic integrator's energy oscillates in an
+/// O(dt^2) band and never drifts secularly) while still rejecting a scheme
+/// whose energy drifts away (explicit Euler). Distinct from `conservation`
+/// (roundoff-exact), `bounded` (one-sided, and too tight for a band that rises
+/// slightly above the start), and `energy-monotone`.
+pub const CONSERVED_BAND_INVARIANT: &str = "conserved_within_band";
+
+/// Tolerance (error budget) for the bounded-drift check. Calibrated so a
+/// well-resolved symplectic scheme passes and a drifting one fails: the
+/// flagship leapfrog oscillator (dt = 0.1) holds its energy within a measured
+/// ~1.25e-3 band forever, so `5e-3` clears it ~4x, while explicit Euler leaves
+/// the band within two steps and grows without bound. Absolute, like every
+/// family tolerance: a kernel must be resolved (and scaled) to fit the budget.
+pub const CONSERVED_BAND_TOLERANCE: f64 = 5e-3;
+
 /// The invariant name emitted for the discrete energy-identity check: the
 /// measured scalar is a per-step energy-BALANCE residual that must stay within
 /// tolerance of ZERO (an absolute bound, unlike conservation/bounded which
@@ -631,6 +650,7 @@ pub const KNOWN_INVARIANTS: &[&str] = &[
     BOUNDED_INVARIANT,
     ENERGY_IDENTITY_INVARIANT,
     RELATION_INVARIANT,
+    CONSERVED_BAND_INVARIANT,
 ];
 
 /// Whether `name` is an invariant this build implements (and can therefore
@@ -638,6 +658,21 @@ pub const KNOWN_INVARIANTS: &[&str] = &[
 /// invariant not in this set is `INVARIANT_UNSUPPORTED`.
 pub fn is_known_invariant(name: &str) -> bool {
     KNOWN_INVARIANTS.contains(&name)
+}
+
+/// The column-count contract for an invariant: the `relation` invariant reads
+/// ACROSS a row's columns and needs at least two; every single-scalar invariant
+/// reads one value per step and requires exactly one column. Emit enforces this
+/// before compiling; verify RE-CHECKS it (FIELD_CONTRACT_VIOLATION) so a
+/// resealed receipt cannot present a column structure the invariant's contract
+/// forbids, keeping the structural contract symmetric across emit and verify
+/// like every other sealed field.
+pub fn column_count_matches_invariant(name: &str, column_count: usize) -> bool {
+    if name == RELATION_INVARIANT {
+        column_count >= 2
+    } else {
+        column_count == 1
+    }
 }
 
 /// The FIXED tolerance for a named invariant. Tolerance is a property of the
@@ -651,6 +686,7 @@ pub fn invariant_tolerance(name: &str) -> f64 {
         BOUNDED_INVARIANT => BOUNDED_TOLERANCE,
         ENERGY_IDENTITY_INVARIANT => ENERGY_IDENTITY_TOLERANCE,
         RELATION_INVARIANT => RELATION_TOLERANCE,
+        CONSERVED_BAND_INVARIANT => CONSERVED_BAND_TOLERANCE,
         _ => ENERGY_MONOTONE_TOLERANCE,
     }
 }
@@ -664,6 +700,9 @@ pub fn invariant_expectation(name: &str) -> &'static str {
             "every step's energy-balance residual stays within tolerance of zero"
         }
         RELATION_INVARIANT => "every row's columns agree within tolerance",
+        CONSERVED_BAND_INVARIANT => {
+            "the quantity stays within the error budget of its initial value"
+        }
         _ => "no step increases energy beyond tolerance",
     }
 }
@@ -673,7 +712,13 @@ pub fn invariant_expectation(name: &str) -> &'static str {
 /// invariant means.
 pub fn evaluate_invariant(name: &str, series: &[f64], tol: f64) -> InvariantObserved {
     match name {
-        CONSERVATION_INVARIANT => conserved_quantity_constant(series, tol),
+        // conserved-band reuses conservation's two-sided evaluator; only its
+        // (looser, calibrated) tolerance differs, which `invariant_tolerance`
+        // supplies. The distinct claim is "approximately conserved within a
+        // fixed error budget", not "conserved to roundoff".
+        CONSERVATION_INVARIANT | CONSERVED_BAND_INVARIANT => {
+            conserved_quantity_constant(series, tol)
+        }
         BOUNDED_INVARIANT => bounded_by_initial_maximum(series, tol),
         ENERGY_IDENTITY_INVARIANT => energy_identity_residual(series, tol),
         _ => energy_monotone_nonincreasing(series, tol),
@@ -1374,6 +1419,20 @@ pub fn evaluate_scientific_runtime_receipt(
         eprintln!(
             "Error: invariant tolerance mismatch: receipt {}, canonical {} for `{}`",
             receipt.invariant.tolerance, canonical_tolerance, receipt.invariant.name
+        );
+        return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+    }
+
+    // Re-check the column-count contract emit enforced (relation needs >= 2
+    // columns, every single-scalar invariant needs exactly 1), so a resealed
+    // receipt cannot present a column structure the invariant forbids. The
+    // field is inert for the single-scalar invariants' verdict, but leaving the
+    // contract unenforced at verify would let emit and verify disagree on what
+    // a well-formed receipt is.
+    if !column_count_matches_invariant(&receipt.invariant.name, receipt.measurement.column_count) {
+        eprintln!(
+            "Error: column_count {} violates the contract for invariant `{}` (relation requires >= 2, every single-scalar invariant requires exactly 1)",
+            receipt.measurement.column_count, receipt.invariant.name
         );
         return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
     }
@@ -2985,6 +3044,207 @@ mod tests {
             result,
             Err(1),
             "a receipt missing the required column_count must be rejected as malformed"
+        );
+    }
+
+    #[test]
+    fn conserved_band_holds_within_the_budget_and_flags_drift() {
+        // Within the 5e-3 budget: no violations.
+        let obs = evaluate_invariant(
+            CONSERVED_BAND_INVARIANT,
+            &[1.0, 1.002, 0.998, 1.001],
+            CONSERVED_BAND_TOLERANCE,
+        );
+        assert_eq!(obs.violation_count, 0);
+        // A drift past the budget is flagged (step 2 leaves the band).
+        let obs = evaluate_invariant(
+            CONSERVED_BAND_INVARIANT,
+            &[1.0, 1.0, 1.1, 1.2],
+            CONSERVED_BAND_TOLERANCE,
+        );
+        assert_eq!(obs.violation_count, 2);
+        assert_eq!(obs.first_violation_step, Some(2));
+    }
+
+    #[test]
+    fn conserved_band_is_distinct_from_conservation_and_bounded() {
+        // A quantity oscillating in a small band around its initial value, both
+        // above and below: conserved-band ACCEPTS it, while conservation
+        // (roundoff-tight) and bounded (one-sided, no rise allowed) both reject
+        // it. This is the symplectic-energy case in miniature.
+        let band = [1.0, 1.002, 0.998];
+        let cb = evaluate_invariant(CONSERVED_BAND_INVARIANT, &band, CONSERVED_BAND_TOLERANCE);
+        assert_eq!(cb.violation_count, 0, "conserved-band accepts the band");
+        let cons = evaluate_invariant(CONSERVATION_INVARIANT, &band, CONSERVATION_TOLERANCE);
+        assert!(
+            cons.violation_count > 0,
+            "conservation rejects the deviation"
+        );
+        let bounded = evaluate_invariant(BOUNDED_INVARIANT, &band, BOUNDED_TOLERANCE);
+        assert!(
+            bounded.violation_count > 0,
+            "bounded rejects the rise above s[0]"
+        );
+    }
+
+    #[test]
+    fn verify_round_trips_a_conserved_band_receipt() {
+        let path = Path::new("k.bld");
+        let receipt = build_scientific_runtime_receipt(base_inputs_for(
+            CONSERVED_BAND_INVARIANT,
+            path,
+            vec![1.0, 1.002, 0.998],
+            true,
+            false,
+        ));
+        assert_eq!(receipt.invariant.name, CONSERVED_BAND_INVARIANT);
+        assert_eq!(receipt.oracle.name, CONSERVED_BAND_INVARIANT);
+        assert_eq!(receipt.invariant.tolerance, CONSERVED_BAND_TOLERANCE);
+        assert_eq!(receipt.receipt_status, "PASS");
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let sd = receipt.source_digest.clone();
+        let gd = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+            |_, _| Ok(rerun(vec![1.0, 1.002, 0.998])),
+        );
+        assert!(
+            result.is_ok(),
+            "a faithful conserved-band receipt must verify: {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_fails_a_faithful_conserved_band_drift() {
+        // A quantity that drifts out of the budget faithfully reproduces a
+        // FAIL_UNEXPECTED, so verify exits 3.
+        let path = Path::new("k.bld");
+        let receipt = build_scientific_runtime_receipt(base_inputs_for(
+            CONSERVED_BAND_INVARIANT,
+            path,
+            vec![1.0, 1.0, 1.1],
+            true,
+            false,
+        ));
+        assert_eq!(receipt.receipt_status, "FAIL_UNEXPECTED");
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let sd = receipt.source_digest.clone();
+        let gd = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+            |_, _| Ok(rerun(vec![1.0, 1.0, 1.1])),
+        );
+        assert_eq!(
+            result,
+            Err(3),
+            "a faithful conserved-band drift must exit 3 (FAIL_UNEXPECTED)"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_a_non_canonical_conserved_band_tolerance() {
+        let path = Path::new("k.bld");
+        let mut receipt = build_scientific_runtime_receipt(base_inputs_for(
+            CONSERVED_BAND_INVARIANT,
+            path,
+            vec![1.0, 1.002, 0.998],
+            true,
+            false,
+        ));
+        receipt.invariant.tolerance = 1e6;
+        seal_receipt(&mut receipt);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let sd = receipt.source_digest.clone();
+        let gd = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+            |_, _| Ok(rerun(vec![1.0, 1.002, 0.998])),
+        );
+        assert_eq!(result, Err(1), "a non-canonical tolerance must be rejected");
+    }
+
+    #[test]
+    fn verify_rejects_a_column_count_that_violates_the_invariant_contract() {
+        // Emit rejects a single-scalar invariant with column_count != 1; verify
+        // RE-CHECKS the same contract, so a resealed conserved-band receipt with
+        // column_count = 2 is rejected (FIELD_CONTRACT_VIOLATION) rather than
+        // silently accepted. (Regression for the D1 review finding: the
+        // structural column contract had no verify-side counterpart.)
+        let path = Path::new("k.bld");
+        let mut receipt = build_scientific_runtime_receipt(base_inputs_for(
+            CONSERVED_BAND_INVARIANT,
+            path,
+            vec![1.0, 1.002, 0.998],
+            true,
+            false,
+        ));
+        assert_eq!(receipt.measurement.column_count, 1);
+        receipt.measurement.column_count = 2;
+        seal_receipt(&mut receipt);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let sd = receipt.source_digest.clone();
+        let gd = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+            |_, _| Ok(rerun(vec![1.0, 1.002, 0.998])),
+        );
+        assert_eq!(
+            result,
+            Err(1),
+            "a single-scalar invariant with column_count != 1 must be rejected"
+        );
+
+        // The mirror case: a relation receipt resealed to column_count 1 (below
+        // the >= 2 contract) is also rejected.
+        let mut relation = build_scientific_runtime_receipt(relation_inputs(
+            path,
+            vec![1.0, 1.0, 2.0, 2.0],
+            true,
+            false,
+        ));
+        relation.measurement.column_count = 1;
+        seal_receipt(&mut relation);
+        let value = serde_json::to_value(&relation).expect("to_value");
+        let sd = relation.source_digest.clone();
+        let gd = relation.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &relation.compiler_version,
+            &relation.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+            |_, _| Ok(rerun(vec![1.0, 1.0, 2.0, 2.0])),
+        );
+        assert_eq!(
+            result,
+            Err(1),
+            "a relation invariant with column_count < 2 must be rejected"
         );
     }
 
