@@ -107,6 +107,32 @@ fn contains_opcode(words: &[u32], opcode: u16) -> bool {
     false
 }
 
+/// Count the number of `OpVariable` instructions (opcode 59) whose storage
+/// class operand is `Workgroup` (SpvStorageClass::Workgroup == 4). Walks the
+/// instruction stream by word-count so it inspects only real instructions.
+/// OpVariable layout: word0 = opcode/count, word1 = result type id, word2 =
+/// result id, word3 = storage class. Used to prove that two logically distinct
+/// `workgroupArray(N)` scratch buffers lower to two DISTINCT workgroup-class
+/// variables rather than aliasing a single deduplicated one.
+fn count_workgroup_variables(words: &[u32]) -> usize {
+    const OP_VARIABLE: u16 = 59;
+    const STORAGE_CLASS_WORKGROUP: u32 = 4;
+    let mut count = 0usize;
+    let mut i = 5usize; // skip 5-word header
+    while i < words.len() {
+        let word_count = (words[i] >> 16) as usize;
+        let op = (words[i] & 0xFFFF) as u16;
+        if word_count == 0 {
+            break; // malformed; stop rather than loop forever
+        }
+        if op == OP_VARIABLE && word_count >= 4 && words[i + 3] == STORAGE_CLASS_WORKGROUP {
+            count += 1;
+        }
+        i += word_count;
+    }
+    count
+}
+
 /// Compile a compute kernel at `src` to SPIR-V at `out`. Panics with full
 /// diagnostics on failure so a codegen regression is legible.
 fn compile_kernel_spirv(src: &Path, out: &Path) {
@@ -494,6 +520,50 @@ fn readonly_buffer_write_is_rejected() {
 
 fn reduce_example() -> PathBuf {
     repo_root().join("examples").join("gpu").join("reduce.bld")
+}
+
+fn two_scratch_example() -> PathBuf {
+    repo_root()
+        .join("examples")
+        .join("gpu")
+        .join("reduce_two_scratch.bld")
+}
+
+/// PHASE 4a ALIASING REGRESSION (Layer A, device-free): a kernel that declares
+/// TWO distinct `workgroupArray(64)` scratch buffers of the SAME shape must emit
+/// TWO distinct `Workgroup`-class `OpVariable`s -- not one shared/deduplicated
+/// variable. If the backend keyed workgroup variables by (element type, length)
+/// only, both `scratch_a` and `scratch_b` would silently alias the same physical
+/// buffer and corrupt each other. This test compiles such a kernel, asserts
+/// spirv-val accepts it, and asserts the module contains exactly TWO
+/// workgroup-class variables.
+#[test]
+fn two_same_shape_workgroup_arrays_do_not_alias() {
+    let Some(tool) = spirv_val_available() else {
+        eprintln!("skipping two_same_shape_workgroup_arrays_do_not_alias: spirv-val not on PATH");
+        return;
+    };
+    let out = temp_spv("two_scratch");
+    compile_kernel_spirv(&two_scratch_example(), &out);
+
+    let (ok, stderr) = spirv_val_ok(tool, &out);
+    assert!(
+        ok,
+        "spirv-val should accept the two-scratch compute module:\n{stderr}"
+    );
+
+    let bytes = std::fs::read(&out).expect("read two_scratch spv");
+    let words = spv_words(&bytes);
+    let workgroup_vars = count_workgroup_variables(&words);
+    assert_eq!(
+        workgroup_vars, 2,
+        "two distinct workgroupArray(64) locals must lower to two distinct \
+         Workgroup-class OpVariables (found {workgroup_vars}); if this is 1 the \
+         backend aliased two logically independent scratch buffers into one, a \
+         silent data-corruption bug"
+    );
+
+    let _ = std::fs::remove_file(&out);
 }
 
 /// PHASE 4a GATING MILESTONE (Layer A, device-free): the `sum_reduce` tree

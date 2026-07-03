@@ -670,10 +670,6 @@ pub struct SpirvBackend {
     /// (`scratch[lid]`) lowers to an `OpAccessChain` into this variable via
     /// `gen_workgroup_element_ptr` -- NOT the SSBO path. Added in Phase 4a.
     workgroup_slots: HashMap<LocalId, WorkgroupSlot>,
-    /// Cache of emitted workgroup-array OpVariables keyed by (element type key,
-    /// length) so two `workgroupArray(64)` scratch arrays of the same shape share
-    /// one variable rather than emitting duplicate globals.
-    workgroup_var_cache: HashMap<(String, u64), u32>,
 
     // == Layout-ordered section buffers (SPIR-V requires strict instruction order) ==
     /// Collected debug instructions (OpName, OpMemberName) -- layout section 7.
@@ -772,7 +768,6 @@ impl SpirvBackend {
             compute_push_constants: HashMap::new(),
             compute_pc_var: None,
             workgroup_slots: HashMap::new(),
-            workgroup_var_cache: HashMap::new(),
             pending_names: Vec::new(),
             pending_annotations: Vec::new(),
             pending_globals: Vec::new(),
@@ -833,7 +828,6 @@ impl SpirvBackend {
         self.compute_push_constants.clear();
         self.compute_pc_var = None;
         self.workgroup_slots.clear();
-        self.workgroup_var_cache.clear();
         self.pending_names.clear();
         self.pending_annotations.clear();
         self.pending_globals.clear();
@@ -2044,37 +2038,36 @@ impl SpirvBackend {
     /// `Workgroup`-class `OpTypePointer` to it, and an `OpVariable` in that class
     /// with NO initializer and NO decorations (workgroup memory carries no
     /// ArrayStride, descriptor set, or binding -- it is on-chip shared memory, not
-    /// a bound buffer). Cached by `(elem_ty, len)`. NOT added to `io_var_ids`: on
-    /// SPIR-V 1.0 a `Workgroup`-class variable is NOT part of the OpEntryPoint
-    /// interface (that requirement arrived in SPIR-V 1.4). Returns the OpVariable
-    /// id.
+    /// a bound buffer). NOT added to `io_var_ids`: on SPIR-V 1.0 a
+    /// `Workgroup`-class variable is NOT part of the OpEntryPoint interface (that
+    /// requirement arrived in SPIR-V 1.4). Returns the OpVariable id.
+    ///
+    /// A FRESH OpVariable is emitted per call -- it is deliberately NOT
+    /// deduplicated by `(elem_ty, len)`. Two logically distinct scratch buffers
+    /// of the same shape (`let a = workgroupArray(64); let b = workgroupArray(64)`)
+    /// are independent storage; sharing one variable between them would silently
+    /// alias and corrupt their data. The array TYPE and pointer type are still
+    /// interned via `get_type_id`/`OpTypePointer` reuse, so only the OpVariable
+    /// itself is per-local, which is the sole thing that must be distinct.
     fn emit_workgroup_var(&mut self, elem_ty: &MirType, len: u64) -> u32 {
-        let key = (format!("{:?}", elem_ty), len);
-        if let Some(&id) = self.workgroup_var_cache.get(&key) {
-            return id;
-        }
+        // Intern the array TYPE and the Workgroup-class POINTER type: SPIR-V
+        // requires types to be unique, so the `array<elem, len>` and its
+        // `Workgroup`-class pointer are shared across all scratch buffers of this
+        // shape (`get_type_id` / `get_ptr_type_id` dedup them). A fixed-size
+        // OpTypeArray needs a constant length operand; a runtime array is a
+        // different, buffer-only construct -- `MirType::Array` lowers to the
+        // former.
+        let arr_ty = MirType::Array(Box::new(elem_ty.clone()), len);
+        let ptr_id = self.get_ptr_type_id(&arr_ty, SpvStorageClass::Workgroup);
 
-        let elem_id = self.get_type_id(elem_ty);
-        // Array length is a %uint OpConstant (a fixed-size OpTypeArray needs a
-        // constant length operand; a runtime array is a different, buffer-only
-        // construct).
-        let len_const = self.get_const_id(&MirConst::Uint(len as u128, MirType::u32()));
-        let arr_id = self.alloc_id();
-        self.emit_global(SpvOp::OpTypeArray, &[arr_id, elem_id, len_const]);
-
-        let ptr_id = self.alloc_id();
-        self.emit_global(
-            SpvOp::OpTypePointer,
-            &[ptr_id, SpvStorageClass::Workgroup as u32, arr_id],
-        );
-
+        // Only the OpVariable is per-call (NOT deduplicated): distinct scratch
+        // locals of the same shape are independent storage.
         let var_id = self.alloc_id();
         self.emit_global(
             SpvOp::OpVariable,
             &[ptr_id, var_id, SpvStorageClass::Workgroup as u32],
         );
 
-        self.workgroup_var_cache.insert(key, var_id);
         var_id
     }
 
