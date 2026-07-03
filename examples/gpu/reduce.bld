@@ -1,0 +1,65 @@
+// ============================================================================
+// BUILDLANG COMPUTE SHADER - REDUCE, the tree-reduction (per-workgroup sum) kernel
+// ============================================================================
+// One workgroup of 64 invocations sums its 64-element slice of `a` into a single
+// partial in `out[wid]` (wid = workgroup index), via a shared-memory TREE
+// REDUCTION with barriers:
+//
+//   1. each invocation loads its element (guarded by `gid < n`) into a
+//      64-element WORKGROUP-SHARED `scratch` array at `scratch[lid]`,
+//   2. a `workgroupBarrier()` makes every load visible to the whole workgroup,
+//   3. the tree collapse: for stride s = 32, 16, 8, 4, 2, 1 the lower half adds
+//      the upper half (`scratch[lid] += scratch[lid + s]`), each step separated
+//      by a `workgroupBarrier()`,
+//   4. invocation 0 writes the workgroup total to `out[wid]`.
+//
+// Approach A (shared memory + barriers), NOT atomics: a tree reduction is
+// DETERMINISTIC (a fixed addition order), so the sealed re-checkable receipt over
+// the emitted module is stable; an OpAtomicFAdd accumulation is not (the hardware
+// interleaves adds nondeterministically), and its capability/extension is absent
+// on this path anyway.
+//
+//   - one scalar length parameter (`n`: u32) -> a PUSH CONSTANT,
+//   - one read-only input buffer (`a`: `&[f32]`),
+//   - one writable output buffer (`out`: `&mut [f32]`, one partial per workgroup),
+//   - a 64-element `f32` WORKGROUP-CLASS shared array (`scratch`),
+//   - two workgroup built-ins beyond the global index: the LOCAL invocation index
+//     (`gl_LocalInvocationID.x`, the lane within the workgroup) and the WORKGROUP
+//     index (`gl_WorkgroupID.x`, which workgroup this is).
+//
+// IN-KERNEL GUARD: `if gid < n { v = a[gid]; }` lets the extra invocations the
+// `div_ceil` grid over-launches (when `n` is not a multiple of 64) contribute a
+// clean 0.0 rather than reading past the exactly-sized `a` buffer.
+//
+// Phase 4a (this milestone, DEVICE-FREE): `buildc build examples/gpu/reduce.bld
+// --target spirv -o reduce.spv` emits VALID compute SPIR-V (validated by
+// spirv-val) that CONTAINS an `OpControlBarrier` and a `Workgroup`-class
+// `OpVariable`. This is the shared-memory + barrier MACHINERY validating -- it is
+// NOT yet a working reduction on the device (that is Phase 4b: device dispatch +
+// CPU cross-check of the summed partials).
+// ============================================================================
+
+#[compute]
+fn sum_reduce(n: u32, a: &[f32], out: &mut [f32]) ~ Gpu {
+    let scratch = workgroupArray(64);
+    let gid = gl_GlobalInvocationID.x;
+    let lid = gl_LocalInvocationID.x;
+    let wid = gl_WorkgroupID.x;
+    let mut v: f32 = 0.0;
+    if gid < n {
+        v = a[gid];
+    }
+    scratch[lid] = v;
+    workgroupBarrier();
+    let mut s: u32 = 32;
+    while s > 0 {
+        if lid < s {
+            scratch[lid] = scratch[lid] + scratch[lid + s];
+        }
+        workgroupBarrier();
+        s = s / 2;
+    }
+    if lid == 0 {
+        out[wid] = scratch[0];
+    }
+}

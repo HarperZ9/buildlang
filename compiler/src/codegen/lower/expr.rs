@@ -164,6 +164,30 @@ impl<'ctx> MirLowerer<'ctx> {
             return Ok(());
         }
 
+        // Special case `let scratch = workgroupArray(N)`: bind the name DIRECTLY
+        // to the workgroup-shared slot local instead of lowering the call to a
+        // fresh slot and then array-COPYING it into the binding (which the SPIR-V
+        // backend cannot express for a Workgroup-class variable). The slot local
+        // carries the `Workgroup:N` annotation and is what `scratch[..]` indexes.
+        if let ast::PatternKind::Ident { name, .. } = &local.pattern.kind {
+            if let Some(init) = &local.init {
+                if let ExprKind::Call { func, args } = &init.expr.kind {
+                    if self.extract_call_name(func) == Some("workgroupArray") && args.len() == 1 {
+                        let slot_val = self.lower_workgroup_array(&args[0])?;
+                        if let MirValue::Local(slot) = slot_val {
+                            // Give the slot the binding's source name for legible
+                            // diagnostics, then alias the name to it.
+                            if let Some(builder) = self.current_fn.as_mut() {
+                                builder.set_local_name(slot, name.name.clone());
+                            }
+                            self.var_map.insert(name.name.clone(), slot);
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+
         // Compute type from annotation if present
         let explicit_ty = local.ty.as_ref().map(|t| self.lower_type_from_ast(t));
 
@@ -1416,6 +1440,27 @@ impl<'ctx> MirLowerer<'ctx> {
                 "vec2" if args.len() == 2 => return self.lower_vec_constructor(2, args),
                 "vec3" if args.len() == 3 => return self.lower_vec_constructor(3, args),
                 "vec4" if args.len() == 4 => return self.lower_vec_constructor(4, args),
+                // workgroupBarrier() -> a void GPU side effect (not an rvalue):
+                // synchronize the workgroup and make Workgroup-class writes
+                // visible. Lowered to a WorkgroupBarrier statement the SPIR-V
+                // backend turns into OpControlBarrier.
+                "workgroupBarrier" if args.is_empty() => {
+                    let builder = self.current_fn.as_mut().ok_or_else(|| {
+                        CodegenError::Internal("No current function".to_string())
+                    })?;
+                    builder.push_workgroup_barrier();
+                    return Ok(values::unit());
+                }
+                // workgroupArray(N) -> a fresh workgroup-shared scratch array of
+                // N f32 elements. Represented as a MIR local of type
+                // `Array(f32, N)` tagged with a `Workgroup:N` annotation the
+                // SPIR-V backend reads to place it in the `Workgroup` storage
+                // class. Phase 4a fixes N to the workgroup size (64); a
+                // non-constant / non-64 length is rejected so the emitted array
+                // length always matches the launch geometry.
+                "workgroupArray" if args.len() == 1 => {
+                    return self.lower_workgroup_array(&args[0]);
+                }
                 // texture_sample(texture, sampler, uv) -> vec4
                 "texture_sample" if args.len() == 3 => {
                     let tex = self.lower_expr(&args[0])?;
@@ -6120,6 +6165,51 @@ impl<'ctx> MirLowerer<'ctx> {
         Ok(values::local(result))
     }
 
+    /// Workgroup-shared array size, fixed to the compute workgroup X size (64)
+    /// in Phase 4a. Kept in one place so the frontend annotation, the SPIR-V
+    /// `OpTypeArray` length, and the launch geometry cannot drift apart.
+    const WORKGROUP_ARRAY_LEN: u64 = 64;
+
+    /// Lower `workgroupArray(N)`: a workgroup-shared scratch array of `N` f32
+    /// elements. Phase 4a requires `N` to be the compile-time constant 64 (the
+    /// workgroup size); the result is a fresh local of type `Array(f32, 64)`
+    /// carrying a `Workgroup:64` annotation the SPIR-V backend uses to place it
+    /// in the `Workgroup` storage class. Indexing this local (`scratch[lid]`)
+    /// then flows through the backend's workgroup-element access-chain path
+    /// rather than the SSBO path.
+    fn lower_workgroup_array(&mut self, len_arg: &ast::Expr) -> CodegenResult<MirValue> {
+        // The length must be the literal workgroup size (64). Accept only an
+        // integer literal so the emitted array length is a compile-time constant
+        // that matches the launch geometry -- a runtime length would need a
+        // runtime-sized workgroup array, which SPIR-V does not allow.
+        let len = match &len_arg.kind {
+            ExprKind::Literal(Literal::Int { value, .. }) => *value as u64,
+            _ => {
+                return Err(CodegenError::Internal(
+                    "workgroupArray(N) requires a constant length (Phase 4a fixes it to the \
+                     workgroup size, 64)"
+                        .to_string(),
+                ))
+            }
+        };
+        if len != Self::WORKGROUP_ARRAY_LEN {
+            return Err(CodegenError::Internal(format!(
+                "workgroupArray length must be {} (the workgroup size) in Phase 4a, got {}",
+                Self::WORKGROUP_ARRAY_LEN,
+                len
+            )));
+        }
+        let elem_ty = MirType::f32();
+        let arr_ty = MirType::Array(Box::new(elem_ty), len);
+        let builder = self
+            .current_fn
+            .as_mut()
+            .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+        let slot = builder.create_local(arr_ty);
+        builder.annotate_local(slot, Arc::from(format!("Workgroup:{}", len)));
+        Ok(values::local(slot))
+    }
+
     fn lower_index(&mut self, arr: &ast::Expr, index: &ast::Expr) -> CodegenResult<MirValue> {
         let arr_val = self.lower_expr(arr)?;
         let idx_val = self.lower_expr(index)?;
@@ -6194,30 +6284,42 @@ impl<'ctx> MirLowerer<'ctx> {
         // emit a `ThreadIndex` nullary op the backends recognize. The result is a
         // u32 index (coerced to i32 for array indexing by the surrounding code).
         if let ExprKind::Ident(base_ident) = &obj.kind {
-            if base_ident.name.as_ref() == "gl_GlobalInvocationID"
-                && !self.var_map.contains_key(&base_ident.name)
-            {
-                let component = match field.name.as_ref() {
-                    "x" => 0u32,
-                    "y" => 1,
-                    "z" => 2,
-                    other => {
-                        return Err(CodegenError::Internal(format!(
-                            "gl_GlobalInvocationID has no component `.{}`",
-                            other
-                        )))
-                    }
-                };
-                let builder = self
-                    .current_fn
-                    .as_mut()
-                    .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-                let result = builder.create_local(MirType::u32());
-                builder.assign(
-                    result,
-                    MirRValue::NullaryOp(NullaryOp::ThreadIndex(component), MirType::u32()),
-                );
-                return Ok(values::local(result));
+            // Map the recognized GPU compute built-in index variables to their
+            // nullary op. `gl_GlobalInvocationID` -> global thread index;
+            // `gl_LocalInvocationID` -> lane within the workgroup;
+            // `gl_WorkgroupID` (also accept the GLSL `gl_WorkGroupID` spelling)
+            // -> which workgroup. Only intercept when the name is NOT a real
+            // in-scope local (a user could shadow it).
+            let base = base_ident.name.as_ref();
+            let builtin_ctor: Option<fn(u32) -> NullaryOp> = match base {
+                "gl_GlobalInvocationID" => Some(NullaryOp::ThreadIndex),
+                "gl_LocalInvocationID" => Some(NullaryOp::LocalInvocationId),
+                "gl_WorkgroupID" | "gl_WorkGroupID" => Some(NullaryOp::WorkgroupId),
+                _ => None,
+            };
+            if let Some(ctor) = builtin_ctor {
+                if !self.var_map.contains_key(&base_ident.name) {
+                    let component = match field.name.as_ref() {
+                        "x" => 0u32,
+                        "y" => 1,
+                        "z" => 2,
+                        other => {
+                            return Err(CodegenError::Internal(format!(
+                                "{} has no component `.{}`",
+                                base, other
+                            )))
+                        }
+                    };
+                    let builder = self.current_fn.as_mut().ok_or_else(|| {
+                        CodegenError::Internal("No current function".to_string())
+                    })?;
+                    let result = builder.create_local(MirType::u32());
+                    builder.assign(
+                        result,
+                        MirRValue::NullaryOp(ctor(component), MirType::u32()),
+                    );
+                    return Ok(values::local(result));
+                }
             }
         }
 

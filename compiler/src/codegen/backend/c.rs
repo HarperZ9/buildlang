@@ -735,7 +735,8 @@ impl CBackend {
                     }
                     MirStmtKind::StorageLive(_)
                     | MirStmtKind::StorageDead(_)
-                    | MirStmtKind::Nop => {}
+                    | MirStmtKind::Nop
+                    | MirStmtKind::WorkgroupBarrier => {}
                 }
             }
             if Self::terminator_lets_local_escape(&block.terminator, id) {
@@ -789,7 +790,8 @@ impl CBackend {
                     }
                     MirStmtKind::StorageLive(_)
                     | MirStmtKind::StorageDead(_)
-                    | MirStmtKind::Nop => {}
+                    | MirStmtKind::Nop
+                    | MirStmtKind::WorkgroupBarrier => {}
                 }
             }
             if Self::terminator_lets_local_escape(&block.terminator, t) {
@@ -2714,6 +2716,11 @@ impl CBackend {
             MirStmtKind::StorageLive(_) | MirStmtKind::StorageDead(_) => {
                 // No-op in C
             }
+            MirStmtKind::WorkgroupBarrier => {
+                // The C path is the single-threaded scalar cross-check; a
+                // workgroup barrier synchronizes GPU invocations and has no
+                // meaning there, so it emits nothing.
+            }
             MirStmtKind::Nop => {
                 self.writeln(";");
             }
@@ -3867,6 +3874,26 @@ impl CBackend {
                         _ => "z",
                     };
                     format!("buildc_gl_global_invocation_{}", axis)
+                }
+                // The LOCAL invocation and WORKGROUP indices likewise read
+                // ambient per-invocation variables the (future Phase-4b) dispatch
+                // driver defines as it loops the grid. The SPIR-V backend wires
+                // the real LocalInvocationId / WorkgroupId built-ins.
+                NullaryOp::LocalInvocationId(component) => {
+                    let axis = match component {
+                        0 => "x",
+                        1 => "y",
+                        _ => "z",
+                    };
+                    format!("buildc_gl_local_invocation_{}", axis)
+                }
+                NullaryOp::WorkgroupId(component) => {
+                    let axis = match component {
+                        0 => "x",
+                        1 => "y",
+                        _ => "z",
+                    };
+                    format!("buildc_gl_workgroup_{}", axis)
                 }
             },
             MirRValue::FieldAccess {
