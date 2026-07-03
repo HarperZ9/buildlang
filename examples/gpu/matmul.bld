@@ -1,0 +1,43 @@
+// ============================================================================
+// BUILDLANG COMPUTE SHADER - MATMUL, the general-compute (2D grid) proof kernel
+// ============================================================================
+// C[i,j] = sum over kk of A[i*k + kk] * B[kk*n + j]   (single-precision).
+//
+// This is the Phase-2 generalization beyond elementwise: a 2D grid drives one
+// invocation per output element, i = gl_GlobalInvocationID.y (row) and
+// j = gl_GlobalInvocationID.x (col), with an ordinary inner loop over kk
+// accumulating the dot product. The shape (m, k, n) arrives as scalar push
+// constants; A is m*k, B is k*n, C is m*n f32.
+//
+//   - three scalar shape parameters (`m`, `k`, `n`: u32) -> PUSH CONSTANTS,
+//   - two read-only input buffers (`a`, `b`: `&[f32]`) of differing lengths,
+//   - one writable output buffer (`c`: `&mut [f32]`),
+//   - a 2D grid: the kernel reads BOTH `.x` and `.y` of gl_GlobalInvocationID.
+//
+// Layer A: `buildc build examples/gpu/matmul.bld --target spirv -o matmul.spv`
+//          emits VALID dispatchable compute SPIR-V (validated by spirv-val).
+// Layer B: `buildc run examples/gpu/matmul.bld --gpu` dispatches on the physical
+//          device over a 2D grid and cross-checks against the CPU-C scalar loop
+//          within 1e-6.
+//
+// SHAPE CONSTRAINT (enforced): this kernel has NO in-body bounds guard, so `m`
+// (rows) and `n` (cols) MUST be exact multiples of the 2D workgroup size (16)
+// -- otherwise `div_ceil` over-launches out-of-range invocations that would
+// read/write past the exactly-sized a/b/c buffers. `validate_matmul_shapes`
+// refuses non-multiple dims before any device work. (An in-body `if i<m` guard
+// is the eventual fix; it is blocked today by the SPIR-V backend not yet
+// emitting a `while` loop nested inside a selection construct.)
+// ============================================================================
+
+#[compute]
+fn matmul(m: u32, k: u32, n: u32, a: &[f32], b: &[f32], c: &mut [f32]) ~ Gpu {
+    let i = gl_GlobalInvocationID.y;
+    let j = gl_GlobalInvocationID.x;
+    let mut acc: f32 = 0.0;
+    let mut kk: u32 = 0;
+    while kk < k {
+        acc = acc + a[i * k + kk] * b[kk * n + j];
+        kk = kk + 1;
+    }
+    c[i * n + j] = acc;
+}
