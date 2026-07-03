@@ -82,11 +82,11 @@
       },
       "mir_digest": {
         "algorithm": "sha256",
-        "hex": "23d955940a63e736d7732ec4bc24174a9a9670d23cbc10c7e2eb58daf5a59559"
+        "hex": "b51c464c140b42daf6e71e94e05ba2343c8722d2244b49b603c538df2b0452e0"
       },
       "memory_evidence_digest": {
         "algorithm": "sha256",
-        "hex": "25fb1ea3573d752998b9fa6c46da05b32a02e3f41f30c7688a28f066b6169b74"
+        "hex": "66e38768709b0bd6b9a90fddd1d0bfae6885246a8d1cfd1f55e0aa752d257df7"
       },
       "manifest_surfaces": [
         "immutable-reference",

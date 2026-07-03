@@ -146,11 +146,11 @@
       },
       "mir_digest": {
         "algorithm": "sha256",
-        "hex": "23d955940a63e736d7732ec4bc24174a9a9670d23cbc10c7e2eb58daf5a59559"
+        "hex": "b51c464c140b42daf6e71e94e05ba2343c8722d2244b49b603c538df2b0452e0"
       },
       "symbol_graph_digest": {
         "algorithm": "sha256",
-        "hex": "c97506129f5c3e9930f53668639fd38df59b0e1fabf083f3d0ab9c553265d062"
+        "hex": "3b052410c08181d809bcfc5283f8862181feec60034bf0bb445a524b197adf50"
       },
       "source_symbols": [
         {
