@@ -1984,6 +1984,24 @@ impl<'ctx> MirLowerer<'ctx> {
                 if let ast::PatternKind::Ident { name, .. } = &param.pattern.kind {
                     let local_id = builder.param_local(i);
                     builder.set_param_name(i, name.name.clone());
+                    // Thread reference mutability (`&mut T` vs `&T`) into the
+                    // param local so backends (notably SPIR-V compute) can tell a
+                    // writable output buffer from a read-only input. A `&mut`
+                    // reference or a `*mut` raw pointer is mutable; everything
+                    // else stays read-only (the MirLocal default).
+                    let is_mut = matches!(
+                        &param.ty.kind,
+                        ast::TypeKind::Ref {
+                            mutability: ast::Mutability::Mutable,
+                            ..
+                        } | ast::TypeKind::Ptr {
+                            mutability: ast::Mutability::Mutable,
+                            ..
+                        }
+                    );
+                    if is_mut {
+                        builder.set_param_mut(i, true);
+                    }
                     // Extract type annotations (e.g., `with ColorSpace<Linear>`)
                     let annotations = Self::extract_type_annotations(&param.ty);
                     if !annotations.is_empty() {

@@ -9,11 +9,12 @@
 //! device, and read back the output. Compiled ONLY under `--features gpu`; the
 //! default build never references `ash`.
 //!
-//! Scope: the canonical `vec_add`-shaped kernel — N single-dimension f32
-//! StorageBuffers at descriptor set 0, bindings 0..N, one invocation per element
-//! (`gl_GlobalInvocationID.x`). This is deliberately narrow: it is enough to run
-//! the canonical kernel on a real device and cross-check it, not a general Vulkan
-//! compute framework.
+//! Scope: arbitrary ELEMENTWISE f32 kernels — any number of f32 StorageBuffers
+//! at descriptor set 0, bindings 0..N (declaration order), plus an optional
+//! push-constant block for scalar params, one invocation per element over a 1D
+//! grid (`gl_GlobalInvocationID.x`). Still deliberately narrow (1D, f32): enough
+//! to run and cross-check elementwise kernels on a real device, not a general
+//! Vulkan compute framework.
 
 use std::ffi::CStr;
 
@@ -55,32 +56,73 @@ pub fn probe_device() -> Option<String> {
     }
 }
 
-/// Dispatch a compute kernel over `inputs` (each an f32 slice bound as a
-/// read-only StorageBuffer at binding i) plus one writable output buffer at the
-/// last binding, and return the output readback.
+/// One f32 buffer bound to a compute kernel: its data (uploaded before
+/// dispatch) and whether the kernel writes into it (the single writable buffer
+/// is read back after the dispatch). Each buffer carries its OWN length -- the
+/// host no longer assumes all buffers share one `n` (though Phase-1
+/// elementwise kernels do use equal lengths).
+pub struct BufferArg<'a> {
+    pub data: &'a [f32],
+    pub writable: bool,
+}
+
+/// Dispatch a compute kernel over `buffers` (each an f32 StorageBuffer at
+/// descriptor set 0, bindings 0..N, in declaration order) with `push_constants`
+/// bytes pushed to the pipeline's push-constant range, and return the readback
+/// of the single writable buffer.
 ///
-/// `spirv` is the compiled module, `entry` the entry-point name, `n` the element
-/// count (one invocation per element), `local_size_x` the kernel's declared
-/// workgroup X size (used to compute the group count).
-pub fn dispatch_vec_add(
+/// `spirv` is the compiled module, `entry` the entry-point name, `grid` the
+/// number of invocations (one per element), `local_size_x` the kernel's
+/// declared workgroup X size (used to compute the 1D group count). Generalizes
+/// the old single-shape `dispatch_vec_add`: arbitrary buffer count, arbitrary
+/// per-buffer length, an optional push-constant block, and the writable buffer
+/// identified by its flag rather than "the last binding".
+pub fn dispatch_compute(
     spirv: &[u32],
     entry: &str,
-    inputs: &[&[f32]],
-    n: usize,
+    buffers: &[BufferArg<'_>],
+    push_constants: &[u8],
+    grid: usize,
     local_size_x: u32,
 ) -> HostResult<Vec<f32>> {
-    let buffer_count = inputs.len() + 1; // inputs + one output
-    unsafe { dispatch_inner(spirv, entry, inputs, n, buffer_count, local_size_x) }
+    let writable: Vec<usize> = buffers
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.writable)
+        .map(|(i, _)| i)
+        .collect();
+    let output_index = match writable.as_slice() {
+        [i] => *i,
+        [] => return Err("dispatch_compute: no writable output buffer".to_string()),
+        _ => {
+            return Err(
+                "dispatch_compute: exactly one writable output buffer is supported".to_string(),
+            )
+        }
+    };
+    unsafe {
+        dispatch_inner(
+            spirv,
+            entry,
+            buffers,
+            push_constants,
+            output_index,
+            grid,
+            local_size_x,
+        )
+    }
 }
 
 unsafe fn dispatch_inner(
     spirv: &[u32],
     entry: &str,
-    inputs: &[&[f32]],
-    n: usize,
-    buffer_count: usize,
+    buffers: &[BufferArg<'_>],
+    push_constants: &[u8],
+    output_index: usize,
+    grid: usize,
     local_size_x: u32,
 ) -> HostResult<Vec<f32>> {
+    let buffer_count = buffers.len();
     let entry_loader = ash::Entry::load().map_err(|e| format!("load Vulkan loader: {e}"))?;
 
     // --- Instance -----------------------------------------------------------
@@ -124,24 +166,30 @@ unsafe fn dispatch_inner(
         let queue = device.get_device_queue(queue_family, 0);
 
         let dispatch = || -> HostResult<Vec<f32>> {
-            let byte_len = (n * std::mem::size_of::<f32>()) as vk::DeviceSize;
+            // Per-buffer byte length: no single-`n` assumption. Each buffer is
+            // sized to its own data (min 4 bytes so a zero-length buffer is
+            // still a valid allocation).
+            let out_len = buffers[output_index].data.len();
 
             // --- Allocate buffers + memory ----------------------------------
-            let mut buffers = Vec::with_capacity(buffer_count);
+            let mut vk_buffers = Vec::with_capacity(buffer_count);
             let mut memories = Vec::with_capacity(buffer_count);
-            for _ in 0..buffer_count {
-                let (buf, mem) = create_host_visible_buffer(&device, &mem_props, byte_len)?;
-                buffers.push(buf);
+            for arg in buffers.iter() {
+                let bytes = (arg.data.len().max(1) * std::mem::size_of::<f32>()) as vk::DeviceSize;
+                let (buf, mem) = create_host_visible_buffer(&device, &mem_props, bytes)?;
+                vk_buffers.push(buf);
                 memories.push(mem);
             }
 
-            // Upload inputs (bindings 0..inputs.len()).
-            for (i, input) in inputs.iter().enumerate() {
-                write_buffer_f32(&device, memories[i], input)?;
+            // Upload every buffer's data. The writable output is uploaded too
+            // (its initial contents are the caller's, typically zeros), so no
+            // separate zeroing pass is needed.
+            for (i, arg) in buffers.iter().enumerate() {
+                if !arg.data.is_empty() {
+                    write_buffer_f32(&device, memories[i], arg.data)?;
+                }
             }
-            // Zero the output buffer (last binding).
-            let zeros = vec![0.0f32; n];
-            write_buffer_f32(&device, memories[buffer_count - 1], &zeros)?;
+            let buffers = vk_buffers;
 
             // --- Descriptor set layout (buffer_count storage buffers) -------
             let bindings: Vec<vk::DescriptorSetLayoutBinding> = (0..buffer_count)
@@ -159,8 +207,18 @@ unsafe fn dispatch_inner(
                 .map_err(|e| format!("create descriptor set layout: {e}"))?;
 
             // --- Pipeline layout + shader module + pipeline -----------------
+            // Wire a push-constant range covering the caller's bytes (visible to
+            // the compute stage) when the kernel has scalar params; otherwise
+            // the layout has no push-constant range.
             let set_layouts = [dsl];
-            let pl_ci = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
+            let pc_ranges = [vk::PushConstantRange::default()
+                .stage_flags(vk::ShaderStageFlags::COMPUTE)
+                .offset(0)
+                .size(push_constants.len() as u32)];
+            let mut pl_ci = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
+            if !push_constants.is_empty() {
+                pl_ci = pl_ci.push_constant_ranges(&pc_ranges);
+            }
             let pipeline_layout = device
                 .create_pipeline_layout(&pl_ci, None)
                 .map_err(|e| format!("create pipeline layout: {e}"))?;
@@ -253,7 +311,17 @@ unsafe fn dispatch_inner(
                 &[descriptor_set],
                 &[],
             );
-            let group_count = (n as u32).div_ceil(local_size_x.max(1));
+            // Push the scalar block (e.g. `alpha`) before dispatch, if any.
+            if !push_constants.is_empty() {
+                device.cmd_push_constants(
+                    cmd,
+                    pipeline_layout,
+                    vk::ShaderStageFlags::COMPUTE,
+                    0,
+                    push_constants,
+                );
+            }
+            let group_count = (grid as u32).div_ceil(local_size_x.max(1));
             device.cmd_dispatch(cmd, group_count, 1, 1);
             device
                 .end_command_buffer(cmd)
@@ -273,8 +341,8 @@ unsafe fn dispatch_inner(
                 .wait_for_fences(&[fence], true, u64::MAX)
                 .map_err(|e| format!("wait for fence: {e}"))?;
 
-            // --- Readback ---------------------------------------------------
-            let out = read_buffer_f32(&device, memories[buffer_count - 1], n)?;
+            // --- Readback (the single writable output buffer) ---------------
+            let out = read_buffer_f32(&device, memories[output_index], out_len)?;
 
             // --- Teardown (device-scoped objects) ---------------------------
             device.destroy_fence(fence, None);
