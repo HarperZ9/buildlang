@@ -44,6 +44,10 @@ fn matmul_example() -> PathBuf {
     repo_root().join("examples").join("gpu").join("matmul.bld")
 }
 
+fn stencil_example() -> PathBuf {
+    repo_root().join("examples").join("gpu").join("stencil.bld")
+}
+
 /// Resolve `spirv-val` on PATH (Vulkan SDK adds it). Returns the program name
 /// to invoke, or `None` if the tool is not installed -> the caller skips.
 fn spirv_val_available() -> Option<&'static str> {
@@ -208,6 +212,30 @@ fn matmul_emits_valid_compute_spirv() {
     assert!(
         ok,
         "spirv-val should accept the emitted matmul compute module:\n{stderr}"
+    );
+
+    let _ = std::fs::remove_file(&out);
+}
+
+/// Phase 3: the 1D stencil proof kernel `blur` (a 3-point blur with CLAMPED
+/// edges: one u32 length push constant + one read-only input + one writable
+/// output, neighbor reads `a[i-1]`/`a[i+1]`, and a nested `if/else` selecting
+/// the clamped boundary value) emits VALID dispatchable compute SPIR-V. This is
+/// the device-free proof that the boundary `if/else` inside the `if i < n` guard
+/// validates -- the exact structured-control-flow shape the recent fix enables.
+#[test]
+fn stencil_emits_valid_compute_spirv() {
+    let Some(tool) = spirv_val_available() else {
+        eprintln!("skipping stencil_emits_valid_compute_spirv: spirv-val not on PATH");
+        return;
+    };
+    let out = temp_spv("stencil_valid");
+    compile_kernel_spirv(&stencil_example(), &out);
+
+    let (ok, stderr) = spirv_val_ok(tool, &out);
+    assert!(
+        ok,
+        "spirv-val should accept the emitted stencil compute module:\n{stderr}"
     );
 
     let _ = std::fs::remove_file(&out);
@@ -680,6 +708,127 @@ mod device {
             !output.status.success(),
             "a divergent readback at a non-multiple dim MUST be caught (non-zero exit)\n\
              stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    /// Phase 3: the 1D stencil `blur` kernel (a 3-point clamped blur: one u32
+    /// length push constant + one input + one output, neighbor reads) dispatches
+    /// on the physical device over a 1D grid and agrees with the CPU-C scalar
+    /// loop within tolerance. The cross-check ALSO asserts a closed-form
+    /// clamped-edge correctness sanity (on the ramp input `a[i] = i+1`, the
+    /// clamped `out[0]` and `out[n-1]` equal their exact formulas), so a PASS
+    /// proves the kernel computes the clamped blur -- not merely that two
+    /// lowerings of the same body agree. Both verdicts must appear in the output.
+    #[test]
+    fn stencil_gpu_matches_cpu() {
+        if !vulkan_device_available() {
+            eprintln!("skipping stencil_gpu_matches_cpu: no Vulkan device");
+            return;
+        }
+        let output = buildc()
+            .arg("run")
+            .arg(stencil_example())
+            .arg("--gpu")
+            .output()
+            .expect("run buildc run --gpu on stencil");
+        assert!(
+            output.status.success(),
+            "buildc run --gpu on stencil should agree with CPU-C within tolerance\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("gpu-cpu agreement") && stdout.contains("PASS"),
+            "expected a gpu-cpu agreement verdict in output:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("stencil clamped-edge sanity: PASS"),
+            "expected the closed-form clamped-edge sanity to PASS:\n{stdout}"
+        );
+    }
+
+    /// Phase 3 BOUNDARY-CORRECTNESS closed-form check on a small KNOWN input
+    /// `a = [1,2,3,4,5]` (n = 5). The clamped edges have exact closed forms:
+    ///   out[0]   = (a[0] + a[0] + a[1]) / 3 = (1 + 1 + 2) / 3 = 4/3
+    ///   out[n-1] = (a[n-2] + a[n-1] + a[n-1]) / 3 = (4 + 5 + 5) / 3 = 14/3
+    /// The cross-check emits `stencil boundary out[0]=... out[n-1]=...` so this
+    /// test can assert the CLAMPED formula holds exactly (within 1e-6), not just
+    /// GPU-vs-CPU agreement. This is the assertion that the clamp -- not an
+    /// out-of-range `a[i-1]`/`a[i+1]` read -- produced the edge values.
+    #[test]
+    fn stencil_clamped_boundary_is_exact() {
+        if !vulkan_device_available() {
+            eprintln!("skipping stencil_clamped_boundary_is_exact: no Vulkan device");
+            return;
+        }
+        let output = buildc()
+            .arg("run")
+            .arg(stencil_example())
+            .arg("--gpu")
+            .env("BUILDLANG_STENCIL_N", "5")
+            .output()
+            .expect("run buildc run --gpu on stencil with n=5");
+        assert!(
+            output.status.success(),
+            "n=5 stencil should agree + pass the clamped-edge sanity\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Parse the reported boundary values and assert the CLAMPED closed form.
+        let line = stdout
+            .lines()
+            .find(|l| l.contains("stencil boundary"))
+            .unwrap_or_else(|| panic!("expected a `stencil boundary` line:\n{stdout}"));
+        // Format: "stencil boundary out[0]=<f> out[n-1]=<f>"
+        let parse_after = |key: &str| -> f64 {
+            let seg = line
+                .split(key)
+                .nth(1)
+                .unwrap_or_else(|| panic!("missing {key} in: {line}"));
+            seg.split_whitespace()
+                .next()
+                .unwrap()
+                .parse::<f64>()
+                .unwrap_or_else(|e| panic!("parse {key} value from '{line}': {e}"))
+        };
+        let out0 = parse_after("out[0]=");
+        let out_last = parse_after("out[n-1]=");
+        let expected_0 = (1.0 + 1.0 + 2.0) / 3.0; // 4/3
+        let expected_last = (4.0 + 5.0 + 5.0) / 3.0; // 14/3
+        assert!(
+            (out0 - expected_0).abs() <= 1e-6,
+            "clamped out[0] must be (a[0]+a[0]+a[1])/3 = 4/3 = {expected_0}; got {out0}"
+        );
+        assert!(
+            (out_last - expected_last).abs() <= 1e-6,
+            "clamped out[n-1] must be (a[n-2]+a[n-1]+a[n-1])/3 = 14/3 = {expected_last}; got {out_last}"
+        );
+    }
+
+    /// CAN-IT-FAIL negative for the stencil path: a corrupted stencil readback
+    /// MUST be caught by the tolerance gate (non-zero exit). This is the negative
+    /// that proves the stencil agreement PASS is a real agreement, not a gate that
+    /// never fires.
+    #[test]
+    fn wrong_stencil_result_is_caught() {
+        if !vulkan_device_available() {
+            eprintln!("skipping wrong_stencil_result_is_caught: no Vulkan device");
+            return;
+        }
+        let output = buildc()
+            .arg("run")
+            .arg(stencil_example())
+            .arg("--gpu")
+            .env("BUILDLANG_GPU_CORRUPT_READBACK", "1")
+            .output()
+            .expect("run buildc run --gpu on stencil with a corrupted readback");
+        assert!(
+            !output.status.success(),
+            "a divergent stencil readback MUST be caught (non-zero exit)\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );

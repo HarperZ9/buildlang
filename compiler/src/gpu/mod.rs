@@ -36,6 +36,12 @@ const MM_N: usize = 64;
 /// The 2D workgroup size the SPIR-V backend emits for a kernel reading `.y`.
 const LOCAL_SIZE_2D: (u32, u32) = (16, 16);
 
+/// Default element count for the 1D stencil cross-check. A test hook
+/// (`BUILDLANG_STENCIL_N`) overrides it (e.g. to `5` for the known-input
+/// boundary closed-form assertion). Not a workgroup multiple by construction of
+/// the override, so the in-kernel `if i < n` guard is exercised.
+const STENCIL_N: usize = 1024;
+
 /// The element (scalar) type of a kernel parameter, post the GPU path's
 /// F64->F32 coercion boundary. Phase 1 is f32-only on the device; f64 is
 /// diagnosed rather than silently coerced.
@@ -92,6 +98,28 @@ impl KernelSig {
             KernelParam::Scalar { name, kind } => Some((name.as_str(), *kind)),
             KernelParam::Buffer { .. } => None,
         })
+    }
+
+    /// True iff this is the 1D stencil shape: exactly one `u32` scalar (the
+    /// length `n`), exactly one read-only `&[f32]` input, and exactly one
+    /// writable `&mut [f32]` output. Distinct from the elementwise shape (which
+    /// has no u32 length scalar) and from matmul (which is 2D with three u32
+    /// scalars and three buffers). Used to route to the stencil cross-check,
+    /// whose CPU-C driver declares `n` as a `uint32_t` set to the buffer length
+    /// (NOT the elementwise path's `float` scalar fixed at 2.0) and asserts the
+    /// clamped-edge closed form.
+    fn is_stencil(&self) -> bool {
+        let u32_scalars = self
+            .scalars()
+            .filter(|(_, k)| *k == ScalarKind::U32)
+            .count();
+        let other_scalars = self
+            .scalars()
+            .filter(|(_, k)| *k != ScalarKind::U32)
+            .count();
+        let inputs = self.buffers().filter(|(_, w, _)| !*w).count();
+        let outputs = self.buffers().filter(|(_, w, _)| *w).count();
+        u32_scalars == 1 && other_scalars == 0 && inputs == 1 && outputs == 1
     }
 
     /// Index of the single writable output buffer among the buffer bindings,
@@ -867,6 +895,314 @@ fn run_matmul_cross_check(
     Ok(())
 }
 
+/// Parse a `BUILDLANG_STENCIL_N` test-hook override of the stencil length.
+/// Returns `None` when unset or malformed (the caller then uses `STENCIL_N`).
+/// The hook drives a small KNOWN input (`n = 5`) so the boundary closed-form
+/// assertion is checkable, and a non-workgroup-multiple `n` exercises the guard.
+fn parse_stencil_n_override() -> Option<usize> {
+    let n = std::env::var("BUILDLANG_STENCIL_N")
+        .ok()?
+        .trim()
+        .parse::<usize>()
+        .ok()?;
+    // A 3-point stencil needs at least 2 elements for the clamped-edge formula
+    // to be well-defined (out[0] reads a[1], out[n-1] reads a[n-2]).
+    if n >= 2 {
+        Some(n)
+    } else {
+        None
+    }
+}
+
+/// Build, compile, and run the CPU-C reference for a 1D stencil kernel over the
+/// SAME grid the device dispatches. Mirrors `cpu_c_reference` but declares the
+/// length parameter as a `uint32_t` (a `u32` push-constant member, NOT a float)
+/// set to the buffer length `n`, and includes `<stdbool.h>` because the clamped
+/// boundary `if/else` lowers to `bool` comparisons in the emitted C. Returns the
+/// `n`-element output.
+fn cpu_c_stencil_reference(
+    sig: &KernelSig,
+    kernel_fn_c: &str,
+    a: &[f32],
+    n: usize,
+) -> Result<Vec<f32>, String> {
+    let fmt_arr = |v: &[f32]| -> String {
+        v.iter()
+            .map(|x| format!("{:.9}f", x))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    // Buffer names in declaration order: one read-only input + one writable
+    // output, both length n. The output starts zeroed.
+    let buffers: Vec<(&str, bool)> = sig.buffers().map(|(name, w, _)| (name, w)).collect();
+    if buffers.len() != 2 {
+        return Err(format!(
+            "stencil cross-check expects exactly two buffers (a, out); found {}",
+            buffers.len()
+        ));
+    }
+    let (a_name, _) = buffers[0];
+    let (out_name, out_writable) = buffers[1];
+    if !out_writable {
+        return Err("stencil output buffer (second) must be `&mut [f32]`".to_string());
+    }
+
+    // The single u32 length scalar's declared name (e.g. `n`).
+    let n_name = sig
+        .scalars()
+        .find(|(_, k)| *k == ScalarKind::U32)
+        .map(|(name, _)| name.to_string())
+        .ok_or_else(|| "stencil kernel has no u32 length scalar".to_string())?;
+
+    let mut decls = String::new();
+    decls.push_str(&format!(
+        "    static float {a_name}_data[{n}] = {{ {ai} }};\n    bl_slice_f32 {a_name} = {{ {a_name}_data, {n} }};\n",
+        ai = fmt_arr(a),
+    ));
+    decls.push_str(&format!(
+        "    static float {out_name}_data[{n}] = {{ 0 }};\n    bl_slice_f32 {out_name} = {{ {out_name}_data, {n} }};\n",
+    ));
+    decls.push_str(&format!("    uint32_t {n_name} = {n};\n"));
+
+    // Call argument list in parameter order: the scalar by value, buffers by
+    // address (matching the emitted `bl_slice_f32*` parameters).
+    let call_args: Vec<String> = sig
+        .params
+        .iter()
+        .map(|p| match p {
+            KernelParam::Scalar { name, .. } => name.clone(),
+            KernelParam::Buffer { name, .. } => format!("&{name}"),
+        })
+        .collect();
+
+    let driver = format!(
+        r#"#include <stdio.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+
+/* Ambient GPU thread-index the kernel body reads; the driver sets it per step. */
+uint32_t buildc_gl_global_invocation_x;
+
+typedef struct {{ float* ptr; size_t len; }} bl_slice_f32;
+
+{kernel}
+
+int main(void) {{
+{decls}    for (uint32_t i = 0; i < {n}; ++i) {{
+        buildc_gl_global_invocation_x = i;
+        {entry}({args});
+    }}
+    for (size_t i = 0; i < {n}; ++i) {{
+        printf("%.9g\n", (double){out}_data[i]);
+    }}
+    return 0;
+}}
+"#,
+        kernel = kernel_fn_c,
+        decls = decls,
+        entry = sig.entry,
+        args = call_args.join(", "),
+        out = out_name,
+    );
+
+    let dir = std::env::temp_dir().join(format!("buildlang_gpu_stencil_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create temp dir: {e}"))?;
+    let c_path = dir.join("cpu_ref_stencil.c");
+    std::fs::write(&c_path, driver).map_err(|e| format!("write cpu_ref_stencil.c: {e}"))?;
+
+    let exe_path = dir.join(if cfg!(windows) {
+        "cpu_ref_stencil.exe"
+    } else {
+        "cpu_ref_stencil"
+    });
+    compile_c(&c_path, &exe_path)?;
+
+    let output = std::process::Command::new(&exe_path)
+        .output()
+        .map_err(|e| format!("run cpu_ref_stencil: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "cpu_ref_stencil exited non-zero: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let values: Vec<f32> = stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            l.trim()
+                .parse::<f32>()
+                .map_err(|e| format!("parse cpu output '{l}': {e}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if values.len() != n {
+        return Err(format!(
+            "cpu_ref_stencil produced {} values, expected {}",
+            values.len(),
+            n
+        ));
+    }
+    Ok(values)
+}
+
+/// Cross-check a 1D stencil kernel on the physical device against a CPU-C scalar
+/// loop, PLUS a closed-form CLAMPED-EDGE correctness sanity. On the ramp input
+/// `a[i] = i + 1`, the clamped boundary outputs have exact closed forms:
+///   out[0]   = (a[0] + a[0] + a[1]) / 3 = (1 + 1 + 2) / 3
+///   out[n-1] = (a[n-2] + a[n-1] + a[n-1]) / 3 = ((n-1) + n + n) / 3
+/// The CPU-C output (the SAME body the GPU runs) must reproduce those exactly.
+/// That is stronger than GPU-vs-CPU agreement: it proves the kernel applied the
+/// CLAMP at the edges -- an unclamped `a[i-1]`/`a[i+1]` read at the boundary
+/// would underflow the index / read past the buffer and produce a different
+/// value. Prints the boundary values so a device test can re-assert the closed
+/// form. f32 + 1e-6 tolerance, same sealed receipt as the other paths.
+fn run_stencil_cross_check(
+    file: &Path,
+    sig: &KernelSig,
+    emit_receipt: Option<&Path>,
+) -> Result<(), i32> {
+    let n = parse_stencil_n_override().unwrap_or(STENCIL_N);
+
+    // Ramp input a[i] = i + 1: distinct, small, exactly-representable f32 values,
+    // so a mis-indexed or unclamped kernel would visibly diverge from the closed
+    // form. For n = 5 this is [1, 2, 3, 4, 5], the known boundary input.
+    let a: Vec<f32> = (0..n).map(|i| (i as f32) + 1.0).collect();
+    let out_zero = vec![0.0f32; n];
+
+    // 1. Compile the kernel to SPIR-V.
+    let spirv_bytes = compile_to(file, Target::SpirV).map_err(|e| {
+        eprintln!("GPU: failed to compile stencil kernel to SPIR-V: {e}");
+        1
+    })?;
+    let words = bytes_to_words(&spirv_bytes).map_err(|e| {
+        eprintln!("GPU: {e}");
+        1
+    })?;
+
+    // 2. Dispatch on the device: buffers a (read-only) + out (writable) in
+    //    declaration order; the u32 length `n` as a 4-byte push-constant.
+    let buffer_args = vec![
+        vulkan_host::BufferArg {
+            data: &a,
+            writable: false,
+        },
+        vulkan_host::BufferArg {
+            data: &out_zero,
+            writable: true,
+        },
+    ];
+    let push_bytes: Vec<u8> = (n as u32).to_le_bytes().to_vec();
+
+    let gpu_out = vulkan_host::dispatch_compute(
+        &words,
+        &sig.entry,
+        &buffer_args,
+        &push_bytes,
+        vulkan_host::Grid::D1(n),
+        (LOCAL_SIZE_X, 1),
+    )
+    .map_err(|e| {
+        eprintln!("GPU: stencil device dispatch failed: {e}");
+        1
+    })?;
+
+    // 3. CPU-C reference over the same grid, from the SAME kernel body.
+    let c_bytes = compile_to(file, Target::C).map_err(|e| {
+        eprintln!("GPU: failed to compile stencil kernel to C: {e}");
+        1
+    })?;
+    let c_source = String::from_utf8_lossy(&c_bytes);
+    let c_source = normalize_slice_type(&c_source);
+    let kernel_fn = extract_c_function(&c_source, &sig.entry).ok_or_else(|| {
+        eprintln!(
+            "GPU: could not extract the `{}` function from the emitted C",
+            sig.entry
+        );
+        1
+    })?;
+    let cpu_out = cpu_c_stencil_reference(sig, &kernel_fn, &a, n).map_err(|e| {
+        eprintln!("GPU: CPU-C stencil reference failed: {e}");
+        1
+    })?;
+
+    // Test hook (can-it-FAIL negative): perturb one readback element so the
+    // agreement gate MUST report a mismatch and exit non-zero.
+    let mut gpu_out = gpu_out;
+    if std::env::var("BUILDLANG_GPU_CORRUPT_READBACK").is_ok() && !gpu_out.is_empty() {
+        gpu_out[0] += 1.0;
+    }
+
+    // 3a. CLOSED-FORM CLAMPED-EDGE SANITY: on a[i] = i+1, the clamped edges have
+    //     exact closed forms. The CPU-C output (SAME body the GPU runs) must
+    //     match them; this proves the kernel CLAMPED (an unclamped edge read
+    //     would underflow/overflow the index and diverge). Skipped when the
+    //     corrupt-readback hook is active (it perturbs only the GPU side).
+    if std::env::var("BUILDLANG_GPU_CORRUPT_READBACK").is_err() {
+        let expected_0 = (a[0] + a[0] + a[1]) / 3.0;
+        let expected_last = (a[n - 2] + a[n - 1] + a[n - 1]) / 3.0;
+        let dev_0 = (cpu_out[0] - expected_0).abs();
+        let dev_last = (cpu_out[n - 1] - expected_last).abs();
+        if dev_0 > TOLERANCE || dev_last > TOLERANCE {
+            eprintln!(
+                "stencil clamped-edge sanity: FAIL (out[0]={} vs clamped {expected_0}, \
+                 out[n-1]={} vs clamped {expected_last}) -- the kernel did not clamp the edges",
+                cpu_out[0],
+                cpu_out[n - 1],
+            );
+            return Err(1);
+        }
+        println!("stencil clamped-edge sanity: PASS (clamped out[0] and out[n-1] match closed form within tol)");
+        // Report the device-side boundary values so a caller can re-assert the
+        // exact closed form independently.
+        println!(
+            "stencil boundary out[0]={:.9} out[n-1]={:.9}",
+            gpu_out[0],
+            gpu_out[n - 1],
+        );
+    }
+
+    // 4. GPU-vs-CPU agreement over the n-element output.
+    let mut max_dev = 0.0f32;
+    for i in 0..n {
+        let dev = (gpu_out[i] - cpu_out[i]).abs();
+        if dev > max_dev {
+            max_dev = dev;
+        }
+    }
+    if max_dev <= TOLERANCE {
+        println!(
+            "gpu-cpu agreement: PASS (stencil n={n}, max abs deviation {max_dev:.3e} <= tol {TOLERANCE:.3e})"
+        );
+    } else {
+        eprintln!(
+            "gpu-cpu agreement: FAIL (stencil n={n}, max abs deviation {max_dev:.3e} > tol {TOLERANCE:.3e})"
+        );
+        return Err(1);
+    }
+
+    // 5. Layer C: sealed, re-checkable receipt over the series.
+    if let Some(receipt_path) = emit_receipt {
+        crate::gpu_receipt::emit_gpu_receipt(
+            file,
+            receipt_path,
+            &gpu_out,
+            &cpu_out,
+            max_dev,
+            TOLERANCE,
+        )
+        .map_err(|e| {
+            eprintln!("GPU: failed to emit receipt: {e}");
+            1
+        })?;
+        println!("wrote gpu receipt to {}", receipt_path.display());
+    }
+
+    Ok(())
+}
+
 /// Run the full Layer-B (and, with `emit_receipt`, Layer-C) cross-check for an
 /// arbitrary ELEMENTWISE f32 kernel. The kernel's entry name, buffer arity, and
 /// scalar params are DISCOVERED from the AST -- nothing is hardcoded to
@@ -917,6 +1253,16 @@ pub fn run_gpu_cross_check(file: &Path, emit_receipt: Option<&Path>) -> Result<(
         return run_matmul_cross_check(file, &sig, emit_receipt);
     }
 
+    // Stencil branch: a 1D kernel with a u32 length scalar + one input + one
+    // output (the neighbor-access blur). Its length push-constant must equal the
+    // buffer length (not the elementwise path's fixed 2.0 float), its CPU-C
+    // driver declares `n` as `uint32_t` and includes <stdbool.h> for the clamped
+    // boundary `if/else`, and it adds the closed-form clamped-edge sanity. The
+    // elementwise (no-length-scalar) kernels fall through below.
+    if sig.is_stencil() {
+        return run_stencil_cross_check(file, &sig, emit_receipt);
+    }
+
     // 1. Fixed, checkable inputs, derived from the signature. Each read-only
     //    input buffer gets a distinct deterministic fill; each scalar a fixed
     //    value; the output buffer starts zeroed.
@@ -963,8 +1309,9 @@ pub fn run_gpu_cross_check(file: &Path, emit_receipt: Option<&Path>) -> Result<(
         // Pack each scalar per its SPIR-V push-constant member TYPE, not always
         // as f32. A `u32` shape member must be an integer bit pattern, otherwise
         // the shader reads an f32 bit pattern as `uint` and silently corrupts the
-        // value. (Matmul, the only U32-scalar kernel today, is 2D and never
-        // reaches here; this keeps the 1D path correct for any future u32 scalar.)
+        // value. (The U32-scalar kernels today — matmul (2D) and stencil (routed
+        // via is_stencil() above) — are both intercepted before this generic
+        // packer runs; this keeps the 1D path correct for any future u32 scalar.)
         match kind {
             ScalarKind::U32 => push_bytes.extend_from_slice(&(val as u32).to_le_bytes()),
             ScalarKind::F32 | ScalarKind::F64 => push_bytes.extend_from_slice(&val.to_le_bytes()),
