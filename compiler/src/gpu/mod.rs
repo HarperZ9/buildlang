@@ -713,10 +713,11 @@ fn run_matmul_cross_check(
     // 2. SHAPE VALIDATION (device-free): A = m*k, B = k*n, C = m*n. A mismatch
     //    would read/write out of bounds on the device, so refuse before dispatch.
     let c_zero = vec![0.0f32; m * n];
-    vulkan_host::validate_matmul_shapes(m, k, n, a.len(), b.len(), c_zero.len()).map_err(|e| {
-        eprintln!("GPU: {e}");
-        1
-    })?;
+    vulkan_host::validate_matmul_shapes(m, k, n, a.len(), b.len(), c_zero.len(), LOCAL_SIZE_2D)
+        .map_err(|e| {
+            eprintln!("GPU: {e}");
+            1
+        })?;
 
     let buffer_args = vec![
         vulkan_host::BufferArg {
@@ -929,13 +930,21 @@ pub fn run_gpu_cross_check(file: &Path, emit_receipt: Option<&Path>) -> Result<(
         .map(|((_, writable, _), (_, data))| vulkan_host::BufferArg { data, writable })
         .collect();
     let mut push_bytes: Vec<u8> = Vec::new();
-    for (name, _kind) in sig.scalars() {
+    for (name, kind) in sig.scalars() {
         let val = scalar_vals
             .iter()
             .find(|(n, _)| *n == name)
             .map(|(_, v)| *v)
             .unwrap_or(0.0);
-        push_bytes.extend_from_slice(&val.to_le_bytes());
+        // Pack each scalar per its SPIR-V push-constant member TYPE, not always
+        // as f32. A `u32` shape member must be an integer bit pattern, otherwise
+        // the shader reads an f32 bit pattern as `uint` and silently corrupts the
+        // value. (Matmul, the only U32-scalar kernel today, is 2D and never
+        // reaches here; this keeps the 1D path correct for any future u32 scalar.)
+        match kind {
+            ScalarKind::U32 => push_bytes.extend_from_slice(&(val as u32).to_le_bytes()),
+            ScalarKind::F32 | ScalarKind::F64 => push_bytes.extend_from_slice(&val.to_le_bytes()),
+        }
     }
     let gpu_out = vulkan_host::dispatch_compute(
         &words,
