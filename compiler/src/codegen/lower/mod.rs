@@ -2481,10 +2481,26 @@ impl<'ctx> MirLowerer<'ctx> {
     /// Determine the result type of a binary operation given its operator and
     /// left operand type.  Comparisons always produce Bool; arithmetic and
     /// bitwise ops propagate the operand type.
-    fn binary_result_type(&self, op: BinOp, left_val: &MirValue) -> MirType {
+    fn binary_result_type(&self, op: BinOp, left_val: &MirValue, right_val: &MirValue) -> MirType {
         match op {
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => MirType::Bool,
-            _ => self.type_of_value(left_val),
+            // A bare integer literal is lowered with a default signedness (signed
+            // `i32`) that need not match a same-width variable operand. Take the
+            // result-temp type from a NON-CONSTANT operand when the left side is
+            // the constant, so `100 - z` (`z: u32`) produces a `u32` temp: were the
+            // literal's `i32` used, storing that temp back into a `u32` destination
+            // (`z = 100 - z`) would be a type mismatch the strict SPIR-V backend
+            // rejects. This mirrors the SPIR-V backend's operand-type derivation so
+            // the temp's declared type and the emitted op's result type agree.
+            _ => {
+                if matches!(left_val, MirValue::Const(_))
+                    && !matches!(right_val, MirValue::Const(_))
+                {
+                    self.type_of_value(right_val)
+                } else {
+                    self.type_of_value(left_val)
+                }
+            }
         }
     }
 
