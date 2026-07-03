@@ -574,6 +574,22 @@ struct ComputeBuffer {
     writable: bool,
 }
 
+/// A compute-kernel scalar parameter mapped to a member of the push-constant
+/// block. Non-pointer scalar parameters (e.g. `alpha: f32`) are passed by push
+/// constant rather than a descriptor/binding: the whole block is one
+/// `OpTypeStruct` in the `PushConstant` storage class, `Block`-decorated, with
+/// each scalar at a 4-byte-aligned member offset. The value is read at each use
+/// site via `OpAccessChain` (member index) + `OpLoad`.
+#[derive(Clone)]
+struct ComputePushConstant {
+    /// Member index of this scalar inside the push-constant struct.
+    member_index: u32,
+    /// Byte offset of this scalar inside the push-constant struct.
+    offset: u32,
+    /// Scalar type (post f64->f32 coercion).
+    ty: MirType,
+}
+
 /// SPIR-V backend for code generation.
 pub struct SpirvBackend {
     /// Output buffer (SPIR-V words).
@@ -624,6 +640,16 @@ pub struct SpirvBackend {
     /// lower to a real OpAccessChain into the buffer's runtime array (member 0).
     compute_buffers: HashMap<LocalId, ComputeBuffer>,
 
+    /// Compute-kernel scalar parameters mapped to push-constant block members:
+    /// parameter local -> its member index / offset / type. Populated by
+    /// `setup_shader_io` for GLCompute; the block's OpVariable is
+    /// `compute_pc_var`. A scalar read (`alpha`) lowers to OpAccessChain +
+    /// OpLoad against this block.
+    compute_push_constants: HashMap<LocalId, ComputePushConstant>,
+    /// The push-constant block OpVariable id (PushConstant storage class), if
+    /// the kernel has any scalar parameters. `None` when there are none.
+    compute_pc_var: Option<u32>,
+
     // == Layout-ordered section buffers (SPIR-V requires strict instruction order) ==
     /// Collected debug instructions (OpName, OpMemberName) -- layout section 7.
     pending_names: Vec<u32>,
@@ -663,6 +689,8 @@ impl SpirvBackend {
             shader_input_vars: Vec::new(),
             value_locals: std::collections::HashSet::new(),
             compute_buffers: HashMap::new(),
+            compute_push_constants: HashMap::new(),
+            compute_pc_var: None,
             pending_names: Vec::new(),
             pending_annotations: Vec::new(),
             pending_globals: Vec::new(),
@@ -719,6 +747,8 @@ impl SpirvBackend {
         self.shader_input_vars.clear();
         self.value_locals.clear();
         self.compute_buffers.clear();
+        self.compute_push_constants.clear();
+        self.compute_pc_var = None;
         self.pending_names.clear();
         self.pending_annotations.clear();
         self.pending_globals.clear();
@@ -1885,6 +1915,17 @@ impl SpirvBackend {
         self.emit_global(SpvOp::OpTypeStruct, &[struct_id, arr_id]);
         self.emit_decoration(struct_id, SpvDecoration::BufferBlock, &[]);
         self.emit_member_decoration(struct_id, 0, SpvDecoration::Offset, &[0]);
+        // Read-only buffers carry `NonWritable` on BOTH the runtime-array member
+        // and the variable. The member decoration is the semantically load-
+        // bearing one (per the SPIR-V memory model a store through a
+        // NonWritable-member access chain is ill-formed); the variable
+        // decoration mirrors it for tools that read either. The SPIR-V backend
+        // additionally REFUSES to lower a store into a read-only buffer
+        // (`IndexStore` below), so read-only-ness is enforced at emit time, not
+        // left to a downstream validator.
+        if !writable {
+            self.emit_member_decoration(struct_id, 0, SpvDecoration::NonWritable, &[]);
+        }
 
         let ptr_id = self.alloc_id();
         self.emit_global(
@@ -1911,6 +1952,40 @@ impl SpirvBackend {
     /// result type of an `OpAccessChain` into a compute SSBO's runtime array.
     fn uniform_elem_ptr_type(&mut self, elem_ty: &MirType) -> u32 {
         self.get_ptr_type_id(elem_ty, SpvStorageClass::Uniform)
+    }
+
+    /// Emit the compute push-constant block: a single `Block`-decorated
+    /// `OpTypeStruct` whose members are the kernel's scalar parameters, in the
+    /// `PushConstant` storage class, each member carrying an `Offset`
+    /// decoration. Returns the OpVariable id. A push constant needs no
+    /// descriptor set / binding (it is part of the pipeline layout, pushed
+    /// directly by the host), so it is strictly cheaper than a UBO for passing
+    /// a handful of scalars like `alpha`.
+    fn emit_push_constant_block(&mut self, member_tys: &[MirType], offsets: &[u32]) -> u32 {
+        let member_ids: Vec<u32> = member_tys.iter().map(|t| self.get_type_id(t)).collect();
+
+        let struct_id = self.alloc_id();
+        let mut struct_operands = Vec::with_capacity(member_ids.len() + 1);
+        struct_operands.push(struct_id);
+        struct_operands.extend_from_slice(&member_ids);
+        self.emit_global(SpvOp::OpTypeStruct, &struct_operands);
+        self.emit_decoration(struct_id, SpvDecoration::Block, &[]);
+        for (i, &offset) in offsets.iter().enumerate() {
+            self.emit_member_decoration(struct_id, i as u32, SpvDecoration::Offset, &[offset]);
+        }
+
+        let ptr_id = self.alloc_id();
+        self.emit_global(
+            SpvOp::OpTypePointer,
+            &[ptr_id, SpvStorageClass::PushConstant as u32, struct_id],
+        );
+
+        let var_id = self.alloc_id();
+        self.emit_global(
+            SpvOp::OpVariable,
+            &[ptr_id, var_id, SpvStorageClass::PushConstant as u32],
+        );
+        var_id
     }
 
     // =========================================================================
@@ -2079,6 +2154,31 @@ impl SpirvBackend {
                 }
             }
 
+            // Compute-kernel scalar params: declare a Function-scope OpVariable
+            // for each push-constant scalar (`alpha`), still in the leading
+            // OpVariable phase. The value is loaded from the PushConstant block
+            // below and the param local repointed at this Function var, so the
+            // rest of the body reads it with a plain OpLoad.
+            let mut pc_param_vars: Vec<(LocalId, u32, u32, u32)> = Vec::new(); // (local, func_var, ty_id, member_index)
+            if let Some(_pc_var) = self.compute_pc_var {
+                let mut pcs: Vec<(LocalId, ComputePushConstant)> = self
+                    .compute_push_constants
+                    .iter()
+                    .map(|(id, pc)| (*id, pc.clone()))
+                    .collect();
+                pcs.sort_by_key(|(_, pc)| pc.member_index);
+                for (local_id, pc) in pcs {
+                    let ty_id = self.get_type_id(&pc.ty);
+                    let func_ptr_ty = self.get_ptr_type_id(&pc.ty, SpvStorageClass::Function);
+                    let func_var = self.alloc_id();
+                    self.emit(
+                        SpvOp::OpVariable,
+                        &[func_ptr_ty, func_var, SpvStorageClass::Function as u32],
+                    );
+                    pc_param_vars.push((local_id, func_var, ty_id, pc.member_index));
+                }
+            }
+
             // Phase 2: AFTER all OpVariables, load shader inputs into local vars
             for (i, local_var, ty_id) in &shader_param_vars {
                 let loaded_id = self.alloc_id();
@@ -2092,6 +2192,29 @@ impl SpirvBackend {
                     .find(|l| l.is_param && l.id.0 == *i as u32)
                 {
                     self.local_ids.insert(local.id, *local_var);
+                }
+            }
+
+            // Load each scalar push-constant member into its Function var, then
+            // register the param local so `alpha` reads via a normal OpLoad.
+            if let Some(pc_var) = self.compute_pc_var {
+                for (local_id, func_var, ty_id, member_index) in &pc_param_vars {
+                    let member_const =
+                        self.get_const_id(&MirConst::Int(*member_index as i128, MirType::i32()));
+                    let member_ptr_ty = {
+                        // A pointer to the scalar member in the PushConstant class.
+                        let elem_ty = self.compute_push_constants[local_id].ty.clone();
+                        self.get_ptr_type_id(&elem_ty, SpvStorageClass::PushConstant)
+                    };
+                    let chain_id = self.alloc_id();
+                    self.emit(
+                        SpvOp::OpAccessChain,
+                        &[member_ptr_ty, chain_id, pc_var, member_const],
+                    );
+                    let loaded_id = self.alloc_id();
+                    self.emit(SpvOp::OpLoad, &[*ty_id, loaded_id, chain_id]);
+                    self.emit(SpvOp::OpStore, &[*func_var, loaded_id]);
+                    self.local_ids.insert(*local_id, *func_var);
                 }
             }
         }
@@ -2171,6 +2294,28 @@ impl SpirvBackend {
                 // fallback. Any other base is unsupported in SPIR-V today.
                 let val_id = self.gen_rvalue(value, func)?;
                 if let MirValue::Local(base_local) = base {
+                    // Refuse to store into a read-only buffer. Writability is
+                    // inferred from the parameter's reference mutability
+                    // (`&mut [_]` writable, `&[_]` read-only) in setup_shader_io;
+                    // a store into a read-only buffer is a genuine error, caught
+                    // here at emit time rather than left to a downstream
+                    // validator. This is what makes the writability inference
+                    // load-bearing instead of decorative.
+                    if let Some(buffer) = self.compute_buffers.get(base_local) {
+                        if !buffer.writable {
+                            let name = func
+                                .locals
+                                .iter()
+                                .find(|l| l.id == *base_local)
+                                .and_then(|l| l.name.as_ref())
+                                .map(|n| n.to_string())
+                                .unwrap_or_else(|| format!("{base_local:?}"));
+                            return Err(CodegenError::Unsupported(format!(
+                                "cannot write into read-only buffer `{name}`: it is a `&[_]` \
+                                 (non-writable) parameter; declare it `&mut [_]` to write into it"
+                            )));
+                        }
+                    }
                     if let Some(chain_id) =
                         self.gen_buffer_element_ptr(*base_local, index, elem_ty, func)?
                     {
@@ -4334,43 +4479,96 @@ impl SpirvBackend {
         // real bindings instead of an entry point with zero interface.
         if matches!(exec_model, SpvExecutionModel::GLCompute) {
             self.compute_buffers.clear();
+            self.compute_push_constants.clear();
+            self.compute_pc_var = None;
+
+            // Pass 1: partition parameters into buffer params (slice/array ->
+            // StorageBuffer at descriptor set 0) and scalar params (-> members
+            // of a single push-constant block). Buffers get contiguous bindings
+            // 0..num_buffers (a scalar param does NOT consume a binding), which
+            // is exactly what the host binds. Scalars accumulate at 4-byte
+            // aligned offsets in declaration order.
+            let mut next_binding: u32 = 0;
+            let mut pc_members: Vec<(LocalId, MirType)> = Vec::new();
+            let mut pc_offset: u32 = 0;
             for (i, param_ty) in func.sig.params.iter().enumerate() {
-                // A slice/array parameter passes as `Ptr(Slice/Array(elem))`.
-                let (elem_ty, writable) = match param_ty {
-                    MirType::Ptr(inner) => match inner.as_ref() {
-                        MirType::Slice(elem) | MirType::Array(elem, _) => {
-                            // Writability: infer from the parameter local's
-                            // mutability (`&mut [_]`). Default to writable so a
-                            // kernel that only writes still validates.
-                            let is_mut = func
-                                .locals
-                                .iter()
-                                .find(|l| l.is_param && l.id.0 == i as u32)
-                                .map(|l| l.is_mut)
-                                .unwrap_or(true);
-                            ((**elem).clone(), is_mut)
-                        }
-                        other => (other.clone(), true),
-                    },
-                    MirType::Slice(elem) | MirType::Array(elem, _) => ((**elem).clone(), true),
-                    other => (other.clone(), true),
-                };
-                let var_id = self.emit_compute_ssbo(0, i as u32, &elem_ty, writable);
-                if let Some(local) = func
+                let local_id = func
                     .locals
                     .iter()
                     .find(|l| l.is_param && l.id.0 == i as u32)
-                {
-                    self.compute_buffers.insert(
-                        local.id,
-                        ComputeBuffer {
-                            var_id,
-                            elem_ty,
-                            writable,
-                        },
-                    );
+                    .map(|l| l.id);
+                // A slice/array parameter passes as `Ptr(Slice/Array(elem))`.
+                let buffer_elem = match param_ty {
+                    MirType::Ptr(inner) => match inner.as_ref() {
+                        MirType::Slice(elem) | MirType::Array(elem, _) => Some((**elem).clone()),
+                        _ => None,
+                    },
+                    MirType::Slice(elem) | MirType::Array(elem, _) => Some((**elem).clone()),
+                    _ => None,
+                };
+
+                if let Some(elem_ty) = buffer_elem {
+                    // Writability: infer strictly from the parameter local's
+                    // mutability (`&mut [_]`). Fail-safe default is READ-ONLY:
+                    // a bare `&[_]` is never writable, so an accidental store is
+                    // caught (see IndexStore). Only `&mut` buffers are writable.
+                    let writable = func
+                        .locals
+                        .iter()
+                        .find(|l| l.is_param && l.id.0 == i as u32)
+                        .map(|l| l.is_mut)
+                        .unwrap_or(false);
+                    let binding = next_binding;
+                    next_binding += 1;
+                    let var_id = self.emit_compute_ssbo(0, binding, &elem_ty, writable);
+                    if let Some(id) = local_id {
+                        self.compute_buffers.insert(
+                            id,
+                            ComputeBuffer {
+                                var_id,
+                                elem_ty,
+                                writable,
+                            },
+                        );
+                    }
+                } else {
+                    // A non-pointer scalar parameter (e.g. `alpha: f32`) becomes
+                    // a push-constant member. Post f64->f32 coercion every scalar
+                    // is 4 bytes here; keep the offset arithmetic general via
+                    // `scalar_stride`.
+                    let scalar_ty = param_ty.clone();
+                    if let Some(id) = local_id {
+                        let stride = Self::scalar_stride(&scalar_ty);
+                        // 4-byte natural alignment (all Phase-1 scalars are <=4).
+                        let align = stride.max(4);
+                        pc_offset = pc_offset.div_ceil(align) * align;
+                        self.compute_push_constants.insert(
+                            id,
+                            ComputePushConstant {
+                                member_index: pc_members.len() as u32,
+                                offset: pc_offset,
+                                ty: scalar_ty.clone(),
+                            },
+                        );
+                        pc_members.push((id, scalar_ty));
+                        pc_offset += stride;
+                    }
                 }
             }
+
+            // Pass 2: if there are any scalar params, emit the push-constant
+            // block (one Block-decorated OpTypeStruct in the PushConstant storage
+            // class, one member per scalar with an Offset decoration).
+            if !pc_members.is_empty() {
+                let member_tys: Vec<MirType> = pc_members.iter().map(|(_, t)| t.clone()).collect();
+                let offsets: Vec<u32> = pc_members
+                    .iter()
+                    .map(|(id, _)| self.compute_push_constants[id].offset)
+                    .collect();
+                let pc_var = self.emit_push_constant_block(&member_tys, &offsets);
+                self.compute_pc_var = Some(pc_var);
+            }
+
             // GlobalInvocationId is a uvec3 Input builtin; declare it now and add
             // it to the entry-point interface (required for Input vars).
             let uvec3 = MirType::Vector(Box::new(MirType::Int(IntSize::I32, false)), 3);
