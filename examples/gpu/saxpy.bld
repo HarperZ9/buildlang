@@ -1,0 +1,22 @@
+// ============================================================================
+// BUILDLANG COMPUTE SHADER - SAXPY, the arbitrary-elementwise proof kernel
+// ============================================================================
+// out[i] = alpha * a[i] + b[i]   (single-precision a*x + y).
+//
+// This is the Phase-1 generalization of the single-shape `vec_add` kernel:
+//   - a scalar parameter (`alpha: f32`) lowered to a Vulkan PUSH CONSTANT,
+//   - two read-only input buffers (`a`, `b`: `&[f32]`),
+//   - one writable output buffer (`out`: `&mut [f32]`),
+//   - the entry-point name discovered from the AST (no hardcoded "vec_add").
+//
+// Layer A: `buildc build examples/gpu/saxpy.bld --target spirv -o saxpy.spv`
+//          emits VALID dispatchable compute SPIR-V (validated by spirv-val).
+// Layer B: `buildc run examples/gpu/saxpy.bld --gpu` dispatches on the physical
+//          device and cross-checks against the CPU-C scalar loop within 1e-6.
+// ============================================================================
+
+#[compute]
+fn saxpy(alpha: f32, a: &[f32], b: &[f32], out: &mut [f32]) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    out[i] = alpha * a[i] + b[i];
+}

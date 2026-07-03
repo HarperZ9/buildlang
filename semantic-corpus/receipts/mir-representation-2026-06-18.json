@@ -108,7 +108,7 @@
       },
       "mir_digest": {
         "algorithm": "sha256",
-        "hex": "23d955940a63e736d7732ec4bc24174a9a9670d23cbc10c7e2eb58daf5a59559"
+        "hex": "b51c464c140b42daf6e71e94e05ba2343c8722d2244b49b603c538df2b0452e0"
       },
       "module": {
         "function_count": 5,
