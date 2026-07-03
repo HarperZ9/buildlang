@@ -662,6 +662,25 @@ int main(void) {{
     Ok(values)
 }
 
+/// Parse a `BUILDLANG_MM_DIMS` test-hook override of the matmul dimensions,
+/// formatted `MxKxN` (e.g. `40x40x40`). Returns `None` when unset or malformed
+/// (the caller then uses the default 64x64x64). This is the device-test hook that
+/// drives a NON-workgroup-multiple matmul through the in-kernel bounds guard.
+fn parse_mm_dims_override() -> Option<(usize, usize, usize)> {
+    let raw = std::env::var("BUILDLANG_MM_DIMS").ok()?;
+    let parts: Vec<&str> = raw.split(['x', 'X']).collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let m = parts[0].trim().parse::<usize>().ok()?;
+    let k = parts[1].trim().parse::<usize>().ok()?;
+    let n = parts[2].trim().parse::<usize>().ok()?;
+    if m == 0 || k == 0 || n == 0 {
+        return None;
+    }
+    Some((m, k, n))
+}
+
 /// Cross-check a 2D matmul kernel on the physical device against a CPU-C nested
 /// loop, PLUS a closed-form correctness sanity: with A = identity(m), the output
 /// C must equal B exactly (`identity x B == B`). That proves the kernel computes
@@ -672,7 +691,12 @@ fn run_matmul_cross_check(
     sig: &KernelSig,
     emit_receipt: Option<&Path>,
 ) -> Result<(), i32> {
-    let (m, k, n) = (MM_M, MM_K, MM_N);
+    // Dims default to the exact-multiple 64x64x64 sanity. A test hook overrides
+    // them (e.g. a NON-workgroup-multiple 40x40x40) to prove the in-kernel bounds
+    // guard makes the over-launched edge invocations safe on real hardware. The
+    // override keeps m <= k so identity(m,k) x B == B still holds exactly and the
+    // closed-form sanity remains meaningful.
+    let (m, k, n) = parse_mm_dims_override().unwrap_or((MM_M, MM_K, MM_N));
 
     // A = identity(m x k) (square here), so C == B is the closed-form expectation.
     // B = distinct, exactly-representable values so a transposed/mis-indexed
