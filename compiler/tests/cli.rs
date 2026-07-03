@@ -435,6 +435,84 @@ fn check_reports_capability_effect_for_gpu_runtime_call() {
     );
 }
 
+/// Phase 4a effect-gating negative: `workgroupBarrier()` carries the `Gpu`
+/// effect (registered in `types/capabilities.rs`), so calling it inside a `fn`
+/// that does NOT declare `~Gpu` MUST be rejected by the effect checker, with a
+/// diagnostic that names both the `Gpu` effect and the triggering
+/// `workgroupBarrier` intrinsic. This is the specific gating the Phase 4a work
+/// claimed but had never committed as a test.
+#[test]
+fn check_rejects_workgroup_barrier_without_gpu_effect() {
+    let fixture = std::env::temp_dir().join(format!(
+        "buildlang_workgroup_barrier_gate_{}.bld",
+        std::process::id()
+    ));
+    // No `~Gpu` on `main`, yet it performs the Gpu-effecting workgroupBarrier().
+    fs::write(&fixture, r#"fn main() { workgroupBarrier(); }"#)
+        .expect("write workgroup barrier fixture");
+
+    let output = buildc()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run buildc check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "workgroupBarrier() should fail the effect check without a ~Gpu declaration"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Gpu"),
+        "diagnostic should name the Gpu effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("workgroupBarrier"),
+        "diagnostic should name the triggering workgroupBarrier intrinsic:\n{}",
+        stderr
+    );
+}
+
+/// Companion negative for the other Phase 4a intrinsic: `workgroupArray(N)` is
+/// also `Gpu`-effecting, so binding it in a non-`~Gpu` function must be rejected
+/// naming the `Gpu` effect and `workgroupArray`.
+#[test]
+fn check_rejects_workgroup_array_without_gpu_effect() {
+    let fixture = std::env::temp_dir().join(format!(
+        "buildlang_workgroup_array_gate_{}.bld",
+        std::process::id()
+    ));
+    fs::write(&fixture, r#"fn main() { let s = workgroupArray(64); }"#)
+        .expect("write workgroup array fixture");
+
+    let output = buildc()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run buildc check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "workgroupArray() should fail the effect check without a ~Gpu declaration"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Gpu"),
+        "diagnostic should name the Gpu effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("workgroupArray"),
+        "diagnostic should name the triggering workgroupArray intrinsic:\n{}",
+        stderr
+    );
+}
+
 #[test]
 fn check_receipt_stdout_records_passing_capabilities() {
     let fixture = std::env::temp_dir().join(format!(
