@@ -2325,19 +2325,37 @@ impl SpirvBackend {
                 ));
             }
             MirStmtKind::Assign { dest, value } => {
-                // Reconcile an integer CONSTANT whose signedness differs from the
-                // destination local's integer type. BuildLang's front end lowers a
-                // bare literal (`let mut kk: u32 = 0`) as a *signed* i32 constant;
-                // SPIR-V is strictly typed and rejects `OpStore <u32 ptr> <i32
-                // const>`. The value is bit-identical, so re-materialize the
-                // constant with the destination type before emitting the store.
-                let value = self.coerce_const_signedness(dest, value, func);
-                let val_id = self.gen_rvalue(&value, func)?;
-                let ptr_id = *self
-                    .local_ids
-                    .get(dest)
-                    .ok_or_else(|| CodegenError::Internal(format!("Unknown local: {:?}", dest)))?;
-                self.emit(SpvOp::OpStore, &[ptr_id, val_id]);
+                // VOID/UNIT assignments are no-ops in SPIR-V. BuildLang lowers an
+                // `if`/`else` (or any unit-typed expression) used in statement
+                // position as an assignment of `Const::Unit` into a `Void`-typed
+                // temp (e.g. the merge value of a value-less `if-else`). `void` has
+                // no SPIR-V value id, so emitting `OpStore <void ptr> <unit>` writes
+                // an UNDEFINED id and yields a module spirv-val rejects with
+                // "ID 'N' has not been defined  OpStore ...". Skip the store: a void
+                // assignment carries no data. (Guard on the destination local's
+                // declared type so a genuine value-store is never dropped.)
+                let dest_is_void = matches!(
+                    self.get_local_type(*dest, func),
+                    Ok(MirType::Void) | Ok(MirType::Never)
+                );
+                let value_is_unit =
+                    matches!(value, MirRValue::Use(MirValue::Const(MirConst::Unit)));
+                if dest_is_void || value_is_unit {
+                    // No-op: nothing to materialize or store for a void/unit value.
+                } else {
+                    // Reconcile an integer CONSTANT whose signedness differs from the
+                    // destination local's integer type. BuildLang's front end lowers a
+                    // bare literal (`let mut kk: u32 = 0`) as a *signed* i32 constant;
+                    // SPIR-V is strictly typed and rejects `OpStore <u32 ptr> <i32
+                    // const>`. The value is bit-identical, so re-materialize the
+                    // constant with the destination type before emitting the store.
+                    let value = self.coerce_const_signedness(dest, value, func);
+                    let val_id = self.gen_rvalue(&value, func)?;
+                    let ptr_id = *self.local_ids.get(dest).ok_or_else(|| {
+                        CodegenError::Internal(format!("Unknown local: {:?}", dest))
+                    })?;
+                    self.emit(SpvOp::OpStore, &[ptr_id, val_id]);
+                }
             }
             MirStmtKind::DerefAssign { ptr, value } => {
                 let val_id = self.gen_rvalue(value, func)?;
@@ -2824,6 +2842,22 @@ impl SpirvBackend {
                 // FALLBACK (analysis punted, e.g. an irreducible or exit-in-both-
                 // arms shape): the legacy branch-following heuristic. Kept so no
                 // previously-emitting shape regresses to an unmerged conditional.
+                // This path was the ORIGINAL source of the nested-CFG bug, so make
+                // it LOUD in debug builds: if the structured-CFG analysis was run
+                // and still returned no classification for an `If` header, a nested
+                // shape may be silently reverting to the fragile heuristic. Debug
+                // builds emit a one-line diagnostic so a future nested-CFG
+                // regression is discoverable instead of silently reproduced.
+                #[cfg(debug_assertions)]
+                if self.structured_cfg.is_some() {
+                    eprintln!(
+                        "buildc[spirv]: structured-CFG analysis punted on If-header block {} \
+                         ({:?}); falling back to the legacy branch-following heuristic. If a \
+                         nested if/while now emits malformed control flow, this is where to look.",
+                        block.id.0, block.label
+                    );
+                }
+
                 // Detect loop header: if the then-branch body eventually jumps
                 // BACK to the current block, this is a while loop header.
                 // Emit OpLoopMerge before OpBranchConditional.

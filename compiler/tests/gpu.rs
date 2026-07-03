@@ -294,6 +294,90 @@ fn loop_in_selection_emits_valid_spirv() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// NESTED STRUCTURED CONTROL FLOW, the DUAL shape (Layer A, device-free): a
+/// selection nested inside a LOOP BODY -- `if-in-while` and `if-else-in-while` --
+/// must also emit SPIR-V that `spirv-val` accepts.
+///
+/// This is the complement of `loop_in_selection_emits_valid_spirv`. That test
+/// covers a loop inside a selection (the matmul guard); this one covers a
+/// selection inside a loop, which exercises a DIFFERENT structured-CFG path: the
+/// loop-body classification (`loop_body_blocks`) must include the inner
+/// selection's blocks, and the inner selection's merge must be computed as its
+/// own immediate post-dominator (the block both arms reconverge at, which lies
+/// INSIDE the loop body and back-edges to the header), NOT the loop merge and NOT
+/// the loop header. The old branch-following heuristic mis-nested these too; a
+/// pass here proves the post-dominance analysis handles arbitrary nesting in both
+/// directions, closing the if-in-while / if-else-in-while coverage gap.
+#[test]
+fn selection_in_loop_emits_valid_spirv() {
+    let Some(tool) = spirv_val_available() else {
+        eprintln!("skipping selection_in_loop_emits_valid_spirv: spirv-val not on PATH");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("buildlang_gpu_selloop_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+
+    // Case 1: a bare `if` (no else) nested inside a `while` loop body.
+    let if_in_while = dir.join("if_in_while.bld");
+    std::fs::write(
+        &if_in_while,
+        "#[compute]\n\
+         fn k(a: &mut [f32]) ~ Gpu {\n\
+        \x20   let i = gl_GlobalInvocationID.x;\n\
+        \x20   let mut s: f32 = 0.0;\n\
+        \x20   let mut j: u32 = 0;\n\
+        \x20   while j < 8 {\n\
+        \x20       if j < 4 {\n\
+        \x20           s = s + a[i];\n\
+        \x20       }\n\
+        \x20       j = j + 1;\n\
+        \x20   }\n\
+        \x20   a[i] = s;\n\
+         }\n",
+    )
+    .expect("write if_in_while.bld");
+    let out1 = dir.join("if_in_while.spv");
+    compile_kernel_spirv(&if_in_while, &out1);
+    let (ok1, stderr1) = spirv_val_ok(tool, &out1);
+    assert!(
+        ok1,
+        "an `if` (no else) nested inside a `while` loop body must emit valid \
+         structured control flow:\n{stderr1}"
+    );
+
+    // Case 2: an `if / else` (both arms) nested inside a `while` loop body.
+    let if_else_in_while = dir.join("if_else_in_while.bld");
+    std::fs::write(
+        &if_else_in_while,
+        "#[compute]\n\
+         fn k(a: &mut [f32]) ~ Gpu {\n\
+        \x20   let i = gl_GlobalInvocationID.x;\n\
+        \x20   let mut s: f32 = 0.0;\n\
+        \x20   let mut j: u32 = 0;\n\
+        \x20   while j < 8 {\n\
+        \x20       if j < 4 {\n\
+        \x20           s = s + a[i];\n\
+        \x20       } else {\n\
+        \x20           s = s - a[i];\n\
+        \x20       }\n\
+        \x20       j = j + 1;\n\
+        \x20   }\n\
+        \x20   a[i] = s;\n\
+         }\n",
+    )
+    .expect("write if_else_in_while.bld");
+    let out2 = dir.join("if_else_in_while.spv");
+    compile_kernel_spirv(&if_else_in_while, &out2);
+    let (ok2, stderr2) = spirv_val_ok(tool, &out2);
+    assert!(
+        ok2,
+        "an `if / else` nested inside a `while` loop body must emit valid \
+         structured control flow:\n{stderr2}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// WRITABILITY PROOF (Layer A, device-free): a kernel that writes into a
 /// parameter declared `&[f32]` (read-only, NOT `&mut`) must be REJECTED at
 /// compile time. This proves the writability inference is real -- not a
