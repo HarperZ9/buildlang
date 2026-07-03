@@ -20,24 +20,26 @@
 //          device over a 2D grid and cross-checks against the CPU-C scalar loop
 //          within 1e-6.
 //
-// SHAPE CONSTRAINT (enforced): this kernel has NO in-body bounds guard, so `m`
-// (rows) and `n` (cols) MUST be exact multiples of the 2D workgroup size (16)
-// -- otherwise `div_ceil` over-launches out-of-range invocations that would
-// read/write past the exactly-sized a/b/c buffers. `validate_matmul_shapes`
-// refuses non-multiple dims before any device work. (An in-body `if i<m` guard
-// is the eventual fix; it is blocked today by the SPIR-V backend not yet
-// emitting a `while` loop nested inside a selection construct.)
+// IN-KERNEL BOUNDS GUARD: `if i < m && j < n { ... }` wraps the dot-product loop
+// and the write, so the extra invocations the `div_ceil` grid over-launches when
+// a dimension is NOT a multiple of the workgroup (16) simply NO-OP -- they never
+// read or write past the exactly-sized a/b/c buffers. This lifts the old
+// workgroup-multiple constraint: matmul now dispatches for ARBITRARY m/k/n. The
+// guard is a `while` loop nested inside a selection (and an `&&`), the exact
+// nested structured-control-flow shape the SPIR-V backend now emits correctly.
 // ============================================================================
 
 #[compute]
 fn matmul(m: u32, k: u32, n: u32, a: &[f32], b: &[f32], c: &mut [f32]) ~ Gpu {
     let i = gl_GlobalInvocationID.y;
     let j = gl_GlobalInvocationID.x;
-    let mut acc: f32 = 0.0;
-    let mut kk: u32 = 0;
-    while kk < k {
-        acc = acc + a[i * k + kk] * b[kk * n + j];
-        kk = kk + 1;
+    if i < m && j < n {
+        let mut acc: f32 = 0.0;
+        let mut kk: u32 = 0;
+        while kk < k {
+            acc = acc + a[i * k + kk] * b[kk * n + j];
+            kk = kk + 1;
+        }
+        c[i * n + j] = acc;
     }
-    c[i * n + j] = acc;
 }
