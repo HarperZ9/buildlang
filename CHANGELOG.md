@@ -78,6 +78,26 @@ this cycle (granular entries follow):
 
 ## Unreleased
 
+- Dimensional analysis (typed physical units), first slice: a new pure,
+  dependency-free core (`compiler/src/units.rs`, public as `buildlang::units`)
+  represents a physical dimension as a vector of integer exponents over the
+  seven SI base dimensions (metre, kilogram, second, ampere, kelvin, mole,
+  candela). It provides the checked algebra a type checker needs (multiply /
+  divide add / subtract exponents; power scales them; ADD / SUBTRACT / COMPARE
+  require EQUAL dimensions, and a mismatch is a `UnitError::Mismatch`), a parser
+  for a compact unit grammar (`m/s`, `kg*m/s^2`, `1/s`, `J`), and a canonical
+  formatter. `buildc run --emit-receipt --units <UNIT>` now canonicalizes the
+  declared unit through this core: a malformed or unknown unit is a hard error
+  reported before any compilation (no receipt is written), and a valid unit is
+  sealed into the scientific-runtime receipt's `measurement.units` as its
+  CHECKED canonical form (so `m*s^-1` and `m/s` seal identically and the receipt
+  still re-verifies). Honest scope: this is unit-ANNOTATION and receipt-label
+  checking; it does NOT yet make `f64<m/s>` a first-class type in the
+  Hindley-Milner checker (that integration is specced in
+  `docs/DIMENSIONAL-ANALYSIS.md`), and the C backend carries no unit metadata at
+  runtime. Backward compatible: `run` without `--units` is byte-identical.
+  Coverage: 18 core unit tests plus 2 CLI integration tests (a canonicalized
+  unit sealed and re-verified, and an unknown unit rejected before compile).
 - Type system (linear types / no-cloning): an opt-in `#[linear]` attribute on a
   struct or enum marks its values as a tracked resource that may be moved /
   consumed **at most once**. The type checker now rejects use-after-consume
