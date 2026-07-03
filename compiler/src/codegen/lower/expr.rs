@@ -940,7 +940,7 @@ impl<'ctx> MirLowerer<'ctx> {
         };
 
         // Compute result type before borrowing the builder mutably
-        let result_ty = self.binary_result_type(mir_op, &left_val);
+        let result_ty = self.binary_result_type(mir_op, &left_val, &right_val);
 
         let builder = self
             .current_fn

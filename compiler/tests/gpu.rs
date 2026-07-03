@@ -674,6 +674,59 @@ fn reduce_corrupt_barrier_is_rejected() {
     let _ = std::fs::remove_file(&corrupt);
 }
 
+/// REGRESSION (Layer A, device-free): an integer binary op with a LITERAL on the
+/// LEFT and an unsigned VARIABLE on the right (`100 - z`, `z: u32`), whose result
+/// is stored back into a declared-`u32` destination, must emit valid SPIR-V.
+///
+/// The signedness fix reconciles a mismatched CONSTANT operand, but the operation
+/// type must be taken from a NON-CONSTANT operand when the left side is the
+/// constant: otherwise `100 - z` derives its type from the left literal (default
+/// signed `i32`), emits `OpISub %int %int_100 %z`, and the store of that `i32`
+/// result into the `u32` `z` is a type mismatch that `spirv-val` rejects
+/// (`OpStore Pointer's type does not match Object's type`). Taking the type from
+/// `z` makes the op emit `%uint` and the store well-typed.
+///
+/// can-it-FAIL: at the pre-fix commit this exact kernel compiles but `spirv-val`
+/// REJECTS the emitted module (the OpStore mismatch above); it validates only
+/// after the operand-type fix. `reduce.bld`'s own `s / 2` is `variable / literal`
+/// (constant on the RIGHT), which the earlier fix already handled -- that is why
+/// this left-literal shape needs its own guard.
+#[test]
+fn left_literal_unsigned_binop_emits_valid_spirv() {
+    let Some(tool) = spirv_val_available() else {
+        eprintln!("skipping left_literal_unsigned_binop_emits_valid_spirv: spirv-val not on PATH");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("buildlang_gpu_litleft_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+
+    let src = dir.join("left_literal.bld");
+    std::fs::write(
+        &src,
+        "#[compute]\n\
+         fn k(n: u32, a: &[f32], out: &mut [f32]) ~ Gpu {\n\
+        \x20   let gid = gl_GlobalInvocationID.x;\n\
+        \x20   let mut z: u32 = 5;\n\
+        \x20   z = 100 - z;\n\
+        \x20   if gid < n {\n\
+        \x20       out[gid] = a[gid] + (z as f32);\n\
+        \x20   }\n\
+         }\n",
+    )
+    .expect("write left_literal.bld");
+    let out = dir.join("left_literal.spv");
+    compile_kernel_spirv(&src, &out);
+    let (ok, stderr) = spirv_val_ok(tool, &out);
+    assert!(
+        ok,
+        "a `literal - unsigned_var` binop whose result is stored into a u32 local \
+         must emit valid SPIR-V (the operation type must come from the unsigned \
+         variable operand, not the signed-i32 literal):\n{stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------------------------------------------------------------------------
 // LAYER B/C: device execution + sealed receipt. Gated on the `gpu` feature and
 // an actual Vulkan device. Compiled in only under `--features gpu`.

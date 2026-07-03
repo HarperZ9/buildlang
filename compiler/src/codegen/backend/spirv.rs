@@ -2669,15 +2669,27 @@ impl SpirvBackend {
         match rvalue {
             MirRValue::Use(value) => self.gen_value(value, func),
             MirRValue::BinaryOp { op, left, right } => {
-                // The operation type is taken from the left operand; a bare
-                // integer literal on either side may have been lowered with a
-                // DIFFERENT signedness (e.g. `s / 2` where `s: u32` but the `2`
-                // literal is a signed `i32`). Strict SPIR-V requires all three
-                // (both operands + result) to share one type, so re-type a
-                // signedness-mismatched integer CONSTANT operand to the operation
-                // type before emitting it. This is the operand-level analogue of
-                // the assign-time `coerce_const_signedness`.
-                let ty = self.infer_value_type(left, func)?;
+                // A bare integer literal is lowered with a default signedness
+                // (signed `i32`) that need not match a same-width variable
+                // operand, yet strict SPIR-V requires both operands AND the
+                // result to share one type. The operation type therefore comes
+                // from a NON-CONSTANT operand whenever one is present: for
+                // `100 - z` (`z: u32`) the type is `z`'s `u32`, not the literal's
+                // `i32`, so the op emits `OpISub %uint %uint_100 %z` and its
+                // result stores back into `z` without a type mismatch. Only when
+                // both operands are constants (or the left is the variable) is the
+                // left operand's type used. A signedness-mismatched CONSTANT
+                // operand is then re-typed to that operation type before emission
+                // (the operand-level analogue of the assign-time
+                // `coerce_const_signedness`); a variable operand is left untouched
+                // (a genuine signed/unsigned VALUE mismatch is a front-end
+                // concern, not something to silently reinterpret here).
+                let ty =
+                    if matches!(left, MirValue::Const(_)) && !matches!(right, MirValue::Const(_)) {
+                        self.infer_value_type(right, func)?
+                    } else {
+                        self.infer_value_type(left, func)?
+                    };
                 let left = self.coerce_operand_signedness(left, &ty);
                 let right = self.coerce_operand_signedness(right, &ty);
                 let left_id = self.gen_value(&left, func)?;
