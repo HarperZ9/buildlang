@@ -114,7 +114,21 @@ pub(crate) fn analyze(blocks: &[MirBlock]) -> StructuredCfg {
                     // Ambiguous (e.g. both or neither arm in the body). Fall back
                     // to: the arm that is the back-edge latch's dominator side is
                     // the body. Use `then` as body, `else` as exit (BuildLang's
-                    // canonical `while` lowering).
+                    // canonical `while` lowering). This branch should NOT fire for
+                    // any shape BuildLang's frontend currently emits (`while` always
+                    // lowers to then=body / else=exit with exactly one arm in the
+                    // body); if it ever does, the frontend's while-lowering shape
+                    // changed and this convention may mis-classify merge/continue.
+                    // Make that loud in debug builds so a future regression is
+                    // caught rather than silently miscompiled.
+                    #[cfg(debug_assertions)]
+                    eprintln!(
+                        "buildc[structured-cfg]: ambiguous loop-body classification for \
+                         header block {} (then={}, else={}, both-or-neither arm in body); \
+                         defaulting to then=body/else=exit. If while-lowering changed, \
+                         verify this convention still holds.",
+                        block.id.0, then_block.0, else_block.0
+                    );
                     (else_i, then_i)
                 };
             headers.insert(
@@ -411,6 +425,61 @@ mod tests {
                 continue_target: BlockId(5),
             }),
             "loop header must name exit bb6 as merge and bb5 as continue target"
+        );
+    }
+
+    /// A selection nested inside a loop body (`if-in-while`), the DUAL of
+    /// `loop_nested_in_selection`:
+    /// bb0: goto bb1              (loop init)
+    /// bb1: if -> bb2 / bb6       (loop header: body / exit)
+    /// bb2: if -> bb3 / bb4       (INNER selection inside the body)
+    /// bb3: goto bb5              (inner then)
+    /// bb4: goto bb5              (inner else)
+    /// bb5: goto bb1              (loop latch, back-edge)
+    /// bb6: return                (loop exit / merge)
+    /// The loop header bb1 must merge at the exit bb6 with continue target the
+    /// body entry bb2; the INNER selection bb2 must merge at bb5 (its own
+    /// reconvergence INSIDE the loop body), NOT at the loop exit bb6 and NOT at
+    /// the loop header bb1.
+    #[test]
+    fn selection_nested_in_loop() {
+        let blocks = vec![
+            blk(0, MirTerminator::Goto(BlockId(1))),
+            blk(
+                1,
+                MirTerminator::If {
+                    cond: cond(),
+                    then_block: BlockId(2),
+                    else_block: BlockId(6),
+                },
+            ),
+            blk(
+                2,
+                MirTerminator::If {
+                    cond: cond(),
+                    then_block: BlockId(3),
+                    else_block: BlockId(4),
+                },
+            ),
+            blk(3, MirTerminator::Goto(BlockId(5))),
+            blk(4, MirTerminator::Goto(BlockId(5))),
+            blk(5, MirTerminator::Goto(BlockId(1))),
+            blk(6, MirTerminator::Return(None)),
+        ];
+        let cfg = analyze(&blocks);
+        assert_eq!(
+            cfg.header(BlockId(1)),
+            Some(HeaderKind::Loop {
+                merge: BlockId(6),
+                continue_target: BlockId(2),
+            }),
+            "loop header must name exit bb6 as merge and the body entry bb2 as continue target"
+        );
+        assert_eq!(
+            cfg.header(BlockId(2)),
+            Some(HeaderKind::Selection { merge: BlockId(5) }),
+            "inner selection merge must be its reconvergence bb5 inside the loop body, \
+             not the loop exit bb6 nor the loop header bb1"
         );
     }
 
