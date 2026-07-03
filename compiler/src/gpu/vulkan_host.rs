@@ -9,11 +9,13 @@
 //! device, and read back the output. Compiled ONLY under `--features gpu`; the
 //! default build never references `ash`.
 //!
-//! Scope: arbitrary ELEMENTWISE f32 kernels — any number of f32 StorageBuffers
-//! at descriptor set 0, bindings 0..N (declaration order), plus an optional
-//! push-constant block for scalar params, one invocation per element over a 1D
-//! grid (`gl_GlobalInvocationID.x`). Still deliberately narrow (1D, f32): enough
-//! to run and cross-check elementwise kernels on a real device, not a general
+//! Scope: arbitrary ELEMENTWISE f32 kernels plus 2D-grid f32 kernels (matmul) —
+//! any number of f32 StorageBuffers at descriptor set 0, bindings 0..N
+//! (declaration order), plus an optional push-constant block for scalar params.
+//! The grid is 1D (`gl_GlobalInvocationID.x`, one invocation per element) or 2D
+//! (`.x`/`.y`, one invocation per output element). Still deliberately narrow
+//! (1D/2D, f32; no reductions/stencils/shared memory): enough to run and
+//! cross-check elementwise + matmul kernels on a real device, not a general
 //! Vulkan compute framework.
 
 use std::ffi::CStr;
@@ -66,24 +68,72 @@ pub struct BufferArg<'a> {
     pub writable: bool,
 }
 
+/// The dispatch grid: how many invocations to launch, and in how many
+/// dimensions. Phase 1 elementwise kernels use `D1` (one invocation per
+/// element over `gl_GlobalInvocationID.x`); Phase 2 kernels that read
+/// `gl_GlobalInvocationID.y` (matmul) use `D2` (one invocation per output
+/// element over a 2D grid, x = column, y = row).
+#[derive(Clone, Copy, Debug)]
+pub enum Grid {
+    /// 1D grid of `gx` invocations.
+    D1(usize),
+    /// 2D grid of `gx` columns by `gy` rows.
+    D2 { gx: usize, gy: usize },
+}
+
 /// Dispatch a compute kernel over `buffers` (each an f32 StorageBuffer at
 /// descriptor set 0, bindings 0..N, in declaration order) with `push_constants`
 /// bytes pushed to the pipeline's push-constant range, and return the readback
 /// of the single writable buffer.
+/// Validate matmul buffer lengths against the shape `(m, k, n)` BEFORE any
+/// device work: A must be `m*k`, B must be `k*n`, C must be `m*n` f32. Returns a
+/// clear, dimension-named error on a mismatch. Pure (no Vulkan), so a shape bug
+/// is caught deterministically on any machine -- a dispatch on inconsistent
+/// buffers would otherwise read/write out of bounds on the device.
+pub fn validate_matmul_shapes(
+    m: usize,
+    k: usize,
+    n: usize,
+    len_a: usize,
+    len_b: usize,
+    len_c: usize,
+) -> HostResult<()> {
+    if len_a != m * k {
+        return Err(format!(
+            "matmul shape mismatch: A has {len_a} elements but m*k = {m}*{k} = {}",
+            m * k
+        ));
+    }
+    if len_b != k * n {
+        return Err(format!(
+            "matmul shape mismatch: B has {len_b} elements but k*n = {k}*{n} = {}",
+            k * n
+        ));
+    }
+    if len_c != m * n {
+        return Err(format!(
+            "matmul shape mismatch: C has {len_c} elements but m*n = {m}*{n} = {}",
+            m * n
+        ));
+    }
+    Ok(())
+}
+
 ///
 /// `spirv` is the compiled module, `entry` the entry-point name, `grid` the
-/// number of invocations (one per element), `local_size_x` the kernel's
-/// declared workgroup X size (used to compute the 1D group count). Generalizes
-/// the old single-shape `dispatch_vec_add`: arbitrary buffer count, arbitrary
-/// per-buffer length, an optional push-constant block, and the writable buffer
-/// identified by its flag rather than "the last binding".
+/// dispatch grid (1D for elementwise, 2D for matmul), `local_size` the kernel's
+/// declared workgroup (x, y) size (used to compute the group counts, div_ceil
+/// per axis). Generalizes the old single-shape `dispatch_vec_add`: arbitrary
+/// buffer count, arbitrary per-buffer length, an optional push-constant block,
+/// the writable buffer identified by its flag rather than "the last binding",
+/// and now a 1D or 2D grid.
 pub fn dispatch_compute(
     spirv: &[u32],
     entry: &str,
     buffers: &[BufferArg<'_>],
     push_constants: &[u8],
-    grid: usize,
-    local_size_x: u32,
+    grid: Grid,
+    local_size: (u32, u32),
 ) -> HostResult<Vec<f32>> {
     let writable: Vec<usize> = buffers
         .iter()
@@ -108,7 +158,7 @@ pub fn dispatch_compute(
             push_constants,
             output_index,
             grid,
-            local_size_x,
+            local_size,
         )
     }
 }
@@ -119,8 +169,8 @@ unsafe fn dispatch_inner(
     buffers: &[BufferArg<'_>],
     push_constants: &[u8],
     output_index: usize,
-    grid: usize,
-    local_size_x: u32,
+    grid: Grid,
+    local_size: (u32, u32),
 ) -> HostResult<Vec<f32>> {
     let buffer_count = buffers.len();
     let entry_loader = ash::Entry::load().map_err(|e| format!("load Vulkan loader: {e}"))?;
@@ -321,8 +371,14 @@ unsafe fn dispatch_inner(
                     push_constants,
                 );
             }
-            let group_count = (grid as u32).div_ceil(local_size_x.max(1));
-            device.cmd_dispatch(cmd, group_count, 1, 1);
+            // Group counts mirror the kernel's workgroup size: div_ceil per axis
+            // so every element is covered. A 1D grid launches one row of groups.
+            let (lx, ly) = (local_size.0.max(1), local_size.1.max(1));
+            let (groups_x, groups_y) = match grid {
+                Grid::D1(gx) => ((gx as u32).div_ceil(lx), 1),
+                Grid::D2 { gx, gy } => ((gx as u32).div_ceil(lx), (gy as u32).div_ceil(ly)),
+            };
+            device.cmd_dispatch(cmd, groups_x, groups_y, 1);
             device
                 .end_command_buffer(cmd)
                 .map_err(|e| format!("end command buffer: {e}"))?;
@@ -445,4 +501,48 @@ fn find_memory_type(
             .contains(flags);
         supported && has_flags
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Consistent shapes validate (device-free).
+    #[test]
+    fn matmul_shapes_consistent_pass() {
+        assert!(validate_matmul_shapes(64, 64, 64, 64 * 64, 64 * 64, 64 * 64).is_ok());
+        assert!(validate_matmul_shapes(3, 5, 7, 15, 35, 21).is_ok());
+    }
+
+    // CAN-IT-FAIL: A of the wrong length is rejected with a dimension-named error.
+    #[test]
+    fn matmul_shape_mismatch_a_is_rejected() {
+        // A should be m*k = 15, but we pass 14.
+        let err = validate_matmul_shapes(3, 5, 7, 14, 35, 21).unwrap_err();
+        assert!(
+            err.contains('A') && err.contains("m*k"),
+            "error should name A and m*k; got: {err}"
+        );
+    }
+
+    // CAN-IT-FAIL: C of the wrong length is rejected with a dimension-named error.
+    #[test]
+    fn matmul_shape_mismatch_c_is_rejected() {
+        // C should be m*n = 21, but we pass 99.
+        let err = validate_matmul_shapes(3, 5, 7, 15, 35, 99).unwrap_err();
+        assert!(
+            err.contains('C') && err.contains("m*n"),
+            "error should name C and m*n; got: {err}"
+        );
+    }
+
+    // CAN-IT-FAIL: B of the wrong length is rejected with a dimension-named error.
+    #[test]
+    fn matmul_shape_mismatch_b_is_rejected() {
+        let err = validate_matmul_shapes(3, 5, 7, 15, 34, 21).unwrap_err();
+        assert!(
+            err.contains('B') && err.contains("k*n"),
+            "error should name B and k*n; got: {err}"
+        );
+    }
 }
