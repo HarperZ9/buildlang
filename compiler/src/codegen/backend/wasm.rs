@@ -914,6 +914,9 @@ impl WasmBackend {
             MirStmtKind::Nop => {
                 // No-op
             }
+            MirStmtKind::WorkgroupBarrier => {
+                // GPU-only synchronization; a no-op on WASM (not a compute target).
+            }
         }
 
         Ok(())
@@ -1023,8 +1026,10 @@ impl WasmBackend {
                         let align = std::cmp::min(self.type_size(ty), 8);
                         self.emit_line(&format!("i32.const {}", align));
                     }
-                    NullaryOp::ThreadIndex(_) => {
-                        // GPU-only built-in; WASM is not a compute target -> 0.
+                    NullaryOp::ThreadIndex(_)
+                    | NullaryOp::LocalInvocationId(_)
+                    | NullaryOp::WorkgroupId(_) => {
+                        // GPU-only built-ins; WASM is not a compute target -> 0.
                         self.emit_line("i32.const 0");
                     }
                 }

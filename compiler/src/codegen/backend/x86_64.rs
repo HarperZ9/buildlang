@@ -275,7 +275,11 @@ impl X86_64Backend {
                 ));
                 self.output.push_str("    mov qword [rbx], rax\n");
             }
-            MirStmtKind::StorageLive(_) | MirStmtKind::StorageDead(_) => {
+            // A workgroup barrier is a no-op on a single-threaded CPU backend
+            // (there is no workgroup to synchronize).
+            MirStmtKind::StorageLive(_)
+            | MirStmtKind::StorageDead(_)
+            | MirStmtKind::WorkgroupBarrier => {
                 // No-op
             }
             MirStmtKind::Nop => {
@@ -814,7 +818,11 @@ impl X86_64Backend {
                 // Full implementation requires register allocator
                 self.enc().nop();
             }
-            MirStmtKind::StorageLive(_) | MirStmtKind::StorageDead(_) => {
+            // A workgroup barrier is a no-op on a single-threaded CPU backend
+            // (there is no workgroup to synchronize).
+            MirStmtKind::StorageLive(_)
+            | MirStmtKind::StorageDead(_)
+            | MirStmtKind::WorkgroupBarrier => {
                 // No-op
             }
             MirStmtKind::Nop => {

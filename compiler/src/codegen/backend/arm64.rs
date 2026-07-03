@@ -303,7 +303,11 @@ impl Arm64Backend {
                 ));
                 self.output.push_str("    str x0, [x1]\n");
             }
-            MirStmtKind::StorageLive(_) | MirStmtKind::StorageDead(_) => {
+            // A workgroup barrier is a no-op on a single-threaded CPU backend
+            // (there is no workgroup to synchronize).
+            MirStmtKind::StorageLive(_)
+            | MirStmtKind::StorageDead(_)
+            | MirStmtKind::WorkgroupBarrier => {
                 // No-op
             }
             MirStmtKind::Nop => {
@@ -859,7 +863,11 @@ impl Arm64Backend {
                 // Full implementation requires register allocator
                 self.enc().nop();
             }
-            MirStmtKind::StorageLive(_) | MirStmtKind::StorageDead(_) => {
+            // A workgroup barrier is a no-op on a single-threaded CPU backend
+            // (there is no workgroup to synchronize).
+            MirStmtKind::StorageLive(_)
+            | MirStmtKind::StorageDead(_)
+            | MirStmtKind::WorkgroupBarrier => {
                 // No-op
             }
             MirStmtKind::Nop => {

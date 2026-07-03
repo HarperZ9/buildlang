@@ -72,6 +72,67 @@ fn temp_spv(label: &str) -> PathBuf {
     ))
 }
 
+/// Parse a SPIR-V binary (little-endian 32-bit words) into its word stream.
+/// Panics if the module is shorter than the 5-word header or not word-aligned.
+fn spv_words(bytes: &[u8]) -> Vec<u32> {
+    assert!(
+        bytes.len() >= 20 && bytes.len() % 4 == 0,
+        "SPIR-V module must be word-aligned and at least a 5-word header"
+    );
+    bytes
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
+/// True iff the SPIR-V word stream contains any instruction with the given
+/// opcode. Walks the instruction stream by the word-count in each opcode's high
+/// 16 bits (SPIR-V encodes `(word_count << 16) | opcode` in word 0 of each
+/// instruction), so it inspects only opcode words -- never mistaking an operand
+/// that happens to equal `opcode` for an instruction.
+fn contains_opcode(words: &[u32], opcode: u16) -> bool {
+    // Skip the 5-word module header.
+    let mut i = 5usize;
+    while i < words.len() {
+        let word_count = (words[i] >> 16) as usize;
+        let op = (words[i] & 0xFFFF) as u16;
+        if word_count == 0 {
+            break; // malformed; stop rather than loop forever
+        }
+        if op == opcode {
+            return true;
+        }
+        i += word_count;
+    }
+    false
+}
+
+/// Count the number of `OpVariable` instructions (opcode 59) whose storage
+/// class operand is `Workgroup` (SpvStorageClass::Workgroup == 4). Walks the
+/// instruction stream by word-count so it inspects only real instructions.
+/// OpVariable layout: word0 = opcode/count, word1 = result type id, word2 =
+/// result id, word3 = storage class. Used to prove that two logically distinct
+/// `workgroupArray(N)` scratch buffers lower to two DISTINCT workgroup-class
+/// variables rather than aliasing a single deduplicated one.
+fn count_workgroup_variables(words: &[u32]) -> usize {
+    const OP_VARIABLE: u16 = 59;
+    const STORAGE_CLASS_WORKGROUP: u32 = 4;
+    let mut count = 0usize;
+    let mut i = 5usize; // skip 5-word header
+    while i < words.len() {
+        let word_count = (words[i] >> 16) as usize;
+        let op = (words[i] & 0xFFFF) as u16;
+        if word_count == 0 {
+            break; // malformed; stop rather than loop forever
+        }
+        if op == OP_VARIABLE && word_count >= 4 && words[i + 3] == STORAGE_CLASS_WORKGROUP {
+            count += 1;
+        }
+        i += word_count;
+    }
+    count
+}
+
 /// Compile a compute kernel at `src` to SPIR-V at `out`. Panics with full
 /// diagnostics on failure so a codegen regression is legible.
 fn compile_kernel_spirv(src: &Path, out: &Path) {
@@ -455,6 +516,162 @@ fn readonly_buffer_write_is_rejected() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn reduce_example() -> PathBuf {
+    repo_root().join("examples").join("gpu").join("reduce.bld")
+}
+
+fn two_scratch_example() -> PathBuf {
+    repo_root()
+        .join("examples")
+        .join("gpu")
+        .join("reduce_two_scratch.bld")
+}
+
+/// PHASE 4a ALIASING REGRESSION (Layer A, device-free): a kernel that declares
+/// TWO distinct `workgroupArray(64)` scratch buffers of the SAME shape must emit
+/// TWO distinct `Workgroup`-class `OpVariable`s -- not one shared/deduplicated
+/// variable. If the backend keyed workgroup variables by (element type, length)
+/// only, both `scratch_a` and `scratch_b` would silently alias the same physical
+/// buffer and corrupt each other. This test compiles such a kernel, asserts
+/// spirv-val accepts it, and asserts the module contains exactly TWO
+/// workgroup-class variables.
+#[test]
+fn two_same_shape_workgroup_arrays_do_not_alias() {
+    let Some(tool) = spirv_val_available() else {
+        eprintln!("skipping two_same_shape_workgroup_arrays_do_not_alias: spirv-val not on PATH");
+        return;
+    };
+    let out = temp_spv("two_scratch");
+    compile_kernel_spirv(&two_scratch_example(), &out);
+
+    let (ok, stderr) = spirv_val_ok(tool, &out);
+    assert!(
+        ok,
+        "spirv-val should accept the two-scratch compute module:\n{stderr}"
+    );
+
+    let bytes = std::fs::read(&out).expect("read two_scratch spv");
+    let words = spv_words(&bytes);
+    let workgroup_vars = count_workgroup_variables(&words);
+    assert_eq!(
+        workgroup_vars, 2,
+        "two distinct workgroupArray(64) locals must lower to two distinct \
+         Workgroup-class OpVariables (found {workgroup_vars}); if this is 1 the \
+         backend aliased two logically independent scratch buffers into one, a \
+         silent data-corruption bug"
+    );
+
+    let _ = std::fs::remove_file(&out);
+}
+
+/// PHASE 4a GATING MILESTONE (Layer A, device-free): the `sum_reduce` tree
+/// reduction -- a 64-element WORKGROUP-shared `scratch` array + `workgroupBarrier()`
+/// between the load and each collapse step -- emits VALID compute SPIR-V that
+/// `spirv-val` ACCEPTS, and that module CONTAINS an `OpControlBarrier` (opcode
+/// 224). The `contains_opcode` assertion is load-bearing: it proves the barrier
+/// (and thus the shared-memory synchronization) is really emitted, not silently
+/// dropped so that a barrier-free module trivially validated.
+///
+/// This is the shared-memory + barrier MACHINERY validating. It is NOT yet a
+/// working reduction on the device (that is Phase 4b: device dispatch + CPU
+/// cross-check of the summed per-workgroup partials).
+#[test]
+fn reduce_emits_valid_compute_spirv() {
+    let Some(tool) = spirv_val_available() else {
+        eprintln!("skipping reduce_emits_valid_compute_spirv: spirv-val not on PATH");
+        return;
+    };
+    let out = temp_spv("reduce_valid");
+    compile_kernel_spirv(&reduce_example(), &out);
+
+    let (ok, stderr) = spirv_val_ok(tool, &out);
+    assert!(
+        ok,
+        "spirv-val should accept the emitted sum_reduce compute module:\n{stderr}"
+    );
+
+    // OpControlBarrier == 224. Prove the workgroup barrier is present so a
+    // barrier-free module cannot pass this gate by accident.
+    let bytes = std::fs::read(&out).expect("read reduce spv");
+    let words = spv_words(&bytes);
+    assert!(
+        contains_opcode(&words, 224),
+        "the emitted sum_reduce module must contain an OpControlBarrier (224); \
+         if it does not, the workgroup barrier was silently dropped"
+    );
+
+    let _ = std::fs::remove_file(&out);
+}
+
+/// CAN-IT-FAIL negative for the barrier gate (Layer A, device-free): corrupt the
+/// scope operand of the emitted `OpControlBarrier` to an invalid scope constant
+/// and assert `spirv-val` REJECTS the result. This proves the gating test's
+/// acceptance actually discriminates on the barrier -- a validator that accepted
+/// a barrier with a nonsense execution scope would make the positive test
+/// vacuous.
+#[test]
+fn reduce_corrupt_barrier_is_rejected() {
+    let Some(tool) = spirv_val_available() else {
+        eprintln!("skipping reduce_corrupt_barrier_is_rejected: spirv-val not on PATH");
+        return;
+    };
+    let out = temp_spv("reduce_corrupt_barrier");
+    compile_kernel_spirv(&reduce_example(), &out);
+
+    // Pristine module validates first (else the corruption proves nothing).
+    let (ok, stderr) = spirv_val_ok(tool, &out);
+    assert!(
+        ok,
+        "pristine reduce module should validate first:\n{stderr}"
+    );
+
+    // The barrier's execution scope is a %uint constant id operand of the
+    // OpControlBarrier instruction. Rather than hunt the scope constant, corrupt
+    // the OpControlBarrier's FIRST operand word in place to a bogus id (0), which
+    // makes the instruction reference an undefined id -> spirv-val rejects. We
+    // locate the instruction by walking the word stream for opcode 224.
+    let mut bytes = std::fs::read(&out).expect("read reduce spv");
+    let words = spv_words(&bytes);
+    // Find the byte offset of the first operand word of the first OpControlBarrier.
+    let mut i = 5usize;
+    let mut operand_word_index: Option<usize> = None;
+    while i < words.len() {
+        let word_count = (words[i] >> 16) as usize;
+        let op = (words[i] & 0xFFFF) as u16;
+        if word_count == 0 {
+            break;
+        }
+        if op == 224 {
+            // Word 0 is the opcode; word 1 is the execution-scope id operand.
+            operand_word_index = Some(i + 1);
+            break;
+        }
+        i += word_count;
+    }
+    let operand_word_index =
+        operand_word_index.expect("emitted reduce module must contain an OpControlBarrier");
+    // Overwrite the execution-scope id operand with 0 (an undefined id): a valid
+    // OpControlBarrier requires its scope to be a defined constant, so this must
+    // be rejected.
+    let byte_off = operand_word_index * 4;
+    bytes[byte_off] = 0;
+    bytes[byte_off + 1] = 0;
+    bytes[byte_off + 2] = 0;
+    bytes[byte_off + 3] = 0;
+    let corrupt = temp_spv("reduce_corrupt_barrier_out");
+    std::fs::write(&corrupt, &bytes).expect("write corrupt reduce spv");
+
+    let (ok, _stderr) = spirv_val_ok(tool, &corrupt);
+    assert!(
+        !ok,
+        "spirv-val must REJECT a reduce module whose OpControlBarrier scope operand \
+         was corrupted; if it accepts, the barrier gate does not discriminate on the barrier"
+    );
+
+    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_file(&corrupt);
 }
 
 // ---------------------------------------------------------------------------

@@ -369,7 +369,13 @@ fn collect_stmt(
             memory.field_writes = true;
             collect_rvalue(value, sets, memory);
         }
-        MirStmtKind::StorageLive(_) | MirStmtKind::StorageDead(_) | MirStmtKind::Nop => {}
+        // A workgroup barrier is a bare synchronization point with no operands
+        // and no memory surface of its own (the shared writes it orders are the
+        // index stores, already accounted for above).
+        MirStmtKind::StorageLive(_)
+        | MirStmtKind::StorageDead(_)
+        | MirStmtKind::Nop
+        | MirStmtKind::WorkgroupBarrier => {}
     }
 }
 
@@ -532,6 +538,7 @@ fn statement_name(stmt: &MirStmtKind) -> &'static str {
         MirStmtKind::StorageLive(_) => "StorageLive",
         MirStmtKind::StorageDead(_) => "StorageDead",
         MirStmtKind::Nop => "Nop",
+        MirStmtKind::WorkgroupBarrier => "WorkgroupBarrier",
     }
 }
 
@@ -726,6 +733,8 @@ fn nullary_op_name(op: NullaryOp) -> &'static str {
         NullaryOp::SizeOf => "SizeOf",
         NullaryOp::AlignOf => "AlignOf",
         NullaryOp::ThreadIndex(_) => "ThreadIndex",
+        NullaryOp::LocalInvocationId(_) => "LocalInvocationId",
+        NullaryOp::WorkgroupId(_) => "WorkgroupId",
     }
 }
 
@@ -1113,7 +1122,9 @@ fn write_mir_stmt(output: &mut String, label: &str, stmt: &MirStmtKind) {
         MirStmtKind::StorageLive(local) | MirStmtKind::StorageDead(local) => {
             push_line(output, format!("{label}.local {}", local.0));
         }
-        MirStmtKind::Nop => {}
+        // A workgroup barrier carries no operands; the statement name emitted at
+        // the top of this function fully describes it.
+        MirStmtKind::Nop | MirStmtKind::WorkgroupBarrier => {}
     }
 }
 
