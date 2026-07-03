@@ -36,6 +36,10 @@ fn vec_add_example() -> PathBuf {
     repo_root().join("examples").join("gpu").join("vec_add.bld")
 }
 
+fn saxpy_example() -> PathBuf {
+    repo_root().join("examples").join("gpu").join("saxpy.bld")
+}
+
 /// Resolve `spirv-val` on PATH (Vulkan SDK adds it). Returns the program name
 /// to invoke, or `None` if the tool is not installed -> the caller skips.
 fn spirv_val_available() -> Option<&'static str> {
@@ -60,24 +64,30 @@ fn temp_spv(label: &str) -> PathBuf {
     ))
 }
 
-/// Compile the canonical compute kernel to SPIR-V. Panics with full diagnostics
-/// on failure so a codegen regression is legible.
-fn compile_vec_add_spirv(out: &Path) {
+/// Compile a compute kernel at `src` to SPIR-V at `out`. Panics with full
+/// diagnostics on failure so a codegen regression is legible.
+fn compile_kernel_spirv(src: &Path, out: &Path) {
     let output = buildc()
-        .arg(vec_add_example())
+        .arg(src)
         .arg("--target")
         .arg("spirv")
         .arg("-o")
         .arg(out)
         .output()
-        .expect("run buildc to compile vec_add.bld");
+        .expect("run buildc to compile a compute kernel");
     assert!(
         output.status.success(),
-        "buildc should compile vec_add.bld to SPIR-V\nstdout:\n{}\nstderr:\n{}",
+        "buildc should compile {} to SPIR-V\nstdout:\n{}\nstderr:\n{}",
+        src.display(),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
     assert!(out.exists(), "expected .spv output at {}", out.display());
+}
+
+/// Compile the canonical `vec_add` compute kernel to SPIR-V.
+fn compile_vec_add_spirv(out: &Path) {
+    compile_kernel_spirv(&vec_add_example(), out);
 }
 
 /// Run spirv-val on a module; return true iff it validated (exit 0).
@@ -154,6 +164,78 @@ fn spirv_val_rejects_corrupt_module() {
     let _ = std::fs::remove_file(&corrupt);
 }
 
+/// Phase 1: the arbitrary-elementwise proof kernel `saxpy` (scalar push
+/// constant + two read-only inputs + one writable output, entry point named
+/// `saxpy`, not `vec_add`) emits VALID dispatchable compute SPIR-V.
+#[test]
+fn saxpy_emits_valid_compute_spirv() {
+    let Some(tool) = spirv_val_available() else {
+        eprintln!("skipping saxpy_emits_valid_compute_spirv: spirv-val not on PATH");
+        return;
+    };
+    let out = temp_spv("saxpy_valid");
+    compile_kernel_spirv(&saxpy_example(), &out);
+
+    let (ok, stderr) = spirv_val_ok(tool, &out);
+    assert!(
+        ok,
+        "spirv-val should accept the emitted saxpy compute module:\n{stderr}"
+    );
+
+    let _ = std::fs::remove_file(&out);
+}
+
+/// WRITABILITY PROOF (Layer A, device-free): a kernel that writes into a
+/// parameter declared `&[f32]` (read-only, NOT `&mut`) must be REJECTED at
+/// compile time. This proves the writability inference is real -- not a
+/// decorative decoration -- because the read-only buffer is emitted as a
+/// non-writable binding a store cannot target.
+///
+/// A passing gate that never rejects proves nothing; this is the negative that
+/// makes the inference bite.
+#[test]
+fn readonly_buffer_write_is_rejected() {
+    let dir = std::env::temp_dir().join(format!("buildlang_gpu_ro_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let src = dir.join("readonly_write.bld");
+    // `a` is `&[f32]` (read-only) yet the body writes `a[i]` -- illegal.
+    std::fs::write(
+        &src,
+        "#[compute]\n\
+         fn ro_write(a: &[f32], out: &mut [f32]) ~ Gpu {\n\
+        \x20   let i = gl_GlobalInvocationID.x;\n\
+        \x20   a[i] = out[i];\n\
+         }\n",
+    )
+    .expect("write readonly_write.bld");
+
+    let out = dir.join("readonly_write.spv");
+    let output = buildc()
+        .arg(&src)
+        .arg("--target")
+        .arg("spirv")
+        .arg("-o")
+        .arg(&out)
+        .output()
+        .expect("run buildc on the read-only-write kernel");
+    assert!(
+        !output.status.success(),
+        "writing into a read-only `&[f32]` buffer MUST be rejected at compile time; \
+         if it compiles, the writability inference is decorative\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.to_lowercase().contains("read-only")
+            || stderr.to_lowercase().contains("writable")
+            || stderr.to_lowercase().contains("non-writable"),
+        "the rejection should name the writability cause; got:\n{stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------------------------------------------------------------------------
 // LAYER B/C: device execution + sealed receipt. Gated on the `gpu` feature and
 // an actual Vulkan device. Compiled in only under `--features gpu`.
@@ -219,6 +301,59 @@ mod device {
         assert!(
             !output.status.success(),
             "a divergent GPU readback MUST be caught (non-zero exit); if it passes, the gate does not discriminate\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    /// Phase 1: the arbitrary-elementwise `saxpy` kernel (scalar push constant +
+    /// two inputs + one output) dispatches on the physical device and agrees
+    /// with the CPU-C scalar loop within tolerance. Proves the generalized path
+    /// (entry-name discovery, push constant, per-buffer host binding) runs on
+    /// real hardware.
+    #[test]
+    fn saxpy_gpu_matches_cpu() {
+        if !vulkan_device_available() {
+            eprintln!("skipping saxpy_gpu_matches_cpu: no Vulkan device");
+            return;
+        }
+        let output = buildc()
+            .arg("run")
+            .arg(saxpy_example())
+            .arg("--gpu")
+            .output()
+            .expect("run buildc run --gpu on saxpy");
+        assert!(
+            output.status.success(),
+            "buildc run --gpu on saxpy should agree with CPU-C within tolerance\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("gpu-cpu agreement") || stdout.contains("PASS"),
+            "expected an agreement verdict in output:\n{stdout}"
+        );
+    }
+
+    /// CAN-IT-FAIL negative for the generalized path: a corrupted saxpy readback
+    /// MUST be caught by the tolerance gate (non-zero exit).
+    #[test]
+    fn wrong_saxpy_result_is_caught() {
+        if !vulkan_device_available() {
+            eprintln!("skipping wrong_saxpy_result_is_caught: no Vulkan device");
+            return;
+        }
+        let output = buildc()
+            .arg("run")
+            .arg(saxpy_example())
+            .arg("--gpu")
+            .env("BUILDLANG_GPU_CORRUPT_READBACK", "1")
+            .output()
+            .expect("run buildc run --gpu on saxpy with a corrupted readback");
+        assert!(
+            !output.status.success(),
+            "a divergent saxpy readback MUST be caught (non-zero exit)\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );

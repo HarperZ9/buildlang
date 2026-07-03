@@ -219,6 +219,16 @@ impl MirBuilder {
         }
     }
 
+    /// Mark a parameter local's mutability. Threaded from the AST parameter type
+    /// (`&mut T` vs `&T`) so backends can distinguish a writable output buffer
+    /// from a read-only input. `MirLocal::is_mut` defaults to `false`; a bare
+    /// `&T` reference stays read-only.
+    pub fn set_param_mut(&mut self, index: usize, is_mut: bool) {
+        if let Some(local) = self.func.locals.get_mut(index) {
+            local.is_mut = is_mut;
+        }
+    }
+
     // =========================================================================
     // STATEMENTS
     // =========================================================================
