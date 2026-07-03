@@ -19,6 +19,14 @@
 // Layer B: `buildc run examples/gpu/matmul.bld --gpu` dispatches on the physical
 //          device over a 2D grid and cross-checks against the CPU-C scalar loop
 //          within 1e-6.
+//
+// SHAPE CONSTRAINT (enforced): this kernel has NO in-body bounds guard, so `m`
+// (rows) and `n` (cols) MUST be exact multiples of the 2D workgroup size (16)
+// -- otherwise `div_ceil` over-launches out-of-range invocations that would
+// read/write past the exactly-sized a/b/c buffers. `validate_matmul_shapes`
+// refuses non-multiple dims before any device work. (An in-body `if i<m` guard
+// is the eventual fix; it is blocked today by the SPIR-V backend not yet
+// emitting a `while` loop nested inside a selection construct.)
 // ============================================================================
 
 #[compute]
