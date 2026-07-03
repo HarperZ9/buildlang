@@ -354,6 +354,31 @@ impl MirBuilder {
         self.assign(dest, MirRValue::Aggregate { kind, operands });
     }
 
+    /// Emit a GPU workgroup barrier (`workgroupBarrier()`): a void statement, not
+    /// an rvalue. Lowered by the SPIR-V backend to `OpControlBarrier`; a no-op on
+    /// CPU/non-GPU backends.
+    pub fn push_workgroup_barrier(&mut self) {
+        self.push_stmt(MirStmtKind::WorkgroupBarrier);
+    }
+
+    /// Rename an existing local by id (for legible diagnostics when a binding
+    /// aliases a previously-created local, e.g. a workgroup scratch slot).
+    pub fn set_local_name(&mut self, id: LocalId, name: impl Into<Arc<str>>) {
+        if let Some(local) = self.func.locals.iter_mut().find(|l| l.id == id) {
+            local.name = Some(name.into());
+        }
+    }
+
+    /// Append a type annotation to an existing local (e.g. `"Workgroup:64"` to
+    /// mark a workgroup-shared scratch array). Used for GPU compute metadata that
+    /// the SPIR-V backend reads back to place the local in the `Workgroup` storage
+    /// class rather than as an ordinary function-local array.
+    pub fn annotate_local(&mut self, id: LocalId, annotation: impl Into<Arc<str>>) {
+        if let Some(local) = self.func.locals.iter_mut().find(|l| l.id == id) {
+            local.annotations.push(annotation.into());
+        }
+    }
+
     // =========================================================================
     // TERMINATORS
     // =========================================================================

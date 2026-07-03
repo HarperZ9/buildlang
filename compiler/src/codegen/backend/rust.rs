@@ -348,7 +348,12 @@ impl RustBackend {
                     base_str, index_str, rvalue
                 ));
             }
-            MirStmtKind::StorageLive(_) | MirStmtKind::StorageDead(_) | MirStmtKind::Nop => {}
+            // A workgroup barrier is a no-op on the single-threaded Rust source
+            // backend (there is no workgroup to synchronize).
+            MirStmtKind::StorageLive(_)
+            | MirStmtKind::StorageDead(_)
+            | MirStmtKind::Nop
+            | MirStmtKind::WorkgroupBarrier => {}
         }
         Ok(())
     }
@@ -628,9 +633,11 @@ impl RustBackend {
             MirRValue::NullaryOp(op, ty) => match op {
                 NullaryOp::SizeOf => format!("std::mem::size_of::<{}>()", self.type_to_rust(ty)),
                 NullaryOp::AlignOf => format!("std::mem::align_of::<{}>()", self.type_to_rust(ty)),
-                // GPU-only built-in; the Rust source backend is not a compute
-                // target, so it lowers to 0.
-                NullaryOp::ThreadIndex(_) => "0".to_string(),
+                // GPU-only built-ins; the Rust source backend is not a compute
+                // target, so they lower to 0.
+                NullaryOp::ThreadIndex(_)
+                | NullaryOp::LocalInvocationId(_)
+                | NullaryOp::WorkgroupId(_) => "0".to_string(),
             },
             MirRValue::FieldAccess {
                 base,

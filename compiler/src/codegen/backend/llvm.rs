@@ -1307,6 +1307,11 @@ impl LlvmBackend {
             MirStmtKind::Nop => {
                 // No-op, nothing to generate
             }
+            MirStmtKind::WorkgroupBarrier => {
+                // GPU-only synchronization; a no-op on the single-threaded LLVM
+                // CPU backend (there is no workgroup to synchronize).
+                writeln!(&mut self.output, "  ; workgroup_barrier (no-op on CPU)").unwrap();
+            }
         }
         Ok(())
     }
@@ -1524,9 +1529,11 @@ impl LlvmBackend {
                 let result = match op {
                     NullaryOp::SizeOf => self.type_size(ty),
                     NullaryOp::AlignOf => self.type_align(ty) as u64,
-                    // GPU-only built-in; the LLVM CPU backend has no thread grid,
-                    // so it lowers to 0 (the LLVM path is not a compute target).
-                    NullaryOp::ThreadIndex(_) => 0,
+                    // GPU-only built-ins; the LLVM CPU backend has no thread
+                    // grid, so they lower to 0 (not a compute target).
+                    NullaryOp::ThreadIndex(_)
+                    | NullaryOp::LocalInvocationId(_)
+                    | NullaryOp::WorkgroupId(_) => 0,
                 };
                 let dest_align = self.type_align(&dest_ty);
                 writeln!(

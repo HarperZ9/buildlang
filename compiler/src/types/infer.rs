@@ -1961,6 +1961,17 @@ impl<'ctx> TypeInfer<'ctx> {
             "build_vk_draw_frame" | "build_vk_request_close" => (vec![], unit_ty.clone()),
             "build_vk_should_close" => (vec![], i64_ty.clone()),
             "build_vk_device_name" => (vec![], str_ty),
+            // GPU compute workgroup intrinsics (Phase 4a). `workgroupBarrier()`
+            // is a void synchronization side effect. `workgroupArray(N)` yields a
+            // workgroup-shared scratch array of `N` f32 elements (typed as a
+            // fixed-size `[f32; 64]`; the length is fixed to the workgroup size in
+            // 4a). Both carry the Gpu effect so they are only legal in a `~Gpu`
+            // compute kernel.
+            "workgroupBarrier" => (vec![], unit_ty.clone()),
+            "workgroupArray" => (
+                vec![Ty::int(IntTy::U32)],
+                Ty::array(Ty::float(FloatTy::F32), 64),
+            ),
             _ => return None,
         };
 

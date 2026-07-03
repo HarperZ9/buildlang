@@ -574,6 +574,19 @@ struct ComputeBuffer {
     writable: bool,
 }
 
+/// A compute-kernel workgroup-shared scratch array mapped from a
+/// `workgroupArray(N)` local. The backend emits one `Workgroup`-class
+/// `OpVariable` of type `array<elem_ty, N>` (N a compile-time `OpConstant`, so
+/// it is NOT a runtime array and carries no ArrayStride / descriptor / binding),
+/// and indexing the local access-chains into it.
+#[derive(Clone)]
+struct WorkgroupSlot {
+    /// The `Workgroup`-class OpVariable id.
+    var_id: u32,
+    /// Element type of the array.
+    elem_ty: MirType,
+}
+
 /// A compute-kernel scalar parameter mapped to a member of the push-constant
 /// block. Non-pointer scalar parameters (e.g. `alpha: f32`) are passed by push
 /// constant rather than a descriptor/binding: the whole block is one
@@ -650,6 +663,18 @@ pub struct SpirvBackend {
     /// the kernel has any scalar parameters. `None` when there are none.
     compute_pc_var: Option<u32>,
 
+    /// Compute-kernel workgroup-shared scratch arrays: parameter/binding local ->
+    /// the `Workgroup`-class OpVariable it maps to. Populated by `setup_shader_io`
+    /// for GLCompute from locals annotated `Workgroup:N` (produced by the
+    /// frontend's `workgroupArray(N)` lowering). Indexing such a local
+    /// (`scratch[lid]`) lowers to an `OpAccessChain` into this variable via
+    /// `gen_workgroup_element_ptr` -- NOT the SSBO path. Added in Phase 4a.
+    workgroup_slots: HashMap<LocalId, WorkgroupSlot>,
+    /// Cache of emitted workgroup-array OpVariables keyed by (element type key,
+    /// length) so two `workgroupArray(64)` scratch arrays of the same shape share
+    /// one variable rather than emitting duplicate globals.
+    workgroup_var_cache: HashMap<(String, u64), u32>,
+
     // == Layout-ordered section buffers (SPIR-V requires strict instruction order) ==
     /// Collected debug instructions (OpName, OpMemberName) -- layout section 7.
     pending_names: Vec<u32>,
@@ -702,6 +727,25 @@ fn mir_reads_thread_axis_ge(mir: &MirModule, axis: u32) -> bool {
 }
 
 impl SpirvBackend {
+    /// True iff `func`'s body assigns a `NullaryOp` matching `pred` (used to
+    /// decide whether to pre-declare the `LocalInvocationId` / `WorkgroupId`
+    /// built-ins in the entry-point interface). After lowering, an invocation-
+    /// index read is always `Assign { value: NullaryOp(..) }`, so scanning
+    /// assignment rvalues is sufficient.
+    fn compute_reads_nullary(func: &MirFunction, pred: impl Fn(&NullaryOp) -> bool) -> bool {
+        func.blocks.as_ref().is_some_and(|blocks| {
+            blocks.iter().any(|b| {
+                b.stmts.iter().any(|s| {
+                    if let MirStmtKind::Assign { value, .. } = &s.kind {
+                        matches!(value, MirRValue::NullaryOp(op, _) if pred(op))
+                    } else {
+                        false
+                    }
+                })
+            })
+        })
+    }
+
     /// Create a new SPIR-V backend.
     pub fn new() -> Self {
         Self {
@@ -727,6 +771,8 @@ impl SpirvBackend {
             compute_buffers: HashMap::new(),
             compute_push_constants: HashMap::new(),
             compute_pc_var: None,
+            workgroup_slots: HashMap::new(),
+            workgroup_var_cache: HashMap::new(),
             pending_names: Vec::new(),
             pending_annotations: Vec::new(),
             pending_globals: Vec::new(),
@@ -786,6 +832,8 @@ impl SpirvBackend {
         self.compute_buffers.clear();
         self.compute_push_constants.clear();
         self.compute_pc_var = None;
+        self.workgroup_slots.clear();
+        self.workgroup_var_cache.clear();
         self.pending_names.clear();
         self.pending_annotations.clear();
         self.pending_globals.clear();
@@ -1239,7 +1287,6 @@ impl SpirvBackend {
 
     /// Emit workgroup barrier (common pattern).
     /// Uses AcquireRelease | WorkgroupMemory semantics.
-    #[allow(dead_code)]
     fn emit_workgroup_barrier(&mut self) {
         // AcquireRelease (0x8) | WorkgroupMemory (0x100) = 0x108
         let semantics = 0x108u128;
@@ -1991,6 +2038,52 @@ impl SpirvBackend {
         self.get_ptr_type_id(elem_ty, SpvStorageClass::Uniform)
     }
 
+    /// Emit a workgroup-shared scratch array in the `Workgroup` storage class:
+    /// an `OpTypeArray` of `len` `elem_ty` elements (length a compile-time
+    /// `OpConstant`, so it is a fixed-size array, NOT a runtime array), a
+    /// `Workgroup`-class `OpTypePointer` to it, and an `OpVariable` in that class
+    /// with NO initializer and NO decorations (workgroup memory carries no
+    /// ArrayStride, descriptor set, or binding -- it is on-chip shared memory, not
+    /// a bound buffer). Cached by `(elem_ty, len)`. NOT added to `io_var_ids`: on
+    /// SPIR-V 1.0 a `Workgroup`-class variable is NOT part of the OpEntryPoint
+    /// interface (that requirement arrived in SPIR-V 1.4). Returns the OpVariable
+    /// id.
+    fn emit_workgroup_var(&mut self, elem_ty: &MirType, len: u64) -> u32 {
+        let key = (format!("{:?}", elem_ty), len);
+        if let Some(&id) = self.workgroup_var_cache.get(&key) {
+            return id;
+        }
+
+        let elem_id = self.get_type_id(elem_ty);
+        // Array length is a %uint OpConstant (a fixed-size OpTypeArray needs a
+        // constant length operand; a runtime array is a different, buffer-only
+        // construct).
+        let len_const = self.get_const_id(&MirConst::Uint(len as u128, MirType::u32()));
+        let arr_id = self.alloc_id();
+        self.emit_global(SpvOp::OpTypeArray, &[arr_id, elem_id, len_const]);
+
+        let ptr_id = self.alloc_id();
+        self.emit_global(
+            SpvOp::OpTypePointer,
+            &[ptr_id, SpvStorageClass::Workgroup as u32, arr_id],
+        );
+
+        let var_id = self.alloc_id();
+        self.emit_global(
+            SpvOp::OpVariable,
+            &[ptr_id, var_id, SpvStorageClass::Workgroup as u32],
+        );
+
+        self.workgroup_var_cache.insert(key, var_id);
+        var_id
+    }
+
+    /// Get (or create) the `Workgroup`-class pointer type to `elem_ty`, used as
+    /// the result type of an `OpAccessChain` into a workgroup-shared array.
+    fn workgroup_elem_ptr_type(&mut self, elem_ty: &MirType) -> u32 {
+        self.get_ptr_type_id(elem_ty, SpvStorageClass::Workgroup)
+    }
+
     /// Emit the compute push-constant block: a single `Block`-decorated
     /// `OpTypeStruct` whose members are the kernel's scalar parameters, in the
     /// `PushConstant` storage class, each member carrying an `Offset`
@@ -2400,6 +2493,17 @@ impl SpirvBackend {
                 // array (member 0) followed by OpStore -- NOT the zero-constant
                 // fallback. Any other base is unsupported in SPIR-V today.
                 let val_id = self.gen_rvalue(value, func)?;
+                // Workgroup-shared write: `scratch[i] = v` on a workgroup slot.
+                // Shared memory is always writable (no read-only concept), so
+                // this needs no writability check. Checked before the buffer path.
+                if let MirValue::Local(base_local) = base {
+                    if let Some(chain_id) =
+                        self.gen_workgroup_element_ptr(*base_local, index, elem_ty, func)?
+                    {
+                        self.emit(SpvOp::OpStore, &[chain_id, val_id]);
+                        return Ok(());
+                    }
+                }
                 if let MirValue::Local(base_local) = base {
                     // Refuse to store into a read-only buffer. Writability is
                     // inferred from the parameter's reference mutability
@@ -2435,6 +2539,13 @@ impl SpirvBackend {
                         .to_string(),
                 ));
             }
+            MirStmtKind::WorkgroupBarrier => {
+                // `workgroupBarrier()` -> OpControlBarrier with Workgroup
+                // execution + memory scope and AcquireRelease|WorkgroupMemory
+                // semantics, synchronizing the workgroup and ordering shared-
+                // memory writes across it.
+                self.emit_workgroup_barrier();
+            }
             MirStmtKind::StorageLive(_) | MirStmtKind::StorageDead(_) | MirStmtKind::Nop => {
                 // No-op in SPIR-V
             }
@@ -2446,6 +2557,28 @@ impl SpirvBackend {
     /// `OpAccessChain` into its runtime array (`buffer.member0[index]`) and
     /// return the resulting `Uniform`-class element pointer id. Returns `Ok(None)`
     /// if the local is not a buffer parameter (caller falls back).
+    /// Read one component of a uvec3 GPU invocation built-in
+    /// (`GlobalInvocationId` / `LocalInvocationId` / `WorkgroupId`): declare (or
+    /// reuse) the built-in as a uvec3 Input variable, access-chain the requested
+    /// component, and load it as a u32. Shared by the three thread-index nullary
+    /// ops so their emission cannot drift apart.
+    fn gen_invocation_component(&mut self, builtin: SpvBuiltIn, component: u32) -> u32 {
+        let uvec3 = MirType::Vector(Box::new(MirType::Int(IntSize::I32, false)), 3);
+        let var_id = self.emit_builtin_var(builtin, &uvec3);
+        let u32_ty = MirType::Int(IntSize::I32, false);
+        let u32_ty_id = self.get_type_id(&u32_ty);
+        let comp_const = self.get_const_id(&MirConst::Int(component as i128, u32_ty.clone()));
+        let ptr_ty_id = self.get_ptr_type_id(&u32_ty, SpvStorageClass::Input);
+        let chain_id = self.alloc_id();
+        self.emit(
+            SpvOp::OpAccessChain,
+            &[ptr_ty_id, chain_id, var_id, comp_const],
+        );
+        let result_id = self.alloc_id();
+        self.emit(SpvOp::OpLoad, &[u32_ty_id, result_id, chain_id]);
+        result_id
+    }
+
     fn gen_buffer_element_ptr(
         &mut self,
         base_local: LocalId,
@@ -2469,6 +2602,37 @@ impl SpirvBackend {
         self.emit(
             SpvOp::OpAccessChain,
             &[ptr_ty_id, chain_id, buffer.var_id, zero_id, index_id],
+        );
+        Ok(Some(chain_id))
+    }
+
+    /// Access-chain into a workgroup-shared scratch array (`scratch[index]`).
+    /// Parallel to `gen_buffer_element_ptr` but for a `Workgroup`-class variable
+    /// that IS the array (no wrapping struct, so no leading member-0 index): the
+    /// access chain is `var[index]`, result type a `Workgroup`-class pointer to
+    /// the element. Returns `None` (so the caller falls through) when `base_local`
+    /// is not a registered workgroup slot.
+    fn gen_workgroup_element_ptr(
+        &mut self,
+        base_local: LocalId,
+        index: &MirValue,
+        elem_ty: &MirType,
+        func: &MirFunction,
+    ) -> CodegenResult<Option<u32>> {
+        let Some(slot) = self.workgroup_slots.get(&base_local).cloned() else {
+            return Ok(None);
+        };
+        let index_id = self.gen_value(index, func)?;
+        let elem_ty = if matches!(elem_ty, MirType::Void) {
+            &slot.elem_ty
+        } else {
+            elem_ty
+        };
+        let ptr_ty_id = self.workgroup_elem_ptr_type(elem_ty);
+        let chain_id = self.alloc_id();
+        self.emit(
+            SpvOp::OpAccessChain,
+            &[ptr_ty_id, chain_id, slot.var_id, index_id],
         );
         Ok(Some(chain_id))
     }
@@ -2577,6 +2741,19 @@ impl SpirvBackend {
                 index,
                 elem_ty,
             } => {
+                // Workgroup-shared read: `scratch[i]` on a workgroup slot lowers
+                // to an OpAccessChain into the Workgroup-class array + OpLoad.
+                // Checked before the buffer path (a local is one or the other).
+                if let MirValue::Local(base_local) = base {
+                    if let Some(chain_id) =
+                        self.gen_workgroup_element_ptr(*base_local, index, elem_ty, func)?
+                    {
+                        let elem_ty_id = self.get_type_id(elem_ty);
+                        let result_id = self.alloc_id();
+                        self.emit(SpvOp::OpLoad, &[elem_ty_id, result_id, chain_id]);
+                        return Ok(result_id);
+                    }
+                }
                 // Compute-kernel buffer read: `a[i]` on a StorageBuffer parameter
                 // lowers to a real OpAccessChain into the runtime array (member 0)
                 // + OpLoad -- NOT the zero-constant fallback.
@@ -2684,23 +2861,25 @@ impl SpirvBackend {
             MirRValue::NullaryOp(op, ty) => {
                 match op {
                     NullaryOp::ThreadIndex(component) => {
-                        // Read `gl_GlobalInvocationID[component]`: access-chain the
-                        // uvec3 Input builtin and load the requested scalar.
-                        let uvec3 = MirType::Vector(Box::new(MirType::Int(IntSize::I32, false)), 3);
-                        let giid = self.emit_builtin_var(SpvBuiltIn::GlobalInvocationId, &uvec3);
-                        let u32_ty = MirType::Int(IntSize::I32, false);
-                        let u32_ty_id = self.get_type_id(&u32_ty);
-                        let comp_const =
-                            self.get_const_id(&MirConst::Int(*component as i128, u32_ty.clone()));
-                        let ptr_ty_id = self.get_ptr_type_id(&u32_ty, SpvStorageClass::Input);
-                        let chain_id = self.alloc_id();
-                        self.emit(
-                            SpvOp::OpAccessChain,
-                            &[ptr_ty_id, chain_id, giid, comp_const],
-                        );
-                        let result_id = self.alloc_id();
-                        self.emit(SpvOp::OpLoad, &[u32_ty_id, result_id, chain_id]);
-                        Ok(result_id)
+                        // Read `gl_GlobalInvocationID[component]`.
+                        Ok(self.gen_invocation_component(
+                            SpvBuiltIn::GlobalInvocationId,
+                            *component,
+                        ))
+                    }
+                    NullaryOp::LocalInvocationId(component) => {
+                        // Read `gl_LocalInvocationID[component]` (lane within the
+                        // workgroup): access-chain the LocalInvocationId uvec3
+                        // Input builtin and load the requested scalar.
+                        Ok(self.gen_invocation_component(
+                            SpvBuiltIn::LocalInvocationId,
+                            *component,
+                        ))
+                    }
+                    NullaryOp::WorkgroupId(component) => {
+                        // Read `gl_WorkgroupID[component]` (which workgroup this
+                        // invocation belongs to).
+                        Ok(self.gen_invocation_component(SpvBuiltIn::WorkgroupId, *component))
                     }
                     // sizeof/alignof have no operand-free SPIR-V form here; the
                     // shader path does not exercise them. Fall back to a zero of
@@ -4731,6 +4910,54 @@ impl SpirvBackend {
             let uvec3 = MirType::Vector(Box::new(MirType::Int(IntSize::I32, false)), 3);
             let giid = self.emit_builtin_var(SpvBuiltIn::GlobalInvocationId, &uvec3);
             self.io_var_ids.push(giid);
+
+            // Pre-declare the LOCAL invocation and WORKGROUP index built-ins when
+            // the kernel reads them (`gl_LocalInvocationID` / `gl_WorkgroupID`).
+            // Both are `Input`-class variables, so they MUST appear in the
+            // OpEntryPoint interface -- declaring them here (before body emission
+            // builds `io_var_ids`) guarantees that. Only emit the ones the body
+            // actually uses so an unused built-in is not forced into the interface.
+            let uses_local_id = Self::compute_reads_nullary(func, |op| {
+                matches!(op, NullaryOp::LocalInvocationId(_))
+            });
+            let uses_workgroup_id = Self::compute_reads_nullary(func, |op| {
+                matches!(op, NullaryOp::WorkgroupId(_))
+            });
+            if uses_local_id {
+                let lid = self.emit_builtin_var(SpvBuiltIn::LocalInvocationId, &uvec3);
+                self.io_var_ids.push(lid);
+            }
+            if uses_workgroup_id {
+                let wid = self.emit_builtin_var(SpvBuiltIn::WorkgroupId, &uvec3);
+                self.io_var_ids.push(wid);
+            }
+
+            // Workgroup-shared scratch arrays: any local annotated `Workgroup:N`
+            // (produced by the frontend's `workgroupArray(N)` lowering) gets one
+            // `Workgroup`-class OpVariable of `array<elem_ty, N>`. Register the
+            // local -> variable mapping so `scratch[..]` access-chains into it.
+            // These variables are NOT pushed into `io_var_ids`: on SPIR-V 1.0 a
+            // Workgroup-class variable is not part of the entry-point interface.
+            self.workgroup_slots.clear();
+            for local in &func.locals {
+                if let Some(len) = local
+                    .annotations
+                    .iter()
+                    .find_map(|a| a.strip_prefix("Workgroup:").and_then(|n| n.parse::<u64>().ok()))
+                {
+                    // Element type of the annotated array local (the frontend
+                    // builds it as `Array(elem, N)`).
+                    let elem_ty = match &local.ty {
+                        MirType::Array(elem, _) => (**elem).clone(),
+                        // Defensive: a bare annotation with no array type falls
+                        // back to f32 (the only Phase-4a element type).
+                        _ => MirType::f32(),
+                    };
+                    let var_id = self.emit_workgroup_var(&elem_ty, len);
+                    self.workgroup_slots
+                        .insert(local.id, WorkgroupSlot { var_id, elem_ty });
+                }
+            }
             return;
         }
 
