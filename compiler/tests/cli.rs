@@ -15852,7 +15852,9 @@ fn run_units_flag_seals_canonicalized_unit_in_receipt() {
     // and the sealed receipt must still verify (the unit rides on the existing
     // seal; it does not bypass the accountability layer).
     if !c_backend_ready() {
-        eprintln!("skipping run_units_flag_seals_canonicalized_unit_in_receipt: C backend not ready");
+        eprintln!(
+            "skipping run_units_flag_seals_canonicalized_unit_in_receipt: C backend not ready"
+        );
         return;
     }
     let dir = std::env::temp_dir().join(format!("buildlang_sci_units_{}", std::process::id()));

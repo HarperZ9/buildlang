@@ -429,9 +429,9 @@ fn parse_factor(tokens: &[String], idx: usize) -> Result<(Dimension, usize), Uni
     let mut next = idx + 1;
     // Optional `^ exp`.
     if next < tokens.len() && tokens[next] == "^" {
-        let exp_tok = tokens.get(next + 1).ok_or_else(|| {
-            UnitError::ParseError("expected an exponent after `^`".to_string())
-        })?;
+        let exp_tok = tokens
+            .get(next + 1)
+            .ok_or_else(|| UnitError::ParseError("expected an exponent after `^`".to_string()))?;
         let exp: i32 = exp_tok
             .parse()
             .map_err(|_| UnitError::ParseError(format!("invalid exponent `{}`", exp_tok)))?;
