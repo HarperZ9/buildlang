@@ -663,6 +663,16 @@ pub struct SpirvBackend {
     /// helpers write to `pending_globals`. When false, `emit()` writes to
     /// `self.output` (used for header/preamble/setup phases).
     in_function_phase: bool,
+
+    /// Structured-control-flow facts for the function currently being emitted:
+    /// for each `If`-terminated header block, whether it is a selection or a loop
+    /// and its correct merge / continue targets. Recomputed per function in
+    /// `gen_function` from dominator/post-dominator analysis. Consulted when
+    /// emitting `OpSelectionMerge` / `OpLoopMerge` so that arbitrarily nested
+    /// `if`/`while` produces valid structured control flow (the old ad-hoc
+    /// branch-following mis-picked the merge block for a loop nested in a
+    /// selection). `None` between functions.
+    structured_cfg: Option<crate::codegen::analysis::structured_cfg::StructuredCfg>,
 }
 
 /// True iff any function in `mir` reads a `gl_GlobalInvocationID` component at
@@ -722,6 +732,7 @@ impl SpirvBackend {
             pending_globals: Vec::new(),
             pending_functions: Vec::new(),
             in_function_phase: false,
+            structured_cfg: None,
         }
     }
 
@@ -2117,6 +2128,16 @@ impl SpirvBackend {
             }
         }
 
+        // Reconstruct structured control flow (selection/loop merge + continue
+        // targets) from dominator/post-dominator analysis. SPIR-V requires every
+        // header to name a merge block that post-dominates it; guessing this by
+        // branch-following mis-picks the merge for a loop nested inside a
+        // selection. This precomputes the correct targets for `gen_terminator`.
+        self.structured_cfg = func
+            .blocks
+            .as_ref()
+            .map(|blocks| crate::codegen::analysis::structured_cfg::analyze(blocks));
+
         // Generate blocks
         if let Some(blocks) = &func.blocks {
             for block in blocks {
@@ -2769,6 +2790,40 @@ impl SpirvBackend {
                 let then_id = *self.block_ids.get(then_block).unwrap();
                 let else_id = *self.block_ids.get(else_block).unwrap();
 
+                // PRIMARY PATH: consult the structured-CFG analysis, which
+                // resolves the correct merge (and, for loops, continue target)
+                // via dominator/post-dominator analysis. This handles arbitrary
+                // nesting of `if`/`while` -- the old branch-following heuristic
+                // below mis-picks the merge for a loop nested in a selection.
+                use crate::codegen::analysis::structured_cfg::HeaderKind;
+                if let Some(kind) = self
+                    .structured_cfg
+                    .as_ref()
+                    .and_then(|cfg| cfg.header(block.id))
+                {
+                    match kind {
+                        HeaderKind::Loop {
+                            merge,
+                            continue_target,
+                        } => {
+                            let merge_id = *self.block_ids.get(&merge).unwrap();
+                            let continue_id = *self.block_ids.get(&continue_target).unwrap();
+                            self.emit(SpvOp::OpLoopMerge, &[merge_id, continue_id, 0]);
+                            self.emit(SpvOp::OpBranchConditional, &[cond_id, then_id, else_id]);
+                            return Ok(());
+                        }
+                        HeaderKind::Selection { merge } => {
+                            let merge_id = *self.block_ids.get(&merge).unwrap();
+                            self.emit(SpvOp::OpSelectionMerge, &[merge_id, 0]);
+                            self.emit(SpvOp::OpBranchConditional, &[cond_id, then_id, else_id]);
+                            return Ok(());
+                        }
+                    }
+                }
+
+                // FALLBACK (analysis punted, e.g. an irreducible or exit-in-both-
+                // arms shape): the legacy branch-following heuristic. Kept so no
+                // previously-emitting shape regresses to an unmerged conditional.
                 // Detect loop header: if the then-branch body eventually jumps
                 // BACK to the current block, this is a while loop header.
                 // Emit OpLoopMerge before OpBranchConditional.
