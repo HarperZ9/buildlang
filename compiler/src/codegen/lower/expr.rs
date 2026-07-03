@@ -1445,9 +1445,10 @@ impl<'ctx> MirLowerer<'ctx> {
                 // visible. Lowered to a WorkgroupBarrier statement the SPIR-V
                 // backend turns into OpControlBarrier.
                 "workgroupBarrier" if args.is_empty() => {
-                    let builder = self.current_fn.as_mut().ok_or_else(|| {
-                        CodegenError::Internal("No current function".to_string())
-                    })?;
+                    let builder = self
+                        .current_fn
+                        .as_mut()
+                        .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
                     builder.push_workgroup_barrier();
                     return Ok(values::unit());
                 }
@@ -6310,9 +6311,10 @@ impl<'ctx> MirLowerer<'ctx> {
                             )))
                         }
                     };
-                    let builder = self.current_fn.as_mut().ok_or_else(|| {
-                        CodegenError::Internal("No current function".to_string())
-                    })?;
+                    let builder = self
+                        .current_fn
+                        .as_mut()
+                        .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
                     let result = builder.create_local(MirType::u32());
                     builder.assign(
                         result,

@@ -2897,19 +2897,19 @@ impl SpirvBackend {
                 match op {
                     NullaryOp::ThreadIndex(component) => {
                         // Read `gl_GlobalInvocationID[component]`.
-                        Ok(self.gen_invocation_component(
-                            SpvBuiltIn::GlobalInvocationId,
-                            *component,
-                        ))
+                        Ok(self
+                            .gen_invocation_component(SpvBuiltIn::GlobalInvocationId, *component))
                     }
                     NullaryOp::LocalInvocationId(component) => {
                         // Read `gl_LocalInvocationID[component]` (lane within the
                         // workgroup): access-chain the LocalInvocationId uvec3
                         // Input builtin and load the requested scalar.
-                        Ok(self.gen_invocation_component(
-                            SpvBuiltIn::LocalInvocationId,
-                            *component,
-                        ))
+                        Ok(
+                            self.gen_invocation_component(
+                                SpvBuiltIn::LocalInvocationId,
+                                *component,
+                            ),
+                        )
                     }
                     NullaryOp::WorkgroupId(component) => {
                         // Read `gl_WorkgroupID[component]` (which workgroup this
@@ -4955,9 +4955,8 @@ impl SpirvBackend {
             let uses_local_id = Self::compute_reads_nullary(func, |op| {
                 matches!(op, NullaryOp::LocalInvocationId(_))
             });
-            let uses_workgroup_id = Self::compute_reads_nullary(func, |op| {
-                matches!(op, NullaryOp::WorkgroupId(_))
-            });
+            let uses_workgroup_id =
+                Self::compute_reads_nullary(func, |op| matches!(op, NullaryOp::WorkgroupId(_)));
             if uses_local_id {
                 let lid = self.emit_builtin_var(SpvBuiltIn::LocalInvocationId, &uvec3);
                 self.io_var_ids.push(lid);
@@ -4975,11 +4974,10 @@ impl SpirvBackend {
             // Workgroup-class variable is not part of the entry-point interface.
             self.workgroup_slots.clear();
             for local in &func.locals {
-                if let Some(len) = local
-                    .annotations
-                    .iter()
-                    .find_map(|a| a.strip_prefix("Workgroup:").and_then(|n| n.parse::<u64>().ok()))
-                {
+                if let Some(len) = local.annotations.iter().find_map(|a| {
+                    a.strip_prefix("Workgroup:")
+                        .and_then(|n| n.parse::<u64>().ok())
+                }) {
                     // Element type of the annotated array local (the frontend
                     // builds it as `Array(elem, N)`).
                     let elem_ty = match &local.ty {
