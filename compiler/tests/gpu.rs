@@ -359,6 +359,54 @@ mod device {
         );
     }
 
+    /// F64 REFUSAL (device-free, no `vulkan_device_available` gate): the GPU
+    /// path is f32-only. A `#[compute]` kernel that declares an f64 parameter
+    /// MUST be refused with a clear diagnostic BEFORE any device dispatch,
+    /// rather than silently coercing precision away. The refusal fires in
+    /// `run_gpu_cross_check` ahead of the device probe, so this test needs no
+    /// Vulkan hardware -- it exercises the diagnostic on any machine with the
+    /// `gpu` feature built.
+    ///
+    /// Without this test the diagnostic could be silently removed by a future
+    /// refactor with no failing test.
+    #[test]
+    fn f64_kernel_is_refused_on_gpu_path() {
+        let dir = std::env::temp_dir().join(format!("buildlang_gpu_f64_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let src = dir.join("f64_kernel.bld");
+        // `alpha: f64` is a scalar the f32-only GPU path must refuse.
+        std::fs::write(
+            &src,
+            "#[compute]\n\
+             fn f64_scale(alpha: f64, a: &[f32], out: &mut [f32]) ~ Gpu {\n\
+            \x20   let i = gl_GlobalInvocationID.x;\n\
+            \x20   out[i] = a[i];\n\
+             }\n",
+        )
+        .expect("write f64_kernel.bld");
+
+        let output = buildc()
+            .arg("run")
+            .arg(&src)
+            .arg("--gpu")
+            .output()
+            .expect("run buildc run --gpu on an f64 kernel");
+        assert!(
+            !output.status.success(),
+            "an f64 parameter on the f32-only GPU path MUST be refused (non-zero exit); \
+             if it passes, precision would be silently coerced\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("f32") && stderr.contains("f64"),
+            "the refusal should name the f32/f64 mismatch; got:\n{stderr}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn gpu_receipt_verifies_and_detects_tamper() {
         if !vulkan_device_available() {
