@@ -216,6 +216,15 @@ enum Commands {
         #[arg(long, default_value = "series")]
         metric: String,
 
+        /// Physical unit of the measured series (e.g. `J`, `m/s`, `kg*m/s^2`,
+        /// `1` for dimensionless). Parsed and CANONICALIZED through the
+        /// dimensional-analysis core: a malformed or unknown unit is a hard
+        /// error, and the receipt records the checked canonical form (so
+        /// `m*s^-1` and `m/s` seal identically). Ignored unless
+        /// `--emit-receipt` is set.
+        #[arg(long, value_name = "UNIT")]
+        units: Option<String>,
+
         /// Columns per row of the captured series (row-major). `1` (default)
         /// for the single-scalar invariants; `>= 2` for `--invariant relation`,
         /// whose verifier compares the columns of each row.
@@ -600,6 +609,7 @@ fn main() -> ExitCode {
             emit_receipt,
             invariant,
             metric,
+            units,
             columns,
             problem,
             method,
@@ -616,6 +626,7 @@ fn main() -> ExitCode {
                     emit_receipt.as_deref(),
                     &invariant,
                     &metric,
+                    units.as_deref(),
                     columns,
                     problem.as_deref(),
                     method.as_deref(),
@@ -7050,11 +7061,28 @@ fn cmd_run(
     emit_receipt: Option<&Path>,
     invariant: &str,
     metric: &str,
+    units: Option<&str>,
     columns: usize,
     problem: Option<&str>,
     method: Option<&str>,
     negative_fixture: bool,
 ) -> Result<(), i32> {
+    // Canonicalize the declared unit through the dimensional-analysis core
+    // BEFORE any compilation work: a malformed or unknown unit is an operator
+    // error we report immediately, and the receipt records the CHECKED
+    // canonical form rather than an arbitrary free-text string. Only meaningful
+    // when emitting a receipt, but validate whenever `--units` is present so a
+    // typo is never silently accepted.
+    let canonical_units: Option<String> = match units {
+        Some(raw) => match buildlang::units::canonicalize_unit(raw) {
+            Ok(canon) => Some(canon),
+            Err(err) => {
+                eprintln!("Invalid --units `{raw}`: {err}");
+                return Err(1);
+            }
+        },
+        None => None,
+    };
     // Map the CLI invariant name (kebab-case) to the registry invariant the
     // receipt seals and verify re-checks. Reject unknown names early (before
     // compiling) so the error is clear and no work is wasted.
@@ -7206,7 +7234,7 @@ fn cmd_run(
         args: args.to_vec(),
         invariant_name: invariant_name.to_string(),
         metric: metric.to_string(),
-        units: None,
+        units: canonical_units.clone(),
         column_count: columns,
         problem_label: problem.map(str::to_string),
         negative_fixture,
