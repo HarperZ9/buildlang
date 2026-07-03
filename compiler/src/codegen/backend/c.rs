@@ -2337,12 +2337,17 @@ impl CBackend {
     /// so the header and the emitted `.c` agree on the symbol.
     fn c_callable_prototype(&self, func: &MirFunction) -> String {
         let mut s = String::new();
-        let ret = self.type_to_c(&func.sig.ret);
+        let array_ret_out = self.array_ret_out_param(&func.sig.ret);
+        let ret = if array_ret_out.is_some() {
+            "void".to_string()
+        } else {
+            self.type_to_c(&func.sig.ret)
+        };
         let name = Self::user_fn_emit_name(func.name.as_ref());
         s.push_str(&format!("{} {}(", ret, name));
 
         let params: Vec<_> = func.locals.iter().filter(|l| l.is_param).collect();
-        if params.is_empty() {
+        if params.is_empty() && array_ret_out.is_none() {
             s.push_str("void");
         } else {
             for (i, param) in params.iter().enumerate() {
@@ -2374,13 +2379,27 @@ impl CBackend {
             if func.sig.is_variadic {
                 s.push_str(", ...");
             }
+            if let Some(ref out_param) = array_ret_out {
+                if !params.is_empty() {
+                    s.push_str(", ");
+                }
+                s.push_str(out_param);
+            }
         }
         s.push(')');
         s
     }
 
     fn generate_function_signature(&mut self, func: &MirFunction) -> CodegenResult<()> {
-        let ret_type = self.type_to_c(&func.sig.ret);
+        // A fixed-size `Array<T,N>` return is lowered to a `void` function with a
+        // trailing pointer-to-array out-parameter: C cannot return or assign an
+        // array by value. The result is `memcpy`d into `*__buildret_out`.
+        let array_ret_out = self.array_ret_out_param(&func.sig.ret);
+        let ret_type = if array_ret_out.is_some() {
+            "void".to_string()
+        } else {
+            self.type_to_c(&func.sig.ret)
+        };
 
         // Linkage
         match func.linkage {
@@ -2403,7 +2422,7 @@ impl CBackend {
         // Parameters
         let params: Vec<_> = func.locals.iter().filter(|l| l.is_param).collect();
 
-        if params.is_empty() {
+        if params.is_empty() && array_ret_out.is_none() {
             self.output.push_str("void");
         } else {
             for (i, param) in params.iter().enumerate() {
@@ -2436,6 +2455,13 @@ impl CBackend {
             }
             if func.sig.is_variadic {
                 self.output.push_str(", ...");
+            }
+            // Trailing out-parameter for an array return type.
+            if let Some(ref out_param) = array_ret_out {
+                if !params.is_empty() {
+                    self.output.push_str(", ");
+                }
+                self.output.push_str(out_param);
             }
         }
 
@@ -3260,11 +3286,24 @@ impl CBackend {
                         .get(dest_local.0 as usize)
                         .map(|l| matches!(l.ty, MirType::Void))
                         .unwrap_or(false);
+                    // Array return: the callee is lowered to a void function with
+                    // a trailing pointer-to-array out-parameter. Pass `&dest` so
+                    // the result is written directly into the caller's array
+                    // local (C cannot assign a call result to an array variable).
+                    let dest_is_array = locals
+                        .get(dest_local.0 as usize)
+                        .map(|l| matches!(l.ty, MirType::Array(_, _)))
+                        .unwrap_or(false);
                     let fn_returns_void = matches!(
                         func_str.as_str(),
                         "assert" | "free" | "exit" | "abort" | "process_exit"
                     );
-                    if dest_is_void || fn_returns_void {
+                    if dest_is_array && !fn_returns_void {
+                        let dest_name = self.local_name(*dest_local, locals);
+                        let mut all_args = args_str.clone();
+                        all_args.push(format!("&{}", dest_name));
+                        write!(self.output, "{}({});\n", func_str, all_args.join(", ")).unwrap();
+                    } else if dest_is_void || fn_returns_void {
                         write!(self.output, "{}({});\n", func_str, args_str.join(", ")).unwrap();
                     } else {
                         let dest_name = self.local_name(*dest_local, locals);
@@ -3310,6 +3349,24 @@ impl CBackend {
                 self.write_indent();
                 self.output.push_str("fflush(stdout);\n");
                 self.write_indent();
+                // Array return: the caller passed a pointer-to-array out-param;
+                // copy the result array into it and return `void`. C cannot
+                // return an array by value.
+                if let Some(val) = value {
+                    if matches!(self.current_ret_ty, MirType::Array(_, _)) {
+                        let val_str = self.value_to_c(val, locals);
+                        write!(
+                            self.output,
+                            "memcpy({out}, {val}, sizeof(*{out}));\n",
+                            out = Self::ARRAY_RET_OUT_PARAM,
+                            val = val_str
+                        )
+                        .unwrap();
+                        self.write_indent();
+                        self.output.push_str("return;\n");
+                        return Ok(());
+                    }
+                }
                 if let Some(val) = value {
                     let val_str = self.value_to_c(val, locals);
                     // Check for type mismatch between return value and function
@@ -3511,6 +3568,31 @@ impl CBackend {
         let base_c = self.type_to_c(base);
         let dim_str: String = dims.iter().map(|d| format!("[{}]", d)).collect();
         format!("{} {}{}", base_c, name, dim_str)
+    }
+
+    /// The synthetic out-parameter name used to return a fixed-size `Array<T,N>`
+    /// by value. C cannot return an array type or assign to one, so an
+    /// array-returning function is lowered to a `void` function that takes a
+    /// trailing pointer-to-array out-parameter and `memcpy`s the result into it.
+    const ARRAY_RET_OUT_PARAM: &'static str = "__buildret_out";
+
+    /// Format the trailing out-parameter declaration for an array return type.
+    /// For a return type `[f64; 3]` this yields `double (*__buildret_out)[3]`
+    /// (a pointer to `double[3]`); for `[[f64; 4]; 4]`, `double (*__buildret_out)[4][4]`.
+    /// Returns `None` for non-array return types.
+    fn array_ret_out_param(&self, ret_ty: &MirType) -> Option<String> {
+        if !matches!(ret_ty, MirType::Array(_, _)) {
+            return None;
+        }
+        let (base, dims) = self.array_base_and_dims(ret_ty);
+        let base_c = self.type_to_c(base);
+        let dim_str: String = dims.iter().map(|d| format!("[{}]", d)).collect();
+        Some(format!(
+            "{} (*{}){}",
+            base_c,
+            Self::ARRAY_RET_OUT_PARAM,
+            dim_str
+        ))
     }
 
     fn value_to_c(&self, value: &MirValue, locals: &[MirLocal]) -> String {
