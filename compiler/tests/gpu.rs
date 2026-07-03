@@ -213,6 +213,171 @@ fn matmul_emits_valid_compute_spirv() {
     let _ = std::fs::remove_file(&out);
 }
 
+/// NESTED STRUCTURED CONTROL FLOW (Layer A, device-free): a `while` loop nested
+/// inside a selection (`if i < 4 { ... while ... }`) AND an `&&`-guarded loop
+/// (`if i < n && j < m { ... while ... }`, the matmul in-kernel bounds-guard
+/// shape) must both emit SPIR-V that `spirv-val` accepts.
+///
+/// This is the regression guard for the nested-structured-control-flow defect:
+/// the old backend guessed merge/continue targets by branch-following and reused
+/// the nested loop header as the outer selection's merge block, producing a
+/// module `spirv-val` rejected with "block N branches to the selection construct,
+/// but not to the selection header". A pass here proves the dominator/
+/// post-dominator-driven structured-CFG reconstruction emits correct nested
+/// `OpSelectionMerge`/`OpLoopMerge`.
+#[test]
+fn loop_in_selection_emits_valid_spirv() {
+    let Some(tool) = spirv_val_available() else {
+        eprintln!("skipping loop_in_selection_emits_valid_spirv: spirv-val not on PATH");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("buildlang_gpu_nestcf_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+
+    // Case 1: a `while` loop nested directly inside a bare `if`.
+    let loop_in_if = dir.join("loop_in_if.bld");
+    std::fs::write(
+        &loop_in_if,
+        "#[compute]\n\
+         fn k(a: &mut [f32]) ~ Gpu {\n\
+        \x20   let i = gl_GlobalInvocationID.x;\n\
+        \x20   if i < 4 {\n\
+        \x20       let mut s: f32 = 0.0;\n\
+        \x20       let mut j: u32 = 0;\n\
+        \x20       while j < 3 {\n\
+        \x20           s = s + a[i];\n\
+        \x20           j = j + 1;\n\
+        \x20       }\n\
+        \x20       a[i] = s;\n\
+        \x20   }\n\
+         }\n",
+    )
+    .expect("write loop_in_if.bld");
+    let out1 = dir.join("loop_in_if.spv");
+    compile_kernel_spirv(&loop_in_if, &out1);
+    let (ok1, stderr1) = spirv_val_ok(tool, &out1);
+    assert!(
+        ok1,
+        "a `while` loop nested inside an `if` must emit valid structured control flow:\n{stderr1}"
+    );
+
+    // Case 2: an `&&` short-circuit guarding a nested loop (the matmul shape).
+    let and_loop = dir.join("and_loop.bld");
+    std::fs::write(
+        &and_loop,
+        "#[compute]\n\
+         fn k(a: &mut [f32]) ~ Gpu {\n\
+        \x20   let i = gl_GlobalInvocationID.x;\n\
+        \x20   let n: u32 = 4;\n\
+        \x20   let m: u32 = 8;\n\
+        \x20   if i < n && i < m {\n\
+        \x20       let mut s: f32 = 0.0;\n\
+        \x20       let mut j: u32 = 0;\n\
+        \x20       while j < 3 {\n\
+        \x20           s = s + a[i];\n\
+        \x20           j = j + 1;\n\
+        \x20       }\n\
+        \x20       a[i] = s;\n\
+        \x20   }\n\
+         }\n",
+    )
+    .expect("write and_loop.bld");
+    let out2 = dir.join("and_loop.spv");
+    compile_kernel_spirv(&and_loop, &out2);
+    let (ok2, stderr2) = spirv_val_ok(tool, &out2);
+    assert!(
+        ok2,
+        "an `&&`-guarded nested loop (the matmul in-kernel bounds-guard shape) must \
+         emit valid structured control flow:\n{stderr2}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// NESTED STRUCTURED CONTROL FLOW, the DUAL shape (Layer A, device-free): a
+/// selection nested inside a LOOP BODY -- `if-in-while` and `if-else-in-while` --
+/// must also emit SPIR-V that `spirv-val` accepts.
+///
+/// This is the complement of `loop_in_selection_emits_valid_spirv`. That test
+/// covers a loop inside a selection (the matmul guard); this one covers a
+/// selection inside a loop, which exercises a DIFFERENT structured-CFG path: the
+/// loop-body classification (`loop_body_blocks`) must include the inner
+/// selection's blocks, and the inner selection's merge must be computed as its
+/// own immediate post-dominator (the block both arms reconverge at, which lies
+/// INSIDE the loop body and back-edges to the header), NOT the loop merge and NOT
+/// the loop header. The old branch-following heuristic mis-nested these too; a
+/// pass here proves the post-dominance analysis handles arbitrary nesting in both
+/// directions, closing the if-in-while / if-else-in-while coverage gap.
+#[test]
+fn selection_in_loop_emits_valid_spirv() {
+    let Some(tool) = spirv_val_available() else {
+        eprintln!("skipping selection_in_loop_emits_valid_spirv: spirv-val not on PATH");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("buildlang_gpu_selloop_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+
+    // Case 1: a bare `if` (no else) nested inside a `while` loop body.
+    let if_in_while = dir.join("if_in_while.bld");
+    std::fs::write(
+        &if_in_while,
+        "#[compute]\n\
+         fn k(a: &mut [f32]) ~ Gpu {\n\
+        \x20   let i = gl_GlobalInvocationID.x;\n\
+        \x20   let mut s: f32 = 0.0;\n\
+        \x20   let mut j: u32 = 0;\n\
+        \x20   while j < 8 {\n\
+        \x20       if j < 4 {\n\
+        \x20           s = s + a[i];\n\
+        \x20       }\n\
+        \x20       j = j + 1;\n\
+        \x20   }\n\
+        \x20   a[i] = s;\n\
+         }\n",
+    )
+    .expect("write if_in_while.bld");
+    let out1 = dir.join("if_in_while.spv");
+    compile_kernel_spirv(&if_in_while, &out1);
+    let (ok1, stderr1) = spirv_val_ok(tool, &out1);
+    assert!(
+        ok1,
+        "an `if` (no else) nested inside a `while` loop body must emit valid \
+         structured control flow:\n{stderr1}"
+    );
+
+    // Case 2: an `if / else` (both arms) nested inside a `while` loop body.
+    let if_else_in_while = dir.join("if_else_in_while.bld");
+    std::fs::write(
+        &if_else_in_while,
+        "#[compute]\n\
+         fn k(a: &mut [f32]) ~ Gpu {\n\
+        \x20   let i = gl_GlobalInvocationID.x;\n\
+        \x20   let mut s: f32 = 0.0;\n\
+        \x20   let mut j: u32 = 0;\n\
+        \x20   while j < 8 {\n\
+        \x20       if j < 4 {\n\
+        \x20           s = s + a[i];\n\
+        \x20       } else {\n\
+        \x20           s = s - a[i];\n\
+        \x20       }\n\
+        \x20       j = j + 1;\n\
+        \x20   }\n\
+        \x20   a[i] = s;\n\
+         }\n",
+    )
+    .expect("write if_else_in_while.bld");
+    let out2 = dir.join("if_else_in_while.spv");
+    compile_kernel_spirv(&if_else_in_while, &out2);
+    let (ok2, stderr2) = spirv_val_ok(tool, &out2);
+    assert!(
+        ok2,
+        "an `if / else` nested inside a `while` loop body must emit valid \
+         structured control flow:\n{stderr2}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// WRITABILITY PROOF (Layer A, device-free): a kernel that writes into a
 /// parameter declared `&[f32]` (read-only, NOT `&mut`) must be REJECTED at
 /// compile time. This proves the writability inference is real -- not a
@@ -440,6 +605,81 @@ mod device {
         assert!(
             !output.status.success(),
             "a divergent matmul readback MUST be caught (non-zero exit)\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    /// ARBITRARY-DIM MATMUL (the in-kernel bounds-guard proof): a matmul whose
+    /// dimensions are NOT multiples of the 16x16 workgroup (40x40x40, so each axis
+    /// over-launches 8 extra invocations under the `div_ceil` grid) dispatches on
+    /// the physical device and agrees with the CPU-C reference within 1e-6. The
+    /// in-body `if i < m && j < n { ... }` guard makes the over-launched edge
+    /// invocations NO-OP, so nothing writes past the exactly-sized C buffer -- the
+    /// old workgroup-multiple constraint is gone. The closed-form identity sanity
+    /// (identity x B == B) must ALSO pass, proving the guard did not drop any
+    /// in-range output. Dims are square (m == k) so identity holds exactly.
+    #[test]
+    fn matmul_nonmultiple_dims_match_cpu() {
+        if !vulkan_device_available() {
+            eprintln!("skipping matmul_nonmultiple_dims_match_cpu: no Vulkan device");
+            return;
+        }
+        let output = buildc()
+            .arg("run")
+            .arg(matmul_example())
+            .arg("--gpu")
+            // 40 is not a multiple of 16 on either grid axis; the guard must make
+            // the over-launched invocations safe.
+            .env("BUILDLANG_MM_DIMS", "40x40x40")
+            .output()
+            .expect("run buildc run --gpu on a non-multiple matmul");
+        assert!(
+            output.status.success(),
+            "a NON-workgroup-multiple matmul must dispatch and agree with CPU-C within \
+             tolerance (the in-kernel bounds guard makes the edge invocations safe)\n\
+             stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("gpu-cpu agreement") && stdout.contains("PASS"),
+            "expected a gpu-cpu agreement verdict for the 40x40x40 matmul:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("40x40x40"),
+            "the agreement verdict should report the overridden 40x40x40 dims:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("matmul identity sanity: PASS"),
+            "the identity(m) x B == B sanity must still PASS at the non-multiple dim, \
+             proving the guard dropped no in-range output:\n{stdout}"
+        );
+    }
+
+    /// CAN-IT-FAIL for the arbitrary-dim path: a corrupted readback at the
+    /// non-multiple dim MUST still be caught (the tolerance gate discriminates
+    /// even when the grid over-launches). This is the negative that proves the
+    /// non-multiple PASS above is a real agreement, not a gate that never fires.
+    #[test]
+    fn wrong_nonmultiple_matmul_result_is_caught() {
+        if !vulkan_device_available() {
+            eprintln!("skipping wrong_nonmultiple_matmul_result_is_caught: no Vulkan device");
+            return;
+        }
+        let output = buildc()
+            .arg("run")
+            .arg(matmul_example())
+            .arg("--gpu")
+            .env("BUILDLANG_MM_DIMS", "40x40x40")
+            .env("BUILDLANG_GPU_CORRUPT_READBACK", "1")
+            .output()
+            .expect("run buildc run --gpu on a corrupted non-multiple matmul");
+        assert!(
+            !output.status.success(),
+            "a divergent readback at a non-multiple dim MUST be caught (non-zero exit)\n\
+             stdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );
