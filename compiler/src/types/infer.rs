@@ -2998,7 +2998,14 @@ impl<'ctx> TypeInfer<'ctx> {
             // backend wires the actual GlobalInvocationId built-in.
             if matches!(
                 name,
-                "gl_GlobalInvocationID" | "gl_LocalInvocationID" | "gl_WorkGroupID"
+                "gl_GlobalInvocationID"
+                    | "gl_LocalInvocationID"
+                    // Both the SPIR-V-style (`gl_WorkgroupID`) and GLSL-style
+                    // (`gl_WorkGroupID`) spellings resolve, matching the two
+                    // spellings the SPIR-V backend's `lower_field` intercept
+                    // accepts for the WorkgroupId built-in.
+                    | "gl_WorkgroupID"
+                    | "gl_WorkGroupID"
             ) {
                 if let Some(type_def) = self.ctx.lookup_type_by_name("uvec3") {
                     return Ty::adt(type_def.def_id, Vec::new());

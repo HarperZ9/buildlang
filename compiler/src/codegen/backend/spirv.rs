@@ -2409,6 +2409,31 @@ impl SpirvBackend {
         }
     }
 
+    /// If `value` is an integer CONSTANT whose signedness differs from `op_ty`
+    /// (an integer operation type) at the same bit width, return a copy re-typed
+    /// to `op_ty` so a binary op's operands and result share one SPIR-V type.
+    /// Otherwise return `value` unchanged. Non-constant operands are left alone
+    /// (a signed/unsigned VALUE mismatch is a front-end concern, not something to
+    /// silently reinterpret here).
+    fn coerce_operand_signedness(&self, value: &MirValue, op_ty: &MirType) -> MirValue {
+        let MirType::Int(dest_size, dest_signed) = op_ty else {
+            return value.clone();
+        };
+        let MirValue::Const(c) = value else {
+            return value.clone();
+        };
+        let (val, src_size, src_signed) = match c {
+            MirConst::Int(v, MirType::Int(size, signed)) => (*v, *size, *signed),
+            MirConst::Uint(v, MirType::Int(size, signed)) => (*v as i128, *size, *signed),
+            _ => return value.clone(),
+        };
+        if src_size == *dest_size && src_signed != *dest_signed {
+            MirValue::Const(MirConst::Int(val, op_ty.clone()))
+        } else {
+            value.clone()
+        }
+    }
+
     /// Generate a statement.
     fn gen_stmt(&mut self, stmt: &MirStmt, func: &MirFunction) -> CodegenResult<()> {
         match &stmt.kind {
@@ -2642,9 +2667,19 @@ impl SpirvBackend {
         match rvalue {
             MirRValue::Use(value) => self.gen_value(value, func),
             MirRValue::BinaryOp { op, left, right } => {
-                let left_id = self.gen_value(left, func)?;
-                let right_id = self.gen_value(right, func)?;
+                // The operation type is taken from the left operand; a bare
+                // integer literal on either side may have been lowered with a
+                // DIFFERENT signedness (e.g. `s / 2` where `s: u32` but the `2`
+                // literal is a signed `i32`). Strict SPIR-V requires all three
+                // (both operands + result) to share one type, so re-type a
+                // signedness-mismatched integer CONSTANT operand to the operation
+                // type before emitting it. This is the operand-level analogue of
+                // the assign-time `coerce_const_signedness`.
                 let ty = self.infer_value_type(left, func)?;
+                let left = self.coerce_operand_signedness(left, &ty);
+                let right = self.coerce_operand_signedness(right, &ty);
+                let left_id = self.gen_value(&left, func)?;
+                let right_id = self.gen_value(&right, func)?;
                 let result_id = self.alloc_id();
 
                 // Comparison ops return bool, not the operand type
