@@ -2267,6 +2267,15 @@ impl SpirvBackend {
             // Phase 1: Emit ALL OpVariable declarations first
             for local in &func.locals {
                 if !local.is_param {
+                    // A workgroup-shared scratch local (`workgroupArray(64)`) is
+                    // backed by a `Workgroup`-class OpVariable declared in
+                    // `setup_shader_io`, NOT a Function-class local: skip it here
+                    // so we do not emit a dead, duplicate `[f32;64]` Function
+                    // variable the body never touches (indexing routes through the
+                    // Workgroup var via `gen_workgroup_element_ptr`).
+                    if self.workgroup_slots.contains_key(&local.id) {
+                        continue;
+                    }
                     let ptr_ty_id = self.get_ptr_type_id(&local.ty, SpvStorageClass::Function);
                     let var_id = self.alloc_id();
                     self.emit(
