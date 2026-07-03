@@ -65,7 +65,12 @@ pub(crate) fn stmt_uses_local(kind: &MirStmtKind, x: LocalId) -> bool {
                 || rvalue_mentions(value, x)
         }
         MirStmtKind::GlobalStore { value, .. } => rvalue_mentions(value, x),
-        MirStmtKind::StorageLive(_) | MirStmtKind::StorageDead(_) | MirStmtKind::Nop => false,
+        // A workgroup barrier reads no locals (it is a bare synchronization
+        // point), so like the other no-op statements it never uses `x`.
+        MirStmtKind::StorageLive(_)
+        | MirStmtKind::StorageDead(_)
+        | MirStmtKind::Nop
+        | MirStmtKind::WorkgroupBarrier => false,
     }
 }
 

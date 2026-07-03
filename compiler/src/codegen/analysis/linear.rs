@@ -946,10 +946,13 @@ fn apply_stmt(
             read_by_rvalue(func, value, &mut reads);
             moved_by_rvalue(func, value, &mut moves);
         }
+        // A workgroup barrier reads and moves no locals, so like the other
+        // non-store statements it contributes nothing to the linear state.
         MirStmtKind::Assign { .. }
         | MirStmtKind::StorageLive(_)
         | MirStmtKind::StorageDead(_)
-        | MirStmtKind::Nop => {}
+        | MirStmtKind::Nop
+        | MirStmtKind::WorkgroupBarrier => {}
     }
     // Borrow-after-move on the current (pre-move) state for borrow-only touches.
     for l in reads {

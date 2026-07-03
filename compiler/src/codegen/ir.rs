@@ -683,6 +683,15 @@ pub enum MirStmtKind {
     /// is a bare identifier that names a global rather than a local.
     GlobalStore { name: Arc<str>, value: MirRValue },
 
+    /// GPU compute workgroup barrier (`workgroupBarrier()`): a void side effect
+    /// that synchronizes every invocation in the workgroup and makes shared
+    /// (`Workgroup`-class) memory writes visible across the workgroup. Added in
+    /// Phase 4a. On the SPIR-V backend this lowers to `OpControlBarrier` with
+    /// Workgroup execution + memory scope and AcquireRelease|WorkgroupMemory
+    /// semantics; the CPU / non-GPU backends treat it as a no-op (a single-
+    /// threaded scalar cross-check needs no barrier).
+    WorkgroupBarrier,
+
     /// Storage live (local becomes valid).
     StorageLive(LocalId),
 
@@ -924,6 +933,17 @@ pub enum NullaryOp {
     /// (the CPU cross-check path) it reads the ambient per-thread index the
     /// dispatch driver supplies.
     ThreadIndex(u32),
+    /// GPU compute built-in LOCAL invocation index component
+    /// (`gl_LocalInvocationID`): the lane's position WITHIN its workgroup. The
+    /// `u32` selects the component (0 = x, 1 = y, 2 = z). SPIR-V reads the
+    /// `LocalInvocationId` built-in. Added in Phase 4a for workgroup-shared
+    /// reductions (`scratch[lid]`).
+    LocalInvocationId(u32),
+    /// GPU compute built-in WORKGROUP index component (`gl_WorkgroupID`): which
+    /// workgroup this invocation belongs to. The `u32` selects the component
+    /// (0 = x, 1 = y, 2 = z). SPIR-V reads the `WorkgroupId` built-in. Added in
+    /// Phase 4a so a per-workgroup partial can be written to `out[wid]`.
+    WorkgroupId(u32),
 }
 
 // ============================================================================

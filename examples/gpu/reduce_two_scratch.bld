@@ -1,0 +1,33 @@
+// ============================================================================
+// BUILDLANG COMPUTE SHADER - TWO-SCRATCH aliasing regression fixture
+// ============================================================================
+// A device-free Phase-4a regression fixture: a kernel that declares TWO distinct
+// `workgroupArray(64)` shared-memory scratch buffers of the SAME shape
+// (`[f32; 64]`). Two logically independent scratch buffers MUST lower to two
+// distinct `Workgroup`-class `OpVariable`s; if the backend deduplicated them by
+// (element type, length) they would silently alias one physical buffer and
+// corrupt each other's data.
+//
+// The kernel copies its input into `scratch_a`, then a shifted/derived value
+// into `scratch_b`, barriers, and writes both back so the compiler cannot dead-
+// code either buffer away. It is NOT a meaningful numeric algorithm -- its only
+// job is to force two same-shape workgroup arrays to coexist so the emission
+// path is exercised. Correctness is checked structurally (two Workgroup-class
+// OpVariables) plus spirv-val acceptance; no device run is claimed (Phase 4a).
+// ============================================================================
+
+#[compute]
+fn two_scratch(n: u32, a: &[f32], out: &mut [f32]) ~ Gpu {
+    let scratch_a = workgroupArray(64);
+    let scratch_b = workgroupArray(64);
+    let gid = gl_GlobalInvocationID.x;
+    let lid = gl_LocalInvocationID.x;
+    let mut v: f32 = 0.0;
+    if gid < n {
+        v = a[gid];
+    }
+    scratch_a[lid] = v;
+    scratch_b[lid] = v + 1.0;
+    workgroupBarrier();
+    out[gid] = scratch_a[lid] + scratch_b[lid];
+}

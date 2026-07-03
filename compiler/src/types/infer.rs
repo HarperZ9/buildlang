@@ -1961,6 +1961,17 @@ impl<'ctx> TypeInfer<'ctx> {
             "build_vk_draw_frame" | "build_vk_request_close" => (vec![], unit_ty.clone()),
             "build_vk_should_close" => (vec![], i64_ty.clone()),
             "build_vk_device_name" => (vec![], str_ty),
+            // GPU compute workgroup intrinsics (Phase 4a). `workgroupBarrier()`
+            // is a void synchronization side effect. `workgroupArray(N)` yields a
+            // workgroup-shared scratch array of `N` f32 elements (typed as a
+            // fixed-size `[f32; 64]`; the length is fixed to the workgroup size in
+            // 4a). Both carry the Gpu effect so they are only legal in a `~Gpu`
+            // compute kernel.
+            "workgroupBarrier" => (vec![], unit_ty.clone()),
+            "workgroupArray" => (
+                vec![Ty::int(IntTy::U32)],
+                Ty::array(Ty::float(FloatTy::F32), 64),
+            ),
             _ => return None,
         };
 
@@ -2987,7 +2998,14 @@ impl<'ctx> TypeInfer<'ctx> {
             // backend wires the actual GlobalInvocationId built-in.
             if matches!(
                 name,
-                "gl_GlobalInvocationID" | "gl_LocalInvocationID" | "gl_WorkGroupID"
+                "gl_GlobalInvocationID"
+                    | "gl_LocalInvocationID"
+                    // Both the SPIR-V-style (`gl_WorkgroupID`) and GLSL-style
+                    // (`gl_WorkGroupID`) spellings resolve, matching the two
+                    // spellings the SPIR-V backend's `lower_field` intercept
+                    // accepts for the WorkgroupId built-in.
+                    | "gl_WorkgroupID"
+                    | "gl_WorkGroupID"
             ) {
                 if let Some(type_def) = self.ctx.lookup_type_by_name("uvec3") {
                     return Ty::adt(type_def.def_id, Vec::new());

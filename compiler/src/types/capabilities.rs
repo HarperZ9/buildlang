@@ -106,7 +106,14 @@ pub fn capability_effect_for_call(name: &str) -> Option<&'static str> {
         | "build_gfx_draw"
         | "build_gfx_end_frame"
         | "build_gfx_should_close"
-        | "build_gfx_shutdown" => Some(GPU),
+        | "build_gfx_shutdown"
+        // GPU compute workgroup intrinsics (Phase 4a): a workgroup barrier and a
+        // workgroup-shared scratch array are only meaningful inside a `~Gpu`
+        // compute kernel. Registering them as Gpu-effecting means a barrier or a
+        // shared array used in a CPU function is a `Gpu` effect the caller must
+        // handle -- it cannot silently leak into non-GPU code.
+        | "workgroupBarrier"
+        | "workgroupArray" => Some(GPU),
         _ => None,
     }
 }
