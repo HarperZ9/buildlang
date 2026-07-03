@@ -13,6 +13,7 @@ pub mod vulkan_host;
 
 use std::path::Path;
 
+use buildlang::ast;
 use buildlang::codegen::{CodeGenerator, Target};
 use buildlang::lexer::{Lexer, SourceFile};
 use buildlang::parser::Parser;
@@ -24,6 +25,175 @@ const N: usize = 1024;
 const LOCAL_SIZE_X: u32 = 64;
 /// Agreement tolerance for the GPU-vs-CPU cross-check.
 const TOLERANCE: f32 = 1e-6;
+
+/// The element (scalar) type of a kernel parameter, post the GPU path's
+/// F64->F32 coercion boundary. Phase 1 is f32-only on the device; f64 is
+/// diagnosed rather than silently coerced.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ScalarKind {
+    F32,
+    F64,
+}
+
+/// A single parameter of the discovered `#[compute]` kernel, in declaration
+/// order. Drives host binding (buffers) / push constants (scalars) and the
+/// CPU-C reference driver's declarations + call argument list.
+#[derive(Clone, Debug)]
+enum KernelParam {
+    /// A by-value scalar (e.g. `alpha: f32`) -> a push constant.
+    Scalar { name: String, kind: ScalarKind },
+    /// A slice buffer (`&[f32]` read-only, `&mut [f32]` writable) -> an SSBO.
+    Buffer {
+        name: String,
+        writable: bool,
+        elem: ScalarKind,
+    },
+}
+
+/// The signature of the single `#[compute]` kernel in a source file: its entry
+/// point name and ordered parameters. Discovered ONCE from the AST so nothing
+/// downstream hardcodes `"vec_add"` or a fixed input arity.
+#[derive(Clone, Debug)]
+struct KernelSig {
+    entry: String,
+    params: Vec<KernelParam>,
+}
+
+impl KernelSig {
+    /// Buffer parameters in declaration order (the descriptor bindings 0..N).
+    fn buffers(&self) -> impl Iterator<Item = (&str, bool, ScalarKind)> {
+        self.params.iter().filter_map(|p| match p {
+            KernelParam::Buffer {
+                name,
+                writable,
+                elem,
+            } => Some((name.as_str(), *writable, *elem)),
+            KernelParam::Scalar { .. } => None,
+        })
+    }
+
+    /// Scalar parameters in declaration order (the push-constant members).
+    fn scalars(&self) -> impl Iterator<Item = (&str, ScalarKind)> {
+        self.params.iter().filter_map(|p| match p {
+            KernelParam::Scalar { name, kind } => Some((name.as_str(), *kind)),
+            KernelParam::Buffer { .. } => None,
+        })
+    }
+
+    /// Index of the single writable output buffer among the buffer bindings,
+    /// or an error if there is not exactly one. Phase 1 elementwise kernels
+    /// have exactly one `&mut [f32]` output.
+    fn output_buffer_index(&self) -> Result<usize, String> {
+        let writable: Vec<usize> = self
+            .buffers()
+            .enumerate()
+            .filter(|(_, (_, w, _))| *w)
+            .map(|(i, _)| i)
+            .collect();
+        match writable.as_slice() {
+            [i] => Ok(*i),
+            [] => Err("kernel has no `&mut [_]` output buffer".to_string()),
+            _ => Err(
+                "Phase-1 elementwise GPU path supports exactly one `&mut [_]` output \
+                      buffer"
+                    .to_string(),
+            ),
+        }
+    }
+}
+
+/// Map an AST parameter type to a scalar element kind, if it is (or wraps) a
+/// float scalar. Returns `None` for non-float element types.
+fn ast_scalar_kind(ty: &ast::Type) -> Option<ScalarKind> {
+    if let ast::TypeKind::Path(path) = &ty.kind {
+        if let Some(ident) = path.last_ident() {
+            return match ident.name.as_ref() {
+                "f32" => Some(ScalarKind::F32),
+                "f64" => Some(ScalarKind::F64),
+                _ => None,
+            };
+        }
+    }
+    None
+}
+
+/// Discover the single `#[compute]` kernel's signature from a source file's
+/// AST. Errors if there is not exactly one compute kernel, or a parameter has
+/// an unsupported shape (Phase 1: scalar `f32`/`f64`, or `&[f32]`/`&mut [f32]`
+/// slices).
+fn discover_kernel_sig(source_path: &Path) -> Result<KernelSig, String> {
+    let text = std::fs::read_to_string(source_path)
+        .map_err(|e| format!("read {}: {e}", source_path.display()))?;
+    let source_file = SourceFile::new(source_path.to_string_lossy(), text);
+    let mut lexer = Lexer::new(&source_file);
+    let tokens = lexer.tokenize().map_err(|e| format!("lex: {e}"))?;
+    let mut parser = Parser::new(&source_file, tokens);
+    let module = parser.parse().map_err(|e| format!("parse: {e}"))?;
+
+    let mut found: Option<KernelSig> = None;
+    for item in &module.items {
+        let ast::ItemKind::Function(f) = &item.kind else {
+            continue;
+        };
+        let is_compute = item.attrs.iter().any(|a| {
+            a.path
+                .segments
+                .first()
+                .map(|s| s.ident.name.as_ref() == "compute")
+                .unwrap_or(false)
+        });
+        if !is_compute {
+            continue;
+        }
+        if found.is_some() {
+            return Err(
+                "more than one `#[compute]` kernel in the file; the GPU path \
+                        expects exactly one"
+                    .to_string(),
+            );
+        }
+
+        let entry = f.name.name.to_string();
+        let mut params = Vec::with_capacity(f.sig.params.len());
+        for p in &f.sig.params {
+            let name = match &p.pattern.kind {
+                ast::PatternKind::Ident { name, .. } => name.name.to_string(),
+                _ => return Err("compute kernel parameters must be simple identifiers".to_string()),
+            };
+            match &p.ty.kind {
+                // A reference to a slice: `&[T]` / `&mut [T]`.
+                ast::TypeKind::Ref { mutability, ty, .. }
+                    if matches!(ty.kind, ast::TypeKind::Slice(_)) =>
+                {
+                    let ast::TypeKind::Slice(elem) = &ty.kind else {
+                        unreachable!()
+                    };
+                    let elem = ast_scalar_kind(elem).ok_or_else(|| {
+                        format!("buffer parameter `{name}` must be a float slice (`&[f32]`)")
+                    })?;
+                    params.push(KernelParam::Buffer {
+                        name,
+                        writable: matches!(mutability, ast::Mutability::Mutable),
+                        elem,
+                    });
+                }
+                // A by-value float scalar: `alpha: f32`.
+                _ => {
+                    let kind = ast_scalar_kind(&p.ty).ok_or_else(|| {
+                        format!(
+                            "parameter `{name}` has an unsupported type for the GPU path \
+                             (Phase 1: float scalars or float slices)"
+                        )
+                    })?;
+                    params.push(KernelParam::Scalar { name, kind });
+                }
+            }
+        }
+        found = Some(KernelSig { entry, params });
+    }
+
+    found.ok_or_else(|| "no `#[compute]` kernel found in the file".to_string())
+}
 
 /// Compile `source` to a byte blob for `target` (SPIR-V or C). Returns the raw
 /// bytes or a diagnostic string.
@@ -163,11 +333,24 @@ fn normalize_slice_type(kernel_fn: &str) -> String {
     result
 }
 
-/// Build, compile, and run the CPU-C reference driver: it re-declares the slice
-/// fat-pointer type + the ambient thread-index variable, embeds the kernel's own
-/// C function, and loops over the grid calling it once per element. Returns the
-/// output vector.
-fn cpu_c_reference(kernel_fn_c: &str, a: &[f32], b: &[f32], n: usize) -> Result<Vec<f32>, String> {
+/// Build, compile, and run the CPU-C reference driver from the DISCOVERED
+/// kernel signature (no hardcoded parameter names, arity, or entry point): it
+/// re-declares the slice fat-pointer type + the ambient thread-index variable,
+/// embeds the kernel's own C function, declares each buffer as a sized array +
+/// slice and each scalar as a plain C value, and loops over the grid calling
+/// the kernel once per element with the exact argument list its signature
+/// implies. Returns the output vector.
+///
+/// `buffer_data` maps each buffer parameter (in declaration order) to its
+/// initial contents; the writable output's initial contents are zeros.
+/// `scalar_vals` maps each scalar parameter to its value.
+fn cpu_c_reference(
+    sig: &KernelSig,
+    kernel_fn_c: &str,
+    buffer_data: &[(&str, Vec<f32>)],
+    scalar_vals: &[(&str, f32)],
+    n: usize,
+) -> Result<Vec<f32>, String> {
     // Emit inputs as C initializers.
     let fmt_arr = |v: &[f32]| -> String {
         v.iter()
@@ -175,6 +358,48 @@ fn cpu_c_reference(kernel_fn_c: &str, a: &[f32], b: &[f32], n: usize) -> Result<
             .collect::<Vec<_>>()
             .join(", ")
     };
+
+    // Declarations: one sized array + slice per buffer, one value per scalar.
+    let mut decls = String::new();
+    for (name, data) in buffer_data {
+        decls.push_str(&format!(
+            "    static float {name}_data[{n}] = {{ {init} }};\n",
+            name = name,
+            n = n,
+            init = fmt_arr(data),
+        ));
+        decls.push_str(&format!(
+            "    bl_slice_f32 {name} = {{ {name}_data, {n} }};\n",
+            name = name,
+            n = n,
+        ));
+    }
+    for (name, val) in scalar_vals {
+        decls.push_str(&format!(
+            "    float {name} = {val:.9}f;\n",
+            name = name,
+            val = val
+        ));
+    }
+
+    // The call argument list, in the kernel's PARAMETER order: a scalar is
+    // passed by value, a buffer by address (`&name`, matching the emitted C
+    // `bl_slice_f32*` parameter).
+    let call_args: Vec<String> = sig
+        .params
+        .iter()
+        .map(|p| match p {
+            KernelParam::Scalar { name, .. } => name.clone(),
+            KernelParam::Buffer { name, .. } => format!("&{name}"),
+        })
+        .collect();
+
+    // The output buffer's name (the single writable one) is what we print.
+    let out_name = sig
+        .buffers()
+        .find(|(_, w, _)| *w)
+        .map(|(n, _, _)| n.to_string())
+        .ok_or_else(|| "kernel has no writable output buffer".to_string())?;
 
     let driver = format!(
         r#"#include <stdio.h>
@@ -189,26 +414,22 @@ typedef struct {{ float* ptr; size_t len; }} bl_slice_f32;
 {kernel}
 
 int main(void) {{
-    static float a_data[{n}] = {{ {a} }};
-    static float b_data[{n}] = {{ {b} }};
-    static float out_data[{n}];
-    bl_slice_f32 a = {{ a_data, {n} }};
-    bl_slice_f32 b = {{ b_data, {n} }};
-    bl_slice_f32 out = {{ out_data, {n} }};
-    for (uint32_t i = 0; i < {n}; ++i) {{
+{decls}    for (uint32_t i = 0; i < {n}; ++i) {{
         buildc_gl_global_invocation_x = i;
-        vec_add(&a, &b, &out);
+        {entry}({args});
     }}
     for (size_t i = 0; i < {n}; ++i) {{
-        printf("%.9g\n", (double)out_data[i]);
+        printf("%.9g\n", (double){out}_data[i]);
     }}
     return 0;
 }}
 "#,
         kernel = kernel_fn_c,
+        decls = decls,
+        entry = sig.entry,
+        args = call_args.join(", "),
+        out = out_name,
         n = n,
-        a = fmt_arr(a),
-        b = fmt_arr(b),
     );
 
     // The emitted kernel declares its own anonymous-struct slice params
@@ -268,11 +489,62 @@ fn compile_c(c_path: &Path, exe_path: &Path) -> Result<(), String> {
         .map_err(|code| format!("C compiler failed (exit {code}) building the CPU reference"))
 }
 
-/// Run the full Layer-B (and, with `emit_receipt`, Layer-C) cross-check.
+/// Run the full Layer-B (and, with `emit_receipt`, Layer-C) cross-check for an
+/// arbitrary ELEMENTWISE f32 kernel. The kernel's entry name, buffer arity, and
+/// scalar params are DISCOVERED from the AST -- nothing is hardcoded to
+/// `vec_add`'s single shape.
 pub fn run_gpu_cross_check(file: &Path, emit_receipt: Option<&Path>) -> Result<(), i32> {
-    // Fixed, checkable inputs: a = [1, 2, .. N], b = [N, N-1, .. 1].
-    let a: Vec<f32> = (0..N).map(|i| (i + 1) as f32).collect();
-    let b: Vec<f32> = (0..N).map(|i| (N - i) as f32).collect();
+    // 0. Discover the kernel signature (entry name + ordered params).
+    let sig = discover_kernel_sig(file).map_err(|e| {
+        eprintln!("GPU: {e}");
+        1
+    })?;
+
+    // F64 DIAGNOSTIC: the GPU path is f32-only (the F64->F32 coercion pass is
+    // on). If the kernel declares any f64 parameter, refuse rather than
+    // silently coercing precision away.
+    if sig.params.iter().any(|p| {
+        matches!(
+            p,
+            KernelParam::Scalar {
+                kind: ScalarKind::F64,
+                ..
+            } | KernelParam::Buffer {
+                elem: ScalarKind::F64,
+                ..
+            }
+        )
+    }) {
+        eprintln!(
+            "GPU: the GPU path is f32; this kernel uses f64. Declare its parameters `f32` \
+             (the device path does not run f64 -- values would be silently coerced)."
+        );
+        return Err(1);
+    }
+
+    // Confirm exactly one writable output buffer before doing any work.
+    let _out_idx = sig.output_buffer_index().map_err(|e| {
+        eprintln!("GPU: {e}");
+        1
+    })?;
+
+    // 1. Fixed, checkable inputs, derived from the signature. Each read-only
+    //    input buffer gets a distinct deterministic fill; each scalar a fixed
+    //    value; the output buffer starts zeroed.
+    let mut buffer_data: Vec<(&str, Vec<f32>)> = Vec::new();
+    for (idx, (name, writable, _elem)) in sig.buffers().enumerate() {
+        let data: Vec<f32> = if writable {
+            vec![0.0f32; N]
+        } else {
+            // input k gets [k+1, k+2, ..] offset so buffers differ; keeps values
+            // small and exactly representable in f32.
+            let base = (idx as f32) * (N as f32);
+            (0..N).map(|i| base + (i + 1) as f32).collect()
+        };
+        buffer_data.push((name, data));
+    }
+    // Scalars: a fixed, exactly-representable value (2.0) for every scalar.
+    let scalar_vals: Vec<(&str, f32)> = sig.scalars().map(|(name, _)| (name, 2.0f32)).collect();
 
     // 1. Compile the kernel to SPIR-V.
     let spirv_bytes = compile_to(file, Target::SpirV).map_err(|e| {
@@ -284,12 +556,35 @@ pub fn run_gpu_cross_check(file: &Path, emit_receipt: Option<&Path>) -> Result<(
         1
     })?;
 
-    // 2. Dispatch on the physical device.
-    let gpu_out = vulkan_host::dispatch_vec_add(&words, "vec_add", &[&a, &b], N, LOCAL_SIZE_X)
-        .map_err(|e| {
-            eprintln!("GPU: device dispatch failed: {e}");
-            1
-        })?;
+    // 2. Dispatch on the physical device: buffers in declaration order (bindings
+    //    0..N), scalars packed into the push-constant block at 4-byte offsets in
+    //    declaration order (mirrors the SPIR-V push-constant member layout).
+    let buffer_args: Vec<vulkan_host::BufferArg<'_>> = sig
+        .buffers()
+        .zip(buffer_data.iter())
+        .map(|((_, writable, _), (_, data))| vulkan_host::BufferArg { data, writable })
+        .collect();
+    let mut push_bytes: Vec<u8> = Vec::new();
+    for (name, _kind) in sig.scalars() {
+        let val = scalar_vals
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| *v)
+            .unwrap_or(0.0);
+        push_bytes.extend_from_slice(&val.to_le_bytes());
+    }
+    let gpu_out = vulkan_host::dispatch_compute(
+        &words,
+        &sig.entry,
+        &buffer_args,
+        &push_bytes,
+        N,
+        LOCAL_SIZE_X,
+    )
+    .map_err(|e| {
+        eprintln!("GPU: device dispatch failed: {e}");
+        1
+    })?;
 
     // 3. CPU-C reference over the same grid, from the SAME kernel body.
     let c_bytes = compile_to(file, Target::C).map_err(|e| {
@@ -301,14 +596,18 @@ pub fn run_gpu_cross_check(file: &Path, emit_receipt: Option<&Path>) -> Result<(
     // extraction: the anonymous `struct { .. }` in the parameter list contains
     // braces that would otherwise confuse the balanced-brace body extractor.
     let c_source = normalize_slice_type(&c_source);
-    let kernel_fn = extract_c_function(&c_source, "vec_add").ok_or_else(|| {
-        eprintln!("GPU: could not extract the `vec_add` function from the emitted C");
+    let kernel_fn = extract_c_function(&c_source, &sig.entry).ok_or_else(|| {
+        eprintln!(
+            "GPU: could not extract the `{}` function from the emitted C",
+            sig.entry
+        );
         1
     })?;
-    let cpu_out = cpu_c_reference(&kernel_fn, &a, &b, N).map_err(|e| {
-        eprintln!("GPU: CPU-C reference failed: {e}");
-        1
-    })?;
+    let cpu_out =
+        cpu_c_reference(&sig, &kernel_fn, &buffer_data, &scalar_vals, N).map_err(|e| {
+            eprintln!("GPU: CPU-C reference failed: {e}");
+            1
+        })?;
 
     // Test hook (can-it-FAIL negative): when BUILDLANG_GPU_CORRUPT_READBACK is
     // set, perturb one readback element so the cross-check MUST report a mismatch
