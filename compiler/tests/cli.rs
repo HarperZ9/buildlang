@@ -15843,3 +15843,103 @@ fn scientific_receipt_nonfinite_run_is_unverifiable() {
         String::from_utf8_lossy(&verify.stderr)
     );
 }
+
+#[test]
+fn run_units_flag_seals_canonicalized_unit_in_receipt() {
+    // The dimensional-analysis core canonicalizes the declared `--units`
+    // annotation before it enters the sealed scientific-runtime receipt: an
+    // equivalent spelling (`m*s^-1`) must be recorded as the canonical `m/s`,
+    // and the sealed receipt must still verify (the unit rides on the existing
+    // seal; it does not bypass the accountability layer).
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping run_units_flag_seals_canonicalized_unit_in_receipt: C backend not ready"
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("buildlang_sci_units_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create units fixture dir");
+
+    let receipt = dir.join("with_units.json");
+    let emit = buildc()
+        .arg("run")
+        .arg(repo_example("energy_identity.bld"))
+        .args(["--emit-receipt"])
+        .arg(&receipt)
+        .args([
+            "--invariant",
+            "energy-identity",
+            "--metric",
+            "residual",
+            "--units",
+            // Deliberately a non-canonical spelling of metres-per-second.
+            "m*s^-1",
+        ])
+        .output()
+        .expect("emit receipt with --units");
+    assert!(
+        emit.status.success(),
+        "emitting a receipt with a valid --units should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&emit.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt).expect("read units receipt")).unwrap();
+    assert_eq!(
+        value["measurement"]["units"], "m/s",
+        "the receipt must seal the CANONICAL unit `m/s`, not the raw `m*s^-1`"
+    );
+
+    let verify = buildc()
+        .args(["receipt", "verify"])
+        .arg(&receipt)
+        .output()
+        .expect("verify units receipt");
+    assert!(
+        verify.status.success(),
+        "a receipt carrying a canonicalized unit must still verify\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn run_units_flag_rejects_unknown_unit_before_compile() {
+    // An unknown or malformed unit is an operator error reported immediately,
+    // before any compilation work. This needs no C backend: the rejection
+    // happens during argument validation. The command must fail and name the
+    // offending unit, and it must NOT write a receipt.
+    let dir = std::env::temp_dir().join(format!("buildlang_sci_bad_units_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create bad-units fixture dir");
+    let receipt = dir.join("should_not_exist.json");
+
+    let output = buildc()
+        .arg("run")
+        .arg(repo_example("energy_identity.bld"))
+        .args(["--emit-receipt"])
+        .arg(&receipt)
+        .args(["--invariant", "energy-identity", "--units", "furlong"])
+        .output()
+        .expect("run with an unknown --units");
+
+    assert!(
+        !output.status.success(),
+        "an unknown unit must fail the command\nstdout:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("furlong"),
+        "the error must name the offending unit `furlong`, got:\n{stderr}"
+    );
+    assert!(
+        !receipt.exists(),
+        "no receipt should be written when the unit is rejected"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
