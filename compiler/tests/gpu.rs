@@ -40,6 +40,10 @@ fn saxpy_example() -> PathBuf {
     repo_root().join("examples").join("gpu").join("saxpy.bld")
 }
 
+fn matmul_example() -> PathBuf {
+    repo_root().join("examples").join("gpu").join("matmul.bld")
+}
+
 /// Resolve `spirv-val` on PATH (Vulkan SDK adds it). Returns the program name
 /// to invoke, or `None` if the tool is not installed -> the caller skips.
 fn spirv_val_available() -> Option<&'static str> {
@@ -180,6 +184,30 @@ fn saxpy_emits_valid_compute_spirv() {
     assert!(
         ok,
         "spirv-val should accept the emitted saxpy compute module:\n{stderr}"
+    );
+
+    let _ = std::fs::remove_file(&out);
+}
+
+/// Phase 2: the 2D-grid proof kernel `matmul` (three u32 shape push constants +
+/// two read-only inputs of differing lengths + one writable output, an inner
+/// loop over `kk`, and a 2D grid reading BOTH `.x` and `.y`) emits VALID
+/// dispatchable compute SPIR-V. This exercises the per-kernel 2D workgroup size
+/// (16x16x1) and the u32-loop-counter signedness reconciliation on the strict
+/// SPIR-V typing path.
+#[test]
+fn matmul_emits_valid_compute_spirv() {
+    let Some(tool) = spirv_val_available() else {
+        eprintln!("skipping matmul_emits_valid_compute_spirv: spirv-val not on PATH");
+        return;
+    };
+    let out = temp_spv("matmul_valid");
+    compile_kernel_spirv(&matmul_example(), &out);
+
+    let (ok, stderr) = spirv_val_ok(tool, &out);
+    assert!(
+        ok,
+        "spirv-val should accept the emitted matmul compute module:\n{stderr}"
     );
 
     let _ = std::fs::remove_file(&out);
@@ -354,6 +382,64 @@ mod device {
         assert!(
             !output.status.success(),
             "a divergent saxpy readback MUST be caught (non-zero exit)\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    /// Phase 2: the 2D-grid `matmul` kernel dispatches on the physical device
+    /// over a 2D grid (16x16x1 workgroup, div_ceil group counts) and agrees with
+    /// the CPU-C nested-loop reference within tolerance. The cross-check ALSO
+    /// asserts the closed-form correctness sanity (identity(m) x B == B), so a
+    /// PASS proves the kernel computes matmul -- not merely that two lowerings of
+    /// the same body agree. Both verdicts must appear in the output.
+    #[test]
+    fn matmul_gpu_matches_cpu() {
+        if !vulkan_device_available() {
+            eprintln!("skipping matmul_gpu_matches_cpu: no Vulkan device");
+            return;
+        }
+        let output = buildc()
+            .arg("run")
+            .arg(matmul_example())
+            .arg("--gpu")
+            .output()
+            .expect("run buildc run --gpu on matmul");
+        assert!(
+            output.status.success(),
+            "buildc run --gpu on matmul should agree with CPU-C within tolerance\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("gpu-cpu agreement") && stdout.contains("PASS"),
+            "expected a gpu-cpu agreement verdict in output:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("matmul identity sanity: PASS"),
+            "expected the closed-form identity(m) x B == B sanity to PASS:\n{stdout}"
+        );
+    }
+
+    /// CAN-IT-FAIL negative for the 2D matmul path: a corrupted matmul readback
+    /// MUST be caught by the tolerance gate (non-zero exit).
+    #[test]
+    fn wrong_matmul_result_is_caught() {
+        if !vulkan_device_available() {
+            eprintln!("skipping wrong_matmul_result_is_caught: no Vulkan device");
+            return;
+        }
+        let output = buildc()
+            .arg("run")
+            .arg(matmul_example())
+            .arg("--gpu")
+            .env("BUILDLANG_GPU_CORRUPT_READBACK", "1")
+            .output()
+            .expect("run buildc run --gpu on matmul with a corrupted readback");
+        assert!(
+            !output.status.success(),
+            "a divergent matmul readback MUST be caught (non-zero exit)\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );
