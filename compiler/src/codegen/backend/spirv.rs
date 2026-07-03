@@ -665,6 +665,32 @@ pub struct SpirvBackend {
     in_function_phase: bool,
 }
 
+/// True iff any function in `mir` reads a `gl_GlobalInvocationID` component at
+/// or above `axis` (0 = x, 1 = y, 2 = z), lowered to `ThreadIndex(component)`.
+/// Used to pick a 2D workgroup size for kernels that use a 2D (or 3D) grid. The
+/// thread-index read is always an `Assign { value: NullaryOp(ThreadIndex(c)) }`
+/// after lowering, so scanning assignment rvalues is sufficient.
+fn mir_reads_thread_axis_ge(mir: &MirModule, axis: u32) -> bool {
+    mir.functions.iter().any(|f| {
+        f.blocks.as_ref().is_some_and(|blocks| {
+            blocks.iter().any(|b| {
+                b.stmts.iter().any(|s| match &s.kind {
+                    MirStmtKind::Assign { value, .. }
+                    | MirStmtKind::DerefAssign { value, .. }
+                    | MirStmtKind::FieldDerefAssign { value, .. }
+                    | MirStmtKind::FieldAssign { value, .. } => {
+                        matches!(
+                            value,
+                            MirRValue::NullaryOp(NullaryOp::ThreadIndex(c), _) if *c >= axis
+                        )
+                    }
+                    _ => false,
+                })
+            })
+        })
+    })
+}
+
 impl SpirvBackend {
     /// Create a new SPIR-V backend.
     pub fn new() -> Self {
@@ -2234,6 +2260,41 @@ impl SpirvBackend {
         Ok(())
     }
 
+    /// If `value` is an integer CONSTANT whose SPIR-V integer type would differ
+    /// from `dest`'s declared integer type only in signedness (same bit width),
+    /// return a copy of the constant re-typed to the destination so `OpStore`
+    /// sees matching types. Otherwise return `value` unchanged. This closes the
+    /// gap where a bare literal initializing a `u32` local (`let mut kk = 0`) is
+    /// lowered as a signed `i32` constant, which strict SPIR-V would reject.
+    fn coerce_const_signedness(
+        &self,
+        dest: &LocalId,
+        value: &MirRValue,
+        func: &MirFunction,
+    ) -> MirRValue {
+        let Some(local) = func.locals.iter().find(|l| &l.id == dest) else {
+            return value.clone();
+        };
+        let MirType::Int(dest_size, dest_signed) = &local.ty else {
+            return value.clone();
+        };
+        let MirRValue::Use(MirValue::Const(c)) = value else {
+            return value.clone();
+        };
+        // Extract the constant's integer value + source integer type, if any.
+        let (val, src_size, src_signed) = match c {
+            MirConst::Int(v, MirType::Int(size, signed)) => (*v, *size, *signed),
+            MirConst::Uint(v, MirType::Int(size, signed)) => (*v as i128, *size, *signed),
+            _ => return value.clone(),
+        };
+        // Only reconcile a pure signedness mismatch at the same bit width.
+        if src_size == *dest_size && src_signed != *dest_signed {
+            MirRValue::Use(MirValue::Const(MirConst::Int(val, local.ty.clone())))
+        } else {
+            value.clone()
+        }
+    }
+
     /// Generate a statement.
     fn gen_stmt(&mut self, stmt: &MirStmt, func: &MirFunction) -> CodegenResult<()> {
         match &stmt.kind {
@@ -2243,7 +2304,14 @@ impl SpirvBackend {
                 ));
             }
             MirStmtKind::Assign { dest, value } => {
-                let val_id = self.gen_rvalue(value, func)?;
+                // Reconcile an integer CONSTANT whose signedness differs from the
+                // destination local's integer type. BuildLang's front end lowers a
+                // bare literal (`let mut kk: u32 = 0`) as a *signed* i32 constant;
+                // SPIR-V is strictly typed and rejects `OpStore <u32 ptr> <i32
+                // const>`. The value is bit-identical, so re-materialize the
+                // constant with the destination type before emitting the store.
+                let value = self.coerce_const_signedness(dest, value, func);
+                let val_id = self.gen_rvalue(&value, func)?;
                 let ptr_id = *self
                     .local_ids
                     .get(dest)
@@ -5000,6 +5068,15 @@ impl Backend for SpirvBackend {
         } else {
             mir
         };
+
+        // Per-kernel workgroup size: a 2D kernel (one that reads
+        // `gl_GlobalInvocationID.y`, lowered to `ThreadIndex(component >= 1)`)
+        // dispatches over a 2D grid, so give it a 2D local size (16x16x1) instead
+        // of the 1D default (64x1x1). Group counts on the host mirror this
+        // (div_ceil per axis). Purely additive: 1D kernels keep (64,1,1).
+        if has_shaders && mir_reads_thread_axis_ge(mir, 1) {
+            self.workgroup_size = (16, 16, 1);
+        }
 
         // Load struct definitions from the MIR module for use during type emission
         for type_def in &mir.types {
