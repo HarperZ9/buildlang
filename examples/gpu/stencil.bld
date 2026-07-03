@@ -1,0 +1,56 @@
+// ============================================================================
+// BUILDLANG COMPUTE SHADER - STENCIL, the neighbor-access (3-point blur) kernel
+// ============================================================================
+// out[i] = (a[i-1] + a[i] + a[i+1]) / 3   with CLAMPED edges:
+//   at i == 0:      out[0]   = (a[0]   + a[0]   + a[1])   / 3
+//   at i == n-1:    out[n-1] = (a[n-2] + a[n-1] + a[n-1]) / 3
+//
+// This is the Phase-3 generalization beyond elementwise + matmul: a STENCIL, one
+// invocation per output element reading its NEIGHBORS. Unlike elementwise, the
+// value at `i` depends on `a[i-1]` and `a[i+1]`, so the clamped boundary must be
+// handled explicitly -- and it is, with the nested `if/else` the structured-CFG
+// fix now emits as spirv-val-clean SPIR-V.
+//
+//   - one scalar length parameter (`n`: u32) -> a PUSH CONSTANT,
+//   - one read-only input buffer (`a`: `&[f32]`),
+//   - one writable output buffer (`out`: `&mut [f32]`),
+//   - a 1D grid: the kernel reads `.x` only (one invocation per element).
+//
+// CLAMP-BY-CONSTRUCTION: the left/right neighbor indices are chosen INSIDE an
+// `if/else` so no read ever leaves `[0, n)`. At `i == 0` the left neighbor is
+// `a[0]` (never `a[i-1]`, which would underflow the u32 index); at `i == n-1`
+// the right neighbor is `a[n-1]` (never `a[i+1]`, which would read past the
+// buffer). The interior branch uses the ordinary `a[i-1]` / `a[i+1]` offsets.
+//
+// IN-KERNEL GUARD: `if i < n { ... }` wraps the whole body so the extra
+// invocations the `div_ceil` grid over-launches when `n` is not a multiple of
+// the workgroup (64) simply NO-OP -- they never read or write past the
+// exactly-sized `a`/`out` buffers.
+//
+// Layer A: `buildc build examples/gpu/stencil.bld --target spirv -o stencil.spv`
+//          emits VALID dispatchable compute SPIR-V (validated by spirv-val); the
+//          boundary `if/else` inside the guard is the control-flow shape proven.
+// Layer B: `buildc run examples/gpu/stencil.bld --gpu` dispatches on the physical
+//          device over a 1D grid and cross-checks against the CPU-C scalar loop
+//          within 1e-6, plus a closed-form clamped-edge correctness sanity.
+// ============================================================================
+
+#[compute]
+fn blur(n: u32, a: &[f32], out: &mut [f32]) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    if i < n {
+        let mut left: f32 = 0.0;
+        if i == 0 {
+            left = a[0];
+        } else {
+            left = a[i - 1];
+        }
+        let mut right: f32 = 0.0;
+        if i == n - 1 {
+            right = a[n - 1];
+        } else {
+            right = a[i + 1];
+        }
+        out[i] = (left + a[i] + right) / 3.0;
+    }
+}
