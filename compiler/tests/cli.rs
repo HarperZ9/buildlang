@@ -13019,6 +13019,135 @@ fn array_broadcast_sub_div_run_end_to_end() {
     );
 }
 
+/// Typed `Array<T,N>` end-to-end kernel: a real numerical routine written with
+/// fixed-size array types in the FUNCTION SIGNATURE (params AND return), not just
+/// inline literals. This is the "write real array math naturally" surface — an
+/// axpy (`a*x + y`) kernel whose shapes are declared `[f64; 3]` and whose body
+/// composes scalar-left broadcast (`a .* x`) with an array-array add (`.+ y`).
+/// The compile-time size flows through the call boundary: the caller's arrays,
+/// the parameter types, the body's broadcast result, and the declared return
+/// type must all agree at `[f64; 3]`. Proves the size-tracked type survives being
+/// passed into and returned out of a function, then lowers and runs.
+#[test]
+fn typed_array_kernel_signature_runs_end_to_end() {
+    if !c_backend_ready() {
+        eprintln!("skipping typed-array kernel e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let src = "fn axpy(a: f64, x: [f64; 3], y: [f64; 3]) -> [f64; 3] {\n\
+               let scaled = a .* x;\n\
+               scaled .+ y\n\
+               }\n\
+               fn main() ~ Console {\n\
+               let x = [1.0, 2.0, 3.0];\n\
+               let y = [10.0, 20.0, 30.0];\n\
+               let r = axpy(2.0, x, y);\n\
+               println(\"{} {} {}\", r[0], r[1], r[2]);\n\
+               }\n";
+    let dir = std::env::temp_dir().join("buildlang_typed_array_kernel");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("typed_array_kernel.bld");
+    std::fs::write(&path, src).expect("write typed_array_kernel.bld");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout, "12 24 36\n",
+        "axpy(2, [1,2,3], [10,20,30]) must broadcast through a `[f64; 3]` signature: 2*1+10, 2*2+20, 2*3+30"
+    );
+}
+
+/// Compile-time size tracking through a FUNCTION CALL boundary: passing a
+/// `[f64; 4]` argument where the parameter is declared `[f64; 3]` is a COMPILE
+/// ERROR, not a runtime panic or a silent truncation. This is the can-it-FAIL
+/// proof for the kernel-writing surface: a shape mismatch discovered at the call
+/// site (not just in a literal `.+` expression) must be rejected by `buildc
+/// check` with a length diagnostic before any code is generated.
+#[test]
+fn typed_array_kernel_arg_length_mismatch_is_rejected() {
+    let fixture = std::env::temp_dir().join(format!(
+        "buildlang_typed_array_arg_mismatch_{}.bld",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        "fn scale(x: [f64; 3]) -> [f64; 3] {\n\
+         x .* 2.0\n\
+         }\n\
+         fn main() ~ Console {\n\
+         let wide = [1.0, 2.0, 3.0, 4.0];\n\
+         let r = scale(wide);\n\
+         println(\"{}\", r[0]);\n\
+         }\n",
+    )
+    .expect("write typed-array arg-mismatch fixture");
+
+    let output = buildc()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run buildc check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "passing a `[f64; 4]` where a `[f64; 3]` parameter is declared must fail buildc check"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.to_lowercase().contains("length"),
+        "diagnostic should name the array length mismatch at the call site:\n{}",
+        stderr
+    );
+    assert!(
+        !stderr.to_lowercase().contains("panic"),
+        "shape mismatch must be a compile-time diagnostic, never a runtime panic:\n{}",
+        stderr
+    );
+}
+
+/// Compile-time size tracking through a RETURN type: a body that produces a
+/// `[f64; 3]` value declared to return `[f64; 2]` is a COMPILE ERROR. The
+/// returned array's compile-time N is checked against the declared return
+/// shape, so a kernel that accidentally changes length is caught by `buildc
+/// check` rather than emitting a mis-sized array at codegen.
+#[test]
+fn typed_array_kernel_return_length_mismatch_is_rejected() {
+    let fixture = std::env::temp_dir().join(format!(
+        "buildlang_typed_array_ret_mismatch_{}.bld",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        "fn widen(x: [f64; 3]) -> [f64; 2] {\n\
+         x .+ 1.0\n\
+         }\n\
+         fn main() ~ Console {\n\
+         let r = widen([1.0, 2.0, 3.0]);\n\
+         println(\"{}\", r[0]);\n\
+         }\n",
+    )
+    .expect("write typed-array return-mismatch fixture");
+
+    let output = buildc()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run buildc check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "returning a `[f64; 3]` body from a `-> [f64; 2]` signature must fail buildc check"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("[f64; 3]") && stderr.contains("[f64; 2]"),
+        "diagnostic should name both the produced `[f64; 3]` and expected `[f64; 2]` shapes:\n{}",
+        stderr
+    );
+}
+
 /// Regression: function-style `println(...)` had its argument count fixed by the
 /// FIRST `println` in a function body (its shared type-var binding was
 /// monomorphized to that call's arity), so a later `println` with a different
