@@ -552,7 +552,10 @@ fn reduce_corrupt_barrier_is_rejected() {
 
     // Pristine module validates first (else the corruption proves nothing).
     let (ok, stderr) = spirv_val_ok(tool, &out);
-    assert!(ok, "pristine reduce module should validate first:\n{stderr}");
+    assert!(
+        ok,
+        "pristine reduce module should validate first:\n{stderr}"
+    );
 
     // The barrier's execution scope is a %uint constant id operand of the
     // OpControlBarrier instruction. Rather than hunt the scope constant, corrupt
