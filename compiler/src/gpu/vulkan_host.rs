@@ -91,16 +91,15 @@ pub enum Grid {
 /// is caught deterministically on any machine -- a dispatch on inconsistent
 /// buffers would otherwise read/write out of bounds on the device.
 ///
-/// ALSO enforces that the grid dimensions the host `div_ceil`s over the 2D
-/// workgroup (n columns over `local.0`, m rows over `local.1`) are EXACT
-/// multiples of that workgroup size. The matmul kernel body has no bounds guard
-/// (the SPIR-V backend cannot currently emit a loop nested inside a selection
-/// construct -- `while`-in-`if` produces malformed structured control flow), so
-/// a dimension that is not a whole multiple of the workgroup would make
-/// `div_ceil` launch extra invocations whose `i`/`j` exceed the valid range and
-/// read/write PAST the exactly-sized `a`/`b`/`c` storage buffers -- a real
-/// out-of-bounds GPU access. Refusing non-multiple dims here closes that hole
-/// deterministically and device-free until the kernel can be guarded directly.
+/// The dimensions need NOT be multiples of the workgroup size. The matmul kernel
+/// now carries an in-body bounds guard (`if i < m && j < n { ... }`), so the
+/// extra invocations the host `div_ceil`s over the workgroup for a non-multiple
+/// dimension simply NO-OP -- they never read or write past the exactly-sized
+/// `a`/`b`/`c` buffers. (Before the SPIR-V backend could emit a loop nested in a
+/// selection, the kernel was unguarded and this function had to REFUSE
+/// non-multiple dims to avoid an out-of-bounds device access; that constraint is
+/// now lifted.) Only the internal length consistency (A = m*k, B = k*n, C = m*n)
+/// and a non-zero workgroup remain load-bearing here.
 pub fn validate_matmul_shapes(
     m: usize,
     k: usize,
@@ -128,27 +127,13 @@ pub fn validate_matmul_shapes(
             m * n
         ));
     }
-    // Grid-vs-workgroup evenness. The kernel is unguarded, so the grid MUST tile
-    // the workgroup exactly on each dispatched axis or `div_ceil` over-launches
-    // out-of-range invocations that access the buffers out of bounds.
+    // A non-zero workgroup is still required so the caller's per-axis `div_ceil`
+    // is well-defined. Evenness is NOT required: the in-body guard makes the
+    // over-launched invocations safe.
     let (lx, ly) = (local_size.0 as usize, local_size.1 as usize);
     if lx == 0 || ly == 0 {
         return Err(format!(
             "matmul workgroup size must be non-zero on both axes; got ({lx}, {ly})"
-        ));
-    }
-    if n % lx != 0 {
-        return Err(format!(
-            "matmul grid mismatch: n = {n} (columns) is not a multiple of the workgroup \
-             x-size {lx}; the unguarded kernel would launch out-of-range invocations that \
-             write past C. Pad n to a multiple of {lx}."
-        ));
-    }
-    if m % ly != 0 {
-        return Err(format!(
-            "matmul grid mismatch: m = {m} (rows) is not a multiple of the workgroup \
-             y-size {ly}; the unguarded kernel would launch out-of-range invocations that \
-             write past C. Pad m to a multiple of {ly}."
         ));
     }
     Ok(())
@@ -590,34 +575,52 @@ mod tests {
         );
     }
 
-    // CAN-IT-FAIL (the OOB-write guard): n not a multiple of the workgroup x-size
-    // is rejected BEFORE dispatch, because the unguarded kernel would over-launch
-    // out-of-range column invocations that write past C. Lengths are internally
-    // consistent (a=m*k, b=k*n, c=m*n) so ONLY the evenness rule can fire.
+    // Non-multiple dims are now ACCEPTED: the in-body `if i < m && j < n` guard
+    // makes the over-launched invocations no-op, so `validate_matmul_shapes` no
+    // longer rejects a grid that does not tile the workgroup exactly. It only
+    // checks buffer-length consistency (which holds here). This is the shape the
+    // device test `matmul_nonmultiple_dims_match_cpu` exercises on real hardware.
     #[test]
-    fn matmul_non_multiple_n_is_rejected() {
+    fn matmul_non_multiple_n_is_accepted() {
         // n = 70 is not a multiple of 16 (70 = 4*16 + 6). Shapes are consistent.
         let (m, k, n) = (64usize, 64usize, 70usize);
-        let err =
-            validate_matmul_shapes(m, k, n, m * k, k * n, m * n, WG).unwrap_err();
         assert!(
-            err.contains("grid mismatch") && err.contains('n') && err.contains("16"),
-            "error should name the n/workgroup evenness violation; got: {err}"
+            validate_matmul_shapes(m, k, n, m * k, k * n, m * n, WG).is_ok(),
+            "non-multiple n must be accepted now that the kernel guards in-body"
         );
     }
 
-    // CAN-IT-FAIL (the OOB-write guard): m not a multiple of the workgroup y-size
-    // is rejected BEFORE dispatch (over-launched out-of-range ROW invocations).
     #[test]
-    fn matmul_non_multiple_m_is_rejected() {
-        // m = 40 is not a multiple of 16 (40 = 2*16 + 8). n = 64 is fine, so the
-        // m-rule must be the one that fires.
+    fn matmul_non_multiple_m_is_accepted() {
+        // m = 40 is not a multiple of 16 (40 = 2*16 + 8).
         let (m, k, n) = (40usize, 64usize, 64usize);
-        let err =
-            validate_matmul_shapes(m, k, n, m * k, k * n, m * n, WG).unwrap_err();
         assert!(
-            err.contains("grid mismatch") && err.contains('m') && err.contains("16"),
-            "error should name the m/workgroup evenness violation; got: {err}"
+            validate_matmul_shapes(m, k, n, m * k, k * n, m * n, WG).is_ok(),
+            "non-multiple m must be accepted now that the kernel guards in-body"
+        );
+    }
+
+    // The internal length-consistency check is still load-bearing: an
+    // inconsistent buffer length is rejected even for a non-multiple dim.
+    #[test]
+    fn matmul_inconsistent_length_still_rejected_for_nonmultiple_dims() {
+        // n = 33 (non-multiple); C length deliberately wrong.
+        let (m, k, n) = (40usize, 40usize, 33usize);
+        let err = validate_matmul_shapes(m, k, n, m * k, k * n, m * n + 1, WG).unwrap_err();
+        assert!(
+            err.contains('C') && err.contains("m*n"),
+            "error should name C and m*n; got: {err}"
+        );
+    }
+
+    // Non-zero workgroup remains required (div_ceil must be well-defined).
+    #[test]
+    fn matmul_zero_workgroup_is_rejected() {
+        let (m, k, n) = (40usize, 40usize, 40usize);
+        let err = validate_matmul_shapes(m, k, n, m * k, k * n, m * n, (0, 16)).unwrap_err();
+        assert!(
+            err.contains("non-zero"),
+            "error should name the zero-workgroup violation; got: {err}"
         );
     }
 }
