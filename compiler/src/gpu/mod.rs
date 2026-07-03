@@ -1309,8 +1309,9 @@ pub fn run_gpu_cross_check(file: &Path, emit_receipt: Option<&Path>) -> Result<(
         // Pack each scalar per its SPIR-V push-constant member TYPE, not always
         // as f32. A `u32` shape member must be an integer bit pattern, otherwise
         // the shader reads an f32 bit pattern as `uint` and silently corrupts the
-        // value. (Matmul, the only U32-scalar kernel today, is 2D and never
-        // reaches here; this keeps the 1D path correct for any future u32 scalar.)
+        // value. (The U32-scalar kernels today — matmul (2D) and stencil (routed
+        // via is_stencil() above) — are both intercepted before this generic
+        // packer runs; this keeps the 1D path correct for any future u32 scalar.)
         match kind {
             ScalarKind::U32 => push_bytes.extend_from_slice(&(val as u32).to_le_bytes()),
             ScalarKind::F32 | ScalarKind::F64 => push_bytes.extend_from_slice(&val.to_le_bytes()),

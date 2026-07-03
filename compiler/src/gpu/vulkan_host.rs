@@ -13,10 +13,12 @@
 //! any number of f32 StorageBuffers at descriptor set 0, bindings 0..N
 //! (declaration order), plus an optional push-constant block for scalar params.
 //! The grid is 1D (`gl_GlobalInvocationID.x`, one invocation per element) or 2D
-//! (`.x`/`.y`, one invocation per output element). Still deliberately narrow
-//! (1D/2D, f32; no reductions/stencils/shared memory): enough to run and
-//! cross-check elementwise + matmul kernels on a real device, not a general
-//! Vulkan compute framework.
+//! (`.x`/`.y`, one invocation per output element). This same D1 dispatch path
+//! also carries the 1D neighbor-access (stencil) kernel; see gpu/mod.rs's
+//! run_stencil_cross_check. Still deliberately narrow (1D/2D, f32; no
+//! reductions/shared memory): enough to run and cross-check elementwise +
+//! matmul + 1D-stencil kernels on a real device, not a general Vulkan compute
+//! framework.
 
 use std::ffi::CStr;
 
