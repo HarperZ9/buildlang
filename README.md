@@ -11,8 +11,8 @@
 
 [![license: fair-source](https://img.shields.io/badge/license-fair--source-blue.svg)](LICENSE)
 ![rust](https://img.shields.io/badge/rust-edition_2021-orange.svg)
-[![crates.io](https://img.shields.io/badge/crates.io-buildlang-blue.svg)](https://crates.io/crates/buildlang)
-![version](https://img.shields.io/badge/version-1.1.x-informational.svg)
+[![crates.io](https://img.shields.io/crates/v/buildlang.svg)](https://crates.io/crates/buildlang/)
+[![downloads](https://img.shields.io/crates/dv/buildlang.svg?label=downloads)](https://crates.io/crates/buildlang/)
 [![CI](https://github.com/HarperZ9/buildlang/actions/workflows/ci.yml/badge.svg)](https://github.com/HarperZ9/buildlang/actions/workflows/ci.yml)
 [![part of: Build ecosystem](https://img.shields.io/badge/part_of-Build_ecosystem-00b3a4.svg)](https://github.com/HarperZ9/build-universe)
 
