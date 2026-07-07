@@ -7,7 +7,7 @@ with additional experimental backends.
 
 All commands and flags below are taken from the compiler's actual CLI
 definition (`compiler/src/main.rs`). The worked examples were run against a
-local debug build of `buildc` 1.0.x on Windows; the captured output is shown
+local build of `buildc` 1.1.0 on Windows; the captured output is shown
 verbatim. Output captured from an actual run is marked **(verified)**; any
 output that was not run is marked **(illustrative)**.
 
@@ -47,8 +47,8 @@ authoritative list and `buildc <command> --help` for per-command flags):
 | Command            | Purpose                                                      |
 |--------------------|-------------------------------------------------------------|
 | `buildc <file>`   | Compile a file (no subcommand); honors `-o`, `--target`, `-O`, `-g` |
-| `buildc run`      | Compile and run a `.bld` file via the C backend          |
-| `buildc build`    | Build a project (`--emit c|exe`, `--release`, `--target`, `--keep-c`) |
+| `buildc run`      | Compile and run a `.bld` file via the C backend; `--emit-receipt`/`--invariant`/`--units` seal a scientific-runtime receipt; `--gpu` (with a `--features gpu` build) dispatches a `#[compute]` kernel on Vulkan |
+| `buildc build`    | Build a project (`--emit c|header|exe`, `--release`, `--target`, `--keep-c`) |
 | `buildc check`    | Type-check; optional `--receipt`, `--policy`, `--profile`   |
 | `buildc lex`      | Tokenize a file and print tokens                            |
 | `buildc parse`    | Parse a file and print the AST (`--json` for JSON)          |
@@ -59,8 +59,10 @@ authoritative list and `buildc <command> --help` for per-command flags):
 | `buildc watch`    | Watch files and recompile on change (`--target spirv|c`)    |
 | `buildc pkg`      | Package manager (`init`, `add`, `resolve`, `search`)        |
 | `buildc policy`   | Built-in check policy profiles (`list`, `print`, `scaffold`)|
-| `buildc receipt`  | Verify a saved check receipt (`verify`)                     |
+| `buildc receipt`  | Re-verify a saved receipt (`verify`) or export witnessed measurement rows (`export`) |
 | `buildc corpus`   | Verify the semantic corpus (`verify`)                       |
+| `buildc mir`      | Emit or load the versioned `buildlang.mir/v0` JSON form (`emit`, `load`) |
+| `buildc bdf`      | Build Data Format: `encode`, `decode`, `validate`, flagship-action bridges |
 | `buildc test`     | Run `.bld` programs against `.expected` files            |
 | `buildc doctor`   | Diagnose local toolchain, backend, and package readiness    |
 | `buildc version`  | Print version information                                   |
@@ -172,7 +174,7 @@ No errors found in 'examples/quickstart/hello.bld'
 {
   "schema": "buildlang-check-receipt/v1",
   "compiler": "buildc",
-  "compiler_version": "1.0.4",
+  "compiler_version": "1.1.0",
   "language_version": "1.0.0",
   ...
   "status": "passed",
@@ -250,6 +252,7 @@ Use `--target glsl` to emit GLSL for OpenGL / Vulkan instead.
 
 ## More
 
+- Introduction and first ten minutes: [docs/INTRODUCTION.md](docs/INTRODUCTION.md)
 - A runnable demo: [examples/demo](examples/demo)
 - Quickstart programs: [examples/quickstart](examples/quickstart)
 - Getting started tutorial: [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)
