@@ -128,7 +128,7 @@ profile and print a receipt:
 buildc check examples/quickstart/hello.bld --profile console-only --receipt -
 ```
 
-Output (excerpt, verified against buildc 1.1.0):
+Output (excerpt, verified against buildc 1.2.0):
 
 ```
 Type checking... OK
@@ -136,7 +136,7 @@ Type checking... OK
 No errors found in 'examples/quickstart/hello.bld'
 {
   "schema": "buildlang-check-receipt/v1",
-  "compiler_version": "1.1.0",
+  "compiler_version": "1.2.0",
   "status": "passed",
   "declared_effects": { "main": ["Console"] },
   ...
