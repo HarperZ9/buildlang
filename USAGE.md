@@ -7,7 +7,7 @@ with additional experimental backends.
 
 All commands and flags below are taken from the compiler's actual CLI
 definition (`compiler/src/main.rs`). The worked examples were run against a
-local build of `buildc` 1.1.0 on Windows; the captured output is shown
+local build of `buildc` 1.2.0 on Windows; the captured output is shown
 verbatim. Output captured from an actual run is marked **(verified)**; any
 output that was not run is marked **(illustrative)**.
 
@@ -174,7 +174,7 @@ No errors found in 'examples/quickstart/hello.bld'
 {
   "schema": "buildlang-check-receipt/v1",
   "compiler": "buildc",
-  "compiler_version": "1.1.0",
+  "compiler_version": "1.2.0",
   "language_version": "1.0.0",
   ...
   "status": "passed",
