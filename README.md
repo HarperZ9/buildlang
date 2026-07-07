@@ -1,30 +1,24 @@
-<p align="center">
-  <img src="https://raw.githubusercontent.com/HarperZ9/buildlang/main/docs/brand/buildlang-hero.png" alt="BuildLang, the Effects Language compiler in the Build ecosystem">
-</p>
-<!-- Project mark: https://raw.githubusercontent.com/HarperZ9/buildlang/main/docs/brand/buildlang-mark.svg -->
+<p align="center"><img src=".github/assets/banner.svg" alt="buildlang: A real systems language: typed capability effects, sum and linear types, C FFI, native binaries." width="100%"></p>
 
-# BuildLang
+**A real systems language: typed capability effects, sum and linear types, C FFI, native binaries.**
 
-> The Effects Language: a Rust-built compiler for typed effects, systems experiments, and shader-oriented code generation.
-
-[Build ecosystem](https://github.com/HarperZ9/build-universe) | [buildlang](https://github.com/HarperZ9/buildlang) | [build-universe](https://github.com/HarperZ9/build-universe) | [VS Code extension](https://github.com/HarperZ9/buildlang-vscode) | [grammar](https://github.com/HarperZ9/buildlang-tmLanguage)
-
-[![license: fair-source](https://img.shields.io/badge/license-fair--source-blue.svg)](LICENSE)
-![rust](https://img.shields.io/badge/rust-edition_2021-orange.svg)
-[![crates.io](https://img.shields.io/crates/v/buildlang.svg)](https://crates.io/crates/buildlang/)
-[![downloads](https://img.shields.io/crates/dv/buildlang.svg?label=downloads)](https://crates.io/crates/buildlang/)
+[![crates.io](https://img.shields.io/crates/v/buildlang?style=flat-square&labelColor=14041b&color=ff8334)](https://crates.io/crates/buildlang/)
+[![license: BuildLang Fair-Source](https://img.shields.io/badge/license-BuildLang_Fair--Source-8f8095?style=flat-square&labelColor=14041b)](LICENSE)
+[![downloads](https://img.shields.io/crates/dv/buildlang?label=downloads&style=flat-square&labelColor=14041b)](https://crates.io/crates/buildlang/)
+![rust](https://img.shields.io/badge/rust-edition_2021-orange?style=flat-square&labelColor=14041b)
 [![CI](https://github.com/HarperZ9/buildlang/actions/workflows/ci.yml/badge.svg)](https://github.com/HarperZ9/buildlang/actions/workflows/ci.yml)
-[![part of: Build ecosystem](https://img.shields.io/badge/part_of-Build_ecosystem-00b3a4.svg)](https://github.com/HarperZ9/build-universe)
+[![part of: Build ecosystem](https://img.shields.io/badge/part_of-Build_ecosystem-00b3a4?style=flat-square&labelColor=14041b)](https://github.com/HarperZ9/build-universe)
 
-**The Effects Language** - a Rust-built compiler for typed effects, systems
-experiments, and shader-oriented code generation.
+BuildLang compiles `.bld` source to native binaries through a C backend, emits
+HLSL and GLSL for shader work, and carries experimental SPIR-V, LLVM IR,
+WebAssembly, Rust, x86-64, and ARM64 backends. The type system pairs
+Hindley-Milner inference with typed algebraic effects and an opt-in
+experimental `#[linear]` attribute for no-cloning values. The `buildc` CLI
+covers build, run, test, repl, fmt, pkg, watch, and doctor, plus a bundled LSP
+server with completion, hover, diagnostics, and go-to-definition. Every checked
+build can write a receipt you can re-check.
 
-BuildLang compiles `.bld` source files to **C** as the primary verified
-execution path, emits **HLSL** and **GLSL** for shader work, and keeps SPIR-V,
-LLVM IR, WebAssembly, Rust source, x86-64, and ARM64 backends labeled as
-experimental research surfaces.
-
-**Landing page:** [harperz9.github.io/buildlang](https://harperz9.github.io/buildlang/)
+[Landing page](https://harperz9.github.io/buildlang/) | [Build ecosystem](https://github.com/HarperZ9/build-universe) | [VS Code extension](https://github.com/HarperZ9/buildlang-vscode) | [grammar](https://github.com/HarperZ9/buildlang-tmLanguage)
 
 ## Current status
 
