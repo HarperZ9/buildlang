@@ -37,3 +37,6 @@ stdlib/*.c
 
 # safe_write pre-calibration archive
 **/.warden-safe-cache/
+
+# Local-only Claude instructions (global standard: never commit)
+CLAUDE.local.md
