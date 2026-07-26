@@ -35,3 +35,7 @@ CLAUDE.local.md
 
 # Node
 node_modules/
+
+# direnv environment files (can hold exported secrets)
+.envrc
+.envrc.local
