@@ -9,7 +9,7 @@
 name = "buildlang"
 version = "1.2.0"
 edition = "2021"
-rust-version = "1.70"
+rust-version = "1.85"
 authors = ["Zain Dana Harper"]
 description = "BuildLang (buildc): an effects-oriented compiler with a verified C path, shader output, experimental backends, opt-in linear types, and re-checkable accountability + scientific-runtime receipts"
 license-file = "LICENSE"
