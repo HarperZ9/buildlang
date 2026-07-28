@@ -210,12 +210,12 @@ Details: [docs/SCIENTIFIC-RECEIPT.md](docs/SCIENTIFIC-RECEIPT.md) and
 
 ## Status and maturity
 
-BuildLang 1.1.x. The C backend, capability-effect checking, HLSL/GLSL
+BuildLang 1.2.x. The C backend, capability-effect checking, HLSL/GLSL
 output, and the receipt tooling are the verified core; SPIR-V, LLVM IR, WASM,
 Rust, x86-64, ARM64, GPU dispatch, and `#[linear]` types are labeled
 experimental and stay that way until their evidence says otherwise. The
 release-shaped baseline (2026-07-02, local `cargo test` from `compiler/`):
-lib 940, bin 135, cli 307, lexer 52, parser 88 passing, 0 failing, with
+lib 940, bin 140, cli 309, lexer 52, parser 88 passing, 0 failing, with
 `buildc corpus verify` 8/8. Ground-truth release evidence lives in
 [STATUS.md](STATUS.md); [CHANGELOG.md](CHANGELOG.md) tracks changes.
 
