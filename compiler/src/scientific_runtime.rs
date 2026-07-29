@@ -1279,7 +1279,7 @@ pub fn compute_mc_executed(
         }
         other => {
             return Err(format!(
-                "interval_method `{other}` is not in the EXECUTED executable vocabulary (v1: normal-approx-95, wilson-95); clopper-pearson-95 needs a verified inverse incomplete beta and is not executable"
+                "interval_method `{other}` is not in the EXECUTED executable vocabulary (v1: normal-approx-95, wilson-95); `{MC_INTERVAL_CLOPPER_PEARSON_95}` needs a verified inverse incomplete beta and is not executable"
             ));
         }
     };
