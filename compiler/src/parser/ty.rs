@@ -10,7 +10,7 @@
 
 use super::{ParseError, ParseErrorKind, ParseResult, Parser};
 use crate::ast::*;
-use crate::lexer::{Delimiter, Keyword, TokenKind};
+use crate::lexer::{Delimiter, Keyword, Span, TokenKind};
 
 impl<'a> Parser<'a> {
     /// Parse a type.
@@ -200,6 +200,14 @@ impl<'a> Parser<'a> {
             }
 
             // =================================================================
+            // UNIT-ANNOTATED FLOAT TYPES: f64<m/s>, f32<J>, f64<1> (experimental)
+            // =================================================================
+            // Interception before the general path-types arm: only fires for
+            // an `f64`/`f32` head immediately followed by `<`, so plain `f64`
+            // and every other path type are unaffected.
+            TokenKind::Ident if self.at_unit_float_head() => self.parse_unit_annotated_float(),
+
+            // =================================================================
             // PATH TYPES (including primitives)
             // =================================================================
             TokenKind::Ident
@@ -235,6 +243,80 @@ impl<'a> Parser<'a> {
             // =================================================================
             _ => Err(self.error_expected("type")),
         }
+    }
+
+    /// Whether the parser is positioned at a unit-annotated float head:
+    /// `f64<` or `f32<` (experimental). Checked by exact source text, not
+    /// token kind, since both are ordinary `Ident` tokens; a user type that
+    /// merely starts with `f` never matches unless its full spelling is
+    /// exactly `f64`/`f32` and the very next token is `<`.
+    fn at_unit_float_head(&self) -> bool {
+        if !matches!(self.current_kind(), TokenKind::Ident) {
+            return false;
+        }
+        let text = self.source.slice(self.current_span());
+        (text == "f64" || text == "f32") && matches!(self.peek().kind, TokenKind::Lt)
+    }
+
+    /// Parse a unit-annotated numeric type: `f64<m/s>`, `f32<J>`, `f64<1>`
+    /// (experimental). Only called once `at_unit_float_head` has confirmed
+    /// the head and the following `<`.
+    ///
+    /// The bracket contents are NOT parsed as types (the unit grammar --
+    /// `m`, `s`, `kg*m/s^2`, ... -- is not a type grammar and tokens like
+    /// `/` and `*` cannot appear inside `< >` through `parse_type`). Instead
+    /// this scans raw tokens up to the matching closer, slices the ORIGINAL
+    /// SOURCE TEXT between them, and hands that text to `units::parse_unit`
+    /// verbatim, so the unit grammar stays owned by `units.rs` and is never
+    /// re-implemented here.
+    fn parse_unit_annotated_float(&mut self) -> ParseResult<Type> {
+        let head_span = self.advance().span; // consume `f64` / `f32`
+        let head_text = self.source.slice(head_span).to_string();
+        let lt_span = self.expect(&TokenKind::Lt)?.span;
+
+        // Scan for the closing `>`, downgrading a `>>` in place exactly like
+        // `expect_closing_angle` (parser/mod.rs) so `Vec<f64<m>>` still
+        // closes correctly: the outer `>` is left for the outer closer to
+        // consume, this call only claims the first half.
+        let closer_start = loop {
+            match self.current_kind() {
+                TokenKind::Eof => return Err(self.error_expected("`>`")),
+                TokenKind::Gt => {
+                    let start = self.current_span().start;
+                    self.advance();
+                    break start;
+                }
+                TokenKind::Shr => {
+                    let start = self.current_span().start;
+                    self.tokens[self.pos].kind = TokenKind::Gt;
+                    break start; // do not advance: leave the split `>` for the caller
+                }
+                _ => {
+                    self.advance();
+                }
+            }
+        };
+
+        let unit_span = Span::new(lt_span.end, closer_start, lt_span.source_id);
+        let unit_text = self.source.slice(unit_span);
+        let dim = crate::units::parse_unit(unit_text).map_err(|e| {
+            ParseError::new(
+                ParseErrorKind::InvalidUnitAnnotation(e.to_string()),
+                unit_span,
+            )
+        })?;
+
+        let base_path = Path::from_ident(Ident::new(head_text.as_str(), head_span));
+        let base = Type::new(TypeKind::Path(base_path), head_span);
+        let full_span = head_span.merge(&self.tokens[self.pos.saturating_sub(1)].span);
+        Ok(Type::new(
+            TypeKind::WithUnit {
+                base: Box::new(base),
+                dim,
+                unit_text: std::sync::Arc::from(unit_text),
+            },
+            full_span,
+        ))
     }
 
     /// Parse reference type: &T, &mut T, &'a T, &'a mut T

@@ -1,16 +1,19 @@
 # Compile-time dimensional analysis (typed physical units)
 
-Status: **first slice shipped; full type-checker integration specced.** This
-document describes BuildLang's dimensional-analysis feature. The parts marked
-SHIPPED are implemented and tested on `main`. The parts marked SPEC are the
-staged plan for the remaining passes, precise enough to build against.
+Status: **first slice shipped; checker slice one shipped (experimental);
+remaining passes specced.** This document describes BuildLang's
+dimensional-analysis feature. The parts marked SHIPPED are implemented and
+tested on `main`. The parts marked SPEC are the staged plan for the remaining
+passes, precise enough to build against.
 
-Honest maturity: the shipped slice is a pure, tested dimensional-algebra core
-plus a receipt integration. It does NOT yet make `f64<m/s>` a first-class type
-in the Hindley-Milner checker, and it makes no claim that a compiled program's
-runtime numbers carry units. It checks and canonicalizes unit ANNOTATIONS and
-the scientific-runtime receipt's measurement label. The C backend is unchanged
-and guarantees nothing about units at runtime.
+Honest maturity: `f64<m/s>` is now a first-class, EXPERIMENTAL, opt-in type in
+the Hindley-Milner checker (checker slice one, below), but it makes no claim
+that a compiled program's runtime numbers carry units. The annotation is
+checked and canonicalized at compile time and erased before MIR; the C backend
+is unchanged and guarantees nothing about units at runtime. Dimension
+variables (an unannotated literal inferring its dimension from context) are
+still SPEC, so a unit bug flowing through an unannotated intermediate binding
+is not caught unless a later boundary is annotated.
 
 ## Why
 
@@ -103,50 +106,137 @@ Two CLI integration tests cover the positive path (canonicalized unit sealed
 and re-verified) and the negative path (unknown unit rejected before compile,
 no receipt written).
 
-## SPEC: full type-checker integration (staged, not yet built)
+## SHIPPED: checker slice one (experimental, 2026-07-29)
 
-This is the remaining multi-pass work. It is deliberately NOT part of the first
-slice, because it touches the parser, the AST, the type representation, and the
-Hindley-Milner unification engine (`compiler/src/types/infer.rs`), and doing it
-correctly is a larger build than one increment should attempt.
+`f64<UNIT>` / `f32<UNIT>` unit annotations now parse through the shipped
+`units::parse_unit` grammar and are enforced by the Hindley-Milner checker.
+EXPERIMENTAL and opt-in: a program that never writes `<...>` after a float
+head is completely unaffected (byte-identical behavior, byte-identical
+emitted C, byte-identical receipts).
 
-### Pass A: unit-annotated types in the parser and AST
+**Syntax and shared grammar.** A unit annotation is angle brackets directly
+after `f64`/`f32`: `f64<m/s>`, `f32<J>`, `f64<kg*m/s^2>`, `f64<1>`
+(dimensionless). The grammar inside `< >` is EXACTLY `units::parse_unit`'s,
+shared errors included: `f64<zebra>` reports `unknown unit \`zebra\``,
+`f64<>` reports `empty unit annotation`, both as parse errors. Everything
+routed through the type parser gets the syntax: let annotations, function
+parameters, return types, struct fields, and casts (`x as f64<m>` is the
+deliberate re-annotation escape hatch: casts resolve their target through
+the same `lower_type` path as a let annotation).
 
-Surface syntax: a numeric type may carry a unit annotation in angle brackets,
-`f64<m/s>`, `f32<J>`, `f64<1>` (explicitly dimensionless). Add a `TypeKind`
-variant (or a side-table keyed by `NodeId`) carrying the parsed `Dimension`.
-The parser reuses `units::parse_unit` on the annotation text, so the grammar
-and the error messages are shared with the shipped core. An annotation that
-fails to parse is a parse error with the `UnitError` message.
+**Enforcement matrix.** All dimension math is the shipped `units` algebra;
+no new algebra was added anywhere.
 
-### Pass B: dimensions in the type representation
+- `+`, `-`: operands must share a dimension (`checked_add`/`checked_sub`);
+  mismatch reports `` unit mismatch: cannot add/subtract `X` and `Y` ``.
+- `%`, comparisons (`<`,`<=`,`>`,`>=`,`==`,`!=`): same-dimension required via
+  the unifier; comparisons additionally get the operation-worded
+  `checked_compare` pre-check message.
+- `*`, `/`: derived dimensions via `Dimension::multiply`/`divide`. A `None`
+  (unannotated) operand counts as dimensionless in the product, so
+  `2.0 * d` keeps `d`'s unit; `None * None` stays `None` (a unit is never
+  invented where neither operand wrote one).
+- Unary minus preserves the unit.
+- Unification is the backstop covering every boundary: let annotation,
+  assignment, call argument, return value, and generic instantiation (a
+  unit riding on a bound type variable survives substitution).
+- `**` (Pow) on a unit-carrying operand is a LOUD `UnsupportedConstruct`
+  error, never a silently wrong dimension: dimensional exponentiation
+  (`powi` lifting) is specced below, not shipped.
+- `.sqrt()`, `.cbrt()`, `.powi()`, `.powf()` on a unit-carrying receiver: the
+  same LOUD `UnsupportedConstruct` refusal, not the silently wrong dimension
+  an earlier build of this slice returned (root/power lifting needs the same
+  specced exponent-scaling follow-up as `**`). `.abs()`, `.floor()`,
+  `.ceil()`, `.round()`, `.trunc()`, `.fract()` remain identity-shaped and
+  correct as-is.
 
-Extend the internal `Ty` for a numeric type with an optional `Dimension`. A
-numeric literal with no annotation is dimension-POLYMORPHIC (a fresh dimension
-variable), so `1.0` unifies with any unit; an annotated binding fixes it.
+**Weak mode (the one deliberate simplification).** This slice uses a
+weaker, safe rule instead of full dimension variables: an unannotated
+numeric type is UNCONSTRAINED and compatible with any unit (same rule the
+pre-existing `Ty.annotations` `with` mechanism already used). Fewer catches,
+zero false positives, no new inference machinery. `let p: f64 = 1.0; d + p`
+where `d: f64<m>` is therefore accepted; a unit bug flowing through an
+unannotated intermediate binding is caught only if a LATER boundary is
+annotated. Full dimension variables are the specced follow-up.
 
-### Pass C: unification and the checked rules
+**Erasure before MIR (zero codegen impact, mechanically verified).**
+`MirType::Float` has no unit slot and codegen lowers types from the AST, not
+from the checked `Ty`, so there is no channel for a dimension to reach
+emitted C. A `WithUnit` AST node delegates to its base type in
+`codegen/lower/types.rs`; every other `ast::TypeKind` matcher in the codegen
+and parser layers was audited for a path a `WithUnit` node could reach a
+wrong-type fallback (none found: each site either delegates through the
+fixed function, cannot structurally receive the node, or already refuses
+loudly rather than guessing, e.g. the GPU kernel path, which requires a bare
+`f32`/`f64` path type and rejects anything else). Mechanically pinned by a
+fixture pair (`compiler/tests/units/units_velocity.bld` and
+`units_velocity_plain.bld`, identical minus annotations): `buildc build`
+emits byte-identical C for both, and both run with identical stdout. A
+mutation check (removing the delegation arm) confirmed the byte-identity
+test goes red -- an annotated local would silently lower to `MirType::i32()`
+without it.
 
-- Unifying two numeric types unifies their dimensions: equal dimensions unify,
-  a dimension variable binds to a concrete dimension, and two DIFFERENT
-  concrete dimensions are a unification failure that surfaces as a unit-mismatch
-  diagnostic (reusing `UnitError::Mismatch`'s wording).
-- `+`, `-`, and the comparison operators require their operands' dimensions to
-  unify (this is `Dimension::checked_add` / `checked_sub` / `checked_compare`
-  lifted into inference). `*` produces `multiply`, `/` produces `divide`, and an
-  integer-literal exponent in a `powi`-like intrinsic produces `powi`.
-- `let v: f64<m> = a + b;` where `a: f64<m>` and `b: f64<s>` is then a COMPILE
-  ERROR. That negative test (a unit mismatch failing to compile) is the
-  acceptance criterion for this pass.
+**Receipts unchanged.** Check receipts (`buildlang-check-receipt/v1`): no
+schema change; the new errors are ordinary entries in the existing
+`diagnostics` array (`kind: "UnitMismatch"` / `"UnitOperationMismatch"`).
+Scientific-runtime receipts: untouched; `measurement.units` keeps its
+shipped `--units` source (Pass D below, still SPEC).
+
+**Honesty note: the one intended semantic change.** Before this slice,
+`f64<ident>` parsed as an ordinary path type and the generic argument was
+SILENTLY DISCARDED at lowering (`lower_type_path` matches the primitive name
+before ever looking at generics). A single-token form like `f64<m>` checked
+OK with the unit ignored; a composite form like `f64<m/s>` could not parse
+at all (`/` is not a type). Probe table (recorded 2026-07-29 on
+`feat/drop-flags` HEAD, re-run after shipping):
+
+| annotation | before this slice | after this slice |
+|---|---|---|
+| `f64<m/s>` | parse error `expected `>`, found `/`` | parses, checks OK |
+| `f64<kg*m/s^2>` | parse error `expected `>`, found `*`` | parses, checks OK |
+| `f64<1>` | parse error `expected type, found integer` | parses, checks OK |
+| `f64<m>` | parses; argument silently discarded; check OK | parses; unit honored; check OK |
+| `f64<zebra>` | parses; silently discarded; check OK | parse error `unknown unit \`zebra\`` |
+
+A repo-wide grep found zero BuildLang sources using `f64<`/`f32<` syntax
+before this slice, so no existing corpus program, test fixture, or example
+is affected by the one behavior change (`f64<zebra>`, previously
+meaningless and accepted, now correctly rejected).
+
+## SPEC: remaining passes (staged, not yet built)
+
+Checker slice one (above) ships enforcement; these are the follow-ups it
+deliberately deferred.
+
+### Dimension variables (weak-mode follow-up)
+
+Full inference: an unannotated numeric literal is dimension-POLYMORPHIC (a
+fresh dimension variable) rather than unconstrained, so `1.0` unifies with
+whatever dimension context ultimately requires, and an unannotated
+intermediate binding no longer hides a unit bug. This is the generalization
+of checker slice one's weak-mode rule.
+
+### `powi` lifting for `**`, `.sqrt()`, `.cbrt()`, `.powi()`, `.powf()`
+
+An integer-literal exponent in `d ** 2` should scale `d`'s dimension
+(`Dimension::powi`) rather than being rejected. Requires recognizing the
+literal-exponent shape at the type-checking site; a non-literal exponent on
+a unit-carrying base stays rejected (fractional/runtime exponents are a
+non-goal, below). The same per-method exponent rule would resolve
+`.sqrt()`/`.cbrt()` (halve/third the exponents, rejecting an odd/
+non-divisible exponent as today's integer-only `Dimension` cannot represent
+it) and `.powi()`/`.powf()` (scale by a literal integer / stay rejected for
+a non-literal), all of which currently refuse rather than compute.
 
 ### Pass D: receipt flow-through
 
-When a `run` kernel's measured value has an inferred, non-polymorphic dimension,
-`--units` becomes optional: the receipt's `measurement.units` is derived from
-the checked type instead of a hand-declared flag, and a `--units` that
-disagrees with the inferred dimension is a hard error. Until Pass C lands,
-`--units` stays the (checked, canonicalized) source of the receipt unit, which
-is what the shipped slice does.
+When a `run` kernel's measured value has an inferred, non-polymorphic
+dimension (once dimension variables land), `--units` becomes optional: the
+receipt's `measurement.units` is derived from the checked type instead of a
+hand-declared flag, and a `--units` that disagrees with the inferred
+dimension is a hard error. Until then, `--units` stays the (checked,
+canonicalized) source of the receipt unit, which is what both the original
+shipped slice and checker slice one do.
 
 ## Non-goals (explicit)
 
@@ -158,6 +248,26 @@ is what the shipped slice does.
   the C backend emits ordinary `double` arithmetic and carries no unit metadata.
 - A complete SI/CODATA derived-unit table. The named-derived set is a curated,
   documented subset.
+- Integer units (`i64<m>`), GPU kernels, and arrays/broadcast ops of united
+  floats as a CLAIMED surface (checker slice one's fixtures and tests are
+  `f64`/`f32` scalars only; a unit-annotated GPU kernel parameter is
+  correctly rejected today by the existing "must be a float scalar or
+  slice" gate, and the derivation/multiply-divide arms flow mechanically
+  through arrays and broadcast ops without a miscompile, but neither is a
+  tested, claimed surface).
+- Dimensional correctness of inherent numeric methods beyond `.sqrt()`,
+  `.cbrt()`, `.powi()`, `.powf()`. Those four now loudly refuse
+  (`UnsupportedConstruct`) on a unit-carrying receiver -- the same principle
+  that makes `**` a refusal, not the silently wrong (unscaled) dimension an
+  earlier build of this slice returned (`infer.rs`'s FLOAT METHODS arm,
+  guarded on `unit_dim.is_some()`). `.abs()`, `.floor()`, `.ceil()`,
+  `.round()`, `.trunc()`, `.fract()` remain identity-shaped and correct
+  as-is. Every other float method in that arm (`.recip()`, `.signum()`,
+  trig/log/exp, `.hypot()`, `.clamp()`, ...) is unaudited by this document
+  for dimensional correctness and unchanged by this fix: unclaimed. A future
+  pass would compute the actual scaled dimension (`Dimension::powi`/
+  `reciprocal` already exist) once a per-method exponent rule is wired at
+  the call site, rather than refuse.
 
 ## Provenance
 

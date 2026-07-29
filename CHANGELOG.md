@@ -28,6 +28,42 @@ tracked in `STATUS.md`, `README.md`, and
   closed 6-name runtime list, escaping/reassigned/multi-move-tainted owners,
   and `BuildVec`/`BuildMap` buffers are unchanged declines. The memory
   pillar is NOT done and the flag is NOT default-on.
+- **Unit-annotated numeric types, checker slice one (EXPERIMENTAL, opt-in)**:
+  `f64<m/s>`-style dimension annotations (sibling to the shipped
+  `dimensional analysis, first slice` unit-core entry below) parse through
+  the shared `units::parse_unit` grammar and are now enforced by the
+  Hindley-Milner checker, not just the receipt label. `+`/`-`/`%`/comparisons
+  require equal dimensions (`+`/`-`/compare get an operation-worded message);
+  `*`/`/` derive dimensions via `Dimension::multiply`/`divide`; `**` on a
+  unit-carrying operand is a loud `UnsupportedConstruct` refusal, never a
+  silently wrong dimension; `.sqrt()`/`.cbrt()`/`.powi()`/`.powf()` on a
+  unit-carrying receiver get the identical refusal (a review pass found they
+  had silently kept returning the receiver's unchanged, wrong dimension;
+  `.abs()`/`.floor()`/`.ceil()`/`.round()`/`.trunc()`/`.fract()` stay
+  identity-shaped and correct, unchanged; the REMAINING float methods in
+  that dispatch arm, `.recip()`, `.signum()`, trig/log/exp, `.hypot()`,
+  `.clamp()` and siblings, are UNAUDITED for dimensional correctness in
+  this slice and may propagate a dimension a method does not actually
+  preserve, so annotate receivers of those methods with care until the
+  audit lands as a follow-up); unification is the backstop at
+  every let, assign, argument, and return boundary. Weak mode: an
+  unannotated float
+  stays UNCONSTRAINED (compatible with any unit) rather than a full
+  dimension variable, so a bug through an unannotated intermediate binding
+  is caught only if a later boundary is annotated -- full dimension
+  variables are a specced follow-up. Zero codegen impact, mechanically
+  verified: `MirType` has no unit slot, the `WithUnit` AST node erases to
+  its base type before MIR, and a fixture pair
+  (`compiler/tests/units/units_velocity.bld` / `_plain.bld`, identical minus
+  annotations) proves byte-identical emitted C and stdout; a mutation check
+  confirmed removing the erasure arm goes red. Backward compatible: a
+  repo-wide grep found zero existing sources using `f64<`/`f32<` syntax, so
+  the only semantic change is that `f64<zebra>` (previously silently
+  accepted, unit ignored) now correctly fails to parse. No receipt schema
+  change: the new checker errors are ordinary `diagnostics` entries; the
+  scientific-runtime receipt's `measurement.units` keeps its existing
+  `--units` source (Pass D receipt flow-through stays specced). Detail:
+  `docs/DIMENSIONAL-ANALYSIS.md`.
 - **Wall-clock metering, the first EXECUTED budget fact**: `runtime_state` gains
   `wall_seconds`, the receipt's first EXECUTED time fact, measured with
   `std::time::Instant` around the primary run's `.output()` call, rounded to

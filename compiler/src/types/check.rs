@@ -3160,4 +3160,415 @@ mod tests {
             "expected `missing` to be unresolved when no bound provides it, got {errors:#?}"
         );
     }
+
+    // =========================================================================
+    // UNIT-ANNOTATED NUMERIC TYPES (`f64<m/s>`, experimental) -- W6 checker
+    // slice one. All dimension math below is the shipped `units` algebra
+    // (units.rs, unmodified); these tests only prove it is correctly wired
+    // into the checker's unifier and `infer_binary`.
+    // =========================================================================
+
+    mod unit_annotated_types {
+        use super::*;
+
+        fn unit_errors(errors: &[TypeErrorWithSpan]) -> Vec<&TypeError> {
+            errors
+                .iter()
+                .map(|e| &e.error)
+                .filter(|e| {
+                    matches!(
+                        e,
+                        TypeError::UnitMismatch { .. } | TypeError::UnitOperationMismatch { .. }
+                    )
+                })
+                .collect()
+        }
+
+        #[test]
+        fn mismatched_add_refused_with_operation_wording() {
+            let errors = check_source(
+                "fn main() { let d: f64<m> = 3.0; let t: f64<s> = 1.0; let x = d + t; }",
+            );
+            assert_eq!(errors.len(), 1, "expected exactly one error: {errors:#?}");
+            match &errors[0].error {
+                TypeError::UnitOperationMismatch {
+                    operation,
+                    left,
+                    right,
+                } => {
+                    assert_eq!(*operation, "add");
+                    assert_eq!(left, "m");
+                    assert_eq!(right, "s");
+                }
+                other => panic!("expected UnitOperationMismatch, got {other:?}"),
+            }
+            assert_eq!(
+                errors[0].error.to_string(),
+                "unit mismatch: cannot add `m` and `s` (dimensions differ)"
+            );
+        }
+
+        #[test]
+        fn mismatched_subtract_refused_with_operation_wording() {
+            let errors = check_source(
+                "fn main() { let d: f64<m> = 3.0; let t: f64<s> = 1.0; let x = d - t; }",
+            );
+            let unit_errs = unit_errors(&errors);
+            assert_eq!(unit_errs.len(), 1, "{errors:#?}");
+            match unit_errs[0] {
+                TypeError::UnitOperationMismatch { operation, .. } => {
+                    assert_eq!(*operation, "subtract")
+                }
+                other => panic!("expected UnitOperationMismatch, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn mismatched_compare_refused_with_operation_wording() {
+            let errors = check_source(
+                "fn main() { let d: f64<m> = 3.0; let t: f64<s> = 1.0; let x = d < t; }",
+            );
+            let unit_errs = unit_errors(&errors);
+            assert_eq!(unit_errs.len(), 1, "{errors:#?}");
+            match unit_errs[0] {
+                TypeError::UnitOperationMismatch { operation, .. } => {
+                    assert_eq!(*operation, "compare")
+                }
+                other => panic!("expected UnitOperationMismatch, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn mismatched_assign_refused() {
+            let errors =
+                check_source("fn main() { let mut d: f64<m> = 3.0; let t: f64<s> = 1.0; d = t; }");
+            let unit_errs = unit_errors(&errors);
+            assert_eq!(unit_errs.len(), 1, "{errors:#?}");
+            match unit_errs[0] {
+                TypeError::UnitMismatch { expected, found } => {
+                    assert_eq!(expected, "m");
+                    assert_eq!(found, "s");
+                }
+                other => panic!("expected UnitMismatch, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn mismatched_let_annotation_refused() {
+            let errors = check_source(
+                "fn main() { let d: f64<m> = 3.0; let t: f64<s> = 1.0; \
+                 let bad: f64<m> = d / t; }",
+            );
+            let unit_errs = unit_errors(&errors);
+            assert_eq!(unit_errs.len(), 1, "{errors:#?}");
+            match unit_errs[0] {
+                TypeError::UnitMismatch { expected, found } => {
+                    assert_eq!(expected, "m");
+                    assert_eq!(found, "m/s");
+                }
+                other => panic!("expected UnitMismatch, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn mismatched_argument_refused() {
+            let errors = check_source(
+                "fn go(v: f64<m/s>) { } \
+                 fn main() { let d: f64<m> = 3.0; go(d); }",
+            );
+            let unit_errs = unit_errors(&errors);
+            assert_eq!(
+                unit_errs.len(),
+                1,
+                "the unify backstop must catch a unit mismatch through a call \
+                 argument: {errors:#?}"
+            );
+            assert!(matches!(unit_errs[0], TypeError::UnitMismatch { .. }));
+        }
+
+        #[test]
+        fn derived_division_dimension_accepted() {
+            let errors = check_source(
+                "fn main() { let d: f64<m> = 3.0; let t: f64<s> = 1.0; \
+                 let v: f64<m/s> = d / t; }",
+            );
+            assert!(unit_errors(&errors).is_empty(), "{errors:#?}");
+        }
+
+        #[test]
+        fn unannotated_product_stays_unconstrained_weak_mode() {
+            // `None * None` must stay `None` (never invent a dimensionless
+            // unit where neither operand wrote one): the product must still
+            // mix freely with an explicitly dimensioned quantity, exactly
+            // like the unannotated-mixing rule for Add.
+            let errors = check_source(
+                "fn main() { \
+                    let a: f64 = 1.0; let b: f64 = 2.0; let p = a * b; \
+                    let d: f64<m> = 3.0; let s = p + d; \
+                 }",
+            );
+            assert!(unit_errors(&errors).is_empty(), "{errors:#?}");
+        }
+
+        #[test]
+        fn derived_multiplication_named_unit_equivalence_accepted() {
+            // kg*m/s^2 (force) times m (length) is J (energy): proves
+            // `multiply` and named-derived-unit equivalence end to end.
+            let errors = check_source(
+                "fn main() { let f: f64<kg*m/s^2> = 1.0; let len: f64<m> = 2.0; \
+                 let e: f64<J> = f * len; }",
+            );
+            assert!(unit_errors(&errors).is_empty(), "{errors:#?}");
+        }
+
+        #[test]
+        fn same_dimension_add_rem_compare_accepted() {
+            let errors = check_source(
+                "fn main() { \
+                    let d: f64<m> = 3.0; \
+                    let sum: f64<m> = d + d; \
+                    let r: f64<m> = d % d; \
+                    let b: bool = d < d; \
+                 }",
+            );
+            assert!(unit_errors(&errors).is_empty(), "{errors:#?}");
+        }
+
+        #[test]
+        fn scalar_times_unit_keeps_the_unit() {
+            let errors =
+                check_source("fn main() { let d: f64<m> = 3.0; let p: f64<m> = 2.0 * d; }");
+            assert!(unit_errors(&errors).is_empty(), "{errors:#?}");
+        }
+
+        #[test]
+        fn unannotated_mixing_is_allowed_weak_mode() {
+            // An unannotated float is UNCONSTRAINED (compatible with any
+            // unit); full dimension variables are a deferred follow-up, not
+            // this slice.
+            let errors =
+                check_source("fn main() { let d: f64<m> = 3.0; let p: f64 = 1.0; let s = d + p; }");
+            assert!(unit_errors(&errors).is_empty(), "{errors:#?}");
+        }
+
+        #[test]
+        fn pow_on_unit_carrying_operand_is_loudly_unsupported() {
+            let errors = check_source("fn main() { let d: f64<m> = 3.0; let bad = d ** 2.0; }");
+            assert!(
+                errors.iter().any(|e| matches!(
+                    &e.error,
+                    TypeError::UnsupportedConstruct { construct, .. }
+                        if construct.contains("unit-carrying")
+                )),
+                "expected UnsupportedConstruct for `**` on a unit-carrying \
+                 operand: {errors:#?}"
+            );
+        }
+
+        #[test]
+        fn unary_minus_preserves_the_unit() {
+            let errors = check_source("fn main() { let d: f64<m> = 3.0; let neg: f64<m> = -d; }");
+            assert!(unit_errors(&errors).is_empty(), "{errors:#?}");
+        }
+
+        #[test]
+        fn cast_to_unit_annotated_float_reannotates() {
+            // `infer_cast` resolves its target via `lower_type` (the exact
+            // path `WithUnit` lowering hooks into), so `x as f64<m>` is a
+            // deliberate re-annotation escape hatch: the cast's result
+            // carries the annotated dimension from that point on. If casts
+            // were instead unclaimed (target ignored), `d` would stay an
+            // unconstrained plain float and this would produce no error.
+            let errors = check_source(
+                "fn main() { let p: f64 = 1.0; let d = p as f64<m>; let bad: f64<s> = d; }",
+            );
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| matches!(&e.error, TypeError::UnitMismatch { .. })),
+                "the cast must have attached `m`, so binding it to `f64<s>` \
+                 should mismatch: {errors:#?}"
+            );
+        }
+
+        #[test]
+        fn negative_exponent_form_normalizes_and_unifies() {
+            // `m*s^-1` and `m/s` are the same dimension; an argument-passing
+            // boundary must accept either spelling for the other.
+            let errors = check_source(
+                "fn go(v: f64<m/s>) { } \
+                 fn main() { let d: f64<m*s^-1> = 3.0; go(d); }",
+            );
+            assert!(unit_errors(&errors).is_empty(), "{errors:#?}");
+        }
+
+        // =====================================================================
+        // TASK 5: Ty-EQUALITY AUDIT (the diffuse risk)
+        //
+        // `unit_dim` now participates in `Ty`'s derived `Eq`/`Hash`, so any
+        // Ty-keyed lookup or equality-driven classification could newly
+        // distinguish `f64<m>` from `f64`. The audit (see the commit body)
+        // found ONE real hazard: `infer.rs`'s `dispatch_position_match`
+        // (multiple-dispatch overload scoring) compared full `Ty` equality
+        // for its Exact-match check, but codegen's mangled overload names
+        // come from `MirType`, which has no unit slot. Two candidates
+        // differing ONLY by unit annotation would therefore mangle to the
+        // SAME C name -- a probed program confirmed the checker uniquely
+        // resolving such a call while codegen emitted two colliding
+        // `go_f64` definitions. Mitigated by stripping `unit_dim` at that
+        // one comparison boundary, keeping the checker and codegen decision
+        // procedures in agreement (see `dispatch_position_match`'s doc
+        // comment). Every other Ty-keyed site audited (dispatch.rs itself
+        // is MirType/generic, not Ty-keyed; traits.rs and context.rs's
+        // `HashMap<Arc<str>, Ty>` tables are string-keyed, `Ty` only ever
+        // the value) was safe as-is: no code change.
+        // =====================================================================
+
+        #[test]
+        fn overload_set_differing_only_by_unit_is_ambiguous_not_silently_accepted() {
+            let errors = check_source(
+                "fn go(v: f64<m>) -> f64 { v } \
+                 fn go(v: f64<s>) -> f64 { v + 1.0 } \
+                 fn main() { let d: f64<m> = 3.0; let r = go(d); }",
+            );
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| matches!(&e.error, TypeError::AmbiguousMethod { .. })),
+                "expected AmbiguousMethod (matching codegen's unit-blindness at the \
+                 mangled name), not a silent unique resolution that a real C \
+                 compiler would then reject as a duplicate definition: {errors:#?}"
+            );
+        }
+
+        #[test]
+        fn method_call_on_annotated_float_receiver_resolves() {
+            // `.abs()` is dimension-preserving (identity on magnitude): a unit
+            // riding on the receiver must not break method resolution, and
+            // the result keeps the receiver's dimension (inherent float
+            // methods return `receiver_ty` unchanged; see infer.rs's FLOAT
+            // METHODS arm).
+            let errors =
+                check_source("fn main() { let d: f64<m> = -3.0; let a: f64<m> = d.abs(); }");
+            assert!(unit_errors(&errors).is_empty(), "{errors:#?}");
+        }
+
+        #[test]
+        fn annotated_float_survives_a_generic_function() {
+            let errors = check_source(
+                "fn identity<T>(x: T) -> T { x } \
+                 fn main() { let d: f64<m> = 3.0; let r: f64<m> = identity(d); }",
+            );
+            assert!(unit_errors(&errors).is_empty(), "{errors:#?}");
+        }
+
+        // No negative (mismatch-catching) counterpart: the checker does not
+        // thread a generic function's return type back to enforce anything
+        // against the caller for ANY type, unit-carrying or not (confirmed:
+        // the identical gap reproduces for a plain, unit-free
+        // `let bad: i32 = identity(3.0);`, zero diagnostics). Pre-existing,
+        // orthogonal to units, and out of scope for this slice ("if the
+        // checker supports it" per the plan's Task 5 bullet -- it does not,
+        // for generics in general). The positive test above is the honest
+        // claim: units are not lost passing through, nothing stronger.
+
+        // =====================================================================
+        // Review follow-up: `.sqrt()`/`.cbrt()`/`.powi()`/`.powf()` on a
+        // unit-carrying receiver used to silently return the receiver's
+        // unchanged (and therefore wrong) dimension. Now a loud
+        // `UnsupportedConstruct` refusal, matching `**`'s principle.
+        // =====================================================================
+
+        #[test]
+        fn sqrt_on_unit_carrying_receiver_is_loudly_unsupported() {
+            let errors =
+                check_source("fn main() { let area: f64<m*m> = 9.0; let side = area.sqrt(); }");
+            assert!(
+                errors.iter().any(|e| matches!(
+                    &e.error,
+                    TypeError::UnsupportedConstruct { construct, .. }
+                        if construct.contains("unit-carrying") && construct.contains("sqrt")
+                )),
+                "expected UnsupportedConstruct for `.sqrt()` on a unit-carrying \
+                 receiver: {errors:#?}"
+            );
+        }
+
+        #[test]
+        fn cbrt_on_unit_carrying_receiver_is_loudly_unsupported() {
+            let errors =
+                check_source("fn main() { let vol: f64<m*m*m> = 27.0; let side = vol.cbrt(); }");
+            assert!(
+                errors.iter().any(|e| matches!(
+                    &e.error,
+                    TypeError::UnsupportedConstruct { construct, .. }
+                        if construct.contains("unit-carrying") && construct.contains("cbrt")
+                )),
+                "expected UnsupportedConstruct for `.cbrt()` on a unit-carrying \
+                 receiver: {errors:#?}"
+            );
+        }
+
+        #[test]
+        fn powi_and_powf_on_unit_carrying_receiver_are_loudly_unsupported() {
+            let errors = check_source(
+                "fn main() { \
+                    let d: f64<m> = 3.0; \
+                    let a = d.powi(2); \
+                    let b = d.powf(2.0); \
+                 }",
+            );
+            let refusals: Vec<_> = errors
+                .iter()
+                .filter(|e| matches!(&e.error, TypeError::UnsupportedConstruct { construct, .. } if construct.contains("unit-carrying")))
+                .collect();
+            assert_eq!(
+                refusals.len(),
+                2,
+                "expected UnsupportedConstruct for both `.powi()` and `.powf()` \
+                 on a unit-carrying receiver: {errors:#?}"
+            );
+        }
+
+        #[test]
+        fn sqrt_on_unannotated_receiver_is_unaffected() {
+            // `unit_dim: None` must keep matching the identity-methods arm:
+            // the refusal is guarded on `unit_dim.is_some()` and must not
+            // fire for a plain, unit-free float.
+            let errors = check_source("fn main() { let x: f64 = 9.0; let y: f64 = x.sqrt(); }");
+            assert!(unit_errors(&errors).is_empty(), "{errors:#?}");
+            assert!(
+                !errors
+                    .iter()
+                    .any(|e| matches!(&e.error, TypeError::UnsupportedConstruct { .. })),
+                "unannotated `.sqrt()` must not be refused: {errors:#?}"
+            );
+        }
+
+        #[test]
+        fn identity_shaped_methods_still_preserve_the_unit() {
+            // `.abs()`, `.floor()`, `.ceil()`, `.round()`, `.trunc()`,
+            // `.fract()` genuinely preserve dimension (the numeric value
+            // changes, the unit it is expressed in does not) and must stay
+            // untouched by the sqrt/cbrt/powi/powf refusal.
+            let errors = check_source(
+                "fn main() { \
+                    let d: f64<m> = -3.7; \
+                    let a: f64<m> = d.abs(); \
+                    let b: f64<m> = d.floor(); \
+                    let c: f64<m> = d.ceil(); \
+                    let e: f64<m> = d.round(); \
+                    let f: f64<m> = d.trunc(); \
+                    let g: f64<m> = d.fract(); \
+                 }",
+            );
+            assert!(unit_errors(&errors).is_empty(), "{errors:#?}");
+            assert!(
+                !errors
+                    .iter()
+                    .any(|e| matches!(&e.error, TypeError::UnsupportedConstruct { .. })),
+                "identity-shaped methods must not be refused: {errors:#?}"
+            );
+        }
+    }
 }

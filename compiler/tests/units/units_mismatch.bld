@@ -1,0 +1,12 @@
+// Unit-annotated numeric types fixture (experimental, W6 checker slice one).
+//
+// A deliberately mismatched-dimension add: `m` and `s` cannot be added.
+// Used to prove the check receipt surfaces `UnitOperationMismatch` as an
+// ordinary `diagnostics` entry (no receipt schema change).
+
+fn main() ~ Console {
+    let d: f64<m> = 3.0;
+    let t: f64<s> = 1.0;
+    let x = d + t;
+    println!("{}", x);
+}

@@ -376,6 +376,116 @@ mod types {
 }
 
 // =============================================================================
+// UNIT-ANNOTATED FLOAT TYPES: f64<m/s> (experimental, W6 checker slice one)
+// =============================================================================
+
+mod unit_annotated_types {
+    use super::*;
+
+    /// Parse `fn f() -> <TYPE> { 0.0 }` and return the parsed return type.
+    /// Panics if the source does not parse or has no return type.
+    fn return_type_of(ty_src: &str) -> Type {
+        let src = format!("fn f() -> {ty_src} {{ 0.0 }}");
+        let module = parse(&src).expect("source must parse");
+        let func = match &module.items[0].kind {
+            ItemKind::Function(f) => f,
+            other => panic!("expected function item, got {other:?}"),
+        };
+        *func
+            .sig
+            .return_ty
+            .clone()
+            .expect("function must have a return type")
+    }
+
+    #[test]
+    fn simple_velocity_parses_to_with_unit() {
+        let ty = return_type_of("f64<m/s>");
+        match ty.kind {
+            TypeKind::WithUnit {
+                base, unit_text, ..
+            } => {
+                assert!(matches!(base.kind, TypeKind::Path(_)));
+                assert_eq!(unit_text.as_ref(), "m/s");
+            }
+            other => panic!("expected WithUnit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn composite_force_parses_with_expected_dimension() {
+        use buildlang::units::{BaseDimension, Dimension};
+        let ty = return_type_of("f64<kg*m/s^2>");
+        match ty.kind {
+            TypeKind::WithUnit { dim, .. } => {
+                let expected = Dimension::base(BaseDimension::Mass)
+                    .multiply(&Dimension::base(BaseDimension::Length))
+                    .divide(&Dimension::base(BaseDimension::Time).powi(2));
+                assert_eq!(dim, expected);
+                assert_eq!(dim.to_canonical_string(), "m*kg/s^2");
+            }
+            other => panic!("expected WithUnit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dimensionless_literal_one_parses() {
+        use buildlang::units::Dimension;
+        let ty = return_type_of("f64<1>");
+        match ty.kind {
+            TypeKind::WithUnit { dim, .. } => assert_eq!(dim, Dimension::DIMENSIONLESS),
+            other => panic!("expected WithUnit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn f32_head_parses() {
+        let ty = return_type_of("f32<J>");
+        assert!(matches!(ty.kind, TypeKind::WithUnit { .. }));
+    }
+
+    #[test]
+    fn empty_annotation_is_parse_error() {
+        assert!(fails("fn f() -> f64<> { 0.0 }"));
+    }
+
+    #[test]
+    fn two_factors_with_no_operator_is_parse_error() {
+        assert!(fails("fn f() -> f64<m s> { 0.0 }"));
+    }
+
+    #[test]
+    fn unknown_unit_is_parse_error() {
+        assert!(fails("fn f() -> f64<zebra> { 0.0 }"));
+    }
+
+    #[test]
+    fn nested_generic_closes_via_shr_split() {
+        // `Vec<f64<m>>` exercises the `>>` downgrade-in-place trick: the
+        // inner `f64<m>` claims the first half, the outer `Vec<...>` claims
+        // the second.
+        assert!(parses("fn f(v: Vec<f64<m>>) { }"));
+    }
+
+    #[test]
+    fn plain_f64_annotation_is_untouched() {
+        // A bare `f64` (no `<`) must still parse as an ordinary path type,
+        // not attempt unit interception.
+        let ty = return_type_of("f64");
+        assert!(matches!(ty.kind, TypeKind::Path(_)));
+    }
+
+    #[test]
+    fn comparison_in_expression_position_still_parses() {
+        // `parse_path_in_expr` never takes generics (the existing guard
+        // that keeps `f64 < x` from being read as `f64<x>` in expression
+        // position); the unit-annotation interception lives only in
+        // `parse_type_primary`, so this is unaffected.
+        assert!(parses("fn f() { f64 < x; }"));
+    }
+}
+
+// =============================================================================
 // PATTERN TESTS
 // =============================================================================
 
