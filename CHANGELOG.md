@@ -10,6 +10,32 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- **Executed Monte Carlo intervals with a witnessed denominator**: `monte_carlo`
+  gains a two-arm `DECLARED | EXECUTED` status. Under the new `--mc-executed`
+  flag (opt-in; requires the full `--mc-*` declaration and forces `--columns`
+  to 3), the kernel prints a three-column row per post-burn-in step
+  (`<invariant_scalar> <successes> <trials>`), and `receipt verify`
+  RE-DERIVES the Wilson or normal-approx-95 interval from those raw
+  sufficient-statistic columns, entirely in verifier-owned code, at two
+  stages: Stage A over the sealed series before any re-run (a
+  tampered-and-resealed interval is a pure data contradiction, rejectable
+  with no C compiler), and Stage B over the re-run series (a new failure
+  class, `MC_INTERVAL_DRIFT`, for a receipt that stays internally coherent
+  while no longer describing the run it names). The declared sample count
+  becomes a WITNESSED denominator: the final row's `trials` must equal
+  `monte_carlo.samples`. Coherence is checked as a cumulative Bernoulli
+  count (integers below 2^53, `trials` incrementing by exactly 1, `successes`
+  non-decreasing in `{0, 1}`, `successes <= trials`). An EXECUTED block adds
+  three `not_claimed` entries -- `sample_independence`, `interval_coverage`,
+  `estimator_semantics` -- present if and only if the block is EXECUTED:
+  EXECUTED hardens the interval arithmetic and the denominator, never the
+  estimator's semantics or independence. Backward compatible: `DECLARED`
+  receipts stay valid forever, the five new fields are `Option` with
+  `skip_serializing_if`, and a receipt sealed before this slice re-serializes
+  to its exact bytes (pinned by test). New kernel pair
+  `examples/mc_pi_rejection_executed.bld` /
+  `examples/mc_pi_rejection_executed_broken.bld`; corpus 29/29; self-test
+  10/10; full suite 1,644 passed, 0 failed.
 - **Split-frontier drop flags (memory pillar increment 5, opt-in)**: behind the
   same `BUILDLANG_EXPERIMENTAL_FREE` flag (default off, flag-off output
   byte-identical, verified mechanically), the C backend now reclaims heap

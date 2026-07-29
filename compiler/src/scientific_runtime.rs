@@ -140,6 +140,49 @@ pub const CROSS_BACKEND_INVARIANT: &str = "cross_backend_columns_agree";
 /// tolerance it is absolute: cross-backend kernels must emit O(1) values.
 pub const CROSS_BACKEND_TOLERANCE: f64 = 1e-5;
 
+/// Executed Monte Carlo estimator vocabulary, v1: the mean of Bernoulli
+/// indicators. DECLARED blocks keep free text forever (the shipped corpus
+/// uses `mean`); this vocabulary gates EXECUTED blocks only.
+pub const MC_EXECUTED_ESTIMATOR_PROPORTION: &str = "proportion";
+
+/// Executed interval method: normal approximation. Degenerate at a boundary
+/// proportion (successes == 0 or successes == trials): refused at emit and
+/// at verify, pointing at `wilson-95`.
+pub const MC_INTERVAL_NORMAL_APPROX_95: &str = "normal-approx-95";
+
+/// Executed interval method: Wilson score. Well-defined at the boundary
+/// proportions, asymmetric by construction.
+pub const MC_INTERVAL_WILSON_95: &str = "wilson-95";
+
+/// NOT executable in v1 (needs an inverse incomplete beta with no in-tree
+/// oracle). Named here only so refusal messages can point at it by
+/// constant rather than a bare string; never accepted by
+/// `compute_mc_executed`.
+pub const MC_INTERVAL_CLOPPER_PEARSON_95: &str = "clopper-pearson-95";
+
+/// z for a two-sided 95% normal/Wilson interval: the double nearest the
+/// 0.975 standard-normal quantile. Shared by both executable methods.
+pub const MC_INTERVAL_Z_95: f64 = 1.959963984540054;
+
+/// Absolute float tolerance for the emit/verify interval recompute
+/// (`estimate`, `interval_low`, `interval_high`, both stages). The
+/// arithmetic runs on identical integer inputs through one fixed Rust
+/// implementation at emit and verify, so agreement should be exact in
+/// practice; this is headroom against a future compiler reassociating
+/// verifier-side float ops, not load-bearing looseness. Values are O(1)
+/// proportions, so absolute is safe.
+pub const MC_RECOMPUTE_TOLERANCE: f64 = 1e-12;
+
+/// The three `not_claimed` entries an EXECUTED monte_carlo block adds,
+/// present iff `status == "EXECUTED"` (the `NOT_PROVES_OPTIMALITY`/
+/// `optimality` pairing idiom). EXECUTED hardens the interval arithmetic
+/// and the denominator; it cannot and does not claim these.
+pub const MC_EXECUTED_NOT_CLAIMED: &[&str] = &[
+    "sample_independence",
+    "interval_coverage",
+    "estimator_semantics",
+];
+
 /// Provenance reference to the Telos pass-0009 research probe (reference only;
 /// never matched byte-wise, per the determinism decision in the design).
 pub const RESEARCH_SOURCE_HASH: &str =
@@ -277,7 +320,11 @@ pub struct ScientificNumericalMethod {
 /// the estimator's denominator, id, and interval method were stated up
 /// front, and that the run they describe re-derives exactly under the sealed
 /// seed. The weaker the mode's promise, the more the receipt must carry.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+///
+/// No longer `Eq` (only `PartialEq`): the five EXECUTED fields below add
+/// `f64`, which has no total order (`Eq` cannot be derived over it), the
+/// same `ScientificBudget` precedent (its wall fields dropped `Eq` first).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ScientificMonteCarlo {
     /// The estimator's id (e.g. `mean`), author-declared, non-empty.
     pub estimator: String,
@@ -288,8 +335,27 @@ pub struct ScientificMonteCarlo {
     /// claim is the interval, never the point, so a result whose interval
     /// method is undeclared is refused.
     pub interval_method: String,
-    /// `DECLARED` (v0): the facts were stated, not independently executed.
+    /// `DECLARED` | `EXECUTED`. DECLARED (v0): the facts were stated, not
+    /// independently executed. EXECUTED: the verifier RE-DERIVES the interval
+    /// from raw sufficient-statistic columns the kernel prints, at two
+    /// stages (see `compute_mc_executed`).
     pub status: String,
+    /// p_hat = successes_final / trials_final. Present IFF `status ==
+    /// "EXECUTED"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate: Option<f64>,
+    /// Lower bound by the named method. Present IFF `status == "EXECUTED"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_low: Option<f64>,
+    /// Upper bound by the named method. Present IFF `status == "EXECUTED"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_high: Option<f64>,
+    /// trials_final; MUST equal `samples`, the witnessed denominator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n_effective: Option<u64>,
+    /// successes_final.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub successes: Option<u64>,
 }
 
 /// The budgeted-search admission block: a heuristic result without its
@@ -902,21 +968,28 @@ pub fn is_known_invariant(name: &str) -> bool {
 }
 
 /// The column-count contract for an invariant: the `relation` invariant reads
-/// ACROSS a row's columns and needs at least two; every single-scalar invariant
-/// reads one value per step and requires exactly one column. Emit enforces this
-/// before compiling; verify RE-CHECKS it (FIELD_CONTRACT_VIOLATION) so a
-/// resealed receipt cannot present a column structure the invariant's contract
-/// forbids, keeping the structural contract symmetric across emit and verify
-/// like every other sealed field.
-pub fn column_count_matches_invariant(name: &str, column_count: usize) -> bool {
+/// ACROSS a row's columns and needs at least two; an EXECUTED monte_carlo
+/// receipt requires exactly 3 columns (the invariant scalar plus the
+/// witnessed successes/trials counters) paired with a single-scalar invariant
+/// name, never with `relation`/`cross-backend` (their columns already mean
+/// something else); every other single-scalar invariant requires exactly 1.
+/// Emit enforces this before compiling; verify RE-CHECKS it
+/// (FIELD_CONTRACT_VIOLATION) so a resealed receipt cannot present a column
+/// structure the invariant's contract forbids, keeping the structural
+/// contract symmetric across emit and verify like every other sealed field.
+pub fn column_count_matches_invariant(name: &str, column_count: usize, mc_executed: bool) -> bool {
     if name == RELATION_INVARIANT {
-        column_count >= 2
+        !mc_executed && column_count >= 2
     } else if name == CROSS_BACKEND_INVARIANT {
         // The cross-backend row is exactly two columns (the C anchor and the
         // secondary lane): unlike the open-ended relation family member, the
         // invariant itself defines the column structure, so no other count
-        // is expressible.
-        column_count == 2
+        // is expressible. Never paired with an EXECUTED mc block: the
+        // columns already mean something else, and cross-backend refuses
+        // Random anyway, which mc requires.
+        !mc_executed && column_count == 2
+    } else if mc_executed {
+        column_count == 3
     } else {
         column_count == 1
     }
@@ -1057,11 +1130,167 @@ pub fn evaluate_measurement(
                 effective_len: rows,
             }
         }
+        _ if column_count == 3 => {
+            // An EXECUTED monte_carlo receipt: column 0 is the declared
+            // single-scalar invariant, columns 1-2 are the witnessed
+            // successes/trials counters `compute_mc_executed` checks
+            // separately. De-interleave and evaluate the invariant over
+            // column 0 only; rows are the effective observation count,
+            // mirroring the relation arm above. Ragged (not a multiple of
+            // 3) yields zero rows, same "cannot witness" treatment
+            // `relation_columns_agree` gives a ragged relation series.
+            let ragged = series.is_empty() || series.len() % 3 != 0;
+            let col0: Vec<f64> = if ragged {
+                Vec::new()
+            } else {
+                series.iter().step_by(3).copied().collect()
+            };
+            let rows = col0.len();
+            MeasurementVerdict {
+                observed: evaluate_invariant(name, &col0, tol),
+                effective_len: rows,
+            }
+        }
         _ => MeasurementVerdict {
             observed: evaluate_invariant(name, series, tol),
             effective_len: series.len(),
         },
     }
+}
+
+/// The recomputed EXECUTED monte_carlo fields, owned by the caller to
+/// compare against the sealed ones (emit: seal them; verify: compare).
+#[derive(Clone, Debug, PartialEq)]
+pub struct McExecutedComputed {
+    pub estimate: f64,
+    pub interval_low: f64,
+    pub interval_high: f64,
+    pub n_effective: u64,
+    pub successes: u64,
+}
+
+/// Recompute the EXECUTED monte_carlo fields from a captured three-column
+/// series (`<invariant_scalar> <successes> <trials>` per row), the
+/// declared denominator, and the named interval method. PURE and
+/// unit-tested; called from emit (fail closed before sealing), verify
+/// Stage A (over the sealed series, before any re-run), and verify Stage B
+/// (over the re-run series). Never trusts anything but the raw columns.
+///
+/// Coherence checks, in order (Decision 1, design doc): every successes/
+/// trials value is integer-valued (`fract() == 0`) and below 2^53; trials
+/// increments by exactly 1 across consecutive rows (the first row's
+/// absolute value is free, the burn-in edge); successes is non-decreasing
+/// with increments in {0, 1}; successes <= trials on every row; the final
+/// row's trials equals `samples` (the witnessed-denominator equality).
+/// `interval_method` must be one of the two executable methods
+/// (`MC_INTERVAL_NORMAL_APPROX_95`, `MC_INTERVAL_WILSON_95`); any other
+/// name (including `clopper-pearson-95`) is refused here, the single
+/// source of truth for the executable vocabulary. `normal-approx-95` is
+/// additionally refused at a boundary proportion (successes_final == 0 or
+/// == trials_final): a zero-width interval there overclaims precision;
+/// the message points at `wilson-95`.
+pub fn compute_mc_executed(
+    series: &[f64],
+    column_count: usize,
+    samples: u64,
+    interval_method: &str,
+) -> Result<McExecutedComputed, String> {
+    const MAX_EXACT_INTEGER: f64 = 9007199254740992.0; // 2^53
+
+    if column_count != 3 {
+        return Err(format!(
+            "column_count {column_count} is not 3: an EXECUTED monte_carlo receipt requires exactly three columns per row"
+        ));
+    }
+    if series.is_empty() || series.len() % 3 != 0 {
+        return Err(format!(
+            "series length {} is not a positive multiple of 3: ragged rows cannot witness a Bernoulli count",
+            series.len()
+        ));
+    }
+    let rows = series.len() / 3;
+
+    let mut prev_trials: Option<f64> = None;
+    let mut prev_successes: Option<f64> = None;
+    for k in 0..rows {
+        let successes_k = series[k * 3 + 1];
+        let trials_k = series[k * 3 + 2];
+        for (label, value) in [("successes", successes_k), ("trials", trials_k)] {
+            if value.fract() != 0.0 || !value.is_finite() || value.abs() >= MAX_EXACT_INTEGER {
+                return Err(format!(
+                    "row {k}: {label} = {value} is not an exact non-negative integer below 2^53"
+                ));
+            }
+        }
+        if let Some(prev) = prev_trials {
+            if trials_k != prev + 1.0 {
+                return Err(format!(
+                    "row {k}: trials {trials_k} does not follow row {}'s trials {prev} by exactly 1",
+                    k - 1
+                ));
+            }
+        }
+        if let Some(prev) = prev_successes {
+            let delta = successes_k - prev;
+            if delta != 0.0 && delta != 1.0 {
+                return Err(format!(
+                    "row {k}: successes {successes_k} does not follow row {}'s successes {prev} by 0 or 1",
+                    k - 1
+                ));
+            }
+        }
+        if successes_k > trials_k {
+            return Err(format!(
+                "row {k}: successes {successes_k} exceeds trials {trials_k}"
+            ));
+        }
+        prev_trials = Some(trials_k);
+        prev_successes = Some(successes_k);
+    }
+
+    let trials_final = prev_trials.expect("rows > 0, checked above") as u64;
+    let successes_final = prev_successes.expect("rows > 0, checked above") as u64;
+    if trials_final != samples {
+        return Err(format!(
+            "witnessed final trials {trials_final} does not equal the declared samples {samples}: the denominator is not witnessed"
+        ));
+    }
+
+    let n = trials_final as f64;
+    let p_hat = successes_final as f64 / n;
+    let z = MC_INTERVAL_Z_95;
+
+    let (interval_low, interval_high) = match interval_method {
+        MC_INTERVAL_NORMAL_APPROX_95 => {
+            if successes_final == 0 || successes_final == trials_final {
+                return Err(format!(
+                    "normal-approx-95 is degenerate at the boundary proportion (successes = {successes_final} of {trials_final}); use wilson-95"
+                ));
+            }
+            let half_width = z * (p_hat * (1.0 - p_hat) / n).sqrt();
+            (p_hat - half_width, p_hat + half_width)
+        }
+        MC_INTERVAL_WILSON_95 => {
+            let z2 = z * z;
+            let denom = 1.0 + z2 / n;
+            let center = (p_hat + z2 / (2.0 * n)) / denom;
+            let margin = (z / denom) * (p_hat * (1.0 - p_hat) / n + z2 / (4.0 * n * n)).sqrt();
+            (center - margin, center + margin)
+        }
+        other => {
+            return Err(format!(
+                "interval_method `{other}` is not in the EXECUTED executable vocabulary (v1: normal-approx-95, wilson-95); clopper-pearson-95 needs a verified inverse incomplete beta and is not executable"
+            ));
+        }
+    };
+
+    Ok(McExecutedComputed {
+        estimate: p_hat,
+        interval_low,
+        interval_high,
+        n_effective: trials_final,
+        successes: successes_final,
+    })
 }
 
 /// Inputs threaded from `cmd_run` into the receipt builder.
@@ -1215,6 +1444,15 @@ pub fn build_scientific_runtime_receipt(
     if budget.is_some() {
         labels.push("NOT_PROVES_OPTIMALITY".to_string());
         not_claimed.push("optimality".to_string());
+    }
+    // The EXECUTED monte_carlo boundary: hardening the interval arithmetic
+    // and the denominator cannot and does not harden sample independence,
+    // interval coverage, or the estimator's semantics. Sealed machine-
+    // readably (the NOT_PROVES_OPTIMALITY/optimality pairing idiom).
+    if let Some(mc) = &monte_carlo {
+        if mc.status == "EXECUTED" {
+            not_claimed.extend(MC_EXECUTED_NOT_CLAIMED.iter().map(|s| s.to_string()));
+        }
     }
 
     // The typed-effect system doing receipt work: witnessed absences and the
@@ -1573,6 +1811,51 @@ pub fn build_self_test_cases(
         });
     }
 
+    // 10. FIELD_CONTRACT_VIOLATION (MC executed interval does not recompute):
+    //    nudge the sealed interval_high on an EXECUTED monte_carlo block (the
+    //    receipt's own block if it already carries one -- e.g. a receipt
+    //    emitted from mc_pi_rejection_executed.bld -- else a syntactically
+    //    valid one is added, mirroring case 9's cross_backend fallback).
+    //    Either way the tamper reaches Stage A's FIELD_CONTRACT_VIOLATION arm:
+    //    whichever stage-A gate fires first (seed pairing, field presence, or
+    //    the interval-mismatch check this case targets) on an arbitrary
+    //    pristine input, the reported class is FIELD_CONTRACT_VIOLATION
+    //    either way, the same robustness case 7's zero-denominator tamper
+    //    already relies on.
+    {
+        let mut v = receipt_json.clone();
+        match v.get_mut("monte_carlo") {
+            Some(mc)
+                if !mc.is_null()
+                    && mc.get("status").and_then(|s| s.as_str()) == Some("EXECUTED") =>
+            {
+                let bumped = mc["interval_high"].as_f64().unwrap_or(0.5) + 0.25;
+                mc["interval_high"] = serde_json::Value::from(bumped);
+            }
+            _ => {
+                v["monte_carlo"] = serde_json::json!({
+                    "estimator": "proportion",
+                    "samples": 4u64,
+                    "interval_method": "wilson-95",
+                    "status": "EXECUTED",
+                    "estimate": 0.5,
+                    "interval_low": 0.15,
+                    "interval_high": 0.85,
+                    "n_effective": 4u64,
+                    "successes": 2u64,
+                });
+            }
+        }
+        let v = reseal_json(&v)?;
+        cases.push(SelfTestCase {
+            label: "EXECUTED monte_carlo interval_high nudged against its Stage A recompute"
+                .to_string(),
+            tampered: v,
+            expected_class: "FIELD_CONTRACT_VIOLATION".to_string(),
+            resealed: true,
+        });
+    }
+
     Ok(cases)
 }
 
@@ -1688,6 +1971,13 @@ pub struct ScientificCorpusMember {
     pub mc_samples: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mc_interval: Option<String>,
+    /// Whether to emit under `--mc-executed`, passed through by the runner.
+    /// No `skip_serializing_if` (the `negative_fixture` precedent): this
+    /// manifest is hand-authored input, never re-serialized from the
+    /// struct, so byte-stability does not apply here the way it does to a
+    /// sealed receipt.
+    #[serde(default)]
+    pub mc_executed: bool,
     /// The member's budgeted-search declaration (`--budget-steps` /
     /// `--budget-consumed`), passed through by the runner. The same
     /// all-or-nothing contract applies: a partial declaration is refused at
@@ -2159,14 +2449,23 @@ pub fn evaluate_scientific_runtime_receipt(
     }
 
     // Re-check the column-count contract emit enforced (relation needs >= 2
-    // columns, every single-scalar invariant needs exactly 1), so a resealed
-    // receipt cannot present a column structure the invariant forbids. The
-    // field is inert for the single-scalar invariants' verdict, but leaving the
-    // contract unenforced at verify would let emit and verify disagree on what
-    // a well-formed receipt is.
-    if !column_count_matches_invariant(&receipt.invariant.name, receipt.measurement.column_count) {
+    // columns, an EXECUTED monte_carlo receipt needs exactly 3, every other
+    // single-scalar invariant needs exactly 1), so a resealed receipt cannot
+    // present a column structure the invariant forbids. The field is inert
+    // for the single-scalar invariants' verdict, but leaving the contract
+    // unenforced at verify would let emit and verify disagree on what a
+    // well-formed receipt is.
+    let mc_executed_for_columns = receipt
+        .monte_carlo
+        .as_ref()
+        .is_some_and(|mc| mc.status == "EXECUTED");
+    if !column_count_matches_invariant(
+        &receipt.invariant.name,
+        receipt.measurement.column_count,
+        mc_executed_for_columns,
+    ) {
         eprintln!(
-            "Error: column_count {} violates the contract for invariant `{}` (relation requires >= 2, every single-scalar invariant requires exactly 1)",
+            "Error: column_count {} violates the contract for invariant `{}` (relation requires >= 2, an EXECUTED monte_carlo receipt requires exactly 3, every other single-scalar invariant requires exactly 1)",
             receipt.measurement.column_count, receipt.invariant.name
         );
         return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
@@ -2319,7 +2618,11 @@ pub fn evaluate_scientific_runtime_receipt(
     // its SHAPE is not negotiable: it rides only on a seeded Random program
     // (an MC claim over a stream that cannot re-derive is unpriceable), its
     // denominator is non-zero, its estimator and interval method are named,
-    // and its status is the one thing v0 can honestly say (DECLARED).
+    // and its status is one of the two things v0 can honestly say (DECLARED
+    // or EXECUTED). Stage A (this block): re-derived over the SEALED series,
+    // before any re-run, so a tampered-and-resealed interval is a pure data
+    // contradiction. Stage B (after the re-run, below) re-derives the same
+    // fields over the re-run series.
     if let Some(mc) = &receipt.monte_carlo {
         if !rederived_uses_random || receipt.seed_value.is_none() {
             eprintln!(
@@ -2339,12 +2642,90 @@ pub fn evaluate_scientific_runtime_receipt(
             );
             return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
         }
-        if mc.status != "DECLARED" {
-            eprintln!(
-                "Error: monte_carlo.status `{}` is not expressible: v0 declares the facts, it does not execute them (the only valid status is DECLARED)",
-                mc.status
-            );
-            return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+        let executed_fields_present = mc.estimate.is_some()
+            || mc.interval_low.is_some()
+            || mc.interval_high.is_some()
+            || mc.n_effective.is_some()
+            || mc.successes.is_some();
+        match mc.status.as_str() {
+            "DECLARED" => {
+                if executed_fields_present {
+                    eprintln!(
+                        "Error: monte_carlo.status is DECLARED but an executed field is present: a DECLARED block never carries estimate/interval_low/interval_high/n_effective/successes"
+                    );
+                    return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+                }
+            }
+            "EXECUTED" => {
+                let (
+                    Some(estimate),
+                    Some(interval_low),
+                    Some(interval_high),
+                    Some(n_effective),
+                    Some(successes),
+                ) = (
+                    mc.estimate,
+                    mc.interval_low,
+                    mc.interval_high,
+                    mc.n_effective,
+                    mc.successes,
+                )
+                else {
+                    eprintln!(
+                        "Error: monte_carlo.status is EXECUTED but not all five executed fields (estimate, interval_low, interval_high, n_effective, successes) are present"
+                    );
+                    return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+                };
+                if mc.estimator != MC_EXECUTED_ESTIMATOR_PROPORTION {
+                    eprintln!(
+                        "Error: EXECUTED monte_carlo estimator `{}` is not in the executable vocabulary (v1: proportion)",
+                        mc.estimator
+                    );
+                    return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+                }
+                let computed = compute_mc_executed(
+                    &receipt.measurement.observed_values,
+                    receipt.measurement.column_count,
+                    mc.samples,
+                    &mc.interval_method,
+                )
+                .map_err(|reason| {
+                    eprintln!(
+                        "Error: EXECUTED monte_carlo Stage A (sealed series, no re-run) recompute failed: {reason}"
+                    );
+                    verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1)
+                })?;
+                if computed.n_effective != n_effective || n_effective != mc.samples {
+                    eprintln!(
+                        "Error: sealed n_effective {n_effective} does not match the Stage A witnessed denominator {} (declared samples {})",
+                        computed.n_effective, mc.samples
+                    );
+                    return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+                }
+                if computed.successes != successes {
+                    eprintln!(
+                        "Error: sealed successes {successes} does not match the Stage A recompute {}",
+                        computed.successes
+                    );
+                    return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+                }
+                if (computed.estimate - estimate).abs() > MC_RECOMPUTE_TOLERANCE
+                    || (computed.interval_low - interval_low).abs() > MC_RECOMPUTE_TOLERANCE
+                    || (computed.interval_high - interval_high).abs() > MC_RECOMPUTE_TOLERANCE
+                {
+                    eprintln!(
+                        "Error: sealed EXECUTED interval fields do not match the Stage A recompute over the sealed series (estimate {estimate} vs {}, low {interval_low} vs {}, high {interval_high} vs {})",
+                        computed.estimate, computed.interval_low, computed.interval_high
+                    );
+                    return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+                }
+            }
+            other => {
+                eprintln!(
+                    "Error: monte_carlo.status `{other}` is not expressible (only DECLARED or EXECUTED)"
+                );
+                return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+            }
         }
     }
     // The budgeted-search admission contracts. Deterministic: unlike
@@ -2503,6 +2884,27 @@ pub fn evaluate_scientific_runtime_receipt(
             "Error: not_claimed `optimality` entry present={} but budget block present={}: the boundary entry must pair exactly with the block",
             has_optimality_boundary,
             receipt.budget.is_some()
+        );
+        return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+    }
+    // The EXECUTED monte_carlo not_claimed triad: sample_independence,
+    // interval_coverage, and estimator_semantics must pair exactly (all
+    // three or none) with an EXECUTED monte_carlo block.
+    let mc_executed = receipt
+        .monte_carlo
+        .as_ref()
+        .is_some_and(|mc| mc.status == "EXECUTED");
+    let has_all_mc_not_claimed = MC_EXECUTED_NOT_CLAIMED
+        .iter()
+        .all(|c| receipt.not_claimed.iter().any(|x| x == c));
+    let has_any_mc_not_claimed = MC_EXECUTED_NOT_CLAIMED
+        .iter()
+        .any(|c| receipt.not_claimed.iter().any(|x| x == c));
+    if mc_executed != has_all_mc_not_claimed || (has_any_mc_not_claimed && !has_all_mc_not_claimed)
+    {
+        eprintln!(
+            "Error: not_claimed `sample_independence`/`interval_coverage`/`estimator_semantics` present={} but monte_carlo EXECUTED={}: the boundary entries must pair exactly (all three or none) with an EXECUTED block",
+            has_any_mc_not_claimed, mc_executed
         );
         return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
     }
@@ -2736,6 +3138,42 @@ pub fn evaluate_scientific_runtime_receipt(
             verdict_series.len()
         );
         return Err(verify_failure_class(json, "MEASUREMENT_COUNT_DRIFT", 1));
+    }
+
+    // Stage B: an EXECUTED monte_carlo block's sealed fields must ALSO
+    // re-derive over the RE-RUN series (not just the sealed one, Stage A
+    // above). Stage A alone would let a receipt stay internally coherent
+    // while no longer describing the run it names; Stage B catches that.
+    if let Some(mc) = &receipt.monte_carlo {
+        if mc.status == "EXECUTED" {
+            // Stage A already required all five fields present; unwrap is safe.
+            let estimate = mc.estimate.expect("Stage A validated presence");
+            let interval_low = mc.interval_low.expect("Stage A validated presence");
+            let interval_high = mc.interval_high.expect("Stage A validated presence");
+            let computed = compute_mc_executed(
+                &verdict_series,
+                receipt.measurement.column_count,
+                mc.samples,
+                &mc.interval_method,
+            )
+            .map_err(|reason| {
+                eprintln!(
+                    "Error: EXECUTED monte_carlo Stage B (re-run series) recompute failed: {reason}"
+                );
+                verify_failure_class(json, "MC_INTERVAL_DRIFT", 1)
+            })?;
+            if computed.n_effective != mc.samples
+                || computed.successes != mc.successes.expect("Stage A validated presence")
+                || (computed.estimate - estimate).abs() > MC_RECOMPUTE_TOLERANCE
+                || (computed.interval_low - interval_low).abs() > MC_RECOMPUTE_TOLERANCE
+                || (computed.interval_high - interval_high).abs() > MC_RECOMPUTE_TOLERANCE
+            {
+                eprintln!(
+                    "Error: EXECUTED monte_carlo interval drift: sealed fields do not match the Stage B recompute over the re-run series"
+                );
+                return Err(verify_failure_class(json, "MC_INTERVAL_DRIFT", 1));
+            }
+        }
     }
 
     // (4) Recompute the verdict and compare against the stored one.
@@ -3175,6 +3613,10 @@ fn digest_is_well_formed(digest: &ScientificDigest) -> bool {
 /// - `MEASUREMENT_COUNT_DRIFT`, `INVARIANT_STATUS_DRIFT`,
 ///   `VIOLATION_COUNT_DRIFT`, `RECEIPT_STATUS_DRIFT`: the re-run disagrees with
 ///   the stored verdict facts.
+/// - `MC_INTERVAL_DRIFT`: an EXECUTED monte_carlo receipt's sealed interval
+///   fields do not match the Stage B recompute over the re-run series
+///   (Stage A already passed over the sealed series; this catches a
+///   receipt that stopped describing the run it names).
 /// - `SEAL_MISMATCH`: the stored receipt body does not re-seal.
 /// - `INVARIANT_NOT_HELD` (exit 3): the receipt is FAITHFUL but records
 ///   FAIL_UNEXPECTED / UNVERIFIABLE (emitted at the verdict tail, not here).
@@ -3457,6 +3899,7 @@ mod tests {
                 "MALFORMED",
                 "FIELD_CONTRACT_VIOLATION",
                 "INVARIANT_UNSUPPORTED",
+                "FIELD_CONTRACT_VIOLATION",
                 "FIELD_CONTRACT_VIOLATION",
                 "FIELD_CONTRACT_VIOLATION",
                 "FIELD_CONTRACT_VIOLATION",
@@ -4220,6 +4663,201 @@ mod tests {
             1,
         );
         assert_eq!(mono.effective_len, 4);
+    }
+
+    #[test]
+    fn evaluate_measurement_deinterleaves_column_zero_for_three_columns() {
+        // Columns 1-2 would fail non_negative (negative values), but column 0
+        // (the invariant scalar) is all non-negative, so the verdict must
+        // read column 0 only, ignoring the witnessed counters beside it.
+        let series = [
+            1.0, -5.0, -5.0, // row 0: invariant 1.0, successes -5, trials -5
+            2.0, -6.0, -6.0, // row 1
+        ];
+        let verdict =
+            evaluate_measurement(NON_NEGATIVE_INVARIANT, &series, NON_NEGATIVE_TOLERANCE, 3);
+        assert_eq!(verdict.effective_len, 2, "row count, not token count");
+        assert_eq!(
+            verdict.observed.violation_count, 0,
+            "column 0 alone is non-negative; columns 1-2 must be ignored by the invariant check"
+        );
+    }
+
+    #[test]
+    fn evaluate_measurement_three_column_ragged_series_cannot_witness() {
+        // A series length not a multiple of 3 cannot form complete rows,
+        // mirroring the existing ragged-relation test.
+        let verdict = evaluate_measurement(
+            NON_NEGATIVE_INVARIANT,
+            &[1.0, 2.0, 3.0, 4.0],
+            NON_NEGATIVE_TOLERANCE,
+            3,
+        );
+        assert_eq!(verdict.effective_len, 0);
+    }
+
+    #[test]
+    fn column_count_matches_invariant_refuses_mc_executed_with_relation() {
+        // An EXECUTED mc block can never pair with relation/cross-backend:
+        // their columns already mean something else.
+        assert!(!column_count_matches_invariant(RELATION_INVARIANT, 3, true));
+        assert!(!column_count_matches_invariant(
+            CROSS_BACKEND_INVARIANT,
+            3,
+            true
+        ));
+        assert!(column_count_matches_invariant(RELATION_INVARIANT, 3, false));
+        assert!(column_count_matches_invariant(
+            NON_NEGATIVE_INVARIANT,
+            3,
+            true
+        ));
+        assert!(!column_count_matches_invariant(
+            NON_NEGATIVE_INVARIANT,
+            3,
+            false
+        ));
+    }
+
+    #[test]
+    fn compute_mc_executed_recovers_a_coherent_wilson_series() {
+        // successes 1,1,2,2; trials 10,11,12,13 (each an increment of exactly
+        // 1); the invariant scalar column is arbitrary (0.0 throughout).
+        let series = [
+            0.0, 1.0, 10.0, //
+            0.0, 1.0, 11.0, //
+            0.0, 2.0, 12.0, //
+            0.0, 2.0, 13.0, //
+        ];
+        let result = compute_mc_executed(&series, 3, 13, MC_INTERVAL_WILSON_95);
+        let computed = result.expect("a coherent series must compute");
+        assert_eq!(computed.n_effective, 13);
+        assert_eq!(computed.successes, 2);
+        assert!((computed.estimate - 2.0 / 13.0).abs() < 1e-12);
+        assert!(computed.interval_low < computed.estimate);
+        assert!(computed.estimate < computed.interval_high);
+    }
+
+    #[test]
+    fn compute_mc_executed_rejects_before_any_rerun_on_bad_trials_step() {
+        // trials jumps by 2 between row 0 and row 1 (10 -> 12): a pure data
+        // contradiction the function catches with no re-run machinery at all
+        // (the function takes no compile/run inputs).
+        let series = [0.0, 1.0, 10.0, 0.0, 1.0, 12.0];
+        let err = compute_mc_executed(&series, 3, 12, MC_INTERVAL_WILSON_95)
+            .expect_err("a trials step of 2 must be rejected");
+        assert!(err.contains("row 1"), "error must name the row: {err}");
+        assert!(err.contains("trials"), "error must name the field: {err}");
+    }
+
+    #[test]
+    fn compute_mc_executed_rejects_successes_decrease() {
+        let series = [0.0, 2.0, 10.0, 0.0, 1.0, 11.0];
+        let err = compute_mc_executed(&series, 3, 11, MC_INTERVAL_WILSON_95)
+            .expect_err("a successes decrease must be rejected");
+        assert!(err.contains("row 1"), "error must name the row: {err}");
+        assert!(
+            err.contains("successes"),
+            "error must name the field: {err}"
+        );
+    }
+
+    #[test]
+    fn compute_mc_executed_rejects_successes_exceeding_trials() {
+        let series = [0.0, 5.0, 4.0];
+        let err = compute_mc_executed(&series, 3, 4, MC_INTERVAL_WILSON_95)
+            .expect_err("successes exceeding trials must be rejected");
+        assert!(err.contains("exceeds"), "error must name the reason: {err}");
+    }
+
+    #[test]
+    fn compute_mc_executed_rejects_non_integer_column() {
+        let series = [0.0, 1.5, 10.0];
+        let err = compute_mc_executed(&series, 3, 10, MC_INTERVAL_WILSON_95)
+            .expect_err("a non-integer successes value must be rejected");
+        assert!(
+            err.contains("integer"),
+            "error must name the integrality reason: {err}"
+        );
+    }
+
+    #[test]
+    fn compute_mc_executed_witnessed_denominator_must_equal_samples() {
+        // A coherent series whose final trials is 2000, but samples declares
+        // 1999: the denominator is not witnessed.
+        let series = [0.0, 1000.0, 2000.0];
+        let err = compute_mc_executed(&series, 3, 1999, MC_INTERVAL_WILSON_95)
+            .expect_err("a witnessed/declared denominator mismatch must be rejected");
+        assert!(
+            err.contains("2000"),
+            "error must name the witnessed trials: {err}"
+        );
+        assert!(
+            err.contains("1999"),
+            "error must name the declared samples: {err}"
+        );
+    }
+
+    #[test]
+    fn compute_mc_executed_rejects_ragged_series() {
+        let series = [0.0, 1.0, 10.0, 0.0];
+        let err = compute_mc_executed(&series, 3, 10, MC_INTERVAL_WILSON_95)
+            .expect_err("a series length not a multiple of 3 must be rejected");
+        assert!(err.contains("ragged"), "error must name the reason: {err}");
+    }
+
+    #[test]
+    fn compute_mc_executed_normal_approx_degenerate_at_zero_successes() {
+        let series = [0.0, 0.0, 10.0];
+        let err = compute_mc_executed(&series, 3, 10, MC_INTERVAL_NORMAL_APPROX_95)
+            .expect_err("zero successes must be rejected for normal-approx-95");
+        assert!(
+            err.contains("wilson-95"),
+            "error must point at the alternative: {err}"
+        );
+    }
+
+    #[test]
+    fn compute_mc_executed_normal_approx_degenerate_at_all_successes() {
+        let series = [0.0, 10.0, 10.0];
+        let err = compute_mc_executed(&series, 3, 10, MC_INTERVAL_NORMAL_APPROX_95)
+            .expect_err("all-successes must be rejected for normal-approx-95");
+        assert!(
+            err.contains("wilson-95"),
+            "error must point at the alternative: {err}"
+        );
+    }
+
+    #[test]
+    fn compute_mc_executed_rejects_clopper_pearson() {
+        let series = [0.0, 5.0, 10.0];
+        let err = compute_mc_executed(&series, 3, 10, MC_INTERVAL_CLOPPER_PEARSON_95)
+            .expect_err("clopper-pearson-95 is not executable in v1");
+        assert!(
+            err.contains("inverse incomplete beta"),
+            "error must name the reason: {err}"
+        );
+    }
+
+    #[test]
+    fn compute_mc_executed_wilson_matches_hand_computed_value() {
+        // successes = 3, trials = 10: p_hat = 0.3, z = 1.959963984540054.
+        // Hand-computed (independent transcription of the Wilson formula):
+        // z2 = 3.84145...; denom = 1 + z2/n; center = (p + z2/(2n)) / denom;
+        // margin = (z/denom) * sqrt(p*(1-p)/n + z2/(4n^2)).
+        let series = [0.0, 3.0, 10.0];
+        let computed = compute_mc_executed(&series, 3, 10, MC_INTERVAL_WILSON_95)
+            .expect("a coherent series must compute");
+        let z = MC_INTERVAL_Z_95;
+        let z2 = z * z;
+        let n = 10.0f64;
+        let p = 0.3f64;
+        let denom = 1.0 + z2 / n;
+        let center = (p + z2 / (2.0 * n)) / denom;
+        let margin = (z / denom) * (p * (1.0 - p) / n + z2 / (4.0 * n * n)).sqrt();
+        assert!((computed.interval_low - (center - margin)).abs() < 1e-9);
+        assert!((computed.interval_high - (center + margin)).abs() < 1e-9);
+        assert!((computed.estimate - 0.3).abs() < 1e-12);
     }
 
     #[test]
@@ -5718,6 +6356,11 @@ mod tests {
                 samples: 2000,
                 interval_method: "normal-approx-95".to_string(),
                 status: "DECLARED".to_string(),
+                estimate: None,
+                interval_low: None,
+                interval_high: None,
+                n_effective: None,
+                successes: None,
             }
         }
         fn run(
@@ -5764,6 +6407,25 @@ mod tests {
             Ok(()),
             "a complete MC declaration on a seeded Random run must verify"
         );
+        // BACKWARD COMPATIBILITY PIN: a DECLARED block's serialized JSON
+        // carries EXACTLY the four original keys, none of the five new
+        // EXECUTED fields (`skip_serializing_if = "Option::is_none"`
+        // working as intended). A receipt sealed before this slice, when
+        // re-parsed and re-serialized today, produces this exact shape, so
+        // its bytes and seal are unchanged.
+        let mc_keys: std::collections::BTreeSet<&str> = value["monte_carlo"]
+            .as_object()
+            .expect("monte_carlo is an object")
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        assert_eq!(
+            mc_keys,
+            ["estimator", "samples", "interval_method", "status"]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<&str>>(),
+            "a DECLARED monte_carlo block must serialize with exactly its original four keys"
+        );
 
         // A zero denominator is unpriceable.
         let mut bad = mc();
@@ -5776,9 +6438,18 @@ mod tests {
         bad.interval_method = " ".to_string();
         assert_eq!(run(&seeded_mc(bad), random_policy()), Err(1));
 
-        // A status v0 cannot honestly say is refused.
+        // EXECUTED is now expressible, but this literal (via mc(), which
+        // sets none of the five executed fields) must still fail: EXECUTED
+        // with no executed fields present is FIELD_CONTRACT_VIOLATION (the
+        // field-presence gate), not an unknown status.
         let mut bad = mc();
         bad.status = "EXECUTED".to_string();
+        assert_eq!(run(&seeded_mc(bad), random_policy()), Err(1));
+
+        // A THIRD status string is refused as unknown: the two-arm
+        // vocabulary (DECLARED | EXECUTED) itself stays gated.
+        let mut bad = mc();
+        bad.status = "SIMULATED".to_string();
         assert_eq!(run(&seeded_mc(bad), random_policy()), Err(1));
 
         // An MC block on a program with no Random capability (and no seed) is
@@ -5795,6 +6466,387 @@ mod tests {
             build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
         let value = serde_json::to_value(&plain).unwrap();
         assert!(value.get("monte_carlo").is_none());
+    }
+
+    /// The effect-policy fixture for the EXECUTED monte_carlo tests: Random
+    /// paired with a sealed seed.
+    fn mc_executed_random_policy() -> ScientificEffectPolicy {
+        ScientificEffectPolicy {
+            facts_digest: hex_digest('9'),
+            observed_capabilities: vec!["Console".to_string(), "Random".to_string()],
+            reads_stdin: false,
+        }
+    }
+
+    /// A coherent 3-column EXECUTED monte_carlo receipt fixture: series is
+    /// `<invariant scalar 0.0> <successes> <trials>` per row, successes
+    /// 1,1,2,2 over trials 1,2,3,4 (samples = 4), wilson-95. The executed
+    /// fields are computed by `compute_mc_executed` itself so the fixture is
+    /// self-consistent by construction.
+    fn coherent_executed_mc_receipt(path: &Path) -> ScientificRuntimeReceipt {
+        let series = vec![
+            0.0, 1.0, 1.0, //
+            0.0, 1.0, 2.0, //
+            0.0, 2.0, 3.0, //
+            0.0, 2.0, 4.0, //
+        ];
+        let computed = compute_mc_executed(&series, 3, 4, MC_INTERVAL_WILSON_95)
+            .expect("fixture series must be coherent");
+        let mc = ScientificMonteCarlo {
+            estimator: MC_EXECUTED_ESTIMATOR_PROPORTION.to_string(),
+            samples: 4,
+            interval_method: MC_INTERVAL_WILSON_95.to_string(),
+            status: "EXECUTED".to_string(),
+            estimate: Some(computed.estimate),
+            interval_low: Some(computed.interval_low),
+            interval_high: Some(computed.interval_high),
+            n_effective: Some(computed.n_effective),
+            successes: Some(computed.successes),
+        };
+        build_scientific_runtime_receipt(ScientificReceiptInputs {
+            effect_policy: mc_executed_random_policy(),
+            seed_value: Some(42),
+            monte_carlo: Some(mc),
+            column_count: 3,
+            ..base_inputs_for(NON_NEGATIVE_INVARIANT, path, series, true, false)
+        })
+    }
+
+    /// An ALL-FAILURE variant (successes = 0 on every row) of the coherent
+    /// EXECUTED fixture, under wilson-95 (which, unlike normal-approx-95,
+    /// has no boundary refusal at successes = 0). This exists specifically
+    /// to isolate the "all five executed fields present" gate from the
+    /// Stage A recompute-mismatch gate: since `u64::default() == 0` equals
+    /// the REAL successes value here, a missing `successes` field defaults
+    /// to exactly the correct number, so ONLY the presence gate (not the
+    /// recompute comparison) can catch it -- the field-presence-guard
+    /// mutation test below relies on this.
+    fn coherent_executed_mc_receipt_all_failures(path: &Path) -> ScientificRuntimeReceipt {
+        let series = vec![
+            0.0, 0.0, 1.0, //
+            0.0, 0.0, 2.0, //
+            0.0, 0.0, 3.0, //
+            0.0, 0.0, 4.0, //
+        ];
+        let computed = compute_mc_executed(&series, 3, 4, MC_INTERVAL_WILSON_95)
+            .expect("an all-failure series is coherent under wilson-95");
+        assert_eq!(computed.successes, 0, "fixture precondition");
+        let mc = ScientificMonteCarlo {
+            estimator: MC_EXECUTED_ESTIMATOR_PROPORTION.to_string(),
+            samples: 4,
+            interval_method: MC_INTERVAL_WILSON_95.to_string(),
+            status: "EXECUTED".to_string(),
+            estimate: Some(computed.estimate),
+            interval_low: Some(computed.interval_low),
+            interval_high: Some(computed.interval_high),
+            n_effective: Some(computed.n_effective),
+            successes: Some(computed.successes),
+        };
+        build_scientific_runtime_receipt(ScientificReceiptInputs {
+            effect_policy: mc_executed_random_policy(),
+            seed_value: Some(42),
+            monte_carlo: Some(mc),
+            column_count: 3,
+            ..base_inputs_for(NON_NEGATIVE_INVARIANT, path, series, true, false)
+        })
+    }
+
+    #[test]
+    fn verify_round_trips_a_coherent_executed_monte_carlo_receipt() {
+        // The positive control for every negative test below: a faithful
+        // EXECUTED receipt must verify (both stages pass on an untampered,
+        // faithfully re-run receipt).
+        let path = Path::new("k.bld");
+        let receipt = coherent_executed_mc_receipt(path);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        assert_eq!(value["monte_carlo"]["status"], "EXECUTED");
+        assert_eq!(value["monte_carlo"]["n_effective"], 4);
+        assert_eq!(value["monte_carlo"]["successes"], 2);
+        assert!(receipt
+            .not_claimed
+            .iter()
+            .any(|c| c == "sample_independence"));
+        assert!(receipt.not_claimed.iter().any(|c| c == "interval_coverage"));
+        assert!(receipt
+            .not_claimed
+            .iter()
+            .any(|c| c == "estimator_semantics"));
+        let src = receipt.source_digest.clone();
+        let graph = receipt.input_graph_digest.clone();
+        let series = receipt.measurement.observed_values.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            move |_| {
+                Ok(RederivedFacts {
+                    source_digest: src,
+                    input_graph_digest: graph,
+                    effect_policy: mc_executed_random_policy(),
+                })
+            },
+            move |_, _, _, _| Ok(rerun(series)),
+        );
+        assert_eq!(result, Ok(()), "a faithful EXECUTED receipt must verify");
+    }
+
+    #[test]
+    fn verify_stage_a_rejects_tampered_executed_interval_before_any_rerun() {
+        // Tamper interval_high directly on the sealed JSON (bypassing
+        // `seal_receipt`, so the seal would be stale) then re-seal via the
+        // same `reseal_json` path the self-test uses. A rerun_series closure
+        // that panics if called proves the rejection fires BEFORE any
+        // re-run: this is the "Stage-A-rejects-before-rerun" property test.
+        let path = Path::new("k.bld");
+        let receipt = coherent_executed_mc_receipt(path);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let mut tampered = value.clone();
+        let bumped = tampered["monte_carlo"]["interval_high"]
+            .as_f64()
+            .expect("interval_high must be present")
+            + 0.25;
+        tampered["monte_carlo"]["interval_high"] = serde_json::Value::from(bumped);
+        let tampered = reseal_json(&tampered).expect("reseal must succeed");
+        let src = receipt.source_digest.clone();
+        let graph = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &tampered,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            move |_| {
+                Ok(RederivedFacts {
+                    source_digest: src,
+                    input_graph_digest: graph,
+                    effect_policy: mc_executed_random_policy(),
+                })
+            },
+            |_, _, _, _| panic!("Stage A must reject a tampered interval before any re-run"),
+        );
+        assert_eq!(result, Err(1));
+    }
+
+    #[test]
+    fn verify_stage_b_reports_mc_interval_drift_on_a_changed_rerun() {
+        // The SEALED series is untampered (Stage A passes cleanly), but the
+        // RE-RUN returns a DIFFERENT coherent series (one more successful
+        // draw): a receipt that stayed internally coherent while no longer
+        // describing the run it names. Only Stage B catches this.
+        let path = Path::new("k.bld");
+        let receipt = coherent_executed_mc_receipt(path);
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src = receipt.source_digest.clone();
+        let graph = receipt.input_graph_digest.clone();
+        let drifted_series = vec![
+            0.0, 1.0, 1.0, //
+            0.0, 2.0, 2.0, // one more success than the sealed series
+            0.0, 3.0, 3.0, //
+            0.0, 3.0, 4.0, //
+        ];
+        let report = evaluate_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            move |_| {
+                Ok(RederivedFacts {
+                    source_digest: src,
+                    input_graph_digest: graph,
+                    effect_policy: mc_executed_random_policy(),
+                })
+            },
+            move |_, _, _, _| Ok(rerun(drifted_series)),
+        );
+        assert!(report.is_err(), "a Stage B interval drift must fail verify");
+    }
+
+    #[test]
+    fn verify_refuses_declared_block_carrying_an_executed_field() {
+        let path = Path::new("k.bld");
+        let mut mc = ScientificMonteCarlo {
+            estimator: "mean".to_string(),
+            samples: 2000,
+            interval_method: "normal-approx-95".to_string(),
+            status: "DECLARED".to_string(),
+            estimate: None,
+            interval_low: None,
+            interval_high: None,
+            n_effective: None,
+            successes: None,
+        };
+        mc.estimate = Some(0.5); // an executed field on a DECLARED block
+        let receipt = build_scientific_runtime_receipt(ScientificReceiptInputs {
+            effect_policy: mc_executed_random_policy(),
+            seed_value: Some(42),
+            monte_carlo: Some(mc),
+            ..base_inputs(path, vec![4.0, 3.0, 2.0], true, false)
+        });
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src = receipt.source_digest.clone();
+        let graph = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            move |_| {
+                Ok(RederivedFacts {
+                    source_digest: src,
+                    input_graph_digest: graph,
+                    effect_policy: mc_executed_random_policy(),
+                })
+            },
+            |_, _, _, _| {
+                panic!("a DECLARED-with-executed-field block must reject before any re-run")
+            },
+        );
+        assert_eq!(result, Err(1));
+    }
+
+    #[test]
+    fn verify_refuses_executed_block_missing_an_executed_field() {
+        let path = Path::new("k.bld");
+        // The all-failure fixture: real successes = 0 EQUALS
+        // `u64::default()`, so a missing `successes` field would slip past
+        // the Stage A recompute-mismatch comparison undetected -- ONLY the
+        // "all five fields present" gate can catch it here, which is the
+        // point (an ordinary nonzero fixture would be caught downstream
+        // regardless of whether this specific gate runs, which would make
+        // the test insensitive to this gate's removal).
+        let receipt = coherent_executed_mc_receipt_all_failures(path);
+        let mut value = serde_json::to_value(&receipt).expect("to_value");
+        value["monte_carlo"]
+            .as_object_mut()
+            .unwrap()
+            .remove("successes");
+        let value = reseal_json(&value).expect("reseal must succeed");
+        let src = receipt.source_digest.clone();
+        let graph = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            move |_| {
+                Ok(RederivedFacts {
+                    source_digest: src,
+                    input_graph_digest: graph,
+                    effect_policy: mc_executed_random_policy(),
+                })
+            },
+            |_, _, _, _| panic!("EXECUTED with a missing field must reject before any re-run"),
+        );
+        assert_eq!(result, Err(1));
+    }
+
+    #[test]
+    fn verify_refuses_executed_estimator_outside_vocabulary() {
+        let path = Path::new("k.bld");
+        let receipt = coherent_executed_mc_receipt(path);
+        let mut value = serde_json::to_value(&receipt).expect("to_value");
+        value["monte_carlo"]["estimator"] = serde_json::Value::from("mean");
+        let value = reseal_json(&value).expect("reseal must succeed");
+        let src = receipt.source_digest.clone();
+        let graph = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            move |_| {
+                Ok(RederivedFacts {
+                    source_digest: src,
+                    input_graph_digest: graph,
+                    effect_policy: mc_executed_random_policy(),
+                })
+            },
+            |_, _, _, _| panic!("an out-of-vocabulary estimator must reject before any re-run"),
+        );
+        assert_eq!(result, Err(1));
+    }
+
+    #[test]
+    fn verify_not_claimed_triad_biconditional() {
+        let path = Path::new("k.bld");
+
+        fn check(receipt: &ScientificRuntimeReceipt, value: serde_json::Value) -> Result<(), i32> {
+            let src = receipt.source_digest.clone();
+            let graph = receipt.input_graph_digest.clone();
+            verify_scientific_runtime_receipt(
+                &value,
+                None,
+                true,
+                &receipt.compiler_version,
+                &receipt.language_version,
+                Some(&test_toolchain()),
+                move |_| {
+                    Ok(RederivedFacts {
+                        source_digest: src,
+                        input_graph_digest: graph,
+                        effect_policy: mc_executed_random_policy(),
+                    })
+                },
+                |_, _, _, _| panic!("a not_claimed triad mismatch must reject before any re-run"),
+            )
+        }
+
+        // EXECUTED with the triad ABSENT is refused.
+        let receipt = coherent_executed_mc_receipt(path);
+        let mut value = serde_json::to_value(&receipt).expect("to_value");
+        value["not_claimed"] = serde_json::Value::Array(
+            receipt
+                .not_claimed
+                .iter()
+                .filter(|c| !MC_EXECUTED_NOT_CLAIMED.contains(&c.as_str()))
+                .map(|c| serde_json::Value::from(c.clone()))
+                .collect(),
+        );
+        let value = reseal_json(&value).expect("reseal must succeed");
+        assert_eq!(check(&receipt, value), Err(1));
+
+        // DECLARED with the triad PRESENT is refused.
+        let plain =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        let mut value = serde_json::to_value(&plain).expect("to_value");
+        let mut not_claimed: Vec<serde_json::Value> = value["not_claimed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
+        for c in MC_EXECUTED_NOT_CLAIMED {
+            not_claimed.push(serde_json::Value::from(*c));
+        }
+        value["not_claimed"] = serde_json::Value::Array(not_claimed);
+        let value = reseal_json(&value).expect("reseal must succeed");
+        assert_eq!(check(&plain, value), Err(1));
+
+        // EXECUTED with only two of three present is refused.
+        let receipt = coherent_executed_mc_receipt(path);
+        let mut value = serde_json::to_value(&receipt).expect("to_value");
+        value["not_claimed"] = serde_json::Value::Array(
+            receipt
+                .not_claimed
+                .iter()
+                .filter(|c| c.as_str() != "interval_coverage")
+                .map(|c| serde_json::Value::from(c.clone()))
+                .collect(),
+        );
+        let value = reseal_json(&value).expect("reseal must succeed");
+        assert_eq!(check(&receipt, value), Err(1));
     }
 
     #[test]
