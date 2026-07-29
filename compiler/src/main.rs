@@ -246,6 +246,15 @@ enum Commands {
         #[arg(long)]
         negative_fixture: bool,
 
+        /// Seed for the program's `random_f64()` stream (the Random
+        /// capability). buildc sets BUILD_RANDOM_SEED for the program and,
+        /// with `--emit-receipt`, seals the seed so `receipt verify` re-runs
+        /// the exact stream. A Random-using program REQUIRES this (an
+        /// unseeded draw aborts); a program with no Random capability
+        /// refuses it (nothing would consume it).
+        #[arg(long, value_name = "N")]
+        seed: Option<u64>,
+
         /// Execute a `#[compute]` kernel on the physical GPU (Vulkan) and
         /// cross-check the readback against the CPU-C scalar loop within
         /// tolerance. Requires a build with `--features gpu` and a Vulkan device.
@@ -614,11 +623,19 @@ fn main() -> ExitCode {
             problem,
             method,
             negative_fixture,
+            seed,
             gpu,
             args,
         }) => {
             if gpu {
-                cmd_run_gpu(&file, emit_receipt.as_deref())
+                if seed.is_some() {
+                    eprintln!(
+                        "--seed is not supported with --gpu (the GPU cross-check has no Random capability)"
+                    );
+                    Err(1)
+                } else {
+                    cmd_run_gpu(&file, emit_receipt.as_deref())
+                }
             } else {
                 cmd_run(
                     &file,
@@ -631,6 +648,7 @@ fn main() -> ExitCode {
                     problem.as_deref(),
                     method.as_deref(),
                     negative_fixture,
+                    seed,
                 )
             }
         }
@@ -1971,6 +1989,9 @@ fn cmd_receipt_corpus(manifest_path: &Path) -> Result<(), i32> {
         if member.negative_fixture {
             emit.arg("--negative-fixture");
         }
+        if let Some(seed) = member.seed {
+            emit.args(["--seed", &seed.to_string()]);
+        }
         let emit_out = match emit.output() {
             Ok(out) => out,
             Err(err) => {
@@ -2139,11 +2160,12 @@ fn cmd_receipt_export(
                 effect_policy: derive_effect_policy(&outcome),
             })
         },
-        |source_path, args| {
+        |source_path, args, seed| {
             let captured = compile_and_capture_run(
                 source_path,
                 args,
                 probed_toolchain.as_ref().map(|t| t.c_compiler.as_str()),
+                seed,
             )?;
             let raw_stdout_digest = ScientificDigest {
                 algorithm: "sha256".to_string(),
@@ -2525,11 +2547,12 @@ fn verify_scientific_receipt_dispatch(
                 effect_policy: derive_effect_policy(&outcome),
             })
         },
-        |source_path, args| {
+        |source_path, args, seed| {
             let captured = compile_and_capture_run(
                 source_path,
                 args,
                 probed_toolchain.as_ref().map(|t| t.c_compiler.as_str()),
+                seed,
             )?;
             let raw_stdout_digest = ScientificDigest {
                 algorithm: "sha256".to_string(),
@@ -6985,6 +7008,7 @@ fn compile_and_capture_run(
     file: &Path,
     args: &[String],
     compiler_override: Option<&str>,
+    seed: Option<u64>,
 ) -> Result<CapturedRun, i32> {
     let CompiledProgram { temp_dir, exe_file } = compile_program_to_exe(file, compiler_override)?;
 
@@ -7013,6 +7037,14 @@ fn compile_and_capture_run(
     let run_output = {
         let mut run_cmd = std::process::Command::new(&exe_file);
         run_cmd.args(args);
+        // The seed transport: ALWAYS strip any ambient BUILD_RANDOM_SEED first
+        // (a stale shell export must never silently seed a run the receipt
+        // would then claim as unseeded or differently seeded), then set the
+        // explicit seed when one was given.
+        run_cmd.env_remove("BUILD_RANDOM_SEED");
+        if let Some(seed) = seed {
+            run_cmd.env("BUILD_RANDOM_SEED", seed.to_string());
+        }
         run_cmd.output().map_err(|e| {
             eprintln!("Failed to run program: {}", e);
             let _ = std::fs::remove_dir_all(&temp_dir);
@@ -7066,6 +7098,7 @@ fn cmd_run(
     problem: Option<&str>,
     method: Option<&str>,
     negative_fixture: bool,
+    seed: Option<u64>,
 ) -> Result<(), i32> {
     // Canonicalize the declared unit through the dimensional-analysis core
     // BEFORE any compilation work: a malformed or unknown unit is an operator
@@ -7136,6 +7169,14 @@ fn cmd_run(
         let status = {
             let mut run_cmd = std::process::Command::new(&exe_file);
             run_cmd.args(args);
+            // Same seed transport as the captured path: strip any ambient
+            // BUILD_RANDOM_SEED, then set the explicit one. A Random-using
+            // program run seedless aborts at its first draw (fail closed in
+            // the runtime), so the plain-run path needs no policy re-check.
+            run_cmd.env_remove("BUILD_RANDOM_SEED");
+            if let Some(seed) = seed {
+                run_cmd.env("BUILD_RANDOM_SEED", seed.to_string());
+            }
             run_cmd.status().map_err(|e| {
                 eprintln!("Failed to run program: {}", e);
                 1i32
@@ -7164,7 +7205,33 @@ fn cmd_run(
         );
         return Err(1);
     };
-    let captured = compile_and_capture_run(file, args, Some(&toolchain.c_compiler))?;
+
+    // Derive the effect/capability facts BEFORE running: the seed pairing is
+    // an operator-level contract checked up front (fail closed), not a
+    // runtime trap discovered mid-capture. A Random-using program requires a
+    // sealed seed (an unseeded stream cannot be re-derived by verify), and a
+    // seed on a program with no Random capability is a knob nothing reads,
+    // which a receipt must not seal as if it were witnessed.
+    let outcome = run_check(file)?;
+    let effect_policy = derive_effect_policy(&outcome);
+    let uses_random = effect_policy
+        .observed_capabilities
+        .iter()
+        .any(|cap| cap == "Random");
+    if uses_random && seed.is_none() {
+        eprintln!(
+            "Error: this program observes the Random capability; a receipt requires an explicit seed (`--seed N`), which is sealed so `receipt verify` re-runs the same stream"
+        );
+        return Err(1);
+    }
+    if !uses_random && seed.is_some() {
+        eprintln!(
+            "Error: --seed was given but the program observes no Random capability (nothing draws from a seed; refusing to seal an unconsumed knob)"
+        );
+        return Err(1);
+    }
+
+    let captured = compile_and_capture_run(file, args, Some(&toolchain.c_compiler), seed)?;
     toolchain.program_executable_digest = captured.executable_digest.clone();
 
     // Seal the raw stdout bytes (the pass-0122 runtime_branch output hash):
@@ -7199,10 +7266,6 @@ fn cmd_run(
     // retained so the receipt always serializes cleanly.
     let parsed = parse_numeric_series(&captured_stdout);
 
-    // Re-derive source + input-graph digests from the same check pipeline the
-    // check-receipt path uses, so the two digests agree byte-for-byte.
-    let outcome = run_check(file)?;
-
     let os = std::env::consts::OS.to_string();
     let mut flags = vec![format!("invariant={invariant}"), format!("metric={metric}")];
     if negative_fixture {
@@ -7225,13 +7288,14 @@ fn cmd_run(
         os: &os,
         exit_code,
         toolchain,
-        effect_policy: derive_effect_policy(&outcome),
+        effect_policy,
         method_description: method.map(str::to_string),
         raw_stdout_digest,
         series: parsed.series,
         series_parsed: parsed.any_parsed,
         diverged: parsed.diverged,
         args: args.to_vec(),
+        seed_value: seed,
         invariant_name: invariant_name.to_string(),
         metric: metric.to_string(),
         units: canonical_units.clone(),

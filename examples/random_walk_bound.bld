@@ -1,0 +1,37 @@
+// Seeded-stochastic result-bearing kernel: a random walk stays inside its
+// worst-case envelope.
+//
+// A walk of n = 200 unit steps can never be farther than k steps from the
+// origin after k steps, so |position| <= n at every step and the SLACK =
+// n - |position| is non-negative for EVERY seed. The steps are drawn from
+// random_f64() (the Random capability), so the kernel runs only under an
+// explicit seed: `buildc run examples/random_walk_bound.bld --seed 42`. With
+// `--emit-receipt` the seed is sealed into the receipt, and `receipt verify`
+// re-runs the exact stream, so the stochastic run is as re-derivable as a
+// deterministic one.
+//
+// This is the family's first stochastic member: the receipt witnesses a
+// measured property of a seeded random process. Companion negative fixture:
+// random_walk_bound_broken.bld, which claims a tighter envelope the walk
+// actually leaves.
+
+fn main() ~ Console + Random {
+    let n: i32 = 200;
+    let mut pos: i32 = 0;
+    let mut k: i32 = 0;
+    while k < n {
+        let u: f64 = random_f64();
+        if u < 0.5 {
+            pos = pos - 1;
+        } else {
+            pos = pos + 1;
+        }
+        let mut mag: i32 = pos;
+        if mag < 0 {
+            mag = 0 - mag;
+        }
+        // Slack against the worst-case envelope; non-negative for any stream.
+        println!("{}", (n - mag) as f64);
+        k = k + 1;
+    }
+}

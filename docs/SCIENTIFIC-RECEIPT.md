@@ -84,6 +84,15 @@ Flags on the `run` subcommand (all additive; absent `--emit-receipt`, none of th
 - `--problem <LABEL>` records a free-text problem label (optional).
 - `--negative-fixture` marks that the invariant is *expected* to fail (see
   [Negative fixtures](#4-negative-fixtures)).
+- `--seed <N>` seeds the program's `random_f64()` stream (the `Random`
+  capability). The pairing is enforced both ways, fail closed: a kernel that
+  observes `Random` refuses to emit a receipt without a seed (an unseeded
+  stream cannot be re-derived), and a kernel with no `Random` capability
+  refuses a seed (nothing consumes it, so sealing it would fabricate a
+  witnessed knob). The seed is sealed as `seed_value` and `receipt verify`
+  re-runs the exact stream. This flag also works without `--emit-receipt`
+  (plain `run` of a seeded kernel); a `Random`-using program run with no seed
+  anywhere aborts at its first draw rather than inventing a default stream.
 
 The program's own stdout is preserved: when the receipt is written to a file, the program's
 output is echoed to real stdout byte-for-byte (identical to plain `run`); when the receipt is
@@ -110,6 +119,13 @@ The receipt is a single JSON object. Its layers, outermost meaning first:
 - `runtime_state`: `{ os, exit_code }`.
 - `args`: the trailing program arguments the run was invoked with; `receipt verify` re-runs
   with exactly these.
+- `seed_value`: the RNG seed the run was invoked with (`--seed N`), present IFF the program
+  observes the `Random` capability; `receipt verify` re-runs under exactly this seed, so a
+  seeded stochastic run is as re-derivable as a deterministic one. Verify enforces the
+  pairing against the RE-DERIVED capabilities (`FIELD_CONTRACT_VIOLATION` when a
+  Random-using program's receipt seals no seed, or a seed rides on a program nothing in
+  which draws), and a re-sealed seed swap is caught because the `seed` field's grounds no
+  longer re-derive (`EFFECT_POLICY_DRIFT`).
 - `problem`: `{ label }` from `--problem` (optional).
 - `oracle`: `{ kind, name, status }`, the criterion the verdict is measured against. v0
   emits `kind: "declared_invariant"` with `status: "DECLARED"`: the named invariant IS the
@@ -128,15 +144,21 @@ The receipt is a single JSON object. Its layers, outermost meaning first:
   Foreign (extern C), Gpu, and `Console`-reading-stdin all fence the field
   (`POSSIBLE_UNWITNESSED`); a program with none of them PROVABLY consumed no external
   dataset (`NONE_WITNESSED`). Any capability this build does not recognise is treated as a
-  hazard, so a capability added later cannot silently widen the claim. `seed` is
-  `NOT_APPLICABLE` in v0 (the language has no RNG builtin). These are the master plan's
+  hazard, so a capability added later cannot silently widen the claim. `seed` is a
+  trichotomy: `NOT_APPLICABLE` when the program observes no `Random` capability (nothing
+  draws, so there is no seed to record), `SEALED` when it does and the seed was supplied
+  (the grounds name the value; `seed_value` carries it machine-readably), and `UNSEEDED`
+  only as the re-derivation's honest answer for a receipt whose claims disagree with its
+  capabilities (emit refuses to produce that state). These are the master plan's
   "input dataset" and "seed" receipt fields, filled by the typed-effect system rather than
   by assertion.
 - `determinism`: `{ deterministic_modulo_args, grounds }`, derived the same fail-closed
   way from every nondeterminism source the language exposes (Clock, Environment,
-  FileSystem, Network, Foreign, Gpu, and stdin reads); `Process` (exit) alone is safe, and
-  the wall `Clock` breaks determinism without counting as a dataset. Verify re-derives all
-  three capability-derived fields; edits that do not re-derive fail as
+  FileSystem, Network, Foreign, Gpu, stdin reads, and UNSEEDED Random); `Process` (exit)
+  alone is safe, and the wall `Clock` breaks determinism without counting as a dataset.
+  A SEEDED `Random` is the third honest state: it does not break the claim, and the
+  grounds carry the qualification (deterministic given the sealed seed). Verify
+  re-derives all three capability-derived fields; edits that do not re-derive fail as
   `EFFECT_POLICY_DRIFT`.
 - `numerical_method`: `{ description?, status }`, author-DECLARED via `--method` (buildc
   cannot derive scheme semantics from source and does not pretend to); an inconsistent
@@ -325,7 +347,13 @@ open-addressing scheme whose worst-case probe count stays under a calibrated bou
 load, its measured worst being 14 probes, so it PASSes) with `examples/funnel_probe_linear.bld`
 (naive single-level linear probing on the same keys clusters to 85 probes and exceeds the bound,
 so it FAILs; this is a faithful-in-spirit funnel that exhibits the sub-linear worst-case probe
-bound, not a bit-exact reproduction of the paper's optimal constant). Run any negative kernel
+bound, not a bit-exact reproduction of the paper's optimal constant), and a SEEDED-STOCHASTIC
+instance in `examples/random_walk_bound.bld` (a 200-step random walk driven by `random_f64()`
+under `--seed 42` can never be farther than its step count from the origin, so the slack
+against that worst-case envelope stays non-negative for every seed and it PASSes) with
+`examples/random_walk_bound_broken.bld` (the same walk claiming the tighter envelope
+`|position| <= 7`, which a 200-step walk leaves for essentially any seed, so it FAILs; the
+sealed seed makes both stochastic verdicts exactly re-derivable). Run any negative kernel
 with `--negative-fixture` for a `FAIL_EXPECTED` receipt.
 
 ## 5. The heat-equation kernel example
@@ -434,7 +462,7 @@ fixtures and CI pin the *specific* failure instead of accepting "anything failed
 | `DIGEST_MALFORMED` | a sealed digest field is not a real sha256 (64 hex chars); an absent hash cannot masquerade as witnessed provenance | 1 |
 | `ORACLE_KIND_UNSUPPORTED`, `ORACLE_STATUS_UNSUPPORTED`, `ORACLE_BINDING_MISMATCH`, `INVARIANT_UNSUPPORTED` | the oracle/invariant block names a kind, status, or criterion this verifier does not implement; binding is pinned to the implementation, never to another sealed field | 1 |
 | `FENCE_STATUS_UNEXPECTED` | a telemetry/lineage fence was edited to claim availability v0 does not produce | 1 |
-| `FIELD_CONTRACT_VIOLATION` | a sealed field claims something the language version cannot express (a seed with no RNG builtin), is internally inconsistent (DECLARED method, no description), or resealed a non-canonical `invariant.tolerance` | 1 |
+| `FIELD_CONTRACT_VIOLATION` | a sealed field claims something the program cannot express (a `seed_value` when nothing observes `Random`, a Random-using program with no sealed seed), is internally inconsistent (DECLARED method, no description), or resealed a non-canonical `invariant.tolerance` | 1 |
 | `EFFECT_POLICY_DRIFT` | the sealed effect/capability facts, or the witnessed fields derived from them, do not re-derive from the source | 1 |
 | `TOOL_UNAVAILABLE` | no C compiler available for the re-run | 4 |
 | `REDERIVATION_FAILED` | the source could not be re-checked (missing file, check failure) | inner code |
@@ -467,9 +495,12 @@ that keep the body well-formed are re-sealed (so the tamper passes the integrity
 the specific contract check under test); the seal-mismatch case is deliberately left unsealed.
 The current cases exercise five separate arms of the taxonomy: `COMPILER_MISMATCH` (foreign
 compiler tag), `SEAL_MISMATCH` (a witnessed value edited without re-sealing), `MALFORMED` (a
-required field removed), `FIELD_CONTRACT_VIOLATION` (a sealed tolerance loosened then re-sealed),
-and `INVARIANT_UNSUPPORTED` (an unknown invariant name, re-sealed). Every case is rejected before
-any program re-run, so `--self-test` needs no C toolchain. It exits 0 only if every tamper
+required field removed), `FIELD_CONTRACT_VIOLATION` (twice, through different gates: a sealed
+tolerance loosened then re-sealed, and the sealed `seed_value` flipped against the program's
+capabilities then re-sealed), and `INVARIANT_UNSUPPORTED` (an unknown invariant name,
+re-sealed). Every case is rejected before any program re-run, so `--self-test` needs no C
+compiler; the seed-pairing case is rejected at the source re-derivation stage, so it (alone)
+needs the receipt's source file readable, exactly as `buildc check` would. It exits 0 only if every tamper
 produced its expected class, and prints `self-test: N/N tampers rejected with the expected
 failure_class`.
 
@@ -496,8 +527,10 @@ re-runs each member, `chain verify` needs the C toolchain and the member sources
 ### The example corpus (`receipt corpus`)
 
 The example kernels come in positive/negative pairs, each declared to PASS or to FAIL_EXPECTED
-under a named invariant. `examples/scientific-corpus.json` records that ground truth for all ten
-pairs, and one command checks reality against it:
+under a named invariant. `examples/scientific-corpus.json` records that ground truth for all
+eleven pairs (a member whose kernel draws from `random_f64()` also declares its `seed`, which
+the runner passes as `--seed`; a Random member with no declared seed fails the corpus loudly,
+because emit refuses it), and one command checks reality against it:
 
 ```
 buildc receipt corpus examples/scientific-corpus.json

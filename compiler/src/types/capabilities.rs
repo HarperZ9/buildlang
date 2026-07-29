@@ -8,6 +8,7 @@ pub const ENVIRONMENT: &str = "Environment";
 pub const CLOCK: &str = "Clock";
 pub const FOREIGN: &str = "Foreign";
 pub const GPU: &str = "Gpu";
+pub const RANDOM: &str = "Random";
 
 const CAPABILITY_EFFECTS: &[&str] = &[
     CONSOLE,
@@ -18,6 +19,7 @@ const CAPABILITY_EFFECTS: &[&str] = &[
     CLOCK,
     FOREIGN,
     GPU,
+    RANDOM,
 ];
 
 pub fn capability_effect_names() -> &'static [&'static str] {
@@ -88,6 +90,11 @@ pub fn capability_effect_for_call(name: &str) -> Option<&'static str> {
         "getenv" | "args_count" | "args_get" | "build_getenv" | "build_args_init"
         | "build_args_count" | "build_args_get" => Some(ENVIRONMENT),
         "clock_ms" | "time_unix" | "build_clock_ms" | "build_time_unix" => Some(CLOCK),
+        // The seeded PRNG builtin. Its own capability (not Clock, not
+        // Environment) because the scientific receipt treats it distinctly:
+        // an UNSEEDED draw is a nondeterminism hazard, but a draw under a
+        // sealed seed is deterministic and the receipt says so.
+        "random_f64" | "build_random_f64" => Some(RANDOM),
         "build_vk_init"
         | "build_vk_load_shader_file"
         | "build_vk_run_compute"
@@ -161,6 +168,11 @@ mod tests {
         assert_eq!(capability_effect_for_call("build_clock_ms"), Some("Clock"));
         assert_eq!(capability_effect_for_call("build_gfx_init"), Some("Gpu"));
         assert_eq!(capability_effect_for_call("build_gfx_draw"), Some("Gpu"));
+        assert_eq!(capability_effect_for_call("random_f64"), Some("Random"));
+        assert_eq!(
+            capability_effect_for_call("build_random_f64"),
+            Some("Random")
+        );
         assert_eq!(capability_effect_for_call("sqrt"), None);
     }
 
@@ -174,6 +186,7 @@ mod tests {
         assert!(capability_effect_names().contains(&"Clock"));
         assert!(capability_effect_names().contains(&"Foreign"));
         assert!(capability_effect_names().contains(&"Gpu"));
+        assert!(capability_effect_names().contains(&"Random"));
     }
 
     #[test]

@@ -1632,6 +1632,54 @@ static int64_t build_time_unix(void) {
     return (int64_t)time(NULL);
 }
 
+// --- Seeded random builtin (Random capability) ---
+//
+// SplitMix64 over the top 53 bits: every operation is exact 64-bit integer
+// arithmetic followed by an exact power-of-two scale, so the stream is
+// bit-identical on every platform for a given seed. The seed arrives in
+// BUILD_RANDOM_SEED, which `buildc run --seed N` sets for this process (and
+// seals into the scientific receipt, so `receipt verify` re-runs the same
+// stream). FAIL CLOSED: with no seed, or a malformed one, the first draw
+// aborts rather than silently running an unseeded or fixed-default stream
+// that would masquerade as sampling.
+static uint64_t build_random_state;
+static int build_random_seeded = 0;
+static double build_random_f64(void) {
+    if (!build_random_seeded) {
+        const char* text = getenv("BUILD_RANDOM_SEED");
+        uint64_t seed = 0;
+        size_t i;
+        if (text == NULL || text[0] == '\0') {
+            fprintf(stderr, "random_f64: no seed provided; run under `buildc run <file> --seed N` (buildc sets BUILD_RANDOM_SEED for the program and seals the seed into the receipt)\n");
+            exit(101);
+        }
+        for (i = 0; text[i] != '\0'; i++) {
+            uint64_t digit;
+            if (text[i] < '0' || text[i] > '9') {
+                fprintf(stderr, "random_f64: BUILD_RANDOM_SEED `%s` is not a decimal u64\n", text);
+                exit(101);
+            }
+            digit = (uint64_t)(text[i] - '0');
+            if (seed > (UINT64_MAX - digit) / 10u) {
+                fprintf(stderr, "random_f64: BUILD_RANDOM_SEED `%s` overflows u64\n", text);
+                exit(101);
+            }
+            seed = seed * 10u + digit;
+        }
+        build_random_state = seed;
+        build_random_seeded = 1;
+    }
+    build_random_state += 0x9E3779B97F4A7C15ULL;
+    {
+        uint64_t z = build_random_state;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+        z = z ^ (z >> 31);
+        // Top 53 bits scaled by 2^-53: exact, uniform in [0, 1).
+        return (double)(z >> 11) * (1.0 / 9007199254740992.0);
+    }
+}
+
 // ============================================================================
 // End BuildLang Runtime
 // ============================================================================
