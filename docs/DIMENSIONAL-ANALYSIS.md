@@ -143,6 +143,12 @@ no new algebra was added anywhere.
 - `**` (Pow) on a unit-carrying operand is a LOUD `UnsupportedConstruct`
   error, never a silently wrong dimension: dimensional exponentiation
   (`powi` lifting) is specced below, not shipped.
+- `.sqrt()`, `.cbrt()`, `.powi()`, `.powf()` on a unit-carrying receiver: the
+  same LOUD `UnsupportedConstruct` refusal, not the silently wrong dimension
+  an earlier build of this slice returned (root/power lifting needs the same
+  specced exponent-scaling follow-up as `**`). `.abs()`, `.floor()`,
+  `.ceil()`, `.round()`, `.trunc()`, `.fract()` remain identity-shaped and
+  correct as-is.
 
 **Weak mode (the one deliberate simplification).** This slice uses a
 weaker, safe rule instead of full dimension variables: an unannotated
@@ -210,13 +216,17 @@ whatever dimension context ultimately requires, and an unannotated
 intermediate binding no longer hides a unit bug. This is the generalization
 of checker slice one's weak-mode rule.
 
-### `powi` lifting for `**`
+### `powi` lifting for `**`, `.sqrt()`, `.cbrt()`, `.powi()`, `.powf()`
 
 An integer-literal exponent in `d ** 2` should scale `d`'s dimension
 (`Dimension::powi`) rather than being rejected. Requires recognizing the
 literal-exponent shape at the type-checking site; a non-literal exponent on
 a unit-carrying base stays rejected (fractional/runtime exponents are a
-non-goal, below).
+non-goal, below). The same per-method exponent rule would resolve
+`.sqrt()`/`.cbrt()` (halve/third the exponents, rejecting an odd/
+non-divisible exponent as today's integer-only `Dimension` cannot represent
+it) and `.powi()`/`.powf()` (scale by a literal integer / stay rejected for
+a non-literal), all of which currently refuse rather than compute.
 
 ### Pass D: receipt flow-through
 
@@ -245,13 +255,19 @@ shipped slice and checker slice one do.
   slice" gate, and the derivation/multiply-divide arms flow mechanically
   through arrays and broadcast ops without a miscompile, but neither is a
   tested, claimed surface).
-- Dimensional correctness of inherent numeric methods (`.sqrt()`, `.cbrt()`,
-  ...). These currently return the receiver's type unchanged
-  (`infer.rs`'s FLOAT METHODS arm), which is correct for identity-shaped
-  methods (`.abs()`, `.floor()`, `.ceil()`, `.round()`, `.trunc()`) but NOT
-  for `.sqrt()`/`.cbrt()` (which should scale the exponents). Unclaimed and
-  unchanged by checker slice one; a future pass would need a `powi`-style
-  per-method exponent rule, not a unification change.
+- Dimensional correctness of inherent numeric methods beyond `.sqrt()`,
+  `.cbrt()`, `.powi()`, `.powf()`. Those four now loudly refuse
+  (`UnsupportedConstruct`) on a unit-carrying receiver -- the same principle
+  that makes `**` a refusal, not the silently wrong (unscaled) dimension an
+  earlier build of this slice returned (`infer.rs`'s FLOAT METHODS arm,
+  guarded on `unit_dim.is_some()`). `.abs()`, `.floor()`, `.ceil()`,
+  `.round()`, `.trunc()`, `.fract()` remain identity-shaped and correct
+  as-is. Every other float method in that arm (`.recip()`, `.signum()`,
+  trig/log/exp, `.hypot()`, `.clamp()`, ...) is unaudited by this document
+  for dimensional correctness and unchanged by this fix: unclaimed. A future
+  pass would compute the actual scaled dimension (`Dimension::powi`/
+  `reciprocal` already exist) once a per-method exponent rule is wired at
+  the call site, rather than refuse.
 
 ## Provenance
 

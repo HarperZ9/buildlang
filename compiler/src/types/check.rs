@@ -3471,5 +3471,104 @@ mod tests {
         // checker supports it" per the plan's Task 5 bullet -- it does not,
         // for generics in general). The positive test above is the honest
         // claim: units are not lost passing through, nothing stronger.
+
+        // =====================================================================
+        // Review follow-up: `.sqrt()`/`.cbrt()`/`.powi()`/`.powf()` on a
+        // unit-carrying receiver used to silently return the receiver's
+        // unchanged (and therefore wrong) dimension. Now a loud
+        // `UnsupportedConstruct` refusal, matching `**`'s principle.
+        // =====================================================================
+
+        #[test]
+        fn sqrt_on_unit_carrying_receiver_is_loudly_unsupported() {
+            let errors =
+                check_source("fn main() { let area: f64<m*m> = 9.0; let side = area.sqrt(); }");
+            assert!(
+                errors.iter().any(|e| matches!(
+                    &e.error,
+                    TypeError::UnsupportedConstruct { construct, .. }
+                        if construct.contains("unit-carrying") && construct.contains("sqrt")
+                )),
+                "expected UnsupportedConstruct for `.sqrt()` on a unit-carrying \
+                 receiver: {errors:#?}"
+            );
+        }
+
+        #[test]
+        fn cbrt_on_unit_carrying_receiver_is_loudly_unsupported() {
+            let errors =
+                check_source("fn main() { let vol: f64<m*m*m> = 27.0; let side = vol.cbrt(); }");
+            assert!(
+                errors.iter().any(|e| matches!(
+                    &e.error,
+                    TypeError::UnsupportedConstruct { construct, .. }
+                        if construct.contains("unit-carrying") && construct.contains("cbrt")
+                )),
+                "expected UnsupportedConstruct for `.cbrt()` on a unit-carrying \
+                 receiver: {errors:#?}"
+            );
+        }
+
+        #[test]
+        fn powi_and_powf_on_unit_carrying_receiver_are_loudly_unsupported() {
+            let errors = check_source(
+                "fn main() { \
+                    let d: f64<m> = 3.0; \
+                    let a = d.powi(2); \
+                    let b = d.powf(2.0); \
+                 }",
+            );
+            let refusals: Vec<_> = errors
+                .iter()
+                .filter(|e| matches!(&e.error, TypeError::UnsupportedConstruct { construct, .. } if construct.contains("unit-carrying")))
+                .collect();
+            assert_eq!(
+                refusals.len(),
+                2,
+                "expected UnsupportedConstruct for both `.powi()` and `.powf()` \
+                 on a unit-carrying receiver: {errors:#?}"
+            );
+        }
+
+        #[test]
+        fn sqrt_on_unannotated_receiver_is_unaffected() {
+            // `unit_dim: None` must keep matching the identity-methods arm:
+            // the refusal is guarded on `unit_dim.is_some()` and must not
+            // fire for a plain, unit-free float.
+            let errors = check_source("fn main() { let x: f64 = 9.0; let y: f64 = x.sqrt(); }");
+            assert!(unit_errors(&errors).is_empty(), "{errors:#?}");
+            assert!(
+                !errors
+                    .iter()
+                    .any(|e| matches!(&e.error, TypeError::UnsupportedConstruct { .. })),
+                "unannotated `.sqrt()` must not be refused: {errors:#?}"
+            );
+        }
+
+        #[test]
+        fn identity_shaped_methods_still_preserve_the_unit() {
+            // `.abs()`, `.floor()`, `.ceil()`, `.round()`, `.trunc()`,
+            // `.fract()` genuinely preserve dimension (the numeric value
+            // changes, the unit it is expressed in does not) and must stay
+            // untouched by the sqrt/cbrt/powi/powf refusal.
+            let errors = check_source(
+                "fn main() { \
+                    let d: f64<m> = -3.7; \
+                    let a: f64<m> = d.abs(); \
+                    let b: f64<m> = d.floor(); \
+                    let c: f64<m> = d.ceil(); \
+                    let e: f64<m> = d.round(); \
+                    let f: f64<m> = d.trunc(); \
+                    let g: f64<m> = d.fract(); \
+                 }",
+            );
+            assert!(unit_errors(&errors).is_empty(), "{errors:#?}");
+            assert!(
+                !errors
+                    .iter()
+                    .any(|e| matches!(&e.error, TypeError::UnsupportedConstruct { .. })),
+                "identity-shaped methods must not be refused: {errors:#?}"
+            );
+        }
     }
 }

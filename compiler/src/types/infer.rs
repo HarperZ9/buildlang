@@ -4906,6 +4906,33 @@ impl<'ctx> TypeInfer<'ctx> {
             // =================================================================
             // FLOAT METHODS
             // =================================================================
+
+            // Root/power-taking on a unit-carrying receiver: `.sqrt()`/`.cbrt()`
+            // need to halve/third the exponents, `.powi()`/`.powf()` need to
+            // scale them by the (possibly runtime) exponent -- dimensional
+            // root/power lifting is a specced follow-up
+            // (`docs/DIMENSIONAL-ANALYSIS.md`), not this slice. Loudly refuse
+            // rather than silently returning the receiver's unchanged (and
+            // therefore wrong) dimension: the same principle that makes `**`
+            // (`BinOp::Pow`) a loud refusal on unit-carrying operands.
+            // Guarded on `unit_dim.is_some()` and placed before the identity
+            // arm below, so an unannotated (`unit_dim: None`) receiver keeps
+            // matching that arm unchanged.
+            "sqrt" | "cbrt" | "powi" | "powf" if is_float && receiver_ty.unit_dim.is_some() => {
+                self.error(
+                    TypeError::UnsupportedConstruct {
+                        construct: format!("`.{method_name}()` on a unit-carrying receiver"),
+                        detail: "dimensional root/power lifting (scaling the exponents) is a \
+                                 specced follow-up in docs/DIMENSIONAL-ANALYSIS.md; drop the \
+                                 annotation, or re-annotate the result via the `as f64<UNIT>` \
+                                 cast escape hatch"
+                            .to_string(),
+                    },
+                    span,
+                );
+                return Ty::error();
+            }
+
             "abs" | "sqrt" | "cbrt" | "ceil" | "floor" | "round" | "trunc" | "fract" | "signum"
             | "recip" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh"
             | "tanh" | "asinh" | "acosh" | "atanh" | "exp" | "exp2" | "ln" | "log2" | "log10"

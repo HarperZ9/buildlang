@@ -36,8 +36,18 @@ tracked in `STATUS.md`, `README.md`, and
   require equal dimensions (`+`/`-`/compare get an operation-worded message);
   `*`/`/` derive dimensions via `Dimension::multiply`/`divide`; `**` on a
   unit-carrying operand is a loud `UnsupportedConstruct` refusal, never a
-  silently wrong dimension; unification is the backstop at every let,
-  assign, argument, and return boundary. Weak mode: an unannotated float
+  silently wrong dimension; `.sqrt()`/`.cbrt()`/`.powi()`/`.powf()` on a
+  unit-carrying receiver get the identical refusal (a review pass found they
+  had silently kept returning the receiver's unchanged, wrong dimension;
+  `.abs()`/`.floor()`/`.ceil()`/`.round()`/`.trunc()`/`.fract()` stay
+  identity-shaped and correct, unchanged; the REMAINING float methods in
+  that dispatch arm, `.recip()`, `.signum()`, trig/log/exp, `.hypot()`,
+  `.clamp()` and siblings, are UNAUDITED for dimensional correctness in
+  this slice and may propagate a dimension a method does not actually
+  preserve, so annotate receivers of those methods with care until the
+  audit lands as a follow-up); unification is the backstop at
+  every let, assign, argument, and return boundary. Weak mode: an
+  unannotated float
   stays UNCONSTRAINED (compatible with any unit) rather than a full
   dimension variable, so a bug through an unannotated intermediate binding
   is caught only if a later boundary is annotated -- full dimension
