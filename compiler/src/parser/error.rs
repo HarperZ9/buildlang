@@ -146,6 +146,13 @@ pub enum ParseErrorKind {
     #[error("expected type")]
     ExpectedType,
 
+    /// A unit annotation (`f64<...>`, experimental) failed to parse or named
+    /// an unknown unit. Carries `units::UnitError`'s Display verbatim, so
+    /// the message names the exact grammar problem, shared word-for-word
+    /// with the checker's unit algebra (`compiler/src/units.rs`).
+    #[error("{0}")]
+    InvalidUnitAnnotation(String),
+
     // =========================================================================
     // PATTERN ERRORS
     // =========================================================================

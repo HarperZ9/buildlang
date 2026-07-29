@@ -126,6 +126,12 @@ impl<'ctx> MirLowerer<'ctx> {
                 // Effects are preserved via extract_type_annotations() for shader output.
                 self.lower_type_from_ast(inner)
             }
+            // A unit annotation (`f64<m/s>`, experimental) is compile-time
+            // metadata only: MirType::Float has no unit slot, so the runtime
+            // type is the base type. WITHOUT this arm the wildcard below
+            // would silently lower an annotated local to `MirType::i32()` --
+            // a miscompile pinned by a mutation check (Task 7).
+            ast::TypeKind::WithUnit { base, .. } => self.lower_type_from_ast(base),
             _ => MirType::i32(),
         }
     }

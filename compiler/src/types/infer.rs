@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use crate::ast::{self, AssignOp, BinOp, ExprKind, Literal as AstLiteral, UnaryOp};
 use crate::lexer::{source_text_for_id, Delimiter, SourceId, Span, Token, TokenKind};
+use crate::units;
 
 use super::context::{ScopeKind, TypeContext, TypeDefKind};
 use super::error::*;
@@ -3403,6 +3404,65 @@ impl<'ctx> TypeInfer<'ctx> {
         }
     }
 
+    /// Pre-check for `+`/`-`: when both applied operands are `TyKind::Float`
+    /// with `Some` unit dimensions, run the shipped `checked_add`/
+    /// `checked_sub` algebra and, on mismatch, produce the operation-worded
+    /// `UnitOperationMismatch`. Returns `None` whenever the pre-check does
+    /// not apply (not both concrete floats, dimensions agree, or either
+    /// side is unconstrained `None`); the unifier's Float-arm unit rule
+    /// remains the enforcement backstop for every shape this misses (type
+    /// variables, mixed annotation, argument passing).
+    fn unit_binop_precheck(&self, left_ty: &Ty, right_ty: &Ty, is_add: bool) -> Option<TypeError> {
+        let left_applied = self.apply(left_ty);
+        let right_applied = self.apply(right_ty);
+        if let (TyKind::Float(_), TyKind::Float(_)) = (&left_applied.kind, &right_applied.kind) {
+            if let (Some(a), Some(b)) = (left_applied.unit_dim, right_applied.unit_dim) {
+                let result = if is_add {
+                    a.checked_add(&b)
+                } else {
+                    a.checked_sub(&b)
+                };
+                if let Err(units::UnitError::Mismatch {
+                    left,
+                    right,
+                    operation,
+                }) = result
+                {
+                    return Some(TypeError::UnitOperationMismatch {
+                        operation,
+                        left: left.to_canonical_string(),
+                        right: right.to_canonical_string(),
+                    });
+                }
+            }
+        }
+        None
+    }
+
+    /// The same pre-check as [`Self::unit_binop_precheck`], for comparison
+    /// operators (`checked_compare`).
+    fn unit_compare_precheck(&self, left_ty: &Ty, right_ty: &Ty) -> Option<TypeError> {
+        let left_applied = self.apply(left_ty);
+        let right_applied = self.apply(right_ty);
+        if let (TyKind::Float(_), TyKind::Float(_)) = (&left_applied.kind, &right_applied.kind) {
+            if let (Some(a), Some(b)) = (left_applied.unit_dim, right_applied.unit_dim) {
+                if let Err(units::UnitError::Mismatch {
+                    left,
+                    right,
+                    operation,
+                }) = a.checked_compare(&b)
+                {
+                    return Some(TypeError::UnitOperationMismatch {
+                        operation,
+                        left: left.to_canonical_string(),
+                        right: right.to_canonical_string(),
+                    });
+                }
+            }
+        }
+        None
+    }
+
     fn infer_binary(&mut self, op: BinOp, left: &ast::Expr, right: &ast::Expr, span: Span) -> Ty {
         let left_ty = self.infer_expr(left);
         let right_ty = self.infer_expr(right);
@@ -3525,14 +3585,78 @@ impl<'ctx> TypeInfer<'ctx> {
                 }
             }
 
-            // Arithmetic operators
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
+            // Add, Subtract: a pre-check reports the operation-worded
+            // `UnitOperationMismatch` when both operands are unit-carrying
+            // floats with different dimensions; the unify below remains the
+            // enforcement backstop for every other shape (vars, mixed
+            // annotation, argument passing). Same-dimension math (`m % m`)
+            // and every non-unit case fall through to the unchanged body.
+            BinOp::Add | BinOp::Sub => {
+                if let Some(err) = self.unit_binop_precheck(&left_ty, &right_ty, op == BinOp::Add) {
+                    self.error(err, span);
+                    return Ty::error();
+                }
                 let _ = self.unify(&left_ty, &right_ty, span);
                 self.apply(&left_ty)
             }
 
-            // Comparison operators
+            // Remainder: no operation-worded pre-check (per design, `m % m`
+            // is correct Rem semantics and comes free from the unifier's
+            // Float-arm unit rule alone).
+            BinOp::Rem => {
+                let _ = self.unify(&left_ty, &right_ty, span);
+                self.apply(&left_ty)
+            }
+
+            // Multiply, Divide: derived dimensions. When at least one
+            // operand is a unit-carrying float, unify STRIPPED copies (unit
+            // dimension removed) so float-width coercion still happens
+            // without a spurious dimension mismatch, then attach the
+            // computed product/quotient dimension to the result. A `None`
+            // operand counts as dimensionless in the computation (so
+            // `2.0 * d` keeps `d`'s unit), but `None * None` stays `None`:
+            // never invent a unit neither operand wrote.
+            BinOp::Mul | BinOp::Div => {
+                let left_applied = self.apply(&left_ty);
+                let right_applied = self.apply(&right_ty);
+                let both_float_dims = match (&left_applied.kind, &right_applied.kind) {
+                    (TyKind::Float(_), TyKind::Float(_)) => {
+                        Some((left_applied.unit_dim, right_applied.unit_dim))
+                    }
+                    _ => None,
+                };
+                match both_float_dims {
+                    Some((l, r)) if l.is_some() || r.is_some() => {
+                        let mut left_stripped = left_applied.clone();
+                        left_stripped.unit_dim = None;
+                        let mut right_stripped = right_applied.clone();
+                        right_stripped.unit_dim = None;
+                        let _ = self.unify(&left_stripped, &right_stripped, span);
+                        let mut result = self.apply(&left_stripped);
+                        let l_dim = l.unwrap_or(units::Dimension::DIMENSIONLESS);
+                        let r_dim = r.unwrap_or(units::Dimension::DIMENSIONLESS);
+                        result.unit_dim = Some(if op == BinOp::Mul {
+                            l_dim.multiply(&r_dim)
+                        } else {
+                            l_dim.divide(&r_dim)
+                        });
+                        result
+                    }
+                    _ => {
+                        let _ = self.unify(&left_ty, &right_ty, span);
+                        self.apply(&left_ty)
+                    }
+                }
+            }
+
+            // Comparison operators: the same operation-worded pre-check as
+            // Add/Sub, reported as `compare`; the unifier remains the
+            // backstop for every shape the pre-check does not see.
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                if let Some(err) = self.unit_compare_precheck(&left_ty, &right_ty) {
+                    self.error(err, span);
+                    return Ty::error();
+                }
                 let _ = self.unify(&left_ty, &right_ty, span);
                 Ty::bool()
             }
@@ -3590,8 +3714,34 @@ impl<'ctx> TypeInfer<'ctx> {
                 }
             }
 
-            // Power operator
+            // Power operator: dimensional exponentiation (`powi` lifting,
+            // scaling a unit's exponents by an integer power) is a specced
+            // follow-up (`docs/DIMENSIONAL-ANALYSIS.md`), not this slice.
+            // Loudly refuse `**` on a unit-carrying operand rather than
+            // silently producing a wrong dimension.
             BinOp::Pow => {
+                let left_applied = self.apply(&left_ty);
+                let right_applied = self.apply(&right_ty);
+                let has_unit = matches!(
+                    (&left_applied.kind, left_applied.unit_dim),
+                    (TyKind::Float(_), Some(_))
+                ) || matches!(
+                    (&right_applied.kind, right_applied.unit_dim),
+                    (TyKind::Float(_), Some(_))
+                );
+                if has_unit {
+                    self.error(
+                        TypeError::UnsupportedConstruct {
+                            construct: "`**` on unit-carrying operands".to_string(),
+                            detail: "dimensional exponentiation (powi lifting) is a \
+                                     specced follow-up in docs/DIMENSIONAL-ANALYSIS.md; \
+                                     compute the power with `*`, or drop the annotation"
+                                .to_string(),
+                        },
+                        span,
+                    );
+                    return Ty::error();
+                }
                 let _ = self.unify(&left_ty, &right_ty, span);
                 self.apply(&left_ty)
             }
@@ -3945,8 +4095,22 @@ impl<'ctx> TypeInfer<'ctx> {
         if is_generic_slot {
             return Some(PositionMatch::Generic);
         }
-        // Exact structural match is most specific.
-        if p == a {
+        // Exact structural match is most specific. Compared WITHOUT unit
+        // dimensions (`f64<m/s>`, experimental): codegen's mangled overload
+        // names come from `MirType` (no unit slot -- units are erased before
+        // MIR), so two candidates differing ONLY by unit annotation mangle
+        // to the SAME C name. Comparing `unit_dim` here would let the
+        // checker uniquely resolve a call that codegen's mangler cannot
+        // distinguish, producing C with a duplicate definition -- exactly
+        // the DIVERGENCE TRAP this function's doc comment warns about. Both
+        // sides stripped keeps the checker and codegen decision procedures
+        // in agreement: such an overload set is reported AmbiguousMethod
+        // here instead of silently accepted and mis-emitted.
+        let mut p_unitless = p.clone();
+        p_unitless.unit_dim = None;
+        let mut a_unitless = a.clone();
+        a_unitless.unit_dim = None;
+        if p_unitless == a_unitless {
             return Some(PositionMatch::Exact);
         }
         // Numeric literal defaulting: an unsuffixed integer literal is an
@@ -6357,6 +6521,15 @@ impl<'ctx> TypeInfer<'ctx> {
                     }
                 }
                 base_ty
+            }
+            ast::TypeKind::WithUnit { base, dim, .. } => {
+                let base_ty = self.lower_type(base);
+                match base_ty.kind {
+                    TyKind::Float(_) => base_ty.with_unit_dim(*dim),
+                    // Defensive: the parser only emits `WithUnit` for
+                    // f64/f32 heads, so this arm is unreached in practice.
+                    _ => base_ty,
+                }
             }
             _ => Ty::fresh_var(),
         }

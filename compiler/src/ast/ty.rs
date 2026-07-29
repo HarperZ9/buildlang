@@ -162,6 +162,16 @@ pub enum TypeKind {
     /// Effect annotation: `T with Effect`
     WithEffect { ty: Box<Type>, effects: Vec<Path> },
 
+    /// A unit-annotated numeric type: `f64<m/s>` (experimental).
+    /// `dim` is the parsed, canonical dimension; `unit_text` is the source
+    /// spelling for diagnostics. The base is always a primitive float path
+    /// in this slice (the parser only produces this for f64/f32 heads).
+    WithUnit {
+        base: Box<Type>,
+        dim: crate::units::Dimension,
+        unit_text: std::sync::Arc<str>,
+    },
+
     /// Neural type: `Neural<Input, Output>`
     Neural { input: Box<Type>, output: Box<Type> },
 

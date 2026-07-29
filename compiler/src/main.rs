@@ -5016,6 +5016,8 @@ fn type_error_kind(error: &TypeError) -> &'static str {
         TypeError::MissingHandlerClause { .. } => "MissingHandlerClause",
         TypeError::NotTryable { .. } => "NotTryable",
         TypeError::NotAwaitable { .. } => "NotAwaitable",
+        TypeError::UnitMismatch { .. } => "UnitMismatch",
+        TypeError::UnitOperationMismatch { .. } => "UnitOperationMismatch",
         _ => "TypeError",
     }
 }

@@ -1,0 +1,17 @@
+// Unit-annotated numeric types fixture (experimental, W6 checker slice one).
+//
+// Byte-identity proof: this program and its sibling `units_velocity_plain.bld`
+// differ ONLY in the `<...>` unit annotations. `buildc build --emit c` must
+// emit byte-identical C for both (the annotation is erased before MIR), and
+// both must run with identical stdout.
+
+fn speed(distance: f64<m>, time: f64<s>) -> f64<m/s> {
+    distance / time
+}
+
+fn main() ~ Console {
+    let distance: f64<m> = 100.0;
+    let time: f64<s> = 9.58;
+    let v: f64<m/s> = speed(distance, time);
+    println!("{}", v);
+}

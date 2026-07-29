@@ -410,6 +410,23 @@ pub enum TypeError {
         effect_name: String,
         operation: String,
     },
+
+    // =========================================================================
+    // UNIT ERRORS (experimental: unit-annotated numeric types, `f64<m/s>`)
+    // =========================================================================
+    /// Unit dimensions disagree at a unification boundary (assignment,
+    /// annotation, argument, return).
+    #[error("unit mismatch: expected `{expected}`, found `{found}` (dimensions differ)")]
+    UnitMismatch { expected: String, found: String },
+
+    /// Unit dimensions disagree for a specific operation (add/subtract/compare),
+    /// wording identical to units::UnitError::Mismatch.
+    #[error("unit mismatch: cannot {operation} `{left}` and `{right}` (dimensions differ)")]
+    UnitOperationMismatch {
+        operation: &'static str,
+        left: String,
+        right: String,
+    },
 }
 
 impl TypeError {

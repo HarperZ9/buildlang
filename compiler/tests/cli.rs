@@ -17500,3 +17500,155 @@ fn five_modes_bind_into_one_chain() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+// =============================================================================
+// UNIT-ANNOTATED NUMERIC TYPES (experimental, W6 checker slice one)
+//
+// `f64<m/s>`-style annotations (`compiler/src/units.rs` grammar) are checked
+// at unification boundaries but have ZERO codegen impact: MIR lowers types
+// from the AST, and the `WithUnit` node delegates to its base type
+// (`codegen/lower/types.rs`). These tests are the mechanical proof: emitted C
+// is byte-identical to the same program with the annotations stripped, and
+// the check receipt surfaces the new checker rule through the EXISTING
+// open-string `diagnostics` field with no schema change.
+// =============================================================================
+
+fn units_fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("units")
+        .join(name)
+}
+
+#[test]
+fn units_annotation_erases_to_byte_identical_c() {
+    let dir = std::env::temp_dir().join(format!("buildlang_units_byte_id_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create units byte-identity fixture dir");
+
+    let annotated_c = dir.join("annotated.c");
+    let plain_c = dir.join("plain.c");
+
+    // `buildc <file> --target c -o <out>` writes raw generated C bytes
+    // directly (cmd_compile), no C compiler required to prove erasure.
+    let annotated = buildc()
+        .arg(units_fixture("units_velocity.bld"))
+        .args(["--target", "c", "-o"])
+        .arg(&annotated_c)
+        .output()
+        .expect("compile the unit-annotated fixture to C");
+    assert!(
+        annotated.status.success(),
+        "the unit-annotated fixture must compile to C\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&annotated.stdout),
+        String::from_utf8_lossy(&annotated.stderr)
+    );
+
+    let plain = buildc()
+        .arg(units_fixture("units_velocity_plain.bld"))
+        .args(["--target", "c", "-o"])
+        .arg(&plain_c)
+        .output()
+        .expect("compile the plain fixture to C");
+    assert!(
+        plain.status.success(),
+        "the plain fixture must compile to C\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&plain.stdout),
+        String::from_utf8_lossy(&plain.stderr)
+    );
+
+    let annotated_bytes = fs::read(&annotated_c).expect("read annotated C output");
+    let plain_bytes = fs::read(&plain_c).expect("read plain C output");
+    assert_eq!(
+        annotated_bytes, plain_bytes,
+        "a unit annotation must have ZERO codegen impact: the emitted C for \
+         `units_velocity.bld` and `units_velocity_plain.bld` must be byte-identical"
+    );
+
+    if c_backend_ready() {
+        let run_annotated = buildc()
+            .arg("run")
+            .arg(units_fixture("units_velocity.bld"))
+            .output()
+            .expect("run the unit-annotated fixture");
+        let run_plain = buildc()
+            .arg("run")
+            .arg(units_fixture("units_velocity_plain.bld"))
+            .output()
+            .expect("run the plain fixture");
+        assert!(
+            run_annotated.status.success() && run_plain.status.success(),
+            "both fixtures must run successfully\nannotated stderr:\n{}\nplain stderr:\n{}",
+            String::from_utf8_lossy(&run_annotated.stderr),
+            String::from_utf8_lossy(&run_plain.stderr)
+        );
+        assert_eq!(
+            run_annotated.stdout, run_plain.stdout,
+            "both fixtures must run with identical stdout"
+        );
+    } else {
+        eprintln!(
+            "skipping the run-output half of units_annotation_erases_to_byte_identical_c: \
+             C backend not ready"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn units_check_receipt_clean_and_mismatch() {
+    // Clean fixture: receipt schema string unchanged, diagnostics empty.
+    let clean = buildc()
+        .arg("check")
+        .arg(units_fixture("units_velocity.bld"))
+        .args(["--receipt", "-"])
+        .output()
+        .expect("check the unit-annotated fixture with a receipt");
+    assert!(
+        clean.status.success(),
+        "the unit-annotated fixture must check clean\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&clean.stdout),
+        String::from_utf8_lossy(&clean.stderr)
+    );
+    let clean_receipt = receipt_from_stdout(&clean);
+    assert_eq!(clean_receipt["schema"], "buildlang-check-receipt/v1");
+    assert_eq!(clean_receipt["status"], "passed");
+    assert_eq!(
+        clean_receipt["diagnostics"].as_array().map(Vec::len),
+        Some(0),
+        "a program using the new syntax that checks OK must have no \
+         diagnostics: {clean_receipt:#?}"
+    );
+
+    // Mismatched fixture: one diagnostic, stage "type", kind
+    // "UnitOperationMismatch" -- the new checker rule surfaces through the
+    // EXISTING open-string `diagnostics` field, no schema change.
+    let mismatch = buildc()
+        .arg("check")
+        .arg(units_fixture("units_mismatch.bld"))
+        .args(["--receipt", "-"])
+        .output()
+        .expect("check the mismatched-add fixture with a receipt");
+    assert!(
+        !mismatch.status.success(),
+        "a mismatched-dimension add must fail the check"
+    );
+    let mismatch_receipt = receipt_from_stdout(&mismatch);
+    assert_eq!(mismatch_receipt["schema"], "buildlang-check-receipt/v1");
+    assert_eq!(mismatch_receipt["status"], "failed");
+    let diagnostics = mismatch_receipt["diagnostics"]
+        .as_array()
+        .expect("diagnostics array");
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly one diagnostic: {mismatch_receipt:#?}"
+    );
+    assert_eq!(diagnostics[0]["stage"], "type");
+    assert_eq!(diagnostics[0]["kind"], "UnitOperationMismatch");
+    assert_eq!(
+        diagnostics[0]["message"],
+        "unit mismatch: cannot add `m` and `s` (dimensions differ)"
+    );
+}

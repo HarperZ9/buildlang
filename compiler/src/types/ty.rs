@@ -197,6 +197,9 @@ pub struct Ty {
     /// These are compile-time metadata for color space safety, precision tracking, etc.
     /// An empty vec means no annotations (the common case).
     pub annotations: Vec<Arc<str>>,
+    /// Optional physical dimension for numeric types (`f64<m/s>`), experimental.
+    /// `None` means unconstrained: compatible with any unit, the common case.
+    pub unit_dim: Option<crate::units::Dimension>,
 }
 
 impl Ty {
@@ -205,12 +208,26 @@ impl Ty {
         Self {
             kind,
             annotations: Vec::new(),
+            unit_dim: None,
         }
     }
 
     /// Create a type with annotations (e.g., `with ColorSpace<Linear>`).
     pub fn with_annotations(kind: TyKind, annotations: Vec<Arc<str>>) -> Self {
-        Self { kind, annotations }
+        Self {
+            kind,
+            annotations,
+            unit_dim: None,
+        }
+    }
+
+    /// Attach a physical dimension (`f64<m/s>`), experimental. Named
+    /// `unit_dim`, not `unit`, because `Ty::unit()` already names the
+    /// unit-type constructor; a same-named field would shadow-confuse
+    /// every reader.
+    pub fn with_unit_dim(mut self, dim: crate::units::Dimension) -> Self {
+        self.unit_dim = Some(dim);
+        self
     }
 
     /// Check if this type has a specific annotation.
@@ -540,6 +557,11 @@ impl Ty {
         if !self.annotations.is_empty() && result.annotations.is_empty() {
             result.annotations = self.annotations.clone();
         }
+        // Preserve a unit dimension riding on a Var-containing type through
+        // substitution, mirroring the annotations-preservation rule above.
+        if self.unit_dim.is_some() && result.unit_dim.is_none() {
+            result.unit_dim = self.unit_dim;
+        }
         result
     }
 
@@ -745,6 +767,13 @@ impl fmt::Display for Ty {
             }
             TyKind::Error => write!(f, "{{error}}"),
         }?;
+        // Append a unit dimension (`f64<m/s>`, experimental) if present,
+        // using the canonical formatter so two spellings of the same unit
+        // (`m/s` and `m*s^-1`) always display identically. Existing
+        // programs never have `Some` here, so Display is unchanged for them.
+        if let Some(dim) = &self.unit_dim {
+            write!(f, "<{}>", dim)?;
+        }
         // Append color space / precision annotations if present
         if !self.annotations.is_empty() {
             write!(f, " with ")?;
@@ -1175,5 +1204,46 @@ mod tests {
 
         // Each instantiation should have different variables
         assert_ne!(ty1, ty2);
+    }
+
+    // =========================================================================
+    // UNIT DIMENSIONS (experimental: `f64<m/s>`)
+    // =========================================================================
+
+    #[test]
+    fn test_unit_dim_display_canonicalizes() {
+        // `m*s^-1` and `m/s` are the same dimension; Display always renders
+        // the canonical form regardless of how the dimension was parsed.
+        let dim = crate::units::parse_unit("m*s^-1").unwrap();
+        let ty = Ty::float(FloatTy::F64).with_unit_dim(dim);
+        assert_eq!(format!("{}", ty), "f64<m/s>");
+        // A plain float's Display is unchanged (no `Some`, no `<...>`).
+        assert_eq!(format!("{}", Ty::float(FloatTy::F64)), "f64");
+    }
+
+    #[test]
+    fn test_unit_dim_survives_substitution_through_var_chain() {
+        // Mirrors the pre-existing `annotations` precedent: a unit
+        // dimension attached to a type that resolves through a Var
+        // indirection must survive substitution even though the resolved
+        // type's own `substitute` arm does not carry it forward on its own.
+        let v1 = TyVarId::fresh();
+        let dim = crate::units::parse_unit("m").unwrap();
+        let carrier = Ty::var(v1).with_unit_dim(dim);
+
+        let mut subst = Substitution::new();
+        subst.insert(v1, Ty::float(FloatTy::F64));
+
+        let result = carrier.substitute(&subst);
+        assert_eq!(result.unit_dim, Some(dim));
+    }
+
+    #[test]
+    fn test_unit_dim_participates_in_equality() {
+        let dim = crate::units::parse_unit("m").unwrap();
+        let with_unit = Ty::float(FloatTy::F64).with_unit_dim(dim);
+        let without_unit = Ty::float(FloatTy::F64);
+        assert_ne!(with_unit, without_unit);
+        assert_eq!(with_unit.clone(), with_unit);
     }
 }

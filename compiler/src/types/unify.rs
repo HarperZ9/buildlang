@@ -122,10 +122,19 @@ impl Unifier {
             // widening; for now we allow all integer-to-integer conversions
             // so test programs that index arrays with i32 variables compile.
             (TyKind::Int(_), TyKind::Int(_)) => Ok(()),
-            (TyKind::Float(f1), TyKind::Float(f2)) if f1 == f2 => Ok(()),
-            // Allow implicit float width coercion (f32 <-> f64) for ecosystem
-            // compatibility. Shader code frequently mixes f32 and f64.
-            (TyKind::Float(_), TyKind::Float(_)) => Ok(()),
+            // Float-to-float coercion (f32 <-> f64) stays allowed for
+            // ecosystem compatibility, exactly as before. A unit dimension
+            // (`f64<m/s>`, experimental) is the one thing that still hard
+            // fails here: two DIFFERENT `Some` dimensions never unify.
+            // Equal dimensions, or at least one `None` (unconstrained,
+            // compatible with any unit), unify same as an unannotated float.
+            (TyKind::Float(_), TyKind::Float(_)) => match (&t1.unit_dim, &t2.unit_dim) {
+                (Some(a), Some(b)) if a != b => Err(TypeError::UnitMismatch {
+                    expected: a.to_canonical_string(),
+                    found: b.to_canonical_string(),
+                }),
+                _ => Ok(()),
+            },
             (TyKind::Bool, TyKind::Bool) => Ok(()),
             (TyKind::Char, TyKind::Char) => Ok(()),
             (TyKind::Str, TyKind::Str) => Ok(()),
