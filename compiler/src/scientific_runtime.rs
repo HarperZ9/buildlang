@@ -123,6 +123,23 @@ pub const RELATION_INVARIANT: &str = "relation_columns_agree";
 /// wrong formula) differs by an O(1) amount this bound catches decisively.
 pub const RELATION_TOLERANCE: f64 = 1e-9;
 
+/// The invariant name emitted for the CROSS-BACKEND agreement check: each row
+/// holds the same step's value computed by two backends (column 0 the C
+/// anchor, column 1 the secondary lane), and every row must agree within the
+/// cross-backend tolerance. The evaluator is the relation family's; only the
+/// tolerance and the sealed provenance differ.
+pub const CROSS_BACKEND_INVARIANT: &str = "cross_backend_columns_agree";
+
+/// Tolerance for the cross-backend check. Looser than RELATION_TOLERANCE for
+/// a measured reason: the C runtime prints %g (6 significant digits) while
+/// the Rust lane prints shortest-roundtrip, so two IDENTICAL doubles can
+/// print up to ~5e-7 apart on O(1) values (measured 2026-07-28 on the decay
+/// recurrence). 1e-5 clears that display-rounding floor by ~20x, while a
+/// genuine cross-backend divergence (a dropped term, a different formula, a
+/// miscompiled kernel) is O(1) and caught decisively. Like every family
+/// tolerance it is absolute: cross-backend kernels must emit O(1) values.
+pub const CROSS_BACKEND_TOLERANCE: f64 = 1e-5;
+
 /// Provenance reference to the Telos pass-0009 research probe (reference only;
 /// never matched byte-wise, per the determinism decision in the design).
 pub const RESEARCH_SOURCE_HASH: &str =
@@ -295,6 +312,32 @@ pub struct ScientificBudget {
     /// `steps_consumed == steps_limit`, re-derived at verify.
     pub exhausted: bool,
     /// `DECLARED` (v0): the facts were stated, not independently metered.
+    pub status: String,
+}
+
+/// The cross-backend admission block: the secondary lane's witnessed facts.
+/// Present IFF the invariant is the cross-backend member (a strict
+/// biconditional verify re-checks). The secondary raw-stdout digest and
+/// executable digest are sealed at emit and REPORTED at verify (exact bytes
+/// are toolchain-dependent by design, exactly like the primary's); the
+/// re-checked quantity is the verdict over the re-derived columns.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ScientificCrossBackend {
+    /// The secondary lane. v0: `rust` only (the validation lane); the GPU
+    /// lane is a later value, not a different mechanism.
+    pub secondary_target: String,
+    /// First line of `rustc --version` at emit (human triage).
+    pub secondary_toolchain_version: String,
+    /// sha256 over the full version-probe output bytes.
+    pub secondary_toolchain_digest: ScientificDigest,
+    /// sha256 of the compiled secondary executable BEFORE it ran.
+    pub secondary_executable_digest: ScientificDigest,
+    /// sha256 over the secondary's exact raw stdout bytes at emit.
+    pub secondary_raw_stdout_digest: ScientificDigest,
+    /// The secondary's process exit code (sealed; re-checked at verify).
+    pub secondary_exit_code: i32,
+    /// `EXECUTED` (v0): unlike the declared blocks, this one witnesses a run
+    /// that actually happened; verify re-executes it.
     pub status: String,
 }
 
@@ -605,6 +648,12 @@ pub struct ScientificRuntimeReceipt {
     /// so receipts sealed before this block existed keep their exact bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<ScientificBudget>,
+    /// The cross-backend admission block, present IFF the invariant is the
+    /// cross-backend member (`--cross-backend <TARGET> --invariant
+    /// cross-backend`). Optional-with-default so receipts sealed before this
+    /// block existed keep their exact bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cross_backend: Option<ScientificCrossBackend>,
     pub measurement: ScientificMeasurement,
     pub invariant: ScientificInvariant,
     /// Explicitly fenced pass-0122 branches buildc does not produce: absence
@@ -810,6 +859,7 @@ pub const KNOWN_INVARIANTS: &[&str] = &[
     RELATION_INVARIANT,
     CONSERVED_BAND_INVARIANT,
     NON_NEGATIVE_INVARIANT,
+    CROSS_BACKEND_INVARIANT,
 ];
 
 /// Whether `name` is an invariant this build implements (and can therefore
@@ -829,6 +879,12 @@ pub fn is_known_invariant(name: &str) -> bool {
 pub fn column_count_matches_invariant(name: &str, column_count: usize) -> bool {
     if name == RELATION_INVARIANT {
         column_count >= 2
+    } else if name == CROSS_BACKEND_INVARIANT {
+        // The cross-backend row is exactly two columns (the C anchor and the
+        // secondary lane): unlike the open-ended relation family member, the
+        // invariant itself defines the column structure, so no other count
+        // is expressible.
+        column_count == 2
     } else {
         column_count == 1
     }
@@ -847,6 +903,7 @@ pub fn invariant_tolerance(name: &str) -> f64 {
         RELATION_INVARIANT => RELATION_TOLERANCE,
         CONSERVED_BAND_INVARIANT => CONSERVED_BAND_TOLERANCE,
         NON_NEGATIVE_INVARIANT => NON_NEGATIVE_TOLERANCE,
+        CROSS_BACKEND_INVARIANT => CROSS_BACKEND_TOLERANCE,
         _ => ENERGY_MONOTONE_TOLERANCE,
     }
 }
@@ -864,6 +921,9 @@ pub fn invariant_expectation(name: &str) -> &'static str {
             "the quantity stays within the error budget of its initial value"
         }
         NON_NEGATIVE_INVARIANT => "no value drops below zero beyond tolerance",
+        CROSS_BACKEND_INVARIANT => {
+            "every row's two backend columns agree within the cross-backend tolerance"
+        }
         _ => "no step increases energy beyond tolerance",
     }
 }
@@ -953,7 +1013,12 @@ pub fn evaluate_measurement(
     column_count: usize,
 ) -> MeasurementVerdict {
     match name {
-        RELATION_INVARIANT => {
+        // The cross-backend invariant reuses the relation family's evaluator
+        // unchanged: only the tolerance (looser, for the C/Rust print-format
+        // floor) and the sealed provenance (the `cross_backend` block)
+        // differ. Do NOT add it to `evaluate_invariant` (it lacks the
+        // `column_count` the relation arm needs), same reason as `relation`.
+        RELATION_INVARIANT | CROSS_BACKEND_INVARIANT => {
             let (observed, rows) = relation_columns_agree(series, tol, column_count);
             MeasurementVerdict {
                 observed,
@@ -1008,6 +1073,11 @@ pub struct ScientificReceiptInputs<'a> {
     /// the coherence of consumption against the ceiling before building the
     /// receipt.
     pub budget: Option<ScientificBudget>,
+    /// The cross-backend admission block (`--cross-backend <TARGET>`).
+    /// `cmd_run` has already run the secondary lane, interleaved its series
+    /// with the primary's, and enforced the pairing before building the
+    /// receipt.
+    pub cross_backend: Option<ScientificCrossBackend>,
     /// The invariant to check over the series (a name from the registry;
     /// `is_known_invariant`). Selects the evaluator, tolerance, expectation,
     /// and the sealed oracle/invariant binding.
@@ -1055,6 +1125,7 @@ pub fn build_scientific_runtime_receipt(
         seed_value,
         monte_carlo,
         budget,
+        cross_backend,
         invariant_name,
         metric,
         units,
@@ -1158,6 +1229,7 @@ pub fn build_scientific_runtime_receipt(
         },
         monte_carlo,
         budget,
+        cross_backend,
         effect_policy,
         measurement: ScientificMeasurement {
             metric,
@@ -1425,6 +1497,43 @@ pub fn build_self_test_cases(
         });
     }
 
+    // 9. FIELD_CONTRACT_VIOLATION (cross-backend biconditional): swap the
+    //    sealed invariant/block pairing. If the receipt carries a
+    //    cross_backend block, remove it (keeping the invariant name); if not,
+    //    add a syntactically valid block (target `rust`, `EXECUTED`, three
+    //    64-hex digests of `a`, exit 0) while leaving the invariant name
+    //    unchanged. Either way the tamper reaches the biconditional admission
+    //    contract, never the integrity gate.
+    {
+        let mut v = receipt_json.clone();
+        match v.get("cross_backend") {
+            Some(cb) if !cb.is_null() => {
+                if let Some(obj) = v.as_object_mut() {
+                    obj.remove("cross_backend");
+                }
+            }
+            _ => {
+                v["cross_backend"] = serde_json::json!({
+                    "secondary_target": "rust",
+                    "secondary_toolchain_version": "rustc 0.0.0 (self-test)",
+                    "secondary_toolchain_digest": {"algorithm": "sha256", "hex": "a".repeat(64)},
+                    "secondary_executable_digest": {"algorithm": "sha256", "hex": "a".repeat(64)},
+                    "secondary_raw_stdout_digest": {"algorithm": "sha256", "hex": "a".repeat(64)},
+                    "secondary_exit_code": 0,
+                    "status": "EXECUTED",
+                });
+            }
+        }
+        let v = reseal_json(&v)?;
+        cases.push(SelfTestCase {
+            label: "cross_backend block swapped against the invariant/block biconditional"
+                .to_string(),
+            tampered: v,
+            expected_class: "FIELD_CONTRACT_VIOLATION".to_string(),
+            resealed: true,
+        });
+    }
+
     Ok(cases)
 }
 
@@ -1548,6 +1657,10 @@ pub struct ScientificCorpusMember {
     pub budget_steps: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_consumed: Option<u64>,
+    /// The member's cross-backend declaration (`--cross-backend <TARGET>`),
+    /// passed through by the runner. v0: `rust` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cross_backend: Option<String>,
     /// The declared receipt status: `PASS`, `FAIL_EXPECTED`, or `FAIL_UNEXPECTED`.
     pub expected_status: String,
 }
@@ -1709,6 +1822,41 @@ pub struct RederivedFacts {
     pub effect_policy: ScientificEffectPolicy,
 }
 
+/// What a verify re-run observes from the SECONDARY (cross-backend) lane,
+/// returned inside [`RerunObservation`] when the closure was called with
+/// `Some(target)`. Mirrors the primary's shape (parsed series, exit code, the
+/// two digests) since the secondary lane is re-checked the exact same way.
+pub struct SecondaryObservation {
+    /// The secondary re-run's parsed numeric stdout.
+    pub parsed: ParsedSeries,
+    /// The secondary re-run's process exit code (re-checked against the
+    /// sealed `cross_backend.secondary_exit_code`; drift is
+    /// `RERUN_EXIT_MISMATCH`, naming the secondary lane).
+    pub exit_code: i32,
+    /// sha256 of the secondary re-run's RAW stdout bytes (REPORTED as
+    /// `secondary_raw_stdout_reproduced`; never a failure by itself).
+    pub raw_stdout_digest: ScientificDigest,
+    /// sha256 of the secondary's re-compiled executable (REPORTED as
+    /// `secondary_executable_reproduced`; never a failure by itself).
+    pub executable_digest: ScientificDigest,
+    /// First line of the FRESHLY PROBED secondary (rustc) toolchain's
+    /// version banner, from the same probe `rerun_scientific_receipt`
+    /// already runs to invoke the compiler. Gives verify the secondary-lane
+    /// visibility parity the primary C lane already has: without this, the
+    /// probed rustc's identity was discarded after compiling, so a
+    /// substituted `RUSTC` re-executed the secondary lane with zero
+    /// visibility into whether it was the toolchain the receipt was sealed
+    /// under.
+    pub probed_toolchain_version: String,
+    /// sha256 over the freshly probed rustc's full version-probe output
+    /// bytes, compared against the sealed `cross_backend.secondary_toolchain_digest`
+    /// to compute `secondary_toolchain_matched` (WARN on drift, exactly like
+    /// the primary's `toolchain_matched`; cross-toolchain re-verification
+    /// stays legitimate by design, the defect being fixed here is
+    /// invisibility, not the ability to do it).
+    pub probed_toolchain_digest: ScientificDigest,
+}
+
 /// What a verify re-run observes, returned by the `rerun_series` callback.
 pub struct RerunObservation {
     /// The re-run's parsed numeric stdout.
@@ -1716,6 +1864,11 @@ pub struct RerunObservation {
     /// The re-run's process exit code (re-checked against the sealed
     /// `runtime_state.exit_code`; drift is `RERUN_EXIT_MISMATCH`).
     pub exit_code: i32,
+    /// The secondary (cross-backend) lane's re-run observation, present IFF
+    /// the `rerun_series` closure was called with `Some(target)` (i.e. the
+    /// receipt carries a `cross_backend` block). `None` for every other
+    /// receipt.
+    pub secondary: Option<SecondaryObservation>,
     /// sha256 of the re-run's RAW stdout bytes (REPORTED as
     /// `raw_stdout_reproduced`; never a failure by itself).
     pub raw_stdout_digest: ScientificDigest,
@@ -1778,7 +1931,10 @@ pub struct RerunObservation {
 /// against the sealed `runtime_state.exit_code`; drift is
 /// `RERUN_EXIT_MISMATCH`, not a tamper-flavored count drift), and the raw
 /// stdout + executable digests (REPORTED as reproduced / not reproduced,
-/// never failures by themselves).
+/// never failures by themselves). The fourth argument is the secondary
+/// target named by the receipt's `cross_backend` block (`Some("rust")`), or
+/// `None` for every receipt without one; when `Some`, the returned
+/// observation's `secondary` field must be filled.
 ///
 /// Returns Ok(report) for every FAITHFUL receipt regardless of its recorded
 /// verdict (PASS, FAIL_EXPECTED, FAIL_UNEXPECTED, UNVERIFIABLE alike); the
@@ -1795,7 +1951,12 @@ pub fn evaluate_scientific_runtime_receipt(
     current_language_version: &str,
     probed_toolchain: Option<&ScientificToolchain>,
     rederive_digests: impl FnOnce(&Path) -> Result<RederivedFacts, i32>,
-    rerun_series: impl FnOnce(&Path, &[String], Option<u64>) -> Result<RerunObservation, i32>,
+    rerun_series: impl FnOnce(
+        &Path,
+        &[String],
+        Option<u64>,
+        Option<&str>,
+    ) -> Result<RerunObservation, i32>,
 ) -> Result<ScientificVerifyReport, i32> {
     let receipt: ScientificRuntimeReceipt =
         serde_json::from_value(receipt_json.clone()).map_err(|err| {
@@ -2174,6 +2335,77 @@ pub fn evaluate_scientific_runtime_receipt(
             return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
         }
     }
+    // The cross-backend admission contract. The block and the invariant are
+    // a STRICT BICONDITIONAL: a receipt witnessing backend agreement must
+    // name the cross-backend invariant, and that invariant must carry the
+    // block (there is nothing else it could mean). Unlike monte_carlo and
+    // budget this block is EXECUTED, not DECLARED: v0 supports the `rust`
+    // validation lane only, and the three witnessed digests must be
+    // well-formed sha256 (reused from the top-level digest gate).
+    let cross_backend_paired =
+        receipt.cross_backend.is_some() == (receipt.invariant.name == CROSS_BACKEND_INVARIANT);
+    if !cross_backend_paired {
+        eprintln!(
+            "Error: cross_backend block present={} but invariant is `{}`: the block and the invariant are a strict biconditional",
+            receipt.cross_backend.is_some(),
+            receipt.invariant.name
+        );
+        return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+    }
+    if let Some(cb) = &receipt.cross_backend {
+        // The mirror of emit's own Random exclusion (main.rs: `--cross-backend`
+        // refuses a Random-observing kernel before compiling, because the Rust
+        // lane has no seeded PRNG builtin). Checked on the RE-DERIVED
+        // capability union, exactly like the seed pairing and Model gates
+        // above, so a hand-built (or tampered-toolchain) receipt cannot ride a
+        // seeded Random kernel through to the re-run and get misclassified as
+        // RERUN_FAILED when rustc later chokes on the undefined symbol. This
+        // transitively excludes a monte_carlo block riding alongside
+        // cross_backend too, since an MC block requires Random by the pairing
+        // gate a few lines up.
+        if rederived_uses_random {
+            eprintln!(
+                "Error: cross_backend block present but the re-derived capabilities include Random: the Rust lane has no seeded PRNG, so the two streams could not agree; emit refuses this combination and verify must too"
+            );
+            return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+        }
+        if cb.secondary_target != "rust" {
+            eprintln!(
+                "Error: cross_backend.secondary_target `{}` is not supported (v0: rust only)",
+                cb.secondary_target
+            );
+            return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+        }
+        if cb.status != "EXECUTED" {
+            eprintln!(
+                "Error: cross_backend.status `{}` is not expressible: this block witnesses a run that actually happened (the only valid status is EXECUTED)",
+                cb.status
+            );
+            return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+        }
+        for (field, digest) in [
+            (
+                "cross_backend.secondary_toolchain_digest",
+                &cb.secondary_toolchain_digest,
+            ),
+            (
+                "cross_backend.secondary_executable_digest",
+                &cb.secondary_executable_digest,
+            ),
+            (
+                "cross_backend.secondary_raw_stdout_digest",
+                &cb.secondary_raw_stdout_digest,
+            ),
+        ] {
+            if !digest_is_well_formed(digest) {
+                eprintln!(
+                    "Error: malformed digest in `{}`: algorithm `{}`, hex `{}` (must be sha256 with 64 hex chars)",
+                    field, digest.algorithm, digest.hex
+                );
+                return Err(verify_failure_class(json, "DIGEST_MALFORMED", 1));
+            }
+        }
+    }
     // The label pairing, checked for EVERY receipt (not only budgeted ones):
     // a budgetless receipt claiming NOT_PROVES_OPTIMALITY, or a budgeted one
     // missing it, is refused. Same for the not_claimed boundary entry.
@@ -2266,9 +2498,19 @@ pub fn evaluate_scientific_runtime_receipt(
 
     // (3) Re-run the program WITH THE STORED ARGS and re-parse its stdout, so an
     // argv-parameterized kernel is reproduced under the same conditions it was
-    // emitted under.
-    let observation = rerun_series(&source_path, &receipt.args, receipt.seed_value)
-        .map_err(|code| verify_failure_class(json, "RERUN_FAILED", code))?;
+    // emitted under. The fourth argument is the secondary lane named by a
+    // sealed `cross_backend` block (`None` for every other receipt).
+    let secondary_target = receipt
+        .cross_backend
+        .as_ref()
+        .map(|cb| cb.secondary_target.as_str());
+    let observation = rerun_series(
+        &source_path,
+        &receipt.args,
+        receipt.seed_value,
+        secondary_target,
+    )
+    .map_err(|code| verify_failure_class(json, "RERUN_FAILED", code))?;
     let parsed = observation.parsed;
 
     // (3a) The process exit code is sealed and deterministic; a re-run that
@@ -2297,6 +2539,92 @@ pub fn evaluate_scientific_runtime_receipt(
         &receipt.build_state.toolchain.program_executable_digest,
     );
 
+    // Cross-backend: require the secondary observation, re-check its exit
+    // code, and rebuild the interleaved 2-column series from the two
+    // re-parsed series the EXACT same way emit does, so verify re-derives
+    // (never trusts) the backend agreement. `verdict_series` feeds every
+    // check below in place of the primary-only `parsed.series`; for every
+    // other receipt it IS `parsed.series`, so the rest of this function is
+    // unchanged.
+    let (
+        verdict_series,
+        secondary_raw_stdout_reproduced,
+        secondary_executable_reproduced,
+        secondary_toolchain_matched,
+    ) = if let Some(cb) = &receipt.cross_backend {
+        let secondary = observation.secondary.ok_or_else(|| {
+                eprintln!(
+                    "Error: cross-backend receipt requires a secondary (rust) re-run observation, but none was produced"
+                );
+                verify_failure_class(json, "RERUN_FAILED", 1)
+            })?;
+
+        // Secondary toolchain visibility parity with the primary's
+        // `toolchain_matched` (WARN, never fail: cross-toolchain
+        // re-verification stays legitimate by design). Unlike the
+        // primary there is no "missing toolchain" branch to handle
+        // here: `rerun_series` already mapped rustc absence to `Err(4)`
+        // before this closure could return an observation at all.
+        let secondary_toolchain_matched = digests_match(
+            &secondary.probed_toolchain_digest,
+            &cb.secondary_toolchain_digest,
+        );
+        if !secondary_toolchain_matched {
+            eprintln!(
+                    "Warning: secondary (rust) toolchain differs: receipt `{}`, local `{}` (re-checking the verdict anyway; any drift below may be environmental)",
+                    cb.secondary_toolchain_version,
+                    secondary.probed_toolchain_version
+                );
+        }
+
+        if secondary.exit_code != cb.secondary_exit_code {
+            eprintln!(
+                "Error: secondary (rust) exit code drift: receipt {}, re-run {}",
+                cb.secondary_exit_code, secondary.exit_code
+            );
+            return Err(verify_failure_class(json, "RERUN_EXIT_MISMATCH", 1));
+        }
+        if parsed.diverged
+            || secondary.parsed.diverged
+            || parsed.series.is_empty()
+            || secondary.parsed.series.is_empty()
+            || parsed.series.len() != secondary.parsed.series.len()
+        {
+            eprintln!(
+                    "Error: cross-backend re-run series mismatch: primary (C) produced {} values (diverged={}), secondary (rust) produced {} values (diverged={})",
+                    parsed.series.len(),
+                    parsed.diverged,
+                    secondary.parsed.series.len(),
+                    secondary.parsed.diverged
+                );
+            return Err(verify_failure_class(json, "MEASUREMENT_COUNT_DRIFT", 1));
+        }
+        let mut interleaved = Vec::with_capacity(parsed.series.len() * 2);
+        for (c, r) in parsed.series.iter().zip(secondary.parsed.series.iter()) {
+            interleaved.push(*c);
+            interleaved.push(*r);
+        }
+        let secondary_raw_stdout_reproduced = digests_match(
+            &secondary.raw_stdout_digest,
+            &cb.secondary_raw_stdout_digest,
+        );
+        let secondary_executable_reproduced = digests_match(
+            &secondary.executable_digest,
+            &cb.secondary_executable_digest,
+        );
+        (
+            interleaved,
+            secondary_raw_stdout_reproduced,
+            secondary_executable_reproduced,
+            secondary_toolchain_matched,
+        )
+    } else {
+        // True-absent semantics: with no secondary lane there is nothing
+        // to (not) reproduce, so all three flags default to true rather
+        // than reading as a failure signal on an ordinary receipt.
+        (parsed.series.clone(), true, true, true)
+    };
+
     // For a DIVERGED run the finite-prefix length (and hence violation_count
     // over that prefix) is the step index of the first non-finite value: a
     // function of the exact float trajectory, which the design declares
@@ -2315,11 +2643,13 @@ pub fn evaluate_scientific_runtime_receipt(
     // breaks re-derivation). Element values are NOT re-compared: exact floats
     // need not reproduce across platforms (see the doc comment), so the
     // verdict is the re-checked quantity, with count guarding series length.
-    if !both_diverged && parsed.series.len() != receipt.measurement.count {
+    // `verdict_series` is the rebuilt interleaved series for a cross-backend
+    // receipt, so this also catches a tampered `measurement.count` there.
+    if !both_diverged && verdict_series.len() != receipt.measurement.count {
         eprintln!(
             "Error: measurement count drift: receipt {}, re-run {}",
             receipt.measurement.count,
-            parsed.series.len()
+            verdict_series.len()
         );
         return Err(verify_failure_class(json, "MEASUREMENT_COUNT_DRIFT", 1));
     }
@@ -2327,7 +2657,7 @@ pub fn evaluate_scientific_runtime_receipt(
     // (4) Recompute the verdict and compare against the stored one.
     let recomputed = recompute_verdict(
         &receipt.invariant.name,
-        &parsed.series,
+        &verdict_series,
         parsed.any_parsed,
         parsed.diverged,
         receipt.negative_fixture,
@@ -2373,6 +2703,9 @@ pub fn evaluate_scientific_runtime_receipt(
         toolchain_matched,
         raw_stdout_reproduced,
         executable_reproduced,
+        secondary_raw_stdout_reproduced,
+        secondary_executable_reproduced,
+        secondary_toolchain_matched,
         tolerance: receipt.invariant.tolerance,
         negative_fixture: receipt.negative_fixture,
         diverged: receipt.diverged,
@@ -2400,6 +2733,23 @@ pub struct ScientificVerifyReport {
     pub toolchain_matched: bool,
     pub raw_stdout_reproduced: bool,
     pub executable_reproduced: bool,
+    /// REPORTED (never required) reproduction of the cross-backend secondary
+    /// lane's raw stdout / executable digests. True-absent semantics: for a
+    /// receipt with no `cross_backend` block both default to `true` (nothing
+    /// to reproduce), so they never read as a failure signal on an ordinary
+    /// receipt.
+    pub secondary_raw_stdout_reproduced: bool,
+    pub secondary_executable_reproduced: bool,
+    /// Secondary-lane toolchain visibility parity with the primary's
+    /// `toolchain_matched`: whether the FRESHLY PROBED rustc (the one that
+    /// actually re-executed the secondary lane, honoring a `RUSTC` env
+    /// override) matches the sealed `cross_backend.secondary_toolchain_digest`.
+    /// A mismatch WARNS (never fails: cross-toolchain re-verification is
+    /// legitimate by design) and this flag carries the result so a
+    /// substituted rustc is at least visible rather than silently discarded.
+    /// True-absent semantics like the two flags above: `true` when the
+    /// receipt has no `cross_backend` block.
+    pub secondary_toolchain_matched: bool,
     pub tolerance: f64,
     pub negative_fixture: bool,
     pub diverged: bool,
@@ -2550,7 +2900,12 @@ pub fn verify_scientific_runtime_receipt(
     current_language_version: &str,
     probed_toolchain: Option<&ScientificToolchain>,
     rederive_digests: impl FnOnce(&Path) -> Result<RederivedFacts, i32>,
-    rerun_series: impl FnOnce(&Path, &[String], Option<u64>) -> Result<RerunObservation, i32>,
+    rerun_series: impl FnOnce(
+        &Path,
+        &[String],
+        Option<u64>,
+        Option<&str>,
+    ) -> Result<RerunObservation, i32>,
 ) -> Result<(), i32> {
     let report = evaluate_scientific_runtime_receipt(
         receipt_json,
@@ -2576,8 +2931,19 @@ pub fn verify_scientific_runtime_receipt(
             "toolchain_matched": report.toolchain_matched,
             "raw_stdout_reproduced": report.raw_stdout_reproduced,
             "executable_reproduced": report.executable_reproduced,
+            "secondary_raw_stdout_reproduced": report.secondary_raw_stdout_reproduced,
+            "secondary_executable_reproduced": report.secondary_executable_reproduced,
             "seal": { "algorithm": "sha256", "hex": report.seal_hex },
         });
+        // Secondary toolchain visibility parity (finding 1): unlike the two
+        // reproduction flags above (always present, true-absent default),
+        // this key is included only when the receipt actually carries a
+        // `cross_backend` block, so a plain receipt's JSON report gains no
+        // new key from this fix.
+        if report.invariant_name == CROSS_BACKEND_INVARIANT {
+            out["secondary_toolchain_matched"] =
+                serde_json::Value::Bool(report.secondary_toolchain_matched);
+        }
         if !report.invariant_held {
             out["failure_class"] = serde_json::Value::String("INVARIANT_NOT_HELD".to_string());
         }
@@ -2590,14 +2956,28 @@ pub fn verify_scientific_runtime_receipt(
         })?;
         println!("{}", text);
     } else if report.invariant_held {
-        println!(
-            "MATCH: scientific-runtime receipt re-runs and re-checks clean ({}, violation_count={}; toolchain_matched={}, raw_stdout_reproduced={}, executable_reproduced={})",
-            report.receipt_status,
-            report.violation_count,
-            report.toolchain_matched,
-            report.raw_stdout_reproduced,
-            report.executable_reproduced
-        );
+        if report.invariant_name == CROSS_BACKEND_INVARIANT {
+            println!(
+                "MATCH: scientific-runtime receipt re-runs and re-checks clean ({}, violation_count={}; toolchain_matched={}, raw_stdout_reproduced={}, executable_reproduced={}, secondary_toolchain_matched={}, secondary_raw_stdout_reproduced={}, secondary_executable_reproduced={})",
+                report.receipt_status,
+                report.violation_count,
+                report.toolchain_matched,
+                report.raw_stdout_reproduced,
+                report.executable_reproduced,
+                report.secondary_toolchain_matched,
+                report.secondary_raw_stdout_reproduced,
+                report.secondary_executable_reproduced
+            );
+        } else {
+            println!(
+                "MATCH: scientific-runtime receipt re-runs and re-checks clean ({}, violation_count={}; toolchain_matched={}, raw_stdout_reproduced={}, executable_reproduced={})",
+                report.receipt_status,
+                report.violation_count,
+                report.toolchain_matched,
+                report.raw_stdout_reproduced,
+                report.executable_reproduced
+            );
+        }
     } else {
         eprintln!(
             "FAIL: scientific-runtime receipt faithfully reproduces, but the invariant did not hold ({}, violation_count={}). `receipt verify` exits nonzero so it is safe as a pass/fail gate.",
@@ -2666,7 +3046,11 @@ fn digest_is_well_formed(digest: &ScientificDigest) -> bool {
 ///   outright; today only `Model` (models propose, oracles dispose).
 /// - `TOOL_UNAVAILABLE` (exit 4): no C compiler is available for the re-run.
 /// - `REDERIVATION_FAILED`, `RERUN_FAILED`: the source could not be re-checked
-///   or re-run (missing file, toolchain failure), distinct from drift.
+///   or re-run (missing file, toolchain failure), distinct from drift. Exit 4
+///   is shared: `TOOL_UNAVAILABLE` for a missing primary (C) toolchain and
+///   `RERUN_FAILED` for a missing secondary (rustc) toolchain both propagate
+///   exit code 4. `failure_class`, not the exit code, is the machine key that
+///   distinguishes which toolchain was unavailable.
 /// - `SOURCE_DIGEST_MISMATCH`, `INPUT_GRAPH_DIGEST_MISMATCH`: the source
 ///   changed since sealing.
 /// - `RERUN_EXIT_MISMATCH`: the re-run's process exit code differs from the
@@ -2764,6 +3148,7 @@ mod tests {
             seed_value: None,
             monte_carlo: None,
             budget: None,
+            cross_backend: None,
             invariant_name: ENERGY_MONOTONE_INVARIANT.to_string(),
             metric: "series".to_string(),
             units: None,
@@ -2941,9 +3326,10 @@ mod tests {
         let cases = build_self_test_cases(&json).expect("build self-test cases");
 
         // The table exercises five separate arms of the failure taxonomy (the
-        // seed-pairing, MC-denominator, and budget-consumption cases share
-        // FIELD_CONTRACT_VIOLATION with the tolerance case but tamper
-        // different sealed fields through different gates).
+        // seed-pairing, MC-denominator, budget-consumption, and cross-backend
+        // biconditional cases share FIELD_CONTRACT_VIOLATION with the
+        // tolerance case but tamper different sealed fields through different
+        // gates).
         let classes: Vec<&str> = cases.iter().map(|c| c.expected_class.as_str()).collect();
         assert_eq!(
             classes,
@@ -2953,6 +3339,7 @@ mod tests {
                 "MALFORMED",
                 "FIELD_CONTRACT_VIOLATION",
                 "INVARIANT_UNSUPPORTED",
+                "FIELD_CONTRACT_VIOLATION",
                 "FIELD_CONTRACT_VIOLATION",
                 "FIELD_CONTRACT_VIOLATION",
                 "FIELD_CONTRACT_VIOLATION",
@@ -3303,7 +3690,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _| Ok(rerun(vec![2.0, 2.0, 2.0])),
+            |_, _, _, _| Ok(rerun(vec![2.0, 2.0, 2.0])),
         );
         assert!(
             result.is_ok(),
@@ -3335,7 +3722,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _| Ok(rerun(vec![2.0, 2.0, 1.0])),
+            |_, _, _, _| Ok(rerun(vec![2.0, 2.0, 1.0])),
         );
         assert_eq!(
             result,
@@ -3370,7 +3757,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _| Ok(rerun(vec![2.0, 2.0, 2.0])),
+            |_, _, _, _| Ok(rerun(vec![2.0, 2.0, 2.0])),
         );
         assert_eq!(result, Err(1), "a non-canonical tolerance must be rejected");
     }
@@ -3447,7 +3834,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _| Ok(rerun(vec![1.0, 0.5, 1.0])),
+            |_, _, _, _| Ok(rerun(vec![1.0, 0.5, 1.0])),
         );
         assert!(
             result.is_ok(),
@@ -3479,7 +3866,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _| Ok(rerun(vec![1.0, 2.0, 1.0])),
+            |_, _, _, _| Ok(rerun(vec![1.0, 2.0, 1.0])),
         );
         assert_eq!(
             result,
@@ -3513,7 +3900,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _| Ok(rerun(vec![1.0, 0.5, 1.0])),
+            |_, _, _, _| Ok(rerun(vec![1.0, 0.5, 1.0])),
         );
         assert_eq!(result, Err(1), "a non-canonical tolerance must be rejected");
     }
@@ -3579,7 +3966,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _| Ok(rerun(vec![1e-12, -1e-13, 2e-14])),
+            |_, _, _, _| Ok(rerun(vec![1e-12, -1e-13, 2e-14])),
         );
         assert!(
             result.is_ok(),
@@ -3611,7 +3998,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _| Ok(rerun(vec![1e-3, 1e-3, 1e-3])),
+            |_, _, _, _| Ok(rerun(vec![1e-3, 1e-3, 1e-3])),
         );
         assert_eq!(
             result,
@@ -3644,7 +4031,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _| Ok(rerun(vec![1e-12, -1e-13, 2e-14])),
+            |_, _, _, _| Ok(rerun(vec![1e-12, -1e-13, 2e-14])),
         );
         assert_eq!(result, Err(1), "a non-canonical tolerance must be rejected");
     }
@@ -3742,7 +4129,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _| Ok(rerun(vec![1.0, 1.0, 2.0, 2.0, 3.0, 3.0])),
+            |_, _, _, _| Ok(rerun(vec![1.0, 1.0, 2.0, 2.0, 3.0, 3.0])),
         );
         assert!(
             result.is_ok(),
@@ -3773,7 +4160,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _| Ok(rerun(vec![1.0, 1.0, 2.0, 9.0])),
+            |_, _, _, _| Ok(rerun(vec![1.0, 1.0, 2.0, 9.0])),
         );
         assert_eq!(
             result,
@@ -3804,7 +4191,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _| Ok(rerun(vec![1.0, 1.0, 2.0, 2.0])),
+            |_, _, _, _| Ok(rerun(vec![1.0, 1.0, 2.0, 2.0])),
         );
         assert_eq!(result, Err(1), "a non-canonical tolerance must be rejected");
     }
@@ -3832,7 +4219,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| panic!("a malformed receipt must be rejected before re-derivation"),
-            |_, _, _| panic!("a malformed receipt must be rejected before the re-run"),
+            |_, _, _, _| panic!("a malformed receipt must be rejected before the re-run"),
         );
         assert_eq!(
             result,
@@ -3906,7 +4293,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _| Ok(rerun(vec![1.0, 1.002, 0.998])),
+            |_, _, _, _| Ok(rerun(vec![1.0, 1.002, 0.998])),
         );
         assert!(
             result.is_ok(),
@@ -3938,7 +4325,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _| Ok(rerun(vec![1.0, 1.0, 1.1])),
+            |_, _, _, _| Ok(rerun(vec![1.0, 1.0, 1.1])),
         );
         assert_eq!(
             result,
@@ -3970,7 +4357,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _| Ok(rerun(vec![1.0, 1.002, 0.998])),
+            |_, _, _, _| Ok(rerun(vec![1.0, 1.002, 0.998])),
         );
         assert_eq!(result, Err(1), "a non-canonical tolerance must be rejected");
     }
@@ -4004,7 +4391,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _| Ok(rerun(vec![1.0, 1.002, 0.998])),
+            |_, _, _, _| Ok(rerun(vec![1.0, 1.002, 0.998])),
         );
         assert_eq!(
             result,
@@ -4033,7 +4420,7 @@ mod tests {
             &relation.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _| Ok(rerun(vec![1.0, 1.0, 2.0, 2.0])),
+            |_, _, _, _| Ok(rerun(vec![1.0, 1.0, 2.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -4103,7 +4490,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _| Ok(rerun(vec![0.0, 5.0, 100.0])),
+            |_, _, _, _| Ok(rerun(vec![0.0, 5.0, 100.0])),
         );
         assert!(
             result.is_ok(),
@@ -4135,7 +4522,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _| Ok(rerun(vec![1.0, -0.5, 2.0])),
+            |_, _, _, _| Ok(rerun(vec![1.0, -0.5, 2.0])),
         );
         assert_eq!(
             result,
@@ -4167,7 +4554,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _| Ok(rerun(vec![0.0, 5.0, 100.0])),
+            |_, _, _, _| Ok(rerun(vec![0.0, 5.0, 100.0])),
         );
         assert_eq!(result, Err(1), "a non-canonical tolerance must be rejected");
     }
@@ -4182,6 +4569,7 @@ mod tests {
                 series,
             },
             exit_code: 0,
+            secondary: None,
             raw_stdout_digest: hex_digest('c'),
             executable_digest: hex_digest('f'),
         }
@@ -4206,7 +4594,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert!(result.is_ok(), "a faithful re-run must verify");
     }
@@ -4232,7 +4620,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(wrong.clone(), graph_digest.clone())),
-            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(result, Err(1), "a source-digest mismatch must fail verify");
     }
@@ -4256,7 +4644,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _| Ok(rerun(vec![1.0, 2.0, 3.0])),
+            |_, _, _, _| Ok(rerun(vec![1.0, 2.0, 3.0])),
         );
         assert_eq!(result, Err(1), "an invariant drift must fail verify");
     }
@@ -4284,7 +4672,7 @@ mod tests {
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
             // Two points instead of three; still monotone (PASS), so only the
             // count check can reject this.
-            |_, _, _| Ok(rerun(vec![4.0, 3.0])),
+            |_, _, _, _| Ok(rerun(vec![4.0, 3.0])),
         );
         assert_eq!(result, Err(1), "a measurement count drift must fail verify");
     }
@@ -4310,7 +4698,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _| Ok(rerun(vec![1.0, 2.0, 3.0])),
+            |_, _, _, _| Ok(rerun(vec![1.0, 2.0, 3.0])),
         );
         assert_eq!(
             result,
@@ -4339,7 +4727,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _| Ok(rerun(vec![1.0, 2.0, 3.0])),
+            |_, _, _, _| Ok(rerun(vec![1.0, 2.0, 3.0])),
         );
         assert!(
             result.is_ok(),
@@ -4375,7 +4763,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _| {
+            |_, _, _, _| {
                 let mut observation = rerun(vec![4.0, 3.0, 2.5]);
                 // Three finite values instead of two: the divergence step
                 // shifted by one on the re-run platform.
@@ -4411,7 +4799,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -4441,7 +4829,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -4470,7 +4858,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(result, Err(1), "an unbound oracle must be rejected");
 
@@ -4489,7 +4877,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -4532,7 +4920,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(result, Err(1), "an empty sealed digest must be rejected");
     }
@@ -4562,7 +4950,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -4587,7 +4975,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -4617,7 +5005,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -4648,7 +5036,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert!(
             result.is_ok(),
@@ -4671,6 +5059,9 @@ mod tests {
             toolchain_matched: true,
             raw_stdout_reproduced: true,
             executable_reproduced: false,
+            secondary_raw_stdout_reproduced: true,
+            secondary_executable_reproduced: true,
+            secondary_toolchain_matched: true,
             tolerance: ENERGY_MONOTONE_TOLERANCE,
             negative_fixture: receipt_status == "FAIL_EXPECTED",
             diverged: false,
@@ -5048,7 +5439,7 @@ mod tests {
                     effect_policy: random_policy(),
                 })
             },
-            |_, _, seed| {
+            |_, _, seed, _| {
                 assert_eq!(seed, Some(42), "the re-run must receive the sealed seed");
                 Ok(rerun(vec![4.0, 3.0, 2.0]))
             },
@@ -5079,7 +5470,7 @@ mod tests {
                     effect_policy: random_policy(),
                 })
             },
-            |_, _, _| panic!("an unseeded Random receipt must be refused before the re-run"),
+            |_, _, _, _| panic!("an unseeded Random receipt must be refused before the re-run"),
         );
         assert_eq!(
             result,
@@ -5104,7 +5495,7 @@ mod tests {
             &overclaimed.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src.clone(), graph.clone())),
-            |_, _, _| panic!("a seed nothing consumes must be refused before the re-run"),
+            |_, _, _, _| panic!("a seed nothing consumes must be refused before the re-run"),
         );
         assert_eq!(
             result,
@@ -5142,7 +5533,7 @@ mod tests {
                     effect_policy: random_policy(),
                 })
             },
-            |_, _, _| panic!("a swapped seed must be refused before the re-run"),
+            |_, _, _, _| panic!("a swapped seed must be refused before the re-run"),
         );
         assert_eq!(result, Err(1), "a re-sealed seed swap must fail");
     }
@@ -5182,7 +5573,7 @@ mod tests {
                     effect_policy: model_policy(),
                 })
             },
-            |_, _, _| panic!("a model-observing receipt must be refused before the re-run"),
+            |_, _, _, _| panic!("a model-observing receipt must be refused before the re-run"),
         );
         assert_eq!(
             result,
@@ -5229,7 +5620,7 @@ mod tests {
                         effect_policy: policy,
                     })
                 },
-                |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+                |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
             )
         }
         let path = Path::new("k.bld");
@@ -5316,7 +5707,7 @@ mod tests {
                         effect_policy: policy,
                     })
                 },
-                |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+                |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
             )
         }
         let path = Path::new("k.bld");
@@ -5400,6 +5791,452 @@ mod tests {
         assert!(!plain.labels.contains(&"NOT_PROVES_OPTIMALITY".to_string()));
     }
 
+    /// A fixture cross-backend block: target `rust`, `EXECUTED`, three
+    /// well-formed digests, exit 0.
+    fn cross_backend_block() -> ScientificCrossBackend {
+        ScientificCrossBackend {
+            secondary_target: "rust".to_string(),
+            secondary_toolchain_version: "rustc 1.0.0 (test)".to_string(),
+            secondary_toolchain_digest: hex_digest('1'),
+            secondary_executable_digest: hex_digest('2'),
+            secondary_raw_stdout_digest: hex_digest('3'),
+            secondary_exit_code: 0,
+            status: "EXECUTED".to_string(),
+        }
+    }
+
+    /// Inputs for a 2-column cross-backend receipt, modeled on `relation_inputs`.
+    fn cross_backend_inputs<'a>(
+        path: &'a Path,
+        series: Vec<f64>,
+        parsed: bool,
+        negative_fixture: bool,
+    ) -> ScientificReceiptInputs<'a> {
+        ScientificReceiptInputs {
+            invariant_name: CROSS_BACKEND_INVARIANT.to_string(),
+            column_count: 2,
+            cross_backend: Some(cross_backend_block()),
+            ..base_inputs(path, series, parsed, negative_fixture)
+        }
+    }
+
+    #[test]
+    fn cross_backend_receipt_round_trips_and_pins_the_secondary_target() {
+        // Interleaved [c0, r0, c1, r1]: two rows, each backend agreeing well
+        // within the cross-backend tolerance (1e-5).
+        let path = Path::new("k.bld");
+        let series = vec![1.0, 1.0000005, 0.5, 0.5000001];
+        let receipt =
+            build_scientific_runtime_receipt(cross_backend_inputs(path, series, true, false));
+        assert_eq!(receipt.invariant.name, CROSS_BACKEND_INVARIANT);
+        assert_eq!(receipt.oracle.name, CROSS_BACKEND_INVARIANT);
+        assert_eq!(receipt.measurement.column_count, 2);
+        assert_eq!(receipt.measurement.count, 4);
+        assert_eq!(receipt.receipt_status, "PASS");
+        assert_eq!(receipt.invariant.observed.violation_count, 0);
+        assert!(receipt.cross_backend.is_some());
+
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let sd = receipt.source_digest.clone();
+        let gd = receipt.input_graph_digest.clone();
+        // The re-run returns the PRIMARY-only and SECONDARY-only series
+        // separately, exactly like `cmd_run`'s two backends; the evaluator
+        // rebuilds the interleaved series itself.
+        let primary_rerun = vec![1.0, 0.5];
+        let secondary_rerun = vec![1.0000005, 0.5000001];
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+            |_, _, _, target| {
+                assert_eq!(
+                    target,
+                    Some("rust"),
+                    "the rerun closure must receive the secondary target from the sealed block"
+                );
+                let mut observation = rerun(primary_rerun.clone());
+                observation.secondary = Some(SecondaryObservation {
+                    parsed: ParsedSeries {
+                        series: secondary_rerun.clone(),
+                        any_parsed: true,
+                        diverged: false,
+                    },
+                    exit_code: 0,
+                    raw_stdout_digest: hex_digest('3'),
+                    executable_digest: hex_digest('2'),
+                    // Matches cross_backend_block()'s sealed toolchain facts:
+                    // a faithful round trip probes the SAME rustc it was
+                    // sealed under.
+                    probed_toolchain_version: "rustc 1.0.0 (test)".to_string(),
+                    probed_toolchain_digest: hex_digest('1'),
+                });
+                Ok(observation)
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "a faithful cross-backend receipt must verify: {result:?}"
+        );
+    }
+
+    #[test]
+    fn cross_backend_evaluator_fails_a_genuine_divergence() {
+        // Row 0 disagrees: 1.0 vs 1.1 is far outside the cross-backend
+        // tolerance (1e-5). This is the family's can-it-fail evidence at the
+        // evaluator level: a genuine cross-backend divergence FAILs.
+        let path = Path::new("k.bld");
+        let series = vec![1.0, 1.1, 0.5, 0.5];
+        let receipt = build_scientific_runtime_receipt(cross_backend_inputs(
+            path,
+            series.clone(),
+            true,
+            false,
+        ));
+        assert_eq!(receipt.receipt_status, "FAIL_UNEXPECTED");
+        assert_eq!(receipt.invariant.status, "FAIL");
+        assert_eq!(receipt.invariant.observed.violation_count, 1);
+        assert_eq!(receipt.invariant.observed.first_violation_step, Some(0));
+
+        // The negative-fixture variant of the exact same divergent series is
+        // FAIL_EXPECTED, not FAIL_UNEXPECTED.
+        let negative =
+            build_scientific_runtime_receipt(cross_backend_inputs(path, series, true, true));
+        assert_eq!(negative.receipt_status, "FAIL_EXPECTED");
+    }
+
+    #[test]
+    fn verify_enforces_the_cross_backend_admission_contracts() {
+        let path = Path::new("k.bld");
+        let series = vec![1.0, 1.0000005, 0.5, 0.5000001];
+        let receipt =
+            build_scientific_runtime_receipt(cross_backend_inputs(path, series, true, false));
+
+        fn run(receipt: &ScientificRuntimeReceipt) -> Result<(), i32> {
+            let value = serde_json::to_value(receipt).expect("to_value");
+            let sd = receipt.source_digest.clone();
+            let gd = receipt.input_graph_digest.clone();
+            verify_scientific_runtime_receipt(
+                &value,
+                None,
+                true,
+                &receipt.compiler_version,
+                &receipt.language_version,
+                Some(&test_toolchain()),
+                move |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+                |_, _, _, _| {
+                    panic!("a biconditional or shape violation must be refused before any re-run")
+                },
+            )
+        }
+
+        // A cross_backend block attached to a receipt whose invariant is NOT
+        // cross-backend: refused (block without the invariant).
+        let mut block_without_invariant =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        block_without_invariant.cross_backend = Some(cross_backend_block());
+        seal_receipt(&mut block_without_invariant);
+        assert_eq!(
+            run(&block_without_invariant),
+            Err(1),
+            "a cross_backend block without the cross-backend invariant must be refused"
+        );
+
+        // The cross-backend invariant with NO block: refused (invariant
+        // without the block).
+        let mut invariant_without_block = receipt.clone();
+        invariant_without_block.cross_backend = None;
+        seal_receipt(&mut invariant_without_block);
+        assert_eq!(
+            run(&invariant_without_block),
+            Err(1),
+            "the cross-backend invariant without its block must be refused"
+        );
+
+        // An unsupported secondary target is refused.
+        let mut wrong_target = receipt.clone();
+        wrong_target
+            .cross_backend
+            .as_mut()
+            .unwrap()
+            .secondary_target = "vulkan".to_string();
+        seal_receipt(&mut wrong_target);
+        assert_eq!(
+            run(&wrong_target),
+            Err(1),
+            "an unsupported secondary_target must be refused"
+        );
+
+        // A non-EXECUTED status is refused (this block witnesses a run that
+        // actually happened; it is not author-DECLARED like monte_carlo/budget).
+        let mut wrong_status = receipt.clone();
+        wrong_status.cross_backend.as_mut().unwrap().status = "DECLARED".to_string();
+        seal_receipt(&mut wrong_status);
+        assert_eq!(
+            run(&wrong_status),
+            Err(1),
+            "a non-EXECUTED cross_backend.status must be refused"
+        );
+    }
+
+    #[test]
+    fn verify_refuses_a_cross_backend_receipt_over_a_random_kernel() {
+        // I-1 from the final-stack review: emit refuses `--cross-backend` on a
+        // Random-observing kernel (main.rs) because the Rust lane has no
+        // seeded PRNG builtin, so the two streams could not agree. Verify had
+        // no mirror -- a hand-built, correctly re-sealed receipt pairing
+        // cross_backend with a seeded Random effect policy passed every other
+        // field-contract gate and was only caught deep in the re-run, when
+        // rustc failed on the undefined `build_random_f64` symbol
+        // (misclassified RERUN_FAILED instead of FIELD_CONTRACT_VIOLATION).
+        // This test builds exactly that receipt through the real builder --
+        // a Random-including effect policy, a sealed seed, AND a cross_backend
+        // block -- and asserts it is refused before any re-run is attempted.
+        fn random_policy() -> ScientificEffectPolicy {
+            ScientificEffectPolicy {
+                facts_digest: hex_digest('9'),
+                observed_capabilities: vec!["Console".to_string(), "Random".to_string()],
+                reads_stdin: false,
+            }
+        }
+        let path = Path::new("k.bld");
+        let series = vec![1.0, 1.0000005, 0.5, 0.5000001];
+        let receipt = build_scientific_runtime_receipt(ScientificReceiptInputs {
+            effect_policy: random_policy(),
+            seed_value: Some(42),
+            ..cross_backend_inputs(path, series, true, false)
+        });
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let sd = receipt.source_digest.clone();
+        let gd = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            move |_| {
+                Ok(RederivedFacts {
+                    source_digest: sd,
+                    input_graph_digest: gd,
+                    effect_policy: random_policy(),
+                })
+            },
+            |_, _, _, _| panic!("must be refused before the re-run"),
+        );
+        assert_eq!(
+            result,
+            Err(1),
+            "a cross_backend receipt over a re-derived Random kernel must be refused"
+        );
+    }
+
+    #[test]
+    fn verify_passes_none_as_the_secondary_target_when_no_cross_backend_block() {
+        // A receipt with no cross_backend block still verifies, and the
+        // rerun closure must be handed `None` as the fourth argument.
+        let path = Path::new("k.bld");
+        let receipt =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        assert!(receipt.cross_backend.is_none());
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let sd = receipt.source_digest.clone();
+        let gd = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+            |_, _, _, target| {
+                assert_eq!(
+                    target, None,
+                    "a receipt without a cross_backend block must pass None as the secondary target"
+                );
+                Ok(rerun(vec![4.0, 3.0, 2.0]))
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "a plain receipt must still verify: {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_a_cross_backend_length_mismatch() {
+        // The primary and secondary re-run series must agree in length
+        // BEFORE the interleaved verdict series is rebuilt: this is the
+        // covering assertion for the length-mismatch interleave refusal
+        // (mutation check 6b). The primary re-run stays at the SEALED
+        // length (2), and the secondary re-run carries one EXTRA value (3):
+        // a naive `.zip()`-truncate (dropping the length guard) would
+        // silently produce an interleaved series whose length coincidentally
+        // still matches the sealed `measurement.count` (4), so the generic
+        // downstream count-drift check alone would NOT catch this mutation;
+        // only the dedicated length-mismatch guard does, which is exactly
+        // what makes this the discriminating test for it.
+        let path = Path::new("k.bld");
+        let series = vec![1.0, 1.0000005, 0.5, 0.5000001];
+        let receipt =
+            build_scientific_runtime_receipt(cross_backend_inputs(path, series, true, false));
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let sd = receipt.source_digest.clone();
+        let gd = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+            |_, _, _, target| {
+                assert_eq!(target, Some("rust"));
+                let mut observation = rerun(vec![1.0, 0.5]);
+                observation.secondary = Some(SecondaryObservation {
+                    // Three values instead of two: the primary and
+                    // secondary re-run series lengths disagree.
+                    parsed: ParsedSeries {
+                        series: vec![1.0000005, 0.5000001, 0.7],
+                        any_parsed: true,
+                        diverged: false,
+                    },
+                    exit_code: 0,
+                    raw_stdout_digest: hex_digest('3'),
+                    executable_digest: hex_digest('2'),
+                    probed_toolchain_version: "rustc 1.0.0 (test)".to_string(),
+                    probed_toolchain_digest: hex_digest('1'),
+                });
+                Ok(observation)
+            },
+        );
+        assert_eq!(
+            result,
+            Err(1),
+            "a primary/secondary re-run length mismatch must be refused"
+        );
+    }
+
+    #[test]
+    fn verify_reports_secondary_toolchain_matched_when_probe_agrees_with_the_seal() {
+        // Finding 1 (secondary toolchain visibility parity): the freshly
+        // probed secondary (rust) toolchain facts, threaded through
+        // SecondaryObservation, are compared against the sealed
+        // cross_backend.secondary_toolchain_digest. A matching probe (the
+        // common case: the same rustc that sealed the receipt re-executes it
+        // at verify) reports secondary_toolchain_matched=true, and verify
+        // still Oks (this flag never fails verify by itself, mirroring the
+        // primary's toolchain_matched).
+        let path = Path::new("k.bld");
+        let series = vec![1.0, 1.0000005, 0.5, 0.5000001];
+        let receipt =
+            build_scientific_runtime_receipt(cross_backend_inputs(path, series, true, false));
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let sd = receipt.source_digest.clone();
+        let gd = receipt.input_graph_digest.clone();
+        let report = evaluate_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+            |_, _, _, target| {
+                assert_eq!(target, Some("rust"));
+                let mut observation = rerun(vec![1.0, 0.5]);
+                observation.secondary = Some(SecondaryObservation {
+                    parsed: ParsedSeries {
+                        series: vec![1.0000005, 0.5000001],
+                        any_parsed: true,
+                        diverged: false,
+                    },
+                    exit_code: 0,
+                    raw_stdout_digest: hex_digest('3'),
+                    executable_digest: hex_digest('2'),
+                    // Matches cross_backend_block()'s sealed
+                    // secondary_toolchain_digest exactly.
+                    probed_toolchain_version: "rustc 1.0.0 (test)".to_string(),
+                    probed_toolchain_digest: hex_digest('1'),
+                });
+                Ok(observation)
+            },
+        )
+        .expect("a faithful cross-backend receipt with a matching secondary toolchain must verify");
+        assert!(
+            report.secondary_toolchain_matched,
+            "a probed rustc matching the sealed digest must report secondary_toolchain_matched=true"
+        );
+    }
+
+    #[test]
+    fn verify_warns_but_still_matches_on_a_mismatched_secondary_toolchain() {
+        // The mirror case: the probed rustc's version-output digest
+        // DISAGREES with the sealed cross_backend.secondary_toolchain_digest
+        // (e.g. a substituted RUSTC pointed at a different or fabricating
+        // binary, or a legitimate different-toolchain re-verification
+        // environment). By design this WARNS -- the evaluator's
+        // `if !secondary_toolchain_matched { eprintln!(...) }` fires, naming
+        // both the sealed and the local version line; not captured by this
+        // test, which asserts the machine-readable signal instead -- and
+        // does NOT fail verify (cross-toolchain re-verification stays
+        // legitimate by design, exactly like the primary C lane's
+        // toolchain_matched). The mismatch is instead surfaced through
+        // secondary_toolchain_matched=false on the returned report, closing
+        // the visibility gap the review flagged: before this fix, a
+        // substituted rustc's identity was silently discarded after
+        // compiling, with zero warning and zero visibility.
+        let path = Path::new("k.bld");
+        let series = vec![1.0, 1.0000005, 0.5, 0.5000001];
+        let receipt =
+            build_scientific_runtime_receipt(cross_backend_inputs(path, series, true, false));
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let sd = receipt.source_digest.clone();
+        let gd = receipt.input_graph_digest.clone();
+        let report = evaluate_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+            |_, _, _, target| {
+                assert_eq!(target, Some("rust"));
+                let mut observation = rerun(vec![1.0, 0.5]);
+                observation.secondary = Some(SecondaryObservation {
+                    parsed: ParsedSeries {
+                        series: vec![1.0000005, 0.5000001],
+                        any_parsed: true,
+                        diverged: false,
+                    },
+                    exit_code: 0,
+                    raw_stdout_digest: hex_digest('3'),
+                    executable_digest: hex_digest('2'),
+                    // DISAGREES with cross_backend_block()'s sealed digest
+                    // (hex_digest('1')): simulates a substituted rustc.
+                    probed_toolchain_version: "rustc 9.9.9 (substituted)".to_string(),
+                    probed_toolchain_digest: hex_digest('9'),
+                });
+                Ok(observation)
+            },
+        )
+        .expect(
+            "a mismatched secondary toolchain must WARN, not fail: cross-toolchain \
+             re-verification stays legitimate by design",
+        );
+        assert!(
+            !report.secondary_toolchain_matched,
+            "a probed rustc differing from the sealed digest must report secondary_toolchain_matched=false"
+        );
+    }
+
     #[test]
     fn verify_rejects_effect_policy_drift() {
         // The sealed capability union disagrees with what the checker
@@ -5429,7 +6266,7 @@ mod tests {
                 facts.effect_policy.facts_digest = hex_digest('8');
                 Ok(facts)
             },
-            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(result, Err(1), "effect-policy drift must fail verify");
     }
@@ -5458,7 +6295,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -5487,7 +6324,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -5512,7 +6349,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -5548,7 +6385,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _| panic!("an unsealed receipt must be rejected before any re-run"),
+            |_, _, _, _| panic!("an unsealed receipt must be rejected before any re-run"),
         );
         assert_eq!(result, Err(1), "an unsealed field edit must be rejected");
     }
@@ -5573,7 +6410,7 @@ mod tests {
             &receipt.language_version,
             None,
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _| panic!("the re-run must never be attempted without a toolchain"),
+            |_, _, _, _| panic!("the re-run must never be attempted without a toolchain"),
         );
         assert_eq!(result, Err(4), "a missing toolchain must exit 4");
     }
@@ -5601,7 +6438,7 @@ mod tests {
             &receipt.language_version,
             Some(&other),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert!(
             result.is_ok(),
@@ -5631,7 +6468,7 @@ mod tests {
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
             // Same series, but the process exited 9 instead of the sealed 0.
-            |_, _, _| {
+            |_, _, _, _| {
                 let mut observation = rerun(vec![4.0, 3.0, 2.0]);
                 observation.exit_code = 9;
                 Ok(observation)
@@ -5663,7 +6500,7 @@ mod tests {
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
             // Finite, monotone re-run: no divergence reproduced.
-            |_, _, _| Ok(rerun(vec![4.0, 3.0])),
+            |_, _, _, _| Ok(rerun(vec![4.0, 3.0])),
         );
         assert_eq!(
             result,
@@ -5692,7 +6529,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, args, _| {
+            |_, args, _, _| {
                 assert_eq!(
                     args,
                     ["--mode".to_string(), "stable".to_string()],

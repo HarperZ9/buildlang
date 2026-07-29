@@ -1,0 +1,21 @@
+// Cross-backend kernel: the same decay recurrence through two backends.
+//
+// x starts at 1.0 and steps through x = x * 0.9 + 0.01 for 40 steps,
+// printing x each step. Emitted with `--cross-backend rust --invariant
+// cross-backend`, buildc runs this through the C anchor AND the Rust
+// validation lane and seals each step's two values as one row of a
+// 2-column relation checked at the cross-backend tolerance (1e-5,
+// calibrated to the display-rounding floor between C's %g and Rust's
+// shortest-roundtrip formatting; the computed doubles are identical for
+// this kernel, measured 2026-07-28). The receipt witnesses backend
+// AGREEMENT on this kernel, not correctness of either backend.
+
+fn main() ~ Console {
+    let mut x: f64 = 1.0;
+    let mut k: i32 = 0;
+    while k < 40 {
+        x = x * 0.9 + 0.01;
+        println!("{}", x);
+        k = k + 1;
+    }
+}
