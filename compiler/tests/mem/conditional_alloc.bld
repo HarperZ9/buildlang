@@ -1,0 +1,58 @@
+// ASan battery fixture for increment-5 (split-frontier drop flags): the
+// CONDITIONAL-ALLOCATION half of the design (as opposed to
+// split_frontier_loop.bld's conditional-USE half). `s` is allocated only
+// when `i % 2 == 0` (half the iterations skip allocation entirely: the def
+// block does not dominate the loop's exit), and the arm that DOES allocate
+// immediately splits again on `i % 4 == 0`, using `s` on BOTH of that inner
+// `if`'s branches with a different message.
+//
+// VERIFIED DEVIATION FROM THE DESIGN DOC'S ORIGINAL MOTIVATING FIXTURE:
+// the design doc's first draft allocated and used `s` on a SINGLE arm (`if
+// i < 1 { let s = ...; println!("{}", s); }`, no further split), framed as
+// the "would-be UNINITIALIZED-FREE shape: an unguarded join free would free
+// garbage `cap` on the skip path". Compiling that program and diffing
+// flag-on against flag-off showed increment 4 (`multi_block_freeable`)
+// already claims it, UNGUARDED -- and correctly so: because a `Call`
+// terminator's continuation block is a single-predecessor site entirely
+// inside the allocating arm's own dominance region (see
+// split_frontier_loop.bld's header for the full mechanism), the free never
+// merges with the skip path before running, so there is no uninitialized
+// free to guard against in that exact program. The hazard the design doc
+// describes is real for the STATIC placement rule (a naive free at the
+// post-merge join, which is what `analysis::flags`'s own
+// `conditional_alloc_enrolls_with_no_dominance` unit test constructs and
+// verifies directly against MIR), but that exact join is not where real
+// `if`/`else`-without-further-branching source lowers its free to.
+//
+// As with split_frontier_loop.bld, the shape that genuinely defeats
+// increment 4 here is MULTIPLE candidate sites for the same conditionally-
+// allocated owner: the inner `if i % 4 == 0` gives `s` two independently
+// valid single-predecessor continuation blocks (one per branch), so
+// `multi_block_freeable`'s function-wide uniqueness requirement declines
+// the owner entirely. Increment 5 claims both sites (no uniqueness
+// requirement, no dominance requirement -- `def_bi` need not dominate a
+// site, which matters here since `s`'s def is nested two `if`s deep) plus
+// the guarded Return backstop for the iterations that never allocate at
+// all. This is still the would-be UNINITIALIZED-FREE shape in spirit (the
+// `i % 2 != 0` iterations never allocate `s`, and the guard is what keeps
+// the shared flag's Return-backstop free from firing on those iterations'
+// eventual function exit); the ASan mutation run recorded in the design
+// doc (flipping the flag's initializer from `= 0` to `= 1`) proves the
+// guard is load-bearing.
+//
+// See docs/MEMORY-PILLAR-DESIGN.md, "Increment 5: split-frontier drop
+// flags" for the exact commands and results.
+fn main() ~ Console {
+    let mut i = 0;
+    while i < 1000000 {
+        if i % 2 == 0 {
+            let s = i.to_string() + "!";
+            if i % 4 == 0 {
+                println!("a {}", s);
+            } else {
+                println!("b {}", s);
+            }
+        }
+        i = i + 1;
+    }
+}

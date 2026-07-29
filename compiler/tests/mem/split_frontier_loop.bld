@@ -1,0 +1,57 @@
+// ASan battery fixture for increment-5 (split-frontier drop flags).
+//
+// `s` is allocated every iteration (`i.to_string() + "!"`, a
+// `build_string_concat` call) and used on BOTH arms of the `if` (different
+// message per parity), so its death frontier has two disjoint candidate
+// free sites, one per arm.
+//
+// VERIFIED DEVIATION FROM THE DESIGN DOC'S ORIGINAL MOTIVATING FIXTURE:
+// the design doc's first draft used a one-sided `if i % 2 == 0 { println!
+// ("{}", s); }` (no `else`) modeled on `drops.rs`'s synthetic
+// `declines_split_death_frontier` unit-test CFG (one TERMINAL predecessor,
+// one CLEAN predecessor descending from a live block, merging at a shared
+// join). Compiling that program and diffing flag-on against flag-off showed
+// NO flag machinery: increment 4 (`multi_block_freeable`) already claims it,
+// unguarded. Reason (confirmed by reading the generated C, not assumed):
+// every `Call` terminator (here, `printf`) gets its OWN continuation block
+// for "control after the call returns". That continuation block is reached
+// from exactly one predecessor (the arm that made the call), so it
+// satisfies increment 4's single-clean-death-frontier rule ALL BY ITSELF,
+// entirely within the allocating arm's own dominance region -- the
+// paired-with-a-clean-sibling join increment 4's `clean_chain_ok` walk is
+// designed to reject never enters the picture, because the free never
+// needs to look past that one-hop continuation block.
+//
+// The shape that genuinely defeats increment 4 in real compiled code is
+// MULTIPLE independently-valid candidate sites for the SAME owner: when
+// BOTH arms of the `if` use `s` (this fixture), EACH arm's `printf`
+// continuation block independently satisfies increment 4's per-block site
+// rule, so `multi_block_freeable`'s function-wide "exactly one qualifying
+// block" requirement is violated by having TWO, and it declines the owner
+// ENTIRELY (leak, safe) -- even though each site would have been sound in
+// isolation. Increment 5 has no such uniqueness requirement (multiple sites
+// on different paths are fine; the shared flag's clear makes a later site
+// on the same path a no-op), so it is the only mechanism that reclaims
+// this owner. `analysis::flags`'s own unit tests
+// (`enrolls_split_frontier_and_places_join_site`,
+// `uaf_shape_declines_live_join`, etc.) separately verify the
+// clean-chain/dominance-declined shape the design doc's synthetic CFG
+// describes, via directly constructed MIR; this real, compilable fixture
+// verifies the multiplicity shape that real `if`/`else` lowering actually
+// produces. Both are genuine declines of increments 1-4; this file
+// exercises the one reachable from real BuildLang source today.
+//
+// See docs/MEMORY-PILLAR-DESIGN.md, "Increment 5: split-frontier drop
+// flags" for the exact commands and results.
+fn main() ~ Console {
+    let mut i = 0;
+    while i < 1000000 {
+        let s = i.to_string() + "!";
+        if i % 2 == 0 {
+            println!("even {}", s);
+        } else {
+            println!("odd {}", s);
+        }
+        i = i + 1;
+    }
+}

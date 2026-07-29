@@ -54,6 +54,28 @@ pub struct CBackend {
     /// keyed by the block's `bb<id>`. Bounds loop memory; disjoint from
     /// `current_fn_freeable`. Empty unless the experimental path is enabled.
     current_fn_block_frees: std::collections::HashMap<u32, Vec<LocalId>>,
+    /// Increment 5: owners enrolled for a runtime `uint8_t __bl_live_N` drop
+    /// flag (split-frontier / conditional-allocation death frontiers, the two
+    /// shapes increments 1-4 decline). Drives the flag declaration, the
+    /// def-site `= 1;` set, and the guarded Return-backstop free. Disjoint
+    /// from `current_fn_freeable`/`current_fn_block_frees`. Empty unless the
+    /// experimental path is enabled.
+    current_fn_flag_owners: Vec<LocalId>,
+    /// Increment 5: guarded frees at block START for flag owners, keyed by
+    /// the block's `bb<id>`. Same key space as `current_fn_block_frees`, but
+    /// emitted through the flag guard (`if (__bl_live_N) { ...; __bl_live_N =
+    /// 0; }`), never merged into `current_fn_block_frees` (that map emits
+    /// UNGUARDED frees). Empty unless the experimental path is enabled.
+    current_fn_flag_block_frees: std::collections::HashMap<u32, Vec<LocalId>>,
+    /// TEST-ONLY override for `experimental_free_enabled()`. `None` in every
+    /// production path (`CBackend::new()` never sets it), so this field has
+    /// no effect outside `#[cfg(test)]`: `experimental_free_enabled()` falls
+    /// back to the exact `BUILDLANG_EXPERIMENTAL_FREE` env check it used
+    /// before this field existed. Exists so an in-process unit test can pin
+    /// the flag-guarded emission (w5-review.md Important finding 2) without
+    /// setting a process-global env var, which is unsound under parallel
+    /// `cargo test` (see `set_experimental_free_enabled_for_test`).
+    experimental_free_override_for_test: Option<bool>,
 }
 
 impl CBackend {
@@ -71,6 +93,9 @@ impl CBackend {
             current_fn_freeable: Vec::new(),
             module_mut_global_alias_risk: false,
             current_fn_block_frees: std::collections::HashMap::new(),
+            current_fn_flag_owners: Vec::new(),
+            current_fn_flag_block_frees: std::collections::HashMap::new(),
+            experimental_free_override_for_test: None,
         }
     }
 
@@ -78,9 +103,25 @@ impl CBackend {
     /// default so the verified baseline (corpus c-execution, all current
     /// programs) keeps the existing leak-but-correct behavior; enabled by
     /// setting `BUILDLANG_EXPERIMENTAL_FREE` while the analysis is matured and
-    /// proven under AddressSanitizer.
-    fn experimental_free_enabled() -> bool {
-        std::env::var_os("BUILDLANG_EXPERIMENTAL_FREE").is_some()
+    /// proven under AddressSanitizer. `experimental_free_override_for_test`,
+    /// when set, takes precedence over the env var; every production path
+    /// leaves it `None`, so production behavior is byte-for-byte unchanged.
+    fn experimental_free_enabled(&self) -> bool {
+        self.experimental_free_override_for_test
+            .unwrap_or_else(|| std::env::var_os("BUILDLANG_EXPERIMENTAL_FREE").is_some())
+    }
+
+    /// TEST-ONLY: force `experimental_free_enabled()` to `enabled`, bypassing
+    /// the `BUILDLANG_EXPERIMENTAL_FREE` environment variable. Lets an
+    /// in-process unit test exercise the flag-guarded emission path without
+    /// setting a process-global env var -- unsafe under parallel `cargo
+    /// test`, and the repo's established idiom is to never do so (see
+    /// `docs/superpowers/plans/2026-07-29-drop-flags.md`'s "Test idiom
+    /// note"). No effect on any production path: nothing outside `#[cfg(test)]`
+    /// can call this, and `CBackend::new()` always leaves the override `None`.
+    #[cfg(test)]
+    fn set_experimental_free_enabled_for_test(&mut self, enabled: bool) {
+        self.experimental_free_override_for_test = Some(enabled);
     }
 
     /// Runtime functions that return a FRESH, solely-owned heap `BuildString`
@@ -1920,17 +1961,19 @@ impl CBackend {
         self.current_ret_ty = func.sig.ret.clone();
         self.current_fn_name = Some(func.name.to_string());
         self.local_string_literals.clear();
-        self.current_fn_freeable = if Self::experimental_free_enabled() {
+        self.current_fn_freeable = if self.experimental_free_enabled() {
             self.freeable_owned_string_locals(func)
         } else {
             Vec::new()
         };
-        self.current_fn_block_frees = if Self::experimental_free_enabled() {
+        self.current_fn_block_frees = if self.experimental_free_enabled() {
             self.block_scoped_freeable(func, &self.current_fn_freeable)
         } else {
             std::collections::HashMap::new()
         };
-        if Self::experimental_free_enabled() {
+        self.current_fn_flag_owners = Vec::new();
+        self.current_fn_flag_block_frees = std::collections::HashMap::new();
+        if self.experimental_free_enabled() {
             // Increment 4: multi-block live ranges the block-scoped (single-block)
             // rule declines. Disjoint from both prior sets.
             let fn_exit_set: std::collections::HashSet<LocalId> =
@@ -1948,6 +1991,8 @@ impl CBackend {
                 &fn_exit_set,
                 &block_scoped_set,
             );
+            let multi_block_set: std::collections::HashSet<LocalId> =
+                extra.values().flatten().copied().collect();
             for (bb, ids) in extra {
                 let slot = self.current_fn_block_frees.entry(bb).or_default();
                 for id in ids {
@@ -1957,6 +2002,26 @@ impl CBackend {
                 }
                 slot.sort_by_key(|id| id.0);
             }
+
+            // Increment 5: split-frontier / conditional-allocation drop flags.
+            // `claimed` is every owner already freed by increments 1-4
+            // (fn-exit, block-scoped, and increment 4's multi-block set):
+            // disjointness, so no owner is freed by two mechanisms. Reuses
+            // `candidates` (the same escape-filtered ownership/move/taint/
+            // one-def gates) computed above for increment 4.
+            let claimed: std::collections::HashSet<LocalId> = fn_exit_set
+                .iter()
+                .copied()
+                .chain(block_scoped_set.iter().copied())
+                .chain(multi_block_set.iter().copied())
+                .collect();
+            let flag_frees = crate::codegen::analysis::flags::split_frontier_flag_frees(
+                func,
+                &candidates,
+                &claimed,
+            );
+            self.current_fn_flag_owners = flag_frees.owners;
+            self.current_fn_flag_block_frees = flag_frees.block_frees;
         }
         self.generate_function_signature(func)?;
         self.output.push_str(" {\n");
@@ -1999,6 +2064,22 @@ impl CBackend {
                     write!(self.output, "{} {};\n", self.type_to_c(&local.ty), name).unwrap();
                 }
             }
+        }
+
+        // Increment 5: declare a runtime drop flag for each enrolled owner,
+        // initialized to 0 (not yet allocated). Keyed by the owner's numeric
+        // LocalId so it cannot collide with another flag; the `__bl_` prefix
+        // matches existing emitted-runtime naming (`__build_init_io`).
+        // Residual collision with a user identifier literally named
+        // `__bl_live_N` is accepted as negligible (see docs/MEMORY-PILLAR-DESIGN.md).
+        // Soundness invariant (verbatim, also in analysis::flags and the
+        // guarded-free emission below): at every point in the emitted C,
+        // `__bl_live_N == 1` implies the owner currently holds a fresh
+        // allocated buffer that no free site has released.
+        let flag_owners = self.current_fn_flag_owners.clone();
+        for owner in flag_owners {
+            self.write_indent();
+            writeln!(self.output, "uint8_t __bl_live_{} = 0;", owner.0).unwrap();
         }
 
         // Emit parameter aliases when MIR renames differ from C signature names.
@@ -2057,6 +2138,17 @@ impl CBackend {
                         let name = self.local_name(id, &func.locals);
                         self.write_indent();
                         writeln!(self.output, "build_string_free({});", name).unwrap();
+                    }
+                }
+
+                // Increment 5: guarded frees at the split-frontier / conditional-
+                // allocation death sites `analysis::flags` computed. Unlike the
+                // unguarded loop above, each of these is wrapped in the owner's
+                // `__bl_live_N` flag test (see `emit_flag_guarded_free`).
+                if let Some(flag_frees) = self.current_fn_flag_block_frees.get(&block.id.0).cloned()
+                {
+                    for id in flag_frees {
+                        self.emit_flag_guarded_free(id, &func.locals);
                     }
                 }
 
@@ -2637,6 +2729,18 @@ impl CBackend {
                     }
                 } else {
                     self.emit_typed_assign(dest_name.clone(), value, *dest, locals)?;
+                }
+
+                // Increment 5: def-site flag set, move-acquire case.
+                // `sound_owned_candidates`'s def_count == 1 guarantee makes
+                // any Assign to a flag owner its unique def; the candidate
+                // gates only admit allocating-Call and `Use(Local)` (move-
+                // acquire) defs, so an Assign reaching here for a flag owner
+                // is always the move-acquire of a fresh buffer whose source
+                // is moved-from and therefore excluded from every free set.
+                if self.current_fn_flag_owners.contains(dest) {
+                    self.write_indent();
+                    writeln!(self.output, "__bl_live_{} = 1;", dest.0).unwrap();
                 }
             }
             MirStmtKind::DerefAssign { ptr, value } => {
@@ -3327,6 +3431,31 @@ impl CBackend {
                     write!(self.output, "{}({});\n", func_str, args_str.join(", ")).unwrap();
                 }
 
+                // Increment 5: def-site flag set for an allocating-Call dest.
+                // `sound_owned_candidates`'s def_count == 1 guarantee makes
+                // this Call the owner's unique def, so the set is
+                // unconditional once dest is a flag owner. Read confirmation
+                // (recorded in the commit body): every special-case early
+                // exit above this generic tail (vtable dispatch, the
+                // `intrinsic_*` remap, `Vec_new`/`String_new`/`String_from`/
+                // `clone`/`None`/`Some`/`Ok`/`Err`/unit-struct constructors)
+                // keys on a `func_str` that can never equal one of the closed
+                // 6-name `allocates_owned_string` list (`build_string_concat`,
+                // `build_format_str`, `build_format_i32`, `build_format_f64`,
+                // `build_i32_to_string`, `build_f64_to_string`), so this
+                // generic tail is the ONLY path where `dest = callee(...)`
+                // for an allocating callee. A missed set fails SAFE (flag
+                // stays 0, buffer leaks); a spurious set is impossible
+                // because the emission is keyed on `dest == flag owner`,
+                // which `sound_owned_candidates` only admits for a def_count
+                // == 1 owner.
+                if let Some(dest_local) = dest {
+                    if self.current_fn_flag_owners.contains(dest_local) {
+                        self.write_indent();
+                        writeln!(self.output, "__bl_live_{} = 1;", dest_local.0).unwrap();
+                    }
+                }
+
                 if let Some(target_block) = target {
                     self.write_indent();
                     write!(
@@ -3349,6 +3478,22 @@ impl CBackend {
                     for name in names {
                         self.write_indent();
                         writeln!(self.output, "build_string_free({});", name).unwrap();
+                    }
+                }
+                // Increment 5: the Return backstop. Every flag-managed owner
+                // gets a guarded free here too, alongside the unguarded
+                // function-exit frees above (disjoint owner sets, so this
+                // never re-frees an increment-1-4 owner). This reclaims paths
+                // that bypass every frontier site (early return, break out of
+                // a loop mid-iteration) and is sound unconditionally: nothing
+                // executes after the block's statements at a Return
+                // terminator, and non-escape (already gated by
+                // `sound_owned_candidates`) means no pointer derived from the
+                // owner survives the function.
+                if !self.current_fn_flag_owners.is_empty() {
+                    let owners = self.current_fn_flag_owners.clone();
+                    for owner in owners {
+                        self.emit_flag_guarded_free(owner, locals);
                     }
                 }
                 // Flush stdout before returning to ensure all output is visible,
@@ -4364,6 +4509,29 @@ impl CBackend {
                 }
             })
             .unwrap_or_else(|| format!("_{}", id.0))
+    }
+
+    /// Increment 5: emit a guarded free for a flag-managed owner:
+    /// `if (__bl_live_N) { build_string_free(<name>); __bl_live_N = 0; }`.
+    /// Soundness invariant (verbatim, also in `analysis::flags` and the flag
+    /// declaration above): at every point in the emitted C, `__bl_live_N ==
+    /// 1` implies the owner currently holds a fresh allocated buffer that no
+    /// free site has released. The guard is what makes ALLOCATED sound
+    /// (double free, uninitialized free); it does NOT guard liveness -- the
+    /// call site is responsible for only reaching this at a buffer-dead-at-
+    /// entry point (the UAF guard lives in `analysis::flags`'s site rule and
+    /// the unconditional Return backstop). The clear (`= 0`) after the free
+    /// is load-bearing: without it, a later guarded free on the same path
+    /// (e.g. a frontier site followed by the Return backstop) would double-free.
+    fn emit_flag_guarded_free(&mut self, owner: LocalId, locals: &[MirLocal]) {
+        let name = self.local_name(owner, locals);
+        self.write_indent();
+        writeln!(
+            self.output,
+            "if (__bl_live_{0}) {{ build_string_free({1}); __bl_live_{0} = 0; }}",
+            owner.0, name
+        )
+        .unwrap();
     }
 
     /// Check if a name conflicts with C reserved words or standard type names.
@@ -5683,6 +5851,289 @@ mod tests {
             extra.is_empty(),
             "a multi-hop-aliased owner must never be scheduled for a free: {extra:?}"
         );
+        // Increment 5: a multi-hop-aliased owner is excluded from
+        // `sound_owned_candidates` (asserted above), so it can never even be
+        // OFFERED to `split_frontier_flag_frees` in production -- but confirm
+        // the function is inert on an empty candidate list too (defense in
+        // depth: the escape gate is upstream of every drop mechanism).
+        let flag_frees = crate::codegen::analysis::flags::split_frontier_flag_frees(
+            &func,
+            &candidates,
+            &std::collections::HashSet::new(),
+        );
+        assert!(
+            !flag_frees.owners.contains(&LocalId(0)),
+            "a multi-hop-aliased owner must never be enrolled as a flag owner: {:?}",
+            flag_frees.owners
+        );
+    }
+
+    // Increment 5: exact-text emission test for `emit_flag_guarded_free`.
+    // Pins the guard/free/clear text (all on the owner's real local name) so
+    // a change to the emitted C is caught here, not just by the C-diff
+    // fixture evidence.
+    #[test]
+    fn emit_flag_guarded_free_produces_exact_guard_text() {
+        let mut backend = CBackend::new();
+        let locals = vec![bs(0, "s")];
+        backend.emit_flag_guarded_free(LocalId(0), &locals);
+        assert_eq!(
+            backend.output,
+            "if (__bl_live_0) { build_string_free(s); __bl_live_0 = 0; }\n"
+        );
+    }
+
+    // Increment 5, w5-review.md Important finding 2: the exact-text test
+    // above pins ONLY `emit_flag_guarded_free`'s guard/free/clear text. It
+    // does not touch the flag DECLARATION (c.rs ~line 2056, `uint8_t
+    // __bl_live_N = 0;`), the def-site `= 1;` set, or the fact that the
+    // Return backstop specifically (not just any frontier site) emits the
+    // same guard text. Before this test, only the manual C-diff protocol
+    // recorded in `docs/MEMORY-PILLAR-DESIGN.md` pinned those three
+    // emissions -- so the proven memory-corruption mutation (flip the
+    // declaration's `= 0` to `= 1`; w5-report.md Task 6 mutation 6, ASan
+    // bad-free) was invisible to `cargo test`. This test compiles the real
+    // shipped fixture `compiler/tests/mem/split_frontier_loop.bld` through
+    // the actual front-end pipeline (lex/parse/typecheck/lower, the same
+    // steps `buildc build` runs) and then through the real
+    // `CBackend::generate_function` path, with `BUILDLANG_EXPERIMENTAL_FREE`
+    // forced on via the test-only override -- never a process env var
+    // (unsafe under parallel `cargo test`; see the "Test idiom note" in
+    // `docs/superpowers/plans/2026-07-29-drop-flags.md`).
+    #[test]
+    fn real_fixture_pins_flag_declaration_set_and_return_backstop() {
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/mem/split_frontier_loop.bld"
+        ));
+        let source_file = crate::lexer::SourceFile::new("split_frontier_loop.bld", source);
+        let mut lexer = crate::lexer::Lexer::new(&source_file);
+        let tokens = lexer
+            .tokenize()
+            .expect("lexing the real fixture should succeed");
+        let mut parser = crate::parser::Parser::new(&source_file, tokens);
+        let ast = parser
+            .parse()
+            .expect("parsing the real fixture should succeed");
+        assert!(
+            parser.errors().is_empty(),
+            "unexpected parser errors: {:?}",
+            parser.errors()
+        );
+
+        let mut ctx = crate::types::TypeContext::new();
+        let mut checker = crate::types::TypeChecker::new(&mut ctx);
+        checker.set_source_file(&source_file);
+        checker.check_module(&ast);
+        assert!(
+            !checker.has_errors(),
+            "unexpected type errors: {:?}",
+            checker.errors()
+        );
+
+        let mir =
+            crate::codegen::lower::MirLowerer::with_source(&ctx, Arc::from(source_file.source()))
+                .lower_module(&ast)
+                .expect("lowering the real fixture should succeed");
+
+        let mut backend = CBackend::new();
+        backend.set_experimental_free_enabled_for_test(true);
+        let output = backend.generate(&mir).expect("C generation should succeed");
+        let code = output.as_string().expect("C output should be a string");
+
+        // Exactly one flag owner (`s`) in this fixture: locate its
+        // declaration and extract the LocalId suffix. The suffix itself is
+        // allowed to drift with unrelated lowering changes; the exact text
+        // around it is what this test pins.
+        let decl_marker = "uint8_t __bl_live_";
+        assert_eq!(
+            code.matches(decl_marker).count(),
+            1,
+            "this fixture allocates exactly one flag owner (`s`); a different count means the fixture's shape changed:\n{code}"
+        );
+        let decl_start = code.find(decl_marker).unwrap();
+        let after_prefix = &code[decl_start + decl_marker.len()..];
+        let digits_len = after_prefix
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .count();
+        assert!(
+            digits_len > 0,
+            "expected a numeric LocalId after __bl_live_: {after_prefix}"
+        );
+        let owner_id = &after_prefix[..digits_len];
+
+        // 1) The declaration, initialized to 0 (c.rs ~line 2056). This is
+        //    the exact text the initializer-flip mutation corrupts by
+        //    changing `= 0` to `= 1`.
+        let decl_line = format!("uint8_t __bl_live_{owner_id} = 0;");
+        assert!(
+            code.contains(&decl_line),
+            "expected the flag declaration initialized to 0:\n{decl_line}\nfull output:\n{code}"
+        );
+
+        // 2) The def-site set, immediately after the owner's unique
+        //    move-acquire (`s = _N;`) -- c.rs's Assign arm (~line 2717).
+        let set_line = format!("__bl_live_{owner_id} = 1;");
+        assert!(
+            code.contains(&set_line),
+            "expected the def-site flag set:\n{set_line}\nfull output:\n{code}"
+        );
+
+        // 3) The guarded free/clear text. Both arm-continuation frontier
+        //    sites (bb10, bb11 per the design doc's recorded C-diff) and the
+        //    Return backstop emit this exact text (the guard is what makes a
+        //    later hit on the same path a safe no-op) -- three occurrences.
+        let guard_line = format!(
+            "if (__bl_live_{owner_id}) {{ build_string_free(s); __bl_live_{owner_id} = 0; }}"
+        );
+        let guard_occurrences = code.matches(guard_line.as_str()).count();
+        assert_eq!(
+            guard_occurrences, 3,
+            "expected 3 occurrences of the guarded free/clear (two frontier sites + the Return backstop), found {guard_occurrences}:\n{guard_line}\nfull output:\n{code}"
+        );
+
+        // The Return backstop specifically sits directly before
+        // `fflush(stdout);` (c.rs ~line 3470-3476), distinguishing it from
+        // the two frontier-site occurrences above.
+        let lines: Vec<&str> = code.lines().collect();
+        let fflush_idx = lines
+            .iter()
+            .position(|l| l.trim() == "fflush(stdout);")
+            .expect("expected an fflush(stdout); line at the fixture's single return");
+        assert!(
+            fflush_idx > 0 && lines[fflush_idx - 1].trim() == guard_line,
+            "expected the guarded Return backstop directly before fflush(stdout); got: {:?}\nfull output:\n{code}",
+            lines.get(fflush_idx.wrapping_sub(1))
+        );
+    }
+
+    // Increment 5 disjointness: a fn with a CONDITIONALLY ALLOCATED owner
+    // (`analysis::flags`'s `conditional_alloc_enrolls_with_no_dominance`
+    // shape: the allocation itself lives inside one arm of an `if`, so the
+    // def block does NOT dominate the join/return) must yield an owner set
+    // from `split_frontier_flag_frees` that is disjoint from every prior
+    // increment's set on the SAME candidate list. This is deliberately NOT
+    // the unconditional-allocation split-frontier shape
+    // (`drops.rs::declines_split_death_frontier`): on that CFG the def block
+    // DOES dominate the single return, so `freeable_owned_string_locals`
+    // (fn-exit, which only requires definite-init + no escape, not uniform
+    // per-arm USE) legitimately claims the owner -- proving fn-exit's rule
+    // is about ALLOCATION being definite, not about the buffer being used on
+    // every arm. Conditional allocation is the shape that defeats fn-exit's
+    // dominance check outright.
+    // bb0: if cond -> bb1 else bb2
+    // bb1: _0 = alloc() -> bb1b
+    // bb1b: _1 = _0.ptr ; printf(_1) -> bb3     (used on this arm)
+    // bb2: -> bb3                                (never allocated on this arm)
+    // bb3: return                                (join; def does not dominate it)
+    fn conditional_alloc_owner_func() -> MirFunction {
+        let mut func = MirFunction::new("f", MirFnSig::new(vec![], MirType::Void));
+        func.locals.push(i64_local(9, "cond"));
+        func.locals.push(bs(0, "_0"));
+        func.locals.push(i64_local(1, "_1"));
+
+        let mut b0 = MirBlock::new(BlockId(0));
+        b0.terminator = Some(MirTerminator::If {
+            cond: MirValue::Local(LocalId(9)),
+            then_block: BlockId(1),
+            else_block: BlockId(2),
+        });
+        let mut b1 = MirBlock::new(BlockId(1));
+        b1.terminator = Some(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("build_string_concat")),
+            args: Vec::new(),
+            dest: Some(LocalId(0)),
+            target: Some(BlockId(4)),
+            unwind: None,
+        });
+        let mut b1b = MirBlock::new(BlockId(4));
+        b1b.stmts.push(MirStmt::assign(
+            LocalId(1),
+            MirRValue::FieldAccess {
+                base: MirValue::Local(LocalId(0)),
+                field_name: Arc::from("ptr"),
+                field_ty: MirType::i64(),
+            },
+        ));
+        b1b.terminator = Some(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("printf")),
+            args: vec![MirValue::Local(LocalId(1))],
+            dest: None,
+            target: Some(BlockId(3)),
+            unwind: None,
+        });
+        let mut b2 = MirBlock::new(BlockId(2));
+        b2.terminator = Some(MirTerminator::Goto(BlockId(3)));
+        let mut b3 = MirBlock::new(BlockId(3));
+        b3.terminator = Some(MirTerminator::Return(None));
+        func.blocks = Some(vec![b0, b1, b1b, b2, b3]);
+        func
+    }
+
+    #[test]
+    fn increment5_owner_set_is_disjoint_from_increments_1_4() {
+        let backend = CBackend::new();
+        let func = conditional_alloc_owner_func();
+
+        let fn_exit = backend.freeable_owned_string_locals(&func);
+        assert!(
+            !fn_exit.contains(&LocalId(0)),
+            "fn-exit must decline a conditionally allocated owner (def does not dominate the return): {fn_exit:?}"
+        );
+        let fn_exit_set: std::collections::HashSet<LocalId> = fn_exit.into_iter().collect();
+
+        let block_scoped = backend.block_scoped_freeable(&func, &[]);
+        assert!(
+            block_scoped.values().flatten().all(|id| *id != LocalId(0)),
+            "block-scoped must decline (live range spans blocks): {block_scoped:?}"
+        );
+        let block_scoped_set: std::collections::HashSet<LocalId> =
+            block_scoped.values().flatten().copied().collect();
+
+        let candidates = backend.sound_owned_candidates(&func);
+        let multi_block = crate::codegen::analysis::drops::multi_block_freeable(
+            &func,
+            &candidates,
+            &fn_exit_set,
+            &block_scoped_set,
+        );
+        assert!(
+            multi_block.values().flatten().all(|id| *id != LocalId(0)),
+            "increment 4 must decline (its site rule requires def to dominate the site): {multi_block:?}"
+        );
+        let multi_block_set: std::collections::HashSet<LocalId> =
+            multi_block.values().flatten().copied().collect();
+
+        let claimed: std::collections::HashSet<LocalId> = fn_exit_set
+            .iter()
+            .copied()
+            .chain(block_scoped_set.iter().copied())
+            .chain(multi_block_set.iter().copied())
+            .collect();
+        let flag_frees = crate::codegen::analysis::flags::split_frontier_flag_frees(
+            &func,
+            &candidates,
+            &claimed,
+        );
+        assert_eq!(
+            flag_frees.owners,
+            vec![LocalId(0)],
+            "increment 5 must claim the owner every prior increment declined: {:?}",
+            flag_frees.owners
+        );
+        assert_eq!(
+            flag_frees.block_frees.get(&3).map(|v| v.as_slice()),
+            Some(&[LocalId(0)][..]),
+            "the guarded site lands at the join bb3, with no dominance requirement: {:?}",
+            flag_frees.block_frees
+        );
+
+        // Pairwise disjoint: the same owner never appears in two sets.
+        assert!(!fn_exit_set.contains(&LocalId(0)));
+        assert!(!block_scoped_set.contains(&LocalId(0)));
+        assert!(!multi_block_set.contains(&LocalId(0)));
+        assert!(flag_frees.owners.contains(&LocalId(0)));
     }
 
     #[test]
