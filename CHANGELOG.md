@@ -10,6 +10,13 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- **Five modes, one chain**: a cli test (`five_modes_bind_into_one_chain`) emits
+  one PASS receipt per computation mode (deterministic, probabilistic-exact,
+  stochastic, Monte Carlo, heuristic, plus the cross-backend bonus when `rustc`
+  is available) from the shipped example kernels, binds them with the existing
+  `receipt chain build`/`verify` machinery, and asserts that tampering one
+  member's stored `violation_count` without re-sealing breaks the chain with
+  `CHAIN_LINK_UNVERIFIED`. New walkthrough doc: `docs/FIVE-MODES-TOUR.md`.
 - **Cross-backend relation receipts**: `buildc run` gains `--cross-backend
   <TARGET>` (v0: `rust` only), running the kernel through the C anchor AND a
   secondary backend and sealing each step's two values as one row of a
