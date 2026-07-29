@@ -50,8 +50,8 @@ use scientific_runtime::{
 use scientific_runtime::{
     build_scientific_runtime_receipt, build_self_test_cases, column_count_matches_invariant,
     crucible_measurement_from_report, evaluate_scientific_runtime_receipt, parse_numeric_series,
-    verify_scientific_runtime_receipt, RederivedFacts, RerunObservation, ScientificDigest,
-    ScientificEffectPolicy, ScientificMonteCarlo, ScientificReceiptInputs,
+    verify_scientific_runtime_receipt, RederivedFacts, RerunObservation, ScientificBudget,
+    ScientificDigest, ScientificEffectPolicy, ScientificMonteCarlo, ScientificReceiptInputs,
     ScientificRuntimeReceipt, ScientificToolchain, BOUNDED_INVARIANT, CONSERVATION_INVARIANT,
     CONSERVED_BAND_INVARIANT, CRUCIBLE_MEASUREMENT_EXPORT_SCHEMA, ENERGY_IDENTITY_INVARIANT,
     ENERGY_MONOTONE_INVARIANT, NON_NEGATIVE_INVARIANT, RELATION_INVARIANT,
@@ -270,6 +270,17 @@ enum Commands {
         /// The MC declaration's interval method (e.g. `normal-approx-95`).
         #[arg(long, value_name = "METHOD")]
         mc_interval: Option<String>,
+
+        /// Declare the run a budgeted search: the step ceiling. Both
+        /// --budget-* flags declare together or not at all. A budgeted
+        /// receipt carries NOT_PROVES_OPTIMALITY and refuses free text
+        /// claiming optimality.
+        #[arg(long, value_name = "LIMIT")]
+        budget_steps: Option<u64>,
+
+        /// The declared steps consumed (at most the ceiling).
+        #[arg(long, value_name = "N")]
+        budget_consumed: Option<u64>,
 
         /// Execute a `#[compute]` kernel on the physical GPU (Vulkan) and
         /// cross-check the readback against the CPU-C scalar loop within
@@ -643,6 +654,8 @@ fn main() -> ExitCode {
             mc_estimator,
             mc_samples,
             mc_interval,
+            budget_steps,
+            budget_consumed,
             gpu,
             args,
         }) => {
@@ -655,6 +668,11 @@ fn main() -> ExitCode {
                 } else if mc_estimator.is_some() || mc_samples.is_some() || mc_interval.is_some() {
                     eprintln!(
                         "--mc-* flags are not supported with --gpu (the GPU cross-check has no Random capability)"
+                    );
+                    Err(1)
+                } else if budget_steps.is_some() || budget_consumed.is_some() {
+                    eprintln!(
+                        "--budget-* flags are not supported with --gpu (the GPU cross-check produces no budget block)"
                     );
                     Err(1)
                 } else {
@@ -676,6 +694,8 @@ fn main() -> ExitCode {
                     mc_estimator.as_deref(),
                     mc_samples,
                     mc_interval.as_deref(),
+                    budget_steps,
+                    budget_consumed,
                 )
             }
         }
@@ -2027,6 +2047,12 @@ fn cmd_receipt_corpus(manifest_path: &Path) -> Result<(), i32> {
         }
         if let Some(interval) = &member.mc_interval {
             emit.args(["--mc-interval", interval]);
+        }
+        if let Some(steps) = member.budget_steps {
+            emit.args(["--budget-steps", &steps.to_string()]);
+        }
+        if let Some(consumed) = member.budget_consumed {
+            emit.args(["--budget-consumed", &consumed.to_string()]);
         }
         let emit_out = match emit.output() {
             Ok(out) => out,
@@ -7138,6 +7164,8 @@ fn cmd_run(
     mc_estimator: Option<&str>,
     mc_samples: Option<u64>,
     mc_interval: Option<&str>,
+    budget_steps: Option<u64>,
+    budget_consumed: Option<u64>,
 ) -> Result<(), i32> {
     // The Monte Carlo declaration is all-or-nothing, validated whenever ANY
     // mc flag is present (like --units: a typo is never silently accepted):
@@ -7181,6 +7209,54 @@ fn cmd_run(
             return Err(1);
         }
     };
+    // The budgeted-search declaration is all-or-nothing, exactly like the MC
+    // declaration: a result without its budget ceiling hides whether it
+    // stopped at the limit, so neither flag alone is accepted. Deterministic
+    // (no Random needed): a budget block is not coupled to the seed pairing.
+    let budget: Option<ScientificBudget> = match (budget_steps, budget_consumed) {
+        (None, None) => None,
+        (Some(steps_limit), Some(steps_consumed)) => {
+            if steps_limit == 0 {
+                eprintln!("Error: --budget-steps 0: a zero ceiling is not a budget");
+                return Err(1);
+            }
+            if steps_consumed > steps_limit {
+                eprintln!(
+                    "Error: --budget-consumed {steps_consumed} exceeds --budget-steps {steps_limit}: a consumption above its ceiling is incoherent"
+                );
+                return Err(1);
+            }
+            Some(ScientificBudget {
+                steps_limit,
+                steps_consumed,
+                exhausted: steps_consumed == steps_limit,
+                status: "DECLARED".to_string(),
+            })
+        }
+        _ => {
+            eprintln!(
+                "Error: a budget declares its ceiling AND its consumption together (--budget-steps, --budget-consumed); a result without its budget ceiling hides whether it stopped at the limit"
+            );
+            return Err(1);
+        }
+    };
+    // The claim-language emit gate, beside the budget declaration: a
+    // budgeted search reports its incumbent, never optimality, so
+    // --method / --problem free text may not contradict NOT_PROVES_OPTIMALITY.
+    if budget.is_some() {
+        let problem_claims_optimal = problem
+            .map(|s| s.to_lowercase().contains("optimal"))
+            .unwrap_or(false);
+        let method_claims_optimal = method
+            .map(|s| s.to_lowercase().contains("optimal"))
+            .unwrap_or(false);
+        if problem_claims_optimal || method_claims_optimal {
+            eprintln!(
+                "Error: a budgeted search reports its incumbent, never optimality; the free text may not contradict NOT_PROVES_OPTIMALITY (the check is a plain case-insensitive substring: even a word like `suboptimal` trips it, so reword the label rather than weakening the gate)"
+            );
+            return Err(1);
+        }
+    }
     // Canonicalize the declared unit through the dimensional-analysis core
     // BEFORE any compilation work: a malformed or unknown unit is an operator
     // error we report immediately, and the receipt records the CHECKED
@@ -7384,6 +7460,7 @@ fn cmd_run(
         args: args.to_vec(),
         seed_value: seed,
         monte_carlo,
+        budget,
         invariant_name: invariant_name.to_string(),
         metric: metric.to_string(),
         units: canonical_units.clone(),

@@ -1,0 +1,56 @@
+// Budgeted-search kernel: greedy coin change, a genuine heuristic that is
+// demonstrably NOT optimal, run under a calibrated step budget.
+//
+// Denominations {4, 3, 1}. For every amount a from 1 to 60 the kernel
+// repeatedly subtracts the largest denomination <= the remaining amount
+// (the standard greedy loop) and counts the coins used as `steps`. Greedy
+// is not optimal for this denomination set: amount 6 takes 4+1+1, three
+// coins, where 3+3 (two coins) is strictly better. The kernel prints
+// SLACK = step_budget - steps for every amount; a faithful greedy loop
+// never exceeds the calibrated budget, so the slack stays non-negative and
+// `--invariant non-negative` PASSes.
+//
+// Calibration: run with step_budget printing raw `steps` first (`buildc
+// run`, no receipt) over a = 1..60; the measured worst is 16 coins, at
+// amount 58 (floor(58/4) = 14 fours, remainder 2 taken as two 1-coins).
+// step_budget is set to 23, a margin of ~1.4x over the measured worst
+// (matching how examples/mc_pi_rejection.bld's band of 0.3 sits ~1.4x
+// above its measured worst error of 0.2094). Companion negative fixture:
+// greedy_change_budget_broken.bld, whose step_budget sits BELOW the
+// measured worst.
+//
+// The receipt is emitted with a full budget declaration
+// (`--budget-steps 60000 --budget-consumed 495`, 495 being the real
+// measured total coins used across all 60 amounts): because a heuristic
+// result without its budget ceiling hides whether it stopped at the limit,
+// the sealed `budget` block carries the ceiling and consumption, and the
+// receipt additionally carries `NOT_PROVES_OPTIMALITY` in `labels` and
+// `optimality` in `not_claimed` (a budgeted search reports its incumbent,
+// never a proof of optimality -- the amount-6 witness above is exactly
+// why: greedy's 3 coins is a valid result, not the optimal 2).
+// Deterministic kernel: no Random capability, no seed needed.
+
+fn main() ~ Console {
+    let step_budget: i32 = 23;
+    let mut a: i32 = 1;
+    while a <= 60 {
+        let mut remaining: i32 = a;
+        let mut steps: i32 = 0;
+        while remaining > 0 {
+            if remaining >= 4 {
+                remaining = remaining - 4;
+            } else {
+                if remaining >= 3 {
+                    remaining = remaining - 3;
+                } else {
+                    remaining = remaining - 1;
+                }
+            }
+            steps = steps + 1;
+        }
+        // Slack against the calibrated per-amount step budget; non-negative
+        // iff greedy never needed more coins than the budget allows.
+        println!("{}", (step_budget - steps) as f64);
+        a = a + 1;
+    }
+}

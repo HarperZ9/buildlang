@@ -275,6 +275,29 @@ pub struct ScientificMonteCarlo {
     pub status: String,
 }
 
+/// The budgeted-search admission block: a heuristic result without its
+/// budget ceiling hides whether it stopped at the limit, so the ceiling,
+/// the consumption, and the exhausted flag seal together. Author-DECLARED
+/// like [`ScientificMonteCarlo`], with shape contracts verify re-checks:
+/// the ceiling is non-zero, consumption never exceeds it (a consumption
+/// above its ceiling is incoherent), and `exhausted` is DERIVED
+/// (`steps_consumed == steps_limit`), never hand-set. A budgeted receipt
+/// additionally carries `NOT_PROVES_OPTIMALITY` in `labels` and
+/// `optimality` in `not_claimed`, both re-derived at verify: a budgeted
+/// search may report its incumbent, never a proof of optimality.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ScientificBudget {
+    /// The declared step ceiling. Non-zero.
+    pub steps_limit: u64,
+    /// The declared steps consumed. At most `steps_limit`.
+    pub steps_consumed: u64,
+    /// Whether the search ran to its ceiling: EXACTLY
+    /// `steps_consumed == steps_limit`, re-derived at verify.
+    pub exhausted: bool,
+    /// `DECLARED` (v0): the facts were stated, not independently metered.
+    pub status: String,
+}
+
 /// Derive the witnessed-absence fields from the observed capability union
 /// (PURE, unit-tested): the typed-effect system doing receipt work.
 ///
@@ -577,6 +600,11 @@ pub struct ScientificRuntimeReceipt {
     /// to their original bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub monte_carlo: Option<ScientificMonteCarlo>,
+    /// The budgeted-search admission block, present IFF the run declared a
+    /// budget (`--budget-steps` + `--budget-consumed`). Optional-with-default
+    /// so receipts sealed before this block existed keep their exact bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<ScientificBudget>,
     pub measurement: ScientificMeasurement,
     pub invariant: ScientificInvariant,
     /// Explicitly fenced pass-0122 branches buildc does not produce: absence
@@ -975,6 +1003,11 @@ pub struct ScientificReceiptInputs<'a> {
     /// `--mc-interval`). `cmd_run` has already enforced completeness and the
     /// Random pairing before building the receipt.
     pub monte_carlo: Option<ScientificMonteCarlo>,
+    /// The budgeted-search admission block (`--budget-steps` /
+    /// `--budget-consumed`). `cmd_run` has already enforced completeness and
+    /// the coherence of consumption against the ceiling before building the
+    /// receipt.
+    pub budget: Option<ScientificBudget>,
     /// The invariant to check over the series (a name from the registry;
     /// `is_known_invariant`). Selects the evaluator, tolerance, expectation,
     /// and the sealed oracle/invariant binding.
@@ -1021,6 +1054,7 @@ pub fn build_scientific_runtime_receipt(
         args,
         seed_value,
         monte_carlo,
+        budget,
         invariant_name,
         metric,
         units,
@@ -1064,6 +1098,14 @@ pub fn build_scientific_runtime_receipt(
         // produced a non-finite (inf/NaN) value, distinct from "no numeric
         // output at all".
         labels.push("NONFINITE_OBSERVED".to_string());
+    }
+    // The budgeted-search boundary rule: a heuristic result carries its
+    // ceiling only if it also carries the mechanical reminder that a
+    // budgeted search may report its incumbent, never a proof of optimality.
+    let mut not_claimed: Vec<String> = NOT_CLAIMED_BOUNDARY.iter().map(|s| s.to_string()).collect();
+    if budget.is_some() {
+        labels.push("NOT_PROVES_OPTIMALITY".to_string());
+        not_claimed.push("optimality".to_string());
     }
 
     // The typed-effect system doing receipt work: witnessed absences and the
@@ -1115,6 +1157,7 @@ pub fn build_scientific_runtime_receipt(
             description: method_description,
         },
         monte_carlo,
+        budget,
         effect_policy,
         measurement: ScientificMeasurement {
             metric,
@@ -1136,7 +1179,7 @@ pub fn build_scientific_runtime_receipt(
         lineage_branch: ScientificFencedBranch::fenced(),
         negative_fixture,
         diverged,
-        not_claimed: NOT_CLAIMED_BOUNDARY.iter().map(|s| s.to_string()).collect(),
+        not_claimed,
         labels,
         receipt_status: receipt_status.to_string(),
         // Placeholder; overwritten by `seal_receipt` below.
@@ -1351,6 +1394,37 @@ pub fn build_self_test_cases(
         });
     }
 
+    // 8. FIELD_CONTRACT_VIOLATION (budget consumption): a budget block whose
+    //    steps_consumed exceeds steps_limit, re-sealed. If the receipt already
+    //    carries a block, its consumption is bumped past the ceiling; if not,
+    //    an incoherent block is added. Either way the tamper reaches the
+    //    admission contract (a consumption above its ceiling is incoherent),
+    //    never the integrity gate.
+    {
+        let mut v = receipt_json.clone();
+        match v.get_mut("budget") {
+            Some(budget) if !budget.is_null() => {
+                let limit = budget["steps_limit"].as_u64().unwrap_or(10);
+                budget["steps_consumed"] = serde_json::Value::from(limit + 1);
+            }
+            _ => {
+                v["budget"] = serde_json::json!({
+                    "steps_limit": 10u64,
+                    "steps_consumed": 11u64,
+                    "exhausted": false,
+                    "status": "DECLARED",
+                });
+            }
+        }
+        let v = reseal_json(&v)?;
+        cases.push(SelfTestCase {
+            label: "budget block with steps_consumed above steps_limit".to_string(),
+            tampered: v,
+            expected_class: "FIELD_CONTRACT_VIOLATION".to_string(),
+            resealed: true,
+        });
+    }
+
     Ok(cases)
 }
 
@@ -1466,6 +1540,14 @@ pub struct ScientificCorpusMember {
     pub mc_samples: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mc_interval: Option<String>,
+    /// The member's budgeted-search declaration (`--budget-steps` /
+    /// `--budget-consumed`), passed through by the runner. The same
+    /// all-or-nothing contract applies: a partial declaration is refused at
+    /// emit, which fails the corpus loudly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_steps: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_consumed: Option<u64>,
     /// The declared receipt status: `PASS`, `FAIL_EXPECTED`, or `FAIL_UNEXPECTED`.
     pub expected_status: String,
 }
@@ -2043,6 +2125,81 @@ pub fn evaluate_scientific_runtime_receipt(
             return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
         }
     }
+    // The budgeted-search admission contracts. Deterministic: unlike
+    // monte_carlo, a budget block does NOT ride on Random or a seed. A
+    // heuristic result without its budget ceiling hides whether it stopped
+    // at the limit, so the ceiling is non-zero, consumption never exceeds
+    // it, exhausted is DERIVED (never hand-set), and status is the one
+    // thing v0 can honestly say (DECLARED).
+    if let Some(budget) = &receipt.budget {
+        if budget.steps_limit == 0 {
+            eprintln!("Error: budget.steps_limit is 0: a zero ceiling is not a budget");
+            return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+        }
+        if budget.steps_consumed > budget.steps_limit {
+            eprintln!(
+                "Error: budget.steps_consumed {} exceeds budget.steps_limit {}: a consumption above its ceiling is incoherent",
+                budget.steps_consumed, budget.steps_limit
+            );
+            return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+        }
+        if budget.exhausted != (budget.steps_consumed == budget.steps_limit) {
+            eprintln!(
+                "Error: budget.exhausted `{}` disagrees with steps_consumed == steps_limit ({} == {}): exhausted is DERIVED, never hand-set",
+                budget.exhausted, budget.steps_consumed, budget.steps_limit
+            );
+            return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+        }
+        if budget.status != "DECLARED" {
+            eprintln!(
+                "Error: budget.status `{}` is not expressible: v0 declares the facts, it does not execute them (the only valid status is DECLARED)",
+                budget.status
+            );
+            return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+        }
+    }
+    // The label pairing, checked for EVERY receipt (not only budgeted ones):
+    // a budgetless receipt claiming NOT_PROVES_OPTIMALITY, or a budgeted one
+    // missing it, is refused. Same for the not_claimed boundary entry.
+    let has_not_proves_optimality = receipt.labels.iter().any(|l| l == "NOT_PROVES_OPTIMALITY");
+    if has_not_proves_optimality != receipt.budget.is_some() {
+        eprintln!(
+            "Error: NOT_PROVES_OPTIMALITY label present={} but budget block present={}: the label must pair exactly with the block",
+            has_not_proves_optimality,
+            receipt.budget.is_some()
+        );
+        return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+    }
+    let has_optimality_boundary = receipt.not_claimed.iter().any(|c| c == "optimality");
+    if has_optimality_boundary != receipt.budget.is_some() {
+        eprintln!(
+            "Error: not_claimed `optimality` entry present={} but budget block present={}: the boundary entry must pair exactly with the block",
+            has_optimality_boundary,
+            receipt.budget.is_some()
+        );
+        return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+    }
+    // The claim-language rule: a budgeted search reports its incumbent,
+    // never optimality, so the free text may not contradict
+    // NOT_PROVES_OPTIMALITY.
+    if receipt.budget.is_some() {
+        let problem_claims_optimal = receipt
+            .problem
+            .label
+            .as_deref()
+            .is_some_and(|s| s.to_lowercase().contains("optimal"));
+        let method_claims_optimal = receipt
+            .numerical_method
+            .description
+            .as_deref()
+            .is_some_and(|s| s.to_lowercase().contains("optimal"));
+        if problem_claims_optimal || method_claims_optimal {
+            eprintln!(
+                "Error: a budgeted search reports its incumbent, never optimality; the free text may not contradict NOT_PROVES_OPTIMALITY (the check is a plain case-insensitive substring: even a word like `suboptimal` trips it, so reword the label rather than weakening the gate)"
+            );
+            return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+        }
+    }
     let (expected_input_dataset, expected_seed, expected_determinism) =
         witnessed_fields_from_capabilities(
             &rederived.effect_policy.observed_capabilities,
@@ -2588,6 +2745,7 @@ mod tests {
             args: Vec::new(),
             seed_value: None,
             monte_carlo: None,
+            budget: None,
             invariant_name: ENERGY_MONOTONE_INVARIANT.to_string(),
             metric: "series".to_string(),
             units: None,
@@ -2765,9 +2923,9 @@ mod tests {
         let cases = build_self_test_cases(&json).expect("build self-test cases");
 
         // The table exercises five separate arms of the failure taxonomy (the
-        // seed-pairing and MC-denominator cases share FIELD_CONTRACT_VIOLATION
-        // with the tolerance case but tamper different sealed fields through
-        // different gates).
+        // seed-pairing, MC-denominator, and budget-consumption cases share
+        // FIELD_CONTRACT_VIOLATION with the tolerance case but tamper
+        // different sealed fields through different gates).
         let classes: Vec<&str> = cases.iter().map(|c| c.expected_class.as_str()).collect();
         assert_eq!(
             classes,
@@ -2777,6 +2935,7 @@ mod tests {
                 "MALFORMED",
                 "FIELD_CONTRACT_VIOLATION",
                 "INVARIANT_UNSUPPORTED",
+                "FIELD_CONTRACT_VIOLATION",
                 "FIELD_CONTRACT_VIOLATION",
                 "FIELD_CONTRACT_VIOLATION",
             ]
@@ -5046,6 +5205,121 @@ mod tests {
             build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
         let value = serde_json::to_value(&plain).unwrap();
         assert!(value.get("monte_carlo").is_none());
+    }
+
+    #[test]
+    fn verify_enforces_the_budget_admission_contracts() {
+        fn budget() -> ScientificBudget {
+            ScientificBudget {
+                steps_limit: 500,
+                steps_consumed: 437,
+                exhausted: false,
+                status: "DECLARED".to_string(),
+            }
+        }
+        fn run(
+            receipt: &ScientificRuntimeReceipt,
+            policy: ScientificEffectPolicy,
+        ) -> Result<(), i32> {
+            let value = serde_json::to_value(receipt).expect("to_value");
+            let src = receipt.source_digest.clone();
+            let graph = receipt.input_graph_digest.clone();
+            verify_scientific_runtime_receipt(
+                &value,
+                None,
+                true,
+                &receipt.compiler_version,
+                &receipt.language_version,
+                Some(&test_toolchain()),
+                move |_| {
+                    Ok(RederivedFacts {
+                        source_digest: src,
+                        input_graph_digest: graph,
+                        effect_policy: policy,
+                    })
+                },
+                |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            )
+        }
+        let path = Path::new("k.bld");
+        let budgeted = |block: ScientificBudget| {
+            build_scientific_runtime_receipt(ScientificReceiptInputs {
+                budget: Some(block),
+                ..base_inputs(path, vec![4.0, 3.0, 2.0], true, false)
+            })
+        };
+
+        // A complete, coherent budget declaration verifies, and the block is
+        // sealed alongside the boundary rule (label + not_claimed entry).
+        let receipt = budgeted(budget());
+        let value = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(value["budget"]["steps_limit"], 500);
+        assert_eq!(value["budget"]["steps_consumed"], 437);
+        assert_eq!(value["budget"]["exhausted"], false);
+        assert!(receipt
+            .labels
+            .contains(&"NOT_PROVES_OPTIMALITY".to_string()));
+        assert!(receipt.not_claimed.contains(&"optimality".to_string()));
+        assert_eq!(
+            run(&receipt, test_effect_policy()),
+            Ok(()),
+            "a complete, coherent budget declaration must verify"
+        );
+
+        // A zero ceiling is not a budget.
+        let mut bad = budget();
+        bad.steps_limit = 0;
+        assert_eq!(run(&budgeted(bad), test_effect_policy()), Err(1));
+
+        // Consumption above the ceiling is incoherent.
+        let mut bad = budget();
+        bad.steps_consumed = bad.steps_limit + 1;
+        assert_eq!(run(&budgeted(bad), test_effect_policy()), Err(1));
+
+        // exhausted is DERIVED, never hand-set: consumed < limit with
+        // exhausted hand-set true is refused.
+        let mut bad = budget();
+        bad.exhausted = true;
+        assert_eq!(run(&budgeted(bad), test_effect_policy()), Err(1));
+
+        // A status v0 cannot honestly say is refused.
+        let mut bad = budget();
+        bad.status = "METERED".to_string();
+        assert_eq!(run(&budgeted(bad), test_effect_policy()), Err(1));
+
+        // The claim-language rule: free text may not contradict
+        // NOT_PROVES_OPTIMALITY.
+        let claims_optimal = build_scientific_runtime_receipt(ScientificReceiptInputs {
+            budget: Some(budget()),
+            problem_label: Some("greedy-change-optimal".to_string()),
+            ..base_inputs(path, vec![4.0, 3.0, 2.0], true, false)
+        });
+        assert_eq!(run(&claims_optimal, test_effect_policy()), Err(1));
+
+        // The label-pairing rule, both directions (the covering tests for
+        // this rule, so its mutation check can go red): a budgeted receipt
+        // whose NOT_PROVES_OPTIMALITY label is stripped after building is
+        // refused.
+        let mut stripped = receipt.clone();
+        stripped.labels.retain(|l| l != "NOT_PROVES_OPTIMALITY");
+        seal_receipt(&mut stripped);
+        assert_eq!(run(&stripped, test_effect_policy()), Err(1));
+
+        // Symmetrically, a budgetless receipt with the label pushed and
+        // re-sealed is refused.
+        let mut faked =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        faked.labels.push("NOT_PROVES_OPTIMALITY".to_string());
+        seal_receipt(&mut faked);
+        assert_eq!(run(&faked, test_effect_policy()), Err(1));
+
+        // A budgetless receipt's JSON has no budget key and no
+        // NOT_PROVES_OPTIMALITY label.
+        let plain =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        let value = serde_json::to_value(&plain).unwrap();
+        assert!(value.get("budget").is_none());
+        assert!(!plain.labels.contains(&"NOT_PROVES_OPTIMALITY".to_string()));
     }
 
     #[test]

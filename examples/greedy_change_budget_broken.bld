@@ -1,0 +1,33 @@
+// Negative fixture for greedy_change_budget.bld: the same greedy loop under
+// a step_budget set BELOW the measured worst.
+//
+// The measured worst coin count over a = 1..60 is 16 (at amount 58). This
+// fixture sets step_budget to 14 (measured worst minus 2), so the slack
+// `step_budget - steps` goes negative for the worst amounts (58: 16 coins,
+// slack -2; also 54, 57, 59, 60 at 15 coins each, slack -1) and the
+// `non-negative` invariant FAILs as declared (FAIL_EXPECTED): the harness
+// proves it can catch a search that overruns its own declared budget, not
+// just bless a comfortably-budgeted one.
+
+fn main() ~ Console {
+    let step_budget: i32 = 14;
+    let mut a: i32 = 1;
+    while a <= 60 {
+        let mut remaining: i32 = a;
+        let mut steps: i32 = 0;
+        while remaining > 0 {
+            if remaining >= 4 {
+                remaining = remaining - 4;
+            } else {
+                if remaining >= 3 {
+                    remaining = remaining - 3;
+                } else {
+                    remaining = remaining - 1;
+                }
+            }
+            steps = steps + 1;
+        }
+        println!("{}", (step_budget - steps) as f64);
+        a = a + 1;
+    }
+}
