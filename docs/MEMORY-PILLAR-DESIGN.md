@@ -731,9 +731,20 @@ green; every mutation reverted and reconfirmed byte-identical to the clean
   frontier site frees, the Return backstop frees the same buffer again on
   the same path). Restored; helper text test GREEN; regenerated `on.c`
   byte-identical to the clean version; re-ran ASan clean.
-- Change the flag initializer `= 0` to `= 1`: helper/decl text RED (both
-  the emitted declaration and, separately, the exact-text helper test).
-  The natural compiled-fixture repro (a program whose allocating arm never
+- Change the flag initializer `= 0` to `= 1`: RED at the compiled-C level
+  (the emitted declaration reads `uint8_t __bl_live_8 = 1;`). At the time
+  this mutation was run, no Rust unit test pinned the declaration text
+  specifically -- only `emit_flag_guarded_free`'s exact-text test, which
+  this mutation does not touch, since it never calls that helper. A
+  dedicated test now closes that gap
+  (`real_fixture_pins_flag_declaration_set_and_return_backstop`,
+  `compiler/src/codegen/backend/c.rs`): it compiles the real
+  `split_frontier_loop.bld` fixture through the actual front-end and
+  `CBackend` pipeline and pins the declaration's `= 0`, the def-site
+  `= 1` set, and the guarded Return backstop as exact text, so this same
+  mutation now turns THAT test red too (verified: red on the mutation,
+  green restored). The natural compiled-fixture repro (a program whose
+  allocating arm never
   runs) depended on whatever garbage happened to occupy the never-assigned
   local's stack slot; on the test machine that garbage read back as
   `cap == 0`, so `build_string_free`'s own `if (cap > 0)` guard silently
@@ -744,8 +755,9 @@ green; every mutation reverted and reconfirmed byte-identical to the clean
   with a REAL stale pointer left in the reused stack slot (via ordinary
   stack-frame reuse across two calls) hit
   `AddressSanitizer: attempting free on address which was not
-  malloc()-ed`, exit 1: bad-free. Restored; both text checks GREEN;
-  regenerated `on.c` byte-identical to the clean version.
+  malloc()-ed`, exit 1: bad-free. Restored; the new automated test and the
+  compiled-C text both GREEN; regenerated `on.c` byte-identical to the
+  clean version.
 - Remove the def-site `__bl_live_N = 1;` emission (move-acquire arm, the
   one the shipped fixtures exercise): C-diff check RED (the set line is
   absent from the expected on-diff). This mutation fails SAFE: the flag

@@ -67,6 +67,15 @@ pub struct CBackend {
     /// 0; }`), never merged into `current_fn_block_frees` (that map emits
     /// UNGUARDED frees). Empty unless the experimental path is enabled.
     current_fn_flag_block_frees: std::collections::HashMap<u32, Vec<LocalId>>,
+    /// TEST-ONLY override for `experimental_free_enabled()`. `None` in every
+    /// production path (`CBackend::new()` never sets it), so this field has
+    /// no effect outside `#[cfg(test)]`: `experimental_free_enabled()` falls
+    /// back to the exact `BUILDLANG_EXPERIMENTAL_FREE` env check it used
+    /// before this field existed. Exists so an in-process unit test can pin
+    /// the flag-guarded emission (w5-review.md Important finding 2) without
+    /// setting a process-global env var, which is unsound under parallel
+    /// `cargo test` (see `set_experimental_free_enabled_for_test`).
+    experimental_free_override_for_test: Option<bool>,
 }
 
 impl CBackend {
@@ -86,6 +95,7 @@ impl CBackend {
             current_fn_block_frees: std::collections::HashMap::new(),
             current_fn_flag_owners: Vec::new(),
             current_fn_flag_block_frees: std::collections::HashMap::new(),
+            experimental_free_override_for_test: None,
         }
     }
 
@@ -93,9 +103,25 @@ impl CBackend {
     /// default so the verified baseline (corpus c-execution, all current
     /// programs) keeps the existing leak-but-correct behavior; enabled by
     /// setting `BUILDLANG_EXPERIMENTAL_FREE` while the analysis is matured and
-    /// proven under AddressSanitizer.
-    fn experimental_free_enabled() -> bool {
-        std::env::var_os("BUILDLANG_EXPERIMENTAL_FREE").is_some()
+    /// proven under AddressSanitizer. `experimental_free_override_for_test`,
+    /// when set, takes precedence over the env var; every production path
+    /// leaves it `None`, so production behavior is byte-for-byte unchanged.
+    fn experimental_free_enabled(&self) -> bool {
+        self.experimental_free_override_for_test
+            .unwrap_or_else(|| std::env::var_os("BUILDLANG_EXPERIMENTAL_FREE").is_some())
+    }
+
+    /// TEST-ONLY: force `experimental_free_enabled()` to `enabled`, bypassing
+    /// the `BUILDLANG_EXPERIMENTAL_FREE` environment variable. Lets an
+    /// in-process unit test exercise the flag-guarded emission path without
+    /// setting a process-global env var -- unsafe under parallel `cargo
+    /// test`, and the repo's established idiom is to never do so (see
+    /// `docs/superpowers/plans/2026-07-29-drop-flags.md`'s "Test idiom
+    /// note"). No effect on any production path: nothing outside `#[cfg(test)]`
+    /// can call this, and `CBackend::new()` always leaves the override `None`.
+    #[cfg(test)]
+    fn set_experimental_free_enabled_for_test(&mut self, enabled: bool) {
+        self.experimental_free_override_for_test = Some(enabled);
     }
 
     /// Runtime functions that return a FRESH, solely-owned heap `BuildString`
@@ -1935,19 +1961,19 @@ impl CBackend {
         self.current_ret_ty = func.sig.ret.clone();
         self.current_fn_name = Some(func.name.to_string());
         self.local_string_literals.clear();
-        self.current_fn_freeable = if Self::experimental_free_enabled() {
+        self.current_fn_freeable = if self.experimental_free_enabled() {
             self.freeable_owned_string_locals(func)
         } else {
             Vec::new()
         };
-        self.current_fn_block_frees = if Self::experimental_free_enabled() {
+        self.current_fn_block_frees = if self.experimental_free_enabled() {
             self.block_scoped_freeable(func, &self.current_fn_freeable)
         } else {
             std::collections::HashMap::new()
         };
         self.current_fn_flag_owners = Vec::new();
         self.current_fn_flag_block_frees = std::collections::HashMap::new();
-        if Self::experimental_free_enabled() {
+        if self.experimental_free_enabled() {
             // Increment 4: multi-block live ranges the block-scoped (single-block)
             // rule declines. Disjoint from both prior sets.
             let fn_exit_set: std::collections::HashSet<LocalId> =
@@ -5854,6 +5880,131 @@ mod tests {
         assert_eq!(
             backend.output,
             "if (__bl_live_0) { build_string_free(s); __bl_live_0 = 0; }\n"
+        );
+    }
+
+    // Increment 5, w5-review.md Important finding 2: the exact-text test
+    // above pins ONLY `emit_flag_guarded_free`'s guard/free/clear text. It
+    // does not touch the flag DECLARATION (c.rs ~line 2056, `uint8_t
+    // __bl_live_N = 0;`), the def-site `= 1;` set, or the fact that the
+    // Return backstop specifically (not just any frontier site) emits the
+    // same guard text. Before this test, only the manual C-diff protocol
+    // recorded in `docs/MEMORY-PILLAR-DESIGN.md` pinned those three
+    // emissions -- so the proven memory-corruption mutation (flip the
+    // declaration's `= 0` to `= 1`; w5-report.md Task 6 mutation 6, ASan
+    // bad-free) was invisible to `cargo test`. This test compiles the real
+    // shipped fixture `compiler/tests/mem/split_frontier_loop.bld` through
+    // the actual front-end pipeline (lex/parse/typecheck/lower, the same
+    // steps `buildc build` runs) and then through the real
+    // `CBackend::generate_function` path, with `BUILDLANG_EXPERIMENTAL_FREE`
+    // forced on via the test-only override -- never a process env var
+    // (unsafe under parallel `cargo test`; see the "Test idiom note" in
+    // `docs/superpowers/plans/2026-07-29-drop-flags.md`).
+    #[test]
+    fn real_fixture_pins_flag_declaration_set_and_return_backstop() {
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/mem/split_frontier_loop.bld"
+        ));
+        let source_file = crate::lexer::SourceFile::new("split_frontier_loop.bld", source);
+        let mut lexer = crate::lexer::Lexer::new(&source_file);
+        let tokens = lexer
+            .tokenize()
+            .expect("lexing the real fixture should succeed");
+        let mut parser = crate::parser::Parser::new(&source_file, tokens);
+        let ast = parser
+            .parse()
+            .expect("parsing the real fixture should succeed");
+        assert!(
+            parser.errors().is_empty(),
+            "unexpected parser errors: {:?}",
+            parser.errors()
+        );
+
+        let mut ctx = crate::types::TypeContext::new();
+        let mut checker = crate::types::TypeChecker::new(&mut ctx);
+        checker.set_source_file(&source_file);
+        checker.check_module(&ast);
+        assert!(
+            !checker.has_errors(),
+            "unexpected type errors: {:?}",
+            checker.errors()
+        );
+
+        let mir =
+            crate::codegen::lower::MirLowerer::with_source(&ctx, Arc::from(source_file.source()))
+                .lower_module(&ast)
+                .expect("lowering the real fixture should succeed");
+
+        let mut backend = CBackend::new();
+        backend.set_experimental_free_enabled_for_test(true);
+        let output = backend.generate(&mir).expect("C generation should succeed");
+        let code = output.as_string().expect("C output should be a string");
+
+        // Exactly one flag owner (`s`) in this fixture: locate its
+        // declaration and extract the LocalId suffix. The suffix itself is
+        // allowed to drift with unrelated lowering changes; the exact text
+        // around it is what this test pins.
+        let decl_marker = "uint8_t __bl_live_";
+        assert_eq!(
+            code.matches(decl_marker).count(),
+            1,
+            "this fixture allocates exactly one flag owner (`s`); a different count means the fixture's shape changed:\n{code}"
+        );
+        let decl_start = code.find(decl_marker).unwrap();
+        let after_prefix = &code[decl_start + decl_marker.len()..];
+        let digits_len = after_prefix
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .count();
+        assert!(
+            digits_len > 0,
+            "expected a numeric LocalId after __bl_live_: {after_prefix}"
+        );
+        let owner_id = &after_prefix[..digits_len];
+
+        // 1) The declaration, initialized to 0 (c.rs ~line 2056). This is
+        //    the exact text the initializer-flip mutation corrupts by
+        //    changing `= 0` to `= 1`.
+        let decl_line = format!("uint8_t __bl_live_{owner_id} = 0;");
+        assert!(
+            code.contains(&decl_line),
+            "expected the flag declaration initialized to 0:\n{decl_line}\nfull output:\n{code}"
+        );
+
+        // 2) The def-site set, immediately after the owner's unique
+        //    move-acquire (`s = _N;`) -- c.rs's Assign arm (~line 2717).
+        let set_line = format!("__bl_live_{owner_id} = 1;");
+        assert!(
+            code.contains(&set_line),
+            "expected the def-site flag set:\n{set_line}\nfull output:\n{code}"
+        );
+
+        // 3) The guarded free/clear text. Both arm-continuation frontier
+        //    sites (bb10, bb11 per the design doc's recorded C-diff) and the
+        //    Return backstop emit this exact text (the guard is what makes a
+        //    later hit on the same path a safe no-op) -- three occurrences.
+        let guard_line = format!(
+            "if (__bl_live_{owner_id}) {{ build_string_free(s); __bl_live_{owner_id} = 0; }}"
+        );
+        let guard_occurrences = code.matches(guard_line.as_str()).count();
+        assert_eq!(
+            guard_occurrences, 3,
+            "expected 3 occurrences of the guarded free/clear (two frontier sites + the Return backstop), found {guard_occurrences}:\n{guard_line}\nfull output:\n{code}"
+        );
+
+        // The Return backstop specifically sits directly before
+        // `fflush(stdout);` (c.rs ~line 3470-3476), distinguishing it from
+        // the two frontier-site occurrences above.
+        let lines: Vec<&str> = code.lines().collect();
+        let fflush_idx = lines
+            .iter()
+            .position(|l| l.trim() == "fflush(stdout);")
+            .expect("expected an fflush(stdout); line at the fixture's single return");
+        assert!(
+            fflush_idx > 0 && lines[fflush_idx - 1].trim() == guard_line,
+            "expected the guarded Return backstop directly before fflush(stdout); got: {:?}\nfull output:\n{code}",
+            lines.get(fflush_idx.wrapping_sub(1))
         );
     }
 
