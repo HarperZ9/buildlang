@@ -223,6 +223,44 @@ The receipt is a single JSON object. Its layers, outermost meaning first:
   practice, since no receipt over a Model-observing program can exist to carry those
   fields. There is no corpus member and no `--self-test` case for `Model`: the refusal
   happens before a receipt can exist, so there is nothing for either to exercise.
+  **The refusal is unchanged and un-weakened by the paragraph below.** A model
+  boundary crossing still cannot become scientific evidence; it becomes a
+  DIFFERENT, separately-schemed artifact instead.
+
+### Model boundary receipts (`buildlang-model-boundary-receipt/v0`)
+
+A model receipt is a PROVENANCE artifact about a `Model`-capability boundary
+crossing: harness-side, emitted by `harness/model_shim.py` (the local-model
+repo), never by buildc. It carries no invariant, no oracle, and no verdict, so
+it cannot masquerade as a scientific-runtime receipt, and the reverse is
+enforced structurally too: `receipt chain build`'s allowlist accepts exactly
+`buildlang-scientific-runtime-receipt/v0` and
+`buildlang-model-boundary-receipt/v0`, nothing else. Full schema, field-tag
+table (SHIM-WITNESSED vs. DECLARED), and the verify arm's failure classes are
+documented in [MODEL-RECEIPT.md](MODEL-RECEIPT.md). Two consequences worth
+stating here, beside the scientific schema they sit next to:
+
+- `buildc receipt verify` dispatches a model receipt to its own arm (offline
+  only: seal recompute, digest well-formedness, field-shape contracts --
+  there is no re-run, because the artifact witnesses a PAST crossing, not a
+  re-derivable one). It shares the same `failure_class` taxonomy as the
+  scientific verifier (`SEAL_MISMATCH`, `DIGEST_MALFORMED`,
+  `FIELD_CONTRACT_VIOLATION`, `MALFORMED`, `SCHEMA_UNSUPPORTED`) -- no new
+  classes for v1.
+- `receipt chain build` accepts a model receipt as a chain member beside
+  scientific-runtime receipts (the propose/dispose demo: a model receipt as
+  the proposer link, a Model-FREE disposer kernel's scientific receipt as the
+  checker link). `receipt chain verify` needed zero changes: pinned seals and
+  subprocess re-verification (`buildc receipt verify <member>`) already
+  compose across schemas.
+- The model receipt is **not** a corpus member: `examples/scientific-corpus.json`
+  and the `29/29` corpus count are about scientific-runtime receipts over
+  `.bld` kernels only. A model receipt has no invariant to classify PASS or
+  FAIL_EXPECTED against, so it is not corpus-shaped, by construction -- not an
+  oversight. The `10/10` self-test count is likewise scientific-runtime-only
+  (`--self-test` builds its tamper table from `ScientificRuntimeReceipt`); the
+  model arm's own tamper coverage lives in `compiler/src/model_receipt.rs`'s
+  unit tests and `compiler/tests/cli.rs`'s CLI-level tests instead.
 - `numerical_method`: `{ description?, status }`, author-DECLARED via `--method` (buildc
   cannot derive scheme semantics from source and does not pretend to); an inconsistent
   status/description pair is rejected (`FIELD_CONTRACT_VIOLATION`).

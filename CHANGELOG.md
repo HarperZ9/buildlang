@@ -10,6 +10,41 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- **Model boundary receipts, the verify arm and chain admission**: a new
+  artifact kind, `buildlang-model-boundary-receipt/v0`, documented in the new
+  `docs/MODEL-RECEIPT.md` (SCIENTIFIC-RECEIPT.md gains a pointer section).
+  Emission is harness-side (`harness/model_shim.py`'s `--receipt-dir` flag,
+  local-model repo), never buildc; this slice ships the buildc-side READ path
+  only. `receipt verify` gains a fourth schema arm (beside gpu,
+  scientific-runtime, and check) in the new `compiler/src/model_receipt.rs`:
+  offline seal recompute, digest well-formedness (`DIGEST_MALFORMED`), and
+  field-shape contracts (`FIELD_CONTRACT_VIOLATION` for a `daemon_digest.hex`
+  present alongside `UNAVAILABLE`, a `COMPLETED` outcome with a null `reply`,
+  or a `PROTOCOL_VIOLATION` with a present `prompt`) -- no new failure
+  classes, the shared taxonomy is reused whole. `receipt chain build`'s
+  member-schema gate widens from a single-schema equality to a two-schema
+  allowlist (scientific-runtime + model-boundary-receipt); chain verify needed
+  zero changes, since pinned seals and subprocess re-verification already
+  dispatch through the new arm. The scientific verifier's
+  `CAPABILITY_INADMISSIBLE` refusal of any `Model`-observing program is
+  untouched: a model receipt is a different artifact kind by construction, it
+  cannot masquerade as scientific evidence. A byte-identical GOLDEN FIXTURE
+  (`compiler/tests/fixtures/model-receipt-golden.json`, an echo-mode
+  `COMPLETED` receipt) is checked into both this repo and local-model's
+  `_wshim` worktree with the same pinned seal, proving the Rust
+  (`serde_json::to_vec`) and Python (`json.dumps(..., separators=(",", ":"))`)
+  canonicalizations agree byte-for-byte; the no-floats schema is what makes
+  that agreement stable across the two serializers. Tamper coverage: a
+  resealed field-shape violation, a seal mismatch, and a chain binding a
+  model receipt beside a scientific receipt that breaks
+  (`CHAIN_LINK_UNVERIFIED`) when only the model member is tampered, all
+  exercised both as `compiler/src/model_receipt.rs` unit tests and as
+  `compiler/tests/cli.rs` CLI-level tests against the real `buildc` binary.
+  The model receipt is **not** a corpus member (it has no invariant to
+  classify PASS/FAIL_EXPECTED against, and is emitted by a different program
+  entirely) and not a `--self-test` case (that table is
+  scientific-runtime-only): corpus 29/29 and self-test 10/10 stay unchanged,
+  re-run and recorded. Full suite: 1,698 passed, 0 failed; `cargo fmt` clean.
 - **Executed Monte Carlo intervals with a witnessed denominator**: `monte_carlo`
   gains a two-arm `DECLARED | EXECUTED` status. Under the new `--mc-executed`
   flag (opt-in; requires the full `--mc-*` declaration and forces `--columns`
