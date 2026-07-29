@@ -177,6 +177,18 @@ The receipt is a single JSON object. Its layers, outermost meaning first:
   grounds carry the qualification (deterministic given the sealed seed). Verify
   re-derives all three capability-derived fields; edits that do not re-derive fail as
   `EFFECT_POLICY_DRIFT`.
+- **The `Model` capability and the propose/dispose admission rule.** `model_complete`
+  (a dumb line-protocol call over TCP to `BUILD_MODEL_ENDPOINT`) carries its own `Model`
+  capability, and the receipt layer refuses it outright: `buildc run --emit-receipt`
+  aborts up front on a Model-observing program, and `receipt verify` refuses any receipt
+  whose RE-DERIVED capabilities include `Model` (`CAPABILITY_INADMISSIBLE`), so a
+  hand-built or tampered receipt cannot slip one through either. Models propose; oracles
+  dispose. `Model` carries no explicit arm in the capability-derived fields above, so the
+  fail-closed default treats it as a hazard for both `input_dataset` and `determinism`
+  the same as any other capability this build does not specifically recognise -- moot in
+  practice, since no receipt over a Model-observing program can exist to carry those
+  fields. There is no corpus member and no `--self-test` case for `Model`: the refusal
+  happens before a receipt can exist, so there is nothing for either to exercise.
 - `numerical_method`: `{ description?, status }`, author-DECLARED via `--method` (buildc
   cannot derive scheme semantics from source and does not pretend to); an inconsistent
   status/description pair is rejected (`FIELD_CONTRACT_VIOLATION`).
@@ -519,6 +531,7 @@ fixtures and CI pin the *specific* failure instead of accepting "anything failed
 | `FENCE_STATUS_UNEXPECTED` | a telemetry/lineage fence was edited to claim availability v0 does not produce | 1 |
 | `FIELD_CONTRACT_VIOLATION` | a sealed field claims something the program cannot express (a `seed_value` when nothing observes `Random`, a Random-using program with no sealed seed, a `monte_carlo` block without a seeded Random run or with a zero/nameless denominator, estimator, or interval method, a `budget` block with a zero ceiling, consumption above its ceiling, a hand-set `exhausted`, or a non-`DECLARED` status, or a `NOT_PROVES_OPTIMALITY`/`optimality` pairing or claim-language mismatch), is internally inconsistent (DECLARED method, no description), or resealed a non-canonical `invariant.tolerance` | 1 |
 | `EFFECT_POLICY_DRIFT` | the sealed effect/capability facts, or the witnessed fields derived from them, do not re-derive from the source | 1 |
+| `CAPABILITY_INADMISSIBLE` | the RE-DERIVED capabilities include `Model`: a scientific receipt cannot witness a model-mediated run (models propose, oracles dispose) | 1 |
 | `TOOL_UNAVAILABLE` | no C compiler available for the re-run | 4 |
 | `REDERIVATION_FAILED` | the source could not be re-checked (missing file, check failure) | inner code |
 | `RERUN_FAILED` | the program could not be re-compiled or re-run | inner code |

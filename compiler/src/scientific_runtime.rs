@@ -2070,6 +2070,22 @@ pub fn evaluate_scientific_runtime_receipt(
         );
         return Err(verify_failure_class(json, "EFFECT_POLICY_DRIFT", 1));
     }
+    // The propose/dispose admission rule, enforced on the RE-DERIVED
+    // capability union: a Model-observing program is inadmissible on the
+    // accept path outright. Emit refuses to produce such a receipt; one
+    // presented anyway (hand-built, or emitted by a tampered toolchain) is
+    // refused with its own class rather than folded into a field contract.
+    if rederived
+        .effect_policy
+        .observed_capabilities
+        .iter()
+        .any(|cap| cap == "Model")
+    {
+        eprintln!(
+            "Error: the program observes the Model capability; a scientific receipt cannot witness a model-mediated run (models propose, oracles dispose)"
+        );
+        return Err(verify_failure_class(json, "CAPABILITY_INADMISSIBLE", 1));
+    }
     // The seed pairing, checked against the RE-DERIVED capabilities: a
     // Random-using program's receipt must seal the seed it ran under (emit
     // refuses to produce one otherwise), and a program with no Random
@@ -2646,6 +2662,8 @@ fn digest_is_well_formed(digest: &ScientificDigest) -> bool {
 ///   internally inconsistent (a DECLARED method with no description).
 /// - `EFFECT_POLICY_DRIFT`: the sealed effect/capability facts, or the
 ///   witnessed fields derived from them, do not re-derive from the source.
+/// - `CAPABILITY_INADMISSIBLE`: a capability the receipt layer refuses
+///   outright; today only `Model` (models propose, oracles dispose).
 /// - `TOOL_UNAVAILABLE` (exit 4): no C compiler is available for the re-run.
 /// - `REDERIVATION_FAILED`, `RERUN_FAILED`: the source could not be re-checked
 ///   or re-run (missing file, toolchain failure), distinct from drift.
@@ -4948,6 +4966,22 @@ mod tests {
     }
 
     #[test]
+    fn witnessed_fields_treat_model_as_a_hazard_for_both_claims() {
+        // Model carries NO explicit arm in witnessed_fields_from_capabilities:
+        // it falls through to the fail-closed default, exactly like any other
+        // capability this function does not specifically recognise. This
+        // pins that behaviour: if someone later adds an explicit Model arm
+        // that weakens either claim (e.g. treating it as dataset-safe because
+        // "it's just text"), this test goes red.
+        let caps = vec!["Console".to_string(), "Model".to_string()];
+        let (dataset, _, determinism) = witnessed_fields_from_capabilities(&caps, false, None);
+        assert_eq!(dataset.status, "POSSIBLE_UNWITNESSED");
+        assert!(dataset.grounds.contains("Model"));
+        assert!(!determinism.deterministic_modulo_args);
+        assert!(determinism.grounds.contains("Model"));
+    }
+
+    #[test]
     fn witnessed_fields_derive_the_seed_trichotomy() {
         let caps = vec!["Console".to_string(), "Random".to_string()];
 
@@ -5111,6 +5145,50 @@ mod tests {
             |_, _, _| panic!("a swapped seed must be refused before the re-run"),
         );
         assert_eq!(result, Err(1), "a re-sealed seed swap must fail");
+    }
+
+    #[test]
+    fn verify_refuses_a_model_observing_receipt() {
+        let model_policy = || ScientificEffectPolicy {
+            facts_digest: hex_digest('9'),
+            observed_capabilities: vec!["Console".to_string(), "Model".to_string()],
+            reads_stdin: false,
+        };
+        let path = Path::new("k.bld");
+
+        // A receipt whose RE-DERIVED capabilities include Model is refused
+        // outright, before any re-run: models propose, oracles dispose. The
+        // rerun closure panics if reached, so a verifier that let this
+        // through to the re-run would fail this test at the panic, not by
+        // luck.
+        let receipt = build_scientific_runtime_receipt(ScientificReceiptInputs {
+            effect_policy: model_policy(),
+            ..base_inputs(path, vec![4.0, 3.0, 2.0], true, false)
+        });
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src = receipt.source_digest.clone();
+        let graph = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| {
+                Ok(RederivedFacts {
+                    source_digest: src.clone(),
+                    input_graph_digest: graph.clone(),
+                    effect_policy: model_policy(),
+                })
+            },
+            |_, _, _| panic!("a model-observing receipt must be refused before the re-run"),
+        );
+        assert_eq!(
+            result,
+            Err(1),
+            "a receipt whose capabilities include Model must fail"
+        );
     }
 
     #[test]

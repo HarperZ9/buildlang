@@ -1947,6 +1947,7 @@ impl<'ctx> TypeInfer<'ctx> {
             "args_get" => (vec![i64_ty.clone()], str_ty.clone()),
             "clock_ms" | "time_unix" => (vec![], i64_ty.clone()),
             "random_f64" => (vec![], Ty::float(FloatTy::F64)),
+            "model_complete" => (vec![str_ty.clone()], str_ty.clone()),
             "build_vk_init" => (vec![], bool_ty.clone()),
             "build_vk_load_shader_file" | "build_vk_run_compute" => {
                 (vec![str_ty.clone()], bool_ty.clone())
@@ -3048,6 +3049,8 @@ impl<'ctx> TypeInfer<'ctx> {
                 "clock_ms" | "time_unix" |
                 // Seeded random builtin
                 "random_f64" |
+                // Model-call builtin
+                "model_complete" |
                 // Vec builtins
                 "vec_new" | "vec_push" | "vec_get" | "vec_len" | "vec_pop" |
                 "vec_new_f64" | "vec_push_f64" | "vec_get_f64" | "vec_pop_f64" |

@@ -1657,6 +1657,77 @@ static double build_random_f64(void) {
     }
 }
 
+// --- Model-call builtin (Model capability) ---
+//
+// A deliberately DUMB line protocol over TCP: connect to the host:port in
+// BUILD_MODEL_ENDPOINT, send the prompt bytes plus a single '\n', read the
+// reply with build_tcp_recv (which reads until the peer closes the
+// connection or its 64KB buffer fills -- the harness-side shim is expected
+// to write one line and close), and return it with one trailing newline
+// (and a preceding carriage return) trimmed off. The model adapter (HTTP,
+// tokenization, parameters) lives on the harness side of this seam, never
+// in the compiler. FAIL CLOSED: no endpoint, a malformed endpoint, an
+// embedded newline in the prompt, or a connection failure aborts rather
+// than fabricating a completion.
+static BuildString build_model_complete(const char* prompt) {
+    const char* endpoint = getenv("BUILD_MODEL_ENDPOINT");
+    char host[256];
+    const char* colon;
+    int64_t port;
+    int64_t sock;
+    size_t i;
+    BuildString reply;
+    if (endpoint == NULL || endpoint[0] == '\0') {
+        fprintf(stderr, "model_complete: no endpoint provided; set BUILD_MODEL_ENDPOINT to host:port (the harness-side shim speaks one prompt line out, one completion line back)\n");
+        exit(102);
+    }
+    colon = strrchr(endpoint, ':');
+    if (colon == NULL || colon == endpoint || colon[1] == '\0' || (size_t)(colon - endpoint) >= sizeof(host)) {
+        fprintf(stderr, "model_complete: BUILD_MODEL_ENDPOINT `%s` is not host:port\n", endpoint);
+        exit(102);
+    }
+    memcpy(host, endpoint, (size_t)(colon - endpoint));
+    host[colon - endpoint] = '\0';
+    port = 0;
+    for (i = 0; colon[1 + i] != '\0'; i++) {
+        if (colon[1 + i] < '0' || colon[1 + i] > '9' || port > 65535) {
+            fprintf(stderr, "model_complete: BUILD_MODEL_ENDPOINT port `%s` is not a valid port\n", colon + 1);
+            exit(102);
+        }
+        port = port * 10 + (colon[1 + i] - '0');
+    }
+    if (port == 0 || port > 65535) {
+        fprintf(stderr, "model_complete: BUILD_MODEL_ENDPOINT port out of range\n");
+        exit(102);
+    }
+    for (i = 0; prompt[i] != '\0'; i++) {
+        if (prompt[i] == '\n') {
+            fprintf(stderr, "model_complete: the prompt may not contain a newline (the line protocol uses it as the terminator)\n");
+            exit(102);
+        }
+    }
+    sock = build_tcp_connect(host, port);
+    if (sock < 0) {
+        fprintf(stderr, "model_complete: could not connect to %s\n", endpoint);
+        exit(102);
+    }
+    build_tcp_send(sock, prompt);
+    build_tcp_send(sock, "\n");
+    reply = build_tcp_recv(sock);
+    build_tcp_close(sock);
+    // Trim one trailing newline (and a carriage return before it). `len` is
+    // the logical length build_print_string and friends respect (BuildString
+    // is not required to be NUL-terminated at that offset), so shortening it
+    // is enough; the trimmed bytes are simply never read.
+    if (reply.len > 0 && reply.ptr[reply.len - 1] == '\n') {
+        reply.len -= 1;
+    }
+    if (reply.len > 0 && reply.ptr[reply.len - 1] == '\r') {
+        reply.len -= 1;
+    }
+    return reply;
+}
+
 // ============================================================================
 // End BuildLang Runtime
 // ============================================================================
@@ -1781,6 +1852,8 @@ pub const MATH_BUILTINS: &[&str] = &[
     "time_unix",
     // Seeded random builtin
     "random_f64",
+    // Model-call builtin
+    "model_complete",
 ];
 
 /// Maps a BuildLang math built-in name to its C equivalent expression.
@@ -1911,6 +1984,8 @@ pub fn math_builtin_to_c(name: &str) -> Option<&'static str> {
         "time_unix" => Some("build_time_unix"),
         // Seeded random builtin
         "random_f64" => Some("build_random_f64"),
+        // Model-call builtin
+        "model_complete" => Some("build_model_complete"),
         _ => None,
     }
 }
@@ -2000,9 +2075,10 @@ mod tests {
 
     #[test]
     fn test_math_builtins_list() {
-        assert_eq!(MATH_BUILTINS.len(), 97);
+        assert_eq!(MATH_BUILTINS.len(), 98);
         assert!(MATH_BUILTINS.contains(&"abs"));
         assert!(MATH_BUILTINS.contains(&"random_f64"));
+        assert!(MATH_BUILTINS.contains(&"model_complete"));
         assert!(MATH_BUILTINS.contains(&"min"));
         assert!(MATH_BUILTINS.contains(&"max"));
         assert!(MATH_BUILTINS.contains(&"dot"));
@@ -2265,6 +2341,14 @@ mod tests {
     }
 
     #[test]
+    fn test_model_builtin_lookup() {
+        assert_eq!(
+            math_builtin_to_c("model_complete"),
+            Some("build_model_complete")
+        );
+    }
+
+    #[test]
     fn test_runtime_header_contains_clock() {
         let header = runtime_header();
         assert!(header.contains("build_clock_ms"));
@@ -2279,6 +2363,16 @@ mod tests {
         // back to a default seed.
         assert!(header.contains("BUILD_RANDOM_SEED"));
         assert!(header.contains("no seed provided"));
+    }
+
+    #[test]
+    fn test_runtime_header_contains_model() {
+        let header = runtime_header();
+        assert!(header.contains("build_model_complete"));
+        // The fail-closed contract: no endpoint aborts rather than
+        // fabricating a completion.
+        assert!(header.contains("BUILD_MODEL_ENDPOINT"));
+        assert!(header.contains("no endpoint provided"));
     }
 
     #[test]

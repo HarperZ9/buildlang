@@ -16600,3 +16600,143 @@ fn run_units_flag_rejects_unknown_unit_before_compile() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn model_capability_is_fail_closed_and_inadmissible_on_the_receipt_path() {
+    if !c_backend_ready() {
+        eprintln!("skipping model_capability_is_fail_closed_and_inadmissible_on_the_receipt_path: C backend not ready");
+        return;
+    }
+
+    // FAIL CLOSED: with no BUILD_MODEL_ENDPOINT in the child env, the first
+    // model_complete() call aborts rather than fabricating a completion.
+    let no_endpoint = buildc()
+        .arg("run")
+        .arg(repo_example("model_propose.bld"))
+        .env_remove("BUILD_MODEL_ENDPOINT")
+        .output()
+        .expect("run model kernel with no endpoint");
+    assert!(
+        !no_endpoint.status.success(),
+        "a Model-observing kernel with no endpoint must be refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&no_endpoint.stderr).contains("no endpoint provided"),
+        "the refusal must name the missing endpoint\nstderr:\n{}",
+        String::from_utf8_lossy(&no_endpoint.stderr)
+    );
+
+    // THE WIRE FORMAT: a bare TcpListener stands in for the harness-side
+    // shim. It accepts one connection, reads until it sees the '\n'
+    // terminator, asserts the received line equals the kernel's EXACT
+    // prompt (this is the live smoke test for the wire protocol, not just an
+    // exit-code check), writes one completion line, and closes.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral TCP port");
+    let port = listener.local_addr().expect("listener local_addr").port();
+    let server = std::thread::spawn(move || {
+        use std::io::{BufRead, BufReader, Write};
+        let (stream, _) = listener.accept().expect("accept model kernel connection");
+        let mut received_line = String::new();
+        BufReader::new(&stream)
+            .read_line(&mut received_line)
+            .expect("read prompt line up to the newline terminator");
+        (&stream)
+            .write_all(b"four\n")
+            .expect("write completion line");
+        drop(stream);
+        received_line
+    });
+
+    let shimmed = buildc()
+        .arg("run")
+        .arg(repo_example("model_propose.bld"))
+        .env("BUILD_MODEL_ENDPOINT", format!("127.0.0.1:{port}"))
+        .output()
+        .expect("run model kernel against the TCP shim");
+    let received_line = server.join().expect("shim thread should not panic");
+    assert_eq!(
+        received_line, "propose: 2 + 2 =\n",
+        "the shim must receive the kernel's EXACT prompt line, newline-terminated"
+    );
+    assert!(
+        shimmed.status.success(),
+        "a shimmed model kernel should exit 0\nstderr:\n{}",
+        String::from_utf8_lossy(&shimmed.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&shimmed.stdout).contains("four"),
+        "stdout should contain the shim's completion\nstdout:\n{}",
+        String::from_utf8_lossy(&shimmed.stdout)
+    );
+
+    // THE RECEIPT BOUNDARY: --emit-receipt on the same kernel is refused
+    // outright, before the program is even compiled (the capability check
+    // runs on the checked source, independent of whether an endpoint is
+    // reachable), because models propose and oracles dispose.
+    let dir = std::env::temp_dir().join(format!("buildlang_model_receipt_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create model receipt fixture dir");
+    let receipt = dir.join("model.json");
+    let refused = buildc()
+        .arg("run")
+        .arg(repo_example("model_propose.bld"))
+        .args(["--emit-receipt"])
+        .arg(&receipt)
+        .args(["--invariant", "non-negative"])
+        .env_remove("BUILD_MODEL_ENDPOINT")
+        .output()
+        .expect("run model kernel with --emit-receipt");
+    assert!(
+        !refused.status.success(),
+        "--emit-receipt on a Model-observing kernel must be refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("models propose, oracles dispose"),
+        "the refusal must state the propose/dispose rule\nstderr:\n{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        !receipt.exists(),
+        "no receipt should be written when the Model capability is refused"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn check_reports_capability_effect_for_model_call() {
+    // Effect-gate coverage for the Model capability, mirroring
+    // check_reports_capability_effect_for_gpu_runtime_call: a fixture whose
+    // main lacks `~ Model` but calls model_complete() must be rejected by
+    // `buildc check`, naming both the effect and the triggering call.
+    let fixture = std::env::temp_dir().join(format!(
+        "buildlang_model_capability_gate_{}.bld",
+        std::process::id()
+    ));
+    fs::write(&fixture, r#"fn main() { model_complete("x"); }"#)
+        .expect("write model capability fixture");
+
+    let output = buildc()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run buildc check");
+
+    let _ = fs::remove_file(&fixture);
+
+    assert!(
+        !output.status.success(),
+        "model_complete call should fail without Model effect"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Model"),
+        "diagnostic should name Model effect:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("model_complete"),
+        "diagnostic should name triggering ambient call:\n{}",
+        stderr
+    );
+}

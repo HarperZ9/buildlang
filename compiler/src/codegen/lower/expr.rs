@@ -1659,6 +1659,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     | "tcp_connect"
                     | "tcp_send"
                     | "getenv"
+                    | "model_complete"
             );
             if needs_str_coerce {
                 for arg_val in arg_vals.iter_mut() {
@@ -2165,6 +2166,8 @@ impl<'ctx> MirLowerer<'ctx> {
                 "clock_ms" | "time_unix" => return MirType::i64(),
                 // Seeded random builtin
                 "random_f64" => return MirType::f64(),
+                // Model-call builtin
+                "model_complete" => return MirType::Struct(Arc::from("BuildString")),
                 // Format builtins
                 "to_string_i32" | "to_string_f64" => {
                     return MirType::Struct(Arc::from("BuildString"))

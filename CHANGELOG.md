@@ -10,6 +10,30 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- **Model capability with the propose/dispose receipt boundary**: a new
+  `model_complete(prompt) -> str` builtin carries a `Model` capability
+  effect, transported over a deliberately dumb line protocol on the
+  existing TCP runtime (connect to `BUILD_MODEL_ENDPOINT`, send one prompt
+  line, read the reply until the shim closes the connection; a conforming
+  shim writes one completion line and closes, and one trailing newline is
+  trimmed). The model adapter (HTTP,
+  tokenization, parameters) lives on the harness side of this seam, never
+  in the compiler. FAIL CLOSED: no endpoint, a malformed endpoint, an
+  embedded newline in the prompt, or a connection failure aborts rather
+  than fabricating a completion. The receipt layer enforces propose/dispose
+  at both ends: `buildc run --emit-receipt` refuses a Model-observing
+  program up front, and `receipt verify` refuses any receipt whose
+  RE-DERIVED capabilities include `Model`, both under a new failure class
+  (`CAPABILITY_INADMISSIBLE`) -- models propose, oracles dispose. `Model`
+  carries no explicit arm in the witnessed-absence derivation, so it falls
+  through to the fail-closed default (a hazard for both `input_dataset` and
+  `determinism`), which a unit test pins. v0 ships the capability, the
+  transport contract, and the type-level rule only; it does not ship model
+  receipts (digest, prompt hash, parameters) or the flywheel demo, which
+  are a separate follow-on. No corpus member and no `--self-test` case: the
+  refusal happens before a receipt can exist, so there is nothing for
+  either to exercise; the corpus stays at 26 members and the self-test
+  stays at eight cases.
 - **Budgeted-search receipts**: `buildc run` gains `--budget-steps` /
   `--budget-consumed`, sealing the heuristic's admission facts (step
   ceiling, consumption, a DERIVED `exhausted` flag) as a `budget` receipt

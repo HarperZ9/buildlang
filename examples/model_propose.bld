@@ -1,0 +1,17 @@
+// The Model capability: a model call is a typed foreign boundary crossing.
+//
+// model_complete() sends one prompt line to the shim at
+// BUILD_MODEL_ENDPOINT (host:port), then reads the reply until the shim
+// CLOSES the connection (the runtime's tcp receive reads to close, not to
+// a newline), so a conforming shim writes its one completion line and
+// closes; one trailing newline, if present, is trimmed. FAIL CLOSED: with
+// no endpoint the first call aborts. And the propose/dispose
+// rule is enforced by the compiler at the receipt boundary: this program
+// can run, but `--emit-receipt` refuses it outright, because models
+// propose and oracles dispose. A model's output becomes evidence only by
+// passing through a model-free oracled kernel.
+
+fn main() ~ Console + Model {
+    let reply: str = model_complete("propose: 2 + 2 =");
+    println!("{}", reply);
+}

@@ -9,6 +9,7 @@ pub const CLOCK: &str = "Clock";
 pub const FOREIGN: &str = "Foreign";
 pub const GPU: &str = "Gpu";
 pub const RANDOM: &str = "Random";
+pub const MODEL: &str = "Model";
 
 const CAPABILITY_EFFECTS: &[&str] = &[
     CONSOLE,
@@ -20,6 +21,7 @@ const CAPABILITY_EFFECTS: &[&str] = &[
     FOREIGN,
     GPU,
     RANDOM,
+    MODEL,
 ];
 
 pub fn capability_effect_names() -> &'static [&'static str] {
@@ -95,6 +97,11 @@ pub fn capability_effect_for_call(name: &str) -> Option<&'static str> {
         // an UNSEEDED draw is a nondeterminism hazard, but a draw under a
         // sealed seed is deterministic and the receipt says so.
         "random_f64" | "build_random_f64" => Some(RANDOM),
+        // The model-call builtin. A foreign boundary crossing with its own
+        // capability (not Foreign) because the receipt layer treats it
+        // distinctly: a Model-observing program is INADMISSIBLE on the
+        // receipt path outright. Models propose; oracles dispose.
+        "model_complete" | "build_model_complete" => Some(MODEL),
         "build_vk_init"
         | "build_vk_load_shader_file"
         | "build_vk_run_compute"
@@ -173,6 +180,11 @@ mod tests {
             capability_effect_for_call("build_random_f64"),
             Some("Random")
         );
+        assert_eq!(capability_effect_for_call("model_complete"), Some("Model"));
+        assert_eq!(
+            capability_effect_for_call("build_model_complete"),
+            Some("Model")
+        );
         assert_eq!(capability_effect_for_call("sqrt"), None);
     }
 
@@ -187,6 +199,7 @@ mod tests {
         assert!(capability_effect_names().contains(&"Foreign"));
         assert!(capability_effect_names().contains(&"Gpu"));
         assert!(capability_effect_names().contains(&"Random"));
+        assert!(capability_effect_names().contains(&"Model"));
     }
 
     #[test]
