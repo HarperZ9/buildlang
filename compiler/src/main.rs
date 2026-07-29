@@ -282,6 +282,14 @@ enum Commands {
         #[arg(long, value_name = "N")]
         budget_consumed: Option<u64>,
 
+        /// The declared wall-clock ceiling in seconds: a member of the
+        /// budget declaration, not a freestanding knob. Requires the
+        /// --budget-steps/--budget-consumed pair and a positive, finite
+        /// value. The `wall_exceeded` flag is DERIVED at emit from this
+        /// ceiling against the SEALED measured wall time.
+        #[arg(long, value_name = "LIMIT")]
+        budget_wall_seconds: Option<f64>,
+
         /// Run the kernel through a SECOND backend as well and seal a
         /// 2-column cross-backend receipt (the C anchor and the secondary
         /// lane's outputs, checked for agreement). v0 supports `rust` (the
@@ -667,6 +675,7 @@ fn main() -> ExitCode {
             mc_interval,
             budget_steps,
             budget_consumed,
+            budget_wall_seconds,
             cross_backend,
             gpu,
             args,
@@ -682,7 +691,10 @@ fn main() -> ExitCode {
                         "--mc-* flags are not supported with --gpu (the GPU cross-check has no Random capability)"
                     );
                     Err(1)
-                } else if budget_steps.is_some() || budget_consumed.is_some() {
+                } else if budget_steps.is_some()
+                    || budget_consumed.is_some()
+                    || budget_wall_seconds.is_some()
+                {
                     eprintln!(
                         "--budget-* flags are not supported with --gpu (the GPU cross-check produces no budget block)"
                     );
@@ -713,6 +725,7 @@ fn main() -> ExitCode {
                     mc_interval.as_deref(),
                     budget_steps,
                     budget_consumed,
+                    budget_wall_seconds,
                     cross_backend.as_deref(),
                 )
             }
@@ -6809,6 +6822,11 @@ struct CapturedRun {
     /// temp dir is deleted afterwards). Sealed into the receipt's
     /// compiler_branch block at emit; REPORTED (never required) at verify.
     executable_digest: ScientificDigest,
+    /// Wall-clock duration of the child process run, measured with
+    /// `std::time::Instant` around the `.output()` call and rounded to 3
+    /// decimal places (millisecond precision keeps the JSON tidy and the
+    /// fact honest). The receipt's first EXECUTED time fact.
+    wall_seconds: f64,
 }
 
 /// Derive the scientific receipt's effect_policy block from a check outcome:
@@ -7099,6 +7117,10 @@ fn compile_and_capture_run(
     };
 
     // Run the compiled program, capturing stdout so we can parse the series.
+    // The wall clock brackets ONLY the child process's `.output()` call (not
+    // the compile above it or the cleanup below): this is the receipt's
+    // EXECUTED wall-clock fact, so it must measure exactly the witnessed run.
+    let run_start = std::time::Instant::now();
     let run_output = {
         let mut run_cmd = std::process::Command::new(&exe_file);
         run_cmd.args(args);
@@ -7116,6 +7138,10 @@ fn compile_and_capture_run(
             1i32
         })?
     };
+    // Rounded to 3 decimal places (millisecond precision keeps the JSON tidy
+    // and the fact honest: buildc cannot claim sub-millisecond fidelity over
+    // a `.output()` call that itself pipes through the OS).
+    let wall_seconds = (run_start.elapsed().as_secs_f64() * 1000.0).round() / 1000.0;
 
     // Clean up temp files.
     let _ = std::fs::remove_dir_all(&temp_dir);
@@ -7128,6 +7154,7 @@ fn compile_and_capture_run(
         stderr_bytes: run_output.stderr,
         exit_code,
         executable_digest,
+        wall_seconds,
     })
 }
 
@@ -7318,6 +7345,10 @@ fn compile_and_capture_rust_run(
         },
     };
 
+    // Measured for the same reason as the primary lane (a shared
+    // `CapturedRun` shape), though the secondary's wall time is not sealed
+    // anywhere in v0: the cross-backend block carries no wall_seconds field.
+    let run_start = std::time::Instant::now();
     let run_output = {
         let mut run_cmd = std::process::Command::new(&exe_file);
         run_cmd.args(args);
@@ -7328,6 +7359,7 @@ fn compile_and_capture_rust_run(
             1i32
         })?
     };
+    let wall_seconds = (run_start.elapsed().as_secs_f64() * 1000.0).round() / 1000.0;
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 
@@ -7339,6 +7371,7 @@ fn compile_and_capture_rust_run(
         stderr_bytes: run_output.stderr,
         exit_code,
         executable_digest,
+        wall_seconds,
     })
 }
 
@@ -7408,6 +7441,7 @@ fn rerun_scientific_receipt(
         secondary,
         raw_stdout_digest,
         executable_digest: captured.executable_digest,
+        wall_seconds: captured.wall_seconds,
     })
 }
 
@@ -7449,6 +7483,7 @@ fn cmd_run(
     mc_interval: Option<&str>,
     budget_steps: Option<u64>,
     budget_consumed: Option<u64>,
+    budget_wall_seconds: Option<f64>,
     cross_backend: Option<&str>,
 ) -> Result<(), i32> {
     // The Monte Carlo declaration is all-or-nothing, validated whenever ANY
@@ -7497,7 +7532,7 @@ fn cmd_run(
     // declaration: a result without its budget ceiling hides whether it
     // stopped at the limit, so neither flag alone is accepted. Deterministic
     // (no Random needed): a budget block is not coupled to the seed pairing.
-    let budget: Option<ScientificBudget> = match (budget_steps, budget_consumed) {
+    let mut budget: Option<ScientificBudget> = match (budget_steps, budget_consumed) {
         (None, None) => None,
         (Some(steps_limit), Some(steps_consumed)) => {
             if steps_limit == 0 {
@@ -7515,6 +7550,8 @@ fn cmd_run(
                 steps_consumed,
                 exhausted: steps_consumed == steps_limit,
                 status: "DECLARED".to_string(),
+                wall_seconds_limit: None,
+                wall_exceeded: None,
             })
         }
         _ => {
@@ -7524,6 +7561,25 @@ fn cmd_run(
             return Err(1);
         }
     };
+    // The wall ceiling is a MEMBER of the budget declaration, not a
+    // freestanding knob: it requires the steps pair and a positive, finite
+    // value. `wall_exceeded` is set below, once the primary run's wall time
+    // has actually been measured (it is DERIVED from the sealed
+    // measurement, never a hand-set or pre-run guess).
+    if let Some(limit) = budget_wall_seconds {
+        if budget.is_none() {
+            eprintln!(
+                "Error: --budget-wall-seconds requires the budget declaration (--budget-steps, --budget-consumed); the wall ceiling is a member of the budget block, not a freestanding one"
+            );
+            return Err(1);
+        }
+        if limit <= 0.0 || !limit.is_finite() {
+            eprintln!(
+                "Error: --budget-wall-seconds {limit}: must be a positive, finite number of seconds"
+            );
+            return Err(1);
+        }
+    }
     // The claim-language emit gate, beside the budget declaration: a
     // budgeted search reports its incumbent, never optimality, so
     // --method / --problem free text may not contradict NOT_PROVES_OPTIMALITY.
@@ -7777,6 +7833,17 @@ fn cmd_run(
     let captured = compile_and_capture_run(file, args, Some(&toolchain.c_compiler), seed)?;
     toolchain.program_executable_digest = captured.executable_digest.clone();
 
+    // The wall ceiling's exceeded flag is DERIVED here, from the SEALED
+    // measurement just captured, never from a re-run's re-measured time (see
+    // `evaluate_scientific_runtime_receipt`'s wall contract, which re-checks
+    // exactly this derivation from the two sealed numbers).
+    if let Some(limit) = budget_wall_seconds {
+        if let Some(b) = budget.as_mut() {
+            b.wall_seconds_limit = Some(limit);
+            b.wall_exceeded = Some(captured.wall_seconds > limit);
+        }
+    }
+
     // Seal the raw stdout bytes (the pass-0122 runtime_branch output hash):
     // computed over the EXACT captured bytes, before any parsing.
     let raw_stdout_digest = ScientificDigest {
@@ -7881,6 +7948,7 @@ fn cmd_run(
         target: "c",
         os: &os,
         exit_code,
+        wall_seconds: Some(captured.wall_seconds),
         toolchain,
         effect_policy,
         method_description: method.map(str::to_string),

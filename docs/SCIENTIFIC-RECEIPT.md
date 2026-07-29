@@ -112,6 +112,12 @@ Flags on the `run` subcommand (all additive; absent `--emit-receipt`, none of th
   `NOT_PROVES_OPTIMALITY` in `labels` and `optimality` in `not_claimed`, and `--method` /
   `--problem` text containing `optimal` (case-insensitively) is refused: a budgeted search
   may report its incumbent, never a proof of optimality.
+- `--budget-wall-seconds <LIMIT>` declares an OPTIONAL wall-clock ceiling on top of the step
+  budget: a member of the budget declaration, not a freestanding knob, so it requires the
+  `--budget-steps`/`--budget-consumed` pair and refuses without it. `LIMIT` must be a
+  positive, finite number of seconds. When present, `budget.wall_exceeded` is set at emit
+  from the SEALED measurement (`runtime_state.wall_seconds > wall_seconds_limit`), never
+  from a later re-run: a slower verify machine must not flip a receipt's coherence.
 - `--cross-backend <TARGET>` runs the kernel through a SECOND backend as well and seals a
   2-column cross-backend receipt: column 0 is the C anchor, column 1 the secondary lane. v0
   supports `rust` (the repo's designated validation lane) only. Requires `--invariant
@@ -143,7 +149,14 @@ The receipt is a single JSON object. Its layers, outermost meaning first:
   version-probe output, the host `os/arch` target, a sha256 of the buildc binary that
   emitted the receipt, and a sha256 of the compiled program executable (hashed before it
   ran).
-- `runtime_state`: `{ os, exit_code }`.
+- `runtime_state`: `{ os, exit_code, wall_seconds? }`. `wall_seconds` is the receipt's first
+  EXECUTED time fact: the witnessed run's wall-clock duration, measured with
+  `std::time::Instant` around the primary program's run and sealed at emit. `receipt verify`
+  re-measures its own re-run and REPORTS the fresh number beside the sealed one (in the human
+  MATCH line and, when the receipt sealed one, under a `wall_seconds` object in `--json`
+  output); there is no pass/fail on either number, since timing is environmental, exactly
+  like raw stdout bytes. Optional-with-default so receipts sealed before this field existed
+  parse and re-seal byte-identically.
 - `args`: the trailing program arguments the run was invoked with; `receipt verify` re-runs
   with exactly these.
 - `seed_value`: the RNG seed the run was invoked with (`--seed N`), present IFF the program
@@ -211,18 +224,25 @@ The receipt is a single JSON object. Its layers, outermost meaning first:
   hash, but an MC number without its denominator, seed, and interval method is
   unpriceable, so the receipt refuses to exist without them. v0 claims REPRODUCIBILITY
   and declaration discipline, never correctness of the interval.
-- `budget` (optional): `{ steps_limit, steps_consumed, exhausted, status }`, the
-  budgeted-search admission block from the `--budget-*` flags. Author-declared like
-  `monte_carlo`, but with hard shape contracts verify re-checks (`FIELD_CONTRACT_VIOLATION`):
-  `steps_limit` is non-zero, `steps_consumed` never exceeds it, `exhausted` is DERIVED
-  (`steps_consumed == steps_limit`, never hand-set), and `status` is `DECLARED`. The label
-  pairing is checked for EVERY receipt: `labels` must contain `NOT_PROVES_OPTIMALITY` and
-  `not_claimed` must contain `optimality` if and only if the receipt carries a `budget`
-  block. The claim-language rule keeps the free text honest: on a budgeted receipt,
-  `problem.label` or `numerical_method.description` containing `optimal`
+- `budget` (optional): `{ steps_limit, steps_consumed, exhausted, status, wall_seconds_limit?,
+  wall_exceeded? }`, the budgeted-search admission block from the `--budget-*` flags.
+  Author-declared like `monte_carlo`, but with hard shape contracts verify re-checks
+  (`FIELD_CONTRACT_VIOLATION`): `steps_limit` is non-zero, `steps_consumed` never exceeds it,
+  `exhausted` is DERIVED (`steps_consumed == steps_limit`, never hand-set), and `status` is
+  `DECLARED`. The label pairing is checked for EVERY receipt: `labels` must contain
+  `NOT_PROVES_OPTIMALITY` and `not_claimed` must contain `optimality` if and only if the
+  receipt carries a `budget` block. The claim-language rule keeps the free text honest: on a
+  budgeted receipt, `problem.label` or `numerical_method.description` containing `optimal`
   (case-insensitively) is refused, because a budgeted search reports its incumbent, never a
   proof of optimality. A result without its budget ceiling hides whether it stopped at the
-  limit, so the receipt refuses to exist without it.
+  limit, so the receipt refuses to exist without it. `wall_seconds_limit` (from
+  `--budget-wall-seconds`) is the OPTIONAL declared wall-clock ceiling in seconds, present
+  IFF one was declared; when present it must be positive and finite, and the receipt must
+  carry a sealed `runtime_state.wall_seconds` to derive against. `wall_exceeded` is present
+  IFF `wall_seconds_limit` is, and is DERIVED from the two SEALED numbers only
+  (`runtime_state.wall_seconds > wall_seconds_limit`), both at emit and at re-check: verify
+  never substitutes its own re-measured time into this comparison, because a slower verify
+  machine must not flip a receipt's coherence.
 - `cross_backend` (optional): `{ secondary_target, secondary_toolchain_version,
   secondary_toolchain_digest, secondary_executable_digest, secondary_raw_stdout_digest,
   secondary_exit_code, status }`, the cross-backend admission block from `--cross-backend
@@ -581,7 +601,7 @@ fixtures and CI pin the *specific* failure instead of accepting "anything failed
 | `DIGEST_MALFORMED` | a sealed digest field is not a real sha256 (64 hex chars); an absent hash cannot masquerade as witnessed provenance | 1 |
 | `ORACLE_KIND_UNSUPPORTED`, `ORACLE_STATUS_UNSUPPORTED`, `ORACLE_BINDING_MISMATCH`, `INVARIANT_UNSUPPORTED` | the oracle/invariant block names a kind, status, or criterion this verifier does not implement; binding is pinned to the implementation, never to another sealed field | 1 |
 | `FENCE_STATUS_UNEXPECTED` | a telemetry/lineage fence was edited to claim availability v0 does not produce | 1 |
-| `FIELD_CONTRACT_VIOLATION` | a sealed field claims something the program cannot express (a `seed_value` when nothing observes `Random`, a Random-using program with no sealed seed, a `monte_carlo` block without a seeded Random run or with a zero/nameless denominator, estimator, or interval method, a `budget` block with a zero ceiling, consumption above its ceiling, a hand-set `exhausted`, or a non-`DECLARED` status, a `cross_backend` block present without the `cross_backend_columns_agree` invariant or that invariant without the block (the biconditional), a non-`rust` `cross_backend.secondary_target`, a non-`EXECUTED` `cross_backend.status`, a `cross_backend` block whose RE-DERIVED capabilities include `Random` (the Rust lane has no seeded PRNG, so the streams could not agree; this transitively excludes a `monte_carlo` block riding along too, since MC requires `Random`), or a `NOT_PROVES_OPTIMALITY`/`optimality` pairing or claim-language mismatch), is internally inconsistent (DECLARED method, no description), or resealed a non-canonical `invariant.tolerance` | 1 |
+| `FIELD_CONTRACT_VIOLATION` | a sealed field claims something the program cannot express (a `seed_value` when nothing observes `Random`, a Random-using program with no sealed seed, a `monte_carlo` block without a seeded Random run or with a zero/nameless denominator, estimator, or interval method, a `budget` block with a zero ceiling, consumption above its ceiling, a hand-set `exhausted`, or a non-`DECLARED` status, a `budget.wall_seconds_limit` that is non-positive or non-finite, present without a sealed `runtime_state.wall_seconds`, or paired with a `wall_exceeded` that disagrees with the SEALED `wall_seconds > wall_seconds_limit` comparison, a `wall_exceeded` present without `wall_seconds_limit`, a `cross_backend` block present without the `cross_backend_columns_agree` invariant or that invariant without the block (the biconditional), a non-`rust` `cross_backend.secondary_target`, a non-`EXECUTED` `cross_backend.status`, a `cross_backend` block whose RE-DERIVED capabilities include `Random` (the Rust lane has no seeded PRNG, so the streams could not agree; this transitively excludes a `monte_carlo` block riding along too, since MC requires `Random`), or a `NOT_PROVES_OPTIMALITY`/`optimality` pairing or claim-language mismatch), is internally inconsistent (DECLARED method, no description), or resealed a non-canonical `invariant.tolerance` | 1 |
 | `EFFECT_POLICY_DRIFT` | the sealed effect/capability facts, or the witnessed fields derived from them, do not re-derive from the source | 1 |
 | `CAPABILITY_INADMISSIBLE` | the RE-DERIVED capabilities include `Model`: a scientific receipt cannot witness a model-mediated run (models propose, oracles dispose) | 1 |
 | `TOOL_UNAVAILABLE` | no C compiler available for the re-run | 4 |
@@ -627,7 +647,10 @@ compiler (and no rustc): the seed-pairing, MC, budget, and cross-backend cases a
 the source re-derivation stage or the field-contract gate, so they (alone) need the receipt's
 source file readable, exactly as `buildc check` would. It exits 0 only if every tamper produced
 its expected class, and prints `self-test: N/N tampers rejected with the expected
-failure_class`.
+failure_class`. There is no tenth case for the wall-metering fields: a tampered
+`wall_exceeded` or `wall_seconds_limit` is rejected through the exact same
+`FIELD_CONTRACT_VIOLATION` arm the budget case (case 8) already exercises, so a tenth case
+would prove nothing the ninth does not already prove.
 
 ### Chaining receipts (`receipt chain`)
 

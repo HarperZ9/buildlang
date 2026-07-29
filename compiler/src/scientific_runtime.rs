@@ -302,7 +302,11 @@ pub struct ScientificMonteCarlo {
 /// additionally carries `NOT_PROVES_OPTIMALITY` in `labels` and
 /// `optimality` in `not_claimed`, both re-derived at verify: a budgeted
 /// search may report its incumbent, never a proof of optimality.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+///
+/// No longer `Eq` (only `PartialEq`): the wall fields below add `f64`,
+/// which has no total order (`Eq` cannot be derived over it), matching the
+/// sibling `ScientificInvariant`'s `tolerance: f64`.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ScientificBudget {
     /// The declared step ceiling. Non-zero.
     pub steps_limit: u64,
@@ -313,6 +317,21 @@ pub struct ScientificBudget {
     pub exhausted: bool,
     /// `DECLARED` (v0): the facts were stated, not independently metered.
     pub status: String,
+    /// The declared wall-clock ceiling in seconds (`--budget-wall-seconds`),
+    /// present IFF the run declared one. A member of the budget block, not a
+    /// freestanding knob: it requires the steps pair and a positive, finite
+    /// value. Optional-with-default so receipts sealed before this field
+    /// existed keep their exact bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_seconds_limit: Option<f64>,
+    /// Whether the EMITTED run's sealed wall time exceeded the ceiling:
+    /// EXACTLY `runtime_state.wall_seconds > wall_seconds_limit`, DERIVED
+    /// from the two SEALED numbers at emit and re-derived at verify from the
+    /// same sealed pair, never from verify's own re-measured time (a slower
+    /// verify machine must not flip a receipt's coherence). Present IFF
+    /// `wall_seconds_limit` is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_exceeded: Option<bool>,
 }
 
 /// The cross-backend admission block: the secondary lane's witnessed facts.
@@ -518,10 +537,23 @@ pub struct ScientificBuildState {
     pub toolchain: ScientificToolchain,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+// No longer `Eq` (only `PartialEq`): `wall_seconds` adds an `f64`, which has
+// no total order (`Eq` cannot be derived over it).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ScientificRuntimeState {
     pub os: String,
     pub exit_code: i32,
+    /// Wall-clock duration of the witnessed run in seconds, measured with
+    /// `std::time::Instant` around the primary program's `.output()` call
+    /// and rounded to 3 decimal places. This is the receipt's first EXECUTED
+    /// time fact (buildc genuinely observes it, unlike the declared step
+    /// counts in `budget`). Sealed at emit; `receipt verify` re-measures its
+    /// own re-run and REPORTS the fresh number beside this one, never
+    /// requiring agreement (timing is environmental, exactly like raw
+    /// stdout bytes). Optional-with-default so receipts sealed before this
+    /// field existed keep their exact bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_seconds: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1042,6 +1074,11 @@ pub struct ScientificReceiptInputs<'a> {
     pub target: &'a str,
     pub os: &'a str,
     pub exit_code: i32,
+    /// The witnessed run's wall-clock duration in seconds (measured by
+    /// `compile_and_capture_run`). The real emit path always supplies
+    /// `Some`; `None` is for test fixtures modeling a receipt sealed before
+    /// this field existed.
+    pub wall_seconds: Option<f64>,
     /// The pass-0122 `compiler_branch` facts probed at emit.
     pub toolchain: ScientificToolchain,
     /// The effect/capability facts derived by the check pipeline at emit.
@@ -1114,6 +1151,7 @@ pub fn build_scientific_runtime_receipt(
         target,
         os,
         exit_code,
+        wall_seconds,
         toolchain,
         effect_policy,
         method_description,
@@ -1205,6 +1243,7 @@ pub fn build_scientific_runtime_receipt(
         runtime_state: ScientificRuntimeState {
             os: os.to_string(),
             exit_code,
+            wall_seconds,
         },
         args,
         problem: ScientificProblem {
@@ -1876,6 +1915,12 @@ pub struct RerunObservation {
     /// `executable_reproduced`; never a failure by itself, since C compiler
     /// output is not byte-stable across compiler versions).
     pub executable_digest: ScientificDigest,
+    /// Wall-clock duration of THIS re-run in seconds, measured the same way
+    /// `compile_and_capture_run` measured the emitted run. Always present
+    /// (verify always re-measures, regardless of whether the sealed receipt
+    /// carries a `runtime_state.wall_seconds`); REPORTED beside the sealed
+    /// value, never compared for pass/fail (timing is environmental).
+    pub wall_seconds: f64,
 }
 
 /// Verify a `buildlang-scientific-runtime-receipt/v0` receipt by RE-DERIVING,
@@ -2334,6 +2379,40 @@ pub fn evaluate_scientific_runtime_receipt(
             );
             return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
         }
+        // The declared wall ceiling, when present: a positive finite value,
+        // riding only on a receipt that sealed a measured wall_seconds
+        // (a ceiling needs a measurement to derive `wall_exceeded` against),
+        // with `wall_exceeded` re-derived from the two SEALED numbers only
+        // (never from this verify run's own re-measured time: a slower
+        // verify machine must not flip a receipt's coherence).
+        if let Some(limit) = budget.wall_seconds_limit {
+            if limit <= 0.0 || !limit.is_finite() {
+                eprintln!(
+                    "Error: budget.wall_seconds_limit {} is not a positive, finite value",
+                    limit
+                );
+                return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+            }
+            let Some(sealed_wall) = receipt.runtime_state.wall_seconds else {
+                eprintln!(
+                    "Error: budget.wall_seconds_limit is declared but runtime_state.wall_seconds is not sealed: a wall ceiling needs a measured wall time to derive wall_exceeded against"
+                );
+                return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+            };
+            let expected_exceeded = sealed_wall > limit;
+            if budget.wall_exceeded != Some(expected_exceeded) {
+                eprintln!(
+                    "Error: budget.wall_exceeded {:?} disagrees with sealed wall_seconds {} > sealed wall_seconds_limit {} ({}): wall_exceeded is DERIVED from the two SEALED numbers, never hand-set",
+                    budget.wall_exceeded, sealed_wall, limit, expected_exceeded
+                );
+                return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+            }
+        } else if budget.wall_exceeded.is_some() {
+            eprintln!(
+                "Error: budget.wall_exceeded is present without budget.wall_seconds_limit: the flag cannot exist without the ceiling it is derived from"
+            );
+            return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+        }
     }
     // The cross-backend admission contract. The block and the invariant are
     // a STRICT BICONDITIONAL: a receipt witnessing backend agreement must
@@ -2511,6 +2590,11 @@ pub fn evaluate_scientific_runtime_receipt(
         secondary_target,
     )
     .map_err(|code| verify_failure_class(json, "RERUN_FAILED", code))?;
+    // Wall-clock: REPORTED, never compared for pass/fail (timing is
+    // environmental, exactly like raw stdout bytes). `wall_seconds_sealed`
+    // is `None` for a receipt sealed before this field existed.
+    let wall_seconds_sealed = receipt.runtime_state.wall_seconds;
+    let wall_seconds_remeasured = observation.wall_seconds;
     let parsed = observation.parsed;
 
     // (3a) The process exit code is sealed and deterministic; a re-run that
@@ -2714,6 +2798,8 @@ pub fn evaluate_scientific_runtime_receipt(
         raw_stdout_digest_hex: receipt.measurement.raw_stdout_digest.hex.clone(),
         args: receipt.args.clone(),
         seal_hex: receipt.seal.hex.clone(),
+        wall_seconds_sealed,
+        wall_seconds_remeasured,
     })
 }
 
@@ -2758,6 +2844,13 @@ pub struct ScientificVerifyReport {
     pub raw_stdout_digest_hex: String,
     pub args: Vec<String>,
     pub seal_hex: String,
+    /// The sealed `runtime_state.wall_seconds`, `None` for a receipt sealed
+    /// before this field existed. REPORTED beside the fresh remeasurement,
+    /// never required to match (timing is environmental).
+    pub wall_seconds_sealed: Option<f64>,
+    /// This verification's own fresh wall-clock remeasurement, always
+    /// present (verify always re-measures its re-run).
+    pub wall_seconds_remeasured: f64,
 }
 
 /// Schema id for the Crucible-measurement export envelope (the Telos bridge).
@@ -2944,6 +3037,16 @@ pub fn verify_scientific_runtime_receipt(
             out["secondary_toolchain_matched"] =
                 serde_json::Value::Bool(report.secondary_toolchain_matched);
         }
+        // The wall-clock time fact: included only when the receipt sealed a
+        // measurement, so a plain (pre-wall-metering) receipt's JSON report
+        // gains no new key. Never a pass/fail signal, so there is no
+        // "matched" boolean here, only the two numbers side by side.
+        if let Some(sealed) = report.wall_seconds_sealed {
+            out["wall_seconds"] = serde_json::json!({
+                "sealed": sealed,
+                "remeasured": report.wall_seconds_remeasured,
+            });
+        }
         if !report.invariant_held {
             out["failure_class"] = serde_json::Value::String("INVARIANT_NOT_HELD".to_string());
         }
@@ -2956,9 +3059,21 @@ pub fn verify_scientific_runtime_receipt(
         })?;
         println!("{}", text);
     } else if report.invariant_held {
+        // Appended only when the receipt sealed a wall_seconds measurement
+        // (a plain pre-wall-metering receipt's MATCH line is unchanged).
+        // Never a pass/fail signal: the two numbers are reported side by
+        // side, with no "matched" verdict between them (timing is
+        // environmental, exactly like raw stdout bytes).
+        let wall_seconds_suffix = match report.wall_seconds_sealed {
+            Some(sealed) => format!(
+                ", wall_seconds={}~{}",
+                sealed, report.wall_seconds_remeasured
+            ),
+            None => String::new(),
+        };
         if report.invariant_name == CROSS_BACKEND_INVARIANT {
             println!(
-                "MATCH: scientific-runtime receipt re-runs and re-checks clean ({}, violation_count={}; toolchain_matched={}, raw_stdout_reproduced={}, executable_reproduced={}, secondary_toolchain_matched={}, secondary_raw_stdout_reproduced={}, secondary_executable_reproduced={})",
+                "MATCH: scientific-runtime receipt re-runs and re-checks clean ({}, violation_count={}; toolchain_matched={}, raw_stdout_reproduced={}, executable_reproduced={}, secondary_toolchain_matched={}, secondary_raw_stdout_reproduced={}, secondary_executable_reproduced={}{})",
                 report.receipt_status,
                 report.violation_count,
                 report.toolchain_matched,
@@ -2966,16 +3081,18 @@ pub fn verify_scientific_runtime_receipt(
                 report.executable_reproduced,
                 report.secondary_toolchain_matched,
                 report.secondary_raw_stdout_reproduced,
-                report.secondary_executable_reproduced
+                report.secondary_executable_reproduced,
+                wall_seconds_suffix
             );
         } else {
             println!(
-                "MATCH: scientific-runtime receipt re-runs and re-checks clean ({}, violation_count={}; toolchain_matched={}, raw_stdout_reproduced={}, executable_reproduced={})",
+                "MATCH: scientific-runtime receipt re-runs and re-checks clean ({}, violation_count={}; toolchain_matched={}, raw_stdout_reproduced={}, executable_reproduced={}{})",
                 report.receipt_status,
                 report.violation_count,
                 report.toolchain_matched,
                 report.raw_stdout_reproduced,
-                report.executable_reproduced
+                report.executable_reproduced,
+                wall_seconds_suffix
             );
         }
     } else {
@@ -3137,6 +3254,7 @@ mod tests {
             target: "c",
             os: "test-os",
             exit_code: 0,
+            wall_seconds: None,
             toolchain: test_toolchain(),
             effect_policy: test_effect_policy(),
             method_description: None,
@@ -4572,6 +4690,7 @@ mod tests {
             secondary: None,
             raw_stdout_digest: hex_digest('c'),
             executable_digest: hex_digest('f'),
+            wall_seconds: 0.123,
         }
     }
 
@@ -5070,6 +5189,8 @@ mod tests {
             raw_stdout_digest_hex: "c".repeat(64),
             args: vec!["--mode".to_string()],
             seal_hex: "e".repeat(64),
+            wall_seconds_sealed: Some(1.234),
+            wall_seconds_remeasured: 1.240,
         }
     }
 
@@ -5684,6 +5805,8 @@ mod tests {
                 steps_consumed: 437,
                 exhausted: false,
                 status: "DECLARED".to_string(),
+                wall_seconds_limit: None,
+                wall_exceeded: None,
             }
         }
         fn run(
@@ -5789,6 +5912,116 @@ mod tests {
         let value = serde_json::to_value(&plain).unwrap();
         assert!(value.get("budget").is_none());
         assert!(!plain.labels.contains(&"NOT_PROVES_OPTIMALITY".to_string()));
+    }
+
+    #[test]
+    fn verify_enforces_the_wall_metering_contracts() {
+        fn budget_with_wall(limit: Option<f64>, exceeded: Option<bool>) -> ScientificBudget {
+            ScientificBudget {
+                steps_limit: 500,
+                steps_consumed: 437,
+                exhausted: false,
+                status: "DECLARED".to_string(),
+                wall_seconds_limit: limit,
+                wall_exceeded: exceeded,
+            }
+        }
+        fn run(
+            receipt: &ScientificRuntimeReceipt,
+            policy: ScientificEffectPolicy,
+        ) -> Result<(), i32> {
+            let value = serde_json::to_value(receipt).expect("to_value");
+            let src = receipt.source_digest.clone();
+            let graph = receipt.input_graph_digest.clone();
+            verify_scientific_runtime_receipt(
+                &value,
+                None,
+                true,
+                &receipt.compiler_version,
+                &receipt.language_version,
+                Some(&test_toolchain()),
+                move |_| {
+                    Ok(RederivedFacts {
+                        source_digest: src,
+                        input_graph_digest: graph,
+                        effect_policy: policy,
+                    })
+                },
+                |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            )
+        }
+        let path = Path::new("k.bld");
+        let metered = |block: ScientificBudget, wall_seconds: Option<f64>| {
+            build_scientific_runtime_receipt(ScientificReceiptInputs {
+                budget: Some(block),
+                wall_seconds,
+                ..base_inputs(path, vec![4.0, 3.0, 2.0], true, false)
+            })
+        };
+
+        // A complete, coherent wall declaration verifies: sealed
+        // wall_seconds 12.5, limit 300.0, correctly-derived exceeded=false.
+        let receipt = metered(budget_with_wall(Some(300.0), Some(false)), Some(12.5));
+        let value = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(value["runtime_state"]["wall_seconds"], 12.5);
+        assert_eq!(value["budget"]["wall_seconds_limit"], 300.0);
+        assert_eq!(value["budget"]["wall_exceeded"], false);
+        assert_eq!(
+            run(&receipt, test_effect_policy()),
+            Ok(()),
+            "a coherent wall ceiling declaration must verify"
+        );
+
+        // The exceeded flag disagreeing with the sealed numbers is refused:
+        // sealed wall_seconds 12.5 is NOT > limit 300.0, so a sealed
+        // exceeded=true is incoherent.
+        let bad_exceeded = metered(budget_with_wall(Some(300.0), Some(true)), Some(12.5));
+        assert_eq!(run(&bad_exceeded, test_effect_policy()), Err(1));
+
+        // wall_exceeded present without wall_seconds_limit is refused: the
+        // flag cannot exist without the ceiling it is derived from.
+        let bad_flag_only = metered(budget_with_wall(None, Some(false)), Some(12.5));
+        assert_eq!(run(&bad_flag_only, test_effect_policy()), Err(1));
+
+        // wall_seconds_limit present without a sealed
+        // runtime_state.wall_seconds is refused: a ceiling needs a measured
+        // wall time to derive wall_exceeded against.
+        let bad_no_measurement = metered(budget_with_wall(Some(300.0), Some(false)), None);
+        assert_eq!(run(&bad_no_measurement, test_effect_policy()), Err(1));
+
+        // The zeroed-steps + wall-fields interaction (plan Task 2, line 26):
+        // a budget block with a zeroed steps_limit but otherwise-coherent
+        // wall fields present must still be refused, and refused by the
+        // PRE-EXISTING steps gate, not by any wall-specific one. This pins
+        // the gate ORDER at scientific_runtime.rs:2357 (the steps_limit == 0
+        // check) running before the wall gate at ~2372, so a future reorder
+        // of these checks can't silently let a zeroed-steps budget slip
+        // through just because its wall fields happen to be coherent.
+        let mut zeroed_steps = budget_with_wall(Some(300.0), Some(false));
+        zeroed_steps.steps_limit = 0;
+        zeroed_steps.steps_consumed = 0;
+        zeroed_steps.exhausted = true;
+        let bad_zeroed_steps = metered(zeroed_steps, Some(12.5));
+        assert_eq!(
+            run(&bad_zeroed_steps, test_effect_policy()),
+            Err(1),
+            "a zeroed steps_limit with coherent wall fields present must still be refused by the pre-existing steps gates"
+        );
+
+        // A receipt with NO new fields (no runtime_state.wall_seconds, no
+        // wall fields in budget) round-trips with no new keys in its JSON,
+        // AND still verifies: the backward-compat pin. This is the shape a
+        // receipt sealed before wall metering existed would have.
+        let plain = metered(budget_with_wall(None, None), None);
+        let value = serde_json::to_value(&plain).unwrap();
+        assert!(value["runtime_state"].get("wall_seconds").is_none());
+        assert!(value["budget"].get("wall_seconds_limit").is_none());
+        assert!(value["budget"].get("wall_exceeded").is_none());
+        assert_eq!(
+            run(&plain, test_effect_policy()),
+            Ok(()),
+            "a pre-wall-metering-shaped receipt (no wall fields at all) must still verify"
+        );
     }
 
     /// A fixture cross-backend block: target `rust`, `EXECUTED`, three

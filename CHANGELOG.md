@@ -10,6 +10,25 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- **Wall-clock metering, the first EXECUTED budget fact**: `runtime_state` gains
+  `wall_seconds`, the receipt's first EXECUTED time fact, measured with
+  `std::time::Instant` around the primary run's `.output()` call, rounded to
+  3 decimal places, and sealed at emit. `receipt verify` re-measures its own
+  re-run and REPORTS the fresh number beside the sealed one (the human MATCH
+  line appends `wall_seconds=<sealed>~<remeasured>`, and `--json` carries a
+  `wall_seconds` object), never requiring agreement: timing is environmental,
+  exactly like raw stdout bytes. The `budget` block gains an OPTIONAL declared
+  ceiling, `--budget-wall-seconds <LIMIT>`, valid only alongside the existing
+  `--budget-steps`/`--budget-consumed` pair and refused when non-positive or
+  non-finite; when present, `wall_exceeded` is DERIVED at emit from the two
+  SEALED numbers (`wall_seconds > wall_seconds_limit`) and re-derived at
+  verify from the same sealed pair only, never from verify's own re-measured
+  time, so a slower verify machine cannot flip a receipt's coherence.
+  Backward compatible: both new fields are `Option` with
+  `skip_serializing_if`, so a receipt sealed before this change parses and
+  re-seals byte-identically. No new `--self-test` case: a tampered wall field
+  is rejected through the same `FIELD_CONTRACT_VIOLATION` arm the existing
+  budget case already exercises.
 - **Five modes, one chain**: a cli test (`five_modes_bind_into_one_chain`) emits
   one PASS receipt per computation mode (deterministic, probabilistic-exact,
   stochastic, Monte Carlo, heuristic, plus the cross-backend bonus when `rustc`
