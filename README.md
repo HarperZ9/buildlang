@@ -195,28 +195,70 @@ stdout together.
 
 ## Scientific-runtime receipts
 
-For numeric programs, `buildc run --emit-receipt <path> --invariant <name>`
-captures the program's numeric stdout as a measurement series, checks a
-stated invariant over it, and seals a re-checkable JSON receipt that
-`buildc receipt verify` re-derives by re-running the program. Seven
-invariants ship (`energy-monotone`, `conservation`, `bounded`,
-`energy-identity`, `relation`, `conserved-band`, `non-negative`), each with a
+`buildc run --emit-receipt <path> --invariant <name>` captures a numeric
+program's stdout as a measurement series, checks a stated invariant over it,
+and seals a re-checkable JSON receipt; `buildc receipt verify` re-derives it
+by re-running the program. The invariant family has eight members
+(`energy-monotone`, `conservation`, `bounded`, `energy-identity`, `relation`,
+`conserved-band`, `non-negative`, `cross_backend_columns_agree`), each with a
 paired negative-fixture kernel that must fail for the right reason.
-`--units m/s` canonicalizes a declared physical unit through a dependency-free
-SI dimensional-analysis core before sealing. Honest scope: the receipt
-witnesses the observed output series, not the model or any physical law.
-Details: [docs/SCIENTIFIC-RECEIPT.md](docs/SCIENTIFIC-RECEIPT.md) and
+`--units m/s` canonicalizes a declared physical unit through a
+dependency-free SI dimensional-analysis core before sealing.
+
+The same schema seals five distinct computation modes end to end:
+deterministic, exact-probabilistic (a quantum amplitude), seeded stochastic
+(the `Random` capability, witnessed seed), Monte Carlo (`--mc-estimator` /
+`--mc-samples` / `--mc-interval`, sealing the estimator's declared
+denominator and interval method), and budgeted heuristic search
+(`--budget-steps` / `--budget-consumed`, sealing the step ceiling and a
+derived exhaustion flag), plus a cross-backend bonus mode that runs one
+kernel through both the C and Rust backends and checks their agreement.
+`buildc receipt chain` binds any number of receipts into one ordered,
+tamper-evident bundle. A `Model` capability exists for calling out to a
+model over TCP; the receipt layer refuses outright to emit or verify a
+receipt over a Model-observing program, because models propose and oracles
+dispose.
+
+Run it now:
+
+```bash
+# emit a receipt from the flagship kernel, then verify it
+buildc run examples/heat_equation_energy.bld --emit-receipt receipt.json \
+  --invariant energy-monotone --problem 1d-heat-equation-energy
+buildc receipt verify receipt.json
+
+# run the full 27-member example corpus (paired PASS / FAIL_EXPECTED kernels)
+buildc receipt corpus examples/scientific-corpus.json
+
+# emit one receipt per mode (docs/FIVE-MODES-TOUR.md has all six commands),
+# then chain and verify the bundle
+buildc receipt chain build det.json prob.json stoch.json mc.json heur.json cross.json -o chain.json
+buildc receipt chain verify chain.json
+```
+
+Walk all five modes plus the cross-backend bonus one command at a time:
+[docs/FIVE-MODES-TOUR.md](docs/FIVE-MODES-TOUR.md). Full schema, flags, and
+failure-class reference:
+[docs/SCIENTIFIC-RECEIPT.md](docs/SCIENTIFIC-RECEIPT.md) and
 [docs/DIMENSIONAL-ANALYSIS.md](docs/DIMENSIONAL-ANALYSIS.md).
+
+Honest scope: a receipt witnesses that the compiled program's observed
+output series satisfies the stated invariant over that one run, never a
+physical law (`NOT_A_NEW_PHYSICAL_LAW`); a budgeted-search receipt reports an
+incumbent under its declared step ceiling and never claims optimality
+(`NOT_PROVES_OPTIMALITY`); a Monte Carlo receipt seals the estimator's
+declaration discipline (denominator, seed, interval method), not the
+correctness of the interval.
 
 ## Status and maturity
 
-BuildLang 1.1.x. The C backend, capability-effect checking, HLSL/GLSL
+BuildLang 1.2.x. The C backend, capability-effect checking, HLSL/GLSL
 output, and the receipt tooling are the verified core; SPIR-V, LLVM IR, WASM,
 Rust, x86-64, ARM64, GPU dispatch, and `#[linear]` types are labeled
 experimental and stay that way until their evidence says otherwise. The
-release-shaped baseline (2026-07-02, local `cargo test` from `compiler/`):
-lib 940, bin 135, cli 307, lexer 52, parser 88 passing, 0 failing, with
-`buildc corpus verify` 8/8. Ground-truth release evidence lives in
+release-shaped baseline (2026-07-29, local `cargo test` from `compiler/`):
+1605 tests passing, 0 failing (11 ignored), with `buildc receipt corpus`
+27/27 and `buildc corpus verify` 8/8. Ground-truth release evidence lives in
 [STATUS.md](STATUS.md); [CHANGELOG.md](CHANGELOG.md) tracks changes.
 
 ## Documentation and ecosystem
