@@ -7371,6 +7371,23 @@ fn cmd_run(
     // which a receipt must not seal as if it were witnessed.
     let outcome = run_check(file)?;
     let effect_policy = derive_effect_policy(&outcome);
+
+    // The propose/dispose admission rule, checked before any other gate: a
+    // Model-observing program cannot emit a scientific receipt outright.
+    // Models propose; oracles dispose. This is not a seed-style pairing
+    // (there is no flag that would make a Model program admissible), so it
+    // short-circuits ahead of the seed gates rather than joining them.
+    let uses_model = effect_policy
+        .observed_capabilities
+        .iter()
+        .any(|cap| cap == "Model");
+    if uses_model {
+        eprintln!(
+            "Error: this program observes the Model capability and cannot emit a scientific receipt: models propose, oracles dispose. Run the model as a proposer and verify its output with a model-free oracled kernel."
+        );
+        return Err(1);
+    }
+
     let uses_random = effect_policy
         .observed_capabilities
         .iter()

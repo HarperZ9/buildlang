@@ -82,6 +82,7 @@ macro expansion.
 | `Foreign` | calls to unknown functions declared in `extern` blocks and reads from foreign statics |
 | `Gpu` | direct `build_vk_*` and `build_gfx_*` runtime helpers |
 | `Random` | `random_f64` (the seeded PRNG; `buildc run --seed N` supplies the seed, and an unseeded draw aborts) |
+| `Model` | `model_complete` (line-protocol shim at `BUILD_MODEL_ENDPOINT`; a Model-observing program cannot emit a scientific receipt: models propose, oracles dispose) |
 
 Known `build_*` C runtime helper aliases declared through `extern` blocks are
 classified by their specific domain capability instead of generic `Foreign`.
