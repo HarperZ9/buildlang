@@ -7384,6 +7384,14 @@ fn rerun_scientific_receipt(
                     hex: source_digest_hex(&secondary_captured.stdout_bytes),
                 },
                 executable_digest: secondary_captured.executable_digest,
+                // The SAME probe that resolved `rustc.path` above (honoring
+                // a RUSTC env override): carried into the observation so the
+                // evaluator can compare it against the sealed
+                // cross_backend.secondary_toolchain_digest and warn on drift,
+                // giving the secondary lane the same toolchain visibility
+                // the primary C lane already has at verify.
+                probed_toolchain_version: rustc.version_line,
+                probed_toolchain_digest: rustc.version_output_digest,
             })
         }
         Some(other) => {

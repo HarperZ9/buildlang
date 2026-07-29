@@ -233,9 +233,13 @@ The receipt is a single JSON object. Its layers, outermost meaning first:
   RE-EXECUTES both lanes rather than trusting the declaration. The three secondary digests
   must be well-formed sha256 (`DIGEST_MALFORMED` otherwise) and, like the primary's, are
   REPORTED as reproduced at verify (`secondary_raw_stdout_reproduced`,
-  `secondary_executable_reproduced`), never required. rustc absent at verify time exits 4
-  (`RERUN_FAILED`, TOOL_UNAVAILABLE semantics for the secondary lane; see the failure-class
-  table below).
+  `secondary_executable_reproduced`), never required. Verify also re-probes the local rustc
+  and compares it against the sealed `secondary_toolchain_digest`, mirroring the primary C
+  lane's `toolchain_matched`: `secondary_toolchain_matched` is `false` on drift, WARNS
+  (never fails; cross-toolchain re-verification stays legitimate by design) so a `RUSTC`
+  override at verify time is visible rather than silently discarded. rustc absent at verify
+  time exits 4 (`RERUN_FAILED`, TOOL_UNAVAILABLE semantics for the secondary lane; see the
+  failure-class table below).
 - `measurement`: `{ metric, observed_values: [f64], count, raw_stdout_digest,
   series_extraction_policy, units? }`. `raw_stdout_digest` seals the EXACT captured stdout
   bytes (the parse into `observed_values` is a lossy transform, so byte drift stays

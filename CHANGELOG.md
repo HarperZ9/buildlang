@@ -28,7 +28,11 @@ tracked in `STATUS.md`, `README.md`, and
   two fresh re-runs before recomputing the verdict. rustc absence at verify
   exits 4, matching how the primary C toolchain's absence is classed.
   Reproduction of the secondary's raw stdout and executable digests is
-  REPORTED, never required, exactly like the primary's.
+  REPORTED, never required, exactly like the primary's. Verify also re-probes
+  the local rustc and compares it against the sealed toolchain digest,
+  mirroring the primary C lane's `toolchain_matched`: a drift WARNS (never
+  fails) and is carried as `secondary_toolchain_matched`, closing a gap where
+  a `RUSTC` override at verify time was previously invisible.
 
   Tolerance calibration: a measured probe (2026-07-28) found the C and Rust
   backends compute IDENTICAL doubles for the reference decay recurrence, but

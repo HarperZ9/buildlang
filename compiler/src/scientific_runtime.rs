@@ -1839,6 +1839,22 @@ pub struct SecondaryObservation {
     /// sha256 of the secondary's re-compiled executable (REPORTED as
     /// `secondary_executable_reproduced`; never a failure by itself).
     pub executable_digest: ScientificDigest,
+    /// First line of the FRESHLY PROBED secondary (rustc) toolchain's
+    /// version banner, from the same probe `rerun_scientific_receipt`
+    /// already runs to invoke the compiler. Gives verify the secondary-lane
+    /// visibility parity the primary C lane already has: without this, the
+    /// probed rustc's identity was discarded after compiling, so a
+    /// substituted `RUSTC` re-executed the secondary lane with zero
+    /// visibility into whether it was the toolchain the receipt was sealed
+    /// under.
+    pub probed_toolchain_version: String,
+    /// sha256 over the freshly probed rustc's full version-probe output
+    /// bytes, compared against the sealed `cross_backend.secondary_toolchain_digest`
+    /// to compute `secondary_toolchain_matched` (WARN on drift, exactly like
+    /// the primary's `toolchain_matched`; cross-toolchain re-verification
+    /// stays legitimate by design, the defect being fixed here is
+    /// invisibility, not the ability to do it).
+    pub probed_toolchain_digest: ScientificDigest,
 }
 
 /// What a verify re-run observes, returned by the `rerun_series` callback.
@@ -2514,60 +2530,84 @@ pub fn evaluate_scientific_runtime_receipt(
     // check below in place of the primary-only `parsed.series`; for every
     // other receipt it IS `parsed.series`, so the rest of this function is
     // unchanged.
-    let (verdict_series, secondary_raw_stdout_reproduced, secondary_executable_reproduced) =
-        if let Some(cb) = &receipt.cross_backend {
-            let secondary = observation.secondary.ok_or_else(|| {
+    let (
+        verdict_series,
+        secondary_raw_stdout_reproduced,
+        secondary_executable_reproduced,
+        secondary_toolchain_matched,
+    ) = if let Some(cb) = &receipt.cross_backend {
+        let secondary = observation.secondary.ok_or_else(|| {
                 eprintln!(
                     "Error: cross-backend receipt requires a secondary (rust) re-run observation, but none was produced"
                 );
                 verify_failure_class(json, "RERUN_FAILED", 1)
             })?;
-            if secondary.exit_code != cb.secondary_exit_code {
-                eprintln!(
-                    "Error: secondary (rust) exit code drift: receipt {}, re-run {}",
-                    cb.secondary_exit_code, secondary.exit_code
+
+        // Secondary toolchain visibility parity with the primary's
+        // `toolchain_matched` (WARN, never fail: cross-toolchain
+        // re-verification stays legitimate by design). Unlike the
+        // primary there is no "missing toolchain" branch to handle
+        // here: `rerun_series` already mapped rustc absence to `Err(4)`
+        // before this closure could return an observation at all.
+        let secondary_toolchain_matched = digests_match(
+            &secondary.probed_toolchain_digest,
+            &cb.secondary_toolchain_digest,
+        );
+        if !secondary_toolchain_matched {
+            eprintln!(
+                    "Warning: secondary (rust) toolchain differs: receipt `{}`, local `{}` (re-checking the verdict anyway; any drift below may be environmental)",
+                    cb.secondary_toolchain_version,
+                    secondary.probed_toolchain_version
                 );
-                return Err(verify_failure_class(json, "RERUN_EXIT_MISMATCH", 1));
-            }
-            if parsed.diverged
-                || secondary.parsed.diverged
-                || parsed.series.is_empty()
-                || secondary.parsed.series.is_empty()
-                || parsed.series.len() != secondary.parsed.series.len()
-            {
-                eprintln!(
+        }
+
+        if secondary.exit_code != cb.secondary_exit_code {
+            eprintln!(
+                "Error: secondary (rust) exit code drift: receipt {}, re-run {}",
+                cb.secondary_exit_code, secondary.exit_code
+            );
+            return Err(verify_failure_class(json, "RERUN_EXIT_MISMATCH", 1));
+        }
+        if parsed.diverged
+            || secondary.parsed.diverged
+            || parsed.series.is_empty()
+            || secondary.parsed.series.is_empty()
+            || parsed.series.len() != secondary.parsed.series.len()
+        {
+            eprintln!(
                     "Error: cross-backend re-run series mismatch: primary (C) produced {} values (diverged={}), secondary (rust) produced {} values (diverged={})",
                     parsed.series.len(),
                     parsed.diverged,
                     secondary.parsed.series.len(),
                     secondary.parsed.diverged
                 );
-                return Err(verify_failure_class(json, "MEASUREMENT_COUNT_DRIFT", 1));
-            }
-            let mut interleaved = Vec::with_capacity(parsed.series.len() * 2);
-            for (c, r) in parsed.series.iter().zip(secondary.parsed.series.iter()) {
-                interleaved.push(*c);
-                interleaved.push(*r);
-            }
-            let secondary_raw_stdout_reproduced = digests_match(
-                &secondary.raw_stdout_digest,
-                &cb.secondary_raw_stdout_digest,
-            );
-            let secondary_executable_reproduced = digests_match(
-                &secondary.executable_digest,
-                &cb.secondary_executable_digest,
-            );
-            (
-                interleaved,
-                secondary_raw_stdout_reproduced,
-                secondary_executable_reproduced,
-            )
-        } else {
-            // True-absent semantics: with no secondary lane there is nothing
-            // to (not) reproduce, so both flags default to true rather than
-            // reading as a failure signal on an ordinary receipt.
-            (parsed.series.clone(), true, true)
-        };
+            return Err(verify_failure_class(json, "MEASUREMENT_COUNT_DRIFT", 1));
+        }
+        let mut interleaved = Vec::with_capacity(parsed.series.len() * 2);
+        for (c, r) in parsed.series.iter().zip(secondary.parsed.series.iter()) {
+            interleaved.push(*c);
+            interleaved.push(*r);
+        }
+        let secondary_raw_stdout_reproduced = digests_match(
+            &secondary.raw_stdout_digest,
+            &cb.secondary_raw_stdout_digest,
+        );
+        let secondary_executable_reproduced = digests_match(
+            &secondary.executable_digest,
+            &cb.secondary_executable_digest,
+        );
+        (
+            interleaved,
+            secondary_raw_stdout_reproduced,
+            secondary_executable_reproduced,
+            secondary_toolchain_matched,
+        )
+    } else {
+        // True-absent semantics: with no secondary lane there is nothing
+        // to (not) reproduce, so all three flags default to true rather
+        // than reading as a failure signal on an ordinary receipt.
+        (parsed.series.clone(), true, true, true)
+    };
 
     // For a DIVERGED run the finite-prefix length (and hence violation_count
     // over that prefix) is the step index of the first non-finite value: a
@@ -2649,6 +2689,7 @@ pub fn evaluate_scientific_runtime_receipt(
         executable_reproduced,
         secondary_raw_stdout_reproduced,
         secondary_executable_reproduced,
+        secondary_toolchain_matched,
         tolerance: receipt.invariant.tolerance,
         negative_fixture: receipt.negative_fixture,
         diverged: receipt.diverged,
@@ -2683,6 +2724,16 @@ pub struct ScientificVerifyReport {
     /// receipt.
     pub secondary_raw_stdout_reproduced: bool,
     pub secondary_executable_reproduced: bool,
+    /// Secondary-lane toolchain visibility parity with the primary's
+    /// `toolchain_matched`: whether the FRESHLY PROBED rustc (the one that
+    /// actually re-executed the secondary lane, honoring a `RUSTC` env
+    /// override) matches the sealed `cross_backend.secondary_toolchain_digest`.
+    /// A mismatch WARNS (never fails: cross-toolchain re-verification is
+    /// legitimate by design) and this flag carries the result so a
+    /// substituted rustc is at least visible rather than silently discarded.
+    /// True-absent semantics like the two flags above: `true` when the
+    /// receipt has no `cross_backend` block.
+    pub secondary_toolchain_matched: bool,
     pub tolerance: f64,
     pub negative_fixture: bool,
     pub diverged: bool,
@@ -2868,6 +2919,15 @@ pub fn verify_scientific_runtime_receipt(
             "secondary_executable_reproduced": report.secondary_executable_reproduced,
             "seal": { "algorithm": "sha256", "hex": report.seal_hex },
         });
+        // Secondary toolchain visibility parity (finding 1): unlike the two
+        // reproduction flags above (always present, true-absent default),
+        // this key is included only when the receipt actually carries a
+        // `cross_backend` block, so a plain receipt's JSON report gains no
+        // new key from this fix.
+        if report.invariant_name == CROSS_BACKEND_INVARIANT {
+            out["secondary_toolchain_matched"] =
+                serde_json::Value::Bool(report.secondary_toolchain_matched);
+        }
         if !report.invariant_held {
             out["failure_class"] = serde_json::Value::String("INVARIANT_NOT_HELD".to_string());
         }
@@ -2882,12 +2942,13 @@ pub fn verify_scientific_runtime_receipt(
     } else if report.invariant_held {
         if report.invariant_name == CROSS_BACKEND_INVARIANT {
             println!(
-                "MATCH: scientific-runtime receipt re-runs and re-checks clean ({}, violation_count={}; toolchain_matched={}, raw_stdout_reproduced={}, executable_reproduced={}, secondary_raw_stdout_reproduced={}, secondary_executable_reproduced={})",
+                "MATCH: scientific-runtime receipt re-runs and re-checks clean ({}, violation_count={}; toolchain_matched={}, raw_stdout_reproduced={}, executable_reproduced={}, secondary_toolchain_matched={}, secondary_raw_stdout_reproduced={}, secondary_executable_reproduced={})",
                 report.receipt_status,
                 report.violation_count,
                 report.toolchain_matched,
                 report.raw_stdout_reproduced,
                 report.executable_reproduced,
+                report.secondary_toolchain_matched,
                 report.secondary_raw_stdout_reproduced,
                 report.secondary_executable_reproduced
             );
@@ -4980,6 +5041,7 @@ mod tests {
             executable_reproduced: false,
             secondary_raw_stdout_reproduced: true,
             secondary_executable_reproduced: true,
+            secondary_toolchain_matched: true,
             tolerance: ENERGY_MONOTONE_TOLERANCE,
             negative_fixture: receipt_status == "FAIL_EXPECTED",
             diverged: false,
@@ -5786,6 +5848,11 @@ mod tests {
                     exit_code: 0,
                     raw_stdout_digest: hex_digest('3'),
                     executable_digest: hex_digest('2'),
+                    // Matches cross_backend_block()'s sealed toolchain facts:
+                    // a faithful round trip probes the SAME rustc it was
+                    // sealed under.
+                    probed_toolchain_version: "rustc 1.0.0 (test)".to_string(),
+                    probed_toolchain_digest: hex_digest('1'),
                 });
                 Ok(observation)
             },
@@ -5970,6 +6037,8 @@ mod tests {
                     exit_code: 0,
                     raw_stdout_digest: hex_digest('3'),
                     executable_digest: hex_digest('2'),
+                    probed_toolchain_version: "rustc 1.0.0 (test)".to_string(),
+                    probed_toolchain_digest: hex_digest('1'),
                 });
                 Ok(observation)
             },
@@ -5978,6 +6047,120 @@ mod tests {
             result,
             Err(1),
             "a primary/secondary re-run length mismatch must be refused"
+        );
+    }
+
+    #[test]
+    fn verify_reports_secondary_toolchain_matched_when_probe_agrees_with_the_seal() {
+        // Finding 1 (secondary toolchain visibility parity): the freshly
+        // probed secondary (rust) toolchain facts, threaded through
+        // SecondaryObservation, are compared against the sealed
+        // cross_backend.secondary_toolchain_digest. A matching probe (the
+        // common case: the same rustc that sealed the receipt re-executes it
+        // at verify) reports secondary_toolchain_matched=true, and verify
+        // still Oks (this flag never fails verify by itself, mirroring the
+        // primary's toolchain_matched).
+        let path = Path::new("k.bld");
+        let series = vec![1.0, 1.0000005, 0.5, 0.5000001];
+        let receipt =
+            build_scientific_runtime_receipt(cross_backend_inputs(path, series, true, false));
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let sd = receipt.source_digest.clone();
+        let gd = receipt.input_graph_digest.clone();
+        let report = evaluate_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+            |_, _, _, target| {
+                assert_eq!(target, Some("rust"));
+                let mut observation = rerun(vec![1.0, 0.5]);
+                observation.secondary = Some(SecondaryObservation {
+                    parsed: ParsedSeries {
+                        series: vec![1.0000005, 0.5000001],
+                        any_parsed: true,
+                        diverged: false,
+                    },
+                    exit_code: 0,
+                    raw_stdout_digest: hex_digest('3'),
+                    executable_digest: hex_digest('2'),
+                    // Matches cross_backend_block()'s sealed
+                    // secondary_toolchain_digest exactly.
+                    probed_toolchain_version: "rustc 1.0.0 (test)".to_string(),
+                    probed_toolchain_digest: hex_digest('1'),
+                });
+                Ok(observation)
+            },
+        )
+        .expect("a faithful cross-backend receipt with a matching secondary toolchain must verify");
+        assert!(
+            report.secondary_toolchain_matched,
+            "a probed rustc matching the sealed digest must report secondary_toolchain_matched=true"
+        );
+    }
+
+    #[test]
+    fn verify_warns_but_still_matches_on_a_mismatched_secondary_toolchain() {
+        // The mirror case: the probed rustc's version-output digest
+        // DISAGREES with the sealed cross_backend.secondary_toolchain_digest
+        // (e.g. a substituted RUSTC pointed at a different or fabricating
+        // binary, or a legitimate different-toolchain re-verification
+        // environment). By design this WARNS -- the evaluator's
+        // `if !secondary_toolchain_matched { eprintln!(...) }` fires, naming
+        // both the sealed and the local version line; not captured by this
+        // test, which asserts the machine-readable signal instead -- and
+        // does NOT fail verify (cross-toolchain re-verification stays
+        // legitimate by design, exactly like the primary C lane's
+        // toolchain_matched). The mismatch is instead surfaced through
+        // secondary_toolchain_matched=false on the returned report, closing
+        // the visibility gap the review flagged: before this fix, a
+        // substituted rustc's identity was silently discarded after
+        // compiling, with zero warning and zero visibility.
+        let path = Path::new("k.bld");
+        let series = vec![1.0, 1.0000005, 0.5, 0.5000001];
+        let receipt =
+            build_scientific_runtime_receipt(cross_backend_inputs(path, series, true, false));
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let sd = receipt.source_digest.clone();
+        let gd = receipt.input_graph_digest.clone();
+        let report = evaluate_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(sd.clone(), gd.clone())),
+            |_, _, _, target| {
+                assert_eq!(target, Some("rust"));
+                let mut observation = rerun(vec![1.0, 0.5]);
+                observation.secondary = Some(SecondaryObservation {
+                    parsed: ParsedSeries {
+                        series: vec![1.0000005, 0.5000001],
+                        any_parsed: true,
+                        diverged: false,
+                    },
+                    exit_code: 0,
+                    raw_stdout_digest: hex_digest('3'),
+                    executable_digest: hex_digest('2'),
+                    // DISAGREES with cross_backend_block()'s sealed digest
+                    // (hex_digest('1')): simulates a substituted rustc.
+                    probed_toolchain_version: "rustc 9.9.9 (substituted)".to_string(),
+                    probed_toolchain_digest: hex_digest('9'),
+                });
+                Ok(observation)
+            },
+        )
+        .expect(
+            "a mismatched secondary toolchain must WARN, not fail: cross-toolchain \
+             re-verification stays legitimate by design",
+        );
+        assert!(
+            !report.secondary_toolchain_matched,
+            "a probed rustc differing from the sealed digest must report secondary_toolchain_matched=false"
         );
     }
 

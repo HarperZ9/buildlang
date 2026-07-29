@@ -15493,6 +15493,35 @@ fn cross_backend_receipt_round_trips_and_pins_the_pairing() {
         String::from_utf8_lossy(&bad_target.stderr)
     );
 
+    // REFUSAL: --gpu composed with --cross-backend (finding 2, previously
+    // untested composition gate). The two flags name two different secondary
+    // lanes (GPU cross-check vs. the rust cross-backend lane), so combining
+    // them is refused up front, before any GPU device probe or receipt work.
+    let gpu_composition = buildc()
+        .arg("run")
+        .arg(repo_example("decay_cross_backend.bld"))
+        .args(["--emit-receipt"])
+        .arg(dir.join("gpu_composition.json"))
+        .args([
+            "--gpu",
+            "--cross-backend",
+            "rust",
+            "--invariant",
+            "cross-backend",
+        ])
+        .output()
+        .expect("run --gpu --cross-backend together");
+    assert!(
+        !gpu_composition.status.success(),
+        "--gpu combined with --cross-backend must be refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&gpu_composition.stderr)
+            .contains("--cross-backend is not supported with --gpu"),
+        "the refusal must name the gpu/cross-backend composition\nstderr:\n{}",
+        String::from_utf8_lossy(&gpu_composition.stderr)
+    );
+
     // REFUSAL: rustc unreachable, simulated via RUSTC pointing at a
     // nonexistent binary (the same override `rustc_available` /
     // `rustc_compile_and_run` honor), so this is deterministic rather than
