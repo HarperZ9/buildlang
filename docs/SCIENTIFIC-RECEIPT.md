@@ -101,6 +101,15 @@ Flags on the `run` subcommand (all additive; absent `--emit-receipt`, none of th
   zero sample count is refused as an unpriceable denominator, and the declaration requires
   a `Random`-observing program with a seed (an MC claim over a stream that cannot
   re-derive is worthless as evidence).
+- `--budget-steps <LIMIT>`, `--budget-consumed <N>` declare the run a budgeted search and
+  seal the step ceiling, the consumption, and a DERIVED `exhausted` flag as the receipt's
+  `budget` block. Both declare together or not at all (a result without its budget ceiling
+  hides whether it stopped at the limit). A zero ceiling is refused, and consumption above
+  the ceiling is refused as incoherent. Unlike `--mc-*`, this declaration is deterministic
+  and does not require `Random` or a seed. A budgeted receipt additionally carries
+  `NOT_PROVES_OPTIMALITY` in `labels` and `optimality` in `not_claimed`, and `--method` /
+  `--problem` text containing `optimal` (case-insensitively) is refused: a budgeted search
+  may report its incumbent, never a proof of optimality.
 
 The program's own stdout is preserved: when the receipt is written to a file, the program's
 output is echoed to real stdout byte-for-byte (identical to plain `run`); when the receipt is
@@ -180,6 +189,18 @@ The receipt is a single JSON object. Its layers, outermost meaning first:
   hash, but an MC number without its denominator, seed, and interval method is
   unpriceable, so the receipt refuses to exist without them. v0 claims REPRODUCIBILITY
   and declaration discipline, never correctness of the interval.
+- `budget` (optional): `{ steps_limit, steps_consumed, exhausted, status }`, the
+  budgeted-search admission block from the `--budget-*` flags. Author-declared like
+  `monte_carlo`, but with hard shape contracts verify re-checks (`FIELD_CONTRACT_VIOLATION`):
+  `steps_limit` is non-zero, `steps_consumed` never exceeds it, `exhausted` is DERIVED
+  (`steps_consumed == steps_limit`, never hand-set), and `status` is `DECLARED`. The label
+  pairing is checked for EVERY receipt: `labels` must contain `NOT_PROVES_OPTIMALITY` and
+  `not_claimed` must contain `optimality` if and only if the receipt carries a `budget`
+  block. The claim-language rule keeps the free text honest: on a budgeted receipt,
+  `problem.label` or `numerical_method.description` containing `optimal`
+  (case-insensitively) is refused, because a budgeted search reports its incumbent, never a
+  proof of optimality. A result without its budget ceiling hides whether it stopped at the
+  limit, so the receipt refuses to exist without it.
 - `measurement`: `{ metric, observed_values: [f64], count, raw_stdout_digest,
   series_extraction_policy, units? }`. `raw_stdout_digest` seals the EXACT captured stdout
   bytes (the parse into `observed_values` is a lossy transform, so byte drift stays
@@ -378,7 +399,17 @@ band of 0.3 of pi, calibrated against the corpus seed 42 whose measured worst er
 `examples/mc_pi_rejection_broken.bld` (a wrong-area estimator multiplies by 3.0 instead of
 4.0 and converges to 3*pi/4, a systematic bias of ~0.785 no sampling repairs, so it blows
 through the band and FAILs: the harness catches a biased estimator, not just an unlucky
-one). Run any negative kernel with `--negative-fixture` for a `FAIL_EXPECTED` receipt.
+one), and a BUDGETED-SEARCH instance in `examples/greedy_change_budget.bld` (greedy coin
+change over denominations {4, 3, 1}, a genuine heuristic: amount 6 takes greedy's 3 coins
+(4+1+1) where 3+3 is the optimal 2, so the receipt carries `NOT_PROVES_OPTIMALITY`. Under
+the full `--budget-*` declaration, the measured worst coin count over amounts 1..60 is 16
+(at amount 58); the per-amount step_budget is calibrated to 23, a margin of ~1.4x, so the
+slack stays non-negative and it PASSes; the run declares `--budget-steps 60000
+--budget-consumed 495`, 495 being the real measured total coins used across all 60
+amounts) with `examples/greedy_change_budget_broken.bld` (the same loop under
+step_budget 14, the measured worst minus 2, so the worst amounts blow through it and it
+FAILs: the harness catches a search that overran its own declared budget). Run any
+negative kernel with `--negative-fixture` for a `FAIL_EXPECTED` receipt.
 
 ## 5. The heat-equation kernel example
 
@@ -486,7 +517,7 @@ fixtures and CI pin the *specific* failure instead of accepting "anything failed
 | `DIGEST_MALFORMED` | a sealed digest field is not a real sha256 (64 hex chars); an absent hash cannot masquerade as witnessed provenance | 1 |
 | `ORACLE_KIND_UNSUPPORTED`, `ORACLE_STATUS_UNSUPPORTED`, `ORACLE_BINDING_MISMATCH`, `INVARIANT_UNSUPPORTED` | the oracle/invariant block names a kind, status, or criterion this verifier does not implement; binding is pinned to the implementation, never to another sealed field | 1 |
 | `FENCE_STATUS_UNEXPECTED` | a telemetry/lineage fence was edited to claim availability v0 does not produce | 1 |
-| `FIELD_CONTRACT_VIOLATION` | a sealed field claims something the program cannot express (a `seed_value` when nothing observes `Random`, a Random-using program with no sealed seed, a `monte_carlo` block without a seeded Random run or with a zero/nameless denominator, estimator, or interval method), is internally inconsistent (DECLARED method, no description), or resealed a non-canonical `invariant.tolerance` | 1 |
+| `FIELD_CONTRACT_VIOLATION` | a sealed field claims something the program cannot express (a `seed_value` when nothing observes `Random`, a Random-using program with no sealed seed, a `monte_carlo` block without a seeded Random run or with a zero/nameless denominator, estimator, or interval method, a `budget` block with a zero ceiling, consumption above its ceiling, a hand-set `exhausted`, or a non-`DECLARED` status, or a `NOT_PROVES_OPTIMALITY`/`optimality` pairing or claim-language mismatch), is internally inconsistent (DECLARED method, no description), or resealed a non-canonical `invariant.tolerance` | 1 |
 | `EFFECT_POLICY_DRIFT` | the sealed effect/capability facts, or the witnessed fields derived from them, do not re-derive from the source | 1 |
 | `TOOL_UNAVAILABLE` | no C compiler available for the re-run | 4 |
 | `REDERIVATION_FAILED` | the source could not be re-checked (missing file, check failure) | inner code |
@@ -517,17 +548,18 @@ Given a valid scientific-runtime receipt, it tampers several distinct sealed fie
 that each tamper is rejected by the real verify path with its expected `failure_class`. Cases
 that keep the body well-formed are re-sealed (so the tamper passes the integrity gate and reaches
 the specific contract check under test); the seal-mismatch case is deliberately left unsealed.
-The current cases exercise five separate arms of the taxonomy: `COMPILER_MISMATCH` (foreign
-compiler tag), `SEAL_MISMATCH` (a witnessed value edited without re-sealing), `MALFORMED` (a
-required field removed), `FIELD_CONTRACT_VIOLATION` (three times, through different gates: a
-sealed tolerance loosened then re-sealed, the sealed `seed_value` flipped against the
-program's capabilities then re-sealed, and a `monte_carlo` block given a zero sample
-denominator then re-sealed), and `INVARIANT_UNSUPPORTED` (an unknown invariant name,
+The current eight cases exercise five separate arms of the taxonomy: `COMPILER_MISMATCH`
+(foreign compiler tag), `SEAL_MISMATCH` (a witnessed value edited without re-sealing),
+`MALFORMED` (a required field removed), `FIELD_CONTRACT_VIOLATION` (four times, through
+different gates: a sealed tolerance loosened then re-sealed, the sealed `seed_value` flipped
+against the program's capabilities then re-sealed, a `monte_carlo` block given a zero sample
+denominator then re-sealed, and a `budget` block given a `steps_consumed` above
+`steps_limit` then re-sealed), and `INVARIANT_UNSUPPORTED` (an unknown invariant name,
 re-sealed). Every case is rejected before any program re-run, so `--self-test` needs no C
-compiler; the seed-pairing and MC cases are rejected at the source re-derivation stage, so
-they (alone) need the receipt's source file readable, exactly as `buildc check` would. It exits 0 only if every tamper
-produced its expected class, and prints `self-test: N/N tampers rejected with the expected
-failure_class`.
+compiler; the seed-pairing, MC, and budget cases are rejected at the source re-derivation
+stage, so they (alone) need the receipt's source file readable, exactly as `buildc check`
+would. It exits 0 only if every tamper produced its expected class, and prints `self-test:
+N/N tampers rejected with the expected failure_class`.
 
 ### Chaining receipts (`receipt chain`)
 
@@ -553,11 +585,12 @@ re-runs each member, `chain verify` needs the C toolchain and the member sources
 
 The example kernels come in positive/negative pairs, each declared to PASS or to FAIL_EXPECTED
 under a named invariant. `examples/scientific-corpus.json` records that ground truth for all
-twelve pairs (a member whose kernel draws from `random_f64()` also declares its `seed`, which
-the runner passes as `--seed`, and an MC member declares `mc_estimator` / `mc_samples` /
-`mc_interval`, passed through the same way; a Random member with no declared seed, or a
-partial MC declaration, fails the corpus loudly, because emit refuses it), and one command
-checks reality against it:
+thirteen pairs (a member whose kernel draws from `random_f64()` also declares its `seed`, which
+the runner passes as `--seed`, an MC member declares `mc_estimator` / `mc_samples` /
+`mc_interval`, passed through the same way, and a budgeted member declares `budget_steps` /
+`budget_consumed`, passed through as `--budget-steps` / `--budget-consumed`; a Random member
+with no declared seed, or a partial MC or budget declaration, fails the corpus loudly, because
+emit refuses it), and one command checks reality against it:
 
 ```
 buildc receipt corpus examples/scientific-corpus.json

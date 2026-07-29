@@ -10,6 +10,28 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- **Budgeted-search receipts**: `buildc run` gains `--budget-steps` /
+  `--budget-consumed`, sealing the heuristic's admission facts (step
+  ceiling, consumption, a DERIVED `exhausted` flag) as a `budget` receipt
+  block. The declaration is all-or-nothing (a result without its budget
+  ceiling hides whether it stopped at the limit) and, unlike `monte_carlo`,
+  is deterministic: no `Random` capability or seed required. Verify
+  re-checks the shape contracts (`FIELD_CONTRACT_VIOLATION`): a zero
+  ceiling, a consumption above the ceiling, a hand-set `exhausted`, or a
+  non-`DECLARED` status are all refused. Two mechanical honesty rules ride
+  with it: every receipt's `labels` must contain `NOT_PROVES_OPTIMALITY`
+  and `not_claimed` must contain `optimality` if and only if it carries a
+  `budget` block, and `--method` / `--problem` text containing `optimal`
+  on a budgeted run is refused (a budgeted search reports its incumbent,
+  never a proof of optimality). The verifier self-test grows an eighth
+  tamper case (`steps_consumed` above `steps_limit`, re-sealed). Ships with
+  a heuristic kernel pair (greedy coin change over denominations
+  {4, 3, 1}, a genuine non-optimal heuristic: amount 6 takes greedy's 3
+  coins where 3+3 is the optimal 2, run under a calibrated step budget of
+  23 against a measured worst of 16, and the same loop under a step budget
+  of 14 that the worst amounts overrun), taking the corpus to 26 members.
+  Backward compatible: receipts without the block keep their exact bytes
+  and seals.
 - **Monte Carlo estimator receipts**: `buildc run` gains `--mc-estimator` /
   `--mc-samples` / `--mc-interval`, sealing the estimator's admission facts
   (id, sample-count denominator, interval method) as a `monte_carlo` receipt

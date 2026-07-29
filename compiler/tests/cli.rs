@@ -15117,6 +15117,207 @@ fn monte_carlo_declaration_round_trips_and_pins_the_admission_contract() {
 }
 
 #[test]
+fn budget_declaration_round_trips_and_pins_the_admission_contract() {
+    if !c_backend_ready() {
+        eprintln!("skipping budget_declaration_round_trips_and_pins_the_admission_contract: C backend not ready");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("buildlang_sci_budget_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create budget fixture dir");
+
+    let budget_flags = ["--budget-steps", "60000", "--budget-consumed", "495"];
+
+    // POSITIVE: the greedy kernel under the full declaration PASSes, the
+    // block is sealed with the declared facts plus the boundary rule
+    // (NOT_PROVES_OPTIMALITY label, optimality not_claimed entry), and the
+    // receipt verifies.
+    let pass_receipt = dir.join("greedy.json");
+    let emit_pass = buildc()
+        .arg("run")
+        .arg(repo_example("greedy_change_budget.bld"))
+        .args(["--emit-receipt"])
+        .arg(&pass_receipt)
+        .args([
+            "--invariant",
+            "non-negative",
+            "--metric",
+            "slack",
+            "--problem",
+            "greedy-change-budget",
+        ])
+        .args(budget_flags)
+        .output()
+        .expect("emit budget PASS receipt");
+    assert!(
+        emit_pass.status.success(),
+        "emitting the budget PASS receipt should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&emit_pass.stderr)
+    );
+    let pass: serde_json::Value =
+        serde_json::from_slice(&fs::read(&pass_receipt).expect("read PASS receipt")).unwrap();
+    assert_eq!(pass["receipt_status"], "PASS");
+    assert_eq!(pass["budget"]["steps_limit"], 60000);
+    assert_eq!(pass["budget"]["steps_consumed"], 495);
+    assert_eq!(pass["budget"]["exhausted"], false);
+    assert_eq!(pass["budget"]["status"], "DECLARED");
+    assert!(pass["labels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|l| l == "NOT_PROVES_OPTIMALITY"));
+    assert!(pass["not_claimed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c == "optimality"));
+    let verify_pass = buildc()
+        .args(["receipt", "verify"])
+        .arg(&pass_receipt)
+        .output()
+        .expect("verify budget PASS receipt");
+    assert!(
+        verify_pass.status.success(),
+        "the budget PASS receipt must verify\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_pass.stderr)
+    );
+
+    // NEGATIVE fixture: the under-budgeted kernel overruns its own declared
+    // step budget for the worst amounts and FAILs as declared.
+    let fail_receipt = dir.join("greedy-broken.json");
+    let emit_fail = buildc()
+        .arg("run")
+        .arg(repo_example("greedy_change_budget_broken.bld"))
+        .args(["--emit-receipt"])
+        .arg(&fail_receipt)
+        .args([
+            "--invariant",
+            "non-negative",
+            "--negative-fixture",
+            "--metric",
+            "slack",
+            "--problem",
+            "greedy-change-budget",
+        ])
+        .args(budget_flags)
+        .output()
+        .expect("emit budget negative fixture");
+    assert!(
+        emit_fail.status.success(),
+        "emitting the budget negative fixture should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&emit_fail.stderr)
+    );
+    let fail: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fail_receipt).expect("read FAIL receipt")).unwrap();
+    assert_eq!(fail["receipt_status"], "FAIL_EXPECTED");
+    assert!(
+        fail["invariant"]["observed"]["violation_count"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    let verify_fail = buildc()
+        .args(["receipt", "verify"])
+        .arg(&fail_receipt)
+        .output()
+        .expect("verify budget negative fixture");
+    assert!(
+        verify_fail.status.success(),
+        "a faithfully reproduced FAIL_EXPECTED must verify (exit 0)\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_fail.stderr)
+    );
+
+    // FAIL CLOSED: each partial declaration (either flag alone) is refused.
+    for partial in [
+        &["--budget-steps", "60000"][..],
+        &["--budget-consumed", "495"][..],
+    ] {
+        let refused = buildc()
+            .arg("run")
+            .arg(repo_example("greedy_change_budget.bld"))
+            .args(["--emit-receipt"])
+            .arg(dir.join("partial.json"))
+            .args(["--invariant", "non-negative"])
+            .args(partial)
+            .output()
+            .expect("run partial budget declaration");
+        assert!(
+            !refused.status.success(),
+            "a partial budget declaration must be refused: {partial:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("together"),
+            "the refusal must name the all-or-nothing contract\nstderr:\n{}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+    }
+
+    // FAIL CLOSED: a zero ceiling is refused before anything runs.
+    let zero = buildc()
+        .arg("run")
+        .arg(repo_example("greedy_change_budget.bld"))
+        .args(["--emit-receipt"])
+        .arg(dir.join("zero.json"))
+        .args(["--invariant", "non-negative"])
+        .args(["--budget-steps", "0", "--budget-consumed", "0"])
+        .output()
+        .expect("run zero-ceiling budget declaration");
+    assert!(
+        !zero.status.success(),
+        "a zero budget ceiling must be refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&zero.stderr).contains("ceiling"),
+        "the refusal must name the ceiling\nstderr:\n{}",
+        String::from_utf8_lossy(&zero.stderr)
+    );
+
+    // FAIL CLOSED: consumption above the ceiling is incoherent and refused.
+    let over = buildc()
+        .arg("run")
+        .arg(repo_example("greedy_change_budget.bld"))
+        .args(["--emit-receipt"])
+        .arg(dir.join("over.json"))
+        .args(["--invariant", "non-negative"])
+        .args(["--budget-steps", "10", "--budget-consumed", "11"])
+        .output()
+        .expect("run over-consumed budget declaration");
+    assert!(
+        !over.status.success(),
+        "a consumption above the ceiling must be refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&over.stderr).contains("incoherent"),
+        "the refusal must name the incoherence\nstderr:\n{}",
+        String::from_utf8_lossy(&over.stderr)
+    );
+
+    // FAIL CLOSED: the claim-language rule refuses free text claiming
+    // optimality on a budgeted run.
+    let claims_optimal = buildc()
+        .arg("run")
+        .arg(repo_example("greedy_change_budget.bld"))
+        .args(["--emit-receipt"])
+        .arg(dir.join("optimal.json"))
+        .args(["--invariant", "non-negative"])
+        .args(budget_flags)
+        .args(["--problem", "greedy-optimal-change"])
+        .output()
+        .expect("run budget declaration with optimal-claiming problem text");
+    assert!(
+        !claims_optimal.status.success(),
+        "free text claiming optimality on a budgeted run must be refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&claims_optimal.stderr).contains("optimality"),
+        "the refusal must name the optimality claim\nstderr:\n{}",
+        String::from_utf8_lossy(&claims_optimal.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn receipt_verify_self_test_proves_the_verifier_can_fail() {
     if !c_backend_ready() {
         eprintln!(
@@ -15162,8 +15363,8 @@ fn receipt_verify_self_test_proves_the_verifier_can_fail() {
     );
     let stdout = String::from_utf8_lossy(&self_test.stdout);
     assert!(
-        stdout.contains("7/7 tampers rejected with the expected failure_class"),
-        "self-test should report all seven tampers rejected\nstdout:\n{}",
+        stdout.contains("8/8 tampers rejected with the expected failure_class"),
+        "self-test should report all eight tampers rejected\nstdout:\n{}",
         stdout
     );
     // The taxonomy arms actually exercised must appear in the report.
@@ -15351,8 +15552,8 @@ fn receipt_corpus_asserts_declared_classifications() {
     assert_eq!(shipped["schema"], "buildlang-scientific-receipt-corpus/v0");
     assert_eq!(
         shipped["members"].as_array().unwrap().len(),
-        24,
-        "the shipped corpus should cover all twelve kernel pairs"
+        26,
+        "the shipped corpus should cover all thirteen kernel pairs"
     );
 
     // A small correct manifest: the command emits, verifies, and confirms each
