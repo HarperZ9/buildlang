@@ -17,6 +17,7 @@ mod gpu_receipt;
 mod lsp_dispatch;
 mod memory_layout;
 mod mir_representation;
+mod model_receipt;
 mod module_graph;
 mod scientific_runtime;
 mod symbol_graph;
@@ -42,6 +43,7 @@ use memory_layout::{verify_memory_layout_receipt, MemoryLayoutReceipt, MEMORY_LA
 use mir_representation::{
     verify_mir_representation_receipt, MirRepresentationReceipt, MIR_REPRESENTATION_RECEIPT,
 };
+use model_receipt::{verify_model_boundary_receipt, MODEL_RECEIPT_SCHEMA};
 use module_graph::{verify_module_graph_receipt, ModuleGraphReceipt, MODULE_GRAPH_RECEIPT};
 use scientific_runtime::{
     build_receipt_chain, receipt_chain_seal_hex, ReceiptChainManifest, ScientificCorpusManifest,
@@ -1899,11 +1901,21 @@ fn cmd_receipt_chain_build(receipts: &[PathBuf], output: &Path) -> Result<(), i3
             code
         })?;
         let schema = receipt.get("schema").and_then(|v| v.as_str()).unwrap_or("");
-        if schema != SCIENTIFIC_RUNTIME_SCHEMA {
+        // Allowlist widened for model boundary receipts (design section 6):
+        // a model receipt can be a chain member beside scientific-runtime
+        // receipts, demonstrating propose (model) / dispose (oracle) as a
+        // single chained bundle. `source` extraction below needs no change:
+        // both schemas carry a top-level `source` label. Chain VERIFY needs
+        // zero changes beyond this: pinned seals and subprocess
+        // re-verification (`buildc receipt verify <member>`) already compose
+        // through the schema-agnostic dispatch this widening exercises.
+        if schema != SCIENTIFIC_RUNTIME_SCHEMA && schema != MODEL_RECEIPT_SCHEMA {
             eprintln!(
-                "Error: '{}' is not a scientific-runtime receipt (schema `{}`)",
+                "Error: '{}' is not a chainable receipt (schema `{}`; expected `{}` or `{}`)",
                 path.display(),
-                schema
+                schema,
+                SCIENTIFIC_RUNTIME_SCHEMA,
+                MODEL_RECEIPT_SCHEMA
             );
             return Err(1);
         }
@@ -2714,6 +2726,9 @@ fn cmd_receipt_verify(
     if schema == SCIENTIFIC_RUNTIME_SCHEMA {
         return verify_scientific_receipt_dispatch(&receipt, source_override, false);
     }
+    if schema == MODEL_RECEIPT_SCHEMA {
+        return verify_model_boundary_receipt(&receipt, false);
+    }
     if schema != "buildlang-check-receipt/v1" {
         eprintln!("Error: unsupported check receipt schema `{}`", schema);
         return Err(1);
@@ -2844,6 +2859,18 @@ fn cmd_receipt_verify_json(
         == SCIENTIFIC_RUNTIME_SCHEMA
     {
         return verify_scientific_receipt_dispatch(&receipt, source_override, true);
+    }
+
+    // Model boundary receipts (design:
+    // docs/superpowers/specs/2026-07-29-model-boundary-receipts-design.md):
+    // offline schema/seal/field-contract verification only, no re-run. Routed
+    // the same way as the scientific-runtime arm above, before the
+    // check-receipt schema guard.
+    if receipt_field_str(&receipt, "/schema", "schema")
+        .map_err(|code| receipt_load_failure(true, "SCHEMA_UNSUPPORTED", code))?
+        == MODEL_RECEIPT_SCHEMA
+    {
+        return verify_model_boundary_receipt(&receipt, true);
     }
 
     let mut checks = Vec::new();

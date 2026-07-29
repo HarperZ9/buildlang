@@ -18194,3 +18194,281 @@ fn units_check_receipt_clean_and_mismatch() {
         "unit mismatch: cannot add `m` and `s` (dimensions differ)"
     );
 }
+
+// =============================================================================
+// MODEL BOUNDARY RECEIPT (buildlang-model-boundary-receipt/v0)
+//
+// Design: docs/superpowers/specs/2026-07-29-model-boundary-receipts-design.md
+// Emission belongs to the harness-side shim (local-model), never to buildc;
+// these tests exercise the READ side only -- `receipt verify`'s model arm and
+// the chain-build allowlist widening -- against hand-built and golden-fixture
+// JSON. No C backend is required for any test in this section.
+// =============================================================================
+
+fn model_receipt_golden_fixture_path() -> PathBuf {
+    repo_root()
+        .join("compiler")
+        .join("tests")
+        .join("fixtures")
+        .join("model-receipt-golden.json")
+}
+
+#[test]
+fn model_receipt_golden_fixture_verifies_byte_identically() {
+    // The cross-repo pin (design section 2, "Seal and the cross-language
+    // canonicalization contract"): this exact file, with this exact seal, is
+    // ALSO checked into the local-model / _wshim repo, sealed there by the
+    // Python shim. buildc's verify arm accepting it here is the buildlang
+    // half of the byte-identity claim.
+    let verify = buildc()
+        .args(["receipt", "verify"])
+        .arg(model_receipt_golden_fixture_path())
+        .output()
+        .expect("verify golden model receipt");
+    assert!(
+        verify.status.success(),
+        "the golden model receipt must verify\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&verify.stdout);
+    assert!(
+        stdout.contains("VERIFIED"),
+        "human output should report VERIFIED\nstdout:\n{stdout}"
+    );
+
+    let verify_json = buildc()
+        .args(["receipt", "verify"])
+        .arg(model_receipt_golden_fixture_path())
+        .arg("--json")
+        .output()
+        .expect("verify golden model receipt --json");
+    assert!(
+        verify_json.status.success(),
+        "--json verify must also succeed"
+    );
+    let report = receipt_from_stdout(&verify_json);
+    assert_eq!(report["schema"], "buildlang-model-boundary-receipt/v0");
+    assert_eq!(report["status"], "verified");
+    assert_eq!(
+        report["seal"]["hex"],
+        "6bb2a09c47f5eaa2e3208a5eadcd6d57d1faffa74a567e024e920571c3794035"
+    );
+}
+
+#[test]
+fn model_receipt_seal_mismatch_is_rejected() {
+    // A resealed-looking edit that was NOT actually resealed: the integrity
+    // gate must catch it before any field-contract check runs.
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(model_receipt_golden_fixture_path()).unwrap()).unwrap();
+    receipt["session"]["nonce"] = serde_json::Value::String("ffffffff".to_string());
+    let dir = std::env::temp_dir().join(format!("buildlang_model_seal_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create fixture dir");
+    let path = dir.join("tampered.json");
+    fs::write(&path, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+
+    let verify = buildc()
+        .args(["receipt", "verify"])
+        .arg(&path)
+        .output()
+        .expect("verify tampered model receipt");
+    assert!(
+        !verify.status.success(),
+        "an unsealed edit must fail verify"
+    );
+    assert!(
+        String::from_utf8_lossy(&verify.stderr).contains("failure_class: SEAL_MISMATCH"),
+        "an unsealed edit must report SEAL_MISMATCH\nstderr:\n{}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn model_receipt_resealed_field_shape_violation_is_rejected() {
+    // A COMPLETED outcome with a null reply, re-sealed so the tamper reaches
+    // the field-contract gate instead of tripping SEAL_MISMATCH first.
+    //
+    // The reseal is computed over a HAND-BUILT canonical string, not by
+    // round-tripping through `serde_json::Value` (this crate's `Value` is a
+    // `BTreeMap`, so re-serializing a `Value` sorts keys ALPHABETICALLY --
+    // it would NOT reproduce the struct-field-order canonicalization the
+    // real seal uses). The string below mirrors the golden fixture's field
+    // order with `reply` set to `null`, exactly as `model_receipt.rs`'s
+    // typed struct would serialize it.
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(model_receipt_golden_fixture_path()).unwrap()).unwrap();
+    receipt["reply"] = serde_json::Value::Null;
+    let canonical = concat!(
+        r#"{"schema":"buildlang-model-boundary-receipt/v0","source":"model:echo:echo/v1","#,
+        r#""shim":{"name":"model_shim.py","version":"0.1.0","mode":"echo"},"#,
+        r#""session":{"listen":"127.0.0.1:8931","nonce":"a1b2c3d4","#,
+        r#""request_received_utc":"2026-07-29T00:00:00Z","reply_written_utc":"2026-07-29T00:00:00Z"},"#,
+        r#""prompt":{"sha256":"758d61f26a44448384e5c4468a0dcb7a2abe456067b0f7b505bc28b9411fe931","bytes":4},"#,
+        r#""reply":null,"model":{"name":"echo/v1"},"seed":{"status":"NOT_SENT"},"#,
+        r#""outcome":"COMPLETED","seal":{"algorithm":"sha256","hex":""}}"#,
+    );
+    receipt["seal"]["hex"] = serde_json::Value::String(sha256_hex(canonical.as_bytes()));
+
+    let dir = std::env::temp_dir().join(format!("buildlang_model_fcv_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create fixture dir");
+    let path = dir.join("resealed_bad_shape.json");
+    fs::write(&path, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+
+    let verify = buildc()
+        .args(["receipt", "verify"])
+        .arg(&path)
+        .output()
+        .expect("verify resealed field-shape violation");
+    assert!(
+        !verify.status.success(),
+        "a re-sealed COMPLETED-with-null-reply receipt must still fail verify"
+    );
+    assert!(
+        String::from_utf8_lossy(&verify.stderr).contains("failure_class: FIELD_CONTRACT_VIOLATION"),
+        "must report FIELD_CONTRACT_VIOLATION\nstderr:\n{}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn model_receipt_chain_build_refuses_before_the_allowlist_widening_check() {
+    // Sanity: an unrelated schema (neither scientific-runtime nor
+    // model-boundary-receipt) is still refused by chain build. This pins the
+    // allowlist is exactly two members, not "anything with a seal".
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang_model_chain_refuse_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create fixture dir");
+    let bogus = serde_json::json!({
+        "schema": "not-a-real-schema/v0",
+        "source": "nowhere",
+        "seal": { "algorithm": "sha256", "hex": "0".repeat(64) },
+    });
+    let a = dir.join("bogus.json");
+    fs::write(&a, serde_json::to_vec_pretty(&bogus).unwrap()).unwrap();
+    let b = model_receipt_golden_fixture_path();
+    let out = dir.join("chain.json");
+    let build = buildc()
+        .args(["receipt", "chain", "build"])
+        .arg(&a)
+        .arg(&b)
+        .arg("-o")
+        .arg(&out)
+        .output()
+        .expect("attempt chain build with a bogus schema member");
+    assert!(
+        !build.status.success(),
+        "chain build must refuse a member whose schema is neither allowlisted schema"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn model_receipt_chains_beside_a_scientific_receipt_and_tamper_breaks_it() {
+    // The propose/dispose demo (design section 6): a model receipt (the
+    // proposal crossing) chained beside a scientific-runtime receipt (a
+    // Model-FREE disposer kernel), bound in order. Tampering the model member
+    // must break the chain even though the scientific member is untouched --
+    // this is the chain-build allowlist widening plus the verify arm
+    // composing with ZERO changes to the schema-agnostic chain machinery.
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping model_receipt_chains_beside_a_scientific_receipt_and_tamper_breaks_it: C backend not ready"
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("buildlang_model_chain_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create fixture dir");
+
+    // Member 0: the model receipt (the proposer). Copy the golden fixture
+    // byte-for-byte so its seal stays intact.
+    let model_member = dir.join("model.json");
+    fs::copy(model_receipt_golden_fixture_path(), &model_member)
+        .expect("copy golden model receipt as chain member 0");
+    let model_member_original = fs::read(&model_member).expect("snapshot model member");
+
+    // Member 1: a Model-free scientific-runtime receipt (the disposer). Any
+    // corpus kernel works; CAPABILITY_INADMISSIBLE never fires because this
+    // kernel does not observe Model -- the rule is demonstrated by what each
+    // chain member IS, not bent.
+    let sci_member = dir.join("sci.json");
+    let emit = buildc()
+        .arg("run")
+        .arg(repo_example("funnel_probe.bld"))
+        .args(["--emit-receipt"])
+        .arg(&sci_member)
+        .args([
+            "--invariant",
+            "non-negative",
+            "--metric",
+            "slack",
+            "--problem",
+            "disposer",
+        ])
+        .output()
+        .expect("emit disposer receipt");
+    assert!(
+        emit.status.success(),
+        "emitting the disposer receipt should succeed"
+    );
+
+    let chain = dir.join("chain.json");
+    let build = buildc()
+        .args(["receipt", "chain", "build"])
+        .arg(&model_member)
+        .arg(&sci_member)
+        .arg("-o")
+        .arg(&chain)
+        .output()
+        .expect("build propose/dispose chain");
+    assert!(
+        build.status.success(),
+        "chaining a model receipt beside a scientific receipt must succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let verify = buildc()
+        .args(["receipt", "chain", "verify"])
+        .arg(&chain)
+        .output()
+        .expect("verify propose/dispose chain");
+    assert!(
+        verify.status.success(),
+        "the clean propose/dispose chain must verify\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+
+    // Tamper the model member's body WITHOUT touching its seal.hex text
+    // field: the chain's pinned-seal check (step 2) still matches, so the
+    // break is caught only when `receipt verify` re-derives the seal over
+    // the now-inconsistent body (step 3), reported as CHAIN_LINK_UNVERIFIED.
+    let mut tampered: serde_json::Value = serde_json::from_slice(&model_member_original).unwrap();
+    tampered["prompt"]["bytes"] = serde_json::Value::from(999);
+    fs::write(&model_member, serde_json::to_vec_pretty(&tampered).unwrap()).unwrap();
+
+    let verify_tampered = buildc()
+        .args(["receipt", "chain", "verify"])
+        .arg(&chain)
+        .output()
+        .expect("verify chain with a tampered model member");
+    assert!(
+        !verify_tampered.status.success(),
+        "a tampered model member must break the chain"
+    );
+    assert!(
+        String::from_utf8_lossy(&verify_tampered.stderr).contains("CHAIN_LINK_UNVERIFIED"),
+        "a model member whose body no longer re-seals must report CHAIN_LINK_UNVERIFIED\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_tampered.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
