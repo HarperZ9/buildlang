@@ -75,7 +75,9 @@ Flags on the `run` subcommand (all additive; absent `--emit-receipt`, none of th
   `conserved-band` (the scalar stays within a fixed error budget of its initial
   value: approximate conservation, e.g. a symplectic integrator's energy), or
   `non-negative` (the scalar never drops below zero: an absolute lower floor,
-  e.g. a result-bearing slack that stays non-negative). Any other value is an
+  e.g. a result-bearing slack that stays non-negative), or `cross-backend` (the
+  same kernel's C anchor and secondary-lane columns must agree; requires
+  `--cross-backend <TARGET>`, forces `--columns` to 2). Any other value is an
   error reported **before** compiling.
 - `--columns <N>` sets how many columns each row of the captured series holds
   (default `1`). `>= 2` is required by `--invariant relation` and rejected by
@@ -110,6 +112,14 @@ Flags on the `run` subcommand (all additive; absent `--emit-receipt`, none of th
   `NOT_PROVES_OPTIMALITY` in `labels` and `optimality` in `not_claimed`, and `--method` /
   `--problem` text containing `optimal` (case-insensitively) is refused: a budgeted search
   may report its incumbent, never a proof of optimality.
+- `--cross-backend <TARGET>` runs the kernel through a SECOND backend as well and seals a
+  2-column cross-backend receipt: column 0 is the C anchor, column 1 the secondary lane. v0
+  supports `rust` (the repo's designated validation lane) only. Requires `--invariant
+  cross-backend` (and vice versa, a strict biconditional); refused with `--gpu`, with
+  `--seed`, with any `--mc-*` flag, and on a `Random`-observing kernel (the Rust lane has no
+  seeded PRNG builtin, so the streams could not agree). `--columns` is forced to 2 (an unset
+  default of 1 is silently upgraded; any other value is refused). The secondary lane's stdout
+  is captured and parsed but never echoed (only the primary's output is echoed, as always).
 
 The program's own stdout is preserved: when the receipt is written to a file, the program's
 output is echoed to real stdout byte-for-byte (identical to plain `run`); when the receipt is
@@ -213,6 +223,19 @@ The receipt is a single JSON object. Its layers, outermost meaning first:
   (case-insensitively) is refused, because a budgeted search reports its incumbent, never a
   proof of optimality. A result without its budget ceiling hides whether it stopped at the
   limit, so the receipt refuses to exist without it.
+- `cross_backend` (optional): `{ secondary_target, secondary_toolchain_version,
+  secondary_toolchain_digest, secondary_executable_digest, secondary_raw_stdout_digest,
+  secondary_exit_code, status }`, the cross-backend admission block from `--cross-backend
+  <TARGET>`. Present IFF the invariant is `cross_backend_columns_agree` (a strict
+  biconditional verify re-checks, `FIELD_CONTRACT_VIOLATION` on either side alone).
+  `secondary_target` must be `rust` (v0). Unlike `monte_carlo`/`budget`, `status` is
+  `EXECUTED`, not `DECLARED`: this block witnesses a run that ACTUALLY HAPPENED, and verify
+  RE-EXECUTES both lanes rather than trusting the declaration. The three secondary digests
+  must be well-formed sha256 (`DIGEST_MALFORMED` otherwise) and, like the primary's, are
+  REPORTED as reproduced at verify (`secondary_raw_stdout_reproduced`,
+  `secondary_executable_reproduced`), never required. rustc absent at verify time exits 4
+  (`RERUN_FAILED`, TOOL_UNAVAILABLE semantics for the secondary lane; see the failure-class
+  table below).
 - `measurement`: `{ metric, observed_values: [f64], count, raw_stdout_digest,
   series_extraction_policy, units? }`. `raw_stdout_digest` seals the EXACT captured stdout
   bytes (the parse into `observed_values` is a lossy transform, so byte drift stays
@@ -275,6 +298,7 @@ a receipt cannot weaken its own check.
 | `relation` (`--columns N>=2`) | `relation_columns_agree` | a row's columns differ by more than `tol` (the verifier compares them) | `1e-9` |
 | `conserved-band` | `conserved_within_band` | `abs(s[k] - s[0]) > tol` (left a fixed error budget of the initial value) | `5e-3` |
 | `non-negative` | `non_negative` | `s[k] < -tol` (dropped below zero) | `1e-9` |
+| `cross-backend` (`--cross-backend <TARGET>`, `--columns` forced to 2) | `cross_backend_columns_agree` | the C-anchor and secondary-lane columns of a row differ by more than `tol` (the same evaluator as `relation`) | `1e-5` |
 
 The `conservation` and `bounded` references are both `s[0]` (the initial value), not the mean,
 so a re-run that reproduces a different-length prefix cannot shift the reference. The checks
@@ -329,6 +353,30 @@ fixture (`examples/relation_double_angle_broken.bld`) drops the factor of 2, so 
 differ by `abs(col0)/2` and it FAILs. `count` stays the total token count (`N * rows`), so a
 re-run's token drift is caught independently of the column structure, while the "at least two
 observations" verdict rule counts ROWS.
+
+`cross-backend` is `relation` applied across BACKENDS instead of across formulas: it reuses
+`relation_columns_agree` unchanged (only the tolerance and the sealed provenance differ), with
+column 0 the C anchor and column 1 the secondary lane (`--cross-backend rust`, v0's only
+supported value, the repo's designated validation lane). Unlike every other member, the block
+that carries its provenance (`cross_backend`) is EXECUTED, not DECLARED: verify re-runs BOTH
+lanes rather than trusting a declaration. **Tolerance calibration.** A probe on this machine
+(2026-07-28) built the same scalar f64 recurrence through both backends and found the computed
+doubles IDENTICAL, but the printed text differs: the C runtime prints `%g` (6 significant
+digits) while the Rust lane prints shortest-roundtrip, so two bit-identical doubles can print up
+to ~5e-7 apart on O(1) values (`0.829` vs `0.8290000000000001`). `relation`'s `1e-9` would
+therefore reject faithful agreement on formatting alone, so `cross-backend` uses a dedicated
+`1e-5`, clearing that display floor by ~20x while still catching a genuine divergence (a dropped
+term, a different formula, a miscompiled kernel), which is O(1) and caught decisively. The
+reference kernel (`examples/decay_cross_backend.bld`) steps `x = x*0.9 + 0.01` for 40 iterations
+under `--cross-backend rust --invariant cross-backend`, PASSing because the two backends compute
+(and, up to the print-format floor, report) the same trajectory. **There is deliberately no
+negative-fixture partner.** Every other family member ships a paired kernel that PASSes and one
+that FAILs, but an honest deterministic kernel that computes DIFFERENT values on two backends
+cannot exist by construction here: that impossibility (two faithful compilations of the same
+source agree) is exactly what the invariant witnesses. The can-it-fail evidence instead lives at
+the evaluator level (a unit test asserts a genuine divergence FAILs), in the refusal gates (an
+unsupported target, a Random-observing kernel, a length mismatch between the two re-parsed
+series), and in self-test case 9 (the invariant/block biconditional).
 
 `energy-identity` is the family's first **quantitative** invariant. The 1-D heat equation's
 continuous energy law `d/dt integral(u^2) = -2*alpha*integral(u_x^2)` has an exact discrete
@@ -534,7 +582,7 @@ fixtures and CI pin the *specific* failure instead of accepting "anything failed
 | `CAPABILITY_INADMISSIBLE` | the RE-DERIVED capabilities include `Model`: a scientific receipt cannot witness a model-mediated run (models propose, oracles dispose) | 1 |
 | `TOOL_UNAVAILABLE` | no C compiler available for the re-run | 4 |
 | `REDERIVATION_FAILED` | the source could not be re-checked (missing file, check failure) | inner code |
-| `RERUN_FAILED` | the program could not be re-compiled or re-run | inner code |
+| `RERUN_FAILED` | the program could not be re-compiled or re-run; for a cross-backend receipt, a missing `rustc` at verify time is TOOL_UNAVAILABLE semantics for the secondary lane, reported here with exit code 4 (matching how the primary C toolchain's absence is classed) | inner code (4 for a missing rustc) |
 | `RERUN_EXIT_MISMATCH` | the re-run's process exit code differs from the sealed one (covers a crashing re-run) | 1 |
 | `SOURCE_DIGEST_MISMATCH`, `INPUT_GRAPH_DIGEST_MISMATCH` | the source changed since sealing | 1 |
 | `MEASUREMENT_COUNT_DRIFT`, `INVARIANT_STATUS_DRIFT`, `VIOLATION_COUNT_DRIFT`, `RECEIPT_STATUS_DRIFT` | the re-run disagrees with a stored verdict fact | 1 |
@@ -561,18 +609,21 @@ Given a valid scientific-runtime receipt, it tampers several distinct sealed fie
 that each tamper is rejected by the real verify path with its expected `failure_class`. Cases
 that keep the body well-formed are re-sealed (so the tamper passes the integrity gate and reaches
 the specific contract check under test); the seal-mismatch case is deliberately left unsealed.
-The current eight cases exercise five separate arms of the taxonomy: `COMPILER_MISMATCH`
+The current nine cases exercise five separate arms of the taxonomy: `COMPILER_MISMATCH`
 (foreign compiler tag), `SEAL_MISMATCH` (a witnessed value edited without re-sealing),
-`MALFORMED` (a required field removed), `FIELD_CONTRACT_VIOLATION` (four times, through
+`MALFORMED` (a required field removed), `FIELD_CONTRACT_VIOLATION` (five times, through
 different gates: a sealed tolerance loosened then re-sealed, the sealed `seed_value` flipped
 against the program's capabilities then re-sealed, a `monte_carlo` block given a zero sample
-denominator then re-sealed, and a `budget` block given a `steps_consumed` above
-`steps_limit` then re-sealed), and `INVARIANT_UNSUPPORTED` (an unknown invariant name,
+denominator then re-sealed, a `budget` block given a `steps_consumed` above
+`steps_limit` then re-sealed, and the sealed `cross_backend` block swapped against the
+invariant name -- removed if present, added with a syntactically valid shape if absent --
+then re-sealed), and `INVARIANT_UNSUPPORTED` (an unknown invariant name,
 re-sealed). Every case is rejected before any program re-run, so `--self-test` needs no C
-compiler; the seed-pairing, MC, and budget cases are rejected at the source re-derivation
-stage, so they (alone) need the receipt's source file readable, exactly as `buildc check`
-would. It exits 0 only if every tamper produced its expected class, and prints `self-test:
-N/N tampers rejected with the expected failure_class`.
+compiler (and no rustc): the seed-pairing, MC, budget, and cross-backend cases are rejected at
+the source re-derivation stage or the field-contract gate, so they (alone) need the receipt's
+source file readable, exactly as `buildc check` would. It exits 0 only if every tamper produced
+its expected class, and prints `self-test: N/N tampers rejected with the expected
+failure_class`.
 
 ### Chaining receipts (`receipt chain`)
 
@@ -598,12 +649,14 @@ re-runs each member, `chain verify` needs the C toolchain and the member sources
 
 The example kernels come in positive/negative pairs, each declared to PASS or to FAIL_EXPECTED
 under a named invariant. `examples/scientific-corpus.json` records that ground truth for all
-thirteen pairs (a member whose kernel draws from `random_f64()` also declares its `seed`, which
-the runner passes as `--seed`, an MC member declares `mc_estimator` / `mc_samples` /
-`mc_interval`, passed through the same way, and a budgeted member declares `budget_steps` /
-`budget_consumed`, passed through as `--budget-steps` / `--budget-consumed`; a Random member
-with no declared seed, or a partial MC or budget declaration, fails the corpus loudly, because
-emit refuses it), and one command checks reality against it:
+thirteen pairs plus the cross-backend singleton (a member whose kernel draws from
+`random_f64()` also declares its `seed`, which the runner passes as `--seed`, an MC member
+declares `mc_estimator` / `mc_samples` / `mc_interval`, passed through the same way, a budgeted
+member declares `budget_steps` / `budget_consumed`, passed through as `--budget-steps` /
+`--budget-consumed`, and the cross-backend member declares `cross_backend`, passed through as
+`--cross-backend`; a Random member with no declared seed, or a partial MC or budget
+declaration, fails the corpus loudly, because emit refuses it), and one command checks reality
+against it:
 
 ```
 buildc receipt corpus examples/scientific-corpus.json
@@ -617,6 +670,14 @@ silently changes (a PASS that starts failing, or a negative fixture that stops f
 corpus with a `declared X, emitted Y` line and a non-zero exit, so the corpus is a gate that can
 fail, not a rubber stamp. The manifest is author-written input and is not sealed; its declared
 statuses are the ground truth the command checks against.
+
+The `cross-backend` member (`examples/decay_cross_backend.bld`) is deliberately a SINGLETON,
+with no FAIL_EXPECTED partner: every other invariant ships a paired kernel that PASSes and one
+that FAILs, but an honest deterministic kernel that computes DIFFERENT values on two backends
+cannot exist by construction (that impossibility is what the invariant witnesses), so there is
+no negative fixture to pair it with. The can-it-fail evidence for this member instead lives in
+the evaluator-level divergence unit test, the CLI refusal gates, and self-test case 9 (see
+above).
 
 ### What the seal does and does not witness
 
@@ -739,13 +800,16 @@ scope for v0:
 
 - **Richer relations and analytics.** `energy-monotone`, `conservation`, `bounded` (a discrete
   max principle), `energy-identity` (a quantitative energy-balance residual), `relation`
-  (cross-column agreement over `--columns N`), `conserved-band` (approximate conservation), and
+  (cross-column agreement over `--columns N`), `conserved-band` (approximate conservation),
   `non-negative` (an absolute lower floor, used for a result-bearing complexity slack, shipped
-  with both a binary-search bound and a funnel-hashing (arXiv 2501.02305) probe bound) ship.
-  Relations beyond per-row agreement (named physical identities across columns, header-named
-  columns) are follow-ons. The Born-rule kernel ships the roundoff-crisp normalization-conservation
-  form; the deeper Carcassi and Aidala entropy equivalence (AoP Brief 003) would need a calibrated
-  tolerance or a seeded-RNG frequency-convergence demo and stays a follow-on.
+  with both a binary-search bound and a funnel-hashing (arXiv 2501.02305) probe bound), and
+  `cross-backend` (`relation`'s evaluator applied across the C anchor and a secondary lane,
+  `--cross-backend rust` in v0) ship. Relations beyond per-row agreement (named physical
+  identities across columns, header-named columns) are follow-ons. The Born-rule kernel ships
+  the roundoff-crisp normalization-conservation form; the deeper Carcassi and Aidala entropy
+  equivalence (AoP Brief 003) would need a calibrated tolerance or a seeded-RNG
+  frequency-convergence demo and stays a follow-on. The GPU lane for `--cross-backend` is a
+  later value, not a mechanism change.
 - **The full 7-layer receipt richness.** The research schema carries more layers than buildc
   can honestly fill today; v0 fills the subset buildc actually derives.
 - **Crucible-at-emit-time.** v0 checks the invariant and seals; it does not run a Crucible

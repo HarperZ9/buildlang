@@ -10,6 +10,42 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- **Cross-backend relation receipts**: `buildc run` gains `--cross-backend
+  <TARGET>` (v0: `rust` only), running the kernel through the C anchor AND a
+  secondary backend and sealing each step's two values as one row of a
+  2-column relation checked under a new invariant, `cross-backend`
+  (`cross_backend_columns_agree`), which reuses the `relation` family's
+  evaluator unchanged. The declaration is a strict biconditional with the
+  invariant (both directions refused) and requires `--columns` be unset or
+  exactly 2 (an unset default is silently upgraded). Refused with `--gpu`,
+  `--seed`, any `--mc-*` flag, and on a `Random`-observing kernel, because the
+  Rust lane has no seeded PRNG builtin and the streams could not agree.
+  Unlike `monte_carlo`/`budget`, the sealed `cross_backend` block is
+  EXECUTED, not DECLARED: it carries the secondary lane's witnessed facts
+  (target, toolchain version and digest, executable digest, raw-stdout
+  digest, exit code), and `receipt verify` RE-EXECUTES both lanes rather
+  than trusting the declaration, rebuilding the interleaved series from the
+  two fresh re-runs before recomputing the verdict. rustc absence at verify
+  exits 4, matching how the primary C toolchain's absence is classed.
+  Reproduction of the secondary's raw stdout and executable digests is
+  REPORTED, never required, exactly like the primary's.
+
+  Tolerance calibration: a measured probe (2026-07-28) found the C and Rust
+  backends compute IDENTICAL doubles for the reference decay recurrence, but
+  the C runtime prints `%g` (6 significant digits) while Rust prints
+  shortest-roundtrip, so two bit-identical doubles can print up to ~5e-7
+  apart on O(1) values. `relation`'s `1e-9` tolerance would reject that on
+  formatting alone, so `cross-backend` uses a dedicated `1e-5`, clearing the
+  display floor by ~20x while still catching a genuine O(1) divergence
+  decisively. Ships with one kernel (`examples/decay_cross_backend.bld`,
+  `x = x*0.9 + 0.01` for 40 steps) and deliberately NO negative-fixture
+  partner: an honest deterministic kernel that computes different values on
+  two backends cannot exist by construction, so the can-it-fail evidence
+  lives in an evaluator-level divergence unit test, the CLI refusal gates,
+  and a ninth verifier self-test tamper case (the invariant/block
+  biconditional swapped). Corpus grows to 27 members (thirteen pairs plus
+  the cross-backend singleton); self-test grows to nine cases. Backward
+  compatible: receipts without the block keep their exact bytes and seals.
 - **Model capability with the propose/dispose receipt boundary**: a new
   `model_complete(prompt) -> str` builtin carries a `Model` capability
   effect, transported over a deliberately dumb line protocol on the

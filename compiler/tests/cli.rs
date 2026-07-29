@@ -15318,6 +15318,208 @@ fn budget_declaration_round_trips_and_pins_the_admission_contract() {
 }
 
 #[test]
+fn cross_backend_receipt_round_trips_and_pins_the_pairing() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping cross_backend_receipt_round_trips_and_pins_the_pairing: C backend not ready"
+        );
+        return;
+    }
+    if !rustc_available() {
+        eprintln!(
+            "skipping cross_backend_receipt_round_trips_and_pins_the_pairing: rustc not available"
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang_sci_cross_backend_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create cross-backend fixture dir");
+
+    // POSITIVE: the decay kernel through both backends agrees, sealed as a
+    // 2-column relation, and verifies.
+    let receipt_path = dir.join("decay_cross_backend.json");
+    let emit = buildc()
+        .arg("run")
+        .arg(repo_example("decay_cross_backend.bld"))
+        .args(["--emit-receipt"])
+        .arg(&receipt_path)
+        .args(["--cross-backend", "rust", "--invariant", "cross-backend"])
+        .args(["--problem", "decay-cross-backend"])
+        .output()
+        .expect("emit cross-backend receipt");
+    assert!(
+        emit.status.success(),
+        "emitting the cross-backend receipt should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&emit.stderr)
+    );
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt_path).expect("read cross-backend receipt"))
+            .unwrap();
+    assert_eq!(receipt["receipt_status"], "PASS");
+    assert_eq!(receipt["invariant"]["name"], "cross_backend_columns_agree");
+    assert_eq!(receipt["measurement"]["column_count"], 2);
+    assert_eq!(receipt["measurement"]["count"], 80);
+    assert_eq!(receipt["cross_backend"]["secondary_target"], "rust");
+    assert_eq!(receipt["cross_backend"]["status"], "EXECUTED");
+    assert_eq!(receipt["cross_backend"]["secondary_exit_code"], 0);
+    for digest_field in [
+        "secondary_toolchain_digest",
+        "secondary_executable_digest",
+        "secondary_raw_stdout_digest",
+    ] {
+        let digest = &receipt["cross_backend"][digest_field];
+        assert_eq!(digest["algorithm"], "sha256");
+        assert_eq!(
+            digest["hex"].as_str().map(|h| h.len()),
+            Some(64),
+            "{digest_field} must be a well-formed sha256"
+        );
+    }
+
+    let verify = buildc()
+        .args(["receipt", "verify"])
+        .arg(&receipt_path)
+        .output()
+        .expect("verify cross-backend receipt");
+    assert!(
+        verify.status.success(),
+        "the cross-backend receipt must verify\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+
+    // REFUSAL: --cross-backend without --invariant cross-backend.
+    let missing_invariant = buildc()
+        .arg("run")
+        .arg(repo_example("decay_cross_backend.bld"))
+        .args(["--emit-receipt"])
+        .arg(dir.join("missing_invariant.json"))
+        .args(["--cross-backend", "rust"])
+        .output()
+        .expect("run cross-backend without the paired invariant");
+    assert!(
+        !missing_invariant.status.success(),
+        "--cross-backend without --invariant cross-backend must be refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&missing_invariant.stderr).contains("--invariant cross-backend"),
+        "the refusal must name the pairing\nstderr:\n{}",
+        String::from_utf8_lossy(&missing_invariant.stderr)
+    );
+
+    // REFUSAL: --invariant cross-backend without --cross-backend (vice versa).
+    let missing_flag = buildc()
+        .arg("run")
+        .arg(repo_example("decay_cross_backend.bld"))
+        .args(["--emit-receipt"])
+        .arg(dir.join("missing_flag.json"))
+        .args(["--invariant", "cross-backend"])
+        .output()
+        .expect("run cross-backend invariant without the flag");
+    assert!(
+        !missing_flag.status.success(),
+        "--invariant cross-backend without --cross-backend must be refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&missing_flag.stderr).contains("--cross-backend"),
+        "the refusal must name the pairing\nstderr:\n{}",
+        String::from_utf8_lossy(&missing_flag.stderr)
+    );
+
+    // REFUSAL: --seed on a cross-backend run.
+    let with_seed = buildc()
+        .arg("run")
+        .arg(repo_example("decay_cross_backend.bld"))
+        .args(["--emit-receipt"])
+        .arg(dir.join("with_seed.json"))
+        .args([
+            "--cross-backend",
+            "rust",
+            "--invariant",
+            "cross-backend",
+            "--seed",
+            "7",
+        ])
+        .output()
+        .expect("run cross-backend with --seed");
+    assert!(
+        !with_seed.status.success(),
+        "--cross-backend with --seed must be refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&with_seed.stderr).contains("--seed"),
+        "the refusal must name --seed\nstderr:\n{}",
+        String::from_utf8_lossy(&with_seed.stderr)
+    );
+
+    // REFUSAL: a Random-observing kernel.
+    let random_kernel = buildc()
+        .arg("run")
+        .arg(repo_example("random_walk_bound.bld"))
+        .args(["--emit-receipt"])
+        .arg(dir.join("random_kernel.json"))
+        .args(["--cross-backend", "rust", "--invariant", "cross-backend"])
+        .output()
+        .expect("run cross-backend on a Random-observing kernel");
+    assert!(
+        !random_kernel.status.success(),
+        "--cross-backend on a Random-observing kernel must be refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&random_kernel.stderr).contains("Random"),
+        "the refusal must name the Random capability\nstderr:\n{}",
+        String::from_utf8_lossy(&random_kernel.stderr)
+    );
+
+    // REFUSAL: an unsupported target.
+    let bad_target = buildc()
+        .arg("run")
+        .arg(repo_example("decay_cross_backend.bld"))
+        .args(["--emit-receipt"])
+        .arg(dir.join("bad_target.json"))
+        .args(["--cross-backend", "vulkan", "--invariant", "cross-backend"])
+        .output()
+        .expect("run cross-backend with an unsupported target");
+    assert!(
+        !bad_target.status.success(),
+        "--cross-backend vulkan must be refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&bad_target.stderr).contains("vulkan"),
+        "the refusal must name the unsupported target\nstderr:\n{}",
+        String::from_utf8_lossy(&bad_target.stderr)
+    );
+
+    // REFUSAL: rustc unreachable, simulated via RUSTC pointing at a
+    // nonexistent binary (the same override `rustc_available` /
+    // `rustc_compile_and_run` honor), so this is deterministic rather than
+    // depending on PATH manipulation.
+    let missing_rustc = buildc()
+        .arg("run")
+        .arg(repo_example("decay_cross_backend.bld"))
+        .args(["--emit-receipt"])
+        .arg(dir.join("missing_rustc.json"))
+        .args(["--cross-backend", "rust", "--invariant", "cross-backend"])
+        .env("RUSTC", "buildlang-cross-backend-missing-rustc-probe")
+        .output()
+        .expect("run cross-backend with rustc unreachable");
+    assert!(
+        !missing_rustc.status.success(),
+        "a missing rustc must be refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&missing_rustc.stderr).contains("rustc"),
+        "the refusal must name rustc\nstderr:\n{}",
+        String::from_utf8_lossy(&missing_rustc.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn receipt_verify_self_test_proves_the_verifier_can_fail() {
     if !c_backend_ready() {
         eprintln!(
@@ -15363,8 +15565,8 @@ fn receipt_verify_self_test_proves_the_verifier_can_fail() {
     );
     let stdout = String::from_utf8_lossy(&self_test.stdout);
     assert!(
-        stdout.contains("8/8 tampers rejected with the expected failure_class"),
-        "self-test should report all eight tampers rejected\nstdout:\n{}",
+        stdout.contains("9/9 tampers rejected with the expected failure_class"),
+        "self-test should report all nine tampers rejected\nstdout:\n{}",
         stdout
     );
     // The taxonomy arms actually exercised must appear in the report.
@@ -15552,8 +15754,8 @@ fn receipt_corpus_asserts_declared_classifications() {
     assert_eq!(shipped["schema"], "buildlang-scientific-receipt-corpus/v0");
     assert_eq!(
         shipped["members"].as_array().unwrap().len(),
-        26,
-        "the shipped corpus should cover all thirteen kernel pairs"
+        27,
+        "the shipped corpus should cover all thirteen kernel pairs plus the cross-backend singleton"
     );
 
     // A small correct manifest: the command emits, verifies, and confirms each

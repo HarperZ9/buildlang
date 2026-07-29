@@ -51,11 +51,11 @@ use scientific_runtime::{
     build_scientific_runtime_receipt, build_self_test_cases, column_count_matches_invariant,
     crucible_measurement_from_report, evaluate_scientific_runtime_receipt, parse_numeric_series,
     verify_scientific_runtime_receipt, RederivedFacts, RerunObservation, ScientificBudget,
-    ScientificDigest, ScientificEffectPolicy, ScientificMonteCarlo, ScientificReceiptInputs,
-    ScientificRuntimeReceipt, ScientificToolchain, BOUNDED_INVARIANT, CONSERVATION_INVARIANT,
-    CONSERVED_BAND_INVARIANT, CRUCIBLE_MEASUREMENT_EXPORT_SCHEMA, ENERGY_IDENTITY_INVARIANT,
-    ENERGY_MONOTONE_INVARIANT, NON_NEGATIVE_INVARIANT, RELATION_INVARIANT,
-    SCIENTIFIC_RUNTIME_SCHEMA,
+    ScientificCrossBackend, ScientificDigest, ScientificEffectPolicy, ScientificMonteCarlo,
+    ScientificReceiptInputs, ScientificRuntimeReceipt, ScientificToolchain, SecondaryObservation,
+    BOUNDED_INVARIANT, CONSERVATION_INVARIANT, CONSERVED_BAND_INVARIANT, CROSS_BACKEND_INVARIANT,
+    CRUCIBLE_MEASUREMENT_EXPORT_SCHEMA, ENERGY_IDENTITY_INVARIANT, ENERGY_MONOTONE_INVARIANT,
+    NON_NEGATIVE_INVARIANT, RELATION_INVARIANT, SCIENTIFIC_RUNTIME_SCHEMA,
 };
 use symbol_graph::{verify_symbol_graph_receipt, SymbolGraphReceipt, SYMBOL_GRAPH_RECEIPT};
 
@@ -281,6 +281,17 @@ enum Commands {
         /// The declared steps consumed (at most the ceiling).
         #[arg(long, value_name = "N")]
         budget_consumed: Option<u64>,
+
+        /// Run the kernel through a SECOND backend as well and seal a
+        /// 2-column cross-backend receipt (the C anchor and the secondary
+        /// lane's outputs, checked for agreement). v0 supports `rust` (the
+        /// repo's validation lane) only. Requires `--invariant cross-backend`
+        /// (and vice versa). Refused with `--gpu`, with `--seed`, with
+        /// `--mc-*` (Monte Carlo needs Random, which this refuses anyway),
+        /// and on a `Random`-observing kernel (the Rust lane has no seeded
+        /// PRNG builtin, so the streams could not agree).
+        #[arg(long, value_name = "TARGET")]
+        cross_backend: Option<String>,
 
         /// Execute a `#[compute]` kernel on the physical GPU (Vulkan) and
         /// cross-check the readback against the CPU-C scalar loop within
@@ -656,6 +667,7 @@ fn main() -> ExitCode {
             mc_interval,
             budget_steps,
             budget_consumed,
+            cross_backend,
             gpu,
             args,
         }) => {
@@ -673,6 +685,11 @@ fn main() -> ExitCode {
                 } else if budget_steps.is_some() || budget_consumed.is_some() {
                     eprintln!(
                         "--budget-* flags are not supported with --gpu (the GPU cross-check produces no budget block)"
+                    );
+                    Err(1)
+                } else if cross_backend.is_some() {
+                    eprintln!(
+                        "--cross-backend is not supported with --gpu (the GPU cross-check is a separate secondary lane)"
                     );
                     Err(1)
                 } else {
@@ -696,6 +713,7 @@ fn main() -> ExitCode {
                     mc_interval.as_deref(),
                     budget_steps,
                     budget_consumed,
+                    cross_backend.as_deref(),
                 )
             }
         }
@@ -2054,6 +2072,9 @@ fn cmd_receipt_corpus(manifest_path: &Path) -> Result<(), i32> {
         if let Some(consumed) = member.budget_consumed {
             emit.args(["--budget-consumed", &consumed.to_string()]);
         }
+        if let Some(target) = &member.cross_backend {
+            emit.args(["--cross-backend", target]);
+        }
         let emit_out = match emit.output() {
             Ok(out) => out,
             Err(err) => {
@@ -2222,23 +2243,14 @@ fn cmd_receipt_export(
                 effect_policy: derive_effect_policy(&outcome),
             })
         },
-        |source_path, args, seed| {
-            let captured = compile_and_capture_run(
+        |source_path, args, seed, secondary_target| {
+            rerun_scientific_receipt(
                 source_path,
                 args,
-                probed_toolchain.as_ref().map(|t| t.c_compiler.as_str()),
                 seed,
-            )?;
-            let raw_stdout_digest = ScientificDigest {
-                algorithm: "sha256".to_string(),
-                hex: source_digest_hex(&captured.stdout_bytes),
-            };
-            Ok(RerunObservation {
-                parsed: parse_numeric_series(&captured.stdout),
-                exit_code: captured.exit_code,
-                raw_stdout_digest,
-                executable_digest: captured.executable_digest,
-            })
+                secondary_target,
+                probed_toolchain.as_ref(),
+            )
         },
     )?;
 
@@ -2609,23 +2621,14 @@ fn verify_scientific_receipt_dispatch(
                 effect_policy: derive_effect_policy(&outcome),
             })
         },
-        |source_path, args, seed| {
-            let captured = compile_and_capture_run(
+        |source_path, args, seed, secondary_target| {
+            rerun_scientific_receipt(
                 source_path,
                 args,
-                probed_toolchain.as_ref().map(|t| t.c_compiler.as_str()),
                 seed,
-            )?;
-            let raw_stdout_digest = ScientificDigest {
-                algorithm: "sha256".to_string(),
-                hex: source_digest_hex(&captured.stdout_bytes),
-            };
-            Ok(RerunObservation {
-                parsed: parse_numeric_series(&captured.stdout),
-                exit_code: captured.exit_code,
-                raw_stdout_digest,
-                executable_digest: captured.executable_digest,
-            })
+                secondary_target,
+                probed_toolchain.as_ref(),
+            )
         },
     )
 }
@@ -7128,6 +7131,278 @@ fn compile_and_capture_run(
     })
 }
 
+// =============================================================================
+// CROSS-BACKEND SECONDARY LANE (--cross-backend rust)
+// =============================================================================
+
+/// The rustc toolchain facts probed for a `--cross-backend rust` run: the
+/// resolved command (honoring a `RUSTC` env override, mirroring the existing
+/// `rustc_available`/`rustc_compile_and_run` test convention), the first line
+/// of its version banner, and a sha256 over the full version-probe output.
+struct RustcProbe {
+    path: String,
+    version_line: String,
+    version_output_digest: ScientificDigest,
+}
+
+/// Probe `rustc --version` for the secondary lane's toolchain facts. Returns
+/// `None` when rustc is unreachable: at emit this refuses with an install
+/// hint (exit 1) BEFORE any work is wasted; at verify the caller maps the
+/// absence to the `RERUN_FAILED`/exit-4 pairing that matches how the primary
+/// C toolchain's absence is classed (`TOOL_UNAVAILABLE`).
+fn probe_rustc_toolchain() -> Option<RustcProbe> {
+    let path = std::env::var_os("RUSTC")
+        .map(|v| v.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "rustc".to_string());
+    let output = std::process::Command::new(&path)
+        .arg("--version")
+        .output()
+        .ok()?;
+    let mut banner = output.stdout.clone();
+    banner.extend_from_slice(&output.stderr);
+    let version_line = String::from_utf8_lossy(&banner)
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("unknown")
+        .trim()
+        .to_string();
+    Some(RustcProbe {
+        path,
+        version_line,
+        version_output_digest: ScientificDigest {
+            algorithm: "sha256".to_string(),
+            hex: source_digest_hex(&banner),
+        },
+    })
+}
+
+/// Compile a `.bld` program to a native executable via the RUST backend: the
+/// same internal codegen path `cmd_build --target rust` dispatches
+/// (`CodeGenerator::with_source(&ctx, Target::Rust, ...)`), reached directly
+/// (mirroring `compile_program_to_exe`'s structure) rather than shelling out
+/// to `cmd_build`, since the pipeline through type-checking is byte-identical
+/// to the C path above it and only the codegen target and the invoked
+/// compiler differ.
+///
+/// A lowering failure (the kernel is outside the Rust subset) refuses with a
+/// message naming the limitation; a `rustc` compile failure refuses with its
+/// stderr forwarded. Returns the temp build dir and the produced exe path;
+/// the caller MUST remove the temp dir.
+fn compile_program_to_rust_exe(file: &Path, rustc_path: &str) -> Result<CompiledProgram, i32> {
+    let source = std::fs::read_to_string(file).map_err(|e| {
+        eprintln!("Error reading file '{}': {}", file.display(), e);
+        1
+    })?;
+    let source = resolve_imports(&source, file)?;
+    let run_base = file.parent().unwrap_or(Path::new("."));
+    let source = preprocess_includes(&source, run_base)?;
+    let source_file = SourceFile::new(file.to_string_lossy(), source);
+
+    let mut lexer = Lexer::new(&source_file);
+    let tokens = lexer.tokenize().map_err(|e| {
+        eprintln!("Lexer error: {}", e);
+        1
+    })?;
+
+    let mut parser = Parser::new(&source_file, tokens);
+    let mut ast = parser.parse().map_err(|e| {
+        eprintln!("Parse error: {}", e);
+        for err in parser.errors() {
+            eprintln!("  {}", err);
+        }
+        1
+    })?;
+
+    let source_dir = file.parent().unwrap_or(Path::new("."));
+    resolve_modules(&mut ast, source_dir)?;
+
+    let mut ctx = TypeContext::new();
+    let mut checker = TypeChecker::new(&mut ctx);
+    checker.set_source_file(&source_file);
+    checker.set_source_dir(source_dir.to_path_buf());
+    checker.check_module(&ast);
+    if checker.has_errors() {
+        for err in checker.errors() {
+            eprintln!("Type error: {}", err);
+        }
+        return Err(1);
+    }
+
+    let mut codegen =
+        CodeGenerator::with_source(&ctx, Target::Rust, Arc::from(source_file.source()));
+    let output = codegen.generate(&ast).map_err(|e| {
+        eprintln!(
+            "Error: kernel could not be lowered to the Rust backend (Rust subset limitation): {}",
+            e
+        );
+        1
+    })?;
+    if !codegen.linear_errors().is_empty() {
+        eprintln!("Linear type errors found (Rust backend):");
+        for err in codegen.linear_errors() {
+            eprintln!("  {}", err);
+        }
+        return Err(1);
+    }
+
+    let temp_dir = run_temp_build_dir(file);
+    std::fs::create_dir_all(&temp_dir).map_err(|e| {
+        eprintln!("Failed to create temp directory: {}", e);
+        1
+    })?;
+
+    let rs_file = temp_dir.join("main.rs");
+    std::fs::write(&rs_file, &output.data).map_err(|e| {
+        eprintln!("Failed to write temp Rust source: {}", e);
+        1
+    })?;
+
+    let exe_file = temp_dir.join("main_rust.exe");
+    let compile_output = std::process::Command::new(rustc_path)
+        .arg("-O")
+        .arg("-o")
+        .arg(&exe_file)
+        .arg(&rs_file)
+        .output()
+        .map_err(|e| {
+            eprintln!("Failed to invoke rustc: {}", e);
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            1
+        })?;
+    if !compile_output.status.success() {
+        eprintln!(
+            "Error: rustc failed to compile the secondary (cross-backend) lane:\n{}",
+            String::from_utf8_lossy(&compile_output.stderr)
+        );
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        return Err(1);
+    }
+    if !exe_file.exists() {
+        eprintln!(
+            "Error: rustc reported success but the secondary executable was not found at '{}'",
+            exe_file.display()
+        );
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        return Err(1);
+    }
+
+    Ok(CompiledProgram { temp_dir, exe_file })
+}
+
+/// Compile `file` through the Rust backend, run the produced executable with
+/// `args`, and capture its stdout/stderr and exit code with `.output()`.
+/// Mirrors `compile_and_capture_run`: no seed is ever set (a cross-backend
+/// request already refused a Random-observing kernel), but the same
+/// `BUILD_RANDOM_SEED` scrub applies defensively. Cleans up the temp build
+/// dir.
+fn compile_and_capture_rust_run(
+    file: &Path,
+    args: &[String],
+    rustc_path: &str,
+) -> Result<CapturedRun, i32> {
+    let CompiledProgram { temp_dir, exe_file } = compile_program_to_rust_exe(file, rustc_path)?;
+
+    let executable_digest = ScientificDigest {
+        algorithm: "sha256".to_string(),
+        hex: match std::fs::read(&exe_file) {
+            Ok(bytes) => source_digest_hex(&bytes),
+            Err(err) => {
+                eprintln!(
+                    "Error: could not hash the compiled secondary executable '{}': {}",
+                    exe_file.display(),
+                    err
+                );
+                let _ = std::fs::remove_dir_all(&temp_dir);
+                return Err(1);
+            }
+        },
+    };
+
+    let run_output = {
+        let mut run_cmd = std::process::Command::new(&exe_file);
+        run_cmd.args(args);
+        run_cmd.env_remove("BUILD_RANDOM_SEED");
+        run_cmd.output().map_err(|e| {
+            eprintln!("Failed to run the secondary (Rust) executable: {}", e);
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            1i32
+        })?
+    };
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    let stdout = String::from_utf8_lossy(&run_output.stdout).into_owned();
+    let exit_code = run_output.status.code().unwrap_or(-1);
+    Ok(CapturedRun {
+        stdout,
+        stdout_bytes: run_output.stdout,
+        stderr_bytes: run_output.stderr,
+        exit_code,
+        executable_digest,
+    })
+}
+
+/// Shared `rerun_series` body for BOTH scientific-runtime verify dispatch
+/// call sites (`receipt export` and `receipt verify`): re-runs the primary
+/// (C) program through the exact path `run --emit-receipt` used, and, when
+/// `secondary_target` names a lane (from the receipt's sealed
+/// `cross_backend` block), re-runs the secondary too and fills
+/// `RerunObservation.secondary`. `None` leaves it `None`.
+///
+/// rustc absence AT VERIFY is TOOL_UNAVAILABLE semantics: `probe_rustc_toolchain`
+/// returning `None` maps to `Err(4)`, matching the exit code the primary C
+/// toolchain's absence gets (checked by the caller before this is ever
+/// invoked). A lowering or compile failure propagates as `Err(1)` (or
+/// whatever `compile_and_capture_rust_run` returns), which the evaluator
+/// maps to `RERUN_FAILED`.
+fn rerun_scientific_receipt(
+    source_path: &Path,
+    args: &[String],
+    seed: Option<u64>,
+    secondary_target: Option<&str>,
+    probed_toolchain: Option<&ScientificToolchain>,
+) -> Result<RerunObservation, i32> {
+    let captured = compile_and_capture_run(
+        source_path,
+        args,
+        probed_toolchain.map(|t| t.c_compiler.as_str()),
+        seed,
+    )?;
+    let raw_stdout_digest = ScientificDigest {
+        algorithm: "sha256".to_string(),
+        hex: source_digest_hex(&captured.stdout_bytes),
+    };
+    let secondary = match secondary_target {
+        Some("rust") => {
+            let rustc = probe_rustc_toolchain().ok_or(4)?;
+            let secondary_captured = compile_and_capture_rust_run(source_path, args, &rustc.path)?;
+            Some(SecondaryObservation {
+                parsed: parse_numeric_series(&secondary_captured.stdout),
+                exit_code: secondary_captured.exit_code,
+                raw_stdout_digest: ScientificDigest {
+                    algorithm: "sha256".to_string(),
+                    hex: source_digest_hex(&secondary_captured.stdout_bytes),
+                },
+                executable_digest: secondary_captured.executable_digest,
+            })
+        }
+        Some(other) => {
+            eprintln!(
+                "Error: unsupported secondary target `{other}` in sealed cross_backend block"
+            );
+            return Err(1);
+        }
+        None => None,
+    };
+    Ok(RerunObservation {
+        parsed: parse_numeric_series(&captured.stdout),
+        exit_code: captured.exit_code,
+        secondary,
+        raw_stdout_digest,
+        executable_digest: captured.executable_digest,
+    })
+}
+
 /// `buildc run <kernel> --gpu`: execute a `#[compute]` kernel on the physical
 /// Vulkan device and cross-check the readback against the CPU-C scalar loop over
 /// the same grid within tolerance (default 1e-6). Exits non-zero on mismatch.
@@ -7166,6 +7441,7 @@ fn cmd_run(
     mc_interval: Option<&str>,
     budget_steps: Option<u64>,
     budget_consumed: Option<u64>,
+    cross_backend: Option<&str>,
 ) -> Result<(), i32> {
     // The Monte Carlo declaration is all-or-nothing, validated whenever ANY
     // mc flag is present (like --units: a typo is never silently accepted):
@@ -7284,10 +7560,11 @@ fn cmd_run(
         "relation" => RELATION_INVARIANT,
         "conserved-band" => CONSERVED_BAND_INVARIANT,
         "non-negative" => NON_NEGATIVE_INVARIANT,
+        "cross-backend" => CROSS_BACKEND_INVARIANT,
         other => {
             if emit_receipt.is_some() {
                 eprintln!(
-                    "Unknown --invariant '{other}'. Supported: energy-monotone, conservation, bounded, energy-identity, relation, conserved-band, non-negative"
+                    "Unknown --invariant '{other}'. Supported: energy-monotone, conservation, bounded, energy-identity, relation, conserved-band, non-negative, cross-backend"
                 );
                 return Err(1);
             }
@@ -7295,6 +7572,16 @@ fn cmd_run(
             // default so the no-receipt run path is unaffected.
             ENERGY_MONOTONE_INVARIANT
         }
+    };
+
+    // `--invariant cross-backend` defines its own column structure (2: the C
+    // anchor and the secondary lane), so an unset `--columns` (the CLI
+    // default, 1) is silently upgraded; anything else is left for the
+    // existing column-count gate below to refuse.
+    let columns = if invariant_name == CROSS_BACKEND_INVARIANT && columns == 1 {
+        2
+    } else {
+        columns
     };
 
     // Column structure validation (only meaningful when emitting a receipt),
@@ -7306,6 +7593,10 @@ fn cmd_run(
         if invariant_name == RELATION_INVARIANT {
             eprintln!(
                 "--invariant relation needs --columns >= 2 (each row must hold the columns to compare)"
+            );
+        } else if invariant_name == CROSS_BACKEND_INVARIANT {
+            eprintln!(
+                "--invariant cross-backend needs --columns 2 (the C anchor and the secondary lane); the invariant defines its own column structure"
             );
         } else {
             eprintln!(
@@ -7350,6 +7641,47 @@ fn cmd_run(
         };
     };
 
+    // --cross-backend gates, cheap and CLI-shape-only, checked before any
+    // toolchain probing so a malformed invocation fails fast: the value must
+    // be one v0 supports, the pairing with the invariant is a strict
+    // biconditional (both directions refused), and --seed / --mc-* can never
+    // combine with it (Monte Carlo requires Random, which cross-backend
+    // refuses anyway a few lines down once the effect policy is derived).
+    if let Some(target) = cross_backend {
+        if target != "rust" {
+            eprintln!("Unsupported --cross-backend target '{target}'. v0 supports: rust");
+            return Err(1);
+        }
+    }
+    let cross_backend_paired =
+        cross_backend.is_some() == (invariant_name == CROSS_BACKEND_INVARIANT);
+    if !cross_backend_paired {
+        if cross_backend.is_some() {
+            eprintln!(
+                "--cross-backend requires --invariant cross-backend (the cross-backend receipt IS the pairing)"
+            );
+        } else {
+            eprintln!(
+                "--invariant cross-backend requires --cross-backend <TARGET> (v0 supports rust)"
+            );
+        }
+        return Err(1);
+    }
+    if cross_backend.is_some() {
+        if seed.is_some() {
+            eprintln!(
+                "--cross-backend does not support --seed (the Rust validation lane has no seeded PRNG builtin, so a Random-observing stream could not agree across backends)"
+            );
+            return Err(1);
+        }
+        if mc_flag_count > 0 {
+            eprintln!(
+                "--cross-backend does not support --mc-* (Monte Carlo requires the Random capability, which --cross-backend already refuses)"
+            );
+            return Err(1);
+        }
+    }
+
     // --emit-receipt path: probe the toolchain FIRST (its identity is sealed
     // into the receipt's compiler_branch block; without a C compiler the
     // compile below would fail anyway, but the receipt must not be emitted
@@ -7361,6 +7693,23 @@ fn cmd_run(
             "Error: could not establish toolchain facts (no C compiler available, or the buildc binary could not be hashed); cannot emit a scientific-runtime receipt"
         );
         return Err(1);
+    };
+
+    // Probe rustc beside the C toolchain probe, BEFORE the primary run: a
+    // missing rustc refuses here so no compile/run work is wasted on a
+    // cross-backend request that cannot complete.
+    let rustc_probe = if cross_backend.is_some() {
+        match probe_rustc_toolchain() {
+            Some(probe) => Some(probe),
+            None => {
+                eprintln!(
+                    "Error: rustc not found; install the Rust toolchain (https://rustup.rs) to use --cross-backend rust"
+                );
+                return Err(1);
+            }
+        }
+    } else {
+        None
     };
 
     // Derive the effect/capability facts BEFORE running: the seed pairing is
@@ -7392,6 +7741,12 @@ fn cmd_run(
         .observed_capabilities
         .iter()
         .any(|cap| cap == "Random");
+    if cross_backend.is_some() && uses_random {
+        eprintln!(
+            "Error: --cross-backend refuses a Random-observing kernel: the Rust lane has no seeded PRNG builtin, so the streams could not agree"
+        );
+        return Err(1);
+    }
     if uses_random && seed.is_none() {
         eprintln!(
             "Error: this program observes the Random capability; a receipt requires an explicit seed (`--seed N`), which is sealed so `receipt verify` re-runs the same stream"
@@ -7445,6 +7800,57 @@ fn cmd_run(
     // marks the run as diverged -> UNVERIFIABLE, and only the finite prefix is
     // retained so the receipt always serializes cleanly.
     let parsed = parse_numeric_series(&captured_stdout);
+    let series_parsed = parsed.any_parsed;
+    let diverged = parsed.diverged;
+    let primary_series = parsed.series;
+
+    // The secondary (cross-backend) pipeline: emit the SAME resolved source
+    // through the Rust backend, compile it with rustc, run it with the same
+    // trailing args (no seed is ever set here, since --cross-backend already
+    // refused a Random-observing kernel), and capture its stdout. The
+    // secondary's stdout is never echoed (primary-only echo, above).
+    let (series, column_count, cross_backend_block) = if let Some(target) = cross_backend {
+        let rustc = rustc_probe
+            .as_ref()
+            .expect("rustc_probe is Some whenever cross_backend is Some");
+        let secondary = compile_and_capture_rust_run(file, args, &rustc.path)?;
+        let secondary_parsed = parse_numeric_series(&secondary.stdout);
+        if diverged
+            || secondary_parsed.diverged
+            || primary_series.is_empty()
+            || secondary_parsed.series.is_empty()
+            || primary_series.len() != secondary_parsed.series.len()
+        {
+            eprintln!(
+                "Error: cross-backend series mismatch: the C anchor produced {} values (diverged={}), the Rust lane produced {} values (diverged={})",
+                primary_series.len(),
+                diverged,
+                secondary_parsed.series.len(),
+                secondary_parsed.diverged
+            );
+            return Err(1);
+        }
+        let mut interleaved = Vec::with_capacity(primary_series.len() * 2);
+        for (c, r) in primary_series.iter().zip(secondary_parsed.series.iter()) {
+            interleaved.push(*c);
+            interleaved.push(*r);
+        }
+        let block = ScientificCrossBackend {
+            secondary_target: target.to_string(),
+            secondary_toolchain_version: rustc.version_line.clone(),
+            secondary_toolchain_digest: rustc.version_output_digest.clone(),
+            secondary_executable_digest: secondary.executable_digest.clone(),
+            secondary_raw_stdout_digest: ScientificDigest {
+                algorithm: "sha256".to_string(),
+                hex: source_digest_hex(&secondary.stdout_bytes),
+            },
+            secondary_exit_code: secondary.exit_code,
+            status: "EXECUTED".to_string(),
+        };
+        (interleaved, 2usize, Some(block))
+    } else {
+        (primary_series, columns, None)
+    };
 
     let os = std::env::consts::OS.to_string();
     let mut flags = vec![format!("invariant={invariant}"), format!("metric={metric}")];
@@ -7471,17 +7877,18 @@ fn cmd_run(
         effect_policy,
         method_description: method.map(str::to_string),
         raw_stdout_digest,
-        series: parsed.series,
-        series_parsed: parsed.any_parsed,
-        diverged: parsed.diverged,
+        series,
+        series_parsed,
+        diverged,
         args: args.to_vec(),
         seed_value: seed,
         monte_carlo,
         budget,
+        cross_backend: cross_backend_block,
         invariant_name: invariant_name.to_string(),
         metric: metric.to_string(),
         units: canonical_units.clone(),
-        column_count: columns,
+        column_count,
         problem_label: problem.map(str::to_string),
         negative_fixture,
         flags,
