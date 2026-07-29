@@ -22,6 +22,8 @@
     {"source": "examples/funnel_probe.bld", "invariant": "non-negative", "expected_status": "PASS"},
     {"source": "examples/funnel_probe_linear.bld", "invariant": "non-negative", "negative_fixture": true, "expected_status": "FAIL_EXPECTED"},
     {"source": "examples/random_walk_bound.bld", "invariant": "non-negative", "seed": 42, "expected_status": "PASS"},
-    {"source": "examples/random_walk_bound_broken.bld", "invariant": "non-negative", "negative_fixture": true, "seed": 42, "expected_status": "FAIL_EXPECTED"}
+    {"source": "examples/random_walk_bound_broken.bld", "invariant": "non-negative", "negative_fixture": true, "seed": 42, "expected_status": "FAIL_EXPECTED"},
+    {"source": "examples/mc_pi_rejection.bld", "invariant": "non-negative", "seed": 42, "mc_estimator": "mean", "mc_samples": 2000, "mc_interval": "normal-approx-95", "expected_status": "PASS"},
+    {"source": "examples/mc_pi_rejection_broken.bld", "invariant": "non-negative", "negative_fixture": true, "seed": 42, "mc_estimator": "mean", "mc_samples": 2000, "mc_interval": "normal-approx-95", "expected_status": "FAIL_EXPECTED"}
   ]
 }

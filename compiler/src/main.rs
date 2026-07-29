@@ -51,10 +51,11 @@ use scientific_runtime::{
     build_scientific_runtime_receipt, build_self_test_cases, column_count_matches_invariant,
     crucible_measurement_from_report, evaluate_scientific_runtime_receipt, parse_numeric_series,
     verify_scientific_runtime_receipt, RederivedFacts, RerunObservation, ScientificDigest,
-    ScientificEffectPolicy, ScientificReceiptInputs, ScientificRuntimeReceipt, ScientificToolchain,
-    BOUNDED_INVARIANT, CONSERVATION_INVARIANT, CONSERVED_BAND_INVARIANT,
-    CRUCIBLE_MEASUREMENT_EXPORT_SCHEMA, ENERGY_IDENTITY_INVARIANT, ENERGY_MONOTONE_INVARIANT,
-    NON_NEGATIVE_INVARIANT, RELATION_INVARIANT, SCIENTIFIC_RUNTIME_SCHEMA,
+    ScientificEffectPolicy, ScientificMonteCarlo, ScientificReceiptInputs,
+    ScientificRuntimeReceipt, ScientificToolchain, BOUNDED_INVARIANT, CONSERVATION_INVARIANT,
+    CONSERVED_BAND_INVARIANT, CRUCIBLE_MEASUREMENT_EXPORT_SCHEMA, ENERGY_IDENTITY_INVARIANT,
+    ENERGY_MONOTONE_INVARIANT, NON_NEGATIVE_INVARIANT, RELATION_INVARIANT,
+    SCIENTIFIC_RUNTIME_SCHEMA,
 };
 use symbol_graph::{verify_symbol_graph_receipt, SymbolGraphReceipt, SYMBOL_GRAPH_RECEIPT};
 
@@ -254,6 +255,21 @@ enum Commands {
         /// refuses it (nothing would consume it).
         #[arg(long, value_name = "N")]
         seed: Option<u64>,
+
+        /// Declare the run a Monte Carlo estimate: the estimator's id (e.g.
+        /// `mean`). All three `--mc-*` flags declare together or not at all;
+        /// a partial declaration is refused (the claim is the interval,
+        /// never the point). Sealed into the receipt's `monte_carlo` block.
+        #[arg(long, value_name = "ID")]
+        mc_estimator: Option<String>,
+
+        /// The MC declaration's sample count n (the denominator). Non-zero.
+        #[arg(long, value_name = "N")]
+        mc_samples: Option<u64>,
+
+        /// The MC declaration's interval method (e.g. `normal-approx-95`).
+        #[arg(long, value_name = "METHOD")]
+        mc_interval: Option<String>,
 
         /// Execute a `#[compute]` kernel on the physical GPU (Vulkan) and
         /// cross-check the readback against the CPU-C scalar loop within
@@ -624,6 +640,9 @@ fn main() -> ExitCode {
             method,
             negative_fixture,
             seed,
+            mc_estimator,
+            mc_samples,
+            mc_interval,
             gpu,
             args,
         }) => {
@@ -631,6 +650,11 @@ fn main() -> ExitCode {
                 if seed.is_some() {
                     eprintln!(
                         "--seed is not supported with --gpu (the GPU cross-check has no Random capability)"
+                    );
+                    Err(1)
+                } else if mc_estimator.is_some() || mc_samples.is_some() || mc_interval.is_some() {
+                    eprintln!(
+                        "--mc-* flags are not supported with --gpu (the GPU cross-check has no Random capability)"
                     );
                     Err(1)
                 } else {
@@ -649,6 +673,9 @@ fn main() -> ExitCode {
                     method.as_deref(),
                     negative_fixture,
                     seed,
+                    mc_estimator.as_deref(),
+                    mc_samples,
+                    mc_interval.as_deref(),
                 )
             }
         }
@@ -1991,6 +2018,15 @@ fn cmd_receipt_corpus(manifest_path: &Path) -> Result<(), i32> {
         }
         if let Some(seed) = member.seed {
             emit.args(["--seed", &seed.to_string()]);
+        }
+        if let Some(estimator) = &member.mc_estimator {
+            emit.args(["--mc-estimator", estimator]);
+        }
+        if let Some(samples) = member.mc_samples {
+            emit.args(["--mc-samples", &samples.to_string()]);
+        }
+        if let Some(interval) = &member.mc_interval {
+            emit.args(["--mc-interval", interval]);
         }
         let emit_out = match emit.output() {
             Ok(out) => out,
@@ -7099,7 +7135,52 @@ fn cmd_run(
     method: Option<&str>,
     negative_fixture: bool,
     seed: Option<u64>,
+    mc_estimator: Option<&str>,
+    mc_samples: Option<u64>,
+    mc_interval: Option<&str>,
 ) -> Result<(), i32> {
+    // The Monte Carlo declaration is all-or-nothing, validated whenever ANY
+    // mc flag is present (like --units: a typo is never silently accepted):
+    // an estimator whose interval method is undeclared is refused, and so is
+    // every other partial combination. A zero sample count is an unpriceable
+    // denominator, refused just as early.
+    let mc_flag_count = [
+        mc_estimator.is_some(),
+        mc_samples.is_some(),
+        mc_interval.is_some(),
+    ]
+    .iter()
+    .filter(|present| **present)
+    .count();
+    let monte_carlo = match (mc_flag_count, mc_estimator, mc_samples, mc_interval) {
+        (0, ..) => None,
+        (3, Some(estimator), Some(samples), Some(interval_method)) => {
+            if samples == 0 {
+                eprintln!(
+                    "Error: --mc-samples 0: an MC claim without its denominator is unpriceable"
+                );
+                return Err(1);
+            }
+            if estimator.trim().is_empty() || interval_method.trim().is_empty() {
+                eprintln!(
+                    "Error: --mc-estimator and --mc-interval must be non-empty: the claim is the interval, never the point, so both must be named"
+                );
+                return Err(1);
+            }
+            Some(ScientificMonteCarlo {
+                estimator: estimator.to_string(),
+                samples,
+                interval_method: interval_method.to_string(),
+                status: "DECLARED".to_string(),
+            })
+        }
+        _ => {
+            eprintln!(
+                "Error: a Monte Carlo declaration states estimator, samples, AND interval method together (--mc-estimator, --mc-samples, --mc-interval); an estimator whose interval method is undeclared is refused, and so is every other partial declaration"
+            );
+            return Err(1);
+        }
+    };
     // Canonicalize the declared unit through the dimensional-analysis core
     // BEFORE any compilation work: a malformed or unknown unit is an operator
     // error we report immediately, and the receipt records the CHECKED
@@ -7230,6 +7311,12 @@ fn cmd_run(
         );
         return Err(1);
     }
+    if monte_carlo.is_some() && !uses_random {
+        eprintln!(
+            "Error: --mc-* flags declare a Monte Carlo estimate, but the program observes no Random capability (nothing samples; refusing to seal an MC block no stream backs)"
+        );
+        return Err(1);
+    }
 
     let captured = compile_and_capture_run(file, args, Some(&toolchain.c_compiler), seed)?;
     toolchain.program_executable_digest = captured.executable_digest.clone();
@@ -7296,6 +7383,7 @@ fn cmd_run(
         diverged: parsed.diverged,
         args: args.to_vec(),
         seed_value: seed,
+        monte_carlo,
         invariant_name: invariant_name.to_string(),
         metric: metric.to_string(),
         units: canonical_units.clone(),

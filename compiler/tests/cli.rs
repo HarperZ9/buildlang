@@ -14919,6 +14919,204 @@ fn seeded_random_walk_round_trips_and_pins_the_seed_contract() {
 }
 
 #[test]
+fn monte_carlo_declaration_round_trips_and_pins_the_admission_contract() {
+    if !c_backend_ready() {
+        eprintln!("skipping monte_carlo_declaration_round_trips_and_pins_the_admission_contract: C backend not ready");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("buildlang_sci_mc_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create mc fixture dir");
+
+    let mc_flags = [
+        "--mc-estimator",
+        "mean",
+        "--mc-samples",
+        "2000",
+        "--mc-interval",
+        "normal-approx-95",
+    ];
+
+    // POSITIVE: the pi kernel under the full declaration PASSes, the block is
+    // sealed with the declared facts, and the receipt verifies.
+    let pass_receipt = dir.join("mcpi.json");
+    let emit_pass = buildc()
+        .arg("run")
+        .arg(repo_example("mc_pi_rejection.bld"))
+        .args(["--emit-receipt"])
+        .arg(&pass_receipt)
+        .args([
+            "--invariant",
+            "non-negative",
+            "--metric",
+            "slack",
+            "--problem",
+            "mc-pi-rejection",
+            "--seed",
+            "42",
+        ])
+        .args(mc_flags)
+        .output()
+        .expect("emit mc PASS receipt");
+    assert!(
+        emit_pass.status.success(),
+        "emitting the mc PASS receipt should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&emit_pass.stderr)
+    );
+    let pass: serde_json::Value =
+        serde_json::from_slice(&fs::read(&pass_receipt).expect("read PASS receipt")).unwrap();
+    assert_eq!(pass["receipt_status"], "PASS");
+    assert_eq!(pass["monte_carlo"]["estimator"], "mean");
+    assert_eq!(pass["monte_carlo"]["samples"], 2000);
+    assert_eq!(pass["monte_carlo"]["interval_method"], "normal-approx-95");
+    assert_eq!(pass["monte_carlo"]["status"], "DECLARED");
+    assert_eq!(pass["seed_value"], 42);
+    let verify_pass = buildc()
+        .args(["receipt", "verify"])
+        .arg(&pass_receipt)
+        .output()
+        .expect("verify mc PASS receipt");
+    assert!(
+        verify_pass.status.success(),
+        "the mc PASS receipt must verify\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_pass.stderr)
+    );
+
+    // NEGATIVE fixture: the wrong-area estimator misses pi by ~0.785, blows
+    // through the calibrated band, and FAILs as declared.
+    let fail_receipt = dir.join("mcpi-broken.json");
+    let emit_fail = buildc()
+        .arg("run")
+        .arg(repo_example("mc_pi_rejection_broken.bld"))
+        .args(["--emit-receipt"])
+        .arg(&fail_receipt)
+        .args([
+            "--invariant",
+            "non-negative",
+            "--negative-fixture",
+            "--metric",
+            "slack",
+            "--problem",
+            "mc-pi-rejection",
+            "--seed",
+            "42",
+        ])
+        .args(mc_flags)
+        .output()
+        .expect("emit mc negative fixture");
+    assert!(
+        emit_fail.status.success(),
+        "emitting the mc negative fixture should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&emit_fail.stderr)
+    );
+    let fail: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fail_receipt).expect("read FAIL receipt")).unwrap();
+    assert_eq!(fail["receipt_status"], "FAIL_EXPECTED");
+    assert!(
+        fail["invariant"]["observed"]["violation_count"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    let verify_fail = buildc()
+        .args(["receipt", "verify"])
+        .arg(&fail_receipt)
+        .output()
+        .expect("verify mc negative fixture");
+    assert!(
+        verify_fail.status.success(),
+        "a faithfully reproduced FAIL_EXPECTED must verify (exit 0)\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_fail.stderr)
+    );
+
+    // FAIL CLOSED: every partial declaration is refused (an estimator whose
+    // interval method is undeclared, and each other missing-one combination).
+    for partial in [
+        &["--mc-estimator", "mean", "--mc-samples", "2000"][..],
+        &[
+            "--mc-estimator",
+            "mean",
+            "--mc-interval",
+            "normal-approx-95",
+        ][..],
+        &["--mc-samples", "2000", "--mc-interval", "normal-approx-95"][..],
+        &["--mc-estimator", "mean"][..],
+    ] {
+        let refused = buildc()
+            .arg("run")
+            .arg(repo_example("mc_pi_rejection.bld"))
+            .args(["--emit-receipt"])
+            .arg(dir.join("partial.json"))
+            .args(["--invariant", "non-negative", "--seed", "42"])
+            .args(partial)
+            .output()
+            .expect("run partial mc declaration");
+        assert!(
+            !refused.status.success(),
+            "a partial mc declaration must be refused: {partial:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("together"),
+            "the refusal must name the all-or-nothing contract\nstderr:\n{}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+    }
+
+    // FAIL CLOSED: a zero denominator is refused before anything runs.
+    let zero = buildc()
+        .arg("run")
+        .arg(repo_example("mc_pi_rejection.bld"))
+        .args(["--emit-receipt"])
+        .arg(dir.join("zero.json"))
+        .args([
+            "--invariant",
+            "non-negative",
+            "--seed",
+            "42",
+            "--mc-estimator",
+            "mean",
+            "--mc-samples",
+            "0",
+            "--mc-interval",
+            "normal-approx-95",
+        ])
+        .output()
+        .expect("run zero-sample mc declaration");
+    assert!(
+        !zero.status.success(),
+        "a zero mc denominator must be refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&zero.stderr).contains("unpriceable"),
+        "the refusal must name the unpriceable denominator\nstderr:\n{}",
+        String::from_utf8_lossy(&zero.stderr)
+    );
+
+    // FAIL CLOSED: an mc declaration on a program with no Random capability
+    // is refused (nothing samples).
+    let unbacked = buildc()
+        .arg("run")
+        .arg(repo_example("search_bound_binary.bld"))
+        .args(["--emit-receipt"])
+        .arg(dir.join("unbacked.json"))
+        .args(["--invariant", "non-negative"])
+        .args(mc_flags)
+        .output()
+        .expect("run mc declaration on a seedless program");
+    assert!(
+        !unbacked.status.success(),
+        "an mc declaration on a non-Random program must be refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&unbacked.stderr).contains("no Random capability"),
+        "the refusal must name the missing capability\nstderr:\n{}",
+        String::from_utf8_lossy(&unbacked.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn receipt_verify_self_test_proves_the_verifier_can_fail() {
     if !c_backend_ready() {
         eprintln!(
@@ -14964,8 +15162,8 @@ fn receipt_verify_self_test_proves_the_verifier_can_fail() {
     );
     let stdout = String::from_utf8_lossy(&self_test.stdout);
     assert!(
-        stdout.contains("6/6 tampers rejected with the expected failure_class"),
-        "self-test should report all six tampers rejected\nstdout:\n{}",
+        stdout.contains("7/7 tampers rejected with the expected failure_class"),
+        "self-test should report all seven tampers rejected\nstdout:\n{}",
         stdout
     );
     // The taxonomy arms actually exercised must appear in the report.
@@ -15153,8 +15351,8 @@ fn receipt_corpus_asserts_declared_classifications() {
     assert_eq!(shipped["schema"], "buildlang-scientific-receipt-corpus/v0");
     assert_eq!(
         shipped["members"].as_array().unwrap().len(),
-        22,
-        "the shipped corpus should cover all eleven kernel pairs"
+        24,
+        "the shipped corpus should cover all twelve kernel pairs"
     );
 
     // A small correct manifest: the command emits, verifies, and confirms each

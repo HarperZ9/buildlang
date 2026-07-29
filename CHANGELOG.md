@@ -10,6 +10,20 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- **Monte Carlo estimator receipts**: `buildc run` gains `--mc-estimator` /
+  `--mc-samples` / `--mc-interval`, sealing the estimator's admission facts
+  (id, sample-count denominator, interval method) as a `monte_carlo` receipt
+  block. The declaration is all-or-nothing (an estimator whose interval
+  method is undeclared is refused, as is every partial combination or a zero
+  denominator) and requires a seeded `Random` run; verify re-checks the
+  shape contracts against the re-derived capabilities
+  (`FIELD_CONTRACT_VIOLATION`), and the verifier self-test grows a seventh
+  tamper case (a zero MC denominator, re-sealed). v0 claims reproducibility
+  and declaration discipline, never correctness of the interval. Ships with
+  a known-answer kernel pair (pi by rejection sampling inside a
+  seed-calibrated truth band, and a wrong-area estimator that blows through
+  it), taking the corpus to 24 members. Backward compatible: receipts
+  without the block keep their exact bytes and seals.
 - **`Random` capability + witnessed-seed receipts**: `random_f64()` is a new
   seeded PRNG builtin carrying its own `Random` capability effect (SplitMix64
   over the top 53 bits, bit-identical across platforms for a given seed).
