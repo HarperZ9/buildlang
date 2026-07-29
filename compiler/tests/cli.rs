@@ -15360,9 +15360,13 @@ fn wall_metering_seals_and_reports() {
     let wall_seconds = receipt["runtime_state"]["wall_seconds"]
         .as_f64()
         .expect("runtime_state.wall_seconds must be a number");
+    // wall_seconds is rounded to 3 decimals at emit, so a sub-0.5ms run
+    // legitimately rounds to exactly 0.0; assert presence, finiteness, and
+    // non-negativity instead of a strict positivity bound a fast-enough run
+    // could round below (the 0.5ms rounding floor).
     assert!(
-        wall_seconds > 0.0,
-        "runtime_state.wall_seconds must be positive, got {wall_seconds}"
+        wall_seconds.is_finite() && wall_seconds >= 0.0,
+        "runtime_state.wall_seconds must be a finite, non-negative number, got {wall_seconds}"
     );
     assert_eq!(receipt["budget"]["wall_seconds_limit"], 300.0);
     assert_eq!(receipt["budget"]["wall_exceeded"], false);
@@ -15632,6 +15636,27 @@ fn cross_backend_receipt_round_trips_and_pins_the_pairing() {
             .contains("--cross-backend is not supported with --gpu"),
         "the refusal must name the gpu/cross-backend composition\nstderr:\n{}",
         String::from_utf8_lossy(&gpu_composition.stderr)
+    );
+
+    // REFUSAL: --gpu composed with --budget-wall-seconds (review finding:
+    // the gpu/budget composition refusal at main.rs:694-701 had zero test
+    // coverage). The GPU cross-check produces no budget block, so the flag
+    // is refused up front, before any GPU device probe or receipt work.
+    let gpu_budget_wall = buildc()
+        .arg("run")
+        .arg(repo_example("decay_cross_backend.bld"))
+        .args(["--gpu", "--budget-wall-seconds", "300"])
+        .output()
+        .expect("run --gpu --budget-wall-seconds together");
+    assert!(
+        !gpu_budget_wall.status.success(),
+        "--gpu combined with --budget-wall-seconds must be refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&gpu_budget_wall.stderr)
+            .contains("--budget-* flags are not supported with --gpu"),
+        "the refusal must name the gpu/budget composition\nstderr:\n{}",
+        String::from_utf8_lossy(&gpu_budget_wall.stderr)
     );
 
     // REFUSAL: rustc unreachable, simulated via RUSTC pointing at a

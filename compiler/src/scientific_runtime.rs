@@ -5989,6 +5989,25 @@ mod tests {
         let bad_no_measurement = metered(budget_with_wall(Some(300.0), Some(false)), None);
         assert_eq!(run(&bad_no_measurement, test_effect_policy()), Err(1));
 
+        // The zeroed-steps + wall-fields interaction (plan Task 2, line 26):
+        // a budget block with a zeroed steps_limit but otherwise-coherent
+        // wall fields present must still be refused, and refused by the
+        // PRE-EXISTING steps gate, not by any wall-specific one. This pins
+        // the gate ORDER at scientific_runtime.rs:2357 (the steps_limit == 0
+        // check) running before the wall gate at ~2372, so a future reorder
+        // of these checks can't silently let a zeroed-steps budget slip
+        // through just because its wall fields happen to be coherent.
+        let mut zeroed_steps = budget_with_wall(Some(300.0), Some(false));
+        zeroed_steps.steps_limit = 0;
+        zeroed_steps.steps_consumed = 0;
+        zeroed_steps.exhausted = true;
+        let bad_zeroed_steps = metered(zeroed_steps, Some(12.5));
+        assert_eq!(
+            run(&bad_zeroed_steps, test_effect_policy()),
+            Err(1),
+            "a zeroed steps_limit with coherent wall fields present must still be refused by the pre-existing steps gates"
+        );
+
         // A receipt with NO new fields (no runtime_state.wall_seconds, no
         // wall fields in budget) round-trips with no new keys in its JSON,
         // AND still verifies: the backward-compat pin. This is the shape a
