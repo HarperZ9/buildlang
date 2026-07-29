@@ -15318,6 +15318,118 @@ fn budget_declaration_round_trips_and_pins_the_admission_contract() {
 }
 
 #[test]
+fn wall_metering_seals_and_reports() {
+    if !c_backend_ready() {
+        eprintln!("skipping wall_metering_seals_and_reports: C backend not ready");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("buildlang_sci_wall_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create wall-metering fixture dir");
+
+    // POSITIVE: the greedy kernel under the full budget declaration plus a
+    // generous wall ceiling (300s, far above any real run) PASSes, and the
+    // receipt seals both the EXECUTED wall time and the DECLARED ceiling
+    // with a correctly-derived wall_exceeded.
+    let receipt_path = dir.join("greedy-wall.json");
+    let emit = buildc()
+        .arg("run")
+        .arg(repo_example("greedy_change_budget.bld"))
+        .args(["--emit-receipt"])
+        .arg(&receipt_path)
+        .args([
+            "--invariant",
+            "non-negative",
+            "--metric",
+            "slack",
+            "--problem",
+            "greedy-change-budget",
+        ])
+        .args(["--budget-steps", "60000", "--budget-consumed", "495"])
+        .args(["--budget-wall-seconds", "300"])
+        .output()
+        .expect("emit wall-metering receipt");
+    assert!(
+        emit.status.success(),
+        "emitting the wall-metering receipt should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&emit.stderr)
+    );
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt_path).expect("read wall-metering receipt"))
+            .unwrap();
+    let wall_seconds = receipt["runtime_state"]["wall_seconds"]
+        .as_f64()
+        .expect("runtime_state.wall_seconds must be a number");
+    assert!(
+        wall_seconds > 0.0,
+        "runtime_state.wall_seconds must be positive, got {wall_seconds}"
+    );
+    assert_eq!(receipt["budget"]["wall_seconds_limit"], 300.0);
+    assert_eq!(receipt["budget"]["wall_exceeded"], false);
+
+    let verify = buildc()
+        .args(["receipt", "verify"])
+        .arg(&receipt_path)
+        .output()
+        .expect("verify wall-metering receipt");
+    assert!(
+        verify.status.success(),
+        "the wall-metering receipt must verify\nstderr:\n{}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&verify.stdout).contains("wall_seconds"),
+        "verify stdout must mention wall_seconds\nstdout:\n{}",
+        String::from_utf8_lossy(&verify.stdout)
+    );
+
+    // FAIL CLOSED: --budget-wall-seconds without the steps pair is refused
+    // (the wall ceiling is a member of the budget declaration, not a
+    // freestanding one).
+    let unpaired = buildc()
+        .arg("run")
+        .arg(repo_example("greedy_change_budget.bld"))
+        .args(["--emit-receipt"])
+        .arg(dir.join("unpaired.json"))
+        .args(["--invariant", "non-negative"])
+        .args(["--budget-wall-seconds", "300"])
+        .output()
+        .expect("run wall ceiling without the steps pair");
+    assert!(
+        !unpaired.status.success(),
+        "--budget-wall-seconds without the steps pair must be refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&unpaired.stderr).contains("budget declaration"),
+        "the refusal must name the missing budget declaration\nstderr:\n{}",
+        String::from_utf8_lossy(&unpaired.stderr)
+    );
+
+    // FAIL CLOSED: a zero wall ceiling is refused before anything runs.
+    let zero = buildc()
+        .arg("run")
+        .arg(repo_example("greedy_change_budget.bld"))
+        .args(["--emit-receipt"])
+        .arg(dir.join("zero-wall.json"))
+        .args(["--invariant", "non-negative"])
+        .args(["--budget-steps", "60000", "--budget-consumed", "495"])
+        .args(["--budget-wall-seconds", "0"])
+        .output()
+        .expect("run zero wall ceiling");
+    assert!(
+        !zero.status.success(),
+        "a zero wall ceiling must be refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&zero.stderr).contains("positive"),
+        "the refusal must name the positive/finite contract\nstderr:\n{}",
+        String::from_utf8_lossy(&zero.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn cross_backend_receipt_round_trips_and_pins_the_pairing() {
     if !c_backend_ready() {
         eprintln!(
