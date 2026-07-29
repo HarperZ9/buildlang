@@ -1,0 +1,58 @@
+// Monte Carlo kernel: pi by rejection sampling, EXECUTED interval sibling of
+// mc_pi_rejection.bld. Same algorithm, same seed-42 stream (n = 2000, burn =
+// 200, band = 0.3, the same `4.0 * inside / k` estimate and slack
+// computation), so a re-derivation on the SAME PRNG stream needs no new
+// calibration: the measured worst error after burn-in under seed 42 is
+// 0.2094, so the band clears it by ~1.4x (see mc_pi_rejection.bld for the
+// full calibration story).
+//
+// The difference: each post-burn-in row prints THREE columns instead of one,
+// `slack inside k`, so the verifier can re-derive the Monte Carlo interval
+// itself from the raw sufficient-statistic columns (cumulative successes and
+// trials) instead of trusting a declared one. Column 0 (slack) feeds the
+// `non-negative` invariant unchanged; columns 1-2 (`inside`, `k`) are the
+// witnessed successes/trials counters `compute_mc_executed` checks for
+// structural coherence and re-derives the wilson-95 interval from, at two
+// stages (Stage A over the sealed series before any re-run, Stage B over the
+// re-run series).
+//
+// Emitted with `--seed 42 --mc-executed --mc-estimator proportion
+// --mc-samples 2000 --mc-interval wilson-95 --invariant non-negative`
+// (`--columns` auto-upgrades to 3). Measured at implementation time by
+// running the emitted receipt (not invented here, the same discipline the
+// DECLARED kernel's header used for its 0.2094 figure): under seed 42,
+// successes_final = 1551 of trials_final = 2000, estimate = 0.7755,
+// wilson-95 interval_low = 0.7566951910008709, interval_high =
+// 0.7932485159471586.
+//
+// EXECUTED hardens the interval arithmetic and the witnessed denominator; it
+// does not, and cannot, harden sample independence, interval coverage, or
+// the estimator's semantics (sealed as `not_claimed` entries). Companion
+// negative fixture: mc_pi_rejection_executed_broken.bld.
+
+fn main() ~ Console + Random {
+    let n: i32 = 2000;
+    let burn: i32 = 200;
+    let band: f64 = 0.3;
+    let mut inside: i32 = 0;
+    let mut k: i32 = 0;
+    while k < n {
+        let x: f64 = random_f64();
+        let y: f64 = random_f64();
+        if x * x + y * y < 1.0 {
+            inside = inside + 1;
+        }
+        k = k + 1;
+        if k >= burn {
+            let est: f64 = 4.0 * (inside as f64) / (k as f64);
+            let mut err: f64 = est - 3.14159265358979323846;
+            if err < 0.0 {
+                err = 0.0 - err;
+            }
+            // Slack against the calibrated truth band (column 0), plus the
+            // witnessed successes/trials counters (columns 1-2) the
+            // verifier re-derives the executed interval from.
+            println!("{} {} {}", band - err, inside, k);
+        }
+    }
+}

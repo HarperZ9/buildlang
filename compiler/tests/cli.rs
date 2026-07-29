@@ -15117,6 +15117,548 @@ fn monte_carlo_declaration_round_trips_and_pins_the_admission_contract() {
 }
 
 #[test]
+fn mc_pi_rejection_executed_round_trip_and_negative_fixture() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping mc_pi_rejection_executed_round_trip_and_negative_fixture: C backend not ready"
+        );
+        return;
+    }
+    let dir =
+        std::env::temp_dir().join(format!("buildlang_sci_mc_executed_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create mc-executed fixture dir");
+
+    let mc_executed_flags = [
+        "--mc-executed",
+        "--mc-estimator",
+        "proportion",
+        "--mc-samples",
+        "2000",
+        "--mc-interval",
+        "wilson-95",
+    ];
+
+    // POSITIVE: the executed pi kernel PASSes, the block is sealed EXECUTED
+    // with a re-deriving interval and a witnessed denominator, and the
+    // receipt verifies (both Stage A and Stage B).
+    let pass_receipt = dir.join("mcpi_executed.json");
+    let emit_pass = buildc()
+        .arg("run")
+        .arg(repo_example("mc_pi_rejection_executed.bld"))
+        .args(["--emit-receipt"])
+        .arg(&pass_receipt)
+        .args([
+            "--invariant",
+            "non-negative",
+            "--metric",
+            "slack",
+            "--problem",
+            "mc-pi-rejection-executed",
+            "--seed",
+            "42",
+        ])
+        .args(mc_executed_flags)
+        .output()
+        .expect("emit mc-executed PASS receipt");
+    assert!(
+        emit_pass.status.success(),
+        "emitting the mc-executed PASS receipt should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&emit_pass.stderr)
+    );
+    let pass: serde_json::Value =
+        serde_json::from_slice(&fs::read(&pass_receipt).expect("read PASS receipt")).unwrap();
+    assert_eq!(pass["receipt_status"], "PASS");
+    assert_eq!(pass["monte_carlo"]["status"], "EXECUTED");
+    assert_eq!(pass["monte_carlo"]["n_effective"], 2000);
+    let successes = pass["monte_carlo"]["successes"]
+        .as_u64()
+        .expect("successes must be present");
+    assert!(successes <= 2000);
+    let estimate = pass["monte_carlo"]["estimate"].as_f64().unwrap();
+    let low = pass["monte_carlo"]["interval_low"].as_f64().unwrap();
+    let high = pass["monte_carlo"]["interval_high"].as_f64().unwrap();
+    assert!(
+        low < estimate && estimate < high,
+        "interval_low < estimate < interval_high must hold: {low} < {estimate} < {high}"
+    );
+    let verify_pass = buildc()
+        .args(["receipt", "verify"])
+        .arg(&pass_receipt)
+        .output()
+        .expect("verify mc-executed PASS receipt");
+    assert!(
+        verify_pass.status.success(),
+        "the mc-executed PASS receipt must verify\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_pass.stderr)
+    );
+
+    // NEGATIVE fixture: the wrong-area estimator still executes and
+    // re-derives a coherent interval (the raw successes/trials counters are
+    // untouched by the wrong-area factor), while the slack column blows the
+    // truth band and FAILs as declared. The interval claim and the
+    // truth-band claim fail independently.
+    let fail_receipt = dir.join("mcpi_executed_broken.json");
+    let emit_fail = buildc()
+        .arg("run")
+        .arg(repo_example("mc_pi_rejection_executed_broken.bld"))
+        .args(["--emit-receipt"])
+        .arg(&fail_receipt)
+        .args([
+            "--invariant",
+            "non-negative",
+            "--negative-fixture",
+            "--metric",
+            "slack",
+            "--problem",
+            "mc-pi-rejection-executed",
+            "--seed",
+            "42",
+        ])
+        .args(mc_executed_flags)
+        .output()
+        .expect("emit mc-executed negative fixture");
+    assert!(
+        emit_fail.status.success(),
+        "emitting the mc-executed negative fixture should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&emit_fail.stderr)
+    );
+    let fail: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fail_receipt).expect("read FAIL receipt")).unwrap();
+    assert_eq!(fail["receipt_status"], "FAIL_EXPECTED");
+    assert_eq!(
+        fail["monte_carlo"]["status"], "EXECUTED",
+        "the wrong-area estimator still yields a coherent, re-deriving EXECUTED interval"
+    );
+    let verify_fail = buildc()
+        .args(["receipt", "verify"])
+        .arg(&fail_receipt)
+        .output()
+        .expect("verify mc-executed negative fixture");
+    assert!(
+        verify_fail.status.success(),
+        "a faithfully reproduced FAIL_EXPECTED must verify (exit 0)\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_fail.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn mc_executed_without_full_declaration_is_refused() {
+    if !c_backend_ready() {
+        eprintln!("skipping mc_executed_without_full_declaration_is_refused: C backend not ready");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang_sci_mc_executed_refuse_partial_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create fixture dir");
+
+    let refused = buildc()
+        .arg("run")
+        .arg(repo_example("mc_pi_rejection_executed.bld"))
+        .args(["--emit-receipt"])
+        .arg(dir.join("partial.json"))
+        .args([
+            "--invariant",
+            "non-negative",
+            "--seed",
+            "42",
+            "--mc-executed",
+        ])
+        .output()
+        .expect("run --mc-executed with no other mc flags");
+    assert!(
+        !refused.status.success(),
+        "--mc-executed alone must be refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr)
+            .contains("requires the full Monte Carlo declaration"),
+        "the refusal must name the all-or-nothing contract\nstderr:\n{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn mc_executed_clopper_pearson_is_refused() {
+    if !c_backend_ready() {
+        eprintln!("skipping mc_executed_clopper_pearson_is_refused: C backend not ready");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang_sci_mc_executed_refuse_clopper_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create fixture dir");
+
+    let refused = buildc()
+        .arg("run")
+        .arg(repo_example("mc_pi_rejection_executed.bld"))
+        .args(["--emit-receipt"])
+        .arg(dir.join("clopper.json"))
+        .args(["--invariant", "non-negative", "--seed", "42"])
+        .args([
+            "--mc-executed",
+            "--mc-estimator",
+            "proportion",
+            "--mc-samples",
+            "2000",
+            "--mc-interval",
+            "clopper-pearson-95",
+        ])
+        .output()
+        .expect("run --mc-executed with clopper-pearson-95");
+    assert!(
+        !refused.status.success(),
+        "clopper-pearson-95 must be refused (not executable in v1)"
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("not in the EXECUTED executable vocabulary")
+            || stderr.contains("inverse incomplete beta"),
+        "the refusal must name the unexecutable method\nstderr:\n{}",
+        stderr
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn mc_executed_declared_samples_mismatching_witnessed_trials_is_refused() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping mc_executed_declared_samples_mismatching_witnessed_trials_is_refused: C backend not ready"
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang_sci_mc_executed_refuse_denominator_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create fixture dir");
+
+    // A tiny kernel that prints exactly 5 post-burn rows (trials_final = 5),
+    // declared under --mc-samples 2000: the witnessed denominator does not
+    // equal the declared one.
+    let src = "fn main() ~ Console + Random {\n\
+               let n: i32 = 5;\n\
+               let mut inside: i32 = 0;\n\
+               let mut k: i32 = 0;\n\
+               while k < n {\n\
+               let x: f64 = random_f64();\n\
+               if x < 0.5 { inside = inside + 1; }\n\
+               k = k + 1;\n\
+               println!(\"{} {} {}\", 1.0, inside, k);\n\
+               }\n\
+               }\n";
+    let path = dir.join("mc_five_rows.bld");
+    fs::write(&path, src).expect("write mc_five_rows.bld");
+
+    let refused = buildc()
+        .arg("run")
+        .arg(&path)
+        .args(["--emit-receipt"])
+        .arg(dir.join("mismatch.json"))
+        .args(["--invariant", "non-negative", "--seed", "42"])
+        .args([
+            "--mc-executed",
+            "--mc-estimator",
+            "proportion",
+            "--mc-samples",
+            "2000",
+            "--mc-interval",
+            "wilson-95",
+        ])
+        .output()
+        .expect("run --mc-executed on a kernel with fewer draws than declared");
+    assert!(
+        !refused.status.success(),
+        "a witnessed/declared denominator mismatch must be refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("does not equal the declared samples"),
+        "the refusal must name the denominator mismatch\nstderr:\n{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn mc_executed_incoherent_successes_jump_is_refused() {
+    if !c_backend_ready() {
+        eprintln!("skipping mc_executed_incoherent_successes_jump_is_refused: C backend not ready");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang_sci_mc_executed_refuse_jump_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create fixture dir");
+
+    // A tiny kernel whose "successes" column jumps by 2 between row 0 (k=1,
+    // successes=0) and row 1 (k=2, successes=2): never exceeds trials at any
+    // row, but is not a coherent cumulative Bernoulli count (a delta of 2
+    // is neither 0 nor 1).
+    let src = "fn main() ~ Console + Random {\n\
+               let mut k: i32 = 0;\n\
+               while k < 3 {\n\
+               let x: f64 = random_f64();\n\
+               let _unused: f64 = x;\n\
+               k = k + 1;\n\
+               let mut succ: i32 = 0;\n\
+               if k >= 2 { succ = k; }\n\
+               println!(\"{} {} {}\", 1.0, succ, k);\n\
+               }\n\
+               }\n";
+    let path = dir.join("mc_jump.bld");
+    fs::write(&path, src).expect("write mc_jump.bld");
+
+    let refused = buildc()
+        .arg("run")
+        .arg(&path)
+        .args(["--emit-receipt"])
+        .arg(dir.join("jump.json"))
+        .args(["--invariant", "non-negative", "--seed", "42"])
+        .args([
+            "--mc-executed",
+            "--mc-estimator",
+            "proportion",
+            "--mc-samples",
+            "3",
+            "--mc-interval",
+            "wilson-95",
+        ])
+        .output()
+        .expect("run --mc-executed on a kernel with an incoherent successes jump");
+    assert!(
+        !refused.status.success(),
+        "a successes column jumping by 2 must be refused"
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("does not follow") && stderr.contains("by 0 or 1"),
+        "the refusal must name the incoherent jump\nstderr:\n{}",
+        stderr
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn mc_executed_explicit_columns_other_than_three_is_refused() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping mc_executed_explicit_columns_other_than_three_is_refused: C backend not ready"
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang_sci_mc_executed_refuse_columns_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create fixture dir");
+
+    let refused = buildc()
+        .arg("run")
+        .arg(repo_example("mc_pi_rejection_executed.bld"))
+        .args(["--emit-receipt"])
+        .arg(dir.join("columns.json"))
+        .args([
+            "--invariant",
+            "non-negative",
+            "--seed",
+            "42",
+            "--columns",
+            "2",
+        ])
+        .args([
+            "--mc-executed",
+            "--mc-estimator",
+            "proportion",
+            "--mc-samples",
+            "2000",
+            "--mc-interval",
+            "wilson-95",
+        ])
+        .output()
+        .expect("run --mc-executed with an explicit --columns 2");
+    assert!(
+        !refused.status.success(),
+        "an explicit --columns other than 3 must be refused under --mc-executed"
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("needs --columns 3"),
+        "the refusal must name the required column count\nstderr:\n{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn mc_executed_normal_approx_degenerate_boundary_is_refused() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping mc_executed_normal_approx_degenerate_boundary_is_refused: C backend not ready"
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang_sci_mc_executed_refuse_degenerate_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create fixture dir");
+
+    // A tiny kernel whose counter never fails a single draw: successes ==
+    // trials on every row, so the final proportion sits at the 1.0 boundary.
+    let src = "fn main() ~ Console + Random {\n\
+               let n: i32 = 5;\n\
+               let mut k: i32 = 0;\n\
+               while k < n {\n\
+               let x: f64 = random_f64();\n\
+               let _unused: f64 = x;\n\
+               k = k + 1;\n\
+               println!(\"{} {} {}\", 1.0, k, k);\n\
+               }\n\
+               }\n";
+    let path = dir.join("mc_always_succeeds.bld");
+    fs::write(&path, src).expect("write mc_always_succeeds.bld");
+
+    let refused = buildc()
+        .arg("run")
+        .arg(&path)
+        .args(["--emit-receipt"])
+        .arg(dir.join("degenerate.json"))
+        .args(["--invariant", "non-negative", "--seed", "42"])
+        .args([
+            "--mc-executed",
+            "--mc-estimator",
+            "proportion",
+            "--mc-samples",
+            "5",
+            "--mc-interval",
+            "normal-approx-95",
+        ])
+        .output()
+        .expect("run --mc-executed on a boundary-proportion kernel with normal-approx-95");
+    assert!(
+        !refused.status.success(),
+        "a boundary proportion under normal-approx-95 must be refused"
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("degenerate") && stderr.contains("wilson-95"),
+        "the refusal must name the degeneracy and point at wilson-95\nstderr:\n{}",
+        stderr
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn mc_executed_refused_with_gpu() {
+    // No `c_backend_ready()` gate needed: this refusal fires on CLI shape
+    // before any GPU device probe or receipt work (mirroring the existing
+    // --gpu/--budget-wall-seconds composition test).
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang_sci_mc_executed_refuse_gpu_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create fixture dir");
+
+    let refused = buildc()
+        .arg("run")
+        .arg(repo_example("decay_cross_backend.bld"))
+        .args([
+            "--gpu",
+            "--mc-executed",
+            "--mc-estimator",
+            "proportion",
+            "--mc-samples",
+            "2000",
+            "--mc-interval",
+            "wilson-95",
+        ])
+        .output()
+        .expect("run --gpu --mc-executed together");
+    assert!(
+        !refused.status.success(),
+        "--gpu combined with --mc-executed must be refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr)
+            .contains("--mc-* flags are not supported with --gpu"),
+        "the refusal must name the gpu/mc composition\nstderr:\n{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn mc_executed_refused_with_cross_backend() {
+    if !c_backend_ready() {
+        eprintln!("skipping mc_executed_refused_with_cross_backend: C backend not ready");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang_sci_mc_executed_refuse_cross_backend_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create fixture dir");
+
+    let refused = buildc()
+        .arg("run")
+        .arg(repo_example("decay_cross_backend.bld"))
+        .args(["--emit-receipt"])
+        .arg(dir.join("cb_mc_executed.json"))
+        .args(["--cross-backend", "rust", "--invariant", "cross-backend"])
+        .args([
+            "--mc-executed",
+            "--mc-estimator",
+            "proportion",
+            "--mc-samples",
+            "2000",
+            "--mc-interval",
+            "wilson-95",
+        ])
+        .output()
+        .expect("run --cross-backend --mc-executed together");
+    assert!(
+        !refused.status.success(),
+        "--cross-backend combined with --mc-executed must be refused"
+    );
+    // The column-count gate is the FIRST refusal to fire here (Task 3's
+    // `column_count_matches_invariant` update makes the cross-backend arm
+    // require `!mc_executed`, so it refuses for ANY --columns value once
+    // mc_executed is true), ahead of the later `mc_flag_count > 0` check
+    // inside the `--cross-backend` block. Both gates independently cover
+    // this composition; the column gate simply wins the race.
+    assert!(
+        String::from_utf8_lossy(&refused.stderr)
+            .contains("--invariant cross-backend needs --columns 2"),
+        "the refusal must name the cross-backend column contract\nstderr:\n{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn budget_declaration_round_trips_and_pins_the_admission_contract() {
     if !c_backend_ready() {
         eprintln!("skipping budget_declaration_round_trips_and_pins_the_admission_contract: C backend not ready");
@@ -15875,8 +16417,8 @@ fn receipt_verify_self_test_proves_the_verifier_can_fail() {
     );
     let stdout = String::from_utf8_lossy(&self_test.stdout);
     assert!(
-        stdout.contains("9/9 tampers rejected with the expected failure_class"),
-        "self-test should report all nine tampers rejected\nstdout:\n{}",
+        stdout.contains("10/10 tampers rejected with the expected failure_class"),
+        "self-test should report all ten tampers rejected\nstdout:\n{}",
         stdout
     );
     // The taxonomy arms actually exercised must appear in the report.
@@ -16064,8 +16606,8 @@ fn receipt_corpus_asserts_declared_classifications() {
     assert_eq!(shipped["schema"], "buildlang-scientific-receipt-corpus/v0");
     assert_eq!(
         shipped["members"].as_array().unwrap().len(),
-        27,
-        "the shipped corpus should cover all thirteen kernel pairs plus the cross-backend singleton"
+        29,
+        "the shipped corpus should cover all fourteen kernel pairs plus the cross-backend singleton"
     );
 
     // A small correct manifest: the command emits, verifies, and confirms each

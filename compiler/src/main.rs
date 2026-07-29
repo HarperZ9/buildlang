@@ -49,13 +49,14 @@ use scientific_runtime::{
 };
 use scientific_runtime::{
     build_scientific_runtime_receipt, build_self_test_cases, column_count_matches_invariant,
-    crucible_measurement_from_report, evaluate_scientific_runtime_receipt, parse_numeric_series,
-    verify_scientific_runtime_receipt, RederivedFacts, RerunObservation, ScientificBudget,
-    ScientificCrossBackend, ScientificDigest, ScientificEffectPolicy, ScientificMonteCarlo,
-    ScientificReceiptInputs, ScientificRuntimeReceipt, ScientificToolchain, SecondaryObservation,
-    BOUNDED_INVARIANT, CONSERVATION_INVARIANT, CONSERVED_BAND_INVARIANT, CROSS_BACKEND_INVARIANT,
-    CRUCIBLE_MEASUREMENT_EXPORT_SCHEMA, ENERGY_IDENTITY_INVARIANT, ENERGY_MONOTONE_INVARIANT,
-    NON_NEGATIVE_INVARIANT, RELATION_INVARIANT, SCIENTIFIC_RUNTIME_SCHEMA,
+    compute_mc_executed, crucible_measurement_from_report, evaluate_scientific_runtime_receipt,
+    parse_numeric_series, verify_scientific_runtime_receipt, RederivedFacts, RerunObservation,
+    ScientificBudget, ScientificCrossBackend, ScientificDigest, ScientificEffectPolicy,
+    ScientificMonteCarlo, ScientificReceiptInputs, ScientificRuntimeReceipt, ScientificToolchain,
+    SecondaryObservation, BOUNDED_INVARIANT, CONSERVATION_INVARIANT, CONSERVED_BAND_INVARIANT,
+    CROSS_BACKEND_INVARIANT, CRUCIBLE_MEASUREMENT_EXPORT_SCHEMA, ENERGY_IDENTITY_INVARIANT,
+    ENERGY_MONOTONE_INVARIANT, MC_EXECUTED_ESTIMATOR_PROPORTION, NON_NEGATIVE_INVARIANT,
+    RELATION_INVARIANT, SCIENTIFIC_RUNTIME_SCHEMA,
 };
 use symbol_graph::{verify_symbol_graph_receipt, SymbolGraphReceipt, SYMBOL_GRAPH_RECEIPT};
 
@@ -270,6 +271,15 @@ enum Commands {
         /// The MC declaration's interval method (e.g. `normal-approx-95`).
         #[arg(long, value_name = "METHOD")]
         mc_interval: Option<String>,
+
+        /// Declare the Monte Carlo run EXECUTED: the verifier re-derives the
+        /// interval from raw sufficient-statistic columns the kernel prints
+        /// (successes/trials counters beside the invariant scalar) instead of
+        /// trusting the declaration. Requires all three --mc-* flags together;
+        /// forces --columns to 3 (an unset default is silently upgraded, any
+        /// other explicit value is refused, the --cross-backend idiom).
+        #[arg(long)]
+        mc_executed: bool,
 
         /// Declare the run a budgeted search: the step ceiling. Both
         /// --budget-* flags declare together or not at all. A budgeted
@@ -673,6 +683,7 @@ fn main() -> ExitCode {
             mc_estimator,
             mc_samples,
             mc_interval,
+            mc_executed,
             budget_steps,
             budget_consumed,
             budget_wall_seconds,
@@ -686,7 +697,11 @@ fn main() -> ExitCode {
                         "--seed is not supported with --gpu (the GPU cross-check has no Random capability)"
                     );
                     Err(1)
-                } else if mc_estimator.is_some() || mc_samples.is_some() || mc_interval.is_some() {
+                } else if mc_estimator.is_some()
+                    || mc_samples.is_some()
+                    || mc_interval.is_some()
+                    || mc_executed
+                {
                     eprintln!(
                         "--mc-* flags are not supported with --gpu (the GPU cross-check has no Random capability)"
                     );
@@ -723,6 +738,7 @@ fn main() -> ExitCode {
                     mc_estimator.as_deref(),
                     mc_samples,
                     mc_interval.as_deref(),
+                    mc_executed,
                     budget_steps,
                     budget_consumed,
                     budget_wall_seconds,
@@ -2078,6 +2094,9 @@ fn cmd_receipt_corpus(manifest_path: &Path) -> Result<(), i32> {
         }
         if let Some(interval) = &member.mc_interval {
             emit.args(["--mc-interval", interval]);
+        }
+        if member.mc_executed {
+            emit.arg("--mc-executed");
         }
         if let Some(steps) = member.budget_steps {
             emit.args(["--budget-steps", &steps.to_string()]);
@@ -7483,6 +7502,7 @@ fn cmd_run(
     mc_estimator: Option<&str>,
     mc_samples: Option<u64>,
     mc_interval: Option<&str>,
+    mc_executed: bool,
     budget_steps: Option<u64>,
     budget_consumed: Option<u64>,
     budget_wall_seconds: Option<f64>,
@@ -7516,11 +7536,20 @@ fn cmd_run(
                 );
                 return Err(1);
             }
+            // Only the DECLARED shape can be built here: whether the block
+            // is EXECUTED-and-coherent is unknown until the real series
+            // exists. The finalization below (after capture) upgrades this
+            // to EXECUTED when --mc-executed was passed, fail closed.
             Some(ScientificMonteCarlo {
                 estimator: estimator.to_string(),
                 samples,
                 interval_method: interval_method.to_string(),
                 status: "DECLARED".to_string(),
+                estimate: None,
+                interval_low: None,
+                interval_high: None,
+                n_effective: None,
+                successes: None,
             })
         }
         _ => {
@@ -7530,6 +7559,25 @@ fn cmd_run(
             return Err(1);
         }
     };
+    // --mc-executed requires the full declaration (all three --mc-* flags),
+    // and its estimator must be in the v1 executable vocabulary (`proportion`);
+    // DECLARED blocks may still use free text. The interval-method vocabulary
+    // check is NOT duplicated here: it is fail-closed inside
+    // `compute_mc_executed`, called once real data exists, below.
+    if mc_executed && mc_flag_count < 3 {
+        eprintln!(
+            "Error: --mc-executed requires the full Monte Carlo declaration (--mc-estimator, --mc-samples, --mc-interval)"
+        );
+        return Err(1);
+    }
+    if let Some(estimator) = mc_estimator {
+        if mc_executed && estimator != MC_EXECUTED_ESTIMATOR_PROPORTION {
+            eprintln!(
+                "Error: --mc-executed requires --mc-estimator proportion (v1 executable vocabulary); DECLARED blocks may still use free text"
+            );
+            return Err(1);
+        }
+    }
     // The budgeted-search declaration is all-or-nothing, exactly like the MC
     // declaration: a result without its budget ceiling hides whether it
     // stopped at the limit, so neither flag alone is accepted. Deterministic
@@ -7642,10 +7690,14 @@ fn cmd_run(
 
     // `--invariant cross-backend` defines its own column structure (2: the C
     // anchor and the secondary lane), so an unset `--columns` (the CLI
-    // default, 1) is silently upgraded; anything else is left for the
-    // existing column-count gate below to refuse.
+    // default, 1) is silently upgraded; `--mc-executed` similarly forces 3
+    // (the invariant scalar plus the witnessed successes/trials counters);
+    // anything else is left for the existing column-count gate below to
+    // refuse.
     let columns = if invariant_name == CROSS_BACKEND_INVARIANT && columns == 1 {
         2
+    } else if mc_executed && columns == 1 {
+        3
     } else {
         columns
     };
@@ -7655,7 +7707,9 @@ fn cmd_run(
     // so the two can never drift: the `relation` invariant reads across columns
     // and needs at least two; every single-scalar invariant reads one value per
     // step and rejects a multi-column request rather than silently ignoring it.
-    if emit_receipt.is_some() && !column_count_matches_invariant(invariant_name, columns) {
+    if emit_receipt.is_some()
+        && !column_count_matches_invariant(invariant_name, columns, mc_executed)
+    {
         if invariant_name == RELATION_INVARIANT {
             eprintln!(
                 "--invariant relation needs --columns >= 2 (each row must hold the columns to compare)"
@@ -7663,6 +7717,10 @@ fn cmd_run(
         } else if invariant_name == CROSS_BACKEND_INVARIANT {
             eprintln!(
                 "--invariant cross-backend needs --columns 2 (the C anchor and the secondary lane); the invariant defines its own column structure"
+            );
+        } else if mc_executed {
+            eprintln!(
+                "--mc-executed needs --columns 3 (the invariant scalar plus the witnessed successes/trials counters); the invariant defines its own column structure"
             );
         } else {
             eprintln!(
@@ -7740,6 +7798,9 @@ fn cmd_run(
             );
             return Err(1);
         }
+        // This transitively refuses --cross-backend --mc-executed too:
+        // --mc-executed requires mc_flag_count == 3 (checked above), which
+        // this arm already refuses whenever any mc flag is present.
         if mc_flag_count > 0 {
             eprintln!(
                 "--cross-backend does not support --mc-* (Monte Carlo requires the Random capability, which --cross-backend already refuses)"
@@ -7927,6 +7988,33 @@ fn cmd_run(
         (interleaved, 2usize, Some(block))
     } else {
         (primary_series, columns, None)
+    };
+
+    // --mc-executed finalization: the early `monte_carlo` block could only
+    // build the DECLARED shape (whether it is EXECUTED-and-coherent was
+    // unknown until the real series existed). Recompute now, fail closed:
+    // an incoherent EXECUTED block never reaches
+    // `build_scientific_runtime_receipt` (never gets sealed).
+    let monte_carlo = if mc_executed {
+        let mc = monte_carlo.expect("mc_executed implies mc_flag_count == 3, checked above");
+        let computed = compute_mc_executed(&series, column_count, mc.samples, &mc.interval_method)
+            .map_err(|reason| {
+                eprintln!(
+                    "Error: --mc-executed refuses to seal an incoherent EXECUTED block: {reason}"
+                );
+                1i32
+            })?;
+        Some(ScientificMonteCarlo {
+            status: "EXECUTED".to_string(),
+            estimate: Some(computed.estimate),
+            interval_low: Some(computed.interval_low),
+            interval_high: Some(computed.interval_high),
+            n_effective: Some(computed.n_effective),
+            successes: Some(computed.successes),
+            ..mc
+        })
+    } else {
+        monte_carlo
     };
 
     let os = std::env::consts::OS.to_string();

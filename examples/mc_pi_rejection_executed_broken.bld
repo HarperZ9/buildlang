@@ -1,0 +1,43 @@
+// Negative fixture for mc_pi_rejection_executed.bld: the same sampler under
+// the same WRONG-AREA estimator as mc_pi_rejection_broken.bld (factor 3.0
+// instead of 4.0), with the same three-column EXECUTED capture
+// (`slack inside k`).
+//
+// The central lesson this fixture seals into the corpus: the wrong-area
+// factor only scales the printed estimate/slack (column 0), never the raw
+// `inside`/`k` counters (columns 1-2). So the EXECUTED interval still
+// executes and re-derives CLEANLY (a coherent, witnessed denominator and a
+// correctly re-derived wilson-95 interval), while the slack column still
+// blows through the truth band and the `non-negative` invariant FAILs as
+// declared (FAIL_EXPECTED). The interval claim and the estimator-truth claim
+// fail INDEPENDENTLY: an executed interval is not a truth claim about the
+// quantity it estimates, only about the arithmetic and the denominator.
+//
+// The sealed seed makes the failure exactly re-derivable.
+
+fn main() ~ Console + Random {
+    let n: i32 = 2000;
+    let burn: i32 = 200;
+    let band: f64 = 0.3;
+    let mut inside: i32 = 0;
+    let mut k: i32 = 0;
+    while k < n {
+        let x: f64 = random_f64();
+        let y: f64 = random_f64();
+        if x * x + y * y < 1.0 {
+            inside = inside + 1;
+        }
+        k = k + 1;
+        if k >= burn {
+            // Wrong area factor: 3.0 instead of 4.0. Untouched: the raw
+            // inside/k counters below, so the executed interval still
+            // re-derives cleanly even as the slack claim fails.
+            let est: f64 = 3.0 * (inside as f64) / (k as f64);
+            let mut err: f64 = est - 3.14159265358979323846;
+            if err < 0.0 {
+                err = 0.0 - err;
+            }
+            println!("{} {} {}", band - err, inside, k);
+        }
+    }
+}

@@ -25,6 +25,8 @@
     {"source": "examples/random_walk_bound_broken.bld", "invariant": "non-negative", "negative_fixture": true, "seed": 42, "expected_status": "FAIL_EXPECTED"},
     {"source": "examples/mc_pi_rejection.bld", "invariant": "non-negative", "seed": 42, "mc_estimator": "mean", "mc_samples": 2000, "mc_interval": "normal-approx-95", "expected_status": "PASS"},
     {"source": "examples/mc_pi_rejection_broken.bld", "invariant": "non-negative", "negative_fixture": true, "seed": 42, "mc_estimator": "mean", "mc_samples": 2000, "mc_interval": "normal-approx-95", "expected_status": "FAIL_EXPECTED"},
+    {"source": "examples/mc_pi_rejection_executed.bld", "invariant": "non-negative", "seed": 42, "mc_estimator": "proportion", "mc_samples": 2000, "mc_interval": "wilson-95", "mc_executed": true, "expected_status": "PASS"},
+    {"source": "examples/mc_pi_rejection_executed_broken.bld", "invariant": "non-negative", "negative_fixture": true, "seed": 42, "mc_estimator": "proportion", "mc_samples": 2000, "mc_interval": "wilson-95", "mc_executed": true, "expected_status": "FAIL_EXPECTED"},
     {"source": "examples/greedy_change_budget.bld", "invariant": "non-negative", "budget_steps": 60000, "budget_consumed": 495, "expected_status": "PASS"},
     {"source": "examples/greedy_change_budget_broken.bld", "invariant": "non-negative", "negative_fixture": true, "budget_steps": 60000, "budget_consumed": 495, "expected_status": "FAIL_EXPECTED"},
     {"source": "examples/decay_cross_backend.bld", "invariant": "cross-backend", "cross_backend": "rust", "expected_status": "PASS"}

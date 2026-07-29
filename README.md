@@ -257,8 +257,8 @@ output, and the receipt tooling are the verified core; SPIR-V, LLVM IR, WASM,
 Rust, x86-64, ARM64, GPU dispatch, and `#[linear]` types are labeled
 experimental and stay that way until their evidence says otherwise. The
 release-shaped baseline (2026-07-29, local `cargo test` from `compiler/`):
-1605 tests passing, 0 failing (11 ignored), with `buildc receipt corpus`
-27/27 and `buildc corpus verify` 8/8. Ground-truth release evidence lives in
+1683 tests passing, 0 failing (11 ignored), with `buildc receipt corpus`
+29/29 and `buildc corpus verify` 8/8. Ground-truth release evidence lives in
 [STATUS.md](STATUS.md); [CHANGELOG.md](CHANGELOG.md) tracks changes.
 
 ## Documentation and ecosystem
