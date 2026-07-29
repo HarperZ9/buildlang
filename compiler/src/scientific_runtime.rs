@@ -2353,6 +2353,22 @@ pub fn evaluate_scientific_runtime_receipt(
         return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
     }
     if let Some(cb) = &receipt.cross_backend {
+        // The mirror of emit's own Random exclusion (main.rs: `--cross-backend`
+        // refuses a Random-observing kernel before compiling, because the Rust
+        // lane has no seeded PRNG builtin). Checked on the RE-DERIVED
+        // capability union, exactly like the seed pairing and Model gates
+        // above, so a hand-built (or tampered-toolchain) receipt cannot ride a
+        // seeded Random kernel through to the re-run and get misclassified as
+        // RERUN_FAILED when rustc later chokes on the undefined symbol. This
+        // transitively excludes a monte_carlo block riding alongside
+        // cross_backend too, since an MC block requires Random by the pairing
+        // gate a few lines up.
+        if rederived_uses_random {
+            eprintln!(
+                "Error: cross_backend block present but the re-derived capabilities include Random: the Rust lane has no seeded PRNG, so the two streams could not agree; emit refuses this combination and verify must too"
+            );
+            return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+        }
         if cb.secondary_target != "rust" {
             eprintln!(
                 "Error: cross_backend.secondary_target `{}` is not supported (v0: rust only)",
@@ -3030,7 +3046,11 @@ fn digest_is_well_formed(digest: &ScientificDigest) -> bool {
 ///   outright; today only `Model` (models propose, oracles dispose).
 /// - `TOOL_UNAVAILABLE` (exit 4): no C compiler is available for the re-run.
 /// - `REDERIVATION_FAILED`, `RERUN_FAILED`: the source could not be re-checked
-///   or re-run (missing file, toolchain failure), distinct from drift.
+///   or re-run (missing file, toolchain failure), distinct from drift. Exit 4
+///   is shared: `TOOL_UNAVAILABLE` for a missing primary (C) toolchain and
+///   `RERUN_FAILED` for a missing secondary (rustc) toolchain both propagate
+///   exit code 4. `failure_class`, not the exit code, is the machine key that
+///   distinguishes which toolchain was unavailable.
 /// - `SOURCE_DIGEST_MISMATCH`, `INPUT_GRAPH_DIGEST_MISMATCH`: the source
 ///   changed since sealing.
 /// - `RERUN_EXIT_MISMATCH`: the re-run's process exit code differs from the
@@ -5959,6 +5979,59 @@ mod tests {
             run(&wrong_status),
             Err(1),
             "a non-EXECUTED cross_backend.status must be refused"
+        );
+    }
+
+    #[test]
+    fn verify_refuses_a_cross_backend_receipt_over_a_random_kernel() {
+        // I-1 from the final-stack review: emit refuses `--cross-backend` on a
+        // Random-observing kernel (main.rs) because the Rust lane has no
+        // seeded PRNG builtin, so the two streams could not agree. Verify had
+        // no mirror -- a hand-built, correctly re-sealed receipt pairing
+        // cross_backend with a seeded Random effect policy passed every other
+        // field-contract gate and was only caught deep in the re-run, when
+        // rustc failed on the undefined `build_random_f64` symbol
+        // (misclassified RERUN_FAILED instead of FIELD_CONTRACT_VIOLATION).
+        // This test builds exactly that receipt through the real builder --
+        // a Random-including effect policy, a sealed seed, AND a cross_backend
+        // block -- and asserts it is refused before any re-run is attempted.
+        fn random_policy() -> ScientificEffectPolicy {
+            ScientificEffectPolicy {
+                facts_digest: hex_digest('9'),
+                observed_capabilities: vec!["Console".to_string(), "Random".to_string()],
+                reads_stdin: false,
+            }
+        }
+        let path = Path::new("k.bld");
+        let series = vec![1.0, 1.0000005, 0.5, 0.5000001];
+        let receipt = build_scientific_runtime_receipt(ScientificReceiptInputs {
+            effect_policy: random_policy(),
+            seed_value: Some(42),
+            ..cross_backend_inputs(path, series, true, false)
+        });
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let sd = receipt.source_digest.clone();
+        let gd = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            move |_| {
+                Ok(RederivedFacts {
+                    source_digest: sd,
+                    input_graph_digest: gd,
+                    effect_policy: random_policy(),
+                })
+            },
+            |_, _, _, _| panic!("must be refused before the re-run"),
+        );
+        assert_eq!(
+            result,
+            Err(1),
+            "a cross_backend receipt over a re-derived Random kernel must be refused"
         );
     }
 
