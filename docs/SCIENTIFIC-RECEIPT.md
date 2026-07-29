@@ -649,6 +649,10 @@ member file is gone), and `CHAIN_LINK_UNVERIFIED` (a member no longer re-verifie
 re-runs each member, `chain verify` needs the C toolchain and the member sources, exactly like
 `receipt verify`.
 
+For a worked walkthrough that chains one receipt per computation mode (deterministic,
+probabilistic-exact, stochastic, Monte Carlo, heuristic, plus the cross-backend bonus), see
+[FIVE-MODES-TOUR.md](FIVE-MODES-TOUR.md).
+
 ### The example corpus (`receipt corpus`)
 
 The example kernels come in positive/negative pairs, each declared to PASS or to FAIL_EXPECTED

@@ -17141,3 +17141,225 @@ fn check_reports_capability_effect_for_model_call() {
         stderr
     );
 }
+
+#[test]
+fn five_modes_bind_into_one_chain() {
+    if !c_backend_ready() {
+        eprintln!("skipping five_modes_bind_into_one_chain: C backend not ready");
+        return;
+    }
+    let dir =
+        std::env::temp_dir().join(format!("buildlang_five_modes_chain_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create five-modes chain fixture dir");
+
+    // One receipt per computation mode, each under its shipped exemplar
+    // kernel and PASS-declared invariant from examples/scientific-corpus.json.
+    let emit_member = |label: &str, src: &str, out: &Path, metric: Option<&str>, extra: &[&str]| {
+        let mut cmd = buildc();
+        cmd.arg("run")
+            .arg(repo_example(src))
+            .args(["--emit-receipt"])
+            .arg(out);
+        if let Some(metric) = metric {
+            cmd.args(["--metric", metric]);
+        }
+        cmd.args(extra);
+        let output = cmd
+            .output()
+            .unwrap_or_else(|err| panic!("emit {label} receipt: {err}"));
+        assert!(
+            output.status.success(),
+            "emitting the {label} receipt should succeed\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let receipt: serde_json::Value = serde_json::from_slice(
+            &fs::read(out).unwrap_or_else(|err| panic!("read {label} receipt: {err}")),
+        )
+        .unwrap_or_else(|err| panic!("parse {label} receipt: {err}"));
+        assert_eq!(
+            receipt["receipt_status"], "PASS",
+            "the {label} receipt must PASS\nreceipt:\n{receipt}"
+        );
+    };
+
+    let deterministic = dir.join("01-deterministic.json");
+    emit_member(
+        "deterministic",
+        "heat_equation_energy.bld",
+        &deterministic,
+        Some("energy"),
+        &[
+            "--invariant",
+            "energy-monotone",
+            "--problem",
+            "1d-heat-equation-energy",
+        ],
+    );
+
+    let probabilistic_exact = dir.join("02-probabilistic-exact.json");
+    emit_member(
+        "probabilistic-exact",
+        "born_rule_normalization.bld",
+        &probabilistic_exact,
+        None,
+        &[
+            "--invariant",
+            "conservation",
+            "--problem",
+            "born-rule-normalization",
+        ],
+    );
+
+    let stochastic = dir.join("03-stochastic.json");
+    emit_member(
+        "stochastic",
+        "random_walk_bound.bld",
+        &stochastic,
+        Some("slack"),
+        &[
+            "--invariant",
+            "non-negative",
+            "--problem",
+            "seeded-random-walk-envelope",
+            "--seed",
+            "42",
+        ],
+    );
+
+    let monte_carlo = dir.join("04-monte-carlo.json");
+    emit_member(
+        "monte-carlo",
+        "mc_pi_rejection.bld",
+        &monte_carlo,
+        Some("slack"),
+        &[
+            "--invariant",
+            "non-negative",
+            "--problem",
+            "mc-pi-rejection",
+            "--seed",
+            "42",
+            "--mc-estimator",
+            "mean",
+            "--mc-samples",
+            "2000",
+            "--mc-interval",
+            "normal-approx-95",
+        ],
+    );
+
+    let heuristic = dir.join("05-heuristic.json");
+    emit_member(
+        "heuristic",
+        "greedy_change_budget.bld",
+        &heuristic,
+        Some("slack"),
+        &[
+            "--invariant",
+            "non-negative",
+            "--problem",
+            "greedy-change-budget",
+            "--budget-steps",
+            "60000",
+            "--budget-consumed",
+            "495",
+        ],
+    );
+
+    let mut members = vec![
+        deterministic.clone(),
+        probabilistic_exact.clone(),
+        stochastic.clone(),
+        monte_carlo.clone(),
+        heuristic.clone(),
+    ];
+
+    // The cross-backend bonus link rides only on a local rustc; if it is
+    // unavailable, proceed with the five-member chain instead of six,
+    // mirroring c_backend_ready's skip idiom for the affected link only.
+    let cross_backend_included = rustc_available();
+    if cross_backend_included {
+        let cross_backend = dir.join("06-cross-backend.json");
+        emit_member(
+            "cross-backend",
+            "decay_cross_backend.bld",
+            &cross_backend,
+            None,
+            &[
+                "--cross-backend",
+                "rust",
+                "--invariant",
+                "cross-backend",
+                "--problem",
+                "decay-cross-backend",
+            ],
+        );
+        members.push(cross_backend);
+    } else {
+        eprintln!(
+            "five_modes_bind_into_one_chain: skipping the cross-backend link, rustc not available; chaining five members instead of six"
+        );
+    }
+
+    // Bind every member into one tamper-evident chain with the EXISTING
+    // chain machinery, and the clean chain verifies.
+    let chain = dir.join("chain.json");
+    let mut build_cmd = buildc();
+    build_cmd
+        .args(["receipt", "chain", "build"])
+        .args(&members)
+        .arg("-o")
+        .arg(&chain);
+    let build = build_cmd.output().expect("build the five-modes chain");
+    assert!(
+        build.status.success(),
+        "chain build should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let verify = buildc()
+        .args(["receipt", "chain", "verify"])
+        .arg(&chain)
+        .output()
+        .expect("verify the clean five-modes chain");
+    assert!(
+        verify.status.success(),
+        "the clean five-modes chain must verify\nstderr:\n{}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+
+    // Tamper the stochastic member's stored violation_count WITHOUT
+    // re-sealing: seal.hex still matches the pin (step 2 of chain verify
+    // passes), but the member's own `receipt verify` recomputes the seal
+    // over the edited body and rejects it, so the exact failure class is
+    // CHAIN_LINK_UNVERIFIED, not CHAIN_LINK_TAMPERED (that class is reserved
+    // for a seal.hex edit / member substitution; see
+    // receipt_chain_build_and_verify_is_tamper_evident).
+    let mut body: serde_json::Value =
+        serde_json::from_slice(&fs::read(&stochastic).expect("read stochastic receipt"))
+            .expect("parse stochastic receipt");
+    let violation_count = body["invariant"]["observed"]["violation_count"]
+        .as_i64()
+        .unwrap_or(0);
+    body["invariant"]["observed"]["violation_count"] = serde_json::Value::from(violation_count + 1);
+    fs::write(&stochastic, serde_json::to_vec_pretty(&body).unwrap())
+        .expect("write tampered stochastic receipt");
+
+    let verify_tampered = buildc()
+        .args(["receipt", "chain", "verify"])
+        .arg(&chain)
+        .output()
+        .expect("verify the tampered five-modes chain");
+    assert!(
+        !verify_tampered.status.success(),
+        "a chain with a tampered member must fail"
+    );
+    assert!(
+        String::from_utf8_lossy(&verify_tampered.stderr).contains("CHAIN_LINK_UNVERIFIED"),
+        "editing a witnessed field without re-sealing must report CHAIN_LINK_UNVERIFIED\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_tampered.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
