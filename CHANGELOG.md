@@ -10,6 +10,24 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- **Split-frontier drop flags (memory pillar increment 5, opt-in)**: behind the
+  same `BUILDLANG_EXPERIMENTAL_FREE` flag (default off, flag-off output
+  byte-identical, verified mechanically), the C backend now reclaims heap
+  `BuildString` buffers whose death frontier is split across conditional
+  edges and buffers whose allocation is itself conditional, the two shapes
+  increments 1-4 decline. Mechanism: a per-buffer runtime `uint8_t` drop
+  flag, set immediately after the owner's unique allocation or move-acquire,
+  tested and cleared at every free (`analysis::flags::split_frontier_flag_frees`,
+  wired into `backend::c`). Additive and disjoint from increments 1-4: every
+  buffer is freed by exactly one mechanism. Verified ASan-clean on two
+  1,000,000-total-iteration real-program fixtures and a six-lens adversarial
+  pass in an isolated worktree; `buildc corpus verify` 8/8 flag on and off;
+  full suite 1,613 passed. Honest scope kept: re-entrant frontier sites
+  (loop headers, self-loops) still decline (only the Return backstop
+  reclaims those, leaking safely per-iteration); allocations outside the
+  closed 6-name runtime list, escaping/reassigned/multi-move-tainted owners,
+  and `BuildVec`/`BuildMap` buffers are unchanged declines. The memory
+  pillar is NOT done and the flag is NOT default-on.
 - **Wall-clock metering, the first EXECUTED budget fact**: `runtime_state` gains
   `wall_seconds`, the receipt's first EXECUTED time fact, measured with
   `std::time::Instant` around the primary run's `.output()` call, rounded to

@@ -554,6 +554,282 @@ but does NOT hold as a peak-working-set measurement while ASan's quarantine is
 active — that is a limitation of the measurement tool for this specific
 metric, not evidence against the free's correctness or effect.
 
+### Increment 5: split-frontier drop flags
+
+Increment 5 (`split_frontier_flag_frees` in `compiler/src/codegen/analysis/flags.rs`,
+wired into `compiler/src/codegen/backend/c.rs`'s `generate_function`/
+`generate_terminator`/`generate_statement`) is wired behind
+`BUILDLANG_EXPERIMENTAL_FREE` and reclaims owners whose death frontier is
+SPLIT across conditional edges (used on one arm of an `if`, not the other)
+and owners whose ALLOCATION is conditional (def block does not dominate the
+frees), the two shapes increments 1-4 decline. Mechanism: a per-buffer
+runtime `uint8_t` drop flag in the emitted C, tested and cleared at every
+free, additive and disjoint from increments 1-4 (each buffer freed by
+exactly one mechanism).
+
+**The soundness invariant (verbatim, carried in both `analysis::flags` and
+`backend::c`'s emission code):**
+
+> At every point in the emitted C, `__bl_live_N == 1` implies `L` currently
+> holds a fresh allocated buffer that no free site has released. Established
+> by: init 0 at declaration; set 1 ONLY immediately after `L`'s unique def
+> (an allocating call or a move-acquire of a fresh buffer whose source is
+> moved-from and therefore excluded from every free set); cleared to 0
+> immediately after every guarded free; `build_string_free` reached only
+> under the flag test. The flag guards ALLOCATED (double free, uninitialized
+> free). It does not guard LIVENESS: a site must additionally satisfy
+> buffer-dead-at-entry (no future use of the owner or any borrow temp on any
+> path), which is what forbids use-after-free. Both halves are load-bearing.
+
+**Placement rule.** For each owner not already claimed by increments 1-4:
+enroll it as a flag owner unconditionally; compute per-block buffer
+liveness and `terminal[b] = buf_in[b] && !buf_out[b]`; a block `S` is a
+frontier free site iff it is reachable, not the entry, has a predecessor,
+`!buf_in[S]` (the UAF guard), some predecessor is terminal (a real death
+happened upstream), and `S` is not re-entrant (no predecessor has `S` in
+its dominator set, i.e. no back-edge into `S`). Unlike increment 4 there is
+no dominance requirement (the flag covers conditional allocation) and no
+uniqueness requirement (multiple sites are fine; the shared flag's clear
+makes a later site on the same path a no-op). Every enrolled owner
+additionally gets a guarded free at every `Return` (the backstop), which
+reclaims paths that bypass every frontier site.
+
+**Two hazards caught in design** (both are why the flag exists rather than
+an unguarded free at the naive placement):
+
+1. Return-backstop double free without the clear: a frontier site frees the
+   buffer, then the same execution reaches a `Return` whose backstop would
+   free it again if the guard did not clear the flag on every free.
+2. Uninitialized free without the guard on conditional allocation: an owner
+   allocated on only one arm of an `if`, with the other arm never touching
+   it; an unguarded free reachable from both arms would free garbage
+   (uninitialized `cap`/`ptr`) on the arm that never allocated.
+
+**Verified deviation from the original motivating fixture.** The first
+draft of the motivating fixture and of `conditional_alloc.bld` modeled the
+would-be leak on `drops.rs`'s synthetic `declines_split_death_frontier`
+unit-test CFG: a single owner used (or allocated) on one arm of an `if`,
+merging directly at a shared join. Compiling that exact shape and diffing
+flag-on against flag-off showed NO flag machinery: increment 4
+(`multi_block_freeable`) already claims it, unguarded, and correctly so.
+Reading the generated C explained why: every `Call` terminator (`printf`,
+here) gets its own continuation block for "control after the call
+returns". That continuation block is reached from exactly one predecessor
+(the arm that made the call) and lies entirely inside the allocating arm's
+own dominance region, so it satisfies increment 4's single-clean-death-
+frontier rule (and, for the conditional-allocation case, its dominance
+requirement) all by itself, without ever needing to look past the join the
+synthetic CFG's clean-chain rejection is designed to catch.
+
+The shape that genuinely defeats increment 4 in real compiled code is
+MULTIPLE independently-valid candidate sites for the same owner: when both
+arms of an `if` use (or allocate-and-use) the owner, each arm's call
+continuation block independently satisfies increment 4's per-block site
+rule, so `multi_block_freeable`'s function-wide "exactly one qualifying
+block" requirement is violated by having two, and it declines the owner
+entirely (leak, safe) even though each site would have been sound in
+isolation. Increment 5 has no uniqueness requirement, so it is the only
+mechanism that reclaims this owner. The shipped fixtures
+(`compiler/tests/mem/split_frontier_loop.bld`,
+`compiler/tests/mem/conditional_alloc.bld`) use this multiplicity shape;
+`analysis::flags`'s own unit tests separately verify the clean-chain/
+dominance-declined shape the original synthetic CFG describes, via directly
+constructed MIR. Both are genuine declines of increments 1-4; the real
+`.bld` fixtures exercise the one reachable from real BuildLang source
+today, and each fixture's header comment records this finding in full.
+
+**C-diff confirmation** (`buildc compiler/tests/mem/split_frontier_loop.bld
+--target c -o off.c` / `set BUILDLANG_EXPERIMENTAL_FREE=1` / `-o on.c` /
+`fc off.c on.c`):
+
+```
++    uint8_t __bl_live_6 = 0;
+...
+bb3:
++    if (__bl_live_6) { build_string_free(s); __bl_live_6 = 0; }
+     fflush(stdout);
+     return 0;
+bb4:
+     _4 = build_string_new(__str0);
+     _5 = build_string_concat(_3, _4);
+     s = _5;
++    __bl_live_6 = 1;
+     _7 = (i % 2);
+     _8 = (_7 == 0);
+     if (_8) goto bb7; else goto bb8;
+...
+bb10:
++    if (__bl_live_6) { build_string_free(s); __bl_live_6 = 0; }
+     goto bb9;
+bb11:
++    if (__bl_live_6) { build_string_free(s); __bl_live_6 = 0; }
+     goto bb9;
+```
+
+One declaration, one set after the concat's move-acquire (`s = _5;`), one
+guarded free per `if`/`else` arm's continuation block, one guarded Return
+backstop. `conditional_alloc.bld`'s diff has the same four-part shape (decl,
+set, two frontier sites, Return backstop), with the set landing inside the
+conditionally-allocating arm instead of unconditionally in the loop body.
+
+**Double-free negative regression.** Regenerating `on.c` for the pre-
+existing `compiler/tests/mem/multi_block_loop.bld` and diffing against its
+`off.c` is still exactly the single unguarded `build_string_free(s);` line
+from increment 4: no flag machinery. Disjointness holds at the emitted-C
+level; a buffer already freed by increment 4 gains no second freer.
+
+**ASan run** (MSVC BuildTools 2022, `vcvars64.bat` loaded):
+
+```
+call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+cl.exe /nologo /std:c11 /fsanitize=address /Fe:on.exe on.c
+on.exe > out.txt 2> err.txt
+```
+
+Result: `split_frontier_loop.bld` on.exe, two independent runs, exit 0,
+zero `AddressSanitizer:` lines, 1,000,000 lines of output ending
+`odd 999999!` (matches the fixture's predicate: 1,000,000 iterations, one
+line per iteration). off.exe: exit 0, same 1,000,000 lines, zero
+`AddressSanitizer:` lines. `conditional_alloc.bld` on.exe, two independent
+runs, exit 0, zero `AddressSanitizer:` lines, 500,000 lines ending
+`b 999998!` (500,000 iterations satisfy `i % 2 == 0`; matches the
+predicate). off.exe: same, clean.
+
+**Peak memory** (without ASan, `cl /nologo /std:c11 /O2`, `PeakWorkingSet64`
+polling, two runs each): `split_frontier_loop` off.exe 34.2-34.6 MB, on.exe
+~19.2 MB (about 1.8x lower). `conditional_alloc` off.exe 18.7-19.2 MB,
+on.exe 11.0-11.8 MB (about 1.6-1.7x lower). Direction only, as with
+increment 4: the multiplier is fixture-dependent.
+
+**Mutation checks** (break each guard, observe red, restore, observe
+green; every mutation reverted and reconfirmed byte-identical to the clean
+`on.c` before moving to the next):
+
+- Remove `!buf_in[S]`: `uaf_shape_declines_live_join` and the full
+  `codegen` test suite stayed GREEN. This is not a gap: `buf_out[p]` is
+  defined as the union of `buf_in` over ALL of `p`'s successors, so
+  `terminal[p] == true` mathematically implies `buf_in[S] == false` for
+  every direct successor `S` of `p` (if some successor still needed the
+  buffer, that need would flow into `buf_out[p]` via the union, making
+  `p` not terminal). The `some predecessor is terminal` check already
+  implies the UAF guard for any site reachable through this rule; removing
+  `!buf_in[S]` cannot produce a counterexample under the current, correct
+  liveness formalism. The check is KEPT (defense in depth against a future
+  change to `terminal`'s definition) but this is recorded as a finding
+  against the plan's assumption, not a red/green pair: it does not
+  independently falsify.
+- Remove the `claimed` skip: `claimed_owner_not_enrolled` RED (a claimed
+  owner got enrolled, violating disjointness). Restored, GREEN.
+- Remove the terminal-pred requirement: `no_site_without_terminal_pred`
+  RED (clean blocks downstream of a non-terminal predecessor wrongly
+  re-qualified). Restored, GREEN.
+- Remove the re-entrant exclusion: `declines_reentrant_site` RED (a loop
+  header wrongly became a site). Restored, GREEN.
+- Remove the `__bl_live_N = 0;` clear: helper exact-text test RED.
+  Compiling and running `split_frontier_loop.bld` under ASan with the
+  mutation: `AddressSanitizer: attempting double-free`, exit 1 (the
+  frontier site frees, the Return backstop frees the same buffer again on
+  the same path). Restored; helper text test GREEN; regenerated `on.c`
+  byte-identical to the clean version; re-ran ASan clean.
+- Change the flag initializer `= 0` to `= 1`: helper/decl text RED (both
+  the emitted declaration and, separately, the exact-text helper test).
+  The natural compiled-fixture repro (a program whose allocating arm never
+  runs) depended on whatever garbage happened to occupy the never-assigned
+  local's stack slot; on the test machine that garbage read back as
+  `cap == 0`, so `build_string_free`'s own `if (cap > 0)` guard silently
+  no-oped it (still undefined behavior, but not one MSVC ASan's UAF/
+  double-free/invalid-free detectors are positioned to catch without
+  MemorySanitizer-style uninitialized-read detection). A second,
+  deterministic harness reproducing the identical emitted guard pattern
+  with a REAL stale pointer left in the reused stack slot (via ordinary
+  stack-frame reuse across two calls) hit
+  `AddressSanitizer: attempting free on address which was not
+  malloc()-ed`, exit 1: bad-free. Restored; both text checks GREEN;
+  regenerated `on.c` byte-identical to the clean version.
+- Remove the def-site `__bl_live_N = 1;` emission (move-acquire arm, the
+  one the shipped fixtures exercise): C-diff check RED (the set line is
+  absent from the expected on-diff). This mutation fails SAFE: the flag
+  never becomes 1, so every guarded free is a permanent no-op and the
+  buffer leaks every iteration; no corruption. Restored; C-diff
+  byte-identical to the clean version.
+
+**Adversarial pass** (six lenses, isolated `git worktree`, never the main
+tree; removed after): every lens either found no counterexample or found
+something that resolves, on rigorous analysis, to a documented and
+harmless margin.
+
+1. Flag-invariant attack: no counterexample. `sound_owned_candidates`'s
+   `def_count == 1` gate, combined with how `owner_def` is populated
+   (only an allocating-Call dest or a move-acquire from an existing
+   owner), makes it structurally impossible for the SET emission to fire
+   on anything other than the owner's true unique definition.
+2. Borrow-overlay blindness: no counterexample. `owned_string_escapes`'s
+   exhaustive `rvalue_mentions` match rejects `Ref`/`AddressOf` and any
+   non-`FieldAccess` mention before a candidate ever reaches
+   `analysis::flags`; the multi-hop-`.ptr`-copy shape the escape check
+   defends against is confirmed NOT reachable from surface BuildLang
+   syntax today (`.ptr` is not a user-accessible field), matching the
+   existing "latent: not currently source-reachable" comment in `cfg.rs`.
+3. Move-chain aliasing: no counterexample. A source moved conditionally
+   into two different destinations on mutually exclusive arms is tainted
+   by the pre-existing (increment-2) multi-acquirer guard regardless of
+   control flow, excluding both destinations from `sound_owned_candidates`
+   entirely; verified on a real 1,000,000-iteration compiled program that
+   emits zero free machinery for the tainted owner (leak, safe).
+4. Re-entrance: the dominator-based re-entrant exclusion, as written, does
+   not catch every structurally re-entrant block (a body block reached by
+   a single forward edge whose own successor loops back to the header is
+   not flagged by "does some predecessor's dominator set contain this
+   block"). This is not a soundness gap: any such block either fails the
+   `buf_in[S] == false`/terminal-predecessor checks via the same
+   liveness-fixpoint argument that makes the mutation-1 finding hold (the
+   buffer being genuinely needed again next iteration makes the fixpoint
+   correctly mark it live), or, if it does qualify, the runtime GUARD
+   (not the site-selection logic) makes a repeat execution of an
+   already-cleared flag a safe no-op. Confirmed empirically on a nested-
+   loop nightmare stress case (2,000 x 500 = 1,000,000 inner iterations,
+   increments 4 and 5 both active) under ASan: exit 0, zero
+   `AddressSanitizer:` lines, all 1,000,000 lines correct. The kept
+   exclusion is therefore a scope-bounding choice matching increment 4's
+   rule verbatim, not a load-bearing soundness gate for increment 5;
+   relaxing it remains a named follow-up, not this brick.
+5. Return-backstop interaction: no counterexample. Disjoint from the
+   unguarded fn-exit frees by construction (the `claimed` set excludes any
+   overlap). Found a minor, harmless REDUNDANCY: when a frontier site and
+   a `Return` land in the same block (e.g. an early `return` right after
+   the site), two guarded-free statements for the same owner are emitted
+   back to back; the second is always a no-op (the flag is already 0).
+   Verified sound under ASan on a 500,001-line early-return stress case
+   (exit 0, zero `AddressSanitizer:` lines). Not fixed: it is pure
+   emission verbosity with zero soundness effect.
+6. Special-case Call emission paths: no counterexample. Every special-case
+   string comparison in the Call arm's generic tail (`__vtable_dispatch_`,
+   the `intrinsic_*` remap, `Vec_new`/`String_new`/`String_from`/`clone`/
+   `None`/`Some`/`Ok`/`Err`/the unit-struct constructors/`fn_returns_void`)
+   was re-enumerated exhaustively; none can ever equal one of the closed
+   6-name `allocates_owned_string` list, so an allocating callee always
+   reaches the generic tail where the def-site set is emitted.
+
+**Kept re-entrant exclusion.** As lens 4 above establishes, the flag's
+runtime guard would make a re-entrant site SOUND (the guard blocks the
+second free); the exclusion is kept verbatim from increment 4 to bound
+this brick's adversarial surface to exactly what is already audited and
+tested, per the plan. Relaxing it to cover loop-header/self-loop death
+frontiers (the largest remaining decline, per-iteration leaks in a loop
+whose only death frontier is its header) is a named, scoped follow-up.
+
+**Verification bar.** Unit: 12 new tests (6 in `analysis::flags`, 2 new
+plus 1 extended in `backend::c`), full suite 1,613 passed / 0 failed / 11
+ignored (parent baseline 1,605 / 0 / 11). C-diff: both new fixtures and the
+double-free negative regression confirmed. ASan: clean on both new
+fixtures, two runs each, plus three additional adversarial-pass ASan runs
+(nested-loop stress, early-return stress) all clean; two mutation ASan
+runs both caught the intended hazard (double-free, bad-free). Corpus:
+`buildc corpus verify` 8/8 with the flag on and off. Byte-identity: flag
+off, zero differences across both new fixtures, the pre-existing
+`multi_block_loop.bld`, and two semantic-corpus programs, generated at the
+parent commit and at this increment.
+
 ## Why this is documented rather than already implemented
 
 The transpiler/effects/receipts pillars were bounded, TDD-verifiable bricks and
