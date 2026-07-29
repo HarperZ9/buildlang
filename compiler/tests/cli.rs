@@ -14973,8 +14973,8 @@ fn receipt_corpus_asserts_declared_classifications() {
     assert_eq!(shipped["schema"], "buildlang-scientific-receipt-corpus/v0");
     assert_eq!(
         shipped["members"].as_array().unwrap().len(),
-        20,
-        "the shipped corpus should cover all ten kernel pairs"
+        22,
+        "the shipped corpus should cover all eleven kernel pairs"
     );
 
     // A small correct manifest: the command emits, verifies, and confirms each
@@ -16017,6 +16017,128 @@ fn run_units_flag_rejects_unknown_unit_before_compile() {
     assert!(
         !receipt.exists(),
         "no receipt should be written when the unit is rejected"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn carcassi_entropy_relation_round_trips_positive_and_negative() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping carcassi_entropy_relation_round_trips_positive_and_negative: C backend not ready"
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("buildlang_sci_carcassi_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create carcassi fixture dir");
+
+    // POSITIVE: the mixture entropy computed through the Born route (AoP Brief
+    // 003, Proposition 3 closed form) and through the spectral route (trace and
+    // determinant of the assembled density matrix, no Born rule anywhere) agree
+    // per row across the whole lambda sweep, so `--invariant relation
+    // --columns 2` PASSes with zero violations.
+    let pass_receipt = dir.join("carcassi.json");
+    let emit_pass = buildc()
+        .arg("run")
+        .arg(repo_example("carcassi_entropy_relation.bld"))
+        .args(["--emit-receipt"])
+        .arg(&pass_receipt)
+        .args([
+            "--invariant",
+            "relation",
+            "--columns",
+            "2",
+            "--metric",
+            "mixture-entropy",
+            "--problem",
+            "born-rule-entropy-identity",
+        ])
+        .output()
+        .expect("emit carcassi PASS receipt");
+    assert!(
+        emit_pass.status.success(),
+        "emitting the carcassi PASS receipt should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&emit_pass.stderr)
+    );
+    let pass: serde_json::Value =
+        serde_json::from_slice(&fs::read(&pass_receipt).expect("read PASS receipt")).unwrap();
+    assert_eq!(pass["receipt_status"], "PASS");
+    assert_eq!(pass["invariant"]["name"], "relation_columns_agree");
+    assert_eq!(pass["measurement"]["column_count"], 2);
+    assert_eq!(pass["invariant"]["observed"]["violation_count"], 0);
+    // The kernel SWEEPS the identity's curve rather than witnessing one point:
+    // a constant series would make this a much weaker check, so the endpoints
+    // must differ. (Initial entropy is near 0 at lambda close to 1; the final
+    // step sits elsewhere on the curve.)
+    let initial = pass["invariant"]["observed"]["initial_value"]
+        .as_f64()
+        .unwrap();
+    let final_v = pass["invariant"]["observed"]["final_value"]
+        .as_f64()
+        .unwrap();
+    assert!(
+        (initial - final_v).abs() > 1e-3,
+        "the sweep must traverse the curve, got initial={initial} final={final_v}"
+    );
+
+    let verify_pass = buildc()
+        .args(["receipt", "verify"])
+        .arg(&pass_receipt)
+        .output()
+        .expect("verify carcassi PASS receipt");
+    assert!(
+        verify_pass.status.success(),
+        "the carcassi PASS receipt must verify\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_pass.stderr)
+    );
+
+    // NEGATIVE: the unnormalized fixture violates the identity's premise (unit
+    // norm), the two routes disagree at the percent scale, and the receipt is
+    // FAIL_EXPECTED, which still verifies when faithfully reproduced.
+    let fail_receipt = dir.join("unnormalized.json");
+    let emit_fail = buildc()
+        .arg("run")
+        .arg(repo_example("carcassi_entropy_unnormalized.bld"))
+        .args(["--emit-receipt"])
+        .arg(&fail_receipt)
+        .args([
+            "--invariant",
+            "relation",
+            "--columns",
+            "2",
+            "--negative-fixture",
+            "--metric",
+            "mixture-entropy",
+            "--problem",
+            "unnormalized-state",
+        ])
+        .output()
+        .expect("emit carcassi negative fixture");
+    assert!(
+        emit_fail.status.success(),
+        "emitting the carcassi negative fixture should succeed"
+    );
+    let fail: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fail_receipt).expect("read FAIL receipt")).unwrap();
+    assert_eq!(fail["receipt_status"], "FAIL_EXPECTED");
+    assert!(
+        fail["invariant"]["observed"]["violation_count"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+
+    let verify_fail = buildc()
+        .args(["receipt", "verify"])
+        .arg(&fail_receipt)
+        .output()
+        .expect("verify carcassi negative fixture");
+    assert!(
+        verify_fail.status.success(),
+        "a faithfully reproduced FAIL_EXPECTED must verify (exit 0)\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_fail.stderr)
     );
 
     let _ = fs::remove_dir_all(&dir);

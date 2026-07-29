@@ -1,0 +1,83 @@
+// Cross-column RELATION kernel: the Born rule IS the von Neumann entropy.
+//
+// AoP Technical Brief 003 (Carcassi, "The Born rule is equivalent to the von
+// Neumann entropy", assumptionsofphysics.org) proves an exact identity,
+// Proposition 3: for pure states psi and phi with Born probability
+// lambda = p(phi|psi), the entropy of their EQUAL MIXTURE is
+//
+//   S(rho) = -(1+sqrt(lambda))/2 * ln((1+sqrt(lambda))/2)
+//            -(1-sqrt(lambda))/2 * ln((1-sqrt(lambda))/2)
+//
+// and the map lambda <-> S is invertible. This kernel checks that identity
+// numerically along a whole family of state pairs, by computing S each step
+// through TWO INDEPENDENT ROUTES:
+//
+//   column 0 (Born route):     lambda from the inner product <phi|psi>^2,
+//                              then S via the closed form above.
+//   column 1 (spectral route): the mixture density matrix
+//                              rho = (psi psi^T + phi phi^T) / 2 assembled
+//                              entry by entry, its eigenvalues from trace and
+//                              determinant, then S = -sum e_i ln e_i. The Born
+//                              inner product is never used on this route.
+//
+// The AGREEMENT is checked by the VERIFIER (`--invariant relation --columns
+// 2`), not by the program: the kernel prints only the two raw entropies, so it
+// cannot conceal a divergence by computing the residual itself. Both routes
+// are analytic, so faithful implementations agree to roundoff, far inside the
+// relation tolerance (1e-9). The receipt witnesses that the observed output
+// satisfies the relation; it does not claim the brief's theorem (that stays
+// NOT_A_NEW_PHYSICAL_LAW, as every receipt in this family states).
+//
+// The sweep: phi = (1, 0) fixed, psi_k = (cos t, sin t) with t = 0.07 * k for
+// k = 1..60, so lambda = cos^2 t sweeps the identity's whole curve (Fig. 2 of
+// the brief) instead of witnessing one point. States stay unit-norm by
+// construction, which is the premise the identity needs; the companion
+// negative fixture carcassi_entropy_unnormalized.bld breaks exactly that
+// premise and the two routes then disagree at the percent scale.
+
+fn main() ~ Console {
+    let mut k: i32 = 1;
+    while k <= 60 {
+        let t: f64 = 0.07 * (k as f64);
+        let phi0: f64 = 1.0;
+        let phi1: f64 = 0.0;
+        let psi0: f64 = cos(t);
+        let psi1: f64 = sin(t);
+
+        // --- column 0: the Born route -----------------------------------
+        let dot: f64 = phi0 * psi0 + phi1 * psi1;
+        let lambda: f64 = dot * dot;
+        let p_hi: f64 = (1.0 + sqrt(lambda)) / 2.0;
+        let p_lo: f64 = (1.0 - sqrt(lambda)) / 2.0;
+        let mut s_born: f64 = 0.0;
+        if p_hi > 0.0 {
+            s_born = s_born - p_hi * log(p_hi);
+        }
+        if p_lo > 0.0 {
+            s_born = s_born - p_lo * log(p_lo);
+        }
+
+        // --- column 1: the spectral route (no Born rule anywhere) -------
+        // rho = (psi psi^T + phi phi^T) / 2, entry by entry.
+        let r00: f64 = (psi0 * psi0 + phi0 * phi0) / 2.0;
+        let r01: f64 = (psi0 * psi1 + phi0 * phi1) / 2.0;
+        let r11: f64 = (psi1 * psi1 + phi1 * phi1) / 2.0;
+        // Eigenvalues of a symmetric 2x2 from trace and determinant.
+        let tr: f64 = r00 + r11;
+        let det: f64 = r00 * r11 - r01 * r01;
+        let disc: f64 = sqrt(tr * tr / 4.0 - det);
+        let e_hi: f64 = tr / 2.0 + disc;
+        let e_lo: f64 = tr / 2.0 - disc;
+        let mut s_spec: f64 = 0.0;
+        if e_hi > 0.0 {
+            s_spec = s_spec - e_hi * log(e_hi);
+        }
+        if e_lo > 0.0 {
+            s_spec = s_spec - e_lo * log(e_lo);
+        }
+
+        println!("{}", s_born);
+        println!("{}", s_spec);
+        k = k + 1;
+    }
+}

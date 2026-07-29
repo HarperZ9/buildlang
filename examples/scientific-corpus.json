@@ -20,6 +20,8 @@
     {"source": "examples/born_rule_normalization.bld", "invariant": "conservation", "expected_status": "PASS"},
     {"source": "examples/born_rule_leaky.bld", "invariant": "conservation", "negative_fixture": true, "expected_status": "FAIL_EXPECTED"},
     {"source": "examples/funnel_probe.bld", "invariant": "non-negative", "expected_status": "PASS"},
-    {"source": "examples/funnel_probe_linear.bld", "invariant": "non-negative", "negative_fixture": true, "expected_status": "FAIL_EXPECTED"}
+    {"source": "examples/funnel_probe_linear.bld", "invariant": "non-negative", "negative_fixture": true, "expected_status": "FAIL_EXPECTED"},
+    {"source": "examples/carcassi_entropy_relation.bld", "invariant": "relation", "columns": 2, "expected_status": "PASS"},
+    {"source": "examples/carcassi_entropy_unnormalized.bld", "invariant": "relation", "columns": 2, "negative_fixture": true, "expected_status": "FAIL_EXPECTED"}
   ]
 }

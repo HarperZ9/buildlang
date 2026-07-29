@@ -326,7 +326,12 @@ load, its measured worst being 14 probes, so it PASSes) with `examples/funnel_pr
 (naive single-level linear probing on the same keys clusters to 85 probes and exceeds the bound,
 so it FAILs; this is a faithful-in-spirit funnel that exhibits the sub-linear worst-case probe
 bound, not a bit-exact reproduction of the paper's optimal constant). Run any negative kernel
-with `--negative-fixture` for a `FAIL_EXPECTED` receipt.
+with `--negative-fixture` for a `FAIL_EXPECTED` receipt. The second `relation` pair is quantum:
+`examples/carcassi_entropy_relation.bld` checks AoP Brief 003's Born-rule/entropy
+identity per step through two independent routes (the Born closed form vs the
+mixture's own spectrum via trace and determinant), swept across the identity's
+whole curve, with `examples/carcassi_entropy_unnormalized.bld` breaking the
+unit-norm premise as its declared-FAIL companion.
 
 ## 5. The heat-equation kernel example
 
@@ -496,7 +501,7 @@ re-runs each member, `chain verify` needs the C toolchain and the member sources
 ### The example corpus (`receipt corpus`)
 
 The example kernels come in positive/negative pairs, each declared to PASS or to FAIL_EXPECTED
-under a named invariant. `examples/scientific-corpus.json` records that ground truth for all ten
+under a named invariant. `examples/scientific-corpus.json` records that ground truth for all eleven
 pairs, and one command checks reality against it:
 
 ```

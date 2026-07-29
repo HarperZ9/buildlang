@@ -1,0 +1,63 @@
+// Cross-column RELATION NEGATIVE fixture (unnormalized state).
+//
+// Identical sweep to carcassi_entropy_relation.bld EXCEPT psi is scaled by
+// 1.05 and neither route compensates. The Born-rule/entropy identity (AoP
+// Brief 003, Proposition 3) presumes genuine states: the Born rule's own
+// denominator <psi|psi><phi|phi> is what this fixture drops, and the mixture
+// stops being trace-one. The Born route then feeds an inflated lambda into the
+// closed form while the spectral route diagonalizes a non-state, and the two
+// entropies disagree at the ~1e-2 scale, far above the 1e-9 relation
+// tolerance, so `--invariant relation --columns 2` FAILs.
+//
+// The verifier catches this even though each column alone still looks like a
+// plausible entropy series: only their RELATION reveals that the premise was
+// violated. Paired negative fixture for carcassi_entropy_relation.bld; run
+// with `--negative-fixture` for FAIL_EXPECTED.
+
+fn main() ~ Console {
+    let mut k: i32 = 1;
+    while k <= 60 {
+        let t: f64 = 0.07 * (k as f64);
+        let phi0: f64 = 1.0;
+        let phi1: f64 = 0.0;
+        // BROKEN: a 5 percent norm inflation, never divided back out.
+        let psi0: f64 = 1.05 * cos(t);
+        let psi1: f64 = 1.05 * sin(t);
+
+        // Born route, naive: no <psi|psi> normalization in the denominator.
+        let dot: f64 = phi0 * psi0 + phi1 * psi1;
+        let lambda: f64 = dot * dot;
+        let p_hi: f64 = (1.0 + sqrt(lambda)) / 2.0;
+        let p_lo: f64 = (1.0 - sqrt(lambda)) / 2.0;
+        let mut s_born: f64 = 0.0;
+        if p_hi > 0.0 {
+            s_born = s_born - p_hi * log(p_hi);
+        }
+        if p_lo > 0.0 {
+            s_born = s_born - p_lo * log(p_lo);
+        }
+        // p_lo can go negative once lambda exceeds 1; the guard then drops the
+        // term entirely, which is itself part of the wrongness on display.
+
+        // Spectral route over the same unnormalized outer products.
+        let r00: f64 = (psi0 * psi0 + phi0 * phi0) / 2.0;
+        let r01: f64 = (psi0 * psi1 + phi0 * phi1) / 2.0;
+        let r11: f64 = (psi1 * psi1 + phi1 * phi1) / 2.0;
+        let tr: f64 = r00 + r11;
+        let det: f64 = r00 * r11 - r01 * r01;
+        let disc: f64 = sqrt(tr * tr / 4.0 - det);
+        let e_hi: f64 = tr / 2.0 + disc;
+        let e_lo: f64 = tr / 2.0 - disc;
+        let mut s_spec: f64 = 0.0;
+        if e_hi > 0.0 {
+            s_spec = s_spec - e_hi * log(e_hi);
+        }
+        if e_lo > 0.0 {
+            s_spec = s_spec - e_lo * log(e_lo);
+        }
+
+        println!("{}", s_born);
+        println!("{}", s_spec);
+        k = k + 1;
+    }
+}

@@ -8,6 +8,17 @@ tracked in `STATUS.md`, `README.md`, and
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
 `108/108` or `132/132` are not the current release gate.
 
+## Unreleased
+
+- Carcassi Born-rule/entropy identity kernel pair (`relation`, 2 columns):
+  `examples/carcassi_entropy_relation.bld` checks AoP Brief 003's Proposition 3
+  per step through two independent routes (Born closed form vs spectral
+  trace/determinant), swept across the identity's whole curve;
+  `examples/carcassi_entropy_unnormalized.bld` breaks the unit-norm premise and
+  FAILs as declared. Scientific corpus grows to eleven pairs (22/22 classified
+  and re-verified); no new invariant and no registry change, per the 2026-07-02
+  plan's own scope rule now that the brief's exact identity is in hand.
+
 ## 1.2.0 - 2026-07-07 - general GPU compute
 
 BuildLang programs now run real work on the GPU: `#[compute]` kernels compile
