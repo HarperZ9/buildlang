@@ -2163,6 +2163,8 @@ impl<'ctx> MirLowerer<'ctx> {
                 "getenv" => return MirType::Struct(Arc::from("BuildString")),
                 // Clock / time builtins
                 "clock_ms" | "time_unix" => return MirType::i64(),
+                // Seeded random builtin
+                "random_f64" => return MirType::f64(),
                 // Format builtins
                 "to_string_i32" | "to_string_f64" => {
                     return MirType::Struct(Arc::from("BuildString"))

@@ -265,13 +265,26 @@ pub struct ScientificNumericalMethod {
 ///
 /// `Console` is the one capability whose character depends on HOW it is used
 /// (stdout writes are safe, stdin reads are not), which `reads_stdin`
-/// disambiguates. Every capability not explicitly recognised as safe counts
-/// as a hazard for BOTH claims, so a capability added to the type checker
-/// later cannot silently widen a witnessed-absence claim. `seed` is
-/// NOT_APPLICABLE in v0 because the language has no RNG builtin at all.
+/// disambiguates. `Random` is the other conditional one: it feeds no dataset
+/// (the PRNG is arithmetic over a 64-bit state, not a data channel), and it
+/// varies between runs ONLY when unseeded, which `sealed_seed` disambiguates.
+/// Every capability not explicitly recognised as safe counts as a hazard for
+/// BOTH claims, so a capability added to the type checker later cannot
+/// silently widen a witnessed-absence claim.
+///
+/// The `seed` field is a trichotomy:
+/// * no Random capability -> `NOT_APPLICABLE` (nothing draws; a sealed seed
+///   would be a claim about a capability the program does not have);
+/// * Random with a sealed seed -> `SEALED` (the receipt's `seed_value` field
+///   carries the number; the same seed reproduces the stream);
+/// * Random with NO seed -> `UNSEEDED`. Emit refuses to produce a receipt in
+///   this state, so it only arises when verify re-derives the fields for a
+///   receipt whose sealed claims disagree with its capabilities, where the
+///   mismatch is exactly the point.
 pub fn witnessed_fields_from_capabilities(
     observed_capabilities: &[String],
     reads_stdin: bool,
+    sealed_seed: Option<u64>,
 ) -> (
     ScientificWitnessedField,
     ScientificWitnessedField,
@@ -279,17 +292,24 @@ pub fn witnessed_fields_from_capabilities(
 ) {
     let mut dataset_hazards: Vec<String> = Vec::new();
     let mut determinism_hazards: Vec<String> = Vec::new();
+    let mut uses_random = false;
     for cap in observed_capabilities {
         let (feeds_dataset, varies) = match cap.as_str() {
             "Console" => (reads_stdin, reads_stdin),
             "Process" => (false, false),
             "Clock" => (false, true),
+            "Random" => {
+                uses_random = true;
+                (false, sealed_seed.is_none())
+            }
             // FileSystem, Network, Environment, Foreign, Gpu, and any
             // capability this build does not recognise: assume it can do both.
             _ => (true, true),
         };
         let label = if cap == "Console" && reads_stdin {
             "stdin".to_string()
+        } else if cap == "Random" && sealed_seed.is_none() {
+            "unseeded Random".to_string()
         } else {
             cap.clone()
         };
@@ -316,15 +336,33 @@ pub fn witnessed_fields_from_capabilities(
         }
     };
 
-    let seed = ScientificWitnessedField {
-        status: "NOT_APPLICABLE".to_string(),
-        grounds: "the language has no RNG builtin; there is no seed to record".to_string(),
+    let seed = match (uses_random, sealed_seed) {
+        (false, _) => ScientificWitnessedField {
+            status: "NOT_APPLICABLE".to_string(),
+            grounds: "the program exercises no Random capability; there is no seed to record"
+                .to_string(),
+        },
+        (true, Some(value)) => ScientificWitnessedField {
+            status: "SEALED".to_string(),
+            grounds: format!(
+                "the Random capability draws from a PRNG seeded with the sealed seed {value}; re-running under the same seed reproduces the stream"
+            ),
+        },
+        (true, None) => ScientificWitnessedField {
+            status: "UNSEEDED".to_string(),
+            grounds: "the Random capability draws with no sealed seed; emit refuses this state, so a receipt carrying it cannot have come from buildc".to_string(),
+        },
     };
 
     let determinism = if determinism_hazards.is_empty() {
+        let grounds = if uses_random {
+            "no observed capability varies between runs given the sealed seed (no Clock, Environment, FileSystem, Network, stdin, Foreign, or GPU access; Random is seeded)".to_string()
+        } else {
+            "no observed capability varies between runs (no Clock, Environment, FileSystem, Network, stdin, Foreign, GPU, or unseeded Random access)".to_string()
+        };
         ScientificDeterminism {
             deterministic_modulo_args: true,
-            grounds: "no observed capability varies between runs (no Clock, Environment, FileSystem, Network, stdin, Foreign, or GPU access)".to_string(),
+            grounds,
         }
     } else {
         ScientificDeterminism {
@@ -492,6 +530,15 @@ pub struct ScientificRuntimeReceipt {
     /// facts (see `witnessed_fields_from_capabilities`).
     pub input_dataset: ScientificWitnessedField,
     pub seed: ScientificWitnessedField,
+    /// The sealed RNG seed, present IFF the program observes the Random
+    /// capability (the `seed` field's status is then `SEALED`). Verify re-runs
+    /// the program under exactly this seed, so the stream (and therefore the
+    /// verdict) is re-derived rather than trusted. Optional-with-default so
+    /// receipts sealed before the Random capability existed still parse AND
+    /// re-serialize to their original bytes (the field is skipped when absent,
+    /// keeping their seals stable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_value: Option<u64>,
     pub determinism: ScientificDeterminism,
     /// Author-declared numerical method (buildc cannot derive scheme
     /// semantics and does not pretend to).
@@ -886,6 +933,10 @@ pub struct ScientificReceiptInputs<'a> {
     /// The program arguments the run was invoked with (recorded so verify can
     /// re-run identically).
     pub args: Vec<String>,
+    /// The RNG seed the run was invoked with (`--seed N`). `cmd_run` has
+    /// already enforced the pairing (a Random-using program requires a seed,
+    /// a seed requires a Random-using program) before building the receipt.
+    pub seed_value: Option<u64>,
     /// The invariant to check over the series (a name from the registry;
     /// `is_known_invariant`). Selects the evaluator, tolerance, expectation,
     /// and the sealed oracle/invariant binding.
@@ -930,6 +981,7 @@ pub fn build_scientific_runtime_receipt(
         series_parsed,
         diverged,
         args,
+        seed_value,
         invariant_name,
         metric,
         units,
@@ -980,6 +1032,7 @@ pub fn build_scientific_runtime_receipt(
     let (input_dataset, seed, determinism) = witnessed_fields_from_capabilities(
         &effect_policy.observed_capabilities,
         effect_policy.reads_stdin,
+        seed_value,
     );
 
     let count = series.len();
@@ -1012,6 +1065,7 @@ pub fn build_scientific_runtime_receipt(
         },
         input_dataset,
         seed,
+        seed_value,
         determinism,
         numerical_method: ScientificNumericalMethod {
             status: if method_description.is_some() {
@@ -1205,6 +1259,29 @@ pub fn build_self_test_cases(
         });
     }
 
+    // 6. FIELD_CONTRACT_VIOLATION (seed pairing): flip the sealed seed_value
+    //    against what the program's capabilities can consume, then re-seal so
+    //    the tamper reaches the capability-conditioned pairing check rather
+    //    than the integrity gate. Both directions are inexpressible: a seed
+    //    added to a program with no Random capability claims a knob nothing
+    //    reads, and a seed removed from a Random-using program un-seals the
+    //    one input that made its stream re-derivable.
+    {
+        let mut v = receipt_json.clone();
+        if v.get("seed_value").is_none() {
+            v["seed_value"] = serde_json::Value::from(7u64);
+        } else if let Some(obj) = v.as_object_mut() {
+            obj.remove("seed_value");
+        }
+        let v = reseal_json(&v)?;
+        cases.push(SelfTestCase {
+            label: "sealed seed_value flipped against the program's capabilities".to_string(),
+            tampered: v,
+            expected_class: "FIELD_CONTRACT_VIOLATION".to_string(),
+            resealed: true,
+        });
+    }
+
     Ok(cases)
 }
 
@@ -1304,6 +1381,12 @@ pub struct ScientificCorpusMember {
     /// its invariant).
     #[serde(default)]
     pub negative_fixture: bool,
+    /// The RNG seed to emit under (`--seed N`). Required for a member whose
+    /// kernel observes the Random capability; emit refuses a seedless Random
+    /// run, so a missing seed here fails the corpus loudly rather than
+    /// producing an unseeded receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
     /// The declared receipt status: `PASS`, `FAIL_EXPECTED`, or `FAIL_UNEXPECTED`.
     pub expected_status: String,
 }
@@ -1551,7 +1634,7 @@ pub fn evaluate_scientific_runtime_receipt(
     current_language_version: &str,
     probed_toolchain: Option<&ScientificToolchain>,
     rederive_digests: impl FnOnce(&Path) -> Result<RederivedFacts, i32>,
-    rerun_series: impl FnOnce(&Path, &[String]) -> Result<RerunObservation, i32>,
+    rerun_series: impl FnOnce(&Path, &[String], Option<u64>) -> Result<RerunObservation, i32>,
 ) -> Result<ScientificVerifyReport, i32> {
     let receipt: ScientificRuntimeReceipt =
         serde_json::from_value(receipt_json.clone()).map_err(|err| {
@@ -1736,18 +1819,13 @@ pub fn evaluate_scientific_runtime_receipt(
         return Err(verify_failure_class(json, "FENCE_STATUS_UNEXPECTED", 1));
     }
 
-    // Field contracts the language version pins: v0 has no RNG builtin, so a
-    // seed status other than NOT_APPLICABLE claims a capability the language
-    // does not have; a numerical_method status must agree with whether a
-    // description is present (a DECLARED method with no description, or an
-    // UNDECLARED one with a description, is an inconsistent claim).
-    if receipt.seed.status != "NOT_APPLICABLE" {
-        eprintln!(
-            "Error: seed status `{}` is not expressible: the language has no RNG builtin (v0 requires NOT_APPLICABLE)",
-            receipt.seed.status
-        );
-        return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
-    }
+    // Field contracts: the seed pairing is checked against the RE-DERIVED
+    // capability facts in step (2a) below (whether a seed is expressible
+    // depends on whether the program observes the Random capability, which
+    // only the re-derivation can say); the numerical_method status must agree
+    // with whether a description is present (a DECLARED method with no
+    // description, or an UNDECLARED one with a description, is an
+    // inconsistent claim).
     let method_consistent = match receipt.numerical_method.status.as_str() {
         "DECLARED" => receipt.numerical_method.description.is_some(),
         "UNDECLARED" => receipt.numerical_method.description.is_none(),
@@ -1831,10 +1909,34 @@ pub fn evaluate_scientific_runtime_receipt(
         );
         return Err(verify_failure_class(json, "EFFECT_POLICY_DRIFT", 1));
     }
+    // The seed pairing, checked against the RE-DERIVED capabilities: a
+    // Random-using program's receipt must seal the seed it ran under (emit
+    // refuses to produce one otherwise), and a program with no Random
+    // capability has no seed to seal, so a sealed value there is a claim
+    // about a capability the program does not have.
+    let rederived_uses_random = rederived
+        .effect_policy
+        .observed_capabilities
+        .iter()
+        .any(|cap| cap == "Random");
+    if rederived_uses_random && receipt.seed_value.is_none() {
+        eprintln!(
+            "Error: the program observes the Random capability but the receipt seals no seed_value (a Random-using run requires `--seed N`, and the receipt must carry it)"
+        );
+        return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+    }
+    if !rederived_uses_random && receipt.seed_value.is_some() {
+        eprintln!(
+            "Error: the receipt seals seed_value {} but the program observes no Random capability (nothing draws from a seed)",
+            receipt.seed_value.unwrap_or_default()
+        );
+        return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+    }
     let (expected_input_dataset, expected_seed, expected_determinism) =
         witnessed_fields_from_capabilities(
             &rederived.effect_policy.observed_capabilities,
             rederived.effect_policy.reads_stdin,
+            receipt.seed_value,
         );
     if receipt.input_dataset != expected_input_dataset
         || receipt.seed != expected_seed
@@ -1881,7 +1983,7 @@ pub fn evaluate_scientific_runtime_receipt(
     // (3) Re-run the program WITH THE STORED ARGS and re-parse its stdout, so an
     // argv-parameterized kernel is reproduced under the same conditions it was
     // emitted under.
-    let observation = rerun_series(&source_path, &receipt.args)
+    let observation = rerun_series(&source_path, &receipt.args, receipt.seed_value)
         .map_err(|code| verify_failure_class(json, "RERUN_FAILED", code))?;
     let parsed = observation.parsed;
 
@@ -2164,7 +2266,7 @@ pub fn verify_scientific_runtime_receipt(
     current_language_version: &str,
     probed_toolchain: Option<&ScientificToolchain>,
     rederive_digests: impl FnOnce(&Path) -> Result<RederivedFacts, i32>,
-    rerun_series: impl FnOnce(&Path, &[String]) -> Result<RerunObservation, i32>,
+    rerun_series: impl FnOnce(&Path, &[String], Option<u64>) -> Result<RerunObservation, i32>,
 ) -> Result<(), i32> {
     let report = evaluate_scientific_runtime_receipt(
         receipt_json,
@@ -2270,8 +2372,9 @@ fn digest_is_well_formed(digest: &ScientificDigest) -> bool {
 ///   (binding is pinned to the implementation, never to another sealed field).
 /// - `FENCE_STATUS_UNEXPECTED`: a telemetry/lineage fence was edited to claim
 ///   availability v0 does not produce.
-/// - `FIELD_CONTRACT_VIOLATION`: a sealed field claims something the language
-///   version cannot express (a seed when no RNG builtin exists) or is
+/// - `FIELD_CONTRACT_VIOLATION`: a sealed field claims something the program
+///   cannot express (a seed_value when nothing draws from the Random
+///   capability, or a Random-using program with no sealed seed) or is
 ///   internally inconsistent (a DECLARED method with no description).
 /// - `EFFECT_POLICY_DRIFT`: the sealed effect/capability facts, or the
 ///   witnessed fields derived from them, do not re-derive from the source.
@@ -2372,6 +2475,7 @@ mod tests {
             series_parsed: parsed,
             diverged: false,
             args: Vec::new(),
+            seed_value: None,
             invariant_name: ENERGY_MONOTONE_INVARIANT.to_string(),
             metric: "series".to_string(),
             units: None,
@@ -2548,7 +2652,9 @@ mod tests {
         let json = serde_json::to_value(&receipt).expect("serialize receipt");
         let cases = build_self_test_cases(&json).expect("build self-test cases");
 
-        // The table exercises five separate arms of the failure taxonomy.
+        // The table exercises five separate arms of the failure taxonomy (the
+        // seed-pairing case shares FIELD_CONTRACT_VIOLATION with the tolerance
+        // case but tampers a different sealed field through a different gate).
         let classes: Vec<&str> = cases.iter().map(|c| c.expected_class.as_str()).collect();
         assert_eq!(
             classes,
@@ -2558,6 +2664,7 @@ mod tests {
                 "MALFORMED",
                 "FIELD_CONTRACT_VIOLATION",
                 "INVARIANT_UNSUPPORTED",
+                "FIELD_CONTRACT_VIOLATION",
             ]
         );
 
@@ -2905,7 +3012,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _| Ok(rerun(vec![2.0, 2.0, 2.0])),
+            |_, _, _| Ok(rerun(vec![2.0, 2.0, 2.0])),
         );
         assert!(
             result.is_ok(),
@@ -2937,7 +3044,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _| Ok(rerun(vec![2.0, 2.0, 1.0])),
+            |_, _, _| Ok(rerun(vec![2.0, 2.0, 1.0])),
         );
         assert_eq!(
             result,
@@ -2972,7 +3079,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _| Ok(rerun(vec![2.0, 2.0, 2.0])),
+            |_, _, _| Ok(rerun(vec![2.0, 2.0, 2.0])),
         );
         assert_eq!(result, Err(1), "a non-canonical tolerance must be rejected");
     }
@@ -3049,7 +3156,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _| Ok(rerun(vec![1.0, 0.5, 1.0])),
+            |_, _, _| Ok(rerun(vec![1.0, 0.5, 1.0])),
         );
         assert!(
             result.is_ok(),
@@ -3081,7 +3188,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _| Ok(rerun(vec![1.0, 2.0, 1.0])),
+            |_, _, _| Ok(rerun(vec![1.0, 2.0, 1.0])),
         );
         assert_eq!(
             result,
@@ -3115,7 +3222,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _| Ok(rerun(vec![1.0, 0.5, 1.0])),
+            |_, _, _| Ok(rerun(vec![1.0, 0.5, 1.0])),
         );
         assert_eq!(result, Err(1), "a non-canonical tolerance must be rejected");
     }
@@ -3181,7 +3288,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _| Ok(rerun(vec![1e-12, -1e-13, 2e-14])),
+            |_, _, _| Ok(rerun(vec![1e-12, -1e-13, 2e-14])),
         );
         assert!(
             result.is_ok(),
@@ -3213,7 +3320,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _| Ok(rerun(vec![1e-3, 1e-3, 1e-3])),
+            |_, _, _| Ok(rerun(vec![1e-3, 1e-3, 1e-3])),
         );
         assert_eq!(
             result,
@@ -3246,7 +3353,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _| Ok(rerun(vec![1e-12, -1e-13, 2e-14])),
+            |_, _, _| Ok(rerun(vec![1e-12, -1e-13, 2e-14])),
         );
         assert_eq!(result, Err(1), "a non-canonical tolerance must be rejected");
     }
@@ -3344,7 +3451,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _| Ok(rerun(vec![1.0, 1.0, 2.0, 2.0, 3.0, 3.0])),
+            |_, _, _| Ok(rerun(vec![1.0, 1.0, 2.0, 2.0, 3.0, 3.0])),
         );
         assert!(
             result.is_ok(),
@@ -3375,7 +3482,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _| Ok(rerun(vec![1.0, 1.0, 2.0, 9.0])),
+            |_, _, _| Ok(rerun(vec![1.0, 1.0, 2.0, 9.0])),
         );
         assert_eq!(
             result,
@@ -3406,7 +3513,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _| Ok(rerun(vec![1.0, 1.0, 2.0, 2.0])),
+            |_, _, _| Ok(rerun(vec![1.0, 1.0, 2.0, 2.0])),
         );
         assert_eq!(result, Err(1), "a non-canonical tolerance must be rejected");
     }
@@ -3434,7 +3541,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| panic!("a malformed receipt must be rejected before re-derivation"),
-            |_, _| panic!("a malformed receipt must be rejected before the re-run"),
+            |_, _, _| panic!("a malformed receipt must be rejected before the re-run"),
         );
         assert_eq!(
             result,
@@ -3508,7 +3615,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _| Ok(rerun(vec![1.0, 1.002, 0.998])),
+            |_, _, _| Ok(rerun(vec![1.0, 1.002, 0.998])),
         );
         assert!(
             result.is_ok(),
@@ -3540,7 +3647,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _| Ok(rerun(vec![1.0, 1.0, 1.1])),
+            |_, _, _| Ok(rerun(vec![1.0, 1.0, 1.1])),
         );
         assert_eq!(
             result,
@@ -3572,7 +3679,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _| Ok(rerun(vec![1.0, 1.002, 0.998])),
+            |_, _, _| Ok(rerun(vec![1.0, 1.002, 0.998])),
         );
         assert_eq!(result, Err(1), "a non-canonical tolerance must be rejected");
     }
@@ -3606,7 +3713,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _| Ok(rerun(vec![1.0, 1.002, 0.998])),
+            |_, _, _| Ok(rerun(vec![1.0, 1.002, 0.998])),
         );
         assert_eq!(
             result,
@@ -3635,7 +3742,7 @@ mod tests {
             &relation.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _| Ok(rerun(vec![1.0, 1.0, 2.0, 2.0])),
+            |_, _, _| Ok(rerun(vec![1.0, 1.0, 2.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -3705,7 +3812,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _| Ok(rerun(vec![0.0, 5.0, 100.0])),
+            |_, _, _| Ok(rerun(vec![0.0, 5.0, 100.0])),
         );
         assert!(
             result.is_ok(),
@@ -3737,7 +3844,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _| Ok(rerun(vec![1.0, -0.5, 2.0])),
+            |_, _, _| Ok(rerun(vec![1.0, -0.5, 2.0])),
         );
         assert_eq!(
             result,
@@ -3769,7 +3876,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _| Ok(rerun(vec![0.0, 5.0, 100.0])),
+            |_, _, _| Ok(rerun(vec![0.0, 5.0, 100.0])),
         );
         assert_eq!(result, Err(1), "a non-canonical tolerance must be rejected");
     }
@@ -3808,7 +3915,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert!(result.is_ok(), "a faithful re-run must verify");
     }
@@ -3834,7 +3941,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(wrong.clone(), graph_digest.clone())),
-            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(result, Err(1), "a source-digest mismatch must fail verify");
     }
@@ -3858,7 +3965,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _| Ok(rerun(vec![1.0, 2.0, 3.0])),
+            |_, _, _| Ok(rerun(vec![1.0, 2.0, 3.0])),
         );
         assert_eq!(result, Err(1), "an invariant drift must fail verify");
     }
@@ -3886,7 +3993,7 @@ mod tests {
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
             // Two points instead of three; still monotone (PASS), so only the
             // count check can reject this.
-            |_, _| Ok(rerun(vec![4.0, 3.0])),
+            |_, _, _| Ok(rerun(vec![4.0, 3.0])),
         );
         assert_eq!(result, Err(1), "a measurement count drift must fail verify");
     }
@@ -3912,7 +4019,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _| Ok(rerun(vec![1.0, 2.0, 3.0])),
+            |_, _, _| Ok(rerun(vec![1.0, 2.0, 3.0])),
         );
         assert_eq!(
             result,
@@ -3941,7 +4048,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _| Ok(rerun(vec![1.0, 2.0, 3.0])),
+            |_, _, _| Ok(rerun(vec![1.0, 2.0, 3.0])),
         );
         assert!(
             result.is_ok(),
@@ -3977,7 +4084,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _| {
+            |_, _, _| {
                 let mut observation = rerun(vec![4.0, 3.0, 2.5]);
                 // Three finite values instead of two: the divergence step
                 // shifted by one on the re-run platform.
@@ -4013,7 +4120,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -4043,7 +4150,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -4072,7 +4179,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(result, Err(1), "an unbound oracle must be rejected");
 
@@ -4091,7 +4198,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -4134,7 +4241,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(result, Err(1), "an empty sealed digest must be rejected");
     }
@@ -4164,7 +4271,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -4189,7 +4296,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -4219,7 +4326,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -4250,7 +4357,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert!(
             result.is_ok(),
@@ -4501,7 +4608,7 @@ mod tests {
         // absences. This is the pure-println flagship kernel; it MUST keep its
         // true absence claims.
         let (dataset, seed, determinism) =
-            witnessed_fields_from_capabilities(&["Console".to_string()], false);
+            witnessed_fields_from_capabilities(&["Console".to_string()], false, None);
         assert_eq!(dataset.status, "NONE_WITNESSED");
         assert_eq!(seed.status, "NOT_APPLICABLE");
         assert!(determinism.deterministic_modulo_args);
@@ -4509,7 +4616,7 @@ mod tests {
         // Console READING stdin: stdin is an external input, so both absences
         // collapse (the Console NAME alone would have missed this).
         let (dataset, _, determinism) =
-            witnessed_fields_from_capabilities(&["Console".to_string()], true);
+            witnessed_fields_from_capabilities(&["Console".to_string()], true, None);
         assert_eq!(dataset.status, "POSSIBLE_UNWITNESSED");
         assert!(dataset.grounds.contains("stdin"));
         assert!(!determinism.deterministic_modulo_args);
@@ -4518,7 +4625,7 @@ mod tests {
         // FileSystem present: the dataset field fences honestly, and
         // determinism cannot be claimed.
         let caps = vec!["Console".to_string(), "FileSystem".to_string()];
-        let (dataset, _, determinism) = witnessed_fields_from_capabilities(&caps, false);
+        let (dataset, _, determinism) = witnessed_fields_from_capabilities(&caps, false, None);
         assert_eq!(dataset.status, "POSSIBLE_UNWITNESSED");
         assert!(dataset.grounds.contains("FileSystem"));
         assert!(!determinism.deterministic_modulo_args);
@@ -4526,34 +4633,34 @@ mod tests {
         // Clock alone breaks determinism but not the dataset absence (the wall
         // clock is a scalar nondeterminism source, not a data channel).
         let caps = vec!["Clock".to_string(), "Console".to_string()];
-        let (dataset, _, determinism) = witnessed_fields_from_capabilities(&caps, false);
+        let (dataset, _, determinism) = witnessed_fields_from_capabilities(&caps, false, None);
         assert_eq!(dataset.status, "NONE_WITNESSED");
         assert!(!determinism.deterministic_modulo_args);
         assert!(determinism.grounds.contains("Clock"));
 
         // Foreign (extern C) can do arbitrary IO: hazard for BOTH claims.
         let caps = vec!["Console".to_string(), "Foreign".to_string()];
-        let (dataset, _, determinism) = witnessed_fields_from_capabilities(&caps, false);
+        let (dataset, _, determinism) = witnessed_fields_from_capabilities(&caps, false, None);
         assert_eq!(dataset.status, "POSSIBLE_UNWITNESSED");
         assert!(dataset.grounds.contains("Foreign"));
         assert!(!determinism.deterministic_modulo_args);
 
         // Gpu: hazard for BOTH claims.
         let caps = vec!["Console".to_string(), "Gpu".to_string()];
-        let (dataset, _, determinism) = witnessed_fields_from_capabilities(&caps, false);
+        let (dataset, _, determinism) = witnessed_fields_from_capabilities(&caps, false, None);
         assert_eq!(dataset.status, "POSSIBLE_UNWITNESSED");
         assert!(dataset.grounds.contains("Gpu"));
         assert!(!determinism.deterministic_modulo_args);
 
         // Environment (getenv / argv): hazard for BOTH claims.
         let caps = vec!["Console".to_string(), "Environment".to_string()];
-        let (dataset, _, determinism) = witnessed_fields_from_capabilities(&caps, false);
+        let (dataset, _, determinism) = witnessed_fields_from_capabilities(&caps, false, None);
         assert_eq!(dataset.status, "POSSIBLE_UNWITNESSED");
         assert!(!determinism.deterministic_modulo_args);
 
         // Process (exit) reads nothing and is deterministic: safe for BOTH.
         let caps = vec!["Console".to_string(), "Process".to_string()];
-        let (dataset, _, determinism) = witnessed_fields_from_capabilities(&caps, false);
+        let (dataset, _, determinism) = witnessed_fields_from_capabilities(&caps, false, None);
         assert_eq!(dataset.status, "NONE_WITNESSED");
         assert!(determinism.deterministic_modulo_args);
 
@@ -4561,10 +4668,176 @@ mod tests {
         // capability added to the checker later cannot silently widen either
         // absence claim.
         let caps = vec!["Console".to_string(), "Bluetooth".to_string()];
-        let (dataset, _, determinism) = witnessed_fields_from_capabilities(&caps, false);
+        let (dataset, _, determinism) = witnessed_fields_from_capabilities(&caps, false, None);
         assert_eq!(dataset.status, "POSSIBLE_UNWITNESSED");
         assert!(dataset.grounds.contains("Bluetooth"));
         assert!(!determinism.deterministic_modulo_args);
+    }
+
+    #[test]
+    fn witnessed_fields_derive_the_seed_trichotomy() {
+        let caps = vec!["Console".to_string(), "Random".to_string()];
+
+        // Random with a sealed seed: no dataset hazard (the PRNG is arithmetic,
+        // not a data channel), deterministic GIVEN the seed, and the seed field
+        // is SEALED with the value named in its grounds.
+        let (dataset, seed, determinism) =
+            witnessed_fields_from_capabilities(&caps, false, Some(42));
+        assert_eq!(dataset.status, "NONE_WITNESSED");
+        assert_eq!(seed.status, "SEALED");
+        assert!(seed.grounds.contains("42"));
+        assert!(determinism.deterministic_modulo_args);
+        assert!(determinism.grounds.contains("seeded"));
+
+        // Random with NO seed: determinism collapses, and the seed field says
+        // UNSEEDED (a state emit refuses; kept so the derivation is total and
+        // a receipt claiming it can never re-derive as anything else).
+        let (dataset, seed, determinism) = witnessed_fields_from_capabilities(&caps, false, None);
+        assert_eq!(dataset.status, "NONE_WITNESSED");
+        assert_eq!(seed.status, "UNSEEDED");
+        assert!(!determinism.deterministic_modulo_args);
+        assert!(determinism.grounds.contains("unseeded Random"));
+
+        // No Random capability: NOT_APPLICABLE (a seed nothing draws from is
+        // refused by the pairing gate upstream, not silently recorded here).
+        let (_, seed, _) =
+            witnessed_fields_from_capabilities(&["Console".to_string()], false, None);
+        assert_eq!(seed.status, "NOT_APPLICABLE");
+    }
+
+    #[test]
+    fn verify_enforces_the_seed_capability_pairing() {
+        let random_policy = || ScientificEffectPolicy {
+            facts_digest: hex_digest('9'),
+            observed_capabilities: vec!["Console".to_string(), "Random".to_string()],
+            reads_stdin: false,
+        };
+        let path = Path::new("k.bld");
+
+        // A seeded Random receipt is faithful, and the re-run receives the
+        // SEALED seed (the closure pins it, so a verifier that re-ran the
+        // program seedless would fail this test at the assert, not by luck).
+        let receipt = build_scientific_runtime_receipt(ScientificReceiptInputs {
+            effect_policy: random_policy(),
+            seed_value: Some(42),
+            ..base_inputs(path, vec![4.0, 3.0, 2.0], true, false)
+        });
+        assert_eq!(receipt.seed.status, "SEALED");
+        assert_eq!(receipt.seed_value, Some(42));
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        let src = receipt.source_digest.clone();
+        let graph = receipt.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| {
+                Ok(RederivedFacts {
+                    source_digest: src.clone(),
+                    input_graph_digest: graph.clone(),
+                    effect_policy: random_policy(),
+                })
+            },
+            |_, _, seed| {
+                assert_eq!(seed, Some(42), "the re-run must receive the sealed seed");
+                Ok(rerun(vec![4.0, 3.0, 2.0]))
+            },
+        );
+        assert_eq!(result, Ok(()), "a seeded Random receipt must verify");
+
+        // A Random-using program whose receipt seals NO seed is refused at the
+        // pairing gate, before any re-run.
+        let unseeded = build_scientific_runtime_receipt(ScientificReceiptInputs {
+            effect_policy: random_policy(),
+            seed_value: None,
+            ..base_inputs(path, vec![4.0, 3.0, 2.0], true, false)
+        });
+        let value = serde_json::to_value(&unseeded).expect("to_value");
+        let src = unseeded.source_digest.clone();
+        let graph = unseeded.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &unseeded.compiler_version,
+            &unseeded.language_version,
+            Some(&test_toolchain()),
+            |_| {
+                Ok(RederivedFacts {
+                    source_digest: src.clone(),
+                    input_graph_digest: graph.clone(),
+                    effect_policy: random_policy(),
+                })
+            },
+            |_, _, _| panic!("an unseeded Random receipt must be refused before the re-run"),
+        );
+        assert_eq!(
+            result,
+            Err(1),
+            "a Random program with no sealed seed must fail"
+        );
+
+        // A sealed seed on a program with NO Random capability is a claim
+        // about a knob nothing reads: refused at the same gate.
+        let overclaimed = build_scientific_runtime_receipt(ScientificReceiptInputs {
+            seed_value: Some(7),
+            ..base_inputs(path, vec![4.0, 3.0, 2.0], true, false)
+        });
+        let value = serde_json::to_value(&overclaimed).expect("to_value");
+        let src = overclaimed.source_digest.clone();
+        let graph = overclaimed.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &overclaimed.compiler_version,
+            &overclaimed.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(src.clone(), graph.clone())),
+            |_, _, _| panic!("a seed nothing consumes must be refused before the re-run"),
+        );
+        assert_eq!(
+            result,
+            Err(1),
+            "a seed without a Random capability must fail"
+        );
+
+        // A CHANGED seed, properly re-sealed, passes the pairing gate (Random
+        // is present, a seed is present) but the sealed `seed` grounds still
+        // name the original value, so the witnessed-field re-derivation
+        // refuses it: the seed cannot be quietly swapped for one whose stream
+        // was never observed.
+        let receipt = build_scientific_runtime_receipt(ScientificReceiptInputs {
+            effect_policy: random_policy(),
+            seed_value: Some(42),
+            ..base_inputs(path, vec![4.0, 3.0, 2.0], true, false)
+        });
+        let mut swapped = receipt.clone();
+        swapped.seed_value = Some(43);
+        seal_receipt(&mut swapped);
+        let value = serde_json::to_value(&swapped).expect("to_value");
+        let src = swapped.source_digest.clone();
+        let graph = swapped.input_graph_digest.clone();
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &swapped.compiler_version,
+            &swapped.language_version,
+            Some(&test_toolchain()),
+            |_| {
+                Ok(RederivedFacts {
+                    source_digest: src.clone(),
+                    input_graph_digest: graph.clone(),
+                    effect_policy: random_policy(),
+                })
+            },
+            |_, _, _| panic!("a swapped seed must be refused before the re-run"),
+        );
+        assert_eq!(result, Err(1), "a re-sealed seed swap must fail");
     }
 
     #[test]
@@ -4596,7 +4869,7 @@ mod tests {
                 facts.effect_policy.facts_digest = hex_digest('8');
                 Ok(facts)
             },
-            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(result, Err(1), "effect-policy drift must fail verify");
     }
@@ -4625,7 +4898,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -4654,7 +4927,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -4679,7 +4952,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -4715,7 +4988,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _| panic!("an unsealed receipt must be rejected before any re-run"),
+            |_, _, _| panic!("an unsealed receipt must be rejected before any re-run"),
         );
         assert_eq!(result, Err(1), "an unsealed field edit must be rejected");
     }
@@ -4740,7 +5013,7 @@ mod tests {
             &receipt.language_version,
             None,
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _| panic!("the re-run must never be attempted without a toolchain"),
+            |_, _, _| panic!("the re-run must never be attempted without a toolchain"),
         );
         assert_eq!(result, Err(4), "a missing toolchain must exit 4");
     }
@@ -4768,7 +5041,7 @@ mod tests {
             &receipt.language_version,
             Some(&other),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert!(
             result.is_ok(),
@@ -4798,7 +5071,7 @@ mod tests {
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
             // Same series, but the process exited 9 instead of the sealed 0.
-            |_, _| {
+            |_, _, _| {
                 let mut observation = rerun(vec![4.0, 3.0, 2.0]);
                 observation.exit_code = 9;
                 Ok(observation)
@@ -4830,7 +5103,7 @@ mod tests {
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
             // Finite, monotone re-run: no divergence reproduced.
-            |_, _| Ok(rerun(vec![4.0, 3.0])),
+            |_, _, _| Ok(rerun(vec![4.0, 3.0])),
         );
         assert_eq!(
             result,
@@ -4859,7 +5132,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, args| {
+            |_, args, _| {
                 assert_eq!(
                     args,
                     ["--mode".to_string(), "stable".to_string()],

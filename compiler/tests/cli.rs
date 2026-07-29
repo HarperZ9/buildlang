@@ -14739,6 +14739,186 @@ fn funnel_hashing_round_trips_a_probe_bound() {
 }
 
 #[test]
+fn seeded_random_walk_round_trips_and_pins_the_seed_contract() {
+    if !c_backend_ready() {
+        eprintln!("skipping seeded_random_walk_round_trips_and_pins_the_seed_contract: C backend not ready");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("buildlang_sci_random_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create random fixture dir");
+
+    // FAIL CLOSED, operator level: a Random-using kernel with no --seed is
+    // refused before any run (an unseeded stream cannot be re-derived, so a
+    // receipt over it would be unverifiable by construction).
+    let refused = buildc()
+        .arg("run")
+        .arg(repo_example("random_walk_bound.bld"))
+        .args(["--emit-receipt"])
+        .arg(dir.join("no-seed.json"))
+        .args(["--invariant", "non-negative"])
+        .output()
+        .expect("run seedless random kernel");
+    assert!(
+        !refused.status.success(),
+        "a Random-using kernel with no --seed must be refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("requires an explicit seed"),
+        "the refusal must name the missing seed\nstderr:\n{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+
+    // FAIL CLOSED, the other direction: a seed on a kernel with no Random
+    // capability is an unconsumed knob and must not be sealed as witnessed.
+    let unconsumed = buildc()
+        .arg("run")
+        .arg(repo_example("search_bound_binary.bld"))
+        .args(["--emit-receipt"])
+        .arg(dir.join("unconsumed.json"))
+        .args(["--invariant", "non-negative", "--seed", "7"])
+        .output()
+        .expect("run seedless program with a seed");
+    assert!(
+        !unconsumed.status.success(),
+        "a seed on a program with no Random capability must be refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&unconsumed.stderr).contains("no Random capability"),
+        "the refusal must name the unconsumed seed\nstderr:\n{}",
+        String::from_utf8_lossy(&unconsumed.stderr)
+    );
+
+    // POSITIVE: the seeded walk stays inside its worst-case envelope, the
+    // receipt seals the seed and the derived claims, and verify re-runs the
+    // exact stream.
+    let emit = |source: &str, receipt: &std::path::Path, seed: &str, negative: bool| {
+        let mut cmd = buildc();
+        cmd.arg("run")
+            .arg(repo_example(source))
+            .args(["--emit-receipt"])
+            .arg(receipt)
+            .args([
+                "--invariant",
+                "non-negative",
+                "--metric",
+                "slack",
+                "--problem",
+                "seeded-random-walk-envelope",
+                "--seed",
+                seed,
+            ]);
+        if negative {
+            cmd.arg("--negative-fixture");
+        }
+        cmd.output().expect("emit seeded receipt")
+    };
+    let pass_receipt = dir.join("walk.json");
+    let emit_pass = emit("random_walk_bound.bld", &pass_receipt, "42", false);
+    assert!(
+        emit_pass.status.success(),
+        "emitting the seeded PASS receipt should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&emit_pass.stderr)
+    );
+    let pass: serde_json::Value =
+        serde_json::from_slice(&fs::read(&pass_receipt).expect("read PASS receipt")).unwrap();
+    assert_eq!(pass["receipt_status"], "PASS");
+    assert_eq!(pass["seed_value"], 42);
+    assert_eq!(pass["seed"]["status"], "SEALED");
+    assert!(
+        pass["effect_policy"]["observed_capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c == "Random"),
+        "the effect policy must observe the Random capability"
+    );
+    // The receipt's honest third determinism state: deterministic GIVEN the
+    // sealed seed, with the grounds saying so.
+    assert_eq!(pass["determinism"]["deterministic_modulo_args"], true);
+    assert!(
+        pass["determinism"]["grounds"]
+            .as_str()
+            .unwrap()
+            .contains("seeded"),
+        "determinism grounds must name the seeded qualification"
+    );
+    let verify_pass = buildc()
+        .args(["receipt", "verify"])
+        .arg(&pass_receipt)
+        .output()
+        .expect("verify seeded PASS receipt");
+    assert!(
+        verify_pass.status.success(),
+        "the seeded PASS receipt must verify\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_pass.stderr)
+    );
+
+    // The seed genuinely drives the stream: the same seed reproduces the raw
+    // stdout byte-for-byte, a different seed does not. This is what makes the
+    // stochastic run as re-derivable as a deterministic one, and it is the
+    // check that would catch a runtime whose "seeded" PRNG ignored its seed.
+    let again_receipt = dir.join("walk-again.json");
+    let other_receipt = dir.join("walk-other.json");
+    assert!(emit("random_walk_bound.bld", &again_receipt, "42", false)
+        .status
+        .success());
+    assert!(emit("random_walk_bound.bld", &other_receipt, "43", false)
+        .status
+        .success());
+    let digest = |path: &std::path::Path| -> String {
+        let v: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        v["measurement"]["raw_stdout_digest"]["hex"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(
+        digest(&pass_receipt),
+        digest(&again_receipt),
+        "the same seed must reproduce the stream byte-for-byte"
+    );
+    assert_ne!(
+        digest(&pass_receipt),
+        digest(&other_receipt),
+        "a different seed must produce a different stream"
+    );
+
+    // NEGATIVE fixture under the same seed: the walk leaves the claimed
+    // tighter envelope, the invariant FAILs as declared, and the receipt
+    // still verifies (the harness catches a false stochastic claim, it does
+    // not just bless a true one).
+    let fail_receipt = dir.join("walk-broken.json");
+    let emit_fail = emit("random_walk_bound_broken.bld", &fail_receipt, "42", true);
+    assert!(
+        emit_fail.status.success(),
+        "emitting the negative fixture should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&emit_fail.stderr)
+    );
+    let fail: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fail_receipt).expect("read FAIL receipt")).unwrap();
+    assert_eq!(fail["receipt_status"], "FAIL_EXPECTED");
+    assert!(
+        fail["invariant"]["observed"]["violation_count"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    let verify_fail = buildc()
+        .args(["receipt", "verify"])
+        .arg(&fail_receipt)
+        .output()
+        .expect("verify seeded negative fixture");
+    assert!(
+        verify_fail.status.success(),
+        "a faithfully reproduced FAIL_EXPECTED must verify (exit 0)\nstderr:\n{}",
+        String::from_utf8_lossy(&verify_fail.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn receipt_verify_self_test_proves_the_verifier_can_fail() {
     if !c_backend_ready() {
         eprintln!(
@@ -14784,8 +14964,8 @@ fn receipt_verify_self_test_proves_the_verifier_can_fail() {
     );
     let stdout = String::from_utf8_lossy(&self_test.stdout);
     assert!(
-        stdout.contains("5/5 tampers rejected with the expected failure_class"),
-        "self-test should report all five tampers rejected\nstdout:\n{}",
+        stdout.contains("6/6 tampers rejected with the expected failure_class"),
+        "self-test should report all six tampers rejected\nstdout:\n{}",
         stdout
     );
     // The taxonomy arms actually exercised must appear in the report.
@@ -14973,8 +15153,8 @@ fn receipt_corpus_asserts_declared_classifications() {
     assert_eq!(shipped["schema"], "buildlang-scientific-receipt-corpus/v0");
     assert_eq!(
         shipped["members"].as_array().unwrap().len(),
-        20,
-        "the shipped corpus should cover all ten kernel pairs"
+        22,
+        "the shipped corpus should cover all eleven kernel pairs"
     );
 
     // A small correct manifest: the command emits, verifies, and confirms each

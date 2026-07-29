@@ -81,6 +81,7 @@ macro expansion.
 | `Console` | `read_line`, `read_all`, `stdin_is_pipe`, direct print helpers, console macros such as `println!`, `print!`, `eprintln!`, `eprint!`, and diagnostic logging macros |
 | `Foreign` | calls to unknown functions declared in `extern` blocks and reads from foreign statics |
 | `Gpu` | direct `build_vk_*` and `build_gfx_*` runtime helpers |
+| `Random` | `random_f64` (the seeded PRNG; `buildc run --seed N` supplies the seed, and an unseeded draw aborts) |
 
 Known `build_*` C runtime helper aliases declared through `extern` blocks are
 classified by their specific domain capability instead of generic `Foreign`.

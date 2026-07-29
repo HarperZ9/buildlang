@@ -1,0 +1,33 @@
+// Negative fixture for random_walk_bound.bld: the same seeded walk claiming a
+// TIGHTER envelope than it actually keeps.
+//
+// The claim here is |position| <= 7 across all 200 steps, so the printed
+// SLACK = 7 - |position| goes negative as soon as the walk drifts 8 steps
+// from the origin, which a 200-step walk does for essentially every seed
+// (the walk's typical excursion is ~sqrt(200), about 14). Run under the
+// corpus seed, the `non-negative` invariant FAILs and the receipt records
+// FAIL_EXPECTED: the harness proves it can catch a stochastic kernel whose
+// claimed bound is false, not just bless one whose bound holds.
+
+fn main() ~ Console + Random {
+    let n: i32 = 200;
+    let claimed: i32 = 7;
+    let mut pos: i32 = 0;
+    let mut k: i32 = 0;
+    while k < n {
+        let u: f64 = random_f64();
+        if u < 0.5 {
+            pos = pos - 1;
+        } else {
+            pos = pos + 1;
+        }
+        let mut mag: i32 = pos;
+        if mag < 0 {
+            mag = 0 - mag;
+        }
+        // Slack against the CLAIMED envelope; goes negative when the walk
+        // leaves it.
+        println!("{}", (claimed - mag) as f64);
+        k = k + 1;
+    }
+}

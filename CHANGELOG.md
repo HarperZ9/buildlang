@@ -8,6 +8,28 @@ tracked in `STATUS.md`, `README.md`, and
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
 `108/108` or `132/132` are not the current release gate.
 
+## Unreleased
+
+- **`Random` capability + witnessed-seed receipts**: `random_f64()` is a new
+  seeded PRNG builtin carrying its own `Random` capability effect (SplitMix64
+  over the top 53 bits, bit-identical across platforms for a given seed).
+  `buildc run --seed N` supplies the seed via `BUILD_RANDOM_SEED`; an
+  unseeded draw aborts (fail closed, never a silent default stream). With
+  `--emit-receipt` the pairing is enforced both ways (a Random-using kernel
+  requires a seed, a seed requires a Random-using kernel) and the seed is
+  sealed as `seed_value`; `receipt verify` re-runs the exact stream and
+  re-checks the pairing against the re-derived capabilities
+  (`FIELD_CONTRACT_VIOLATION`), so a seeded stochastic run is as
+  re-derivable as a deterministic one. The receipt's `seed` field becomes a
+  trichotomy (`NOT_APPLICABLE` / `SEALED` / `UNSEEDED`), determinism gains
+  the honest seeded state (deterministic given the sealed seed), the
+  verifier self-test grows a sixth tamper case (seed flipped against
+  capabilities), and the example corpus gains its first seeded-stochastic
+  pair (`random_walk_bound.bld` / `random_walk_bound_broken.bld`, a
+  200-step random walk against its worst-case envelope and against a
+  falsely tight one), taking the corpus to 22 members. Backward compatible:
+  programs and receipts that never touch `random_f64()` are byte-identical.
+
 ## 1.2.0 - 2026-07-07 - general GPU compute
 
 BuildLang programs now run real work on the GPU: `#[compute]` kernels compile
