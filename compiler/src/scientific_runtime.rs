@@ -247,6 +247,34 @@ pub struct ScientificNumericalMethod {
     pub status: String,
 }
 
+/// The Monte Carlo admission block: the estimator's facts, sealed, without
+/// which an MC number is unpriceable. Author-DECLARED like
+/// [`ScientificNumericalMethod`] (buildc cannot derive the sample count or
+/// the interval method from source and does not pretend to), but with hard
+/// contracts verify re-checks: the block declares completely or not at all
+/// (emit refuses a partial declaration; the struct makes a partial block
+/// unparseable), it rides only on a program that observes `Random` with a
+/// sealed seed, and a zero sample count or a nameless estimator/interval is
+/// refused as unpriceable. v0 claims REPRODUCIBILITY and declaration
+/// discipline, never correctness of the interval: the receipt witnesses that
+/// the estimator's denominator, id, and interval method were stated up
+/// front, and that the run they describe re-derives exactly under the sealed
+/// seed. The weaker the mode's promise, the more the receipt must carry.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ScientificMonteCarlo {
+    /// The estimator's id (e.g. `mean`), author-declared, non-empty.
+    pub estimator: String,
+    /// The declared sample count n (the denominator). Non-zero: an MC claim
+    /// without its denominator is unpriceable.
+    pub samples: u64,
+    /// The declared interval method (e.g. `normal-approx-95`), non-empty: the
+    /// claim is the interval, never the point, so a result whose interval
+    /// method is undeclared is refused.
+    pub interval_method: String,
+    /// `DECLARED` (v0): the facts were stated, not independently executed.
+    pub status: String,
+}
+
 /// Derive the witnessed-absence fields from the observed capability union
 /// (PURE, unit-tested): the typed-effect system doing receipt work.
 ///
@@ -543,6 +571,12 @@ pub struct ScientificRuntimeReceipt {
     /// Author-declared numerical method (buildc cannot derive scheme
     /// semantics and does not pretend to).
     pub numerical_method: ScientificNumericalMethod,
+    /// The Monte Carlo admission block, present IFF the run declared itself
+    /// an MC estimate (all three `--mc-*` flags). Optional-with-default so
+    /// receipts sealed before this block existed still parse AND re-serialize
+    /// to their original bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monte_carlo: Option<ScientificMonteCarlo>,
     pub measurement: ScientificMeasurement,
     pub invariant: ScientificInvariant,
     /// Explicitly fenced pass-0122 branches buildc does not produce: absence
@@ -937,6 +971,10 @@ pub struct ScientificReceiptInputs<'a> {
     /// already enforced the pairing (a Random-using program requires a seed,
     /// a seed requires a Random-using program) before building the receipt.
     pub seed_value: Option<u64>,
+    /// The Monte Carlo admission block (`--mc-estimator` / `--mc-samples` /
+    /// `--mc-interval`). `cmd_run` has already enforced completeness and the
+    /// Random pairing before building the receipt.
+    pub monte_carlo: Option<ScientificMonteCarlo>,
     /// The invariant to check over the series (a name from the registry;
     /// `is_known_invariant`). Selects the evaluator, tolerance, expectation,
     /// and the sealed oracle/invariant binding.
@@ -982,6 +1020,7 @@ pub fn build_scientific_runtime_receipt(
         diverged,
         args,
         seed_value,
+        monte_carlo,
         invariant_name,
         metric,
         units,
@@ -1075,6 +1114,7 @@ pub fn build_scientific_runtime_receipt(
             },
             description: method_description,
         },
+        monte_carlo,
         effect_policy,
         measurement: ScientificMeasurement {
             metric,
@@ -1282,6 +1322,35 @@ pub fn build_self_test_cases(
         });
     }
 
+    // 7. FIELD_CONTRACT_VIOLATION (MC denominator): a monte_carlo block whose
+    //    sample count is 0, re-sealed. If the receipt already carries a block,
+    //    its denominator is zeroed; if not, a zero-denominator block is added.
+    //    Either way the tamper reaches the admission contract (an MC claim
+    //    without its denominator is unpriceable), never the integrity gate.
+    {
+        let mut v = receipt_json.clone();
+        match v.get_mut("monte_carlo") {
+            Some(mc) if !mc.is_null() => {
+                mc["samples"] = serde_json::Value::from(0u64);
+            }
+            _ => {
+                v["monte_carlo"] = serde_json::json!({
+                    "estimator": "mean",
+                    "samples": 0u64,
+                    "interval_method": "normal-approx-95",
+                    "status": "DECLARED",
+                });
+            }
+        }
+        let v = reseal_json(&v)?;
+        cases.push(SelfTestCase {
+            label: "monte_carlo block with a zero sample denominator".to_string(),
+            tampered: v,
+            expected_class: "FIELD_CONTRACT_VIOLATION".to_string(),
+            resealed: true,
+        });
+    }
+
     Ok(cases)
 }
 
@@ -1387,6 +1456,16 @@ pub struct ScientificCorpusMember {
     /// producing an unseeded receipt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
+    /// The member's Monte Carlo declaration (`--mc-estimator` /
+    /// `--mc-samples` / `--mc-interval`), passed through by the runner. The
+    /// same all-or-nothing contract applies: a partial declaration is refused
+    /// at emit, which fails the corpus loudly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mc_estimator: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mc_samples: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mc_interval: Option<String>,
     /// The declared receipt status: `PASS`, `FAIL_EXPECTED`, or `FAIL_UNEXPECTED`.
     pub expected_status: String,
 }
@@ -1932,6 +2011,38 @@ pub fn evaluate_scientific_runtime_receipt(
         );
         return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
     }
+    // The Monte Carlo admission contracts. The block is author-declared, but
+    // its SHAPE is not negotiable: it rides only on a seeded Random program
+    // (an MC claim over a stream that cannot re-derive is unpriceable), its
+    // denominator is non-zero, its estimator and interval method are named,
+    // and its status is the one thing v0 can honestly say (DECLARED).
+    if let Some(mc) = &receipt.monte_carlo {
+        if !rederived_uses_random || receipt.seed_value.is_none() {
+            eprintln!(
+                "Error: the receipt carries a monte_carlo block but the program is not a seeded Random run (an MC estimate needs the Random capability and a sealed seed to re-derive)"
+            );
+            return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+        }
+        if mc.samples == 0 {
+            eprintln!(
+                "Error: monte_carlo.samples is 0: an MC claim without its denominator is unpriceable"
+            );
+            return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+        }
+        if mc.estimator.trim().is_empty() || mc.interval_method.trim().is_empty() {
+            eprintln!(
+                "Error: monte_carlo declares an empty estimator or interval_method: the claim is the interval, never the point, so both must be named"
+            );
+            return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+        }
+        if mc.status != "DECLARED" {
+            eprintln!(
+                "Error: monte_carlo.status `{}` is not expressible: v0 declares the facts, it does not execute them (the only valid status is DECLARED)",
+                mc.status
+            );
+            return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+        }
+    }
     let (expected_input_dataset, expected_seed, expected_determinism) =
         witnessed_fields_from_capabilities(
             &rederived.effect_policy.observed_capabilities,
@@ -2476,6 +2587,7 @@ mod tests {
             diverged: false,
             args: Vec::new(),
             seed_value: None,
+            monte_carlo: None,
             invariant_name: ENERGY_MONOTONE_INVARIANT.to_string(),
             metric: "series".to_string(),
             units: None,
@@ -2653,8 +2765,9 @@ mod tests {
         let cases = build_self_test_cases(&json).expect("build self-test cases");
 
         // The table exercises five separate arms of the failure taxonomy (the
-        // seed-pairing case shares FIELD_CONTRACT_VIOLATION with the tolerance
-        // case but tampers a different sealed field through a different gate).
+        // seed-pairing and MC-denominator cases share FIELD_CONTRACT_VIOLATION
+        // with the tolerance case but tamper different sealed fields through
+        // different gates).
         let classes: Vec<&str> = cases.iter().map(|c| c.expected_class.as_str()).collect();
         assert_eq!(
             classes,
@@ -2664,6 +2777,7 @@ mod tests {
                 "MALFORMED",
                 "FIELD_CONTRACT_VIOLATION",
                 "INVARIANT_UNSUPPORTED",
+                "FIELD_CONTRACT_VIOLATION",
                 "FIELD_CONTRACT_VIOLATION",
             ]
         );
@@ -4838,6 +4952,100 @@ mod tests {
             |_, _, _| panic!("a swapped seed must be refused before the re-run"),
         );
         assert_eq!(result, Err(1), "a re-sealed seed swap must fail");
+    }
+
+    #[test]
+    fn verify_enforces_the_monte_carlo_admission_contracts() {
+        fn random_policy() -> ScientificEffectPolicy {
+            ScientificEffectPolicy {
+                facts_digest: hex_digest('9'),
+                observed_capabilities: vec!["Console".to_string(), "Random".to_string()],
+                reads_stdin: false,
+            }
+        }
+        fn mc() -> ScientificMonteCarlo {
+            ScientificMonteCarlo {
+                estimator: "mean".to_string(),
+                samples: 2000,
+                interval_method: "normal-approx-95".to_string(),
+                status: "DECLARED".to_string(),
+            }
+        }
+        fn run(
+            receipt: &ScientificRuntimeReceipt,
+            policy: ScientificEffectPolicy,
+        ) -> Result<(), i32> {
+            let value = serde_json::to_value(receipt).expect("to_value");
+            let src = receipt.source_digest.clone();
+            let graph = receipt.input_graph_digest.clone();
+            verify_scientific_runtime_receipt(
+                &value,
+                None,
+                true,
+                &receipt.compiler_version,
+                &receipt.language_version,
+                Some(&test_toolchain()),
+                move |_| {
+                    Ok(RederivedFacts {
+                        source_digest: src,
+                        input_graph_digest: graph,
+                        effect_policy: policy,
+                    })
+                },
+                |_, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            )
+        }
+        let path = Path::new("k.bld");
+        let seeded_mc = |block: ScientificMonteCarlo| {
+            build_scientific_runtime_receipt(ScientificReceiptInputs {
+                effect_policy: random_policy(),
+                seed_value: Some(42),
+                monte_carlo: Some(block),
+                ..base_inputs(path, vec![4.0, 3.0, 2.0], true, false)
+            })
+        };
+
+        // A complete, paired MC declaration verifies, and the block is sealed.
+        let receipt = seeded_mc(mc());
+        let value = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(value["monte_carlo"]["samples"], 2000);
+        assert_eq!(value["monte_carlo"]["interval_method"], "normal-approx-95");
+        assert_eq!(
+            run(&receipt, random_policy()),
+            Ok(()),
+            "a complete MC declaration on a seeded Random run must verify"
+        );
+
+        // A zero denominator is unpriceable.
+        let mut bad = mc();
+        bad.samples = 0;
+        assert_eq!(run(&seeded_mc(bad), random_policy()), Err(1));
+
+        // An unnamed interval method is refused: the claim is the interval,
+        // never the point.
+        let mut bad = mc();
+        bad.interval_method = " ".to_string();
+        assert_eq!(run(&seeded_mc(bad), random_policy()), Err(1));
+
+        // A status v0 cannot honestly say is refused.
+        let mut bad = mc();
+        bad.status = "EXECUTED".to_string();
+        assert_eq!(run(&seeded_mc(bad), random_policy()), Err(1));
+
+        // An MC block on a program with no Random capability (and no seed) is
+        // refused at the pairing gate.
+        let unpaired = build_scientific_runtime_receipt(ScientificReceiptInputs {
+            monte_carlo: Some(mc()),
+            ..base_inputs(path, vec![4.0, 3.0, 2.0], true, false)
+        });
+        assert_eq!(run(&unpaired, test_effect_policy()), Err(1));
+
+        // A receipt with no MC block serializes without the key, so receipts
+        // sealed before the block existed keep their exact bytes and seals.
+        let plain =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        let value = serde_json::to_value(&plain).unwrap();
+        assert!(value.get("monte_carlo").is_none());
     }
 
     #[test]

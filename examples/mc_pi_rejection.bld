@@ -1,0 +1,46 @@
+// Monte Carlo kernel: pi by rejection sampling, the estimate checked against
+// truth for the sealed seed.
+//
+// n = 2000 draws of (x, y) in the unit square; the fraction landing inside
+// the quarter circle estimates pi/4, so `4 * inside / k` is the running
+// estimate of pi. From k = 200 (the burn-in) the kernel prints
+// SLACK = band - |estimate - pi| with band = 0.3, calibrated against the
+// corpus seed 42 the way funnel_probe's probe bound was calibrated: the
+// measured worst error after burn-in under that seed is 0.2094, so the band
+// clears it by ~1.4x while a wrong-area estimator (see the negative fixture)
+// misses pi by ~0.785 and blows decisively through it.
+//
+// The receipt is emitted with the full Monte Carlo declaration
+// (`--mc-estimator mean --mc-samples 2000 --mc-interval normal-approx-95`)
+// plus `--seed 42`, so the sealed block carries the estimator's denominator
+// and interval discipline, and `receipt verify` re-runs the exact stream.
+// The declaration is admission metadata: the receipt witnesses that the
+// facts were stated and that THIS seed's estimate stayed in the band, not
+// that the interval method is correct. Companion negative fixture:
+// mc_pi_rejection_broken.bld.
+
+fn main() ~ Console + Random {
+    let n: i32 = 2000;
+    let burn: i32 = 200;
+    let band: f64 = 0.3;
+    let mut inside: i32 = 0;
+    let mut k: i32 = 0;
+    while k < n {
+        let x: f64 = random_f64();
+        let y: f64 = random_f64();
+        if x * x + y * y < 1.0 {
+            inside = inside + 1;
+        }
+        k = k + 1;
+        if k >= burn {
+            let est: f64 = 4.0 * (inside as f64) / (k as f64);
+            let mut err: f64 = est - 3.14159265358979323846;
+            if err < 0.0 {
+                err = 0.0 - err;
+            }
+            // Slack against the calibrated truth band; non-negative iff the
+            // running estimate stayed within the band for this seed.
+            println!("{}", band - err);
+        }
+    }
+}

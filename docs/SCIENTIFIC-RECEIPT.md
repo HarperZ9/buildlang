@@ -93,6 +93,14 @@ Flags on the `run` subcommand (all additive; absent `--emit-receipt`, none of th
   re-runs the exact stream. This flag also works without `--emit-receipt`
   (plain `run` of a seeded kernel); a `Random`-using program run with no seed
   anywhere aborts at its first draw rather than inventing a default stream.
+- `--mc-estimator <ID>`, `--mc-samples <N>`, `--mc-interval <METHOD>` declare the run a
+  Monte Carlo estimate and seal the estimator's admission facts (id, sample-count
+  denominator, interval method) as the receipt's `monte_carlo` block. All three declare
+  together or not at all: an estimator whose interval method is undeclared is refused, and
+  so is every other partial declaration (the claim is the interval, never the point). A
+  zero sample count is refused as an unpriceable denominator, and the declaration requires
+  a `Random`-observing program with a seed (an MC claim over a stream that cannot
+  re-derive is worthless as evidence).
 
 The program's own stdout is preserved: when the receipt is written to a file, the program's
 output is echoed to real stdout byte-for-byte (identical to plain `run`); when the receipt is
@@ -163,6 +171,15 @@ The receipt is a single JSON object. Its layers, outermost meaning first:
 - `numerical_method`: `{ description?, status }`, author-DECLARED via `--method` (buildc
   cannot derive scheme semantics from source and does not pretend to); an inconsistent
   status/description pair is rejected (`FIELD_CONTRACT_VIOLATION`).
+- `monte_carlo` (optional): `{ estimator, samples, interval_method, status }`, the MC
+  admission block from the `--mc-*` flags. Author-declared like `numerical_method`, but
+  with hard shape contracts verify re-checks (`FIELD_CONTRACT_VIOLATION`): it rides only
+  on a seeded `Random` run, `samples` is non-zero, `estimator` and `interval_method` are
+  non-empty, and `status` is `DECLARED` (v0 states the facts, it does not execute them).
+  This is the admission rule for the weakest-promise mode: deterministic work needs only a
+  hash, but an MC number without its denominator, seed, and interval method is
+  unpriceable, so the receipt refuses to exist without them. v0 claims REPRODUCIBILITY
+  and declaration discipline, never correctness of the interval.
 - `measurement`: `{ metric, observed_values: [f64], count, raw_stdout_digest,
   series_extraction_policy, units? }`. `raw_stdout_digest` seals the EXACT captured stdout
   bytes (the parse into `observed_values` is a lossy transform, so byte drift stays
@@ -353,8 +370,15 @@ under `--seed 42` can never be farther than its step count from the origin, so t
 against that worst-case envelope stays non-negative for every seed and it PASSes) with
 `examples/random_walk_bound_broken.bld` (the same walk claiming the tighter envelope
 `|position| <= 7`, which a 200-step walk leaves for essentially any seed, so it FAILs; the
-sealed seed makes both stochastic verdicts exactly re-derivable). Run any negative kernel
-with `--negative-fixture` for a `FAIL_EXPECTED` receipt.
+sealed seed makes both stochastic verdicts exactly re-derivable), and a MONTE CARLO
+instance in `examples/mc_pi_rejection.bld` (pi by rejection sampling under the full
+`--mc-*` declaration: from a burn-in of 200 samples the running estimate stays within a
+band of 0.3 of pi, calibrated against the corpus seed 42 whose measured worst error is
+0.2094, so the slack stays non-negative and it PASSes) with
+`examples/mc_pi_rejection_broken.bld` (a wrong-area estimator multiplies by 3.0 instead of
+4.0 and converges to 3*pi/4, a systematic bias of ~0.785 no sampling repairs, so it blows
+through the band and FAILs: the harness catches a biased estimator, not just an unlucky
+one). Run any negative kernel with `--negative-fixture` for a `FAIL_EXPECTED` receipt.
 
 ## 5. The heat-equation kernel example
 
@@ -462,7 +486,7 @@ fixtures and CI pin the *specific* failure instead of accepting "anything failed
 | `DIGEST_MALFORMED` | a sealed digest field is not a real sha256 (64 hex chars); an absent hash cannot masquerade as witnessed provenance | 1 |
 | `ORACLE_KIND_UNSUPPORTED`, `ORACLE_STATUS_UNSUPPORTED`, `ORACLE_BINDING_MISMATCH`, `INVARIANT_UNSUPPORTED` | the oracle/invariant block names a kind, status, or criterion this verifier does not implement; binding is pinned to the implementation, never to another sealed field | 1 |
 | `FENCE_STATUS_UNEXPECTED` | a telemetry/lineage fence was edited to claim availability v0 does not produce | 1 |
-| `FIELD_CONTRACT_VIOLATION` | a sealed field claims something the program cannot express (a `seed_value` when nothing observes `Random`, a Random-using program with no sealed seed), is internally inconsistent (DECLARED method, no description), or resealed a non-canonical `invariant.tolerance` | 1 |
+| `FIELD_CONTRACT_VIOLATION` | a sealed field claims something the program cannot express (a `seed_value` when nothing observes `Random`, a Random-using program with no sealed seed, a `monte_carlo` block without a seeded Random run or with a zero/nameless denominator, estimator, or interval method), is internally inconsistent (DECLARED method, no description), or resealed a non-canonical `invariant.tolerance` | 1 |
 | `EFFECT_POLICY_DRIFT` | the sealed effect/capability facts, or the witnessed fields derived from them, do not re-derive from the source | 1 |
 | `TOOL_UNAVAILABLE` | no C compiler available for the re-run | 4 |
 | `REDERIVATION_FAILED` | the source could not be re-checked (missing file, check failure) | inner code |
@@ -495,12 +519,13 @@ that keep the body well-formed are re-sealed (so the tamper passes the integrity
 the specific contract check under test); the seal-mismatch case is deliberately left unsealed.
 The current cases exercise five separate arms of the taxonomy: `COMPILER_MISMATCH` (foreign
 compiler tag), `SEAL_MISMATCH` (a witnessed value edited without re-sealing), `MALFORMED` (a
-required field removed), `FIELD_CONTRACT_VIOLATION` (twice, through different gates: a sealed
-tolerance loosened then re-sealed, and the sealed `seed_value` flipped against the program's
-capabilities then re-sealed), and `INVARIANT_UNSUPPORTED` (an unknown invariant name,
+required field removed), `FIELD_CONTRACT_VIOLATION` (three times, through different gates: a
+sealed tolerance loosened then re-sealed, the sealed `seed_value` flipped against the
+program's capabilities then re-sealed, and a `monte_carlo` block given a zero sample
+denominator then re-sealed), and `INVARIANT_UNSUPPORTED` (an unknown invariant name,
 re-sealed). Every case is rejected before any program re-run, so `--self-test` needs no C
-compiler; the seed-pairing case is rejected at the source re-derivation stage, so it (alone)
-needs the receipt's source file readable, exactly as `buildc check` would. It exits 0 only if every tamper
+compiler; the seed-pairing and MC cases are rejected at the source re-derivation stage, so
+they (alone) need the receipt's source file readable, exactly as `buildc check` would. It exits 0 only if every tamper
 produced its expected class, and prints `self-test: N/N tampers rejected with the expected
 failure_class`.
 
@@ -528,9 +553,11 @@ re-runs each member, `chain verify` needs the C toolchain and the member sources
 
 The example kernels come in positive/negative pairs, each declared to PASS or to FAIL_EXPECTED
 under a named invariant. `examples/scientific-corpus.json` records that ground truth for all
-eleven pairs (a member whose kernel draws from `random_f64()` also declares its `seed`, which
-the runner passes as `--seed`; a Random member with no declared seed fails the corpus loudly,
-because emit refuses it), and one command checks reality against it:
+twelve pairs (a member whose kernel draws from `random_f64()` also declares its `seed`, which
+the runner passes as `--seed`, and an MC member declares `mc_estimator` / `mc_samples` /
+`mc_interval`, passed through the same way; a Random member with no declared seed, or a
+partial MC declaration, fails the corpus loudly, because emit refuses it), and one command
+checks reality against it:
 
 ```
 buildc receipt corpus examples/scientific-corpus.json

@@ -1,0 +1,35 @@
+// Negative fixture for mc_pi_rejection.bld: the same sampler under a
+// WRONG-AREA estimator.
+//
+// The estimator multiplies the inside fraction by 3.0 instead of 4.0, so it
+// converges to 3*pi/4 (about 2.356) instead of pi: a systematic bias of
+// about 0.785 that no amount of sampling repairs. The printed slack
+// `band - |estimate - pi|` with band = 0.3 goes decisively negative and the
+// `non-negative` invariant FAILs as declared (FAIL_EXPECTED): the harness
+// proves it can catch a biased estimator, not just bless an honest one. The
+// sealed seed makes the failure exactly re-derivable.
+
+fn main() ~ Console + Random {
+    let n: i32 = 2000;
+    let burn: i32 = 200;
+    let band: f64 = 0.3;
+    let mut inside: i32 = 0;
+    let mut k: i32 = 0;
+    while k < n {
+        let x: f64 = random_f64();
+        let y: f64 = random_f64();
+        if x * x + y * y < 1.0 {
+            inside = inside + 1;
+        }
+        k = k + 1;
+        if k >= burn {
+            // Wrong area factor: 3.0 instead of 4.0.
+            let est: f64 = 3.0 * (inside as f64) / (k as f64);
+            let mut err: f64 = est - 3.14159265358979323846;
+            if err < 0.0 {
+                err = 0.0 - err;
+            }
+            println!("{}", band - err);
+        }
+    }
+}
