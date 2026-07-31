@@ -20,6 +20,7 @@ mod mir_representation;
 mod model_receipt;
 mod module_graph;
 mod scientific_runtime;
+mod tool_receipt;
 mod symbol_graph;
 
 use clap::{Parser as ClapParser, Subcommand};
@@ -45,6 +46,7 @@ use mir_representation::{
 };
 use model_receipt::{verify_model_boundary_receipt, MODEL_RECEIPT_SCHEMA};
 use module_graph::{verify_module_graph_receipt, ModuleGraphReceipt, MODULE_GRAPH_RECEIPT};
+use tool_receipt::{verify_tool_call_receipt, TOOL_RECEIPT_SCHEMA};
 use scientific_runtime::{
     build_receipt_chain, receipt_chain_seal_hex, ReceiptChainManifest, ScientificCorpusManifest,
     RECEIPT_CHAIN_SCHEMA, RECEIPT_CORPUS_SCHEMA,
@@ -1909,13 +1911,17 @@ fn cmd_receipt_chain_build(receipts: &[PathBuf], output: &Path) -> Result<(), i3
         // zero changes beyond this: pinned seals and subprocess
         // re-verification (`buildc receipt verify <member>`) already compose
         // through the schema-agnostic dispatch this widening exercises.
-        if schema != SCIENTIFIC_RUNTIME_SCHEMA && schema != MODEL_RECEIPT_SCHEMA {
+        if schema != SCIENTIFIC_RUNTIME_SCHEMA
+            && schema != MODEL_RECEIPT_SCHEMA
+            && schema != TOOL_RECEIPT_SCHEMA
+        {
             eprintln!(
-                "Error: '{}' is not a chainable receipt (schema `{}`; expected `{}` or `{}`)",
+                "Error: '{}' is not a chainable receipt (schema `{}`; expected `{}`, `{}`, or `{}`)",
                 path.display(),
                 schema,
                 SCIENTIFIC_RUNTIME_SCHEMA,
-                MODEL_RECEIPT_SCHEMA
+                MODEL_RECEIPT_SCHEMA,
+                TOOL_RECEIPT_SCHEMA
             );
             return Err(1);
         }
@@ -2729,6 +2735,9 @@ fn cmd_receipt_verify(
     if schema == MODEL_RECEIPT_SCHEMA {
         return verify_model_boundary_receipt(&receipt, false);
     }
+    if schema == TOOL_RECEIPT_SCHEMA {
+        return verify_tool_call_receipt(&receipt, false);
+    }
     if schema != "buildlang-check-receipt/v1" {
         eprintln!("Error: unsupported check receipt schema `{}`", schema);
         return Err(1);
@@ -2871,6 +2880,15 @@ fn cmd_receipt_verify_json(
         == MODEL_RECEIPT_SCHEMA
     {
         return verify_model_boundary_receipt(&receipt, true);
+    }
+
+    // Tool-call receipts: offline schema/seal/field-contract verification only,
+    // no re-run. Same dispatch pattern, before the check-receipt schema guard.
+    if receipt_field_str(&receipt, "/schema", "schema")
+        .map_err(|code| receipt_load_failure(true, "SCHEMA_UNSUPPORTED", code))?
+        == TOOL_RECEIPT_SCHEMA
+    {
+        return verify_tool_call_receipt(&receipt, true);
     }
 
     let mut checks = Vec::new();

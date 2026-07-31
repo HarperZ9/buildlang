@@ -1,1 +1,2 @@
 compiler/tests/fixtures/model-receipt-golden.json text eol=lf
+compiler/tests/fixtures/tool-receipt-golden.json eol=lf
