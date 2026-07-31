@@ -125,15 +125,11 @@ fn tool_failure_class(json: bool, class: &str, code: i32) -> i32 {
 /// SEAL_MISMATCH (recompute + compare, FIRST), DIGEST_MALFORMED (digest hex
 /// well-formedness), FIELD_CONTRACT_VIOLATION (outcome/ok coherence). Mirrors
 /// `verify_model_boundary_receipt` in ordering and taxonomy.
-pub fn verify_tool_call_receipt(
-    receipt_json: &serde_json::Value,
-    json: bool,
-) -> Result<(), i32> {
-    let receipt: ToolCallReceipt =
-        serde_json::from_value(receipt_json.clone()).map_err(|err| {
-            eprintln!("Error: tool-call receipt is malformed: {err}");
-            tool_failure_class(json, "MALFORMED", 1)
-        })?;
+pub fn verify_tool_call_receipt(receipt_json: &serde_json::Value, json: bool) -> Result<(), i32> {
+    let receipt: ToolCallReceipt = serde_json::from_value(receipt_json.clone()).map_err(|err| {
+        eprintln!("Error: tool-call receipt is malformed: {err}");
+        tool_failure_class(json, "MALFORMED", 1)
+    })?;
 
     // Integrity gate FIRST.
     let recomputed_seal = recompute_seal_hex(&receipt);
@@ -288,8 +284,8 @@ mod tests {
             .join("tests/fixtures/tool-receipt-golden.json");
         let fixture_bytes = std::fs::read(&fixture_path)
             .unwrap_or_else(|e| panic!("read golden fixture {:?}: {e}", fixture_path));
-        let receipt: ToolCallReceipt = serde_json::from_slice(&fixture_bytes)
-            .expect("deserialize golden fixture");
+        let receipt: ToolCallReceipt =
+            serde_json::from_slice(&fixture_bytes).expect("deserialize golden fixture");
         let expected_seal = "fde2a06af85de9ee962f2ea6141126799be4838409874edbf0fab68899535534";
         let recomputed = recompute_seal_hex(&receipt);
         assert_eq!(
