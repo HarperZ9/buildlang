@@ -103,6 +103,17 @@ Flags on the `run` subcommand (all additive; absent `--emit-receipt`, none of th
   zero sample count is refused as an unpriceable denominator, and the declaration requires
   a `Random`-observing program with a seed (an MC claim over a stream that cannot
   re-derive is worthless as evidence).
+- `--mc-executed` upgrades the declaration to EXECUTED: the verifier RE-DERIVES the interval
+  from raw sufficient-statistic columns the kernel prints (successes/trials counters beside
+  the invariant scalar) instead of trusting it. Requires all three `--mc-*` flags together
+  (`--mc-executed` alone is refused), and `--mc-estimator` must be `proportion` (v1's only
+  executable estimator; DECLARED blocks may still use free text). `--columns` is forced to 3
+  (an unset default of 1 is silently upgraded, any other explicit value is refused, the
+  `--cross-backend` idiom). Fail-closed at emit: an incoherent EXECUTED block (a bad
+  successes/trials stream, a witnessed denominator that disagrees with `--mc-samples`, an
+  unexecutable `--mc-interval`, or a degenerate boundary proportion under
+  `normal-approx-95`) is refused before the receipt is sealed, never sealed as if it were
+  coherent.
 - `--budget-steps <LIMIT>`, `--budget-consumed <N>` declare the run a budgeted search and
   seal the step ceiling, the consumption, and a DERIVED `exhausted` flag as the receipt's
   `budget` block. Both declare together or not at all (a result without its budget ceiling
@@ -212,18 +223,92 @@ The receipt is a single JSON object. Its layers, outermost meaning first:
   practice, since no receipt over a Model-observing program can exist to carry those
   fields. There is no corpus member and no `--self-test` case for `Model`: the refusal
   happens before a receipt can exist, so there is nothing for either to exercise.
+  **The refusal is unchanged and un-weakened by the paragraph below.** A model
+  boundary crossing still cannot become scientific evidence; it becomes a
+  DIFFERENT, separately-schemed artifact instead.
+
+### Model boundary receipts (`buildlang-model-boundary-receipt/v0`)
+
+A model receipt is a PROVENANCE artifact about a `Model`-capability boundary
+crossing: harness-side, emitted by `harness/model_shim.py` (the local-model
+repo), never by buildc. It carries no invariant, no oracle, and no verdict, so
+it cannot masquerade as a scientific-runtime receipt, and the reverse is
+enforced structurally too: `receipt chain build`'s allowlist accepts exactly
+`buildlang-scientific-runtime-receipt/v0` and
+`buildlang-model-boundary-receipt/v0`, nothing else. Full schema, field-tag
+table (SHIM-WITNESSED vs. DECLARED), and the verify arm's failure classes are
+documented in [MODEL-RECEIPT.md](MODEL-RECEIPT.md). Two consequences worth
+stating here, beside the scientific schema they sit next to:
+
+- `buildc receipt verify` dispatches a model receipt to its own arm (offline
+  only: seal recompute, digest well-formedness, field-shape contracts --
+  there is no re-run, because the artifact witnesses a PAST crossing, not a
+  re-derivable one). It shares the same `failure_class` taxonomy as the
+  scientific verifier (`SEAL_MISMATCH`, `DIGEST_MALFORMED`,
+  `FIELD_CONTRACT_VIOLATION`, `MALFORMED`, `SCHEMA_UNSUPPORTED`) -- no new
+  classes for v1.
+- `receipt chain build` accepts a model receipt as a chain member beside
+  scientific-runtime receipts (the propose/dispose demo: a model receipt as
+  the proposer link, a Model-FREE disposer kernel's scientific receipt as the
+  checker link). `receipt chain verify` needed zero changes: pinned seals and
+  subprocess re-verification (`buildc receipt verify <member>`) already
+  compose across schemas.
+- The model receipt is **not** a corpus member: `examples/scientific-corpus.json`
+  and the `29/29` corpus count are about scientific-runtime receipts over
+  `.bld` kernels only. A model receipt has no invariant to classify PASS or
+  FAIL_EXPECTED against, so it is not corpus-shaped, by construction -- not an
+  oversight. The `10/10` self-test count is likewise scientific-runtime-only
+  (`--self-test` builds its tamper table from `ScientificRuntimeReceipt`); the
+  model arm's own tamper coverage lives in `compiler/src/model_receipt.rs`'s
+  unit tests and `compiler/tests/cli.rs`'s CLI-level tests instead.
 - `numerical_method`: `{ description?, status }`, author-DECLARED via `--method` (buildc
   cannot derive scheme semantics from source and does not pretend to); an inconsistent
   status/description pair is rejected (`FIELD_CONTRACT_VIOLATION`).
-- `monte_carlo` (optional): `{ estimator, samples, interval_method, status }`, the MC
-  admission block from the `--mc-*` flags. Author-declared like `numerical_method`, but
-  with hard shape contracts verify re-checks (`FIELD_CONTRACT_VIOLATION`): it rides only
-  on a seeded `Random` run, `samples` is non-zero, `estimator` and `interval_method` are
-  non-empty, and `status` is `DECLARED` (v0 states the facts, it does not execute them).
+- `monte_carlo` (optional): `{ estimator, samples, interval_method, status, estimate?,
+  interval_low?, interval_high?, n_effective?, successes? }`, the MC admission block from
+  the `--mc-*` flags. Author-declared, with hard shape contracts verify re-checks
+  (`FIELD_CONTRACT_VIOLATION`): it rides only on a seeded `Random` run, `samples` is
+  non-zero, `estimator` and `interval_method` are non-empty, and `status` is one of two
+  values.
+  - `DECLARED` (v0's original shape): the facts were stated, not independently executed;
+    the five `estimate`/`interval_low`/`interval_high`/`n_effective`/`successes` fields are
+    absent, and their presence on a DECLARED block is refused. `estimator`/`interval_method`
+    stay free text forever (the shipped corpus uses `mean`/`normal-approx-95`).
+  - `EXECUTED` (`--mc-executed`): the verifier RE-DERIVES the interval from raw
+    sufficient-statistic columns the kernel prints (a three-column series,
+    `<invariant_scalar> <successes> <trials>` per row), never from the kernel's own
+    arithmetic, at TWO stages: Stage A over the SEALED `measurement.observed_values` before
+    any re-run (so a tampered-and-resealed interval is a pure data contradiction, rejectable
+    with no C compiler), and Stage B over the re-parsed re-run series (`MC_INTERVAL_DRIFT`
+    on disagreement, since a Stage-A-clean receipt that no longer describes the run it names
+    is a different kind of dishonesty than a tampered field). All five executed fields must
+    be present, and are refused when absent. The executable estimator vocabulary (v1) is
+    `proportion` only (the mean of Bernoulli indicators); the executable interval-method
+    vocabulary is `normal-approx-95` and `wilson-95` (`normal-approx-95` additionally
+    refused at the boundary proportion, successes = 0 or successes = trials, since a
+    zero-width interval there overclaims precision; the message points at `wilson-95`).
+    `clopper-pearson-95` is sealed-successes-only, not executable in v1 (it needs a verified
+    inverse incomplete beta with no in-tree oracle), and is refused at both emit and verify.
+    The aggregate columns must be structurally coherent as a cumulative Bernoulli count
+    (every value an exact integer below 2^53, `trials` incrementing by exactly 1 across
+    consecutive rows after the free first-row value, `successes` non-decreasing with
+    increments in `{0, 1}`, `successes <= trials` on every row), and the final row's
+    `trials` MUST equal the declared `samples`: the witnessed-denominator equality, the
+    single biggest honesty gain of the EXECUTED shape. Float fields are compared within a
+    pinned absolute tolerance (`1e-12`) in both stages. An EXECUTED block additionally adds
+    three `not_claimed` entries -- `sample_independence`, `interval_coverage`,
+    `estimator_semantics` -- present if and only if `status == "EXECUTED"` (the
+    `NOT_PROVES_OPTIMALITY`/`optimality` pairing idiom): EXECUTED hardens the interval
+    arithmetic and the denominator, but it cannot and does not harden that the draws are
+    independent, that the named confidence level covers the true value, or that the
+    indicator counts what the author says it counts.
+
   This is the admission rule for the weakest-promise mode: deterministic work needs only a
   hash, but an MC number without its denominator, seed, and interval method is
-  unpriceable, so the receipt refuses to exist without them. v0 claims REPRODUCIBILITY
-  and declaration discipline, never correctness of the interval.
+  unpriceable, so the receipt refuses to exist without them. DECLARED claims
+  REPRODUCIBILITY and declaration discipline, never correctness of the interval; EXECUTED
+  hardens the interval arithmetic and the witnessed denominator, never the estimator's
+  semantics or independence.
 - `budget` (optional): `{ steps_limit, steps_consumed, exhausted, status, wall_seconds_limit?,
   wall_exceeded? }`, the budgeted-search admission block from the `--budget-*` flags.
   Author-declared like `monte_carlo`, but with hard shape contracts verify re-checks
@@ -323,6 +408,17 @@ a receipt cannot weaken its own check.
 | `conserved-band` | `conserved_within_band` | `abs(s[k] - s[0]) > tol` (left a fixed error budget of the initial value) | `5e-3` |
 | `non-negative` | `non_negative` | `s[k] < -tol` (dropped below zero) | `1e-9` |
 | `cross-backend` (`--cross-backend <TARGET>`, `--columns` forced to 2) | `cross_backend_columns_agree` | the C-anchor and secondary-lane columns of a row differ by more than `tol` (the same evaluator as `relation`) | `1e-5` |
+
+An EXECUTED `monte_carlo` receipt (`--mc-executed`, `--columns` forced to 3) takes any
+single-scalar invariant name above (never `relation`/`cross-backend`: their columns already
+mean something else, and `column_count_matches_invariant` refuses the pairing). The row is
+`<invariant_scalar> <successes> <trials>`; `evaluate_measurement` DE-INTERLEAVES it,
+evaluating the named invariant over column 0 only, with columns 1-2 left for
+`compute_mc_executed`'s separate coherence and interval re-derivation. The effective
+observation count for the "at least two points" verdict rule is the ROW count, mirroring
+how `relation` counts rows rather than raw tokens. A ragged three-column series (length not
+a multiple of 3) yields zero rows, the same "cannot witness" treatment a ragged `relation`
+series gets.
 
 The `conservation` and `bounded` references are both `s[0]` (the initial value), not the mean,
 so a re-run that reproduces a different-length prefix cannot shift the reference. The checks
@@ -601,7 +697,7 @@ fixtures and CI pin the *specific* failure instead of accepting "anything failed
 | `DIGEST_MALFORMED` | a sealed digest field is not a real sha256 (64 hex chars); an absent hash cannot masquerade as witnessed provenance | 1 |
 | `ORACLE_KIND_UNSUPPORTED`, `ORACLE_STATUS_UNSUPPORTED`, `ORACLE_BINDING_MISMATCH`, `INVARIANT_UNSUPPORTED` | the oracle/invariant block names a kind, status, or criterion this verifier does not implement; binding is pinned to the implementation, never to another sealed field | 1 |
 | `FENCE_STATUS_UNEXPECTED` | a telemetry/lineage fence was edited to claim availability v0 does not produce | 1 |
-| `FIELD_CONTRACT_VIOLATION` | a sealed field claims something the program cannot express (a `seed_value` when nothing observes `Random`, a Random-using program with no sealed seed, a `monte_carlo` block without a seeded Random run or with a zero/nameless denominator, estimator, or interval method, a `budget` block with a zero ceiling, consumption above its ceiling, a hand-set `exhausted`, or a non-`DECLARED` status, a `budget.wall_seconds_limit` that is non-positive or non-finite, present without a sealed `runtime_state.wall_seconds`, or paired with a `wall_exceeded` that disagrees with the SEALED `wall_seconds > wall_seconds_limit` comparison, a `wall_exceeded` present without `wall_seconds_limit`, a `cross_backend` block present without the `cross_backend_columns_agree` invariant or that invariant without the block (the biconditional), a non-`rust` `cross_backend.secondary_target`, a non-`EXECUTED` `cross_backend.status`, a `cross_backend` block whose RE-DERIVED capabilities include `Random` (the Rust lane has no seeded PRNG, so the streams could not agree; this transitively excludes a `monte_carlo` block riding along too, since MC requires `Random`), or a `NOT_PROVES_OPTIMALITY`/`optimality` pairing or claim-language mismatch), is internally inconsistent (DECLARED method, no description), or resealed a non-canonical `invariant.tolerance` | 1 |
+| `FIELD_CONTRACT_VIOLATION` | a sealed field claims something the program cannot express (a `seed_value` when nothing observes `Random`, a Random-using program with no sealed seed, a `monte_carlo` block without a seeded Random run or with a zero/nameless denominator, estimator, or interval method, a status outside `DECLARED`/`EXECUTED`, a `budget` block with a zero ceiling, consumption above its ceiling, a hand-set `exhausted`, or a non-`DECLARED` status, a `budget.wall_seconds_limit` that is non-positive or non-finite, present without a sealed `runtime_state.wall_seconds`, or paired with a `wall_exceeded` that disagrees with the SEALED `wall_seconds > wall_seconds_limit` comparison, a `wall_exceeded` present without `wall_seconds_limit`, a `cross_backend` block present without the `cross_backend_columns_agree` invariant or that invariant without the block (the biconditional), a non-`rust` `cross_backend.secondary_target`, a non-`EXECUTED` `cross_backend.status`, a `cross_backend` block whose RE-DERIVED capabilities include `Random` (the Rust lane has no seeded PRNG, so the streams could not agree; this transitively excludes a `monte_carlo` block riding along too, since MC requires `Random`), or a `NOT_PROVES_OPTIMALITY`/`optimality` pairing or claim-language mismatch), is internally inconsistent (DECLARED method, no description), or resealed a non-canonical `invariant.tolerance`. The EXECUTED `monte_carlo` sub-cases: an executed field (`estimate`/`interval_low`/`interval_high`/`n_effective`/`successes`) present on a DECLARED block, or one of the five ABSENT on an EXECUTED block; an EXECUTED `estimator`/`interval_method` outside the v1 executable vocabulary (`proportion`; `normal-approx-95`, `wilson-95`); a `column_count` other than 3 on an EXECUTED block; an incoherent aggregate successes/trials stream (non-integer, a trials step other than +1, a successes step outside `{0, 1}`, `successes > trials`); a witnessed final `trials` that disagrees with the declared `samples` (the denominator is not witnessed); the Stage A recompute (over the sealed series) disagreeing with the sealed `estimate`/`interval_low`/`interval_high`/`n_effective`/`successes`; and the `sample_independence`/`interval_coverage`/`estimator_semantics` `not_claimed` triad biconditional | 1 |
 | `EFFECT_POLICY_DRIFT` | the sealed effect/capability facts, or the witnessed fields derived from them, do not re-derive from the source | 1 |
 | `CAPABILITY_INADMISSIBLE` | the RE-DERIVED capabilities include `Model`: a scientific receipt cannot witness a model-mediated run (models propose, oracles dispose) | 1 |
 | `TOOL_UNAVAILABLE` | no C compiler available for the re-run | 4 |
@@ -610,6 +706,7 @@ fixtures and CI pin the *specific* failure instead of accepting "anything failed
 | `RERUN_EXIT_MISMATCH` | the re-run's process exit code differs from the sealed one (covers a crashing re-run) | 1 |
 | `SOURCE_DIGEST_MISMATCH`, `INPUT_GRAPH_DIGEST_MISMATCH` | the source changed since sealing | 1 |
 | `MEASUREMENT_COUNT_DRIFT`, `INVARIANT_STATUS_DRIFT`, `VIOLATION_COUNT_DRIFT`, `RECEIPT_STATUS_DRIFT` | the re-run disagrees with a stored verdict fact | 1 |
+| `MC_INTERVAL_DRIFT` | an EXECUTED `monte_carlo` receipt's sealed interval fields do not match the Stage B recompute over the re-run series (Stage A already passed over the sealed series; this catches a receipt that stopped describing the run it names) | 1 |
 | `SEAL_MISMATCH` | the stored receipt body does not re-seal | 1 |
 | `INVARIANT_NOT_HELD` | faithful receipt, but the recorded verdict is `FAIL_UNEXPECTED` or `UNVERIFIABLE` | 3 |
 
@@ -633,24 +730,29 @@ Given a valid scientific-runtime receipt, it tampers several distinct sealed fie
 that each tamper is rejected by the real verify path with its expected `failure_class`. Cases
 that keep the body well-formed are re-sealed (so the tamper passes the integrity gate and reaches
 the specific contract check under test); the seal-mismatch case is deliberately left unsealed.
-The current nine cases exercise five separate arms of the taxonomy: `COMPILER_MISMATCH`
+The current ten cases exercise five separate arms of the taxonomy: `COMPILER_MISMATCH`
 (foreign compiler tag), `SEAL_MISMATCH` (a witnessed value edited without re-sealing),
-`MALFORMED` (a required field removed), `FIELD_CONTRACT_VIOLATION` (five times, through
+`MALFORMED` (a required field removed), `FIELD_CONTRACT_VIOLATION` (six times, through
 different gates: a sealed tolerance loosened then re-sealed, the sealed `seed_value` flipped
 against the program's capabilities then re-sealed, a `monte_carlo` block given a zero sample
 denominator then re-sealed, a `budget` block given a `steps_consumed` above
-`steps_limit` then re-sealed, and the sealed `cross_backend` block swapped against the
+`steps_limit` then re-sealed, the sealed `cross_backend` block swapped against the
 invariant name -- removed if present, added with a syntactically valid shape if absent --
-then re-sealed), and `INVARIANT_UNSUPPORTED` (an unknown invariant name,
-re-sealed). Every case is rejected before any program re-run, so `--self-test` needs no C
-compiler (and no rustc): the seed-pairing, MC, budget, and cross-backend cases are rejected at
-the source re-derivation stage or the field-contract gate, so they (alone) need the receipt's
-source file readable, exactly as `buildc check` would. It exits 0 only if every tamper produced
-its expected class, and prints `self-test: N/N tampers rejected with the expected
-failure_class`. There is no tenth case for the wall-metering fields: a tampered
-`wall_exceeded` or `wall_seconds_limit` is rejected through the exact same
-`FIELD_CONTRACT_VIOLATION` arm the budget case (case 8) already exercises, so a tenth case
-would prove nothing the ninth does not already prove.
+then re-sealed, and case 10: an EXECUTED `monte_carlo` block's sealed `interval_high`
+nudged against its Stage A recompute -- the receipt's own block if it already carries one
+(e.g. a receipt emitted from `mc_pi_rejection_executed.bld`), else a syntactically valid
+one is added, mirroring case 9's `cross_backend` fallback -- then re-sealed), and
+`INVARIANT_UNSUPPORTED` (an unknown invariant name, re-sealed). Every case is rejected
+before any program re-run, so `--self-test` needs no C compiler (and no rustc): the
+seed-pairing, MC, budget, cross-backend, and EXECUTED-interval cases are rejected at the
+source re-derivation stage or the field-contract gate (Stage A, in the EXECUTED case),
+so they (alone) need the receipt's source file readable, exactly as `buildc check` would.
+It exits 0 only if every tamper produced its expected class, and prints `self-test: N/N
+tampers rejected with the expected failure_class`. Case 10 is robust to WHICHEVER Stage A
+gate fires first (seed pairing, field presence, or the interval-mismatch check it targets)
+on an arbitrary pristine input: every pre-re-run EXECUTED violation this slice adds
+reports `FIELD_CONTRACT_VIOLATION`, the same class case 7's zero-denominator tamper
+already relies on regardless of which specific MC gate fires first.
 
 ### Chaining receipts (`receipt chain`)
 
@@ -680,14 +782,15 @@ probabilistic-exact, stochastic, Monte Carlo, heuristic, plus the cross-backend 
 
 The example kernels come in positive/negative pairs, each declared to PASS or to FAIL_EXPECTED
 under a named invariant. `examples/scientific-corpus.json` records that ground truth for all
-thirteen pairs plus the cross-backend singleton (a member whose kernel draws from
+fourteen pairs plus the cross-backend singleton (a member whose kernel draws from
 `random_f64()` also declares its `seed`, which the runner passes as `--seed`, an MC member
-declares `mc_estimator` / `mc_samples` / `mc_interval`, passed through the same way, a budgeted
-member declares `budget_steps` / `budget_consumed`, passed through as `--budget-steps` /
-`--budget-consumed`, and the cross-backend member declares `cross_backend`, passed through as
-`--cross-backend`; a Random member with no declared seed, or a partial MC or budget
-declaration, fails the corpus loudly, because emit refuses it), and one command checks reality
-against it:
+declares `mc_estimator` / `mc_samples` / `mc_interval`, passed through the same way, an
+EXECUTED MC member additionally declares `mc_executed: true`, passed through as
+`--mc-executed`, a budgeted member declares `budget_steps` / `budget_consumed`, passed
+through as `--budget-steps` / `--budget-consumed`, and the cross-backend member declares
+`cross_backend`, passed through as `--cross-backend`; a Random member with no declared seed,
+or a partial MC or budget declaration, fails the corpus loudly, because emit refuses it),
+and one command checks reality against it:
 
 ```
 buildc receipt corpus examples/scientific-corpus.json

@@ -1,0 +1,34 @@
+{
+  "schema": "buildlang-model-boundary-receipt/v0",
+  "source": "model:echo:echo/v1",
+  "shim": {
+    "name": "model_shim.py",
+    "version": "0.1.0",
+    "mode": "echo"
+  },
+  "session": {
+    "listen": "127.0.0.1:8931",
+    "nonce": "a1b2c3d4",
+    "request_received_utc": "2026-07-29T00:00:00Z",
+    "reply_written_utc": "2026-07-29T00:00:00Z"
+  },
+  "prompt": {
+    "sha256": "758d61f26a44448384e5c4468a0dcb7a2abe456067b0f7b505bc28b9411fe931",
+    "bytes": 4
+  },
+  "reply": {
+    "sha256": "de2406a7ccdb9add6361bdf86cfd31dfaa95806f8d42f91102290ae3abe5afae",
+    "bytes": 10
+  },
+  "model": {
+    "name": "echo/v1"
+  },
+  "seed": {
+    "status": "NOT_SENT"
+  },
+  "outcome": "COMPLETED",
+  "seal": {
+    "algorithm": "sha256",
+    "hex": "6bb2a09c47f5eaa2e3208a5eadcd6d57d1faffa74a567e024e920571c3794035"
+  }
+}
