@@ -20,8 +20,8 @@ mod mir_representation;
 mod model_receipt;
 mod module_graph;
 mod scientific_runtime;
-mod tool_receipt;
 mod symbol_graph;
+mod tool_receipt;
 
 use clap::{Parser as ClapParser, Subcommand};
 use sha2::{Digest, Sha256};
@@ -46,7 +46,6 @@ use mir_representation::{
 };
 use model_receipt::{verify_model_boundary_receipt, MODEL_RECEIPT_SCHEMA};
 use module_graph::{verify_module_graph_receipt, ModuleGraphReceipt, MODULE_GRAPH_RECEIPT};
-use tool_receipt::{verify_tool_call_receipt, TOOL_RECEIPT_SCHEMA};
 use scientific_runtime::{
     build_receipt_chain, receipt_chain_seal_hex, ReceiptChainManifest, ScientificCorpusManifest,
     RECEIPT_CHAIN_SCHEMA, RECEIPT_CORPUS_SCHEMA,
@@ -63,6 +62,7 @@ use scientific_runtime::{
     RELATION_INVARIANT, SCIENTIFIC_RUNTIME_SCHEMA,
 };
 use symbol_graph::{verify_symbol_graph_receipt, SymbolGraphReceipt, SYMBOL_GRAPH_RECEIPT};
+use tool_receipt::{verify_tool_call_receipt, TOOL_RECEIPT_SCHEMA};
 
 fn parse_codegen_target(target: &str) -> Result<Target, String> {
     match target {
