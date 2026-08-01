@@ -1,6 +1,6 @@
 # BuildLang Language Specification
 
-Version 1.0 - March 2026
+Version 1.2 - August 2026
 
 ## 1. Lexical Structure
 

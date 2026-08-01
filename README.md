@@ -227,7 +227,7 @@ buildc run examples/heat_equation_energy.bld --emit-receipt receipt.json \
   --invariant energy-monotone --problem 1d-heat-equation-energy
 buildc receipt verify receipt.json
 
-# run the full 27-member example corpus (paired PASS / FAIL_EXPECTED kernels)
+# run the full 30-member example corpus (paired PASS / FAIL_EXPECTED kernels)
 buildc receipt corpus examples/scientific-corpus.json
 
 # emit one receipt per mode (docs/FIVE-MODES-TOUR.md has all six commands),
@@ -256,10 +256,32 @@ BuildLang 1.2.x. The C backend, capability-effect checking, HLSL/GLSL
 output, and the receipt tooling are the verified core; SPIR-V, LLVM IR, WASM,
 Rust, x86-64, ARM64, GPU dispatch, and `#[linear]` types are labeled
 experimental and stay that way until their evidence says otherwise. The
-release-shaped baseline (2026-07-29, local `cargo test` from `compiler/`):
-1698 tests passing, 0 failing (11 ignored), with `buildc receipt corpus`
-29/29 and `buildc corpus verify` 8/8. Ground-truth release evidence lives in
+release-shaped baseline (2026-08-01, local `cargo test` from `compiler/`):
+1704 tests passing, 0 failing (11 ignored), 136 source files, 142,792 lines.
+The corpus is 30 `.bld` example kernels and 8 C-execution receipts.
+Ground-truth release evidence lives in
 [STATUS.md](STATUS.md); [CHANGELOG.md](CHANGELOG.md) tracks changes.
+
+## Boundary receipts
+
+BuildLang verifies computation through sealed, re-checkable receipts. Two
+boundary receipt kinds extend this discipline beyond the compiler itself:
+
+- **Model boundary receipts** (`buildlang-model-boundary-receipt/v0`): witness
+  that a `Model`-capability call crossed the boundary between the harness and a
+  model daemon. The harness-side shim emits the receipt; `buildc receipt verify`
+  reads it. A model-observing program is refused a scientific receipt with
+  `CAPABILITY_INADMISSIBLE` (models propose, oracles dispose).
+- **Tool-call receipts** (`flywheel.tool-call-receipt/v1`): witness that an agent
+  tool invocation occurred, binding the tool name, capability class (read / write
+  / exec / external-mcp), admission decision, and witnessed args/output digests.
+  The Flywheel harness emits these; `buildc receipt verify` reads them with a
+  golden-pinned cross-language seal contract (Rust serde_json agrees byte-for-byte
+  with Python json.dumps). This is the enforced AgentRiskBOM primitive.
+
+Both share a seal idiom and the closed failure taxonomy
+(`MALFORMED`, `SEAL_MISMATCH`, `DIGEST_MALFORMED`, `FIELD_CONTRACT_VIOLATION`)
+with the scientific receipt verifier, and compose into receipt chains.
 
 ## Documentation and ecosystem
 

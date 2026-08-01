@@ -10,6 +10,12 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- **Tool-call receipt verify arm**: `buildc receipt verify` gains a third
+  schema dispatch for `flywheel.tool-call-receipt/v1`, the sealed per-tool-call
+  receipt emitted by Flywheel's agent loop. Mirrors `model_receipt.rs` in
+  structure (fixed-order seal, shared failure taxonomy, golden fixture pinned
+  across Python and Rust). Chain allowlist widened to admit tool-call receipts
+  alongside scientific and model-boundary receipts.
 - **Model boundary receipts, the verify arm and chain admission**: a new
   artifact kind, `buildlang-model-boundary-receipt/v0`, documented in the new
   `docs/MODEL-RECEIPT.md` (SCIENTIFIC-RECEIPT.md gains a pointer section).
