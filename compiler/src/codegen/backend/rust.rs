@@ -178,14 +178,64 @@ impl RustBackend {
                         ty.name
                     )));
                 }
-                TypeDefKind::Enum { .. } => {
-                    return Err(CodegenError::Unsupported(format!(
-                        "Rust backend does not yet lower enum type '{}'",
-                        ty.name
-                    )));
+                TypeDefKind::Enum {
+                    discriminant_ty: _,
+                    variants,
+                } => {
+                    self.emit_enum_definition(&ty.name, variants)?;
                 }
             }
         }
+        Ok(())
+    }
+
+    fn emit_enum_definition(
+        &mut self,
+        enum_name: &str,
+        variants: &[crate::codegen::ir::MirEnumVariant],
+    ) -> CodegenResult<()> {
+        let enum_name = Self::rust_type_name(enum_name);
+
+        self.writeln("#[derive(Clone, Debug)]");
+        self.writeln(&format!("enum {} {{", enum_name));
+        self.indent += 1;
+
+        for variant in variants {
+            if variant.fields.is_empty() {
+                self.writeln(&format!("{},", Self::rust_ident(&variant.name)));
+            } else {
+                let fields = variant
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (name, ty))| {
+                        let field_name = name
+                            .as_ref()
+                            .map(|n| Self::rust_ident(n))
+                            .unwrap_or_else(|| format!("f{}", i));
+                        format!("{}: {}", field_name, self.type_to_rust(ty))
+                    })
+                    .collect::<Vec<_>>();
+
+                if variant.fields.len() == 1 && variant.fields[0].0.is_none() {
+                    // Tuple variant: VariantName(Type)
+                    self.writeln(&format!("{}({}),", Self::rust_ident(&variant.name), fields[0].split(": ").nth(1).unwrap()));
+                } else {
+                    // Struct variant: VariantName { field: Type, ... }
+                    self.writeln(&format!("{}{{", Self::rust_ident(&variant.name)));
+                    self.indent += 1;
+                    for field in fields {
+                        self.writeln(&format!("{},", field));
+                    }
+                    self.indent -= 1;
+                    self.writeln("},");
+                }
+            }
+        }
+
+        self.indent -= 1;
+        self.writeln("}");
+        self.writeln("");
         Ok(())
     }
 
