@@ -3,22 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from hashlib import sha256
 from importlib import import_module
 from os import PathLike
 from pathlib import Path
-from typing import Protocol, cast
+from typing import NoReturn, Protocol, cast
 
 from build_engine.capital.contracts import CapitalReplayResult, EvidenceSummary, ModelObservation
 
 _INSTALL_INSTRUCTION = "install with: pip install 'build-engine[capital]'"
-_REQUIRED_CORE_METHODS = (
-    "capture_local_fixture",
-    "admit_local_fixture",
-    "build_model_disabled_inputs",
-    "run_offline_paper_kernel",
-    "projection_bytes",
-)
 
 
 class MissingCapitalDependencyError(RuntimeError):
@@ -26,26 +20,86 @@ class MissingCapitalDependencyError(RuntimeError):
 
 
 class _CapitalCore(Protocol):
+    profiles_type: type[object]
+
     def capture_local_fixture(self, fixture: Path) -> object: ...
 
     def admit_local_fixture(self, captured: object) -> object: ...
 
-    def build_model_disabled_inputs(self, captured: object, admission: object) -> object: ...
+    def build_verified_run_inputs(
+        self,
+        run_receipt_record: bytes,
+        admitted_candidates: object,
+        source_receipt_records: object,
+        resolver: object,
+        profiles: object,
+    ) -> object: ...
 
-    def run_offline_paper_kernel(self, verified: object) -> object: ...
+    def run_offline_paper_kernel(
+        self,
+        verified: object,
+        resolver: object,
+        profiles: object,
+    ) -> object: ...
 
-    def projection_bytes(self, result: object) -> bytes: ...
+    def kernel_result_canonical_bytes(self, result: object) -> bytes: ...
 
 
-def _load_paper_core() -> _CapitalCore:
+class _RunContext(Protocol):
+    run_receipt_record: bytes
+    resolver: object
+    profiles: object
+
+
+@dataclass(frozen=True, slots=True)
+class _PaperCoreAdapter:
+    capture_local_fixture: Callable[..., object]
+    admit_local_fixture: Callable[..., object]
+    build_verified_run_inputs: Callable[..., object]
+    run_offline_paper_kernel: Callable[..., object]
+    kernel_result_canonical_bytes: Callable[..., bytes]
+    profiles_type: type[object]
+
+
+def _required_callable(module: object, name: str) -> Callable[..., object]:
+    value = getattr(module, name, None)
+    if not callable(value):
+        raise AttributeError(name)
+    return cast(Callable[..., object], value)
+
+
+def _load_paper_core(
+    *,
+    module_loader: Callable[[str], object] = import_module,
+) -> _CapitalCore:
+    """Bind the optional package's reviewed low-level offline exports lazily."""
     try:
-        core = import_module("build_finance.live_paper")
-    except ImportError as error:
+        fixture_module = module_loader("build_finance.crypto_replay.local_fixture")
+        admission_module = module_loader("build_finance.crypto_replay.admission")
+        paper_module = module_loader("build_finance.live_paper")
+        profiles_type = paper_module.PaperKernelProfiles
+        if not isinstance(profiles_type, type):
+            raise TypeError("PaperKernelProfiles must be a type")
+        return _PaperCoreAdapter(
+            capture_local_fixture=_required_callable(fixture_module, "capture_local_fixture"),
+            admit_local_fixture=_required_callable(admission_module, "admit_local_fixture"),
+            build_verified_run_inputs=_required_callable(paper_module, "build_verified_run_inputs"),
+            run_offline_paper_kernel=_required_callable(paper_module, "run_offline_paper_kernel"),
+            kernel_result_canonical_bytes=cast(
+                Callable[..., bytes],
+                _required_callable(paper_module, "kernel_result_canonical_bytes"),
+            ),
+            profiles_type=profiles_type,
+        )
+    except (AttributeError, ImportError, TypeError) as error:
         raise MissingCapitalDependencyError(_INSTALL_INSTRUCTION) from error
 
-    if any(not callable(getattr(core, method, None)) for method in _REQUIRED_CORE_METHODS):
-        raise MissingCapitalDependencyError(f"incompatible paper core; {_INSTALL_INSTRUCTION}")
-    return cast(_CapitalCore, core)
+
+def _missing_run_context(fixture: Path, captured: object, admission: object) -> NoReturn:
+    raise ValueError(
+        "admitted fixture is missing a run-level replay envelope; "
+        "configure a run_context_loader with the rooted run receipt, resolver, and paper profiles"
+    )
 
 
 def _reason_codes(value: object) -> tuple[str, ...]:
@@ -120,8 +174,14 @@ def _model_observations(projection: object) -> tuple[ModelObservation, ...]:
 class CapitalSupervisor:
     """Run explicit local fixtures through an injected offline paper core."""
 
-    def __init__(self, *, core_loader: Callable[[], _CapitalCore] = _load_paper_core) -> None:
+    def __init__(
+        self,
+        *,
+        core_loader: Callable[[], _CapitalCore] = _load_paper_core,
+        run_context_loader: Callable[[Path, object, object], _RunContext] = _missing_run_context,
+    ) -> None:
         self._core_loader = core_loader
+        self._run_context_loader = run_context_loader
 
     def replay(self, fixture: str | PathLike[str]) -> CapitalReplayResult:
         """Replay a local fixture after loading the optional core fail-closed."""
@@ -134,12 +194,24 @@ class CapitalSupervisor:
             detail = ", ".join(reasons) or str(admission.status)
             raise ValueError(f"capital fixture was not admitted: {detail}")
 
-        verified = core.build_model_disabled_inputs(captured, admission)
-        if verified.model_registry is not None or verified.model_signal_manifest is not None:
+        context = self._run_context_loader(fixture_path, captured, admission)
+        verified = core.build_verified_run_inputs(
+            bytes(context.run_receipt_record),
+            admission.candidates,
+            admission.source_receipt_records,
+            context.resolver,
+            context.profiles,
+        )
+        bundle = verified.bundle
+        if bundle.model_registry is not None or bundle.model_signal_manifest is not None:
             raise ValueError("capital replay requires model-disabled verified inputs")
 
-        paper_result = core.run_offline_paper_kernel(verified)
-        projection_payload = bytes(core.projection_bytes(paper_result))
+        paper_result = core.run_offline_paper_kernel(
+            verified,
+            context.resolver,
+            context.profiles,
+        )
+        projection_payload = bytes(core.kernel_result_canonical_bytes(paper_result))
         closure = paper_result.closure
         projection = paper_result.projection
         return CapitalReplayResult(

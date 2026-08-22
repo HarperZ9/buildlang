@@ -75,6 +75,13 @@ build-engine capital-replay --fixture C:/path/to/explicit-local-fixture
 If the optional paper core is absent or incompatible, the command fails before
 the fixture path is accessed and prints an installation instruction.
 
+The current G2 shell intentionally does not invent an on-disk run-envelope
+format. After a source fixture is admitted, replay also requires a rooted run
+receipt, evidence resolver, and closed `PaperKernelProfiles`. Library callers
+can provide those through `CapitalSupervisor(run_context_loader=...)`; the CLI
+fails closed with a run-level replay-envelope error until that disk format and
+loader receive a separately reviewed contract.
+
 ## Legacy Adaptive Paper Mode
 
 The existing direct model -> `AutoTrader` workflow remains available for
