@@ -4,6 +4,7 @@ Command-line interface for Build Engine.
 Commands::
 
     build-engine run --symbols AAPL,BTC-USD --paper --cycles 10
+    build-engine capital-replay --fixture C:/fixtures/local-replay
     build-engine status
     build-engine backtest --symbols AAPL --days 252
     build-engine gui           (default when invoked with no arguments)
@@ -126,6 +127,22 @@ def _cmd_status(args: argparse.Namespace) -> None:
     print("Build Engine status")
     print("  No running engine detected.")
     print("  Use 'build-engine run' to start a new session.")
+
+
+def _cmd_capital_replay(args: argparse.Namespace) -> None:
+    """Replay an explicit local fixture through the offline paper core."""
+    from build_engine.capital import CapitalSupervisor, MissingCapitalDependencyError
+
+    try:
+        result = CapitalSupervisor().replay(args.fixture)
+    except MissingCapitalDependencyError as error:
+        raise SystemExit(str(error)) from error
+
+    print("Capital replay complete (offline, model-disabled)")
+    print(f"  Projection ID : {result.projection_id}")
+    print(f"  Closure ID    : {result.closure_id}")
+    print(f"  Closure status: {result.closure_status}")
+    print(f"  Receipt IDs   : {', '.join(result.receipt_ids)}")
 
 
 def _cmd_gui(args: argparse.Namespace) -> None:
@@ -253,6 +270,18 @@ def main(argv: list[str] | None = None) -> None:
     # -- status ------------------------------------------------------------
     p_status = subparsers.add_parser("status", help="Show engine status")
     p_status.set_defaults(func=_cmd_status)
+
+    # -- capital-replay ----------------------------------------------------
+    p_capital = subparsers.add_parser(
+        "capital-replay",
+        help="Replay an explicit local fixture through the offline paper core",
+    )
+    p_capital.add_argument(
+        "--fixture",
+        required=True,
+        help="Explicit path to a local replay fixture",
+    )
+    p_capital.set_defaults(func=_cmd_capital_replay)
 
     # -- gui ---------------------------------------------------------------
     p_gui = subparsers.add_parser("gui", help="Launch the GUI")
