@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from build_engine.capital import CapitalSupervisor
+from build_engine.capital import CapitalSupervisor, MissingCapitalDependencyError
 from build_engine.capital.supervisor import _load_paper_core
 
 
@@ -35,6 +35,19 @@ class FakePaperCore:
             reason_codes=(),
             candidates=("candidate",),
             source_receipt_records=(b"source-receipt",),
+        )
+
+    def load_replay_envelope_context(
+        self,
+        fixture: Path,
+        captured: object,
+        admission: object,
+    ) -> object:
+        self.calls.append(("disk-context", fixture, captured, admission))
+        return SimpleNamespace(
+            run_receipt_record=b"run-receipt",
+            resolver="resolver",
+            profiles=FakeProfiles(),
         )
 
     def build_verified_run_inputs(
@@ -163,6 +176,10 @@ def test_low_level_loader_binds_current_paper_core_exports(tmp_path: Path) -> No
             return SimpleNamespace(capture_local_fixture=fake.capture_local_fixture)
         if name == "build_finance.crypto_replay.admission":
             return SimpleNamespace(admit_local_fixture=fake.admit_local_fixture)
+        if name == "build_finance.paper_core_loader":
+            return SimpleNamespace(
+                load_replay_envelope_context=fake.load_replay_envelope_context,
+            )
         if name == "build_finance.live_paper":
             return SimpleNamespace(
                 build_verified_run_inputs=fake.build_verified_run_inputs,
@@ -173,20 +190,18 @@ def test_low_level_loader_binds_current_paper_core_exports(tmp_path: Path) -> No
         raise AssertionError(f"unexpected optional import: {name}")
 
     core = _load_paper_core(module_loader=module_loader)
-    CapitalSupervisor(
-        core_loader=lambda: core,
-        run_context_loader=_run_context_loader(fake),
-    ).replay(tmp_path / "fixture")
+    CapitalSupervisor(core_loader=lambda: core).replay(tmp_path / "fixture")
 
     assert imported == [
         "build_finance.crypto_replay.local_fixture",
         "build_finance.crypto_replay.admission",
+        "build_finance.paper_core_loader",
         "build_finance.live_paper",
     ]
     assert [call[0] for call in fake.calls] == [
         "capture",
         "admit",
-        "context",
+        "disk-context",
         "verify",
         "kernel",
         "projection",
@@ -201,13 +216,54 @@ def test_installed_paper_core_exports_are_accepted_when_available() -> None:
     assert core.profiles_type.__name__ == "PaperKernelProfiles"
 
 
-def test_supervisor_fails_closed_when_admitted_fixture_has_no_run_envelope(tmp_path: Path) -> None:
+def test_supervisor_uses_paper_core_disk_loader_when_no_context_is_injected(tmp_path: Path) -> None:
     fake = FakePaperCore()
 
-    with pytest.raises(ValueError, match="run-level replay envelope"):
-        CapitalSupervisor(core_loader=lambda: fake).replay(tmp_path / "fixture")
+    result = CapitalSupervisor(core_loader=lambda: fake).replay(tmp_path / "fixture")
 
-    assert [call[0] for call in fake.calls] == ["capture", "admit"]
+    assert [call[0] for call in fake.calls] == [
+        "capture",
+        "admit",
+        "disk-context",
+        "verify",
+        "kernel",
+        "projection",
+    ]
+    assert result.closure_status == "CLOSED"
+
+
+def test_incompatible_paper_core_fails_before_fixture_access() -> None:
+    fake = FakePaperCore()
+    fixture_touched = False
+
+    class FixtureProbe:
+        def __fspath__(self) -> str:
+            nonlocal fixture_touched
+            fixture_touched = True
+            return "must-not-be-touched"
+
+    def module_loader(name: str) -> object:
+        if name == "build_finance.crypto_replay.local_fixture":
+            return SimpleNamespace(capture_local_fixture=fake.capture_local_fixture)
+        if name == "build_finance.crypto_replay.admission":
+            return SimpleNamespace(admit_local_fixture=fake.admit_local_fixture)
+        if name == "build_finance.paper_core_loader":
+            return SimpleNamespace()
+        if name == "build_finance.live_paper":
+            return SimpleNamespace(
+                build_verified_run_inputs=fake.build_verified_run_inputs,
+                run_offline_paper_kernel=fake.run_offline_paper_kernel,
+                kernel_result_canonical_bytes=fake.kernel_result_canonical_bytes,
+                PaperKernelProfiles=FakeProfiles,
+            )
+        raise AssertionError(f"unexpected optional import: {name}")
+
+    with pytest.raises(MissingCapitalDependencyError, match=r"build-engine\[capital\]"):
+        CapitalSupervisor(core_loader=lambda: _load_paper_core(module_loader=module_loader)).replay(
+            FixtureProbe()
+        )
+
+    assert fixture_touched is False
 
 
 def test_supervisor_fails_closed_on_rejected_admission(tmp_path: Path) -> None:
@@ -236,3 +292,49 @@ def test_supervisor_rejects_verified_inputs_with_model_evidence(tmp_path: Path) 
         ).replay(tmp_path / "fixture")
 
     assert all(call[0] != "kernel" for call in fake.calls)
+
+
+def test_supervisor_rejects_non_abstain_model_projection(tmp_path: Path) -> None:
+    fake = FakePaperCore()
+    run_kernel = fake.run_offline_paper_kernel
+
+    def run_with_model_action(verified: object, resolver: object, profiles: object) -> object:
+        result = run_kernel(verified, resolver, profiles)  # type: ignore[arg-type]
+        result.projection.model_validation = (
+            SimpleNamespace(
+                decision_sequence="1",
+                disposition="ACCEPT",
+                reason_code="MODEL_ENABLED",
+            ),
+        )
+        return result
+
+    fake.run_offline_paper_kernel = run_with_model_action  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="ABSTAIN / MODEL_DISABLED"):
+        CapitalSupervisor(
+            core_loader=lambda: fake,
+            run_context_loader=_run_context_loader(fake),
+        ).replay(tmp_path / "fixture")
+
+    assert all(call[0] != "projection" for call in fake.calls)
+
+
+def test_supervisor_rejects_missing_model_abstain_projection(tmp_path: Path) -> None:
+    fake = FakePaperCore()
+    run_kernel = fake.run_offline_paper_kernel
+
+    def run_without_model_evidence(verified: object, resolver: object, profiles: object) -> object:
+        result = run_kernel(verified, resolver, profiles)  # type: ignore[arg-type]
+        result.projection.model_validation = ()
+        return result
+
+    fake.run_offline_paper_kernel = run_without_model_evidence  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="ABSTAIN / MODEL_DISABLED"):
+        CapitalSupervisor(
+            core_loader=lambda: fake,
+            run_context_loader=_run_context_loader(fake),
+        ).replay(tmp_path / "fixture")
+
+    assert all(call[0] != "projection" for call in fake.calls)

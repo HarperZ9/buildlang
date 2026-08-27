@@ -67,20 +67,23 @@ Install the separately built and verified local paper-core wheel, then install
 Build Engine with its optional capital dependency metadata:
 
 ```powershell
-pip install C:/path/to/build_finance_paper_core-1.0.1-py3-none-any.whl
-pip install -e ".[capital]"
-build-engine capital-replay --fixture C:/path/to/explicit-local-fixture
+python -m pip install --no-deps C:/path/to/build_finance_paper_core-1.1.0-py3-none-any.whl
+python -m pip install -e ".[capital]" --no-deps
+build-engine capital-replay --fixture C:/path/to/export/g2-disk-fixture --receipt-output C:/path/to/output/evaluator-receipt.json
 ```
 
 If the optional paper core is absent or incompatible, the command fails before
 the fixture path is accessed and prints an installation instruction.
 
-The current G2 shell intentionally does not invent an on-disk run-envelope
-format. After a source fixture is admitted, replay also requires a rooted run
-receipt, evidence resolver, and closed `PaperKernelProfiles`. Library callers
-can provide those through `CapitalSupervisor(run_context_loader=...)`; the CLI
-fails closed with a run-level replay-envelope error until that disk format and
-loader receive a separately reviewed contract.
+The current G2 shell binds the reviewed Build Finance `replay-envelope/` disk
+loader lazily. It reports a CLOSED PAPER ONLY / SIMULATED replay and exact
+`ABSTAIN / MODEL_DISABLED` model evidence. The optional evaluator receipt is
+canonical, content-addressed JSON and does not retain the absolute fixture
+path. It is evaluation evidence, not trading authority, a live-readiness
+signal, or a profitability claim.
+
+See [docs/capital-evaluation.md](docs/capital-evaluation.md) for the reproducible
+local export, verification, replay, and receipt-check workflow.
 
 ## Legacy Adaptive Paper Mode
 

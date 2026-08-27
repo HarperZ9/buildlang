@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from pathlib import Path
 
 
 def _cmd_run(args: argparse.Namespace) -> None:
@@ -143,6 +144,18 @@ def _cmd_capital_replay(args: argparse.Namespace) -> None:
     print(f"  Closure ID    : {result.closure_id}")
     print(f"  Closure status: {result.closure_status}")
     print(f"  Receipt IDs   : {', '.join(result.receipt_ids)}")
+    for observation in getattr(result, "model_observations", ()):
+        reasons = " / ".join(observation.reason_codes) or "NO_REASON"
+        print(f"  Model evidence: decision {observation.decision_sequence}: {observation.status} / {reasons}")
+    if args.receipt_output is not None:
+        receipt = result.evaluator_receipt()
+        receipt_path = Path(args.receipt_output)
+        try:
+            receipt_path.write_bytes(result.evaluator_receipt_bytes())
+        except OSError as error:
+            raise SystemExit(f"unable to write evaluator receipt: {error}") from error
+        print(f"  Evaluator receipt ID: {receipt['evaluator_receipt_id']}")
+        print(f"  Evaluator receipt   : {receipt_path}")
 
 
 def _cmd_gui(args: argparse.Namespace) -> None:
@@ -280,6 +293,10 @@ def main(argv: list[str] | None = None) -> None:
         "--fixture",
         required=True,
         help="Explicit path to a local replay fixture",
+    )
+    p_capital.add_argument(
+        "--receipt-output",
+        help="Write a canonical path-free evaluator receipt to this explicit local path",
     )
     p_capital.set_defaults(func=_cmd_capital_replay)
 

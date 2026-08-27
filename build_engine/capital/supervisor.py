@@ -8,7 +8,7 @@ from hashlib import sha256
 from importlib import import_module
 from os import PathLike
 from pathlib import Path
-from typing import NoReturn, Protocol, cast
+from typing import Any, Protocol, cast
 
 from build_engine.capital.contracts import CapitalReplayResult, EvidenceSummary, ModelObservation
 
@@ -20,11 +20,19 @@ class MissingCapitalDependencyError(RuntimeError):
 
 
 class _CapitalCore(Protocol):
-    profiles_type: type[object]
+    @property
+    def profiles_type(self) -> type[object]: ...
 
-    def capture_local_fixture(self, fixture: Path) -> object: ...
+    def capture_local_fixture(self, fixture: Path) -> Any: ...
 
-    def admit_local_fixture(self, captured: object) -> object: ...
+    def admit_local_fixture(self, captured: object) -> Any: ...
+
+    def load_replay_envelope_context(
+        self,
+        fixture: Path,
+        captured: object,
+        admission: object,
+    ) -> Any: ...
 
     def build_verified_run_inputs(
         self,
@@ -33,14 +41,14 @@ class _CapitalCore(Protocol):
         source_receipt_records: object,
         resolver: object,
         profiles: object,
-    ) -> object: ...
+    ) -> Any: ...
 
     def run_offline_paper_kernel(
         self,
         verified: object,
         resolver: object,
         profiles: object,
-    ) -> object: ...
+    ) -> Any: ...
 
     def kernel_result_canonical_bytes(self, result: object) -> bytes: ...
 
@@ -53,29 +61,31 @@ class _RunContext(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class _PaperCoreAdapter:
-    capture_local_fixture: Callable[..., object]
-    admit_local_fixture: Callable[..., object]
-    build_verified_run_inputs: Callable[..., object]
-    run_offline_paper_kernel: Callable[..., object]
+    capture_local_fixture: Callable[..., Any]
+    admit_local_fixture: Callable[..., Any]
+    load_replay_envelope_context: Callable[..., Any]
+    build_verified_run_inputs: Callable[..., Any]
+    run_offline_paper_kernel: Callable[..., Any]
     kernel_result_canonical_bytes: Callable[..., bytes]
     profiles_type: type[object]
 
 
-def _required_callable(module: object, name: str) -> Callable[..., object]:
+def _required_callable(module: object, name: str) -> Callable[..., Any]:
     value = getattr(module, name, None)
     if not callable(value):
         raise AttributeError(name)
-    return cast(Callable[..., object], value)
+    return cast(Callable[..., Any], value)
 
 
 def _load_paper_core(
     *,
-    module_loader: Callable[[str], object] = import_module,
+    module_loader: Callable[[str], Any] = import_module,
 ) -> _CapitalCore:
     """Bind the optional package's reviewed low-level offline exports lazily."""
     try:
         fixture_module = module_loader("build_finance.crypto_replay.local_fixture")
         admission_module = module_loader("build_finance.crypto_replay.admission")
+        loader_module = module_loader("build_finance.paper_core_loader")
         paper_module = module_loader("build_finance.live_paper")
         profiles_type = paper_module.PaperKernelProfiles
         if not isinstance(profiles_type, type):
@@ -83,6 +93,10 @@ def _load_paper_core(
         return _PaperCoreAdapter(
             capture_local_fixture=_required_callable(fixture_module, "capture_local_fixture"),
             admit_local_fixture=_required_callable(admission_module, "admit_local_fixture"),
+            load_replay_envelope_context=_required_callable(
+                loader_module,
+                "load_replay_envelope_context",
+            ),
             build_verified_run_inputs=_required_callable(paper_module, "build_verified_run_inputs"),
             run_offline_paper_kernel=_required_callable(paper_module, "run_offline_paper_kernel"),
             kernel_result_canonical_bytes=cast(
@@ -95,20 +109,13 @@ def _load_paper_core(
         raise MissingCapitalDependencyError(_INSTALL_INSTRUCTION) from error
 
 
-def _missing_run_context(fixture: Path, captured: object, admission: object) -> NoReturn:
-    raise ValueError(
-        "admitted fixture is missing a run-level replay envelope; "
-        "configure a run_context_loader with the rooted run receipt, resolver, and paper profiles"
-    )
-
-
 def _reason_codes(value: object) -> tuple[str, ...]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         return ()
     return tuple(item for item in value if isinstance(item, str))
 
 
-def _receipt_ids(projection: object) -> tuple[str, ...]:
+def _receipt_ids(projection: Any) -> tuple[str, ...]:
     identifiers = projection.receipt_ids
     values = (
         identifiers.run_receipt_id,
@@ -120,7 +127,7 @@ def _receipt_ids(projection: object) -> tuple[str, ...]:
     return tuple(value for value in values if isinstance(value, str))
 
 
-def _evidence(projection: object, closure: object) -> tuple[EvidenceSummary, ...]:
+def _evidence(projection: Any, closure: Any) -> tuple[EvidenceSummary, ...]:
     summaries = [
         EvidenceSummary(
             kind="DECISION",
@@ -160,7 +167,7 @@ def _evidence(projection: object, closure: object) -> tuple[EvidenceSummary, ...
     return tuple(summaries)
 
 
-def _model_observations(projection: object) -> tuple[ModelObservation, ...]:
+def _model_observations(projection: Any) -> tuple[ModelObservation, ...]:
     return tuple(
         ModelObservation(
             decision_sequence=str(observation.decision_sequence),
@@ -172,13 +179,13 @@ def _model_observations(projection: object) -> tuple[ModelObservation, ...]:
 
 
 class CapitalSupervisor:
-    """Run explicit local fixtures through an injected offline paper core."""
+    """Run explicit local fixtures through a lazy or injected offline paper core."""
 
     def __init__(
         self,
         *,
         core_loader: Callable[[], _CapitalCore] = _load_paper_core,
-        run_context_loader: Callable[[Path, object, object], _RunContext] = _missing_run_context,
+        run_context_loader: Callable[[Path, object, object], _RunContext] | None = None,
     ) -> None:
         self._core_loader = core_loader
         self._run_context_loader = run_context_loader
@@ -194,7 +201,8 @@ class CapitalSupervisor:
             detail = ", ".join(reasons) or str(admission.status)
             raise ValueError(f"capital fixture was not admitted: {detail}")
 
-        context = self._run_context_loader(fixture_path, captured, admission)
+        context_loader = self._run_context_loader or core.load_replay_envelope_context
+        context = cast(_RunContext, context_loader(fixture_path, captured, admission))
         verified = core.build_verified_run_inputs(
             bytes(context.run_receipt_record),
             admission.candidates,
@@ -211,9 +219,15 @@ class CapitalSupervisor:
             context.resolver,
             context.profiles,
         )
-        projection_payload = bytes(core.kernel_result_canonical_bytes(paper_result))
         closure = paper_result.closure
         projection = paper_result.projection
+        model_observations = _model_observations(projection)
+        if not model_observations or any(
+            observation.status != "ABSTAIN" or observation.reason_codes != ("MODEL_DISABLED",)
+            for observation in model_observations
+        ):
+            raise ValueError("capital replay requires exact ABSTAIN / MODEL_DISABLED model evidence")
+        projection_payload = bytes(core.kernel_result_canonical_bytes(paper_result))
         return CapitalReplayResult(
             fixture=fixture_path,
             projection_id=sha256(projection_payload).hexdigest(),
@@ -221,7 +235,7 @@ class CapitalSupervisor:
             closure_reason_codes=_reason_codes(closure.reason_codes),
             receipt_ids=_receipt_ids(projection),
             evidence=_evidence(projection, closure),
-            model_observations=_model_observations(projection),
+            model_observations=model_observations,
             closure_id=str(closure.closure_id),
         )
 
