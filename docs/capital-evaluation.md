@@ -102,6 +102,23 @@ To confirm path independence, export into two clean roots, run the command for
 both fixtures, and compare the two receipt files with `Get-FileHash -Algorithm
 SHA256`; hashes and bytes must match.
 
+## Windows directory-metadata limitation
+
+On Windows/NTFS, strict Build Finance admission or replay-envelope identity
+checks can fail if the filesystem reports transiently different directory
+metadata for the same root or path prefix. This has been observed even when
+the exported file bytes still pass the bundle checksum verifier. The failed
+replay remains failed: Build Engine performs no retry and does not weaken,
+repair, or reinterpret the upstream filesystem trust decision.
+
+Preserve the failed fixture root unchanged together with the complete command,
+stderr, admission reason codes, filesystem details, and checksum-verification
+output for diagnosis. Do not delete, rewrite, or silently replace that root.
+Copying the same verified bytes into a fresh local root and replaying them may
+be useful as a separate diagnostic run. A successful fresh-root diagnostic is
+new evidence only; it does not accept, promote, or retroactively validate the
+failed run or its original root.
+
 ## Expected fail-closed outcomes
 
 - Missing or incompatible paper core: exits with

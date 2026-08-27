@@ -139,14 +139,8 @@ def _cmd_capital_replay(args: argparse.Namespace) -> None:
     except MissingCapitalDependencyError as error:
         raise SystemExit(str(error)) from error
 
-    print("Capital replay complete (offline, model-disabled)")
-    print(f"  Projection ID : {result.projection_id}")
-    print(f"  Closure ID    : {result.closure_id}")
-    print(f"  Closure status: {result.closure_status}")
-    print(f"  Receipt IDs   : {', '.join(result.receipt_ids)}")
-    for observation in getattr(result, "model_observations", ()):
-        reasons = " / ".join(observation.reason_codes) or "NO_REASON"
-        print(f"  Model evidence: decision {observation.decision_sequence}: {observation.status} / {reasons}")
+    receipt = None
+    receipt_path = None
     if args.receipt_output is not None:
         receipt = result.evaluator_receipt()
         receipt_path = Path(args.receipt_output)
@@ -154,6 +148,17 @@ def _cmd_capital_replay(args: argparse.Namespace) -> None:
             receipt_path.write_bytes(result.evaluator_receipt_bytes())
         except OSError as error:
             raise SystemExit(f"unable to write evaluator receipt: {error}") from error
+
+    print("PAPER ONLY / SIMULATED / MODEL DISABLED")
+    print("Capital replay complete")
+    print(f"  Projection ID : {result.projection_id}")
+    print(f"  Closure ID    : {result.closure_id}")
+    print(f"  Closure status: {result.closure_status}")
+    print(f"  Receipt IDs   : {', '.join(result.receipt_ids)}")
+    for observation in getattr(result, "model_observations", ()):
+        reasons = " / ".join(observation.reason_codes) or "NO_REASON"
+        print(f"  Model evidence: decision {observation.decision_sequence}: {observation.status} / {reasons}")
+    if receipt is not None and receipt_path is not None:
         print(f"  Evaluator receipt ID: {receipt['evaluator_receipt_id']}")
         print(f"  Evaluator receipt   : {receipt_path}")
 

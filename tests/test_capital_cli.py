@@ -97,6 +97,7 @@ def test_capital_replay_uses_actual_disk_envelope_without_injected_context(tmp_p
     completed = _run_capital_replay(fixture, cwd=runner)
 
     assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines()[0] == "PAPER ONLY / SIMULATED / MODEL DISABLED"
     assert f"Projection ID : {EXPECTED_PROJECTION_ID}" in completed.stdout
     assert f"Closure ID    : {EXPECTED_CLOSURE_ID}" in completed.stdout
     assert "Closure status: CLOSED" in completed.stdout
@@ -181,3 +182,21 @@ def test_capital_replay_writes_path_free_canonical_stable_evaluator_receipt(tmp_
     unsigned = dict(receipt)
     evaluator_receipt_id = unsigned.pop("evaluator_receipt_id")
     assert evaluator_receipt_id == hashlib.sha256(_canonical_json(unsigned)).hexdigest()
+
+
+def test_capital_replay_prints_no_success_output_when_receipt_cannot_be_written(tmp_path: Path) -> None:
+    """Breaks if completion is reported before the requested receipt is durable."""
+
+    fixture = _fresh_fixture(tmp_path / "fixture")
+    runner = tmp_path / "runner"
+    runner.mkdir()
+    receipt = runner / "missing-parent" / "evaluator-receipt.json"
+
+    completed = _run_capital_replay(fixture, cwd=runner, receipt_output=receipt)
+
+    assert completed.returncode != 0
+    assert "unable to write evaluator receipt" in completed.stderr
+    assert "PAPER ONLY / SIMULATED / MODEL DISABLED" not in completed.stdout
+    assert "Capital replay complete" not in completed.stdout
+    assert "Projection ID" not in completed.stdout
+    assert not receipt.exists()
