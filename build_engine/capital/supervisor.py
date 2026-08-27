@@ -6,13 +6,16 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
 from importlib import import_module
+from inspect import Parameter, signature
 from os import PathLike
 from pathlib import Path
+from re import compile as compile_pattern
 from typing import Any, Protocol, cast
 
 from build_engine.capital.contracts import CapitalReplayResult, EvidenceSummary, ModelObservation
 
 _INSTALL_INSTRUCTION = "install with: pip install 'build-engine[capital]'"
+_PAPER_CORE_VERSION = compile_pattern(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)")
 
 
 class MissingCapitalDependencyError(RuntimeError):
@@ -70,11 +73,31 @@ class _PaperCoreAdapter:
     profiles_type: type[object]
 
 
-def _required_callable(module: object, name: str) -> Callable[..., Any]:
+def _required_callable(
+    module: object,
+    name: str,
+    parameter_names: tuple[str, ...],
+) -> Callable[..., Any]:
     value = getattr(module, name, None)
     if not callable(value):
         raise AttributeError(name)
+    try:
+        parameters = tuple(signature(value).parameters.values())
+    except (TypeError, ValueError) as error:
+        raise TypeError(f"{name} has no inspectable signature") from error
+    if tuple(parameter.name for parameter in parameters) != parameter_names or any(
+        parameter.kind is not Parameter.POSITIONAL_OR_KEYWORD or parameter.default is not Parameter.empty
+        for parameter in parameters
+    ):
+        raise TypeError(f"{name} has an incompatible signature")
     return cast(Callable[..., Any], value)
+
+
+def _require_paper_core_version(module: object) -> None:
+    value = getattr(module, "__version__", None)
+    match = _PAPER_CORE_VERSION.fullmatch(value) if isinstance(value, str) else None
+    if match is None or tuple(int(part) for part in match.groups()[:2]) != (1, 1):
+        raise TypeError("build-finance paper core version must satisfy >=1.1.0,<1.2")
 
 
 def _load_paper_core(
@@ -83,6 +106,8 @@ def _load_paper_core(
 ) -> _CapitalCore:
     """Bind the optional package's reviewed low-level offline exports lazily."""
     try:
+        package_module = module_loader("build_finance")
+        _require_paper_core_version(package_module)
         fixture_module = module_loader("build_finance.crypto_replay.local_fixture")
         admission_module = module_loader("build_finance.crypto_replay.admission")
         loader_module = module_loader("build_finance.paper_core_loader")
@@ -91,17 +116,44 @@ def _load_paper_core(
         if not isinstance(profiles_type, type):
             raise TypeError("PaperKernelProfiles must be a type")
         return _PaperCoreAdapter(
-            capture_local_fixture=_required_callable(fixture_module, "capture_local_fixture"),
-            admit_local_fixture=_required_callable(admission_module, "admit_local_fixture"),
+            capture_local_fixture=_required_callable(
+                fixture_module,
+                "capture_local_fixture",
+                ("root",),
+            ),
+            admit_local_fixture=_required_callable(
+                admission_module,
+                "admit_local_fixture",
+                ("captured",),
+            ),
             load_replay_envelope_context=_required_callable(
                 loader_module,
                 "load_replay_envelope_context",
+                ("fixture_root", "captured", "admission"),
             ),
-            build_verified_run_inputs=_required_callable(paper_module, "build_verified_run_inputs"),
-            run_offline_paper_kernel=_required_callable(paper_module, "run_offline_paper_kernel"),
+            build_verified_run_inputs=_required_callable(
+                paper_module,
+                "build_verified_run_inputs",
+                (
+                    "run_receipt_record",
+                    "admitted_candidates",
+                    "source_receipt_records",
+                    "resolver",
+                    "profiles",
+                ),
+            ),
+            run_offline_paper_kernel=_required_callable(
+                paper_module,
+                "run_offline_paper_kernel",
+                ("verified", "resolver", "profiles"),
+            ),
             kernel_result_canonical_bytes=cast(
                 Callable[..., bytes],
-                _required_callable(paper_module, "kernel_result_canonical_bytes"),
+                _required_callable(
+                    paper_module,
+                    "kernel_result_canonical_bytes",
+                    ("result",),
+                ),
             ),
             profiles_type=profiles_type,
         )
@@ -201,7 +253,11 @@ class CapitalSupervisor:
             detail = ", ".join(reasons) or str(admission.status)
             raise ValueError(f"capital fixture was not admitted: {detail}")
 
-        context_loader = self._run_context_loader or core.load_replay_envelope_context
+        context_loader = (
+            core.load_replay_envelope_context
+            if self._run_context_loader is None
+            else self._run_context_loader
+        )
         context = cast(_RunContext, context_loader(fixture_path, captured, admission))
         verified = core.build_verified_run_inputs(
             bytes(context.run_receipt_record),
