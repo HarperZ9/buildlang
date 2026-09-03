@@ -19,6 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from repo_art import header_svg  # noqa: E402
+from repo_card import card_svg  # noqa: E402
 from repo_flow import flow_svg  # noqa: E402
 
 ART = Path(__file__).resolve().parents[1] / "docs" / "art"
@@ -31,6 +32,8 @@ def rendered(spec_path: Path) -> dict[Path, str]:
     out = {spec_path.parent / f"{stem}-header.svg": header_svg(spec["header"])}
     for flow in spec.get("flows", []):
         out[spec_path.parent / flow["file"]] = flow_svg(flow)
+    for card in spec.get("cards", []):
+        out[spec_path.parent / card["file"]] = card_svg(card)
     return out
 
 

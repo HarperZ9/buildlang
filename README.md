@@ -179,6 +179,8 @@ reference with expected output lives in [USAGE.md](USAGE.md).
 
 ## Backends
 
+<p align="center"><img src="docs/art/backend-maturity.svg" alt="A record card titled Every backend you can select, and how far each one goes, listing the nine buildc --target flags with the rank buildc doctor gives each one. The c row is accented as the only primary backend, the one the substrate receipt records as the production anchor. hlsl and glsl are supported shader source output, and the remaining six are experimental." width="100%"></p>
+
 | Target | Flag | Output | Status |
 |---|---|---|---|
 | C | `--target c` (default) | `.c` / executable | Production |
