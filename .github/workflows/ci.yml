@@ -42,7 +42,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Re-render the README art and compare bytes
+      - name: Re-render the README art and compare it to what is committed
         run: python tools/check_repo_art.py
 
   test:
