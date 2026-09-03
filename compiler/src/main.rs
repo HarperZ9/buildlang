@@ -10592,17 +10592,24 @@ mod tests {
 
     #[test]
     fn the_readme_backends_table_offers_the_same_flags() {
+        // Line by line, because a Windows checkout arrives with CRLF unless a
+        // file is pinned, and the README is prose that should stay unpinned.
+        // str::lines drops the carriage return, so this reads what the section
+        // says rather than how it happens to be stored.
         let readme =
             std::fs::read_to_string(repo_root().join("README.md")).expect("read the README");
-        let start = readme
-            .find("\n## Backends\n")
-            .expect("the README has a Backends section");
-        let section = &readme[start + 1..];
-        let section = &section[..section.find("\n## ").unwrap_or(section.len())];
+        let mut lines = readme.lines();
+        assert!(
+            lines.any(|line| line == "## Backends"),
+            "the README has a Backends section"
+        );
+        let section: Vec<&str> = lines.take_while(|line| !line.starts_with("## ")).collect();
+        assert!(!section.is_empty(), "the Backends section says nothing");
 
         for (flag, _, _) in BACKEND_MATURITY {
+            let offered = format!("`--target {flag}`");
             assert!(
-                section.contains(&format!("`--target {flag}`")),
+                section.iter().any(|line| line.contains(&offered)),
                 "the README Backends table never offers --target {flag}"
             );
         }
