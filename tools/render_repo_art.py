@@ -6,8 +6,8 @@
 The check mode is the point. Committed artwork drifts from the words it
 illustrates the moment someone edits one and not the other, and nobody
 notices, because a picture in a README is never diffed. Here the picture is
-a pure function of a spec that IS diffable, so a test can re-render and
-compare bytes.
+a pure function of a spec that IS diffable, so a test can re-render it and
+compare the result against what is committed.
 """
 from __future__ import annotations
 
