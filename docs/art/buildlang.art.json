@@ -137,5 +137,68 @@
         }
       ]
     }
+  ],
+  "cards": [
+    {
+      "file": "backend-maturity.svg",
+      "kicker": "one primary path, nine flags",
+      "title": "Every backend you can select, and how far each one goes",
+      "source": "buildc doctor",
+      "heads": [
+        "--target",
+        "how far it goes",
+        "what it emits, and what backs it"
+      ],
+      "fields": [
+        {
+          "key": "c",
+          "value": "PRIMARY",
+          "note": "Executable C99, the path buildc run takes. The substrate receipt ranks it production-anchor.",
+          "tone": "verified"
+        },
+        {
+          "key": "hlsl",
+          "value": "SUPPORTED",
+          "note": "Shader source output. Nothing runs it here, so no execution receipt covers what it emits."
+        },
+        {
+          "key": "glsl",
+          "value": "SUPPORTED",
+          "note": "Shader source output from the same emitter family, and no execution receipt covers it either."
+        },
+        {
+          "key": "rust",
+          "value": "EXPERIMENTAL",
+          "note": "Source output checked against a semantic-corpus subset. The receipt covers that subset, not the language."
+        },
+        {
+          "key": "llvm",
+          "value": "EXPERIMENTAL",
+          "note": "LLVM IR. Whether it reaches an executable depends on clang being installed on the machine."
+        },
+        {
+          "key": "wasm",
+          "value": "EXPERIMENTAL",
+          "note": "WASM and WAT output. Running the result depends on wasmtime being installed."
+        },
+        {
+          "key": "spirv",
+          "value": "EXPERIMENTAL",
+          "note": "SPIR-V output to validate with spirv-val. The substrate receipt records it as not yet runtime verified."
+        },
+        {
+          "key": "x86-64",
+          "value": "EXPERIMENTAL",
+          "note": "Assembly and object output. Linker integration is partial, so the last step is yours."
+        },
+        {
+          "key": "arm64",
+          "value": "EXPERIMENTAL",
+          "note": "Assembly and object output. Linker integration is partial here too."
+        }
+      ],
+      "footnote": "These rows are read from the same array buildc doctor prints, so the picture cannot outlive a re-ranked backend. Three of the nine reach the substrate receipt: c is recorded as the production anchor, rust carries an execution receipt over a corpus subset, and spirv is recorded as not yet runtime verified. The other six are ranked by what they emit, and nothing here records one of them running. A subset test passing does not make a backend production-ready.",
+      "alt": "A record card titled Every backend you can select, and how far each one goes, listing the nine buildc --target flags with the rank buildc doctor gives each one. The c row is accented as the only primary backend, the one the substrate receipt records as the production anchor. hlsl and glsl are supported shader source output, and the remaining six are experimental."
+    }
   ]
 }

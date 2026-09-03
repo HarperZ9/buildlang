@@ -25,16 +25,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import render_repo_art as RENDER  # noqa: E402
 import repo_art as ART_LIB  # noqa: E402
+import check_repo_card as CARD_GATE  # noqa: E402
+import check_repo_flow as FLOW_GATE  # noqa: E402
 import repo_flow as FLOW  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 ART = ROOT / "docs" / "art"
 SCHEMA = "buildlang.repo-art/v1"
-
-# The widest tagline that has been looked at on a rendered page. It counts
-# characters rather than measuring glyphs, so it cannot tell "mmmm" from
-# "iiii": a guardrail, not a typographic fact.
-TAGLINE_BUDGET = 70
 
 # Where an illustration lives. .github/assets/ and docs/brand/ are deliberately
 # outside this set: they hold the social-preview source and the flagship heroes,
@@ -130,18 +127,7 @@ def check_note_survives_the_wrapper(_unused: list[Path]) -> list[str]:
     """Card notes wrap to three lines and the wrapper drops the rest, so an
     edited sentence can lose its ending in the drawing while reading fine
     in the spec."""
-    return _notes_the_wrapper_cuts(_loaded())
-
-
-def _notes_the_wrapper_cuts(specs: list[dict]) -> list[str]:
-    bad = []
-    for spec in specs:
-        for flow in spec.get("flows", []):
-            for stage in flow["stages"]:
-                drawn = " ".join(FLOW._wrap(stage["note"]))
-                if drawn != " ".join(stage["note"].split()):
-                    bad.append(f'{stage["title"]}: the drawing cuts off at "{drawn}"')
-    return bad
+    return FLOW_GATE.notes_the_wrapper_cuts(_loaded())
 
 
 def check_return_edge_stays_on_its_row(_unused: list[Path]) -> list[str]:
@@ -171,65 +157,19 @@ def check_every_illustration_is_shown(_unused: list[Path]) -> list[str]:
 def check_tagline_stays_inside_its_rule(_unused: list[Path]) -> list[str]:
     """The tagline is one unwrapped line under a rule that ends at x=700. Past
     that it runs on toward the aperture and nothing about the render fails."""
-    return _taglines_that_overrun(_loaded())
-
-
-def _taglines_that_overrun(specs: list[dict]) -> list[str]:
-    bad = []
-    for spec in specs:
-        tagline = spec["header"]["tagline"]
-        if len(tagline) > TAGLINE_BUDGET:
-            bad.append(f"{len(tagline)} characters runs past the rule: {tagline!r}")
-    return bad
-
-
-def _outcome_budgets(count: int) -> tuple[int, int]:
-    """Label and note budgets for one box in a band of `count` boxes."""
-    span = (FLOW.W - FLOW.PAD * 2 - FLOW.GAP * (count - 1)) / count
-    usable = span - 14 - 10
-    return int(usable / 7.0), int(usable / 5.4)
+    return FLOW_GATE.taglines_that_overrun(_loaded())
 
 
 def check_outcome_fits_its_box(_unused: list[Path]) -> list[str]:
     """An outcome box is one unwrapped label over one unwrapped note, and
     neither is clipped, so an over-long note runs into the next box."""
-    return _outcomes_that_overflow(_loaded())
-
-
-def _outcomes_that_overflow(specs: list[dict]) -> list[str]:
-    bad = []
-    for spec in specs:
-        for flow in spec.get("flows", []):
-            label_budget, note_budget = _outcome_budgets(len(flow["outcomes"]))
-            for item in flow["outcomes"]:
-                if len(item["label"]) > label_budget:
-                    bad.append(f'{item["label"]!r} is wider than its box')
-                if len(item["note"]) > note_budget:
-                    bad.append(f'the note under {item["label"]} is wider than '
-                               f'its box: {item["note"]!r}')
-    return bad
-
-
-# A spec built to break all three geometry budgets at once. Every other check
-# here reports clean, which says it ran and not that it works.
-CONTROL = [{
-    "header": {"tagline": "x" * (TAGLINE_BUDGET + 1)},
-    "flows": [{
-        "stages": [{"title": "CARD", "note": "word " * 60}],
-        "outcomes": [{"label": "OK", "note": "x" * 200},
-                     {"label": "y" * 200, "note": "short"}],
-    }],
-}]
+    return FLOW_GATE.outcomes_that_overflow(_loaded())
 
 
 def check_the_gate_can_fail(_unused: list[Path]) -> list[str]:
-    """Feed the three geometry checks input they have to reject."""
-    return [f"the gate missed {what}" for caught, what in (
-        (len(_notes_the_wrapper_cuts(CONTROL)) == 1, "a truncated note"),
-        (len(_taglines_that_overrun(CONTROL)) == 1, "a tagline past its rule"),
-        (len(_outcomes_that_overflow(CONTROL)) == 2,
-         "an over-wide label and an over-long note"),
-    ) if not caught]
+    """A gate that cannot fail is not a gate. Every check with a budget in it
+    gets handed input it has to reject, and anything that passes is named."""
+    return FLOW_GATE.control_failures() + CARD_GATE.control_failures()
 
 
 CHECKS = [
@@ -245,6 +185,7 @@ CHECKS = [
     ("art.every_illustration_is_shown", check_every_illustration_is_shown),
     ("art.tagline_stays_inside_its_rule", check_tagline_stays_inside_its_rule),
     ("art.outcome_fits_its_box", check_outcome_fits_its_box),
+] + CARD_GATE.checks() + [
     ("art.the_gate_can_fail", check_the_gate_can_fail),
 ]
 
