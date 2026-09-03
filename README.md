@@ -1,4 +1,4 @@
-<p align="center"><img src=".github/assets/banner.svg" alt="buildlang: A real systems language: typed capability effects, sum and linear types, C FFI, native binaries." width="100%"></p>
+<p align="center"><img src="docs/art/buildlang-header.svg" alt="buildlang: systems language with typed effects. What a program is allowed to reach is part of its type." width="100%"></p>
 
 **A real systems language: typed capability effects, sum and linear types, C FFI, native binaries.**
 
@@ -307,10 +307,10 @@ with the scientific receipt verifier, and compose into receipt chains.
   [buildlang-vscode](https://github.com/HarperZ9/buildlang-vscode),
   [buildlang-tmLanguage](https://github.com/HarperZ9/buildlang-tmLanguage)
 
-<p align="center"><img src="docs/art/buildlang-header.svg" alt="buildlang: systems language with typed effects. What a program is allowed to reach is part of its type." width="100%"></p>
+<p align="center"><img src=".github/assets/banner.svg" alt="buildlang: A real systems language: typed capability effects, sum and linear types, C FFI, native binaries." width="100%"></p>
 
-The mark above is generated from the repository name, so every tool in this family
-carries a different one. The banner at the top of this page is buildlang's own,
+The mark at the top of this page is generated from the repository name, so every
+tool in this family carries a different one. The banner above is buildlang's own,
 drawn by hand and kept. The mark and the two diagrams on this page are rendered
 from `docs/art/buildlang.art.json` by `tools/render_repo_art.py`, and a gate
 re-renders each drawing and compares it against what is committed, so a label
