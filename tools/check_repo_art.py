@@ -130,8 +130,12 @@ def check_note_survives_the_wrapper(_unused: list[Path]) -> list[str]:
     """Card notes wrap to three lines and the wrapper drops the rest, so an
     edited sentence can lose its ending in the drawing while reading fine
     in the spec."""
+    return _notes_the_wrapper_cuts(_loaded())
+
+
+def _notes_the_wrapper_cuts(specs: list[dict]) -> list[str]:
     bad = []
-    for spec in _loaded():
+    for spec in specs:
         for flow in spec.get("flows", []):
             for stage in flow["stages"]:
                 drawn = " ".join(FLOW._wrap(stage["note"]))
@@ -167,8 +171,12 @@ def check_every_illustration_is_shown(_unused: list[Path]) -> list[str]:
 def check_tagline_stays_inside_its_rule(_unused: list[Path]) -> list[str]:
     """The tagline is one unwrapped line under a rule that ends at x=700. Past
     that it runs on toward the aperture and nothing about the render fails."""
+    return _taglines_that_overrun(_loaded())
+
+
+def _taglines_that_overrun(specs: list[dict]) -> list[str]:
     bad = []
-    for spec in _loaded():
+    for spec in specs:
         tagline = spec["header"]["tagline"]
         if len(tagline) > TAGLINE_BUDGET:
             bad.append(f"{len(tagline)} characters runs past the rule: {tagline!r}")
@@ -185,8 +193,12 @@ def _outcome_budgets(count: int) -> tuple[int, int]:
 def check_outcome_fits_its_box(_unused: list[Path]) -> list[str]:
     """An outcome box is one unwrapped label over one unwrapped note, and
     neither is clipped, so an over-long note runs into the next box."""
+    return _outcomes_that_overflow(_loaded())
+
+
+def _outcomes_that_overflow(specs: list[dict]) -> list[str]:
     bad = []
-    for spec in _loaded():
+    for spec in specs:
         for flow in spec.get("flows", []):
             label_budget, note_budget = _outcome_budgets(len(flow["outcomes"]))
             for item in flow["outcomes"]:
@@ -196,6 +208,28 @@ def check_outcome_fits_its_box(_unused: list[Path]) -> list[str]:
                     bad.append(f'the note under {item["label"]} is wider than '
                                f'its box: {item["note"]!r}')
     return bad
+
+
+# A spec built to break all three geometry budgets at once. Every other check
+# here reports clean, which says it ran and not that it works.
+CONTROL = [{
+    "header": {"tagline": "x" * (TAGLINE_BUDGET + 1)},
+    "flows": [{
+        "stages": [{"title": "CARD", "note": "word " * 60}],
+        "outcomes": [{"label": "OK", "note": "x" * 200},
+                     {"label": "y" * 200, "note": "short"}],
+    }],
+}]
+
+
+def check_the_gate_can_fail(_unused: list[Path]) -> list[str]:
+    """Feed the three geometry checks input they have to reject."""
+    return [f"the gate missed {what}" for caught, what in (
+        (len(_notes_the_wrapper_cuts(CONTROL)) == 1, "a truncated note"),
+        (len(_taglines_that_overrun(CONTROL)) == 1, "a tagline past its rule"),
+        (len(_outcomes_that_overflow(CONTROL)) == 2,
+         "an over-wide label and an over-long note"),
+    ) if not caught]
 
 
 CHECKS = [
@@ -211,6 +245,7 @@ CHECKS = [
     ("art.every_illustration_is_shown", check_every_illustration_is_shown),
     ("art.tagline_stays_inside_its_rule", check_tagline_stays_inside_its_rule),
     ("art.outcome_fits_its_box", check_outcome_fits_its_box),
+    ("art.the_gate_can_fail", check_the_gate_can_fail),
 ]
 
 
