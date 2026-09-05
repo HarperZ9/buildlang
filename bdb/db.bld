@@ -165,17 +165,27 @@ struct DB {
     p_val_count: i32,
     p_row_count: i32,
     has_where: i32,
-    // WHERE as a flat DNF condition list (OR of AND-groups). Conditions with
-    // the same wc_group index are AND-ed; distinct groups are OR-ed. AND binds
-    // tighter than OR, which is the correct SQL precedence for any number of
-    // unparenthesized conditions. Parenthesized grouping is not parsed
-    // (honest limitation).
+    // WHERE leaf conditions. Each entry is one comparison / LIKE / IN /
+    // IS [NOT] NULL predicate; the boolean structure over them lives in the
+    // wn_* node tree below, so these arrays carry no grouping of their own.
     wc_count: i32,
     wc_left: Vec<i32>,     // left column-ref string id, per condition
     wc_op: Vec<i32>,       // op code 0..9, per condition
     wc_right: Vec<i32>,    // right value string id (-1 for IN / IS [NOT] NULL)
-    wc_neg: Vec<i32>,      // 1 = negate this condition (NOT / NOT IN / NOT LIKE)
-    wc_group: Vec<i32>,    // DNF group index, per condition
+    wc_neg: Vec<i32>,      // 1 = negate this condition (NOT IN / NOT LIKE)
+    // WHERE as a boolean-expression tree over the leaf conditions above.
+    // Node i has kind wn_kind[i] (0=leaf, 1=AND, 2=OR, 3=NOT). A leaf's wn_a
+    // is its condition index into the wc_* arrays (wn_b unused). AND/OR read
+    // both children (wn_a, wn_b); NOT reads its one child (wn_a). Nodes are
+    // emitted post-order, so a parent's child indices already exist. wc_root
+    // is the root node index, or -1 when there is no WHERE. This expresses
+    // arbitrary parenthesized grouping, NOT of a group, and NOT BETWEEN with
+    // full SQL precedence (OR binds loosest, then AND, then NOT).
+    wn_kind: Vec<i32>,
+    wn_a: Vec<i32>,
+    wn_b: Vec<i32>,
+    wn_count: i32,
+    wc_root: i32,
     has_order: i32,
     order_col: i32,
     order_desc: i32,
@@ -287,7 +297,8 @@ fn db_new(db_path: String) -> DB {
         p_vals: vec![], p_val_count: 0, p_row_count: 0,
         has_where: 0, wc_count: 0,
         wc_left: vec![], wc_op: vec![], wc_right: vec![],
-        wc_neg: vec![], wc_group: vec![],
+        wc_neg: vec![],
+        wn_kind: vec![], wn_a: vec![], wn_b: vec![], wn_count: 0, wc_root: -1,
         has_order: 0, order_col: -1, order_desc: 0,
         order_col2: -1, order_desc2: 0,
         has_limit: 0, limit_val: 0,
@@ -1244,7 +1255,11 @@ fn reset_parser(d: &mut DB, input: String) {
     d.wc_op = vec![];
     d.wc_right = vec![];
     d.wc_neg = vec![];
-    d.wc_group = vec![];
+    d.wn_kind = vec![];
+    d.wn_a = vec![];
+    d.wn_b = vec![];
+    d.wn_count = 0;
+    d.wc_root = -1;
     d.has_order = 0;
     d.order_col = -1;
     d.order_desc = 0;
@@ -1681,8 +1696,10 @@ fn parse_drop(d: &mut DB) ~ Console + Process {
 
 // Append one non-IN condition to the DNF list under group `grp`.
 // wc_in_start = -1 / wc_in_len = 0 mark it as not an IN condition.
-fn wc_push(d: &mut DB, grp: i32, left_id: i32, op: i32, right_id: i32, neg: i32) {
-    vec_push(d.wc_group, grp);
+// Append one leaf condition and return its index (its position in the wc_*
+// arrays). The parser wraps that index in a tree leaf node via wn_leaf.
+fn wc_push(d: &mut DB, left_id: i32, op: i32, right_id: i32, neg: i32) -> i32 {
+    let ci = d.wc_count;
     vec_push(d.wc_left, left_id);
     vec_push(d.wc_op, op);
     vec_push(d.wc_right, right_id);
@@ -1690,12 +1707,14 @@ fn wc_push(d: &mut DB, grp: i32, left_id: i32, op: i32, right_id: i32, neg: i32)
     vec_push(d.wc_in_start, -1);
     vec_push(d.wc_in_len, 0);
     d.wc_count = d.wc_count + 1;
+    ci
 }
 
-// Append one IN condition (op 7) under group `grp`. Its value list is copied
+// Append one IN condition (op 7) and return its index. Its value list is copied
 // into the shared wc_in_pool; the slice is recorded via wc_in_start / wc_in_len
 // (buildlang has no Vec<Vec<i32>>, so every IN list shares one flat pool).
-fn wc_push_in(d: &mut DB, grp: i32, left_id: i32, neg: i32, vals: Vec<i32>, vcount: i32) {
+fn wc_push_in(d: &mut DB, left_id: i32, neg: i32, vals: Vec<i32>, vcount: i32) -> i32 {
+    let ci = d.wc_count;
     let mut start = 0;
     start = vec_len(d.wc_in_pool);
     let mut i = 0;
@@ -1703,7 +1722,6 @@ fn wc_push_in(d: &mut DB, grp: i32, left_id: i32, neg: i32, vals: Vec<i32>, vcou
         vec_push(d.wc_in_pool, vec_get(vals, i));
         i = i + 1;
     }
-    vec_push(d.wc_group, grp);
     vec_push(d.wc_left, left_id);
     vec_push(d.wc_op, 7);
     vec_push(d.wc_right, -1);
@@ -1711,23 +1729,37 @@ fn wc_push_in(d: &mut DB, grp: i32, left_id: i32, neg: i32, vals: Vec<i32>, vcou
     vec_push(d.wc_in_start, start);
     vec_push(d.wc_in_len, vcount);
     d.wc_count = d.wc_count + 1;
+    ci
 }
 
-// Parse one WHERE condition into DNF group `grp`. Handles a leading NOT
-// (WHERE NOT col = val) and an infix NOT (col NOT IN / col NOT LIKE), both of
-// which set the per-condition negate flag. Handles comparison ops, LIKE,
-// IN (value-list or SELECT subquery), BETWEEN (two AND-ed conditions in the
-// same group), IS [NOT] NULL, and scalar subqueries.
-fn parse_where_cond(d: &mut DB, grp: i32) ~ Console + Process {
+// Append one boolean-tree node and return its index. kind: 0=leaf, 1=AND,
+// 2=OR, 3=NOT. For a leaf, a is the condition index and b is -1; for AND/OR,
+// a and b are child node indices; for NOT, a is the one child and b is -1.
+fn wn_push(d: &mut DB, kind: i32, a: i32, b: i32) -> i32 {
+    let n = d.wn_count;
+    vec_push(d.wn_kind, kind);
+    vec_push(d.wn_a, a);
+    vec_push(d.wn_b, b);
+    d.wn_count = d.wn_count + 1;
+    n
+}
+
+// Wrap a leaf condition index in a tree leaf node.
+fn wn_leaf(d: &mut DB, ci: i32) -> i32 {
+    wn_push(d, 0, ci, -1)
+}
+
+// Parse one leaf WHERE predicate and return its tree-node index. A leading NOT
+// is handled by parse_not_expr; this reads the infix NOT (col NOT IN / NOT LIKE
+// / NOT BETWEEN) that binds to a single predicate. Comparison ops, LIKE,
+// IN (value-list or SELECT subquery), IS [NOT] NULL, and scalar subqueries each
+// become one leaf. BETWEEN expands to a real subtree: AND(>=lo,<=hi), or when
+// negated OR(<lo,>hi), so the compound case is exact rather than an honest null.
+fn parse_condition(d: &mut DB) -> i32 ~ Console + Process {
     let mut neg = 0;
-    // Leading NOT: WHERE NOT col = val
-    if tk_is_kw(d, "NOT") == 1 {
-        neg = 1;
-        next_token(d);
-    }
     let lref = read_col_ref(d);
     let left_id = sp_add(d, lref);
-    // Infix NOT: col NOT IN (...) / col NOT LIKE 'pat'
+    // Infix NOT: col NOT IN (...) / col NOT LIKE 'pat' / col NOT BETWEEN lo AND hi
     if tk_is_kw(d, "NOT") == 1 {
         neg = 1;
         next_token(d);
@@ -1739,8 +1771,8 @@ fn parse_where_cond(d: &mut DB, grp: i32) ~ Console + Process {
         let pattern = d.tk_val;
         let pat_id = sp_add(d, pattern);
         next_token(d);
-        wc_push(d, grp, left_id, 6, pat_id, neg);
-        return;
+        let ci = wc_push(d, left_id, 6, pat_id, neg);
+        return wn_leaf(d, ci);
     }
 
     // IN (value-list or SELECT subquery)
@@ -1760,7 +1792,8 @@ fn parse_where_cond(d: &mut DB, grp: i32) ~ Console + Process {
                 svi = svi + 1;
             }
             expect_punct(d, ")");
-            wc_push_in(d, grp, left_id, neg, sv, svc);
+            let ci = wc_push_in(d, left_id, neg, sv, svc);
+            return wn_leaf(d, ci);
         } else {
             let mut vals: Vec<i32> = vec![];
             let mut vcount = 0;
@@ -1775,12 +1808,14 @@ fn parse_where_cond(d: &mut DB, grp: i32) ~ Console + Process {
                 else { go = false; }
             }
             expect_punct(d, ")");
-            wc_push_in(d, grp, left_id, neg, vals, vcount);
+            let ci = wc_push_in(d, left_id, neg, vals, vcount);
+            return wn_leaf(d, ci);
         }
-        return;
     }
 
-    // BETWEEN: col BETWEEN lo AND hi -> col >= lo AND col <= hi (same group)
+    // BETWEEN: col BETWEEN lo AND hi. Positive -> AND(col>=lo, col<=hi).
+    // Negated (NOT BETWEEN) -> OR(col<lo, col>hi). Both are real subtrees, so
+    // the result is exact even inside a larger AND/OR expression.
     if tk_is_kw(d, "BETWEEN") == 1 {
         next_token(d);
         let lo_val = d.tk_val;
@@ -1791,17 +1826,18 @@ fn parse_where_cond(d: &mut DB, grp: i32) ~ Console + Process {
         let hi_id = sp_add(d, hi_val);
         next_token(d);
         if neg == 1 {
-            // NOT BETWEEN is (x < lo OR x > hi), which needs an OR distributed
-            // across groups the flat parser cannot express (same limit as
-            // parenthesized WHERE). Emit an always-false group (x < lo AND
-            // x >= lo) so the result is empty, not silently wrong. Honest null.
-            wc_push(d, grp, left_id, 1, lo_id, 0);
-            wc_push(d, grp, left_id, 4, lo_id, 0);
+            let a = wc_push(d, left_id, 1, lo_id, 0);
+            let b = wc_push(d, left_id, 2, hi_id, 0);
+            let la = wn_leaf(d, a);
+            let lb = wn_leaf(d, b);
+            return wn_push(d, 2, la, lb);
         } else {
-            wc_push(d, grp, left_id, 4, lo_id, 0);
-            wc_push(d, grp, left_id, 3, hi_id, 0);
+            let a = wc_push(d, left_id, 4, lo_id, 0);
+            let b = wc_push(d, left_id, 3, hi_id, 0);
+            let la = wn_leaf(d, a);
+            let lb = wn_leaf(d, b);
+            return wn_push(d, 1, la, lb);
         }
-        return;
     }
 
     // IS NULL / IS NOT NULL
@@ -1810,12 +1846,13 @@ fn parse_where_cond(d: &mut DB, grp: i32) ~ Console + Process {
         if tk_is_kw(d, "NOT") == 1 {
             next_token(d);
             expect_kw(d, "NULL");
-            wc_push(d, grp, left_id, 9, -1, neg);
+            let ci = wc_push(d, left_id, 9, -1, neg);
+            return wn_leaf(d, ci);
         } else {
             expect_kw(d, "NULL");
-            wc_push(d, grp, left_id, 8, -1, neg);
+            let ci = wc_push(d, left_id, 8, -1, neg);
+            return wn_leaf(d, ci);
         }
-        return;
     }
 
     // Normal operator: =, <, >, <=, >=, <>, !=
@@ -1830,8 +1867,8 @@ fn parse_where_cond(d: &mut DB, grp: i32) ~ Console + Process {
             let sub_result = parse_and_exec_subquery(d);
             let rid = sp_add(d, sub_result);
             expect_punct(d, ")");
-            wc_push(d, grp, left_id, op_code, rid, neg);
-            return;
+            let ci = wc_push(d, left_id, op_code, rid, neg);
+            return wn_leaf(d, ci);
         }
     }
 
@@ -1839,31 +1876,59 @@ fn parse_where_cond(d: &mut DB, grp: i32) ~ Console + Process {
     let rval = d.tk_val;
     let rid = sp_add(d, rval);
     next_token(d);
-    wc_push(d, grp, left_id, op_code, rid, neg);
+    let ci = wc_push(d, left_id, op_code, rid, neg);
+    wn_leaf(d, ci)
 }
 
-// Parse the full WHERE clause as DNF (OR of AND-groups). AND keeps the current
-// group index; OR opens a new one. AND binds tighter than OR, the correct SQL
-// precedence for any number of unparenthesized conditions. Parenthesized
-// grouping is not parsed (honest limitation).
+// Recursive-descent boolean-expression parser over parse_condition leaves with
+// real SQL precedence: OR lowest, then AND, then a NOT prefix, then a primary
+// (a parenthesized subexpression or one condition). Each returns the root node
+// index of the subtree it parsed, so parse_where can record a single wc_root.
+fn parse_primary(d: &mut DB) -> i32 ~ Console + Process {
+    if tk_is_punct(d, "(") == 1 {
+        next_token(d);
+        let n = parse_or_expr(d);
+        expect_punct(d, ")");
+        return n;
+    }
+    parse_condition(d)
+}
+
+fn parse_not_expr(d: &mut DB) -> i32 ~ Console + Process {
+    if tk_is_kw(d, "NOT") == 1 {
+        next_token(d);
+        let child = parse_primary(d);
+        return wn_push(d, 3, child, -1);
+    }
+    parse_primary(d)
+}
+
+fn parse_and_expr(d: &mut DB) -> i32 ~ Console + Process {
+    let mut left = parse_not_expr(d);
+    while tk_is_kw(d, "AND") == 1 {
+        next_token(d);
+        let right = parse_not_expr(d);
+        left = wn_push(d, 1, left, right);
+    }
+    left
+}
+
+fn parse_or_expr(d: &mut DB) -> i32 ~ Console + Process {
+    let mut left = parse_and_expr(d);
+    while tk_is_kw(d, "OR") == 1 {
+        next_token(d);
+        let right = parse_and_expr(d);
+        left = wn_push(d, 2, left, right);
+    }
+    left
+}
+
+// Parse the full WHERE clause into a boolean-expression tree rooted at wc_root.
 fn parse_where(d: &mut DB) ~ Console + Process {
     next_token(d);
     d.has_where = 1;
-    let mut grp = 0;
-    parse_where_cond(d, grp);
-    let mut go = true;
-    while go {
-        if tk_is_kw(d, "AND") == 1 {
-            next_token(d);
-            parse_where_cond(d, grp);
-        } else if tk_is_kw(d, "OR") == 1 {
-            grp = grp + 1;
-            next_token(d);
-            parse_where_cond(d, grp);
-        } else {
-            go = false;
-        }
-    }
+    let root = parse_or_expr(d);
+    d.wc_root = root;
 }
 
 // ALTER TABLE tname ADD COLUMN cname TYPE
@@ -1953,7 +2018,11 @@ fn parse_and_exec_subquery(d: &mut DB) -> String ~ Console + Process {
     let save_wc_op = d.wc_op;
     let save_wc_right = d.wc_right;
     let save_wc_neg = d.wc_neg;
-    let save_wc_group = d.wc_group;
+    let save_wn_kind = d.wn_kind;
+    let save_wn_a = d.wn_a;
+    let save_wn_b = d.wn_b;
+    let save_wn_count = d.wn_count;
+    let save_wc_root = d.wc_root;
     let save_wc_in_start = d.wc_in_start;
     let save_wc_in_len = d.wc_in_len;
     let save_wc_in_pool = d.wc_in_pool;
@@ -2010,7 +2079,11 @@ fn parse_and_exec_subquery(d: &mut DB) -> String ~ Console + Process {
     d.wc_op = save_wc_op;
     d.wc_right = save_wc_right;
     d.wc_neg = save_wc_neg;
-    d.wc_group = save_wc_group;
+    d.wn_kind = save_wn_kind;
+    d.wn_a = save_wn_a;
+    d.wn_b = save_wn_b;
+    d.wn_count = save_wn_count;
+    d.wc_root = save_wc_root;
     d.wc_in_start = save_wc_in_start;
     d.wc_in_len = save_wc_in_len;
     d.wc_in_pool = save_wc_in_pool;
@@ -2447,40 +2520,35 @@ fn eval_cond_row(d: &DB, ci: i32, cs: i32, cc: i32, rs: i32, row: i32,
     res
 }
 
-// Evaluate the full WHERE clause for a single-table row as DNF: OR over
-// groups, AND within a group. A row matches if any group has all its
-// conditions true. has_where==0 or an empty condition list means no filter.
+// Recursively evaluate the WHERE boolean-expression tree for a single-table
+// row. node < 0 means "no predicate" (true). Leaf (kind 0) evaluates its
+// condition via eval_cond_row; NOT (3) negates its one child; AND (1) / OR (2)
+// combine both children.
+fn eval_where_tree(d: &DB, node: i32, cs: i32, cc: i32, rs: i32, row: i32,
+                   tname: String, alias: i32) -> bool {
+    if node < 0 { return true; }
+    let k = vec_get(d.wn_kind, node);
+    if k == 0 {
+        return eval_cond_row(d, vec_get(d.wn_a, node), cs, cc, rs, row, tname, alias);
+    }
+    if k == 3 {
+        return !eval_where_tree(d, vec_get(d.wn_a, node), cs, cc, rs, row, tname, alias);
+    }
+    let la = eval_where_tree(d, vec_get(d.wn_a, node), cs, cc, rs, row, tname, alias);
+    let rb = eval_where_tree(d, vec_get(d.wn_b, node), cs, cc, rs, row, tname, alias);
+    if k == 1 { return la && rb; }
+    if k == 2 { return la || rb; }
+    true
+}
+
+// Evaluate the full WHERE clause for a single-table row by walking the
+// boolean-expression tree from wc_root. has_where==0 or an empty tree means no
+// filter. AND/OR/NOT and parenthesized grouping are all exact.
 fn eval_compound_where(d: &DB, cs: i32, cc: i32, rs: i32, row: i32,
                        tname: String, alias: i32) -> bool {
     if d.has_where == 0 { return true; }
     if d.wc_count == 0 { return true; }
-    let mut maxg = 0;
-    let mut gi = 0;
-    while gi < d.wc_count {
-        let g = vec_get(d.wc_group, gi);
-        if g > maxg { maxg = g; }
-        gi = gi + 1;
-    }
-    let mut grp = 0;
-    while grp <= maxg {
-        let mut any_in_group = false;
-        let mut all_true = true;
-        let mut ci = 0;
-        while ci < d.wc_count {
-            if vec_get(d.wc_group, ci) == grp {
-                any_in_group = true;
-                if eval_cond_row(d, ci, cs, cc, rs, row, tname, alias) == false {
-                    all_true = false;
-                }
-            }
-            ci = ci + 1;
-        }
-        if any_in_group {
-            if all_true { return true; }
-        }
-        grp = grp + 1;
-    }
-    false
+    eval_where_tree(d, d.wc_root, cs, cc, rs, row, tname, alias)
 }
 
 fn check_has_agg(d: &DB) -> i32 {
@@ -2571,25 +2639,29 @@ fn exec_select(d: &mut DB) ~ Console {
     let mut match_count = 0;
 
     // Try index lookup for a single simple WHERE comparison on an indexed
-    // column: exactly one condition, not negated, a comparison op (0..5 —
-    // index_scan does equality by binary search and 1..5 by sorted range).
-    // LIKE / IN / IS NULL and any multi-condition WHERE fall to the full scan.
+    // column: the WHERE must be exactly one bare leaf (wc_count==1 AND
+    // wn_count==1, so no NOT/AND/OR wrapper), not negated, with a comparison op
+    // (0..5 — index_scan does equality by binary search and 1..5 by sorted
+    // range). A NOT-wrapped leaf has wn_count>1 and must fall to the full scan,
+    // as do LIKE / IN / IS NULL and any multi-condition WHERE.
     let mut used_index = false;
     if d.has_where == 1 {
         if d.wc_count == 1 {
-            if vec_get(d.wc_neg, 0) == 0 {
-                let op0 = vec_get(d.wc_op, 0);
-                if op0 >= 0 {
-                    if op0 <= 5 {
-                        let wl = sp_get(d, vec_get(d.wc_left, 0));
-                        let wcol = resolve_col(d, cs, cc, tname, d.alias1, wl);
-                        if wcol >= 0 {
-                            let ix_id = find_index_for(d, tidx, wcol);
-                            if ix_id >= 0 {
-                                let wr = sp_get(d, vec_get(d.wc_right, 0));
-                                match_rows = index_scan(d, ix_id, op0, wr);
-                                match_count = vec_len(match_rows);
-                                used_index = true;
+            if d.wn_count == 1 {
+                if vec_get(d.wc_neg, 0) == 0 {
+                    let op0 = vec_get(d.wc_op, 0);
+                    if op0 >= 0 {
+                        if op0 <= 5 {
+                            let wl = sp_get(d, vec_get(d.wc_left, 0));
+                            let wcol = resolve_col(d, cs, cc, tname, d.alias1, wl);
+                            if wcol >= 0 {
+                                let ix_id = find_index_for(d, tidx, wcol);
+                                if ix_id >= 0 {
+                                    let wr = sp_get(d, vec_get(d.wc_right, 0));
+                                    match_rows = index_scan(d, ix_id, op0, wr);
+                                    match_count = vec_len(match_rows);
+                                    used_index = true;
+                                }
                             }
                         }
                     }
@@ -3602,41 +3674,37 @@ fn eval_cond_join(d: &DB, ci: i32, cs1: i32, cc1: i32, rs1: i32, r1: i32,
     res
 }
 
-// Evaluate WHERE for a JOIN row (checks both tables) as DNF: OR over groups,
-// AND within a group.
+// Recursively evaluate the WHERE boolean-expression tree for a JOIN row (either
+// table). node < 0 is true; leaf (0) evaluates its condition via eval_cond_join;
+// NOT (3) negates its child; AND (1) / OR (2) combine both children.
+fn eval_join_tree(d: &DB, node: i32, cs1: i32, cc1: i32, rs1: i32, r1: i32,
+                  tname1: String, alias1: i32,
+                  cs2: i32, cc2: i32, rs2: i32, r2: i32,
+                  tname2: String, alias2: i32) -> bool {
+    if node < 0 { return true; }
+    let k = vec_get(d.wn_kind, node);
+    if k == 0 {
+        return eval_cond_join(d, vec_get(d.wn_a, node), cs1, cc1, rs1, r1, tname1, alias1, cs2, cc2, rs2, r2, tname2, alias2);
+    }
+    if k == 3 {
+        return !eval_join_tree(d, vec_get(d.wn_a, node), cs1, cc1, rs1, r1, tname1, alias1, cs2, cc2, rs2, r2, tname2, alias2);
+    }
+    let la = eval_join_tree(d, vec_get(d.wn_a, node), cs1, cc1, rs1, r1, tname1, alias1, cs2, cc2, rs2, r2, tname2, alias2);
+    let rb = eval_join_tree(d, vec_get(d.wn_b, node), cs1, cc1, rs1, r1, tname1, alias1, cs2, cc2, rs2, r2, tname2, alias2);
+    if k == 1 { return la && rb; }
+    if k == 2 { return la || rb; }
+    true
+}
+
+// Evaluate WHERE for a JOIN row (checks both tables) by walking the
+// boolean-expression tree from wc_root.
 fn eval_join_where(d: &DB, cs1: i32, cc1: i32, rs1: i32, r1: i32,
                    tname1: String, alias1: i32,
                    cs2: i32, cc2: i32, rs2: i32, r2: i32,
                    tname2: String, alias2: i32) -> bool {
     if d.has_where == 0 { return true; }
     if d.wc_count == 0 { return true; }
-    let mut maxg = 0;
-    let mut gi = 0;
-    while gi < d.wc_count {
-        let g = vec_get(d.wc_group, gi);
-        if g > maxg { maxg = g; }
-        gi = gi + 1;
-    }
-    let mut grp = 0;
-    while grp <= maxg {
-        let mut any_in_group = false;
-        let mut all_true = true;
-        let mut ci = 0;
-        while ci < d.wc_count {
-            if vec_get(d.wc_group, ci) == grp {
-                any_in_group = true;
-                if eval_cond_join(d, ci, cs1, cc1, rs1, r1, tname1, alias1, cs2, cc2, rs2, r2, tname2, alias2) == false {
-                    all_true = false;
-                }
-            }
-            ci = ci + 1;
-        }
-        if any_in_group {
-            if all_true { return true; }
-        }
-        grp = grp + 1;
-    }
-    false
+    eval_join_tree(d, d.wc_root, cs1, cc1, rs1, r1, tname1, alias1, cs2, cc2, rs2, r2, tname2, alias2)
 }
 
 // Execute UPDATE. Scans all cells for the target table, replacing the

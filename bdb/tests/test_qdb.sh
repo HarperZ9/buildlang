@@ -78,6 +78,9 @@ chksel "like_prefix"   "SELECT name FROM emp WHERE name LIKE 'a%'" "alice"
 chksel "not_like"      "SELECT name FROM emp WHERE name NOT LIKE 'a%' ORDER BY id" "$(printf 'bob\ncarol\ndave\neve')"
 chksel "between"       "SELECT name FROM emp WHERE salary BETWEEN 80 AND 100 ORDER BY id" "$(printf 'alice\nbob\ncarol')"
 chksel "between_and"   "SELECT name FROM emp WHERE salary BETWEEN 80 AND 120 AND dept='sales' ORDER BY id" "$(printf 'carol\ndave')"
+chksel "paren_group"   "SELECT name FROM emp WHERE (dept='eng' OR dept='hr') AND salary > 85 ORDER BY id" "$(printf 'alice\nbob')"
+chksel "not_between"   "SELECT name FROM emp WHERE salary NOT BETWEEN 80 AND 120 ORDER BY id" "eve"
+chksel "not_paren"     "SELECT name FROM emp WHERE NOT (dept='eng' OR dept='hr') ORDER BY id" "$(printf 'carol\ndave')"
 # IS NULL / IS NOT NULL need a null cell (emp has none), so use a dedicated table.
 # NULL in INSERT stores a blank cell; IS NULL matches it, IS NOT NULL matches the rest.
 $QDB "$DB" "CREATE TABLE nn (id INTEGER, name TEXT)" >/dev/null
@@ -133,6 +136,9 @@ echo "== INDEX (equality fast-path returns same rows) =="
 reseed; $QDB "$DB" "CREATE INDEX ix ON emp (salary)" >/dev/null
 chksel "index_eq"      "SELECT name FROM emp WHERE salary = 100" "alice"
 chksel "index_gt"      "SELECT name FROM emp WHERE salary > 100" "dave"
+# NOT over an indexed-column equality must bypass the fast-path (wn_count>1) and
+# full-scan: the answer is the complement, not the indexed match.
+chksel "not_index"     "SELECT name FROM emp WHERE NOT salary = 100 ORDER BY id" "$(printf 'bob\ncarol\ndave\neve')"
 
 echo "== JOIN =="
 reseed
@@ -148,12 +154,10 @@ chk   "drop"           "$($QDB "$DB" 'SELECT * FROM dep' 2>&1 | tr -d '\r' | gre
 
 echo "== documented honest nulls (XFAIL: divergence is by design) =="
 reseed
-# Parenthesized WHERE grouping: the flat DNF parser cannot express
-# (a OR b) AND c. SQL-correct here is alice,bob; the engine returns empty.
-xfail "paren_group" "$(rows "SELECT name FROM emp WHERE (dept='eng' OR dept='hr') AND salary > 85")" "$(printf 'alice\nbob')"
-# NOT BETWEEN needs an OR across groups the flat parser cannot emit.
-# SQL-correct is eve(70); the engine returns empty.
-xfail "not_between" "$(rows "SELECT name FROM emp WHERE salary NOT BETWEEN 80 AND 120")" "eve"
+# paren_group and not_between are no longer nulls: the WHERE parser now builds a
+# boolean-expression tree (OR<AND<NOT<primary, with '(' opening a subexpression),
+# so parenthesized grouping and NOT BETWEEN evaluate exactly. Both moved up to
+# chksel assertions in the WHERE section.
 # ORDER BY an aggregate term on a grouped query: parse_order_by cannot capture
 # COUNT(*)/SUM(col) as an order key, so grouped ORDER BY resolves only a plain
 # output column. SQL-correct ascending by count is hr(1),eng(2),sales(2); the
