@@ -65,6 +65,9 @@ echo "== WHERE: comparisons, DNF, NOT, IN, LIKE, BETWEEN, IS NULL =="
 chksel "eq"            "SELECT name FROM emp WHERE dept = 'hr'" "eve"
 chksel "lt"            "SELECT name FROM emp WHERE salary < 90 ORDER BY id" "$(printf 'carol\neve')"
 chksel "ne"            "SELECT name FROM emp WHERE dept <> 'eng' ORDER BY id" "$(printf 'carol\ndave\neve')"
+chksel "ne_bang"       "SELECT name FROM emp WHERE dept != 'eng' ORDER BY id" "$(printf 'carol\ndave\neve')"
+chksel "ge"            "SELECT name FROM emp WHERE salary >= 100 ORDER BY id" "$(printf 'alice\ndave')"
+chksel "le"            "SELECT name FROM emp WHERE salary <= 80 ORDER BY id" "$(printf 'carol\neve')"
 chksel "and3"          "SELECT name FROM emp WHERE dept = 'eng' AND salary > 85 AND age < 40" "alice"
 chksel "or3"           "SELECT name FROM emp WHERE dept='eng' OR dept='hr' OR dept='sales' ORDER BY id" "$(printf 'alice\nbob\ncarol\ndave\neve')"
 chksel "and_or_prec"   "SELECT name FROM emp WHERE dept='eng' AND salary>95 OR dept='hr' ORDER BY id" "$(printf 'alice\neve')"
@@ -75,6 +78,13 @@ chksel "like_prefix"   "SELECT name FROM emp WHERE name LIKE 'a%'" "alice"
 chksel "not_like"      "SELECT name FROM emp WHERE name NOT LIKE 'a%' ORDER BY id" "$(printf 'bob\ncarol\ndave\neve')"
 chksel "between"       "SELECT name FROM emp WHERE salary BETWEEN 80 AND 100 ORDER BY id" "$(printf 'alice\nbob\ncarol')"
 chksel "between_and"   "SELECT name FROM emp WHERE salary BETWEEN 80 AND 120 AND dept='sales' ORDER BY id" "$(printf 'carol\ndave')"
+# IS NULL / IS NOT NULL need a null cell (emp has none), so use a dedicated table.
+# NULL in INSERT stores a blank cell; IS NULL matches it, IS NOT NULL matches the rest.
+$QDB "$DB" "CREATE TABLE nn (id INTEGER, name TEXT)" >/dev/null
+$QDB "$DB" "INSERT INTO nn VALUES (1,'alice'),(2,NULL),(3,'carol')" >/dev/null
+chksel "is_null"       "SELECT id FROM nn WHERE name IS NULL" "2"
+chksel "is_not_null"   "SELECT id FROM nn WHERE name IS NOT NULL ORDER BY id" "$(printf '1\n3')"
+$QDB "$DB" "DROP TABLE nn" >/dev/null 2>&1
 
 echo "== ORDER BY (multi-key) / LIMIT / OFFSET / DISTINCT =="
 chksel "order_desc"    "SELECT name FROM emp ORDER BY salary DESC" "$(printf 'dave\nalice\nbob\ncarol\neve')"
@@ -92,6 +102,13 @@ chksel "group_count"   "SELECT dept, COUNT(*) FROM emp GROUP BY dept ORDER BY de
 chksel "group_desc"    "SELECT dept, COUNT(*) FROM emp GROUP BY dept ORDER BY dept DESC" "$(printf 'sales | 2\nhr    | 1\neng   | 2')"
 chksel "group_sum_ord" "SELECT dept, SUM(salary) FROM emp GROUP BY dept ORDER BY dept" "$(printf 'eng   | 190\nhr    | 70\nsales | 200')"
 chksel "having"        "SELECT dept FROM emp GROUP BY dept HAVING COUNT(*) > 1 ORDER BY dept" "$(printf 'eng\nsales')"
+
+echo "== subqueries (scalar + IN) =="
+reseed
+# Scalar subquery in WHERE: AVG(salary)=460/5=92, so salary>92 -> alice(100),dave(120).
+chksel "subq_scalar"   "SELECT name FROM emp WHERE salary > (SELECT AVG(salary) FROM emp) ORDER BY id" "$(printf 'alice\ndave')"
+# IN-subquery: depts of rows with age>40 are {eng(bob),sales(dave)}; names there are all but eve.
+chksel "subq_in"       "SELECT name FROM emp WHERE dept IN (SELECT dept FROM emp WHERE age > 40) ORDER BY id" "$(printf 'alice\nbob\ncarol\ndave')"
 
 echo "== UPDATE: literal, arithmetic (+ - * /), fail-closed =="
 reseed; $QDB "$DB" "UPDATE emp SET salary = 500 WHERE name='alice'" >/dev/null
