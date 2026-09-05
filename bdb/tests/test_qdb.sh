@@ -119,6 +119,30 @@ $QDB "$DB" "INSERT INTO tal_f VALUES (2.5),(10.1),(1.9)" >/dev/null
 chksel "alias_float_order_desc" "SELECT x FROM tal_f ORDER BY x DESC" "$(printf '10.1\n2.5\n1.9')"
 $QDB "$DB" "DROP TABLE tal_f" >/dev/null 2>&1
 
+echo "== ORDER BY key resolution: ordinal / alias / fail-closed (non-grouped) =="
+# The non-grouped single-table ORDER BY path used to silently no-sort (return
+# discovery order) whenever the key was not a real table column. It now resolves
+# a positional ordinal (SQL-92) and a projection alias, and FAILS CLOSED on a key
+# that resolves to nothing -- matching the grouped path's discipline. Without the
+# fix each of these returned insert order (100,90,80,120,70) with no error.
+# Positional ordinal into the projected list: position 1 = the projected column.
+chksel "order_ordinal_proj"    "SELECT salary FROM emp ORDER BY 1 DESC"    "$(printf '120\n100\n90\n80\n70')"
+# Projection alias on a plain (non-grouped) SELECT.
+chksel "order_alias_plain"     "SELECT salary AS s FROM emp ORDER BY s DESC" "$(printf '120\n100\n90\n80\n70')"
+# Secondary key by ordinal and by alias: dept ASC, then salary DESC within dept.
+chksel "order_secondary_ord"   "SELECT dept, salary FROM emp ORDER BY dept, 2 DESC"      "$(printf 'eng   |    100\neng   |     90\nhr    |     70\nsales |    120\nsales |     80')"
+chksel "order_secondary_alias" "SELECT dept, salary AS s FROM emp ORDER BY dept, s DESC" "$(printf 'eng   | 100\neng   |  90\nhr    |  70\nsales | 120\nsales |  80')"
+# Positional ordinal against SELECT * maps onto table columns (col 1 = v).
+$QDB "$DB" "CREATE TABLE o8 (v INTEGER)" >/dev/null
+$QDB "$DB" "INSERT INTO o8 VALUES (100),(90),(80),(120),(70)" >/dev/null
+chksel "order_ordinal_star"    "SELECT * FROM o8 ORDER BY 1 DESC" "$(printf '120\n100\n90\n80\n70')"
+$QDB "$DB" "DROP TABLE o8" >/dev/null 2>&1
+# Fail closed: unknown column, out-of-range ordinal, ordinal 0, unresolved secondary.
+reseed; errchk "order_unknown_closed"      "SELECT name FROM emp ORDER BY nonesuch"             "must name"
+reseed; errchk "order_ordinal_oor_closed"  "SELECT name, salary FROM emp ORDER BY 9"            "must name"
+reseed; errchk "order_ordinal_zero_closed" "SELECT name FROM emp ORDER BY 0"                    "must name"
+reseed; errchk "order_secondary_closed"    "SELECT name, salary FROM emp ORDER BY salary, nope" "must name"
+
 echo "== aggregates / GROUP BY / HAVING =="
 chksel "count_star"    "SELECT COUNT(*) FROM emp" "5"
 chksel "sum"           "SELECT SUM(salary) FROM emp" "460"

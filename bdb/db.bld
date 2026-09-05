@@ -2411,6 +2411,59 @@ fn parse_int_str(s: String) -> i32 {
     if neg { 0 - num } else { num }
 }
 
+// Resolve an ORDER BY key to a table column index in [0, cc), or -1 when it
+// resolves to nothing. Three key forms are accepted so the non-grouped
+// single-table SELECT path can fail closed instead of silently returning
+// discovery order on an unresolvable key:
+//   (a) a column name, bare or dotted (table.col)  -> resolve_col
+//   (b) a positional ordinal (ORDER BY 2, SQL-92)  -> the Nth output column
+//   (c) a projection alias (SELECT salary AS s ... ORDER BY s)
+// A positional ordinal or alias only resolves when the referenced select item
+// is a plain table column; one that points at an aggregate returns -1, since
+// this path never sorts by an aggregate value.
+fn resolve_order_key(d: &DB, cs: i32, cc: i32, tname: String, key_id: i32) -> i32 {
+    let key = sp_get(d, key_id);
+    // (b) positional ordinal: a bare integer is the 1-based select-list slot.
+    if is_int_str(key) {
+        let n = parse_int_str(key);
+        if n < 1 { return 0 - 1; }
+        if d.select_star == 1 {
+            // SELECT * projects every table column in order, so slot N is
+            // table column N-1.
+            if n <= cc { return n - 1; }
+            return 0 - 1;
+        }
+        if n <= d.p_agg_count {
+            let k = n - 1;
+            if vec_get(d.p_agg_funcs, k) == 0 {
+                let col_name = sp_get(d, vec_get(d.p_agg_cols, k));
+                return resolve_col(d, cs, cc, tname, d.alias1, col_name);
+            }
+        }
+        return 0 - 1;
+    }
+    // (a) a real column name (dotted or bare) takes precedence over an alias.
+    let direct = resolve_col(d, cs, cc, tname, d.alias1, key);
+    if direct >= 0 { return direct; }
+    // (c) projection alias -> its underlying plain column.
+    if d.select_star == 0 {
+        let mut k = 0;
+        while k < d.p_agg_count {
+            let al = vec_get(d.p_aliases, k);
+            if al >= 0 {
+                if sp_get(d, al) == key {
+                    if vec_get(d.p_agg_funcs, k) == 0 {
+                        let col_name = sp_get(d, vec_get(d.p_agg_cols, k));
+                        return resolve_col(d, cs, cc, tname, d.alias1, col_name);
+                    }
+                }
+            }
+            k = k + 1;
+        }
+    }
+    0 - 1
+}
+
 // =========================================================================
 // SECTION 6: EXECUTOR — Query Execution Engine
 // =========================================================================
@@ -2813,21 +2866,28 @@ fn exec_select(d: &mut DB) ~ Console + Process {
         }
     }
 
-    // ORDER BY
+    // ORDER BY. Resolve each key to a table column and FAIL CLOSED on an
+    // unresolvable key rather than silently returning discovery order. A key
+    // may be a column name, a positional ordinal, or a projection alias (see
+    // resolve_order_key).
     if d.has_order == 1 {
-        let ocol_name = sp_get(d, d.order_col);
-        let ocol_idx = resolve_col(d, cs, cc, tname, d.alias1, ocol_name);
-        if ocol_idx >= 0 {
-            let ocol_type = vec_get(d.col_types, cs + ocol_idx);
-            let mut ocol2_idx = 0 - 1;
-            let mut ocol2_type = 0;
-            if d.order_col2 >= 0 {
-                let ocol2_name = sp_get(d, d.order_col2);
-                ocol2_idx = resolve_col(d, cs, cc, tname, d.alias1, ocol2_name);
-                if ocol2_idx >= 0 { ocol2_type = vec_get(d.col_types, cs + ocol2_idx); }
-            }
-            match_rows = sort_rows(d, match_rows, match_count, rs, cc, ocol_idx, ocol_type, d.order_desc, ocol2_idx, ocol2_type, d.order_desc2);
+        let ocol_idx = resolve_order_key(d, cs, cc, tname, d.order_col);
+        if ocol_idx < 0 {
+            println!("Error: ORDER BY must name a column, alias, or select position");
+            process_exit(1);
         }
+        let ocol_type = vec_get(d.col_types, cs + ocol_idx);
+        let mut ocol2_idx = 0 - 1;
+        let mut ocol2_type = 0;
+        if d.order_col2 >= 0 {
+            ocol2_idx = resolve_order_key(d, cs, cc, tname, d.order_col2);
+            if ocol2_idx < 0 {
+                println!("Error: ORDER BY must name a column, alias, or select position");
+                process_exit(1);
+            }
+            ocol2_type = vec_get(d.col_types, cs + ocol2_idx);
+        }
+        match_rows = sort_rows(d, match_rows, match_count, rs, cc, ocol_idx, ocol_type, d.order_desc, ocol2_idx, ocol2_type, d.order_desc2);
     }
 
     // LIMIT / OFFSET
