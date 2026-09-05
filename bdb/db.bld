@@ -3637,38 +3637,77 @@ fn exec_select_group(d: &mut DB) ~ Console {
         final_count = group_count;
     }
 
-    // ORDER BY on grouped output. Sort the emitted rows by an output column
-    // that names a plain (non-aggregate) select column, which is the GROUP BY
-    // column in the common case: SELECT dept, COUNT(*) ... GROUP BY dept ORDER
-    // BY dept. Ordering by an aggregate term is a documented null. parse_order_by
-    // cannot capture COUNT(*) or SUM(col) as an order key, so that name never
-    // matches an output column and the rows stay in group-discovery order rather
-    // than being sorted wrong.
+    // ORDER BY on grouped output. The key may name the grouped/selected column
+    // (SELECT dept, COUNT(*) ... GROUP BY dept ORDER BY dept), an aggregate term
+    // (ORDER BY SUM(salary)), or a projection alias (SELECT SUM(salary) AS s ...
+    // ORDER BY s). It is resolved to an output column, then a stable sort keeps
+    // equal keys in group-discovery order. An unresolvable key fails closed.
     if d.has_order == 1 {
         let go_name = sp_get(d, d.order_col);
-        // Match the order key against an output column of the SAME kind: a
-        // plain key (order_agg_func == 0) matches a plain output column; an
-        // aggregate key matches the output column with the same func + arg.
+        // Resolve the order key to an output column, in order:
+        //   (1) same-kind match -- a plain key (order_agg_func == 0) matches a
+        //       plain output column; an aggregate key matches the output column
+        //       with the same func + arg (ORDER BY SUM(salary)).
+        //   (2) alias match -- the key names a projection alias
+        //       (SELECT SUM(salary) AS s ... ORDER BY s). An alias is a bare
+        //       identifier, so it parses as a plain key but may bind to an
+        //       aggregate output column; the alias binding wins.
+        // go_match_af carries the matched column's aggregate func so the sort
+        // type comes from the output column, not the parsed key.
         let mut go_oidx = 0 - 1;
+        let mut go_match_af = 0;
         let mut go_ci = 0;
         while go_ci < ncols {
             if vec_get(local_agg_funcs, go_ci) == d.order_agg_func {
                 let go_cn = sp_get(d, vec_get(local_agg_cols, go_ci));
-                if go_cn == go_name { go_oidx = go_ci; }
+                if go_cn == go_name {
+                    if go_oidx < 0 {
+                        go_oidx = go_ci;
+                        go_match_af = d.order_agg_func;
+                    }
+                }
             }
             go_ci = go_ci + 1;
+        }
+        if go_oidx < 0 {
+            let mut go_ai = 0;
+            while go_ai < ncols {
+                if go_ai < vec_len(d.p_aliases) {
+                    let go_al = vec_get(d.p_aliases, go_ai);
+                    if go_al >= 0 {
+                        let go_aln = sp_get(d, go_al);
+                        if go_aln == go_name {
+                            if go_oidx < 0 {
+                                go_oidx = go_ai;
+                                go_match_af = vec_get(local_agg_funcs, go_ai);
+                            }
+                        }
+                    }
+                }
+                go_ai = go_ai + 1;
+            }
+        }
+        if go_oidx < 0 {
+            // Fail closed: an ORDER BY term on a grouped result that names
+            // neither the grouped/selected column, an aggregate output, nor a
+            // select alias has no defined ordering. Erroring beats silently
+            // emitting rows in group-discovery order (a wrong answer with no
+            // signal).
+            println!("Error: ORDER BY term '{}' is not a grouped column, aggregate, or alias", go_name);
+            return;
         }
         if go_oidx >= 0 {
             // Aggregate results sort numerically. COUNT is an integer; SUM/AVG/
             // MIN/MAX compare as real so AVG decimals order correctly. A plain
             // key keeps the source column's declared type (TEXT default).
             let mut go_type = 2;
-            if d.order_agg_func == 1 {
+            if go_match_af == 1 {
                 go_type = 0;
-            } else if d.order_agg_func > 1 {
+            } else if go_match_af > 1 {
                 go_type = 1;
             } else {
-                let go_real = resolve_col(d, cs, cc, tname, alias1_val, go_name);
+                let go_argn = sp_get(d, vec_get(local_agg_cols, go_oidx));
+                let go_real = resolve_col(d, cs, cc, tname, alias1_val, go_argn);
                 if go_real >= 0 { go_type = vec_get(d.col_types, cs + go_real); }
             }
             // Stable selection sort over final_count rows, each ncols wide.

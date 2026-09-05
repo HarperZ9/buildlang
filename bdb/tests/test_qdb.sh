@@ -111,6 +111,16 @@ chksel "having"        "SELECT dept FROM emp GROUP BY dept HAVING COUNT(*) > 1 O
 chksel "group_ord_agg"      "SELECT dept, COUNT(*) FROM emp GROUP BY dept ORDER BY COUNT(*)" "$(printf 'hr    | 1\neng   | 2\nsales | 2')"
 chksel "group_ord_cnt_desc" "SELECT dept, COUNT(*) FROM emp GROUP BY dept ORDER BY COUNT(*) DESC" "$(printf 'eng   | 2\nsales | 2\nhr    | 1')"
 chksel "group_ord_sum_desc" "SELECT dept, SUM(salary) FROM emp GROUP BY dept ORDER BY SUM(salary) DESC" "$(printf 'sales | 200\neng   | 190\nhr    | 70')"
+# ORDER BY a projection ALIAS of an aggregate. `s`/`c` are bare identifiers, so
+# they parse as plain keys; resolution falls through to the alias binding and
+# sorts by the aliased aggregate column (previously left in discovery order).
+chksel "group_ord_alias_sum_desc" "SELECT dept, SUM(salary) AS s FROM emp GROUP BY dept ORDER BY s DESC" "$(printf 'sales | 200\neng   | 190\nhr    | 70')"
+chksel "group_ord_alias_sum_asc"  "SELECT dept, SUM(salary) AS s FROM emp GROUP BY dept ORDER BY s"      "$(printf 'hr    | 70\neng   | 190\nsales | 200')"
+chksel "group_ord_alias_cnt_desc" "SELECT dept, COUNT(*) AS c FROM emp GROUP BY dept ORDER BY c DESC"    "$(printf 'eng   | 2\nsales | 2\nhr    | 1')"
+# Fail closed: an ORDER BY term that names neither the grouped column, an
+# aggregate output, nor a select alias has no defined ordering -- error rather
+# than emit rows in arbitrary discovery order.
+reseed; errchk "group_ord_unresolved_closed" "SELECT dept, COUNT(*) FROM emp GROUP BY dept ORDER BY age" "grouped column, aggregate, or alias"
 
 echo "== subqueries (scalar + IN) =="
 reseed
