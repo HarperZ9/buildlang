@@ -2802,9 +2802,23 @@ fn compute_single_agg(d: &mut DB, af: i32, ac_name_id: i32, cs: i32, cc: i32,
         return sp_add(d, val);
     }
     if af == 1 {
-        // COUNT(*)
-        let val = int_to_str(match_count);
-        return sp_add(d, val);
+        // COUNT(*) counts every matching row; COUNT(col) counts non-NULL
+        // cells (NULL is the empty string).
+        if ac_name == "*" {
+            return sp_add(d, int_to_str(match_count));
+        }
+        let col_idx = resolve_col(d, cs, cc, tname, alias_val, ac_name);
+        let mut cnt = 0;
+        let mut mi = 0;
+        while mi < match_count {
+            let row = vec_get(match_rows, mi);
+            if col_idx >= 0 {
+                let cell = sp_get(d, vec_get(d.cells, rs + row * cc + col_idx));
+                if cell.len() > 0 { cnt = cnt + 1; }
+            }
+            mi = mi + 1;
+        }
+        return sp_add(d, int_to_str(cnt));
     }
     // SUM/AVG/MIN/MAX
     let col_idx = resolve_col(d, cs, cc, tname, alias_val, ac_name);
@@ -2840,7 +2854,10 @@ fn build_agg_header(d: &mut DB, af: i32, ac_name_id: i32, al_id: i32) -> i32 {
     if al_id >= 0 { return al_id; }
     let ac_name = sp_get(d, ac_name_id);
     if af == 0 { return sp_add(d, ac_name); }
-    if af == 1 { return sp_add(d, "COUNT(*)"); }
+    if af == 1 {
+        if ac_name == "*" { return sp_add(d, "COUNT(*)"); }
+        return sp_add(d, "COUNT(" + ac_name + ")");
+    }
     let mut func_name = "SUM";
     if af == 3 { func_name = "AVG"; }
     if af == 4 { func_name = "MIN"; }
@@ -2960,7 +2977,12 @@ fn exec_select_group(d: &mut DB) ~ Console {
             gi2_af = vec_get(local_agg_funcs, gi2_ai);
             gi2_ac_name = sp_get(d, vec_get(local_agg_cols, gi2_ai));
             if gi2_af == 1 {
-                gi2_cnt = group_count_rows(d, gi2_gk, rs, cc, gcol, match_rows, match_count);
+                if gi2_ac_name == "*" {
+                    gi2_cnt = group_count_rows(d, gi2_gk, rs, cc, gcol, match_rows, match_count);
+                } else {
+                    gi2_col_idx = resolve_col(d, cs, cc, tname, alias1_val, gi2_ac_name);
+                    gi2_cnt = group_count_col(d, gi2_gk, gi2_col_idx, gcol, rs, cc, match_rows, match_count);
+                }
                 gi2_val_str = int_to_str(gi2_cnt);
                 gi2_vid = sp_add(d, gi2_val_str);
                 vec_push(all_results, gi2_vid);
@@ -3122,6 +3144,26 @@ fn group_count_rows(d: &DB, gk: String, rs: i32, cc: i32, gcol: i32,
     cnt
 }
 
+// COUNT(col) within a group: rows in the group whose col cell is non-NULL
+// (NULL is the empty string).
+fn group_count_col(d: &DB, gk: String, col_idx: i32, gcol: i32, rs: i32, cc: i32,
+                   match_rows: Vec<i32>, match_count: i32) -> i32 {
+    let mut cnt = 0;
+    let mut ci = 0;
+    while ci < match_count {
+        let crow = vec_get(match_rows, ci);
+        let cgv = sp_get(d, vec_get(d.cells, rs + crow * cc + gcol));
+        if cgv == gk {
+            if col_idx >= 0 {
+                let cell = sp_get(d, vec_get(d.cells, rs + crow * cc + col_idx));
+                if cell.len() > 0 { cnt = cnt + 1; }
+            }
+        }
+        ci = ci + 1;
+    }
+    cnt
+}
+
 fn group_get_plain(d: &DB, gk: String, col_idx: i32, gcol: i32, rs: i32, cc: i32,
                    match_rows: Vec<i32>, match_count: i32) -> String {
     if col_idx == gcol { return gk; }
@@ -3148,7 +3190,12 @@ fn push_agg_header(d: &mut DB, hi: i32, headers: Vec<i32>) {
         return;
     }
     if af == 1 {
-        let hid = sp_add(d, "COUNT(*)");
+        if ac_name == "*" {
+            let hid = sp_add(d, "COUNT(*)");
+            vec_push(headers, hid);
+            return;
+        }
+        let hid = sp_add(d, "COUNT(" + ac_name + ")");
         vec_push(headers, hid);
         return;
     }
