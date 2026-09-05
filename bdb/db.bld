@@ -210,6 +210,11 @@ struct DB {
     w_in_vals2: Vec<i32>,
     w_in_count2: i32,
 
+    // Scratch: the first result column of the most recent subquery, collected
+    // across all matching rows. Turns IN (SELECT ...) into a real IN-list.
+    subq_vals: Vec<i32>,
+    subq_count: i32,
+
     // DISTINCT flag
     has_distinct: i32,
 
@@ -286,6 +291,7 @@ fn db_new(db_path: String) -> DB {
         idx_name: -1, idx_table_name: -1, idx_col_name: -1,
         w_in_vals1: vec![], w_in_count1: 0,
         w_in_vals2: vec![], w_in_count2: 0,
+        subq_vals: vec![], subq_count: 0,
         has_distinct: 0,
         has_having: 0, having_agg_func: 0, having_agg_col: -1, having_op: -1, having_val: -1,
         p_aliases: vec![],
@@ -1260,6 +1266,8 @@ fn reset_parser(d: &mut DB, input: String) {
     d.w_in_count1 = 0;
     d.w_in_vals2 = vec![];
     d.w_in_count2 = 0;
+    d.subq_vals = vec![];
+    d.subq_count = 0;
     d.has_distinct = 0;
     d.has_having = 0;
     d.having_agg_func = 0;
@@ -1676,16 +1684,30 @@ fn parse_where_cond(d: &mut DB, which: i32) ~ Console + Process {
         expect_punct(d, "(");
         // Check for subquery: IN (SELECT ...)
         if tk_is_kw(d, "SELECT") == 1 {
-            let sub_result = parse_and_exec_subquery(d);
-            let rid = sp_add(d, sub_result);
+            // Run the subquery and take its full first-column result set as the
+            // IN-list, not just the first value. subq_vals survives the
+            // subquery's own parser-state restore.
+            parse_and_exec_subquery(d);
+            let mut sv: Vec<i32> = vec![];
+            let mut svc = 0;
+            let mut svi = 0;
+            while svi < d.subq_count {
+                vec_push(sv, vec_get(d.subq_vals, svi));
+                svc = svc + 1;
+                svi = svi + 1;
+            }
             if which == 1 {
                 d.w_left = left_id;
-                d.w_op = 0;
-                d.w_right = rid;
+                d.w_op = 7;
+                d.w_right = -1;
+                d.w_in_vals1 = sv;
+                d.w_in_count1 = svc;
             } else {
                 d.w_left2 = left_id;
-                d.w_op2 = 0;
-                d.w_right2 = rid;
+                d.w_op2 = 7;
+                d.w_right2 = -1;
+                d.w_in_vals2 = sv;
+                d.w_in_count2 = svc;
             }
             expect_punct(d, ")");
         } else {
@@ -2041,7 +2063,10 @@ fn exec_subquery_scalar(d: &mut DB, sql: String) -> String ~ Console + Process {
             let ac_name = sp_get(d, vec_get(d.p_agg_cols, 0));
             if af == 1 {
                 // COUNT(*)
-                return int_to_str(match_count);
+                let cstr = int_to_str(match_count);
+                vec_push(d.subq_vals, sp_add(d, cstr));
+                d.subq_count = 1;
+                return cstr;
             }
             // SUM/AVG/MIN/MAX
             let col_idx = resolve_col(d, cs, cc, tname, d.alias1, ac_name);
@@ -2069,23 +2094,35 @@ fn exec_subquery_scalar(d: &mut DB, sql: String) -> String ~ Console + Process {
             }
             if af == 4 { result_val = min_val; }
             if af == 5 { result_val = max_val; }
-            return float_to_str(result_val);
+            let rstr = float_to_str(result_val);
+            vec_push(d.subq_vals, sp_add(d, rstr));
+            d.subq_count = 1;
+            return rstr;
         }
     }
 
-    // Non-aggregate: return the first matching value of the first column
-    if match_count > 0 {
-        let row = vec_get(match_rows, 0);
-        if d.p_col_count > 0 {
-            let cname = sp_get(d, vec_get(d.p_cols, 0));
-            let col_idx = resolve_col(d, cs, cc, tname, d.alias1, cname);
-            if col_idx >= 0 {
-                return sp_get(d, vec_get(d.cells, rs + row * cc + col_idx));
-            }
+    // Non-aggregate: collect the first result column across every matching row
+    // into d.subq_vals (so IN (SELECT ...) sees the whole set), and return the
+    // first value as the scalar contract.
+    let mut result_col = 0 - 1;
+    if d.p_col_count > 0 {
+        let cname = sp_get(d, vec_get(d.p_cols, 0));
+        result_col = resolve_col(d, cs, cc, tname, d.alias1, cname);
+    } else if d.select_star == 1 {
+        result_col = 0;
+    }
+    if result_col >= 0 {
+        let mut mi = 0;
+        while mi < match_count {
+            let row = vec_get(match_rows, mi);
+            let cid = vec_get(d.cells, rs + row * cc + result_col);
+            vec_push(d.subq_vals, cid);
+            d.subq_count = d.subq_count + 1;
+            mi = mi + 1;
         }
-        if d.select_star == 1 {
-            return sp_get(d, vec_get(d.cells, rs + row * cc));
-        }
+    }
+    if d.subq_count > 0 {
+        return sp_get(d, vec_get(d.subq_vals, 0));
     }
     "0"
 }
