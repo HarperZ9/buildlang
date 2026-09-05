@@ -176,6 +176,10 @@ struct DB {
     has_order: i32,
     order_col: i32,
     order_desc: i32,
+    // Optional secondary ORDER BY key (a comma-separated second column).
+    // order_col2 = -1 when the query gives only one key.
+    order_col2: i32,
+    order_desc2: i32,
     has_limit: i32,
     limit_val: i32,
     has_offset: i32,
@@ -279,6 +283,7 @@ fn db_new(db_path: String) -> DB {
         has_where: 0, w_left: -1, w_op: -1, w_right: -1,
         w_logic: 0, w_left2: -1, w_op2: -1, w_right2: -1,
         has_order: 0, order_col: -1, order_desc: 0,
+        order_col2: -1, order_desc2: 0,
         has_limit: 0, limit_val: 0,
         has_offset: 0, offset_val: 0,
         set_col: -1, set_val: -1,
@@ -1239,6 +1244,8 @@ fn reset_parser(d: &mut DB, input: String) {
     d.has_order = 0;
     d.order_col = -1;
     d.order_desc = 0;
+    d.order_col2 = -1;
+    d.order_desc2 = 0;
     d.has_limit = 0;
     d.limit_val = 0;
     d.has_offset = 0;
@@ -1929,6 +1936,8 @@ fn parse_and_exec_subquery(d: &mut DB) -> String ~ Console + Process {
     let save_has_order = d.has_order;
     let save_order_col = d.order_col;
     let save_order_desc = d.order_desc;
+    let save_order_col2 = d.order_col2;
+    let save_order_desc2 = d.order_desc2;
     let save_has_limit = d.has_limit;
     let save_limit_val = d.limit_val;
     let save_has_offset = d.has_offset;
@@ -1982,6 +1991,8 @@ fn parse_and_exec_subquery(d: &mut DB) -> String ~ Console + Process {
     d.has_order = save_has_order;
     d.order_col = save_order_col;
     d.order_desc = save_order_desc;
+    d.order_col2 = save_order_col2;
+    d.order_desc2 = save_order_desc2;
     d.has_limit = save_has_limit;
     d.limit_val = save_limit_val;
     d.has_offset = save_has_offset;
@@ -2121,6 +2132,16 @@ fn parse_order_by(d: &mut DB) ~ Console + Process {
     next_token(d);
     if tk_is_kw(d, "DESC") == 1 { d.order_desc = 1; next_token(d); }
     else if tk_is_kw(d, "ASC") == 1 { d.order_desc = 0; next_token(d); }
+    // Optional secondary key: ORDER BY a, b [ASC|DESC]. It breaks ties on the
+    // primary key. A third comma-key is not stored (honest limitation).
+    if tk_is_punct(d, ",") == 1 {
+        next_token(d);
+        let cname2 = d.tk_val;
+        d.order_col2 = sp_add(d, cname2);
+        next_token(d);
+        if tk_is_kw(d, "DESC") == 1 { d.order_desc2 = 1; next_token(d); }
+        else if tk_is_kw(d, "ASC") == 1 { d.order_desc2 = 0; next_token(d); }
+    }
 }
 
 fn parse_limit(d: &mut DB) {
@@ -2527,7 +2548,14 @@ fn exec_select(d: &mut DB) ~ Console {
         let ocol_idx = resolve_col(d, cs, cc, tname, d.alias1, ocol_name);
         if ocol_idx >= 0 {
             let ocol_type = vec_get(d.col_types, cs + ocol_idx);
-            match_rows = sort_rows(d, match_rows, match_count, rs, cc, ocol_idx, ocol_type, d.order_desc);
+            let mut ocol2_idx = 0 - 1;
+            let mut ocol2_type = 0;
+            if d.order_col2 >= 0 {
+                let ocol2_name = sp_get(d, d.order_col2);
+                ocol2_idx = resolve_col(d, cs, cc, tname, d.alias1, ocol2_name);
+                if ocol2_idx >= 0 { ocol2_type = vec_get(d.col_types, cs + ocol2_idx); }
+            }
+            match_rows = sort_rows(d, match_rows, match_count, rs, cc, ocol_idx, ocol_type, d.order_desc, ocol2_idx, ocol2_type, d.order_desc2);
         }
     }
 
@@ -3903,8 +3931,29 @@ fn is_numeric_str(s: String) -> bool {
     true
 }
 
-fn sort_rows(d: &DB, rows: Vec<i32>, count: i32, rs: i32, cc: i32, ocol: i32, ocol_type: i32, desc: i32) -> Vec<i32> {
-    // Selection sort
+// Order two rows by the primary key, breaking ties on the secondary key
+// (ocol2 < 0 means no secondary). Returns <0 if rowa should come before rowb,
+// >0 if after, 0 if equal under both keys. desc flags flip each key.
+fn cmp_rows_2key(d: &DB, rowa: i32, rowb: i32, rs: i32, cc: i32, ocol: i32, ocol_type: i32, desc: i32, ocol2: i32, ocol2_type: i32, desc2: i32) -> i64 {
+    let va = sp_get(d, vec_get(d.cells, rs + rowa * cc + ocol));
+    let vb = sp_get(d, vec_get(d.cells, rs + rowb * cc + ocol));
+    let mut c = compare_vals(va, vb, ocol_type);
+    if desc == 1 { c = 0 - c; }
+    if c < 0 { return c; }
+    if c > 0 { return c; }
+    if ocol2 >= 0 {
+        let sa = sp_get(d, vec_get(d.cells, rs + rowa * cc + ocol2));
+        let sb = sp_get(d, vec_get(d.cells, rs + rowb * cc + ocol2));
+        let mut c2 = compare_vals(sa, sb, ocol2_type);
+        if desc2 == 1 { c2 = 0 - c2; }
+        return c2;
+    }
+    0
+}
+
+fn sort_rows(d: &DB, rows: Vec<i32>, count: i32, rs: i32, cc: i32, ocol: i32, ocol_type: i32, desc: i32, ocol2: i32, ocol2_type: i32, desc2: i32) -> Vec<i32> {
+    // Selection sort, stable: primary key, then secondary key on ties, then
+    // original insertion order (a strict `< 0` pick never displaces an equal).
     let mut used: Vec<i32> = vec![];
     let mut i = 0;
     while i < count {
@@ -3916,22 +3965,16 @@ fn sort_rows(d: &DB, rows: Vec<i32>, count: i32, rs: i32, cc: i32, ocol: i32, oc
     let mut picked = 0;
     while picked < count {
         let mut best = 0 - 1;
-        let mut best_val = "";
         let mut j = 0;
         while j < count {
             if vec_get(used, j) == 0 {
-                let row = vec_get(rows, j);
-                let val = sp_get(d, vec_get(d.cells, rs + row * cc + ocol));
                 if best < 0 {
                     best = j;
-                    best_val = val;
                 } else {
-                    let cmp = compare_vals(val, best_val, ocol_type);
-                    if desc == 1 {
-                        if cmp > 0 { best = j; best_val = val; }
-                    } else {
-                        if cmp < 0 { best = j; best_val = val; }
-                    }
+                    let cand_row = vec_get(rows, j);
+                    let best_row = vec_get(rows, best);
+                    let c = cmp_rows_2key(d, cand_row, best_row, rs, cc, ocol, ocol_type, desc, ocol2, ocol2_type, desc2);
+                    if c < 0 { best = j; }
                 }
             }
             j = j + 1;
