@@ -279,6 +279,18 @@ struct DB {
     snap_idx_rowids: Vec<i32>,
     snap_idx_key_starts: Vec<i32>,
     snap_idx_key_counts: Vec<i32>,
+
+    // UNION accumulator: rows materialized across all branches of a UNION.
+    // union_vals is row-major, union_ncol wide, each cell a string-pool id
+    // (the same ids the source table cells already hold). Headers and per-
+    // output-column types come from the first branch. union_started guards
+    // one-time first-branch setup.
+    union_vals: Vec<i32>,
+    union_headers: Vec<i32>,
+    union_coltypes: Vec<i32>,
+    union_ncol: i32,
+    union_rows: i32,
+    union_started: i32,
 }
 
 // Initialize a new empty DB. All parallel arrays start empty; pn (pool next
@@ -332,6 +344,8 @@ fn db_new(db_path: String) -> DB {
         snap_col_starts: vec![], snap_col_counts: vec![],
         snap_idx_names: vec![], snap_idx_tables: vec![], snap_idx_col_indices: vec![], snap_idx_count: 0,
         snap_idx_keys: vec![], snap_idx_rowids: vec![], snap_idx_key_starts: vec![], snap_idx_key_counts: vec![],
+        union_vals: vec![], union_headers: vec![], union_coltypes: vec![],
+        union_ncol: -1, union_rows: 0, union_started: 0,
     }
 }
 
@@ -1074,6 +1088,8 @@ fn is_keyword(word: String) -> i32 {
     if u == "DISTINCT" { return 1; }
     if u == "HAVING" { return 1; }
     if u == "BETWEEN" { return 1; }
+    if u == "UNION" { return 1; }
+    if u == "ALL" { return 1; }
     0
 }
 
@@ -1245,14 +1261,12 @@ fn op_encode(op: String) -> i32 {
 // parsed state back to defaults.
 // =========================================================================
 
-// Clear all parser state fields to defaults. Must be called before parsing
-// each new SQL statement to avoid stale values from previous parses.
-fn reset_parser(d: &mut DB, input: String) {
-    d.input = input;
-    d.ilen = input.len();
-    d.pos = 0;
-    d.tk_type = 7;
-    d.tk_val = "";
+// Clear the per-statement parse fields to defaults, WITHOUT touching the
+// tokenizer position or the UNION accumulator. reset_parser calls this after
+// setting up the tokenizer; the UNION executor calls it between branches to
+// clear branch 1's parse before parsing branch 2 while keeping the tokenizer
+// where it stopped (just past UNION) and the accumulated rows intact.
+fn reset_select_fields(d: &mut DB) {
     d.stmt_type = 0;
     d.p_table = -1;
     d.p_cols = vec![];
@@ -1316,6 +1330,24 @@ fn reset_parser(d: &mut DB, input: String) {
     d.p_aliases = vec![];
     d.alter_col_name = -1;
     d.alter_col_type = -1;
+}
+
+// Clear all parser state fields to defaults. Must be called before parsing
+// each new SQL statement to avoid stale values from previous parses. This is
+// the top-level entry, so it also clears the UNION accumulator.
+fn reset_parser(d: &mut DB, input: String) {
+    d.input = input;
+    d.ilen = input.len();
+    d.pos = 0;
+    d.tk_type = 7;
+    d.tk_val = "";
+    reset_select_fields(d);
+    d.union_vals = vec![];
+    d.union_headers = vec![];
+    d.union_coltypes = vec![];
+    d.union_ncol = -1;
+    d.union_rows = 0;
+    d.union_started = 0;
 }
 
 fn parse_sql(d: &mut DB) ~ Console + Process {
@@ -2620,10 +2652,10 @@ fn eval_compound_where(d: &DB, cs: i32, cc: i32, rs: i32, row: i32,
 }
 
 fn check_has_agg(d: &DB) -> i32 {
-    let mut ai = 0;
-    while ai < d.p_agg_count {
-        if vec_get(d.p_agg_funcs, ai) > 0 { return 1; }
-        ai = ai + 1;
+    let mut k = 0;
+    while k < d.p_agg_count {
+        if vec_get(d.p_agg_funcs, k) > 0 { return 1; }
+        k = k + 1;
     }
     0
 }
@@ -2649,7 +2681,13 @@ fn check_has_agg(d: &DB) -> i32 {
 //
 // Calls: eval_compound_where(), sort_rows(), resolve_col(), find_index_for(),
 //        index_scan(), sp_get(), pad_right(), make_dashes()
-fn exec_select(d: &mut DB) ~ Console {
+fn exec_select(d: &mut DB) ~ Console + Process {
+    // Dispatch to UNION handler. parse_select stops at a trailing UNION
+    // keyword, leaving it as the current token; branch 1 is already parsed into
+    // d.*, so hand the whole set to the union executor. This must precede the
+    // JOIN/GROUP dispatch so a UNION whose first branch joins or groups is
+    // rejected by the union path rather than rendered alone.
+    if tk_is_kw(d, "UNION") == 1 { exec_select_union(d); return; }
     // Dispatch to JOIN handler
     if d.has_join == 1 { exec_select_join(d); return; }
     // Dispatch to GROUP BY handler
@@ -2931,6 +2969,368 @@ fn exec_select(d: &mut DB) ~ Console {
     }
 }
 
+// --- 6c-union: SELECT ... UNION [ALL] ... ---
+
+// Index of the union output column whose header matches `name`, or -1. A
+// trailing ORDER BY after a UNION names an output column (or its alias); a
+// table qualifier (t.col) is stripped before matching, since union headers are
+// stored bare.
+fn union_header_index(d: &DB, name: String) -> i32 {
+    let mut key = name;
+    let dot_pos = name.index_of(".");
+    if dot_pos > 0 {
+        key = name.substring(dot_pos + 1, name.len() - dot_pos - 1);
+    }
+    let mut i = 0;
+    while i < d.union_ncol {
+        let h = sp_get(d, vec_get(d.union_headers, i));
+        if h == key { return i; }
+        i = i + 1;
+    }
+    0 - 1
+}
+
+// Compare two accumulator rows on a primary key, then a secondary on ties.
+// Mirrors cmp_rows_2key but addresses the flat union_vals buffer (ncol wide),
+// which has no per-table row-start offset.
+fn cmp_union_rows(d: &DB, rowa: i32, rowb: i32, ncol: i32, k1: i32, k1_type: i32, desc: i32, k2: i32, k2_type: i32, desc2: i32) -> i64 {
+    let va = sp_get(d, vec_get(d.union_vals, rowa * ncol + k1));
+    let vb = sp_get(d, vec_get(d.union_vals, rowb * ncol + k1));
+    let mut c = compare_vals(va, vb, k1_type);
+    if desc == 1 { c = 0 - c; }
+    if c < 0 { return c; }
+    if c > 0 { return c; }
+    if k2 >= 0 {
+        let sa = sp_get(d, vec_get(d.union_vals, rowa * ncol + k2));
+        let sb = sp_get(d, vec_get(d.union_vals, rowb * ncol + k2));
+        let mut c2 = compare_vals(sa, sb, k2_type);
+        if desc2 == 1 { c2 = 0 - c2; }
+        return c2;
+    }
+    0
+}
+
+// Materialize the currently-parsed SELECT branch into the UNION accumulator.
+// Only a basic single-table projection is supported: a branch that joins,
+// groups, or aggregates cannot be laid out as flat cells here, so fail closed
+// (print an error, emit nothing) rather than silently drop its rows. Returns 0
+// on success, 1 on failure (the caller must abort the whole UNION).
+fn gather_basic_branch(d: &mut DB) -> i32 ~ Console {
+    if d.has_join == 1 {
+        println!("Error: UNION does not support a JOIN in a branch");
+        return 1;
+    }
+    if d.has_group_by == 1 {
+        println!("Error: UNION does not support GROUP BY in a branch");
+        return 1;
+    }
+    if check_has_agg(d) == 1 {
+        println!("Error: UNION does not support aggregate functions in a branch");
+        return 1;
+    }
+
+    let tname = sp_get(d, d.p_table);
+    let tidx = find_table(d, tname);
+    if tidx < 0 {
+        println!("Error: table '{}' not found", tname);
+        return 1;
+    }
+    let cs = vec_get(d.tbl_col_starts, tidx);
+    let cc = vec_get(d.tbl_col_counts, tidx);
+    let rs = vec_get(d.tbl_row_starts, tidx);
+    let rc = vec_get(d.tbl_row_counts, tidx);
+
+    // Columns this branch projects, in output order.
+    let mut show_cols: Vec<i32> = vec![];
+    let mut show_count = 0;
+    if d.select_star == 1 {
+        let mut ci = 0;
+        while ci < cc {
+            vec_push(show_cols, ci);
+            show_count = show_count + 1;
+            ci = ci + 1;
+        }
+    } else {
+        let mut ci = 0;
+        while ci < d.p_col_count {
+            let cname = sp_get(d, vec_get(d.p_cols, ci));
+            let idx = resolve_col(d, cs, cc, tname, d.alias1, cname);
+            if idx < 0 {
+                println!("Error: column '{}' not found", cname);
+                return 1;
+            }
+            vec_push(show_cols, idx);
+            show_count = show_count + 1;
+            ci = ci + 1;
+        }
+    }
+
+    // The first branch fixes the output shape: column count, header names
+    // (alias wins over column name), and per-column type. Later branches must
+    // match the column count — UNION pairs columns by position, not by name.
+    if d.union_started == 0 {
+        d.union_ncol = show_count;
+        let mut hi = 0;
+        while hi < show_count {
+            let col_idx = vec_get(show_cols, hi);
+            let mut hid = vec_get(d.col_names, cs + col_idx);
+            if d.select_star == 0 {
+                let al = vec_get(d.p_aliases, hi);
+                if al >= 0 { hid = al; }
+            }
+            vec_push(d.union_headers, hid);
+            vec_push(d.union_coltypes, vec_get(d.col_types, cs + col_idx));
+            hi = hi + 1;
+        }
+        d.union_started = 1;
+    } else {
+        if show_count != d.union_ncol {
+            println!("Error: UNION branches have different column counts");
+            return 1;
+        }
+    }
+
+    // Append each WHERE-matching row's projected cells (as string-pool ids) to
+    // the accumulator. Full scan: union branches are small, and correctness
+    // matters more than index acceleration here.
+    let mut r = 0;
+    while r < rc {
+        if eval_compound_where(d, cs, cc, rs, r, tname, d.alias1) {
+            let mut ci = 0;
+            while ci < show_count {
+                let col_idx = vec_get(show_cols, ci);
+                vec_push(d.union_vals, vec_get(d.cells, rs + r * cc + col_idx));
+                ci = ci + 1;
+            }
+            d.union_rows = d.union_rows + 1;
+        }
+        r = r + 1;
+    }
+    0
+}
+
+// Execute SELECT ... UNION [ALL] SELECT ... [UNION [ALL] SELECT ...].
+//
+// Branch 1 is already parsed into d.* (parse_select stopped at the UNION
+// keyword). Each branch is validated and materialized into the accumulator by
+// gather_basic_branch; then plain UNION removes duplicate rows across the whole
+// result (UNION ALL keeps them), a trailing ORDER BY (which binds to the whole
+// result and lands in the final branch's order fields) is applied, and the
+// result renders once.
+//
+// Fail-closed limits: ORDER BY / LIMIT / OFFSET are honored only after the
+// final branch (a non-final branch carrying them is rejected); LIMIT / OFFSET
+// on a union is not supported; every branch must be a basic single-table
+// projection with a matching column count.
+fn exec_select_union(d: &mut DB) ~ Console + Process {
+    let mut all_flag = 1;   // 1 while every branch seen so far is UNION ALL
+
+    // Branch 1 is non-final: a UNION follows it. A per-branch ORDER BY / LIMIT /
+    // OFFSET before UNION does not compose here, so reject it.
+    if d.has_order == 1 || d.has_limit == 1 || d.has_offset == 1 {
+        println!("Error: ORDER BY / LIMIT must follow the final UNION branch");
+        return;
+    }
+    if gather_basic_branch(d) == 1 { return; }
+
+    let mut go = true;
+    while go {
+        // Current token is UNION. Consume it and an optional ALL.
+        next_token(d);
+        if tk_is_kw(d, "ALL") == 1 {
+            next_token(d);
+        } else {
+            all_flag = 0;
+        }
+
+        // Parse the next branch. reset_select_fields clears the previous
+        // branch's parse without moving the tokenizer or clearing the
+        // accumulator.
+        reset_select_fields(d);
+        if tk_is_kw(d, "SELECT") == 0 {
+            println!("Error: expected SELECT after UNION, got '{}'", d.tk_val);
+            return;
+        }
+        parse_select(d);
+
+        // This is the final branch iff no further UNION follows.
+        let mut is_final = 0;
+        if tk_is_kw(d, "UNION") == 0 { is_final = 1; }
+        if is_final == 1 {
+            if d.has_limit == 1 || d.has_offset == 1 {
+                println!("Error: LIMIT / OFFSET is not supported on a UNION");
+                return;
+            }
+        } else {
+            if d.has_order == 1 || d.has_limit == 1 || d.has_offset == 1 {
+                println!("Error: ORDER BY / LIMIT must follow the final UNION branch");
+                return;
+            }
+        }
+
+        if gather_basic_branch(d) == 1 { return; }
+        if is_final == 1 { go = false; }
+    }
+
+    let ncol = d.union_ncol;
+
+    // Surviving row indices. UNION ALL keeps every row; plain UNION drops a row
+    // whose full projection equals an earlier kept row.
+    let mut keep: Vec<i32> = vec![];
+    let mut keep_count = 0;
+    if all_flag == 1 {
+        let mut r = 0;
+        while r < d.union_rows {
+            vec_push(keep, r);
+            keep_count = keep_count + 1;
+            r = r + 1;
+        }
+    } else {
+        let mut r = 0;
+        while r < d.union_rows {
+            let mut rkey = "";
+            let mut ci = 0;
+            while ci < ncol {
+                let v = sp_get(d, vec_get(d.union_vals, r * ncol + ci));
+                if ci > 0 { rkey = rkey + "|"; }
+                rkey = rkey + v;
+                ci = ci + 1;
+            }
+            let mut dup = false;
+            let mut kj = 0;
+            while kj < keep_count {
+                let kr = vec_get(keep, kj);
+                let mut ekey = "";
+                let mut eci = 0;
+                while eci < ncol {
+                    let ev = sp_get(d, vec_get(d.union_vals, kr * ncol + eci));
+                    if eci > 0 { ekey = ekey + "|"; }
+                    ekey = ekey + ev;
+                    eci = eci + 1;
+                }
+                if rkey == ekey { dup = true; }
+                kj = kj + 1;
+            }
+            if !dup {
+                vec_push(keep, r);
+                keep_count = keep_count + 1;
+            }
+            r = r + 1;
+        }
+    }
+
+    // Trailing ORDER BY binds to the whole result. Resolve the key(s) against
+    // the output headers; the sort type is the first branch's type for that
+    // position. An unresolved key leaves rows in their current order, matching
+    // the single-table path.
+    if d.has_order == 1 {
+        let oname = sp_get(d, d.order_col);
+        let k1 = union_header_index(d, oname);
+        if k1 >= 0 {
+            let k1_type = vec_get(d.union_coltypes, k1);
+            let mut k2 = 0 - 1;
+            if d.order_col2 >= 0 {
+                let oname2 = sp_get(d, d.order_col2);
+                k2 = union_header_index(d, oname2);
+            }
+            let mut k2_type = 0;
+            if k2 >= 0 { k2_type = vec_get(d.union_coltypes, k2); }
+
+            // Stable selection sort into a new order (mirrors sort_rows): pick
+            // the leftmost minimum among unplaced rows each pass, so equal keys
+            // keep their pre-sort order.
+            let mut used: Vec<i32> = vec![];
+            let mut ui = 0;
+            while ui < keep_count { vec_push(used, 0); ui = ui + 1; }
+            let mut sorted: Vec<i32> = vec![];
+            let mut picked = 0;
+            while picked < keep_count {
+                let mut best = 0 - 1;
+                let mut j = 0;
+                while j < keep_count {
+                    if vec_get(used, j) == 0 {
+                        if best < 0 {
+                            best = j;
+                        } else {
+                            let cand = vec_get(keep, j);
+                            let bestrow = vec_get(keep, best);
+                            let c = cmp_union_rows(d, cand, bestrow, ncol, k1, k1_type, d.order_desc, k2, k2_type, d.order_desc2);
+                            if c < 0 { best = j; }
+                        }
+                    }
+                    j = j + 1;
+                }
+                let mut new_used: Vec<i32> = vec![];
+                let mut k = 0;
+                while k < keep_count {
+                    if k == best { vec_push(new_used, 1); }
+                    else { vec_push(new_used, vec_get(used, k)); }
+                    k = k + 1;
+                }
+                used = new_used;
+                vec_push(sorted, vec_get(keep, best));
+                picked = picked + 1;
+            }
+            keep = sorted;
+        }
+    }
+
+    // Column widths across headers + surviving rows.
+    let mut widths: Vec<i32> = vec![];
+    let mut wi = 0;
+    while wi < ncol {
+        let hdr = sp_get(d, vec_get(d.union_headers, wi));
+        let mut w = hdr.len();
+        let mut wri = 0;
+        while wri < keep_count {
+            let rr = vec_get(keep, wri);
+            let val = sp_get(d, vec_get(d.union_vals, rr * ncol + wi));
+            let vlen = val.len();
+            if vlen > w { w = vlen; }
+            wri = wri + 1;
+        }
+        vec_push(widths, w);
+        wi = wi + 1;
+    }
+
+    // Header + separator.
+    let mut hdr_line = "";
+    let mut sep_line = "";
+    let mut hi = 0;
+    while hi < ncol {
+        if hi > 0 { hdr_line = hdr_line + " | "; sep_line = sep_line + "-+-"; }
+        let hdr = sp_get(d, vec_get(d.union_headers, hi));
+        let w = vec_get(widths, hi);
+        hdr_line = hdr_line + pad_right(hdr, w);
+        sep_line = sep_line + make_dashes(w);
+        hi = hi + 1;
+    }
+    println!("{}", hdr_line);
+    println!("{}", sep_line);
+
+    // Rows.
+    let mut ri = 0;
+    while ri < keep_count {
+        let rr = vec_get(keep, ri);
+        let mut row_line = "";
+        let mut ci = 0;
+        while ci < ncol {
+            if ci > 0 { row_line = row_line + " | "; }
+            let val = sp_get(d, vec_get(d.union_vals, rr * ncol + ci));
+            let w = vec_get(widths, ci);
+            let ct = vec_get(d.union_coltypes, ci);
+            if ct == 0 || ct == 1 {
+                row_line = row_line + pad_left(val, w);
+            } else {
+                row_line = row_line + pad_right(val, w);
+            }
+            ci = ci + 1;
+        }
+        println!("{}", row_line);
+        ri = ri + 1;
+    }
+}
+
 // --- 6d: SELECT with Aggregates (no GROUP BY) ---
 
 // Execute a SELECT with aggregate functions but no GROUP BY clause.
@@ -2958,7 +3358,6 @@ fn exec_select_agg_no_group(d: &mut DB, tidx: i32) ~ Console {
     let mut headers: Vec<i32> = vec![];
     let mut match_count = 0;
     let mut r = 0;
-    let mut ai = 0;
     let mut af = 0;
     let mut ac_name_id = 0;
     let mut al_id = 0;

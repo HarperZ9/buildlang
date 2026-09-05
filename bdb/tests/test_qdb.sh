@@ -203,6 +203,40 @@ chksel "join_order_leftnull" "SELECT la_o.id FROM la_o LEFT JOIN lb_o ON la_o.ta
 $QDB "$DB" "DROP TABLE la_o" >/dev/null 2>&1
 $QDB "$DB" "DROP TABLE lb_o" >/dev/null 2>&1
 
+echo "== UNION / UNION ALL =="
+# Two tables that overlap on (3,carol): plain UNION dedups the shared row, UNION
+# ALL keeps it. Branches are full SELECTs, so each may carry its own WHERE. A
+# trailing ORDER BY / LIMIT binds to the merged set and must sit after the final
+# branch. Aggregate, group, and join branches fail closed rather than merge a
+# shape the union path does not evaluate.
+$QDB "$DB" "CREATE TABLE ua (id INTEGER, name TEXT)" >/dev/null
+$QDB "$DB" "INSERT INTO ua VALUES (1,'alice'),(2,'bob'),(3,'carol')" >/dev/null
+$QDB "$DB" "CREATE TABLE ub (id INTEGER, name TEXT)" >/dev/null
+$QDB "$DB" "INSERT INTO ub VALUES (3,'carol'),(4,'dave'),(5,'eve')" >/dev/null
+# Plain UNION removes the duplicate id=3; UNION ALL preserves it.
+chksel "union_dedup"       "SELECT id FROM ua UNION SELECT id FROM ub ORDER BY id" "$(printf '1\n2\n3\n4\n5')"
+chksel "union_all_dups"    "SELECT id FROM ua UNION ALL SELECT id FROM ub ORDER BY id" "$(printf '1\n2\n3\n3\n4\n5')"
+# Trailing ORDER BY on the merged set, descending, proves the sort is applied
+# after the merge rather than per branch.
+chksel "union_order_desc"  "SELECT id FROM ua UNION SELECT id FROM ub ORDER BY id DESC" "$(printf '5\n4\n3\n2\n1')"
+# Text column dedups on the shared 'carol' the same way an integer column does.
+chksel "union_text_dedup"  "SELECT name FROM ua UNION SELECT name FROM ub ORDER BY name" "$(printf 'alice\nbob\ncarol\ndave\neve')"
+# Per-branch WHERE: id<3 from ua and id>4 from ub, two projected columns.
+chksel "union_twocol_where" "SELECT id, name FROM ua WHERE id < 3 UNION SELECT id, name FROM ub WHERE id > 4" "$(printf '1 | alice\n2 | bob\n5 | eve')"
+# Three-way chain still collapses to one deduped set.
+chksel "union_three"       "SELECT id FROM ua UNION SELECT id FROM ub UNION SELECT id FROM ua ORDER BY id" "$(printf '1\n2\n3\n4\n5')"
+# WHERE on both branches then dedup across the survivors.
+chksel "union_where_both"  "SELECT id FROM ua WHERE id >= 2 UNION SELECT id FROM ub WHERE id <= 4 ORDER BY id" "$(printf '2\n3\n4')"
+# Fail closed, never silently merge, on shapes the union path does not evaluate:
+# mismatched column counts, an aggregate branch, an ORDER BY / LIMIT that is not
+# after the final branch, and LIMIT / OFFSET on the union itself.
+chk "union_colcount_closed" "$($QDB "$DB" "SELECT id FROM ua UNION SELECT id, name FROM ub" 2>&1 | tr -d '\r' | grep -ci 'different column counts')" "1"
+chk "union_agg_closed"      "$($QDB "$DB" "SELECT COUNT(*) FROM ua UNION SELECT id FROM ub" 2>&1 | tr -d '\r' | grep -ci 'aggregate')" "1"
+chk "union_nonfinal_closed" "$($QDB "$DB" "SELECT id FROM ua ORDER BY id UNION SELECT id FROM ub" 2>&1 | tr -d '\r' | grep -ci 'final UNION branch')" "1"
+chk "union_limit_closed"    "$($QDB "$DB" "SELECT id FROM ua UNION SELECT id FROM ub LIMIT 2" 2>&1 | tr -d '\r' | grep -ci 'not supported on a UNION')" "1"
+$QDB "$DB" "DROP TABLE ua" >/dev/null 2>&1
+$QDB "$DB" "DROP TABLE ub" >/dev/null 2>&1
+
 echo "== ALTER / DROP =="
 reseed; $QDB "$DB" "ALTER TABLE emp ADD COLUMN active INTEGER" >/dev/null
 chkhdr "alter_add"     "SELECT * FROM emp LIMIT 0" "id | name | dept | salary | age | active"
