@@ -3076,6 +3076,21 @@ fn union_header_index(d: &DB, name: String) -> i32 {
     0 - 1
 }
 
+// Resolve a UNION ORDER BY key to an output column position, or -1 if it names
+// no output column. A bare integer is a 1-based positional ordinal (ORDER BY 2)
+// -- the canonical way to order a union, since only the first branch's column
+// names reach the output headers. Anything else is matched by header name.
+fn resolve_union_order_key(d: &DB, key_id: i32) -> i32 {
+    let key = sp_get(d, key_id);
+    if is_int_str(key) {
+        let n = parse_int_str(key);
+        if n < 1 { return 0 - 1; }
+        if n <= d.union_ncol { return n - 1; }
+        return 0 - 1;
+    }
+    union_header_index(d, key)
+}
+
 // Compare two accumulator rows on a primary key, then a secondary on ties.
 // Mirrors cmp_rows_2key but addresses the flat union_vals buffer (ncol wide),
 // which has no per-table row-start offset.
@@ -3305,60 +3320,63 @@ fn exec_select_union(d: &mut DB) ~ Console + Process {
         }
     }
 
-    // Trailing ORDER BY binds to the whole result. Resolve the key(s) against
-    // the output headers; the sort type is the first branch's type for that
-    // position. An unresolved key leaves rows in their current order, matching
-    // the single-table path.
+    // Trailing ORDER BY binds to the whole result. Resolve each key to an output
+    // column (by ordinal or header name) and FAIL CLOSED on an unresolvable key
+    // rather than silently returning accumulation order.
     if d.has_order == 1 {
-        let oname = sp_get(d, d.order_col);
-        let k1 = union_header_index(d, oname);
-        if k1 >= 0 {
-            let k1_type = vec_get(d.union_coltypes, k1);
-            let mut k2 = 0 - 1;
-            if d.order_col2 >= 0 {
-                let oname2 = sp_get(d, d.order_col2);
-                k2 = union_header_index(d, oname2);
-            }
-            let mut k2_type = 0;
-            if k2 >= 0 { k2_type = vec_get(d.union_coltypes, k2); }
-
-            // Stable selection sort into a new order (mirrors sort_rows): pick
-            // the leftmost minimum among unplaced rows each pass, so equal keys
-            // keep their pre-sort order.
-            let mut used: Vec<i32> = vec![];
-            let mut ui = 0;
-            while ui < keep_count { vec_push(used, 0); ui = ui + 1; }
-            let mut sorted: Vec<i32> = vec![];
-            let mut picked = 0;
-            while picked < keep_count {
-                let mut best = 0 - 1;
-                let mut j = 0;
-                while j < keep_count {
-                    if vec_get(used, j) == 0 {
-                        if best < 0 {
-                            best = j;
-                        } else {
-                            let cand = vec_get(keep, j);
-                            let bestrow = vec_get(keep, best);
-                            let c = cmp_union_rows(d, cand, bestrow, ncol, k1, k1_type, d.order_desc, k2, k2_type, d.order_desc2);
-                            if c < 0 { best = j; }
-                        }
-                    }
-                    j = j + 1;
-                }
-                let mut new_used: Vec<i32> = vec![];
-                let mut k = 0;
-                while k < keep_count {
-                    if k == best { vec_push(new_used, 1); }
-                    else { vec_push(new_used, vec_get(used, k)); }
-                    k = k + 1;
-                }
-                used = new_used;
-                vec_push(sorted, vec_get(keep, best));
-                picked = picked + 1;
-            }
-            keep = sorted;
+        let k1 = resolve_union_order_key(d, d.order_col);
+        if k1 < 0 {
+            println!("Error: ORDER BY must name an output column or a select position");
+            return;
         }
+        let k1_type = vec_get(d.union_coltypes, k1);
+        let mut k2 = 0 - 1;
+        if d.order_col2 >= 0 {
+            k2 = resolve_union_order_key(d, d.order_col2);
+            if k2 < 0 {
+                println!("Error: ORDER BY must name an output column or a select position");
+                return;
+            }
+        }
+        let mut k2_type = 0;
+        if k2 >= 0 { k2_type = vec_get(d.union_coltypes, k2); }
+
+        // Stable selection sort into a new order (mirrors sort_rows): pick the
+        // leftmost minimum among unplaced rows each pass, so equal keys keep
+        // their pre-sort order.
+        let mut used: Vec<i32> = vec![];
+        let mut ui = 0;
+        while ui < keep_count { vec_push(used, 0); ui = ui + 1; }
+        let mut sorted: Vec<i32> = vec![];
+        let mut picked = 0;
+        while picked < keep_count {
+            let mut best = 0 - 1;
+            let mut j = 0;
+            while j < keep_count {
+                if vec_get(used, j) == 0 {
+                    if best < 0 {
+                        best = j;
+                    } else {
+                        let cand = vec_get(keep, j);
+                        let bestrow = vec_get(keep, best);
+                        let c = cmp_union_rows(d, cand, bestrow, ncol, k1, k1_type, d.order_desc, k2, k2_type, d.order_desc2);
+                        if c < 0 { best = j; }
+                    }
+                }
+                j = j + 1;
+            }
+            let mut new_used: Vec<i32> = vec![];
+            let mut k = 0;
+            while k < keep_count {
+                if k == best { vec_push(new_used, 1); }
+                else { vec_push(new_used, vec_get(used, k)); }
+                k = k + 1;
+            }
+            used = new_used;
+            vec_push(sorted, vec_get(keep, best));
+            picked = picked + 1;
+        }
+        keep = sorted;
     }
 
     // Column widths across headers + surviving rows.
@@ -4325,45 +4343,81 @@ fn exec_select_join(d: &mut DB) ~ Console {
 
     // ORDER BY: the nested loop emits rows in left-table scan order, so apply
     // the sort here (single-table SELECT sorts in exec_select; joins reach this
-    // path instead). The key resolves against either joined table; a key on the
-    // right side of a null-extended LEFT JOIN row sorts as NULL (empty string).
-    // If the key names no known column the rows are left in scan order, matching
-    // the single-table path, which also skips an unresolvable key.
+    // path instead). A key resolves against either joined table, or as a 1-based
+    // positional ordinal into the output columns (mapped back to its source
+    // table + column so the key materialization below works unchanged); a key on
+    // the right side of a null-extended LEFT JOIN row sorts as NULL (empty
+    // string). An unresolvable key FAILS CLOSED rather than silently returning
+    // scan order.
     if d.has_order == 1 {
         let oname = sp_get(d, d.order_col);
         let mut k1_tab = 0;
         let mut k1_col = 0 - 1;
         let mut k1_type = 2;
-        let rc_a = resolve_col(d, cs1, cc1, tname1, d.alias1, oname);
-        if rc_a >= 0 {
-            k1_tab = 1;
-            k1_col = rc_a;
-            k1_type = vec_get(d.col_types, cs1 + rc_a);
-        } else {
-            let rc_b = resolve_col(d, cs2, cc2, tname2, d.alias2, oname);
-            if rc_b >= 0 {
-                k1_tab = 2;
-                k1_col = rc_b;
-                k1_type = vec_get(d.col_types, cs2 + rc_b);
+        if is_int_str(oname) {
+            let n1 = parse_int_str(oname);
+            if n1 >= 1 {
+                if n1 <= sel_count {
+                    let s1 = n1 - 1;
+                    k1_tab = vec_get(sel_table, s1);
+                    k1_col = vec_get(sel_col, s1);
+                    if k1_tab == 1 { k1_type = vec_get(d.col_types, cs1 + k1_col); }
+                    else { k1_type = vec_get(d.col_types, cs2 + k1_col); }
+                }
             }
+        } else {
+            let rc_a = resolve_col(d, cs1, cc1, tname1, d.alias1, oname);
+            if rc_a >= 0 {
+                k1_tab = 1;
+                k1_col = rc_a;
+                k1_type = vec_get(d.col_types, cs1 + rc_a);
+            } else {
+                let rc_b = resolve_col(d, cs2, cc2, tname2, d.alias2, oname);
+                if rc_b >= 0 {
+                    k1_tab = 2;
+                    k1_col = rc_b;
+                    k1_type = vec_get(d.col_types, cs2 + rc_b);
+                }
+            }
+        }
+        if k1_tab == 0 {
+            println!("Error: ORDER BY must name a column or a select position");
+            return;
         }
         let mut k2_tab = 0;
         let mut k2_col = 0 - 1;
         let mut k2_type = 2;
         if d.order_col2 >= 0 {
             let oname2 = sp_get(d, d.order_col2);
-            let rc2a = resolve_col(d, cs1, cc1, tname1, d.alias1, oname2);
-            if rc2a >= 0 {
-                k2_tab = 1;
-                k2_col = rc2a;
-                k2_type = vec_get(d.col_types, cs1 + rc2a);
-            } else {
-                let rc2b = resolve_col(d, cs2, cc2, tname2, d.alias2, oname2);
-                if rc2b >= 0 {
-                    k2_tab = 2;
-                    k2_col = rc2b;
-                    k2_type = vec_get(d.col_types, cs2 + rc2b);
+            if is_int_str(oname2) {
+                let n2 = parse_int_str(oname2);
+                if n2 >= 1 {
+                    if n2 <= sel_count {
+                        let s2 = n2 - 1;
+                        k2_tab = vec_get(sel_table, s2);
+                        k2_col = vec_get(sel_col, s2);
+                        if k2_tab == 1 { k2_type = vec_get(d.col_types, cs1 + k2_col); }
+                        else { k2_type = vec_get(d.col_types, cs2 + k2_col); }
+                    }
                 }
+            } else {
+                let rc2a = resolve_col(d, cs1, cc1, tname1, d.alias1, oname2);
+                if rc2a >= 0 {
+                    k2_tab = 1;
+                    k2_col = rc2a;
+                    k2_type = vec_get(d.col_types, cs1 + rc2a);
+                } else {
+                    let rc2b = resolve_col(d, cs2, cc2, tname2, d.alias2, oname2);
+                    if rc2b >= 0 {
+                        k2_tab = 2;
+                        k2_col = rc2b;
+                        k2_type = vec_get(d.col_types, cs2 + rc2b);
+                    }
+                }
+            }
+            if k2_tab == 0 {
+                println!("Error: ORDER BY must name a column or a select position");
+                return;
             }
         }
         if k1_tab > 0 {

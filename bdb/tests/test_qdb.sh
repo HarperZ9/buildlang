@@ -275,6 +275,14 @@ chksel "join_order_secondary" "SELECT la_o.id FROM la_o JOIN lb_o ON la_o.tag = 
 # LEFT JOIN: the unmatched 'z' row null-extends lb_o.w to NULL, which sorts first
 # (NULL-first), then w=10 (id1), then the stable w=20 pair (id3, id2).
 chksel "join_order_leftnull" "SELECT la_o.id FROM la_o LEFT JOIN lb_o ON la_o.tag = lb_o.tag ORDER BY lb_o.w" "$(printf '4\n1\n3\n2')"
+# ORDER BY a positional ordinal: 1 -> la_o.id (left, numeric), 2 -> lb_o.w (right,
+# numeric). The ordinal maps back to its source column, so numeric ordering and
+# the stable tie-break match the named-key path. An out-of-range or unknown key
+# fails closed rather than silently returning scan order.
+chksel "join_order_ordinal_left" "SELECT la_o.id, lb_o.w FROM la_o JOIN lb_o ON la_o.tag = lb_o.tag ORDER BY 1 DESC" "$(printf '3  | 20\n2  | 20\n1  | 10')"
+chksel "join_order_ordinal_sec"  "SELECT la_o.id, lb_o.w FROM la_o JOIN lb_o ON la_o.tag = lb_o.tag ORDER BY 2, 1"    "$(printf '1  | 10\n2  | 20\n3  | 20')"
+chk "join_order_ordinal_oor_closed" "$($QDB "$DB" "SELECT la_o.id FROM la_o JOIN lb_o ON la_o.tag = lb_o.tag ORDER BY 9" 2>&1 | tr -d '\r' | grep -ci 'select position')" "1"
+chk "join_order_unknown_closed"     "$($QDB "$DB" "SELECT la_o.id FROM la_o JOIN lb_o ON la_o.tag = lb_o.tag ORDER BY nope" 2>&1 | tr -d '\r' | grep -ci 'select position')" "1"
 $QDB "$DB" "DROP TABLE la_o" >/dev/null 2>&1
 $QDB "$DB" "DROP TABLE lb_o" >/dev/null 2>&1
 
@@ -309,6 +317,15 @@ chk "union_colcount_closed" "$($QDB "$DB" "SELECT id FROM ua UNION SELECT id, na
 chk "union_agg_closed"      "$($QDB "$DB" "SELECT COUNT(*) FROM ua UNION SELECT id FROM ub" 2>&1 | tr -d '\r' | grep -ci 'aggregate')" "1"
 chk "union_nonfinal_closed" "$($QDB "$DB" "SELECT id FROM ua ORDER BY id UNION SELECT id FROM ub" 2>&1 | tr -d '\r' | grep -ci 'final UNION branch')" "1"
 chk "union_limit_closed"    "$($QDB "$DB" "SELECT id FROM ua UNION SELECT id FROM ub LIMIT 2" 2>&1 | tr -d '\r' | grep -ci 'not supported on a UNION')" "1"
+# ORDER BY a positional ordinal binds to an output column -- the canonical way to
+# order a union, since only the first branch's names reach the merged headers. 1
+# -> id, 2 -> name. An out-of-range or unknown key fails closed rather than
+# silently returning merge order.
+chksel "union_order_ordinal_desc" "SELECT id FROM ua UNION SELECT id FROM ub ORDER BY 1 DESC" "$(printf '5\n4\n3\n2\n1')"
+chksel "union_order_ordinal_two"  "SELECT id, name FROM ua UNION SELECT id, name FROM ub ORDER BY 1" "$(printf '1 | alice\n2 | bob\n3 | carol\n4 | dave\n5 | eve')"
+chksel "union_order_ordinal_name" "SELECT id, name FROM ua UNION ALL SELECT id, name FROM ub ORDER BY 2" "$(printf '1 | alice\n2 | bob\n3 | carol\n3 | carol\n4 | dave\n5 | eve')"
+chk "union_order_ordinal_oor_closed" "$($QDB "$DB" "SELECT id FROM ua UNION SELECT id FROM ub ORDER BY 5" 2>&1 | tr -d '\r' | grep -ci 'select position')" "1"
+chk "union_order_unknown_closed"     "$($QDB "$DB" "SELECT id FROM ua UNION SELECT id FROM ub ORDER BY nope" 2>&1 | tr -d '\r' | grep -ci 'select position')" "1"
 $QDB "$DB" "DROP TABLE ua" >/dev/null 2>&1
 $QDB "$DB" "DROP TABLE ub" >/dev/null 2>&1
 
