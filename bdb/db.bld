@@ -344,7 +344,7 @@ fn sp_get(d: &DB, id: i32) -> String {
 // Serialize the entire database (all tables, rows, and index declarations)
 // to the text-based file format and write to d.db_path.
 // Does NOT write WAL — this is the "clean" checkpoint format.
-fn db_save(d: &DB) {
+fn db_save(d: &DB) ~ FileSystem {
     let mut out = "";
     let mut t = 0;
     while t < d.tbl_count {
@@ -405,7 +405,7 @@ fn db_save(d: &DB) {
 // If the file doesn't exist or is empty, returns immediately (empty database).
 // After loading, the caller should also call wal_replay() to recover any
 // committed transactions from the WAL that haven't been checkpointed.
-fn db_load(d: &mut DB) {
+fn db_load(d: &mut DB) ~ FileSystem {
     if !file_exists(d.db_path) { return; }
     let content = read_file(d.db_path);
     let clen = content.len();
@@ -618,13 +618,13 @@ fn db_load(d: &mut DB) {
 // =========================================================================
 
 // Append a line to the WAL file
-fn wal_write(d: &mut DB, line: String) {
+fn wal_write(d: &mut DB, line: String) ~ FileSystem {
     let existing = if file_exists(d.wal_path) { read_file(d.wal_path) } else { "" };
     write_file(d.wal_path, existing + line + "\n");
 }
 
 // Checkpoint: merge WAL into main .db file, then clear WAL
-fn wal_checkpoint(d: &mut DB) {
+fn wal_checkpoint(d: &mut DB) ~ FileSystem {
     db_save(d);
     // Clear the WAL file
     if file_exists(d.wal_path) {
@@ -642,7 +642,7 @@ fn wal_checkpoint(d: &mut DB) {
 //
 // Assumes: DB is already loaded from the .db file. WAL contains only
 // mutations that happened after the last checkpoint.
-fn wal_replay(d: &mut DB) {
+fn wal_replay(d: &mut DB) ~ Console + FileSystem + Process {
     if !file_exists(d.wal_path) { return; }
     let content = read_file(d.wal_path);
     let clen = content.len();
@@ -850,7 +850,7 @@ fn restore_snapshot(d: &mut DB) {
 }
 
 // BEGIN — start a new explicit transaction
-fn wal_begin(d: &mut DB) {
+fn wal_begin(d: &mut DB) ~ Console + FileSystem {
     if d.in_transaction {
         println!("Error: transaction already in progress");
         return;
@@ -862,7 +862,7 @@ fn wal_begin(d: &mut DB) {
 }
 
 // COMMIT — finalize the current transaction
-fn wal_commit(d: &mut DB) {
+fn wal_commit(d: &mut DB) ~ Console + FileSystem {
     if !d.in_transaction {
         println!("Error: no transaction in progress");
         return;
@@ -873,7 +873,7 @@ fn wal_commit(d: &mut DB) {
 }
 
 // ROLLBACK — discard changes since BEGIN
-fn wal_rollback(d: &mut DB) {
+fn wal_rollback(d: &mut DB) ~ Console + FileSystem {
     if !d.in_transaction {
         println!("Error: no transaction in progress");
         return;
@@ -885,7 +885,7 @@ fn wal_rollback(d: &mut DB) {
 }
 
 // Write a mutation to WAL and optionally auto-commit
-fn wal_log_mutation(d: &mut DB, sql: String) {
+fn wal_log_mutation(d: &mut DB, sql: String) ~ FileSystem {
     if d.in_transaction {
         // In explicit transaction — just append OP to WAL
         wal_write(d, "OP " + sql);
@@ -900,7 +900,7 @@ fn wal_log_mutation(d: &mut DB, sql: String) {
 }
 
 // Count WAL entries and pending status (for .wal command)
-fn cmd_wal(d: &DB) {
+fn cmd_wal(d: &DB) ~ Console + FileSystem {
     if !file_exists(d.wal_path) {
         println!("WAL status: empty (no WAL file)");
         return;
@@ -1154,7 +1154,7 @@ fn tk_is_punct(d: &DB, p: String) -> i32 {
     0
 }
 
-fn expect_kw(d: &mut DB, kw: String) {
+fn expect_kw(d: &mut DB, kw: String) ~ Console + Process {
     if tk_is_kw(d, kw) == 0 {
         println!("Error: expected keyword '{}', got '{}'", kw, d.tk_val);
         process_exit(1);
@@ -1162,7 +1162,7 @@ fn expect_kw(d: &mut DB, kw: String) {
     next_token(d);
 }
 
-fn expect_punct(d: &mut DB, p: String) {
+fn expect_punct(d: &mut DB, p: String) ~ Console + Process {
     if tk_is_punct(d, p) == 0 {
         println!("Error: expected '{}', got '{}'", p, d.tk_val);
         process_exit(1);
@@ -1263,7 +1263,7 @@ fn reset_parser(d: &mut DB, input: String) {
     d.alter_col_type = -1;
 }
 
-fn parse_sql(d: &mut DB) {
+fn parse_sql(d: &mut DB) ~ Console + Process {
     next_token(d);
     if tk_is_kw(d, "SELECT") == 1 { parse_select(d); return; }
     if tk_is_kw(d, "INSERT") == 1 { parse_insert(d); return; }
@@ -1323,7 +1323,7 @@ fn is_agg_kw(val: String) -> i32 {
 //   d.p_aliases, d.p_table, d.alias1, d.has_join, d.join_table, d.alias2,
 //   d.join_left_col, d.join_right_col, d.has_where, d.has_group_by,
 //   d.has_having, d.has_order, d.has_limit, d.has_distinct
-fn parse_select(d: &mut DB) {
+fn parse_select(d: &mut DB) ~ Console + Process {
     d.stmt_type = 0;
     next_token(d);
 
@@ -1458,7 +1458,7 @@ fn parse_select(d: &mut DB) {
     if tk_is_kw(d, "LIMIT") == 1 { parse_limit(d); }
 }
 
-fn parse_insert(d: &mut DB) {
+fn parse_insert(d: &mut DB) ~ Console + Process {
     d.stmt_type = 1;
     next_token(d);
     expect_kw(d, "INTO");
@@ -1500,7 +1500,7 @@ fn parse_insert(d: &mut DB) {
     expect_punct(d, ")");
 }
 
-fn parse_create_table(d: &mut DB) {
+fn parse_create_table(d: &mut DB) ~ Console + Process {
     d.stmt_type = 2;
     // TABLE keyword already consumed by parse_sql
     let tname = d.tk_val;
@@ -1529,7 +1529,7 @@ fn parse_create_table(d: &mut DB) {
     expect_punct(d, ")");
 }
 
-fn parse_create_index(d: &mut DB) {
+fn parse_create_index(d: &mut DB) ~ Console + Process {
     d.stmt_type = 6;
     // INDEX keyword already consumed by parse_sql
     let iname = d.tk_val;
@@ -1546,7 +1546,7 @@ fn parse_create_index(d: &mut DB) {
     expect_punct(d, ")");
 }
 
-fn parse_group_by(d: &mut DB) {
+fn parse_group_by(d: &mut DB) ~ Console + Process {
     next_token(d);
     expect_kw(d, "BY");
     d.has_group_by = 1;
@@ -1556,7 +1556,7 @@ fn parse_group_by(d: &mut DB) {
 
 // Parse HAVING clause: HAVING agg_func(col) op value
 // e.g. HAVING COUNT(*) > 2
-fn parse_having(d: &mut DB) {
+fn parse_having(d: &mut DB) ~ Console + Process {
     next_token(d);
     d.has_having = 1;
     // Parse aggregate function
@@ -1584,7 +1584,7 @@ fn parse_having(d: &mut DB) {
     next_token(d);
 }
 
-fn parse_update(d: &mut DB) {
+fn parse_update(d: &mut DB) ~ Console + Process {
     d.stmt_type = 3;
     next_token(d);
     let tname = d.tk_val;
@@ -1601,7 +1601,7 @@ fn parse_update(d: &mut DB) {
     if tk_is_kw(d, "WHERE") == 1 { parse_where(d); }
 }
 
-fn parse_delete(d: &mut DB) {
+fn parse_delete(d: &mut DB) ~ Console + Process {
     d.stmt_type = 4;
     next_token(d);
     expect_kw(d, "FROM");
@@ -1611,7 +1611,7 @@ fn parse_delete(d: &mut DB) {
     if tk_is_kw(d, "WHERE") == 1 { parse_where(d); }
 }
 
-fn parse_drop(d: &mut DB) {
+fn parse_drop(d: &mut DB) ~ Console + Process {
     d.stmt_type = 5;
     next_token(d);
     expect_kw(d, "TABLE");
@@ -1627,7 +1627,7 @@ fn parse_drop(d: &mut DB) {
 //   1 -> w_left2, w_op2, w_right2, w_in_vals2, w_in_count2
 // Handles: comparison ops, LIKE, IN (...), IS NULL, IS NOT NULL, BETWEEN,
 // and scalar subqueries (SELECT inside parentheses).
-fn parse_where_cond(d: &mut DB, which: i32) {
+fn parse_where_cond(d: &mut DB, which: i32) ~ Console + Process {
     // which: 1 = first condition, 2 = second condition
     let lref = read_col_ref(d);
     let left_id = sp_add(d, lref);
@@ -1792,7 +1792,7 @@ fn parse_where_cond(d: &mut DB, which: i32) {
     }
 }
 
-fn parse_where(d: &mut DB) {
+fn parse_where(d: &mut DB) ~ Console + Process {
     next_token(d);
     d.has_where = 1;
     parse_where_cond(d, 1);
@@ -1809,7 +1809,7 @@ fn parse_where(d: &mut DB) {
 }
 
 // ALTER TABLE tname ADD COLUMN cname TYPE
-fn parse_alter_table(d: &mut DB) {
+fn parse_alter_table(d: &mut DB) ~ Console + Process {
     d.stmt_type = 10;
     next_token(d);
     expect_kw(d, "TABLE");
@@ -1839,7 +1839,7 @@ fn parse_alter_table(d: &mut DB) {
 // restores the original parser state so the outer query can continue.
 //
 // Returns: the scalar result string from the subquery.
-fn parse_and_exec_subquery(d: &mut DB) -> String {
+fn parse_and_exec_subquery(d: &mut DB) -> String ~ Console + Process {
     // Capture the rest of the input from current position up to the matching ')'
     // The SELECT keyword has been recognized but not consumed yet.
     // We need to grab everything from d.pos (which is past SELECT keyword) up to
@@ -1985,7 +1985,7 @@ fn parse_and_exec_subquery(d: &mut DB) -> String {
 
 // Execute a subquery and return a single scalar value as a string.
 // Handles aggregate queries like SELECT AVG(age) FROM users.
-fn exec_subquery_scalar(d: &mut DB, sql: String) -> String {
+fn exec_subquery_scalar(d: &mut DB, sql: String) -> String ~ Console + Process {
     reset_parser(d, sql);
     parse_sql(d);
 
@@ -2066,7 +2066,7 @@ fn exec_subquery_scalar(d: &mut DB, sql: String) -> String {
     "0"
 }
 
-fn parse_order_by(d: &mut DB) {
+fn parse_order_by(d: &mut DB) ~ Console + Process {
     next_token(d);
     expect_kw(d, "BY");
     d.has_order = 1;
@@ -2132,7 +2132,7 @@ fn parse_int_str(s: String) -> i32 {
 
 // Execute CREATE TABLE. Adds a new table entry to the parallel arrays.
 // Fails if a table with the same name already exists.
-fn exec_create(d: &mut DB) {
+fn exec_create(d: &mut DB) ~ Console {
     let tname = sp_get(d, d.p_table);
     let existing = find_table(d, tname);
     if existing >= 0 {
@@ -2167,7 +2167,7 @@ fn exec_create(d: &mut DB) {
 // Values are read from d.p_vals. The row is inserted at the correct
 // position in the flat cells array (after existing rows for this table),
 // and subsequent tables' row starts are shifted. Indexes are rebuilt.
-fn exec_insert(d: &mut DB) {
+fn exec_insert(d: &mut DB) ~ Console {
     let tname = sp_get(d, d.p_table);
     let tidx = find_table(d, tname);
     if tidx < 0 {
@@ -2329,7 +2329,7 @@ fn check_has_agg(d: &DB) -> i32 {
 //
 // Calls: eval_compound_where(), sort_rows(), resolve_col(), find_index_for(),
 //        index_scan(), sp_get(), pad_right(), make_dashes()
-fn exec_select(d: &mut DB) {
+fn exec_select(d: &mut DB) ~ Console {
     // Dispatch to JOIN handler
     if d.has_join == 1 { exec_select_join(d); return; }
     // Dispatch to GROUP BY handler
@@ -2609,7 +2609,7 @@ fn exec_select(d: &mut DB) {
 //
 // Calls: eval_compound_where(), compute_single_agg(), build_agg_header(),
 //        print_result_row()
-fn exec_select_agg_no_group(d: &mut DB, tidx: i32) {
+fn exec_select_agg_no_group(d: &mut DB, tidx: i32) ~ Console {
     let tname = sp_get(d, d.p_table);
     let cs = vec_get(d.tbl_col_starts, tidx);
     let cc = vec_get(d.tbl_col_counts, tidx);
@@ -2738,7 +2738,7 @@ fn build_agg_header(d: &mut DB, af: i32, ac_name_id: i32, al_id: i32) -> i32 {
 // Group keys are collected into a Vec<i32> of pool IDs. For each key,
 // helper functions (group_count_rows, compute_group_numeric, group_get_plain)
 // scan match_rows to compute aggregates for that group.
-fn exec_select_group(d: &mut DB) {
+fn exec_select_group(d: &mut DB) ~ Console {
     let tname = sp_get(d, d.p_table);
     let tidx = find_table(d, tname);
     if tidx < 0 {
@@ -3084,7 +3084,7 @@ fn compute_group_numeric(d: &mut DB, af: i32, ac_name: String, gk: String,
 //   8. Print formatted output
 //
 // Table aliases (u, o) are resolved via d.alias1 and d.alias2.
-fn exec_select_join(d: &mut DB) {
+fn exec_select_join(d: &mut DB) ~ Console {
     let tname1 = sp_get(d, d.p_table);
     let tname2 = sp_get(d, d.join_table);
     let t1 = find_table(d, tname1);
@@ -3313,7 +3313,7 @@ fn eval_join_where(d: &DB, cs1: i32, cc1: i32, rs1: i32, r1: i32,
 // SET column value for rows that match the WHERE condition. Rebuilds
 // the entire cells array (no in-place mutation due to Vec immutability
 // constraints). Rebuilds affected indexes afterward.
-fn exec_update(d: &mut DB) {
+fn exec_update(d: &mut DB) ~ Console {
     let tname = sp_get(d, d.p_table);
     let tidx = find_table(d, tname);
     if tidx < 0 {
@@ -3364,7 +3364,7 @@ fn exec_update(d: &mut DB) {
 // Execute DELETE FROM. Rebuilds the cells array, skipping rows that match
 // the WHERE condition. Adjusts row counts and row starts for all tables.
 // Rebuilds affected indexes afterward.
-fn exec_delete(d: &mut DB) {
+fn exec_delete(d: &mut DB) ~ Console {
     let tname = sp_get(d, d.p_table);
     let tidx = find_table(d, tname);
     if tidx < 0 {
@@ -3451,7 +3451,7 @@ fn exec_delete(d: &mut DB) {
     update_indexes_for_table(d, tidx);
 }
 
-fn exec_drop(d: &mut DB) {
+fn exec_drop(d: &mut DB) ~ Console {
     let tname = sp_get(d, d.p_table);
     let tidx = find_table(d, tname);
     if tidx < 0 {
@@ -3529,7 +3529,7 @@ fn exec_drop(d: &mut DB) {
 // =============================================================================
 // ALTER TABLE ADD COLUMN
 // =============================================================================
-fn exec_alter_table(d: &mut DB) {
+fn exec_alter_table(d: &mut DB) ~ Console {
     let tname = sp_get(d, d.p_table);
     let tidx = find_table(d, tname);
     if tidx < 0 {
@@ -4012,7 +4012,7 @@ fn vec_replace(v: Vec<i32>, vlen: i32, idx: i32, new_val: i32) -> Vec<i32> {
 // PRINT HELPERS
 // =============================================================================
 
-fn print_result_row(d: &DB, headers: Vec<i32>, results: Vec<i32>, count: i32) {
+fn print_result_row(d: &DB, headers: Vec<i32>, results: Vec<i32>, count: i32) ~ Console {
     // Calculate widths
     let mut widths: Vec<i32> = vec![];
     let mut wi = 0;
@@ -4282,7 +4282,7 @@ fn update_indexes_for_table(d: &mut DB, tidx: i32) {
 }
 
 // Execute CREATE INDEX. Registers a new index entry and rebuilds its sorted data.
-fn exec_create_index(d: &mut DB) {
+fn exec_create_index(d: &mut DB) ~ Console {
     let iname = sp_get(d, d.idx_name);
     let tname = sp_get(d, d.idx_table_name);
     let cname = sp_get(d, d.idx_col_name);
@@ -4336,7 +4336,7 @@ fn exec_create_index(d: &mut DB) {
 // =========================================================================
 
 // exec_sql_no_wal: used during WAL replay — executes + saves directly, no WAL logging
-fn exec_sql_no_wal(d: &mut DB, input: String) {
+fn exec_sql_no_wal(d: &mut DB, input: String) ~ Console + FileSystem + Process {
     reset_parser(d, input);
     parse_sql(d);
     let st = d.stmt_type;
@@ -4353,7 +4353,7 @@ fn exec_sql_no_wal(d: &mut DB, input: String) {
     else if st == 10 { exec_alter_table(d); }
 }
 
-fn exec_sql(d: &mut DB, input: String) {
+fn exec_sql(d: &mut DB, input: String) ~ Console + FileSystem + Process {
     // Handle transaction control keywords before parsing
     let trimmed_upper = input.to_uppercase();
     if trimmed_upper == "BEGIN" {
@@ -4394,7 +4394,7 @@ fn exec_sql(d: &mut DB, input: String) {
 // the input to exec_sql() as a SQL statement.
 // =========================================================================
 
-fn cmd_tables(d: &DB) {
+fn cmd_tables(d: &DB) ~ Console {
     let mut i = 0;
     while i < d.tbl_count {
         let tn = sp_get(d, vec_get(d.tbl_names, i));
@@ -4403,7 +4403,7 @@ fn cmd_tables(d: &DB) {
     }
 }
 
-fn cmd_schema(d: &DB, tname: String) {
+fn cmd_schema(d: &DB, tname: String) ~ Console {
     let tidx = find_table(d, tname);
     if tidx < 0 {
         println!("Error: table '{}' not found", tname);
@@ -4426,7 +4426,7 @@ fn cmd_schema(d: &DB, tname: String) {
     println!("{}", out);
 }
 
-fn run_repl(d: &mut DB) {
+fn run_repl(d: &mut DB) ~ Console + FileSystem + Process {
     let mut go = true;
     while go {
         print!("qdb> ");
@@ -4501,7 +4501,7 @@ fn run_repl(d: &mut DB) {
 //   5. Execute SQL or enter REPL
 // =========================================================================
 
-fn main() {
+fn main() ~ Console + Environment + FileSystem + Process {
     let nargs = args_count();
     if nargs < 2 {
         println!("Usage: qdb <database> [sql]");
