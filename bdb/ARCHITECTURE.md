@@ -14,7 +14,7 @@ BuildLang does not support multi-file compilation or `use` imports between `.bld
 Section                          Lines         Functions   Purpose
 -------------------------------  -----------   ---------   ----------------------------------
  0. PRIMITIVES                   ~81-98        6           Character classification (is_ws, is_digit, etc.)
- 1. DATA MODEL                   ~99-345       3           struct DB (139 fields), db_new, string pool
+ 1. DATA MODEL                   ~99-345       3           struct DB (105 fields), db_new, string pool
  2. STORAGE                      ~346-614      2           File save/load (text format)
  3. WAL                          ~615-971      11          Write-ahead log, snapshots, transactions
  4. TOKENIZER                    ~972-1205     8           SQL lexical analysis
@@ -37,9 +37,9 @@ Section                          Lines         Functions   Purpose
 
 ## Data Model
 
-### The DB Struct (139 fields)
+### The DB Struct (105 fields)
 
-All engine state lives in one flat struct. This is a BuildLang constraint, not a design preference — the C codegen cannot reliably emit struct field assignments on local variables.
+All engine state lives in one flat struct threaded by `&mut` reference. buildc 1.2.0 lowers local struct field assignment (`p.x = 10`) correctly, so this single-struct layout is a retained design choice, not a compiler constraint. The flattened parallel-array layout inside it is still required by the `Vec<String>` limitation (see below).
 
 The struct fields are grouped into:
 
@@ -150,11 +150,11 @@ Sorted-array indexes with binary search:
 
 | Decision | Rationale |
 |----------|-----------|
-| Single flat struct | BuildLang codegen limitation — no reliable local struct field assignment |
+| Single flat struct | Retained pattern; buildc 1.2.0 now supports local struct field assignment |
 | String pool | `Vec<String>` codegen is incomplete |
 | Text file format | Human-readable, simple parsing, adequate for target scale |
 | Selection sort | O(n^2) but trivial to implement correctly without stdlib sort |
-| Full array rebuilds | No in-place Vec mutation in BuildLang — must reconstruct |
+| Full array rebuilds | No in-place Vec mutation in BuildLang, so arrays are reconstructed |
 | No B-tree | Sorted arrays sufficient; B-tree in flat arrays not justified |
 | Embedded parser state | No separate AST struct; parsed state lives in DB fields |
 
