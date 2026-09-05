@@ -188,7 +188,9 @@ struct DB {
     has_offset: i32,
     offset_val: i32,
     set_col: i32,
-    set_val: i32,
+    set_val: i32,        // RHS: literal text, or left operand of an arithmetic RHS
+    set_op: i32,         // UPDATE arithmetic op: 0=+ 1=- 2=* 3=/ ; -1 = plain literal
+    set_operand: i32,    // right operand string id for arithmetic RHS (-1 if none)
     select_star: i32,
     // Aggregate functions for GROUP BY: 0=none, 1=COUNT, 2=SUM, 3=AVG, 4=MIN, 5=MAX
     p_agg_funcs: Vec<i32>,
@@ -290,7 +292,7 @@ fn db_new(db_path: String) -> DB {
         order_col2: -1, order_desc2: 0,
         has_limit: 0, limit_val: 0,
         has_offset: 0, offset_val: 0,
-        set_col: -1, set_val: -1,
+        set_col: -1, set_val: -1, set_op: -1, set_operand: -1,
         select_star: 0,
         p_agg_funcs: vec![], p_agg_cols: vec![], p_agg_count: 0,
         has_group_by: 0, group_col: -1,
@@ -1254,6 +1256,8 @@ fn reset_parser(d: &mut DB, input: String) {
     d.offset_val = 0;
     d.set_col = -1;
     d.set_val = -1;
+    d.set_op = -1;
+    d.set_operand = -1;
     d.select_star = 0;
     d.p_agg_funcs = vec![];
     d.p_agg_cols = vec![];
@@ -1621,7 +1625,39 @@ fn parse_update(d: &mut DB) ~ Console + Process {
     let vtext = d.tk_val;
     d.set_val = sp_add(d, vtext);
     next_token(d);
-    if tk_is_kw(d, "WHERE") == 1 { parse_where(d); }
+    // Optional arithmetic RHS: SET col = <vtext> <op> <operand>. Match the
+    // operator by VALUE, not token type: '*' tokenizes as the star token
+    // (type 6) while '+' '-' '/' are operator tokens (type 4), so a type-only
+    // guard silently misses '*', leaving it in the stream. A stray '*' then
+    // drops the WHERE clause below and overwrites every row, so match all four
+    // uniformly on tk_val.
+    let p = d.tk_val;
+    let mut opc = 0 - 1;
+    if p == "+" { opc = 0; }
+    else if p == "-" { opc = 1; }
+    else if p == "*" { opc = 2; }
+    else if p == "/" { opc = 3; }
+    if opc >= 0 {
+        d.set_op = opc;
+        next_token(d);
+        d.set_operand = sp_add(d, d.tk_val);
+        next_token(d);
+    }
+    // Fail-closed: after the SET value (and its optional arithmetic tail), the
+    // only legal continuations are WHERE, a ';' terminator, or end of input.
+    // Any other leftover token means we failed to parse part of the SET clause;
+    // proceeding would silently drop the WHERE clause and rewrite the whole
+    // table, so abort before exec runs any mutation.
+    if tk_is_kw(d, "WHERE") == 1 {
+        parse_where(d);
+    } else if d.tk_type == 7 {
+        // end of input: whole-table UPDATE, no WHERE
+    } else if tk_is_punct(d, ";") == 1 {
+        // ';' terminator: also a whole-table UPDATE
+    } else {
+        println!("Error: unexpected token '{}' after UPDATE SET value", d.tk_val);
+        process_exit(1);
+    }
 }
 
 fn parse_delete(d: &mut DB) ~ Console + Process {
@@ -3562,10 +3598,33 @@ fn exec_update(d: &mut DB) ~ Console {
         return;
     }
 
+    // Arithmetic RHS (SET col = col <op> literal): validate before mutating.
+    let mut operand_int = 0;
+    if d.set_op >= 0 {
+        let left_name = sp_get(d, d.set_val);
+        if left_name != set_col_name {
+            println!("Error: UPDATE arithmetic must reference column '{}'", set_col_name);
+            return;
+        }
+        let operand_txt = sp_get(d, d.set_operand);
+        if is_int_str(operand_txt) == false {
+            println!("Error: UPDATE arithmetic operand must be an integer");
+            return;
+        }
+        operand_int = parse_int_str(operand_txt);
+        if d.set_op == 3 {
+            if operand_int == 0 {
+                println!("Error: UPDATE division by zero");
+                return;
+            }
+        }
+    }
+
     let new_val_id = sp_add(d, set_val_text);
     let total_cells = vec_len(d.cells);
     let mut new_cells: Vec<i32> = vec![];
     let mut updated = 0;
+    let mut arith_err = false;
     let mut ci: i64 = 0;
     while ci < total_cells {
         let mut cell_id = vec_get(d.cells, ci);
@@ -3577,7 +3636,22 @@ fn exec_update(d: &mut DB) ~ Console {
                 if col_in_row == scol {
                     let do_update = eval_compound_where(d, cs, cc, rs, row_in_tbl, tname, d.alias1);
                     if do_update {
-                        cell_id = new_val_id;
+                        if d.set_op >= 0 {
+                            let cur = sp_get(d, cell_id);
+                            if is_int_str(cur) {
+                                let a = parse_int_str(cur);
+                                let mut r = 0;
+                                if d.set_op == 0 { r = a + operand_int; }
+                                else if d.set_op == 1 { r = a - operand_int; }
+                                else if d.set_op == 2 { r = a * operand_int; }
+                                else { r = a / operand_int; }
+                                cell_id = sp_add(d, int_to_str(r));
+                            } else {
+                                arith_err = true;
+                            }
+                        } else {
+                            cell_id = new_val_id;
+                        }
                         updated = updated + 1;
                     }
                 }
@@ -3585,6 +3659,10 @@ fn exec_update(d: &mut DB) ~ Console {
         }
         vec_push(new_cells, cell_id);
         ci = ci + 1;
+    }
+    if arith_err {
+        println!("Error: UPDATE arithmetic on a non-integer value in column '{}'", set_col_name);
+        return;
     }
     d.cells = new_cells;
     update_indexes_for_table(d, tidx);
@@ -4019,6 +4097,14 @@ fn is_numeric_str(s: String) -> bool {
         }
         else { return false; }
     }
+    true
+}
+
+// True only for a signed decimal integer (no dot). parse_int_str ignores a
+// dot, so integer-only UPDATE arithmetic gates on this, not is_numeric_str.
+fn is_int_str(s: String) -> bool {
+    if is_numeric_str(s) == false { return false; }
+    if s.index_of(".") >= 0 { return false; }
     true
 }
 
