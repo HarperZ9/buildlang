@@ -165,14 +165,17 @@ struct DB {
     p_val_count: i32,
     p_row_count: i32,
     has_where: i32,
-    w_left: i32,
-    w_op: i32,
-    w_right: i32,
-    // Compound WHERE: AND/OR with second condition
-    w_logic: i32,
-    w_left2: i32,
-    w_op2: i32,
-    w_right2: i32,
+    // WHERE as a flat DNF condition list (OR of AND-groups). Conditions with
+    // the same wc_group index are AND-ed; distinct groups are OR-ed. AND binds
+    // tighter than OR, which is the correct SQL precedence for any number of
+    // unparenthesized conditions. Parenthesized grouping is not parsed
+    // (honest limitation).
+    wc_count: i32,
+    wc_left: Vec<i32>,     // left column-ref string id, per condition
+    wc_op: Vec<i32>,       // op code 0..9, per condition
+    wc_right: Vec<i32>,    // right value string id (-1 for IN / IS [NOT] NULL)
+    wc_neg: Vec<i32>,      // 1 = negate this condition (NOT / NOT IN / NOT LIKE)
+    wc_group: Vec<i32>,    // DNF group index, per condition
     has_order: i32,
     order_col: i32,
     order_desc: i32,
@@ -206,12 +209,12 @@ struct DB {
     idx_table_name: i32,
     idx_col_name: i32,
 
-    // IN operator: list of values for WHERE col IN (...)
-    // w_in_vals1 / w_in_count1 for first condition, w_in_vals2 / w_in_count2 for second
-    w_in_vals1: Vec<i32>,
-    w_in_count1: i32,
-    w_in_vals2: Vec<i32>,
-    w_in_count2: i32,
+    // IN operator: value lists for WHERE col IN (...). All conditions' IN
+    // values are concatenated into one flat pool; each IN condition records
+    // its slice via wc_in_start / wc_in_len (buildlang has no Vec<Vec<i32>>).
+    wc_in_start: Vec<i32>,
+    wc_in_len: Vec<i32>,
+    wc_in_pool: Vec<i32>,
 
     // Scratch: the first result column of the most recent subquery, collected
     // across all matching rows. Turns IN (SELECT ...) into a real IN-list.
@@ -280,8 +283,9 @@ fn db_new(db_path: String) -> DB {
         p_cols: vec![], p_col_count: 0,
         p_types: vec![],
         p_vals: vec![], p_val_count: 0, p_row_count: 0,
-        has_where: 0, w_left: -1, w_op: -1, w_right: -1,
-        w_logic: 0, w_left2: -1, w_op2: -1, w_right2: -1,
+        has_where: 0, wc_count: 0,
+        wc_left: vec![], wc_op: vec![], wc_right: vec![],
+        wc_neg: vec![], wc_group: vec![],
         has_order: 0, order_col: -1, order_desc: 0,
         order_col2: -1, order_desc2: 0,
         has_limit: 0, limit_val: 0,
@@ -293,8 +297,7 @@ fn db_new(db_path: String) -> DB {
         has_join: 0, join_table: -1, join_left_col: -1, join_right_col: -1,
         alias1: -1, alias2: -1,
         idx_name: -1, idx_table_name: -1, idx_col_name: -1,
-        w_in_vals1: vec![], w_in_count1: 0,
-        w_in_vals2: vec![], w_in_count2: 0,
+        wc_in_start: vec![], wc_in_len: vec![], wc_in_pool: vec![],
         subq_vals: vec![], subq_count: 0,
         has_distinct: 0,
         has_having: 0, having_agg_func: 0, having_agg_col: -1, having_op: -1, having_val: -1,
@@ -1202,7 +1205,7 @@ fn op_encode(op: String) -> i32 {
 // =========================================================================
 // Parses tokenized SQL into the "AST" fields of the DB struct. There is no
 // separate AST data structure; parsed state is written directly into d.p_*,
-// d.has_*, d.w_* fields. The parser is recursive-descent.
+// d.has_*, d.wc_* fields. The parser is recursive-descent.
 //
 // Statement types (d.stmt_type):
 //   0 = SELECT    1 = INSERT     2 = CREATE TABLE
@@ -1234,13 +1237,12 @@ fn reset_parser(d: &mut DB, input: String) {
     d.p_val_count = 0;
     d.p_row_count = 0;
     d.has_where = 0;
-    d.w_left = -1;
-    d.w_op = -1;
-    d.w_right = -1;
-    d.w_logic = 0;
-    d.w_left2 = -1;
-    d.w_op2 = -1;
-    d.w_right2 = -1;
+    d.wc_count = 0;
+    d.wc_left = vec![];
+    d.wc_op = vec![];
+    d.wc_right = vec![];
+    d.wc_neg = vec![];
+    d.wc_group = vec![];
     d.has_order = 0;
     d.order_col = -1;
     d.order_desc = 0;
@@ -1267,10 +1269,9 @@ fn reset_parser(d: &mut DB, input: String) {
     d.idx_name = -1;
     d.idx_table_name = -1;
     d.idx_col_name = -1;
-    d.w_in_vals1 = vec![];
-    d.w_in_count1 = 0;
-    d.w_in_vals2 = vec![];
-    d.w_in_count2 = 0;
+    d.wc_in_start = vec![];
+    d.wc_in_len = vec![];
+    d.wc_in_pool = vec![];
     d.subq_vals = vec![];
     d.subq_count = 0;
     d.has_distinct = 0;
@@ -1642,45 +1643,77 @@ fn parse_drop(d: &mut DB) ~ Console + Process {
     next_token(d);
 }
 
-// Parse a single WHERE condition: handles normal ops, LIKE, IN, IS NULL, IS NOT NULL, subqueries
-// Parse a single WHERE condition (the left-hand side, operator, right-hand side).
-// `which` selects which set of fields to populate:
-//   0 -> w_left, w_op, w_right, w_in_vals1, w_in_count1
-//   1 -> w_left2, w_op2, w_right2, w_in_vals2, w_in_count2
-// Handles: comparison ops, LIKE, IN (...), IS NULL, IS NOT NULL, BETWEEN,
-// and scalar subqueries (SELECT inside parentheses).
-fn parse_where_cond(d: &mut DB, which: i32) ~ Console + Process {
-    // which: 1 = first condition, 2 = second condition
+// Append one non-IN condition to the DNF list under group `grp`.
+// wc_in_start = -1 / wc_in_len = 0 mark it as not an IN condition.
+fn wc_push(d: &mut DB, grp: i32, left_id: i32, op: i32, right_id: i32, neg: i32) {
+    vec_push(d.wc_group, grp);
+    vec_push(d.wc_left, left_id);
+    vec_push(d.wc_op, op);
+    vec_push(d.wc_right, right_id);
+    vec_push(d.wc_neg, neg);
+    vec_push(d.wc_in_start, -1);
+    vec_push(d.wc_in_len, 0);
+    d.wc_count = d.wc_count + 1;
+}
+
+// Append one IN condition (op 7) under group `grp`. Its value list is copied
+// into the shared wc_in_pool; the slice is recorded via wc_in_start / wc_in_len
+// (buildlang has no Vec<Vec<i32>>, so every IN list shares one flat pool).
+fn wc_push_in(d: &mut DB, grp: i32, left_id: i32, neg: i32, vals: Vec<i32>, vcount: i32) {
+    let mut start = 0;
+    start = vec_len(d.wc_in_pool);
+    let mut i = 0;
+    while i < vcount {
+        vec_push(d.wc_in_pool, vec_get(vals, i));
+        i = i + 1;
+    }
+    vec_push(d.wc_group, grp);
+    vec_push(d.wc_left, left_id);
+    vec_push(d.wc_op, 7);
+    vec_push(d.wc_right, -1);
+    vec_push(d.wc_neg, neg);
+    vec_push(d.wc_in_start, start);
+    vec_push(d.wc_in_len, vcount);
+    d.wc_count = d.wc_count + 1;
+}
+
+// Parse one WHERE condition into DNF group `grp`. Handles a leading NOT
+// (WHERE NOT col = val) and an infix NOT (col NOT IN / col NOT LIKE), both of
+// which set the per-condition negate flag. Handles comparison ops, LIKE,
+// IN (value-list or SELECT subquery), BETWEEN (two AND-ed conditions in the
+// same group), IS [NOT] NULL, and scalar subqueries.
+fn parse_where_cond(d: &mut DB, grp: i32) ~ Console + Process {
+    let mut neg = 0;
+    // Leading NOT: WHERE NOT col = val
+    if tk_is_kw(d, "NOT") == 1 {
+        neg = 1;
+        next_token(d);
+    }
     let lref = read_col_ref(d);
     let left_id = sp_add(d, lref);
+    // Infix NOT: col NOT IN (...) / col NOT LIKE 'pat'
+    if tk_is_kw(d, "NOT") == 1 {
+        neg = 1;
+        next_token(d);
+    }
 
-    // Check for LIKE
+    // LIKE
     if tk_is_kw(d, "LIKE") == 1 {
         next_token(d);
         let pattern = d.tk_val;
         let pat_id = sp_add(d, pattern);
         next_token(d);
-        if which == 1 {
-            d.w_left = left_id;
-            d.w_op = 6;
-            d.w_right = pat_id;
-        } else {
-            d.w_left2 = left_id;
-            d.w_op2 = 6;
-            d.w_right2 = pat_id;
-        }
+        wc_push(d, grp, left_id, 6, pat_id, neg);
         return;
     }
 
-    // Check for IN
+    // IN (value-list or SELECT subquery)
     if tk_is_kw(d, "IN") == 1 {
         next_token(d);
         expect_punct(d, "(");
-        // Check for subquery: IN (SELECT ...)
         if tk_is_kw(d, "SELECT") == 1 {
             // Run the subquery and take its full first-column result set as the
-            // IN-list, not just the first value. subq_vals survives the
-            // subquery's own parser-state restore.
+            // IN-list. subq_vals survives the subquery's own state restore.
             parse_and_exec_subquery(d);
             let mut sv: Vec<i32> = vec![];
             let mut svc = 0;
@@ -1690,22 +1723,9 @@ fn parse_where_cond(d: &mut DB, which: i32) ~ Console + Process {
                 svc = svc + 1;
                 svi = svi + 1;
             }
-            if which == 1 {
-                d.w_left = left_id;
-                d.w_op = 7;
-                d.w_right = -1;
-                d.w_in_vals1 = sv;
-                d.w_in_count1 = svc;
-            } else {
-                d.w_left2 = left_id;
-                d.w_op2 = 7;
-                d.w_right2 = -1;
-                d.w_in_vals2 = sv;
-                d.w_in_count2 = svc;
-            }
             expect_punct(d, ")");
+            wc_push_in(d, grp, left_id, neg, sv, svc);
         } else {
-            // Parse value list
             let mut vals: Vec<i32> = vec![];
             let mut vcount = 0;
             let mut go = true;
@@ -1719,25 +1739,12 @@ fn parse_where_cond(d: &mut DB, which: i32) ~ Console + Process {
                 else { go = false; }
             }
             expect_punct(d, ")");
-            if which == 1 {
-                d.w_left = left_id;
-                d.w_op = 7;
-                d.w_right = -1;
-                d.w_in_vals1 = vals;
-                d.w_in_count1 = vcount;
-            } else {
-                d.w_left2 = left_id;
-                d.w_op2 = 7;
-                d.w_right2 = -1;
-                d.w_in_vals2 = vals;
-                d.w_in_count2 = vcount;
-            }
+            wc_push_in(d, grp, left_id, neg, vals, vcount);
         }
         return;
     }
 
-    // Check for BETWEEN: col BETWEEN val1 AND val2
-    // Translates to: col >= val1 AND col <= val2
+    // BETWEEN: col BETWEEN lo AND hi -> col >= lo AND col <= hi (same group)
     if tk_is_kw(d, "BETWEEN") == 1 {
         next_token(d);
         let lo_val = d.tk_val;
@@ -1747,43 +1754,30 @@ fn parse_where_cond(d: &mut DB, which: i32) ~ Console + Process {
         let hi_val = d.tk_val;
         let hi_id = sp_add(d, hi_val);
         next_token(d);
-        // Encode as compound: col >= lo AND col <= hi
-        d.w_left = left_id;
-        d.w_op = 4; // >=
-        d.w_right = lo_id;
-        d.w_logic = 1; // AND
-        d.w_left2 = left_id;
-        d.w_op2 = 3; // <=
-        d.w_right2 = hi_id;
+        if neg == 1 {
+            // NOT BETWEEN is (x < lo OR x > hi), which needs an OR distributed
+            // across groups the flat parser cannot express (same limit as
+            // parenthesized WHERE). Emit an always-false group (x < lo AND
+            // x >= lo) so the result is empty, not silently wrong. Honest null.
+            wc_push(d, grp, left_id, 1, lo_id, 0);
+            wc_push(d, grp, left_id, 4, lo_id, 0);
+        } else {
+            wc_push(d, grp, left_id, 4, lo_id, 0);
+            wc_push(d, grp, left_id, 3, hi_id, 0);
+        }
         return;
     }
 
-    // Check for IS NULL / IS NOT NULL
+    // IS NULL / IS NOT NULL
     if tk_is_kw(d, "IS") == 1 {
         next_token(d);
         if tk_is_kw(d, "NOT") == 1 {
             next_token(d);
             expect_kw(d, "NULL");
-            if which == 1 {
-                d.w_left = left_id;
-                d.w_op = 9;
-                d.w_right = -1;
-            } else {
-                d.w_left2 = left_id;
-                d.w_op2 = 9;
-                d.w_right2 = -1;
-            }
+            wc_push(d, grp, left_id, 9, -1, neg);
         } else {
             expect_kw(d, "NULL");
-            if which == 1 {
-                d.w_left = left_id;
-                d.w_op = 8;
-                d.w_right = -1;
-            } else {
-                d.w_left2 = left_id;
-                d.w_op2 = 8;
-                d.w_right2 = -1;
-            }
+            wc_push(d, grp, left_id, 8, -1, neg);
         }
         return;
     }
@@ -1793,22 +1787,14 @@ fn parse_where_cond(d: &mut DB, which: i32) ~ Console + Process {
     let op_code = op_encode(op);
     next_token(d);
 
-    // Check for scalar subquery: (SELECT ...)
+    // Scalar subquery: op (SELECT ...)
     if tk_is_punct(d, "(") == 1 {
         next_token(d);
         if tk_is_kw(d, "SELECT") == 1 {
             let sub_result = parse_and_exec_subquery(d);
             let rid = sp_add(d, sub_result);
             expect_punct(d, ")");
-            if which == 1 {
-                d.w_left = left_id;
-                d.w_op = op_code;
-                d.w_right = rid;
-            } else {
-                d.w_left2 = left_id;
-                d.w_op2 = op_code;
-                d.w_right2 = rid;
-            }
+            wc_push(d, grp, left_id, op_code, rid, neg);
             return;
         }
     }
@@ -1817,30 +1803,30 @@ fn parse_where_cond(d: &mut DB, which: i32) ~ Console + Process {
     let rval = d.tk_val;
     let rid = sp_add(d, rval);
     next_token(d);
-    if which == 1 {
-        d.w_left = left_id;
-        d.w_op = op_code;
-        d.w_right = rid;
-    } else {
-        d.w_left2 = left_id;
-        d.w_op2 = op_code;
-        d.w_right2 = rid;
-    }
+    wc_push(d, grp, left_id, op_code, rid, neg);
 }
 
+// Parse the full WHERE clause as DNF (OR of AND-groups). AND keeps the current
+// group index; OR opens a new one. AND binds tighter than OR, the correct SQL
+// precedence for any number of unparenthesized conditions. Parenthesized
+// grouping is not parsed (honest limitation).
 fn parse_where(d: &mut DB) ~ Console + Process {
     next_token(d);
     d.has_where = 1;
-    parse_where_cond(d, 1);
-    // Check for AND / OR
-    if tk_is_kw(d, "AND") == 1 {
-        d.w_logic = 1;
-        next_token(d);
-        parse_where_cond(d, 2);
-    } else if tk_is_kw(d, "OR") == 1 {
-        d.w_logic = 2;
-        next_token(d);
-        parse_where_cond(d, 2);
+    let mut grp = 0;
+    parse_where_cond(d, grp);
+    let mut go = true;
+    while go {
+        if tk_is_kw(d, "AND") == 1 {
+            next_token(d);
+            parse_where_cond(d, grp);
+        } else if tk_is_kw(d, "OR") == 1 {
+            grp = grp + 1;
+            next_token(d);
+            parse_where_cond(d, grp);
+        } else {
+            go = false;
+        }
     }
 }
 
@@ -1926,13 +1912,15 @@ fn parse_and_exec_subquery(d: &mut DB) -> String ~ Console + Process {
     let save_p_vals = d.p_vals;
     let save_p_val_count = d.p_val_count;
     let save_has_where = d.has_where;
-    let save_w_left = d.w_left;
-    let save_w_op = d.w_op;
-    let save_w_right = d.w_right;
-    let save_w_logic = d.w_logic;
-    let save_w_left2 = d.w_left2;
-    let save_w_op2 = d.w_op2;
-    let save_w_right2 = d.w_right2;
+    let save_wc_count = d.wc_count;
+    let save_wc_left = d.wc_left;
+    let save_wc_op = d.wc_op;
+    let save_wc_right = d.wc_right;
+    let save_wc_neg = d.wc_neg;
+    let save_wc_group = d.wc_group;
+    let save_wc_in_start = d.wc_in_start;
+    let save_wc_in_len = d.wc_in_len;
+    let save_wc_in_pool = d.wc_in_pool;
     let save_has_order = d.has_order;
     let save_order_col = d.order_col;
     let save_order_desc = d.order_desc;
@@ -1981,13 +1969,15 @@ fn parse_and_exec_subquery(d: &mut DB) -> String ~ Console + Process {
     d.p_vals = save_p_vals;
     d.p_val_count = save_p_val_count;
     d.has_where = save_has_where;
-    d.w_left = save_w_left;
-    d.w_op = save_w_op;
-    d.w_right = save_w_right;
-    d.w_logic = save_w_logic;
-    d.w_left2 = save_w_left2;
-    d.w_op2 = save_w_op2;
-    d.w_right2 = save_w_right2;
+    d.wc_count = save_wc_count;
+    d.wc_left = save_wc_left;
+    d.wc_op = save_wc_op;
+    d.wc_right = save_wc_right;
+    d.wc_neg = save_wc_neg;
+    d.wc_group = save_wc_group;
+    d.wc_in_start = save_wc_in_start;
+    d.wc_in_len = save_wc_in_len;
+    d.wc_in_pool = save_wc_in_pool;
     d.has_order = save_has_order;
     d.order_col = save_order_col;
     d.order_desc = save_order_desc;
@@ -2381,49 +2371,80 @@ fn resolve_col(d: &DB, cs: i32, cc: i32, tname: String, alias: i32, ref_str: Str
     find_col(d, cs, cc, ref_str)
 }
 
-// Evaluate compound WHERE for a single-table row
-// Evaluate the full WHERE clause (up to two conditions joined by AND/OR).
-// If has_where==0, returns true (no filter). Otherwise evaluates condition 1,
-// then condition 2 if w_logic is set (1=AND, 2=OR). Handles special ops:
-// IN (op 7) via eval_in, IS NULL (op 8), IS NOT NULL (op 9), BETWEEN (op 10).
+// True if cell_val is in condition ci's IN-list (its slice of wc_in_pool).
+fn eval_in_pool(d: &DB, cell_val: String, start: i32, len: i32) -> bool {
+    let mut i = 0;
+    while i < len {
+        let v = sp_get(d, vec_get(d.wc_in_pool, start + i));
+        if cell_val == v { return true; }
+        i = i + 1;
+    }
+    false
+}
+
+// Evaluate condition ci's operator against an already-resolved cell value.
+// op 7 = IN (against the condition's wc_in_pool slice); all other ops go
+// through eval_where. Negation is applied by the caller.
+fn eval_cond_val(d: &DB, ci: i32, op: i32, cv: String) -> bool {
+    if op == 7 {
+        return eval_in_pool(d, cv, vec_get(d.wc_in_start, ci), vec_get(d.wc_in_len, ci));
+    }
+    let wr = sp_get(d, vec_get(d.wc_right, ci));
+    eval_where(cv, op, wr)
+}
+
+// Evaluate DNF condition ci for a single-table row, applying its negate flag.
+fn eval_cond_row(d: &DB, ci: i32, cs: i32, cc: i32, rs: i32, row: i32,
+                 tname: String, alias: i32) -> bool {
+    let wl = sp_get(d, vec_get(d.wc_left, ci));
+    let wcol = resolve_col(d, cs, cc, tname, alias, wl);
+    let op = vec_get(d.wc_op, ci);
+    let mut res = false;
+    if wcol >= 0 {
+        let cv = sp_get(d, vec_get(d.cells, rs + row * cc + wcol));
+        res = eval_cond_val(d, ci, op, cv);
+    } else {
+        // Column not found — for IS NULL on missing cols, treat as NULL.
+        if op == 8 { res = true; }
+    }
+    if vec_get(d.wc_neg, ci) == 1 { res = !res; }
+    res
+}
+
+// Evaluate the full WHERE clause for a single-table row as DNF: OR over
+// groups, AND within a group. A row matches if any group has all its
+// conditions true. has_where==0 or an empty condition list means no filter.
 fn eval_compound_where(d: &DB, cs: i32, cc: i32, rs: i32, row: i32,
                        tname: String, alias: i32) -> bool {
     if d.has_where == 0 { return true; }
-    let wl = sp_get(d, d.w_left);
-    let wc1 = resolve_col(d, cs, cc, tname, alias, wl);
-    let mut pass1 = false;
-    if wc1 >= 0 {
-        let cv1 = sp_get(d, vec_get(d.cells, rs + row * cc + wc1));
-        if d.w_op == 7 {
-            // IN operator
-            pass1 = eval_in(d, cv1, d.w_in_vals1, d.w_in_count1);
-        } else {
-            let wr = sp_get(d, d.w_right);
-            pass1 = eval_where(cv1, d.w_op, wr);
-        }
-    } else {
-        // Column not found — for IS NULL on missing cols, treat as NULL
-        if d.w_op == 8 { pass1 = true; }
+    if d.wc_count == 0 { return true; }
+    let mut maxg = 0;
+    let mut gi = 0;
+    while gi < d.wc_count {
+        let g = vec_get(d.wc_group, gi);
+        if g > maxg { maxg = g; }
+        gi = gi + 1;
     }
-    if d.w_logic == 0 { return pass1; }
-    // Second condition
-    let wl2 = sp_get(d, d.w_left2);
-    let wc2 = resolve_col(d, cs, cc, tname, alias, wl2);
-    let mut pass2 = false;
-    if wc2 >= 0 {
-        let cv2 = sp_get(d, vec_get(d.cells, rs + row * cc + wc2));
-        if d.w_op2 == 7 {
-            pass2 = eval_in(d, cv2, d.w_in_vals2, d.w_in_count2);
-        } else {
-            let wr2 = sp_get(d, d.w_right2);
-            pass2 = eval_where(cv2, d.w_op2, wr2);
+    let mut grp = 0;
+    while grp <= maxg {
+        let mut any_in_group = false;
+        let mut all_true = true;
+        let mut ci = 0;
+        while ci < d.wc_count {
+            if vec_get(d.wc_group, ci) == grp {
+                any_in_group = true;
+                if eval_cond_row(d, ci, cs, cc, rs, row, tname, alias) == false {
+                    all_true = false;
+                }
+            }
+            ci = ci + 1;
         }
-    } else {
-        if d.w_op2 == 8 { pass2 = true; }
+        if any_in_group {
+            if all_true { return true; }
+        }
+        grp = grp + 1;
     }
-    if d.w_logic == 1 { return pass1 && pass2; }
-    if d.w_logic == 2 { return pass1 || pass2; }
-    pass1
+    false
 }
 
 fn check_has_agg(d: &DB) -> i32 {
@@ -2440,7 +2461,7 @@ fn check_has_agg(d: &DB) -> i32 {
 // Execute a SELECT query. This is the main SELECT dispatcher.
 //
 // Reads parsed state: d.p_table, d.select_star, d.p_cols, d.p_agg_funcs,
-//   d.has_where, d.w_* (filter conditions), d.has_order / d.order_col /
+//   d.has_where, d.wc_* (DNF filter conditions), d.has_order / d.order_col /
 //   d.order_desc, d.has_limit / d.limit_val, d.has_distinct
 //
 // Flow:
@@ -2513,19 +2534,29 @@ fn exec_select(d: &mut DB) ~ Console {
     let mut match_rows: Vec<i32> = vec![];
     let mut match_count = 0;
 
-    // Try index lookup for simple WHERE on indexed column
+    // Try index lookup for a single simple WHERE comparison on an indexed
+    // column: exactly one condition, not negated, a comparison op (0..5 —
+    // index_scan does equality by binary search and 1..5 by sorted range).
+    // LIKE / IN / IS NULL and any multi-condition WHERE fall to the full scan.
     let mut used_index = false;
     if d.has_where == 1 {
-        if d.w_logic == 0 {
-            let wl = sp_get(d, d.w_left);
-            let wcol = resolve_col(d, cs, cc, tname, d.alias1, wl);
-            if wcol >= 0 {
-                let ix_id = find_index_for(d, tidx, wcol);
-                if ix_id >= 0 {
-                    let wr = sp_get(d, d.w_right);
-                    match_rows = index_scan(d, ix_id, d.w_op, wr);
-                    match_count = vec_len(match_rows);
-                    used_index = true;
+        if d.wc_count == 1 {
+            if vec_get(d.wc_neg, 0) == 0 {
+                let op0 = vec_get(d.wc_op, 0);
+                if op0 >= 0 {
+                    if op0 <= 5 {
+                        let wl = sp_get(d, vec_get(d.wc_left, 0));
+                        let wcol = resolve_col(d, cs, cc, tname, d.alias1, wl);
+                        if wcol >= 0 {
+                            let ix_id = find_index_for(d, tidx, wcol);
+                            if ix_id >= 0 {
+                                let wr = sp_get(d, vec_get(d.wc_right, 0));
+                                match_rows = index_scan(d, ix_id, op0, wr);
+                                match_count = vec_len(match_rows);
+                                used_index = true;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -3446,41 +3477,65 @@ fn exec_select_join(d: &mut DB) ~ Console {
     }
 }
 
-// Evaluate WHERE for a JOIN row (needs to check both tables)
+// Evaluate DNF condition ci for a JOIN row: resolve its column in either
+// table, evaluate the operator, then apply the negate flag.
+fn eval_cond_join(d: &DB, ci: i32, cs1: i32, cc1: i32, rs1: i32, r1: i32,
+                  tname1: String, alias1: i32,
+                  cs2: i32, cc2: i32, rs2: i32, r2: i32,
+                  tname2: String, alias2: i32) -> bool {
+    let wl = sp_get(d, vec_get(d.wc_left, ci));
+    let op = vec_get(d.wc_op, ci);
+    let c1 = resolve_col(d, cs1, cc1, tname1, alias1, wl);
+    let c2 = resolve_col(d, cs2, cc2, tname2, alias2, wl);
+    let mut res = false;
+    if c1 >= 0 {
+        let cv = sp_get(d, vec_get(d.cells, rs1 + r1 * cc1 + c1));
+        res = eval_cond_val(d, ci, op, cv);
+    } else if c2 >= 0 {
+        let cv = sp_get(d, vec_get(d.cells, rs2 + r2 * cc2 + c2));
+        res = eval_cond_val(d, ci, op, cv);
+    } else {
+        if op == 8 { res = true; }
+    }
+    if vec_get(d.wc_neg, ci) == 1 { res = !res; }
+    res
+}
+
+// Evaluate WHERE for a JOIN row (checks both tables) as DNF: OR over groups,
+// AND within a group.
 fn eval_join_where(d: &DB, cs1: i32, cc1: i32, rs1: i32, r1: i32,
                    tname1: String, alias1: i32,
                    cs2: i32, cc2: i32, rs2: i32, r2: i32,
                    tname2: String, alias2: i32) -> bool {
     if d.has_where == 0 { return true; }
-    let wl = sp_get(d, d.w_left);
-    let wr = sp_get(d, d.w_right);
-    // Try to find the WHERE column in either table
-    let wc1 = resolve_col(d, cs1, cc1, tname1, alias1, wl);
-    let wc2 = resolve_col(d, cs2, cc2, tname2, alias2, wl);
-    let mut pass1 = false;
-    if wc1 >= 0 {
-        let cv = sp_get(d, vec_get(d.cells, rs1 + r1 * cc1 + wc1));
-        pass1 = eval_where(cv, d.w_op, wr);
-    } else if wc2 >= 0 {
-        let cv = sp_get(d, vec_get(d.cells, rs2 + r2 * cc2 + wc2));
-        pass1 = eval_where(cv, d.w_op, wr);
+    if d.wc_count == 0 { return true; }
+    let mut maxg = 0;
+    let mut gi = 0;
+    while gi < d.wc_count {
+        let g = vec_get(d.wc_group, gi);
+        if g > maxg { maxg = g; }
+        gi = gi + 1;
     }
-    if d.w_logic == 0 { return pass1; }
-    let wl2 = sp_get(d, d.w_left2);
-    let wr2 = sp_get(d, d.w_right2);
-    let wc1b = resolve_col(d, cs1, cc1, tname1, alias1, wl2);
-    let wc2b = resolve_col(d, cs2, cc2, tname2, alias2, wl2);
-    let mut pass2 = false;
-    if wc1b >= 0 {
-        let cv = sp_get(d, vec_get(d.cells, rs1 + r1 * cc1 + wc1b));
-        pass2 = eval_where(cv, d.w_op2, wr2);
-    } else if wc2b >= 0 {
-        let cv = sp_get(d, vec_get(d.cells, rs2 + r2 * cc2 + wc2b));
-        pass2 = eval_where(cv, d.w_op2, wr2);
+    let mut grp = 0;
+    while grp <= maxg {
+        let mut any_in_group = false;
+        let mut all_true = true;
+        let mut ci = 0;
+        while ci < d.wc_count {
+            if vec_get(d.wc_group, ci) == grp {
+                any_in_group = true;
+                if eval_cond_join(d, ci, cs1, cc1, rs1, r1, tname1, alias1, cs2, cc2, rs2, r2, tname2, alias2) == false {
+                    all_true = false;
+                }
+            }
+            ci = ci + 1;
+        }
+        if any_in_group {
+            if all_true { return true; }
+        }
+        grp = grp + 1;
     }
-    if d.w_logic == 1 { return pass1 && pass2; }
-    if d.w_logic == 2 { return pass1 || pass2; }
-    pass1
+    false
 }
 
 // Execute UPDATE. Scans all cells for the target table, replacing the
@@ -3820,9 +3875,9 @@ fn exec_alter_table(d: &mut DB) ~ Console {
 //
 // WHERE evaluation:
 //   eval_where()          — evaluate a single comparison (op codes 0-9)
-//   eval_compound_where() — evaluate compound WHERE (AND/OR of two conditions)
+//   eval_compound_where() — evaluate the DNF WHERE (OR of AND-groups) for a row
 //   eval_like()           — LIKE pattern matching (%, starts_with/ends_with/contains)
-//   eval_in()             — IN (value list) membership test
+//   eval_in_pool()        — IN membership test against a condition's pool slice
 //
 // Sorting:
 //   sort_rows()           — selection sort on row indices by column value
@@ -3942,17 +3997,6 @@ fn eval_like(cell_val: String, pattern: String) -> bool {
         } else { tgo = false; }
     }
     pi == plen
-}
-
-// Evaluate IN operator: check if cell value matches any value in the list
-fn eval_in(d: &DB, cell_val: String, in_vals: Vec<i32>, in_count: i32) -> bool {
-    let mut i = 0;
-    while i < in_count {
-        let v = sp_get(d, vec_get(in_vals, i));
-        if cell_val == v { return true; }
-        i = i + 1;
-    }
-    false
 }
 
 fn is_numeric_str(s: String) -> bool {
