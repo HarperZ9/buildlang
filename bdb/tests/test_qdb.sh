@@ -96,6 +96,29 @@ chksel "limit"         "SELECT name FROM emp ORDER BY id LIMIT 2" "$(printf 'ali
 chksel "limit_offset"  "SELECT name FROM emp ORDER BY id LIMIT 2 OFFSET 1" "$(printf 'bob\ncarol')"
 chksel "distinct"      "SELECT DISTINCT dept FROM emp ORDER BY dept" "$(printf 'eng\nhr\nsales')"
 
+echo "== numeric type aliases sort numerically (not lexicographic) =="
+# A column declared with a SQL integer/real ALIAS (INT, BIGINT, FLOAT, ...) must
+# order and right-justify as a number, exactly like INTEGER/REAL. The regression:
+# only "INTEGER"/"REAL" were recognized, so an INT column sorted lexicographically
+# -- "90" > "120" as text -- a silent wrong answer on ORDER BY. Uses dedicated
+# tables so emp (declared INTEGER) stays pristine for the aggregate section.
+$QDB "$DB" "CREATE TABLE tal_i (v INT)" >/dev/null
+$QDB "$DB" "INSERT INTO tal_i VALUES (100),(90),(80),(120),(70)" >/dev/null
+# Lexicographic DESC would give 90,80,70,120,100; numeric DESC is 120,100,90,80,70.
+chksel "alias_int_order_desc"  "SELECT v FROM tal_i ORDER BY v DESC" "$(printf '120\n100\n90\n80\n70')"
+chksel "alias_int_order_asc"   "SELECT v FROM tal_i ORDER BY v"      "$(printf '70\n80\n90\n100\n120')"
+$QDB "$DB" "DROP TABLE tal_i" >/dev/null 2>&1
+$QDB "$DB" "CREATE TABLE tal_b (v BIGINT)" >/dev/null
+$QDB "$DB" "INSERT INTO tal_b VALUES (5),(100),(20)" >/dev/null
+# Lexicographic ASC would give 100,20,5; numeric ASC is 5,20,100.
+chksel "alias_bigint_order_asc" "SELECT v FROM tal_b ORDER BY v" "$(printf '5\n20\n100')"
+$QDB "$DB" "DROP TABLE tal_b" >/dev/null 2>&1
+$QDB "$DB" "CREATE TABLE tal_f (x FLOAT)" >/dev/null
+$QDB "$DB" "INSERT INTO tal_f VALUES (2.5),(10.1),(1.9)" >/dev/null
+# Lexicographic DESC would give 2.5,10.1,1.9; numeric DESC is 10.1,2.5,1.9.
+chksel "alias_float_order_desc" "SELECT x FROM tal_f ORDER BY x DESC" "$(printf '10.1\n2.5\n1.9')"
+$QDB "$DB" "DROP TABLE tal_f" >/dev/null 2>&1
+
 echo "== aggregates / GROUP BY / HAVING =="
 chksel "count_star"    "SELECT COUNT(*) FROM emp" "5"
 chksel "sum"           "SELECT SUM(salary) FROM emp" "460"

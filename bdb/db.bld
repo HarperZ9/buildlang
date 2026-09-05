@@ -536,7 +536,7 @@ fn db_load(d: &mut DB) ~ FileSystem {
                                 let ctype_up = ctype_str.to_uppercase();
                                 let cnid = sp_add(d, cname);
                                 vec_push(d.col_names, cnid);
-                                let ct = if ctype_up == "INTEGER" { 0 } else if ctype_up == "REAL" { 1 } else { 2 };
+                                let ct = type_code_for(ctype_up);
                                 vec_push(d.col_types, ct);
                                 col_c = col_c + 1;
                             }
@@ -2454,7 +2454,7 @@ fn exec_create(d: &mut DB) ~ Console {
         vec_push(d.col_names, cnid);
         let type_str = sp_get(d, vec_get(d.p_types, i));
         let type_up = type_str.to_uppercase();
-        let ct = if type_up == "INTEGER" { 0 } else if type_up == "REAL" { 1 } else { 2 };
+        let ct = type_code_for(type_up);
         vec_push(d.col_types, ct);
         i = i + 1;
     }
@@ -4782,7 +4782,7 @@ fn exec_alter_table(d: &mut DB) ~ Console {
     let new_col_name = sp_get(d, d.alter_col_name);
     let new_col_type_str = sp_get(d, d.alter_col_type);
     let type_up = new_col_type_str.to_uppercase();
-    let ct = if type_up == "INTEGER" { 0 } else if type_up == "REAL" { 1 } else { 2 };
+    let ct = type_code_for(type_up);
 
     let cs = vec_get(d.tbl_col_starts, tidx);
     let old_cc = vec_get(d.tbl_col_counts, tidx);
@@ -5041,6 +5041,28 @@ fn is_int_str(s: String) -> bool {
     if is_numeric_str(s) == false { return false; }
     if s.index_of(".") >= 0 { return false; }
     true
+}
+
+// Map a declared column type name to its internal storage code:
+//   0 = INTEGER, 1 = REAL, 2 = TEXT.
+// Recognizes the common SQL aliases (INT, BIGINT, FLOAT, DOUBLE, ...) so an INT
+// column sorts and right-justifies as a number instead of comparing
+// lexicographically as text. `type_up` must already be uppercased; anything
+// unrecognized is TEXT. Numeric codes 0 and 1 both drive numeric comparison in
+// compare_vals, so an alias mapped to either sorts correctly.
+fn type_code_for(type_up: String) -> i32 {
+    if type_up == "INTEGER" { return 0; }
+    if type_up == "INT" { return 0; }
+    if type_up == "SMALLINT" { return 0; }
+    if type_up == "BIGINT" { return 0; }
+    if type_up == "TINYINT" { return 0; }
+    if type_up == "MEDIUMINT" { return 0; }
+    if type_up == "REAL" { return 1; }
+    if type_up == "FLOAT" { return 1; }
+    if type_up == "DOUBLE" { return 1; }
+    if type_up == "NUMERIC" { return 1; }
+    if type_up == "DECIMAL" { return 1; }
+    return 2;
 }
 
 // Order two rows by the primary key, breaking ties on the secondary key
