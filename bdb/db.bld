@@ -2290,10 +2290,13 @@ fn parse_order_by(d: &mut DB) ~ Console + Process {
         expect_punct(d, ")");
         d.order_agg_func = ag;
     } else {
-        let cname = d.tk_val;
+        // read_col_ref captures a dotted "table.col" ref whole; a bare column
+        // reads as just the name. Taking only tk_val here dropped the ".col"
+        // half of a qualified key (e.g. ORDER BY emp.name kept "emp"), which
+        // the join sort needs to resolve the column.
+        let cname = read_col_ref(d);
         d.order_col = sp_add(d, cname);
         d.order_agg_func = 0;
-        next_token(d);
     }
     if tk_is_kw(d, "DESC") == 1 { d.order_desc = 1; next_token(d); }
     else if tk_is_kw(d, "ASC") == 1 { d.order_desc = 0; next_token(d); }
@@ -2301,9 +2304,8 @@ fn parse_order_by(d: &mut DB) ~ Console + Process {
     // primary key. A third comma-key is not stored (honest limitation).
     if tk_is_punct(d, ",") == 1 {
         next_token(d);
-        let cname2 = d.tk_val;
+        let cname2 = read_col_ref(d);
         d.order_col2 = sp_add(d, cname2);
-        next_token(d);
         if tk_is_kw(d, "DESC") == 1 { d.order_desc2 = 1; next_token(d); }
         else if tk_is_kw(d, "ASC") == 1 { d.order_desc2 = 0; next_token(d); }
     }
@@ -3638,6 +3640,11 @@ fn exec_select_join(d: &mut DB) ~ Console {
     // Nested loop join: collect matching result rows as pool-id strings
     // Store flattened: result_vals[row * sel_count + col] = pool id
     let mut result_vals: Vec<i32> = vec![];
+    // Source row indices per emitted result row, kept parallel to result_vals so
+    // ORDER BY can reorder rows after assembly. src_r2 = -1 marks a LEFT JOIN
+    // null-extended row (the right side is NULL for that row).
+    let mut src_r1: Vec<i32> = vec![];
+    let mut src_r2: Vec<i32> = vec![];
     let mut result_count = 0;
 
     let mut r1 = 0;
@@ -3674,6 +3681,8 @@ fn exec_select_join(d: &mut DB) ~ Console {
                         si = si + 1;
                     }
                     result_count = result_count + 1;
+                    vec_push(src_r1, r1);
+                    vec_push(src_r2, r2);
                 }
             }
             r2 = r2 + 1;
@@ -3703,10 +3712,147 @@ fn exec_select_join(d: &mut DB) ~ Console {
                         si2 = si2 + 1;
                     }
                     result_count = result_count + 1;
+                    vec_push(src_r1, r1);
+                    vec_push(src_r2, 0 - 1);
                 }
             }
         }
         r1 = r1 + 1;
+    }
+
+    // ORDER BY: the nested loop emits rows in left-table scan order, so apply
+    // the sort here (single-table SELECT sorts in exec_select; joins reach this
+    // path instead). The key resolves against either joined table; a key on the
+    // right side of a null-extended LEFT JOIN row sorts as NULL (empty string).
+    // If the key names no known column the rows are left in scan order, matching
+    // the single-table path, which also skips an unresolvable key.
+    if d.has_order == 1 {
+        let oname = sp_get(d, d.order_col);
+        let mut k1_tab = 0;
+        let mut k1_col = 0 - 1;
+        let mut k1_type = 2;
+        let rc_a = resolve_col(d, cs1, cc1, tname1, d.alias1, oname);
+        if rc_a >= 0 {
+            k1_tab = 1;
+            k1_col = rc_a;
+            k1_type = vec_get(d.col_types, cs1 + rc_a);
+        } else {
+            let rc_b = resolve_col(d, cs2, cc2, tname2, d.alias2, oname);
+            if rc_b >= 0 {
+                k1_tab = 2;
+                k1_col = rc_b;
+                k1_type = vec_get(d.col_types, cs2 + rc_b);
+            }
+        }
+        let mut k2_tab = 0;
+        let mut k2_col = 0 - 1;
+        let mut k2_type = 2;
+        if d.order_col2 >= 0 {
+            let oname2 = sp_get(d, d.order_col2);
+            let rc2a = resolve_col(d, cs1, cc1, tname1, d.alias1, oname2);
+            if rc2a >= 0 {
+                k2_tab = 1;
+                k2_col = rc2a;
+                k2_type = vec_get(d.col_types, cs1 + rc2a);
+            } else {
+                let rc2b = resolve_col(d, cs2, cc2, tname2, d.alias2, oname2);
+                if rc2b >= 0 {
+                    k2_tab = 2;
+                    k2_col = rc2b;
+                    k2_type = vec_get(d.col_types, cs2 + rc2b);
+                }
+            }
+        }
+        if k1_tab > 0 {
+            // Materialize each result row's key strings from its source rows.
+            let mut k1_vals: Vec<i32> = vec![];
+            let mut k2_vals: Vec<i32> = vec![];
+            let mut kr = 0;
+            while kr < result_count {
+                let rr1 = vec_get(src_r1, kr);
+                let rr2 = vec_get(src_r2, kr);
+                let v1 = if k1_tab == 1 {
+                    sp_get(d, vec_get(d.cells, rs1 + rr1 * cc1 + k1_col))
+                } else {
+                    if rr2 < 0 { "" } else { sp_get(d, vec_get(d.cells, rs2 + rr2 * cc2 + k1_col)) }
+                };
+                vec_push(k1_vals, sp_add(d, v1));
+                let v2 = if k2_tab == 1 {
+                    sp_get(d, vec_get(d.cells, rs1 + rr1 * cc1 + k2_col))
+                } else {
+                    if k2_tab == 2 {
+                        if rr2 < 0 { "" } else { sp_get(d, vec_get(d.cells, rs2 + rr2 * cc2 + k2_col)) }
+                    } else {
+                        ""
+                    }
+                };
+                vec_push(k2_vals, sp_add(d, v2));
+                kr = kr + 1;
+            }
+            // Stable selection sort of a row permutation by (k1, k2): only a
+            // strict `<` displaces the current best, and j scans low-to-high, so
+            // equal rows keep their original emission order.
+            let mut used: Vec<i32> = vec![];
+            let mut ui = 0;
+            while ui < result_count { vec_push(used, 0); ui = ui + 1; }
+            let mut perm: Vec<i32> = vec![];
+            let mut picked = 0;
+            while picked < result_count {
+                let mut best = 0 - 1;
+                let mut j = 0;
+                while j < result_count {
+                    if vec_get(used, j) == 0 {
+                        if best < 0 {
+                            best = j;
+                        } else {
+                            let va = sp_get(d, vec_get(k1_vals, j));
+                            let vb = sp_get(d, vec_get(k1_vals, best));
+                            let mut c = compare_vals(va, vb, k1_type);
+                            if d.order_desc == 1 { c = 0 - c; }
+                            let mut lt = false;
+                            if c < 0 {
+                                lt = true;
+                            } else if c > 0 {
+                                lt = false;
+                            } else {
+                                if k2_tab > 0 {
+                                    let sa = sp_get(d, vec_get(k2_vals, j));
+                                    let sb = sp_get(d, vec_get(k2_vals, best));
+                                    let mut c2 = compare_vals(sa, sb, k2_type);
+                                    if d.order_desc2 == 1 { c2 = 0 - c2; }
+                                    if c2 < 0 { lt = true; }
+                                }
+                            }
+                            if lt { best = j; }
+                        }
+                    }
+                    j = j + 1;
+                }
+                let mut new_used: Vec<i32> = vec![];
+                let mut k = 0;
+                while k < result_count {
+                    if k == best { vec_push(new_used, 1); }
+                    else { vec_push(new_used, vec_get(used, k)); }
+                    k = k + 1;
+                }
+                used = new_used;
+                vec_push(perm, best);
+                picked = picked + 1;
+            }
+            // Rebuild result_vals row-blocks in the sorted order.
+            let mut sorted_vals: Vec<i32> = vec![];
+            let mut pp = 0;
+            while pp < result_count {
+                let srcrow = vec_get(perm, pp);
+                let mut cc_i = 0;
+                while cc_i < sel_count {
+                    vec_push(sorted_vals, vec_get(result_vals, srcrow * sel_count + cc_i));
+                    cc_i = cc_i + 1;
+                }
+                pp = pp + 1;
+            }
+            result_vals = sorted_vals;
+        }
     }
 
     // Calculate widths

@@ -155,8 +155,9 @@ chksel "join"          "SELECT emp.name FROM emp JOIN dep ON emp.dept = dep.dnam
 echo "== LEFT [OUTER] JOIN (null-extend unmatched left rows) =="
 # Dedicated pair: la carries three tags, lb covers only x and z, so the 'y' row
 # has no match. INNER drops it; LEFT keeps it with a NULL (blank) right column.
-# The join executor emits rows in left-table scan order and does not honor ORDER
-# BY (see the join_order XFAIL), so la is inserted 1,2,3 to fix output order.
+# These assertions select without ORDER BY, so rows render in left-table scan
+# order; la is inserted 1,2,3 so that order is already sorted. ORDER BY inside a
+# join is covered in the "ORDER BY inside JOIN" section below.
 $QDB "$DB" "CREATE TABLE la (id INTEGER, tag TEXT)" >/dev/null
 $QDB "$DB" "INSERT INTO la VALUES (1,'x'),(2,'y'),(3,'z')" >/dev/null
 $QDB "$DB" "CREATE TABLE lb (tag TEXT, note TEXT)" >/dev/null
@@ -179,6 +180,29 @@ chk "cross_join_closed" "$($QDB "$DB" "SELECT la.id FROM la CROSS JOIN lb ON la.
 $QDB "$DB" "DROP TABLE la" >/dev/null 2>&1
 $QDB "$DB" "DROP TABLE lb" >/dev/null 2>&1
 
+echo "== ORDER BY inside JOIN =="
+# The join executor emits in left-table scan order, then applies ORDER BY. la_o is
+# inserted out of order (3,1,2) and carries an unmatched 'z' row for the LEFT-JOIN
+# null-ordering case; lb_o carries a weight column w so a key can resolve against
+# the RIGHT table too. The sort is stable, so ties keep scan order.
+$QDB "$DB" "CREATE TABLE la_o (id INTEGER, tag TEXT)" >/dev/null
+$QDB "$DB" "INSERT INTO la_o VALUES (3,'x'),(1,'y'),(2,'x'),(4,'z')" >/dev/null
+$QDB "$DB" "CREATE TABLE lb_o (tag TEXT, w INTEGER)" >/dev/null
+$QDB "$DB" "INSERT INTO lb_o VALUES ('x',20),('y',10)" >/dev/null
+# Left-table key, ascending then descending: reorders the scan-order rows.
+chksel "join_order_asc"   "SELECT la_o.id FROM la_o JOIN lb_o ON la_o.tag = lb_o.tag ORDER BY la_o.id" "$(printf '1\n2\n3')"
+chksel "join_order_desc"  "SELECT la_o.id FROM la_o JOIN lb_o ON la_o.tag = lb_o.tag ORDER BY la_o.id DESC" "$(printf '3\n2\n1')"
+# Right-table key: w=10 (id1) sorts before the two w=20 rows, which tie and keep
+# scan order (id3 before id2) -- proves right-side resolution and stability.
+chksel "join_order_rightkey" "SELECT la_o.id FROM la_o JOIN lb_o ON la_o.tag = lb_o.tag ORDER BY lb_o.w" "$(printf '1\n3\n2')"
+# Secondary key breaks the w=20 tie by la_o.id ascending -> 2 before 3.
+chksel "join_order_secondary" "SELECT la_o.id FROM la_o JOIN lb_o ON la_o.tag = lb_o.tag ORDER BY lb_o.w, la_o.id" "$(printf '1\n2\n3')"
+# LEFT JOIN: the unmatched 'z' row null-extends lb_o.w to NULL, which sorts first
+# (NULL-first), then w=10 (id1), then the stable w=20 pair (id3, id2).
+chksel "join_order_leftnull" "SELECT la_o.id FROM la_o LEFT JOIN lb_o ON la_o.tag = lb_o.tag ORDER BY lb_o.w" "$(printf '4\n1\n3\n2')"
+$QDB "$DB" "DROP TABLE la_o" >/dev/null 2>&1
+$QDB "$DB" "DROP TABLE lb_o" >/dev/null 2>&1
+
 echo "== ALTER / DROP =="
 reseed; $QDB "$DB" "ALTER TABLE emp ADD COLUMN active INTEGER" >/dev/null
 chkhdr "alter_add"     "SELECT * FROM emp LIMIT 0" "id | name | dept | salary | age | active"
@@ -187,18 +211,10 @@ chk   "drop"           "$($QDB "$DB" 'SELECT * FROM dep' 2>&1 | tr -d '\r' | gre
 
 echo "== documented honest nulls (XFAIL: divergence is by design) =="
 reseed
-# ORDER BY inside a JOIN is parsed but not applied: the join executor emits rows
-# in left-table scan order regardless of the ORDER BY key. Full SQL would sort,
-# so la_o inserted 3,1,2 should come back 1,2,3; it comes back 3,1,2. Single-table
-# ORDER BY is unaffected (WHERE/aggregate sections) -- this null is join-only.
-$QDB "$DB" "CREATE TABLE la_o (id INTEGER, tag TEXT)" >/dev/null
-$QDB "$DB" "INSERT INTO la_o VALUES (3,'x'),(1,'x'),(2,'x')" >/dev/null
-$QDB "$DB" "CREATE TABLE lb_o (tag TEXT)" >/dev/null
-$QDB "$DB" "INSERT INTO lb_o VALUES ('x')" >/dev/null
-xfail "join_order" "$(rows "SELECT la_o.id FROM la_o JOIN lb_o ON la_o.tag = lb_o.tag ORDER BY la_o.id")" "$(printf '1\n2\n3')"
-$QDB "$DB" "DROP TABLE la_o" >/dev/null 2>&1
-$QDB "$DB" "DROP TABLE lb_o" >/dev/null 2>&1
-reseed
+# join_order is no longer a null: the join executor now applies ORDER BY after
+# assembling result rows (left key asc/desc, right key, secondary key, NULL-first
+# under LEFT JOIN). It moved up to chksel assertions in the "ORDER BY inside JOIN"
+# section.
 # paren_group and not_between are no longer nulls: the WHERE parser now builds a
 # boolean-expression tree (OR<AND<NOT<primary, with '(' opening a subexpression),
 # so parenthesized grouping and NOT BETWEEN evaluate exactly. Both moved up to
