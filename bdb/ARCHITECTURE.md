@@ -2,7 +2,7 @@
 
 ## Overview
 
-`qdb` is a SQL database engine written in ~4,500 lines of BuildLang (103 functions, 1 struct). It implements a substantial subset of SQL including DDL, DML, queries with JOIN/GROUP BY/ORDER BY/HAVING, sorted-array indexes with binary search, and transactions with WAL crash recovery. It persists data via a human-readable text file format and includes an interactive REPL.
+`qdb` is a SQL database engine written in ~4,940 lines of BuildLang (109 functions, 1 struct). It implements a substantial subset of SQL including DDL, DML, queries with JOIN/GROUP BY/ORDER BY/HAVING, sorted-array indexes with binary search, and transactions with WAL crash recovery. It persists data via a human-readable text file format and includes an interactive REPL.
 
 ## Why One File?
 
@@ -13,26 +13,26 @@ BuildLang does not support multi-file compilation or `use` imports between `.bld
 ```
 Section                          Lines         Functions   Purpose
 -------------------------------  -----------   ---------   ----------------------------------
- 0. PRIMITIVES                   ~81-97        6           Character classification (is_ws, is_digit, etc.)
- 1. DATA MODEL                   ~99-325       3           struct DB (139 fields), db_new, string pool
- 2. STORAGE                      ~327-595      2           File save/load (text format)
- 3. WAL                          ~596-940      10          Write-ahead log, snapshots, transactions
- 4. TOKENIZER                    ~953-1185     8           SQL lexical analysis
- 5. PARSER                       ~1186-2113    18          Recursive-descent SQL parsing
- 6. EXECUTOR                     ~2115-3640    26          Query execution engine
+ 0. PRIMITIVES                   ~81-98        6           Character classification (is_ws, is_digit, etc.)
+ 1. DATA MODEL                   ~99-345       3           struct DB (139 fields), db_new, string pool
+ 2. STORAGE                      ~346-614      2           File save/load (text format)
+ 3. WAL                          ~615-971      11          Write-ahead log, snapshots, transactions
+ 4. TOKENIZER                    ~972-1205     8           SQL lexical analysis
+ 5. PARSER                       ~1206-2215    24          Recursive-descent SQL parsing (incl. DNF WHERE)
+ 6. EXECUTOR                     ~2216-4014    26          Query execution engine
     6a. DDL                                    2             CREATE TABLE, DROP TABLE
-    6b. DML                                    3             INSERT, UPDATE, DELETE
+    6b. DML                                    3             INSERT, UPDATE (arithmetic RHS), DELETE
     6c. SELECT (basic)                         1             Single-table with WHERE/ORDER/LIMIT/DISTINCT
     6d. SELECT (aggregates)                    3             COUNT/SUM/AVG/MIN/MAX without GROUP BY
-    6e. SELECT (GROUP BY)                      6             GROUP BY + HAVING
+    6e. SELECT (GROUP BY)                      6             GROUP BY + HAVING + ORDER BY on group column
     6f. SELECT (JOIN)                          2             Nested-loop join
     6g. Subqueries                             2             Scalar subqueries in WHERE
     6h. ALTER TABLE                            1             ADD COLUMN
- 7. HELPERS                      ~3643-4055    17          WHERE eval, LIKE, sorting, formatting, conversions
- 8. INDEX                        ~4056-4326    5           Sorted-array indexes, binary search, CREATE INDEX
- 9. DISPATCH                     ~4327-4389    2           exec_sql / exec_sql_no_wal routing
-10. REPL                         ~4390-4489    3           Interactive shell, dot-commands
-11. MAIN                         ~4490-end     1           Entry point, arg handling
+ 7. HELPERS                      ~4015-4436    18          WHERE eval, LIKE, sorting, formatting, conversions
+ 8. INDEX                        ~4437-4707    5           Sorted-array indexes, binary search, CREATE INDEX
+ 9. DISPATCH                     ~4708-4770    2           exec_sql / exec_sql_no_wal routing
+10. REPL                         ~4771-4871    3           Interactive shell, dot-commands
+11. MAIN                         ~4872-end     1           Entry point, arg handling
 ```
 
 ## Data Model
