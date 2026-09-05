@@ -214,6 +214,8 @@ struct DB {
     group_col: i32,
     // JOIN state
     has_join: i32,
+    // 0 = INNER (default), 1 = LEFT [OUTER]
+    join_type: i32,
     join_table: i32,
     join_left_col: i32,
     join_right_col: i32,
@@ -311,7 +313,7 @@ fn db_new(db_path: String) -> DB {
         select_star: 0,
         p_agg_funcs: vec![], p_agg_cols: vec![], p_agg_count: 0,
         has_group_by: 0, group_col: -1,
-        has_join: 0, join_table: -1, join_left_col: -1, join_right_col: -1,
+        has_join: 0, join_type: 0, join_table: -1, join_left_col: -1, join_right_col: -1,
         alias1: -1, alias2: -1,
         idx_name: -1, idx_table_name: -1, idx_col_name: -1,
         wc_in_start: vec![], wc_in_len: vec![], wc_in_pool: vec![],
@@ -1048,6 +1050,12 @@ fn is_keyword(word: String) -> i32 {
     if u == "INDEX" { return 1; }
     if u == "ON" { return 1; }
     if u == "JOIN" { return 1; }
+    if u == "LEFT" { return 1; }
+    if u == "RIGHT" { return 1; }
+    if u == "INNER" { return 1; }
+    if u == "OUTER" { return 1; }
+    if u == "FULL" { return 1; }
+    if u == "CROSS" { return 1; }
     if u == "GROUP" { return 1; }
     if u == "SUM" { return 1; }
     if u == "AVG" { return 1; }
@@ -1285,6 +1293,7 @@ fn reset_parser(d: &mut DB, input: String) {
     d.has_group_by = 0;
     d.group_col = -1;
     d.has_join = 0;
+    d.join_type = 0;
     d.join_table = -1;
     d.join_left_col = -1;
     d.join_right_col = -1;
@@ -1459,6 +1468,36 @@ fn parse_select(d: &mut DB) ~ Console + Process {
                     }
                 }
             }
+        }
+    }
+
+    // Optional join qualifier before JOIN: LEFT [OUTER] | INNER.
+    // RIGHT/FULL/CROSS are recognized but not yet implemented, so fail closed
+    // with a clear error rather than silently running an inner join.
+    let mut saw_qualifier = false;
+    if tk_is_kw(d, "LEFT") == 1 {
+        d.join_type = 1;
+        saw_qualifier = true;
+        next_token(d);
+        if tk_is_kw(d, "OUTER") == 1 { next_token(d); }
+    } else if tk_is_kw(d, "INNER") == 1 {
+        d.join_type = 0;
+        saw_qualifier = true;
+        next_token(d);
+    } else if tk_is_kw(d, "RIGHT") == 1 {
+        println!("Error: RIGHT JOIN is not supported");
+        process_exit(1);
+    } else if tk_is_kw(d, "FULL") == 1 {
+        println!("Error: FULL JOIN is not supported");
+        process_exit(1);
+    } else if tk_is_kw(d, "CROSS") == 1 {
+        println!("Error: CROSS JOIN is not supported");
+        process_exit(1);
+    }
+    if saw_qualifier {
+        if tk_is_kw(d, "JOIN") == 0 {
+            println!("Error: expected JOIN after join qualifier, got '{}'", d.tk_val);
+            process_exit(1);
         }
     }
 
@@ -3604,10 +3643,15 @@ fn exec_select_join(d: &mut DB) ~ Console {
     let mut r1 = 0;
     while r1 < rc1 {
         let key1 = sp_get(d, vec_get(d.cells, rs1 + r1 * cc1 + jc1));
+        let mut matched = false;
         let mut r2 = 0;
         while r2 < rc2 {
             let key2 = sp_get(d, vec_get(d.cells, rs2 + r2 * cc2 + jc2));
             if key1 == key2 {
+                // ON matched (equi-join key). Record it independently of WHERE so
+                // a LEFT JOIN does not null-extend a left row that matched ON but
+                // was later filtered by WHERE — matching SQL outer-join semantics.
+                matched = true;
                 // Check WHERE if present (evaluate against combined row)
                 let mut passes = true;
                 if d.has_where == 1 {
@@ -3633,6 +3677,34 @@ fn exec_select_join(d: &mut DB) ~ Console {
                 }
             }
             r2 = r2 + 1;
+        }
+        // LEFT JOIN: a left row with no ON-match is emitted once with its
+        // right-table columns as NULL (empty). WHERE still applies, evaluated
+        // with the right columns treated as NULL (r2 = -1).
+        if d.join_type == 1 {
+            if matched == false {
+                let mut lpasses = true;
+                if d.has_where == 1 {
+                    lpasses = eval_join_where(d, cs1, cc1, rs1, r1, tname1, d.alias1,
+                                              cs2, cc2, rs2, 0 - 1, tname2, d.alias2);
+                }
+                if lpasses {
+                    let mut si2 = 0;
+                    while si2 < sel_count {
+                        let st2 = vec_get(sel_table, si2);
+                        let sc2 = vec_get(sel_col, si2);
+                        let val2 = if st2 == 1 {
+                            sp_get(d, vec_get(d.cells, rs1 + r1 * cc1 + sc2))
+                        } else {
+                            ""
+                        };
+                        let vid2 = sp_add(d, val2);
+                        vec_push(result_vals, vid2);
+                        si2 = si2 + 1;
+                    }
+                    result_count = result_count + 1;
+                }
+            }
         }
         r1 = r1 + 1;
     }
@@ -3704,7 +3776,9 @@ fn eval_cond_join(d: &DB, ci: i32, cs1: i32, cc1: i32, rs1: i32, r1: i32,
         let cv = sp_get(d, vec_get(d.cells, rs1 + r1 * cc1 + c1));
         res = eval_cond_val(d, ci, op, cv);
     } else if c2 >= 0 {
-        let cv = sp_get(d, vec_get(d.cells, rs2 + r2 * cc2 + c2));
+        // r2 < 0 marks a LEFT JOIN null-extended row: the right table has no
+        // matching row, so its columns evaluate as NULL (empty string).
+        let cv = if r2 < 0 { "" } else { sp_get(d, vec_get(d.cells, rs2 + r2 * cc2 + c2)) };
         res = eval_cond_val(d, ci, op, cv);
     } else {
         if op == 8 { res = true; }

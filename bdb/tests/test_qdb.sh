@@ -152,6 +152,33 @@ $QDB "$DB" "CREATE TABLE dep (dname TEXT, loc TEXT)" >/dev/null
 $QDB "$DB" "INSERT INTO dep VALUES ('eng','b1'),('sales','b2'),('hr','b3')" >/dev/null
 chksel "join"          "SELECT emp.name FROM emp JOIN dep ON emp.dept = dep.dname WHERE dep.loc='b1' ORDER BY emp.name" "$(printf 'alice\nbob')"
 
+echo "== LEFT [OUTER] JOIN (null-extend unmatched left rows) =="
+# Dedicated pair: la carries three tags, lb covers only x and z, so the 'y' row
+# has no match. INNER drops it; LEFT keeps it with a NULL (blank) right column.
+# The join executor emits rows in left-table scan order and does not honor ORDER
+# BY (see the join_order XFAIL), so la is inserted 1,2,3 to fix output order.
+$QDB "$DB" "CREATE TABLE la (id INTEGER, tag TEXT)" >/dev/null
+$QDB "$DB" "INSERT INTO la VALUES (1,'x'),(2,'y'),(3,'z')" >/dev/null
+$QDB "$DB" "CREATE TABLE lb (tag TEXT, note TEXT)" >/dev/null
+$QDB "$DB" "INSERT INTO lb VALUES ('x','has-x'),('z','has-z')" >/dev/null
+chksel "join_inner_drop"   "SELECT la.id, lb.note FROM la JOIN lb ON la.tag = lb.tag" "$(printf '1  | has-x\n3  | has-z')"
+chksel "left_join_null"    "SELECT la.id, lb.note FROM la LEFT JOIN lb ON la.tag = lb.tag" "$(printf '1  | has-x\n2  |\n3  | has-z')"
+chksel "left_outer_join"   "SELECT la.id, lb.note FROM la LEFT OUTER JOIN lb ON la.tag = lb.tag" "$(printf '1  | has-x\n2  |\n3  | has-z')"
+# WHERE on the null-extended right column: IS NULL selects exactly the unmatched
+# left row; IS NOT NULL and equality keep matched rows only (null excluded).
+chksel "left_join_isnull"  "SELECT la.id FROM la LEFT JOIN lb ON la.tag = lb.tag WHERE lb.note IS NULL" "2"
+chksel "left_join_notnull" "SELECT la.id FROM la LEFT JOIN lb ON la.tag = lb.tag WHERE lb.note IS NOT NULL" "$(printf '1\n3')"
+chksel "left_join_reqeq"   "SELECT la.id FROM la LEFT JOIN lb ON la.tag = lb.tag WHERE lb.note = 'has-x'" "1"
+# WHERE on the preserved (left) column filters left rows, null-extension intact.
+chksel "left_join_leftwh"  "SELECT la.id, lb.note FROM la LEFT JOIN lb ON la.tag = lb.tag WHERE la.id > 1" "$(printf '2  |\n3  | has-z')"
+# RIGHT / FULL / CROSS are recognized but unimplemented: fail closed with a clear
+# error, never a silent inner join.
+chk "right_join_closed" "$($QDB "$DB" "SELECT la.id FROM la RIGHT JOIN lb ON la.tag = lb.tag" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"
+chk "full_join_closed"  "$($QDB "$DB" "SELECT la.id FROM la FULL JOIN lb ON la.tag = lb.tag" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"
+chk "cross_join_closed" "$($QDB "$DB" "SELECT la.id FROM la CROSS JOIN lb ON la.tag = lb.tag" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"
+$QDB "$DB" "DROP TABLE la" >/dev/null 2>&1
+$QDB "$DB" "DROP TABLE lb" >/dev/null 2>&1
+
 echo "== ALTER / DROP =="
 reseed; $QDB "$DB" "ALTER TABLE emp ADD COLUMN active INTEGER" >/dev/null
 chkhdr "alter_add"     "SELECT * FROM emp LIMIT 0" "id | name | dept | salary | age | active"
@@ -159,6 +186,18 @@ $QDB "$DB" "DROP TABLE dep" >/dev/null 2>&1
 chk   "drop"           "$($QDB "$DB" 'SELECT * FROM dep' 2>&1 | tr -d '\r' | grep -ci 'not found')" "1"
 
 echo "== documented honest nulls (XFAIL: divergence is by design) =="
+reseed
+# ORDER BY inside a JOIN is parsed but not applied: the join executor emits rows
+# in left-table scan order regardless of the ORDER BY key. Full SQL would sort,
+# so la_o inserted 3,1,2 should come back 1,2,3; it comes back 3,1,2. Single-table
+# ORDER BY is unaffected (WHERE/aggregate sections) -- this null is join-only.
+$QDB "$DB" "CREATE TABLE la_o (id INTEGER, tag TEXT)" >/dev/null
+$QDB "$DB" "INSERT INTO la_o VALUES (3,'x'),(1,'x'),(2,'x')" >/dev/null
+$QDB "$DB" "CREATE TABLE lb_o (tag TEXT)" >/dev/null
+$QDB "$DB" "INSERT INTO lb_o VALUES ('x')" >/dev/null
+xfail "join_order" "$(rows "SELECT la_o.id FROM la_o JOIN lb_o ON la_o.tag = lb_o.tag ORDER BY la_o.id")" "$(printf '1\n2\n3')"
+$QDB "$DB" "DROP TABLE la_o" >/dev/null 2>&1
+$QDB "$DB" "DROP TABLE lb_o" >/dev/null 2>&1
 reseed
 # paren_group and not_between are no longer nulls: the WHERE parser now builds a
 # boolean-expression tree (OR<AND<NOT<primary, with '(' opening a subexpression),
