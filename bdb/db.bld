@@ -177,6 +177,8 @@ struct DB {
     order_desc: i32,
     has_limit: i32,
     limit_val: i32,
+    has_offset: i32,
+    offset_val: i32,
     set_col: i32,
     set_val: i32,
     select_star: i32,
@@ -273,6 +275,7 @@ fn db_new(db_path: String) -> DB {
         w_logic: 0, w_left2: -1, w_op2: -1, w_right2: -1,
         has_order: 0, order_col: -1, order_desc: 0,
         has_limit: 0, limit_val: 0,
+        has_offset: 0, offset_val: 0,
         set_col: -1, set_val: -1,
         select_star: 0, select_count: 0,
         p_agg_funcs: vec![], p_agg_cols: vec![], p_agg_count: 0,
@@ -999,6 +1002,7 @@ fn is_keyword(word: String) -> i32 {
     if u == "ASC" { return 1; }
     if u == "DESC" { return 1; }
     if u == "LIMIT" { return 1; }
+    if u == "OFFSET" { return 1; }
     if u == "AND" { return 1; }
     if u == "OR" { return 1; }
     if u == "NOT" { return 1; }
@@ -1230,6 +1234,8 @@ fn reset_parser(d: &mut DB, input: String) {
     d.order_desc = 0;
     d.has_limit = 0;
     d.limit_val = 0;
+    d.has_offset = 0;
+    d.offset_val = 0;
     d.set_col = -1;
     d.set_val = -1;
     d.select_star = 0;
@@ -1456,6 +1462,7 @@ fn parse_select(d: &mut DB) ~ Console + Process {
     if tk_is_kw(d, "HAVING") == 1 { parse_having(d); }
     if tk_is_kw(d, "ORDER") == 1 { parse_order_by(d); }
     if tk_is_kw(d, "LIMIT") == 1 { parse_limit(d); }
+    if tk_is_kw(d, "OFFSET") == 1 { parse_offset(d); }
 }
 
 fn parse_insert(d: &mut DB) ~ Console + Process {
@@ -1489,7 +1496,8 @@ fn parse_insert(d: &mut DB) ~ Console + Process {
     expect_punct(d, "(");
     let mut vgo = true;
     while vgo {
-        let vtext = d.tk_val;
+        // Unquoted NULL keyword stores SQL NULL (empty cell); quoted 'NULL' is text.
+        let vtext = if d.tk_type == 0 && d.tk_val == "NULL" { "" } else { d.tk_val };
         let vid = sp_add(d, vtext);
         vec_push(d.p_vals, vid);
         d.p_val_count = d.p_val_count + 1;
@@ -1902,6 +1910,8 @@ fn parse_and_exec_subquery(d: &mut DB) -> String ~ Console + Process {
     let save_order_desc = d.order_desc;
     let save_has_limit = d.has_limit;
     let save_limit_val = d.limit_val;
+    let save_has_offset = d.has_offset;
+    let save_offset_val = d.offset_val;
     let save_set_col = d.set_col;
     let save_set_val = d.set_val;
     let save_select_star = d.select_star;
@@ -1954,6 +1964,8 @@ fn parse_and_exec_subquery(d: &mut DB) -> String ~ Console + Process {
     d.order_desc = save_order_desc;
     d.has_limit = save_has_limit;
     d.limit_val = save_limit_val;
+    d.has_offset = save_has_offset;
+    d.offset_val = save_offset_val;
     d.set_col = save_set_col;
     d.set_val = save_set_val;
     d.select_star = save_select_star;
@@ -2082,6 +2094,14 @@ fn parse_limit(d: &mut DB) {
     d.has_limit = 1;
     let val = d.tk_val;
     d.limit_val = parse_int_str(val);
+    next_token(d);
+}
+
+fn parse_offset(d: &mut DB) {
+    next_token(d);
+    d.has_offset = 1;
+    let val = d.tk_val;
+    d.offset_val = parse_int_str(val);
     next_token(d);
 }
 
@@ -2443,18 +2463,29 @@ fn exec_select(d: &mut DB) ~ Console {
         }
     }
 
-    // LIMIT
-    if d.has_limit == 1 {
-        if d.limit_val < match_count {
-            let mut limited: Vec<i32> = vec![];
-            let mut li = 0;
-            while li < d.limit_val {
+    // LIMIT / OFFSET
+    if d.has_limit == 1 || d.has_offset == 1 {
+        let mut off = 0;
+        if d.has_offset == 1 { off = d.offset_val; }
+        let mut lim = match_count;
+        if d.has_limit == 1 { lim = d.limit_val; }
+        let mut limited: Vec<i32> = vec![];
+        let mut new_count = 0;
+        let mut taken = 0;
+        let mut li = off;
+        let mut lgo = true;
+        while lgo {
+            if li >= match_count { lgo = false; }
+            else if taken >= lim { lgo = false; }
+            else {
                 vec_push(limited, vec_get(match_rows, li));
+                new_count = new_count + 1;
+                taken = taken + 1;
                 li = li + 1;
             }
-            match_rows = limited;
-            match_count = d.limit_val;
         }
+        match_rows = limited;
+        match_count = new_count;
     }
 
     // DISTINCT: remove duplicate rows (compare all selected column values)
@@ -3713,64 +3744,61 @@ fn eval_where(cell_val: String, op: i32, rval: String) -> bool {
     false
 }
 
-// LIKE pattern matching: supports % wildcard
-// 'prefix%' -> starts_with, '%suffix' -> ends_with, '%mid%' -> contains, 'exact' -> equality
+// LIKE pattern matching. Full SQL wildcards: '%' matches any run of characters
+// (including none) at any position; '_' matches exactly one character. All other
+// characters match literally. Iterative backtracking, so '%' anywhere is handled.
 fn eval_like(cell_val: String, pattern: String) -> bool {
+    let slen = cell_val.len();
     let plen = pattern.len();
-    if plen == 0 { return cell_val == ""; }
-    let clen = cell_val.len();
-    let starts_pct = pattern.char_at(0) == "%";
-    let ends_pct = if plen > 0 { pattern.char_at(plen - 1) == "%" } else { false };
-
-    if starts_pct && ends_pct {
-        // %mid% -> contains
-        if plen <= 2 { return true; }
-        let mid = pattern.substring(1, plen - 2);
-        return str_contains(cell_val, mid);
+    let mut si = 0;
+    let mut pi = 0;
+    let mut star = -1;   // pattern index just after the last '%' seen, or -1
+    let mut star_s = 0;  // string index to resume from on backtrack
+    let mut decided = false;
+    let mut result = false;
+    let mut go = true;
+    while go {
+        if si >= slen {
+            go = false;
+        } else if pi < plen {
+            let pc = pattern.char_at(pi);
+            let sc = cell_val.char_at(si);
+            if pc == "_" || pc == sc {
+                si = si + 1;
+                pi = pi + 1;
+            } else if pc == "%" {
+                star = pi + 1;
+                star_s = si;
+                pi = pi + 1;
+            } else if star >= 0 {
+                pi = star;
+                star_s = star_s + 1;
+                si = star_s;
+            } else {
+                result = false;
+                decided = true;
+                go = false;
+            }
+        } else if star >= 0 {
+            pi = star;
+            star_s = star_s + 1;
+            si = star_s;
+        } else {
+            result = false;
+            decided = true;
+            go = false;
+        }
     }
-    if starts_pct {
-        // %suffix -> ends_with
-        let suffix = pattern.substring(1, plen - 1);
-        return str_ends_with(cell_val, suffix);
+    if decided { return result; }
+    // All of the string consumed; any trailing pattern must be only '%'.
+    let mut tgo = true;
+    while tgo {
+        if pi < plen {
+            if pattern.char_at(pi) == "%" { pi = pi + 1; }
+            else { tgo = false; }
+        } else { tgo = false; }
     }
-    if ends_pct {
-        // prefix% -> starts_with
-        let prefix = pattern.substring(0, plen - 1);
-        return str_starts_with(cell_val, prefix);
-    }
-    // Exact match
-    cell_val == pattern
-}
-
-fn str_starts_with(s: String, prefix: String) -> bool {
-    let slen = s.len();
-    let plen = prefix.len();
-    if plen > slen { return false; }
-    let sub = s.substring(0, plen);
-    sub == prefix
-}
-
-fn str_ends_with(s: String, suffix: String) -> bool {
-    let slen = s.len();
-    let xlen = suffix.len();
-    if xlen > slen { return false; }
-    let sub = s.substring(slen - xlen, xlen);
-    sub == suffix
-}
-
-fn str_contains(s: String, needle: String) -> bool {
-    let slen = s.len();
-    let nlen = needle.len();
-    if nlen > slen { return false; }
-    if nlen == 0 { return true; }
-    let limit = slen - nlen + 1;
-    let mut i = 0;
-    while i < limit {
-        let sub = s.substring(i, nlen);
-        if sub == needle { return true; }
-        i = i + 1;
-    }
-    false
+    pi == plen
 }
 
 // Evaluate IN operator: check if cell value matches any value in the list
