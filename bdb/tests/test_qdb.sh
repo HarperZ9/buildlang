@@ -122,6 +122,24 @@ chksel "group_ord_alias_cnt_desc" "SELECT dept, COUNT(*) AS c FROM emp GROUP BY 
 # than emit rows in arbitrary discovery order.
 reseed; errchk "group_ord_unresolved_closed" "SELECT dept, COUNT(*) FROM emp GROUP BY dept ORDER BY age" "grouped column, aggregate, or alias"
 
+echo "== COUNT(DISTINCT) =="
+reseed
+# Non-grouped: 3 distinct depts among 5 rows -- distinct (3) diverges from a
+# plain COUNT(dept) of 5, proving dedup on the no-group aggregate path.
+chksel "count_distinct_dept_nogroup" "SELECT COUNT(DISTINCT dept) FROM emp" "3"
+# Grouped: add a duplicate salary in eng (frank, 100) so the distinct count (2)
+# diverges from the eng row count (3), proving per-group dedup. ORDER BY dept
+# gives a stable listing. Reseeded afterward so later tests see the base rows.
+"$QDB" "$DB" "INSERT INTO emp VALUES (6,'frank','eng',100,60)" >/dev/null 2>&1
+chksel "count_distinct_grouped"     "SELECT dept, COUNT(DISTINCT salary) FROM emp GROUP BY dept ORDER BY dept"          "$(printf 'eng   | 2\nhr    | 1\nsales | 2')"
+# ORDER BY the distinct-count alias, DESC; eng/sales tie at 2 -> discovery order.
+chksel "count_distinct_alias_order" "SELECT dept, COUNT(DISTINCT salary) AS ds FROM emp GROUP BY dept ORDER BY ds DESC" "$(printf 'eng   | 2\nsales | 2\nhr    | 1')"
+reseed
+# Fail closed: DISTINCT outside COUNT, and COUNT(DISTINCT *), are rejected rather
+# than silently ignored; the table stays intact.
+errchk "count_distinct_sum_closed"  "SELECT SUM(DISTINCT salary) FROM emp" "DISTINCT is only supported inside COUNT"
+errchk "count_distinct_star_closed" "SELECT COUNT(DISTINCT *) FROM emp"    "is not supported; use COUNT"
+
 echo "== subqueries (scalar + IN) =="
 reseed
 # Scalar subquery in WHERE: AVG(salary)=460/5=92, so salary>92 -> alice(100),dave(120).

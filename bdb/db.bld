@@ -252,6 +252,10 @@ struct DB {
     // Column aliases: parallel to p_agg_cols, -1 means no alias
     p_aliases: Vec<i32>,
 
+    // DISTINCT flag per projection item, parallel to p_agg_funcs/p_agg_cols:
+    // 1 = COUNT(DISTINCT col), 0 = plain aggregate or column.
+    p_agg_distinct: Vec<i32>,
+
     // ALTER TABLE state
     alter_col_name: i32,
     alter_col_type: i32,
@@ -333,6 +337,7 @@ fn db_new(db_path: String) -> DB {
         has_distinct: 0,
         has_having: 0, having_agg_func: 0, having_agg_col: -1, having_op: -1, having_val: -1,
         p_aliases: vec![],
+        p_agg_distinct: vec![],
         alter_col_name: -1, alter_col_type: -1,
         wal_path: wp,
         in_transaction: false,
@@ -1328,6 +1333,7 @@ fn reset_select_fields(d: &mut DB) {
     d.having_op = -1;
     d.having_val = -1;
     d.p_aliases = vec![];
+    d.p_agg_distinct = vec![];
     d.alter_col_name = -1;
     d.alter_col_type = -1;
 }
@@ -1433,8 +1439,24 @@ fn parse_select(d: &mut DB) ~ Console + Process {
             if agg > 0 {
                 next_token(d);
                 expect_punct(d, "(");
+                // Optional DISTINCT inside the aggregate. Only COUNT(DISTINCT col)
+                // is supported; DISTINCT in any other aggregate, or COUNT(DISTINCT *),
+                // fails closed rather than silently ignoring the keyword.
+                let mut is_distinct = 0;
+                if tk_is_kw(d, "DISTINCT") == 1 {
+                    is_distinct = 1;
+                    next_token(d);
+                    if agg != 1 {
+                        println!("Error: DISTINCT is only supported inside COUNT");
+                        process_exit(1);
+                    }
+                }
                 if d.tk_type == 6 {
                     // COUNT(*)
+                    if is_distinct == 1 {
+                        println!("Error: COUNT(DISTINCT *) is not supported; use COUNT(*)");
+                        process_exit(1);
+                    }
                     let star_id = sp_add(d, "*");
                     vec_push(d.p_agg_cols, star_id);
                     next_token(d);
@@ -1445,6 +1467,7 @@ fn parse_select(d: &mut DB) ~ Console + Process {
                 }
                 expect_punct(d, ")");
                 vec_push(d.p_agg_funcs, agg);
+                vec_push(d.p_agg_distinct, is_distinct);
                 d.p_agg_count = d.p_agg_count + 1;
                 // Check for AS alias after aggregate
                 if tk_is_kw(d, "AS") == 1 {
@@ -1465,6 +1488,7 @@ fn parse_select(d: &mut DB) ~ Console + Process {
                 // 0 = no aggregate
                 vec_push(d.p_agg_funcs, 0);
                 vec_push(d.p_agg_cols, cid);
+                vec_push(d.p_agg_distinct, 0);
                 d.p_agg_count = d.p_agg_count + 1;
                 // Check for AS alias after plain column
                 if tk_is_kw(d, "AS") == 1 {
@@ -2133,6 +2157,7 @@ fn parse_and_exec_subquery(d: &mut DB) -> String ~ Console + Process {
     let save_having_op = d.having_op;
     let save_having_val = d.having_val;
     let save_p_aliases = d.p_aliases;
+    let save_p_agg_distinct = d.p_agg_distinct;
 
     // Execute the subquery to get a scalar result
     let result = exec_subquery_scalar(d, sub_sql);
@@ -2195,6 +2220,7 @@ fn parse_and_exec_subquery(d: &mut DB) -> String ~ Console + Process {
     d.having_op = save_having_op;
     d.having_val = save_having_val;
     d.p_aliases = save_p_aliases;
+    d.p_agg_distinct = save_p_agg_distinct;
 
     // Advance the token past ')'
     next_token(d);
@@ -3361,6 +3387,7 @@ fn exec_select_agg_no_group(d: &mut DB, tidx: i32) ~ Console {
     let mut af = 0;
     let mut ac_name_id = 0;
     let mut al_id = 0;
+    let mut dist_r = 0;
     let mut vid = 0;
     let mut hid = 0;
 
@@ -3381,9 +3408,10 @@ fn exec_select_agg_no_group(d: &mut DB, tidx: i32) ~ Console {
         af = vec_get(d.p_agg_funcs, r);
         ac_name_id = vec_get(d.p_agg_cols, r);
         al_id = if r < vec_len(d.p_aliases) { vec_get(d.p_aliases, r) } else { 0 - 1 };
-        vid = compute_single_agg(d, af, ac_name_id, cs, cc, rs, tname, alias_val, match_rows, match_count);
+        dist_r = if r < vec_len(d.p_agg_distinct) { vec_get(d.p_agg_distinct, r) } else { 0 };
+        vid = compute_single_agg(d, af, ac_name_id, cs, cc, rs, tname, alias_val, match_rows, match_count, dist_r);
         vec_push(results, vid);
-        hid = build_agg_header(d, af, ac_name_id, al_id);
+        hid = build_agg_header(d, af, ac_name_id, al_id, dist_r);
         vec_push(headers, hid);
         r = r + 1;
     }
@@ -3393,7 +3421,7 @@ fn exec_select_agg_no_group(d: &mut DB, tidx: i32) ~ Console {
 // Compute a single aggregate value, returning its pool id
 fn compute_single_agg(d: &mut DB, af: i32, ac_name_id: i32, cs: i32, cc: i32,
                        rs: i32, tname: String, alias_val: i32,
-                       match_rows: Vec<i32>, match_count: i32) -> i32 {
+                       match_rows: Vec<i32>, match_count: i32, distinct: i32) -> i32 {
     let ac_name = sp_get(d, ac_name_id);
     if af == 0 {
         // Plain column: first row value
@@ -3409,11 +3437,38 @@ fn compute_single_agg(d: &mut DB, af: i32, ac_name_id: i32, cs: i32, cc: i32,
     }
     if af == 1 {
         // COUNT(*) counts every matching row; COUNT(col) counts non-NULL
-        // cells (NULL is the empty string).
+        // cells (NULL is the empty string); COUNT(DISTINCT col) counts the
+        // distinct non-NULL values.
         if ac_name == "*" {
             return sp_add(d, int_to_str(match_count));
         }
         let col_idx = resolve_col(d, cs, cc, tname, alias_val, ac_name);
+        if distinct == 1 {
+            let mut seen: Vec<i32> = vec![];
+            let mut dcnt = 0;
+            let mut di = 0;
+            while di < match_count {
+                let drow = vec_get(match_rows, di);
+                if col_idx >= 0 {
+                    let dcell_id = vec_get(d.cells, rs + drow * cc + col_idx);
+                    let dcell = sp_get(d, dcell_id);
+                    if dcell.len() > 0 {
+                        let mut dfound = 0;
+                        let mut dsi = 0;
+                        while dsi < dcnt {
+                            if sp_get(d, vec_get(seen, dsi)) == dcell { dfound = 1; }
+                            dsi = dsi + 1;
+                        }
+                        if dfound == 0 {
+                            vec_push(seen, dcell_id);
+                            dcnt = dcnt + 1;
+                        }
+                    }
+                }
+                di = di + 1;
+            }
+            return sp_add(d, int_to_str(dcnt));
+        }
         let mut cnt = 0;
         let mut mi = 0;
         while mi < match_count {
@@ -3456,12 +3511,13 @@ fn compute_single_agg(d: &mut DB, af: i32, ac_name_id: i32, cs: i32, cc: i32,
 }
 
 // Build the header string pool id for an aggregate
-fn build_agg_header(d: &mut DB, af: i32, ac_name_id: i32, al_id: i32) -> i32 {
+fn build_agg_header(d: &mut DB, af: i32, ac_name_id: i32, al_id: i32, distinct: i32) -> i32 {
     if al_id >= 0 { return al_id; }
     let ac_name = sp_get(d, ac_name_id);
     if af == 0 { return sp_add(d, ac_name); }
     if af == 1 {
         if ac_name == "*" { return sp_add(d, "COUNT(*)"); }
+        if distinct == 1 { return sp_add(d, "COUNT(DISTINCT " + ac_name + ")"); }
         return sp_add(d, "COUNT(" + ac_name + ")");
     }
     let mut func_name = "SUM";
@@ -3555,14 +3611,18 @@ fn exec_select_group(d: &mut DB) ~ Console {
     // Pre-copy agg info to avoid struct access issues across function calls
     let mut local_agg_funcs: Vec<i32> = vec![];
     let mut local_agg_cols: Vec<i32> = vec![];
+    let mut local_agg_distinct: Vec<i32> = vec![];
     let mut copy_i = 0;
     let mut copy_af = 0;
     let mut copy_ac = 0;
+    let mut copy_dist = 0;
     while copy_i < ncols {
         copy_af = vec_get(d.p_agg_funcs, copy_i);
         copy_ac = vec_get(d.p_agg_cols, copy_i);
+        copy_dist = if copy_i < vec_len(d.p_agg_distinct) { vec_get(d.p_agg_distinct, copy_i) } else { 0 };
         vec_push(local_agg_funcs, copy_af);
         vec_push(local_agg_cols, copy_ac);
+        vec_push(local_agg_distinct, copy_dist);
         copy_i = copy_i + 1;
     }
     // Now compute results for each group
@@ -3587,7 +3647,11 @@ fn exec_select_group(d: &mut DB) ~ Console {
                     gi2_cnt = group_count_rows(d, gi2_gk, rs, cc, gcol, match_rows, match_count);
                 } else {
                     gi2_col_idx = resolve_col(d, cs, cc, tname, alias1_val, gi2_ac_name);
-                    gi2_cnt = group_count_col(d, gi2_gk, gi2_col_idx, gcol, rs, cc, match_rows, match_count);
+                    if vec_get(local_agg_distinct, gi2_ai) == 1 {
+                        gi2_cnt = group_count_col_distinct(d, gi2_gk, gi2_col_idx, gcol, rs, cc, match_rows, match_count);
+                    } else {
+                        gi2_cnt = group_count_col(d, gi2_gk, gi2_col_idx, gcol, rs, cc, match_rows, match_count);
+                    }
                 }
                 gi2_val_str = int_to_str(gi2_cnt);
                 gi2_vid = sp_add(d, gi2_val_str);
@@ -3886,6 +3950,41 @@ fn group_count_col(d: &DB, gk: String, col_idx: i32, gcol: i32, rs: i32, cc: i32
     cnt
 }
 
+// COUNT(DISTINCT col) within a group: the number of distinct non-NULL values of
+// col among the rows whose group cell equals gk. Dedup is a linear scan over the
+// values already seen (no hash set), which is fine for the row counts this
+// teaching engine handles.
+fn group_count_col_distinct(d: &DB, gk: String, col_idx: i32, gcol: i32, rs: i32, cc: i32,
+                            match_rows: Vec<i32>, match_count: i32) -> i32 {
+    let mut seen: Vec<i32> = vec![];
+    let mut dcnt = 0;
+    let mut ci = 0;
+    while ci < match_count {
+        let crow = vec_get(match_rows, ci);
+        let cgv = sp_get(d, vec_get(d.cells, rs + crow * cc + gcol));
+        if cgv == gk {
+            if col_idx >= 0 {
+                let cell_id = vec_get(d.cells, rs + crow * cc + col_idx);
+                let cell = sp_get(d, cell_id);
+                if cell.len() > 0 {
+                    let mut found = 0;
+                    let mut si = 0;
+                    while si < dcnt {
+                        if sp_get(d, vec_get(seen, si)) == cell { found = 1; }
+                        si = si + 1;
+                    }
+                    if found == 0 {
+                        vec_push(seen, cell_id);
+                        dcnt = dcnt + 1;
+                    }
+                }
+            }
+        }
+        ci = ci + 1;
+    }
+    dcnt
+}
+
 fn group_get_plain(d: &DB, gk: String, col_idx: i32, gcol: i32, rs: i32, cc: i32,
                    match_rows: Vec<i32>, match_count: i32) -> String {
     if col_idx == gcol { return gk; }
@@ -3906,6 +4005,7 @@ fn group_get_plain(d: &DB, gk: String, col_idx: i32, gcol: i32, rs: i32, cc: i32
 fn push_agg_header(d: &mut DB, hi: i32, headers: Vec<i32>) {
     let af = vec_get(d.p_agg_funcs, hi);
     let ac_name = sp_get(d, vec_get(d.p_agg_cols, hi));
+    let dist = if hi < vec_len(d.p_agg_distinct) { vec_get(d.p_agg_distinct, hi) } else { 0 };
     if af == 0 {
         let hid = sp_add(d, ac_name);
         vec_push(headers, hid);
@@ -3914,6 +4014,11 @@ fn push_agg_header(d: &mut DB, hi: i32, headers: Vec<i32>) {
     if af == 1 {
         if ac_name == "*" {
             let hid = sp_add(d, "COUNT(*)");
+            vec_push(headers, hid);
+            return;
+        }
+        if dist == 1 {
+            let hid = sp_add(d, "COUNT(DISTINCT " + ac_name + ")");
             vec_push(headers, hid);
             return;
         }
