@@ -3098,6 +3098,71 @@ fn exec_select_group(d: &mut DB) ~ Console {
         final_count = group_count;
     }
 
+    // ORDER BY on grouped output. Sort the emitted rows by an output column
+    // that names a plain (non-aggregate) select column, which is the GROUP BY
+    // column in the common case: SELECT dept, COUNT(*) ... GROUP BY dept ORDER
+    // BY dept. Ordering by an aggregate term is a documented null. parse_order_by
+    // cannot capture COUNT(*) or SUM(col) as an order key, so that name never
+    // matches an output column and the rows stay in group-discovery order rather
+    // than being sorted wrong.
+    if d.has_order == 1 {
+        let go_name = sp_get(d, d.order_col);
+        let mut go_oidx = 0 - 1;
+        let mut go_ci = 0;
+        while go_ci < ncols {
+            if vec_get(local_agg_funcs, go_ci) == 0 {
+                let go_cn = sp_get(d, vec_get(local_agg_cols, go_ci));
+                if go_cn == go_name { go_oidx = go_ci; }
+            }
+            go_ci = go_ci + 1;
+        }
+        if go_oidx >= 0 {
+            let go_real = resolve_col(d, cs, cc, tname, alias1_val, go_name);
+            let mut go_type = 2;
+            if go_real >= 0 { go_type = vec_get(d.col_types, cs + go_real); }
+            // Stable selection sort over final_count rows, each ncols wide.
+            // A strict `< 0` pick keeps equal keys in group-discovery order.
+            let mut go_used: Vec<i32> = vec![];
+            let mut go_u = 0;
+            while go_u < final_count { vec_push(go_used, 0); go_u = go_u + 1; }
+            let mut go_sorted: Vec<i32> = vec![];
+            let mut go_picked = 0;
+            while go_picked < final_count {
+                let mut go_best = 0 - 1;
+                let mut go_j = 0;
+                while go_j < final_count {
+                    if vec_get(go_used, go_j) == 0 {
+                        if go_best < 0 {
+                            go_best = go_j;
+                        } else {
+                            let go_va = sp_get(d, vec_get(final_results, go_j * ncols + go_oidx));
+                            let go_vb = sp_get(d, vec_get(final_results, go_best * ncols + go_oidx));
+                            let mut go_c = compare_vals(go_va, go_vb, go_type);
+                            if d.order_desc == 1 { go_c = 0 - go_c; }
+                            if go_c < 0 { go_best = go_j; }
+                        }
+                    }
+                    go_j = go_j + 1;
+                }
+                let mut go_nu: Vec<i32> = vec![];
+                let mut go_k = 0;
+                while go_k < final_count {
+                    if go_k == go_best { vec_push(go_nu, 1); }
+                    else { vec_push(go_nu, vec_get(go_used, go_k)); }
+                    go_k = go_k + 1;
+                }
+                go_used = go_nu;
+                let mut go_cp = 0;
+                while go_cp < ncols {
+                    vec_push(go_sorted, vec_get(final_results, go_best * ncols + go_cp));
+                    go_cp = go_cp + 1;
+                }
+                go_picked = go_picked + 1;
+            }
+            final_results = go_sorted;
+        }
+    }
+
     // Build headers (with alias support)
     let mut headers: Vec<i32> = vec![];
     let mut bhi = 0;
