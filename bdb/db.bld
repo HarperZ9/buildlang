@@ -183,7 +183,6 @@ struct DB {
     set_col: i32,
     set_val: i32,
     select_star: i32,
-    select_count: i32,
     // Aggregate functions for GROUP BY: 0=none, 1=COUNT, 2=SUM, 3=AVG, 4=MIN, 5=MAX
     p_agg_funcs: Vec<i32>,
     p_agg_cols: Vec<i32>,
@@ -283,7 +282,7 @@ fn db_new(db_path: String) -> DB {
         has_limit: 0, limit_val: 0,
         has_offset: 0, offset_val: 0,
         set_col: -1, set_val: -1,
-        select_star: 0, select_count: 0,
+        select_star: 0,
         p_agg_funcs: vec![], p_agg_cols: vec![], p_agg_count: 0,
         has_group_by: 0, group_col: -1,
         has_join: 0, join_table: -1, join_left_col: -1, join_right_col: -1,
@@ -1247,7 +1246,6 @@ fn reset_parser(d: &mut DB, input: String) {
     d.set_col = -1;
     d.set_val = -1;
     d.select_star = 0;
-    d.select_count = 0;
     d.p_agg_funcs = vec![];
     d.p_agg_cols = vec![];
     d.p_agg_count = 0;
@@ -1408,17 +1406,6 @@ fn parse_select(d: &mut DB) ~ Console + Process {
             }
             if tk_is_punct(d, ",") == 1 { next_token(d); }
             else { go = false; }
-        }
-        // If all items are aggregates with no plain cols AND we have a COUNT(*),
-        // mark select_count for backward compat if it is a simple COUNT(*)
-        if d.p_col_count == 0 {
-            if d.p_agg_count == 1 {
-                let f0 = vec_get(d.p_agg_funcs, 0);
-                if f0 == 1 {
-                    let c0 = sp_get(d, vec_get(d.p_agg_cols, 0));
-                    if c0 == "*" { d.select_count = 1; }
-                }
-            }
         }
     }
 
@@ -1949,7 +1936,6 @@ fn parse_and_exec_subquery(d: &mut DB) -> String ~ Console + Process {
     let save_set_col = d.set_col;
     let save_set_val = d.set_val;
     let save_select_star = d.select_star;
-    let save_select_count = d.select_count;
     let save_p_agg_funcs = d.p_agg_funcs;
     let save_p_agg_cols = d.p_agg_cols;
     let save_p_agg_count = d.p_agg_count;
@@ -2003,7 +1989,6 @@ fn parse_and_exec_subquery(d: &mut DB) -> String ~ Console + Process {
     d.set_col = save_set_col;
     d.set_val = save_set_val;
     d.select_star = save_select_star;
-    d.select_count = save_select_count;
     d.p_agg_funcs = save_p_agg_funcs;
     d.p_agg_cols = save_p_agg_cols;
     d.p_agg_count = save_p_agg_count;
@@ -2466,24 +2451,6 @@ fn exec_select(d: &mut DB) ~ Console {
     let cc = vec_get(d.tbl_col_counts, tidx);
     let rs = vec_get(d.tbl_row_starts, tidx);
     let rc = vec_get(d.tbl_row_counts, tidx);
-
-    // Handle simple COUNT(*)
-    if d.select_count == 1 {
-        if d.p_agg_count == 1 {
-            if d.p_col_count == 0 {
-                let mut count = 0;
-                let mut r = 0;
-                while r < rc {
-                    if eval_compound_where(d, cs, cc, rs, r, tname, d.alias1) {
-                        count = count + 1;
-                    }
-                    r = r + 1;
-                }
-                println!("{}", count);
-                return;
-            }
-        }
-    }
 
     // Check if we have any aggregate functions (mixed with columns) without GROUP BY
     // Handle aggregates: COUNT, SUM, AVG, MIN, MAX without GROUP BY
