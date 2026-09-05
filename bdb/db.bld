@@ -193,6 +193,10 @@ struct DB {
     // order_col2 = -1 when the query gives only one key.
     order_col2: i32,
     order_desc2: i32,
+    // Aggregate order key: 0 = order_col names a plain column (the common
+    // case); 1..5 = COUNT/SUM/AVG/MIN/MAX, with order_col holding the arg
+    // name ("*" for COUNT(*)). Lets ORDER BY match an aggregate output column.
+    order_agg_func: i32,
     has_limit: i32,
     limit_val: i32,
     has_offset: i32,
@@ -300,7 +304,7 @@ fn db_new(db_path: String) -> DB {
         wc_neg: vec![],
         wn_kind: vec![], wn_a: vec![], wn_b: vec![], wn_count: 0, wc_root: -1,
         has_order: 0, order_col: -1, order_desc: 0,
-        order_col2: -1, order_desc2: 0,
+        order_col2: -1, order_desc2: 0, order_agg_func: 0,
         has_limit: 0, limit_val: 0,
         has_offset: 0, offset_val: 0,
         set_col: -1, set_val: -1, set_op: -1, set_operand: -1,
@@ -1265,6 +1269,7 @@ fn reset_parser(d: &mut DB, input: String) {
     d.order_desc = 0;
     d.order_col2 = -1;
     d.order_desc2 = 0;
+    d.order_agg_func = 0;
     d.has_limit = 0;
     d.limit_val = 0;
     d.has_offset = 0;
@@ -2031,6 +2036,7 @@ fn parse_and_exec_subquery(d: &mut DB) -> String ~ Console + Process {
     let save_order_desc = d.order_desc;
     let save_order_col2 = d.order_col2;
     let save_order_desc2 = d.order_desc2;
+    let save_order_agg_func = d.order_agg_func;
     let save_has_limit = d.has_limit;
     let save_limit_val = d.limit_val;
     let save_has_offset = d.has_offset;
@@ -2092,6 +2098,7 @@ fn parse_and_exec_subquery(d: &mut DB) -> String ~ Console + Process {
     d.order_desc = save_order_desc;
     d.order_col2 = save_order_col2;
     d.order_desc2 = save_order_desc2;
+    d.order_agg_func = save_order_agg_func;
     d.has_limit = save_has_limit;
     d.limit_val = save_limit_val;
     d.has_offset = save_has_offset;
@@ -2226,9 +2233,29 @@ fn parse_order_by(d: &mut DB) ~ Console + Process {
     next_token(d);
     expect_kw(d, "BY");
     d.has_order = 1;
-    let cname = d.tk_val;
-    d.order_col = sp_add(d, cname);
-    next_token(d);
+    // Primary key may be a plain column or an aggregate term (COUNT(*),
+    // SUM(col), ...). An aggregate key is matched against an aggregate output
+    // column in the grouped-select path; order_agg_func records which.
+    let ag = is_agg_kw(d.tk_val);
+    if ag > 0 {
+        next_token(d);
+        expect_punct(d, "(");
+        if d.tk_type == 6 {
+            let ostar_id = sp_add(d, "*");
+            d.order_col = ostar_id;
+            next_token(d);
+        } else {
+            let oagg_name = read_col_ref(d);
+            d.order_col = sp_add(d, oagg_name);
+        }
+        expect_punct(d, ")");
+        d.order_agg_func = ag;
+    } else {
+        let cname = d.tk_val;
+        d.order_col = sp_add(d, cname);
+        d.order_agg_func = 0;
+        next_token(d);
+    }
     if tk_is_kw(d, "DESC") == 1 { d.order_desc = 1; next_token(d); }
     else if tk_is_kw(d, "ASC") == 1 { d.order_desc = 0; next_token(d); }
     // Optional secondary key: ORDER BY a, b [ASC|DESC]. It breaks ties on the
@@ -3179,19 +3206,31 @@ fn exec_select_group(d: &mut DB) ~ Console {
     // than being sorted wrong.
     if d.has_order == 1 {
         let go_name = sp_get(d, d.order_col);
+        // Match the order key against an output column of the SAME kind: a
+        // plain key (order_agg_func == 0) matches a plain output column; an
+        // aggregate key matches the output column with the same func + arg.
         let mut go_oidx = 0 - 1;
         let mut go_ci = 0;
         while go_ci < ncols {
-            if vec_get(local_agg_funcs, go_ci) == 0 {
+            if vec_get(local_agg_funcs, go_ci) == d.order_agg_func {
                 let go_cn = sp_get(d, vec_get(local_agg_cols, go_ci));
                 if go_cn == go_name { go_oidx = go_ci; }
             }
             go_ci = go_ci + 1;
         }
         if go_oidx >= 0 {
-            let go_real = resolve_col(d, cs, cc, tname, alias1_val, go_name);
+            // Aggregate results sort numerically. COUNT is an integer; SUM/AVG/
+            // MIN/MAX compare as real so AVG decimals order correctly. A plain
+            // key keeps the source column's declared type (TEXT default).
             let mut go_type = 2;
-            if go_real >= 0 { go_type = vec_get(d.col_types, cs + go_real); }
+            if d.order_agg_func == 1 {
+                go_type = 0;
+            } else if d.order_agg_func > 1 {
+                go_type = 1;
+            } else {
+                let go_real = resolve_col(d, cs, cc, tname, alias1_val, go_name);
+                if go_real >= 0 { go_type = vec_get(d.col_types, cs + go_real); }
+            }
             // Stable selection sort over final_count rows, each ncols wide.
             // A strict `< 0` pick keeps equal keys in group-discovery order.
             let mut go_used: Vec<i32> = vec![];

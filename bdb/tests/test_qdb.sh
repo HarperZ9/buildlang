@@ -105,6 +105,12 @@ chksel "group_count"   "SELECT dept, COUNT(*) FROM emp GROUP BY dept ORDER BY de
 chksel "group_desc"    "SELECT dept, COUNT(*) FROM emp GROUP BY dept ORDER BY dept DESC" "$(printf 'sales | 2\nhr    | 1\neng   | 2')"
 chksel "group_sum_ord" "SELECT dept, SUM(salary) FROM emp GROUP BY dept ORDER BY dept" "$(printf 'eng   | 190\nhr    | 70\nsales | 200')"
 chksel "having"        "SELECT dept FROM emp GROUP BY dept HAVING COUNT(*) > 1 ORDER BY dept" "$(printf 'eng\nsales')"
+# ORDER BY an aggregate term. The order key matches the aggregate output column
+# by func + arg and sorts numerically. Ties keep group-discovery order (eng
+# before sales). SUM proves the numeric path (lexical "200" < "70" would be wrong).
+chksel "group_ord_agg"      "SELECT dept, COUNT(*) FROM emp GROUP BY dept ORDER BY COUNT(*)" "$(printf 'hr    | 1\neng   | 2\nsales | 2')"
+chksel "group_ord_cnt_desc" "SELECT dept, COUNT(*) FROM emp GROUP BY dept ORDER BY COUNT(*) DESC" "$(printf 'eng   | 2\nsales | 2\nhr    | 1')"
+chksel "group_ord_sum_desc" "SELECT dept, SUM(salary) FROM emp GROUP BY dept ORDER BY SUM(salary) DESC" "$(printf 'sales | 200\neng   | 190\nhr    | 70')"
 
 echo "== subqueries (scalar + IN) =="
 reseed
@@ -158,11 +164,10 @@ reseed
 # boolean-expression tree (OR<AND<NOT<primary, with '(' opening a subexpression),
 # so parenthesized grouping and NOT BETWEEN evaluate exactly. Both moved up to
 # chksel assertions in the WHERE section.
-# ORDER BY an aggregate term on a grouped query: parse_order_by cannot capture
-# COUNT(*)/SUM(col) as an order key, so grouped ORDER BY resolves only a plain
-# output column. SQL-correct ascending by count is hr(1),eng(2),sales(2); the
-# engine leaves the rows in group-discovery order (eng,sales,hr).
-xfail "group_ord_agg" "$(rows "SELECT dept, COUNT(*) FROM emp GROUP BY dept ORDER BY COUNT(*)")" "$(printf 'hr    | 1\neng   | 2\nsales | 2')"
+# group_ord_agg is no longer a null: parse_order_by now captures COUNT(*)/SUM(col)
+# as an order key and the grouped-sort path matches it against the aggregate
+# output column and compares numerically. It moved up to chksel assertions in the
+# aggregates section (group_ord_agg, group_ord_cnt_desc, group_ord_sum_desc).
 # Cross-process transactions: each statement is its own process and
 # auto-commit checkpoints, so a later ROLLBACK cannot undo an earlier
 # INSERT. SQL-correct would drop the row; here it persists (count 6).
