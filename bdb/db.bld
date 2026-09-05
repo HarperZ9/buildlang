@@ -163,6 +163,7 @@ struct DB {
     p_types: Vec<i32>,
     p_vals: Vec<i32>,
     p_val_count: i32,
+    p_row_count: i32,
     has_where: i32,
     w_left: i32,
     w_op: i32,
@@ -270,7 +271,7 @@ fn db_new(db_path: String) -> DB {
         stmt_type: 0, p_table: -1,
         p_cols: vec![], p_col_count: 0,
         p_types: vec![],
-        p_vals: vec![], p_val_count: 0,
+        p_vals: vec![], p_val_count: 0, p_row_count: 0,
         has_where: 0, w_left: -1, w_op: -1, w_right: -1,
         w_logic: 0, w_left2: -1, w_op2: -1, w_right2: -1,
         has_order: 0, order_col: -1, order_desc: 0,
@@ -1221,6 +1222,7 @@ fn reset_parser(d: &mut DB, input: String) {
     d.p_types = vec![];
     d.p_vals = vec![];
     d.p_val_count = 0;
+    d.p_row_count = 0;
     d.has_where = 0;
     d.w_left = -1;
     d.w_op = -1;
@@ -1493,19 +1495,29 @@ fn parse_insert(d: &mut DB) ~ Console + Process {
     }
 
     expect_kw(d, "VALUES");
-    expect_punct(d, "(");
-    let mut vgo = true;
-    while vgo {
-        // Unquoted NULL keyword stores SQL NULL (empty cell); quoted 'NULL' is text.
-        let vtext = if d.tk_type == 0 && d.tk_val == "NULL" { "" } else { d.tk_val };
-        let vid = sp_add(d, vtext);
-        vec_push(d.p_vals, vid);
-        d.p_val_count = d.p_val_count + 1;
-        next_token(d);
+    // One or more parenthesized value tuples: (..),(..),..
+    // All tuples flow into d.p_vals; d.p_row_count records how many tuples.
+    let mut rowcnt = 0;
+    let mut rgo = true;
+    while rgo {
+        expect_punct(d, "(");
+        let mut vgo = true;
+        while vgo {
+            // Unquoted NULL keyword stores SQL NULL (empty cell); quoted 'NULL' is text.
+            let vtext = if d.tk_type == 0 && d.tk_val == "NULL" { "" } else { d.tk_val };
+            let vid = sp_add(d, vtext);
+            vec_push(d.p_vals, vid);
+            d.p_val_count = d.p_val_count + 1;
+            next_token(d);
+            if tk_is_punct(d, ",") == 1 { next_token(d); }
+            else { vgo = false; }
+        }
+        expect_punct(d, ")");
+        rowcnt = rowcnt + 1;
         if tk_is_punct(d, ",") == 1 { next_token(d); }
-        else { vgo = false; }
+        else { rgo = false; }
     }
-    expect_punct(d, ")");
+    d.p_row_count = rowcnt;
 }
 
 fn parse_create_table(d: &mut DB) ~ Console + Process {
@@ -2195,19 +2207,75 @@ fn exec_insert(d: &mut DB) ~ Console {
         return;
     }
     let cc = vec_get(d.tbl_col_counts, tidx);
-    if d.p_val_count != cc {
-        println!("Error: expected {} values, got {}", cc, d.p_val_count);
+    let cs = vec_get(d.tbl_col_starts, tidx);
+
+    // Values per row: the named-column count when a column list was given,
+    // otherwise the table's full column count. p_row_count tuples were parsed.
+    let vpr = if d.p_col_count > 0 { d.p_col_count } else { cc };
+    let nrows = d.p_row_count;
+    if nrows < 1 {
+        println!("Error: INSERT has no values");
+        return;
+    }
+    if d.p_val_count != vpr * nrows {
+        println!("Error: expected {} values, got {}", vpr * nrows, d.p_val_count);
         return;
     }
 
-    // We need to insert cells at the right position for this table.
-    // The table's rows start at tbl_row_starts[tidx] and span
-    // tbl_row_counts[tidx] * cc cells. We insert after those.
+    // For a named-column INSERT, map each table column to the value slot that
+    // fills it (src_for_col[c] = slot, or -1 to insert SQL NULL). Validate the
+    // named columns exist before writing anything.
+    let mut src_for_col: Vec<i32> = vec![];
+    if d.p_col_count > 0 {
+        let mut jv = 0;
+        while jv < d.p_col_count {
+            let jn = sp_get(d, vec_get(d.p_cols, jv));
+            if find_col(d, cs, cc, jn) < 0 {
+                println!("Error: no such column: {}", jn);
+                return;
+            }
+            jv = jv + 1;
+        }
+        let mut c = 0;
+        while c < cc {
+            let cn = sp_get(d, vec_get(d.col_names, cs + c));
+            let mut found = 0 - 1;
+            let mut j = 0;
+            while j < d.p_col_count {
+                let jn = sp_get(d, vec_get(d.p_cols, j));
+                if jn == cn { found = j; }
+                j = j + 1;
+            }
+            vec_push(src_for_col, found);
+            c = c + 1;
+        }
+    }
+
+    // Materialize every new row in table-column order into row_cells.
+    let mut row_cells: Vec<i32> = vec![];
+    let mut r = 0;
+    while r < nrows {
+        let mut c2 = 0;
+        while c2 < cc {
+            let mut cell_id = 0;
+            if d.p_col_count > 0 {
+                let src = vec_get(src_for_col, c2);
+                if src < 0 { cell_id = sp_add(d, ""); }
+                else { cell_id = vec_get(d.p_vals, r * vpr + src); }
+            } else {
+                cell_id = vec_get(d.p_vals, r * cc + c2);
+            }
+            vec_push(row_cells, cell_id);
+            c2 = c2 + 1;
+        }
+        r = r + 1;
+    }
+
+    // Splice row_cells into the flat cells array after this table's rows.
     let rs = vec_get(d.tbl_row_starts, tidx);
     let rc = vec_get(d.tbl_row_counts, tidx);
     let insert_at = rs + rc * cc;
-
-    // Rebuild cells vec with new row inserted at correct position
+    let added = nrows * cc;
     let total_cells = vec_len(d.cells);
     let mut new_cells: Vec<i32> = vec![];
     let mut ci: i64 = 0;
@@ -2215,37 +2283,33 @@ fn exec_insert(d: &mut DB) ~ Console {
         vec_push(new_cells, vec_get(d.cells, ci));
         ci = ci + 1;
     }
-    // Insert new values
-    let mut vi = 0;
-    while vi < d.p_val_count {
-        let vtext = sp_get(d, vec_get(d.p_vals, vi));
-        let cid = sp_add(d, vtext);
-        vec_push(new_cells, cid);
-        vi = vi + 1;
+    let mut wi = 0;
+    while wi < added {
+        vec_push(new_cells, vec_get(row_cells, wi));
+        wi = wi + 1;
     }
-    // Copy remaining cells
     while ci < total_cells {
         vec_push(new_cells, vec_get(d.cells, ci));
         ci = ci + 1;
     }
     d.cells = new_cells;
 
-    // Update row count for this table
+    // Update row count for this table (all nrows added).
     let mut new_rc: Vec<i32> = vec![];
     let mut ri = 0;
     while ri < d.tbl_count {
-        if ri == tidx { vec_push(new_rc, rc + 1); }
+        if ri == tidx { vec_push(new_rc, rc + nrows); }
         else { vec_push(new_rc, vec_get(d.tbl_row_counts, ri)); }
         ri = ri + 1;
     }
     d.tbl_row_counts = new_rc;
 
-    // Update row_starts for tables after this one
+    // Shift row_starts for tables after this one by the cells we inserted.
     let mut new_rs: Vec<i32> = vec![];
     let mut si = 0;
     while si < d.tbl_count {
         if si > tidx {
-            vec_push(new_rs, vec_get(d.tbl_row_starts, si) + cc);
+            vec_push(new_rs, vec_get(d.tbl_row_starts, si) + added);
         } else {
             vec_push(new_rs, vec_get(d.tbl_row_starts, si));
         }
