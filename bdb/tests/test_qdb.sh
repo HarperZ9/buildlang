@@ -217,8 +217,9 @@ reseed; errchk "having_gtlt_closed"       "SELECT dept, COUNT(*) FROM emp GROUP 
 # wrong answer. agg_cols_ok validates each projection aggregate argument and the
 # HAVING aggregate argument before dispatch, guarded in exec_select,
 # exec_select_group and exec_subquery_scalar. COUNT(*) and the DISTINCT flag are
-# skipped, and a plain SELECT column keeps its own existing not-found path. An
-# aggregate or GROUP BY over a JOIN fails closed in the JOIN section below.
+# skipped, and a plain SELECT column keeps its own existing not-found path. A
+# scalar aggregate over a JOIN now folds over the joined rows (JOIN section
+# below); GROUP BY and COUNT(DISTINCT) over a JOIN still fail closed there.
 reseed; errchk "agg_unknown_sum"          "SELECT SUM(badcol) FROM emp"                                           "no such column"
 reseed; errchk "agg_unknown_avg"          "SELECT AVG(badcol) FROM emp"                                           "no such column"
 reseed; errchk "agg_unknown_min"          "SELECT MIN(badcol) FROM emp"                                           "no such column"
@@ -305,16 +306,28 @@ chksel "join"          "SELECT emp.name FROM emp JOIN dep ON emp.dept = dep.dnam
 # exact shape the aggregate-over-join guard must not reject: p_agg_count is 2 here
 # (both plain columns), so a guard keyed on p_agg_count alone would wrongly fire.
 chksel "join_multicol"  "SELECT emp.name, dep.loc FROM emp JOIN dep ON emp.dept = dep.dname WHERE dep.loc='b1' ORDER BY emp.name" "$(printf 'alice | b1\nbob   | b1')"
-# The join executor projects one output row per joined row and applies neither
-# aggregation nor grouping. Before the guard, SUM/MIN over a join returned per-row
-# column values (silent wrong), a grouped join returned ungrouped rows, and
-# COUNT(*) reported "*" not found (misleading). Each now fails closed with one
-# accurate message. Computing the aggregate over the join is a tracked limitation.
-chk "join_agg_count_closed" "$($QDB "$DB" "SELECT COUNT(*) FROM emp JOIN dep ON emp.dept = dep.dname" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"
-chk "join_agg_sum_closed"   "$($QDB "$DB" "SELECT SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"
-chk "join_agg_min_closed"   "$($QDB "$DB" "SELECT MIN(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"
+# A scalar aggregate over a join with no GROUP BY folds over the assembled pairs:
+# COUNT(*) counts joined rows, SUM/AVG/MIN/MAX read the referenced table's column
+# on each pair, and COUNT(col) counts non-empty cells. The guard scans p_agg_funcs
+# per projection item, so join_multicol above (two plain columns, p_agg_count 2) is
+# not mistaken for an aggregate. The emp/dep join matches all five emp rows.
+chksel "join_agg_count"     "SELECT COUNT(*) FROM emp JOIN dep ON emp.dept = dep.dname" "5"
+chksel "join_agg_sum"       "SELECT SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname" "460"
+chksel "join_agg_min"       "SELECT MIN(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname" "70"
+chksel "join_agg_max"       "SELECT MAX(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname" "120"
+chksel "join_agg_avg"       "SELECT AVG(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname" "92"
+chksel "join_agg_countcol"  "SELECT COUNT(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname" "5"
+# The fold honors WHERE: loc='b1' keeps only the two eng rows before aggregating.
+chksel "join_agg_where_sum" "SELECT SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname WHERE dep.loc='b1'" "190"
+chksel "join_agg_where_cnt" "SELECT COUNT(*) FROM emp JOIN dep ON emp.dept = dep.dname WHERE dep.loc='b1'" "2"
+# Text-typed MIN/MAX over a join compare lexically, matching single-table MIN/MAX.
+chksel "join_agg_min_text"  "SELECT MIN(emp.name) FROM emp JOIN dep ON emp.dept = dep.dname" "alice"
+chksel "join_agg_max_text"  "SELECT MAX(emp.name) FROM emp JOIN dep ON emp.dept = dep.dname" "eve"
+# GROUP BY over a join and COUNT(DISTINCT) over a join stay fail-closed: an honest
+# partial with one accurate message, never a silent wrong grouping or count.
 chk "join_group_sum_closed" "$($QDB "$DB" "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"
 chk "join_group_cnt_closed" "$($QDB "$DB" "SELECT dep.loc, COUNT(*) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"
+chk "join_distinct_closed"  "$($QDB "$DB" "SELECT COUNT(DISTINCT emp.dept) FROM emp JOIN dep ON emp.dept = dep.dname" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"
 
 echo "== LEFT [OUTER] JOIN (null-extend unmatched left rows) =="
 # Dedicated pair: la carries three tags, lb covers only x and z, so the 'y' row
@@ -336,6 +349,11 @@ chksel "left_join_notnull" "SELECT la.id FROM la LEFT JOIN lb ON la.tag = lb.tag
 chksel "left_join_reqeq"   "SELECT la.id FROM la LEFT JOIN lb ON la.tag = lb.tag WHERE lb.note = 'has-x'" "1"
 # WHERE on the preserved (left) column filters left rows, null-extension intact.
 chksel "left_join_leftwh"  "SELECT la.id, lb.note FROM la LEFT JOIN lb ON la.tag = lb.tag WHERE la.id > 1" "$(printf '2  |\n3  | has-z')"
+# Scalar aggregate over a LEFT JOIN folds the null-extended row in: COUNT(*) counts
+# all three left rows, but COUNT(right col) skips the unmatched row's blank cell.
+chksel "left_join_agg_cnt"     "SELECT COUNT(*) FROM la LEFT JOIN lb ON la.tag = lb.tag" "3"
+chksel "left_join_agg_cntnote" "SELECT COUNT(lb.note) FROM la LEFT JOIN lb ON la.tag = lb.tag" "2"
+chksel "left_join_agg_sum"     "SELECT SUM(la.id) FROM la LEFT JOIN lb ON la.tag = lb.tag" "6"
 # RIGHT / FULL / CROSS are recognized but unimplemented: fail closed with a clear
 # error, never a silent inner join.
 chk "right_join_closed" "$($QDB "$DB" "SELECT la.id FROM la RIGHT JOIN lb ON la.tag = lb.tag" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"

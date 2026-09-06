@@ -4347,31 +4347,6 @@ fn exec_select_join(d: &mut DB) ~ Console {
     if t1 < 0 { println!("Error: table '{}' not found", tname1); return; }
     if t2 < 0 { println!("Error: table '{}' not found", tname2); return; }
 
-    // Fail closed: this path projects one output row per joined row and applies
-    // neither aggregation nor grouping. Before this, an aggregate over a join
-    // (SUM/AVG/MIN/MAX(col)) returned the per-row column values with exit 0 (a
-    // silent wrong answer), a grouped join returned the ungrouped rows, and
-    // COUNT(*) tried to resolve "*" as a column and reported it "not found in
-    // either table" (a misleading message). Reject all of these with one
-    // accurate diagnostic rather than compute a wrong answer. Computing an
-    // aggregate over the assembled join rows is a larger change, tracked as a
-    // known limitation.
-    //
-    // p_agg_count is the count of ALL projection items, plain columns included
-    // (each carries p_agg_funcs[k]==0), so a real aggregate is present only when
-    // some p_agg_funcs entry is non-zero. Checking p_agg_count>0 alone would
-    // reject every plain join.
-    let mut join_has_agg = false;
-    let mut ai = 0;
-    while ai < d.p_agg_count {
-        if vec_get(d.p_agg_funcs, ai) > 0 { join_has_agg = true; }
-        ai = ai + 1;
-    }
-    if join_has_agg || d.has_group_by == 1 {
-        println!("Error: aggregates and GROUP BY over a JOIN are not supported");
-        return;
-    }
-
     let cs1 = vec_get(d.tbl_col_starts, t1);
     let cc1 = vec_get(d.tbl_col_counts, t1);
     let rs1 = vec_get(d.tbl_row_starts, t1);
@@ -4396,6 +4371,179 @@ fn exec_select_join(d: &mut DB) ~ Console {
     }
     if jc1 < 0 || jc2 < 0 {
         println!("Error: cannot resolve JOIN columns");
+        return;
+    }
+
+    // p_agg_count is the count of ALL projection items, plain columns included
+    // (each carries p_agg_funcs[k]==0), so a real aggregate is present only when
+    // some p_agg_funcs entry is non-zero. Checking p_agg_count>0 alone would
+    // treat every plain join as an aggregate.
+    let mut join_has_agg = false;
+    let mut join_has_distinct = false;
+    let mut ai = 0;
+    while ai < d.p_agg_count {
+        if vec_get(d.p_agg_funcs, ai) > 0 { join_has_agg = true; }
+        if ai < vec_len(d.p_agg_distinct) {
+            if vec_get(d.p_agg_distinct, ai) == 1 { join_has_distinct = true; }
+        }
+        ai = ai + 1;
+    }
+
+    // Scalar aggregate over a JOIN with no GROUP BY. Assemble the matched
+    // (r1,r2) pairs the same way the plain projection path does (honoring WHERE
+    // and LEFT JOIN null-extension), then fold each aggregate over those pairs.
+    // NULL and MIN/MAX/COUNT semantics mirror compute_single_agg so a join
+    // aggregate returns the same answer a single-table aggregate would over the
+    // same joined rows. A right-side column of a LEFT JOIN null-extended pair
+    // (r2 < 0) reads as NULL (empty string), which the numeric folds coerce to
+    // 0.0 exactly as the single-table path coerces an empty cell.
+    if join_has_agg && d.has_group_by == 0 {
+        if join_has_distinct {
+            println!("Error: COUNT(DISTINCT) over a JOIN is not supported");
+            return;
+        }
+        let mut pr1: Vec<i32> = vec![];
+        let mut pr2: Vec<i32> = vec![];
+        let mut pcount = 0;
+        let mut q1 = 0;
+        while q1 < rc1 {
+            let jk1 = sp_get(d, vec_get(d.cells, rs1 + q1 * cc1 + jc1));
+            let mut jmatched = false;
+            let mut q2 = 0;
+            while q2 < rc2 {
+                let jk2 = sp_get(d, vec_get(d.cells, rs2 + q2 * cc2 + jc2));
+                if jk1 == jk2 {
+                    jmatched = true;
+                    let mut jpass = true;
+                    if d.has_where == 1 {
+                        jpass = eval_join_where(d, cs1, cc1, rs1, q1, tname1, d.alias1,
+                                                cs2, cc2, rs2, q2, tname2, d.alias2);
+                    }
+                    if jpass {
+                        vec_push(pr1, q1);
+                        vec_push(pr2, q2);
+                        pcount = pcount + 1;
+                    }
+                }
+                q2 = q2 + 1;
+            }
+            if d.join_type == 1 {
+                if jmatched == false {
+                    let mut lpass = true;
+                    if d.has_where == 1 {
+                        lpass = eval_join_where(d, cs1, cc1, rs1, q1, tname1, d.alias1,
+                                                cs2, cc2, rs2, 0 - 1, tname2, d.alias2);
+                    }
+                    if lpass {
+                        vec_push(pr1, q1);
+                        vec_push(pr2, 0 - 1);
+                        pcount = pcount + 1;
+                    }
+                }
+            }
+            q1 = q1 + 1;
+        }
+
+        let mut agg_headers: Vec<i32> = vec![];
+        let mut agg_results: Vec<i32> = vec![];
+        let mut pi = 0;
+        while pi < d.p_agg_count {
+            let af = vec_get(d.p_agg_funcs, pi);
+            let ac_id = vec_get(d.p_agg_cols, pi);
+            let ac = sp_get(d, ac_id);
+            let al = if pi < vec_len(d.p_aliases) { vec_get(d.p_aliases, pi) } else { 0 - 1 };
+            // Resolve the argument column against either table. COUNT(*) has no
+            // column, so skip resolution for it.
+            let mut atab = 0;
+            let mut acol = 0 - 1;
+            let mut atype = 0;
+            if !(af == 1 && ac == "*") {
+                let ra = resolve_col(d, cs1, cc1, tname1, d.alias1, ac);
+                if ra >= 0 { atab = 1; acol = ra; atype = vec_get(d.col_types, cs1 + ra); }
+                else {
+                    let rb = resolve_col(d, cs2, cc2, tname2, d.alias2, ac);
+                    if rb >= 0 { atab = 2; acol = rb; atype = vec_get(d.col_types, cs2 + rb); }
+                    else {
+                        println!("Error: column '{}' not found in either table", ac);
+                        return;
+                    }
+                }
+            }
+            let mut out = "";
+            if af == 0 {
+                // Bare column beside aggregates: first joined row's value, as the
+                // single-table path returns the first matching row's value.
+                if pcount > 0 {
+                    out = join_cell_str(d, atab, acol, cc1, rs1, vec_get(pr1, 0),
+                                        cc2, rs2, vec_get(pr2, 0));
+                }
+            } else if af == 1 {
+                if ac == "*" {
+                    out = int_to_str(pcount);
+                } else {
+                    let mut cnt = 0;
+                    let mut k = 0;
+                    while k < pcount {
+                        let cv = join_cell_str(d, atab, acol, cc1, rs1, vec_get(pr1, k),
+                                               cc2, rs2, vec_get(pr2, k));
+                        if cv.len() > 0 { cnt = cnt + 1; }
+                        k = k + 1;
+                    }
+                    out = int_to_str(cnt);
+                }
+            } else {
+                let mut sum_val = 0.0;
+                let mut min_val = 999999999.0;
+                let mut max_val = 0.0 - 999999999.0;
+                let mut min_str = "";
+                let mut max_str = "";
+                let mut cnt = 0;
+                let mut k = 0;
+                while k < pcount {
+                    let cv = join_cell_str(d, atab, acol, cc1, rs1, vec_get(pr1, k),
+                                           cc2, rs2, vec_get(pr2, k));
+                    let nv = cv.parse_float();
+                    sum_val = sum_val + nv;
+                    if nv < min_val { min_val = nv; }
+                    if nv > max_val { max_val = nv; }
+                    if atype == 2 {
+                        if cnt == 0 { min_str = cv; max_str = cv; }
+                        else {
+                            if compare_vals(cv, min_str, atype) < 0 { min_str = cv; }
+                            if compare_vals(cv, max_str, atype) > 0 { max_str = cv; }
+                        }
+                    }
+                    cnt = cnt + 1;
+                    k = k + 1;
+                }
+                if cnt == 0 && (af == 4 || af == 5) {
+                    out = "";
+                } else if af == 4 && atype == 2 {
+                    out = min_str;
+                } else if af == 5 && atype == 2 {
+                    out = max_str;
+                } else {
+                    let mut rv = sum_val;
+                    if af == 3 { if cnt > 0 { rv = sum_val / cnt; } else { rv = 0.0; } }
+                    if af == 4 { rv = min_val; }
+                    if af == 5 { rv = max_val; }
+                    out = float_to_str(rv);
+                }
+            }
+            vec_push(agg_results, sp_add(d, out));
+            let dist0 = if pi < vec_len(d.p_agg_distinct) { vec_get(d.p_agg_distinct, pi) } else { 0 };
+            vec_push(agg_headers, build_agg_header(d, af, ac_id, al, dist0));
+            pi = pi + 1;
+        }
+        print_result_row(d, agg_headers, agg_results, d.p_agg_count);
+        return;
+    }
+
+    // GROUP BY over a JOIN (with or without aggregates) is not yet supported.
+    // Fail closed rather than return ungrouped rows, which would be a silent
+    // wrong answer. Scalar aggregates over a join are handled above.
+    if join_has_agg || d.has_group_by == 1 {
+        println!("Error: GROUP BY over a JOIN is not supported");
         return;
     }
 
@@ -4763,6 +4911,18 @@ fn exec_select_join(d: &mut DB) ~ Console {
         println!("{}", row_line);
         ri = ri + 1;
     }
+}
+
+// Fetch one cell value for an assembled JOIN pair. tab selects table 1 or 2;
+// col is that table's column index. A LEFT JOIN null-extended pair carries
+// r2 < 0, so a table-2 column reads as NULL (empty string).
+fn join_cell_str(d: &DB, tab: i32, col: i32, cc1: i32, rs1: i32, r1: i32,
+                 cc2: i32, rs2: i32, r2: i32) -> String {
+    if tab == 1 {
+        return sp_get(d, vec_get(d.cells, rs1 + r1 * cc1 + col));
+    }
+    if r2 < 0 { return ""; }
+    sp_get(d, vec_get(d.cells, rs2 + r2 * cc2 + col))
 }
 
 // Evaluate DNF condition ci for a JOIN row: resolve its column in either
