@@ -2283,6 +2283,9 @@ fn exec_subquery_scalar(d: &mut DB, sql: String) -> String ~ Console + Process {
     // A subquery cannot abort just itself and let the outer query continue with
     // a correct value, so an unknown WHERE column fails the whole statement.
     if !where_cols_ok(d, cs, cc, tname, d.alias1) { process_exit(1); }
+    // Same for an aggregate over an unknown column: without this the aggregate
+    // read zero cells and fed 0 into the outer comparison, matching every row.
+    if !agg_cols_ok(d, cs, cc, tname, d.alias1) { process_exit(1); }
 
     // Gather matching rows
     let mut match_rows: Vec<i32> = vec![];
@@ -2741,6 +2744,50 @@ fn where_cols_ok(d: &DB, cs: i32, cc: i32, tname: String, alias: i32) -> bool ~ 
     true
 }
 
+// Fail closed when an aggregate names a column the target table does not have.
+// The projection's aggregate args live in p_agg_cols, parallel to p_agg_funcs;
+// a plain column has func 0 (validated elsewhere) and COUNT(*) stores "*". For
+// any real aggregate (func > 0) over a named column, resolve_col returns -1 for
+// a name no column matches, and every compute site then read zero matching
+// cells: SUM/AVG/COUNT(col) returned 0, MIN/MAX returned empty, a grouped
+// aggregate returned 0 per group, and a scalar subquery fed 0 into the outer
+// comparison, all silent wrong answers (SQLite errors "no such column"). A
+// HAVING aggregate arg is checked the same way. Validating once here, before
+// the scan, also covers an empty table. resolve_col is reused so a dotted or
+// alias-qualified arg resolves exactly as it does during evaluation. Plain
+// SELECT columns are out of scope: they keep their own "column not found" path.
+fn agg_cols_ok(d: &DB, cs: i32, cc: i32, tname: String, alias: i32) -> bool ~ Console {
+    let mut k = 0;
+    while k < d.p_agg_count {
+        if vec_get(d.p_agg_funcs, k) > 0 {
+            let an = sp_get(d, vec_get(d.p_agg_cols, k));
+            let is_star = an == "*";
+            if !is_star {
+                if resolve_col(d, cs, cc, tname, alias, an) < 0 {
+                    println!("Error: no such column: {}", an);
+                    return false;
+                }
+            }
+        }
+        k = k + 1;
+    }
+    if d.has_having == 1 {
+        if d.having_agg_func > 0 {
+            if d.having_agg_col >= 0 {
+                let hn = sp_get(d, d.having_agg_col);
+                let h_star = hn == "*";
+                if !h_star {
+                    if resolve_col(d, cs, cc, tname, alias, hn) < 0 {
+                        println!("Error: no such column: {}", hn);
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
 // True if cell_val is in condition ci's IN-list (its slice of wc_in_pool).
 fn eval_in_pool(d: &DB, cell_val: String, start: i32, len: i32) -> bool {
     let mut i = 0;
@@ -2868,6 +2915,9 @@ fn exec_select(d: &mut DB) ~ Console + Process {
     // Reject an unknown WHERE column before any scan. This runs ahead of the
     // aggregate dispatch below, so exec_select_agg_no_group is covered too.
     if !where_cols_ok(d, cs, cc, tname, d.alias1) { return; }
+    // Reject an aggregate over an unknown column before the aggregate dispatch,
+    // so exec_select_agg_no_group cannot read zero cells and return a silent 0.
+    if !agg_cols_ok(d, cs, cc, tname, d.alias1) { return; }
 
     // Check if we have any aggregate functions (mixed with columns) without GROUP BY
     // Handle aggregates: COUNT, SUM, AVG, MIN, MAX without GROUP BY
@@ -3739,6 +3789,9 @@ fn exec_select_group(d: &mut DB) ~ Console {
     let rc = vec_get(d.tbl_row_counts, tidx);
 
     if !where_cols_ok(d, cs, cc, tname, d.alias1) { return; }
+    // Reject an aggregate (projection or HAVING) over an unknown column before
+    // grouping, so a group's compute never reads zero cells and returns 0.
+    if !agg_cols_ok(d, cs, cc, tname, d.alias1) { return; }
 
     let gcol_name = sp_get(d, d.group_col);
     let gcol = resolve_col(d, cs, cc, tname, d.alias1, gcol_name);

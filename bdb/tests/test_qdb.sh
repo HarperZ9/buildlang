@@ -209,6 +209,24 @@ reseed; errchk "having_arith_plus_closed" "SELECT dept, COUNT(*) FROM emp GROUP 
 reseed; errchk "having_arith_pct_closed"  "SELECT dept, SUM(salary) FROM emp GROUP BY dept HAVING SUM(salary) % 2 = 0" "unsupported operator in HAVING"
 reseed; errchk "having_double_eq_closed"  "SELECT dept, COUNT(*) FROM emp GROUP BY dept HAVING COUNT(*) == 1"      "expected a value after operator"
 reseed; errchk "having_gtlt_closed"       "SELECT dept, COUNT(*) FROM emp GROUP BY dept HAVING COUNT(*) >< 1"      "expected a value after operator"
+# Aggregate over an unknown column, fail closed. resolve_col returns -1 for a name
+# no column matches, and each aggregate compute site then read zero cells. SUM, AVG
+# and COUNT(col) returned 0, MIN and MAX returned blank, a grouped aggregate
+# returned 0 per group, a HAVING aggregate dropped every group, and a scalar
+# subquery fed 0 into the outer comparison. Every one ran with exit 0, a silent
+# wrong answer. agg_cols_ok validates each projection aggregate argument and the
+# HAVING aggregate argument before dispatch, guarded in exec_select,
+# exec_select_group and exec_subquery_scalar. COUNT(*) and the DISTINCT flag are
+# skipped, and a plain SELECT column keeps its own existing not-found path. The
+# JOIN aggregate path already fails closed through its own dotted-column resolver.
+reseed; errchk "agg_unknown_sum"          "SELECT SUM(badcol) FROM emp"                                           "no such column"
+reseed; errchk "agg_unknown_avg"          "SELECT AVG(badcol) FROM emp"                                           "no such column"
+reseed; errchk "agg_unknown_min"          "SELECT MIN(badcol) FROM emp"                                           "no such column"
+reseed; errchk "agg_unknown_count"        "SELECT COUNT(badcol) FROM emp"                                         "no such column"
+reseed; errchk "agg_unknown_group"        "SELECT dept, SUM(badcol) FROM emp GROUP BY dept"                       "no such column"
+reseed; errchk "agg_unknown_having_sum"   "SELECT dept, COUNT(*) FROM emp GROUP BY dept HAVING SUM(badcol) > 0"   "no such column"
+reseed; errchk "agg_unknown_having_count" "SELECT dept, COUNT(*) FROM emp GROUP BY dept HAVING COUNT(badcol) > 0" "no such column"
+reseed; errchk "agg_unknown_subquery"     "SELECT name FROM emp WHERE salary > (SELECT AVG(badcol) FROM emp)"     "no such column"
 # ORDER BY an aggregate term. The order key matches the aggregate output column
 # by func + arg and sorts numerically. Ties keep group-discovery order (eng
 # before sales). SUM proves the numeric path (lexical "200" < "70" would be wrong).
