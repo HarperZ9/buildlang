@@ -368,6 +368,20 @@ chksel "join_group_order_alias_asc" "SELECT dep.dname, COUNT(*) AS n FROM emp JO
 chk "join_group_order_secondary_closed" "$($QDB "$DB" "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc ORDER BY dep.loc, SUM(emp.salary)" 2>&1 | tr -d '\r' | grep -ci 'secondary')" "1"
 chk "join_group_order_ordinal_closed"   "$($QDB "$DB" "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc ORDER BY 2" 2>&1 | tr -d '\r' | grep -ci 'not a grouped column')" "1"
 chk "join_group_order_unresolv_closed"  "$($QDB "$DB" "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc ORDER BY emp.name" 2>&1 | tr -d '\r' | grep -ci 'not a grouped column')" "1"
+# LIMIT / OFFSET over a grouped join truncate the group rows. Applied after the
+# ORDER BY sort, so "ORDER BY ... LIMIT n" is the top-n idiom; LIMIT with no
+# ORDER BY keeps group-discovery order (b1, b2, b3). OFFSET skips whole groups,
+# HAVING runs before LIMIT, and LIMIT 0 or an OFFSET past the last group renders
+# the header with zero data rows. The pre-fix binary answered every LIMIT/OFFSET
+# query with "LIMIT over a grouped JOIN is not supported", so each value and
+# header assertion separates the fixed engine from the guard it replaced.
+chksel "join_group_limit_topn"      "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc ORDER BY SUM(emp.salary) LIMIT 2"          "$(printf 'b3      | 70\nb1      | 190')"
+chksel "join_group_limit_desc_topn" "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc ORDER BY SUM(emp.salary) DESC LIMIT 2"     "$(printf 'b2      | 200\nb1      | 190')"
+chksel "join_group_limit_offset"    "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc ORDER BY SUM(emp.salary) LIMIT 1 OFFSET 1" "b1      | 190"
+chksel "join_group_limit_noorder"   "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc LIMIT 2"                                    "$(printf 'b1      | 190\nb2      | 200')"
+chksel "join_group_limit_having"    "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc HAVING SUM(emp.salary) > 100 ORDER BY SUM(emp.salary) LIMIT 1" "b1      | 190"
+chkhdr "join_group_limit_zero_hdr"  "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc LIMIT 0" "dep.loc | SUM(emp.salary)"
+chk    "join_group_limit_zero_rows" "$(rows "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc LIMIT 0" | grep -c .)" "0"
 # A bare GROUP BY with no aggregate and COUNT(DISTINCT) over a join stay
 # fail-closed: each is an honest partial with one accurate message.
 chk "join_group_noagg_closed"  "$($QDB "$DB" "SELECT dep.loc FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"

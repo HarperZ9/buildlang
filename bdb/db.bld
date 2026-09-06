@@ -4543,9 +4543,10 @@ fn exec_select_join(d: &mut DB) ~ Console {
     // the single group column's value, then fold each projection item over the
     // pairs in one bucket exactly as the scalar path folds over all pairs. One
     // output row per distinct group key, in group-discovery order (the left
-    // table's scan order), matching the single-table grouped path. HAVING, ORDER
-    // BY, DISTINCT, and LIMIT over a grouped join stay fail-closed so an
-    // unsupported clause never silently drops or reorders group rows.
+    // table's scan order), matching the single-table grouped path. HAVING filters
+    // groups, ORDER BY sorts them, and LIMIT/OFFSET truncate them. DISTINCT and
+    // COUNT(DISTINCT) over a grouped join stay fail-closed so an unsupported clause
+    // never silently drops or reorders group rows.
     if join_has_agg && d.has_group_by == 1 {
         if join_has_distinct {
             println!("Error: COUNT(DISTINCT) over a JOIN is not supported");
@@ -4553,10 +4554,6 @@ fn exec_select_join(d: &mut DB) ~ Console {
         }
         if d.has_distinct == 1 {
             println!("Error: DISTINCT over a grouped JOIN is not supported");
-            return;
-        }
-        if d.has_limit == 1 || d.has_offset == 1 {
-            println!("Error: LIMIT over a grouped JOIN is not supported");
             return;
         }
         // Resolve the single group column against either table.
@@ -4910,6 +4907,39 @@ fn exec_select_join(d: &mut DB) ~ Console {
                 jo_picked = jo_picked + 1;
             }
             grows = jo_sorted;
+        }
+
+        // LIMIT / OFFSET over the group rows. Mirrors the single-table grouped
+        // path exactly: skip OFFSET whole group rows, then take up to LIMIT,
+        // each row being ncols pool ids. Applied after the ORDER BY sort so
+        // "ORDER BY ... LIMIT n" returns the top n groups; LIMIT without ORDER BY
+        // keeps group-discovery order like every other unordered path.
+        if d.has_limit == 1 || d.has_offset == 1 {
+            let mut lo_off = 0;
+            if d.has_offset == 1 { lo_off = d.offset_val; }
+            let mut lo_lim = gkc;
+            if d.has_limit == 1 { lo_lim = d.limit_val; }
+            let mut lo_grows: Vec<i32> = vec![];
+            let mut lo_new = 0;
+            let mut lo_taken = 0;
+            let mut lo_i = lo_off;
+            let mut lo_go = true;
+            while lo_go {
+                if lo_i >= gkc { lo_go = false; }
+                else if lo_taken >= lo_lim { lo_go = false; }
+                else {
+                    let mut lo_c = 0;
+                    while lo_c < ncols {
+                        vec_push(lo_grows, vec_get(grows, lo_i * ncols + lo_c));
+                        lo_c = lo_c + 1;
+                    }
+                    lo_new = lo_new + 1;
+                    lo_taken = lo_taken + 1;
+                    lo_i = lo_i + 1;
+                }
+            }
+            grows = lo_grows;
+            gkc = lo_new;
         }
 
         // Column widths, then render header, separator, one line per group.
