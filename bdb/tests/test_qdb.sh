@@ -515,6 +515,44 @@ chk "union_order_unknown_closed"     "$($QDB "$DB" "SELECT id FROM ua UNION SELE
 $QDB "$DB" "DROP TABLE ua" >/dev/null 2>&1
 $QDB "$DB" "DROP TABLE ub" >/dev/null 2>&1
 
+echo "== trailing input fails closed (no silently dropped tokens) =="
+# A finished parse must consume the whole statement. A leftover token is a clause
+# qdb does not parse or plain garbage; running anyway would silently drop it -- a
+# wrong answer for a query, a half-specified write for a mutation. Every statement
+# kind fails closed with the store untouched. These are false-success controls for
+# the end-of-input guard: build qdb without it and each SELECT below returns a
+# plausible answer while each mutation applies its partial write, so every line
+# here fails on the unpatched parser (the needle is never printed; the mutation
+# cases also leave emp changed).
+# --- query side: garbage after a clause is rejected, never dropped ---
+reseed; errchk "trail_where"  "SELECT name FROM emp WHERE salary > 80 EXTRA"  "trailing input"
+reseed; errchk "trail_order"  "SELECT name FROM emp ORDER BY salary WOOPS"    "trailing input"
+reseed; errchk "trail_limit"  "SELECT name FROM emp LIMIT 2 tail"             "trailing input"
+# A table name takes exactly one optional alias. The first bareword after emp is
+# that alias; a second bareword is garbage and must be rejected -- this guards the
+# alias slot from swallowing arbitrary trailing words.
+reseed; errchk "trail_after_alias" "SELECT id FROM emp e2 junk ORDER BY id"   "trailing input"
+# Companion positive: a single trailing bareword IS a legal alias, so this well
+# formed query must still render rather than over-reject.
+reseed; chksel "alias_single_ok"   "SELECT id FROM emp e2 ORDER BY id"        "$(printf '1\n2\n3\n4\n5')"
+# --- mutation side: the partial write is refused before the WAL, table intact ---
+reseed; errchk "trail_delete" "DELETE FROM emp WHERE id = 1 EXTRA"            "trailing input"
+reseed; errchk "trail_insert" "INSERT INTO emp VALUES (9,'z','x',1,1) OOPS"   "trailing input"
+reseed; errchk "trail_update" "UPDATE emp SET salary = 0 WHERE id = 1 OOPS"   "trailing input"
+reseed; errchk "trail_create" "CREATE TABLE ct (id INTEGER) OOPS"             "trailing input"
+# A trailing token after the final UNION branch fails closed too: exec_select_union
+# re-enters the same end-of-input check per branch, so the final branch's tail is
+# guarded there. Garbage right after the table name would bind as that branch's
+# alias, so the control puts it after ORDER BY, which cannot take an alias.
+rm -f "$DB" "$DB".wal 2>/dev/null
+$QDB "$DB" "CREATE TABLE ua (id INTEGER, name TEXT)" >/dev/null
+$QDB "$DB" "INSERT INTO ua VALUES (1,'alice'),(2,'bob')" >/dev/null
+$QDB "$DB" "CREATE TABLE ub (id INTEGER, name TEXT)" >/dev/null
+$QDB "$DB" "INSERT INTO ub VALUES (3,'carol')" >/dev/null
+chk "trail_union_final" "$($QDB "$DB" "SELECT id FROM ua UNION SELECT id FROM ub ORDER BY 1 JUNK" 2>&1 | tr -d '\r' | grep -ci 'trailing input')" "1"
+$QDB "$DB" "DROP TABLE ua" >/dev/null 2>&1
+$QDB "$DB" "DROP TABLE ub" >/dev/null 2>&1
+
 echo "== ALTER / DROP =="
 reseed; $QDB "$DB" "ALTER TABLE emp ADD COLUMN active INTEGER" >/dev/null
 chkhdr "alter_add"     "SELECT * FROM emp LIMIT 0" "id | name | dept | salary | age | active"

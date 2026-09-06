@@ -1587,6 +1587,21 @@ fn parse_select(d: &mut DB) ~ Console + Process {
     if tk_is_kw(d, "ORDER") == 1 { parse_order_by(d); }
     if tk_is_kw(d, "LIMIT") == 1 { parse_limit(d); }
     if tk_is_kw(d, "OFFSET") == 1 { parse_offset(d); }
+
+    // Fail-closed: a finished SELECT parse must leave the cursor at end of
+    // input, at a trailing ';', or at a UNION keyword. A UNION hands the rest of
+    // the token stream to exec_select_union, which re-enters this function per
+    // branch, so this same check fails a stray token after the final branch
+    // closed too. Any other leftover is unconsumed input -- a clause we do not
+    // parse, or garbage after LIMIT/WHERE -- and running the query anyway would
+    // silently drop it and return a plausible wrong answer.
+    if tk_is_punct(d, ";") == 1 { next_token(d); }
+    if d.tk_type != 7 {
+        if tk_is_kw(d, "UNION") == 0 {
+            println!("Error: unexpected trailing input near '{}'", d.tk_val);
+            process_exit(1);
+        }
+    }
 }
 
 fn parse_insert(d: &mut DB) ~ Console + Process {
@@ -2420,11 +2435,31 @@ fn parse_order_by(d: &mut DB) ~ Console + Process {
     if tk_is_kw(d, "DESC") == 1 { d.order_desc = 1; next_token(d); }
     else if tk_is_kw(d, "ASC") == 1 { d.order_desc = 0; next_token(d); }
     // Optional secondary key: ORDER BY a, b [ASC|DESC]. It breaks ties on the
-    // primary key. A third comma-key is not stored (honest limitation).
+    // primary key. A third comma-key is not stored (honest limitation). The
+    // secondary key may itself be an aggregate term (ORDER BY x, SUM(col)); read
+    // the whole term, parentheses included, so no '(col)' tail is left for the
+    // end-of-input check to trip on. A secondary aggregate is reachable only on
+    // the grouped paths, which reject a secondary key outright, so recording the
+    // inner column name is enough to mark that a secondary key is present.
     if tk_is_punct(d, ",") == 1 {
         next_token(d);
-        let cname2 = read_col_ref(d);
-        d.order_col2 = sp_add(d, cname2);
+        let ag2 = is_agg_kw(d.tk_val);
+        if ag2 > 0 {
+            next_token(d);
+            expect_punct(d, "(");
+            if d.tk_type == 6 {
+                let ostar2 = sp_add(d, "*");
+                d.order_col2 = ostar2;
+                next_token(d);
+            } else {
+                let oagg2 = read_col_ref(d);
+                d.order_col2 = sp_add(d, oagg2);
+            }
+            expect_punct(d, ")");
+        } else {
+            let cname2 = read_col_ref(d);
+            d.order_col2 = sp_add(d, cname2);
+        }
         if tk_is_kw(d, "DESC") == 1 { d.order_desc2 = 1; next_token(d); }
         else if tk_is_kw(d, "ASC") == 1 { d.order_desc2 = 0; next_token(d); }
     }
@@ -6673,7 +6708,24 @@ fn exec_sql(d: &mut DB, input: String) ~ Console + FileSystem + Process {
 
     reset_parser(d, input);
     parse_sql(d);
+
     let st = d.stmt_type;
+
+    // Fail-closed backstop for mutations: after a complete parse the token
+    // cursor must sit at end of input. A live token means the mutation parser
+    // stopped early and left the statement half-specified; executing anyway
+    // could apply a partial write. SELECT is guarded inside parse_select, which
+    // also re-enters per UNION branch, so it is exempt here. Tolerate one
+    // trailing ';' -- main() and run_repl() strip one, a direct caller may leave
+    // one -- then refuse any other leftover. This runs before the WAL write, so
+    // a rejected statement mutates nothing.
+    if st != 0 {
+        if tk_is_punct(d, ";") == 1 { next_token(d); }
+        if d.tk_type != 7 {
+            println!("Error: unexpected trailing input near '{}'", d.tk_val);
+            process_exit(1);
+        }
+    }
 
     // Read-only: SELECT — no WAL
     if st == 0 { exec_select(d); return; }
