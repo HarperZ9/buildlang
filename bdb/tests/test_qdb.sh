@@ -334,10 +334,21 @@ chksel "join_group_cnt"    "SELECT dep.dname, COUNT(*) FROM emp JOIN dep ON emp.
 chksel "join_group_minmax" "SELECT emp.dept, MIN(emp.salary), MAX(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY emp.dept" "$(printf 'eng      | 90              | 100\nsales    | 80              | 120\nhr       | 70              | 70')"
 chksel "join_group_avg"    "SELECT dep.loc, AVG(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc" "$(printf 'b1      | 95\nb2      | 100\nb3      | 70')"
 chksel "join_group_where"  "SELECT dep.loc, COUNT(*) FROM emp JOIN dep ON emp.dept = dep.dname WHERE emp.salary > 75 GROUP BY dep.loc" "$(printf 'b1      | 2\nb2      | 2')"
-# The grouped-join path keeps HAVING, ORDER BY, a bare GROUP BY with no aggregate, and
-# COUNT(DISTINCT) over a join fail-closed: each is an honest partial with one accurate
-# message, never a silent wrong grouping, order, or count.
-chk "join_group_having_closed" "$($QDB "$DB" "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc HAVING SUM(emp.salary) > 100" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"
+# HAVING over a grouped join folds the HAVING aggregate over each group's bucket
+# and keeps only groups that pass. The HAVING aggregate is independent of the
+# projected one: maxcross projects COUNT(*) but filters on MAX(salary), and text
+# filters on a TEXT-typed MIN. When every group fails the test the result is an
+# empty-but-well-formed table -- header, zero rows, exit 0 -- never all groups and
+# never an error.
+chksel "join_group_having_sum"      "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc HAVING SUM(emp.salary) > 100" "$(printf 'b1      | 190\nb2      | 200')"
+chksel "join_group_having_cnt"      "SELECT dep.dname, COUNT(*) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.dname HAVING COUNT(*) > 1" "$(printf 'eng       | 2\nsales     | 2')"
+chksel "join_group_having_maxcross" "SELECT emp.dept, COUNT(*) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY emp.dept HAVING MAX(emp.salary) >= 120" "sales    | 2"
+chksel "join_group_having_text"     "SELECT emp.dept, COUNT(*) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY emp.dept HAVING MIN(emp.name) = 'carol'" "sales    | 2"
+chkhdr "join_group_having_emptyhdr" "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc HAVING SUM(emp.salary) > 999" "dep.loc | SUM(emp.salary)"
+chk    "join_group_having_emptyrows" "$(rows "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc HAVING SUM(emp.salary) > 999" | grep -c .)" "0"
+# The grouped-join path keeps ORDER BY, a bare GROUP BY with no aggregate, and
+# COUNT(DISTINCT) over a join fail-closed: each is an honest partial with one
+# accurate message, never a silent wrong order or count.
 chk "join_group_order_closed"  "$($QDB "$DB" "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc ORDER BY dep.loc" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"
 chk "join_group_noagg_closed"  "$($QDB "$DB" "SELECT dep.loc FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"
 chk "join_distinct_closed"     "$($QDB "$DB" "SELECT COUNT(DISTINCT emp.dept) FROM emp JOIN dep ON emp.dept = dep.dname" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"

@@ -4551,10 +4551,6 @@ fn exec_select_join(d: &mut DB) ~ Console {
             println!("Error: COUNT(DISTINCT) over a JOIN is not supported");
             return;
         }
-        if d.has_having == 1 {
-            println!("Error: HAVING over a grouped JOIN is not supported");
-            return;
-        }
         if d.has_order == 1 {
             println!("Error: ORDER BY over a grouped JOIN is not supported");
             return;
@@ -4644,6 +4640,49 @@ fn exec_select_join(d: &mut DB) ~ Console {
                 gkc = gkc + 1;
             }
             kk = kk + 1;
+        }
+
+        // HAVING: keep only group keys whose aggregate passes the test. The
+        // HAVING aggregate is folded over the same bucket the projection uses, so
+        // a surviving group's HAVING value matches what the row displays. The RHS
+        // column, if any, is resolved against either table (COUNT(*) needs none).
+        // Trimming gkeys/gkc here leaves every downstream fold, width, and render
+        // loop untouched.
+        if d.has_having == 1 {
+            let hstar = d.having_agg_func == 1 && sp_get(d, d.having_agg_col) == "*";
+            let mut hatab = 0;
+            let mut hacol = 0 - 1;
+            let mut hatype = 0;
+            if hstar == false {
+                let hname = sp_get(d, d.having_agg_col);
+                let rh1 = resolve_col(d, cs1, cc1, tname1, d.alias1, hname);
+                if rh1 >= 0 { hatab = 1; hacol = rh1; hatype = vec_get(d.col_types, cs1 + rh1); }
+                else {
+                    let rh2 = resolve_col(d, cs2, cc2, tname2, d.alias2, hname);
+                    if rh2 >= 0 { hatab = 2; hacol = rh2; hatype = vec_get(d.col_types, cs2 + rh2); }
+                    else {
+                        println!("Error: HAVING column '{}' not found in either table", hname);
+                        return;
+                    }
+                }
+            }
+            let hv_rval = sp_get(d, d.having_val);
+            let mut kept: Vec<i32> = vec![];
+            let mut keptc = 0;
+            let mut hk = 0;
+            while hk < gkc {
+                let hgkey = sp_get(d, vec_get(gkeys, hk));
+                let hv = join_having_agg(d, d.having_agg_func, hstar, hatab, hacol, hatype,
+                                         gtab, gcol, cc1, rs1, cc2, rs2,
+                                         gpr1, gpr2, gpc, hgkey);
+                if eval_where(hv, d.having_op, hv_rval) {
+                    vec_push(kept, vec_get(gkeys, hk));
+                    keptc = keptc + 1;
+                }
+                hk = hk + 1;
+            }
+            gkeys = kept;
+            gkc = keptc;
         }
 
         // Build headers once (alias-aware), same as the scalar path.
@@ -5212,6 +5251,72 @@ fn join_cell_str(d: &DB, tab: i32, col: i32, cc1: i32, rs1: i32, r1: i32,
     }
     if r2 < 0 { return ""; }
     sp_get(d, vec_get(d.cells, rs2 + r2 * cc2 + col))
+}
+
+// Fold the HAVING aggregate over the bucket pairs whose group cell equals gkey,
+// using the same numeric/text rules as the grouped-JOIN projection fold. Returns
+// the aggregate as a string so eval_where can compare it against the RHS literal.
+// hstar marks COUNT(*); for COUNT(col)/SUM/AVG/MIN/MAX the arg column is at
+// (atab, acol) with column type atype (2 = TEXT).
+fn join_having_agg(d: &DB, haf: i32, hstar: bool, atab: i32, acol: i32, atype: i32,
+                   gtab: i32, gcol: i32, cc1: i32, rs1: i32, cc2: i32, rs2: i32,
+                   gpr1: Vec<i32>, gpr2: Vec<i32>, gpc: i32, gkey: String) -> String {
+    if haf == 1 {
+        // COUNT(*) counts bucket pairs; COUNT(col) counts non-empty cells.
+        let mut cnt = 0;
+        let mut k = 0;
+        while k < gpc {
+            let gv = join_cell_str(d, gtab, gcol, cc1, rs1, vec_get(gpr1, k),
+                                   cc2, rs2, vec_get(gpr2, k));
+            if gv == gkey {
+                if hstar { cnt = cnt + 1; }
+                else {
+                    let cv = join_cell_str(d, atab, acol, cc1, rs1, vec_get(gpr1, k),
+                                           cc2, rs2, vec_get(gpr2, k));
+                    if cv.len() > 0 { cnt = cnt + 1; }
+                }
+            }
+            k = k + 1;
+        }
+        return int_to_str(cnt);
+    }
+    // SUM/AVG/MIN/MAX, mirroring the projection fold's af>=2 branch.
+    let mut sum_val = 0.0;
+    let mut min_val = 999999999.0;
+    let mut max_val = 0.0 - 999999999.0;
+    let mut min_str = "";
+    let mut max_str = "";
+    let mut cnt = 0;
+    let mut k = 0;
+    while k < gpc {
+        let gv = join_cell_str(d, gtab, gcol, cc1, rs1, vec_get(gpr1, k),
+                               cc2, rs2, vec_get(gpr2, k));
+        if gv == gkey {
+            let cv = join_cell_str(d, atab, acol, cc1, rs1, vec_get(gpr1, k),
+                                   cc2, rs2, vec_get(gpr2, k));
+            let nv = cv.parse_float();
+            sum_val = sum_val + nv;
+            if nv < min_val { min_val = nv; }
+            if nv > max_val { max_val = nv; }
+            if atype == 2 {
+                if cnt == 0 { min_str = cv; max_str = cv; }
+                else {
+                    if compare_vals(cv, min_str, atype) < 0 { min_str = cv; }
+                    if compare_vals(cv, max_str, atype) > 0 { max_str = cv; }
+                }
+            }
+            cnt = cnt + 1;
+        }
+        k = k + 1;
+    }
+    if cnt == 0 && (haf == 4 || haf == 5) { return ""; }
+    if haf == 4 && atype == 2 { return min_str; }
+    if haf == 5 && atype == 2 { return max_str; }
+    let mut rv = sum_val;
+    if haf == 3 { if cnt > 0 { rv = sum_val / cnt; } else { rv = 0.0; } }
+    if haf == 4 { rv = min_val; }
+    if haf == 5 { rv = max_val; }
+    float_to_str(rv)
 }
 
 // Evaluate DNF condition ci for a JOIN row: resolve its column in either
