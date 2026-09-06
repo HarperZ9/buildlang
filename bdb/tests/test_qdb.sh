@@ -89,6 +89,16 @@ chksel "is_null"       "SELECT id FROM nn WHERE name IS NULL" "2"
 chksel "is_not_null"   "SELECT id FROM nn WHERE name IS NOT NULL ORDER BY id" "$(printf '1\n3')"
 $QDB "$DB" "DROP TABLE nn" >/dev/null 2>&1
 
+echo "== WHERE operator fail-closed (arithmetic / doubled / stray) =="
+# op_encode returns -1 for any token that is not a comparison operator. Before
+# the parse_condition guards, a leaf built with op -1 evaluated to always-false,
+# so these queries returned zero rows with exit 0: a silent wrong answer. Each
+# must now print a diagnostic, leave emp intact, and (checked below) exit nonzero.
+reseed; errchk "where_arith_plus_closed" "SELECT id FROM emp WHERE salary + 10 > 100" "unsupported operator"
+reseed; errchk "where_arith_pct_closed"  "SELECT id FROM emp WHERE salary % 2 = 0"    "unsupported operator"
+reseed; errchk "where_double_eq_closed"  "SELECT id FROM emp WHERE salary == 100"     "expected a value after operator"
+reseed; errchk "where_gtlt_closed"       "SELECT id FROM emp WHERE salary >< 100"     "expected a value after operator"
+
 echo "== ORDER BY (multi-key) / LIMIT / OFFSET / DISTINCT =="
 chksel "order_desc"    "SELECT name FROM emp ORDER BY salary DESC" "$(printf 'dave\nalice\nbob\ncarol\neve')"
 chksel "order_2key"    "SELECT name FROM emp ORDER BY dept, salary DESC" "$(printf 'alice\nbob\neve\ndave\ncarol')"

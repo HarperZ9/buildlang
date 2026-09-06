@@ -1958,6 +1958,16 @@ fn parse_condition(d: &mut DB) -> i32 ~ Console + Process {
     // Normal operator: =, <, >, <=, >=, <>, !=
     let op = d.tk_val;
     let op_code = op_encode(op);
+    // Fail closed on an unrecognized comparison operator. op_encode returns -1
+    // for any token that is not one of = < > <= >= <> != . An arithmetic
+    // operator (as in `salary + 10 > 100`) or a stray symbol like % lands here.
+    // Before this guard the leaf was built with op -1, which eval_where treats
+    // as always-false, so the query returned zero rows with no diagnostic, a
+    // silent wrong answer.
+    if op_code < 0 {
+        println!("Error: unsupported operator '{}' in WHERE; arithmetic in a condition such as col + N is not supported", op);
+        process_exit(1);
+    }
     next_token(d);
 
     // Scalar subquery: op (SELECT ...)
@@ -1970,6 +1980,17 @@ fn parse_condition(d: &mut DB) -> i32 ~ Console + Process {
             let ci = wc_push(d, left_id, op_code, rid, neg);
             return wn_leaf(d, ci);
         }
+    }
+
+    // Fail closed when the value position holds another operator token
+    // (tk_type 4), which means a doubled operator such as the C-style `==`:
+    // the first `=` parsed as the operator and the second `=` would otherwise
+    // be taken as the literal value `"="`, comparing the column to a string it
+    // never equals and returning zero rows silently. A negative number like -5
+    // is one number token (type 3), so this does not misfire on `col > -5`.
+    if d.tk_type == 4 {
+        println!("Error: expected a value after operator '{}' in WHERE, got '{}' (use = not ==)", op, d.tk_val);
+        process_exit(1);
     }
 
     // Plain value
