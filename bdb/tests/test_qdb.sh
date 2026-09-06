@@ -346,10 +346,30 @@ chksel "join_group_having_maxcross" "SELECT emp.dept, COUNT(*) FROM emp JOIN dep
 chksel "join_group_having_text"     "SELECT emp.dept, COUNT(*) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY emp.dept HAVING MIN(emp.name) = 'carol'" "sales    | 2"
 chkhdr "join_group_having_emptyhdr" "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc HAVING SUM(emp.salary) > 999" "dep.loc | SUM(emp.salary)"
 chk    "join_group_having_emptyrows" "$(rows "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc HAVING SUM(emp.salary) > 999" | grep -c .)" "0"
-# The grouped-join path keeps ORDER BY, a bare GROUP BY with no aggregate, and
-# COUNT(DISTINCT) over a join fail-closed: each is an honest partial with one
-# accurate message, never a silent wrong order or count.
-chk "join_group_order_closed"  "$($QDB "$DB" "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc ORDER BY dep.loc" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"
+# ORDER BY over a grouped join sorts the folded groups. The key names the
+# grouped column, an aggregate term, or a projection alias; it resolves to an
+# output column, and a stable sort keeps equal keys in group-discovery order.
+# COUNT sorts as an integer, SUM/AVG/MIN/MAX as a real, a plain key by its
+# source type. WHERE and HAVING run first, so the sort orders exactly the rows
+# that survive both.
+chksel "join_group_order_agg_asc"   "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc ORDER BY SUM(emp.salary)"      "$(printf 'b3      | 70\nb1      | 190\nb2      | 200')"
+chksel "join_group_order_agg_desc"  "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc ORDER BY SUM(emp.salary) DESC" "$(printf 'b2      | 200\nb1      | 190\nb3      | 70')"
+chksel "join_group_order_col_desc"  "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc ORDER BY dep.loc DESC"         "$(printf 'b3      | 70\nb2      | 200\nb1      | 190')"
+chksel "join_group_order_real_max"  "SELECT emp.dept, MAX(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY emp.dept ORDER BY MAX(emp.salary)"    "$(printf 'hr       | 70\neng      | 100\nsales    | 120')"
+# ORDER BY an alias resolves against the projection alias pool; ASC flips the
+# discovery order (eng, sales, hr) to put the single-row hr group first, and the
+# eng/sales tie holds its discovery order.
+chksel "join_group_order_alias_asc" "SELECT dep.dname, COUNT(*) AS n FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.dname ORDER BY n ASC"               "$(printf 'hr        | 1\neng       | 2\nsales     | 2')"
+# A secondary key, a positional ordinal, and an unresolvable name each fail
+# closed with an accurate message: an honest partial, never a silent wrong
+# order. The pre-fix binary answered every one of these with the blanket
+# "ORDER BY over a grouped JOIN is not supported", so these three messages also
+# separate the fixed engine from the guard it replaced.
+chk "join_group_order_secondary_closed" "$($QDB "$DB" "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc ORDER BY dep.loc, SUM(emp.salary)" 2>&1 | tr -d '\r' | grep -ci 'secondary')" "1"
+chk "join_group_order_ordinal_closed"   "$($QDB "$DB" "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc ORDER BY 2" 2>&1 | tr -d '\r' | grep -ci 'not a grouped column')" "1"
+chk "join_group_order_unresolv_closed"  "$($QDB "$DB" "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc ORDER BY emp.name" 2>&1 | tr -d '\r' | grep -ci 'not a grouped column')" "1"
+# A bare GROUP BY with no aggregate and COUNT(DISTINCT) over a join stay
+# fail-closed: each is an honest partial with one accurate message.
 chk "join_group_noagg_closed"  "$($QDB "$DB" "SELECT dep.loc FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"
 chk "join_distinct_closed"     "$($QDB "$DB" "SELECT COUNT(DISTINCT emp.dept) FROM emp JOIN dep ON emp.dept = dep.dname" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"
 

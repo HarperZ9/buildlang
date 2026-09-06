@@ -4551,10 +4551,6 @@ fn exec_select_join(d: &mut DB) ~ Console {
             println!("Error: COUNT(DISTINCT) over a JOIN is not supported");
             return;
         }
-        if d.has_order == 1 {
-            println!("Error: ORDER BY over a grouped JOIN is not supported");
-            return;
-        }
         if d.has_distinct == 1 {
             println!("Error: DISTINCT over a grouped JOIN is not supported");
             return;
@@ -4816,6 +4812,104 @@ fn exec_select_join(d: &mut DB) ~ Console {
                 ppi = ppi + 1;
             }
             gi = gi + 1;
+        }
+
+        // ORDER BY on the grouped-join output. Mirrors the single-table grouped
+        // path: the key names the grouped column, an aggregate term, or a
+        // projection alias, resolves to an output column, and a stable sort keeps
+        // equal keys in group-discovery order. A secondary key fails closed
+        // (honest partial); an ordinal or an unresolvable name fails closed too,
+        // matching what the single-table grouped path resolves.
+        if d.has_order == 1 {
+            if d.order_col2 >= 0 {
+                println!("Error: secondary ORDER BY over a grouped JOIN is not supported");
+                return;
+            }
+            let jo_name = sp_get(d, d.order_col);
+            let mut jo_oidx = 0 - 1;
+            let mut jo_af = 0;
+            let mut jo_ci = 0;
+            while jo_ci < ncols {
+                if vec_get(d.p_agg_funcs, jo_ci) == d.order_agg_func {
+                    let jo_cn = sp_get(d, vec_get(d.p_agg_cols, jo_ci));
+                    if jo_cn == jo_name {
+                        if jo_oidx < 0 { jo_oidx = jo_ci; jo_af = d.order_agg_func; }
+                    }
+                }
+                jo_ci = jo_ci + 1;
+            }
+            if jo_oidx < 0 {
+                let mut jo_ai = 0;
+                while jo_ai < ncols {
+                    if jo_ai < vec_len(d.p_aliases) {
+                        let jo_al = vec_get(d.p_aliases, jo_ai);
+                        if jo_al >= 0 {
+                            let jo_aln = sp_get(d, jo_al);
+                            if jo_aln == jo_name {
+                                if jo_oidx < 0 { jo_oidx = jo_ai; jo_af = vec_get(d.p_agg_funcs, jo_ai); }
+                            }
+                        }
+                    }
+                    jo_ai = jo_ai + 1;
+                }
+            }
+            if jo_oidx < 0 {
+                println!("Error: ORDER BY term '{}' is not a grouped column, aggregate, or alias", jo_name);
+                return;
+            }
+            // Aggregate outputs sort numerically (COUNT integer, SUM/AVG/MIN/MAX
+            // real); a plain key keeps its source column's declared type.
+            let mut jo_type = 2;
+            if jo_af == 1 { jo_type = 0; }
+            else if jo_af > 1 { jo_type = 1; }
+            else {
+                let jo_argn = sp_get(d, vec_get(d.p_agg_cols, jo_oidx));
+                let jo_r1 = resolve_col(d, cs1, cc1, tname1, d.alias1, jo_argn);
+                if jo_r1 >= 0 { jo_type = vec_get(d.col_types, cs1 + jo_r1); }
+                else {
+                    let jo_r2 = resolve_col(d, cs2, cc2, tname2, d.alias2, jo_argn);
+                    if jo_r2 >= 0 { jo_type = vec_get(d.col_types, cs2 + jo_r2); }
+                }
+            }
+            // Stable selection sort over gkc rows, each ncols wide. A strict
+            // `< 0` pick keeps equal keys in group-discovery order.
+            let mut jo_used: Vec<i32> = vec![];
+            let mut jo_u = 0;
+            while jo_u < gkc { vec_push(jo_used, 0); jo_u = jo_u + 1; }
+            let mut jo_sorted: Vec<i32> = vec![];
+            let mut jo_picked = 0;
+            while jo_picked < gkc {
+                let mut jo_best = 0 - 1;
+                let mut jo_j = 0;
+                while jo_j < gkc {
+                    if vec_get(jo_used, jo_j) == 0 {
+                        if jo_best < 0 { jo_best = jo_j; }
+                        else {
+                            let jo_va = sp_get(d, vec_get(grows, jo_j * ncols + jo_oidx));
+                            let jo_vb = sp_get(d, vec_get(grows, jo_best * ncols + jo_oidx));
+                            let mut jo_c = compare_vals(jo_va, jo_vb, jo_type);
+                            if d.order_desc == 1 { jo_c = 0 - jo_c; }
+                            if jo_c < 0 { jo_best = jo_j; }
+                        }
+                    }
+                    jo_j = jo_j + 1;
+                }
+                let mut jo_nu: Vec<i32> = vec![];
+                let mut jo_k = 0;
+                while jo_k < gkc {
+                    if jo_k == jo_best { vec_push(jo_nu, 1); }
+                    else { vec_push(jo_nu, vec_get(jo_used, jo_k)); }
+                    jo_k = jo_k + 1;
+                }
+                jo_used = jo_nu;
+                let mut jo_cp = 0;
+                while jo_cp < ncols {
+                    vec_push(jo_sorted, vec_get(grows, jo_best * ncols + jo_cp));
+                    jo_cp = jo_cp + 1;
+                }
+                jo_picked = jo_picked + 1;
+            }
+            grows = jo_sorted;
         }
 
         // Column widths, then render header, separator, one line per group.
