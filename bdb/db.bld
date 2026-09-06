@@ -1716,10 +1716,26 @@ fn parse_having(d: &mut DB) ~ Console + Process {
         d.having_agg_col = sp_add(d, col_ref);
     }
     expect_punct(d, ")");
-    // Parse operator
+    // Parse operator. op_encode returns -1 for any token that is not one of
+    // = < > <= >= <> !=. eval_where treats -1 as always-false, so a HAVING with
+    // an arithmetic or stray operator (COUNT(*) + 0 > 1, SUM(salary) % 2 = 0)
+    // dropped every group and returned an empty result with exit 0: a silent
+    // wrong answer, the same class Fork 12 closed for WHERE. Fail closed here.
     let op = d.tk_val;
     d.having_op = op_encode(op);
+    if d.having_op < 0 {
+        println!("Error: unsupported operator in HAVING: {}", op);
+        process_exit(1);
+    }
     next_token(d);
+    // A doubled operator (COUNT(*) == 1) is two tokens: the first parsed as a
+    // valid op above, the second now sits in the value position as an operator
+    // token (type 4). Reading it as the value compared the aggregate against a
+    // symbol it never equals, again silently empty. Reject it.
+    if d.tk_type == 4 {
+        println!("Error: expected a value after operator in HAVING, got '{}'", d.tk_val);
+        process_exit(1);
+    }
     // Parse value
     let val = d.tk_val;
     d.having_val = sp_add(d, val);

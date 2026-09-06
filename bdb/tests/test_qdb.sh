@@ -199,6 +199,16 @@ chksel "group_count"   "SELECT dept, COUNT(*) FROM emp GROUP BY dept ORDER BY de
 chksel "group_desc"    "SELECT dept, COUNT(*) FROM emp GROUP BY dept ORDER BY dept DESC" "$(printf 'sales | 2\nhr    | 1\neng   | 2')"
 chksel "group_sum_ord" "SELECT dept, SUM(salary) FROM emp GROUP BY dept ORDER BY dept" "$(printf 'eng   | 190\nhr    | 70\nsales | 200')"
 chksel "having"        "SELECT dept FROM emp GROUP BY dept HAVING COUNT(*) > 1 ORDER BY dept" "$(printf 'eng\nsales')"
+# HAVING operator fail-closed. parse_having stores op_encode(op) in having_op, and
+# eval_where treats -1 as always-false, so an arithmetic or stray operator dropped
+# every group and a doubled operator compared the aggregate to a symbol: each
+# returned an empty result with exit 0, a silent wrong answer (the WHERE-side of
+# this was Fork 12). Guard 1 rejects an unrecognized operator, guard 2 rejects an
+# operator token in the value position (== and ><).
+reseed; errchk "having_arith_plus_closed" "SELECT dept, COUNT(*) FROM emp GROUP BY dept HAVING COUNT(*) + 0 > 1"   "unsupported operator in HAVING"
+reseed; errchk "having_arith_pct_closed"  "SELECT dept, SUM(salary) FROM emp GROUP BY dept HAVING SUM(salary) % 2 = 0" "unsupported operator in HAVING"
+reseed; errchk "having_double_eq_closed"  "SELECT dept, COUNT(*) FROM emp GROUP BY dept HAVING COUNT(*) == 1"      "expected a value after operator"
+reseed; errchk "having_gtlt_closed"       "SELECT dept, COUNT(*) FROM emp GROUP BY dept HAVING COUNT(*) >< 1"      "expected a value after operator"
 # ORDER BY an aggregate term. The order key matches the aggregate output column
 # by func + arg and sorts numerically. Ties keep group-discovery order (eng
 # before sales). SUM proves the numeric path (lexical "200" < "70" would be wrong).
