@@ -217,8 +217,8 @@ reseed; errchk "having_gtlt_closed"       "SELECT dept, COUNT(*) FROM emp GROUP 
 # wrong answer. agg_cols_ok validates each projection aggregate argument and the
 # HAVING aggregate argument before dispatch, guarded in exec_select,
 # exec_select_group and exec_subquery_scalar. COUNT(*) and the DISTINCT flag are
-# skipped, and a plain SELECT column keeps its own existing not-found path. The
-# JOIN aggregate path already fails closed through its own dotted-column resolver.
+# skipped, and a plain SELECT column keeps its own existing not-found path. An
+# aggregate or GROUP BY over a JOIN fails closed in the JOIN section below.
 reseed; errchk "agg_unknown_sum"          "SELECT SUM(badcol) FROM emp"                                           "no such column"
 reseed; errchk "agg_unknown_avg"          "SELECT AVG(badcol) FROM emp"                                           "no such column"
 reseed; errchk "agg_unknown_min"          "SELECT MIN(badcol) FROM emp"                                           "no such column"
@@ -301,6 +301,20 @@ reseed
 $QDB "$DB" "CREATE TABLE dep (dname TEXT, loc TEXT)" >/dev/null
 $QDB "$DB" "INSERT INTO dep VALUES ('eng','b1'),('sales','b2'),('hr','b3')" >/dev/null
 chksel "join"          "SELECT emp.name FROM emp JOIN dep ON emp.dept = dep.dname WHERE dep.loc='b1' ORDER BY emp.name" "$(printf 'alice\nbob')"
+# A two-column dotted projection still returns one row per joined row. This is the
+# exact shape the aggregate-over-join guard must not reject: p_agg_count is 2 here
+# (both plain columns), so a guard keyed on p_agg_count alone would wrongly fire.
+chksel "join_multicol"  "SELECT emp.name, dep.loc FROM emp JOIN dep ON emp.dept = dep.dname WHERE dep.loc='b1' ORDER BY emp.name" "$(printf 'alice | b1\nbob   | b1')"
+# The join executor projects one output row per joined row and applies neither
+# aggregation nor grouping. Before the guard, SUM/MIN over a join returned per-row
+# column values (silent wrong), a grouped join returned ungrouped rows, and
+# COUNT(*) reported "*" not found (misleading). Each now fails closed with one
+# accurate message. Computing the aggregate over the join is a tracked limitation.
+chk "join_agg_count_closed" "$($QDB "$DB" "SELECT COUNT(*) FROM emp JOIN dep ON emp.dept = dep.dname" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"
+chk "join_agg_sum_closed"   "$($QDB "$DB" "SELECT SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"
+chk "join_agg_min_closed"   "$($QDB "$DB" "SELECT MIN(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"
+chk "join_group_sum_closed" "$($QDB "$DB" "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"
+chk "join_group_cnt_closed" "$($QDB "$DB" "SELECT dep.loc, COUNT(*) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"
 
 echo "== LEFT [OUTER] JOIN (null-extend unmatched left rows) =="
 # Dedicated pair: la carries three tags, lb covers only x and z, so the 'y' row

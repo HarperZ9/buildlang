@@ -4347,6 +4347,31 @@ fn exec_select_join(d: &mut DB) ~ Console {
     if t1 < 0 { println!("Error: table '{}' not found", tname1); return; }
     if t2 < 0 { println!("Error: table '{}' not found", tname2); return; }
 
+    // Fail closed: this path projects one output row per joined row and applies
+    // neither aggregation nor grouping. Before this, an aggregate over a join
+    // (SUM/AVG/MIN/MAX(col)) returned the per-row column values with exit 0 (a
+    // silent wrong answer), a grouped join returned the ungrouped rows, and
+    // COUNT(*) tried to resolve "*" as a column and reported it "not found in
+    // either table" (a misleading message). Reject all of these with one
+    // accurate diagnostic rather than compute a wrong answer. Computing an
+    // aggregate over the assembled join rows is a larger change, tracked as a
+    // known limitation.
+    //
+    // p_agg_count is the count of ALL projection items, plain columns included
+    // (each carries p_agg_funcs[k]==0), so a real aggregate is present only when
+    // some p_agg_funcs entry is non-zero. Checking p_agg_count>0 alone would
+    // reject every plain join.
+    let mut join_has_agg = false;
+    let mut ai = 0;
+    while ai < d.p_agg_count {
+        if vec_get(d.p_agg_funcs, ai) > 0 { join_has_agg = true; }
+        ai = ai + 1;
+    }
+    if join_has_agg || d.has_group_by == 1 {
+        println!("Error: aggregates and GROUP BY over a JOIN are not supported");
+        return;
+    }
+
     let cs1 = vec_get(d.tbl_col_starts, t1);
     let cc1 = vec_get(d.tbl_col_counts, t1);
     let rs1 = vec_get(d.tbl_row_starts, t1);
