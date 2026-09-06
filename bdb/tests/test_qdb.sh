@@ -241,6 +241,17 @@ chksel "group_ord_sum_desc" "SELECT dept, SUM(salary) FROM emp GROUP BY dept ORD
 chksel "group_ord_alias_sum_desc" "SELECT dept, SUM(salary) AS s FROM emp GROUP BY dept ORDER BY s DESC" "$(printf 'sales | 200\neng   | 190\nhr    | 70')"
 chksel "group_ord_alias_sum_asc"  "SELECT dept, SUM(salary) AS s FROM emp GROUP BY dept ORDER BY s"      "$(printf 'hr    | 70\neng   | 190\nsales | 200')"
 chksel "group_ord_alias_cnt_desc" "SELECT dept, COUNT(*) AS c FROM emp GROUP BY dept ORDER BY c DESC"    "$(printf 'eng   | 2\nsales | 2\nhr    | 1')"
+# ORDER BY a positional ordinal over a grouped result: a bare integer is a
+# 1-based position into the output columns (ORDER BY 2 = the aggregate), the
+# same rule the non-grouped and UNION paths use. The matched column's own func
+# drives the sort type, so ORDER BY 2 sorts the SUM numerically while ORDER BY 1
+# sorts dept as text. The pre-fix binary read "2" as a column name and failed
+# closed, so each positive answer separates the fixed engine from the guard.
+chksel "group_ord_pos2_sum_asc"  "SELECT dept, SUM(salary) FROM emp GROUP BY dept ORDER BY 2"      "$(printf 'hr    | 70\neng   | 190\nsales | 200')"
+chksel "group_ord_pos2_sum_desc" "SELECT dept, SUM(salary) FROM emp GROUP BY dept ORDER BY 2 DESC" "$(printf 'sales | 200\neng   | 190\nhr    | 70')"
+chksel "group_ord_pos1_txt_desc" "SELECT dept, SUM(salary) FROM emp GROUP BY dept ORDER BY 1 DESC" "$(printf 'sales | 200\nhr    | 70\neng   | 190')"
+reseed; errchk "group_ord_pos_oor_closed"  "SELECT dept, SUM(salary) FROM emp GROUP BY dept ORDER BY 3" "out of range"
+reseed; errchk "group_ord_pos_zero_closed" "SELECT dept, SUM(salary) FROM emp GROUP BY dept ORDER BY 0" "out of range"
 # Fail closed: an ORDER BY term that names neither the grouped column, an
 # aggregate output, nor a select alias has no defined ordering -- error rather
 # than emit rows in arbitrary discovery order.
@@ -360,13 +371,18 @@ chksel "join_group_order_real_max"  "SELECT emp.dept, MAX(emp.salary) FROM emp J
 # discovery order (eng, sales, hr) to put the single-row hr group first, and the
 # eng/sales tie holds its discovery order.
 chksel "join_group_order_alias_asc" "SELECT dep.dname, COUNT(*) AS n FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.dname ORDER BY n ASC"               "$(printf 'hr        | 1\neng       | 2\nsales     | 2')"
-# A secondary key, a positional ordinal, and an unresolvable name each fail
-# closed with an accurate message: an honest partial, never a silent wrong
-# order. The pre-fix binary answered every one of these with the blanket
-# "ORDER BY over a grouped JOIN is not supported", so these three messages also
-# separate the fixed engine from the guard it replaced.
+# A positional ordinal resolves to an output column (ORDER BY 2 = the SUM),
+# sorting by the matched column's own type: numeric for the aggregate, so
+# ORDER BY 2 walks 70, 190, 200 and ORDER BY 2 DESC reverses it. The pre-fix
+# binary read "2" as a column name and failed closed, so each ordered answer
+# separates the fixed engine from the guard it replaced.
+chksel "join_group_order_ord2_asc"  "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc ORDER BY 2"      "$(printf 'b3      | 70\nb1      | 190\nb2      | 200')"
+chksel "join_group_order_ord2_desc" "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc ORDER BY 2 DESC" "$(printf 'b2      | 200\nb1      | 190\nb3      | 70')"
+# A secondary key still fails closed (honest partial, candidate next fork); an
+# out-of-range ordinal and an unresolvable name fail closed with accurate,
+# distinct messages -- never a silent wrong order.
 chk "join_group_order_secondary_closed" "$($QDB "$DB" "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc ORDER BY dep.loc, SUM(emp.salary)" 2>&1 | tr -d '\r' | grep -ci 'secondary')" "1"
-chk "join_group_order_ordinal_closed"   "$($QDB "$DB" "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc ORDER BY 2" 2>&1 | tr -d '\r' | grep -ci 'not a grouped column')" "1"
+chk "join_group_order_ord_oor_closed"   "$($QDB "$DB" "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc ORDER BY 9" 2>&1 | tr -d '\r' | grep -ci 'out of range')" "1"
 chk "join_group_order_unresolv_closed"  "$($QDB "$DB" "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc ORDER BY emp.name" 2>&1 | tr -d '\r' | grep -ci 'not a grouped column')" "1"
 # LIMIT / OFFSET over a grouped join truncate the group rows. Applied after the
 # ORDER BY sort, so "ORDER BY ... LIMIT n" is the top-n idiom; LIMIT with no

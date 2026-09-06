@@ -3946,6 +3946,9 @@ fn exec_select_group(d: &mut DB) ~ Console {
     if d.has_order == 1 {
         let go_name = sp_get(d, d.order_col);
         // Resolve the order key to an output column, in order:
+        //   (0) ordinal -- a bare integer is a 1-based position into the output
+        //       columns (ORDER BY 2), the same rule the non-grouped and UNION
+        //       paths use. Out of range fails closed.
         //   (1) same-kind match -- a plain key (order_agg_func == 0) matches a
         //       plain output column; an aggregate key matches the output column
         //       with the same func + arg (ORDER BY SUM(salary)).
@@ -3957,6 +3960,17 @@ fn exec_select_group(d: &mut DB) ~ Console {
         // type comes from the output column, not the parsed key.
         let mut go_oidx = 0 - 1;
         let mut go_match_af = 0;
+        if is_int_str(go_name) {
+            let go_n = parse_int_str(go_name);
+            if go_n >= 1 {
+                if go_n <= ncols { go_oidx = go_n - 1; }
+            }
+            if go_oidx < 0 {
+                println!("Error: ORDER BY position {} is out of range", go_name);
+                return;
+            }
+            go_match_af = vec_get(local_agg_funcs, go_oidx);
+        }
         let mut go_ci = 0;
         while go_ci < ncols {
             if vec_get(local_agg_funcs, go_ci) == d.order_agg_func {
@@ -4812,11 +4826,11 @@ fn exec_select_join(d: &mut DB) ~ Console {
         }
 
         // ORDER BY on the grouped-join output. Mirrors the single-table grouped
-        // path: the key names the grouped column, an aggregate term, or a
-        // projection alias, resolves to an output column, and a stable sort keeps
-        // equal keys in group-discovery order. A secondary key fails closed
-        // (honest partial); an ordinal or an unresolvable name fails closed too,
-        // matching what the single-table grouped path resolves.
+        // path: the key is a 1-based ordinal into the output columns, or names the
+        // grouped column, an aggregate term, or a projection alias; it resolves to
+        // an output column and a stable sort keeps equal keys in group-discovery
+        // order. A secondary key fails closed (honest partial); an out-of-range
+        // ordinal or an unresolvable name fails closed too.
         if d.has_order == 1 {
             if d.order_col2 >= 0 {
                 println!("Error: secondary ORDER BY over a grouped JOIN is not supported");
@@ -4825,6 +4839,20 @@ fn exec_select_join(d: &mut DB) ~ Console {
             let jo_name = sp_get(d, d.order_col);
             let mut jo_oidx = 0 - 1;
             let mut jo_af = 0;
+            // A bare integer key is a 1-based ordinal into the output columns, the
+            // same rule the non-grouped and UNION paths use (ORDER BY 2). The
+            // matched column's own aggregate func drives the sort type below.
+            if is_int_str(jo_name) {
+                let jo_n = parse_int_str(jo_name);
+                if jo_n >= 1 {
+                    if jo_n <= ncols { jo_oidx = jo_n - 1; }
+                }
+                if jo_oidx < 0 {
+                    println!("Error: ORDER BY position {} is out of range", jo_name);
+                    return;
+                }
+                jo_af = vec_get(d.p_agg_funcs, jo_oidx);
+            }
             let mut jo_ci = 0;
             while jo_ci < ncols {
                 if vec_get(d.p_agg_funcs, jo_ci) == d.order_agg_func {
