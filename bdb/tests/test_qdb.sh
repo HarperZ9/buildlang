@@ -218,8 +218,9 @@ reseed; errchk "having_gtlt_closed"       "SELECT dept, COUNT(*) FROM emp GROUP 
 # HAVING aggregate argument before dispatch, guarded in exec_select,
 # exec_select_group and exec_subquery_scalar. COUNT(*) and the DISTINCT flag are
 # skipped, and a plain SELECT column keeps its own existing not-found path. A
-# scalar aggregate over a JOIN now folds over the joined rows (JOIN section
-# below); GROUP BY and COUNT(DISTINCT) over a JOIN still fail closed there.
+# scalar aggregate over a JOIN, and GROUP BY over a JOIN, now fold over the joined
+# rows (JOIN section below); HAVING/ORDER BY over a grouped JOIN and COUNT(DISTINCT)
+# over a JOIN still fail closed there.
 reseed; errchk "agg_unknown_sum"          "SELECT SUM(badcol) FROM emp"                                           "no such column"
 reseed; errchk "agg_unknown_avg"          "SELECT AVG(badcol) FROM emp"                                           "no such column"
 reseed; errchk "agg_unknown_min"          "SELECT MIN(badcol) FROM emp"                                           "no such column"
@@ -323,11 +324,23 @@ chksel "join_agg_where_cnt" "SELECT COUNT(*) FROM emp JOIN dep ON emp.dept = dep
 # Text-typed MIN/MAX over a join compare lexically, matching single-table MIN/MAX.
 chksel "join_agg_min_text"  "SELECT MIN(emp.name) FROM emp JOIN dep ON emp.dept = dep.dname" "alice"
 chksel "join_agg_max_text"  "SELECT MAX(emp.name) FROM emp JOIN dep ON emp.dept = dep.dname" "eve"
-# GROUP BY over a join and COUNT(DISTINCT) over a join stay fail-closed: an honest
-# partial with one accurate message, never a silent wrong grouping or count.
-chk "join_group_sum_closed" "$($QDB "$DB" "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"
-chk "join_group_cnt_closed" "$($QDB "$DB" "SELECT dep.loc, COUNT(*) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"
-chk "join_distinct_closed"  "$($QDB "$DB" "SELECT COUNT(DISTINCT emp.dept) FROM emp JOIN dep ON emp.dept = dep.dname" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"
+# GROUP BY over a join buckets the assembled pairs by the single group column and
+# folds each aggregate per bucket: one row per group, in left-scan discovery order.
+# The group key resolves against either table (dep.loc and dep.dname on the right,
+# emp.dept on the left). WHERE filters pairs before bucketing, so a group whose rows
+# all fail the predicate drops out (b3/hr below, whose one row has salary 70).
+chksel "join_group_sum"    "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc" "$(printf 'b1      | 190\nb2      | 200\nb3      | 70')"
+chksel "join_group_cnt"    "SELECT dep.dname, COUNT(*) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.dname" "$(printf 'eng       | 2\nsales     | 2\nhr        | 1')"
+chksel "join_group_minmax" "SELECT emp.dept, MIN(emp.salary), MAX(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY emp.dept" "$(printf 'eng      | 90              | 100\nsales    | 80              | 120\nhr       | 70              | 70')"
+chksel "join_group_avg"    "SELECT dep.loc, AVG(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc" "$(printf 'b1      | 95\nb2      | 100\nb3      | 70')"
+chksel "join_group_where"  "SELECT dep.loc, COUNT(*) FROM emp JOIN dep ON emp.dept = dep.dname WHERE emp.salary > 75 GROUP BY dep.loc" "$(printf 'b1      | 2\nb2      | 2')"
+# The grouped-join path keeps HAVING, ORDER BY, a bare GROUP BY with no aggregate, and
+# COUNT(DISTINCT) over a join fail-closed: each is an honest partial with one accurate
+# message, never a silent wrong grouping, order, or count.
+chk "join_group_having_closed" "$($QDB "$DB" "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc HAVING SUM(emp.salary) > 100" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"
+chk "join_group_order_closed"  "$($QDB "$DB" "SELECT dep.loc, SUM(emp.salary) FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc ORDER BY dep.loc" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"
+chk "join_group_noagg_closed"  "$($QDB "$DB" "SELECT dep.loc FROM emp JOIN dep ON emp.dept = dep.dname GROUP BY dep.loc" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"
+chk "join_distinct_closed"     "$($QDB "$DB" "SELECT COUNT(DISTINCT emp.dept) FROM emp JOIN dep ON emp.dept = dep.dname" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"
 
 echo "== LEFT [OUTER] JOIN (null-extend unmatched left rows) =="
 # Dedicated pair: la carries three tags, lb covers only x and z, so the 'y' row
@@ -354,6 +367,11 @@ chksel "left_join_leftwh"  "SELECT la.id, lb.note FROM la LEFT JOIN lb ON la.tag
 chksel "left_join_agg_cnt"     "SELECT COUNT(*) FROM la LEFT JOIN lb ON la.tag = lb.tag" "3"
 chksel "left_join_agg_cntnote" "SELECT COUNT(lb.note) FROM la LEFT JOIN lb ON la.tag = lb.tag" "2"
 chksel "left_join_agg_sum"     "SELECT SUM(la.id) FROM la LEFT JOIN lb ON la.tag = lb.tag" "6"
+# GROUP BY over a LEFT JOIN preserves the null-extended row in its own bucket: every
+# tag is its own group, so COUNT(*) counts the unmatched 'y' row (1) while COUNT of the
+# right column skips its blank cell (0), exactly as the ungrouped fold does.
+chksel "left_join_group_cnt"     "SELECT la.tag, COUNT(*) FROM la LEFT JOIN lb ON la.tag = lb.tag GROUP BY la.tag" "$(printf 'x      | 1\ny      | 1\nz      | 1')"
+chksel "left_join_group_cntnote" "SELECT la.tag, COUNT(lb.note) FROM la LEFT JOIN lb ON la.tag = lb.tag GROUP BY la.tag" "$(printf 'x      | 1\ny      | 0\nz      | 1')"
 # RIGHT / FULL / CROSS are recognized but unimplemented: fail closed with a clear
 # error, never a silent inner join.
 chk "right_join_closed" "$($QDB "$DB" "SELECT la.id FROM la RIGHT JOIN lb ON la.tag = lb.tag" 2>&1 | tr -d '\r' | grep -ci 'not supported')" "1"

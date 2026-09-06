@@ -4539,10 +4539,299 @@ fn exec_select_join(d: &mut DB) ~ Console {
         return;
     }
 
-    // GROUP BY over a JOIN (with or without aggregates) is not yet supported.
-    // Fail closed rather than return ungrouped rows, which would be a silent
-    // wrong answer. Scalar aggregates over a join are handled above.
-    if join_has_agg || d.has_group_by == 1 {
+    // GROUP BY over a JOIN with aggregates. Bucket the assembled (r1,r2) pairs by
+    // the single group column's value, then fold each projection item over the
+    // pairs in one bucket exactly as the scalar path folds over all pairs. One
+    // output row per distinct group key, in group-discovery order (the left
+    // table's scan order), matching the single-table grouped path. HAVING, ORDER
+    // BY, DISTINCT, and LIMIT over a grouped join stay fail-closed so an
+    // unsupported clause never silently drops or reorders group rows.
+    if join_has_agg && d.has_group_by == 1 {
+        if join_has_distinct {
+            println!("Error: COUNT(DISTINCT) over a JOIN is not supported");
+            return;
+        }
+        if d.has_having == 1 {
+            println!("Error: HAVING over a grouped JOIN is not supported");
+            return;
+        }
+        if d.has_order == 1 {
+            println!("Error: ORDER BY over a grouped JOIN is not supported");
+            return;
+        }
+        if d.has_distinct == 1 {
+            println!("Error: DISTINCT over a grouped JOIN is not supported");
+            return;
+        }
+        if d.has_limit == 1 || d.has_offset == 1 {
+            println!("Error: LIMIT over a grouped JOIN is not supported");
+            return;
+        }
+        // Resolve the single group column against either table.
+        let gref = sp_get(d, d.group_col);
+        let mut gtab = 0;
+        let mut gcol = 0 - 1;
+        let rg1 = resolve_col(d, cs1, cc1, tname1, d.alias1, gref);
+        if rg1 >= 0 { gtab = 1; gcol = rg1; }
+        else {
+            let rg2 = resolve_col(d, cs2, cc2, tname2, d.alias2, gref);
+            if rg2 >= 0 { gtab = 2; gcol = rg2; }
+            else {
+                println!("Error: GROUP BY column '{}' not found in either table", gref);
+                return;
+            }
+        }
+
+        // Assemble matched (r1,r2) pairs honoring WHERE and LEFT JOIN
+        // null-extension, identical to the scalar path above.
+        let mut gpr1: Vec<i32> = vec![];
+        let mut gpr2: Vec<i32> = vec![];
+        let mut gpc = 0;
+        let mut g1 = 0;
+        while g1 < rc1 {
+            let gk1 = sp_get(d, vec_get(d.cells, rs1 + g1 * cc1 + jc1));
+            let mut gm = false;
+            let mut g2 = 0;
+            while g2 < rc2 {
+                let gk2 = sp_get(d, vec_get(d.cells, rs2 + g2 * cc2 + jc2));
+                if gk1 == gk2 {
+                    gm = true;
+                    let mut gp = true;
+                    if d.has_where == 1 {
+                        gp = eval_join_where(d, cs1, cc1, rs1, g1, tname1, d.alias1,
+                                             cs2, cc2, rs2, g2, tname2, d.alias2);
+                    }
+                    if gp {
+                        vec_push(gpr1, g1);
+                        vec_push(gpr2, g2);
+                        gpc = gpc + 1;
+                    }
+                }
+                g2 = g2 + 1;
+            }
+            if d.join_type == 1 {
+                if gm == false {
+                    let mut glp = true;
+                    if d.has_where == 1 {
+                        glp = eval_join_where(d, cs1, cc1, rs1, g1, tname1, d.alias1,
+                                              cs2, cc2, rs2, 0 - 1, tname2, d.alias2);
+                    }
+                    if glp {
+                        vec_push(gpr1, g1);
+                        vec_push(gpr2, 0 - 1);
+                        gpc = gpc + 1;
+                    }
+                }
+            }
+            g1 = g1 + 1;
+        }
+
+        // Distinct group keys in first-seen (left-scan) order.
+        let mut gkeys: Vec<i32> = vec![];
+        let mut gkc = 0;
+        let mut kk = 0;
+        while kk < gpc {
+            let gkv = join_cell_str(d, gtab, gcol, cc1, rs1, vec_get(gpr1, kk),
+                                    cc2, rs2, vec_get(gpr2, kk));
+            let mut seen = false;
+            let mut si = 0;
+            while si < gkc {
+                if sp_get(d, vec_get(gkeys, si)) == gkv { seen = true; }
+                si = si + 1;
+            }
+            if seen == false {
+                vec_push(gkeys, sp_add(d, gkv));
+                gkc = gkc + 1;
+            }
+            kk = kk + 1;
+        }
+
+        // Build headers once (alias-aware), same as the scalar path.
+        let ncols = d.p_agg_count;
+        let mut gheaders: Vec<i32> = vec![];
+        let mut hpi = 0;
+        while hpi < ncols {
+            let haf = vec_get(d.p_agg_funcs, hpi);
+            let hac_id = vec_get(d.p_agg_cols, hpi);
+            let hal = if hpi < vec_len(d.p_aliases) { vec_get(d.p_aliases, hpi) } else { 0 - 1 };
+            let hdist = if hpi < vec_len(d.p_agg_distinct) { vec_get(d.p_agg_distinct, hpi) } else { 0 };
+            vec_push(gheaders, build_agg_header(d, haf, hac_id, hal, hdist));
+            hpi = hpi + 1;
+        }
+
+        // One output row per group key: fold each projection item over just the
+        // pairs whose group cell equals this key.
+        let mut grows: Vec<i32> = vec![];
+        let mut gi = 0;
+        while gi < gkc {
+            let gkey = sp_get(d, vec_get(gkeys, gi));
+            let mut ppi = 0;
+            while ppi < ncols {
+                let af = vec_get(d.p_agg_funcs, ppi);
+                let ac_id = vec_get(d.p_agg_cols, ppi);
+                let ac = sp_get(d, ac_id);
+                let mut atab = 0;
+                let mut acol = 0 - 1;
+                let mut atype = 0;
+                if !(af == 1 && ac == "*") {
+                    let ra = resolve_col(d, cs1, cc1, tname1, d.alias1, ac);
+                    if ra >= 0 { atab = 1; acol = ra; atype = vec_get(d.col_types, cs1 + ra); }
+                    else {
+                        let rb = resolve_col(d, cs2, cc2, tname2, d.alias2, ac);
+                        if rb >= 0 { atab = 2; acol = rb; atype = vec_get(d.col_types, cs2 + rb); }
+                        else {
+                            println!("Error: column '{}' not found in either table", ac);
+                            return;
+                        }
+                    }
+                }
+                let mut out = "";
+                if af == 0 {
+                    // Plain column beside aggregates: the group column returns the
+                    // key; any other plain column returns the first row in the
+                    // group, matching group_get_plain.
+                    let mut found = false;
+                    let mut fk = 0;
+                    while fk < gpc {
+                        if found == false {
+                            let gv = join_cell_str(d, gtab, gcol, cc1, rs1, vec_get(gpr1, fk),
+                                                   cc2, rs2, vec_get(gpr2, fk));
+                            if gv == gkey {
+                                out = join_cell_str(d, atab, acol, cc1, rs1, vec_get(gpr1, fk),
+                                                    cc2, rs2, vec_get(gpr2, fk));
+                                found = true;
+                            }
+                        }
+                        fk = fk + 1;
+                    }
+                } else if af == 1 {
+                    if ac == "*" {
+                        let mut cnt = 0;
+                        let mut k = 0;
+                        while k < gpc {
+                            let gv = join_cell_str(d, gtab, gcol, cc1, rs1, vec_get(gpr1, k),
+                                                   cc2, rs2, vec_get(gpr2, k));
+                            if gv == gkey { cnt = cnt + 1; }
+                            k = k + 1;
+                        }
+                        out = int_to_str(cnt);
+                    } else {
+                        let mut cnt = 0;
+                        let mut k = 0;
+                        while k < gpc {
+                            let gv = join_cell_str(d, gtab, gcol, cc1, rs1, vec_get(gpr1, k),
+                                                   cc2, rs2, vec_get(gpr2, k));
+                            if gv == gkey {
+                                let cv = join_cell_str(d, atab, acol, cc1, rs1, vec_get(gpr1, k),
+                                                       cc2, rs2, vec_get(gpr2, k));
+                                if cv.len() > 0 { cnt = cnt + 1; }
+                            }
+                            k = k + 1;
+                        }
+                        out = int_to_str(cnt);
+                    }
+                } else {
+                    let mut sum_val = 0.0;
+                    let mut min_val = 999999999.0;
+                    let mut max_val = 0.0 - 999999999.0;
+                    let mut min_str = "";
+                    let mut max_str = "";
+                    let mut cnt = 0;
+                    let mut k = 0;
+                    while k < gpc {
+                        let gv = join_cell_str(d, gtab, gcol, cc1, rs1, vec_get(gpr1, k),
+                                               cc2, rs2, vec_get(gpr2, k));
+                        if gv == gkey {
+                            let cv = join_cell_str(d, atab, acol, cc1, rs1, vec_get(gpr1, k),
+                                                   cc2, rs2, vec_get(gpr2, k));
+                            let nv = cv.parse_float();
+                            sum_val = sum_val + nv;
+                            if nv < min_val { min_val = nv; }
+                            if nv > max_val { max_val = nv; }
+                            if atype == 2 {
+                                if cnt == 0 { min_str = cv; max_str = cv; }
+                                else {
+                                    if compare_vals(cv, min_str, atype) < 0 { min_str = cv; }
+                                    if compare_vals(cv, max_str, atype) > 0 { max_str = cv; }
+                                }
+                            }
+                            cnt = cnt + 1;
+                        }
+                        k = k + 1;
+                    }
+                    if cnt == 0 && (af == 4 || af == 5) {
+                        out = "";
+                    } else if af == 4 && atype == 2 {
+                        out = min_str;
+                    } else if af == 5 && atype == 2 {
+                        out = max_str;
+                    } else {
+                        let mut rv = sum_val;
+                        if af == 3 { if cnt > 0 { rv = sum_val / cnt; } else { rv = 0.0; } }
+                        if af == 4 { rv = min_val; }
+                        if af == 5 { rv = max_val; }
+                        out = float_to_str(rv);
+                    }
+                }
+                vec_push(grows, sp_add(d, out));
+                ppi = ppi + 1;
+            }
+            gi = gi + 1;
+        }
+
+        // Column widths, then render header, separator, one line per group.
+        let mut gwidths: Vec<i32> = vec![];
+        let mut wi = 0;
+        while wi < ncols {
+            let wh = sp_get(d, vec_get(gheaders, wi));
+            vec_push(gwidths, wh.len());
+            wi = wi + 1;
+        }
+        let mut wr = 0;
+        while wr < gkc {
+            let mut wc = 0;
+            while wc < ncols {
+                let wv = sp_get(d, vec_get(grows, wr * ncols + wc));
+                let wl = wv.len();
+                if wl > vec_get(gwidths, wc) { gwidths = vec_replace(gwidths, ncols, wc, wl); }
+                wc = wc + 1;
+            }
+            wr = wr + 1;
+        }
+        let mut ghline = "";
+        let mut gsline = "";
+        let mut hp = 0;
+        while hp < ncols {
+            if hp > 0 { ghline = ghline + " | "; gsline = gsline + "-+-"; }
+            let hh = sp_get(d, vec_get(gheaders, hp));
+            let hw = vec_get(gwidths, hp);
+            ghline = ghline + pad_right(hh, hw);
+            gsline = gsline + make_dashes(hw);
+            hp = hp + 1;
+        }
+        println!("{}", ghline);
+        println!("{}", gsline);
+        let mut rr = 0;
+        while rr < gkc {
+            let mut rline = "";
+            let mut rc = 0;
+            while rc < ncols {
+                if rc > 0 { rline = rline + " | "; }
+                let rv = sp_get(d, vec_get(grows, rr * ncols + rc));
+                let rw = vec_get(gwidths, rc);
+                rline = rline + pad_right(rv, rw);
+                rc = rc + 1;
+            }
+            println!("{}", rline);
+            rr = rr + 1;
+        }
+        return;
+    }
+
+    // GROUP BY over a JOIN without an aggregate is not yet supported. Fail closed
+    // rather than return ungrouped rows, which would be a silent wrong answer.
+    // Grouped aggregates are handled above.
+    if d.has_group_by == 1 {
         println!("Error: GROUP BY over a JOIN is not supported");
         return;
     }
