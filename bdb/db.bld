@@ -2264,6 +2264,10 @@ fn exec_subquery_scalar(d: &mut DB, sql: String) -> String ~ Console + Process {
     let rs = vec_get(d.tbl_row_starts, tidx);
     let rc = vec_get(d.tbl_row_counts, tidx);
 
+    // A subquery cannot abort just itself and let the outer query continue with
+    // a correct value, so an unknown WHERE column fails the whole statement.
+    if !where_cols_ok(d, cs, cc, tname, d.alias1) { process_exit(1); }
+
     // Gather matching rows
     let mut match_rows: Vec<i32> = vec![];
     let mut match_count = 0;
@@ -2697,6 +2701,30 @@ fn resolve_col(d: &DB, cs: i32, cc: i32, tname: String, alias: i32, ref_str: Str
     find_col(d, cs, cc, ref_str)
 }
 
+// Fail closed when a WHERE clause names a column the target table does not
+// have. Every leaf condition stores its left side as a column ref (see
+// parse_condition -> read_col_ref), and resolve_col returns -1 for a ref that
+// matches no column. Every single-table WHERE path below evaluated such a leaf
+// as false, so `WHERE nosuchcol = 5` returned an empty result and
+// `WHERE nosuchcol IS NULL` returned every row, both silent wrong answers.
+// Validating once here, before the row scan, also covers an empty table, where
+// no row would ever reach eval_cond_row. resolve_col is reused so a dotted
+// table.col or alias.col ref resolves exactly as it does during evaluation.
+// Returns false after printing the diagnostic; the caller aborts the statement.
+fn where_cols_ok(d: &DB, cs: i32, cc: i32, tname: String, alias: i32) -> bool ~ Console {
+    if d.has_where == 0 { return true; }
+    let mut ci = 0;
+    while ci < d.wc_count {
+        let wl = sp_get(d, vec_get(d.wc_left, ci));
+        if resolve_col(d, cs, cc, tname, alias, wl) < 0 {
+            println!("Error: no such column: {}", wl);
+            return false;
+        }
+        ci = ci + 1;
+    }
+    true
+}
+
 // True if cell_val is in condition ci's IN-list (its slice of wc_in_pool).
 fn eval_in_pool(d: &DB, cell_val: String, start: i32, len: i32) -> bool {
     let mut i = 0;
@@ -2820,6 +2848,10 @@ fn exec_select(d: &mut DB) ~ Console + Process {
     let cc = vec_get(d.tbl_col_counts, tidx);
     let rs = vec_get(d.tbl_row_starts, tidx);
     let rc = vec_get(d.tbl_row_counts, tidx);
+
+    // Reject an unknown WHERE column before any scan. This runs ahead of the
+    // aggregate dispatch below, so exec_select_agg_no_group is covered too.
+    if !where_cols_ok(d, cs, cc, tname, d.alias1) { return; }
 
     // Check if we have any aggregate functions (mixed with columns) without GROUP BY
     // Handle aggregates: COUNT, SUM, AVG, MIN, MAX without GROUP BY
@@ -3689,6 +3721,8 @@ fn exec_select_group(d: &mut DB) ~ Console {
     let cc = vec_get(d.tbl_col_counts, tidx);
     let rs = vec_get(d.tbl_row_starts, tidx);
     let rc = vec_get(d.tbl_row_counts, tidx);
+
+    if !where_cols_ok(d, cs, cc, tname, d.alias1) { return; }
 
     let gcol_name = sp_get(d, d.group_col);
     let gcol = resolve_col(d, cs, cc, tname, d.alias1, gcol_name);
@@ -4712,6 +4746,10 @@ fn exec_update(d: &mut DB) ~ Console {
     let rs = vec_get(d.tbl_row_starts, tidx);
     let rc = vec_get(d.tbl_row_counts, tidx);
 
+    // Validate the WHERE columns before mutating any cell, so an unknown column
+    // leaves the table untouched instead of silently updating zero rows.
+    if !where_cols_ok(d, cs, cc, tname, d.alias1) { return; }
+
     let set_col_name = sp_get(d, d.set_col);
     let set_val_text = sp_get(d, d.set_val);
     let scol = find_col(d, cs, cc, set_col_name);
@@ -4804,6 +4842,10 @@ fn exec_delete(d: &mut DB) ~ Console {
     let cc = vec_get(d.tbl_col_counts, tidx);
     let rs = vec_get(d.tbl_row_starts, tidx);
     let rc = vec_get(d.tbl_row_counts, tidx);
+
+    // Validate the WHERE columns before deciding which rows to drop, so an
+    // unknown column deletes nothing instead of silently matching zero rows.
+    if !where_cols_ok(d, cs, cc, tname, d.alias1) { return; }
 
     // Find rows to keep using compound WHERE
     let mut keep_rows: Vec<i32> = vec![];

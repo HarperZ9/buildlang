@@ -99,6 +99,21 @@ reseed; errchk "where_arith_pct_closed"  "SELECT id FROM emp WHERE salary % 2 = 
 reseed; errchk "where_double_eq_closed"  "SELECT id FROM emp WHERE salary == 100"     "expected a value after operator"
 reseed; errchk "where_gtlt_closed"       "SELECT id FROM emp WHERE salary >< 100"     "expected a value after operator"
 
+echo "== WHERE unknown-column fail-closed (every single-table path) =="
+# A WHERE leaf stores its left side as a column ref resolved at eval time.
+# resolve_col returns -1 for a name no column has, and eval_cond_row scored that
+# leaf false, so a typo'd column returned an empty result (and IS NULL on it
+# returned every row): silent wrong answers on SELECT, GROUP BY, UPDATE, DELETE,
+# and scalar subqueries. Each must now print "no such column" and touch no row.
+reseed; errchk "where_unknown_select"   "SELECT id FROM emp WHERE nosuchcol = 5"                 "no such column"
+reseed; errchk "where_unknown_agg"      "SELECT COUNT(*) FROM emp WHERE nosuchcol = 5"           "no such column"
+reseed; errchk "where_unknown_group"    "SELECT dept, COUNT(*) FROM emp WHERE nosuchcol = 5 GROUP BY dept" "no such column"
+reseed; errchk "where_unknown_update"   "UPDATE emp SET salary = 0 WHERE nosuchcol = 5"          "no such column"
+reseed; errchk "where_unknown_delete"   "DELETE FROM emp WHERE nosuchcol = 5"                    "no such column"
+reseed; errchk "where_unknown_isnull"   "SELECT id FROM emp WHERE nosuchcol IS NULL"             "no such column"
+reseed; errchk "where_unknown_dotted"   "SELECT id FROM emp WHERE emp.nosuchcol = 5"             "no such column"
+reseed; errchk "where_unknown_subquery" "SELECT id FROM emp WHERE salary > (SELECT MAX(salary) FROM emp WHERE nosuchcol = 1)" "no such column"
+
 echo "== ORDER BY (multi-key) / LIMIT / OFFSET / DISTINCT =="
 chksel "order_desc"    "SELECT name FROM emp ORDER BY salary DESC" "$(printf 'dave\nalice\nbob\ncarol\neve')"
 chksel "order_2key"    "SELECT name FROM emp ORDER BY dept, salary DESC" "$(printf 'alice\nbob\neve\ndave\ncarol')"
