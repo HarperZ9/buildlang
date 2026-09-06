@@ -147,6 +147,18 @@ echo "== aggregates / GROUP BY / HAVING =="
 chksel "count_star"    "SELECT COUNT(*) FROM emp" "5"
 chksel "sum"           "SELECT SUM(salary) FROM emp" "460"
 chksel "min_max"       "SELECT MIN(salary) FROM emp" "70"
+chksel "max_salary"    "SELECT MAX(salary) FROM emp" "120"
+# MIN/MAX on a TEXT column order lexicographically (compare_vals), not by
+# parse_float -- which coerces text to 0 and used to collapse every text
+# extreme to 0. SUM/AVG on text stay numeric (0), matching SQLite coercion.
+chksel "min_name"      "SELECT MIN(name) FROM emp" "alice"
+chksel "max_name"      "SELECT MAX(name) FROM emp" "eve"
+chksel "min_dept"      "SELECT MIN(dept) FROM emp" "eng"
+chksel "max_dept"      "SELECT MAX(dept) FROM emp" "sales"
+chksel "group_min_name" "SELECT dept, MIN(name) FROM emp GROUP BY dept ORDER BY dept" "$(printf 'eng   | alice\nhr    | eve\nsales | carol')"
+chksel "group_max_name" "SELECT dept, MAX(name) FROM emp GROUP BY dept ORDER BY dept" "$(printf 'eng   | bob\nhr    | eve\nsales | dave')"
+chksel "subq_min_name" "SELECT id FROM emp WHERE name = (SELECT MIN(name) FROM emp)" "1"
+chksel "subq_max_name" "SELECT id FROM emp WHERE name = (SELECT MAX(name) FROM emp)" "5"
 chkhdr "hdr_count"     "SELECT COUNT(*) FROM emp" "COUNT(*)"
 chksel "group_count"   "SELECT dept, COUNT(*) FROM emp GROUP BY dept ORDER BY dept" "$(printf 'eng   | 2\nhr    | 1\nsales | 2')"
 chksel "group_desc"    "SELECT dept, COUNT(*) FROM emp GROUP BY dept ORDER BY dept DESC" "$(printf 'sales | 2\nhr    | 1\neng   | 2')"

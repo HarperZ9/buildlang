@@ -2269,9 +2269,14 @@ fn exec_subquery_scalar(d: &mut DB, sql: String) -> String ~ Console + Process {
             }
             // SUM/AVG/MIN/MAX
             let col_idx = resolve_col(d, cs, cc, tname, d.alias1, ac_name);
+            let ct = if col_idx >= 0 { vec_get(d.col_types, cs + col_idx) } else { 0 };
             let mut sum_val = 0.0;
             let mut min_val = 999999999.0;
             let mut max_val = 0.0 - 999999999.0;
+            // MIN/MAX on a TEXT column (type 2) order lexicographically via
+            // compare_vals; parse_float coerces text to 0 and collapses them.
+            let mut min_str = "";
+            let mut max_str = "";
             let mut cnt = 0;
             let mut mi = 0;
             while mi < match_count {
@@ -2282,6 +2287,13 @@ fn exec_subquery_scalar(d: &mut DB, sql: String) -> String ~ Console + Process {
                     sum_val = sum_val + nv;
                     if nv < min_val { min_val = nv; }
                     if nv > max_val { max_val = nv; }
+                    if ct == 2 {
+                        if cnt == 0 { min_str = cell_str; max_str = cell_str; }
+                        else {
+                            if compare_vals(cell_str, min_str, ct) < 0 { min_str = cell_str; }
+                            if compare_vals(cell_str, max_str, ct) > 0 { max_str = cell_str; }
+                        }
+                    }
                     cnt = cnt + 1;
                 }
                 mi = mi + 1;
@@ -2293,7 +2305,9 @@ fn exec_subquery_scalar(d: &mut DB, sql: String) -> String ~ Console + Process {
             }
             if af == 4 { result_val = min_val; }
             if af == 5 { result_val = max_val; }
-            let rstr = float_to_str(result_val);
+            let mut rstr = float_to_str(result_val);
+            if ct == 2 && af == 4 { rstr = min_str; }
+            if ct == 2 && af == 5 { rstr = max_str; }
             vec_push(d.subq_vals, sp_add(d, rstr));
             d.subq_count = 1;
             return rstr;
@@ -3561,9 +3575,14 @@ fn compute_single_agg(d: &mut DB, af: i32, ac_name_id: i32, cs: i32, cc: i32,
     }
     // SUM/AVG/MIN/MAX
     let col_idx = resolve_col(d, cs, cc, tname, alias_val, ac_name);
+    let ct = if col_idx >= 0 { vec_get(d.col_types, cs + col_idx) } else { 0 };
     let mut sum_val = 0.0;
     let mut min_val = 999999999.0;
     let mut max_val = 0.0 - 999999999.0;
+    // MIN/MAX on a TEXT column (type 2) order lexicographically via
+    // compare_vals; parse_float coerces text to 0 and collapses them.
+    let mut min_str = "";
+    let mut max_str = "";
     let mut cnt = 0;
     let mut mi = 0;
     while mi < match_count {
@@ -3573,10 +3592,20 @@ fn compute_single_agg(d: &mut DB, af: i32, ac_name_id: i32, cs: i32, cc: i32,
             sum_val = sum_val + nv;
             if nv < min_val { min_val = nv; }
             if nv > max_val { max_val = nv; }
+            if ct == 2 {
+                let cellv = sp_get(d, vec_get(d.cells, rs + row * cc + col_idx));
+                if cnt == 0 { min_str = cellv; max_str = cellv; }
+                else {
+                    if compare_vals(cellv, min_str, ct) < 0 { min_str = cellv; }
+                    if compare_vals(cellv, max_str, ct) > 0 { max_str = cellv; }
+                }
+            }
             cnt = cnt + 1;
         }
         mi = mi + 1;
     }
+    if af == 4 && ct == 2 { return sp_add(d, min_str); }
+    if af == 5 && ct == 2 { return sp_add(d, max_str); }
     let mut result_val = sum_val;
     if af == 3 {
         if cnt > 0 { result_val = sum_val / cnt; }
@@ -4117,9 +4146,14 @@ fn compute_group_numeric(d: &mut DB, af: i32, ac_name: String, gk: String,
                          cs: i32, cc: i32, rs: i32, tname: String, gcol: i32,
                          match_rows: Vec<i32>, match_count: i32) -> String {
     let col_idx = resolve_col(d, cs, cc, tname, d.alias1, ac_name);
+    let ct = if col_idx >= 0 { vec_get(d.col_types, cs + col_idx) } else { 0 };
     let mut sum_v = 0.0;
     let mut min_v = 999999999.0;
     let mut max_v = 0.0 - 999999999.0;
+    // MIN/MAX on a TEXT column (type 2) order lexicographically via
+    // compare_vals; parse_float coerces text to 0 and collapses them.
+    let mut min_str = "";
+    let mut max_str = "";
     let mut cnt = 0;
     let mut si = 0;
     while si < match_count {
@@ -4132,11 +4166,20 @@ fn compute_group_numeric(d: &mut DB, af: i32, ac_name: String, gk: String,
                 sum_v = sum_v + nv;
                 if nv < min_v { min_v = nv; }
                 if nv > max_v { max_v = nv; }
+                if ct == 2 {
+                    if cnt == 0 { min_str = sv; max_str = sv; }
+                    else {
+                        if compare_vals(sv, min_str, ct) < 0 { min_str = sv; }
+                        if compare_vals(sv, max_str, ct) > 0 { max_str = sv; }
+                    }
+                }
                 cnt = cnt + 1;
             }
         }
         si = si + 1;
     }
+    if af == 4 && ct == 2 { return min_str; }
+    if af == 5 && ct == 2 { return max_str; }
     let mut result_val = sum_v;
     if af == 3 {
         if cnt > 0 { result_val = sum_v / cnt; }
