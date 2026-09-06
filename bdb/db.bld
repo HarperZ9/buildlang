@@ -2308,6 +2308,9 @@ fn exec_subquery_scalar(d: &mut DB, sql: String) -> String ~ Console + Process {
             let mut rstr = float_to_str(result_val);
             if ct == 2 && af == 4 { rstr = min_str; }
             if ct == 2 && af == 5 { rstr = max_str; }
+            // MIN/MAX over zero matching rows is SQL NULL (rendered empty), not
+            // the numeric sentinel. COUNT stays 0; SUM/AVG keep their 0 result.
+            if cnt == 0 && (af == 4 || af == 5) { rstr = ""; }
             vec_push(d.subq_vals, sp_add(d, rstr));
             d.subq_count = 1;
             return rstr;
@@ -3604,6 +3607,9 @@ fn compute_single_agg(d: &mut DB, af: i32, ac_name_id: i32, cs: i32, cc: i32,
         }
         mi = mi + 1;
     }
+    // MIN/MAX over zero matching rows is SQL NULL (rendered empty), not the
+    // numeric sentinel. COUNT stays 0; SUM/AVG keep their 0 result.
+    if cnt == 0 && (af == 4 || af == 5) { return sp_add(d, ""); }
     if af == 4 && ct == 2 { return sp_add(d, min_str); }
     if af == 5 && ct == 2 { return sp_add(d, max_str); }
     let mut result_val = sum_val;
@@ -4178,6 +4184,9 @@ fn compute_group_numeric(d: &mut DB, af: i32, ac_name: String, gk: String,
         }
         si = si + 1;
     }
+    // MIN/MAX over zero matching rows is SQL NULL (rendered empty), not the
+    // numeric sentinel. COUNT stays 0; SUM/AVG keep their 0 result.
+    if cnt == 0 && (af == 4 || af == 5) { return ""; }
     if af == 4 && ct == 2 { return min_str; }
     if af == 5 && ct == 2 { return max_str; }
     let mut result_val = sum_v;

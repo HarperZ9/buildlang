@@ -159,6 +159,16 @@ chksel "group_min_name" "SELECT dept, MIN(name) FROM emp GROUP BY dept ORDER BY 
 chksel "group_max_name" "SELECT dept, MAX(name) FROM emp GROUP BY dept ORDER BY dept" "$(printf 'eng   | bob\nhr    | eve\nsales | dave')"
 chksel "subq_min_name" "SELECT id FROM emp WHERE name = (SELECT MIN(name) FROM emp)" "1"
 chksel "subq_max_name" "SELECT id FROM emp WHERE name = (SELECT MAX(name) FROM emp)" "5"
+# Empty match set. An aggregate with no GROUP BY still returns exactly one row.
+# MIN/MAX over zero rows is SQL NULL (blank); before, the internal float sentinel
+# leaked out as 12157520.92 / -12157520.92 (a silent wrong answer). COUNT stays 0
+# (SQLite-correct); SUM/AVG stay 0 here (a kept divergence from SQLite's NULL, and
+# the AVG path returns 0 rather than dividing by a zero count).
+chksel "empty_min_num"  "SELECT MIN(salary) FROM emp WHERE id > 999" ""
+chksel "empty_max_num"  "SELECT MAX(salary) FROM emp WHERE id > 999" ""
+chksel "empty_count"    "SELECT COUNT(*) FROM emp WHERE id > 999" "0"
+chksel "empty_sum"      "SELECT SUM(salary) FROM emp WHERE id > 999" "0"
+chksel "empty_avg"      "SELECT AVG(salary) FROM emp WHERE id > 999" "0"
 chkhdr "hdr_count"     "SELECT COUNT(*) FROM emp" "COUNT(*)"
 chksel "group_count"   "SELECT dept, COUNT(*) FROM emp GROUP BY dept ORDER BY dept" "$(printf 'eng   | 2\nhr    | 1\nsales | 2')"
 chksel "group_desc"    "SELECT dept, COUNT(*) FROM emp GROUP BY dept ORDER BY dept DESC" "$(printf 'sales | 2\nhr    | 1\neng   | 2')"
