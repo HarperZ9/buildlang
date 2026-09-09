@@ -605,6 +605,7 @@ fn bin_op_name(op: BinOp) -> &'static str {
         BinOp::MulWrapping => "MulWrapping",
         BinOp::AddSaturating => "AddSaturating",
         BinOp::SubSaturating => "SubSaturating",
+        BinOp::MulSaturating => "MulSaturating",
     }
 }
 
@@ -796,6 +797,10 @@ fn write_mir_type(output: &mut String, label: &str, ty: &MirType) {
         MirType::Slice(element) => {
             push_line(output, format!("{label} Slice"));
             write_mir_type(output, &format!("{label}.element"), element);
+        }
+        MirType::Option(inner) => {
+            push_line(output, format!("{label} Option"));
+            write_mir_type(output, &format!("{label}.inner"), inner);
         }
         MirType::Struct(name) => push_line(
             output,
@@ -2381,13 +2386,13 @@ mod tests {
     }
 
     // =========================================================================
-    // MIR INTERLINGUA ROUND-TRIP TESTS (buildlang.mir/v0)
+    // MIR INTERLINGUA ROUND-TRIP TESTS (buildlang.mir/v1)
     // =========================================================================
 
     #[test]
     fn mir_envelope_schema_string_is_versioned() {
         use buildlang::codegen::MIR_SCHEMA;
-        assert_eq!(MIR_SCHEMA, "buildlang.mir/v0");
+        assert_eq!(MIR_SCHEMA, "buildlang.mir/v1");
     }
 
     #[test]
@@ -2416,15 +2421,24 @@ mod tests {
 
             // 1. Wrap in the versioned envelope and serialize to JSON.
             let envelope = MirModuleEnvelope::wrap(&lowered.module);
-            assert_eq!(envelope.schema, "buildlang.mir/v0");
+            assert_eq!(envelope.schema, "buildlang.mir/v1");
             let json = serde_json::to_string(&envelope)
                 .unwrap_or_else(|err| panic!("serialize {} MIR to JSON: {err}", program.id));
+            let legacy_json = json.replace("\"buildlang.mir/v1\"", "\"buildlang.mir/v0\"");
+            let migrated = MirModuleEnvelope::from_json(&legacy_json)
+                .unwrap_or_else(|err| panic!("migrate {} v0 MIR JSON: {err}", program.id));
+            assert_eq!(migrated.schema, "buildlang.mir/v1");
+            assert_eq!(
+                migrated.module, lowered.module,
+                "v0 schema compatibility changed MIR module for {}",
+                program.id
+            );
 
             // 2. Deserialize back to an owned envelope/module.
             let restored: MirModuleEnvelope = serde_json::from_str(&json)
                 .unwrap_or_else(|err| panic!("deserialize {} MIR from JSON: {err}", program.id));
             assert_eq!(
-                restored.schema, "buildlang.mir/v0",
+                restored.schema, "buildlang.mir/v1",
                 "schema survives round-trip for {}",
                 program.id
             );
@@ -2518,6 +2532,37 @@ mod tests {
             digest_mir_module(&restored.module),
             digest_mir_module(&module)
         );
+    }
+
+    #[test]
+    fn mir_option_payload_identity_survives_envelope_round_trip() {
+        use buildlang::codegen::MirModuleEnvelope;
+
+        let payload = MirType::Int(IntSize::I128, false);
+        let types = [
+            payload.clone(),
+            MirType::Option(Box::new(payload.clone())),
+            MirType::Option(Box::new(MirType::Int(IntSize::I128, true))),
+            MirType::Option(Box::new(MirType::Int(IntSize::I64, false))),
+            MirType::Option(Box::new(MirType::Option(Box::new(payload)))),
+        ];
+        let mut digests = BTreeSet::new();
+        for ty in types {
+            let mut module = MirModule::new("option_identity");
+            module.add_function(MirFunction::new(
+                "identity",
+                MirFnSig::new(vec![ty.clone()], ty),
+            ));
+            let digest = digest_mir_module(&module);
+            let json = serde_json::to_string(&MirModuleEnvelope::wrap(&module)).unwrap();
+            let restored: MirModuleEnvelope = serde_json::from_str(&json).unwrap();
+            assert_eq!(digest, digest_mir_module(&restored.module));
+            assert!(
+                digests.insert(digest.hex),
+                "Option shape or payload type was erased"
+            );
+        }
+        assert_eq!(digests.len(), 5);
     }
 
     fn buildlang_type_def_point() -> MirTypeDef {

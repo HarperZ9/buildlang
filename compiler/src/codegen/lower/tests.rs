@@ -15,7 +15,9 @@
 
 use std::sync::Arc;
 
-use crate::codegen::ir::MirModule;
+use crate::codegen::ir::{
+    LocalId, MirFunction, MirModule, MirRValue, MirStmtKind, MirTerminator, MirType, MirValue,
+};
 use crate::codegen::lower::MirLowerer;
 use crate::lexer::{Lexer, SourceFile};
 use crate::parser::Parser;
@@ -62,6 +64,76 @@ fn find_fn_def<'a>(module: &'a MirModule, name: &str) -> &'a crate::codegen::ir:
         .iter()
         .find(|f| &*f.name == name && !f.is_declaration())
         .unwrap_or_else(|| panic!("expected a lowered definition for `{name}`"))
+}
+
+fn named_local(func: &MirFunction, name: &str) -> LocalId {
+    func.locals
+        .iter()
+        .find(|local| local.name.as_deref() == Some(name))
+        .unwrap_or_else(|| panic!("expected `{name}` local in {}", func.name))
+        .id
+}
+
+fn local_type(func: &MirFunction, id: LocalId) -> MirType {
+    func.locals
+        .iter()
+        .find(|local| local.id == id)
+        .unwrap_or_else(|| panic!("expected local {id} in {}", func.name))
+        .ty
+        .clone()
+}
+
+fn assert_named_local_assigned_from_local_of_type(
+    func: &MirFunction,
+    name: &str,
+    expected_ty: MirType,
+) {
+    let dest = named_local(func, name);
+    let mut saw_assignment = false;
+
+    for block in func.blocks.as_ref().expect("function should have blocks") {
+        for stmt in &block.stmts {
+            if let MirStmtKind::Assign {
+                dest: stmt_dest,
+                value: MirRValue::Use(MirValue::Local(rhs)),
+            } = &stmt.kind
+            {
+                if *stmt_dest == dest {
+                    let rhs_ty = local_type(func, *rhs);
+                    assert_eq!(
+                        rhs_ty, expected_ty,
+                        "assignment into `{name}` must use the match expression's arm value type"
+                    );
+                    saw_assignment = true;
+                }
+            }
+        }
+    }
+
+    assert!(
+        saw_assignment,
+        "expected `{name}` to be assigned from a lowered match result local"
+    );
+}
+
+fn assert_tail_return_local_of_type(func: &MirFunction, expected_ty: MirType) {
+    let mut saw_return = false;
+
+    for block in func.blocks.as_ref().expect("function should have blocks") {
+        if let Some(MirTerminator::Return(Some(MirValue::Local(local)))) = &block.terminator {
+            let return_ty = local_type(func, *local);
+            assert_eq!(
+                return_ty, expected_ty,
+                "tail match return must use the function result type"
+            );
+            saw_return = true;
+        }
+    }
+
+    assert!(
+        saw_return,
+        "expected function to return a lowered match result local"
+    );
 }
 
 // =============================================================================
@@ -255,4 +327,216 @@ fn spans_table_is_not_populated_when_absent_by_construction() {
     let func = MirFunction::new("empty", MirFnSig::new(vec![], MirType::Void));
     assert!(func.spans.stmt.is_empty());
     assert!(func.spans.terminator.is_empty());
+}
+
+// =============================================================================
+// RUNTIME SUM-TYPE MATCH RESULT TYPES
+// =============================================================================
+
+#[test]
+fn runtime_option_match_assignment_rhs_uses_payload_type_inside_option_returning_fn() {
+    let module = lower_source(
+        r#"
+fn probe(input: u64) -> Option<u64> {
+    let mut value = 0u64;
+    value = match input.checked_mul(10u64) {
+        Some(v) => v,
+        None => { return None; 0u64 },
+    };
+    Some(value)
+}
+"#,
+    );
+    let probe = find_fn_def(&module, "probe");
+
+    assert_named_local_assigned_from_local_of_type(probe, "value", MirType::u64());
+}
+
+#[test]
+fn runtime_option_match_reversed_arms_uses_match_value_type_not_payload_type() {
+    let module = lower_source(
+        r#"
+fn probe(input: u64) -> Option<u64> {
+    let mut flag = false;
+    flag = match input.checked_mul(10u64) {
+        None => { return None; false },
+        Some(v) => v > 0u64,
+    };
+    if flag {
+        Some(input)
+    } else {
+        None
+    }
+}
+"#,
+    );
+    let probe = find_fn_def(&module, "probe");
+
+    assert_named_local_assigned_from_local_of_type(probe, "flag", MirType::Bool);
+}
+
+#[test]
+fn runtime_option_match_retypes_from_nondiverging_arm_after_diverging_arm() {
+    let module = lower_source(
+        r#"
+fn probe(input: u64) -> Option<u64> {
+    let mut value = 0u64;
+    value = match input.checked_mul(10u64) {
+        None => return None,
+        Some(v) => v,
+    };
+    Some(value)
+}
+"#,
+    );
+    let probe = find_fn_def(&module, "probe");
+
+    assert_named_local_assigned_from_local_of_type(probe, "value", MirType::u64());
+}
+
+#[test]
+fn runtime_option_tail_match_keeps_option_result_type() {
+    let module = lower_source(
+        r#"
+fn probe(input: u64) -> Option<u64> {
+    match input.checked_mul(10u64) {
+        Some(v) => Some(v),
+        None => None,
+    }
+}
+"#,
+    );
+    let probe = find_fn_def(&module, "probe");
+
+    assert_tail_return_local_of_type(probe, MirType::Option(Box::new(MirType::u64())));
+}
+
+#[test]
+fn runtime_result_match_assignment_rhs_uses_ok_payload_type_inside_result_returning_fn() {
+    let module = lower_source(
+        r#"
+enum Result {
+    Ok(u64),
+    Err(u64),
+}
+
+fn maybe(input: u64) -> Result {
+    if input > 0u64 {
+        Result::Ok(input)
+    } else {
+        Result::Err(1u64)
+    }
+}
+
+fn probe(input: u64) -> Result {
+    let mut value = 0u64;
+    value = match maybe(input) {
+        Result::Ok(v) => v,
+        Result::Err(e) => { return Result::Err(e); 0u64 },
+    };
+    Result::Ok(value)
+}
+"#,
+    );
+    let probe = find_fn_def(&module, "probe");
+
+    assert_named_local_assigned_from_local_of_type(probe, "value", MirType::u64());
+}
+
+#[test]
+fn runtime_result_match_retypes_from_nondiverging_arm_after_diverging_arm() {
+    let module = lower_source(
+        r#"
+enum Result {
+    Ok(u64),
+    Err(u64),
+}
+
+fn maybe(input: u64) -> Result {
+    if input > 0u64 {
+        Result::Ok(input)
+    } else {
+        Result::Err(1u64)
+    }
+}
+
+fn probe(input: u64) -> Result {
+    let mut value = 0u64;
+    value = match maybe(input) {
+        Result::Err(e) => return Result::Err(e),
+        Result::Ok(v) => v,
+    };
+    Result::Ok(value)
+}
+"#,
+    );
+    let probe = find_fn_def(&module, "probe");
+
+    assert_named_local_assigned_from_local_of_type(probe, "value", MirType::u64());
+}
+
+#[test]
+fn runtime_result_tail_match_keeps_result_type() {
+    let module = lower_source(
+        r#"
+enum Result {
+    Ok(u64),
+    Err(u64),
+}
+
+fn maybe(input: u64) -> Result {
+    if input > 0u64 {
+        Result::Ok(input)
+    } else {
+        Result::Err(1u64)
+    }
+}
+
+fn probe(input: u64) -> Result {
+    match maybe(input) {
+        Result::Ok(v) => Result::Ok(v),
+        Result::Err(e) => Result::Err(e),
+    }
+}
+"#,
+    );
+    let probe = find_fn_def(&module, "probe");
+
+    assert_tail_return_local_of_type(probe, MirType::Struct("Result".into()));
+}
+
+#[test]
+fn runtime_result_match_reversed_arms_uses_match_value_type_not_result_type() {
+    let module = lower_source(
+        r#"
+enum Result {
+    Ok(u64),
+    Err(u64),
+}
+
+fn maybe(input: u64) -> Result {
+    if input > 0u64 {
+        Result::Ok(input)
+    } else {
+        Result::Err(1u64)
+    }
+}
+
+fn probe(input: u64) -> Result {
+    let mut flag = false;
+    flag = match maybe(input) {
+        Result::Err(e) => { return Result::Err(e); false },
+        Result::Ok(v) => v > 0u64,
+    };
+    if flag {
+        Result::Ok(input)
+    } else {
+        Result::Err(0u64)
+    }
+}
+"#,
+    );
+    let probe = find_fn_def(&module, "probe");
+
+    assert_named_local_assigned_from_local_of_type(probe, "flag", MirType::Bool);
 }

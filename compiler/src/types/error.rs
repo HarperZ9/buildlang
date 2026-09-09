@@ -266,6 +266,14 @@ pub enum TypeError {
     #[error("cannot apply unary operator `{op}` to type `{ty}`")]
     InvalidUnaryOp { op: String, ty: Ty },
 
+    /// Integer literal does not fit the requested concrete integer type.
+    #[error("integer literal `{literal}` is out of range for type `{ty}`")]
+    IntegerLiteralOutOfRange { literal: String, ty: String },
+
+    /// Compile-time integer arithmetic overflow in a constant expression.
+    #[error("integer overflow in {op} for type `{ty}`")]
+    IntegerOverflow { op: String, ty: String },
+
     /// Invalid assignment target.
     #[error("invalid assignment target")]
     InvalidAssignTarget,

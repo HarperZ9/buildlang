@@ -315,6 +315,94 @@ fn run_portable_lf_writes_raw_lf_to_stdout_and_stderr() {
 }
 
 #[test]
+fn run_portable_lf_routes_eprint_macros_to_stderr() {
+    if !c_backend_ready() {
+        eprintln!("skipping eprint stream routing test: no C backend available");
+        return;
+    }
+
+    let dir = temp_dir("eprint_streams");
+    let fixture = write_fixture(
+        &dir,
+        "main.bld",
+        r#"fn main() ~ Console {
+    print!("out");
+    eprint!("err");
+    println!(" ok");
+    eprintln!(" bad {}", true);
+}
+"#,
+    );
+
+    let output = buildc()
+        .arg("run")
+        .arg(&fixture)
+        .arg("--stdio-mode")
+        .arg("portable-lf")
+        .output()
+        .expect("run portable stdio eprint program");
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        output.status.success(),
+        "eprint stream routing fixture should run successfully\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout, b"out ok\n",
+        "stdout should contain only print!/println! output"
+    );
+    assert_eq!(
+        output.stderr, b"err bad true\n",
+        "stderr should contain only eprint!/eprintln! output"
+    );
+}
+
+#[test]
+fn run_portable_lf_keeps_function_style_println_on_stdout() {
+    if !c_backend_ready() {
+        eprintln!("skipping function-style println stream routing test: no C backend available");
+        return;
+    }
+
+    let dir = temp_dir("function_style_println_streams");
+    let fixture = write_fixture(
+        &dir,
+        "main.bld",
+        r#"fn main() ~ Console {
+    println("out {}", true);
+    eprintln!("err {}", false);
+}
+"#,
+    );
+
+    let output = buildc()
+        .arg("run")
+        .arg(&fixture)
+        .arg("--stdio-mode")
+        .arg("portable-lf")
+        .output()
+        .expect("run portable stdio function-style println program");
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        output.status.success(),
+        "function-style println stream routing fixture should run successfully\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout, b"out true\n",
+        "stdout should contain function-style println output"
+    );
+    assert_eq!(
+        output.stderr, b"err false\n",
+        "stderr should contain only eprintln! output"
+    );
+}
+
+#[test]
 fn scientific_receipt_default_omits_stdio_mode_and_still_verifies() {
     if !c_backend_ready() {
         eprintln!("skipping native scientific receipt stdio test: no C backend available");

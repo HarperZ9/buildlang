@@ -117,11 +117,11 @@ impl<'ctx> MirLowerer<'ctx> {
 
                 match macro_name {
                     "println" | "print" => {
-                        self.lower_print_macro(tokens, macro_name == "println")?;
+                        self.lower_print_macro(tokens, macro_name == "println", false)?;
                         Ok(None)
                     }
                     "eprintln" | "eprint" => {
-                        self.lower_print_macro(tokens, macro_name == "eprintln")?;
+                        self.lower_print_macro(tokens, macro_name == "eprintln", true)?;
                         Ok(None)
                     }
                     "panic" => {
@@ -129,7 +129,7 @@ impl<'ctx> MirLowerer<'ctx> {
                         Ok(None)
                     }
                     "dbg" => {
-                        self.lower_print_macro(tokens, true)?;
+                        self.lower_print_macro(tokens, true, false)?;
                         Ok(None)
                     }
                     _ => {
@@ -473,11 +473,11 @@ impl<'ctx> MirLowerer<'ctx> {
 
                 match macro_name {
                     "println" | "print" => {
-                        self.lower_print_macro(tokens, macro_name == "println")?;
+                        self.lower_print_macro(tokens, macro_name == "println", false)?;
                         Ok(values::unit())
                     }
                     "eprintln" | "eprint" => {
-                        self.lower_print_macro(tokens, macro_name == "eprintln")?;
+                        self.lower_print_macro(tokens, macro_name == "eprintln", true)?;
                         Ok(values::unit())
                     }
                     "panic" => {
@@ -485,7 +485,7 @@ impl<'ctx> MirLowerer<'ctx> {
                         Ok(values::unit())
                     }
                     "dbg" => {
-                        self.lower_print_macro(tokens, true)?;
+                        self.lower_print_macro(tokens, true, false)?;
                         Ok(values::unit())
                     }
                     "format" => {
@@ -1175,7 +1175,12 @@ impl<'ctx> MirLowerer<'ctx> {
         if matches!(op, AstUnaryOp::Neg) {
             match &inner_val {
                 MirValue::Const(MirConst::Int(v, ty)) => {
-                    return Ok(MirValue::Const(MirConst::Int(-v, ty.clone())));
+                    let Some(negated) = v.checked_neg() else {
+                        return Err(CodegenError::TypeError(
+                            "integer overflow in unary `-` during constant lowering".to_string(),
+                        ));
+                    };
+                    return Ok(MirValue::Const(MirConst::Int(negated, ty.clone())));
                 }
                 MirValue::Const(MirConst::Float(v, ty)) => {
                     return Ok(MirValue::Const(MirConst::Float(-v, ty.clone())));
@@ -1662,12 +1667,7 @@ impl<'ctx> MirLowerer<'ctx> {
             let recv_val = self.lower_expr(arr)?;
             let recv_ty = self.type_of_value(&recv_val);
             if let MirType::Vec(ref elem_ty) = recv_ty {
-                let suffix = match elem_ty.as_ref() {
-                    MirType::Float(_) => "f64",
-                    MirType::Int(IntSize::I64, _) => "i64",
-                    MirType::Struct(n) if n.as_ref() == "BuildString" => "str",
-                    _ => "i32",
-                };
+                let suffix = Self::hvec_elem_suffix(elem_ty.as_ref())?;
                 let idx_val = self.lower_expr(index)?;
                 // For a compound assignment, read the current element, apply the
                 // op, then store; a plain `=` stores the value directly.
@@ -2354,26 +2354,9 @@ impl<'ctx> MirLowerer<'ctx> {
         };
         // Same element -> suffix mapping the method-call path uses, so the two
         // call forms stay in lockstep for every element type.
-        let suffix: String = match &elem_ty {
-            MirType::Float(_) => "f64".to_string(),
-            MirType::Int(IntSize::I64, _) => "i64".to_string(),
-            MirType::Struct(n) if n.as_ref() == "BuildString" => "str".to_string(),
-            MirType::Struct(n) => n.to_string(),
-            MirType::Vec(_) => "BuildVecHandle".to_string(),
-            MirType::Map(_, _) => "BuildMapHandle".to_string(),
-            MirType::Int(_, _) | MirType::Bool => "i32".to_string(),
-            // A tuple or array element has no handle representation and no
-            // backend wrapper; fail closed rather than route it to the i32
-            // helper, whose `int32_t` parameter cannot store it (an array would
-            // decay to a truncated pointer, a tuple leak a raw C type error).
-            _ => {
-                return Some(Err(CodegenError::Unsupported(format!(
-                    "a vector of `{elem_ty}` elements is not supported yet: the Vec \
-                     runtime stores scalar (integer, float, bool, char), string, \
-                     struct, nested-vector, and map elements, not a tuple or array \
-                     element"
-                ))))
-            }
+        let suffix = match Self::hvec_elem_suffix(&elem_ty) {
+            Ok(suffix) => suffix,
+            Err(err) => return Some(Err(err)),
         };
 
         // Lower the remaining args (push value / get index).
@@ -2558,6 +2541,37 @@ impl<'ctx> MirLowerer<'ctx> {
             MirType::Map(_, _) => "BuildStrF64MapHandle".to_string(),
             _ => "int32_t".to_string(),
         }
+    }
+
+    fn hvec_elem_suffix(elem_ty: &MirType) -> CodegenResult<String> {
+        Ok(match elem_ty {
+            MirType::Float(_) => "f64".to_string(),
+            MirType::Int(IntSize::I8, true) => "i8".to_string(),
+            MirType::Int(IntSize::I16, true) => "i16".to_string(),
+            MirType::Int(IntSize::I32, true) => "i32".to_string(),
+            MirType::Int(IntSize::I64, true) => "i64".to_string(),
+            MirType::Int(IntSize::I128, true) => "i128".to_string(),
+            MirType::Int(IntSize::ISize, true) => "isize".to_string(),
+            MirType::Int(IntSize::I8, false) => "u8".to_string(),
+            MirType::Int(IntSize::I16, false) => "u16".to_string(),
+            MirType::Int(IntSize::I32, false) => "u32".to_string(),
+            MirType::Int(IntSize::I64, false) => "u64".to_string(),
+            MirType::Int(IntSize::I128, false) => "u128".to_string(),
+            MirType::Int(IntSize::ISize, false) => "usize".to_string(),
+            MirType::Struct(n) if n.as_ref() == "BuildString" => "str".to_string(),
+            MirType::Struct(n) => n.to_string(),
+            MirType::Vec(_) => "BuildVecHandle".to_string(),
+            MirType::Map(_, _) => "BuildMapHandle".to_string(),
+            MirType::Bool => "i32".to_string(),
+            _ => {
+                return Err(CodegenError::Unsupported(format!(
+                    "a vector of `{elem_ty}` elements is not supported yet: the Vec \
+                     runtime stores scalar (integer, float, bool, char), string, \
+                     struct, nested-vector, and map elements, not a tuple or array \
+                     element"
+                )))
+            }
+        })
     }
 
     /// Best-effort static type inference for an AST expression, used to drive
@@ -3000,6 +3014,75 @@ impl<'ctx> MirLowerer<'ctx> {
         subst
     }
 
+    fn explicit_integer_method_binop(method_name: &str) -> Option<(BinOp, bool)> {
+        match method_name {
+            "wrapping_add" => Some((BinOp::AddWrapping, false)),
+            "wrapping_sub" => Some((BinOp::SubWrapping, false)),
+            "wrapping_mul" => Some((BinOp::MulWrapping, false)),
+            "saturating_add" => Some((BinOp::AddSaturating, false)),
+            "saturating_sub" => Some((BinOp::SubSaturating, false)),
+            "saturating_mul" => Some((BinOp::MulSaturating, false)),
+            "checked_add" => Some((BinOp::AddChecked, true)),
+            "checked_sub" => Some((BinOp::SubChecked, true)),
+            "checked_mul" => Some((BinOp::MulChecked, true)),
+            _ => None,
+        }
+    }
+
+    fn is_option_mir_type(ty: &MirType) -> bool {
+        matches!(ty, MirType::Option(_))
+            || matches!(ty, MirType::Struct(name) if name.as_ref() == "Option")
+    }
+
+    fn option_inner_from_mir_type(ty: &MirType) -> Option<MirType> {
+        match ty {
+            MirType::Option(inner) => Some((**inner).clone()),
+            _ => None,
+        }
+    }
+
+    fn runtime_match_result_seed_type(&self) -> (MirType, bool) {
+        if let Some(expected) = &self.expected_type {
+            if *expected != MirType::Void {
+                return (expected.clone(), false);
+            }
+        }
+        (MirType::i32(), true)
+    }
+
+    fn assign_runtime_match_result(
+        &mut self,
+        result: LocalId,
+        may_retype_from_arm: &mut bool,
+        body_val: MirValue,
+    ) -> CodegenResult<()> {
+        if matches!(body_val, MirValue::Const(MirConst::Unit)) {
+            return Ok(());
+        }
+
+        if *may_retype_from_arm {
+            let body_ty = self.type_of_value(&body_val);
+            if body_ty != MirType::Void && body_ty != MirType::Never {
+                let builder = self
+                    .current_fn
+                    .as_mut()
+                    .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                let current_ty = builder.local_type(result).unwrap_or(MirType::Void);
+                if current_ty == MirType::i32() && body_ty != current_ty {
+                    builder.retype_local(result, body_ty);
+                }
+                *may_retype_from_arm = false;
+            }
+        }
+
+        let builder = self
+            .current_fn
+            .as_mut()
+            .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+        builder.assign(result, MirRValue::Use(body_val));
+        Ok(())
+    }
+
     fn lower_method_call(
         &mut self,
         receiver: &ast::Expr,
@@ -3023,6 +3106,40 @@ impl<'ctx> MirLowerer<'ctx> {
         // Lower the receiver first to determine its type
         let receiver_val = self.lower_expr(receiver)?;
         let receiver_ty = self.type_of_value(&receiver_val);
+
+        if let Some((mir_op, returns_option)) =
+            Self::explicit_integer_method_binop(method.name.as_ref())
+        {
+            if receiver_ty.is_integer() {
+                if args.len() != 1 {
+                    return Err(CodegenError::TypeError(format!(
+                        ".{}() on a primitive integer expects exactly 1 argument, found {}",
+                        method.name,
+                        args.len()
+                    )));
+                }
+
+                let prev_expected = self.expected_type.replace(receiver_ty.clone());
+                let rhs = self.lower_expr(&args[0]);
+                self.expected_type = prev_expected;
+                let rhs = rhs?;
+                let result_ty = if returns_option {
+                    MirType::Option(Box::new(receiver_ty.clone()))
+                } else {
+                    receiver_ty.clone()
+                };
+                let builder = self
+                    .current_fn
+                    .as_mut()
+                    .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                let result = builder.create_local(result_ty.clone());
+                builder.binary_op(result, mir_op, receiver_val, rhs);
+                if let MirType::Option(inner) = result_ty {
+                    self.option_inner_types.insert(result, *inner);
+                }
+                return Ok(values::local(result));
+            }
+        }
 
         // =================================================================
         // String method calls: s.len(), s.is_empty(), s.starts_with(),
@@ -3713,21 +3830,20 @@ impl<'ctx> MirLowerer<'ctx> {
 
         // Option<T> method dispatch: is_some/is_none read the has_value
         // discriminant; unwrap/unwrap_or read the typed payload slot. The
-        // payload type is the tracked inner type (default i32).
-        if matches!(&receiver_ty, MirType::Struct(n) if n.as_ref() == "Option") {
+        // payload type comes from MirType::Option<T> first, with the legacy
+        // side table as a compatibility fallback.
+        if Self::is_option_mir_type(&receiver_ty) {
             let method_name = method.name.as_ref();
-            let inner_ty = match &receiver_val {
-                MirValue::Local(id) => self
-                    .option_inner_types
-                    .get(id)
-                    .cloned()
-                    .unwrap_or_else(MirType::i32),
-                _ => MirType::i32(),
-            };
+            let inner_ty = Self::option_inner_from_mir_type(&receiver_ty)
+                .or_else(|| match &receiver_val {
+                    MirValue::Local(id) => self.option_inner_types.get(id).cloned(),
+                    _ => None,
+                })
+                .unwrap_or_else(MirType::i32);
             match method_name {
                 "is_some" | "is_none" => {
                     let builder = self.current_fn.as_mut().unwrap();
-                    let scrut = builder.create_local(MirType::Struct(Arc::from("Option")));
+                    let scrut = builder.create_local(receiver_ty.clone());
                     builder.assign(scrut, MirRValue::Use(receiver_val));
                     let hv = builder.create_local(MirType::Bool);
                     builder.assign(
@@ -3747,7 +3863,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 }
                 "unwrap" => {
                     let builder = self.current_fn.as_mut().unwrap();
-                    let scrut = builder.create_local(MirType::Struct(Arc::from("Option")));
+                    let scrut = builder.create_local(receiver_ty.clone());
                     builder.assign(scrut, MirRValue::Use(receiver_val));
                     let val = builder.create_local(inner_ty.clone());
                     builder.assign(
@@ -3763,7 +3879,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 "unwrap_or" if args.len() == 1 => {
                     let default_val = self.lower_expr(&args[0])?;
                     let builder = self.current_fn.as_mut().unwrap();
-                    let scrut = builder.create_local(MirType::Struct(Arc::from("Option")));
+                    let scrut = builder.create_local(receiver_ty.clone());
                     builder.assign(scrut, MirRValue::Use(receiver_val));
                     let hv = builder.create_local(MirType::Bool);
                     builder.assign(
@@ -3905,32 +4021,7 @@ impl<'ctx> MirLowerer<'ctx> {
         // to typed runtime functions (build_hvec_*).
         if let MirType::Vec(ref elem_ty) = receiver_ty {
             let method_name = method.name.as_ref();
-            let type_suffix: String = match elem_ty.as_ref() {
-                MirType::Float(_) => "f64".to_string(),
-                MirType::Int(IntSize::I64, _) => "i64".to_string(),
-                MirType::Struct(n) if n.as_ref() == "BuildString" => "str".to_string(),
-                // Aggregate element (user struct etc.): element-sized wrapper
-                // keyed by the struct name (matches the C backend's generated
-                // build_hvec_*_<Struct> wrappers).
-                MirType::Struct(n) => n.to_string(),
-                // Nested collection element (Vec<Vec<_>>, Vec<HashMap<_,_>>): the
-                // element is a handle struct; key the sized wrapper by its C type.
-                MirType::Vec(_) => "BuildVecHandle".to_string(),
-                MirType::Map(_, _) => "BuildMapHandle".to_string(),
-                MirType::Int(_, _) | MirType::Bool => "i32".to_string(),
-                // A tuple or array element has no handle representation and no
-                // backend wrapper; every vec method on it fails closed with one
-                // diagnostic rather than routing element access to the i32
-                // helper, whose `int32_t` parameter cannot store it.
-                _ => {
-                    return Err(CodegenError::Unsupported(format!(
-                        "a vector of `{elem_ty}` elements is not supported yet: the Vec \
-                         runtime stores scalar (integer, float, bool, char), string, \
-                         struct, nested-vector, and map elements, not a tuple or array \
-                         element"
-                    )))
-                }
-            };
+            let type_suffix = Self::hvec_elem_suffix(elem_ty.as_ref())?;
 
             let (runtime_fn, ret_ty): (Option<String>, MirType) = match method_name {
                 "push" => (
@@ -4165,7 +4256,10 @@ impl<'ctx> MirLowerer<'ctx> {
         // to the bare-name fallback and emitted an undefined `to_string` symbol.
         if method.name.as_ref() == "to_string" && args.is_empty() {
             let runtime = match &receiver_ty {
-                MirType::Int(..) => Some("build_i64_to_string"),
+                MirType::Int(IntSize::I128, true) => Some("build_i128_to_string"),
+                MirType::Int(IntSize::I128, false) => Some("build_u128_to_string"),
+                MirType::Int(_, true) => Some("build_i64_to_string"),
+                MirType::Int(_, false) => Some("build_u64_to_string"),
                 MirType::Float(..) => Some("build_f64_to_string"),
                 MirType::Struct(n) if n.as_ref() == "BuildString" => {
                     // String::to_string() is identity; return the receiver.
@@ -4237,7 +4331,7 @@ impl<'ctx> MirLowerer<'ctx> {
     ) -> CodegenResult<MirValue> {
         let scrut_val = self.lower_expr(scrutinee)?;
         let scrut_ty = self.type_of_value(&scrut_val);
-        let is_option = matches!(&scrut_ty, MirType::Struct(n) if n.as_ref() == "Option");
+        let is_option = Self::is_option_mir_type(&scrut_ty);
         let is_result = matches!(&scrut_ty, MirType::Struct(n) if n.as_ref() == "Result");
 
         // Variant name and the (optional) bound payload identifier.
@@ -4259,7 +4353,8 @@ impl<'ctx> MirLowerer<'ctx> {
             // Resolve the payload type and the union field for the bound value.
             let (payload_ty, payload_field) = if is_option {
                 (
-                    self.option_inner_type_for(scrutinee, &scrut_val)
+                    Self::option_inner_from_mir_type(&scrut_ty)
+                        .or_else(|| self.option_inner_type_for(scrutinee, &scrut_val))
                         .unwrap_or_else(MirType::i32),
                     "value",
                 )
@@ -4363,6 +4458,7 @@ impl<'ctx> MirLowerer<'ctx> {
             MirType::Struct(_)
                 | MirType::Vec(_)
                 | MirType::Map(_, _)
+                | MirType::Option(_)
                 | MirType::Tuple(_)
                 | MirType::Array(_, _)
                 | MirType::Slice(_)
@@ -4472,7 +4568,8 @@ impl<'ctx> MirLowerer<'ctx> {
     }
 
     /// Lower `match opt { Some(x) => body1, None => body2 }` for runtime Option.
-    /// The runtime Option struct has `has_value: bool` and `value: union { i64 i; double f; void* p; }`.
+    /// The runtime Option struct has `has_value: bool` and a typed scalar/boxed
+    /// payload union.
     /// `inner_ty_override` threads the payload type recovered at the match site
     /// (from a binding annotation or the matched call's `-> Option<T>` return)
     /// so the union slot is read with the correct type; it takes priority over
@@ -4484,12 +4581,14 @@ impl<'ctx> MirLowerer<'ctx> {
         arms: &[ast::MatchArm],
         inner_ty_override: Option<MirType>,
     ) -> CodegenResult<MirValue> {
+        let (result_ty, mut may_retype_result_from_arm) = self.runtime_match_result_seed_type();
         let builder = self
             .current_fn
             .as_mut()
             .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
 
-        let is_real_option = matches!(scrutinee_ty, MirType::Struct(n) if n.as_ref() == "Option");
+        let is_real_option = Self::is_option_mir_type(scrutinee_ty);
+        let typed_inner_ty = Self::option_inner_from_mir_type(scrutinee_ty);
 
         let scrut_local = builder.create_local(scrutinee_ty.clone());
         builder.assign(scrut_local, MirRValue::Use(scrutinee_val));
@@ -4517,13 +4616,6 @@ impl<'ctx> MirLowerer<'ctx> {
         let some_block = builder.create_block();
         let none_block = builder.create_block();
 
-        // Determine result type from function return type
-        let ret_ty = builder.return_type().clone();
-        let result_ty = if ret_ty == MirType::Void {
-            MirType::i32()
-        } else {
-            ret_ty
-        };
         let result = builder.create_local(result_ty);
 
         builder.branch(values::local(has_value), some_block, none_block);
@@ -4550,10 +4642,12 @@ impl<'ctx> MirLowerer<'ctx> {
                 let builder = self.current_fn.as_mut().unwrap();
                 builder.switch_to_block(none_block);
                 let body_val = self.lower_expr(&arm.body)?;
+                self.assign_runtime_match_result(
+                    result,
+                    &mut may_retype_result_from_arm,
+                    body_val,
+                )?;
                 let builder = self.current_fn.as_mut().unwrap();
-                if !matches!(body_val, MirValue::Const(MirConst::Unit)) {
-                    builder.assign(result, MirRValue::Use(body_val));
-                }
                 builder.goto(merge_block);
             } else if is_some {
                 let builder = self.current_fn.as_mut().unwrap();
@@ -4567,11 +4661,12 @@ impl<'ctx> MirLowerer<'ctx> {
                         if let ast::PatternKind::Ident { name, .. } = &pat.kind {
                             let builder = self.current_fn.as_mut().unwrap();
                             let inner_ty = if is_real_option {
-                                // Priority: threaded override (binding annotation
-                                // or matched call's `-> Option<T>`), then the
-                                // per-local table, then i32.
-                                inner_ty_override
+                                // Priority: MirType::Option<T>, threaded override
+                                // (binding annotation or matched call return),
+                                // then the per-local table, then i32.
+                                typed_inner_ty
                                     .clone()
+                                    .or_else(|| inner_ty_override.clone())
                                     .or_else(|| self.option_inner_types.get(&scrut_local).cloned())
                                     .unwrap_or_else(MirType::i32)
                             } else {
@@ -4601,20 +4696,24 @@ impl<'ctx> MirLowerer<'ctx> {
                 }
 
                 let body_val = self.lower_expr(&arm.body)?;
+                self.assign_runtime_match_result(
+                    result,
+                    &mut may_retype_result_from_arm,
+                    body_val,
+                )?;
                 let builder = self.current_fn.as_mut().unwrap();
-                if !matches!(body_val, MirValue::Const(MirConst::Unit)) {
-                    builder.assign(result, MirRValue::Use(body_val));
-                }
                 builder.goto(merge_block);
             } else {
                 // Wildcard / other - treat as default arm going to merge
                 let builder = self.current_fn.as_mut().unwrap();
                 builder.switch_to_block(none_block);
                 let body_val = self.lower_expr(&arm.body)?;
+                self.assign_runtime_match_result(
+                    result,
+                    &mut may_retype_result_from_arm,
+                    body_val,
+                )?;
                 let builder = self.current_fn.as_mut().unwrap();
-                if !matches!(body_val, MirValue::Const(MirConst::Unit)) {
-                    builder.assign(result, MirRValue::Use(body_val));
-                }
                 builder.goto(merge_block);
             }
         }
@@ -4639,6 +4738,7 @@ impl<'ctx> MirLowerer<'ctx> {
         ok_ty: MirType,
         err_ty: MirType,
     ) -> CodegenResult<MirValue> {
+        let (result_ty, mut may_retype_result_from_arm) = self.runtime_match_result_seed_type();
         let builder = self
             .current_fn
             .as_mut()
@@ -4662,13 +4762,6 @@ impl<'ctx> MirLowerer<'ctx> {
         let ok_block = builder.create_block();
         let err_block = builder.create_block();
 
-        // Result type for the match expression value.
-        let ret_ty = builder.return_type().clone();
-        let result_ty = if ret_ty == MirType::Void {
-            MirType::i32()
-        } else {
-            ret_ty
-        };
         let result = builder.create_local(result_ty);
 
         builder.branch(values::local(is_ok), ok_block, err_block);
@@ -4718,10 +4811,8 @@ impl<'ctx> MirLowerer<'ctx> {
             }
 
             let body_val = self.lower_expr(&arm.body)?;
+            self.assign_runtime_match_result(result, &mut may_retype_result_from_arm, body_val)?;
             let builder = self.current_fn.as_mut().unwrap();
-            if !matches!(body_val, MirValue::Const(MirConst::Unit)) {
-                builder.assign(result, MirRValue::Use(body_val));
-            }
             builder.goto(merge_block);
         }
 
@@ -4826,6 +4917,13 @@ impl<'ctx> MirLowerer<'ctx> {
     ) -> Option<MirType> {
         // Local tracked from a `let o: Option<T> = ...` annotation.
         if let MirValue::Local(id) = scrutinee_val {
+            if let Some(ref builder) = self.current_fn {
+                if let Some(ty) = builder.local_type(*id) {
+                    if let Some(inner) = Self::option_inner_from_mir_type(&ty) {
+                        return Some(inner);
+                    }
+                }
+            }
             if let Some(ty) = self.option_inner_types.get(id) {
                 return Some(ty.clone());
             }
@@ -4915,10 +5013,10 @@ impl<'ctx> MirLowerer<'ctx> {
 
         // Runtime Option match: `match opt { Some(x) => ..., None => ... }`
         // The runtime Option struct has fields `has_value: bool` and `value: union`.
-        let is_runtime_option =
-            matches!(&scrutinee_ty, MirType::Struct(n) if n.as_ref() == "Option");
+        let is_runtime_option = Self::is_option_mir_type(&scrutinee_ty);
         if is_runtime_option {
-            let inner = self.option_inner_type_for(scrutinee, &scrutinee_val);
+            let inner = Self::option_inner_from_mir_type(&scrutinee_ty)
+                .or_else(|| self.option_inner_type_for(scrutinee, &scrutinee_val));
             return self.lower_runtime_option_match(scrutinee_val, &scrutinee_ty, arms, inner);
         }
 
@@ -5995,12 +6093,18 @@ impl<'ctx> MirLowerer<'ctx> {
         let scrut_val = self.lower_expr(scrutinee)?;
         let scrut_ty = self.type_of_value(&scrut_val);
 
-        let builder = self.current_fn.as_mut().unwrap();
-        let scrut_local = builder.create_local(scrut_ty.clone());
-        builder.assign(scrut_local, MirRValue::Use(scrut_val));
+        let scrut_local = {
+            let builder = self.current_fn.as_mut().unwrap();
+            let scrut_local = builder.create_local(scrut_ty.clone());
+            builder.assign(scrut_local, MirRValue::Use(scrut_val));
+            scrut_local
+        };
 
         // For real Option: check has_value. For i32 fallback: always enter body.
-        let is_real_option = matches!(&scrut_ty, MirType::Struct(n) if n.as_ref() == "Option");
+        let is_real_option = Self::is_option_mir_type(&scrut_ty);
+        let option_payload_ty = Self::option_inner_from_mir_type(&scrut_ty)
+            .or_else(|| self.option_inner_type_for(scrutinee, &values::local(scrut_local)));
+        let builder = self.current_fn.as_mut().unwrap();
         if is_real_option {
             let has_value = builder.create_local(MirType::Bool);
             builder.assign(
@@ -6031,7 +6135,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 if let ast::PatternKind::Ident { name, .. } = &pat.kind {
                     let builder = self.current_fn.as_mut().unwrap();
                     let inner_ty = if is_real_option {
-                        MirType::i32()
+                        option_payload_ty.clone().unwrap_or_else(MirType::i32)
                     } else {
                         scrut_ty.clone()
                     };
@@ -6868,18 +6972,18 @@ impl<'ctx> MirLowerer<'ctx> {
                 let ok_ty = self.result_ok_type_for(inner, &inner_val);
                 return self.lower_try_runtime_sumtype(inner_val, &inner_ty, "is_ok", "ok", ok_ty);
             }
-            if name.as_ref() == "Option" {
-                let payload_ty = self
-                    .option_inner_type_for(inner, &inner_val)
-                    .unwrap_or_else(MirType::i32);
-                return self.lower_try_runtime_sumtype(
-                    inner_val,
-                    &inner_ty,
-                    "has_value",
-                    "value",
-                    payload_ty,
-                );
-            }
+        }
+        if Self::is_option_mir_type(&inner_ty) {
+            let payload_ty = Self::option_inner_from_mir_type(&inner_ty)
+                .or_else(|| self.option_inner_type_for(inner, &inner_val))
+                .unwrap_or_else(MirType::i32);
+            return self.lower_try_runtime_sumtype(
+                inner_val,
+                &inner_ty,
+                "has_value",
+                "value",
+                payload_ty,
+            );
         }
 
         // The inner value must be an enum type (Result or Option)

@@ -1,0 +1,28 @@
+enum Result {
+    Ok(u64),
+    Err(u64),
+}
+
+fn maybe(input: u64) -> Result {
+    if input > 0u64 {
+        Result::Ok(input)
+    } else {
+        Result::Err(1u64)
+    }
+}
+
+fn probe(input: u64) -> Result {
+    let mut value = 0u64;
+    value = match maybe(input) {
+        Result::Ok(v) => v,
+        Result::Err(e) => { return Result::Err(e); 0u64 },
+    };
+    Result::Ok(value)
+}
+
+fn main() ~ Console {
+    match probe(7u64) {
+        Result::Ok(v) => println("{}", v),
+        Result::Err(e) => println("{}", e),
+    }
+}
