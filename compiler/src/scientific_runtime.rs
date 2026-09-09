@@ -25,6 +25,13 @@ use super::{source_digest_hex, CheckReceiptSourceDigest};
 /// Schema id for the scientific-runtime receipt.
 pub const SCIENTIFIC_RUNTIME_SCHEMA: &str = "buildlang-scientific-runtime-receipt/v0";
 
+/// Default generated-program stdio mode for receipts sealed before the field
+/// existed, and for new receipts that preserve native host behavior.
+pub const SCIENTIFIC_STDIO_MODE_NATIVE: &str = "native";
+
+/// Explicit byte-stable generated-program stdio mode for C-backend receipts.
+pub const SCIENTIFIC_STDIO_MODE_PORTABLE_LF: &str = "portable-lf";
+
 /// The invariant name emitted for the energy-monotone check.
 pub const ENERGY_MONOTONE_INVARIANT: &str = "energy_monotone_nonincreasing";
 
@@ -597,6 +604,10 @@ impl From<&CheckReceiptSourceDigest> for ScientificDigest {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ScientificBuildState {
     pub target: String,
+    /// Generated-program stdio behavior. Missing means `native`, preserving
+    /// the exact shape and hash of receipts sealed before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdio_mode: Option<String>,
     pub compiler_status: String,
     pub flags: Vec<String>,
     /// The pass-0122 `compiler_branch` block (see [`ScientificToolchain`]).
@@ -1301,6 +1312,9 @@ pub struct ScientificReceiptInputs<'a> {
     pub source_digest: ScientificDigest,
     pub input_graph_digest: ScientificDigest,
     pub target: &'a str,
+    /// Generated-program stdio behavior. `None` means native and is omitted
+    /// from the sealed receipt for backward hash compatibility.
+    pub stdio_mode: Option<&'a str>,
     pub os: &'a str,
     pub exit_code: i32,
     /// The witnessed run's wall-clock duration in seconds (measured by
@@ -1378,6 +1392,7 @@ pub fn build_scientific_runtime_receipt(
         source_digest,
         input_graph_digest,
         target,
+        stdio_mode,
         os,
         exit_code,
         wall_seconds,
@@ -1474,6 +1489,9 @@ pub fn build_scientific_runtime_receipt(
         input_graph_digest,
         build_state: ScientificBuildState {
             target: target.to_string(),
+            stdio_mode: stdio_mode
+                .filter(|mode| *mode != SCIENTIFIC_STDIO_MODE_NATIVE)
+                .map(str::to_string),
             compiler_status: "compiled_and_executed".to_string(),
             flags,
             toolchain,
@@ -2268,8 +2286,9 @@ pub struct RerunObservation {
 /// stdout + executable digests (REPORTED as reproduced / not reproduced,
 /// never failures by themselves). The fourth argument is the secondary
 /// target named by the receipt's `cross_backend` block (`Some("rust")`), or
-/// `None` for every receipt without one; when `Some`, the returned
-/// observation's `secondary` field must be filled.
+/// `None` for every receipt without one; the fifth is the sealed stdio mode,
+/// defaulting missing old receipts to `native`. When a secondary target is
+/// `Some`, the returned observation's `secondary` field must be filled.
 ///
 /// Returns Ok(report) for every FAITHFUL receipt regardless of its recorded
 /// verdict (PASS, FAIL_EXPECTED, FAIL_UNEXPECTED, UNVERIFIABLE alike); the
@@ -2291,6 +2310,7 @@ pub fn evaluate_scientific_runtime_receipt(
         &[String],
         Option<u64>,
         Option<&str>,
+        &str,
     ) -> Result<RerunObservation, i32>,
 ) -> Result<ScientificVerifyReport, i32> {
     let receipt: ScientificRuntimeReceipt =
@@ -2360,6 +2380,28 @@ pub fn evaluate_scientific_runtime_receipt(
             receipt.measurement.series_extraction_policy, SERIES_EXTRACTION_POLICY
         );
         return Err(verify_failure_class(json, "EXTRACTION_POLICY_MISMATCH", 1));
+    }
+
+    let sealed_stdio_mode = receipt
+        .build_state
+        .stdio_mode
+        .as_deref()
+        .unwrap_or(SCIENTIFIC_STDIO_MODE_NATIVE);
+    if !matches!(
+        sealed_stdio_mode,
+        SCIENTIFIC_STDIO_MODE_NATIVE | SCIENTIFIC_STDIO_MODE_PORTABLE_LF
+    ) {
+        eprintln!(
+            "Error: build_state.stdio_mode `{sealed_stdio_mode}` is unsupported; supported: native, portable-lf"
+        );
+        return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+    }
+    if sealed_stdio_mode == SCIENTIFIC_STDIO_MODE_PORTABLE_LF && receipt.build_state.target != "c" {
+        eprintln!(
+            "Error: build_state.stdio_mode portable-lf is supported only by the C backend; receipt target `{}` does not use the C runtime",
+            receipt.build_state.target
+        );
+        return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
     }
 
     // Every sealed digest must be a real sha256 (64 hex chars): an empty or
@@ -2990,6 +3032,7 @@ pub fn evaluate_scientific_runtime_receipt(
         &receipt.args,
         receipt.seed_value,
         secondary_target,
+        sealed_stdio_mode,
     )
     .map_err(|code| verify_failure_class(json, "RERUN_FAILED", code))?;
     // Wall-clock: REPORTED, never compared for pass/fail (timing is
@@ -3234,6 +3277,7 @@ pub fn evaluate_scientific_runtime_receipt(
         source: source_path.to_string_lossy().to_string(),
         source_digest_hex: receipt.source_digest.hex.clone(),
         raw_stdout_digest_hex: receipt.measurement.raw_stdout_digest.hex.clone(),
+        stdio_mode: sealed_stdio_mode.to_string(),
         args: receipt.args.clone(),
         seal_hex: receipt.seal.hex.clone(),
         wall_seconds_sealed,
@@ -3280,6 +3324,9 @@ pub struct ScientificVerifyReport {
     pub source: String,
     pub source_digest_hex: String,
     pub raw_stdout_digest_hex: String,
+    /// The sealed generated-program stdio mode. Missing old receipts report
+    /// `native`.
+    pub stdio_mode: String,
     pub args: Vec<String>,
     pub seal_hex: String,
     /// The sealed `runtime_state.wall_seconds`, `None` for a receipt sealed
@@ -3373,6 +3420,9 @@ pub fn crucible_measurement_from_report(
     if claim_expects_failure {
         evidence.push("claim_expectation:expects_failure".to_string());
     }
+    if report.stdio_mode != SCIENTIFIC_STDIO_MODE_NATIVE {
+        evidence.push(format!("stdio_mode:{}", report.stdio_mode));
+    }
 
     serde_json::json!({
         "claim_id": claim_id,
@@ -3436,6 +3486,7 @@ pub fn verify_scientific_runtime_receipt(
         &[String],
         Option<u64>,
         Option<&str>,
+        &str,
     ) -> Result<RerunObservation, i32>,
 ) -> Result<(), i32> {
     let report = evaluate_scientific_runtime_receipt(
@@ -3485,6 +3536,9 @@ pub fn verify_scientific_runtime_receipt(
                 "remeasured": report.wall_seconds_remeasured,
             });
         }
+        if report.stdio_mode != SCIENTIFIC_STDIO_MODE_NATIVE {
+            out["stdio_mode"] = serde_json::Value::String(report.stdio_mode.clone());
+        }
         if !report.invariant_held {
             out["failure_class"] = serde_json::Value::String("INVARIANT_NOT_HELD".to_string());
         }
@@ -3509,9 +3563,14 @@ pub fn verify_scientific_runtime_receipt(
             ),
             None => String::new(),
         };
+        let stdio_mode_suffix = if report.stdio_mode == SCIENTIFIC_STDIO_MODE_NATIVE {
+            String::new()
+        } else {
+            format!(", stdio_mode={}", report.stdio_mode)
+        };
         if report.invariant_name == CROSS_BACKEND_INVARIANT {
             println!(
-                "MATCH: scientific-runtime receipt re-runs and re-checks clean ({}, violation_count={}; toolchain_matched={}, raw_stdout_reproduced={}, executable_reproduced={}, secondary_toolchain_matched={}, secondary_raw_stdout_reproduced={}, secondary_executable_reproduced={}{})",
+                "MATCH: scientific-runtime receipt re-runs and re-checks clean ({}, violation_count={}; toolchain_matched={}, raw_stdout_reproduced={}, executable_reproduced={}, secondary_toolchain_matched={}, secondary_raw_stdout_reproduced={}, secondary_executable_reproduced={}{}{})",
                 report.receipt_status,
                 report.violation_count,
                 report.toolchain_matched,
@@ -3520,17 +3579,19 @@ pub fn verify_scientific_runtime_receipt(
                 report.secondary_toolchain_matched,
                 report.secondary_raw_stdout_reproduced,
                 report.secondary_executable_reproduced,
-                wall_seconds_suffix
+                wall_seconds_suffix,
+                stdio_mode_suffix
             );
         } else {
             println!(
-                "MATCH: scientific-runtime receipt re-runs and re-checks clean ({}, violation_count={}; toolchain_matched={}, raw_stdout_reproduced={}, executable_reproduced={}{})",
+                "MATCH: scientific-runtime receipt re-runs and re-checks clean ({}, violation_count={}; toolchain_matched={}, raw_stdout_reproduced={}, executable_reproduced={}{}{})",
                 report.receipt_status,
                 report.violation_count,
                 report.toolchain_matched,
                 report.raw_stdout_reproduced,
                 report.executable_reproduced,
-                wall_seconds_suffix
+                wall_seconds_suffix,
+                stdio_mode_suffix
             );
         }
     } else {
@@ -3694,6 +3755,7 @@ mod tests {
             source_digest: hex_digest('a'),
             input_graph_digest: hex_digest('b'),
             target: "c",
+            stdio_mode: None,
             os: "test-os",
             exit_code: 0,
             wall_seconds: None,
@@ -4251,7 +4313,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _, _| Ok(rerun(vec![2.0, 2.0, 2.0])),
+            |_, _, _, _, _| Ok(rerun(vec![2.0, 2.0, 2.0])),
         );
         assert!(
             result.is_ok(),
@@ -4283,7 +4345,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _, _| Ok(rerun(vec![2.0, 2.0, 1.0])),
+            |_, _, _, _, _| Ok(rerun(vec![2.0, 2.0, 1.0])),
         );
         assert_eq!(
             result,
@@ -4318,7 +4380,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _, _| Ok(rerun(vec![2.0, 2.0, 2.0])),
+            |_, _, _, _, _| Ok(rerun(vec![2.0, 2.0, 2.0])),
         );
         assert_eq!(result, Err(1), "a non-canonical tolerance must be rejected");
     }
@@ -4395,7 +4457,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _, _| Ok(rerun(vec![1.0, 0.5, 1.0])),
+            |_, _, _, _, _| Ok(rerun(vec![1.0, 0.5, 1.0])),
         );
         assert!(
             result.is_ok(),
@@ -4427,7 +4489,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _, _| Ok(rerun(vec![1.0, 2.0, 1.0])),
+            |_, _, _, _, _| Ok(rerun(vec![1.0, 2.0, 1.0])),
         );
         assert_eq!(
             result,
@@ -4461,7 +4523,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _, _| Ok(rerun(vec![1.0, 0.5, 1.0])),
+            |_, _, _, _, _| Ok(rerun(vec![1.0, 0.5, 1.0])),
         );
         assert_eq!(result, Err(1), "a non-canonical tolerance must be rejected");
     }
@@ -4527,7 +4589,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _, _| Ok(rerun(vec![1e-12, -1e-13, 2e-14])),
+            |_, _, _, _, _| Ok(rerun(vec![1e-12, -1e-13, 2e-14])),
         );
         assert!(
             result.is_ok(),
@@ -4559,7 +4621,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _, _| Ok(rerun(vec![1e-3, 1e-3, 1e-3])),
+            |_, _, _, _, _| Ok(rerun(vec![1e-3, 1e-3, 1e-3])),
         );
         assert_eq!(
             result,
@@ -4592,7 +4654,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _, _| Ok(rerun(vec![1e-12, -1e-13, 2e-14])),
+            |_, _, _, _, _| Ok(rerun(vec![1e-12, -1e-13, 2e-14])),
         );
         assert_eq!(result, Err(1), "a non-canonical tolerance must be rejected");
     }
@@ -4885,7 +4947,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _, _| Ok(rerun(vec![1.0, 1.0, 2.0, 2.0, 3.0, 3.0])),
+            |_, _, _, _, _| Ok(rerun(vec![1.0, 1.0, 2.0, 2.0, 3.0, 3.0])),
         );
         assert!(
             result.is_ok(),
@@ -4916,7 +4978,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _, _| Ok(rerun(vec![1.0, 1.0, 2.0, 9.0])),
+            |_, _, _, _, _| Ok(rerun(vec![1.0, 1.0, 2.0, 9.0])),
         );
         assert_eq!(
             result,
@@ -4947,7 +5009,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _, _| Ok(rerun(vec![1.0, 1.0, 2.0, 2.0])),
+            |_, _, _, _, _| Ok(rerun(vec![1.0, 1.0, 2.0, 2.0])),
         );
         assert_eq!(result, Err(1), "a non-canonical tolerance must be rejected");
     }
@@ -4975,7 +5037,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| panic!("a malformed receipt must be rejected before re-derivation"),
-            |_, _, _, _| panic!("a malformed receipt must be rejected before the re-run"),
+            |_, _, _, _, _| panic!("a malformed receipt must be rejected before the re-run"),
         );
         assert_eq!(
             result,
@@ -5049,7 +5111,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _, _| Ok(rerun(vec![1.0, 1.002, 0.998])),
+            |_, _, _, _, _| Ok(rerun(vec![1.0, 1.002, 0.998])),
         );
         assert!(
             result.is_ok(),
@@ -5081,7 +5143,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _, _| Ok(rerun(vec![1.0, 1.0, 1.1])),
+            |_, _, _, _, _| Ok(rerun(vec![1.0, 1.0, 1.1])),
         );
         assert_eq!(
             result,
@@ -5113,7 +5175,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _, _| Ok(rerun(vec![1.0, 1.002, 0.998])),
+            |_, _, _, _, _| Ok(rerun(vec![1.0, 1.002, 0.998])),
         );
         assert_eq!(result, Err(1), "a non-canonical tolerance must be rejected");
     }
@@ -5147,7 +5209,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _, _| Ok(rerun(vec![1.0, 1.002, 0.998])),
+            |_, _, _, _, _| Ok(rerun(vec![1.0, 1.002, 0.998])),
         );
         assert_eq!(
             result,
@@ -5176,7 +5238,7 @@ mod tests {
             &relation.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _, _| Ok(rerun(vec![1.0, 1.0, 2.0, 2.0])),
+            |_, _, _, _, _| Ok(rerun(vec![1.0, 1.0, 2.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -5246,7 +5308,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _, _| Ok(rerun(vec![0.0, 5.0, 100.0])),
+            |_, _, _, _, _| Ok(rerun(vec![0.0, 5.0, 100.0])),
         );
         assert!(
             result.is_ok(),
@@ -5278,7 +5340,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _, _| Ok(rerun(vec![1.0, -0.5, 2.0])),
+            |_, _, _, _, _| Ok(rerun(vec![1.0, -0.5, 2.0])),
         );
         assert_eq!(
             result,
@@ -5310,7 +5372,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _, _| Ok(rerun(vec![0.0, 5.0, 100.0])),
+            |_, _, _, _, _| Ok(rerun(vec![0.0, 5.0, 100.0])),
         );
         assert_eq!(result, Err(1), "a non-canonical tolerance must be rejected");
     }
@@ -5333,6 +5395,72 @@ mod tests {
     }
 
     #[test]
+    fn native_stdio_mode_is_omitted_and_verified_as_legacy_default() {
+        let path = Path::new("k.bld");
+        let receipt =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        assert!(
+            value["build_state"].get("stdio_mode").is_none(),
+            "native receipts must preserve the old missing-field shape: {value:#?}"
+        );
+        let src_digest = receipt.source_digest.clone();
+        let graph_digest = receipt.input_graph_digest.clone();
+
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
+            |_, _, _, _, stdio_mode| {
+                assert_eq!(
+                    stdio_mode, SCIENTIFIC_STDIO_MODE_NATIVE,
+                    "missing sealed stdio_mode must verify as native"
+                );
+                Ok(rerun(vec![4.0, 3.0, 2.0]))
+            },
+        );
+
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn portable_stdio_mode_is_sealed_and_passed_to_the_rerun() {
+        let path = Path::new("k.bld");
+        let receipt = build_scientific_runtime_receipt(ScientificReceiptInputs {
+            stdio_mode: Some(SCIENTIFIC_STDIO_MODE_PORTABLE_LF),
+            flags: vec!["stdio-mode=portable-lf".to_string()],
+            ..base_inputs(path, vec![4.0, 3.0, 2.0], true, false)
+        });
+        let value = serde_json::to_value(&receipt).expect("to_value");
+        assert_eq!(value["build_state"]["stdio_mode"], "portable-lf");
+        let src_digest = receipt.source_digest.clone();
+        let graph_digest = receipt.input_graph_digest.clone();
+
+        let result = verify_scientific_runtime_receipt(
+            &value,
+            None,
+            true,
+            &receipt.compiler_version,
+            &receipt.language_version,
+            Some(&test_toolchain()),
+            |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
+            |_, _, _, _, stdio_mode| {
+                assert_eq!(
+                    stdio_mode, SCIENTIFIC_STDIO_MODE_PORTABLE_LF,
+                    "verify must compile the replay with the sealed stdio mode"
+                );
+                Ok(rerun(vec![4.0, 3.0, 2.0]))
+            },
+        );
+
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
     fn verify_matches_a_freshly_built_receipt() {
         // Round trip: build a receipt, serialize it, then verify it with
         // callbacks that reproduce the same digests and series. Verify passes.
@@ -5351,7 +5479,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert!(result.is_ok(), "a faithful re-run must verify");
     }
@@ -5377,7 +5505,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(wrong.clone(), graph_digest.clone())),
-            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(result, Err(1), "a source-digest mismatch must fail verify");
     }
@@ -5401,7 +5529,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _, _| Ok(rerun(vec![1.0, 2.0, 3.0])),
+            |_, _, _, _, _| Ok(rerun(vec![1.0, 2.0, 3.0])),
         );
         assert_eq!(result, Err(1), "an invariant drift must fail verify");
     }
@@ -5429,7 +5557,7 @@ mod tests {
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
             // Two points instead of three; still monotone (PASS), so only the
             // count check can reject this.
-            |_, _, _, _| Ok(rerun(vec![4.0, 3.0])),
+            |_, _, _, _, _| Ok(rerun(vec![4.0, 3.0])),
         );
         assert_eq!(result, Err(1), "a measurement count drift must fail verify");
     }
@@ -5455,7 +5583,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _, _| Ok(rerun(vec![1.0, 2.0, 3.0])),
+            |_, _, _, _, _| Ok(rerun(vec![1.0, 2.0, 3.0])),
         );
         assert_eq!(
             result,
@@ -5484,7 +5612,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _, _| Ok(rerun(vec![1.0, 2.0, 3.0])),
+            |_, _, _, _, _| Ok(rerun(vec![1.0, 2.0, 3.0])),
         );
         assert!(
             result.is_ok(),
@@ -5520,7 +5648,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _, _| {
+            |_, _, _, _, _| {
                 let mut observation = rerun(vec![4.0, 3.0, 2.5]);
                 // Three finite values instead of two: the divergence step
                 // shifted by one on the re-run platform.
@@ -5556,7 +5684,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -5586,7 +5714,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -5615,7 +5743,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(result, Err(1), "an unbound oracle must be rejected");
 
@@ -5634,7 +5762,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -5677,7 +5805,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(result, Err(1), "an empty sealed digest must be rejected");
     }
@@ -5707,7 +5835,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -5732,7 +5860,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -5762,7 +5890,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -5793,7 +5921,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert!(
             result.is_ok(),
@@ -5825,6 +5953,7 @@ mod tests {
             source: "k.bld".to_string(),
             source_digest_hex: "a".repeat(64),
             raw_stdout_digest_hex: "c".repeat(64),
+            stdio_mode: SCIENTIFIC_STDIO_MODE_NATIVE.to_string(),
             args: vec!["--mode".to_string()],
             seal_hex: "e".repeat(64),
             wall_seconds_sealed: Some(1.234),
@@ -6198,7 +6327,7 @@ mod tests {
                     effect_policy: random_policy(),
                 })
             },
-            |_, _, seed, _| {
+            |_, _, seed, _, _| {
                 assert_eq!(seed, Some(42), "the re-run must receive the sealed seed");
                 Ok(rerun(vec![4.0, 3.0, 2.0]))
             },
@@ -6229,7 +6358,7 @@ mod tests {
                     effect_policy: random_policy(),
                 })
             },
-            |_, _, _, _| panic!("an unseeded Random receipt must be refused before the re-run"),
+            |_, _, _, _, _| panic!("an unseeded Random receipt must be refused before the re-run"),
         );
         assert_eq!(
             result,
@@ -6254,7 +6383,7 @@ mod tests {
             &overclaimed.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src.clone(), graph.clone())),
-            |_, _, _, _| panic!("a seed nothing consumes must be refused before the re-run"),
+            |_, _, _, _, _| panic!("a seed nothing consumes must be refused before the re-run"),
         );
         assert_eq!(
             result,
@@ -6292,7 +6421,7 @@ mod tests {
                     effect_policy: random_policy(),
                 })
             },
-            |_, _, _, _| panic!("a swapped seed must be refused before the re-run"),
+            |_, _, _, _, _| panic!("a swapped seed must be refused before the re-run"),
         );
         assert_eq!(result, Err(1), "a re-sealed seed swap must fail");
     }
@@ -6332,7 +6461,7 @@ mod tests {
                     effect_policy: model_policy(),
                 })
             },
-            |_, _, _, _| panic!("a model-observing receipt must be refused before the re-run"),
+            |_, _, _, _, _| panic!("a model-observing receipt must be refused before the re-run"),
         );
         assert_eq!(
             result,
@@ -6384,7 +6513,7 @@ mod tests {
                         effect_policy: policy,
                     })
                 },
-                |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+                |_, _, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
             )
         }
         let path = Path::new("k.bld");
@@ -6588,7 +6717,7 @@ mod tests {
                     effect_policy: mc_executed_random_policy(),
                 })
             },
-            move |_, _, _, _| Ok(rerun(series)),
+            move |_, _, _, _, _| Ok(rerun(series)),
         );
         assert_eq!(result, Ok(()), "a faithful EXECUTED receipt must verify");
     }
@@ -6626,7 +6755,7 @@ mod tests {
                     effect_policy: mc_executed_random_policy(),
                 })
             },
-            |_, _, _, _| panic!("Stage A must reject a tampered interval before any re-run"),
+            |_, _, _, _, _| panic!("Stage A must reject a tampered interval before any re-run"),
         );
         assert_eq!(result, Err(1));
     }
@@ -6662,7 +6791,7 @@ mod tests {
                     effect_policy: mc_executed_random_policy(),
                 })
             },
-            move |_, _, _, _| Ok(rerun(drifted_series)),
+            move |_, _, _, _, _| Ok(rerun(drifted_series)),
         );
         assert!(report.is_err(), "a Stage B interval drift must fail verify");
     }
@@ -6705,7 +6834,7 @@ mod tests {
                     effect_policy: mc_executed_random_policy(),
                 })
             },
-            |_, _, _, _| {
+            |_, _, _, _, _| {
                 panic!("a DECLARED-with-executed-field block must reject before any re-run")
             },
         );
@@ -6745,7 +6874,7 @@ mod tests {
                     effect_policy: mc_executed_random_policy(),
                 })
             },
-            |_, _, _, _| panic!("EXECUTED with a missing field must reject before any re-run"),
+            |_, _, _, _, _| panic!("EXECUTED with a missing field must reject before any re-run"),
         );
         assert_eq!(result, Err(1));
     }
@@ -6773,7 +6902,7 @@ mod tests {
                     effect_policy: mc_executed_random_policy(),
                 })
             },
-            |_, _, _, _| panic!("an out-of-vocabulary estimator must reject before any re-run"),
+            |_, _, _, _, _| panic!("an out-of-vocabulary estimator must reject before any re-run"),
         );
         assert_eq!(result, Err(1));
     }
@@ -6799,7 +6928,9 @@ mod tests {
                         effect_policy: mc_executed_random_policy(),
                     })
                 },
-                |_, _, _, _| panic!("a not_claimed triad mismatch must reject before any re-run"),
+                |_, _, _, _, _| {
+                    panic!("a not_claimed triad mismatch must reject before any re-run")
+                },
             )
         }
 
@@ -6882,7 +7013,7 @@ mod tests {
                         effect_policy: policy,
                     })
                 },
-                |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+                |_, _, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
             )
         }
         let path = Path::new("k.bld");
@@ -6999,7 +7130,7 @@ mod tests {
                         effect_policy: policy,
                     })
                 },
-                |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+                |_, _, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
             )
         }
         let path = Path::new("k.bld");
@@ -7137,7 +7268,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _, target| {
+            |_, _, _, target, _| {
                 assert_eq!(
                     target,
                     Some("rust"),
@@ -7212,7 +7343,7 @@ mod tests {
                 &receipt.language_version,
                 Some(&test_toolchain()),
                 move |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-                |_, _, _, _| {
+                |_, _, _, _, _| {
                     panic!("a biconditional or shape violation must be refused before any re-run")
                 },
             )
@@ -7311,7 +7442,7 @@ mod tests {
                     effect_policy: random_policy(),
                 })
             },
-            |_, _, _, _| panic!("must be refused before the re-run"),
+            |_, _, _, _, _| panic!("must be refused before the re-run"),
         );
         assert_eq!(
             result,
@@ -7339,7 +7470,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _, target| {
+            |_, _, _, target, _| {
                 assert_eq!(
                     target, None,
                     "a receipt without a cross_backend block must pass None as the secondary target"
@@ -7381,7 +7512,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _, target| {
+            |_, _, _, target, _| {
                 assert_eq!(target, Some("rust"));
                 let mut observation = rerun(vec![1.0, 0.5]);
                 observation.secondary = Some(SecondaryObservation {
@@ -7433,7 +7564,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _, target| {
+            |_, _, _, target, _| {
                 assert_eq!(target, Some("rust"));
                 let mut observation = rerun(vec![1.0, 0.5]);
                 observation.secondary = Some(SecondaryObservation {
@@ -7492,7 +7623,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(sd.clone(), gd.clone())),
-            |_, _, _, target| {
+            |_, _, _, target, _| {
                 assert_eq!(target, Some("rust"));
                 let mut observation = rerun(vec![1.0, 0.5]);
                 observation.secondary = Some(SecondaryObservation {
@@ -7551,7 +7682,7 @@ mod tests {
                 facts.effect_policy.facts_digest = hex_digest('8');
                 Ok(facts)
             },
-            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(result, Err(1), "effect-policy drift must fail verify");
     }
@@ -7580,7 +7711,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -7609,7 +7740,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -7634,7 +7765,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert_eq!(
             result,
@@ -7670,7 +7801,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _, _| panic!("an unsealed receipt must be rejected before any re-run"),
+            |_, _, _, _, _| panic!("an unsealed receipt must be rejected before any re-run"),
         );
         assert_eq!(result, Err(1), "an unsealed field edit must be rejected");
     }
@@ -7695,7 +7826,7 @@ mod tests {
             &receipt.language_version,
             None,
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _, _| panic!("the re-run must never be attempted without a toolchain"),
+            |_, _, _, _, _| panic!("the re-run must never be attempted without a toolchain"),
         );
         assert_eq!(result, Err(4), "a missing toolchain must exit 4");
     }
@@ -7723,7 +7854,7 @@ mod tests {
             &receipt.language_version,
             Some(&other),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            |_, _, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
         );
         assert!(
             result.is_ok(),
@@ -7753,7 +7884,7 @@ mod tests {
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
             // Same series, but the process exited 9 instead of the sealed 0.
-            |_, _, _, _| {
+            |_, _, _, _, _| {
                 let mut observation = rerun(vec![4.0, 3.0, 2.0]);
                 observation.exit_code = 9;
                 Ok(observation)
@@ -7785,7 +7916,7 @@ mod tests {
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
             // Finite, monotone re-run: no divergence reproduced.
-            |_, _, _, _| Ok(rerun(vec![4.0, 3.0])),
+            |_, _, _, _, _| Ok(rerun(vec![4.0, 3.0])),
         );
         assert_eq!(
             result,
@@ -7814,7 +7945,7 @@ mod tests {
             &receipt.language_version,
             Some(&test_toolchain()),
             |_| Ok(rederive_facts(src_digest.clone(), graph_digest.clone())),
-            |_, args, _, _| {
+            |_, args, _, _, _| {
                 assert_eq!(
                     args,
                     ["--mode".to_string(), "stable".to_string()],

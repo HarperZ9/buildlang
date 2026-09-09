@@ -177,6 +177,12 @@ buildc corpus verify --root <dir> --write
 buildc version              Print version
 ```
 
+Top-level compile, `buildc build`, and `buildc run` accept `--stdio-mode
+native|portable-lf` on the C backend. Native is the default; on Windows it keeps
+CRT text-mode CRLF translation. Use `portable-lf` when a cross-platform receipt
+or lane protocol needs LF bytes on stdout and stderr. Non-C targets reject
+`portable-lf`.
+
 ---
 
 ## Key Language Features
