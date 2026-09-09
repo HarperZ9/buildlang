@@ -15,7 +15,7 @@
 use std::fmt::Write;
 use std::sync::Arc;
 
-use super::{Backend, CodegenError, CodegenResult, Target};
+use super::{Backend, CodegenError, CodegenResult, StdioMode, Target};
 use crate::codegen::ir::*;
 use crate::codegen::runtime;
 use crate::codegen::{GeneratedCode, OutputFormat};
@@ -28,6 +28,8 @@ pub struct CBackend {
     indent: usize,
     /// Temp variable counter.
     temp_counter: u32,
+    /// Runtime stdio policy for generated programs.
+    stdio_mode: StdioMode,
     /// Function parameter types - indexed by function name, stores param types.
     fn_params: std::collections::HashMap<String, Vec<MirType>>,
     /// Return type of the current function being generated.
@@ -85,6 +87,7 @@ impl CBackend {
             output: String::new(),
             indent: 0,
             temp_counter: 0,
+            stdio_mode: StdioMode::Native,
             fn_params: std::collections::HashMap::new(),
             current_ret_ty: MirType::Void,
             current_fn_name: None,
@@ -97,6 +100,13 @@ impl CBackend {
             current_fn_flag_block_frees: std::collections::HashMap::new(),
             experimental_free_override_for_test: None,
         }
+    }
+
+    /// Create a C backend with an explicit runtime stdio policy.
+    pub fn with_stdio_mode(stdio_mode: StdioMode) -> Self {
+        let mut backend = Self::new();
+        backend.stdio_mode = stdio_mode;
+        backend
     }
 
     /// Whether the experimental deterministic-free path is enabled. Off by
@@ -940,6 +950,12 @@ impl CBackend {
         self.output.push_str("#include <stdbool.h>\n");
         self.output.push_str("#include <stddef.h>\n");
         self.output.push_str("#include <stdio.h>\n");
+        if self.stdio_mode == StdioMode::PortableLf {
+            self.output.push_str("#ifdef _WIN32\n");
+            self.output.push_str("#include <fcntl.h>\n");
+            self.output.push_str("#include <io.h>\n");
+            self.output.push_str("#endif\n");
+        }
         self.output.push_str("#include <stdlib.h>\n");
         self.output.push_str("#include <string.h>\n");
         self.output.push_str("#include <math.h>\n");
@@ -1014,6 +1030,10 @@ impl CBackend {
         // Embedded runtime library
         self.output.push_str(runtime::runtime_header());
         self.output.push('\n');
+        if self.stdio_mode == StdioMode::PortableLf {
+            self.output.push_str(runtime::portable_lf_stdio_support());
+            self.output.push('\n');
+        }
 
         // Type definitions
         let mut all_types = module.types.clone();
@@ -2053,7 +2073,12 @@ impl CBackend {
         // For main(), initialize I/O and command-line args before anything else
         if func.name.as_ref() == "main" {
             self.write_indent();
-            self.output.push_str("__build_init_io();\n");
+            match self.stdio_mode {
+                StdioMode::Native => self.output.push_str("__build_init_io();\n"),
+                StdioMode::PortableLf => {
+                    self.output.push_str("__build_init_portable_lf_stdio();\n")
+                }
+            }
             self.write_indent();
             self.output.push_str("build_args_init(argc, argv);\n");
         }

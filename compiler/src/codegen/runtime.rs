@@ -1900,6 +1900,45 @@ static BuildString build_model_complete(const char* prompt) {
 "#
 }
 
+/// Returns the extra C runtime support for `--stdio-mode portable-lf`.
+///
+/// The default runtime header intentionally remains byte-identical for native
+/// mode. This helper is appended only when the C backend is explicitly asked to
+/// make stdout/stderr byte-stable. On Windows it switches both streams to CRT
+/// binary mode before any program output; on POSIX it retains the existing
+/// unbuffered setup and otherwise has no mode change to perform.
+pub fn portable_lf_stdio_support() -> &'static str {
+    r#"
+// --- portable LF stdio mode ---
+static void __build_stdio_mode_failed(const char* stream_name, const char* call_name) {
+    fprintf(stderr, "BuildLang stdio-mode portable-lf initialization failed: %s(%s)\n", call_name, stream_name);
+    exit(120);
+}
+
+static void __build_init_portable_lf_stdio(void) {
+#ifdef _WIN32
+    int stdout_fd = _fileno(stdout);
+    if (stdout_fd == -1) {
+        __build_stdio_mode_failed("stdout", "_fileno");
+    }
+    if (_setmode(stdout_fd, _O_BINARY) == -1) {
+        __build_stdio_mode_failed("stdout", "_setmode");
+    }
+
+    int stderr_fd = _fileno(stderr);
+    if (stderr_fd == -1) {
+        __build_stdio_mode_failed("stderr", "_fileno");
+    }
+    if (_setmode(stderr_fd, _O_BINARY) == -1) {
+        __build_stdio_mode_failed("stderr", "_setmode");
+    }
+#endif
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+}
+"#
+}
+
 /// List of math built-in function names recognized by the lowerer.
 ///
 /// These are lowered directly to their C `<math.h>` equivalents.

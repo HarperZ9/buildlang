@@ -31,7 +31,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use buildlang::ast::{self, ItemKind, Module, Visibility};
-use buildlang::codegen::{CodeGenerator, Target};
+use buildlang::codegen::{CodeGenerator, StdioMode, Target};
 use buildlang::lexer::{Lexer, SourceFile, Span};
 use buildlang::parser::{ParseError, Parser};
 use buildlang::types::{
@@ -96,6 +96,16 @@ fn target_from_extension(ext: &str) -> Option<Target> {
     }
 }
 
+fn reject_unsupported_stdio_mode(stdio_mode: StdioMode, target: Target) -> Result<(), i32> {
+    if !stdio_mode.is_native() && target != Target::C {
+        eprintln!(
+            "Error: --stdio-mode {stdio_mode} is supported only by the C backend; target `{target}` does not use the C runtime"
+        );
+        return Err(1);
+    }
+    Ok(())
+}
+
 /// BuildLang Compiler
 #[derive(ClapParser)]
 #[command(name = "buildc")]
@@ -131,6 +141,10 @@ struct Cli {
     /// Code generation target (c, llvm, wasm, spirv, rust, x86-64, arm64)
     #[arg(long)]
     target: Option<String>,
+
+    /// Generated-program stdio behavior: native, portable-lf. portable-lf is C-backend only.
+    #[arg(long, default_value_t = StdioMode::Native)]
+    stdio_mode: StdioMode,
 }
 
 #[derive(Subcommand)]
@@ -199,6 +213,10 @@ enum Commands {
         /// Code generation target: c, llvm, x86-64, arm64, wasm, spirv, hlsl, glsl, rust
         #[arg(long, default_value = "c")]
         target: String,
+
+        /// Generated-program stdio behavior: native, portable-lf. portable-lf is C-backend only.
+        #[arg(long, default_value_t = StdioMode::Native)]
+        stdio_mode: StdioMode,
     },
 
     /// Run a file directly
@@ -206,10 +224,14 @@ enum Commands {
         /// Input file
         file: PathBuf,
 
+        /// Generated-program stdio behavior: native, portable-lf. portable-lf is C-backend only.
+        #[arg(long, default_value_t = StdioMode::Native)]
+        stdio_mode: StdioMode,
+
         /// Emit a sealed scientific-runtime receipt to PATH ('-' = stdout).
         /// When set, buildc captures the program's numeric stdout as a
         /// measurement series, checks the invariant, and writes the receipt.
-        /// Without this flag, `run` behavior is byte-identical to before.
+        /// Without this flag, native-mode `run` behavior is byte-identical to before.
         #[arg(long, value_name = "PATH")]
         emit_receipt: Option<PathBuf>,
 
@@ -705,9 +727,11 @@ fn run_cli(cli: Cli) -> Result<(), i32> {
             emit,
             keep_c,
             target,
-        }) => cmd_build(&path, release, &emit, keep_c, &target),
+            stdio_mode,
+        }) => cmd_build(&path, release, &emit, keep_c, &target, stdio_mode),
         Some(Commands::Run {
             file,
+            stdio_mode,
             emit_receipt,
             invariant,
             metric,
@@ -756,12 +780,18 @@ fn run_cli(cli: Cli) -> Result<(), i32> {
                         "--cross-backend is not supported with --gpu (the GPU cross-check is a separate secondary lane)"
                     );
                     Err(1)
+                } else if !stdio_mode.is_native() {
+                    eprintln!(
+                        "Error: --stdio-mode {stdio_mode} is supported only by the C backend; --gpu uses the GPU lane"
+                    );
+                    Err(1)
                 } else {
                     cmd_run_gpu(&file, emit_receipt.as_deref())
                 }
             } else {
                 cmd_run(
                     &file,
+                    stdio_mode,
                     &args,
                     emit_receipt.as_deref(),
                     &invariant,
@@ -813,6 +843,7 @@ fn run_cli(cli: Cli) -> Result<(), i32> {
                     cli.opt_level,
                     cli.debug,
                     cli.target.as_deref(),
+                    cli.stdio_mode,
                 )
             } else {
                 eprintln!("No input file specified. Use --help for usage information.");
@@ -2394,12 +2425,13 @@ fn cmd_receipt_export(
                 effect_policy: derive_effect_policy(&outcome),
             })
         },
-        |source_path, args, seed, secondary_target| {
+        |source_path, args, seed, secondary_target, stdio_mode| {
             rerun_scientific_receipt(
                 source_path,
                 args,
                 seed,
                 secondary_target,
+                stdio_mode,
                 probed_toolchain.as_ref(),
             )
         },
@@ -2772,12 +2804,13 @@ fn verify_scientific_receipt_dispatch(
                 effect_policy: derive_effect_policy(&outcome),
             })
         },
-        |source_path, args, seed, secondary_target| {
+        |source_path, args, seed, secondary_target, stdio_mode| {
             rerun_scientific_receipt(
                 source_path,
                 args,
                 seed,
                 secondary_target,
+                stdio_mode,
                 probed_toolchain.as_ref(),
             )
         },
@@ -6582,6 +6615,7 @@ fn cmd_build(
     emit: &str,
     keep_c: bool,
     target_str: &str,
+    stdio_mode: StdioMode,
 ) -> Result<(), i32> {
     // Look for Build.toml or main.bld in the project directory
     let manifest_path = path.join("Build.toml");
@@ -6613,6 +6647,7 @@ fn cmd_build(
         eprintln!("{}", err);
         1
     })?;
+    reject_unsupported_stdio_mode(stdio_mode, target)?;
     let use_llvm = target == Target::LlvmIr;
     let use_spirv = target == Target::SpirV;
     let use_native = target == Target::X86_64 || target == Target::Arm64;
@@ -6704,6 +6739,7 @@ fn cmd_build(
 
     // Code generation - pass source for macro string extraction
     let mut codegen = CodeGenerator::with_source(&ctx, target, Arc::from(source_file.source()));
+    codegen.set_stdio_mode(stdio_mode);
     let output = codegen.generate(&ast).map_err(|e| {
         eprintln!("Code generation error: {}", e);
         1
@@ -7245,6 +7281,7 @@ fn probe_c_toolchain(hash_own_binary: bool) -> Option<ScientificToolchain> {
 /// the temp dir after running (both call sites do).
 fn compile_program_to_exe(
     file: &Path,
+    stdio_mode: StdioMode,
     compiler_override: Option<&str>,
 ) -> Result<CompiledProgram, i32> {
     // Read source file
@@ -7300,6 +7337,7 @@ fn compile_program_to_exe(
 
     // Generate C code - pass source for macro string extraction
     let mut codegen = CodeGenerator::with_source(&ctx, Target::C, Arc::from(source_file.source()));
+    codegen.set_stdio_mode(stdio_mode);
     let output = codegen.generate(&ast).map_err(|e| {
         eprintln!("Code generation error: {}", e);
         1
@@ -7383,10 +7421,12 @@ fn compile_program_to_exe(
 fn compile_and_capture_run(
     file: &Path,
     args: &[String],
+    stdio_mode: StdioMode,
     compiler_override: Option<&str>,
     seed: Option<u64>,
 ) -> Result<CapturedRun, i32> {
-    let CompiledProgram { temp_dir, exe_file } = compile_program_to_exe(file, compiler_override)?;
+    let CompiledProgram { temp_dir, exe_file } =
+        compile_program_to_exe(file, stdio_mode, compiler_override)?;
 
     // Hash the produced executable BEFORE running (the temp dir is removed
     // after the run). FAIL CLOSED on a read failure: a receipt must never
@@ -7687,11 +7727,17 @@ fn rerun_scientific_receipt(
     args: &[String],
     seed: Option<u64>,
     secondary_target: Option<&str>,
+    stdio_mode: &str,
     probed_toolchain: Option<&ScientificToolchain>,
 ) -> Result<RerunObservation, i32> {
+    let stdio_mode = stdio_mode.parse::<StdioMode>().map_err(|err| {
+        eprintln!("Error: unsupported sealed stdio mode in scientific receipt: {err}");
+        1
+    })?;
     let captured = compile_and_capture_run(
         source_path,
         args,
+        stdio_mode,
         probed_toolchain.map(|t| t.c_compiler.as_str()),
         seed,
     )?;
@@ -7762,6 +7808,7 @@ fn cmd_run_gpu(file: &Path, emit_receipt: Option<&Path>) -> Result<(), i32> {
 #[allow(clippy::too_many_arguments)]
 fn cmd_run(
     file: &PathBuf,
+    stdio_mode: StdioMode,
     args: &[String],
     emit_receipt: Option<&Path>,
     invariant: &str,
@@ -8010,7 +8057,8 @@ fn cmd_run(
     // invariant, seal, and write.
     let Some(receipt_path) = emit_receipt else {
         // No receipt: compile, then run with inherited stdout via `.status()`.
-        let CompiledProgram { temp_dir, exe_file } = compile_program_to_exe(file, None)?;
+        let CompiledProgram { temp_dir, exe_file } =
+            compile_program_to_exe(file, stdio_mode, None)?;
         let status = {
             let mut run_cmd = std::process::Command::new(&exe_file);
             run_cmd.args(args);
@@ -8166,7 +8214,8 @@ fn cmd_run(
         return Err(1);
     }
 
-    let captured = compile_and_capture_run(file, args, Some(&toolchain.c_compiler), seed)?;
+    let captured =
+        compile_and_capture_run(file, args, stdio_mode, Some(&toolchain.c_compiler), seed)?;
     toolchain.program_executable_digest = captured.executable_digest.clone();
 
     // The wall ceiling's exceeded flag is DERIVED here, from the SEALED
@@ -8292,6 +8341,9 @@ fn cmd_run(
 
     let os = std::env::consts::OS.to_string();
     let mut flags = vec![format!("invariant={invariant}"), format!("metric={metric}")];
+    if !stdio_mode.is_native() {
+        flags.push(format!("stdio-mode={stdio_mode}"));
+    }
     if negative_fixture {
         flags.push("negative-fixture".to_string());
     }
@@ -8309,6 +8361,11 @@ fn cmd_run(
             hex: outcome.input_graph_digest.hex.clone(),
         },
         target: "c",
+        stdio_mode: if stdio_mode.is_native() {
+            None
+        } else {
+            Some(stdio_mode.as_str())
+        },
         os: &os,
         exit_code,
         wall_seconds: Some(captured.wall_seconds),
@@ -9812,6 +9869,7 @@ fn cmd_compile(
     opt_level: u8,
     debug: bool,
     target_override: Option<&str>,
+    stdio_mode: StdioMode,
 ) -> Result<(), i32> {
     // Read source file
     let source = std::fs::read_to_string(input).map_err(|e| {
@@ -9908,6 +9966,7 @@ fn cmd_compile(
     } else {
         Target::C
     };
+    reject_unsupported_stdio_mode(stdio_mode, target)?;
 
     // Determine output path using target's default extension
     let output_path = output
@@ -9916,6 +9975,7 @@ fn cmd_compile(
 
     // Code generation (pass source for macro expansion)
     let mut codegen = CodeGenerator::with_source(&ctx, target, source_file.source().into());
+    codegen.set_stdio_mode(stdio_mode);
     // Enable ReShade boilerplate for .fx output files
     if output_path.extension().and_then(|e| e.to_str()) == Some("fx") {
         codegen.reshade = true;
