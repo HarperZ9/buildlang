@@ -5594,6 +5594,7 @@ mod tests {
 
         let mut compile_cmd = std::process::Command::new(&cc);
         compile_cmd.arg(&source_path).arg("-o").arg(&exe_path);
+        compile_cmd.arg("-lm");
         if cfg!(windows) {
             compile_cmd.arg("-lws2_32");
         }
