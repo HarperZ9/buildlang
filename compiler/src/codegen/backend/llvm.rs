@@ -2299,6 +2299,7 @@ impl LlvmBackend {
             MirType::TraitObject(_) => Ok("{ ptr, ptr }".to_string()), // data ptr + vtable ptr
             MirType::Vec(_) => Ok("ptr".to_string()), // BuildVecHandle is a pointer
             MirType::Map(_, _) => Ok("ptr".to_string()), // BuildMapHandle is a pointer
+            MirType::Option(inner) => Ok(format!("{{ i1, {} }}", self.llvm_type(inner)?)),
             MirType::Tuple(elems) => {
                 if elems.is_empty() {
                     Ok("void".into())
@@ -2340,6 +2341,7 @@ impl LlvmBackend {
             MirType::TraitObject(_) => 16, // fat pointer: data ptr + vtable ptr
             MirType::Vec(_) => 8,          // BuildVecHandle is a pointer
             MirType::Map(_, _) => 8,       // BuildMapHandle is a pointer
+            MirType::Option(inner) => 1 + self.type_size(inner),
             MirType::Tuple(elems) => elems.iter().map(|e| self.type_size(e)).sum(),
         }
     }
@@ -2372,6 +2374,7 @@ impl LlvmBackend {
             MirType::TraitObject(_) => 8, // pointer-aligned
             MirType::Vec(_) => 8,         // pointer-aligned
             MirType::Map(_, _) => 8,      // pointer-aligned
+            MirType::Option(inner) => self.type_align(inner).max(1),
             MirType::Tuple(elems) => elems.iter().map(|e| self.type_align(e)).max().unwrap_or(1),
         }
     }
@@ -2535,7 +2538,7 @@ impl LlvmBackend {
             }
             BinOp::AddChecked | BinOp::AddWrapping | BinOp::AddSaturating => "add",
             BinOp::SubChecked | BinOp::SubWrapping | BinOp::SubSaturating => "sub",
-            BinOp::MulChecked | BinOp::MulWrapping => "mul",
+            BinOp::MulChecked | BinOp::MulWrapping | BinOp::MulSaturating => "mul",
             // Pow requires llvm.pow intrinsic, but for integer we use repeated mul
             BinOp::Pow => {
                 if is_float {

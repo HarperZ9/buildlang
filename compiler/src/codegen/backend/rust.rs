@@ -177,6 +177,9 @@ impl RustBackend {
 
     fn emit_type_definitions(&mut self, types: &[MirTypeDef]) -> CodegenResult<()> {
         for ty in types {
+            if matches!(ty.name.as_ref(), "Option" | "Result") {
+                continue;
+            }
             match &ty.kind {
                 TypeDefKind::Struct { fields, .. } => {
                     self.writeln("#[derive(Clone, Debug, Default)]");
@@ -541,12 +544,38 @@ impl RustBackend {
                 let r = self.value_to_rust(right, locals);
                 if *op == BinOp::Pow {
                     format!("({} as f64).powf({} as f64)", l, r)
+                } else if Self::preferred_int_type(left, right, locals).is_some() {
+                    if let Some(method) = Self::checked_option_int_method(*op) {
+                        format!("({}).{}({})", l, method, r)
+                    } else if let Some((method, message)) = Self::checked_int_method(*op) {
+                        format!("({}).{}({}).expect(\"{}\")", l, method, r, message)
+                    } else if let Some(method) = Self::wrapping_int_method(*op) {
+                        format!("({}).{}({})", l, method, r)
+                    } else if let Some(method) = Self::saturating_int_method(*op) {
+                        format!("({}).{}({})", l, method, r)
+                    } else if let Some(op_str) = Self::binop_to_rust(*op) {
+                        format!("({} {} {})", l, op_str, r)
+                    } else {
+                        return Err(CodegenError::Unsupported(format!(
+                            "Rust backend does not support MIR integer operator {op:?}"
+                        )));
+                    }
+                } else if let Some(op_str) = Self::binop_to_rust(*op) {
+                    format!("({} {} {})", l, op_str, r)
                 } else {
-                    format!("({} {} {})", l, Self::binop_to_rust(*op), r)
+                    return Err(CodegenError::Unsupported(format!(
+                        "Rust backend does not support MIR operator {op:?}"
+                    )));
                 }
             }
             MirRValue::UnaryOp { op, operand } => {
                 let v = self.value_to_rust(operand, locals);
+                if *op == UnaryOp::Neg && Self::value_signed_int_type(operand, locals).is_some() {
+                    return Ok(format!(
+                        "({}).checked_neg().expect(\"attempt to negate with overflow\")",
+                        v
+                    ));
+                }
                 let op_str = match op {
                     UnaryOp::Not => "!",
                     UnaryOp::BitNot => "!",
@@ -629,6 +658,23 @@ impl RustBackend {
                             )));
                     }
                 }
+                AggregateKind::Variant(name, _, variant_name) if name.as_ref() == "Option" => {
+                    let vals = operands
+                        .iter()
+                        .map(|op| self.value_to_owned_rust(op, locals))
+                        .collect::<Vec<_>>();
+                    match (variant_name.as_ref(), vals.as_slice()) {
+                        ("Some", [value]) => format!("Some({})", value),
+                        ("None", []) => "None".to_string(),
+                        ("None", _) => "None".to_string(),
+                        _ => {
+                            return Err(CodegenError::Unsupported(format!(
+                                "Rust backend cannot lower Option variant '{}'",
+                                variant_name
+                            )));
+                        }
+                    }
+                }
                 AggregateKind::Variant(_, _, _) | AggregateKind::Closure(_) => {
                     return Err(CodegenError::Unsupported(
                         "Rust backend does not yet lower enum variants or closures".to_string(),
@@ -667,6 +713,20 @@ impl RustBackend {
                 field_ty,
             } => {
                 let base_str = self.value_to_rust(base, locals);
+                if self.value_is_option_like(base, locals) {
+                    match field_name.as_ref() {
+                        "has_value" => return Ok(format!("({}).is_some()", base_str)),
+                        "value" => {
+                            let receiver = if Self::is_copy_like_type(field_ty) {
+                                base_str
+                            } else {
+                                format!("({}).clone()", base_str)
+                            };
+                            return Ok(format!("({}).expect(\"called unwrap on None\")", receiver));
+                        }
+                        _ => {}
+                    }
+                }
                 // The MIR models a runtime string as a C `BuildString` carrying
                 // `ptr`, `len`, and `cap` fields. This backend maps that string
                 // to a native Rust `String`, which has no such fields, so a
@@ -772,8 +832,8 @@ impl RustBackend {
     fn const_to_rust(&self, c: &MirConst) -> String {
         match c {
             MirConst::Bool(b) => b.to_string(),
-            MirConst::Int(v, _) => v.to_string(),
-            MirConst::Uint(v, _) => v.to_string(),
+            MirConst::Int(v, ty) => format!("{}{}", v, self.type_to_rust(ty)),
+            MirConst::Uint(v, ty) => format!("{}{}", v, self.type_to_rust(ty)),
             MirConst::Float(v, ty) => {
                 let mut s = v.to_string();
                 if !s.contains('.') && !s.contains('e') && !s.contains('E') {
@@ -840,6 +900,7 @@ impl RustBackend {
             MirType::Struct(name) if name.as_ref() == "BuildString" => "String".to_string(),
             MirType::Struct(name) if name.as_ref() == "String" => "String".to_string(),
             MirType::Struct(name) => Self::rust_type_name(name),
+            MirType::Option(inner) => format!("Option<{}>", self.type_to_rust(inner)),
             MirType::FnPtr(sig) => {
                 let params = sig
                     .params
@@ -893,6 +954,7 @@ impl RustBackend {
             MirType::Slice(_) => "&[]".to_string(),
             MirType::Struct(name) if name.as_ref() == "String" => "String::new()".to_string(),
             MirType::Struct(name) if name.as_ref() == "BuildString" => "String::new()".to_string(),
+            MirType::Option(_) => "None".to_string(),
             MirType::Vec(_) => "Vec::new()".to_string(),
             MirType::Map(_, _) => "std::collections::BTreeMap::new()".to_string(),
             _ => "Default::default()".to_string(),
@@ -934,6 +996,19 @@ impl RustBackend {
             MirValue::Local(id) => Self::local_by_id(*id, locals)
                 .map(|local| Self::is_string_like_type(&local.ty))
                 .unwrap_or(false),
+            _ => false,
+        }
+    }
+
+    fn value_is_option_like(&self, value: &MirValue, locals: &[MirLocal]) -> bool {
+        match value {
+            MirValue::Local(id) => Self::local_by_id(*id, locals)
+                .map(|local| {
+                    matches!(&local.ty, MirType::Option(_))
+                        || matches!(&local.ty, MirType::Struct(name) if name.as_ref() == "Option")
+                })
+                .unwrap_or(false),
+            MirValue::Global(name) | MirValue::Function(name) => name.as_ref() == "None",
             _ => false,
         }
     }
@@ -1020,6 +1095,7 @@ impl RustBackend {
             | MirType::SampledImage(_)
             | MirType::TraitObject(_) => true,
             MirType::Array(elem, _) | MirType::Vector(elem, _) => Self::is_copy_like_type(elem),
+            MirType::Option(inner) => Self::is_copy_like_type(inner),
             MirType::Tuple(_) => false,
             MirType::Struct(name)
                 if name.as_ref() == "String" || name.as_ref() == "BuildString" =>
@@ -1030,25 +1106,110 @@ impl RustBackend {
         }
     }
 
-    fn binop_to_rust(op: BinOp) -> &'static str {
+    fn value_mir_type(value: &MirValue, locals: &[MirLocal]) -> Option<MirType> {
+        match value {
+            MirValue::Local(id) => locals.get(id.0 as usize).map(|local| local.ty.clone()),
+            MirValue::Const(c) => Some(Self::type_of_const(c)),
+            _ => None,
+        }
+    }
+
+    fn value_int_type(value: &MirValue, locals: &[MirLocal]) -> Option<(IntSize, bool)> {
+        match Self::value_mir_type(value, locals)? {
+            MirType::Int(size, signed) => Some((size, signed)),
+            _ => None,
+        }
+    }
+
+    fn value_signed_int_type(value: &MirValue, locals: &[MirLocal]) -> Option<IntSize> {
+        match Self::value_int_type(value, locals)? {
+            (size, true) => Some(size),
+            _ => None,
+        }
+    }
+
+    fn preferred_int_type(
+        left: &MirValue,
+        right: &MirValue,
+        locals: &[MirLocal],
+    ) -> Option<(IntSize, bool)> {
+        let local_ty = match left {
+            MirValue::Local(_) => Self::value_int_type(left, locals),
+            _ => None,
+        }
+        .or_else(|| match right {
+            MirValue::Local(_) => Self::value_int_type(right, locals),
+            _ => None,
+        });
+        local_ty
+            .or_else(|| Self::value_int_type(left, locals))
+            .or_else(|| Self::value_int_type(right, locals))
+    }
+
+    fn checked_int_method(op: BinOp) -> Option<(&'static str, &'static str)> {
         match op {
-            BinOp::Add | BinOp::AddChecked | BinOp::AddWrapping | BinOp::AddSaturating => "+",
-            BinOp::Sub | BinOp::SubChecked | BinOp::SubWrapping | BinOp::SubSaturating => "-",
-            BinOp::Mul | BinOp::MulChecked | BinOp::MulWrapping => "*",
-            BinOp::Div => "/",
-            BinOp::Rem => "%",
-            BinOp::BitAnd => "&",
-            BinOp::BitOr => "|",
-            BinOp::BitXor => "^",
-            BinOp::Shl => "<<",
-            BinOp::Shr => ">>",
-            BinOp::Eq => "==",
-            BinOp::Ne => "!=",
-            BinOp::Lt => "<",
-            BinOp::Le => "<=",
-            BinOp::Gt => ">",
-            BinOp::Ge => ">=",
-            BinOp::Pow => unreachable!("handled before operator conversion"),
+            BinOp::Add => Some(("checked_add", "attempt to add with overflow")),
+            BinOp::Sub => Some(("checked_sub", "attempt to subtract with overflow")),
+            BinOp::Mul => Some(("checked_mul", "attempt to multiply with overflow")),
+            _ => None,
+        }
+    }
+
+    fn checked_option_int_method(op: BinOp) -> Option<&'static str> {
+        match op {
+            BinOp::AddChecked => Some("checked_add"),
+            BinOp::SubChecked => Some("checked_sub"),
+            BinOp::MulChecked => Some("checked_mul"),
+            _ => None,
+        }
+    }
+
+    fn wrapping_int_method(op: BinOp) -> Option<&'static str> {
+        match op {
+            BinOp::AddWrapping => Some("wrapping_add"),
+            BinOp::SubWrapping => Some("wrapping_sub"),
+            BinOp::MulWrapping => Some("wrapping_mul"),
+            _ => None,
+        }
+    }
+
+    fn saturating_int_method(op: BinOp) -> Option<&'static str> {
+        match op {
+            BinOp::AddSaturating => Some("saturating_add"),
+            BinOp::SubSaturating => Some("saturating_sub"),
+            BinOp::MulSaturating => Some("saturating_mul"),
+            _ => None,
+        }
+    }
+
+    fn binop_to_rust(op: BinOp) -> Option<&'static str> {
+        match op {
+            BinOp::Add => Some("+"),
+            BinOp::Sub => Some("-"),
+            BinOp::Mul => Some("*"),
+            BinOp::Div => Some("/"),
+            BinOp::Rem => Some("%"),
+            BinOp::BitAnd => Some("&"),
+            BinOp::BitOr => Some("|"),
+            BinOp::BitXor => Some("^"),
+            BinOp::Shl => Some("<<"),
+            BinOp::Shr => Some(">>"),
+            BinOp::Eq => Some("=="),
+            BinOp::Ne => Some("!="),
+            BinOp::Lt => Some("<"),
+            BinOp::Le => Some("<="),
+            BinOp::Gt => Some(">"),
+            BinOp::Ge => Some(">="),
+            BinOp::Pow
+            | BinOp::AddChecked
+            | BinOp::SubChecked
+            | BinOp::MulChecked
+            | BinOp::AddWrapping
+            | BinOp::SubWrapping
+            | BinOp::MulWrapping
+            | BinOp::AddSaturating
+            | BinOp::SubSaturating
+            | BinOp::MulSaturating => None,
         }
     }
 
@@ -1387,6 +1548,86 @@ fn main() ~ Console {
     fn generated_rust_runs_for_scalar_branch_subset() {
         let rust = compile_build_to_rust(CORPUS_SCALAR_BRANCH);
         assert_rustc_run_stdout("run_scalar_branch", &rust, "4\n");
+    }
+
+    #[test]
+    fn generated_rust_uses_checked_plain_integer_arithmetic() {
+        let source = r#"
+fn add(a: i32, b: i32) -> i32 { a + b }
+fn sub(a: u32, b: u32) -> u32 { a - b }
+fn mul(a: i64, b: i64) -> i64 { a * b }
+fn neg(a: i8) -> i8 { -a }
+
+fn main() ~ Console {
+    println("{}", add(1, 2));
+    println("{}", sub(3u32, 1u32));
+    println("{}", mul(4i64, 5i64));
+    println("{}", neg(6i8));
+}
+"#;
+        let rust = compile_build_to_rust(source);
+        assert!(
+            rust.contains(".checked_add("),
+            "plain integer `+` must lower to checked_add in generated Rust:\n{}",
+            rust
+        );
+        assert!(
+            rust.contains(".checked_sub("),
+            "plain integer `-` must lower to checked_sub in generated Rust:\n{}",
+            rust
+        );
+        assert!(
+            rust.contains(".checked_mul("),
+            "plain integer `*` must lower to checked_mul in generated Rust:\n{}",
+            rust
+        );
+        assert!(
+            rust.contains(".checked_neg("),
+            "signed integer unary `-` must lower to checked_neg in generated Rust:\n{}",
+            rust
+        );
+        assert_rustc_metadata_ok("checked_plain_integer_arithmetic", &rust);
+    }
+
+    #[test]
+    fn rust_integer_arithmetic_helper_tables_keep_explicit_mir_ops_distinct() {
+        assert_eq!(
+            RustBackend::checked_int_method(BinOp::Add),
+            Some(("checked_add", "attempt to add with overflow"))
+        );
+        assert_eq!(
+            RustBackend::checked_int_method(BinOp::Sub),
+            Some(("checked_sub", "attempt to subtract with overflow"))
+        );
+        assert_eq!(
+            RustBackend::checked_int_method(BinOp::Mul),
+            Some(("checked_mul", "attempt to multiply with overflow"))
+        );
+
+        assert_eq!(RustBackend::checked_int_method(BinOp::AddChecked), None);
+        assert_eq!(RustBackend::checked_int_method(BinOp::SubChecked), None);
+        assert_eq!(RustBackend::checked_int_method(BinOp::MulChecked), None);
+        assert_eq!(
+            RustBackend::checked_option_int_method(BinOp::AddChecked),
+            Some("checked_add")
+        );
+        assert_eq!(
+            RustBackend::checked_option_int_method(BinOp::MulChecked),
+            Some("checked_mul")
+        );
+
+        assert_eq!(
+            RustBackend::wrapping_int_method(BinOp::AddWrapping),
+            Some("wrapping_add")
+        );
+        assert_eq!(
+            RustBackend::saturating_int_method(BinOp::AddSaturating),
+            Some("saturating_add")
+        );
+        assert_eq!(
+            RustBackend::saturating_int_method(BinOp::MulSaturating),
+            Some("saturating_mul")
+        );
     }
 
     #[test]

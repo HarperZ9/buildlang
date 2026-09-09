@@ -1008,19 +1008,26 @@ impl<'a> Parser<'a> {
         match kind {
             LK::Int { base, .. } => {
                 let span = self.tokens[self.pos - 1].span;
-                let text = self.source.slice(span);
+                let literal_text = self.source.slice(span).to_string();
                 // Remove prefix and underscores
                 let text = match base {
-                    IntBase::Decimal => text.replace('_', ""),
-                    IntBase::Hexadecimal => text[2..].replace('_', ""),
-                    IntBase::Octal => text[2..].replace('_', ""),
-                    IntBase::Binary => text[2..].replace('_', ""),
+                    IntBase::Decimal => literal_text.replace('_', ""),
+                    IntBase::Hexadecimal => literal_text[2..].replace('_', ""),
+                    IntBase::Octal => literal_text[2..].replace('_', ""),
+                    IntBase::Binary => literal_text[2..].replace('_', ""),
                 };
                 // Remove suffix
                 let text = suffix
                     .map_or(text.as_str(), |s| &text[..text.len() - s.len()])
                     .to_string();
-                let value = u128::from_str_radix(&text, base.radix()).unwrap_or(0);
+                let value = u128::from_str_radix(&text, base.radix()).map_err(|_| {
+                    ParseError::new(
+                        ParseErrorKind::IntegerLiteralTooLarge {
+                            literal: literal_text.clone(),
+                        },
+                        span,
+                    )
+                })?;
                 let int_suffix = suffix.and_then(IntSuffix::from_str);
                 Ok(Literal::Int {
                     value,

@@ -1726,6 +1726,12 @@ impl SpirvBackend {
                 self.emit_global(SpvOp::OpTypeStruct, &[id, ptr_ty]);
                 self.emit_name(id, "BuildMapHandle");
             }
+            MirType::Option(inner) => {
+                let bool_ty = self.get_type_id(&MirType::Bool);
+                let inner_ty = self.get_type_id(inner);
+                self.emit_global(SpvOp::OpTypeStruct, &[id, bool_ty, inner_ty]);
+                self.emit_name(id, "Option");
+            }
             MirType::Tuple(elems) => {
                 // Tuples map to SPIR-V structs.
                 let mut operands = vec![id];

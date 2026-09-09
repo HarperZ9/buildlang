@@ -7,7 +7,9 @@ use std::{
 use sha2::{Digest, Sha256};
 
 fn buildc() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_buildc"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_buildc"));
+    cmd.env("BUILDLANG_STDLIB", repo_root().join("stdlib"));
+    cmd
 }
 
 fn repo_root() -> PathBuf {
@@ -13029,6 +13031,526 @@ fn large_unsuffixed_int_literal_not_truncated_end_to_end() {
     );
 }
 
+#[test]
+fn compile_time_integer_literal_and_fold_overflow_are_diagnostics() {
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang_integer_overflow_diagnostics_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create overflow diagnostics dir");
+
+    let cases: [(&str, &str, &str); 5] = [
+        (
+            "too_large_u128_literal",
+            "fn main() { let x = 340282366920938463463374607431768211456u128; }\n",
+            "integer literal is too large",
+        ),
+        (
+            "u8_suffix_out_of_range",
+            "fn main() { let x = 256u8; }\n",
+            "integer literal `256u8` is out of range for type `u8`",
+        ),
+        (
+            "i8_add_fold_overflow",
+            "fn main() { let x: i8 = 127i8 + 1i8; }\n",
+            "integer overflow in `+` for type `i8`",
+        ),
+        (
+            "u8_sub_fold_overflow",
+            "fn main() { let x: u8 = 0u8 - 1u8; }\n",
+            "integer overflow in `-` for type `u8`",
+        ),
+        (
+            "i8_neg_fold_overflow",
+            "fn main() { let x: i8 = -(0i8 - 127i8 - 1i8); }\n",
+            "integer overflow in unary `-` for type `i8`",
+        ),
+    ];
+
+    for (name, src, needle) in cases {
+        let file = dir.join(format!("{name}.bld"));
+        fs::write(&file, src).expect("write overflow diagnostic fixture");
+        let (status, stdout, stderr) = check_within(&file, 30);
+        assert!(
+            !status.success(),
+            "overflow diagnostic case `{name}` must fail buildc check\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains(needle),
+            "overflow diagnostic case `{name}` must report `{needle}`\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        let lower_stderr = stderr.to_lowercase();
+        assert!(
+            !lower_stderr.contains("internal") && !lower_stderr.contains("panic"),
+            "overflow diagnostic case `{name}` must be a user diagnostic, not a compiler panic\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+}
+
+fn explicit_integer_arithmetic_source() -> &'static str {
+    r#"fn u8_max() -> u8 { 255u8 }
+fn u8_one() -> u8 { 1u8 }
+fn u8_two() -> u8 { 2u8 }
+fn u8_two_hundred() -> u8 { 200u8 }
+fn i8_max() -> i8 { 127i8 }
+fn i8_min() -> i8 { 0i8 - 127i8 - 1i8 }
+fn i8_sixty_four() -> i8 { 64i8 }
+fn i16_max() -> i16 { 32767i16 }
+fn u16_max() -> u16 { 65535u16 }
+fn i32_big() -> i32 { 46341 }
+fn u32_maxish() -> u32 { 65535u32 }
+fn i64_max() -> i64 { 9223372036854775807i64 }
+fn u64_max() -> u64 { 18446744073709551615u64 }
+fn u64_almost() -> u64 { 18446744073709551614u64 }
+fn i128_max() -> i128 { 170141183460469231731687303715884105727i128 }
+fn u128_max() -> u128 { 340282366920938463463374607431768211455u128 }
+fn isize_max() -> isize { 9223372036854775807isize }
+fn usize_max() -> usize { 18446744073709551615usize }
+fn i16_min() -> i16 { 0i16 - 32767i16 - 1i16 }
+fn i16_half_max() -> i16 { 16383i16 }
+fn u16_half_max() -> u16 { 32767u16 }
+fn i32_max() -> i32 { 2147483647i32 }
+fn i32_min() -> i32 { 0i32 - 2147483647i32 - 1i32 }
+fn i32_half_max() -> i32 { 1073741823i32 }
+fn u32_half_max() -> u32 { 2147483647u32 }
+fn i64_min() -> i64 { 0i64 - 9223372036854775807i64 - 1i64 }
+fn i64_half_max() -> i64 { 4611686018427387903i64 }
+fn u64_half_max() -> u64 { 9223372036854775807u64 }
+fn i128_min() -> i128 { 0i128 - 170141183460469231731687303715884105727i128 - 1i128 }
+fn i128_half_max() -> i128 { 85070591730234615865843651857942052863i128 }
+fn u128_half_max() -> u128 { 170141183460469231731687303715884105727u128 }
+fn isize_min() -> isize { 0isize - 9223372036854775807isize - 1isize }
+fn isize_half_max() -> isize { 4611686018427387903isize }
+fn usize_half_max() -> usize { 9223372036854775807usize }
+fn checked_u64_return() -> Option<u64> { u64_almost().checked_add(1u64) }
+fn id_u64_option(x: Option<u64>) -> Option<u64> { x }
+
+fn main() ~ Console {
+    println("u8 wrap {} {} {}", u8_max().wrapping_add(u8_one()), 0u8.wrapping_sub(u8_one()), u8_two_hundred().wrapping_mul(u8_two()));
+    println("i8 wrap {} {} {}", i8_max().wrapping_add(1i8), i8_min().wrapping_sub(1i8), i8_sixty_four().wrapping_mul(2i8));
+    println("u16 sat {} {}", u16_max().saturating_add(1u16), 0u16.saturating_sub(1u16));
+    println("i16 sat {} {}", i16_max().saturating_add(1i16), (0i16 - 32767i16 - 1i16).saturating_sub(1i16));
+    println("i32 satmul {}", i32_big().saturating_mul(i32_big()));
+    println("u32 satmul {}", u32_maxish().saturating_mul(u32_maxish()));
+    println("i64 sat {}", i64_max().saturating_add(1i64));
+    println("u64 wrap {}", u64_max().wrapping_add(1u64));
+    println("i128 sat {}", i128_max().saturating_add(1i128));
+    println("u128 wrapsat {} {}", u128_max().wrapping_add(1u128), u128_max().saturating_mul(2u128));
+    println("isize sat {}", isize_max().saturating_add(1isize));
+    println("usize wrap {}", usize_max().wrapping_add(1usize));
+
+    match u64_almost().checked_add(1u64) { Some(v) => println("u64 some {}", v), None => println("u64 none {}", 0) }
+    match u64_max().checked_add(1u64) { Some(v) => println("u64 overflow {}", v), None => println("u64 none {}", 1) }
+    match i128_max().checked_sub(1i128) { Some(v) => println("i128 some {}", v), None => println("i128 none {}", 0) }
+    match i128_max().checked_add(1i128) { Some(v) => println("i128 none {}", v), None => println("i128 none {}", 1) }
+    match u128_max().checked_sub(1u128) { Some(v) => println("u128 some {}", v), None => println("u128 none {}", 0) }
+    match u128_max().checked_mul(2u128) { Some(v) => println("u128 overflow {}", v), None => println("u128 none {}", 1) }
+    match 126i8.checked_add(1i8) { Some(v) => println("chk i8 add some {}", v), None => println("chk i8 add some none {}", 0) }
+    match i8_max().checked_add(1i8) { Some(v) => println("chk i8 add none value {}", v), None => println("chk i8 add none {}", 1) }
+    match i8_min().checked_add(1i8).unwrap_or(0i8).checked_sub(1i8) { Some(v) => println("chk i8 sub some {}", v), None => println("chk i8 sub some none {}", 0) }
+    match i8_min().checked_sub(1i8) { Some(v) => println("chk i8 sub none value {}", v), None => println("chk i8 sub none {}", 1) }
+    match 63i8.checked_mul(2i8) { Some(v) => println("chk i8 mul some {}", v), None => println("chk i8 mul some none {}", 0) }
+    match i8_max().checked_mul(2i8) { Some(v) => println("chk i8 mul none value {}", v), None => println("chk i8 mul none {}", 1) }
+    match 254u8.checked_add(1u8) { Some(v) => println("chk u8 add some {}", v), None => println("chk u8 add some none {}", 0) }
+    match u8_max().checked_add(1u8) { Some(v) => println("chk u8 add none value {}", v), None => println("chk u8 add none {}", 1) }
+    match 1u8.checked_sub(1u8) { Some(v) => println("chk u8 sub some {}", v), None => println("chk u8 sub some none {}", 0) }
+    match 0u8.checked_sub(1u8) { Some(v) => println("chk u8 sub none value {}", v), None => println("chk u8 sub none {}", 1) }
+    match 127u8.checked_mul(2u8) { Some(v) => println("chk u8 mul some {}", v), None => println("chk u8 mul some none {}", 0) }
+    match u8_max().checked_mul(2u8) { Some(v) => println("chk u8 mul none value {}", v), None => println("chk u8 mul none {}", 1) }
+    match 32766i16.checked_add(1i16) { Some(v) => println("chk i16 add some {}", v), None => println("chk i16 add some none {}", 0) }
+    match i16_max().checked_add(1i16) { Some(v) => println("chk i16 add none value {}", v), None => println("chk i16 add none {}", 1) }
+    match i16_min().checked_add(1i16).unwrap_or(0i16).checked_sub(1i16) { Some(v) => println("chk i16 sub some {}", v), None => println("chk i16 sub some none {}", 0) }
+    match i16_min().checked_sub(1i16) { Some(v) => println("chk i16 sub none value {}", v), None => println("chk i16 sub none {}", 1) }
+    match i16_half_max().checked_mul(2i16) { Some(v) => println("chk i16 mul some {}", v), None => println("chk i16 mul some none {}", 0) }
+    match i16_max().checked_mul(2i16) { Some(v) => println("chk i16 mul none value {}", v), None => println("chk i16 mul none {}", 1) }
+    match 65534u16.checked_add(1u16) { Some(v) => println("chk u16 add some {}", v), None => println("chk u16 add some none {}", 0) }
+    match u16_max().checked_add(1u16) { Some(v) => println("chk u16 add none value {}", v), None => println("chk u16 add none {}", 1) }
+    match 1u16.checked_sub(1u16) { Some(v) => println("chk u16 sub some {}", v), None => println("chk u16 sub some none {}", 0) }
+    match 0u16.checked_sub(1u16) { Some(v) => println("chk u16 sub none value {}", v), None => println("chk u16 sub none {}", 1) }
+    match u16_half_max().checked_mul(2u16) { Some(v) => println("chk u16 mul some {}", v), None => println("chk u16 mul some none {}", 0) }
+    match u16_max().checked_mul(2u16) { Some(v) => println("chk u16 mul none value {}", v), None => println("chk u16 mul none {}", 1) }
+    match 2147483646i32.checked_add(1i32) { Some(v) => println("chk i32 add some {}", v), None => println("chk i32 add some none {}", 0) }
+    match i32_max().checked_add(1i32) { Some(v) => println("chk i32 add none value {}", v), None => println("chk i32 add none {}", 1) }
+    match i32_min().checked_add(1i32).unwrap_or(0i32).checked_sub(1i32) { Some(v) => println("chk i32 sub some {}", v), None => println("chk i32 sub some none {}", 0) }
+    match i32_min().checked_sub(1i32) { Some(v) => println("chk i32 sub none value {}", v), None => println("chk i32 sub none {}", 1) }
+    match i32_half_max().checked_mul(2i32) { Some(v) => println("chk i32 mul some {}", v), None => println("chk i32 mul some none {}", 0) }
+    match i32_max().checked_mul(2i32) { Some(v) => println("chk i32 mul none value {}", v), None => println("chk i32 mul none {}", 1) }
+    match 4294967294u32.checked_add(1u32) { Some(v) => println("chk u32 add some {}", v), None => println("chk u32 add some none {}", 0) }
+    match 4294967295u32.checked_add(1u32) { Some(v) => println("chk u32 add none value {}", v), None => println("chk u32 add none {}", 1) }
+    match 1u32.checked_sub(1u32) { Some(v) => println("chk u32 sub some {}", v), None => println("chk u32 sub some none {}", 0) }
+    match 0u32.checked_sub(1u32) { Some(v) => println("chk u32 sub none value {}", v), None => println("chk u32 sub none {}", 1) }
+    match u32_half_max().checked_mul(2u32) { Some(v) => println("chk u32 mul some {}", v), None => println("chk u32 mul some none {}", 0) }
+    match 4294967295u32.checked_mul(2u32) { Some(v) => println("chk u32 mul none value {}", v), None => println("chk u32 mul none {}", 1) }
+    match 9223372036854775806i64.checked_add(1i64) { Some(v) => println("chk i64 add some {}", v), None => println("chk i64 add some none {}", 0) }
+    match i64_max().checked_add(1i64) { Some(v) => println("chk i64 add none value {}", v), None => println("chk i64 add none {}", 1) }
+    match i64_min().checked_add(1i64).unwrap_or(0i64).checked_sub(1i64) { Some(v) => println("chk i64 sub some {}", v), None => println("chk i64 sub some none {}", 0) }
+    match i64_min().checked_sub(1i64) { Some(v) => println("chk i64 sub none value {}", v), None => println("chk i64 sub none {}", 1) }
+    match i64_half_max().checked_mul(2i64) { Some(v) => println("chk i64 mul some {}", v), None => println("chk i64 mul some none {}", 0) }
+    match i64_max().checked_mul(2i64) { Some(v) => println("chk i64 mul none value {}", v), None => println("chk i64 mul none {}", 1) }
+    match u64_almost().checked_add(1u64) { Some(v) => println("chk u64 add some {}", v), None => println("chk u64 add some none {}", 0) }
+    match u64_max().checked_add(1u64) { Some(v) => println("chk u64 add none value {}", v), None => println("chk u64 add none {}", 1) }
+    match 1u64.checked_sub(1u64) { Some(v) => println("chk u64 sub some {}", v), None => println("chk u64 sub some none {}", 0) }
+    match 0u64.checked_sub(1u64) { Some(v) => println("chk u64 sub none value {}", v), None => println("chk u64 sub none {}", 1) }
+    match u64_half_max().checked_mul(2u64) { Some(v) => println("chk u64 mul some {}", v), None => println("chk u64 mul some none {}", 0) }
+    match u64_max().checked_mul(2u64) { Some(v) => println("chk u64 mul none value {}", v), None => println("chk u64 mul none {}", 1) }
+    match 170141183460469231731687303715884105726i128.checked_add(1i128) { Some(v) => println("chk i128 add some {}", v), None => println("chk i128 add some none {}", 0) }
+    match i128_max().checked_add(1i128) { Some(v) => println("chk i128 add none value {}", v), None => println("chk i128 add none {}", 1) }
+    match i128_min().checked_add(1i128).unwrap_or(0i128).checked_sub(1i128) { Some(v) => println("chk i128 sub some {}", v), None => println("chk i128 sub some none {}", 0) }
+    match i128_min().checked_sub(1i128) { Some(v) => println("chk i128 sub none value {}", v), None => println("chk i128 sub none {}", 1) }
+    match i128_half_max().checked_mul(2i128) { Some(v) => println("chk i128 mul some {}", v), None => println("chk i128 mul some none {}", 0) }
+    match i128_max().checked_mul(2i128) { Some(v) => println("chk i128 mul none value {}", v), None => println("chk i128 mul none {}", 1) }
+    match 340282366920938463463374607431768211454u128.checked_add(1u128) { Some(v) => println("chk u128 add some {}", v), None => println("chk u128 add some none {}", 0) }
+    match u128_max().checked_add(1u128) { Some(v) => println("chk u128 add none value {}", v), None => println("chk u128 add none {}", 1) }
+    match 1u128.checked_sub(1u128) { Some(v) => println("chk u128 sub some {}", v), None => println("chk u128 sub some none {}", 0) }
+    match 0u128.checked_sub(1u128) { Some(v) => println("chk u128 sub none value {}", v), None => println("chk u128 sub none {}", 1) }
+    match u128_half_max().checked_mul(2u128) { Some(v) => println("chk u128 mul some {}", v), None => println("chk u128 mul some none {}", 0) }
+    match u128_max().checked_mul(2u128) { Some(v) => println("chk u128 mul none value {}", v), None => println("chk u128 mul none {}", 1) }
+    match 9223372036854775806isize.checked_add(1isize) { Some(v) => println("chk isize add some {}", v), None => println("chk isize add some none {}", 0) }
+    match isize_max().checked_add(1isize) { Some(v) => println("chk isize add none value {}", v), None => println("chk isize add none {}", 1) }
+    match isize_min().checked_add(1isize).unwrap_or(0isize).checked_sub(1isize) { Some(v) => println("chk isize sub some {}", v), None => println("chk isize sub some none {}", 0) }
+    match isize_min().checked_sub(1isize) { Some(v) => println("chk isize sub none value {}", v), None => println("chk isize sub none {}", 1) }
+    match isize_half_max().checked_mul(2isize) { Some(v) => println("chk isize mul some {}", v), None => println("chk isize mul some none {}", 0) }
+    match isize_max().checked_mul(2isize) { Some(v) => println("chk isize mul none value {}", v), None => println("chk isize mul none {}", 1) }
+    match 18446744073709551614usize.checked_add(1usize) { Some(v) => println("chk usize add some {}", v), None => println("chk usize add some none {}", 0) }
+    match usize_max().checked_add(1usize) { Some(v) => println("chk usize add none value {}", v), None => println("chk usize add none {}", 1) }
+    match 1usize.checked_sub(1usize) { Some(v) => println("chk usize sub some {}", v), None => println("chk usize sub some none {}", 0) }
+    match 0usize.checked_sub(1usize) { Some(v) => println("chk usize sub none value {}", v), None => println("chk usize sub none {}", 1) }
+    match usize_half_max().checked_mul(2usize) { Some(v) => println("chk usize mul some {}", v), None => println("chk usize mul some none {}", 0) }
+    match usize_max().checked_mul(2usize) { Some(v) => println("chk usize mul none value {}", v), None => println("chk usize mul none {}", 1) }
+    let assigned: Option<u64> = checked_u64_return();
+    match assigned { Some(v) => println("option assign {}", v), None => println("option assign none {}", 0) }
+    match id_u64_option(checked_u64_return()) { Some(v) => println("option call {}", v), None => println("option call none {}", 0) }
+    if let Some(v) = checked_u64_return() { println("option iflet {}", v); }
+    println("option pred {} {}", checked_u64_return().is_some(), u64_max().checked_add(1u64).is_none());
+    println("option unwrap {}", checked_u64_return().unwrap());
+    println("option unwrapor {}", u64_max().checked_add(1u64).unwrap_or(7u64));
+}
+"#
+}
+
+#[test]
+fn explicit_integer_arithmetic_methods_run_on_c_backend_boundaries() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping explicit integer arithmetic C e2e: no C backend available (buildc doctor)"
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang_explicit_integer_methods_c_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create explicit integer C dir");
+    let path = dir.join("explicit_integer_methods.bld");
+    std::fs::write(&path, explicit_integer_arithmetic_source())
+        .expect("write explicit integer method fixture");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout,
+        "u8 wrap 0 255 144\n\
+i8 wrap -128 127 -128\n\
+u16 sat 65535 0\n\
+i16 sat 32767 -32768\n\
+i32 satmul 2147483647\n\
+u32 satmul 4294836225\n\
+i64 sat 9223372036854775807\n\
+u64 wrap 0\n\
+i128 sat 170141183460469231731687303715884105727\n\
+u128 wrapsat 0 340282366920938463463374607431768211455\n\
+isize sat 9223372036854775807\n\
+usize wrap 0\n\
+u64 some 18446744073709551615\n\
+u64 none 1\n\
+i128 some 170141183460469231731687303715884105726\n\
+i128 none 1\n\
+u128 some 340282366920938463463374607431768211454\n\
+u128 none 1\n\
+chk i8 add some 127\n\
+chk i8 add none 1\n\
+chk i8 sub some -128\n\
+chk i8 sub none 1\n\
+chk i8 mul some 126\n\
+chk i8 mul none 1\n\
+chk u8 add some 255\n\
+chk u8 add none 1\n\
+chk u8 sub some 0\n\
+chk u8 sub none 1\n\
+chk u8 mul some 254\n\
+chk u8 mul none 1\n\
+chk i16 add some 32767\n\
+chk i16 add none 1\n\
+chk i16 sub some -32768\n\
+chk i16 sub none 1\n\
+chk i16 mul some 32766\n\
+chk i16 mul none 1\n\
+chk u16 add some 65535\n\
+chk u16 add none 1\n\
+chk u16 sub some 0\n\
+chk u16 sub none 1\n\
+chk u16 mul some 65534\n\
+chk u16 mul none 1\n\
+chk i32 add some 2147483647\n\
+chk i32 add none 1\n\
+chk i32 sub some -2147483648\n\
+chk i32 sub none 1\n\
+chk i32 mul some 2147483646\n\
+chk i32 mul none 1\n\
+chk u32 add some 4294967295\n\
+chk u32 add none 1\n\
+chk u32 sub some 0\n\
+chk u32 sub none 1\n\
+chk u32 mul some 4294967294\n\
+chk u32 mul none 1\n\
+chk i64 add some 9223372036854775807\n\
+chk i64 add none 1\n\
+chk i64 sub some -9223372036854775808\n\
+chk i64 sub none 1\n\
+chk i64 mul some 9223372036854775806\n\
+chk i64 mul none 1\n\
+chk u64 add some 18446744073709551615\n\
+chk u64 add none 1\n\
+chk u64 sub some 0\n\
+chk u64 sub none 1\n\
+chk u64 mul some 18446744073709551614\n\
+chk u64 mul none 1\n\
+chk i128 add some 170141183460469231731687303715884105727\n\
+chk i128 add none 1\n\
+chk i128 sub some -170141183460469231731687303715884105728\n\
+chk i128 sub none 1\n\
+chk i128 mul some 170141183460469231731687303715884105726\n\
+chk i128 mul none 1\n\
+chk u128 add some 340282366920938463463374607431768211455\n\
+chk u128 add none 1\n\
+chk u128 sub some 0\n\
+chk u128 sub none 1\n\
+chk u128 mul some 340282366920938463463374607431768211454\n\
+chk u128 mul none 1\n\
+chk isize add some 9223372036854775807\n\
+chk isize add none 1\n\
+chk isize sub some -9223372036854775808\n\
+chk isize sub none 1\n\
+chk isize mul some 9223372036854775806\n\
+chk isize mul none 1\n\
+chk usize add some 18446744073709551615\n\
+chk usize add none 1\n\
+chk usize sub some 0\n\
+chk usize sub none 1\n\
+chk usize mul some 18446744073709551614\n\
+chk usize mul none 1\n\
+option assign 18446744073709551615\n\
+option call 18446744073709551615\n\
+option iflet 18446744073709551615\n\
+option pred true true\n\
+option unwrap 18446744073709551615\n\
+option unwrapor 7\n",
+        "explicit wrapping/saturating/checked integer methods must run with exact payloads"
+    );
+}
+
+#[test]
+fn explicit_integer_arithmetic_methods_match_c_and_rust_backends() {
+    if !rustc_available() {
+        eprintln!("skipping explicit integer arithmetic Rust e2e: rustc not available");
+        return;
+    }
+    let rust_source = lower_source_to_rust(explicit_integer_arithmetic_source());
+    let result = rustc_compile_and_run("explicit_integer_methods", &rust_source);
+    assert_eq!(
+        result.stdout,
+        "u8 wrap 0 255 144\n\
+i8 wrap -128 127 -128\n\
+u16 sat 65535 0\n\
+i16 sat 32767 -32768\n\
+i32 satmul 2147483647\n\
+u32 satmul 4294836225\n\
+i64 sat 9223372036854775807\n\
+u64 wrap 0\n\
+i128 sat 170141183460469231731687303715884105727\n\
+u128 wrapsat 0 340282366920938463463374607431768211455\n\
+isize sat 9223372036854775807\n\
+usize wrap 0\n\
+u64 some 18446744073709551615\n\
+u64 none 1\n\
+i128 some 170141183460469231731687303715884105726\n\
+i128 none 1\n\
+u128 some 340282366920938463463374607431768211454\n\
+u128 none 1\n\
+chk i8 add some 127\n\
+chk i8 add none 1\n\
+chk i8 sub some -128\n\
+chk i8 sub none 1\n\
+chk i8 mul some 126\n\
+chk i8 mul none 1\n\
+chk u8 add some 255\n\
+chk u8 add none 1\n\
+chk u8 sub some 0\n\
+chk u8 sub none 1\n\
+chk u8 mul some 254\n\
+chk u8 mul none 1\n\
+chk i16 add some 32767\n\
+chk i16 add none 1\n\
+chk i16 sub some -32768\n\
+chk i16 sub none 1\n\
+chk i16 mul some 32766\n\
+chk i16 mul none 1\n\
+chk u16 add some 65535\n\
+chk u16 add none 1\n\
+chk u16 sub some 0\n\
+chk u16 sub none 1\n\
+chk u16 mul some 65534\n\
+chk u16 mul none 1\n\
+chk i32 add some 2147483647\n\
+chk i32 add none 1\n\
+chk i32 sub some -2147483648\n\
+chk i32 sub none 1\n\
+chk i32 mul some 2147483646\n\
+chk i32 mul none 1\n\
+chk u32 add some 4294967295\n\
+chk u32 add none 1\n\
+chk u32 sub some 0\n\
+chk u32 sub none 1\n\
+chk u32 mul some 4294967294\n\
+chk u32 mul none 1\n\
+chk i64 add some 9223372036854775807\n\
+chk i64 add none 1\n\
+chk i64 sub some -9223372036854775808\n\
+chk i64 sub none 1\n\
+chk i64 mul some 9223372036854775806\n\
+chk i64 mul none 1\n\
+chk u64 add some 18446744073709551615\n\
+chk u64 add none 1\n\
+chk u64 sub some 0\n\
+chk u64 sub none 1\n\
+chk u64 mul some 18446744073709551614\n\
+chk u64 mul none 1\n\
+chk i128 add some 170141183460469231731687303715884105727\n\
+chk i128 add none 1\n\
+chk i128 sub some -170141183460469231731687303715884105728\n\
+chk i128 sub none 1\n\
+chk i128 mul some 170141183460469231731687303715884105726\n\
+chk i128 mul none 1\n\
+chk u128 add some 340282366920938463463374607431768211455\n\
+chk u128 add none 1\n\
+chk u128 sub some 0\n\
+chk u128 sub none 1\n\
+chk u128 mul some 340282366920938463463374607431768211454\n\
+chk u128 mul none 1\n\
+chk isize add some 9223372036854775807\n\
+chk isize add none 1\n\
+chk isize sub some -9223372036854775808\n\
+chk isize sub none 1\n\
+chk isize mul some 9223372036854775806\n\
+chk isize mul none 1\n\
+chk usize add some 18446744073709551615\n\
+chk usize add none 1\n\
+chk usize sub some 0\n\
+chk usize sub none 1\n\
+chk usize mul some 18446744073709551614\n\
+chk usize mul none 1\n\
+option assign 18446744073709551615\n\
+option call 18446744073709551615\n\
+option iflet 18446744073709551615\n\
+option pred true true\n\
+option unwrap 18446744073709551615\n\
+option unwrapor 7\n",
+        "Rust backend must match the C backend explicit arithmetic contract"
+    );
+}
+
+#[test]
+fn explicit_integer_method_operands_are_evaluated_once_in_order() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping explicit integer operand order C e2e: no C backend available (buildc doctor)"
+        );
+        return;
+    }
+    if !rustc_available() {
+        eprintln!("skipping explicit integer operand order Rust e2e: rustc not available");
+        return;
+    }
+    let src = r#"fn lhs() -> u8 ~ Console { println("lhs"); 255u8 }
+fn rhs() -> u8 ~ Console { println("rhs"); 1u8 }
+
+fn main() ~ Console {
+    println("wrap {}", lhs().wrapping_add(rhs()));
+    match lhs().checked_add(rhs()) { Some(v) => println("some {}", v), None => println("none {}", 0) }
+}
+"#;
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang_explicit_integer_method_order_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create explicit integer operand order dir");
+    let path = dir.join("explicit_integer_method_order.bld");
+    std::fs::write(&path, src).expect("write explicit integer method operand order fixture");
+    let c_result = c_backend_run(&path);
+    let rust_source = lower_source_to_rust(src);
+    let rust_result = rustc_compile_and_run("explicit_integer_method_order", &rust_source);
+    let expected = "lhs\nrhs\nwrap 0\nlhs\nrhs\nnone 0\n";
+    assert_eq!(
+        c_result.stdout, expected,
+        "C backend must evaluate receiver and rhs once"
+    );
+    assert_eq!(
+        rust_result.stdout, expected,
+        "Rust backend must evaluate receiver and rhs once"
+    );
+}
+
+#[test]
+fn unsupported_explicit_integer_methods_are_type_diagnostics() {
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang_unsupported_explicit_integer_methods_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create unsupported explicit integer dir");
+    let cases = [
+        (
+            "wrapping_div",
+            "fn main() { let x = 1u8.wrapping_div(1u8); }\n",
+            ".wrapping_div() on a primitive integer",
+        ),
+        (
+            "checked_shl",
+            "fn main() { let x = 1u8.checked_shl(1u8); }\n",
+            ".checked_shl() on a primitive integer",
+        ),
+        (
+            "saturating_pow",
+            "fn main() { let x = 2u8.saturating_pow(3u8); }\n",
+            ".saturating_pow() on a primitive integer",
+        ),
+        (
+            "overflowing_add",
+            "fn main() { let x = 255u8.overflowing_add(1u8); }\n",
+            ".overflowing_add() on a primitive integer",
+        ),
+    ];
+
+    for (name, src, needle) in cases {
+        let path = dir.join(format!("{name}.bld"));
+        std::fs::write(&path, src).expect("write unsupported explicit integer fixture");
+        let (status, stdout, stderr) = check_within(&path, 30);
+        assert!(
+            !status.success(),
+            "unsupported explicit integer method `{name}` must fail type checking\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains(needle)
+                && stderr.contains("supported primitive methods are wrapping/checked/saturating add, sub, and mul"),
+            "unsupported explicit integer method `{name}` must produce a focused diagnostic\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        let lower_stderr = stderr.to_lowercase();
+        assert!(
+            !lower_stderr.contains("undefined reference")
+                && !lower_stderr.contains("unresolved")
+                && !lower_stderr.contains("panic"),
+            "unsupported explicit integer method `{name}` must not reach a late backend/link failure\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+}
+
 /// Regression (Cluster P: place projections as store targets and `&mut` operands).
 /// A store into a projected lvalue, and a mutable borrow of one, must reach the
 /// real storage instead of a detached copy. Before this fix the frontend copied a
@@ -13929,6 +14451,328 @@ fn in_bounds_index_reads_and_writes_correctly() {
     }
 }
 
+#[test]
+fn plain_integer_add_sub_mul_and_neg_overflow_abort_fail_closed() {
+    if !c_backend_ready() {
+        eprintln!("skipping plain integer overflow fail-closed e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    // (name, source, required stderr substring) -- every source reads at least
+    // one operand from a Vec-backed local so the runtime checked path is under
+    // test, not host-side constant folding.
+    let cases: [(&str, &str, &str); 13] = [
+        (
+            "i8_add_overflow",
+            r#"fn main() ~ Console {
+    let v: Vec<i8> = vec![127i8, 1i8];
+    let a = v[0];
+    let b = v[1];
+    println!("{}", a + b);
+}
+"#,
+            "attempt to add with overflow",
+        ),
+        (
+            "u8_add_overflow",
+            r#"fn main() ~ Console {
+    let v: Vec<u8> = vec![255u8, 1u8];
+    let a = v[0];
+    let b = v[1];
+    println!("{}", a + b);
+}
+"#,
+            "attempt to add with overflow",
+        ),
+        (
+            "i16_sub_overflow",
+            r#"fn main() ~ Console {
+    let v: Vec<i16> = vec![0i16, 32767i16, 1i16];
+    let min = v[0] - v[1] - v[2];
+    println!("{}", min - v[2]);
+}
+"#,
+            "attempt to subtract with overflow",
+        ),
+        (
+            "u16_sub_overflow",
+            r#"fn main() ~ Console {
+    let v: Vec<u16> = vec![0u16, 1u16];
+    let a = v[0];
+    let b = v[1];
+    println!("{}", a - b);
+}
+"#,
+            "attempt to subtract with overflow",
+        ),
+        (
+            "i32_mul_overflow",
+            r#"fn main() ~ Console {
+    let v: Vec<i32> = vec![2147483647, 2];
+    let a = v[0];
+    let b = v[1];
+    println!("{}", a * b);
+}
+"#,
+            "attempt to multiply with overflow",
+        ),
+        (
+            "u32_mul_overflow",
+            r#"fn main() ~ Console {
+    let v: Vec<u32> = vec![4294967295u32, 2u32];
+    let a = v[0];
+    let b = v[1];
+    println!("{}", a * b);
+}
+"#,
+            "attempt to multiply with overflow",
+        ),
+        (
+            "i64_add_overflow",
+            r#"fn main() ~ Console {
+    let v: Vec<i64> = vec![9223372036854775807i64, 1i64];
+    let a = v[0];
+    let b = v[1];
+    println!("{}", a + b);
+}
+"#,
+            "attempt to add with overflow",
+        ),
+        (
+            "u64_add_overflow",
+            r#"fn main() ~ Console {
+    let v: Vec<u64> = vec![18446744073709551615u64, 1u64];
+    let a = v[0];
+    let b = v[1];
+    println!("{}", a + b);
+}
+"#,
+            "attempt to add with overflow",
+        ),
+        (
+            "i128_add_overflow",
+            r#"fn main() ~ Console {
+    let v: Vec<i128> = vec![170141183460469231731687303715884105727i128, 1i128];
+    let a = v[0];
+    let b = v[1];
+    println!("{}", a + b);
+}
+"#,
+            "attempt to add with overflow",
+        ),
+        (
+            "u128_add_overflow",
+            r#"fn main() ~ Console {
+    let v: Vec<u128> = vec![340282366920938463463374607431768211455u128, 1u128];
+    let a = v[0];
+    let b = v[1];
+    println!("{}", a + b);
+}
+"#,
+            "attempt to add with overflow",
+        ),
+        (
+            "isize_add_overflow",
+            r#"fn main() ~ Console {
+    let v: Vec<isize> = vec![9223372036854775807isize, 1isize];
+    let a = v[0];
+    let b = v[1];
+    println!("{}", a + b);
+}
+"#,
+            "attempt to add with overflow",
+        ),
+        (
+            "usize_add_overflow",
+            r#"fn main() ~ Console {
+    let v: Vec<usize> = vec![18446744073709551615usize, 1usize];
+    let a = v[0];
+    let b = v[1];
+    println!("{}", a + b);
+}
+"#,
+            "attempt to add with overflow",
+        ),
+        (
+            "i8_neg_overflow",
+            r#"fn main() ~ Console {
+    let v: Vec<i8> = vec![0i8, 127i8, 1i8];
+    let min = v[0] - v[1] - v[2];
+    println!("{}", -min);
+}
+"#,
+            "attempt to negate with overflow",
+        ),
+    ];
+
+    let dir = std::env::temp_dir().join("buildlang_plain_integer_overflow_fail_closed");
+    std::fs::create_dir_all(&dir).expect("create plain-overflow fail-closed dir");
+    for (name, src, needle) in cases {
+        let path = dir.join(format!("{name}.bld"));
+        std::fs::write(&path, src).expect("write plain-overflow fail-closed case");
+        let (stdout, stderr, exit_code) = c_backend_run_capture(&path);
+        assert_eq!(
+            exit_code,
+            Some(101),
+            "plain integer overflow case `{name}` must abort with exit 101\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains(needle),
+            "plain integer overflow case `{name}` must print `{needle}`; got exit {exit_code:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn plain_integer_in_bounds_near_boundaries_and_compound_assignment_run() {
+    if !c_backend_ready() {
+        eprintln!("skipping plain integer in-bounds e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let src = r#"fn main() ~ Console {
+    let i8s: Vec<i8> = vec![126i8, 1i8];
+    let u8s: Vec<u8> = vec![254u8, 1u8];
+    let i16s: Vec<i16> = vec![0i16, 32767i16, 1i16];
+    let u16s: Vec<u16> = vec![1u16, 1u16];
+    let i32s: Vec<i32> = vec![46340, 46340];
+    let u32s: Vec<u32> = vec![65535u32, 65535u32];
+    let i64s: Vec<i64> = vec![9223372036854775806i64, 1i64];
+    let u64s: Vec<u64> = vec![18446744073709551614u64, 1u64];
+    let i128s: Vec<i128> = vec![170141183460469231731687303715884105727i128, 1i128];
+    let u128s: Vec<u128> = vec![340282366920938463463374607431768211455u128, 1u128];
+    let isizes: Vec<isize> = vec![9223372036854775806isize, 1isize];
+    let usizes: Vec<usize> = vec![18446744073709551614usize, 1usize];
+
+    println!("{}", i8s[0] + i8s[1]);
+    let mut c: u8 = u8s[0];
+    c += u8s[1];
+    println!("{}", c);
+    println!("{}", i16s[0] - i16s[1] - i16s[2]);
+    println!("{}", u16s[0] - u16s[1]);
+    println!("{}", i32s[0] * i32s[1]);
+    println!("{}", u32s[0] * u32s[1]);
+    println!("{}", i64s[0] + i64s[1]);
+    println!("{}", u64s[0] + u64s[1]);
+    println!("{}", i128s[0] - i128s[1]);
+    println!("{}", u128s[0] - u128s[1]);
+    println!("{}", isizes[0] + isizes[1]);
+    println!("{}", usizes[0] + usizes[1]);
+    let min_i8 = i8s[1] - i8s[0] - i8s[1];
+    println!("{}", -min_i8);
+}
+"#;
+    let dir = std::env::temp_dir().join("buildlang_plain_integer_in_bounds");
+    std::fs::create_dir_all(&dir).expect("create plain integer in-bounds dir");
+    let path = dir.join("in_bounds.bld");
+    std::fs::write(&path, src).expect("write plain integer in-bounds case");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout,
+        "127\n255\n-32768\n0\n2147395600\n4294836225\n9223372036854775807\n18446744073709551615\n170141183460469231731687303715884105726\n340282366920938463463374607431768211454\n9223372036854775807\n18446744073709551615\n126\n",
+        "plain integer checked arithmetic must not reject in-bounds boundary operations"
+    );
+}
+
+#[test]
+fn c_i128_u128_print_materializes_more_than_static_formatter_slot_count() {
+    if !c_backend_ready() {
+        eprintln!("skipping i128/u128 formatter slot e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let src = r#"fn main() ~ Console {
+    let i1: i128 = 1i128;
+    let i2: i128 = 2i128;
+    let i3: i128 = 3i128;
+    let i4: i128 = 4i128;
+    let i5: i128 = 5i128;
+    let i6: i128 = 6i128;
+    let i7: i128 = 7i128;
+    let i8: i128 = 8i128;
+    let i9: i128 = 9i128;
+    let i10: i128 = 10i128;
+    let i11: i128 = 11i128;
+    let i12: i128 = 12i128;
+    let i13: i128 = 13i128;
+    let i14: i128 = 14i128;
+    let i15: i128 = 15i128;
+    let i16: i128 = 16i128;
+    let i17: i128 = 17i128;
+    println("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12, i13, i14, i15, i16, i17);
+    let u1: u128 = 1u128;
+    let u2: u128 = 2u128;
+    let u3: u128 = 3u128;
+    let u4: u128 = 4u128;
+    let u5: u128 = 5u128;
+    let u6: u128 = 6u128;
+    let u7: u128 = 7u128;
+    let u8: u128 = 8u128;
+    let u9: u128 = 9u128;
+    let u10: u128 = 10u128;
+    let u11: u128 = 11u128;
+    let u12: u128 = 12u128;
+    let u13: u128 = 13u128;
+    let u14: u128 = 14u128;
+    let u15: u128 = 15u128;
+    let u16: u128 = 16u128;
+    let u17: u128 = 17u128;
+    println("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, u14, u15, u16, u17);
+}
+"#;
+    let dir = std::env::temp_dir().join("buildlang_i128_u128_formatter_slots");
+    std::fs::create_dir_all(&dir).expect("create i128/u128 formatter slot dir");
+    let path = dir.join("formatter_slots.bld");
+    std::fs::write(&path, src).expect("write i128/u128 formatter slot case");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout,
+        "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17\n1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17\n",
+        "i128/u128 print arguments must not alias the runtime formatter's static ring slots"
+    );
+}
+
+#[test]
+fn plain_integer_runtime_overflow_exit_code_matches_c_and_rust_backends() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping C/Rust plain integer overflow parity: no C backend available (buildc doctor)"
+        );
+        return;
+    }
+    if !rustc_available() {
+        eprintln!("skipping C/Rust plain integer overflow parity: rustc not available");
+        return;
+    }
+    let src = r#"fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+fn main() ~ Console {
+    println!("{}", add(2147483647, 1));
+}
+"#;
+    let dir = std::env::temp_dir().join("buildlang_plain_integer_backend_parity");
+    std::fs::create_dir_all(&dir).expect("create plain integer backend parity dir");
+    let path = dir.join("backend_parity.bld");
+    std::fs::write(&path, src).expect("write backend parity fixture");
+
+    let (c_stdout, c_stderr, c_exit_code) = c_backend_run_capture(&path);
+    let rust_source = lower_source_to_rust(src);
+    let rust_result = rustc_compile_and_run("plain_integer_overflow_parity", &rust_source);
+
+    assert_eq!(
+        c_exit_code,
+        Some(101),
+        "C backend must abort plain integer overflow with exit 101\nstdout:\n{c_stdout}\nstderr:\n{c_stderr}"
+    );
+    assert!(
+        c_stderr.contains("attempt to add with overflow"),
+        "C backend overflow diagnostic must name addition overflow\nstdout:\n{c_stdout}\nstderr:\n{c_stderr}"
+    );
+    assert_eq!(
+        rust_result.exit_code, c_exit_code,
+        "Rust backend must match the C backend's overflow exit status"
+    );
+}
+
 /// Integer division and remainder must trap the two cases Rust panics on: a zero
 /// divisor and the single signed overflow `MIN / -1`, in release as well as
 /// debug. The pre-fix backend emitted raw C `/` and `%`, which deviate from that
@@ -14579,7 +15423,7 @@ fn float_to_int_cast_saturates_like_rust_end_to_end() {
 /// promotes a sub-`int` operand to 32-bit `int` before shifting, so a narrow
 /// type shifted by a count at or past its own width used the un-masked 32-bit
 /// count and printed a silent wrong answer: 255u8 >> 9 gave 0 (want 127), 1u8
-/// << 8 gave 0 (want 1), -128i8 >> 9 gave -1 (want -64), 1u16 << 16 gave 0
+/// << 8 gave 0 (want 1), i8::MIN >> 9 gave -1 (want -64), 1u16 << 16 gave 0
 /// (want 1). The shift amounts are read from mutable locals so the value flows
 /// through codegen rather than being const-folded. The last two lines are wide
 /// types (i32/u64) that were already correct; they pin that masking every width
@@ -14597,7 +15441,7 @@ fn narrow_shift_masks_count_to_width_like_rust_end_to_end() {
     let mut s17: u32 = 17;
     let a: u8 = 255u8;
     let b: u8 = 1u8;
-    let c: i8 = -128i8;
+    let c: i8 = 0i8 - 127i8 - 1i8;
     let d: u16 = 1u16;
     let e: u16 = 65535u16;
     let f: i16 = 1i16;

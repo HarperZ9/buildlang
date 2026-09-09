@@ -15,7 +15,7 @@
 use std::fmt::Write;
 use std::sync::Arc;
 
-use super::{Backend, CodegenError, CodegenResult, Target};
+use super::{Backend, CodegenError, CodegenResult, StdioMode, Target};
 use crate::codegen::ir::*;
 use crate::codegen::runtime;
 use crate::codegen::{GeneratedCode, OutputFormat};
@@ -28,6 +28,8 @@ pub struct CBackend {
     indent: usize,
     /// Temp variable counter.
     temp_counter: u32,
+    /// Runtime stdio policy for generated programs.
+    stdio_mode: StdioMode,
     /// Function parameter types - indexed by function name, stores param types.
     fn_params: std::collections::HashMap<String, Vec<MirType>>,
     /// Return type of the current function being generated.
@@ -85,6 +87,7 @@ impl CBackend {
             output: String::new(),
             indent: 0,
             temp_counter: 0,
+            stdio_mode: StdioMode::Native,
             fn_params: std::collections::HashMap::new(),
             current_ret_ty: MirType::Void,
             current_fn_name: None,
@@ -97,6 +100,13 @@ impl CBackend {
             current_fn_flag_block_frees: std::collections::HashMap::new(),
             experimental_free_override_for_test: None,
         }
+    }
+
+    /// Create a C backend with an explicit runtime stdio policy.
+    pub fn with_stdio_mode(stdio_mode: StdioMode) -> Self {
+        let mut backend = Self::new();
+        backend.stdio_mode = stdio_mode;
+        backend
     }
 
     /// Whether the experimental deterministic-free path is enabled. Off by
@@ -181,8 +191,7 @@ impl CBackend {
     fn hvec_elem_suffix(elem: &MirType) -> String {
         match elem {
             MirType::Struct(n) if n.as_ref() == "BuildString" => "str".to_string(),
-            MirType::Int(IntSize::I64, _) => "i64".to_string(),
-            MirType::Int(..) => "i32".to_string(),
+            MirType::Int(size, signed) => Self::int_runtime_suffix(*size, *signed).to_string(),
             MirType::Float(..) => "f64".to_string(),
             // Aggregate element (a user struct, vector type, etc.): use a
             // monomorphized, element-sized wrapper keyed by the struct name.
@@ -199,6 +208,11 @@ impl CBackend {
     fn vec_elem_needs_sized_wrapper(elem: &MirType) -> bool {
         matches!(elem, MirType::Struct(n) if n.as_ref() != "BuildString")
             || matches!(elem, MirType::Vec(_) | MirType::Map(_, _))
+            || matches!(
+                elem,
+                MirType::Int(size, signed)
+                    if !matches!((size, signed), (IntSize::I32, true) | (IntSize::I64, true))
+            )
     }
 
     /// The directly-named callee of a `Call`, if any.
@@ -937,9 +951,16 @@ impl CBackend {
 
         // Standard includes
         self.output.push_str("#include <stdint.h>\n");
+        self.output.push_str("#include <limits.h>\n");
         self.output.push_str("#include <stdbool.h>\n");
         self.output.push_str("#include <stddef.h>\n");
         self.output.push_str("#include <stdio.h>\n");
+        if self.stdio_mode == StdioMode::PortableLf {
+            self.output.push_str("#ifdef _WIN32\n");
+            self.output.push_str("#include <fcntl.h>\n");
+            self.output.push_str("#include <io.h>\n");
+            self.output.push_str("#endif\n");
+        }
         self.output.push_str("#include <stdlib.h>\n");
         self.output.push_str("#include <string.h>\n");
         self.output.push_str("#include <math.h>\n");
@@ -1014,6 +1035,10 @@ impl CBackend {
         // Embedded runtime library
         self.output.push_str(runtime::runtime_header());
         self.output.push('\n');
+        if self.stdio_mode == StdioMode::PortableLf {
+            self.output.push_str(runtime::portable_lf_stdio_support());
+            self.output.push('\n');
+        }
 
         // Type definitions
         let mut all_types = module.types.clone();
@@ -1118,13 +1143,13 @@ impl CBackend {
         // scalars and strings; an aggregate element rides in the size-aware
         // generic BuildVec via a per-type wrapper so `Vec<P>` push/get/pop work.
         {
-            let mut vec_elem_types: std::collections::HashSet<String> =
-                std::collections::HashSet::new();
+            let mut vec_elem_types = std::collections::BTreeMap::<String, String>::new();
             for func in &module.functions {
                 for local in &func.locals {
                     if let MirType::Vec(ref elem) = local.ty {
                         if Self::vec_elem_needs_sized_wrapper(elem) {
-                            vec_elem_types.insert(self.type_to_c(elem));
+                            vec_elem_types
+                                .insert(Self::hvec_elem_suffix(elem), self.type_to_c(elem));
                         }
                     }
                 }
@@ -1133,14 +1158,11 @@ impl CBackend {
                 self.output.push_str(
                     "// Monomorphized Vec element wrappers for aggregate element types\n",
                 );
-                // Deterministic order for reproducible codegen (receipts).
-                let mut entries: Vec<&String> = vec_elem_types.iter().collect();
-                entries.sort();
-                for elem_c in entries {
-                    let suffix = elem_c.replace('*', "ptr").replace(' ', "_");
+                for (suffix, elem_c) in vec_elem_types {
                     write!(self.output, "static BuildVecHandle build_hvec_new_{suffix}(void) {{ BuildVecHandle h; h.inner = (BuildVec*)malloc(sizeof(BuildVec)); *h.inner = build_vec_new(sizeof({elem_c})); return h; }}\n").unwrap();
                     write!(self.output, "static void build_hvec_push_{suffix}(BuildVecHandle h, {elem_c} val) {{ build_vec_push(h.inner, &val); }}\n").unwrap();
                     write!(self.output, "static {elem_c} build_hvec_get_{suffix}(BuildVecHandle h, size_t index) {{ return *({elem_c}*)build_vec_get(h.inner, index); }}\n").unwrap();
+                    write!(self.output, "static void build_hvec_set_{suffix}(BuildVecHandle h, size_t i, {elem_c} val) {{ if (i >= h.inner->len) {{ fprintf(stderr, \"Vec index out of bounds: %zu >= %zu\\n\", i, h.inner->len); exit(101); }} memcpy((char*)h.inner->ptr + i * h.inner->elem_size, &val, sizeof({elem_c})); }}\n").unwrap();
                     write!(self.output, "static {elem_c} build_hvec_pop_{suffix}(BuildVecHandle h) {{ {elem_c} __z; memset(&__z, 0, sizeof(__z)); if (h.inner->len == 0) return __z; h.inner->len--; return *({elem_c}*)((char*)h.inner->ptr + h.inner->len * h.inner->elem_size); }}\n").unwrap();
                 }
                 self.output.push('\n');
@@ -2053,7 +2075,12 @@ impl CBackend {
         // For main(), initialize I/O and command-line args before anything else
         if func.name.as_ref() == "main" {
             self.write_indent();
-            self.output.push_str("__build_init_io();\n");
+            match self.stdio_mode {
+                StdioMode::Native => self.output.push_str("__build_init_io();\n"),
+                StdioMode::PortableLf => {
+                    self.output.push_str("__build_init_portable_lf_stdio();\n")
+                }
+            }
             self.write_indent();
             self.output.push_str("build_args_init(argc, argv);\n");
         }
@@ -2831,12 +2858,7 @@ impl CBackend {
                     _ => false,
                 };
                 if base_is_vec {
-                    let suffix = match elem_ty {
-                        MirType::Float(_) => "f64",
-                        MirType::Int(IntSize::I64, _) => "i64",
-                        MirType::Struct(n) if n.as_ref() == "BuildString" => "str",
-                        _ => "i32",
-                    };
+                    let suffix = Self::hvec_elem_suffix(elem_ty);
                     write!(
                         self.output,
                         "build_hvec_set_{}({}, {}, {});\n",
@@ -3167,9 +3189,11 @@ impl CBackend {
                 }
 
                 // Runtime Some(x): construct an Option with the payload in the
-                // typed 8-byte union slot (`.value.i` integer/bool, `.value.f`
-                // float, `.value.p` pointer). Previously Some lowered to an
-                // undefined `Some(x)` call into an i32-typed dest (a C2440).
+                // typed scalar union slot (`.value.i` signed integer/bool,
+                // `.value.u` unsigned integer, `.value.i128`/`.value.u128`,
+                // `.value.f` float, `.value.p` pointer). Previously Some
+                // lowered to an undefined `Some(x)` call into an i32-typed dest
+                // (a C2440).
                 if func_str == "Some" && args.len() == 1 {
                     if let Some(dest_local) = dest {
                         let dest_name = self.local_name(*dest_local, locals);
@@ -3195,17 +3219,7 @@ impl CBackend {
                             )
                             .unwrap();
                         } else {
-                            let (slot, cast) = match &args[0] {
-                                MirValue::Local(id) => {
-                                    match locals.get(id.0 as usize).map(|l| &l.ty) {
-                                        Some(MirType::Float(_)) => ("f", "(double)"),
-                                        Some(MirType::Ptr(_)) => ("p", "(void*)"),
-                                        _ => ("i", "(int64_t)"),
-                                    }
-                                }
-                                MirValue::Const(MirConst::Float(..)) => ("f", "(double)"),
-                                _ => ("i", "(int64_t)"),
-                            };
+                            let (slot, cast) = Self::option_payload_slot_and_cast(arg_ty.as_ref());
                             write!(
                                 self.output,
                                 "{}.value.{} = {}({});\n",
@@ -3222,9 +3236,11 @@ impl CBackend {
                 }
 
                 // Runtime Ok(x): construct a Result with is_ok=true and the
-                // payload in the typed 8-byte ok union slot (`.ok.ok_i`/`.ok_f`/
-                // `.ok_p`). Mirrors the Some(x) Option construction. Previously
-                // Ok lowered to an undefined `Ok(x)` call into an i32 dest.
+                // payload in the typed scalar ok union slot (`.ok.ok_i`,
+                // `.ok.ok_u`, `.ok.ok_i128`, `.ok.ok_u128`, `.ok.ok_f`,
+                // `.ok.ok_p`). Mirrors the Some(x) Option construction.
+                // Previously Ok lowered to an undefined `Ok(x)` call into an i32
+                // dest.
                 if func_str == "Ok" && args.len() == 1 {
                     if let Some(dest_local) = dest {
                         let dest_name = self.local_name(*dest_local, locals);
@@ -3250,17 +3266,8 @@ impl CBackend {
                             )
                             .unwrap();
                         } else {
-                            let (slot, cast) = match &args[0] {
-                                MirValue::Local(id) => {
-                                    match locals.get(id.0 as usize).map(|l| &l.ty) {
-                                        Some(MirType::Float(_)) => ("ok_f", "(double)"),
-                                        Some(MirType::Ptr(_)) => ("ok_p", "(void*)"),
-                                        _ => ("ok_i", "(int64_t)"),
-                                    }
-                                }
-                                MirValue::Const(MirConst::Float(..)) => ("ok_f", "(double)"),
-                                _ => ("ok_i", "(int64_t)"),
-                            };
+                            let (slot, cast) =
+                                Self::result_payload_slot_and_cast(arg_ty.as_ref(), true);
                             write!(
                                 self.output,
                                 "{}.ok.{} = {}({});\n",
@@ -3317,17 +3324,8 @@ impl CBackend {
                                 )
                                 .unwrap();
                             } else {
-                                let (slot, cast) = match &args[0] {
-                                    MirValue::Local(id) => {
-                                        match locals.get(id.0 as usize).map(|l| &l.ty) {
-                                            Some(MirType::Float(_)) => ("err_f", "(double)"),
-                                            Some(MirType::Ptr(_)) => ("err_p", "(void*)"),
-                                            _ => ("err_i", "(int64_t)"),
-                                        }
-                                    }
-                                    MirValue::Const(MirConst::Float(..)) => ("err_f", "(double)"),
-                                    _ => ("err_i", "(int64_t)"),
-                                };
+                                let (slot, cast) =
+                                    Self::result_payload_slot_and_cast(arg_ty.as_ref(), false);
                                 write!(
                                     self.output,
                                     "{}.err.{} = {}({});\n",
@@ -3649,12 +3647,11 @@ impl CBackend {
     // TYPE AND VALUE CONVERSION
     // =========================================================================
 
-    /// True when a sum-type payload of this type does not fit the 8-byte
-    /// Option/Result union slot and must be boxed (malloc + store the pointer in
-    /// the `.p` / `.ok_p` slot). Scalars and pointers fit inline; aggregates
-    /// (BuildString and other structs, tuples, arrays, collection handles) are
-    /// boxed. Boxing round-trips any value; it is correctness-safe even for an
-    /// 8-byte handle.
+    /// True when a sum-type payload is an aggregate that must be boxed (malloc +
+    /// store the pointer in the `.p` / `.ok_p` slot). Scalar integer widths,
+    /// floats, pointers, and function pointers fit inline in the runtime union;
+    /// structs, tuples, arrays, collection handles, and nested Options box so
+    /// their value representation round-trips through C without truncation.
     fn payload_needs_boxing(ty: &MirType) -> bool {
         !matches!(
             ty,
@@ -3668,6 +3665,45 @@ impl CBackend {
         )
     }
 
+    fn is_option_type(ty: &MirType) -> bool {
+        matches!(ty, MirType::Option(_))
+            || matches!(ty, MirType::Struct(name) if name.as_ref() == "Option")
+    }
+
+    fn option_payload_slot_and_cast(ty: Option<&MirType>) -> (&'static str, &'static str) {
+        match ty {
+            Some(MirType::Float(_)) => ("f", "(double)"),
+            Some(MirType::Ptr(_)) | Some(MirType::FnPtr(_)) => ("p", "(void*)"),
+            Some(MirType::Int(IntSize::I128, true)) => ("i128", "(__int128)"),
+            Some(MirType::Int(IntSize::I128, false)) => ("u128", "(unsigned __int128)"),
+            Some(MirType::Int(_, false)) => ("u", "(uint64_t)"),
+            Some(MirType::Bool) | Some(MirType::Int(_, true)) => ("i", "(int64_t)"),
+            _ => ("i", "(int64_t)"),
+        }
+    }
+
+    fn result_payload_slot_and_cast(
+        ty: Option<&MirType>,
+        ok: bool,
+    ) -> (&'static str, &'static str) {
+        let (slot, cast) = Self::option_payload_slot_and_cast(ty);
+        let slot = match (ok, slot) {
+            (true, "f") => "ok_f",
+            (true, "p") => "ok_p",
+            (true, "i128") => "ok_i128",
+            (true, "u128") => "ok_u128",
+            (true, "u") => "ok_u",
+            (true, _) => "ok_i",
+            (false, "f") => "err_f",
+            (false, "p") => "err_p",
+            (false, "i128") => "err_i128",
+            (false, "u128") => "err_u128",
+            (false, "u") => "err_u",
+            (false, _) => "err_i",
+        };
+        (slot, cast)
+    }
+
     fn type_to_c(&self, ty: &MirType) -> String {
         match ty {
             MirType::Void => "void".to_string(),
@@ -3679,7 +3715,8 @@ impl CBackend {
                     IntSize::I16 => format!("{}int16_t", prefix),
                     IntSize::I32 => format!("{}int32_t", prefix),
                     IntSize::I64 => format!("{}int64_t", prefix),
-                    IntSize::I128 => format!("__int128_t"), // GCC extension
+                    IntSize::I128 if *signed => "__int128".to_string(), // GCC extension
+                    IntSize::I128 => "unsigned __int128".to_string(),   // GCC extension
                     IntSize::ISize => format!("{}intptr_t", prefix),
                 }
             }
@@ -3727,6 +3764,7 @@ impl CBackend {
             MirType::SampledImage(_) => "void*".to_string(), // Opaque GPU handle
             MirType::TraitObject(name) => format!("dyn_{}", name), // vtable struct
             MirType::Vec(_) => "BuildVecHandle".to_string(),
+            MirType::Option(_) => "Option".to_string(),
             // The handle-struct name depends on key/value types. Default map is
             // str->f64 (BuildStrF64MapHandle), which also backs the value-typed
             // str-key families (build_hmap_*_val_*). The i64->f64 family has its
@@ -3845,16 +3883,43 @@ impl CBackend {
         }
     }
 
+    fn c_u128_const(value: u128) -> String {
+        let hi = value >> 64;
+        let lo = value as u64;
+        if hi == 0 {
+            format!("((unsigned __int128){}ULL)", lo)
+        } else {
+            format!(
+                "(((unsigned __int128){}ULL << 64) | (unsigned __int128){}ULL)",
+                hi, lo
+            )
+        }
+    }
+
+    fn c_i128_const(value: i128) -> String {
+        if value == i128::MIN {
+            return format!(
+                "(-((__int128)({})) - 1)",
+                Self::c_u128_const(i128::MAX as u128)
+            );
+        }
+        if value < 0 {
+            return format!("(-((__int128)({})))", Self::c_u128_const((-value) as u128));
+        }
+        format!("((__int128)({}))", Self::c_u128_const(value as u128))
+    }
+
     fn const_to_c(&self, c: &MirConst) -> String {
         match c {
             MirConst::Bool(b) => if *b { "true" } else { "false" }.to_string(),
             MirConst::Int(v, ty) => match ty {
-                MirType::Int(IntSize::I64, _) => format!("{}LL", v),
-                MirType::Int(IntSize::I128, _) => format!("((__int128){})", v),
+                MirType::Int(IntSize::I64 | IntSize::ISize, _) => format!("{}LL", v),
+                MirType::Int(IntSize::I128, _) => Self::c_i128_const(*v),
                 _ => v.to_string(),
             },
             MirConst::Uint(v, ty) => match ty {
-                MirType::Int(IntSize::I64, _) => format!("{}ULL", v),
+                MirType::Int(IntSize::I64 | IntSize::ISize, _) => format!("{}ULL", v),
+                MirType::Int(IntSize::I128, _) => Self::c_u128_const(*v),
                 _ => format!("{}U", v),
             },
             MirConst::Float(v, ty) => {
@@ -4005,6 +4070,32 @@ impl CBackend {
                         return Ok(format!("{}({}, {})", f, l, r));
                     }
                 }
+                if let Some((size, signed)) = self.preferred_int_type(left, right, locals) {
+                    if let Some(stem) = Self::explicit_int_binop_helper(*op, signed) {
+                        let suffix = Self::int_runtime_suffix(size, signed);
+                        return Ok(format!("{}{}({}, {})", stem, suffix, l, r));
+                    }
+                    if let Some(stem) = Self::checked_int_binop_helper(*op, signed) {
+                        let suffix = Self::int_runtime_suffix(size, signed);
+                        return Ok(format!("{}{}({}, {})", stem, suffix, l, r));
+                    }
+                }
+                if matches!(
+                    op,
+                    BinOp::AddChecked
+                        | BinOp::SubChecked
+                        | BinOp::MulChecked
+                        | BinOp::AddWrapping
+                        | BinOp::SubWrapping
+                        | BinOp::MulWrapping
+                        | BinOp::AddSaturating
+                        | BinOp::SubSaturating
+                        | BinOp::MulSaturating
+                ) {
+                    return Err(CodegenError::Unsupported(format!(
+                        "C backend does not support explicit MIR arithmetic operator {op:?}"
+                    )));
+                }
                 // Integer division and remainder trap. Rust's `/` and `%` panic
                 // on a zero divisor and on the one signed overflow `MIN / -1`, in
                 // release as well as debug. Raw C `/`/`%` instead crash on a zero
@@ -4017,45 +4108,8 @@ impl CBackend {
                 // float `/` stays IEEE (falls through to `/`) and a float `%` is
                 // handled by the fmod block above, so neither reaches here.
                 if *op == BinOp::Div || *op == BinOp::Rem {
-                    let int_type = |v: &MirValue| -> Option<(IntSize, bool)> {
-                        let ty = match v {
-                            MirValue::Const(MirConst::Int(_, t))
-                            | MirValue::Const(MirConst::Uint(_, t)) => t,
-                            MirValue::Local(id) => &locals.get(id.0 as usize)?.ty,
-                            _ => return None,
-                        };
-                        match ty {
-                            MirType::Int(size, signed) => Some((*size, *signed)),
-                            _ => None,
-                        }
-                    };
-                    // Prefer a Local operand's declared type over a literal's; the
-                    // two agree after type-checking, but a literal is the weaker
-                    // source of truth.
-                    let local_ty = match left {
-                        MirValue::Local(_) => int_type(left),
-                        _ => None,
-                    }
-                    .or_else(|| match right {
-                        MirValue::Local(_) => int_type(right),
-                        _ => None,
-                    });
-                    if let Some((size, signed)) = local_ty
-                        .or_else(|| int_type(left))
-                        .or_else(|| int_type(right))
-                    {
-                        let suffix = match (size, signed) {
-                            (IntSize::I8, true) => "i8",
-                            (IntSize::I16, true) => "i16",
-                            (IntSize::I32, true) => "i32",
-                            (IntSize::I64, true) | (IntSize::ISize, true) => "i64",
-                            (IntSize::I128, true) => "i128",
-                            (IntSize::I8, false) => "u8",
-                            (IntSize::I16, false) => "u16",
-                            (IntSize::I32, false) => "u32",
-                            (IntSize::I64, false) | (IntSize::ISize, false) => "u64",
-                            (IntSize::I128, false) => "u128",
-                        };
+                    if let Some((size, signed)) = self.preferred_int_type(left, right, locals) {
+                        let suffix = Self::int_runtime_suffix(size, signed);
                         let stem = if signed {
                             if *op == BinOp::Div {
                                 "bl_idiv_"
@@ -4131,6 +4185,12 @@ impl CBackend {
             }
             MirRValue::UnaryOp { op, operand } => {
                 let v = self.value_to_c(operand, locals);
+                if *op == UnaryOp::Neg {
+                    if let Some((size, true)) = self.value_int_type(operand, locals) {
+                        let suffix = Self::int_runtime_suffix(size, true);
+                        return Ok(format!("bl_ineg_{}({})", suffix, v));
+                    }
+                }
                 let op_str = match op {
                     UnaryOp::Not => "!",
                     UnaryOp::BitNot => "~",
@@ -4246,38 +4306,40 @@ impl CBackend {
                         // `.tag`/`.data` shape (which the Option typedef lacks).
                         let is_builtin_sum = matches!(name.as_ref(), "Option" | "Result");
                         if is_builtin_sum {
-                            // Pick the 8-byte union slot from the payload type.
-                            let slot = match operands.first() {
-                                Some(MirValue::Local(id)) => {
-                                    match locals.get(id.0 as usize).map(|l| &l.ty) {
-                                        Some(MirType::Float(_)) => "f",
-                                        Some(MirType::Ptr(_)) => "p",
-                                        _ => "i",
-                                    }
-                                }
-                                Some(MirValue::Const(MirConst::Float(..))) => "f",
-                                _ => "i",
-                            };
-                            let cast = match slot {
-                                "f" => "(double)",
-                                "p" => "(void*)",
-                                _ => "(int64_t)",
-                            };
+                            let arg_ty = operands
+                                .first()
+                                .and_then(|operand| self.sumtype_arg_type(operand, locals));
+                            if arg_ty
+                                .as_ref()
+                                .map(Self::payload_needs_boxing)
+                                .unwrap_or(false)
+                            {
+                                return Err(CodegenError::Unsupported(format!(
+                                    "C backend cannot lower boxed {}::{} payload in expression form",
+                                    name, variant_name
+                                )));
+                            }
+                            let (option_slot, option_cast) =
+                                Self::option_payload_slot_and_cast(arg_ty.as_ref());
+                            let (ok_slot, ok_cast) =
+                                Self::result_payload_slot_and_cast(arg_ty.as_ref(), true);
+                            let (err_slot, err_cast) =
+                                Self::result_payload_slot_and_cast(arg_ty.as_ref(), false);
                             match (name.as_ref(), variant_name.as_ref()) {
                                 ("Option", "Some") if !vals.is_empty() => format!(
                                     "((Option){{ .has_value = true, .value = {{ .{} = {}{} }} }})",
-                                    slot, cast, vals[0]
+                                    option_slot, option_cast, vals[0]
                                 ),
                                 ("Option", "Some") => "((Option){ .has_value = true })".to_string(),
                                 ("Option", _) => "((Option){ .has_value = false })".to_string(),
                                 ("Result", "Ok") if !vals.is_empty() => format!(
-                                    "((Result){{ .is_ok = true, .ok = {{ .ok_{} = {}{} }} }})",
-                                    slot, cast, vals[0]
+                                    "((Result){{ .is_ok = true, .ok = {{ .{} = {}{} }} }})",
+                                    ok_slot, ok_cast, vals[0]
                                 ),
                                 ("Result", "Ok") => "((Result){ .is_ok = true })".to_string(),
                                 ("Result", _) if !vals.is_empty() => format!(
-                                    "((Result){{ .is_ok = false, .err = {{ .err_{} = {}{} }} }})",
-                                    slot, cast, vals[0]
+                                    "((Result){{ .is_ok = false, .err = {{ .{} = {}{} }} }})",
+                                    err_slot, err_cast, vals[0]
                                 ),
                                 ("Result", _) => "((Result){ .is_ok = false })".to_string(),
                                 _ => unreachable!(),
@@ -4353,11 +4415,11 @@ impl CBackend {
                 field_ty,
             } => {
                 let base_str = self.value_to_c(base, locals);
-                // Option payload read: `opt.value` is an 8-byte union; read the
-                // typed slot (`.i`/`.f`/`.p`) and cast back to the payload type.
+                // Option payload read: `opt.value` is a typed scalar union; read
+                // the width-correct slot and cast back to the payload type.
                 let base_is_option = matches!(base, MirValue::Local(id)
                     if locals.get(id.0 as usize)
-                        .map(|l| matches!(&l.ty, MirType::Struct(n) if n.as_ref() == "Option"))
+                        .map(|l| Self::is_option_type(&l.ty))
                         .unwrap_or(false));
                 if base_is_option && field_name.as_ref() == "value" {
                     // Boxed payload (>8 bytes): the .p slot holds a malloc'd
@@ -4366,11 +4428,7 @@ impl CBackend {
                         let ct = self.type_to_c(field_ty);
                         return Ok(format!("(*({}*){}.value.p)", ct, base_str));
                     }
-                    let slot = match field_ty {
-                        MirType::Float(_) => "f",
-                        MirType::Ptr(_) => "p",
-                        _ => "i",
-                    };
+                    let (slot, _) = Self::option_payload_slot_and_cast(Some(field_ty));
                     return Ok(format!(
                         "({}){}.value.{}",
                         self.type_to_c(field_ty),
@@ -4378,9 +4436,8 @@ impl CBackend {
                         slot
                     ));
                 }
-                // Result Ok payload read: `res.ok` is an 8-byte union; read the
-                // typed slot (`.ok_i`/`.ok_f`/`.ok_p`) and cast to the payload
-                // type. (`.err` is a plain BuildString field handled below.)
+                // Result Ok payload read: `res.ok` is a typed scalar union; read
+                // the width-correct slot and cast to the payload type.
                 let base_is_result = matches!(base, MirValue::Local(id)
                     if locals.get(id.0 as usize)
                         .map(|l| matches!(&l.ty, MirType::Struct(n) if n.as_ref() == "Result"))
@@ -4391,11 +4448,7 @@ impl CBackend {
                         let ct = self.type_to_c(field_ty);
                         return Ok(format!("(*({}*){}.ok.ok_p)", ct, base_str));
                     }
-                    let slot = match field_ty {
-                        MirType::Float(_) => "ok_f",
-                        MirType::Ptr(_) => "ok_p",
-                        _ => "ok_i",
-                    };
+                    let (slot, _) = Self::result_payload_slot_and_cast(Some(field_ty), true);
                     return Ok(format!(
                         "({}){}.ok.{}",
                         self.type_to_c(field_ty),
@@ -4410,11 +4463,7 @@ impl CBackend {
                         let ct = self.type_to_c(field_ty);
                         return Ok(format!("(*({}*){}.err.err_p)", ct, base_str));
                     }
-                    let slot = match field_ty {
-                        MirType::Float(_) => "err_f",
-                        MirType::Ptr(_) => "err_p",
-                        _ => "err_i",
-                    };
+                    let (slot, _) = Self::result_payload_slot_and_cast(Some(field_ty), false);
                     return Ok(format!(
                         "({}){}.err.{}",
                         self.type_to_c(field_ty),
@@ -4476,7 +4525,8 @@ impl CBackend {
                             format!("build_hvec_get_str({}, {})", base_str, index_str)
                         }
                         MirType::Int(..) | MirType::Bool => {
-                            format!("build_hvec_get_i32({}, {})", base_str, index_str)
+                            let suffix = Self::hvec_elem_suffix(elem_ty);
+                            format!("build_hvec_get_{}({}, {})", suffix, base_str, index_str)
                         }
                         other => {
                             let ct = self.type_to_c(other);
@@ -4559,19 +4609,99 @@ impl CBackend {
         }
     }
 
+    fn value_int_type(&self, value: &MirValue, locals: &[MirLocal]) -> Option<(IntSize, bool)> {
+        match self.value_mir_type(value, locals)? {
+            MirType::Int(size, signed) => Some((*size, *signed)),
+            _ => None,
+        }
+    }
+
+    fn preferred_int_type(
+        &self,
+        left: &MirValue,
+        right: &MirValue,
+        locals: &[MirLocal],
+    ) -> Option<(IntSize, bool)> {
+        let local_ty = match left {
+            MirValue::Local(_) => self.value_int_type(left, locals),
+            _ => None,
+        }
+        .or_else(|| match right {
+            MirValue::Local(_) => self.value_int_type(right, locals),
+            _ => None,
+        });
+        local_ty
+            .or_else(|| self.value_int_type(left, locals))
+            .or_else(|| self.value_int_type(right, locals))
+    }
+
+    fn int_runtime_suffix(size: IntSize, signed: bool) -> &'static str {
+        match (size, signed) {
+            (IntSize::I8, true) => "i8",
+            (IntSize::I16, true) => "i16",
+            (IntSize::I32, true) => "i32",
+            (IntSize::I64, true) => "i64",
+            (IntSize::I128, true) => "i128",
+            (IntSize::ISize, true) => "isize",
+            (IntSize::I8, false) => "u8",
+            (IntSize::I16, false) => "u16",
+            (IntSize::I32, false) => "u32",
+            (IntSize::I64, false) => "u64",
+            (IntSize::I128, false) => "u128",
+            (IntSize::ISize, false) => "usize",
+        }
+    }
+
+    fn checked_int_binop_helper(op: BinOp, signed: bool) -> Option<&'static str> {
+        match (op, signed) {
+            (BinOp::Add, true) => Some("bl_iadd_"),
+            (BinOp::Sub, true) => Some("bl_isub_"),
+            (BinOp::Mul, true) => Some("bl_imul_"),
+            (BinOp::Add, false) => Some("bl_uadd_"),
+            (BinOp::Sub, false) => Some("bl_usub_"),
+            (BinOp::Mul, false) => Some("bl_umul_"),
+            _ => None,
+        }
+    }
+
+    fn explicit_int_binop_helper(op: BinOp, signed: bool) -> Option<&'static str> {
+        match (op, signed) {
+            (BinOp::AddChecked, true) => Some("bl_iadd_checked_"),
+            (BinOp::SubChecked, true) => Some("bl_isub_checked_"),
+            (BinOp::MulChecked, true) => Some("bl_imul_checked_"),
+            (BinOp::AddWrapping, true) => Some("bl_iadd_wrapping_"),
+            (BinOp::SubWrapping, true) => Some("bl_isub_wrapping_"),
+            (BinOp::MulWrapping, true) => Some("bl_imul_wrapping_"),
+            (BinOp::AddSaturating, true) => Some("bl_iadd_saturating_"),
+            (BinOp::SubSaturating, true) => Some("bl_isub_saturating_"),
+            (BinOp::MulSaturating, true) => Some("bl_imul_saturating_"),
+            (BinOp::AddChecked, false) => Some("bl_uadd_checked_"),
+            (BinOp::SubChecked, false) => Some("bl_usub_checked_"),
+            (BinOp::MulChecked, false) => Some("bl_umul_checked_"),
+            (BinOp::AddWrapping, false) => Some("bl_uadd_wrapping_"),
+            (BinOp::SubWrapping, false) => Some("bl_usub_wrapping_"),
+            (BinOp::MulWrapping, false) => Some("bl_umul_wrapping_"),
+            (BinOp::AddSaturating, false) => Some("bl_uadd_saturating_"),
+            (BinOp::SubSaturating, false) => Some("bl_usub_saturating_"),
+            (BinOp::MulSaturating, false) => Some("bl_umul_saturating_"),
+            _ => None,
+        }
+    }
+
     /// Resolve the MIR type of a value passed to a sum-type constructor
     /// (`Ok`/`Err`/`Some`), for deciding whether the payload must be boxed.
     /// Beyond locals, this recognizes the `None` value (a `Global`/`Function`
     /// literal that is an `Option`), so `Ok(None)` / `Some(None)` box correctly
     /// instead of casting the Option struct into the scalar slot.
     fn sumtype_arg_type(&self, value: &MirValue, locals: &[MirLocal]) -> Option<MirType> {
-        match value {
-            MirValue::Local(id) => locals.get(id.0 as usize).map(|l| l.ty.clone()),
-            MirValue::Global(n) | MirValue::Function(n) if n.as_ref() == "None" => {
-                Some(MirType::Struct(Arc::from("Option")))
-            }
-            _ => None,
-        }
+        self.value_mir_type(value, locals)
+            .cloned()
+            .or_else(|| match value {
+                MirValue::Global(n) | MirValue::Function(n) if n.as_ref() == "None" => {
+                    Some(MirType::Option(Box::new(MirType::i32())))
+                }
+                _ => None,
+            })
     }
 
     fn value_is_build_string(&self, value: &MirValue, locals: &[MirLocal]) -> bool {
@@ -4583,8 +4713,9 @@ impl CBackend {
 
     fn printf_specifier_for_value(&self, value: &MirValue, locals: &[MirLocal]) -> &'static str {
         match self.value_mir_type(value, locals) {
-            Some(MirType::Int(IntSize::I64 | IntSize::I128 | IntSize::ISize, true)) => "%lld",
-            Some(MirType::Int(IntSize::I64 | IntSize::I128 | IntSize::ISize, false)) => "%llu",
+            Some(MirType::Int(IntSize::I128, _)) => "%s",
+            Some(MirType::Int(IntSize::I64 | IntSize::ISize, true)) => "%lld",
+            Some(MirType::Int(IntSize::I64 | IntSize::ISize, false)) => "%llu",
             Some(MirType::Int(_, true)) => "%d",
             Some(MirType::Int(_, false)) => "%u",
             // Floats print via a runtime formatter that renders Rust's Display
@@ -4615,8 +4746,45 @@ impl CBackend {
                 FloatSize::F32 => format!("bl_fmt_f32({})", rendered),
                 FloatSize::F64 => format!("bl_fmt_f64({})", rendered),
             }
+        } else if let Some(MirType::Int(IntSize::I128, signed)) = self.value_mir_type(value, locals)
+        {
+            if *signed {
+                format!("bl_fmt_i128({})", rendered)
+            } else {
+                format!("bl_fmt_u128({})", rendered)
+            }
         } else {
             rendered
+        }
+    }
+
+    /// Materialize an argument for a C variadic print call. 128-bit integers need
+    /// caller-owned buffers: `bl_fmt_i128`/`bl_fmt_u128` return static-ring
+    /// pointers, and a single call with more than the ring's slot count can reuse
+    /// a pointer before `printf` consumes it. This method is called after the
+    /// surrounding terminator already emitted indentation; if it emits prelude
+    /// lines, it leaves indentation ready for the final `printf`/`fprintf` line.
+    fn materialize_print_arg_to_c(&mut self, value: &MirValue, locals: &[MirLocal]) -> String {
+        let i128_signed = match self.value_mir_type(value, locals) {
+            Some(MirType::Int(IntSize::I128, signed)) => Some(*signed),
+            _ => None,
+        };
+
+        if let Some(signed) = i128_signed {
+            let rendered = self.value_to_c(value, locals);
+            let buffer = self.fresh_temp();
+            let helper = if signed {
+                "bl_fmt_i128_into"
+            } else {
+                "bl_fmt_u128_into"
+            };
+            write!(self.output, "char {}[64];\n", buffer).unwrap();
+            self.write_indent();
+            write!(self.output, "{}({}, {});\n", helper, buffer, rendered).unwrap();
+            self.write_indent();
+            buffer
+        } else {
+            self.print_arg_to_c(value, locals)
         }
     }
 
@@ -4687,11 +4855,10 @@ impl CBackend {
                 c_format.push('\n');
             }
             let escaped_format = self.escape_string(&c_format);
-            let rendered_args = args
-                .iter()
-                .skip(1)
-                .map(|arg| self.print_arg_to_c(arg, locals))
-                .collect::<Vec<_>>();
+            let mut rendered_args = Vec::new();
+            for arg in args.iter().skip(1) {
+                rendered_args.push(self.materialize_print_arg_to_c(arg, locals));
+            }
             if is_err {
                 write!(self.output, "fprintf(stderr, \"{}\"", escaped_format).unwrap();
             } else {
@@ -4708,7 +4875,7 @@ impl CBackend {
                 self.printf_specifier_for_value(&args[0], locals)
                     .to_string()
             };
-            let arg = self.print_arg_to_c(&args[0], locals);
+            let arg = self.materialize_print_arg_to_c(&args[0], locals);
             if is_err {
                 write!(self.output, "fprintf(stderr, \"{}\", {});\n", format, arg).unwrap();
             } else {
@@ -4786,7 +4953,7 @@ impl CBackend {
         match op {
             BinOp::Add | BinOp::AddChecked | BinOp::AddWrapping | BinOp::AddSaturating => "+",
             BinOp::Sub | BinOp::SubChecked | BinOp::SubWrapping | BinOp::SubSaturating => "-",
-            BinOp::Mul | BinOp::MulChecked | BinOp::MulWrapping => "*",
+            BinOp::Mul | BinOp::MulChecked | BinOp::MulWrapping | BinOp::MulSaturating => "*",
             BinOp::Div => "/",
             BinOp::Rem => "%",
             BinOp::BitAnd => "&",
@@ -5303,6 +5470,40 @@ mod tests {
     // =========================================================================
     // C BACKEND TESTS
     // =========================================================================
+
+    #[test]
+    fn c_integer_arithmetic_helper_table_keeps_explicit_mir_ops_distinct() {
+        assert_eq!(
+            CBackend::checked_int_binop_helper(BinOp::Add, true),
+            Some("bl_iadd_")
+        );
+        assert_eq!(
+            CBackend::checked_int_binop_helper(BinOp::Sub, false),
+            Some("bl_usub_")
+        );
+        assert_eq!(
+            CBackend::checked_int_binop_helper(BinOp::Mul, true),
+            Some("bl_imul_")
+        );
+
+        for op in [BinOp::AddChecked, BinOp::SubChecked, BinOp::MulChecked] {
+            assert_eq!(CBackend::checked_int_binop_helper(op, true), None);
+            assert_eq!(CBackend::checked_int_binop_helper(op, false), None);
+        }
+
+        assert_eq!(
+            CBackend::explicit_int_binop_helper(BinOp::AddChecked, true),
+            Some("bl_iadd_checked_")
+        );
+        assert_eq!(
+            CBackend::explicit_int_binop_helper(BinOp::SubWrapping, false),
+            Some("bl_usub_wrapping_")
+        );
+        assert_eq!(
+            CBackend::explicit_int_binop_helper(BinOp::MulSaturating, true),
+            Some("bl_imul_saturating_")
+        );
+    }
 
     #[test]
     fn test_c_backend_simple() {
@@ -7632,8 +7833,8 @@ fn main() {
         );
         // Should have an increment by 1
         assert!(
-            code.contains("+ 1)"),
-            "Expected increment by 1 in:\n{}",
+            code.contains("bl_iadd_i32(") && code.contains(", 1)"),
+            "Expected checked increment by 1 in:\n{}",
             code
         );
     }
@@ -7669,8 +7870,8 @@ fn main() {
         );
         // step_by(2): increment by 2 instead of 1
         assert!(
-            code.contains("+ 2)"),
-            "Expected increment by 2 for step_by(2) in:\n{}",
+            code.contains("bl_iadd_i32(") && code.contains(", 2)"),
+            "Expected checked increment by 2 for step_by(2) in:\n{}",
             code
         );
     }
@@ -7706,8 +7907,8 @@ fn main() {
         );
         // step_by(3): increment by 3
         assert!(
-            code.contains("+ 3)"),
-            "Expected increment by 3 for step_by(3) in:\n{}",
+            code.contains("bl_iadd_i32(") && code.contains(", 3)"),
+            "Expected checked increment by 3 for step_by(3) in:\n{}",
             code
         );
     }

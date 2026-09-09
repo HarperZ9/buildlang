@@ -1242,12 +1242,20 @@ impl<'ctx> MirLowerer<'ctx> {
     fn vec_fn_names_for_type(elem_ty: &MirType) -> CodegenResult<(String, String)> {
         let suffix: String = match elem_ty {
             MirType::Float(FloatSize::F64) | MirType::Float(FloatSize::F32) => "f64".to_string(),
-            MirType::Int(IntSize::I64, _) | MirType::Int(IntSize::ISize, _) => "i64".to_string(),
+            MirType::Int(IntSize::I8, true) => "i8".to_string(),
+            MirType::Int(IntSize::I16, true) => "i16".to_string(),
+            MirType::Int(IntSize::I32, true) => "i32".to_string(),
+            MirType::Int(IntSize::I64, true) => "i64".to_string(),
+            MirType::Int(IntSize::I128, true) => "i128".to_string(),
+            MirType::Int(IntSize::ISize, true) => "isize".to_string(),
+            MirType::Int(IntSize::I8, false) => "u8".to_string(),
+            MirType::Int(IntSize::I16, false) => "u16".to_string(),
+            MirType::Int(IntSize::I32, false) => "u32".to_string(),
+            MirType::Int(IntSize::I64, false) => "u64".to_string(),
+            MirType::Int(IntSize::I128, false) => "u128".to_string(),
+            MirType::Int(IntSize::ISize, false) => "usize".to_string(),
             MirType::Struct(n) if n.as_ref() == "BuildString" => "str".to_string(),
-            // The narrow integer widths, u32, char (lowered to u32), and bool all
-            // pass to the i32 helper's `int32_t` parameter by value, so their
-            // build and read strides agree.
-            MirType::Int(_, _) | MirType::Bool => "i32".to_string(),
+            MirType::Bool => "i32".to_string(),
             // A user struct, a nested vector, or a map rides the element-sized
             // wrapper the C backend generates; the suffix is the struct name or
             // the nested handle's C type, matching hvec_elem_suffix.
@@ -1648,6 +1656,39 @@ impl<'ctx> MirLowerer<'ctx> {
                             continue;
                         }
                     }
+                    // printf has no native i128/u128 format specifier. Convert
+                    // 128-bit integer macro arguments to an owned BuildString
+                    // before they enter the variadic call; static formatter
+                    // slots would alias when one call has many wide arguments.
+                    if let MirType::Int(IntSize::I128, signed) = ty {
+                        let conv = if signed {
+                            "build_i128_to_string"
+                        } else {
+                            "build_u128_to_string"
+                        };
+                        let builder = self.current_fn.as_mut().unwrap();
+                        let sdest = builder.create_local(MirType::Struct(Arc::from("BuildString")));
+                        let cont = builder.create_block();
+                        builder.call(
+                            MirValue::Function(Arc::from(conv)),
+                            vec![val],
+                            Some(sdest),
+                            cont,
+                        );
+                        builder.switch_to_block(cont);
+                        let ptr_local = builder.create_local(MirType::Ptr(Box::new(MirType::i8())));
+                        builder.assign(
+                            ptr_local,
+                            MirRValue::FieldAccess {
+                                base: MirValue::Local(sdest),
+                                field_name: Arc::from("ptr"),
+                                field_ty: MirType::Ptr(Box::new(MirType::i8())),
+                            },
+                        );
+                        arg_types.push(Some(MirType::Ptr(Box::new(MirType::i8()))));
+                        arg_values.push(MirValue::Local(ptr_local));
+                        continue;
+                    }
                     // For BuildString values, extract .ptr for printf
                     if let MirType::Struct(ref name) = ty {
                         if name.as_ref() == "BuildString" {
@@ -2024,8 +2065,9 @@ impl<'ctx> MirLowerer<'ctx> {
     /// Pick the correct printf format specifier based on the MIR type.
     fn format_specifier_for_type(&self, ty: Option<&MirType>, precision: Option<&str>) -> String {
         match ty {
-            Some(MirType::Int(IntSize::I64, true)) => "%lld".to_string(),
-            Some(MirType::Int(IntSize::I64, false)) => "%llu".to_string(),
+            Some(MirType::Int(IntSize::I128, _)) => "%s".to_string(),
+            Some(MirType::Int(IntSize::I64 | IntSize::ISize, true)) => "%lld".to_string(),
+            Some(MirType::Int(IntSize::I64 | IntSize::ISize, false)) => "%llu".to_string(),
             Some(MirType::Int(_, true)) => "%d".to_string(),
             Some(MirType::Int(_, false)) => "%u".to_string(),
             Some(MirType::Float(FloatSize::F32)) | Some(MirType::Float(FloatSize::F64)) => {
