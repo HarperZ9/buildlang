@@ -3365,11 +3365,11 @@ impl CBackend {
                 // Special-case setjmp: when passed a BuildHandler local,
                 // emit `setjmp(handler.env)` instead of `setjmp(handler)`.
                 //
-                // Special-case printf: bool arguments used with %s must be
-                // converted to "true"/"false" strings via a ternary.
+                // Special-case printf-style calls: bool arguments used with
+                // %s must be converted to "true"/"false" strings via a ternary.
                 // Look up target function's parameter types for auto-ref.
                 let target_params = self.fn_params.get(func_str.as_str()).cloned();
-                let is_printf = func_str == "printf";
+                let is_printf = matches!(func_str.as_str(), "printf" | "eprintf");
                 let args_str: Vec<_> = args
                     .iter()
                     .enumerate()
@@ -3411,7 +3411,8 @@ impl CBackend {
                                 }
                             }
                         }
-                        // For printf, convert bool args to "true"/"false" strings
+                        // For printf-style calls, convert bool args to
+                        // "true"/"false" strings.
                         if is_printf {
                             if let MirValue::Local(id) = a {
                                 if let Some(local) = locals.get(id.0 as usize) {
@@ -3428,7 +3429,13 @@ impl CBackend {
                     })
                     .collect();
 
-                if let Some(dest_local) = dest {
+                if func_str == "eprintf" {
+                    write!(self.output, "fprintf(stderr").unwrap();
+                    if !args_str.is_empty() {
+                        write!(self.output, ", {}", args_str.join(", ")).unwrap();
+                    }
+                    self.output.push_str(");\n");
+                } else if let Some(dest_local) = dest {
                     // Skip assignment for void-returning functions.
                     // Check both the dest type and known void functions
                     // (assert returns void but MIR may type the dest as i32).
@@ -5471,6 +5478,148 @@ mod tests {
     // C BACKEND TESTS
     // =========================================================================
 
+    fn function_style_print_mir_module() -> MirModule {
+        let mut module = MirModule::new("function_style_print_streams");
+        let out_fmt = module.intern_string("out {}");
+        let txt = module.intern_string("txt");
+        let stdout_bool_fmt = module.intern_string(" {}");
+        let err_fmt = module.intern_string("err {}");
+        let stderr_bool_fmt = module.intern_string(" {}");
+
+        let mut func = MirFunction::new("main", MirFnSig::new(vec![], MirType::Void));
+        func.is_public = true;
+        func.linkage = Linkage::External;
+
+        let mut b0 = MirBlock::new(BlockId(0));
+        b0.set_terminator(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("print")),
+            args: vec![
+                MirValue::Const(MirConst::Str(out_fmt)),
+                MirValue::Const(MirConst::Str(txt)),
+            ],
+            dest: None,
+            target: Some(BlockId(1)),
+            unwind: None,
+        });
+        let mut b1 = MirBlock::new(BlockId(1));
+        b1.set_terminator(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("println")),
+            args: vec![
+                MirValue::Const(MirConst::Str(stdout_bool_fmt)),
+                MirValue::Const(MirConst::Bool(true)),
+            ],
+            dest: None,
+            target: Some(BlockId(2)),
+            unwind: None,
+        });
+        let mut b2 = MirBlock::new(BlockId(2));
+        b2.set_terminator(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("eprint")),
+            args: vec![
+                MirValue::Const(MirConst::Str(err_fmt)),
+                MirValue::Const(MirConst::Str(txt)),
+            ],
+            dest: None,
+            target: Some(BlockId(3)),
+            unwind: None,
+        });
+        let mut b3 = MirBlock::new(BlockId(3));
+        b3.set_terminator(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("eprintln")),
+            args: vec![
+                MirValue::Const(MirConst::Str(stderr_bool_fmt)),
+                MirValue::Const(MirConst::Bool(false)),
+            ],
+            dest: None,
+            target: Some(BlockId(4)),
+            unwind: None,
+        });
+        let mut b4 = MirBlock::new(BlockId(4));
+        b4.set_terminator(MirTerminator::Return(None));
+        func.blocks = Some(vec![b0, b1, b2, b3, b4]);
+        module.add_function(func);
+        module
+    }
+
+    fn generate_c_from_mir(module: &MirModule) -> String {
+        let mut backend = CBackend::with_stdio_mode(StdioMode::PortableLf);
+        backend
+            .generate(module)
+            .expect("C backend should generate code")
+            .as_string()
+            .expect("generated C should be UTF-8")
+    }
+
+    fn c_compiler_for_test() -> Option<std::ffi::OsString> {
+        if let Some(cc) = std::env::var_os("CC") {
+            return Some(cc);
+        }
+
+        let candidates: &[&str] = if cfg!(windows) {
+            &["C:/Strawberry/c/bin/gcc.exe", "gcc", "cc"]
+        } else {
+            &["cc", "gcc"]
+        };
+        candidates
+            .iter()
+            .find(|candidate| {
+                std::process::Command::new(candidate)
+                    .arg("--version")
+                    .output()
+                    .map(|output| output.status.success())
+                    .unwrap_or(false)
+            })
+            .map(std::ffi::OsString::from)
+    }
+
+    fn assert_c_run_streams(
+        name: &str,
+        c_source: &str,
+        expected_stdout: &[u8],
+        expected_stderr: &[u8],
+    ) {
+        let Some(cc) = c_compiler_for_test() else {
+            eprintln!("skipping C backend execution test {name}: no C compiler found");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "buildlang_c_backend_run_{}_{}",
+            name,
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let source_path = dir.join("generated.c");
+        let exe_path = dir.join(format!("generated{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&source_path, c_source).expect("write generated C");
+
+        let mut compile_cmd = std::process::Command::new(&cc);
+        compile_cmd.arg(&source_path).arg("-o").arg(&exe_path);
+        if cfg!(windows) {
+            compile_cmd.arg("-lws2_32");
+        }
+        let compile = compile_cmd.output().expect("invoke C compiler");
+        assert!(
+            compile.status.success(),
+            "C compiler failed for {name}\nstdout:\n{}\nstderr:\n{}\nsource:\n{}",
+            String::from_utf8_lossy(&compile.stdout),
+            String::from_utf8_lossy(&compile.stderr),
+            c_source
+        );
+
+        let run = std::process::Command::new(&exe_path)
+            .output()
+            .expect("run generated C executable");
+        assert!(
+            run.status.success(),
+            "generated C executable failed for {name}\nstdout:\n{}\nstderr:\n{}\nsource:\n{}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr),
+            c_source
+        );
+        assert_eq!(run.stdout, expected_stdout);
+        assert_eq!(run.stderr, expected_stderr);
+    }
+
     #[test]
     fn c_integer_arithmetic_helper_table_keeps_explicit_mir_ops_distinct() {
         assert_eq!(
@@ -5502,6 +5651,18 @@ mod tests {
         assert_eq!(
             CBackend::explicit_int_binop_helper(BinOp::MulSaturating, true),
             Some("bl_imul_saturating_")
+        );
+    }
+
+    #[test]
+    fn generated_c_runs_function_style_prints_on_requested_streams() {
+        let module = function_style_print_mir_module();
+        let c = generate_c_from_mir(&module);
+        assert_c_run_streams(
+            "function_style_print_streams",
+            &c,
+            b"out txt true\n",
+            b"err txt false\n",
         );
     }
 

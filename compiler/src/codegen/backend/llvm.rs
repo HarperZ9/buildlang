@@ -175,6 +175,7 @@ impl LlvmBackend {
 
     /// Generate string literal globals.
     fn gen_string_literals(&mut self, module: &MirModule) {
+        let needs_bool_print_literals = self.module_needs_bool_print_literals(module);
         for (idx, s) in module.strings.iter().enumerate() {
             let global_name = format!("@.str.{}", idx);
             self.string_globals.insert(idx as u32, global_name.clone());
@@ -191,7 +192,20 @@ impl LlvmBackend {
             .unwrap();
         }
 
-        if !module.strings.is_empty() {
+        if needs_bool_print_literals {
+            writeln!(
+                &mut self.output,
+                "@.bl.bool.true = private unnamed_addr constant [5 x i8] c\"true\\00\", align 1"
+            )
+            .unwrap();
+            writeln!(
+                &mut self.output,
+                "@.bl.bool.false = private unnamed_addr constant [6 x i8] c\"false\\00\", align 1"
+            )
+            .unwrap();
+        }
+
+        if !module.strings.is_empty() || needs_bool_print_literals {
             writeln!(&mut self.output).unwrap();
         }
     }
@@ -1951,6 +1965,25 @@ impl LlvmBackend {
                 target,
                 unwind: _,
             } => {
+                if let Some(name) = Self::static_callee_name(callee) {
+                    if let Some((print_callee, is_stderr)) =
+                        Self::llvm_preformatted_print_call_target(name)
+                    {
+                        self.gen_llvm_print_call(
+                            print_callee,
+                            is_stderr,
+                            args,
+                            *dest,
+                            *target,
+                            func,
+                        )?;
+                        return Ok(());
+                    }
+                    if Self::is_semantic_print_call(name) {
+                        return Err(Self::unsupported_llvm_semantic_print_call(name));
+                    }
+                }
+
                 let callee_val = self.gen_value(callee, func)?;
 
                 let mut arg_strs = Vec::new();
@@ -2092,6 +2125,140 @@ impl LlvmBackend {
         }
 
         Ok(())
+    }
+
+    fn static_callee_name(value: &MirValue) -> Option<&str> {
+        match value {
+            MirValue::Function(name) | MirValue::Global(name) => Some(name.as_ref()),
+            _ => None,
+        }
+    }
+
+    fn llvm_preformatted_print_call_target(name: &str) -> Option<(&'static str, bool)> {
+        match name {
+            "printf" => Some(("printf", false)),
+            "eprintf" => Some(("fprintf", true)),
+            _ => None,
+        }
+    }
+
+    fn is_semantic_print_call(name: &str) -> bool {
+        matches!(name, "print" | "println" | "eprint" | "eprintln")
+    }
+
+    fn unsupported_llvm_semantic_print_call(name: &str) -> CodegenError {
+        CodegenError::Unsupported(format!(
+            "LLVM backend does not yet lower function-style print call `{name}`; use print!/println!/eprint!/eprintln! macros for LLVM, or target C/Rust for function-style formatting"
+        ))
+    }
+
+    fn llvm_external_callee_name(name: &str) -> &str {
+        Self::llvm_preformatted_print_call_target(name)
+            .map(|(callee, _)| callee)
+            .unwrap_or(name)
+    }
+
+    fn gen_llvm_print_call(
+        &mut self,
+        callee: &str,
+        is_stderr: bool,
+        args: &[MirValue],
+        dest: Option<LocalId>,
+        target: Option<BlockId>,
+        func: &MirFunction,
+    ) -> CodegenResult<()> {
+        let mut arg_strs = Vec::new();
+        if is_stderr {
+            let stderr = self.fresh_value();
+            writeln!(
+                &mut self.output,
+                "  {} = load ptr, ptr @stderr, align 8",
+                stderr
+            )
+            .unwrap();
+            arg_strs.push(format!("ptr {}", stderr));
+        }
+
+        for (arg_index, arg) in args.iter().enumerate() {
+            let ty = self.infer_value_type(arg, func)?;
+            if arg_index > 0 && ty == MirType::Bool {
+                let val = self.gen_value(arg, func)?;
+                let rendered = self.fresh_value();
+                writeln!(
+                    &mut self.output,
+                    "  {} = select i1 {}, ptr @.bl.bool.true, ptr @.bl.bool.false",
+                    rendered, val
+                )
+                .unwrap();
+                arg_strs.push(format!("ptr {}", rendered));
+                continue;
+            }
+
+            let val = self.gen_value(arg, func)?;
+            let llvm_ty = self.llvm_type(&ty)?;
+            arg_strs.push(format!("{} {}", llvm_ty, val));
+        }
+
+        let result = self.fresh_value();
+        writeln!(
+            &mut self.output,
+            "  {} = call i32 @{}({})",
+            result,
+            callee,
+            arg_strs.join(", ")
+        )
+        .unwrap();
+
+        if let Some(dest_local) = dest {
+            let dest_name = self.get_local_name(dest_local)?;
+            let dest_ty = self.get_local_type(dest_local, func)?;
+            let dest_llvm_ty = self.llvm_type(&dest_ty)?;
+            let dest_align = self.type_align(&dest_ty);
+            if dest_llvm_ty != "i32" {
+                return Err(CodegenError::Unsupported(format!(
+                    "LLVM print call result destination must be i32, got {dest_llvm_ty}"
+                )));
+            }
+            writeln!(
+                &mut self.output,
+                "  store i32 {}, ptr {}, align {}",
+                result, dest_name, dest_align
+            )
+            .unwrap();
+        }
+
+        if let Some(target_block) = target {
+            writeln!(&mut self.output, "  br label %bb{}", target_block.0).unwrap();
+        }
+
+        Ok(())
+    }
+
+    fn module_needs_bool_print_literals(&self, module: &MirModule) -> bool {
+        module.functions.iter().any(|func| {
+            func.blocks
+                .as_ref()
+                .map(|blocks| {
+                    blocks.iter().any(|block| {
+                        let Some(MirTerminator::Call {
+                            func: callee, args, ..
+                        }) = &block.terminator
+                        else {
+                            return false;
+                        };
+                        let Some(name) = Self::static_callee_name(callee) else {
+                            return false;
+                        };
+                        if Self::llvm_preformatted_print_call_target(name).is_none() {
+                            return false;
+                        }
+                        args.iter().skip(1).any(|arg| {
+                            matches!(self.infer_value_type(arg, func), Ok(MirType::Bool))
+                        })
+                    })
+                })
+                .unwrap_or(false)
+        })
     }
 
     // =========================================================================
@@ -2738,18 +2905,35 @@ impl LlvmBackend {
 
         // Collect names referenced via MirValue::Function / Call terminators
         let mut needed: HashSet<String> = HashSet::new();
+        let mut needs_stderr_global = false;
         for func in &mir.functions {
             if let Some(blocks) = &func.blocks {
                 for block in blocks {
                     if let Some(MirTerminator::Call { func: callee, .. }) = &block.terminator {
-                        if let MirValue::Function(name) = callee {
-                            if !known.contains(name.as_ref()) && !name.starts_with("llvm.") {
-                                needed.insert(name.to_string());
+                        if let Some(name) = Self::static_callee_name(callee) {
+                            if Self::is_semantic_print_call(name) {
+                                continue;
+                            }
+                            let external_name = Self::llvm_external_callee_name(name);
+                            if Self::llvm_preformatted_print_call_target(name)
+                                .map(|(_, is_stderr)| is_stderr)
+                                .unwrap_or(false)
+                            {
+                                needs_stderr_global = true;
+                            }
+                            if !known.contains(external_name) && !external_name.starts_with("llvm.")
+                            {
+                                needed.insert(external_name.to_string());
                             }
                         }
                     }
                 }
             }
+        }
+
+        if needs_stderr_global && !known.contains("stderr") {
+            writeln!(&mut self.output, "@stderr = external global ptr").unwrap();
+            writeln!(&mut self.output).unwrap();
         }
 
         if !needed.is_empty() {
@@ -2817,6 +3001,10 @@ impl Backend for LlvmBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codegen::CodeGenerator;
+    use crate::lexer::{Lexer, SourceFile};
+    use crate::parser::Parser;
+    use crate::types::{TypeChecker, TypeContext};
 
     fn create_test_module() -> MirModule {
         let mut module = MirModule::new("test");
@@ -2864,6 +3052,109 @@ mod tests {
 
         module.add_function(func);
         module
+    }
+
+    fn try_compile_build_to_llvm(source: &str) -> CodegenResult<String> {
+        let source_file = SourceFile::new("llvm_backend_test.bld", source);
+        let mut lexer = Lexer::new(&source_file);
+        let tokens = lexer.tokenize().expect("lexing should succeed");
+        let mut parser = Parser::new(&source_file, tokens);
+        let ast = parser.parse().expect("parsing should succeed");
+        assert!(
+            parser.errors().is_empty(),
+            "unexpected parser errors: {:?}",
+            parser.errors()
+        );
+
+        let mut ctx = TypeContext::new();
+        let mut checker = TypeChecker::new(&mut ctx);
+        checker.set_source_file(&source_file);
+        checker.check_module(&ast);
+        assert!(
+            !checker.has_errors(),
+            "unexpected type errors: {:?}",
+            checker.errors()
+        );
+
+        let mut codegen =
+            CodeGenerator::with_source(&ctx, Target::LlvmIr, source_file.source().into());
+        codegen
+            .generate(&ast)
+            .map(|output| output.as_string().expect("generated LLVM should be UTF-8"))
+    }
+
+    fn compile_build_to_llvm(source: &str) -> String {
+        try_compile_build_to_llvm(source).expect("llvm codegen should succeed")
+    }
+
+    fn function_style_print_mir_module() -> MirModule {
+        let mut module = MirModule::new("function_style_print_streams");
+        let out_fmt = module.intern_string("out {}");
+        let txt = module.intern_string("txt");
+        let stdout_bool_fmt = module.intern_string(" {}");
+        let err_fmt = module.intern_string("err {}");
+        let stderr_bool_fmt = module.intern_string(" {}");
+
+        let mut func = MirFunction::new("main", MirFnSig::new(vec![], MirType::Void));
+        func.is_public = true;
+        func.linkage = Linkage::External;
+
+        let mut b0 = MirBlock::new(BlockId(0));
+        b0.set_terminator(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("print")),
+            args: vec![
+                MirValue::Const(MirConst::Str(out_fmt)),
+                MirValue::Const(MirConst::Str(txt)),
+            ],
+            dest: None,
+            target: Some(BlockId(1)),
+            unwind: None,
+        });
+        let mut b1 = MirBlock::new(BlockId(1));
+        b1.set_terminator(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("println")),
+            args: vec![
+                MirValue::Const(MirConst::Str(stdout_bool_fmt)),
+                MirValue::Const(MirConst::Bool(true)),
+            ],
+            dest: None,
+            target: Some(BlockId(2)),
+            unwind: None,
+        });
+        let mut b2 = MirBlock::new(BlockId(2));
+        b2.set_terminator(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("eprint")),
+            args: vec![
+                MirValue::Const(MirConst::Str(err_fmt)),
+                MirValue::Const(MirConst::Str(txt)),
+            ],
+            dest: None,
+            target: Some(BlockId(3)),
+            unwind: None,
+        });
+        let mut b3 = MirBlock::new(BlockId(3));
+        b3.set_terminator(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("eprintln")),
+            args: vec![
+                MirValue::Const(MirConst::Str(stderr_bool_fmt)),
+                MirValue::Const(MirConst::Bool(false)),
+            ],
+            dest: None,
+            target: Some(BlockId(4)),
+            unwind: None,
+        });
+        let mut b4 = MirBlock::new(BlockId(4));
+        b4.set_terminator(MirTerminator::Return(None));
+        func.blocks = Some(vec![b0, b1, b2, b3, b4]);
+        module.add_function(func);
+        module
+    }
+
+    fn try_generate_llvm_from_mir(module: &MirModule) -> CodegenResult<String> {
+        let mut backend = LlvmBackend::new();
+        backend
+            .generate(module)
+            .map(|output| output.as_string().expect("generated LLVM should be UTF-8"))
     }
 
     #[test]
@@ -3062,6 +3353,76 @@ mod tests {
         assert!(output.contains("define external i32 @add_one"));
         assert!(output.contains("add i32"));
         assert!(output.contains("ret i32"));
+    }
+
+    #[test]
+    fn generated_llvm_declares_and_loads_stderr_for_eprint_macros() {
+        let llvm = compile_build_to_llvm(
+            r#"
+fn main() ~ Console {
+    eprint!("err");
+    eprintln!(" bad {}", true);
+}
+"#,
+        );
+
+        assert!(
+            !llvm.contains("@eprintf(")
+                && !llvm.contains("@eprint(")
+                && !llvm.contains("@eprintln("),
+            "stderr macro helper names should be lowered by the LLVM backend:\n{llvm}"
+        );
+        assert!(
+            llvm.contains("@stderr = external global ptr"),
+            "LLVM stderr output must declare the stderr global it references:\n{llvm}"
+        );
+        assert!(
+            llvm.contains("load ptr, ptr @stderr"),
+            "LLVM stderr output must load FILE* from the stderr global before fprintf:\n{llvm}"
+        );
+        assert!(
+            llvm.contains("call i32 @fprintf(ptr"),
+            "LLVM stderr output should call fprintf with the loaded stderr stream:\n{llvm}"
+        );
+        assert!(
+            llvm.contains("@.bl.bool.true")
+                && llvm.contains("@.bl.bool.false")
+                && llvm.contains("select i1 true, ptr @.bl.bool.true, ptr @.bl.bool.false"),
+            "LLVM formatted bool print arguments should be marshalled to string pointers:\n{llvm}"
+        );
+    }
+
+    #[test]
+    fn generated_llvm_rejects_source_function_style_println_until_semantic_formatting_exists() {
+        let err = try_compile_build_to_llvm(
+            r#"
+fn main() ~ Console {
+    println("out {}", true);
+}
+"#,
+        )
+        .expect_err("LLVM backend must not silently emit wrong function-style print IR");
+        let message = err.to_string();
+        assert!(
+            message.contains("LLVM backend")
+                && message.contains("function-style print")
+                && message.contains("print!/println!/eprint!/eprintln!"),
+            "unsupported diagnostic should name the LLVM function-style print gap:\n{message}"
+        );
+    }
+
+    #[test]
+    fn generated_llvm_rejects_mir_function_style_print_family_until_semantic_formatting_exists() {
+        let module = function_style_print_mir_module();
+        let err = try_generate_llvm_from_mir(&module)
+            .expect_err("LLVM backend must not silently emit wrong function-style print IR");
+        let message = err.to_string();
+        assert!(
+            message.contains("LLVM backend")
+                && message.contains("function-style print")
+                && message.contains("print!/println!/eprint!/eprintln!"),
+            "unsupported diagnostic should name the LLVM function-style print gap:\n{message}"
+        );
     }
 
     #[test]

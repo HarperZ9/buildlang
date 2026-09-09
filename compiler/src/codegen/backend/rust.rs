@@ -152,6 +152,20 @@ impl RustBackend {
         self.indent -= 1;
         self.writeln("}");
         self.writeln("");
+        self.writeln("fn build_eprintf<S: AsRef<str>>(fmt: S, args: &[String]) -> i32 {");
+        self.indent += 1;
+        self.writeln("eprint!(\"{}\", build_format(fmt.as_ref(), args));");
+        self.writeln("0");
+        self.indent -= 1;
+        self.writeln("}");
+        self.writeln("");
+        self.writeln("fn build_eprintln<S: AsRef<str>>(fmt: S, args: &[String]) -> i32 {");
+        self.indent += 1;
+        self.writeln("eprintln!(\"{}\", build_format(fmt.as_ref(), args));");
+        self.writeln("0");
+        self.indent -= 1;
+        self.writeln("}");
+        self.writeln("");
         // Numeric-to-string intrinsics. The C runtime returns a heap
         // `BuildString`; here each returns a native `String` whose `Display`
         // form matches the C output: the integer paths print decimal, and the
@@ -489,7 +503,14 @@ impl RustBackend {
         locals: &[MirLocal],
     ) -> CodegenResult<()> {
         let func_name = self.value_to_rust(func, locals);
-        if func_name == "printf" || func_name == "println" {
+        let print_runtime_call = match func_name.as_str() {
+            "printf" | "print" => Some("build_printf"),
+            "println" => Some("build_println"),
+            "eprintf" | "eprint" => Some("build_eprintf"),
+            "eprintln" => Some("build_eprintln"),
+            _ => None,
+        };
+        if let Some(runtime_call) = print_runtime_call {
             if args.is_empty() {
                 return Ok(());
             }
@@ -504,11 +525,6 @@ impl RustBackend {
                 .skip(1)
                 .map(|arg| format!("format!(\"{{}}\", {})", self.value_to_rust(arg, locals)))
                 .collect::<Vec<_>>();
-            let runtime_call = if func_name == "println" {
-                "build_println"
-            } else {
-                "build_printf"
-            };
             let call = format!("{}({}, &[{}])", runtime_call, fmt, arg_strings.join(", "));
             if let Some(dest) = dest {
                 self.writeln(&format!("{} = {};", self.local_name(dest, locals), call));
@@ -1454,6 +1470,78 @@ mod tests {
             .expect("generated Rust should be UTF-8")
     }
 
+    fn function_style_print_mir_module() -> MirModule {
+        let mut module = MirModule::new("function_style_print_streams");
+        let out_fmt = module.intern_string("out {}");
+        let txt = module.intern_string("txt");
+        let stdout_bool_fmt = module.intern_string(" {}");
+        let err_fmt = module.intern_string("err {}");
+        let stderr_bool_fmt = module.intern_string(" {}");
+
+        let mut func = MirFunction::new("main", MirFnSig::new(vec![], MirType::Void));
+        func.is_public = true;
+        func.linkage = Linkage::External;
+
+        let mut b0 = MirBlock::new(BlockId(0));
+        b0.set_terminator(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("print")),
+            args: vec![
+                MirValue::Const(MirConst::Str(out_fmt)),
+                MirValue::Const(MirConst::Str(txt)),
+            ],
+            dest: None,
+            target: Some(BlockId(1)),
+            unwind: None,
+        });
+        let mut b1 = MirBlock::new(BlockId(1));
+        b1.set_terminator(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("println")),
+            args: vec![
+                MirValue::Const(MirConst::Str(stdout_bool_fmt)),
+                MirValue::Const(MirConst::Bool(true)),
+            ],
+            dest: None,
+            target: Some(BlockId(2)),
+            unwind: None,
+        });
+        let mut b2 = MirBlock::new(BlockId(2));
+        b2.set_terminator(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("eprint")),
+            args: vec![
+                MirValue::Const(MirConst::Str(err_fmt)),
+                MirValue::Const(MirConst::Str(txt)),
+            ],
+            dest: None,
+            target: Some(BlockId(3)),
+            unwind: None,
+        });
+        let mut b3 = MirBlock::new(BlockId(3));
+        b3.set_terminator(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("eprintln")),
+            args: vec![
+                MirValue::Const(MirConst::Str(stderr_bool_fmt)),
+                MirValue::Const(MirConst::Bool(false)),
+            ],
+            dest: None,
+            target: Some(BlockId(4)),
+            unwind: None,
+        });
+        let mut b4 = MirBlock::new(BlockId(4));
+        b4.set_terminator(MirTerminator::Return(None));
+        func.blocks = Some(vec![b0, b1, b2, b3, b4]);
+        module.add_function(func);
+        module
+    }
+
+    fn generate_rust_from_mir(module: &MirModule) -> String {
+        let mut backend = RustBackend::new();
+        backend
+            .generate(module)
+            .expect("rust backend should generate code")
+            .as_string()
+            .expect("generated Rust should be UTF-8")
+    }
+
     fn assert_rustc_metadata_ok(name: &str, rust_source: &str) {
         let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
         let dir = std::env::temp_dir().join(format!(
@@ -1484,6 +1572,15 @@ mod tests {
     }
 
     fn assert_rustc_run_stdout(name: &str, rust_source: &str, expected_stdout: &str) {
+        assert_rustc_run_streams(name, rust_source, expected_stdout, "");
+    }
+
+    fn assert_rustc_run_streams(
+        name: &str,
+        rust_source: &str,
+        expected_stdout: &str,
+        expected_stderr: &str,
+    ) {
         let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
         let dir = std::env::temp_dir().join(format!(
             "buildlang_rust_backend_run_{}_{}",
@@ -1520,6 +1617,7 @@ mod tests {
             rust_source
         );
         assert_eq!(String::from_utf8_lossy(&run.stdout), expected_stdout);
+        assert_eq!(String::from_utf8_lossy(&run.stderr), expected_stderr);
     }
 
     #[test]
@@ -1548,6 +1646,32 @@ fn main() ~ Console {
     fn generated_rust_runs_for_scalar_branch_subset() {
         let rust = compile_build_to_rust(CORPUS_SCALAR_BRANCH);
         assert_rustc_run_stdout("run_scalar_branch", &rust, "4\n");
+    }
+
+    #[test]
+    fn generated_rust_runs_eprint_macros_on_stderr() {
+        let source = r#"
+fn main() ~ Console {
+    print!("out");
+    eprint!("err");
+    println!(" ok");
+    eprintln!(" bad {}", true);
+}
+"#;
+        let rust = compile_build_to_rust(source);
+        assert_rustc_run_streams("eprint_streams", &rust, "out ok\n", "err bad true\n");
+    }
+
+    #[test]
+    fn generated_rust_runs_function_style_prints_on_requested_streams() {
+        let module = function_style_print_mir_module();
+        let rust = generate_rust_from_mir(&module);
+        assert_rustc_run_streams(
+            "function_style_print_streams",
+            &rust,
+            "out txt true\n",
+            "err txt false\n",
+        );
     }
 
     #[test]
