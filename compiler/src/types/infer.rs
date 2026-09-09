@@ -56,6 +56,48 @@ impl PatBindMode {
     }
 }
 
+fn is_unsupported_explicit_integer_arithmetic_method(method_name: &str) -> bool {
+    matches!(
+        method_name,
+        "wrapping_div"
+            | "wrapping_rem"
+            | "wrapping_neg"
+            | "wrapping_abs"
+            | "wrapping_shl"
+            | "wrapping_shr"
+            | "saturating_div"
+            | "saturating_neg"
+            | "saturating_abs"
+            | "saturating_pow"
+            | "checked_div"
+            | "checked_rem"
+            | "checked_neg"
+            | "checked_abs"
+            | "checked_shl"
+            | "checked_shr"
+            | "checked_pow"
+            | "overflowing_add"
+            | "overflowing_sub"
+            | "overflowing_mul"
+            | "overflowing_div"
+            | "overflowing_rem"
+            | "overflowing_neg"
+            | "overflowing_abs"
+            | "overflowing_shl"
+            | "overflowing_shr"
+            | "overflowing_pow"
+    )
+}
+
+fn supported_explicit_integer_arithmetic_method_returns_option(method_name: &str) -> Option<bool> {
+    match method_name {
+        "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "saturating_add" | "saturating_sub"
+        | "saturating_mul" => Some(false),
+        "checked_add" | "checked_sub" | "checked_mul" => Some(true),
+        _ => None,
+    }
+}
+
 /// Well-known type definition IDs for built-in types.
 #[derive(Debug, Clone, Copy)]
 pub struct WellKnownTypes {
@@ -174,6 +216,29 @@ impl BreakSourceFrame {
         Self {
             visible_scope_count,
             snapshots: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConstInteger {
+    Signed(i128),
+    Unsigned(u128),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConstIntegerEval {
+    Value(ConstInteger),
+    Overflow { op: String },
+    LiteralOutOfRange { literal: String },
+    NonConst,
+}
+
+impl ConstIntegerEval {
+    fn value(self) -> Option<ConstInteger> {
+        match self {
+            ConstIntegerEval::Value(value) => Some(value),
+            _ => None,
         }
     }
 }
@@ -2710,9 +2775,9 @@ impl<'ctx> TypeInfer<'ctx> {
                 let left_val = self.eval_const_expr(left)?;
                 let right_val = self.eval_const_expr(right)?;
                 match op {
-                    BinOp::Add => Some(left_val + right_val),
+                    BinOp::Add => left_val.checked_add(right_val),
                     BinOp::Sub => left_val.checked_sub(right_val),
-                    BinOp::Mul => Some(left_val * right_val),
+                    BinOp::Mul => left_val.checked_mul(right_val),
                     BinOp::Div => {
                         if right_val != 0 {
                             Some(left_val / right_val)
@@ -2823,7 +2888,7 @@ impl<'ctx> TypeInfer<'ctx> {
                 self.infer_array_repeat(element, count, expr.span)
             }
 
-            ExprKind::Unary { op, expr: inner } => self.infer_unary(*op, inner),
+            ExprKind::Unary { op, expr: inner } => self.infer_unary(*op, inner, expr.span),
             ExprKind::Binary { op, left, right } => self.infer_binary(*op, left, right, expr.span),
             ExprKind::Assign { op, target, value } => {
                 self.infer_assign(*op, target, value, expr.span)
@@ -3006,9 +3071,14 @@ impl<'ctx> TypeInfer<'ctx> {
 
     /// Check an expression against an expected type.
     pub fn check_expr(&mut self, expr: &ast::Expr, expected: &Ty) -> Ty {
+        let error_count = self.errors.len();
         let inferred = self.infer_expr(expr);
         if let Err(_) = self.unify(&inferred, expected, expr.span) {
             // Error already recorded
+        }
+        if self.errors.len() == error_count {
+            let expected = self.apply(expected);
+            self.check_const_integer_expr(expr, &expected, expr.span);
         }
         self.apply(&inferred)
     }
@@ -3017,24 +3087,249 @@ impl<'ctx> TypeInfer<'ctx> {
     // LITERAL INFERENCE
     // =========================================================================
 
+    fn int_suffix_ty(suffix: ast::IntSuffix) -> IntTy {
+        match suffix {
+            ast::IntSuffix::I8 => IntTy::I8,
+            ast::IntSuffix::I16 => IntTy::I16,
+            ast::IntSuffix::I32 => IntTy::I32,
+            ast::IntSuffix::I64 => IntTy::I64,
+            ast::IntSuffix::I128 => IntTy::I128,
+            ast::IntSuffix::Isize => IntTy::Isize,
+            ast::IntSuffix::U8 => IntTy::U8,
+            ast::IntSuffix::U16 => IntTy::U16,
+            ast::IntSuffix::U32 => IntTy::U32,
+            ast::IntSuffix::U64 => IntTy::U64,
+            ast::IntSuffix::U128 => IntTy::U128,
+            ast::IntSuffix::Usize => IntTy::Usize,
+        }
+    }
+
+    fn int_suffix_str(suffix: ast::IntSuffix) -> &'static str {
+        match suffix {
+            ast::IntSuffix::I8 => "i8",
+            ast::IntSuffix::I16 => "i16",
+            ast::IntSuffix::I32 => "i32",
+            ast::IntSuffix::I64 => "i64",
+            ast::IntSuffix::I128 => "i128",
+            ast::IntSuffix::Isize => "isize",
+            ast::IntSuffix::U8 => "u8",
+            ast::IntSuffix::U16 => "u16",
+            ast::IntSuffix::U32 => "u32",
+            ast::IntSuffix::U64 => "u64",
+            ast::IntSuffix::U128 => "u128",
+            ast::IntSuffix::Usize => "usize",
+        }
+    }
+
+    fn literal_label(value: u128, suffix: Option<ast::IntSuffix>) -> String {
+        match suffix {
+            Some(suffix) => format!("{}{}", value, Self::int_suffix_str(suffix)),
+            None => value.to_string(),
+        }
+    }
+
+    fn int_ty_bits(int_ty: IntTy) -> u32 {
+        int_ty.bit_width().unwrap_or(64)
+    }
+
+    fn signed_bounds(int_ty: IntTy) -> (i128, i128) {
+        let bits = Self::int_ty_bits(int_ty);
+        if bits >= 128 {
+            (i128::MIN, i128::MAX)
+        } else {
+            let max = (1i128 << (bits - 1)) - 1;
+            let min = -(1i128 << (bits - 1));
+            (min, max)
+        }
+    }
+
+    fn unsigned_max(int_ty: IntTy) -> u128 {
+        let bits = Self::int_ty_bits(int_ty);
+        if bits >= 128 {
+            u128::MAX
+        } else {
+            (1u128 << bits) - 1
+        }
+    }
+
+    fn int_literal_fits_ty(value: u128, int_ty: IntTy) -> bool {
+        if int_ty.is_signed() {
+            let (_, max) = Self::signed_bounds(int_ty);
+            value <= max as u128
+        } else {
+            value <= Self::unsigned_max(int_ty)
+        }
+    }
+
+    fn check_literal_range(&mut self, value: u128, suffix: Option<ast::IntSuffix>, span: Span) {
+        if let Some(suffix) = suffix {
+            let int_ty = Self::int_suffix_ty(suffix);
+            if !Self::int_literal_fits_ty(value, int_ty) {
+                self.error(
+                    TypeError::IntegerLiteralOutOfRange {
+                        literal: Self::literal_label(value, Some(suffix)),
+                        ty: int_ty.to_string(),
+                    },
+                    span,
+                );
+            }
+        }
+    }
+
+    fn eval_const_integer_expr(expr: &ast::Expr, int_ty: IntTy) -> ConstIntegerEval {
+        match &expr.kind {
+            ExprKind::Literal(AstLiteral::Int { value, suffix, .. }) => {
+                if !Self::int_literal_fits_ty(*value, int_ty) {
+                    return ConstIntegerEval::LiteralOutOfRange {
+                        literal: Self::literal_label(*value, *suffix),
+                    };
+                }
+                if int_ty.is_signed() {
+                    ConstIntegerEval::Value(ConstInteger::Signed(*value as i128))
+                } else {
+                    ConstIntegerEval::Value(ConstInteger::Unsigned(*value))
+                }
+            }
+            ExprKind::Paren(inner) => Self::eval_const_integer_expr(inner, int_ty),
+            ExprKind::Unary {
+                op: UnaryOp::Neg,
+                expr: inner,
+            } => {
+                let Some(value) = Self::eval_const_integer_expr(inner, int_ty).value() else {
+                    return match Self::eval_const_integer_expr(inner, int_ty) {
+                        ConstIntegerEval::Overflow { op } => ConstIntegerEval::Overflow { op },
+                        ConstIntegerEval::LiteralOutOfRange { literal } => {
+                            ConstIntegerEval::LiteralOutOfRange { literal }
+                        }
+                        _ => ConstIntegerEval::NonConst,
+                    };
+                };
+                if int_ty.is_signed() {
+                    let ConstInteger::Signed(value) = value else {
+                        return ConstIntegerEval::NonConst;
+                    };
+                    let Some(negated) = value.checked_neg() else {
+                        return ConstIntegerEval::Overflow {
+                            op: "unary `-`".to_string(),
+                        };
+                    };
+                    let (min, max) = Self::signed_bounds(int_ty);
+                    if negated < min || negated > max {
+                        ConstIntegerEval::Overflow {
+                            op: "unary `-`".to_string(),
+                        }
+                    } else {
+                        ConstIntegerEval::Value(ConstInteger::Signed(negated))
+                    }
+                } else {
+                    let ConstInteger::Unsigned(value) = value else {
+                        return ConstIntegerEval::NonConst;
+                    };
+                    if value == 0 {
+                        ConstIntegerEval::Value(ConstInteger::Unsigned(0))
+                    } else {
+                        ConstIntegerEval::Overflow {
+                            op: "unary `-`".to_string(),
+                        }
+                    }
+                }
+            }
+            ExprKind::Binary { op, left, right }
+                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) =>
+            {
+                let left_eval = Self::eval_const_integer_expr(left, int_ty);
+                let right_eval = Self::eval_const_integer_expr(right, int_ty);
+                match (left_eval, right_eval) {
+                    (
+                        ConstIntegerEval::Value(ConstInteger::Signed(left)),
+                        ConstIntegerEval::Value(ConstInteger::Signed(right)),
+                    ) if int_ty.is_signed() => {
+                        let result = match op {
+                            BinOp::Add => left.checked_add(right),
+                            BinOp::Sub => left.checked_sub(right),
+                            BinOp::Mul => left.checked_mul(right),
+                            _ => unreachable!(),
+                        };
+                        let Some(result) = result else {
+                            return ConstIntegerEval::Overflow {
+                                op: format!("`{}`", op.as_str()),
+                            };
+                        };
+                        let (min, max) = Self::signed_bounds(int_ty);
+                        if result < min || result > max {
+                            ConstIntegerEval::Overflow {
+                                op: format!("`{}`", op.as_str()),
+                            }
+                        } else {
+                            ConstIntegerEval::Value(ConstInteger::Signed(result))
+                        }
+                    }
+                    (
+                        ConstIntegerEval::Value(ConstInteger::Unsigned(left)),
+                        ConstIntegerEval::Value(ConstInteger::Unsigned(right)),
+                    ) if !int_ty.is_signed() => {
+                        let result = match op {
+                            BinOp::Add => left.checked_add(right),
+                            BinOp::Sub => left.checked_sub(right),
+                            BinOp::Mul => left.checked_mul(right),
+                            _ => unreachable!(),
+                        };
+                        let Some(result) = result else {
+                            return ConstIntegerEval::Overflow {
+                                op: format!("`{}`", op.as_str()),
+                            };
+                        };
+                        if result > Self::unsigned_max(int_ty) {
+                            ConstIntegerEval::Overflow {
+                                op: format!("`{}`", op.as_str()),
+                            }
+                        } else {
+                            ConstIntegerEval::Value(ConstInteger::Unsigned(result))
+                        }
+                    }
+                    (ConstIntegerEval::Overflow { op }, _)
+                    | (_, ConstIntegerEval::Overflow { op }) => ConstIntegerEval::Overflow { op },
+                    (ConstIntegerEval::LiteralOutOfRange { literal }, _)
+                    | (_, ConstIntegerEval::LiteralOutOfRange { literal }) => {
+                        ConstIntegerEval::LiteralOutOfRange { literal }
+                    }
+                    _ => ConstIntegerEval::NonConst,
+                }
+            }
+            _ => ConstIntegerEval::NonConst,
+        }
+    }
+
+    fn check_const_integer_expr(&mut self, expr: &ast::Expr, expected: &Ty, span: Span) {
+        let expected = self.apply(expected);
+        let TyKind::Int(int_ty) = expected.kind else {
+            return;
+        };
+        match Self::eval_const_integer_expr(expr, int_ty) {
+            ConstIntegerEval::Overflow { op } => self.error(
+                TypeError::IntegerOverflow {
+                    op,
+                    ty: int_ty.to_string(),
+                },
+                span,
+            ),
+            ConstIntegerEval::LiteralOutOfRange { literal } => self.error(
+                TypeError::IntegerLiteralOutOfRange {
+                    literal,
+                    ty: int_ty.to_string(),
+                },
+                span,
+            ),
+            ConstIntegerEval::Value(_) | ConstIntegerEval::NonConst => {}
+        }
+    }
+
     fn infer_literal(&mut self, lit: &AstLiteral) -> Ty {
         match lit {
             AstLiteral::Int { suffix, value, .. } => {
                 if let Some(suffix) = suffix {
-                    match suffix {
-                        ast::IntSuffix::I8 => Ty::int(IntTy::I8),
-                        ast::IntSuffix::I16 => Ty::int(IntTy::I16),
-                        ast::IntSuffix::I32 => Ty::int(IntTy::I32),
-                        ast::IntSuffix::I64 => Ty::int(IntTy::I64),
-                        ast::IntSuffix::I128 => Ty::int(IntTy::I128),
-                        ast::IntSuffix::Isize => Ty::int(IntTy::Isize),
-                        ast::IntSuffix::U8 => Ty::int(IntTy::U8),
-                        ast::IntSuffix::U16 => Ty::int(IntTy::U16),
-                        ast::IntSuffix::U32 => Ty::int(IntTy::U32),
-                        ast::IntSuffix::U64 => Ty::int(IntTy::U64),
-                        ast::IntSuffix::U128 => Ty::int(IntTy::U128),
-                        ast::IntSuffix::Usize => Ty::int(IntTy::Usize),
-                    }
+                    self.check_literal_range(*value, Some(*suffix), Span::dummy());
+                    Ty::int(Self::int_suffix_ty(*suffix))
                 } else if *value > i64::MAX as u128 {
                     // Exceeds i64 -> must be i128 (would silently truncate otherwise).
                     Ty::int(IntTy::I128)
@@ -3477,7 +3772,7 @@ impl<'ctx> TypeInfer<'ctx> {
     // OPERATOR INFERENCE
     // =========================================================================
 
-    fn infer_unary(&mut self, op: UnaryOp, expr: &ast::Expr) -> Ty {
+    fn infer_unary(&mut self, op: UnaryOp, expr: &ast::Expr, span: Span) -> Ty {
         // `&x` / `&mut x` borrow their operand: it must not consume a linear value.
         let is_borrow = matches!(op, UnaryOp::Ref | UnaryOp::RefMut);
         if is_borrow {
@@ -3491,7 +3786,19 @@ impl<'ctx> TypeInfer<'ctx> {
         match op {
             UnaryOp::Neg => {
                 // Negation works on numeric types
-                inner_ty
+                let result = self.apply(&inner_ty);
+                self.check_const_integer_expr(
+                    &ast::Expr::new(
+                        ExprKind::Unary {
+                            op,
+                            expr: Box::new(expr.clone()),
+                        },
+                        span,
+                    ),
+                    &result,
+                    span,
+                );
+                result
             }
             UnaryOp::Not => {
                 // Logical not on bool, bitwise not on integers
@@ -3764,7 +4071,20 @@ impl<'ctx> TypeInfer<'ctx> {
                     return Ty::error();
                 }
                 let _ = self.unify(&left_ty, &right_ty, span);
-                self.apply(&left_ty)
+                let result = self.apply(&left_ty);
+                self.check_const_integer_expr(
+                    &ast::Expr::new(
+                        ExprKind::Binary {
+                            op,
+                            left: Box::new(left.clone()),
+                            right: Box::new(right.clone()),
+                        },
+                        span,
+                    ),
+                    &result,
+                    span,
+                );
+                result
             }
 
             // Remainder: no operation-worded pre-check (per design, `m % m`
@@ -3811,7 +4131,22 @@ impl<'ctx> TypeInfer<'ctx> {
                     }
                     _ => {
                         let _ = self.unify(&left_ty, &right_ty, span);
-                        self.apply(&left_ty)
+                        let result = self.apply(&left_ty);
+                        if op == BinOp::Mul {
+                            self.check_const_integer_expr(
+                                &ast::Expr::new(
+                                    ExprKind::Binary {
+                                        op,
+                                        left: Box::new(left.clone()),
+                                        right: Box::new(right.clone()),
+                                    },
+                                    span,
+                                ),
+                                &result,
+                                span,
+                            );
+                        }
+                        result
                     }
                 }
             }
@@ -4901,6 +5236,23 @@ impl<'ctx> TypeInfer<'ctx> {
         Ty::fresh_var()
     }
 
+    fn primitive_integer_receiver_ty(ty: &Ty) -> Option<Ty> {
+        match &ty.kind {
+            TyKind::Int(_) => Some(ty.clone()),
+            TyKind::Ref(_, _, inner) if matches!(&inner.kind, TyKind::Int(_)) => {
+                Some((**inner).clone())
+            }
+            _ => None,
+        }
+    }
+
+    fn option_ty(&self, payload: Ty) -> Option<Ty> {
+        self.well_known_types
+            .option
+            .or_else(|| self.ctx.lookup_type_by_name("Option").map(|ty| ty.def_id))
+            .map(|def_id| Ty::adt(def_id, vec![payload]))
+    }
+
     fn infer_method_call(
         &mut self,
         receiver: &ast::Expr,
@@ -4994,6 +5346,55 @@ impl<'ctx> TypeInfer<'ctx> {
             _ => false,
         };
         let is_numeric = is_int || is_float;
+
+        if let Some(returns_option) =
+            supported_explicit_integer_arithmetic_method_returns_option(method_name)
+        {
+            if let Some(int_ty) = Self::primitive_integer_receiver_ty(&receiver_ty) {
+                if args.len() != 1 {
+                    self.error(
+                        TypeError::ArityMismatch {
+                            expected: 1,
+                            found: args.len(),
+                        },
+                        span,
+                    );
+                    return Ty::error();
+                }
+                if let Some(arg_ty) = arg_tys.first() {
+                    let _ = self.coerce_arg(&int_ty, arg_ty, span);
+                }
+                if returns_option {
+                    if let Some(option_ty) = self.option_ty(int_ty) {
+                        return option_ty;
+                    }
+                    self.error(
+                        TypeError::UnsupportedConstruct {
+                            construct: format!(".{method_name}() on a primitive integer"),
+                            detail: "checked primitive integer arithmetic requires the built-in \
+                                     `Option<T>` type to be available"
+                                .to_string(),
+                        },
+                        span,
+                    );
+                    return Ty::error();
+                }
+                return int_ty;
+            }
+        }
+
+        if is_int && is_unsupported_explicit_integer_arithmetic_method(method_name) {
+            self.error(
+                TypeError::UnsupportedConstruct {
+                    construct: format!(".{method_name}() on a primitive integer"),
+                    detail: "this explicit primitive integer arithmetic method is not implemented; \
+                             supported primitive methods are wrapping/checked/saturating add, sub, and mul"
+                        .to_string(),
+                },
+                span,
+            );
+            return Ty::error();
+        }
 
         match method_name {
             // =================================================================
@@ -5114,13 +5515,7 @@ impl<'ctx> TypeInfer<'ctx> {
             {
                 return Ty::int(IntTy::U32);
             }
-            "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "wrapping_div" | "wrapping_neg"
-            | "wrapping_shl" | "wrapping_shr" | "saturating_add" | "saturating_sub"
-            | "saturating_mul" | "checked_add" | "checked_sub" | "checked_mul" | "checked_div"
-            | "overflowing_add" | "overflowing_sub" | "overflowing_mul" | "rotate_left"
-            | "rotate_right" | "swap_bytes" | "reverse_bits"
-                if is_int =>
-            {
+            "rotate_left" | "rotate_right" | "swap_bytes" | "reverse_bits" if is_int => {
                 return receiver_ty.clone();
             }
             "to_le_bytes" | "to_be_bytes" | "to_ne_bytes" if is_int => {
@@ -5131,7 +5526,6 @@ impl<'ctx> TypeInfer<'ctx> {
             }
             "pow" if is_int => return receiver_ty.clone(),
             "abs" if is_int => return receiver_ty.clone(),
-            "checked_neg" | "checked_abs" if is_int => return Ty::fresh_var(),
             "to_le" | "to_be" | "to_ne" if is_int => return receiver_ty.clone(),
             "is_power_of_two" if is_int => return Ty::bool(),
             "next_power_of_two" if is_int => return receiver_ty.clone(),
@@ -5528,12 +5922,12 @@ impl<'ctx> TypeInfer<'ctx> {
                         );
                     }
                 }
-                (TyKind::Int(_)
+                TyKind::Int(_)
                 | TyKind::Char
                 | TyKind::Infer(InferTy {
                     kind: InferKind::Int,
                     ..
-                })) if !has_catch_all => {
+                }) if !has_catch_all => {
                     // Finitely many literal arms can never cover a whole integer
                     // or char type. An integer inference variable (a literal
                     // scrutinee not yet defaulted to a concrete width) only ever
@@ -5889,6 +6283,7 @@ impl<'ctx> TypeInfer<'ctx> {
         };
 
         if let Some(init) = &local.init {
+            let error_count = self.errors.len();
             // let-else (`let PAT = expr else { ... }`) parses, but its diverge
             // block is neither type-checked nor lowered: codegen would silently
             // DISCARD the else path (a silent miscompile). Reject loudly until
@@ -5908,6 +6303,10 @@ impl<'ctx> TypeInfer<'ctx> {
             }
             let init_ty = self.infer_expr(&init.expr);
             let _ = self.unify(&ty, &init_ty, local.span);
+            if self.errors.len() == error_count {
+                let applied_ty = self.apply(&ty);
+                self.check_const_integer_expr(&init.expr, &applied_ty, init.expr.span);
+            }
 
             // Borrow check: if binding a reference, track the borrow
             let var_name = match &local.pattern.kind {
@@ -6741,20 +7140,28 @@ impl<'ctx> TypeInfer<'ctx> {
                     .iter()
                     .enumerate()
                     .map(|(i, _)| {
-                        if let TyKind::Adt(def_id, _) = &resolved_ty.kind {
+                        if let TyKind::Adt(def_id, substs) = &resolved_ty.kind {
                             if let Some(type_def) = self.ctx.lookup_type(*def_id) {
                                 match &type_def.kind {
                                     TypeDefKind::Struct(struct_def) if struct_def.is_tuple => {
                                         return struct_def
                                             .fields
                                             .get(i)
-                                            .map(|(_, ty)| ty.clone())
+                                            .map(|(_, ty)| ty.substitute_params(substs))
                                             .unwrap_or_else(Ty::fresh_var);
                                     }
                                     TypeDefKind::Enum(enum_def) => {
                                         let variant_name =
                                             path.last_ident().map(|ident| ident.name.as_ref());
                                         if let Some(variant_name) = variant_name {
+                                            if Some(*def_id) == self.well_known_types.option
+                                                && variant_name == "Some"
+                                                && i == 0
+                                            {
+                                                if let Some(payload_ty) = substs.first() {
+                                                    return payload_ty.clone();
+                                                }
+                                            }
                                             if let Some(variant) =
                                                 enum_def.variants.iter().find(|variant| {
                                                     variant.name.as_ref() == variant_name
@@ -6763,7 +7170,7 @@ impl<'ctx> TypeInfer<'ctx> {
                                                 return variant
                                                     .fields
                                                     .get(i)
-                                                    .map(|(_, ty)| ty.clone())
+                                                    .map(|(_, ty)| ty.substitute_params(substs))
                                                     .unwrap_or_else(Ty::fresh_var);
                                             }
                                         }

@@ -454,7 +454,7 @@ impl X86_64Backend {
             BinOp::Sub | BinOp::SubChecked | BinOp::SubWrapping | BinOp::SubSaturating => {
                 self.output.push_str("    sub rax, rcx\n");
             }
-            BinOp::Mul | BinOp::MulChecked | BinOp::MulWrapping => {
+            BinOp::Mul | BinOp::MulChecked | BinOp::MulWrapping | BinOp::MulSaturating => {
                 self.output.push_str("    imul rax, rcx\n");
             }
             BinOp::Div => {
@@ -627,7 +627,8 @@ impl X86_64Backend {
             MirType::TraitObject(_) => 16, // fat pointer: data ptr + vtable ptr
             MirType::Vec(_) => 8,          // BuildVecHandle is a pointer
             MirType::Tuple(elems) => elems.iter().map(|e| self.type_size(e)).sum(),
-            MirType::Map(_, _) => 8, // BuildMapHandle is a pointer
+            MirType::Map(_, _) => 8,  // BuildMapHandle is a pointer
+            MirType::Option(_) => 16, // opaque Option payload for native backend layout
         }
     }
 
@@ -984,7 +985,7 @@ impl X86_64Backend {
             BinOp::Sub | BinOp::SubChecked | BinOp::SubWrapping | BinOp::SubSaturating => {
                 self.enc().sub_rr(Reg64::RAX, Reg64::RCX);
             }
-            BinOp::Mul | BinOp::MulChecked | BinOp::MulWrapping => {
+            BinOp::Mul | BinOp::MulChecked | BinOp::MulWrapping | BinOp::MulSaturating => {
                 self.enc().imul_rr(Reg64::RAX, Reg64::RCX);
             }
             BinOp::Div => {

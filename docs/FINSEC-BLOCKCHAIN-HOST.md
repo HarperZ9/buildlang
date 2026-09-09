@@ -28,10 +28,14 @@
 
 **The load-bearing gaps (this is what the brick plan exists to close):**
 
-- **Overflow is unspecified.** Integer arithmetic has no defined overflow
-  behavior yet. For money and consensus that is a critical-bug class: a silent
-  wrap is a minted-coin or a mispriced trade. **Deterministic checked / wrapping
-  / saturating arithmetic is the decisive first brick** for both domains.
+- **Plain integer overflow now traps; domain numeric types remain.** Plain
+  fixed-width integer `+`, `-`, `*`, compound assignment, and signed unary `-`
+  are checked: literal/range and foldable overflow are compile-time diagnostics,
+  and runtime overflow aborts through the arithmetic panic path. Division and
+  remainder keep their existing zero-divisor and signed `MIN / -1` traps. This
+  removes silent wrap from ordinary integer cents and deterministic counters;
+  native `decimal`, `u256`, and explicit ergonomic numeric APIs remain separate
+  bricks below.
   *(Related foundation fix landed 2026-06-30: unsuffixed integer literals over
   i32 range were being silently truncated to 32 bits in both the type checker and
   the MIR lowering — e.g. a 64-bit value printed as `-808`. Now widened to i64 /
@@ -70,17 +74,19 @@ tamper-evident (1=yes, changing an amount changes the hash) 1
   (`2599 -> 9999`) yields a different hash, so the chain is tamper-evident.
 
 The hash is a deterministic *non-cryptographic* mix with explicit modular
-reduction — chosen precisely so it does **not** rely on the unspecified-overflow
-gap. That honesty is the point: the spike proves expressibility + determinism
-today, and names exactly what each brick adds.
+reduction -- chosen precisely so it does **not** rely on overflow. That honesty
+is the point: the spike proves expressibility + determinism today, and names
+exactly what each brick adds.
 
 ## The path (in dependency order)
 
-1. **Deterministic checked / wrapping / saturating arithmetic** — the decisive
-   first brick, shared by both domains. `checked_add(a, b) -> Option<T>` (None on
-   overflow), `wrapping_*`, `saturating_*`, lowered to C overflow-checked
-   intrinsics. Builds on the existing Option lowering and the builtin/runtime
-   pattern. *This is the next concrete piece of work for this prong.*
+1. **Checked and explicit integer arithmetic foundation** -- shared by both
+   domains and now implemented for fixed-width integer `+`, `-`, `*`, compound
+   assignment, signed unary `-`, and the existing div/rem trap cases. Primitive
+   integer `checked_add`/`checked_sub`/`checked_mul` return `Option<T>`, while
+   `wrapping_add`/`wrapping_sub`/`wrapping_mul` and
+   `saturating_add`/`saturating_sub`/`saturating_mul` stay distinct from plain
+   operators.
 2. **`decimal` / fixed-point type** — exact money, fin-sec. A scaled-integer type
    with checked arithmetic from brick 1.
 3. **`u256` / big integers** — EVM-width integers for balances and hashes.
@@ -95,10 +101,11 @@ already exists; brick 5 composes features already present.
 
 ## Bottom line
 
-Today there is no native `decimal`, `u256`, checked arithmetic, or crypto *in the
-compiler* — but the **decisive shared keystone (linear no-cloning) exists**, the
-spike shows the language already expresses and runs exact money and a
-tamper-evident chain deterministically, and the design (effects + linear types +
-C/LLVM determinism + native FFI) is a well-suited foundation. The next brick is
-deterministic checked/wrapping/saturating arithmetic — it closes the single
-gap (unspecified overflow) that both fin-sec and blockchain cannot tolerate.
+Today there is no native `decimal`, `u256`, or crypto *in the compiler* -- but
+plain fixed-width integer overflow is defined and checked, explicit checked,
+wrapping, and saturating add/sub/mul methods compose with that foundation, the
+**decisive shared keystone (linear no-cloning) exists**, the spike shows the
+language already expresses and runs exact money and a tamper-evident chain
+deterministically, and the design (effects + linear types + C/LLVM determinism +
+native FFI) is a well-suited foundation. The next bricks are domain numeric
+types and wider EVM-oriented integers.

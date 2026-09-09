@@ -305,6 +305,40 @@ match value {
 }
 ```
 
+### 5.4 Integer Arithmetic
+
+Plain fixed-width integer `+`, `-`, and `*` are checked operations. For signed
+and unsigned integer types (`i8` through `i128`, `isize`, `u8` through `u128`,
+and `usize`), a result outside the destination type's range is an integer
+overflow. This includes unsigned underflow in subtraction.
+
+Compound assignment uses the same checked operation as the corresponding binary
+operator: `x += y`, `x -= y`, and `x *= y` are checked `+`, `-`, and `*` followed
+by assignment.
+
+Signed unary `-` is checked. Negating the minimum value of a signed integer type
+is an integer overflow.
+
+If an integer literal is too large to represent, or a suffixed literal is outside
+the suffix type's range, the compiler rejects the program. If overflow is
+provable while folding an integer expression at compile time, the compiler
+rejects the program with an integer-overflow diagnostic. Runtime integer
+overflow aborts through the arithmetic panic path.
+
+Integer division and remainder trap on a zero divisor. Signed integer division
+and remainder also trap for the minimum value divided or remaindered by `-1`.
+Floating-point arithmetic keeps the target backend's IEEE behavior.
+
+Explicit wrapping, saturating, and checked arithmetic operations are distinct
+from plain arithmetic. They are not aliases for the plain checked operators.
+Primitive integer `.wrapping_add`, `.wrapping_sub`, `.wrapping_mul`,
+`.saturating_add`, `.saturating_sub`, `.saturating_mul`, `.checked_add`,
+`.checked_sub`, and `.checked_mul` are defined for fixed-width integer types.
+The checked methods return `Option<T>`: `Some(value)` when the result is
+representable, `None` on overflow or unsigned subtraction underflow. Other
+explicit primitive integer arithmetic families remain unsupported unless a
+separate API surface defines them.
+
 ## 6. Algebraic Effects
 
 ### 6.1 Effect Declaration

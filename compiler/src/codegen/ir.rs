@@ -33,7 +33,8 @@ use crate::lexer::Span;
 /// This is the durable, versioned contract for serialized MIR. Bump the
 /// `/vN` suffix on any breaking change to the on-the-wire shape so consumers
 /// can reject or migrate incompatible payloads.
-pub const MIR_SCHEMA: &str = "buildlang.mir/v0";
+pub const MIR_SCHEMA: &str = "buildlang.mir/v1";
+const MIR_SCHEMA_V0: &str = "buildlang.mir/v0";
 
 /// A versioned envelope wrapping a [`MirModule`] for serialization.
 ///
@@ -78,13 +79,18 @@ impl MirModuleEnvelope {
         serde_json::to_string(self)
     }
 
-    /// Deserialize an envelope from JSON, rejecting unknown schema strings.
+    /// Deserialize an envelope from JSON, accepting the previous v0 wire shape
+    /// and normalizing it to the current schema tag.
     pub fn from_json(json: &str) -> Result<Self, String> {
-        let envelope: Self = serde_json::from_str(json).map_err(|err| err.to_string())?;
+        let mut envelope: Self = serde_json::from_str(json).map_err(|err| err.to_string())?;
+        if envelope.schema == MIR_SCHEMA_V0 {
+            envelope.schema = MIR_SCHEMA.to_string();
+            return Ok(envelope);
+        }
         if envelope.schema != MIR_SCHEMA {
             return Err(format!(
-                "unsupported MIR schema '{}', expected '{}'",
-                envelope.schema, MIR_SCHEMA
+                "unsupported MIR schema '{}', expected '{}' or '{}'",
+                envelope.schema, MIR_SCHEMA, MIR_SCHEMA_V0
             ));
         }
         Ok(envelope)
@@ -874,6 +880,7 @@ pub enum BinOp {
     // Saturating arithmetic
     AddSaturating,
     SubSaturating,
+    MulSaturating,
 }
 
 /// Unary operators.
@@ -1055,6 +1062,8 @@ pub enum MirType {
     Vec(Box<MirType>),
     /// HashMap<K, V>: heap-allocated handle wrapping BuildHashMap.
     Map(Box<MirType>, Box<MirType>),
+    /// Option<T>: tagged optional value with a statically known payload type.
+    Option(Box<MirType>),
     /// Tuple type: (T0, T1, ...).
     Tuple(Vec<MirType>),
 }
@@ -1188,6 +1197,7 @@ impl MirType {
                 MirType::Float(FloatSize::F64) => "f64",
                 MirType::Ptr(_) => "ptr",
                 MirType::Struct(name) => name.as_ref(),
+                MirType::Option(_) => "option",
                 _ => "unknown",
             })
             .collect();
@@ -1234,6 +1244,7 @@ impl MirType {
             MirType::TraitObject(_) => Some(ptr_size * 2), // Fat pointer: data + vtable
             MirType::Vec(_) => Some(ptr_size),             // BuildVecHandle is a pointer
             MirType::Map(_, _) => Some(ptr_size),          // BuildMapHandle is a pointer
+            MirType::Option(_) => None,                    // Runtime tagged union.
             MirType::Tuple(elems) => {
                 let mut total = 0u32;
                 for e in elems {
@@ -1287,6 +1298,7 @@ impl fmt::Display for MirType {
             MirType::TraitObject(name) => write!(f, "dyn {}", name),
             MirType::Vec(elem) => write!(f, "Vec<{}>", elem),
             MirType::Map(key, val) => write!(f, "HashMap<{}, {}>", key, val),
+            MirType::Option(inner) => write!(f, "Option<{}>", inner),
             MirType::Tuple(elems) => {
                 write!(f, "(")?;
                 for (i, e) in elems.iter().enumerate() {

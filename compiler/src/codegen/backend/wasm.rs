@@ -320,6 +320,7 @@ impl WasmBackend {
             MirType::Vec(_) => "i32",         // BuildVecHandle is a pointer in wasm32
             MirType::Tuple(_) => "i32",       // Tuples are memory pointers in wasm32
             MirType::Map(_, _) => "i32",      // BuildMapHandle is a pointer in wasm32
+            MirType::Option(_) => "i32",      // opaque handle in wasm32 backend
         }
     }
 
@@ -351,6 +352,7 @@ impl WasmBackend {
             MirType::Vec(_) => 4,         // wasm32 pointer
             MirType::Tuple(elems) => elems.iter().map(|e| self.type_size(e)).sum(),
             MirType::Map(_, _) => 4, // wasm32 pointer
+            MirType::Option(_) => 8, // tag plus payload handle
         }
     }
 
@@ -1621,7 +1623,9 @@ impl WasmBackend {
             BinOp::SubChecked | BinOp::SubWrapping | BinOp::SubSaturating => {
                 format!("{}.sub", wasm_ty)
             }
-            BinOp::MulChecked | BinOp::MulWrapping => format!("{}.mul", wasm_ty),
+            BinOp::MulChecked | BinOp::MulWrapping | BinOp::MulSaturating => {
+                format!("{}.mul", wasm_ty)
+            }
             BinOp::Pow => {
                 // WASM doesn't have a native power instruction
                 // For floats, could use wasm-intrinsics when available

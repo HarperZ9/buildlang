@@ -18,7 +18,7 @@ use crate::lexer::{SourceId, Span};
 
 use super::context::*;
 use super::error::*;
-use super::infer::TypeInfer;
+use super::infer::{TypeInfer, WellKnownTypes};
 use super::ty::*;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -135,6 +135,11 @@ impl<'ctx> TypeChecker<'ctx> {
         // Register built-in vector/matrix struct types so that type annotations
         // like `vec3` resolve to known struct types with accessible fields.
         self.register_builtin_vec_types();
+
+        // Register generic Option<T> before function signatures are collected,
+        // so checked integer methods and explicit `-> Option<T>` annotations
+        // share a real well-known ADT instead of a fresh inference variable.
+        self.register_builtin_option_type();
 
         // Register prelude constructors (Ok, Err, Some, None) as variables
         // with fresh type variables so they pass type checking.
@@ -257,6 +262,53 @@ impl<'ctx> TypeChecker<'ctx> {
                 is_tuple: false,
             }),
         });
+    }
+
+    fn register_builtin_option_type(&mut self) {
+        if self.ctx.lookup_type_by_name("Option").is_some() {
+            return;
+        }
+
+        let def_id = self.ctx.fresh_def_id();
+        let t_name: Arc<str> = Arc::from("T");
+        let t_ty = Ty::param(t_name.clone(), 0);
+        self.ctx.register_type(TypeDef {
+            def_id,
+            name: Arc::from("Option"),
+            generics: vec![GenericParam {
+                name: t_name,
+                index: 0,
+                kind: GenericParamKind::Type { bounds: Vec::new() },
+            }],
+            kind: TypeDefKind::Enum(EnumDef {
+                variants: vec![
+                    EnumVariant {
+                        name: Arc::from("Some"),
+                        fields: vec![(None, t_ty)],
+                        discriminant: Some(0),
+                    },
+                    EnumVariant {
+                        name: Arc::from("None"),
+                        fields: Vec::new(),
+                        discriminant: Some(1),
+                    },
+                ],
+            }),
+        });
+    }
+
+    fn well_known_types_from_ctx(ctx: &TypeContext) -> WellKnownTypes {
+        WellKnownTypes {
+            range: ctx.lookup_type_by_name("Range").map(|ty| ty.def_id),
+            range_inclusive: ctx
+                .lookup_type_by_name("RangeInclusive")
+                .map(|ty| ty.def_id),
+            range_full: ctx.lookup_type_by_name("RangeFull").map(|ty| ty.def_id),
+            range_from: ctx.lookup_type_by_name("RangeFrom").map(|ty| ty.def_id),
+            range_to: ctx.lookup_type_by_name("RangeTo").map(|ty| ty.def_id),
+            option: ctx.lookup_type_by_name("Option").map(|ty| ty.def_id),
+            result: ctx.lookup_type_by_name("Result").map(|ty| ty.def_id),
+        }
     }
 
     // =========================================================================
@@ -902,11 +954,13 @@ impl<'ctx> TypeChecker<'ctx> {
                 infer_errors,
                 has_return,
             ) = {
+                let well_known_types = Self::well_known_types_from_ctx(self.ctx);
                 let mut infer = if let Some(source_text) = &self.source_text {
                     TypeInfer::with_source_text(self.ctx, source_text.clone(), self.source_id)
                 } else {
                     TypeInfer::new(self.ctx)
                 };
+                infer.set_well_known_types(well_known_types);
                 // Pass the expected return type so that `return` statements
                 // inside nested control flow (while/if/match) are properly
                 // type-checked against the function signature.
@@ -1357,7 +1411,9 @@ impl<'ctx> TypeChecker<'ctx> {
         if let Some(init) = &c.value {
             // Use block to limit TypeInfer borrow scope
             let (init_ty, infer_errors) = {
+                let well_known_types = Self::well_known_types_from_ctx(self.ctx);
                 let mut infer = TypeInfer::new(self.ctx);
+                infer.set_well_known_types(well_known_types);
                 let init_ty = infer.infer_expr(init);
                 (init_ty, infer.take_errors())
             };
@@ -1384,7 +1440,9 @@ impl<'ctx> TypeChecker<'ctx> {
         if let Some(init) = &s.value {
             // Use block to limit TypeInfer borrow scope
             let (init_ty, infer_errors) = {
+                let well_known_types = Self::well_known_types_from_ctx(self.ctx);
                 let mut infer = TypeInfer::new(self.ctx);
+                infer.set_well_known_types(well_known_types);
                 let init_ty = infer.infer_expr(init);
                 (init_ty, infer.take_errors())
             };
@@ -1917,7 +1975,9 @@ impl<'ctx> TypeChecker<'ctx> {
 
     fn lower_type(&mut self, ty: &ast::Type) -> Ty {
         // Create a temporary inference context for type lowering
+        let well_known_types = Self::well_known_types_from_ctx(self.ctx);
         let mut infer = TypeInfer::new(self.ctx);
+        infer.set_well_known_types(well_known_types);
         infer.lower_type(ty)
     }
 
@@ -1945,7 +2005,7 @@ impl<'ctx> TypeChecker<'ctx> {
             ast::ExprKind::Unary {
                 op: ast::UnaryOp::Neg,
                 expr: operand,
-            } => self.eval_const_int(operand).map(|n| -n),
+            } => self.eval_const_int(operand).and_then(|n| n.checked_neg()),
             ast::ExprKind::Binary { op, left, right } => {
                 let l = self.eval_const_int(left)?;
                 let r = self.eval_const_int(right)?;
