@@ -1812,12 +1812,13 @@ impl<'ctx> MirLowerer<'ctx> {
         Ok((str_idx, arg_values))
     }
 
-    /// `print!`/`println!`/`eprint!`/`dbg!`: format the arguments and write the
-    /// result to stdout via printf.
+    /// `print!`/`println!`/`eprint!`/`eprintln!`/`dbg!`: format the arguments
+    /// and lower to a backend-neutral stdout or stderr printf-style output call.
     pub(crate) fn lower_print_macro(
         &mut self,
         tokens: &[ast::TokenTree],
         newline: bool,
+        stderr: bool,
     ) -> CodegenResult<()> {
         let (str_idx, arg_values) = self.prepare_format_call(tokens, newline)?;
         let builder = self
@@ -1830,10 +1831,15 @@ impl<'ctx> MirLowerer<'ctx> {
             MirRValue::Use(MirValue::Const(MirConst::Str(str_idx))),
         );
         let continue_block = builder.create_block();
-        let printf_fn = MirValue::Function(Arc::from("printf"));
+        let print_fn = if stderr { "eprintf" } else { "printf" };
         let mut call_args = vec![MirValue::Local(fmt_local)];
         call_args.extend(arg_values);
-        builder.call(printf_fn, call_args, None, continue_block);
+        builder.call(
+            MirValue::Function(Arc::from(print_fn)),
+            call_args,
+            None,
+            continue_block,
+        );
         builder.switch_to_block(continue_block);
         Ok(())
     }
@@ -2107,7 +2113,7 @@ impl<'ctx> MirLowerer<'ctx> {
 
     pub(crate) fn lower_panic_macro(&mut self, tokens: &[ast::TokenTree]) -> CodegenResult<()> {
         // Print the panic message first
-        self.lower_print_macro(tokens, true)?;
+        self.lower_print_macro(tokens, true, false)?;
 
         let builder = self
             .current_fn

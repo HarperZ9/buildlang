@@ -1,0 +1,16 @@
+fn probe(input: u64) -> Option<u64> {
+    let mut value = 0u64;
+    value = match input.checked_mul(10u64) {
+        Some(v) => v,
+        None => { return None; 0u64 },
+    };
+    Some(value)
+}
+
+fn main() ~ Console {
+    let got = probe(7u64);
+    match got {
+        Some(v) => println("{}", v),
+        None => println("{}", 0u64),
+    }
+}

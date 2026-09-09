@@ -117,11 +117,11 @@ impl<'ctx> MirLowerer<'ctx> {
 
                 match macro_name {
                     "println" | "print" => {
-                        self.lower_print_macro(tokens, macro_name == "println")?;
+                        self.lower_print_macro(tokens, macro_name == "println", false)?;
                         Ok(None)
                     }
                     "eprintln" | "eprint" => {
-                        self.lower_print_macro(tokens, macro_name == "eprintln")?;
+                        self.lower_print_macro(tokens, macro_name == "eprintln", true)?;
                         Ok(None)
                     }
                     "panic" => {
@@ -129,7 +129,7 @@ impl<'ctx> MirLowerer<'ctx> {
                         Ok(None)
                     }
                     "dbg" => {
-                        self.lower_print_macro(tokens, true)?;
+                        self.lower_print_macro(tokens, true, false)?;
                         Ok(None)
                     }
                     _ => {
@@ -473,11 +473,11 @@ impl<'ctx> MirLowerer<'ctx> {
 
                 match macro_name {
                     "println" | "print" => {
-                        self.lower_print_macro(tokens, macro_name == "println")?;
+                        self.lower_print_macro(tokens, macro_name == "println", false)?;
                         Ok(values::unit())
                     }
                     "eprintln" | "eprint" => {
-                        self.lower_print_macro(tokens, macro_name == "eprintln")?;
+                        self.lower_print_macro(tokens, macro_name == "eprintln", true)?;
                         Ok(values::unit())
                     }
                     "panic" => {
@@ -485,7 +485,7 @@ impl<'ctx> MirLowerer<'ctx> {
                         Ok(values::unit())
                     }
                     "dbg" => {
-                        self.lower_print_macro(tokens, true)?;
+                        self.lower_print_macro(tokens, true, false)?;
                         Ok(values::unit())
                     }
                     "format" => {
@@ -3041,6 +3041,48 @@ impl<'ctx> MirLowerer<'ctx> {
         }
     }
 
+    fn runtime_match_result_seed_type(&self) -> (MirType, bool) {
+        if let Some(expected) = &self.expected_type {
+            if *expected != MirType::Void {
+                return (expected.clone(), false);
+            }
+        }
+        (MirType::i32(), true)
+    }
+
+    fn assign_runtime_match_result(
+        &mut self,
+        result: LocalId,
+        may_retype_from_arm: &mut bool,
+        body_val: MirValue,
+    ) -> CodegenResult<()> {
+        if matches!(body_val, MirValue::Const(MirConst::Unit)) {
+            return Ok(());
+        }
+
+        if *may_retype_from_arm {
+            let body_ty = self.type_of_value(&body_val);
+            if body_ty != MirType::Void && body_ty != MirType::Never {
+                let builder = self
+                    .current_fn
+                    .as_mut()
+                    .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                let current_ty = builder.local_type(result).unwrap_or(MirType::Void);
+                if current_ty == MirType::i32() && body_ty != current_ty {
+                    builder.retype_local(result, body_ty);
+                }
+                *may_retype_from_arm = false;
+            }
+        }
+
+        let builder = self
+            .current_fn
+            .as_mut()
+            .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+        builder.assign(result, MirRValue::Use(body_val));
+        Ok(())
+    }
+
     fn lower_method_call(
         &mut self,
         receiver: &ast::Expr,
@@ -4539,6 +4581,7 @@ impl<'ctx> MirLowerer<'ctx> {
         arms: &[ast::MatchArm],
         inner_ty_override: Option<MirType>,
     ) -> CodegenResult<MirValue> {
+        let (result_ty, mut may_retype_result_from_arm) = self.runtime_match_result_seed_type();
         let builder = self
             .current_fn
             .as_mut()
@@ -4573,13 +4616,6 @@ impl<'ctx> MirLowerer<'ctx> {
         let some_block = builder.create_block();
         let none_block = builder.create_block();
 
-        // Determine result type from function return type
-        let ret_ty = builder.return_type().clone();
-        let result_ty = if ret_ty == MirType::Void {
-            MirType::i32()
-        } else {
-            ret_ty
-        };
         let result = builder.create_local(result_ty);
 
         builder.branch(values::local(has_value), some_block, none_block);
@@ -4606,10 +4642,12 @@ impl<'ctx> MirLowerer<'ctx> {
                 let builder = self.current_fn.as_mut().unwrap();
                 builder.switch_to_block(none_block);
                 let body_val = self.lower_expr(&arm.body)?;
+                self.assign_runtime_match_result(
+                    result,
+                    &mut may_retype_result_from_arm,
+                    body_val,
+                )?;
                 let builder = self.current_fn.as_mut().unwrap();
-                if !matches!(body_val, MirValue::Const(MirConst::Unit)) {
-                    builder.assign(result, MirRValue::Use(body_val));
-                }
                 builder.goto(merge_block);
             } else if is_some {
                 let builder = self.current_fn.as_mut().unwrap();
@@ -4658,20 +4696,24 @@ impl<'ctx> MirLowerer<'ctx> {
                 }
 
                 let body_val = self.lower_expr(&arm.body)?;
+                self.assign_runtime_match_result(
+                    result,
+                    &mut may_retype_result_from_arm,
+                    body_val,
+                )?;
                 let builder = self.current_fn.as_mut().unwrap();
-                if !matches!(body_val, MirValue::Const(MirConst::Unit)) {
-                    builder.assign(result, MirRValue::Use(body_val));
-                }
                 builder.goto(merge_block);
             } else {
                 // Wildcard / other - treat as default arm going to merge
                 let builder = self.current_fn.as_mut().unwrap();
                 builder.switch_to_block(none_block);
                 let body_val = self.lower_expr(&arm.body)?;
+                self.assign_runtime_match_result(
+                    result,
+                    &mut may_retype_result_from_arm,
+                    body_val,
+                )?;
                 let builder = self.current_fn.as_mut().unwrap();
-                if !matches!(body_val, MirValue::Const(MirConst::Unit)) {
-                    builder.assign(result, MirRValue::Use(body_val));
-                }
                 builder.goto(merge_block);
             }
         }
@@ -4696,6 +4738,7 @@ impl<'ctx> MirLowerer<'ctx> {
         ok_ty: MirType,
         err_ty: MirType,
     ) -> CodegenResult<MirValue> {
+        let (result_ty, mut may_retype_result_from_arm) = self.runtime_match_result_seed_type();
         let builder = self
             .current_fn
             .as_mut()
@@ -4719,13 +4762,6 @@ impl<'ctx> MirLowerer<'ctx> {
         let ok_block = builder.create_block();
         let err_block = builder.create_block();
 
-        // Result type for the match expression value.
-        let ret_ty = builder.return_type().clone();
-        let result_ty = if ret_ty == MirType::Void {
-            MirType::i32()
-        } else {
-            ret_ty
-        };
         let result = builder.create_local(result_ty);
 
         builder.branch(values::local(is_ok), ok_block, err_block);
@@ -4775,10 +4811,8 @@ impl<'ctx> MirLowerer<'ctx> {
             }
 
             let body_val = self.lower_expr(&arm.body)?;
+            self.assign_runtime_match_result(result, &mut may_retype_result_from_arm, body_val)?;
             let builder = self.current_fn.as_mut().unwrap();
-            if !matches!(body_val, MirValue::Const(MirConst::Unit)) {
-                builder.assign(result, MirRValue::Use(body_val));
-            }
             builder.goto(merge_block);
         }
 
