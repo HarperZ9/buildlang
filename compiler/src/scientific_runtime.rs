@@ -1608,6 +1608,7 @@ pub struct SelfTestCase {
     pub expected_class: String,
     /// True if the case was re-sealed (so the tamper reaches a post-seal check),
     /// false if it is meant to trip the seal gate itself.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub resealed: bool,
 }
 
@@ -3318,6 +3319,10 @@ pub struct ScientificVerifyReport {
     /// True-absent semantics like the two flags above: `true` when the
     /// receipt has no `cross_backend` block.
     pub secondary_toolchain_matched: bool,
+    /// Canonical invariant tolerance carried for downstream callers. The current
+    /// printers and Crucible export bridge use their own claim-scale tolerance, so
+    /// this field is intentionally not read inside the crate today.
+    #[allow(dead_code)]
     pub tolerance: f64,
     pub negative_fixture: bool,
     pub diverged: bool,

@@ -10,6 +10,11 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+## 1.4.0 - 2026-09-10 - defined arithmetic and portable stdio
+
+- Release the post-`v1.3.0` mainline compiler updates from PR #49 through PR #51: portable stdio/W1 stream semantics, generated VS Code dependency lockfile repair, and checked integer arithmetic plus match-result lowering coverage.
+- Keep the release boundary to the already-merged mainline changes; older open arithmetic branches remain superseded by PR #51 and are not merged as part of this release.
+
 ## 1.3.0 - 2026-09-06 - fail-closed codegen memory-safety
 
 - **A non-exhaustive scalar `match` is caught at compile time where coverage can
