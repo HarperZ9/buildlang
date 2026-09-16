@@ -302,7 +302,7 @@ fn doctor_reports_adoption_readiness_summary() {
         "receipt   ok",
         "buildlang-substrate-receipt/v0",
         "corpus    ok",
-        "8 semantic program(s)",
+        "9 semantic program(s)",
         "c         anchor",
         "rust      subset",
         "spirv     unverified",
@@ -10890,7 +10890,7 @@ fn corpus_verify_accepts_explicit_root() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
     assert!(
-        stdout.contains("c execution: 8 passed"),
+        stdout.contains("c execution: 9 passed"),
         "corpus verify --root should run the manifest programs:\n{}",
         stdout
     );
@@ -10952,6 +10952,93 @@ fn corpus_verify_write_repairs_receipt_program_drift_in_copy() {
         "repaired C receipt should remove drifted stdout:\n{}",
         repaired_receipt
     );
+    assert!(
+        repaired_receipt.contains("all 9 programs"),
+        "repaired C receipt should restamp notes with current manifest count:\n{}",
+        repaired_receipt
+    );
+    assert!(
+        !repaired_receipt.contains("all 8 programs")
+            && !repaired_receipt.contains("same 8 programs"),
+        "repaired C receipt should not preserve stale 8-program notes:\n{}",
+        repaired_receipt
+    );
+
+    let _ = fs::remove_dir_all(&corpus_root);
+}
+
+#[test]
+fn corpus_refresh_rust_receipt_runs_manifest_and_writes_current_metadata() {
+    if !rustc_available() {
+        eprintln!("skipping rust receipt refresh: rustc not available");
+        return;
+    }
+
+    let corpus_root = temp_semantic_corpus("rust_receipt_refresh");
+
+    let output = buildc()
+        .arg("corpus")
+        .arg("refresh-rust-receipt")
+        .arg("--root")
+        .arg(&corpus_root)
+        .output()
+        .expect("run buildc corpus refresh-rust-receipt");
+
+    assert!(
+        output.status.success(),
+        "rust receipt refresh should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    assert!(
+        stdout.contains("rust receipt: written"),
+        "refresh command should report the write:\n{}",
+        stdout
+    );
+
+    let manifest_path = corpus_root.join("manifest.json");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("read manifest"))
+            .expect("parse manifest");
+    let program_count = manifest["programs"]
+        .as_array()
+        .expect("programs array")
+        .len();
+    let receipt_path = corpus_root
+        .join("receipts")
+        .join("rust-execution-2026-06-13.json");
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt_path).expect("read rust receipt"))
+            .expect("parse rust receipt");
+
+    assert_eq!(receipt["backend"], "rust");
+    assert_eq!(receipt["result"]["passed"], program_count + 1);
+    assert_eq!(
+        receipt["programs"]
+            .as_array()
+            .expect("receipt programs")
+            .len(),
+        program_count
+    );
+    assert!(
+        receipt["programs"]
+            .as_array()
+            .expect("receipt programs")
+            .iter()
+            .any(|program| program["id"] == "integer_arithmetic_portable_lf"),
+        "refreshed rust receipt should include the arithmetic corpus program"
+    );
+    assert!(
+        receipt["verified_at"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("unix-seconds:")),
+        "refreshed rust receipt should carry current runner metadata: {receipt:#?}"
+    );
+    assert_eq!(
+        receipt["verification_command"], receipt["command"],
+        "verification_command should name the exact refresh command"
+    );
 
     let _ = fs::remove_dir_all(&corpus_root);
 }
@@ -10979,10 +11066,10 @@ fn corpus_verify_checks_manifest_receipts_and_c_execution() {
     let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
     for expected in [
         "Semantic Corpus Verify",
-        "manifest: 8 program(s)",
+        "manifest: 9 program(s)",
         "c receipt: ok",
         "rust receipt: ok",
-        "c execution: 8 passed",
+        "c execution: 9 passed",
     ] {
         assert!(
             stdout.contains(expected),
@@ -11194,6 +11281,23 @@ fn write_c_execution_receipt_copy(
     fs::write(&receipt_path, format!("{rendered}\n")).expect("write modified c execution receipt");
 }
 
+/// Transform the Rust execution receipt in a corpus copy.
+fn write_rust_execution_receipt_copy(
+    corpus_root: &Path,
+    transform: impl FnOnce(serde_json::Value) -> serde_json::Value,
+) {
+    let receipt_path = corpus_root
+        .join("receipts")
+        .join("rust-execution-2026-06-13.json");
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt_path).expect("read rust execution receipt"))
+            .expect("parse rust execution receipt");
+    let rendered = serde_json::to_string_pretty(&transform(receipt))
+        .expect("render modified rust execution receipt");
+    fs::write(&receipt_path, format!("{rendered}\n"))
+        .expect("write modified rust execution receipt");
+}
+
 #[test]
 fn corpus_verify_rejects_manifest_stdout_tamper() {
     // Tamper the expected stdout CONSISTENTLY in both the manifest and the C
@@ -11292,6 +11396,110 @@ fn corpus_verify_rejects_capability_gate_stamp_tamper() {
     });
 
     assert_corpus_verify_rejects(&corpus_root, "c receipt capability metadata drift");
+}
+
+#[test]
+fn corpus_verify_rejects_c_execution_mode_tamper() {
+    // The C execution receipt must say it was produced through the portable-LF
+    // path. Otherwise a verifier could normalize native CRLF output and still
+    // let a stale receipt look equivalent to an explicitly portable run.
+    let corpus_root = temp_semantic_corpus("c_exec_mode_tamper");
+    write_c_execution_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["execution_mode"] = serde_json::Value::String("native".to_string());
+        receipt["command"] =
+            serde_json::Value::String("buildc run <semantic-corpus-program>".to_string());
+        receipt
+    });
+
+    assert_corpus_verify_rejects(&corpus_root, "c receipt execution mode drift");
+}
+
+#[test]
+fn corpus_verify_rejects_c_execution_missing_verification_metadata() {
+    // A current C receipt must say when and through which command path it was
+    // verified. Program/count alignment alone is not enough because it can be
+    // hand-edited before the executable corpus run happens.
+    let corpus_root = temp_semantic_corpus("c_exec_missing_verified_at");
+    write_c_execution_receipt_copy(&corpus_root, |mut receipt| {
+        receipt
+            .as_object_mut()
+            .expect("c receipt object")
+            .remove("verified_at");
+        receipt
+            .as_object_mut()
+            .expect("c receipt object")
+            .remove("verification_command");
+        receipt
+    });
+
+    assert_corpus_verify_rejects(
+        &corpus_root,
+        "c receipt verification metadata drift: missing verified_at",
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_c_execution_malformed_verified_at() {
+    let corpus_root = temp_semantic_corpus("c_exec_malformed_verified_at");
+    write_c_execution_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["verified_at"] = serde_json::Value::String("unix-seconds:not-a-number".to_string());
+        receipt
+    });
+
+    assert_corpus_verify_rejects(
+        &corpus_root,
+        "c receipt verification metadata drift: malformed verified_at",
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_rust_execution_missing_verification_metadata() {
+    // The Rust receipt refresh path must leave a runner-attested timestamp and
+    // exact refresh command after the generated-Rust corpus runs.
+    let corpus_root = temp_semantic_corpus("rust_exec_missing_verified_at");
+    write_rust_execution_receipt_copy(&corpus_root, |mut receipt| {
+        receipt
+            .as_object_mut()
+            .expect("rust receipt object")
+            .remove("verified_at");
+        receipt
+            .as_object_mut()
+            .expect("rust receipt object")
+            .remove("verification_command");
+        receipt
+    });
+
+    assert_corpus_verify_rejects(
+        &corpus_root,
+        "rust receipt verification metadata drift: missing verified_at",
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_rust_execution_malformed_verified_at() {
+    let corpus_root = temp_semantic_corpus("rust_exec_malformed_verified_at");
+    write_rust_execution_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["verified_at"] = serde_json::Value::String("unix-seconds:not-a-number".to_string());
+        receipt
+    });
+
+    assert_corpus_verify_rejects(
+        &corpus_root,
+        "rust receipt verification metadata drift: malformed verified_at",
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_rust_execution_command_tamper() {
+    let corpus_root = temp_semantic_corpus("rust_exec_command_tamper");
+    write_rust_execution_receipt_copy(&corpus_root, |mut receipt| {
+        let wrong = "hand edited rust receipt; not the refresh command";
+        receipt["command"] = serde_json::Value::String(wrong.to_string());
+        receipt["verification_command"] = serde_json::Value::String(wrong.to_string());
+        receipt
+    });
+
+    assert_corpus_verify_rejects(&corpus_root, "rust receipt command drift");
 }
 
 #[test]
@@ -11840,7 +12048,14 @@ fn corpus_verify_rejects_memory_layout_source_digest_drift() {
 fn corpus_verify_rejects_memory_layout_observed_surface_drift() {
     let corpus_root = temp_semantic_corpus("memory_layout_observed_surface");
     write_memory_layout_receipt_copy(&corpus_root, |mut receipt| {
-        receipt["programs"][1]["observed_memory_surfaces"]["references"] =
+        let programs = receipt["programs"]
+            .as_array_mut()
+            .expect("memory layout programs");
+        let references_program = programs
+            .iter_mut()
+            .find(|program| program["id"] == "references_mutation")
+            .expect("references_mutation memory layout row");
+        references_program["observed_memory_surfaces"]["references"] =
             serde_json::Value::Bool(false);
         receipt
     });
@@ -12944,6 +13159,27 @@ fn rustc_compile_and_run(name: &str, rust_source: &str) -> RunResult {
     result
 }
 
+#[test]
+fn generated_rust_runs_for_integer_arithmetic_portable_lf() {
+    if !rustc_available() {
+        eprintln!("skipping arithmetic corpus Rust run: rustc not available");
+        return;
+    }
+
+    let path = semantic_corpus_root()
+        .join("programs")
+        .join("integer_arithmetic_portable_lf.bld");
+    let source = fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("read arithmetic corpus program {}: {}", path.display(), err));
+    let rust_source = lower_source_to_rust(&source);
+    let result = rustc_compile_and_run("integer_arithmetic_portable_lf", &rust_source);
+
+    assert_eq!(
+        result.stdout, "arith 9\nwide 1000\nmix 7\n",
+        "generated Rust must preserve the arithmetic corpus stdout"
+    );
+}
+
 /// Run a corpus program through the production C path (`buildc run`) and capture
 /// stdout (CRLF-normalized) plus the process exit code.
 fn c_backend_run(program_path: &Path) -> RunResult {
@@ -12982,6 +13218,41 @@ fn c_backend_run_capture(program_path: &Path) -> (String, String, Option<i32>) {
         String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n"),
         output.status.code(),
     )
+}
+
+#[test]
+fn semantic_corpus_integer_arithmetic_portable_lf_runs_on_c_backend() {
+    if !c_backend_ready() {
+        eprintln!("skipping semantic corpus arithmetic run: no C backend available");
+        return;
+    }
+
+    let path = semantic_corpus_root()
+        .join("programs")
+        .join("integer_arithmetic_portable_lf.bld");
+    let output = buildc()
+        .arg("run")
+        .arg(&path)
+        .arg("--stdio-mode")
+        .arg("portable-lf")
+        .output()
+        .expect("run arithmetic corpus program with portable LF");
+
+    assert!(
+        output.status.success(),
+        "arithmetic corpus program should run\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.stdout.contains(&b'\r'),
+        "portable-LF corpus stdout must not contain CR bytes: {:?}",
+        output.stdout
+    );
+    assert_eq!(
+        output.stdout, b"arith 9\nwide 1000\nmix 7\n",
+        "arithmetic corpus stdout is the executable contract"
+    );
 }
 
 /// Foundation: overflow-safe checked + saturating integer arithmetic

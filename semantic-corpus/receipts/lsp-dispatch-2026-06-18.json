@@ -7,7 +7,7 @@
   "source_set": {
     "kind": "semantic-corpus",
     "manifest": "manifest.json",
-    "program_count": 8
+    "program_count": 9
   },
   "lsp_model": {
     "protocol": "LSP JSON-RPC over stdio",

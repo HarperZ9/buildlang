@@ -7,7 +7,7 @@
   "source_set": {
     "kind": "semantic-corpus",
     "manifest": "manifest.json",
-    "program_count": 8
+    "program_count": 9
   },
   "ir": {
     "name": "MIR",
@@ -89,6 +89,88 @@
       "control_flow": {
         "block_count": 8,
         "branching": true,
+        "switching": false,
+        "calls": true,
+        "loops": false,
+        "unreachable": false
+      }
+    },
+    {
+      "id": "integer_arithmetic_portable_lf",
+      "path": "programs/integer_arithmetic_portable_lf.bld",
+      "source_digest": {
+        "algorithm": "sha256",
+        "hex": "2af555558bde2694aad80b6ab4668f91e4d5626ff1a35e872b1362ee09e22a7e"
+      },
+      "input_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "59dcec1d09c801c3a2886d458b6a7efab2ae5e70a3b3593eeea3bb0030ae5c18"
+      },
+      "mir_digest": {
+        "algorithm": "sha256",
+        "hex": "8d12788ff2569fd03e2b87453412d856d56a66284f8a5810c5fc5415afa702bb"
+      },
+      "module": {
+        "function_count": 3,
+        "defined_function_count": 2,
+        "declaration_count": 1,
+        "type_count": 3,
+        "global_count": 0,
+        "string_count": 3,
+        "external_count": 0,
+        "vtable_count": 0,
+        "uniform_count": 0
+      },
+      "symbols": {
+        "functions": [
+          "main",
+          "mix"
+        ],
+        "types": [
+          "build_vec2",
+          "build_vec3",
+          "build_vec4"
+        ],
+        "globals": [],
+        "externals": []
+      },
+      "operations": {
+        "statements": [
+          "Assign"
+        ],
+        "rvalues": [
+          "BinaryOp",
+          "Use"
+        ],
+        "terminators": [
+          "Call",
+          "Return"
+        ],
+        "binary_ops": [
+          "Add",
+          "Div",
+          "Mul",
+          "Rem",
+          "Sub"
+        ],
+        "unary_ops": [],
+        "casts": [],
+        "aggregate_kinds": [],
+        "place_projections": []
+      },
+      "memory_surfaces": {
+        "references": false,
+        "mutable_references": false,
+        "deref_reads": false,
+        "deref_writes": false,
+        "field_reads": false,
+        "field_writes": false,
+        "index_reads": false,
+        "aggregate_values": false
+      },
+      "control_flow": {
+        "block_count": 9,
+        "branching": false,
         "switching": false,
         "calls": true,
         "loops": false,
@@ -681,7 +763,7 @@
     }
   ],
   "summary": {
-    "program_count": 8,
+    "program_count": 9,
     "statement_families": [
       "Assign",
       "DerefAssign",

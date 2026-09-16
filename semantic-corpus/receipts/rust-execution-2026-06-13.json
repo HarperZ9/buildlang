@@ -4,9 +4,11 @@
   "compiler": "buildc",
   "backend": "rust",
   "evidence_class": "generated-artifact-execution",
-  "command": "cargo test --manifest-path public/pubscan/buildlang/compiler/Cargo.toml generated_rust_runs --quiet && cargo test --manifest-path public/pubscan/buildlang/compiler/Cargo.toml semantic_corpus_manifest --quiet",
+  "command": "buildc corpus refresh-rust-receipt --root <semantic-corpus>",
+  "verified_at": "unix-seconds:1789541180",
+  "verification_command": "buildc corpus refresh-rust-receipt --root <semantic-corpus>",
   "result": {
-    "passed": 9,
+    "passed": 10,
     "failed": 0,
     "ignored": 0
   },
@@ -28,11 +30,20 @@
     "rustc executable build",
     "stdout assertion"
   ],
+  "notes": [
+    "Refreshed by running each manifest program through the Rust backend and rustc (rustc 1.92.0 (ded5c06cf 2025-12-08)).",
+    "Result.passed counts the manifest contract check plus one executable Rust run per manifest program."
+  ],
   "programs": [
     {
       "id": "scalar_branch",
       "path": "../programs/scalar_branch.bld",
       "expected_stdout": "4\n"
+    },
+    {
+      "id": "integer_arithmetic_portable_lf",
+      "path": "../programs/integer_arithmetic_portable_lf.bld",
+      "expected_stdout": "arith 9\nwide 1000\nmix 7\n"
     },
     {
       "id": "references_mutation",
