@@ -1,0 +1,15 @@
+fn mix(a: i64, b: i64) -> i64 {
+    let product: i64 = a * b;
+    let quotient: i64 = product / 3;
+    let remainder: i64 = product % 3;
+    let adjustment: i64 = -5;
+    quotient - remainder + adjustment
+}
+
+fn main() ~ Console {
+    let scaled: i32 = ((20 + 4) * 3 - 9) / 7;
+    let wide: i64 = 9223372036854775000 - 9223372036854774000;
+    println("arith {}", scaled);
+    println("wide {}", wide);
+    println("mix {}", mix(11, 4));
+}

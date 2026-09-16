@@ -7,7 +7,7 @@
   "source_set": {
     "kind": "semantic-corpus",
     "manifest": "manifest.json",
-    "program_count": 8
+    "program_count": 9
   },
   "semantic_surface": {
     "check_receipt_schema": "buildlang-check-receipt/v1",
