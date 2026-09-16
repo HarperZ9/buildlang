@@ -13358,6 +13358,89 @@ fn compile_time_integer_literal_and_fold_overflow_are_diagnostics() {
     }
 }
 
+#[test]
+fn function_i64_argument_signed_min_spelling_is_out_of_range() {
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang_i64_arg_signed_min_literal_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create signed-min literal diagnostics dir");
+    let file = dir.join("i64_arg_signed_min.bld");
+    fs::write(
+        &file,
+        "fn takes_i64(x: i64) -> i64 { x }\n\
+         fn main() { let _ = takes_i64(-9223372036854775808); }\n",
+    )
+    .expect("write signed-min literal fixture");
+
+    let (status, stdout, stderr) = check_within(&file, 30);
+    assert!(
+        !status.success(),
+        "i64 parameter must reject signed-min spelling whose positive literal \
+         magnitude exceeds i64::MAX\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("integer literal `9223372036854775808` is out of range for type `i64`"),
+        "i64 parameter should report the same out-of-range literal diagnostic as \
+         annotated i64 locals\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let mir = buildc()
+        .arg("mir")
+        .arg("emit")
+        .arg(&file)
+        .arg("-o")
+        .arg(dir.join("i64_arg_signed_min.mir.json"))
+        .output()
+        .expect("run buildc mir emit");
+    assert!(
+        !mir.status.success(),
+        "out-of-range i64 argument literal must not reach MIR as an implicit \
+         i128-to-i64 conversion\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&mir.stdout),
+        String::from_utf8_lossy(&mir.stderr)
+    );
+}
+
+#[test]
+fn mut_to_shared_argument_coercion_survives_integer_context_checks() {
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang_mut_to_shared_arg_coercion_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create mut-to-shared argument dir");
+
+    let cases = [
+        (
+            "direct",
+            "fn observe(x: &i64) { }\n\
+             fn main() { let mut v: i64 = 7; observe(&mut v); }\n",
+        ),
+        (
+            "impl_method",
+            "struct Box;\n\
+             impl Box { fn observe(self, x: &i64) { } }\n\
+             fn main() { let b = Box; let mut v: i64 = 7; b.observe(&mut v); }\n",
+        ),
+        (
+            "overload",
+            "fn observe(x: &i64) { }\n\
+             fn observe(x: str) { }\n\
+             fn main() { let mut v: i64 = 7; observe(&mut v); }\n",
+        ),
+    ];
+
+    for (name, src) in cases {
+        let file = dir.join(format!("{name}.bld"));
+        fs::write(&file, src).expect("write mut-to-shared argument fixture");
+        let (status, stdout, stderr) = check_within(&file, 30);
+        assert!(
+            status.success(),
+            "&mut T argument must still coerce to &T parameter for {name}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+}
+
 fn explicit_integer_arithmetic_source() -> &'static str {
     r#"fn u8_max() -> u8 { 255u8 }
 fn u8_one() -> u8 { 1u8 }
