@@ -3083,6 +3083,13 @@ impl<'ctx> TypeInfer<'ctx> {
         self.apply(&inferred)
     }
 
+    fn check_contextual_integer_arg_expr(&mut self, arg: &ast::Expr, param: &Ty) {
+        let param = self.apply(param);
+        if matches!(param.kind, TyKind::Int(_)) {
+            self.check_const_integer_expr(arg, &param, arg.span);
+        }
+    }
+
     // =========================================================================
     // LITERAL INFERENCE
     // =========================================================================
@@ -4727,11 +4734,13 @@ impl<'ctx> TypeInfer<'ctx> {
         match result {
             Ok(idx) => {
                 let (params, ret) = &candidates[idx];
-                // Type-check each argument against the selected signature so a
-                // dispatched call still enforces argument types (and records
-                // coercions / effects) exactly like a direct call would.
+                // Infer then coerce so argument-position relaxations such as
+                // `&mut T` to `&T` stay authoritative. The extra integer check
+                // applies only concrete integer literal ranges from the selected
+                // parameter type.
                 for (param, arg) in params.iter().zip(args.iter()) {
                     let arg_ty = self.infer_expr(arg);
+                    self.check_contextual_integer_arg_expr(arg, param);
                     let _ = self.coerce_arg(param, &arg_ty, span);
                 }
                 Some(self.apply(ret))
@@ -4818,6 +4827,7 @@ impl<'ctx> TypeInfer<'ctx> {
                 for (param, arg) in fn_ty.params.iter().zip(args.iter()) {
                     let arg_sources = self.call_sources(arg);
                     let arg_ty = self.infer_expr(arg);
+                    self.check_contextual_integer_arg_expr(arg, param);
                     // No-cloning: a linear value may be passed only to a parameter
                     // whose type is exactly that linear type. Resolve the param
                     // BEFORE coercion unifies a generic param to the linear type
@@ -5308,9 +5318,13 @@ impl<'ctx> TypeInfer<'ctx> {
                             span,
                         );
                     }
-                    // Unify argument types
-                    for (param, arg) in fn_ty.params.iter().zip(arg_tys.iter()) {
-                        let _ = self.coerce_arg(param, arg, span);
+                    // Infer then coerce so argument-position relaxations stay
+                    // authoritative; only concrete integer parameter contexts
+                    // add literal range diagnostics.
+                    for (param, arg) in fn_ty.params.iter().zip(args.iter()) {
+                        let arg_ty = self.infer_expr(arg);
+                        self.check_contextual_integer_arg_expr(arg, param);
+                        let _ = self.coerce_arg(param, &arg_ty, span);
                     }
                     if !fn_ty.effects.is_empty() {
                         self.current_effects = self.current_effects.merge(&fn_ty.effects);
@@ -5361,7 +5375,8 @@ impl<'ctx> TypeInfer<'ctx> {
                     );
                     return Ty::error();
                 }
-                if let Some(arg_ty) = arg_tys.first() {
+                if let (Some(arg), Some(arg_ty)) = (args.first(), arg_tys.first()) {
+                    self.check_contextual_integer_arg_expr(arg, &int_ty);
                     let _ = self.coerce_arg(&int_ty, arg_ty, span);
                 }
                 if returns_option {

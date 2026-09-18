@@ -7,7 +7,7 @@
   "source_set": {
     "kind": "semantic-corpus",
     "manifest": "manifest.json",
-    "program_count": 8
+    "program_count": 9
   },
   "symbol_model": {
     "source": "AST",
@@ -126,6 +126,121 @@
           "kind": "source_to_mir_function",
           "from": "source:function:main",
           "to": "mir:function:main"
+        }
+      ],
+      "known_gaps": [
+        "call graph is not claimed",
+        "external package resolution is not claimed"
+      ]
+    },
+    {
+      "id": "integer_arithmetic_portable_lf",
+      "path": "programs/integer_arithmetic_portable_lf.bld",
+      "source_digest": {
+        "algorithm": "sha256",
+        "hex": "2af555558bde2694aad80b6ab4668f91e4d5626ff1a35e872b1362ee09e22a7e"
+      },
+      "input_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "59dcec1d09c801c3a2886d458b6a7efab2ae5e70a3b3593eeea3bb0030ae5c18"
+      },
+      "mir_digest": {
+        "algorithm": "sha256",
+        "hex": "8d12788ff2569fd03e2b87453412d856d56a66284f8a5810c5fc5415afa702bb"
+      },
+      "symbol_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "55cc62fde91e21d80d35a337e67b35cc5b0b97255b8c7bd6f70df588153b017c"
+      },
+      "source_symbols": [
+        {
+          "id": "source:function:main",
+          "kind": "function",
+          "name": "main",
+          "visibility": "private",
+          "span": {
+            "start": 208,
+            "end": 438
+          },
+          "signature": {
+            "parameters": 0,
+            "has_return": false,
+            "is_async": false,
+            "is_unsafe": false,
+            "declared_effects": [
+              "Console"
+            ]
+          }
+        },
+        {
+          "id": "source:function:mix",
+          "kind": "function",
+          "name": "mix",
+          "visibility": "private",
+          "span": {
+            "start": 0,
+            "end": 206
+          },
+          "signature": {
+            "parameters": 2,
+            "has_return": true,
+            "is_async": false,
+            "is_unsafe": false,
+            "declared_effects": []
+          }
+        }
+      ],
+      "mir_symbols": {
+        "functions": [
+          "main",
+          "mix"
+        ],
+        "types": [
+          "build_vec2",
+          "build_vec3",
+          "build_vec4"
+        ],
+        "globals": [],
+        "externals": []
+      },
+      "effect_symbols": [
+        {
+          "function": "main",
+          "declared_effects": [
+            "Console"
+          ],
+          "observed_capabilities": [
+            "Console"
+          ],
+          "propagated_effect_sources": []
+        },
+        {
+          "function": "mix",
+          "declared_effects": [],
+          "observed_capabilities": [],
+          "propagated_effect_sources": []
+        }
+      ],
+      "edges": [
+        {
+          "kind": "source_to_effect_summary",
+          "from": "source:function:main",
+          "to": "effect:function:main"
+        },
+        {
+          "kind": "source_to_effect_summary",
+          "from": "source:function:mix",
+          "to": "effect:function:mix"
+        },
+        {
+          "kind": "source_to_mir_function",
+          "from": "source:function:main",
+          "to": "mir:function:main"
+        },
+        {
+          "kind": "source_to_mir_function",
+          "from": "source:function:mix",
+          "to": "mir:function:mix"
         }
       ],
       "known_gaps": [
@@ -1107,7 +1222,7 @@
     }
   ],
   "summary": {
-    "program_count": 8,
+    "program_count": 9,
     "source_symbol_kinds": [
       "function",
       "struct",

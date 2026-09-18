@@ -7,7 +7,7 @@
   "source_set": {
     "kind": "semantic-corpus",
     "manifest": "manifest.json",
-    "program_count": 8
+    "program_count": 9
   },
   "memory_model": {
     "ownership_model": "rust-inspired",
@@ -36,6 +36,57 @@
       "memory_evidence_digest": {
         "algorithm": "sha256",
         "hex": "6cb97af748845b2b4ccaab1a6d8ef695296d5e6b0832201f4011984e32562c55"
+      },
+      "manifest_surfaces": [],
+      "observed_memory_surfaces": {
+        "references": false,
+        "mutable_references": false,
+        "deref_reads": false,
+        "deref_writes": false,
+        "field_reads": false,
+        "field_writes": false,
+        "index_reads": false,
+        "aggregate_values": false
+      },
+      "ownership_surfaces": {
+        "by_value_call": false,
+        "ownership_reuse": false,
+        "mutable_struct": false,
+        "reference_mutation": false
+      },
+      "layout_surfaces": {
+        "struct_fields": false,
+        "tuple_aggregate": false,
+        "fixed_array": false,
+        "nested_field_access": false,
+        "dereference": false,
+        "field_assignment": false
+      },
+      "proof_status": {
+        "representation_level": "verified",
+        "execution_level": "c-stdout-verified",
+        "byte_layout": "not-claimed",
+        "full_borrow_proof": "not-claimed"
+      }
+    },
+    {
+      "id": "integer_arithmetic_portable_lf",
+      "path": "programs/integer_arithmetic_portable_lf.bld",
+      "source_digest": {
+        "algorithm": "sha256",
+        "hex": "2af555558bde2694aad80b6ab4668f91e4d5626ff1a35e872b1362ee09e22a7e"
+      },
+      "input_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "59dcec1d09c801c3a2886d458b6a7efab2ae5e70a3b3593eeea3bb0030ae5c18"
+      },
+      "mir_digest": {
+        "algorithm": "sha256",
+        "hex": "8d12788ff2569fd03e2b87453412d856d56a66284f8a5810c5fc5415afa702bb"
+      },
+      "memory_evidence_digest": {
+        "algorithm": "sha256",
+        "hex": "c20c45386bdf88587edad8db5e83262a6958c3c2073268e11f69e9f668e0c226"
       },
       "manifest_surfaces": [],
       "observed_memory_surfaces": {
@@ -453,7 +504,7 @@
     }
   ],
   "summary": {
-    "program_count": 8,
+    "program_count": 9,
     "manifest_memory_surfaces": [
       "by-value-call",
       "dereference",

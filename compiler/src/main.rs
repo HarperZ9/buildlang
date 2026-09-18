@@ -558,6 +558,12 @@ enum CorpusCommands {
         #[arg(long)]
         write: bool,
     },
+    /// Re-run the semantic corpus through the Rust backend and refresh its receipt
+    RefreshRustReceipt {
+        /// Semantic corpus root directory
+        #[arg(long, value_name = "DIR")]
+        root: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1342,6 +1348,10 @@ struct CorpusExecutionReceipt {
     command: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     execution_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verified_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verification_command: Option<String>,
     result: CorpusExecutionResult,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     declared_effects: Vec<String>,
@@ -1377,6 +1387,11 @@ struct CorpusExecutionProgram {
     path: String,
     expected_stdout: String,
 }
+
+const C_RECEIPT_COMMAND: &str = "buildc run <semantic-corpus-program> --stdio-mode portable-lf";
+const C_RECEIPT_VERIFICATION_COMMAND: &str =
+    "buildc corpus verify --write; per-program command: buildc run <program> --stdio-mode portable-lf";
+const RUST_RECEIPT_COMMAND: &str = "buildc corpus refresh-rust-receipt --root <semantic-corpus>";
 
 #[derive(serde::Deserialize)]
 struct SubstrateReceipt {
@@ -3185,11 +3200,14 @@ fn cmd_receipt_verify_json(
 fn cmd_corpus(command: CorpusCommands) -> Result<(), i32> {
     match command {
         CorpusCommands::Verify { root, write } => cmd_corpus_verify(root.as_deref(), write),
+        CorpusCommands::RefreshRustReceipt { root } => {
+            cmd_corpus_refresh_rust_receipt(root.as_deref())
+        }
     }
 }
 
-fn cmd_corpus_verify(root: Option<&Path>, write: bool) -> Result<(), i32> {
-    let corpus_root = match root {
+fn resolve_semantic_corpus_root(root: Option<&Path>) -> Result<PathBuf, i32> {
+    match root {
         Some(path) => {
             if !path.join("manifest.json").is_file() {
                 eprintln!(
@@ -3198,15 +3216,19 @@ fn cmd_corpus_verify(root: Option<&Path>, write: bool) -> Result<(), i32> {
                 );
                 return Err(1);
             }
-            path.to_path_buf()
+            Ok(path.to_path_buf())
         }
         None => find_semantic_corpus_root().ok_or_else(|| {
             eprintln!(
                 "semantic corpus not found; run from the repository or install semantic-corpus/"
             );
             1
-        })?,
-    };
+        }),
+    }
+}
+
+fn cmd_corpus_verify(root: Option<&Path>, write: bool) -> Result<(), i32> {
+    let corpus_root = resolve_semantic_corpus_root(root)?;
 
     let manifest_path = corpus_root.join("manifest.json");
     let manifest: SemanticCorpusManifest = read_json(&manifest_path)?;
@@ -3321,6 +3343,55 @@ fn cmd_corpus_verify(root: Option<&Path>, write: bool) -> Result<(), i32> {
     Ok(())
 }
 
+fn cmd_corpus_refresh_rust_receipt(root: Option<&Path>) -> Result<(), i32> {
+    let corpus_root = resolve_semantic_corpus_root(root)?;
+    let manifest_path = corpus_root.join("manifest.json");
+    let manifest: SemanticCorpusManifest = read_json(&manifest_path)?;
+    if manifest.schema != "buildlang-semantic-corpus/v1" {
+        eprintln!(
+            "semantic corpus manifest has unsupported schema '{}'",
+            manifest.schema
+        );
+        return Err(1);
+    }
+    validate_rust_receipt_manifest_contract(&corpus_root, &manifest)?;
+
+    let derived_capabilities = derive_corpus_capabilities(&corpus_root, &manifest)?;
+    verify_manifest_surfaces_match_derivation(&manifest, &derived_capabilities)?;
+
+    let rustc = probe_rustc_toolchain().ok_or_else(|| {
+        eprintln!(
+            "Error: rustc not found; install the Rust toolchain or set RUSTC to refresh the Rust corpus receipt"
+        );
+        1
+    })?;
+
+    let passed = verify_rust_corpus_stdout(&corpus_root, &manifest, &rustc.path)?;
+    let receipt_path = corpus_root
+        .join("receipts")
+        .join("rust-execution-2026-06-13.json");
+    let receipt: CorpusExecutionReceipt = read_json(&receipt_path)?;
+    let receipt = refresh_rust_receipt_from_manifest(
+        receipt,
+        &manifest,
+        &derived_capabilities,
+        passed,
+        &rustc.version_line,
+    );
+    verify_receipt("rust", &receipt, &manifest, &derived_capabilities, passed)?;
+    write_json(&receipt_path, &receipt)?;
+
+    let receipt: CorpusExecutionReceipt = read_json(&receipt_path)?;
+    verify_receipt("rust", &receipt, &manifest, &derived_capabilities, passed)?;
+
+    println!("Semantic Corpus Rust Receipt Refresh");
+    println!("manifest: {} program(s)", manifest.programs.len());
+    println!("rustc: {}", rustc.version_line);
+    println!("rust execution: {} passed", manifest.programs.len());
+    println!("rust receipt: written");
+    Ok(())
+}
+
 /// Regenerate the representation receipts (mir, memory layout, module graph,
 /// symbol graph, lsp dispatch) from current corpus source and write them back to
 /// disk. This is the sanctioned `--write` refresh mode: each receipt is rebuilt
@@ -3362,6 +3433,33 @@ fn refresh_representation_receipts(
 fn report_corpus_error(message: String) -> i32 {
     eprintln!("{message}");
     1
+}
+
+fn current_unix_verified_at() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    format!("unix-seconds:{seconds}")
+}
+
+fn verify_unix_verified_at(label: &str, verified_at: Option<&str>) -> Result<(), i32> {
+    let Some(value) = verified_at else {
+        eprintln!("{label} receipt verification metadata drift: missing verified_at");
+        return Err(1);
+    };
+    let Some(seconds) = value.strip_prefix("unix-seconds:") else {
+        eprintln!("{label} receipt verification metadata drift: malformed verified_at");
+        return Err(1);
+    };
+    if seconds.is_empty()
+        || !seconds.bytes().all(|byte| byte.is_ascii_digit())
+        || seconds.parse::<u64>().is_err()
+    {
+        eprintln!("{label} receipt verification metadata drift: malformed verified_at");
+        return Err(1);
+    }
+    Ok(())
 }
 
 fn find_semantic_corpus_root() -> Option<PathBuf> {
@@ -3702,6 +3800,10 @@ fn refresh_c_receipt_from_manifest(
     derived: &DerivedCorpusCapabilities,
     passed: usize,
 ) -> CorpusExecutionReceipt {
+    receipt.command = C_RECEIPT_COMMAND.to_string();
+    receipt.execution_mode = Some("sequential-portable-lf".to_string());
+    receipt.verified_at = Some(current_unix_verified_at());
+    receipt.verification_command = Some(C_RECEIPT_VERIFICATION_COMMAND.to_string());
     receipt.result.passed = passed;
     receipt.result.failed = 0;
     receipt.result.ignored = 0;
@@ -3714,6 +3816,131 @@ fn refresh_c_receipt_from_manifest(
             expected_stdout: program.expected_stdout.clone(),
         })
         .collect();
+    receipt.notes = vec![
+        format!(
+            "Sequential buildc run checks matched manifest stdout for all {} programs.",
+            manifest.programs.len()
+        ),
+        "Each program was rerun with --stdio-mode portable-lf and compared against the manifest LF stdout bytes.".to_string(),
+    ];
+    apply_capability_receipt_metadata(&mut receipt, derived);
+    receipt
+}
+
+fn validate_rust_receipt_manifest_contract(
+    corpus_root: &Path,
+    manifest: &SemanticCorpusManifest,
+) -> Result<(), i32> {
+    let mut ids = BTreeSet::new();
+    for program in &manifest.programs {
+        if program.id.trim().is_empty() {
+            eprintln!("semantic corpus program id must be non-empty");
+            return Err(1);
+        }
+        if !ids.insert(program.id.as_str()) {
+            eprintln!("duplicate semantic corpus program id {}", program.id);
+            return Err(1);
+        }
+        if !program.path.starts_with("programs/") || program.path.contains("..") {
+            eprintln!(
+                "semantic corpus path {} should live under programs/",
+                program.path
+            );
+            return Err(1);
+        }
+        if !corpus_root.join(&program.path).is_file() {
+            eprintln!(
+                "semantic corpus program {} should exist",
+                corpus_root.join(&program.path).display()
+            );
+            return Err(1);
+        }
+        if program.expected_stdout.is_empty() || !program.expected_stdout.ends_with('\n') {
+            eprintln!(
+                "semantic corpus program {} should declare newline-terminated stdout",
+                program.id
+            );
+            return Err(1);
+        }
+        if program.surfaces.is_empty()
+            || !program.surfaces.iter().any(|surface| surface == "stdout")
+        {
+            eprintln!(
+                "semantic corpus program {} should declare stdout surface",
+                program.id
+            );
+            return Err(1);
+        }
+    }
+    Ok(())
+}
+
+fn verify_rust_corpus_stdout(
+    corpus_root: &Path,
+    manifest: &SemanticCorpusManifest,
+    rustc_path: &str,
+) -> Result<usize, i32> {
+    for program in &manifest.programs {
+        let program_path = corpus_root.join(&program.path);
+        let captured = compile_and_capture_rust_run(&program_path, &[], rustc_path)?;
+        if captured.exit_code != 0 {
+            eprintln!(
+                "rust semantic corpus program {} failed with exit code {}\nstdout:\n{}\nstderr:\n{}",
+                program.id,
+                captured.exit_code,
+                String::from_utf8_lossy(&captured.stdout_bytes),
+                String::from_utf8_lossy(&captured.stderr_bytes)
+            );
+            return Err(1);
+        }
+        let stdout = String::from_utf8_lossy(&captured.stdout_bytes).into_owned();
+        if stdout != program.expected_stdout {
+            eprintln!(
+                "rust semantic corpus stdout drift for {}\nexpected:\n{:?}\nactual:\n{:?}",
+                program.id, program.expected_stdout, stdout
+            );
+            return Err(1);
+        }
+        if !captured.stderr_bytes.is_empty() {
+            eprintln!(
+                "rust semantic corpus stderr drift for {}\nstderr:\n{}",
+                program.id,
+                String::from_utf8_lossy(&captured.stderr_bytes)
+            );
+            return Err(1);
+        }
+    }
+    Ok(manifest.programs.len() + 1)
+}
+
+fn refresh_rust_receipt_from_manifest(
+    mut receipt: CorpusExecutionReceipt,
+    manifest: &SemanticCorpusManifest,
+    derived: &DerivedCorpusCapabilities,
+    passed: usize,
+    rustc_version: &str,
+) -> CorpusExecutionReceipt {
+    receipt.command = RUST_RECEIPT_COMMAND.to_string();
+    receipt.verification_command = Some(receipt.command.clone());
+    receipt.verified_at = Some(current_unix_verified_at());
+    receipt.result.passed = passed;
+    receipt.result.failed = 0;
+    receipt.result.ignored = 0;
+    receipt.programs = manifest
+        .programs
+        .iter()
+        .map(|program| CorpusExecutionProgram {
+            id: program.id.clone(),
+            path: format!("../{}", program.path),
+            expected_stdout: program.expected_stdout.clone(),
+        })
+        .collect();
+    receipt.notes = vec![
+        format!(
+            "Refreshed by running each manifest program through the Rust backend and rustc ({rustc_version})."
+        ),
+        "Result.passed counts the manifest contract check plus one executable Rust run per manifest program.".to_string(),
+    ];
     apply_capability_receipt_metadata(&mut receipt, derived);
     receipt
 }
@@ -3755,6 +3982,36 @@ fn verify_receipt(
         );
         return Err(1);
     }
+    if label == "c" {
+        let expected_mode = Some("sequential-portable-lf");
+        if receipt.execution_mode.as_deref() != expected_mode {
+            eprintln!(
+                "c receipt execution mode drift: expected {:?}, found {:?}",
+                expected_mode, receipt.execution_mode
+            );
+            return Err(1);
+        }
+        if receipt.command != C_RECEIPT_COMMAND {
+            eprintln!("c receipt command drift");
+            return Err(1);
+        }
+        verify_unix_verified_at(label, receipt.verified_at.as_deref())?;
+        if receipt.verification_command.as_deref() != Some(C_RECEIPT_VERIFICATION_COMMAND) {
+            eprintln!("c receipt verification metadata drift: missing verification_command");
+            return Err(1);
+        }
+    }
+    if label == "rust" {
+        if receipt.command != RUST_RECEIPT_COMMAND {
+            eprintln!("rust receipt command drift");
+            return Err(1);
+        }
+        verify_unix_verified_at(label, receipt.verified_at.as_deref())?;
+        if receipt.verification_command.as_deref() != Some(RUST_RECEIPT_COMMAND) {
+            eprintln!("rust receipt verification metadata drift: missing verification_command");
+            return Err(1);
+        }
+    }
 
     for (manifest_program, receipt_program) in manifest.programs.iter().zip(receipt.programs.iter())
     {
@@ -3793,12 +4050,12 @@ fn verify_receipt(
             derived.observed
         );
         if label == "rust" {
-            // The rust execution receipt has NO tool-supported writer: it is
-            // hand-maintained, and its capability fields are additionally
-            // pinned by unit tests. Say so, or a legitimate capability-surface
-            // change dead-ends here with no path forward.
+            // The rust execution receipt is refreshed by an explicit command,
+            // and its capability fields are additionally pinned by unit tests.
+            // Say so, or a legitimate capability-surface change dead-ends here
+            // with no path forward.
             eprintln!(
-                "note: the rust execution receipt is hand-maintained (semantic-corpus/receipts/rust-execution-*.json); update it and the pinned assertions in compiler/src/codegen/backend/rust.rs alongside any legitimate capability change"
+                "note: refresh the rust execution receipt with `buildc corpus refresh-rust-receipt --root <semantic-corpus>` and update the pinned assertions in compiler/src/codegen/backend/rust.rs alongside any legitimate capability change"
             );
         }
         return Err(1);
@@ -4444,6 +4701,8 @@ fn verify_c_corpus_stdout(
         let output = std::process::Command::new(&buildc)
             .arg("run")
             .arg(&program_path)
+            .arg("--stdio-mode")
+            .arg("portable-lf")
             .output()
             .map_err(|err| {
                 eprintln!(
@@ -4463,7 +4722,7 @@ fn verify_c_corpus_stdout(
             return Err(1);
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         if stdout != program.expected_stdout {
             eprintln!(
                 "semantic corpus stdout drift for {}\nexpected:\n{:?}\nactual:\n{:?}",

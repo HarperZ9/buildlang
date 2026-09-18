@@ -12,6 +12,13 @@
       "rust_execution_test": "generated_rust_runs_for_scalar_branch_subset"
     },
     {
+      "id": "integer_arithmetic_portable_lf",
+      "path": "programs/integer_arithmetic_portable_lf.bld",
+      "surfaces": ["integer-arithmetic", "division", "remainder", "unary-negation", "large-integer-literal", "stdout", "portable-lf"],
+      "expected_stdout": "arith 9\nwide 1000\nmix 7\n",
+      "rust_execution_test": "generated_rust_runs_for_integer_arithmetic_portable_lf"
+    },
+    {
       "id": "references_mutation",
       "path": "programs/references_mutation.bld",
       "surfaces": ["mutable-reference", "immutable-reference", "stdout"],
