@@ -54,7 +54,7 @@ pub mod ir;
 pub mod lower;
 pub mod runtime;
 
-pub use backend::{Backend, CodegenError, CodegenResult, Target};
+pub use backend::{Backend, CodegenError, CodegenResult, StdioMode, Target};
 pub use builder::*;
 pub use ir::*;
 pub use lower::*;
@@ -70,6 +70,8 @@ pub struct CodeGenerator<'ctx> {
     ctx: &'ctx TypeContext,
     /// The target backend.
     target: Target,
+    /// Runtime stdio policy for generated programs.
+    stdio_mode: StdioMode,
     /// Generated MIR.
     mir: Option<MirModule>,
     /// Source code for macro expansion.
@@ -92,6 +94,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         Self {
             ctx,
             target,
+            stdio_mode: StdioMode::Native,
             mir: None,
             source: None,
             reshade: false,
@@ -104,6 +107,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         Self {
             ctx,
             target,
+            stdio_mode: StdioMode::Native,
             mir: None,
             source: Some(source),
             reshade: false,
@@ -118,6 +122,16 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// linear-valid.
     pub fn linear_errors(&self) -> &[TypeErrorWithSpan] {
         &self.linear_errors
+    }
+
+    /// Set the runtime stdio policy for generated programs.
+    pub fn set_stdio_mode(&mut self, stdio_mode: StdioMode) {
+        self.stdio_mode = stdio_mode;
+    }
+
+    /// Get the runtime stdio policy for generated programs.
+    pub fn stdio_mode(&self) -> StdioMode {
+        self.stdio_mode
     }
 
     /// Generate code from a type-checked module.
@@ -143,6 +157,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Select backend and generate
         let mir = self.mir.as_ref().unwrap();
 
+        if !self.stdio_mode.is_native() && self.target != Target::C {
+            return Err(CodegenError::Unsupported(format!(
+                "--stdio-mode {} is supported only by the C backend; target `{}` does not use the C runtime",
+                self.stdio_mode, self.target
+            )));
+        }
+
         // Run the MIR `#[linear]` affine/borrow checker on every function
         // now that MIR exists, before handing off to a backend. This is the
         // first MIR-phase user diagnostic; errors are collected (not
@@ -152,7 +173,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         match self.target {
             Target::C => {
-                let mut backend = backend::c::CBackend::new();
+                let mut backend = backend::c::CBackend::with_stdio_mode(self.stdio_mode);
                 backend.generate(mir)
             }
             Target::X86_64 => {

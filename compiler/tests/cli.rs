@@ -7,7 +7,9 @@ use std::{
 use sha2::{Digest, Sha256};
 
 fn buildc() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_buildc"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_buildc"));
+    cmd.env("BUILDLANG_STDLIB", repo_root().join("stdlib"));
+    cmd
 }
 
 fn repo_root() -> PathBuf {
@@ -300,7 +302,7 @@ fn doctor_reports_adoption_readiness_summary() {
         "receipt   ok",
         "buildlang-substrate-receipt/v0",
         "corpus    ok",
-        "8 semantic program(s)",
+        "9 semantic program(s)",
         "c         anchor",
         "rust      subset",
         "spirv     unverified",
@@ -2369,6 +2371,142 @@ fn main() {
             .expect("main propagated effects")
             .len(),
         0
+    );
+}
+
+#[test]
+fn check_emits_distinct_argv_slots_for_multi_arg_effect() {
+    // Regression: a multi-parameter effect operation must marshal every
+    // argument, and each handler parameter must read its OWN argument. The
+    // earlier lowering dropped arguments 2..N at the perform site and made
+    // every handler parameter alias the first argument, so `Coord.point(10,
+    // 20, 30)` handled as `(x, y, z)` silently produced `x=10 y=10 z=10`.
+    // The perform site now builds a `void*[N]` argv array and each parameter
+    // reads slot `i` via `((void**)handler_data)[i]`; assert the emitted C
+    // reads three DISTINCT slots rather than the same one three times.
+    let fixture = std::env::temp_dir().join(format!(
+        "buildlang_multi_arg_effect_marshal_{}.bld",
+        std::process::id()
+    ));
+    let out_c = std::env::temp_dir().join(format!(
+        "buildlang_multi_arg_effect_marshal_{}.c",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+effect Coord {
+    fn point(x: i32, y: i32, z: i32) -> (),
+}
+
+fn emit() ~ Coord {
+    perform Coord.point(10, 20, 30);
+}
+
+fn main() ~ Console {
+    handle {
+        emit()
+    } with {
+        Coord.point(x, y, z) => {
+            println!("x={} y={} z={}", x, y, z);
+        },
+    }
+}
+"#,
+    )
+    .expect("write multi-arg effect fixture");
+
+    let output = buildc()
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&out_c)
+        .output()
+        .expect("run buildc to emit C");
+
+    assert!(
+        output.status.success(),
+        "multi-arg effect program should compile to C\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let code = fs::read_to_string(&out_c).expect("read emitted C");
+    let _ = fs::remove_file(&fixture);
+    let _ = fs::remove_file(&out_c);
+
+    for idx in 0..3 {
+        let needle = format!("handler_data)[{}]", idx);
+        assert!(
+            code.contains(&needle),
+            "handler parameter {} should read its own argv slot `{}`; \
+             emitted C:\n{}",
+            idx,
+            needle,
+            code
+        );
+    }
+}
+
+#[test]
+fn check_vec_string_literal_uses_str_push_helper() {
+    // Regression: `vec!["a", "b"]` must build a str-typed handle. The macro
+    // lowering picked the vec helper from a type -> name table that had only
+    // f64/i64/i32 arms, so string elements fell to the i32 default and the
+    // emitted C called `build_hvec_push_i32(handle, <BuildString>)` -- passing a
+    // BuildString where an int32_t is expected, which does not compile. Assert
+    // the emitted C pushes through the str helper and never through the i32 one.
+    let fixture = std::env::temp_dir().join(format!(
+        "buildlang_vec_str_literal_{}.bld",
+        std::process::id()
+    ));
+    let out_c = std::env::temp_dir().join(format!(
+        "buildlang_vec_str_literal_{}.c",
+        std::process::id()
+    ));
+    fs::write(
+        &fixture,
+        r#"
+fn main() ~ Console {
+    let words = vec!["alpha", "beta", "gamma"];
+    println!("count={}", words.len());
+    println!("a={}", words.get(0));
+}
+"#,
+    )
+    .expect("write vec string-literal fixture");
+
+    let output = buildc()
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&out_c)
+        .output()
+        .expect("run buildc to emit C");
+
+    assert!(
+        output.status.success(),
+        "vec string-literal program should compile to C\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let code = fs::read_to_string(&out_c).expect("read emitted C");
+    let _ = fs::remove_file(&fixture);
+    let _ = fs::remove_file(&out_c);
+
+    // The runtime prelude DEFINES every helper, so a bare substring check cannot
+    // tell a call from a definition; match the call form `name(_` (temporary
+    // arguments), which the definitions `name(BuildVecHandle ..)` never produce.
+    assert!(
+        code.contains("build_hvec_push_str(_"),
+        "vec![\"..\"] should push string elements through the str helper; \
+         emitted C:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("build_hvec_push_i32(_"),
+        "vec![\"..\"] must not push string elements through the i32 helper; \
+         emitted C:\n{}",
+        code
     );
 }
 
@@ -4650,6 +4788,12 @@ fn main() ~ FileSystem {
     );
 }
 
+/// A guarded arm never satisfies match exhaustiveness (the guard may be false),
+/// so the `true if allow_secret` arm alone does not cover `true`. The unguarded
+/// `true => {}` arm supplies that coverage, and it is also the path on which the
+/// pre-match `load_config` binding survives when the guard fails, which is the
+/// alias-source propagation this test pins. Do not remove that arm: without it
+/// the type checker rejects the fixture as a non-exhaustive `bool` match.
 #[test]
 fn check_receipt_keeps_pre_match_alias_source_after_guarded_match_assignment() {
     let fixture = std::env::temp_dir().join(format!(
@@ -4677,6 +4821,7 @@ fn main() ~ FileSystem {
     let mut loader = load_config;
     match mode {
         true if allow_secret => { loader = load_secret; },
+        true => {},
         false => { loader = load_backup; }
     };
     loader("ops.txt");
@@ -10745,7 +10890,7 @@ fn corpus_verify_accepts_explicit_root() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
     assert!(
-        stdout.contains("c execution: 8 passed"),
+        stdout.contains("c execution: 9 passed"),
         "corpus verify --root should run the manifest programs:\n{}",
         stdout
     );
@@ -10807,6 +10952,93 @@ fn corpus_verify_write_repairs_receipt_program_drift_in_copy() {
         "repaired C receipt should remove drifted stdout:\n{}",
         repaired_receipt
     );
+    assert!(
+        repaired_receipt.contains("all 9 programs"),
+        "repaired C receipt should restamp notes with current manifest count:\n{}",
+        repaired_receipt
+    );
+    assert!(
+        !repaired_receipt.contains("all 8 programs")
+            && !repaired_receipt.contains("same 8 programs"),
+        "repaired C receipt should not preserve stale 8-program notes:\n{}",
+        repaired_receipt
+    );
+
+    let _ = fs::remove_dir_all(&corpus_root);
+}
+
+#[test]
+fn corpus_refresh_rust_receipt_runs_manifest_and_writes_current_metadata() {
+    if !rustc_available() {
+        eprintln!("skipping rust receipt refresh: rustc not available");
+        return;
+    }
+
+    let corpus_root = temp_semantic_corpus("rust_receipt_refresh");
+
+    let output = buildc()
+        .arg("corpus")
+        .arg("refresh-rust-receipt")
+        .arg("--root")
+        .arg(&corpus_root)
+        .output()
+        .expect("run buildc corpus refresh-rust-receipt");
+
+    assert!(
+        output.status.success(),
+        "rust receipt refresh should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    assert!(
+        stdout.contains("rust receipt: written"),
+        "refresh command should report the write:\n{}",
+        stdout
+    );
+
+    let manifest_path = corpus_root.join("manifest.json");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("read manifest"))
+            .expect("parse manifest");
+    let program_count = manifest["programs"]
+        .as_array()
+        .expect("programs array")
+        .len();
+    let receipt_path = corpus_root
+        .join("receipts")
+        .join("rust-execution-2026-06-13.json");
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt_path).expect("read rust receipt"))
+            .expect("parse rust receipt");
+
+    assert_eq!(receipt["backend"], "rust");
+    assert_eq!(receipt["result"]["passed"], program_count + 1);
+    assert_eq!(
+        receipt["programs"]
+            .as_array()
+            .expect("receipt programs")
+            .len(),
+        program_count
+    );
+    assert!(
+        receipt["programs"]
+            .as_array()
+            .expect("receipt programs")
+            .iter()
+            .any(|program| program["id"] == "integer_arithmetic_portable_lf"),
+        "refreshed rust receipt should include the arithmetic corpus program"
+    );
+    assert!(
+        receipt["verified_at"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("unix-seconds:")),
+        "refreshed rust receipt should carry current runner metadata: {receipt:#?}"
+    );
+    assert_eq!(
+        receipt["verification_command"], receipt["command"],
+        "verification_command should name the exact refresh command"
+    );
 
     let _ = fs::remove_dir_all(&corpus_root);
 }
@@ -10834,10 +11066,10 @@ fn corpus_verify_checks_manifest_receipts_and_c_execution() {
     let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
     for expected in [
         "Semantic Corpus Verify",
-        "manifest: 8 program(s)",
+        "manifest: 9 program(s)",
         "c receipt: ok",
         "rust receipt: ok",
-        "c execution: 8 passed",
+        "c execution: 9 passed",
     ] {
         assert!(
             stdout.contains(expected),
@@ -11049,6 +11281,23 @@ fn write_c_execution_receipt_copy(
     fs::write(&receipt_path, format!("{rendered}\n")).expect("write modified c execution receipt");
 }
 
+/// Transform the Rust execution receipt in a corpus copy.
+fn write_rust_execution_receipt_copy(
+    corpus_root: &Path,
+    transform: impl FnOnce(serde_json::Value) -> serde_json::Value,
+) {
+    let receipt_path = corpus_root
+        .join("receipts")
+        .join("rust-execution-2026-06-13.json");
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt_path).expect("read rust execution receipt"))
+            .expect("parse rust execution receipt");
+    let rendered = serde_json::to_string_pretty(&transform(receipt))
+        .expect("render modified rust execution receipt");
+    fs::write(&receipt_path, format!("{rendered}\n"))
+        .expect("write modified rust execution receipt");
+}
+
 #[test]
 fn corpus_verify_rejects_manifest_stdout_tamper() {
     // Tamper the expected stdout CONSISTENTLY in both the manifest and the C
@@ -11147,6 +11396,110 @@ fn corpus_verify_rejects_capability_gate_stamp_tamper() {
     });
 
     assert_corpus_verify_rejects(&corpus_root, "c receipt capability metadata drift");
+}
+
+#[test]
+fn corpus_verify_rejects_c_execution_mode_tamper() {
+    // The C execution receipt must say it was produced through the portable-LF
+    // path. Otherwise a verifier could normalize native CRLF output and still
+    // let a stale receipt look equivalent to an explicitly portable run.
+    let corpus_root = temp_semantic_corpus("c_exec_mode_tamper");
+    write_c_execution_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["execution_mode"] = serde_json::Value::String("native".to_string());
+        receipt["command"] =
+            serde_json::Value::String("buildc run <semantic-corpus-program>".to_string());
+        receipt
+    });
+
+    assert_corpus_verify_rejects(&corpus_root, "c receipt execution mode drift");
+}
+
+#[test]
+fn corpus_verify_rejects_c_execution_missing_verification_metadata() {
+    // A current C receipt must say when and through which command path it was
+    // verified. Program/count alignment alone is not enough because it can be
+    // hand-edited before the executable corpus run happens.
+    let corpus_root = temp_semantic_corpus("c_exec_missing_verified_at");
+    write_c_execution_receipt_copy(&corpus_root, |mut receipt| {
+        receipt
+            .as_object_mut()
+            .expect("c receipt object")
+            .remove("verified_at");
+        receipt
+            .as_object_mut()
+            .expect("c receipt object")
+            .remove("verification_command");
+        receipt
+    });
+
+    assert_corpus_verify_rejects(
+        &corpus_root,
+        "c receipt verification metadata drift: missing verified_at",
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_c_execution_malformed_verified_at() {
+    let corpus_root = temp_semantic_corpus("c_exec_malformed_verified_at");
+    write_c_execution_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["verified_at"] = serde_json::Value::String("unix-seconds:not-a-number".to_string());
+        receipt
+    });
+
+    assert_corpus_verify_rejects(
+        &corpus_root,
+        "c receipt verification metadata drift: malformed verified_at",
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_rust_execution_missing_verification_metadata() {
+    // The Rust receipt refresh path must leave a runner-attested timestamp and
+    // exact refresh command after the generated-Rust corpus runs.
+    let corpus_root = temp_semantic_corpus("rust_exec_missing_verified_at");
+    write_rust_execution_receipt_copy(&corpus_root, |mut receipt| {
+        receipt
+            .as_object_mut()
+            .expect("rust receipt object")
+            .remove("verified_at");
+        receipt
+            .as_object_mut()
+            .expect("rust receipt object")
+            .remove("verification_command");
+        receipt
+    });
+
+    assert_corpus_verify_rejects(
+        &corpus_root,
+        "rust receipt verification metadata drift: missing verified_at",
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_rust_execution_malformed_verified_at() {
+    let corpus_root = temp_semantic_corpus("rust_exec_malformed_verified_at");
+    write_rust_execution_receipt_copy(&corpus_root, |mut receipt| {
+        receipt["verified_at"] = serde_json::Value::String("unix-seconds:not-a-number".to_string());
+        receipt
+    });
+
+    assert_corpus_verify_rejects(
+        &corpus_root,
+        "rust receipt verification metadata drift: malformed verified_at",
+    );
+}
+
+#[test]
+fn corpus_verify_rejects_rust_execution_command_tamper() {
+    let corpus_root = temp_semantic_corpus("rust_exec_command_tamper");
+    write_rust_execution_receipt_copy(&corpus_root, |mut receipt| {
+        let wrong = "hand edited rust receipt; not the refresh command";
+        receipt["command"] = serde_json::Value::String(wrong.to_string());
+        receipt["verification_command"] = serde_json::Value::String(wrong.to_string());
+        receipt
+    });
+
+    assert_corpus_verify_rejects(&corpus_root, "rust receipt command drift");
 }
 
 #[test]
@@ -11695,7 +12048,14 @@ fn corpus_verify_rejects_memory_layout_source_digest_drift() {
 fn corpus_verify_rejects_memory_layout_observed_surface_drift() {
     let corpus_root = temp_semantic_corpus("memory_layout_observed_surface");
     write_memory_layout_receipt_copy(&corpus_root, |mut receipt| {
-        receipt["programs"][1]["observed_memory_surfaces"]["references"] =
+        let programs = receipt["programs"]
+            .as_array_mut()
+            .expect("memory layout programs");
+        let references_program = programs
+            .iter_mut()
+            .find(|program| program["id"] == "references_mutation")
+            .expect("references_mutation memory layout row");
+        references_program["observed_memory_surfaces"]["references"] =
             serde_json::Value::Bool(false);
         receipt
     });
@@ -12799,6 +13159,27 @@ fn rustc_compile_and_run(name: &str, rust_source: &str) -> RunResult {
     result
 }
 
+#[test]
+fn generated_rust_runs_for_integer_arithmetic_portable_lf() {
+    if !rustc_available() {
+        eprintln!("skipping arithmetic corpus Rust run: rustc not available");
+        return;
+    }
+
+    let path = semantic_corpus_root()
+        .join("programs")
+        .join("integer_arithmetic_portable_lf.bld");
+    let source = fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("read arithmetic corpus program {}: {}", path.display(), err));
+    let rust_source = lower_source_to_rust(&source);
+    let result = rustc_compile_and_run("integer_arithmetic_portable_lf", &rust_source);
+
+    assert_eq!(
+        result.stdout, "arith 9\nwide 1000\nmix 7\n",
+        "generated Rust must preserve the arithmetic corpus stdout"
+    );
+}
+
 /// Run a corpus program through the production C path (`buildc run`) and capture
 /// stdout (CRLF-normalized) plus the process exit code.
 fn c_backend_run(program_path: &Path) -> RunResult {
@@ -12818,6 +13199,60 @@ fn c_backend_run(program_path: &Path) -> RunResult {
         stdout: String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
         exit_code: output.status.code(),
     }
+}
+
+/// Run a program through the C path (`buildc run`) WITHOUT asserting success,
+/// returning stdout, stderr (both CRLF-normalized) and the process exit code.
+/// `buildc run` forwards the compiled program's exit code as its own and runs
+/// it with inherited stdio, so a runtime abort surfaces here as a nonzero exit
+/// plus the abort message on stderr. Used by fail-closed controls that expect a
+/// program to abort at runtime.
+fn c_backend_run_capture(program_path: &Path) -> (String, String, Option<i32>) {
+    let output = buildc()
+        .arg("run")
+        .arg(program_path)
+        .output()
+        .unwrap_or_else(|err| panic!("run buildc run for {}: {}", program_path.display(), err));
+    (
+        String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+        String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n"),
+        output.status.code(),
+    )
+}
+
+#[test]
+fn semantic_corpus_integer_arithmetic_portable_lf_runs_on_c_backend() {
+    if !c_backend_ready() {
+        eprintln!("skipping semantic corpus arithmetic run: no C backend available");
+        return;
+    }
+
+    let path = semantic_corpus_root()
+        .join("programs")
+        .join("integer_arithmetic_portable_lf.bld");
+    let output = buildc()
+        .arg("run")
+        .arg(&path)
+        .arg("--stdio-mode")
+        .arg("portable-lf")
+        .output()
+        .expect("run arithmetic corpus program with portable LF");
+
+    assert!(
+        output.status.success(),
+        "arithmetic corpus program should run\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.stdout.contains(&b'\r'),
+        "portable-LF corpus stdout must not contain CR bytes: {:?}",
+        output.stdout
+    );
+    assert_eq!(
+        output.stdout, b"arith 9\nwide 1000\nmix 7\n",
+        "arithmetic corpus stdout is the executable contract"
+    );
 }
 
 /// Foundation: overflow-safe checked + saturating integer arithmetic
@@ -12867,6 +13302,2714 @@ fn large_unsuffixed_int_literal_not_truncated_end_to_end() {
     );
 }
 
+#[test]
+fn compile_time_integer_literal_and_fold_overflow_are_diagnostics() {
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang_integer_overflow_diagnostics_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create overflow diagnostics dir");
+
+    let cases: [(&str, &str, &str); 5] = [
+        (
+            "too_large_u128_literal",
+            "fn main() { let x = 340282366920938463463374607431768211456u128; }\n",
+            "integer literal is too large",
+        ),
+        (
+            "u8_suffix_out_of_range",
+            "fn main() { let x = 256u8; }\n",
+            "integer literal `256u8` is out of range for type `u8`",
+        ),
+        (
+            "i8_add_fold_overflow",
+            "fn main() { let x: i8 = 127i8 + 1i8; }\n",
+            "integer overflow in `+` for type `i8`",
+        ),
+        (
+            "u8_sub_fold_overflow",
+            "fn main() { let x: u8 = 0u8 - 1u8; }\n",
+            "integer overflow in `-` for type `u8`",
+        ),
+        (
+            "i8_neg_fold_overflow",
+            "fn main() { let x: i8 = -(0i8 - 127i8 - 1i8); }\n",
+            "integer overflow in unary `-` for type `i8`",
+        ),
+    ];
+
+    for (name, src, needle) in cases {
+        let file = dir.join(format!("{name}.bld"));
+        fs::write(&file, src).expect("write overflow diagnostic fixture");
+        let (status, stdout, stderr) = check_within(&file, 30);
+        assert!(
+            !status.success(),
+            "overflow diagnostic case `{name}` must fail buildc check\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains(needle),
+            "overflow diagnostic case `{name}` must report `{needle}`\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        let lower_stderr = stderr.to_lowercase();
+        assert!(
+            !lower_stderr.contains("internal") && !lower_stderr.contains("panic"),
+            "overflow diagnostic case `{name}` must be a user diagnostic, not a compiler panic\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn function_i64_argument_signed_min_spelling_is_out_of_range() {
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang_i64_arg_signed_min_literal_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create signed-min literal diagnostics dir");
+    let file = dir.join("i64_arg_signed_min.bld");
+    fs::write(
+        &file,
+        "fn takes_i64(x: i64) -> i64 { x }\n\
+         fn main() { let _ = takes_i64(-9223372036854775808); }\n",
+    )
+    .expect("write signed-min literal fixture");
+
+    let (status, stdout, stderr) = check_within(&file, 30);
+    assert!(
+        !status.success(),
+        "i64 parameter must reject signed-min spelling whose positive literal \
+         magnitude exceeds i64::MAX\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("integer literal `9223372036854775808` is out of range for type `i64`"),
+        "i64 parameter should report the same out-of-range literal diagnostic as \
+         annotated i64 locals\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let mir = buildc()
+        .arg("mir")
+        .arg("emit")
+        .arg(&file)
+        .arg("-o")
+        .arg(dir.join("i64_arg_signed_min.mir.json"))
+        .output()
+        .expect("run buildc mir emit");
+    assert!(
+        !mir.status.success(),
+        "out-of-range i64 argument literal must not reach MIR as an implicit \
+         i128-to-i64 conversion\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&mir.stdout),
+        String::from_utf8_lossy(&mir.stderr)
+    );
+}
+
+#[test]
+fn mut_to_shared_argument_coercion_survives_integer_context_checks() {
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang_mut_to_shared_arg_coercion_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create mut-to-shared argument dir");
+
+    let cases = [
+        (
+            "direct",
+            "fn observe(x: &i64) { }\n\
+             fn main() { let mut v: i64 = 7; observe(&mut v); }\n",
+        ),
+        (
+            "impl_method",
+            "struct Box;\n\
+             impl Box { fn observe(self, x: &i64) { } }\n\
+             fn main() { let b = Box; let mut v: i64 = 7; b.observe(&mut v); }\n",
+        ),
+        (
+            "overload",
+            "fn observe(x: &i64) { }\n\
+             fn observe(x: str) { }\n\
+             fn main() { let mut v: i64 = 7; observe(&mut v); }\n",
+        ),
+    ];
+
+    for (name, src) in cases {
+        let file = dir.join(format!("{name}.bld"));
+        fs::write(&file, src).expect("write mut-to-shared argument fixture");
+        let (status, stdout, stderr) = check_within(&file, 30);
+        assert!(
+            status.success(),
+            "&mut T argument must still coerce to &T parameter for {name}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+}
+
+fn explicit_integer_arithmetic_source() -> &'static str {
+    r#"fn u8_max() -> u8 { 255u8 }
+fn u8_one() -> u8 { 1u8 }
+fn u8_two() -> u8 { 2u8 }
+fn u8_two_hundred() -> u8 { 200u8 }
+fn i8_max() -> i8 { 127i8 }
+fn i8_min() -> i8 { 0i8 - 127i8 - 1i8 }
+fn i8_sixty_four() -> i8 { 64i8 }
+fn i16_max() -> i16 { 32767i16 }
+fn u16_max() -> u16 { 65535u16 }
+fn i32_big() -> i32 { 46341 }
+fn u32_maxish() -> u32 { 65535u32 }
+fn i64_max() -> i64 { 9223372036854775807i64 }
+fn u64_max() -> u64 { 18446744073709551615u64 }
+fn u64_almost() -> u64 { 18446744073709551614u64 }
+fn i128_max() -> i128 { 170141183460469231731687303715884105727i128 }
+fn u128_max() -> u128 { 340282366920938463463374607431768211455u128 }
+fn isize_max() -> isize { 9223372036854775807isize }
+fn usize_max() -> usize { 18446744073709551615usize }
+fn i16_min() -> i16 { 0i16 - 32767i16 - 1i16 }
+fn i16_half_max() -> i16 { 16383i16 }
+fn u16_half_max() -> u16 { 32767u16 }
+fn i32_max() -> i32 { 2147483647i32 }
+fn i32_min() -> i32 { 0i32 - 2147483647i32 - 1i32 }
+fn i32_half_max() -> i32 { 1073741823i32 }
+fn u32_half_max() -> u32 { 2147483647u32 }
+fn i64_min() -> i64 { 0i64 - 9223372036854775807i64 - 1i64 }
+fn i64_half_max() -> i64 { 4611686018427387903i64 }
+fn u64_half_max() -> u64 { 9223372036854775807u64 }
+fn i128_min() -> i128 { 0i128 - 170141183460469231731687303715884105727i128 - 1i128 }
+fn i128_half_max() -> i128 { 85070591730234615865843651857942052863i128 }
+fn u128_half_max() -> u128 { 170141183460469231731687303715884105727u128 }
+fn isize_min() -> isize { 0isize - 9223372036854775807isize - 1isize }
+fn isize_half_max() -> isize { 4611686018427387903isize }
+fn usize_half_max() -> usize { 9223372036854775807usize }
+fn checked_u64_return() -> Option<u64> { u64_almost().checked_add(1u64) }
+fn id_u64_option(x: Option<u64>) -> Option<u64> { x }
+
+fn main() ~ Console {
+    println("u8 wrap {} {} {}", u8_max().wrapping_add(u8_one()), 0u8.wrapping_sub(u8_one()), u8_two_hundred().wrapping_mul(u8_two()));
+    println("i8 wrap {} {} {}", i8_max().wrapping_add(1i8), i8_min().wrapping_sub(1i8), i8_sixty_four().wrapping_mul(2i8));
+    println("u16 sat {} {}", u16_max().saturating_add(1u16), 0u16.saturating_sub(1u16));
+    println("i16 sat {} {}", i16_max().saturating_add(1i16), (0i16 - 32767i16 - 1i16).saturating_sub(1i16));
+    println("i32 satmul {}", i32_big().saturating_mul(i32_big()));
+    println("u32 satmul {}", u32_maxish().saturating_mul(u32_maxish()));
+    println("i64 sat {}", i64_max().saturating_add(1i64));
+    println("u64 wrap {}", u64_max().wrapping_add(1u64));
+    println("i128 sat {}", i128_max().saturating_add(1i128));
+    println("u128 wrapsat {} {}", u128_max().wrapping_add(1u128), u128_max().saturating_mul(2u128));
+    println("isize sat {}", isize_max().saturating_add(1isize));
+    println("usize wrap {}", usize_max().wrapping_add(1usize));
+
+    match u64_almost().checked_add(1u64) { Some(v) => println("u64 some {}", v), None => println("u64 none {}", 0) }
+    match u64_max().checked_add(1u64) { Some(v) => println("u64 overflow {}", v), None => println("u64 none {}", 1) }
+    match i128_max().checked_sub(1i128) { Some(v) => println("i128 some {}", v), None => println("i128 none {}", 0) }
+    match i128_max().checked_add(1i128) { Some(v) => println("i128 none {}", v), None => println("i128 none {}", 1) }
+    match u128_max().checked_sub(1u128) { Some(v) => println("u128 some {}", v), None => println("u128 none {}", 0) }
+    match u128_max().checked_mul(2u128) { Some(v) => println("u128 overflow {}", v), None => println("u128 none {}", 1) }
+    match 126i8.checked_add(1i8) { Some(v) => println("chk i8 add some {}", v), None => println("chk i8 add some none {}", 0) }
+    match i8_max().checked_add(1i8) { Some(v) => println("chk i8 add none value {}", v), None => println("chk i8 add none {}", 1) }
+    match i8_min().checked_add(1i8).unwrap_or(0i8).checked_sub(1i8) { Some(v) => println("chk i8 sub some {}", v), None => println("chk i8 sub some none {}", 0) }
+    match i8_min().checked_sub(1i8) { Some(v) => println("chk i8 sub none value {}", v), None => println("chk i8 sub none {}", 1) }
+    match 63i8.checked_mul(2i8) { Some(v) => println("chk i8 mul some {}", v), None => println("chk i8 mul some none {}", 0) }
+    match i8_max().checked_mul(2i8) { Some(v) => println("chk i8 mul none value {}", v), None => println("chk i8 mul none {}", 1) }
+    match 254u8.checked_add(1u8) { Some(v) => println("chk u8 add some {}", v), None => println("chk u8 add some none {}", 0) }
+    match u8_max().checked_add(1u8) { Some(v) => println("chk u8 add none value {}", v), None => println("chk u8 add none {}", 1) }
+    match 1u8.checked_sub(1u8) { Some(v) => println("chk u8 sub some {}", v), None => println("chk u8 sub some none {}", 0) }
+    match 0u8.checked_sub(1u8) { Some(v) => println("chk u8 sub none value {}", v), None => println("chk u8 sub none {}", 1) }
+    match 127u8.checked_mul(2u8) { Some(v) => println("chk u8 mul some {}", v), None => println("chk u8 mul some none {}", 0) }
+    match u8_max().checked_mul(2u8) { Some(v) => println("chk u8 mul none value {}", v), None => println("chk u8 mul none {}", 1) }
+    match 32766i16.checked_add(1i16) { Some(v) => println("chk i16 add some {}", v), None => println("chk i16 add some none {}", 0) }
+    match i16_max().checked_add(1i16) { Some(v) => println("chk i16 add none value {}", v), None => println("chk i16 add none {}", 1) }
+    match i16_min().checked_add(1i16).unwrap_or(0i16).checked_sub(1i16) { Some(v) => println("chk i16 sub some {}", v), None => println("chk i16 sub some none {}", 0) }
+    match i16_min().checked_sub(1i16) { Some(v) => println("chk i16 sub none value {}", v), None => println("chk i16 sub none {}", 1) }
+    match i16_half_max().checked_mul(2i16) { Some(v) => println("chk i16 mul some {}", v), None => println("chk i16 mul some none {}", 0) }
+    match i16_max().checked_mul(2i16) { Some(v) => println("chk i16 mul none value {}", v), None => println("chk i16 mul none {}", 1) }
+    match 65534u16.checked_add(1u16) { Some(v) => println("chk u16 add some {}", v), None => println("chk u16 add some none {}", 0) }
+    match u16_max().checked_add(1u16) { Some(v) => println("chk u16 add none value {}", v), None => println("chk u16 add none {}", 1) }
+    match 1u16.checked_sub(1u16) { Some(v) => println("chk u16 sub some {}", v), None => println("chk u16 sub some none {}", 0) }
+    match 0u16.checked_sub(1u16) { Some(v) => println("chk u16 sub none value {}", v), None => println("chk u16 sub none {}", 1) }
+    match u16_half_max().checked_mul(2u16) { Some(v) => println("chk u16 mul some {}", v), None => println("chk u16 mul some none {}", 0) }
+    match u16_max().checked_mul(2u16) { Some(v) => println("chk u16 mul none value {}", v), None => println("chk u16 mul none {}", 1) }
+    match 2147483646i32.checked_add(1i32) { Some(v) => println("chk i32 add some {}", v), None => println("chk i32 add some none {}", 0) }
+    match i32_max().checked_add(1i32) { Some(v) => println("chk i32 add none value {}", v), None => println("chk i32 add none {}", 1) }
+    match i32_min().checked_add(1i32).unwrap_or(0i32).checked_sub(1i32) { Some(v) => println("chk i32 sub some {}", v), None => println("chk i32 sub some none {}", 0) }
+    match i32_min().checked_sub(1i32) { Some(v) => println("chk i32 sub none value {}", v), None => println("chk i32 sub none {}", 1) }
+    match i32_half_max().checked_mul(2i32) { Some(v) => println("chk i32 mul some {}", v), None => println("chk i32 mul some none {}", 0) }
+    match i32_max().checked_mul(2i32) { Some(v) => println("chk i32 mul none value {}", v), None => println("chk i32 mul none {}", 1) }
+    match 4294967294u32.checked_add(1u32) { Some(v) => println("chk u32 add some {}", v), None => println("chk u32 add some none {}", 0) }
+    match 4294967295u32.checked_add(1u32) { Some(v) => println("chk u32 add none value {}", v), None => println("chk u32 add none {}", 1) }
+    match 1u32.checked_sub(1u32) { Some(v) => println("chk u32 sub some {}", v), None => println("chk u32 sub some none {}", 0) }
+    match 0u32.checked_sub(1u32) { Some(v) => println("chk u32 sub none value {}", v), None => println("chk u32 sub none {}", 1) }
+    match u32_half_max().checked_mul(2u32) { Some(v) => println("chk u32 mul some {}", v), None => println("chk u32 mul some none {}", 0) }
+    match 4294967295u32.checked_mul(2u32) { Some(v) => println("chk u32 mul none value {}", v), None => println("chk u32 mul none {}", 1) }
+    match 9223372036854775806i64.checked_add(1i64) { Some(v) => println("chk i64 add some {}", v), None => println("chk i64 add some none {}", 0) }
+    match i64_max().checked_add(1i64) { Some(v) => println("chk i64 add none value {}", v), None => println("chk i64 add none {}", 1) }
+    match i64_min().checked_add(1i64).unwrap_or(0i64).checked_sub(1i64) { Some(v) => println("chk i64 sub some {}", v), None => println("chk i64 sub some none {}", 0) }
+    match i64_min().checked_sub(1i64) { Some(v) => println("chk i64 sub none value {}", v), None => println("chk i64 sub none {}", 1) }
+    match i64_half_max().checked_mul(2i64) { Some(v) => println("chk i64 mul some {}", v), None => println("chk i64 mul some none {}", 0) }
+    match i64_max().checked_mul(2i64) { Some(v) => println("chk i64 mul none value {}", v), None => println("chk i64 mul none {}", 1) }
+    match u64_almost().checked_add(1u64) { Some(v) => println("chk u64 add some {}", v), None => println("chk u64 add some none {}", 0) }
+    match u64_max().checked_add(1u64) { Some(v) => println("chk u64 add none value {}", v), None => println("chk u64 add none {}", 1) }
+    match 1u64.checked_sub(1u64) { Some(v) => println("chk u64 sub some {}", v), None => println("chk u64 sub some none {}", 0) }
+    match 0u64.checked_sub(1u64) { Some(v) => println("chk u64 sub none value {}", v), None => println("chk u64 sub none {}", 1) }
+    match u64_half_max().checked_mul(2u64) { Some(v) => println("chk u64 mul some {}", v), None => println("chk u64 mul some none {}", 0) }
+    match u64_max().checked_mul(2u64) { Some(v) => println("chk u64 mul none value {}", v), None => println("chk u64 mul none {}", 1) }
+    match 170141183460469231731687303715884105726i128.checked_add(1i128) { Some(v) => println("chk i128 add some {}", v), None => println("chk i128 add some none {}", 0) }
+    match i128_max().checked_add(1i128) { Some(v) => println("chk i128 add none value {}", v), None => println("chk i128 add none {}", 1) }
+    match i128_min().checked_add(1i128).unwrap_or(0i128).checked_sub(1i128) { Some(v) => println("chk i128 sub some {}", v), None => println("chk i128 sub some none {}", 0) }
+    match i128_min().checked_sub(1i128) { Some(v) => println("chk i128 sub none value {}", v), None => println("chk i128 sub none {}", 1) }
+    match i128_half_max().checked_mul(2i128) { Some(v) => println("chk i128 mul some {}", v), None => println("chk i128 mul some none {}", 0) }
+    match i128_max().checked_mul(2i128) { Some(v) => println("chk i128 mul none value {}", v), None => println("chk i128 mul none {}", 1) }
+    match 340282366920938463463374607431768211454u128.checked_add(1u128) { Some(v) => println("chk u128 add some {}", v), None => println("chk u128 add some none {}", 0) }
+    match u128_max().checked_add(1u128) { Some(v) => println("chk u128 add none value {}", v), None => println("chk u128 add none {}", 1) }
+    match 1u128.checked_sub(1u128) { Some(v) => println("chk u128 sub some {}", v), None => println("chk u128 sub some none {}", 0) }
+    match 0u128.checked_sub(1u128) { Some(v) => println("chk u128 sub none value {}", v), None => println("chk u128 sub none {}", 1) }
+    match u128_half_max().checked_mul(2u128) { Some(v) => println("chk u128 mul some {}", v), None => println("chk u128 mul some none {}", 0) }
+    match u128_max().checked_mul(2u128) { Some(v) => println("chk u128 mul none value {}", v), None => println("chk u128 mul none {}", 1) }
+    match 9223372036854775806isize.checked_add(1isize) { Some(v) => println("chk isize add some {}", v), None => println("chk isize add some none {}", 0) }
+    match isize_max().checked_add(1isize) { Some(v) => println("chk isize add none value {}", v), None => println("chk isize add none {}", 1) }
+    match isize_min().checked_add(1isize).unwrap_or(0isize).checked_sub(1isize) { Some(v) => println("chk isize sub some {}", v), None => println("chk isize sub some none {}", 0) }
+    match isize_min().checked_sub(1isize) { Some(v) => println("chk isize sub none value {}", v), None => println("chk isize sub none {}", 1) }
+    match isize_half_max().checked_mul(2isize) { Some(v) => println("chk isize mul some {}", v), None => println("chk isize mul some none {}", 0) }
+    match isize_max().checked_mul(2isize) { Some(v) => println("chk isize mul none value {}", v), None => println("chk isize mul none {}", 1) }
+    match 18446744073709551614usize.checked_add(1usize) { Some(v) => println("chk usize add some {}", v), None => println("chk usize add some none {}", 0) }
+    match usize_max().checked_add(1usize) { Some(v) => println("chk usize add none value {}", v), None => println("chk usize add none {}", 1) }
+    match 1usize.checked_sub(1usize) { Some(v) => println("chk usize sub some {}", v), None => println("chk usize sub some none {}", 0) }
+    match 0usize.checked_sub(1usize) { Some(v) => println("chk usize sub none value {}", v), None => println("chk usize sub none {}", 1) }
+    match usize_half_max().checked_mul(2usize) { Some(v) => println("chk usize mul some {}", v), None => println("chk usize mul some none {}", 0) }
+    match usize_max().checked_mul(2usize) { Some(v) => println("chk usize mul none value {}", v), None => println("chk usize mul none {}", 1) }
+    let assigned: Option<u64> = checked_u64_return();
+    match assigned { Some(v) => println("option assign {}", v), None => println("option assign none {}", 0) }
+    match id_u64_option(checked_u64_return()) { Some(v) => println("option call {}", v), None => println("option call none {}", 0) }
+    if let Some(v) = checked_u64_return() { println("option iflet {}", v); }
+    println("option pred {} {}", checked_u64_return().is_some(), u64_max().checked_add(1u64).is_none());
+    println("option unwrap {}", checked_u64_return().unwrap());
+    println("option unwrapor {}", u64_max().checked_add(1u64).unwrap_or(7u64));
+}
+"#
+}
+
+#[test]
+fn explicit_integer_arithmetic_methods_run_on_c_backend_boundaries() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping explicit integer arithmetic C e2e: no C backend available (buildc doctor)"
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang_explicit_integer_methods_c_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create explicit integer C dir");
+    let path = dir.join("explicit_integer_methods.bld");
+    std::fs::write(&path, explicit_integer_arithmetic_source())
+        .expect("write explicit integer method fixture");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout,
+        "u8 wrap 0 255 144\n\
+i8 wrap -128 127 -128\n\
+u16 sat 65535 0\n\
+i16 sat 32767 -32768\n\
+i32 satmul 2147483647\n\
+u32 satmul 4294836225\n\
+i64 sat 9223372036854775807\n\
+u64 wrap 0\n\
+i128 sat 170141183460469231731687303715884105727\n\
+u128 wrapsat 0 340282366920938463463374607431768211455\n\
+isize sat 9223372036854775807\n\
+usize wrap 0\n\
+u64 some 18446744073709551615\n\
+u64 none 1\n\
+i128 some 170141183460469231731687303715884105726\n\
+i128 none 1\n\
+u128 some 340282366920938463463374607431768211454\n\
+u128 none 1\n\
+chk i8 add some 127\n\
+chk i8 add none 1\n\
+chk i8 sub some -128\n\
+chk i8 sub none 1\n\
+chk i8 mul some 126\n\
+chk i8 mul none 1\n\
+chk u8 add some 255\n\
+chk u8 add none 1\n\
+chk u8 sub some 0\n\
+chk u8 sub none 1\n\
+chk u8 mul some 254\n\
+chk u8 mul none 1\n\
+chk i16 add some 32767\n\
+chk i16 add none 1\n\
+chk i16 sub some -32768\n\
+chk i16 sub none 1\n\
+chk i16 mul some 32766\n\
+chk i16 mul none 1\n\
+chk u16 add some 65535\n\
+chk u16 add none 1\n\
+chk u16 sub some 0\n\
+chk u16 sub none 1\n\
+chk u16 mul some 65534\n\
+chk u16 mul none 1\n\
+chk i32 add some 2147483647\n\
+chk i32 add none 1\n\
+chk i32 sub some -2147483648\n\
+chk i32 sub none 1\n\
+chk i32 mul some 2147483646\n\
+chk i32 mul none 1\n\
+chk u32 add some 4294967295\n\
+chk u32 add none 1\n\
+chk u32 sub some 0\n\
+chk u32 sub none 1\n\
+chk u32 mul some 4294967294\n\
+chk u32 mul none 1\n\
+chk i64 add some 9223372036854775807\n\
+chk i64 add none 1\n\
+chk i64 sub some -9223372036854775808\n\
+chk i64 sub none 1\n\
+chk i64 mul some 9223372036854775806\n\
+chk i64 mul none 1\n\
+chk u64 add some 18446744073709551615\n\
+chk u64 add none 1\n\
+chk u64 sub some 0\n\
+chk u64 sub none 1\n\
+chk u64 mul some 18446744073709551614\n\
+chk u64 mul none 1\n\
+chk i128 add some 170141183460469231731687303715884105727\n\
+chk i128 add none 1\n\
+chk i128 sub some -170141183460469231731687303715884105728\n\
+chk i128 sub none 1\n\
+chk i128 mul some 170141183460469231731687303715884105726\n\
+chk i128 mul none 1\n\
+chk u128 add some 340282366920938463463374607431768211455\n\
+chk u128 add none 1\n\
+chk u128 sub some 0\n\
+chk u128 sub none 1\n\
+chk u128 mul some 340282366920938463463374607431768211454\n\
+chk u128 mul none 1\n\
+chk isize add some 9223372036854775807\n\
+chk isize add none 1\n\
+chk isize sub some -9223372036854775808\n\
+chk isize sub none 1\n\
+chk isize mul some 9223372036854775806\n\
+chk isize mul none 1\n\
+chk usize add some 18446744073709551615\n\
+chk usize add none 1\n\
+chk usize sub some 0\n\
+chk usize sub none 1\n\
+chk usize mul some 18446744073709551614\n\
+chk usize mul none 1\n\
+option assign 18446744073709551615\n\
+option call 18446744073709551615\n\
+option iflet 18446744073709551615\n\
+option pred true true\n\
+option unwrap 18446744073709551615\n\
+option unwrapor 7\n",
+        "explicit wrapping/saturating/checked integer methods must run with exact payloads"
+    );
+}
+
+#[test]
+fn explicit_integer_arithmetic_methods_match_c_and_rust_backends() {
+    if !rustc_available() {
+        eprintln!("skipping explicit integer arithmetic Rust e2e: rustc not available");
+        return;
+    }
+    let rust_source = lower_source_to_rust(explicit_integer_arithmetic_source());
+    let result = rustc_compile_and_run("explicit_integer_methods", &rust_source);
+    assert_eq!(
+        result.stdout,
+        "u8 wrap 0 255 144\n\
+i8 wrap -128 127 -128\n\
+u16 sat 65535 0\n\
+i16 sat 32767 -32768\n\
+i32 satmul 2147483647\n\
+u32 satmul 4294836225\n\
+i64 sat 9223372036854775807\n\
+u64 wrap 0\n\
+i128 sat 170141183460469231731687303715884105727\n\
+u128 wrapsat 0 340282366920938463463374607431768211455\n\
+isize sat 9223372036854775807\n\
+usize wrap 0\n\
+u64 some 18446744073709551615\n\
+u64 none 1\n\
+i128 some 170141183460469231731687303715884105726\n\
+i128 none 1\n\
+u128 some 340282366920938463463374607431768211454\n\
+u128 none 1\n\
+chk i8 add some 127\n\
+chk i8 add none 1\n\
+chk i8 sub some -128\n\
+chk i8 sub none 1\n\
+chk i8 mul some 126\n\
+chk i8 mul none 1\n\
+chk u8 add some 255\n\
+chk u8 add none 1\n\
+chk u8 sub some 0\n\
+chk u8 sub none 1\n\
+chk u8 mul some 254\n\
+chk u8 mul none 1\n\
+chk i16 add some 32767\n\
+chk i16 add none 1\n\
+chk i16 sub some -32768\n\
+chk i16 sub none 1\n\
+chk i16 mul some 32766\n\
+chk i16 mul none 1\n\
+chk u16 add some 65535\n\
+chk u16 add none 1\n\
+chk u16 sub some 0\n\
+chk u16 sub none 1\n\
+chk u16 mul some 65534\n\
+chk u16 mul none 1\n\
+chk i32 add some 2147483647\n\
+chk i32 add none 1\n\
+chk i32 sub some -2147483648\n\
+chk i32 sub none 1\n\
+chk i32 mul some 2147483646\n\
+chk i32 mul none 1\n\
+chk u32 add some 4294967295\n\
+chk u32 add none 1\n\
+chk u32 sub some 0\n\
+chk u32 sub none 1\n\
+chk u32 mul some 4294967294\n\
+chk u32 mul none 1\n\
+chk i64 add some 9223372036854775807\n\
+chk i64 add none 1\n\
+chk i64 sub some -9223372036854775808\n\
+chk i64 sub none 1\n\
+chk i64 mul some 9223372036854775806\n\
+chk i64 mul none 1\n\
+chk u64 add some 18446744073709551615\n\
+chk u64 add none 1\n\
+chk u64 sub some 0\n\
+chk u64 sub none 1\n\
+chk u64 mul some 18446744073709551614\n\
+chk u64 mul none 1\n\
+chk i128 add some 170141183460469231731687303715884105727\n\
+chk i128 add none 1\n\
+chk i128 sub some -170141183460469231731687303715884105728\n\
+chk i128 sub none 1\n\
+chk i128 mul some 170141183460469231731687303715884105726\n\
+chk i128 mul none 1\n\
+chk u128 add some 340282366920938463463374607431768211455\n\
+chk u128 add none 1\n\
+chk u128 sub some 0\n\
+chk u128 sub none 1\n\
+chk u128 mul some 340282366920938463463374607431768211454\n\
+chk u128 mul none 1\n\
+chk isize add some 9223372036854775807\n\
+chk isize add none 1\n\
+chk isize sub some -9223372036854775808\n\
+chk isize sub none 1\n\
+chk isize mul some 9223372036854775806\n\
+chk isize mul none 1\n\
+chk usize add some 18446744073709551615\n\
+chk usize add none 1\n\
+chk usize sub some 0\n\
+chk usize sub none 1\n\
+chk usize mul some 18446744073709551614\n\
+chk usize mul none 1\n\
+option assign 18446744073709551615\n\
+option call 18446744073709551615\n\
+option iflet 18446744073709551615\n\
+option pred true true\n\
+option unwrap 18446744073709551615\n\
+option unwrapor 7\n",
+        "Rust backend must match the C backend explicit arithmetic contract"
+    );
+}
+
+#[test]
+fn explicit_integer_method_operands_are_evaluated_once_in_order() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping explicit integer operand order C e2e: no C backend available (buildc doctor)"
+        );
+        return;
+    }
+    if !rustc_available() {
+        eprintln!("skipping explicit integer operand order Rust e2e: rustc not available");
+        return;
+    }
+    let src = r#"fn lhs() -> u8 ~ Console { println("lhs"); 255u8 }
+fn rhs() -> u8 ~ Console { println("rhs"); 1u8 }
+
+fn main() ~ Console {
+    println("wrap {}", lhs().wrapping_add(rhs()));
+    match lhs().checked_add(rhs()) { Some(v) => println("some {}", v), None => println("none {}", 0) }
+}
+"#;
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang_explicit_integer_method_order_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create explicit integer operand order dir");
+    let path = dir.join("explicit_integer_method_order.bld");
+    std::fs::write(&path, src).expect("write explicit integer method operand order fixture");
+    let c_result = c_backend_run(&path);
+    let rust_source = lower_source_to_rust(src);
+    let rust_result = rustc_compile_and_run("explicit_integer_method_order", &rust_source);
+    let expected = "lhs\nrhs\nwrap 0\nlhs\nrhs\nnone 0\n";
+    assert_eq!(
+        c_result.stdout, expected,
+        "C backend must evaluate receiver and rhs once"
+    );
+    assert_eq!(
+        rust_result.stdout, expected,
+        "Rust backend must evaluate receiver and rhs once"
+    );
+}
+
+#[test]
+fn unsupported_explicit_integer_methods_are_type_diagnostics() {
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang_unsupported_explicit_integer_methods_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create unsupported explicit integer dir");
+    let cases = [
+        (
+            "wrapping_div",
+            "fn main() { let x = 1u8.wrapping_div(1u8); }\n",
+            ".wrapping_div() on a primitive integer",
+        ),
+        (
+            "checked_shl",
+            "fn main() { let x = 1u8.checked_shl(1u8); }\n",
+            ".checked_shl() on a primitive integer",
+        ),
+        (
+            "saturating_pow",
+            "fn main() { let x = 2u8.saturating_pow(3u8); }\n",
+            ".saturating_pow() on a primitive integer",
+        ),
+        (
+            "overflowing_add",
+            "fn main() { let x = 255u8.overflowing_add(1u8); }\n",
+            ".overflowing_add() on a primitive integer",
+        ),
+    ];
+
+    for (name, src, needle) in cases {
+        let path = dir.join(format!("{name}.bld"));
+        std::fs::write(&path, src).expect("write unsupported explicit integer fixture");
+        let (status, stdout, stderr) = check_within(&path, 30);
+        assert!(
+            !status.success(),
+            "unsupported explicit integer method `{name}` must fail type checking\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains(needle)
+                && stderr.contains("supported primitive methods are wrapping/checked/saturating add, sub, and mul"),
+            "unsupported explicit integer method `{name}` must produce a focused diagnostic\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        let lower_stderr = stderr.to_lowercase();
+        assert!(
+            !lower_stderr.contains("undefined reference")
+                && !lower_stderr.contains("unresolved")
+                && !lower_stderr.contains("panic"),
+            "unsupported explicit integer method `{name}` must not reach a late backend/link failure\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+}
+
+/// Regression (Cluster P: place projections as store targets and `&mut` operands).
+/// A store into a projected lvalue, and a mutable borrow of one, must reach the
+/// real storage instead of a detached copy. Before this fix the frontend copied a
+/// projected base to a temp and stored into the copy, which silently dropped the
+/// write; no tuple-field target arm existed, so `t.0 = v` was dropped outright; and
+/// `lower_ref` borrowed a value copy, so `&mut place` aliased the copy rather than
+/// the place. Each row pins one path and the whole program prints one value per
+/// line:
+///   p1  compound-assign to a struct field   `p.x += k`            -> 17
+///   p2  field of an array element            `arr[0].x = 100`      -> 100/2/3
+///   p3  nested struct field                  `a.b.c = 42`          -> 42/9
+///   p4  tuple field                          `t.0 = 50`            -> 50/20
+///   p5  `&mut` of a struct field             `set77(&mut p.x)`     -> 77
+///   p6  `&mut` of an array element           `set88(&mut arr[1])`  -> 10/88/30
+/// p6 keeps the borrow element type equal to the array element type (i32) so it
+/// tests projection-ref aliasing alone. The separate case of a borrow whose
+/// pointee width differs from the array's storage width is now covered by
+/// `reference_pointee_width_matched_and_annotated_array_end_to_end` (annotated,
+/// compiles correctly) and `reference_pointee_width_mismatch_is_rejected`
+/// (unannotated, fails closed).
+#[test]
+fn place_projection_stores_and_borrows_reach_real_storage_end_to_end() {
+    if !c_backend_ready() {
+        eprintln!("skipping place-projection e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let cases: [(&str, &str, &str); 6] = [
+        (
+            "cluster_p_struct_field_compound",
+            r#"struct Point { x: i64, y: i64 }
+fn main() ~ Console {
+    let mut p = Point { x: 10, y: 5 };
+    let k = 7;
+    p.x += k;
+    println!("{}", p.x);
+}
+"#,
+            "17\n",
+        ),
+        (
+            "cluster_p_array_element_field",
+            r#"struct Point { x: i64, y: i64 }
+fn main() ~ Console {
+    let mut arr = [Point{x:1,y:1}, Point{x:2,y:2}, Point{x:3,y:3}];
+    arr[0].x = 100;
+    println!("{}", arr[0].x);
+    println!("{}", arr[1].x);
+    println!("{}", arr[2].x);
+}
+"#,
+            "100\n2\n3\n",
+        ),
+        (
+            "cluster_p_nested_struct_field",
+            r#"struct Inner { c: i64 }
+struct Outer { b: Inner, tag: i64 }
+fn main() ~ Console {
+    let mut a = Outer { b: Inner { c: 9 }, tag: 9 };
+    a.b.c = 42;
+    println!("{}", a.b.c);
+    println!("{}", a.tag);
+}
+"#,
+            "42\n9\n",
+        ),
+        (
+            "cluster_p_tuple_field",
+            r#"fn main() ~ Console {
+    let mut t = (10, 20);
+    t.0 = 50;
+    println!("{}", t.0);
+    println!("{}", t.1);
+}
+"#,
+            "50\n20\n",
+        ),
+        (
+            "cluster_p_borrow_struct_field",
+            r#"struct Point { x: i64, y: i64 }
+fn set77(r: &mut i64) {
+    *r = 77;
+}
+fn main() ~ Console {
+    let mut p = Point { x: 1, y: 2 };
+    set77(&mut p.x);
+    println!("{}", p.x);
+}
+"#,
+            "77\n",
+        ),
+        (
+            "cluster_p_borrow_array_element",
+            r#"fn set88(r: &mut i32) {
+    *r = 88;
+}
+fn main() ~ Console {
+    let mut arr = [10, 20, 30];
+    set88(&mut arr[1]);
+    println!("{}", arr[0]);
+    println!("{}", arr[1]);
+    println!("{}", arr[2]);
+}
+"#,
+            "10\n88\n30\n",
+        ),
+    ];
+    let dir = std::env::temp_dir().join("buildlang_cluster_p_projection");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    for (name, src, expected) in cases {
+        let path = dir.join(format!("{name}.bld"));
+        std::fs::write(&path, src).expect("write cluster-p case");
+        let result = c_backend_run(&path);
+        assert_eq!(
+            result.stdout, expected,
+            "cluster-p case `{name}` must store or borrow through the real place"
+        );
+    }
+}
+
+/// Regression (reference-pointee width, positive path). A borrow whose pointee
+/// width matches the callee parameter must reach the real storage, and an
+/// annotated integer array must be laid out at its annotated element width so a
+/// borrow or a read through it is correct. These are the fixed counterparts of
+/// the must-reject controls in the next test. Each row prints one value per line:
+///   a  matched-width scalar borrow  `let mut a: i64; set6(&mut a)`      -> 6
+///   b  matched-width float borrow   `let mut a: f64; setf(&mut a)`      -> 2
+///   c  annotated [i64;3] wide borrow `let arr: [i64;3]; set88(&mut arr[1])` -> 10/88/30
+///   d  annotated [i64;3] plain read  `let arr: [i64;3]; print each`      -> 10/20/30
+/// Cases c and d fail on the pre-fix binary: without threading the annotation
+/// into array-literal lowering the storage defaults to i32, so the read prints a
+/// truncated-then-sign-extended `85899345930` and the wide borrow corrupts the
+/// neighbours.
+#[test]
+fn reference_pointee_width_matched_and_annotated_array_end_to_end() {
+    if !c_backend_ready() {
+        eprintln!("skipping ref-width positive e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let cases: [(&str, &str, &str); 4] = [
+        (
+            "refwidth_matched_scalar_borrow",
+            r#"fn set6(r: &mut i64) { *r = 6; }
+fn main() ~ Console {
+    let mut a: i64 = 5;
+    set6(&mut a);
+    println!("{}", a);
+}
+"#,
+            "6\n",
+        ),
+        (
+            "refwidth_matched_float_borrow",
+            r#"fn setf(r: &mut f64) { *r = 2.0; }
+fn main() ~ Console {
+    let mut a: f64 = 1.0;
+    setf(&mut a);
+    let n: i64 = a as i64;
+    println!("{}", n);
+}
+"#,
+            "2\n",
+        ),
+        (
+            "refwidth_annotated_array_wide_borrow",
+            r#"fn set88(r: &mut i64) { *r = 88; }
+fn main() ~ Console {
+    let mut arr: [i64; 3] = [10, 20, 30];
+    set88(&mut arr[1]);
+    println!("{}", arr[0]);
+    println!("{}", arr[1]);
+    println!("{}", arr[2]);
+}
+"#,
+            "10\n88\n30\n",
+        ),
+        (
+            "refwidth_annotated_array_read",
+            r#"fn main() ~ Console {
+    let arr: [i64; 3] = [10, 20, 30];
+    println!("{}", arr[0]);
+    println!("{}", arr[1]);
+    println!("{}", arr[2]);
+}
+"#,
+            "10\n20\n30\n",
+        ),
+    ];
+    let dir = std::env::temp_dir().join("buildlang_refwidth_positive");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    for (name, src, expected) in cases {
+        let path = dir.join(format!("{name}.bld"));
+        std::fs::write(&path, src).expect("write ref-width positive case");
+        let result = c_backend_run(&path);
+        assert_eq!(
+            result.stdout, expected,
+            "ref-width positive case `{name}` must reach storage at the correct width"
+        );
+    }
+}
+
+/// Regression (compound assignment through a plain dereference, false-success
+/// control). `*p OP= v` must read the current pointee, apply the operator, then
+/// store. The lowering dropped both the load and the operator and stored the
+/// bare right-hand side, so `*p += v` behaved as `*p = v`: a silent wrong answer
+/// with no diagnostic. Each case below ran on the pre-fix binary and printed the
+/// bare `v` in the "pre-fix" comment; the assertions pin the corrected value, so
+/// the pre-fix binary fails every case. Coverage spans the operator classes
+/// (arithmetic, bitwise, shift), both reference forms (a `&mut` parameter and a
+/// local `&mut` binding), and both an integer and a float pointee.
+#[test]
+fn compound_assign_through_plain_deref_reads_before_storing() {
+    if !c_backend_ready() {
+        eprintln!("skipping deref compound-assign e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    // (name, source, expected stdout, value the pre-fix binary printed)
+    let cases: [(&str, &str, &str, &str); 5] = [
+        (
+            "deref_compound_add_param",
+            r#"fn addv(r: &mut i64, v: i64) { *r += v; }
+fn main() ~ Console {
+    let mut a: i64 = 5;
+    addv(&mut a, 3);
+    println!("{}", a);
+}
+"#,
+            "8\n",
+            "3",
+        ),
+        (
+            "deref_compound_mul_param",
+            r#"fn mulv(r: &mut i64, v: i64) { *r *= v; }
+fn main() ~ Console {
+    let mut a: i64 = 6;
+    mulv(&mut a, 7);
+    println!("{}", a);
+}
+"#,
+            "42\n",
+            "7",
+        ),
+        (
+            "deref_compound_bitand_local",
+            r#"fn main() ~ Console {
+    let mut a: i64 = 12;
+    let p: &mut i64 = &mut a;
+    *p &= 10;
+    println!("{}", a);
+}
+"#,
+            "8\n",
+            "10",
+        ),
+        (
+            "deref_compound_shl_local",
+            r#"fn main() ~ Console {
+    let mut a: i64 = 3;
+    let p: &mut i64 = &mut a;
+    *p <<= 4;
+    println!("{}", a);
+}
+"#,
+            "48\n",
+            "4",
+        ),
+        (
+            "deref_compound_mul_float_param",
+            r#"fn scale(r: &mut f64, v: f64) { *r *= v; }
+fn main() ~ Console {
+    let mut a: f64 = 2.5;
+    scale(&mut a, 4.0);
+    println!("{}", a);
+}
+"#,
+            "10\n",
+            "4",
+        ),
+    ];
+    let dir = std::env::temp_dir().join("buildlang_deref_compound");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    for (name, src, expected, prefix_value) in cases {
+        let path = dir.join(format!("{name}.bld"));
+        std::fs::write(&path, src).expect("write deref compound case");
+        let result = c_backend_run(&path);
+        assert_eq!(
+            result.stdout, expected,
+            "deref compound case `{name}` must read-modify-write; pre-fix printed the bare `{prefix_value}`"
+        );
+    }
+}
+
+/// Regression (return-position aggregate element width, false-success control).
+/// An aggregate literal in return position defaulted its element literals to
+/// i32 because the function's declared return type was never threaded in as the
+/// expected type. A `fn f() -> (i64, i64) { (a, b) }` therefore built a tuple at
+/// a 4-byte stride while every caller read it at the declared 8-byte width, so
+/// an 8-byte field read spanned two 4-byte-strided elements: a silent wrong
+/// answer with no diagnostic. Covers the tail-expression and explicit-`return`
+/// forms of a tuple, plus a returned `Vec<i64>` and a returned `[i64; 3]`. Each
+/// case ran on the pre-fix binary and produced the corrupt value in its comment;
+/// the assertions pin the corrected value, so the pre-fix binary fails each one.
+#[test]
+fn return_position_aggregate_is_built_at_declared_width() {
+    if !c_backend_ready() {
+        eprintln!("skipping return-width e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    // (name, source, expected stdout, value the pre-fix binary printed)
+    let cases: [(&str, &str, &str, &str); 4] = [
+        (
+            "return_tuple_tail",
+            r#"fn ret_t() -> (i64, i64) { (11, 22) }
+fn main() ~ Console {
+    let r = ret_t();
+    println!("{}", r.0);
+    println!("{}", r.1);
+}
+"#,
+            "11\n22\n",
+            "94489280523 then 0 = (22<<32)|11 read at i64 over an i32-strided tuple",
+        ),
+        (
+            "return_tuple_explicit",
+            r#"fn ret_t() -> (i64, i64) { return (33, 44); }
+fn main() ~ Console {
+    let r = ret_t();
+    println!("{}", r.0);
+    println!("{}", r.1);
+}
+"#,
+            "33\n44\n",
+            "188978561057 then 0 = (44<<32)|33",
+        ),
+        (
+            "return_vec_i64",
+            r#"fn ret_v() -> Vec<i64> { vec![1, 2, 3] }
+fn main() ~ Console {
+    let v = ret_v();
+    println!("{}", v[1]);
+}
+"#,
+            "2\n",
+            "12884901890 = (3<<32)|2",
+        ),
+        (
+            "return_array_i64",
+            r#"fn ret_a() -> [i64; 3] { [5, 6, 7] }
+fn main() ~ Console {
+    let a = ret_a();
+    println!("{}", a[2]);
+}
+"#,
+            "7\n",
+            "garbage from an out-of-stride 8-byte read",
+        ),
+    ];
+    let dir = std::env::temp_dir().join("buildlang_return_width");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    for (name, src, expected, prefix_value) in cases {
+        let path = dir.join(format!("{name}.bld"));
+        std::fs::write(&path, src).expect("write return-width case");
+        let result = c_backend_run(&path);
+        assert_eq!(
+            result.stdout, expected,
+            "return-width case `{name}` must build the aggregate at the declared width; pre-fix printed `{prefix_value}`"
+        );
+    }
+}
+
+/// Regression (call-argument aggregate element width, false-success control).
+/// An aggregate literal passed as a call argument defaulted its element literals
+/// to i32 because the callee's declared parameter type was never threaded in as
+/// the expected type. Passing `(7, 8)` to a `(i64, i64)` parameter built a
+/// `Tuple_i32_i32` the callee's body reads as `Tuple_i64_i64`, a passed
+/// `vec![10, 20, 30]` to a `Vec<i64>` parameter built an i32-strided vec the
+/// callee indexes at the i64 width, and a passed `[5, 6, 7]` to a `[i64; 3]`
+/// parameter built an i32-strided array. On the pre-fix binary the tuple case
+/// failed the C compile (`incompatible type ... Tuple_i32_i32`) and the vec and
+/// array cases ran and printed the corrupt value in each comment, so every case
+/// fails its assertion on the pre-fix binary.
+#[test]
+fn call_argument_aggregate_is_built_at_parameter_width() {
+    if !c_backend_ready() {
+        eprintln!("skipping call-arg-width e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    // (name, source, expected stdout, value/behaviour the pre-fix binary showed)
+    let cases: [(&str, &str, &str, &str); 3] = [
+        (
+            "tuple_arg",
+            r#"fn take_t(t: (i64, i64)) ~ Console {
+    println!("{}", t.0);
+    println!("{}", t.1);
+}
+fn main() ~ Console {
+    take_t((7, 8));
+}
+"#,
+            "7\n8\n",
+            "C compile error: incompatible type Tuple_i32_i32 for a Tuple_i64_i64 parameter",
+        ),
+        (
+            "vec_arg",
+            r#"fn take_v(v: Vec<i64>) ~ Console {
+    println!("{}", v[1]);
+}
+fn main() ~ Console {
+    take_v(vec![10, 20, 30]);
+}
+"#,
+            "20\n",
+            "128849018900 = (30<<32)|20 read at i64 over an i32-strided vec",
+        ),
+        (
+            "array_arg",
+            r#"fn take_a(a: [i64; 3]) ~ Console {
+    println!("{}", a[2]);
+}
+fn main() ~ Console {
+    take_a([5, 6, 7]);
+}
+"#,
+            "7\n",
+            "garbage from an out-of-stride 8-byte read over an i32-strided array",
+        ),
+    ];
+    let dir = std::env::temp_dir().join("buildlang_call_arg_width");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    for (name, src, expected, prefix_value) in cases {
+        let path = dir.join(format!("{name}.bld"));
+        std::fs::write(&path, src).expect("write call-arg-width case");
+        let result = c_backend_run(&path);
+        assert_eq!(
+            result.stdout, expected,
+            "call-arg-width case `{name}` must build the aggregate at the parameter width; pre-fix showed `{prefix_value}`"
+        );
+    }
+}
+
+/// Regression (reference-pointee width, must-reject controls). A borrow whose
+/// pointee width disagrees with the callee parameter is a silent wrong answer:
+/// the callee stores or loads at its own width through storage laid out at a
+/// different width, corrupting neighbouring memory or reading past the element.
+/// buildc must reject each of these, not run it. Every case COMPILED AND RAN on
+/// the pre-fix binary, printing the wrong value noted:
+///   pinned scalar `&mut i32` -> `&mut i64` param   (checker) pre-fix printed 7
+///   pinned scalar `&mut f32` -> `&mut f64` param   (checker) pre-fix ran, corrupted
+///   unannotated array `&mut arr[i]` inferred wider (codegen) pre-fix printed 10/88/0
+///   unannotated array `&arr[i]` read wider          (codegen) pre-fix printed 128849018900
+/// The scalar cases are caught at the type checker (invariant unification of a
+/// reference pointee); the array cases are caught at the codegen call-site guard,
+/// which cannot lay unannotated storage out at the inferred width and so fails
+/// closed. Each assertion checks the rejection reason, not merely that the run
+/// failed, so an unrelated future error cannot make the control pass silently.
+#[test]
+fn reference_pointee_width_mismatch_is_rejected() {
+    if !c_backend_ready() {
+        eprintln!("skipping ref-width reject e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    // (name, source, reason-token expected in stderr)
+    let cases: [(&str, &str, &str); 4] = [
+        (
+            "refwidth_reject_scalar_int",
+            r#"fn set88(r: &mut i64) { *r = 88; }
+fn main() ~ Console {
+    let mut a: i32 = 5;
+    set88(&mut a);
+    println!("{}", a);
+}
+"#,
+            "type mismatch",
+        ),
+        (
+            "refwidth_reject_scalar_float",
+            r#"fn setf(r: &mut f64) { *r = 2.0; }
+fn main() ~ Console {
+    let mut a: f32 = 1.0;
+    setf(&mut a);
+    println!("{}", a);
+}
+"#,
+            "type mismatch",
+        ),
+        (
+            "refwidth_reject_array_mut_borrow",
+            r#"fn set88(r: &mut i64) { *r = 88; }
+fn main() ~ Console {
+    let mut arr = [10, 20, 30];
+    set88(&mut arr[1]);
+    println!("{}", arr[0]);
+    println!("{}", arr[1]);
+    println!("{}", arr[2]);
+}
+"#,
+            "byte integer reference",
+        ),
+        (
+            "refwidth_reject_array_shared_read",
+            r#"fn get(r: &i64) -> i64 { *r }
+fn main() ~ Console {
+    let arr = [10, 20, 30];
+    let x = get(&arr[1]);
+    println!("{}", x);
+}
+"#,
+            "byte integer reference",
+        ),
+    ];
+    let dir = std::env::temp_dir().join("buildlang_refwidth_reject");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    for (name, src, reason) in cases {
+        let path = dir.join(format!("{name}.bld"));
+        std::fs::write(&path, src).expect("write ref-width reject case");
+        let output = buildc()
+            .arg("run")
+            .arg(&path)
+            .output()
+            .unwrap_or_else(|err| panic!("run buildc for {name}: {err}"));
+        assert!(
+            !output.status.success(),
+            "ref-width reject case `{name}` must fail to compile, not silently miscompile\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(reason),
+            "ref-width reject case `{name}` must fail for the width-mismatch reason (expected `{reason}` in the diagnostic), not an unrelated error:\n{stderr}"
+        );
+    }
+}
+
+/// Regression (vec of a tuple or array element, must-reject control). A `Vec<T>`
+/// stores its element one of two ways: scalars and strings ride a built-in
+/// `build_hvec_*_<suffix>` family (f64, i64, i32, str), and a user struct, a
+/// nested vector, or a map rides a monomorphized element-sized wrapper the C
+/// backend emits per element type. A tuple or an array element fits neither: no
+/// scalar family holds it and the backend emits no wrapper for it. Every element
+/// -> suffix table used to default such an element to the i32 family, so the
+/// element was handed to a helper whose parameter is `int32_t`. For a tuple that
+/// leaked a raw C type error; for an ARRAY element it was a silent wrong answer,
+/// the array decaying to a pointer that `int32_t` truncated to 32 bits under
+/// `-Wint-conversion` (warn only), so the program compiled and read a bogus
+/// value. The three lowering paths (the `vec![...]` macro, the `vec_push`/
+/// `vec_get`/`vec_pop` free functions, and the `.push()`/`.get()` methods) now
+/// all fail closed on a tuple or array element with one diagnostic. Each case
+/// below, on both the `vec![...]` macro path and the `Vec::new()` + `.push()`
+/// builder path, must be rejected, and the assertion checks the rejection
+/// reason, not merely that the run failed, so an unrelated earlier error (a
+/// parser or checker rejection) cannot make the control pass silently.
+#[test]
+fn vec_of_tuple_or_array_element_is_rejected() {
+    if !c_backend_ready() {
+        eprintln!("skipping vec tuple/array reject e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    // (name, source, behaviour on the pre-fix binary)
+    let cases: [(&str, &str, &str); 4] = [
+        (
+            "vec_of_array_macro_swa",
+            r#"fn main() ~ Console {
+    let v: Vec<[i64; 2]> = vec![[1, 2], [3, 4]];
+    println!("{}", v[0][0]);
+}
+"#,
+            "silent wrong answer: the array decayed to a pointer truncated to int32_t",
+        ),
+        (
+            "vec_of_array_push_swa",
+            r#"fn main() ~ Console {
+    let mut v: Vec<[i64; 2]> = Vec::new();
+    v.push([1, 2]);
+    println!("{}", v[0][0]);
+}
+"#,
+            "same array-element mis-store, reached through the .push() builder path",
+        ),
+        (
+            "vec_of_tuple_macro",
+            r#"fn main() ~ Console {
+    let v: Vec<(i64, i64)> = vec![(1, 2), (3, 4)];
+    println!("{}", v[0].0);
+}
+"#,
+            "leaked C type error: int32_t parameter for a Tuple_i64_i64 element",
+        ),
+        (
+            "vec_of_tuple_push",
+            r#"fn main() ~ Console {
+    let mut v: Vec<(i64, i64)> = Vec::new();
+    v.push((1, 2));
+    println!("{}", v[0].0);
+}
+"#,
+            "same tuple-element mis-store, reached through the .push() builder path",
+        ),
+    ];
+    let dir = std::env::temp_dir().join("buildlang_vec_tuple_array_reject");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    for (name, src, prefix_behaviour) in cases {
+        let path = dir.join(format!("{name}.bld"));
+        std::fs::write(&path, src).expect("write vec tuple/array reject case");
+        let output = buildc()
+            .arg("run")
+            .arg(&path)
+            .output()
+            .unwrap_or_else(|err| panic!("run buildc for {name}: {err}"));
+        assert!(
+            !output.status.success(),
+            "vec tuple/array reject case `{name}` must fail to compile, not build a scalar-strided vec (pre-fix: {prefix_behaviour})\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("the Vec runtime stores scalar"),
+            "vec tuple/array reject case `{name}` must fail for the unsupported-element reason, not an unrelated error:\n{stderr}"
+        );
+    }
+}
+
+/// Regression (vec supported-element control, no-over-rejection companion). The
+/// tuple/array rejection above must not swallow the element types a `Vec<T>` does
+/// support. Every supported family is pinned end to end: the scalar/string
+/// helpers (i64, f32 via the f64 helper, i32, bool via the i32 helper read
+/// through a branch so the assertion does not depend on bool Display, and a
+/// string element), a user struct, and a nested vector. The struct and
+/// nested-vector cases run through BOTH construction paths, the `vec![...]` macro
+/// (which this change taught to select the backend's element-sized wrapper,
+/// matching the method path) and the `Vec::new()` + `.push()` builder path (which
+/// already supported them), so the two paths are proven consistent, not merely
+/// individually working. Each must build and read back the element it stored.
+#[test]
+fn vec_of_supported_element_builds_and_reads() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping vec supported-element positive e2e: no C backend available (buildc doctor)"
+        );
+        return;
+    }
+    // (name, source, expected stdout)
+    let cases: [(&str, &str, &str); 9] = [
+        (
+            "vec_i64",
+            r#"fn main() ~ Console {
+    let v: Vec<i64> = vec![10, 20, 30];
+    println!("{}", v[1]);
+}
+"#,
+            "20\n",
+        ),
+        (
+            "vec_f32",
+            r#"fn main() ~ Console {
+    let v: Vec<f32> = vec![1.5, 2.5, 3.5];
+    println!("{}", v[1]);
+}
+"#,
+            "2.5\n",
+        ),
+        (
+            "vec_i32",
+            r#"fn main() ~ Console {
+    let v: Vec<i32> = vec![10, 20, 30];
+    println!("{}", v[1]);
+}
+"#,
+            "20\n",
+        ),
+        (
+            "vec_bool",
+            r#"fn main() ~ Console {
+    let v: Vec<bool> = vec![true, false, true];
+    if v[1] { println!("A"); } else { println!("B"); }
+}
+"#,
+            "B\n",
+        ),
+        (
+            "vec_string",
+            r#"fn main() ~ Console {
+    let v: Vec<String> = vec!["a", "b", "c"];
+    println!("{}", v[1]);
+}
+"#,
+            "b\n",
+        ),
+        (
+            "vec_struct_macro",
+            r#"struct Point { x: i64, y: i64 }
+fn main() ~ Console {
+    let v: Vec<Point> = vec![Point { x: 1, y: 2 }, Point { x: 3, y: 4 }];
+    println!("{}", v[1].x);
+}
+"#,
+            "3\n",
+        ),
+        (
+            "vec_struct_push",
+            r#"struct Point { x: i64, y: i64 }
+fn main() ~ Console {
+    let mut v: Vec<Point> = Vec::new();
+    v.push(Point { x: 5, y: 6 });
+    println!("{}", v[0].y);
+}
+"#,
+            "6\n",
+        ),
+        (
+            "vec_nested_vec_macro",
+            r#"fn main() ~ Console {
+    let v: Vec<Vec<i64>> = vec![vec![1, 2], vec![3, 4]];
+    println!("{}", v[1][0]);
+}
+"#,
+            "3\n",
+        ),
+        (
+            "vec_nested_vec_push",
+            r#"fn main() ~ Console {
+    let mut v: Vec<Vec<i64>> = Vec::new();
+    let inner: Vec<i64> = vec![7, 8];
+    v.push(inner);
+    println!("{}", v[0][1]);
+}
+"#,
+            "8\n",
+        ),
+    ];
+    let dir = std::env::temp_dir().join("buildlang_vec_supported_positive");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    for (name, src, expected) in cases {
+        let path = dir.join(format!("{name}.bld"));
+        std::fs::write(&path, src).expect("write vec supported-element positive case");
+        let result = c_backend_run(&path);
+        assert_eq!(
+            result.stdout, expected,
+            "vec supported-element case `{name}` must build and read its element type"
+        );
+    }
+}
+
+/// Fail-closed control (memory safety): an out-of-bounds index aborts at runtime
+/// with a diagnostic instead of reading or writing past the allocation. Rust
+/// bounds-checks every index unconditionally, in release as well as debug, and
+/// BuildLang follows that contract. Before this fix each case ran to completion
+/// with exit 0: a fixed-array OOB read returned an adjacent value, an OOB write
+/// corrupted neighbouring memory, a heap-Vec OOB read returned heap garbage, a
+/// heap-Vec OOB write silently no-oped, and a negative index wrapped to a huge
+/// unsigned index and read wild memory. Each case now aborts (nonzero exit) and
+/// prints `index out of bounds` on stderr, so this control FAILS on the pre-fix
+/// binary (which exits 0 with no such message). It pins the fixed-array read and
+/// write paths (static length check at the C emission site), the heap-Vec read
+/// and write paths (the check inside `build_vec_get`, which every getter and
+/// setter routes through), and the negative-index path (caught by the same
+/// checks after the signed index wraps).
+#[test]
+fn out_of_bounds_index_aborts_fail_closed() {
+    if !c_backend_ready() {
+        eprintln!("skipping OOB fail-closed e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    // (name, source) -- each must abort at runtime, not return a value.
+    let cases: [(&str, &str); 5] = [
+        (
+            "array_read_oob",
+            r#"fn main() ~ Console {
+    let a = [11, 22, 33];
+    let i = 5;
+    println!("{}", a[i]);
+}
+"#,
+        ),
+        (
+            "array_write_oob",
+            r#"fn main() ~ Console {
+    let mut a = [11, 22, 33];
+    let i = 7;
+    a[i] = 99;
+    println!("{}", a[0]);
+}
+"#,
+        ),
+        (
+            "vec_read_oob",
+            r#"fn main() ~ Console {
+    let v: Vec<i64> = vec![1, 2, 3];
+    let i = 5;
+    println!("{}", v[i]);
+}
+"#,
+        ),
+        (
+            "vec_write_oob",
+            r#"fn main() ~ Console {
+    let mut v: Vec<i64> = vec![1, 2, 3];
+    let i = 5;
+    v[i] = 9;
+    println!("{}", v[0]);
+}
+"#,
+        ),
+        (
+            "array_negative_index",
+            r#"fn main() ~ Console {
+    let a = [11, 22, 33];
+    let i = 0 - 1;
+    println!("{}", a[i]);
+}
+"#,
+        ),
+    ];
+    let dir = std::env::temp_dir().join("buildlang_oob_fail_closed");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    for (name, src) in cases {
+        let path = dir.join(format!("{name}.bld"));
+        std::fs::write(&path, src).expect("write OOB fail-closed case");
+        let (stdout, stderr, exit_code) = c_backend_run_capture(&path);
+        assert_ne!(
+            exit_code,
+            Some(0),
+            "OOB case `{name}` must abort, not exit 0\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("index out of bounds"),
+            "OOB case `{name}` must print the bounds diagnostic; got exit {exit_code:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+}
+
+/// Positive companion to `out_of_bounds_index_aborts_fail_closed`: the bounds
+/// check must not disturb in-bounds indexing, including the last valid index
+/// (index == len - 1). Fixed-array and heap-Vec read and write all return the
+/// correct value. This passes on the pre-fix binary too; it guards against the
+/// check rejecting a valid access (an off-by-one in the bound).
+#[test]
+fn in_bounds_index_reads_and_writes_correctly() {
+    if !c_backend_ready() {
+        eprintln!("skipping in-bounds positive e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    // (name, source, expected stdout) -- boundary index len-1 included.
+    let cases: [(&str, &str, &str); 4] = [
+        (
+            "array_read_last",
+            r#"fn main() ~ Console {
+    let a = [11, 22, 33];
+    let i = 2;
+    println!("{}", a[i]);
+}
+"#,
+            "33\n",
+        ),
+        (
+            "array_write_mid",
+            r#"fn main() ~ Console {
+    let mut a = [11, 22, 33];
+    let i = 1;
+    a[i] = 99;
+    println!("{}", a[i]);
+}
+"#,
+            "99\n",
+        ),
+        (
+            "vec_read_mid",
+            r#"fn main() ~ Console {
+    let v: Vec<i64> = vec![10, 20, 30];
+    let i = 1;
+    println!("{}", v[i]);
+}
+"#,
+            "20\n",
+        ),
+        (
+            "vec_write_last",
+            r#"fn main() ~ Console {
+    let mut v: Vec<i64> = vec![10, 20, 30];
+    let i = 2;
+    v[i] = 77;
+    println!("{}", v[i]);
+}
+"#,
+            "77\n",
+        ),
+    ];
+    let dir = std::env::temp_dir().join("buildlang_in_bounds_positive");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    for (name, src, expected) in cases {
+        let path = dir.join(format!("{name}.bld"));
+        std::fs::write(&path, src).expect("write in-bounds positive case");
+        let result = c_backend_run(&path);
+        assert_eq!(
+            result.stdout, expected,
+            "in-bounds case `{name}` must read/write the correct value at the boundary"
+        );
+    }
+}
+
+#[test]
+fn plain_integer_add_sub_mul_and_neg_overflow_abort_fail_closed() {
+    if !c_backend_ready() {
+        eprintln!("skipping plain integer overflow fail-closed e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    // (name, source, required stderr substring) -- every source reads at least
+    // one operand from a Vec-backed local so the runtime checked path is under
+    // test, not host-side constant folding.
+    let cases: [(&str, &str, &str); 13] = [
+        (
+            "i8_add_overflow",
+            r#"fn main() ~ Console {
+    let v: Vec<i8> = vec![127i8, 1i8];
+    let a = v[0];
+    let b = v[1];
+    println!("{}", a + b);
+}
+"#,
+            "attempt to add with overflow",
+        ),
+        (
+            "u8_add_overflow",
+            r#"fn main() ~ Console {
+    let v: Vec<u8> = vec![255u8, 1u8];
+    let a = v[0];
+    let b = v[1];
+    println!("{}", a + b);
+}
+"#,
+            "attempt to add with overflow",
+        ),
+        (
+            "i16_sub_overflow",
+            r#"fn main() ~ Console {
+    let v: Vec<i16> = vec![0i16, 32767i16, 1i16];
+    let min = v[0] - v[1] - v[2];
+    println!("{}", min - v[2]);
+}
+"#,
+            "attempt to subtract with overflow",
+        ),
+        (
+            "u16_sub_overflow",
+            r#"fn main() ~ Console {
+    let v: Vec<u16> = vec![0u16, 1u16];
+    let a = v[0];
+    let b = v[1];
+    println!("{}", a - b);
+}
+"#,
+            "attempt to subtract with overflow",
+        ),
+        (
+            "i32_mul_overflow",
+            r#"fn main() ~ Console {
+    let v: Vec<i32> = vec![2147483647, 2];
+    let a = v[0];
+    let b = v[1];
+    println!("{}", a * b);
+}
+"#,
+            "attempt to multiply with overflow",
+        ),
+        (
+            "u32_mul_overflow",
+            r#"fn main() ~ Console {
+    let v: Vec<u32> = vec![4294967295u32, 2u32];
+    let a = v[0];
+    let b = v[1];
+    println!("{}", a * b);
+}
+"#,
+            "attempt to multiply with overflow",
+        ),
+        (
+            "i64_add_overflow",
+            r#"fn main() ~ Console {
+    let v: Vec<i64> = vec![9223372036854775807i64, 1i64];
+    let a = v[0];
+    let b = v[1];
+    println!("{}", a + b);
+}
+"#,
+            "attempt to add with overflow",
+        ),
+        (
+            "u64_add_overflow",
+            r#"fn main() ~ Console {
+    let v: Vec<u64> = vec![18446744073709551615u64, 1u64];
+    let a = v[0];
+    let b = v[1];
+    println!("{}", a + b);
+}
+"#,
+            "attempt to add with overflow",
+        ),
+        (
+            "i128_add_overflow",
+            r#"fn main() ~ Console {
+    let v: Vec<i128> = vec![170141183460469231731687303715884105727i128, 1i128];
+    let a = v[0];
+    let b = v[1];
+    println!("{}", a + b);
+}
+"#,
+            "attempt to add with overflow",
+        ),
+        (
+            "u128_add_overflow",
+            r#"fn main() ~ Console {
+    let v: Vec<u128> = vec![340282366920938463463374607431768211455u128, 1u128];
+    let a = v[0];
+    let b = v[1];
+    println!("{}", a + b);
+}
+"#,
+            "attempt to add with overflow",
+        ),
+        (
+            "isize_add_overflow",
+            r#"fn main() ~ Console {
+    let v: Vec<isize> = vec![9223372036854775807isize, 1isize];
+    let a = v[0];
+    let b = v[1];
+    println!("{}", a + b);
+}
+"#,
+            "attempt to add with overflow",
+        ),
+        (
+            "usize_add_overflow",
+            r#"fn main() ~ Console {
+    let v: Vec<usize> = vec![18446744073709551615usize, 1usize];
+    let a = v[0];
+    let b = v[1];
+    println!("{}", a + b);
+}
+"#,
+            "attempt to add with overflow",
+        ),
+        (
+            "i8_neg_overflow",
+            r#"fn main() ~ Console {
+    let v: Vec<i8> = vec![0i8, 127i8, 1i8];
+    let min = v[0] - v[1] - v[2];
+    println!("{}", -min);
+}
+"#,
+            "attempt to negate with overflow",
+        ),
+    ];
+
+    let dir = std::env::temp_dir().join("buildlang_plain_integer_overflow_fail_closed");
+    std::fs::create_dir_all(&dir).expect("create plain-overflow fail-closed dir");
+    for (name, src, needle) in cases {
+        let path = dir.join(format!("{name}.bld"));
+        std::fs::write(&path, src).expect("write plain-overflow fail-closed case");
+        let (stdout, stderr, exit_code) = c_backend_run_capture(&path);
+        assert_eq!(
+            exit_code,
+            Some(101),
+            "plain integer overflow case `{name}` must abort with exit 101\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains(needle),
+            "plain integer overflow case `{name}` must print `{needle}`; got exit {exit_code:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn plain_integer_in_bounds_near_boundaries_and_compound_assignment_run() {
+    if !c_backend_ready() {
+        eprintln!("skipping plain integer in-bounds e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let src = r#"fn main() ~ Console {
+    let i8s: Vec<i8> = vec![126i8, 1i8];
+    let u8s: Vec<u8> = vec![254u8, 1u8];
+    let i16s: Vec<i16> = vec![0i16, 32767i16, 1i16];
+    let u16s: Vec<u16> = vec![1u16, 1u16];
+    let i32s: Vec<i32> = vec![46340, 46340];
+    let u32s: Vec<u32> = vec![65535u32, 65535u32];
+    let i64s: Vec<i64> = vec![9223372036854775806i64, 1i64];
+    let u64s: Vec<u64> = vec![18446744073709551614u64, 1u64];
+    let i128s: Vec<i128> = vec![170141183460469231731687303715884105727i128, 1i128];
+    let u128s: Vec<u128> = vec![340282366920938463463374607431768211455u128, 1u128];
+    let isizes: Vec<isize> = vec![9223372036854775806isize, 1isize];
+    let usizes: Vec<usize> = vec![18446744073709551614usize, 1usize];
+
+    println!("{}", i8s[0] + i8s[1]);
+    let mut c: u8 = u8s[0];
+    c += u8s[1];
+    println!("{}", c);
+    println!("{}", i16s[0] - i16s[1] - i16s[2]);
+    println!("{}", u16s[0] - u16s[1]);
+    println!("{}", i32s[0] * i32s[1]);
+    println!("{}", u32s[0] * u32s[1]);
+    println!("{}", i64s[0] + i64s[1]);
+    println!("{}", u64s[0] + u64s[1]);
+    println!("{}", i128s[0] - i128s[1]);
+    println!("{}", u128s[0] - u128s[1]);
+    println!("{}", isizes[0] + isizes[1]);
+    println!("{}", usizes[0] + usizes[1]);
+    let min_i8 = i8s[1] - i8s[0] - i8s[1];
+    println!("{}", -min_i8);
+}
+"#;
+    let dir = std::env::temp_dir().join("buildlang_plain_integer_in_bounds");
+    std::fs::create_dir_all(&dir).expect("create plain integer in-bounds dir");
+    let path = dir.join("in_bounds.bld");
+    std::fs::write(&path, src).expect("write plain integer in-bounds case");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout,
+        "127\n255\n-32768\n0\n2147395600\n4294836225\n9223372036854775807\n18446744073709551615\n170141183460469231731687303715884105726\n340282366920938463463374607431768211454\n9223372036854775807\n18446744073709551615\n126\n",
+        "plain integer checked arithmetic must not reject in-bounds boundary operations"
+    );
+}
+
+#[test]
+fn c_i128_u128_print_materializes_more_than_static_formatter_slot_count() {
+    if !c_backend_ready() {
+        eprintln!("skipping i128/u128 formatter slot e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let src = r#"fn main() ~ Console {
+    let i1: i128 = 1i128;
+    let i2: i128 = 2i128;
+    let i3: i128 = 3i128;
+    let i4: i128 = 4i128;
+    let i5: i128 = 5i128;
+    let i6: i128 = 6i128;
+    let i7: i128 = 7i128;
+    let i8: i128 = 8i128;
+    let i9: i128 = 9i128;
+    let i10: i128 = 10i128;
+    let i11: i128 = 11i128;
+    let i12: i128 = 12i128;
+    let i13: i128 = 13i128;
+    let i14: i128 = 14i128;
+    let i15: i128 = 15i128;
+    let i16: i128 = 16i128;
+    let i17: i128 = 17i128;
+    println("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12, i13, i14, i15, i16, i17);
+    let u1: u128 = 1u128;
+    let u2: u128 = 2u128;
+    let u3: u128 = 3u128;
+    let u4: u128 = 4u128;
+    let u5: u128 = 5u128;
+    let u6: u128 = 6u128;
+    let u7: u128 = 7u128;
+    let u8: u128 = 8u128;
+    let u9: u128 = 9u128;
+    let u10: u128 = 10u128;
+    let u11: u128 = 11u128;
+    let u12: u128 = 12u128;
+    let u13: u128 = 13u128;
+    let u14: u128 = 14u128;
+    let u15: u128 = 15u128;
+    let u16: u128 = 16u128;
+    let u17: u128 = 17u128;
+    println("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, u14, u15, u16, u17);
+}
+"#;
+    let dir = std::env::temp_dir().join("buildlang_i128_u128_formatter_slots");
+    std::fs::create_dir_all(&dir).expect("create i128/u128 formatter slot dir");
+    let path = dir.join("formatter_slots.bld");
+    std::fs::write(&path, src).expect("write i128/u128 formatter slot case");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout,
+        "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17\n1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17\n",
+        "i128/u128 print arguments must not alias the runtime formatter's static ring slots"
+    );
+}
+
+#[test]
+fn plain_integer_runtime_overflow_exit_code_matches_c_and_rust_backends() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping C/Rust plain integer overflow parity: no C backend available (buildc doctor)"
+        );
+        return;
+    }
+    if !rustc_available() {
+        eprintln!("skipping C/Rust plain integer overflow parity: rustc not available");
+        return;
+    }
+    let src = r#"fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+fn main() ~ Console {
+    println!("{}", add(2147483647, 1));
+}
+"#;
+    let dir = std::env::temp_dir().join("buildlang_plain_integer_backend_parity");
+    std::fs::create_dir_all(&dir).expect("create plain integer backend parity dir");
+    let path = dir.join("backend_parity.bld");
+    std::fs::write(&path, src).expect("write backend parity fixture");
+
+    let (c_stdout, c_stderr, c_exit_code) = c_backend_run_capture(&path);
+    let rust_source = lower_source_to_rust(src);
+    let rust_result = rustc_compile_and_run("plain_integer_overflow_parity", &rust_source);
+
+    assert_eq!(
+        c_exit_code,
+        Some(101),
+        "C backend must abort plain integer overflow with exit 101\nstdout:\n{c_stdout}\nstderr:\n{c_stderr}"
+    );
+    assert!(
+        c_stderr.contains("attempt to add with overflow"),
+        "C backend overflow diagnostic must name addition overflow\nstdout:\n{c_stdout}\nstderr:\n{c_stderr}"
+    );
+    assert_eq!(
+        rust_result.exit_code, c_exit_code,
+        "Rust backend must match the C backend's overflow exit status"
+    );
+}
+
+/// Integer division and remainder must trap the two cases Rust panics on: a zero
+/// divisor and the single signed overflow `MIN / -1`, in release as well as
+/// debug. The pre-fix backend emitted raw C `/` and `%`, which deviate from that
+/// contract three different ways, none of them a clean panic:
+///   - divide or remainder by zero: a hardware divide error. Under the active
+///     toolchain the process died with exit 148, no diagnostic.
+///   - `i32::MIN / -1` and `i64::MIN / -1`: the same fault, except MinGW gcc
+///     turned it into an infinite loop; the process HUNG (only a timeout killed
+///     it). Worse than a crash.
+///   - `i8::MIN / -1` (and `i16`): a SILENT WRONG ANSWER. A sub-`int` operand
+///     promotes to 32-bit `int`, so `(int8_t)-128 / -1` computes 128 and
+///     truncates back to -128, printed with exit 0.
+/// Every case now routes through a per-width runtime helper that aborts with exit
+/// 101 and the exact Rust panic text. Each assertion below therefore fails on the
+/// pre-fix binary: the zero cases exited 148 not 101, the wide-overflow cases
+/// hung, and the narrow-overflow case exited 0 with a value. The divisor (or the
+/// `-1`) is read from a heap `Vec` so the checker cannot fold the operation at
+/// compile time and the runtime helper is the path under test. The overflow
+/// dividends are built as `0 - MAX - 1` to reach `MIN` without an out-of-range
+/// literal.
+#[test]
+fn integer_divide_by_zero_and_overflow_abort_fail_closed() {
+    if !c_backend_ready() {
+        eprintln!(
+            "skipping integer div/rem fail-closed e2e: no C backend available (buildc doctor)"
+        );
+        return;
+    }
+    // (name, source, required stderr substring) -- each must abort with exit 101.
+    let cases: [(&str, &str, &str); 7] = [
+        (
+            "div_zero_i32",
+            r#"fn main() ~ Console {
+    let v: Vec<i32> = vec![0, 1];
+    let b = v[0];
+    let a = 7;
+    println!("{}", a / b);
+}
+"#,
+            "attempt to divide by zero",
+        ),
+        (
+            "rem_zero_i32",
+            r#"fn main() ~ Console {
+    let v: Vec<i32> = vec![0, 1];
+    let b = v[0];
+    let a = 7;
+    println!("{}", a % b);
+}
+"#,
+            "attempt to calculate the remainder with a divisor of zero",
+        ),
+        (
+            "div_zero_u32",
+            r#"fn main() ~ Console {
+    let v: Vec<u32> = vec![0u32, 1u32];
+    let b = v[0];
+    let a: u32 = 7u32;
+    println!("{}", a / b);
+}
+"#,
+            "attempt to divide by zero",
+        ),
+        (
+            "div_overflow_i32",
+            r#"fn main() ~ Console {
+    let v: Vec<i32> = vec![0];
+    let nb = v[0] - 1;
+    let a: i32 = 0 - 2147483647 - 1;
+    println!("{}", a / nb);
+}
+"#,
+            "attempt to divide with overflow",
+        ),
+        (
+            "rem_overflow_i32",
+            r#"fn main() ~ Console {
+    let v: Vec<i32> = vec![0];
+    let nb = v[0] - 1;
+    let a: i32 = 0 - 2147483647 - 1;
+    println!("{}", a % nb);
+}
+"#,
+            "attempt to calculate the remainder with overflow",
+        ),
+        (
+            "div_overflow_i8",
+            r#"fn main() ~ Console {
+    let v: Vec<i8> = vec![0i8];
+    let nb = v[0] - 1i8;
+    let a: i8 = 0i8 - 127i8 - 1i8;
+    println!("{}", a / nb);
+}
+"#,
+            "attempt to divide with overflow",
+        ),
+        (
+            "div_overflow_i64",
+            r#"fn main() ~ Console {
+    let v: Vec<i64> = vec![0i64];
+    let nb = v[0] - 1i64;
+    let a: i64 = 0i64 - 9223372036854775807i64 - 1i64;
+    println!("{}", a / nb);
+}
+"#,
+            "attempt to divide with overflow",
+        ),
+    ];
+    let dir = std::env::temp_dir().join("buildlang_div_fail_closed");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    for (name, src, needle) in cases {
+        let path = dir.join(format!("{name}.bld"));
+        std::fs::write(&path, src).expect("write div/rem fail-closed case");
+        let (stdout, stderr, exit_code) = c_backend_run_capture(&path);
+        assert_eq!(
+            exit_code,
+            Some(101),
+            "div/rem case `{name}` must abort with exit 101 (Rust panic)\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains(needle),
+            "div/rem case `{name}` must print `{needle}`; got exit {exit_code:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+}
+
+/// Positive companion to `integer_divide_by_zero_and_overflow_abort_fail_closed`:
+/// the trap must not disturb a valid division or remainder. Every operand is read
+/// from a heap `Vec`, so the runtime helper actually runs (the emitted C is
+/// `bl_idiv_i32(a, b)`, not a folded constant) and this pins the helper's normal
+/// return, not a compile-time fold. Coverage: truncation toward zero for negative
+/// operands (`-7 / 2 == -3`, `-7 % 2 == -1`, matching Rust and C99), an unsigned
+/// width, a narrow `i8` width, and the three boundary cases around the overflow
+/// guard -- `MIN / 1 == MIN` and `MIN % 1 == 0` (dividend is `MIN` but the divisor
+/// is not `-1`) and `MIN / -2 == 1073741824` (a negative divisor of `MIN` that is
+/// not `-1`). Those prove the guard fires on exactly `b == -1`, never on `MIN`
+/// alone or on any negative divisor. This passes on the pre-fix binary too.
+#[test]
+fn integer_divide_and_remainder_compute_correctly() {
+    if !c_backend_ready() {
+        eprintln!("skipping integer div/rem positive e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    // (name, source, expected stdout)
+    let cases: [(&str, &str, &str); 9] = [
+        (
+            "div_7_2",
+            r#"fn main() ~ Console {
+    let v: Vec<i32> = vec![7, 2];
+    let a = v[0];
+    let b = v[1];
+    println!("{}", a / b);
+}
+"#,
+            "3\n",
+        ),
+        (
+            "rem_7_2",
+            r#"fn main() ~ Console {
+    let v: Vec<i32> = vec![7, 2];
+    let a = v[0];
+    let b = v[1];
+    println!("{}", a % b);
+}
+"#,
+            "1\n",
+        ),
+        (
+            "div_neg7_2",
+            r#"fn main() ~ Console {
+    let v: Vec<i32> = vec![-7, 2];
+    let a = v[0];
+    let b = v[1];
+    println!("{}", a / b);
+}
+"#,
+            "-3\n",
+        ),
+        (
+            "rem_neg7_2",
+            r#"fn main() ~ Console {
+    let v: Vec<i32> = vec![-7, 2];
+    let a = v[0];
+    let b = v[1];
+    println!("{}", a % b);
+}
+"#,
+            "-1\n",
+        ),
+        (
+            "div_u32_7_2",
+            r#"fn main() ~ Console {
+    let v: Vec<u32> = vec![7u32, 2u32];
+    let a = v[0];
+    let b = v[1];
+    println!("{}", a / b);
+}
+"#,
+            "3\n",
+        ),
+        (
+            "div_i8_100_3",
+            r#"fn main() ~ Console {
+    let v: Vec<i8> = vec![100i8, 3i8];
+    let a = v[0];
+    let b = v[1];
+    println!("{}", a / b);
+}
+"#,
+            "33\n",
+        ),
+        (
+            "div_min_1",
+            r#"fn main() ~ Console {
+    let v: Vec<i32> = vec![1];
+    let b = v[0];
+    let a: i32 = 0 - 2147483647 - 1;
+    println!("{}", a / b);
+}
+"#,
+            "-2147483648\n",
+        ),
+        (
+            "rem_min_1",
+            r#"fn main() ~ Console {
+    let v: Vec<i32> = vec![1];
+    let b = v[0];
+    let a: i32 = 0 - 2147483647 - 1;
+    println!("{}", a % b);
+}
+"#,
+            "0\n",
+        ),
+        (
+            "div_min_neg2",
+            r#"fn main() ~ Console {
+    let v: Vec<i32> = vec![1];
+    let b = v[0] - 3;
+    let a: i32 = 0 - 2147483647 - 1;
+    println!("{}", a / b);
+}
+"#,
+            "1073741824\n",
+        ),
+    ];
+    let dir = std::env::temp_dir().join("buildlang_div_positive");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    for (name, src, expected) in cases {
+        let path = dir.join(format!("{name}.bld"));
+        std::fs::write(&path, src).expect("write div/rem positive case");
+        let result = c_backend_run(&path);
+        assert_eq!(
+            result.stdout, expected,
+            "div/rem case `{name}` must compute the correct value"
+        );
+    }
+}
+
+/// The type checker rejects a scalar or bool `match` whose arms cannot cover
+/// every value, at compile time, before any C is emitted. Pre-fix, every case
+/// here compiled and ran: a bool match missing `false`, an `i32` match over two
+/// literals with no `_`, an annotated-`let` `i32` scrutinee, and a typed
+/// parameter scrutinee all slipped through and either printed a stale
+/// zero-initialised result or fell off the end. Each assertion fails on the
+/// pre-fix binary, which exits 0 with no diagnostic. The scrutinee type is fixed
+/// concretely (a bool from a signature, an annotated `let`, or a typed
+/// parameter) so the checker can prove non-exhaustiveness without whole-program
+/// inference. The emit-C path (`buildc FILE -o OUT.c`) runs the type checker and
+/// fails on a type error, so this control needs no C backend.
+#[test]
+fn non_exhaustive_scalar_match_is_rejected_at_compile_time() {
+    // (name, source, required stderr substring)
+    let cases: [(&str, &str, &str); 4] = [
+        (
+            "bool_missing_false",
+            r#"fn pick(b: bool) -> i32 {
+    match b {
+        true => 42,
+    }
+}
+fn main() ~ Console {
+    println!("{}", pick(true));
+}
+"#,
+            "non-exhaustive match: missing variants",
+        ),
+        (
+            "i32_two_literals",
+            r#"fn classify(n: i32) -> i32 {
+    match n {
+        0 => 100,
+        1 => 200,
+    }
+}
+fn main() ~ Console {
+    println!("{}", classify(9));
+}
+"#,
+            "non-exhaustive patterns",
+        ),
+        (
+            "annotated_let_i32",
+            r#"fn main() ~ Console {
+    let n: i32 = 9;
+    let mut out = 7;
+    match n {
+        0 => { out = 1; }
+        1 => { out = 2; }
+    }
+    println!("{}", out);
+}
+"#,
+            "non-exhaustive patterns",
+        ),
+        (
+            "typed_param_i32",
+            r#"fn go(n: i32) ~ Console {
+    let mut out = 7;
+    match n {
+        0 => { out = 1; }
+        1 => { out = 2; }
+    }
+    println!("{}", out);
+}
+fn main() ~ Console {
+    go(9);
+}
+"#,
+            "non-exhaustive patterns",
+        ),
+    ];
+    let dir = std::env::temp_dir().join("buildlang_match_nonexhaustive_reject");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    for (name, src, needle) in cases {
+        let path = dir.join(format!("{name}.bld"));
+        std::fs::write(&path, src).expect("write non-exhaustive case");
+        let out_c = dir.join(format!("{name}.c"));
+        let output = buildc()
+            .arg(&path)
+            .arg("-o")
+            .arg(&out_c)
+            .output()
+            .expect("run buildc to emit C");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "case `{name}` must fail to compile (non-exhaustive match)\nstderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains(needle),
+            "case `{name}` must report `{needle}`\nstderr:\n{stderr}"
+        );
+    }
+}
+
+/// Companion to the rejection control: a scalar `match` that IS exhaustive must
+/// still compile and run, so the new check never over-rejects. A wildcard `_`
+/// arm, a bare binding arm, and a bool match covering both `true` and `false`
+/// each cover their domain. This passes on the pre-fix binary too; it guards
+/// against the checker rejecting a valid match.
+#[test]
+fn exhaustive_scalar_match_still_compiles_and_runs() {
+    if !c_backend_ready() {
+        eprintln!("skipping exhaustive-match e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let cases: [(&str, &str, &str); 3] = [
+        (
+            "wildcard_arm",
+            r#"fn classify(n: i32) -> i32 {
+    match n {
+        0 => 100,
+        1 => 200,
+        _ => 999,
+    }
+}
+fn main() ~ Console {
+    println!("{}", classify(9));
+}
+"#,
+            "999",
+        ),
+        (
+            "binding_arm",
+            r#"fn classify(n: i32) -> i32 {
+    match n {
+        0 => 100,
+        other => other + 1,
+    }
+}
+fn main() ~ Console {
+    println!("{}", classify(41));
+}
+"#,
+            "42",
+        ),
+        (
+            "bool_both_arms",
+            r#"fn pick(b: bool) -> i32 {
+    match b {
+        true => 42,
+        false => 7,
+    }
+}
+fn main() ~ Console {
+    println!("{}", pick(false));
+}
+"#,
+            "7",
+        ),
+    ];
+    let dir = std::env::temp_dir().join("buildlang_match_exhaustive_ok");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    for (name, src, expected) in cases {
+        let path = dir.join(format!("{name}.bld"));
+        std::fs::write(&path, src).expect("write exhaustive case");
+        let (stdout, stderr, exit_code) = c_backend_run_capture(&path);
+        assert_eq!(
+            exit_code,
+            Some(0),
+            "exhaustive case `{name}` must run cleanly\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert_eq!(
+            stdout.trim(),
+            expected,
+            "exhaustive case `{name}` must print `{expected}`\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+}
+
+/// The residual hole the compile-time check cannot close: when the scrutinee's
+/// concrete integer type is pinned only by later whole-program inference (a value
+/// read from a `Vec`), the checker cannot prove non-exhaustiveness, so the match
+/// reaches codegen. Pre-fix, the no-match path fell through and read an
+/// uninitialised result: `let n = v[0]; match n { 0 => .., 1 => .. }` printed the
+/// stale `7`, and `match v[0] { .. }` printed nothing, both exit 0. The codegen
+/// backstop now routes that path to `bl_match_fail`, which aborts with exit 101
+/// and a stderr diagnostic. Each assertion fails on the pre-fix binary, which
+/// exits 0.
+#[test]
+fn non_exhaustive_match_over_runtime_value_aborts_fail_closed() {
+    if !c_backend_ready() {
+        eprintln!("skipping match backstop e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let cases: [(&str, &str); 2] = [
+        (
+            "let_bound_vec_value",
+            r#"fn main() ~ Console {
+    let v: Vec<i32> = vec![9];
+    let n = v[0];
+    let mut out = 7;
+    match n {
+        0 => { out = 1; }
+        1 => { out = 2; }
+    }
+    println!("{}", out);
+}
+"#,
+        ),
+        (
+            "direct_vec_index",
+            r#"fn main() ~ Console {
+    let v: Vec<i32> = vec![9];
+    match v[0] {
+        0 => { println!("z"); }
+        1 => { println!("o"); }
+    }
+}
+"#,
+        ),
+    ];
+    let dir = std::env::temp_dir().join("buildlang_match_backstop");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    for (name, src) in cases {
+        let path = dir.join(format!("{name}.bld"));
+        std::fs::write(&path, src).expect("write match backstop case");
+        let (stdout, stderr, exit_code) = c_backend_run_capture(&path);
+        assert_eq!(
+            exit_code,
+            Some(101),
+            "match backstop case `{name}` must abort with exit 101\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("non-exhaustive match: no arm matched the scrutinee"),
+            "match backstop case `{name}` must print the no-match diagnostic\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+}
+
+/// Regression: unary complement must pick the C operator from the operand type.
+/// BuildLang follows Rust: `!` is logical complement on `bool` and bitwise
+/// complement on integers, and `~` is always bitwise complement. MIR lowering
+/// previously collapsed both `~` and integer `!` onto a single logical-not node,
+/// so the C backend emitted `!` for every case. That is a silent wrong answer:
+/// `~5` and `!5` printed `0` instead of `-6`, and a `u8` complement lost its
+/// width. Each line below pins one path; `!bool` must stay logical.
+///   `~x`  (i32 5)  -> bitwise complement -> -6
+///   `!x`  (i32 5)  -> bitwise complement -> -6
+///   `~y`  (u8 5)   -> width-correct complement -> 250
+///   `!b`  (bool)   -> logical complement, else branch -> f
+#[test]
+fn unary_complement_uses_type_directed_c_operator_end_to_end() {
+    if !c_backend_ready() {
+        eprintln!("skipping unary-complement e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let src = "fn main() ~ Console {\n\
+               let x: i32 = 5;\n\
+               println!(\"{}\", ~x);\n\
+               println!(\"{}\", !x);\n\
+               let y: u8 = 5;\n\
+               println!(\"{}\", ~y);\n\
+               let b: bool = true;\n\
+               if !b { println!(\"t\"); } else { println!(\"f\"); }\n\
+               }\n";
+    let dir = std::env::temp_dir().join("buildlang_unary_complement_regress");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("unary_complement.bld");
+    std::fs::write(&path, src).expect("write unary_complement.bld");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout, "-6\n-6\n250\nf\n",
+        "`~` and integer `!` must lower to bitwise complement, `!bool` to logical not"
+    );
+}
+
+/// Regression: the remainder operator on floats must lower to `fmod`/`fmodf`,
+/// not to C's `%`. C's `%` rejects floating-point operands, so the previous
+/// lowering emitted `(a % b)` and gcc failed to compile the program. That is a
+/// fail-closed crash rather than a wrong answer, but a supported operation on a
+/// supported type must simply work. Both an f64 and an f32 remainder are pinned
+/// so the f32 path (`fmodf`) is covered too; each yields 1.5.
+#[test]
+fn float_remainder_uses_fmod_end_to_end() {
+    if !c_backend_ready() {
+        eprintln!("skipping float-remainder e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let src = "fn main() ~ Console {\n\
+               let a: f64 = 5.5;\n\
+               let b: f64 = 2.0;\n\
+               println!(\"{}\", a % b);\n\
+               let c: f32 = 7.5;\n\
+               let d: f32 = 2.0;\n\
+               println!(\"{}\", c % d);\n\
+               }\n";
+    let dir = std::env::temp_dir().join("buildlang_float_remainder_regress");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("float_remainder.bld");
+    std::fs::write(&path, src).expect("write float_remainder.bld");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout, "1.5\n1.5\n",
+        "float remainder must lower to fmod/fmodf and compute correctly"
+    );
+}
+
+/// Regression (false-success control): default `{}` Display on a float must
+/// print the shortest decimal that round-trips, matching Rust, not C's `%g`
+/// (which caps at 6 significant digits and switches to exponent form). The
+/// previous lowering baked `%g` into the format string, so `0.1 + 0.2` printed
+/// `0.3`, `1234567.0` printed `1.23457e+06`, and `3.14159265358979` lost every
+/// digit past the sixth. That is a silent wrong answer: the program runs and
+/// prints a plausible-but-wrong number. Each line pins one case, and the f32
+/// path is covered so its shortest-round-trip (not the f64 widening) is used.
+/// This whole block prints the `%g` values on the pre-fix binary, so it fails
+/// there and only passes once Display is corrected.
+#[test]
+fn float_display_matches_rust_shortest_roundtrip_end_to_end() {
+    if !c_backend_ready() {
+        eprintln!("skipping float-display e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let src = r#"fn main() ~ Console {
+    let a: f64 = 0.1;
+    let b: f64 = 0.2;
+    println!("{}", a + b);
+    let big: f64 = 1234567.0;
+    println!("{}", big);
+    let whole: f64 = 2.0;
+    println!("{}", whole);
+    let x: f64 = 3.14159265358979;
+    println!("{}", x);
+    let f: f32 = 1234567.0;
+    println!("{}", f);
+    let s: f32 = 0.1;
+    println!("{}", s);
+}
+"#;
+    let dir = std::env::temp_dir().join("buildlang_float_display_regress");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("float_display.bld");
+    std::fs::write(&path, src).expect("write float_display.bld");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout, "0.30000000000000004\n1234567\n2\n3.14159265358979\n1234567\n0.1\n",
+        "float Display must match Rust's shortest round-trip, not C's %g"
+    );
+}
+
+/// Regression (false-success control): a float-to-int cast must saturate like
+/// Rust's `as`, not invoke C's undefined behaviour for out-of-range or NaN
+/// operands. Rust clamps an out-of-range value to the target's MIN/MAX and maps
+/// NaN to 0; a raw C cast of `1e30` to `int32_t` is UB and on x86 wraps to
+/// `INT32_MIN`, and `(int32_t)NAN` is likewise UB. That is a silent wrong
+/// answer. The seven lines pin the positive-overflow, negative-overflow, NaN,
+/// unsigned-overflow, unsigned-negative, and 64-bit-overflow paths for both
+/// signed and unsigned targets. `big`/`neg`/`nan` are computed at runtime so
+/// the cast is not constant-folded, and the pre-fix binary prints the wrapped
+/// UB values here, so the test fails there and passes only once the cast
+/// saturates.
+#[test]
+fn float_to_int_cast_saturates_like_rust_end_to_end() {
+    if !c_backend_ready() {
+        eprintln!("skipping float-cast e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let src = r#"fn main() ~ Console {
+    let m: f64 = 1000000.0;
+    let big: f64 = m * m * m * m * m;
+    let neg: f64 = 0.0 - big;
+    let zero: f64 = 0.0;
+    let nan: f64 = zero / zero;
+    println!("{}", big as i32);
+    println!("{}", neg as i32);
+    println!("{}", nan as i32);
+    println!("{}", big as u8);
+    println!("{}", neg as u8);
+    println!("{}", big as i64);
+    println!("{}", big as u64);
+}
+"#;
+    let dir = std::env::temp_dir().join("buildlang_float_cast_regress");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("float_cast.bld");
+    std::fs::write(&path, src).expect("write float_cast.bld");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout,
+        "2147483647\n-2147483648\n0\n255\n0\n9223372036854775807\n18446744073709551615\n",
+        "float-to-int cast must saturate to MIN/MAX and map NaN to 0 like Rust's as"
+    );
+}
+
+/// Regression: a shift count is masked to the left operand's bit width, matching
+/// Rust's release-wrapping shift (`a << b` shifts by `b % bits`). The C backend
+/// promotes a sub-`int` operand to 32-bit `int` before shifting, so a narrow
+/// type shifted by a count at or past its own width used the un-masked 32-bit
+/// count and printed a silent wrong answer: 255u8 >> 9 gave 0 (want 127), 1u8
+/// << 8 gave 0 (want 1), i8::MIN >> 9 gave -1 (want -64), 1u16 << 16 gave 0
+/// (want 1). The shift amounts are read from mutable locals so the value flows
+/// through codegen rather than being const-folded. The last two lines are wide
+/// types (i32/u64) that were already correct; they pin that masking every width
+/// does not regress them (x86 already masks the count mod width there).
+#[test]
+fn narrow_shift_masks_count_to_width_like_rust_end_to_end() {
+    if !c_backend_ready() {
+        eprintln!("skipping narrow-shift e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let src = r#"fn main() ~ Console {
+    let mut s9: u32 = 9;
+    let mut s8: u32 = 8;
+    let mut s16: u32 = 16;
+    let mut s17: u32 = 17;
+    let a: u8 = 255u8;
+    let b: u8 = 1u8;
+    let c: i8 = 0i8 - 127i8 - 1i8;
+    let d: u16 = 1u16;
+    let e: u16 = 65535u16;
+    let f: i16 = 1i16;
+    println!("{}", a >> s9);
+    println!("{}", b << s8);
+    println!("{}", c >> s9);
+    println!("{}", d << s16);
+    println!("{}", e >> s17);
+    println!("{}", f << s16);
+    let mut s32: u32 = 32;
+    let g: i32 = 1i32;
+    println!("{}", g << s32);
+    let h: u64 = 255u64;
+    let mut s65: u32 = 65;
+    println!("{}", h >> s65);
+}
+"#;
+    let dir = std::env::temp_dir().join("buildlang_narrow_shift_regress");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("narrow_shift.bld");
+    std::fs::write(&path, src).expect("write narrow_shift.bld");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout, "127\n1\n-64\n1\n32767\n1\n1\n127\n",
+        "narrow-width over-shift must mask the count to the operand width like Rust release"
+    );
+}
+
+/// Regression: `break 'label` / `continue 'label` must target the named
+/// enclosing loop, not the innermost one. Labeled loops parse (parser support),
+/// but MIR lowering previously stored only the innermost loop's blocks and
+/// ignored the label, so `break 'outer` from an inner loop compiled to a plain
+/// innermost `break`. That is a silent wrong answer: the four programs below
+/// print 3/6/3/... instead of 1/0/3/2. Each line pins one path:
+///   a: `break 'outer` from inner-for escapes both loops on the first hit -> 1
+///   b: `continue 'outer2` restarts the outer loop before any inner count -> 0
+///   c: bare `break` still targets the innermost loop (no regression) -> 3
+///   d: `break 'w` from an inner-for to an outer *while* (cross loop-kind) -> 2
+#[test]
+fn labeled_break_continue_target_named_loop_end_to_end() {
+    if !c_backend_ready() {
+        eprintln!("skipping labeled-loop e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let src = "fn main() ~ Console {\n\
+               let mut a = 0;\n\
+               'outer: for i in 0..3 {\n\
+               for j in 0..3 { if j == 1 { break 'outer; } a = a + 1; }\n\
+               }\n\
+               println(\"{}\", a);\n\
+               let mut b = 0;\n\
+               'outer2: for i in 0..3 {\n\
+               for j in 0..3 { if j == 0 { continue 'outer2; } b = b + 1; }\n\
+               }\n\
+               println(\"{}\", b);\n\
+               let mut c = 0;\n\
+               for i in 0..3 { for j in 0..3 { if j == 1 { break; } c = c + 1; } }\n\
+               println(\"{}\", c);\n\
+               let mut d = 0;\n\
+               let mut k = 0;\n\
+               'w: while k < 3 {\n\
+               for j in 0..3 { if j == 2 { break 'w; } d = d + 1; }\n\
+               k = k + 1;\n\
+               }\n\
+               println(\"{}\", d);\n\
+               }\n";
+    let dir = std::env::temp_dir().join("buildlang_labeled_loops_regress");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("labeled_loops.bld");
+    std::fs::write(&path, src).expect("write labeled_loops.bld");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout, "1\n0\n3\n2\n",
+        "break/continue with a label must target the named loop, not the innermost"
+    );
+}
+
+/// Check-the-check: `break 'x` / `continue 'x` against a label that names no
+/// enclosing loop cannot compile, so `check` must reject it at the type stage
+/// rather than reporting "no errors" and deferring the failure to codegen. A
+/// valid labeled loop must still pass. Runs without a C backend.
+#[test]
+fn check_rejects_undefined_loop_label() {
+    let id = std::process::id();
+
+    // Undefined break label: `'nope` is never declared.
+    let bad = std::env::temp_dir().join(format!("buildlang_undef_break_label_{id}.bld"));
+    fs::write(
+        &bad,
+        "fn main() {\n    loop {\n        break 'nope;\n    }\n}\n",
+    )
+    .expect("write undefined-label fixture");
+    let output = buildc()
+        .arg("check")
+        .arg(&bad)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run buildc check --receipt -");
+    let stdout = output.stdout.clone();
+    let _ = fs::remove_file(&bad);
+    assert!(
+        !output.status.success(),
+        "check must fail for an undefined loop label\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&stdout).expect("stdout should be JSON receipt");
+    assert_eq!(receipt["status"], "failed");
+    let diagnostics = receipt["diagnostics"]
+        .as_array()
+        .expect("diagnostics array");
+    assert!(
+        diagnostics.iter().any(|diag| {
+            diag["stage"] == "type"
+                && diag["kind"] == "UndefinedLoopLabel"
+                && diag["message"].as_str().unwrap_or("").contains("'nope")
+        }),
+        "expected an UndefinedLoopLabel type diagnostic naming 'nope in {diagnostics:#?}"
+    );
+
+    // Undefined continue label, where a different label is in scope.
+    let bad_cont = std::env::temp_dir().join(format!("buildlang_undef_cont_label_{id}.bld"));
+    fs::write(
+        &bad_cont,
+        "fn main() {\n    'a: loop {\n        continue 'b;\n    }\n}\n",
+    )
+    .expect("write undefined-continue-label fixture");
+    let cont_out = buildc()
+        .arg("check")
+        .arg(&bad_cont)
+        .output()
+        .expect("run buildc check");
+    let _ = fs::remove_file(&bad_cont);
+    assert!(
+        !cont_out.status.success(),
+        "check must fail for `continue` to an undefined label"
+    );
+
+    // A valid labeled loop must still pass `check`.
+    let good = std::env::temp_dir().join(format!("buildlang_valid_label_{id}.bld"));
+    fs::write(
+        &good,
+        "fn main() {\n    'outer: loop {\n        loop {\n            break 'outer;\n        }\n    }\n}\n",
+    )
+    .expect("write valid-label fixture");
+    let good_out = buildc()
+        .arg("check")
+        .arg(&good)
+        .output()
+        .expect("run buildc check");
+    let _ = fs::remove_file(&good);
+    assert!(
+        good_out.status.success(),
+        "a labeled loop with a resolvable `break` target must pass check\nstderr:\n{}",
+        String::from_utf8_lossy(&good_out.stderr)
+    );
+}
+
+/// Regression: the match-lowering pattern tester must actually test each
+/// pattern, and the result local must take the arm type rather than the
+/// scrutinee type. Four codegen paths each produced a silent wrong answer, and
+/// one pattern kind silently matched anything. Every line below pins one path:
+///   `100..`     an open-ended range must not gate on the absent upper bound,
+///               so a large i64 matches -> 1 (was 0: the old lowering compared
+///               against an i32::MAX sentinel that the value overran).
+///   `n @ 1..=5` an `@`-binding must test its subpattern; 100 is out of range,
+///               so the arm is skipped -> -1 (was 100: the binding matched
+///               unconditionally and returned the scrutinee).
+///   `A | B`     an enum or-pattern must test each alternative; `Blue` is the
+///               second alternative -> 2 (was 1: the or-pattern was unhandled
+///               and fell through to a match-anything catch-all).
+///   `n @ E::V`  an enum `@`-binding must test its variant subpattern; `Blue`
+///               is not `Red`, so the arm is skipped -> 2 (was 1: the binding
+///               matched any variant).
+///   `match b`   a bool scrutinee's match yields the arm value, not a bool, so
+///               the result is stored as an int -> 42 (was `true`: the result
+///               local was typed `bool` and truncated 42 to 1).
+#[test]
+fn match_pattern_tests_and_result_type_compute_correctly_end_to_end() {
+    if !c_backend_ready() {
+        eprintln!("skipping match-pattern e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let src = "enum Color { Red, Green, Blue }\n\
+               fn main() ~ Console {\n\
+               let x: i64 = 5000000000;\n\
+               let r_open = match x { 100.. => 1, _ => 0 };\n\
+               println!(\"{}\", r_open);\n\
+               let y: i32 = 100;\n\
+               let r_at = match y { n @ 1..=5 => n, _ => -1 };\n\
+               println!(\"{}\", r_at);\n\
+               let a = Color::Blue;\n\
+               let r_or = match a { Color::Red => 1, Color::Green | Color::Blue => 2 };\n\
+               println!(\"{}\", r_or);\n\
+               let c = Color::Blue;\n\
+               let r_enumat = match c { n @ Color::Red => 1, _ => 2 };\n\
+               println!(\"{}\", r_enumat);\n\
+               let b: bool = true;\n\
+               let r_bool = match b { true => 42, false => 7 };\n\
+               println!(\"{}\", r_bool);\n\
+               }\n";
+    let dir = std::env::temp_dir().join("buildlang_match_pattern_regress");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("match_pattern.bld");
+    std::fs::write(&path, src).expect("write match_pattern.bld");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout, "1\n-1\n2\n2\n42\n",
+        "match pattern tests must gate on the real pattern and the result must take the arm type"
+    );
+}
+
 /// Regression: an `Option<i64>`-returning function whose result is matched must
 /// compile and run end-to-end. Previously the if-expression result local was
 /// typed `int32_t` (the `None` branch defaulted to i32), so the 64-bit Option
@@ -12895,6 +16038,205 @@ fn option_i64_return_and_match_runs_end_to_end() {
     assert_eq!(
         result.stdout, "ok 102599\nrej 1\n",
         "Option<i64> return + match must run end-to-end with the 64-bit payload intact"
+    );
+}
+
+/// Regression (silent-wrong-answer): a tuple pattern with literal elements must
+/// select the arm whose elements ALL equal the scrutinee. Before the fix,
+/// `lower_pattern_test` fell through to a `_ => Ok(bool(true))` catch-all for
+/// tuple patterns, so `(1, 2)` "matched" the scrutinee `(3, 4)`, the first arm
+/// was taken unconditionally, and this printed "a". A compiler that silently
+/// selects the wrong arm is the exact failure the fail-closed rule forbids.
+#[test]
+fn match_tuple_literal_pattern_selects_equal_arm() {
+    if !c_backend_ready() {
+        eprintln!("skipping tuple-literal-arm e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let src = "fn main() ~ Console {\n\
+               let pair = (3, 4);\n\
+               let r = match pair {\n\
+               (1, 2) => \"a\",\n\
+               (3, 4) => \"b\",\n\
+               _ => \"other\",\n\
+               };\n\
+               println(\"{}\", r);\n\
+               }\n";
+    let dir = std::env::temp_dir().join("buildlang_match_tuple_literal");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("tuple_literal.bld");
+    std::fs::write(&path, src).expect("write tuple_literal.bld");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout, "b\n",
+        "a tuple pattern must test every element for equality, not silently always match"
+    );
+}
+
+/// Regression (invalid C): scalar-bodied arms over a tuple scrutinee must yield
+/// a scalar result local. Before the fix, `lower_match` fell back to the
+/// scrutinee type (a tuple) for the result, emitting C that assigned an int
+/// (`100`/`200`) to a `Tuple_i32_i32` local, which gcc rejects as incompatible
+/// types. The program must compile and print the selected scalar.
+#[test]
+fn match_tuple_scalar_result_over_tuple_scrutinee() {
+    if !c_backend_ready() {
+        eprintln!("skipping tuple-scalar-result e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let src = "fn main() ~ Console {\n\
+               let pair = (3, 4);\n\
+               let r = match pair {\n\
+               (1, 2) => 100,\n\
+               (3, 4) => 200,\n\
+               _ => 999,\n\
+               };\n\
+               println(\"{}\", r);\n\
+               }\n";
+    let dir = std::env::temp_dir().join("buildlang_match_tuple_scalar");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("tuple_scalar.bld");
+    std::fs::write(&path, src).expect("write tuple_scalar.bld");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout, "200\n",
+        "scalar match arms over a tuple scrutinee must produce a scalar result, not an aggregate"
+    );
+}
+
+/// Regression: a nested tuple pattern tests every leaf. `((1, 2), 9)` must not
+/// match `((1, 3), 9)` (the inner `2 != 3` fails that arm). Before the fix the
+/// tuple arm always matched, so the first (wrong) arm was taken.
+#[test]
+fn match_nested_tuple_pattern_tests_inner_elements() {
+    if !c_backend_ready() {
+        eprintln!("skipping nested-tuple e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let src = "fn main() ~ Console {\n\
+               let p = ((1, 2), 9);\n\
+               let r = match p {\n\
+               ((1, 3), 9) => \"wrongA\",\n\
+               ((1, 2), 9) => \"right\",\n\
+               _ => \"other\",\n\
+               };\n\
+               println(\"{}\", r);\n\
+               }\n";
+    let dir = std::env::temp_dir().join("buildlang_match_nested_tuple");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("nested_tuple.bld");
+    std::fs::write(&path, src).expect("write nested_tuple.bld");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout, "right\n",
+        "a nested tuple pattern must test inner elements, not silently always match"
+    );
+}
+
+/// Regression (undeclared C variables): tuple-pattern element bindings must be
+/// emitted. `(a, b) => a + b` prints 15; the nested `((a, b), c)` binds all
+/// three (prints 12); the mixed `(1, x)` tests the literal `1` and binds `x`
+/// (prints 20). Before the binder existed, `lower_match` had no tuple arm in
+/// its binding section, so the emitted C referenced undeclared `a`/`b`.
+#[test]
+fn match_tuple_pattern_binds_elements() {
+    if !c_backend_ready() {
+        eprintln!("skipping tuple-binding e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let src = "fn main() ~ Console {\n\
+               let p = (7, 8);\n\
+               match p { (a, b) => println(\"{}\", a + b), }\n\
+               let q = ((3, 4), 5);\n\
+               match q { ((a, b), c) => println(\"{}\", a + b + c), }\n\
+               let m = (1, 20);\n\
+               match m { (1, x) => println(\"{}\", x), _ => println(\"{}\", 0), }\n\
+               }\n";
+    let dir = std::env::temp_dir().join("buildlang_match_tuple_binds");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("tuple_binds.bld");
+    std::fs::write(&path, src).expect("write tuple_binds.bld");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout, "15\n12\n20\n",
+        "tuple, nested-tuple, and mixed literal/binding patterns must bind their element variables"
+    );
+}
+
+/// Regression: a match guard can reference tuple-pattern bindings. The binder
+/// runs in the guard block before the guard expression, so `(a, b) if a < b`
+/// evaluates `a < b` with `a`/`b` in scope. `(3, 4)` takes the guarded arm and
+/// prints 34 (`a * 10 + b`); if the binder did not run before the guard the
+/// guard would reference undeclared variables.
+#[test]
+fn match_tuple_guard_references_bindings() {
+    if !c_backend_ready() {
+        eprintln!("skipping tuple-guard e2e: no C backend available (buildc doctor)");
+        return;
+    }
+    let src = "fn main() ~ Console {\n\
+               let p = (3, 4);\n\
+               let r = match p {\n\
+               (a, b) if a < b => a * 10 + b,\n\
+               (a, b) => a + b,\n\
+               };\n\
+               println(\"{}\", r);\n\
+               }\n";
+    let dir = std::env::temp_dir().join("buildlang_match_tuple_guard");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("tuple_guard.bld");
+    std::fs::write(&path, src).expect("write tuple_guard.bld");
+    let result = c_backend_run(&path);
+    assert_eq!(
+        result.stdout, "34\n",
+        "a guard clause must see the tuple pattern's bound elements"
+    );
+}
+
+/// Regression (fail-closed): a slice pattern in `match` is not yet supported in
+/// codegen. It must be REJECTED with a diagnostic, never compiled as an
+/// always-true test. Before the fix the `_ => Ok(bool(true))` catch-all made
+/// `[1, 2, 3]` silently always match, so a non-matching array would take the
+/// wrong arm. The `--target c` codegen path needs no C compiler, so this proves
+/// the fail-closed diagnostic directly.
+#[test]
+fn match_slice_pattern_fails_closed() {
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang_match_slice_closed_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let fixture = dir.join("slice_pattern.bld");
+    fs::write(
+        &fixture,
+        "fn main() ~ Console {\n\
+         let a = [1, 2, 3];\n\
+         let r = match a {\n\
+         [1, 2, 3] => \"a\",\n\
+         _ => \"other\",\n\
+         };\n\
+         println(\"{}\", r);\n\
+         }\n",
+    )
+    .expect("write slice-pattern fixture");
+    let out_c = dir.join("slice_pattern.c");
+    let output = buildc()
+        .arg(&fixture)
+        .args(["--target", "c", "-o"])
+        .arg(&out_c)
+        .output()
+        .expect("run buildc --target c");
+    let _ = fs::remove_file(&fixture);
+    assert!(
+        !output.status.success(),
+        "a slice pattern in match must fail closed, not compile as always-true\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.to_lowercase().contains("slice pattern"),
+        "diagnostic should name the unsupported slice pattern:\n{}",
+        stderr
     );
 }
 
@@ -13473,6 +16815,52 @@ fn transpile_preservation_c_and_rust_backends_agree_on_stdout() {
         "transpile-preservation: C and Rust backends agree on stdout + exit status \
          for {cross_checked} corpus program(s)"
     );
+}
+
+/// False-success control for the Rust-backend numeric-print path. Printing a
+/// float with `println!("{}", x)` lowers to `build_f64_to_string(x)` followed by
+/// a `.ptr` projection off the resulting runtime string. The C runtime defines
+/// that function and models the string as a `BuildString` with a `ptr` field;
+/// the Rust source backend did neither, so any float-printing program failed to
+/// compile with `error[E0425]: cannot find function build_f64_to_string` and
+/// `error[E0609]: no field ptr on type String`. The C path never exercised this
+/// (its own runtime is complete) and the cross-backend receipt lane was the
+/// first caller to reach it. This test lowers a float- and int-printing program
+/// through the Rust backend, compiles it with `rustc`, runs it, and pins the
+/// output. On the pre-fix binary it fails at the compile step; the assertion
+/// message carries the generated source and rustc's diagnostics.
+#[test]
+fn rust_backend_lowers_float_and_int_println_end_to_end() {
+    if !rustc_available() {
+        eprintln!("skipping rust-backend numeric-print control: rustc not available");
+        return;
+    }
+
+    // `2.0` prints as `2` and `0.1 + 0.2` prints as `0.30000000000000004` under
+    // Rust's shortest round-trip Display, which is the same positional decimal
+    // the C `bl_fmt_f64` helper produces. The integer print takes the direct
+    // format path and is included so a regression there would also surface.
+    let source = r#"
+fn main() ~ Console {
+    let n: i32 = 1234567;
+    let whole: f64 = 2.0;
+    let tenth: f64 = 0.1;
+    let sum: f64 = 0.1 + 0.2;
+    println!("{}", n);
+    println!("{}", whole);
+    println!("{}", tenth);
+    println!("{}", sum);
+}
+"#;
+
+    let rust_source = lower_source_to_rust(source);
+    let result = rustc_compile_and_run("rust_numeric_println", &rust_source);
+    assert_eq!(
+        result.stdout, "1234567\n2\n0.1\n0.30000000000000004\n",
+        "Rust backend must define build_f64_to_string and project `.ptr` off a \
+         runtime string so float printing compiles and round-trips"
+    );
+    assert_eq!(result.exit_code, Some(0), "generated program must exit 0");
 }
 
 // =============================================================================
@@ -18468,6 +21856,169 @@ fn model_receipt_chains_beside_a_scientific_receipt_and_tamper_breaks_it() {
         String::from_utf8_lossy(&verify_tampered.stderr).contains("CHAIN_LINK_UNVERIFIED"),
         "a model member whose body no longer re-seals must report CHAIN_LINK_UNVERIFIED\nstderr:\n{}",
         String::from_utf8_lossy(&verify_tampered.stderr)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Spawn `buildc check <file>` and wait up to `timeout_secs`, killing the
+/// process and failing the test if it does not exit. A module-resolution
+/// regression would otherwise hang the whole suite (this repo has a documented
+/// CI-hang failure class), so the wait is always bounded. Assumes the command's
+/// output is small enough not to fill the OS pipe buffer while we poll, which
+/// holds for `check` on the tiny fixtures below.
+fn check_within(file: &Path, timeout_secs: u64) -> (std::process::ExitStatus, String, String) {
+    use std::io::Read;
+    let mut child = buildc()
+        .arg("check")
+        .arg(file)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn buildc check");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll buildc check") {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "buildc check '{}' did not terminate within {timeout_secs}s -- \
+                 module resolution likely regressed into unbounded recursion",
+                file.display()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = out.read_to_string(&mut stdout);
+    }
+    if let Some(mut err) = child.stderr.take() {
+        let _ = err.read_to_string(&mut stderr);
+    }
+    (status, stdout, stderr)
+}
+
+#[test]
+fn check_file_module_named_after_its_file_terminates() {
+    // A file `benchmarks.bld` that declares `module benchmarks` must NOT be
+    // read back as a `mod benchmarks;` submodule import of itself. This is the
+    // regression for the corpus hang: the file-level `module` header used to be
+    // indistinguishable from a bodyless `mod`, so the resolver loaded the
+    // declaring file again and recursed forever.
+    let dir = std::env::temp_dir().join(format!("buildlang_filemod_{}", std::process::id()));
+    let _ = fs::create_dir_all(&dir);
+    let file = dir.join("benchmarks.bld");
+    fs::write(
+        &file,
+        "module benchmarks\n\npub fn main() -> i32 {\n    return 0\n}\n",
+    )
+    .expect("write file-module fixture");
+
+    let (status, stdout, stderr) = check_within(&file, 30);
+    assert!(
+        status.success(),
+        "a file declaring `module <own filename>` must type-check, not hang or error\n\
+         stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn check_mod_self_import_cycle_fails_closed() {
+    // A `mod selfref;` inside `selfref.bld` asks the resolver to load the very
+    // file that declares it -- an import cycle. The resolver must emit a
+    // diagnostic and exit non-zero, never recurse forever.
+    let dir = std::env::temp_dir().join(format!("buildlang_modcycle_{}", std::process::id()));
+    let _ = fs::create_dir_all(&dir);
+    let file = dir.join("selfref.bld");
+    fs::write(
+        &file,
+        "mod selfref;\n\npub fn main() -> i32 {\n    return 0\n}\n",
+    )
+    .expect("write mod-cycle fixture");
+
+    let (status, _stdout, stderr) = check_within(&file, 30);
+    assert!(
+        !status.success(),
+        "a self-importing `mod` must fail closed, not succeed"
+    );
+    assert!(
+        stderr.contains("cycle detected"),
+        "a module import cycle must report a diagnostic\nstderr:\n{stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn check_parse_error_reports_line_and_column() {
+    // `check` used to print parse errors with no location, while `build`/`run`
+    // printed `error[path:line:col]` with a caret underline. This locks in that
+    // `check` now resolves the same location -- in both the human output and
+    // the receipt -- so a parse failure is as locatable from `check` as from a
+    // build, and the corpus can be triaged by exact site.
+    let dir = std::env::temp_dir().join(format!("buildlang_parseloc_{}", std::process::id()));
+    let _ = fs::create_dir_all(&dir);
+    let file = dir.join("parseloc.bld");
+    // The missing `;` after `let x = 5` is reported at the next token,
+    // `println!` on line 3, which starts at column 5 (a four-space indent).
+    fs::write(
+        &file,
+        "fn main() ~ Console {\n    let x = 5\n    println!(\"{}\", x);\n}\n",
+    )
+    .expect("write parse-location fixture");
+
+    // Human output: `error[<path>:3:5]: expected `;`` plus a caret line.
+    let (status, _stdout, stderr) = check_within(&file, 30);
+    assert!(
+        !status.success(),
+        "a missing semicolon must fail closed\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(":3:5]:"),
+        "check must report the parse error at line 3, column 5\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("expected `;`"),
+        "the diagnostic must name the missing semicolon\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains('^'),
+        "check must underline the offending token with a caret\nstderr:\n{stderr}"
+    );
+
+    // Receipt: the parse diagnostic carries structured line/col, so machine
+    // consumers get the location too (type diagnostics still omit it).
+    let output = buildc()
+        .arg("check")
+        .arg(&file)
+        .arg("--receipt")
+        .arg("-")
+        .output()
+        .expect("run buildc check --receipt -");
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be JSON receipt");
+    let parse_diag = receipt["diagnostics"]
+        .as_array()
+        .expect("diagnostics array")
+        .iter()
+        .find(|d| d["stage"] == "parse")
+        .expect("a parse diagnostic in the receipt");
+    assert_eq!(parse_diag["line"], 3, "receipt parse diagnostic line");
+    assert_eq!(parse_diag["col"], 5, "receipt parse diagnostic column");
+    assert_eq!(parse_diag["kind"], "ParseError");
+    assert!(
+        parse_diag["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("expected `;`"),
+        "receipt message must name the missing semicolon: {parse_diag}"
     );
 
     let _ = fs::remove_dir_all(&dir);

@@ -93,6 +93,10 @@ pub enum ParseErrorKind {
     #[error("invalid expression")]
     InvalidExpression,
 
+    /// Integer literal could not be represented by the parser's literal value.
+    #[error("integer literal is too large: `{literal}`")]
+    IntegerLiteralTooLarge { literal: String },
+
     /// Invalid left-hand side of assignment.
     #[error("invalid left-hand side of assignment")]
     InvalidAssignTarget,

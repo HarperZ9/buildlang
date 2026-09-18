@@ -9,7 +9,8 @@
 //! This module handles type checking at the item level, while `infer.rs`
 //! handles expression-level type inference.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::ast::{self, ImplItemKind, ItemKind, StructFields, TraitItemKind};
@@ -17,7 +18,7 @@ use crate::lexer::{SourceId, Span};
 
 use super::context::*;
 use super::error::*;
-use super::infer::TypeInfer;
+use super::infer::{TypeInfer, WellKnownTypes};
 use super::ty::*;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -38,6 +39,20 @@ pub struct TypeChecker<'ctx> {
     effect_ctx: super::effects::EffectContext,
     /// Source directory for resolving external module files.
     source_dir: Option<std::path::PathBuf>,
+    /// Canonicalized paths of `mod foo;` files currently on the load stack.
+    /// A file that is already being loaded must not be loaded again, or a
+    /// `mod NAME;` chain that comes back to itself would recurse until the
+    /// stack overflows. Fail closed: a repeated path is a cycle diagnostic,
+    /// not a crash. Paths are removed after their subtree finishes so a
+    /// diamond (two siblings importing the same leaf) is not a false cycle.
+    loading_modules: HashSet<PathBuf>,
+    /// Cache of `use` module path (`a::b::c`) -> the set of top-level item
+    /// names that module file exports (`None` when no backing file was found or
+    /// it failed to parse). Reading a module's export names is read-only: it
+    /// never mutates the type context, so binding an imported leaf as an opaque
+    /// value can never perturb the consumer's own types the way collecting the
+    /// module's items would. The cache keeps each module parsed at most once.
+    use_module_exports: HashMap<Arc<str>, Option<HashSet<Arc<str>>>>,
     /// Source text for span-backed token evidence during inference.
     source_text: Option<Arc<str>>,
     /// Source ID associated with `source_text`.
@@ -54,6 +69,8 @@ impl<'ctx> TypeChecker<'ctx> {
             errors: Vec::new(),
             effect_ctx: super::effects::EffectContext::new(),
             source_dir: None,
+            loading_modules: HashSet::new(),
+            use_module_exports: HashMap::new(),
             source_text: None,
             source_id: None,
             function_effect_summaries: Vec::new(),
@@ -118,6 +135,11 @@ impl<'ctx> TypeChecker<'ctx> {
         // Register built-in vector/matrix struct types so that type annotations
         // like `vec3` resolve to known struct types with accessible fields.
         self.register_builtin_vec_types();
+
+        // Register generic Option<T> before function signatures are collected,
+        // so checked integer methods and explicit `-> Option<T>` annotations
+        // share a real well-known ADT instead of a fresh inference variable.
+        self.register_builtin_option_type();
 
         // Register prelude constructors (Ok, Err, Some, None) as variables
         // with fresh type variables so they pass type checking.
@@ -242,6 +264,53 @@ impl<'ctx> TypeChecker<'ctx> {
         });
     }
 
+    fn register_builtin_option_type(&mut self) {
+        if self.ctx.lookup_type_by_name("Option").is_some() {
+            return;
+        }
+
+        let def_id = self.ctx.fresh_def_id();
+        let t_name: Arc<str> = Arc::from("T");
+        let t_ty = Ty::param(t_name.clone(), 0);
+        self.ctx.register_type(TypeDef {
+            def_id,
+            name: Arc::from("Option"),
+            generics: vec![GenericParam {
+                name: t_name,
+                index: 0,
+                kind: GenericParamKind::Type { bounds: Vec::new() },
+            }],
+            kind: TypeDefKind::Enum(EnumDef {
+                variants: vec![
+                    EnumVariant {
+                        name: Arc::from("Some"),
+                        fields: vec![(None, t_ty)],
+                        discriminant: Some(0),
+                    },
+                    EnumVariant {
+                        name: Arc::from("None"),
+                        fields: Vec::new(),
+                        discriminant: Some(1),
+                    },
+                ],
+            }),
+        });
+    }
+
+    fn well_known_types_from_ctx(ctx: &TypeContext) -> WellKnownTypes {
+        WellKnownTypes {
+            range: ctx.lookup_type_by_name("Range").map(|ty| ty.def_id),
+            range_inclusive: ctx
+                .lookup_type_by_name("RangeInclusive")
+                .map(|ty| ty.def_id),
+            range_full: ctx.lookup_type_by_name("RangeFull").map(|ty| ty.def_id),
+            range_from: ctx.lookup_type_by_name("RangeFrom").map(|ty| ty.def_id),
+            range_to: ctx.lookup_type_by_name("RangeTo").map(|ty| ty.def_id),
+            option: ctx.lookup_type_by_name("Option").map(|ty| ty.def_id),
+            result: ctx.lookup_type_by_name("Result").map(|ty| ty.def_id),
+        }
+    }
+
     // =========================================================================
     // COLLECTION PASS
     // =========================================================================
@@ -286,11 +355,29 @@ impl<'ctx> TypeChecker<'ctx> {
             for item in &content.items {
                 self.collect_item(item);
             }
+        } else if m.is_file_module {
+            // File-level `module NAME` header: the rest of the file already IS
+            // the body, so there is nothing to load. Loading `NAME.bld` here
+            // would re-open the file that declared the header (its own stem)
+            // and recurse until the stack overflows.
         } else if let Some(ref dir) = self.source_dir.clone() {
-            // External module: load from disk
+            // External submodule: `mod NAME;` loads NAME.bld from disk.
             let mod_name = m.name.name.as_ref();
             let mod_path = dir.join(format!("{}.bld", mod_name));
             if mod_path.exists() {
+                let key = std::fs::canonicalize(&mod_path).unwrap_or_else(|_| mod_path.clone());
+                if !self.loading_modules.insert(key.clone()) {
+                    // Already on the load stack: a cycle. Fail closed with a
+                    // diagnostic instead of recursing into a stack overflow.
+                    self.error(
+                        TypeError::ModuleImportCycle {
+                            path: mod_path.display().to_string(),
+                            module: mod_name.to_string(),
+                        },
+                        m.name.span,
+                    );
+                    return;
+                }
                 if let Ok(source_text) = std::fs::read_to_string(&mod_path) {
                     let source = crate::lexer::SourceFile::new(
                         mod_path.to_string_lossy().as_ref(),
@@ -306,6 +393,7 @@ impl<'ctx> TypeChecker<'ctx> {
                         }
                     }
                 }
+                self.loading_modules.remove(&key);
             }
         }
     }
@@ -866,11 +954,13 @@ impl<'ctx> TypeChecker<'ctx> {
                 infer_errors,
                 has_return,
             ) = {
+                let well_known_types = Self::well_known_types_from_ctx(self.ctx);
                 let mut infer = if let Some(source_text) = &self.source_text {
                     TypeInfer::with_source_text(self.ctx, source_text.clone(), self.source_id)
                 } else {
                     TypeInfer::new(self.ctx)
                 };
+                infer.set_well_known_types(well_known_types);
                 // Pass the expected return type so that `return` statements
                 // inside nested control flow (while/if/match) are properly
                 // type-checked against the function signature.
@@ -1321,7 +1411,9 @@ impl<'ctx> TypeChecker<'ctx> {
         if let Some(init) = &c.value {
             // Use block to limit TypeInfer borrow scope
             let (init_ty, infer_errors) = {
+                let well_known_types = Self::well_known_types_from_ctx(self.ctx);
                 let mut infer = TypeInfer::new(self.ctx);
+                infer.set_well_known_types(well_known_types);
                 let init_ty = infer.infer_expr(init);
                 (init_ty, infer.take_errors())
             };
@@ -1348,7 +1440,9 @@ impl<'ctx> TypeChecker<'ctx> {
         if let Some(init) = &s.value {
             // Use block to limit TypeInfer borrow scope
             let (init_ty, infer_errors) = {
+                let well_known_types = Self::well_known_types_from_ctx(self.ctx);
                 let mut infer = TypeInfer::new(self.ctx);
+                infer.set_well_known_types(well_known_types);
                 let init_ty = infer.infer_expr(init);
                 (init_ty, infer.take_errors())
             };
@@ -1372,49 +1466,245 @@ impl<'ctx> TypeChecker<'ctx> {
     /// Resolve a `use` statement, importing bindings from a module into the
     /// current scope.
     fn resolve_use(&mut self, tree: &ast::UseTree) {
+        self.resolve_use_prefixed(tree, &[]);
+    }
+
+    /// Resolve a `use` tree carrying the module-path prefix accumulated from
+    /// enclosing nested groups, so `use foundation::math::{sign, cbrt}` binds
+    /// `sign`/`cbrt` from the `foundation::math` module rather than losing the
+    /// `foundation::math` prefix (which the flat handler used to drop).
+    fn resolve_use_prefixed(&mut self, tree: &ast::UseTree, prefix: &[Arc<str>]) {
         match &tree.kind {
             ast::UseTreeKind::Simple { path, rename } => {
-                // use foo::bar; or use foo::bar as baz;
-                if path.segments.len() >= 2 {
-                    let module = path.segments[0].ident.name.as_ref();
-                    let item = &path.segments[path.segments.len() - 1].ident.name;
-                    let local_name = rename
-                        .as_ref()
-                        .map(|r| r.name.clone())
-                        .unwrap_or_else(|| item.clone());
-
-                    if let Some(ty) = self.ctx.lookup_module_binding(module, item.as_ref()) {
-                        self.ctx.define_var(local_name, ty);
-                    }
+                let mut segs: Vec<Arc<str>> = prefix.to_vec();
+                segs.extend(path.segments.iter().map(|s| s.ident.name.clone()));
+                if segs.len() < 2 || Self::is_reserved_use_root(&segs[0]) {
+                    return;
+                }
+                let item = segs[segs.len() - 1].clone();
+                // `use a::b::self` names the module itself, not a value binding.
+                if item.as_ref() == "self" {
+                    return;
+                }
+                let module_segs = &segs[..segs.len() - 1];
+                // First, a module registered by an in-tree `mod NAME;` (real
+                // signatures). Fall back to the file-backed export set, binding
+                // the imported name as an opaque value so it stops reading as
+                // "undefined" without importing a concrete signature that could
+                // collide with the consumer's own same-named type.
+                let local_name = rename
+                    .as_ref()
+                    .map(|r| r.name.clone())
+                    .unwrap_or_else(|| item.clone());
+                if let Some(ty) = self
+                    .ctx
+                    .lookup_module_binding(module_segs[0].as_ref(), item.as_ref())
+                {
+                    self.ctx.define_var(local_name, ty);
+                    return;
+                }
+                if self.module_exports_name(module_segs, item.as_ref()) {
+                    self.ctx.define_var(local_name, Ty::fresh_var());
                 }
             }
             ast::UseTreeKind::Glob(path) => {
-                // use foo::*;
-                if let Some(ident) = path.last_ident() {
-                    let module = ident.name.as_ref();
-                    if let Some(bindings) = self.ctx.clone_module_bindings(module) {
-                        for (name, scheme) in bindings {
-                            self.ctx.define_var(name, scheme.instantiate());
-                        }
+                let mut segs: Vec<Arc<str>> = prefix.to_vec();
+                segs.extend(path.segments.iter().map(|s| s.ident.name.clone()));
+                if segs.is_empty() || Self::is_reserved_use_root(&segs[0]) {
+                    return;
+                }
+                // Real bindings from an in-tree `mod NAME;` win; otherwise bind
+                // every file-backed export name as an opaque value.
+                if let Some(bindings) = self
+                    .ctx
+                    .clone_module_bindings(segs[segs.len() - 1].as_ref())
+                {
+                    for (name, scheme) in bindings {
+                        self.ctx.define_var(name, scheme.instantiate());
+                    }
+                    return;
+                }
+                if let Some(names) = self.module_export_set(&segs) {
+                    for name in names {
+                        self.ctx.define_var(name, Ty::fresh_var());
                     }
                 }
             }
-            ast::UseTreeKind::Nested { path: _, trees } => {
-                // use foo::{bar, baz};
+            ast::UseTreeKind::Nested { path, trees } => {
+                let mut new_prefix: Vec<Arc<str>> = prefix.to_vec();
+                new_prefix.extend(path.segments.iter().map(|s| s.ident.name.clone()));
                 for sub_tree in trees {
-                    self.resolve_use(sub_tree);
+                    self.resolve_use_prefixed(sub_tree, &new_prefix);
                 }
             }
         }
     }
 
+    /// Roots that name the standard library or a path relative to the current
+    /// crate rather than an on-disk sibling module file. These are left to the
+    /// existing prelude/name resolution instead of a filesystem load.
+    fn is_reserved_use_root(seg: &str) -> bool {
+        matches!(seg, "std" | "core" | "crate" | "self" | "super")
+    }
+
+    /// Whether the module backing `module_segs` exports a top-level item named
+    /// `name`. Thin membership test over [`Self::module_export_set`].
+    fn module_exports_name(&mut self, module_segs: &[Arc<str>], name: &str) -> bool {
+        self.module_export_set(module_segs)
+            .is_some_and(|names| names.contains(name))
+    }
+
+    /// The set of top-level item names the `.bld` file backing a `use a::b::c`
+    /// path import exports. Read-only: the module file is lexed and parsed to
+    /// harvest its item names, and NOTHING is written into the type context, so
+    /// no type is registered, no `DefId` is minted, and no diagnostic is
+    /// produced. This keeps `use` provably additive: binding an imported leaf as
+    /// a fresh var stops it reading as "undefined" without importing a concrete
+    /// signature that could collide with the consumer's own same-named type.
+    /// Cached per module path (`None` cached for a missing/unparseable file).
+    fn module_export_set(&mut self, module_segs: &[Arc<str>]) -> Option<HashSet<Arc<str>>> {
+        if module_segs.is_empty() {
+            return None;
+        }
+        let key: Arc<str> = Arc::from(
+            module_segs
+                .iter()
+                .map(|s| s.as_ref())
+                .collect::<Vec<_>>()
+                .join("::"),
+        );
+        if let Some(cached) = self.use_module_exports.get(&key) {
+            return cached.clone();
+        }
+        let names = self
+            .resolve_use_module_file(module_segs)
+            .and_then(|path| Self::collect_export_names(&path));
+        self.use_module_exports.insert(key, names.clone());
+        names
+    }
+
+    /// Resolve module path segments to an on-disk `.bld` file, searching the
+    /// source directory and its ancestors so a file under `tests/` can reach a
+    /// `foundation/` tree sitting beside the corpus root.
+    fn resolve_use_module_file(&self, module_segs: &[Arc<str>]) -> Option<PathBuf> {
+        let start = self.source_dir.as_ref()?;
+        let mut cur: Option<&std::path::Path> = Some(start.as_path());
+        for _ in 0..8 {
+            let root = cur?;
+            if let Some(f) = Self::use_module_candidate(root, module_segs) {
+                return Some(f);
+            }
+            cur = root.parent();
+        }
+        None
+    }
+
+    /// Build candidate files for `segs` under `root` in preference order,
+    /// returning the first that exists. Directory segments may be spelled with
+    /// underscores in the import but hyphens on disk (`field_tensor` ->
+    /// `field-tensor/`), so both spellings are tried per segment.
+    fn use_module_candidate(root: &std::path::Path, segs: &[Arc<str>]) -> Option<PathBuf> {
+        let n = segs.len();
+        let mut dir = root.to_path_buf();
+        for seg in &segs[..n - 1] {
+            let as_is = dir.join(seg.as_ref());
+            let hyphen = dir.join(seg.replace('_', "-"));
+            if as_is.is_dir() {
+                dir = as_is;
+            } else if hyphen.is_dir() {
+                dir = hyphen;
+            } else {
+                return None;
+            }
+        }
+        let last = &segs[n - 1];
+        let last_hyphen = last.replace('_', "-");
+        let mut cands: Vec<PathBuf> = vec![
+            dir.join(format!("{}.bld", last)),
+            dir.join(last.as_ref()).join("lib.bld"),
+            dir.join(last.as_ref()).join("mod.bld"),
+        ];
+        if last_hyphen != last.as_ref() {
+            cands.push(dir.join(format!("{}.bld", last_hyphen)));
+            cands.push(dir.join(&last_hyphen).join("lib.bld"));
+        }
+        cands.into_iter().find(|c| c.is_file())
+    }
+
+    /// Lex and parse `path` READ-ONLY and return the set of top-level item names
+    /// it exports. Touches nothing on `self`: no type context, no error list, no
+    /// module stack. Returns `None` when the file cannot be read, lexed, or
+    /// parsed, so an unresolved import stays silent for the existing
+    /// name-resolution path rather than inventing an error.
+    fn collect_export_names(path: &std::path::Path) -> Option<HashSet<Arc<str>>> {
+        let source_text = std::fs::read_to_string(path).ok()?;
+        let source = crate::lexer::SourceFile::new(path.to_string_lossy().as_ref(), source_text);
+        let mut lexer = crate::lexer::Lexer::new(&source);
+        let tokens = lexer.tokenize().ok()?;
+        let mut parser = crate::parser::Parser::new(&source, tokens);
+        let module_ast = parser.parse().ok()?;
+        let mut names: HashSet<Arc<str>> = HashSet::new();
+        for item in &module_ast.items {
+            match &item.kind {
+                ItemKind::Function(f) => {
+                    names.insert(f.name.name.clone());
+                }
+                ItemKind::Struct(s) => {
+                    names.insert(s.name.name.clone());
+                }
+                ItemKind::Enum(e) => {
+                    names.insert(e.name.name.clone());
+                }
+                ItemKind::Const(c) => {
+                    names.insert(c.name.name.clone());
+                }
+                ItemKind::Static(s) => {
+                    names.insert(s.name.name.clone());
+                }
+                ItemKind::TypeAlias(ta) => {
+                    names.insert(ta.name.name.clone());
+                }
+                ItemKind::Trait(t) => {
+                    names.insert(t.name.name.clone());
+                }
+                ItemKind::Effect(e) => {
+                    names.insert(e.name.name.clone());
+                }
+                ItemKind::Mod(m) => {
+                    names.insert(m.name.name.clone());
+                }
+                _ => {}
+            }
+        }
+        Some(names)
+    }
+
     fn check_mod(&mut self, m: &ast::ModDef) {
         // External module: `mod foo;` loads foo.bld from disk
         if m.content.is_none() {
+            if m.is_file_module {
+                // File-level `module NAME` header: the rest of the file already
+                // IS the body, so there is nothing to load. Loading `NAME.bld`
+                // here would re-open the declaring file and recurse forever.
+                return;
+            }
             if let Some(ref dir) = self.source_dir {
                 let mod_name = m.name.name.as_ref();
                 let mod_path = dir.join(format!("{}.bld", mod_name));
                 if mod_path.exists() {
+                    let key = std::fs::canonicalize(&mod_path).unwrap_or_else(|_| mod_path.clone());
+                    if !self.loading_modules.insert(key.clone()) {
+                        // Already on the load stack: fail closed with a cycle
+                        // diagnostic instead of overflowing the stack.
+                        self.error(
+                            TypeError::ModuleImportCycle {
+                                path: mod_path.display().to_string(),
+                                module: mod_name.to_string(),
+                            },
+                            m.name.span,
+                        );
+                        return;
+                    }
                     if let Ok(source_text) = std::fs::read_to_string(&mod_path) {
                         let source = crate::lexer::SourceFile::new(
                             mod_path.to_string_lossy().as_ref(),
@@ -1475,6 +1765,7 @@ impl<'ctx> TypeChecker<'ctx> {
                             }
                         }
                     }
+                    self.loading_modules.remove(&key);
                 }
             }
             return;
@@ -1684,7 +1975,9 @@ impl<'ctx> TypeChecker<'ctx> {
 
     fn lower_type(&mut self, ty: &ast::Type) -> Ty {
         // Create a temporary inference context for type lowering
+        let well_known_types = Self::well_known_types_from_ctx(self.ctx);
         let mut infer = TypeInfer::new(self.ctx);
+        infer.set_well_known_types(well_known_types);
         infer.lower_type(ty)
     }
 
@@ -1712,7 +2005,7 @@ impl<'ctx> TypeChecker<'ctx> {
             ast::ExprKind::Unary {
                 op: ast::UnaryOp::Neg,
                 expr: operand,
-            } => self.eval_const_int(operand).map(|n| -n),
+            } => self.eval_const_int(operand).and_then(|n| n.checked_neg()),
             ast::ExprKind::Binary { op, left, right } => {
                 let l = self.eval_const_int(left)?;
                 let r = self.eval_const_int(right)?;
@@ -1786,6 +2079,73 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e.error, TypeError::ArityMismatch { .. })),
             "a non-variadic call with extra args must still raise ArityMismatch: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn call_through_fn_pointer_array_element_is_callable() {
+        // Iterating an array of function pointers binds each element by
+        // reference, so the callee is a `&fn(..) -> _`. Calling it must
+        // auto-deref to the underlying function rather than report the type
+        // as NotCallable. Regression for benchmarks.bld's
+        // `for bench in [bench_a, bench_b, ..] { let r = bench(); }`.
+        let errors = check_source(
+            "fn a() -> i32 { 1 }\n\
+             fn b() -> i32 { 2 }\n\
+             fn run() -> i32 {\n\
+                 let mut total = 0;\n\
+                 for f in [a, b] {\n\
+                     total = total + f();\n\
+                 }\n\
+                 total\n\
+             }",
+        );
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e.error, TypeError::NotCallable { .. })),
+            "calling an element of a function-pointer array must not be NotCallable: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn call_through_plain_reference_to_fn_is_callable() {
+        // A bare `&fn(..)` binding (not via an array) is equally callable:
+        // `let g = &f; g()` auto-derefs to call `f`.
+        let errors = check_source(
+            "fn f() -> i32 { 7 }\n\
+             fn run() -> i32 {\n\
+                 let g = &f;\n\
+                 g()\n\
+             }",
+        );
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e.error, TypeError::NotCallable { .. })),
+            "calling through a reference to a function must not be NotCallable: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn call_on_reference_to_non_function_still_errors() {
+        // Auto-deref applies only when the reference's target is a function.
+        // `(&i32)()` must still be reported as not callable (fail closed).
+        let errors = check_source(
+            "fn run() -> i32 {\n\
+                 let x = 5;\n\
+                 let r = &x;\n\
+                 r()\n\
+             }",
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e.error, TypeError::NotCallable { .. })),
+            "calling a reference to a non-function must still be NotCallable: {:?}",
             errors
         );
     }

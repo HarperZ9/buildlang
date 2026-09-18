@@ -157,9 +157,9 @@ with a typed reason.
 
 | Command | Purpose |
 |---|---|
-| `buildc <file>` | Compile a file; `-o`, `--target`, `-O 0-3`, `-g` |
-| `buildc run <file>` | Compile and run via the C backend; `--emit-receipt`, `--invariant`, `--units`, `--gpu` |
-| `buildc build [path]` | Build a project; `--emit c\|header\|exe`, `--release`, `--target`, `--keep-c` |
+| `buildc <file>` | Compile a file; `-o`, `--target`, `--stdio-mode native\|portable-lf`, `-O 0-3`, `-g` |
+| `buildc run <file>` | Compile and run via the C backend; `--stdio-mode native\|portable-lf`, `--emit-receipt`, `--invariant`, `--units`, `--gpu` |
+| `buildc build [path]` | Build a project; `--emit c\|header\|exe`, `--release`, `--target`, `--stdio-mode native\|portable-lf`, `--keep-c` |
 | `buildc check <file>` | Type-check; `--receipt`, `--policy`, `--profile`, `--expect-profile-digest` |
 | `buildc test [dir]` | Run `.bld` programs against `.expected` files |
 | `buildc fmt` / `buildc lint` | Format (`--check`, `--write`) and lint source |
@@ -197,6 +197,12 @@ An 8-program semantic corpus pins C-backend behavior: `buildc corpus verify`
 checks the manifest, the C and Rust execution receipts, and real C-backend
 stdout together.
 
+The generated C runtime defaults to native stdio behavior. On Windows, native
+C stdio translates `\n` written through stdout or stderr to CRLF. Use
+`--stdio-mode portable-lf` on the C backend when a receipt or lane protocol
+needs byte-stable LF output across platforms. The portable mode is rejected for
+non-C targets rather than ignored.
+
 ## Scientific-runtime receipts
 
 `buildc run --emit-receipt <path> --invariant <name>` captures a numeric
@@ -208,6 +214,9 @@ by re-running the program. The invariant family has eight members
 paired negative-fixture kernel that must fail for the right reason.
 `--units m/s` canonicalizes a declared physical unit through a
 dependency-free SI dimensional-analysis core before sealing.
+If `--stdio-mode portable-lf` is used, the receipt seals that mode and
+verification replays it. Native mode is the default and is omitted from the
+receipt so older missing-field receipts continue to verify as native.
 
 The same schema seals five distinct computation modes end to end:
 deterministic, exact-probabilistic (a quantum amplitude), seeded stochastic
@@ -264,12 +273,12 @@ correctness of the interval.
 
 ## Status and maturity
 
-BuildLang 1.2.x. The C backend, capability-effect checking, HLSL/GLSL
+BuildLang 1.4.0. The C backend, capability-effect checking, HLSL/GLSL
 output, and the receipt tooling are the verified core; SPIR-V, LLVM IR, WASM,
 Rust, x86-64, ARM64, GPU dispatch, and `#[linear]` types are labeled
 experimental and stay that way until their evidence says otherwise. The
-release-shaped baseline (2026-08-01, local `cargo test` from `compiler/`):
-1704 tests passing, 0 failing (11 ignored), 136 source files, 142,792 lines.
+release-shaped baseline (2026-09-10, local `cargo test` from `compiler/`
+with `RUSTFLAGS=-Dwarnings`): 1,818 tests passing, 0 failing (11 ignored).
 The corpus is 30 `.bld` example kernels and 8 C-execution receipts.
 Ground-truth release evidence lives in
 [STATUS.md](STATUS.md); [CHANGELOG.md](CHANGELOG.md) tracks changes.

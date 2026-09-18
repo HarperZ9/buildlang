@@ -165,6 +165,18 @@ impl<'ctx> MirLowerer<'ctx> {
                 if !generic_args.is_empty() {
                     let type_name = ident.name.as_ref();
 
+                    // Special-case Option<T>: keep the payload type in MIR.
+                    // This is the canonical shape for checked arithmetic and
+                    // runtime Option matching; legacy monomorphized enum names
+                    // are still accepted by older fallback paths.
+                    if type_name == "Option" {
+                        if let Some(ast::GenericArg::Type(arg_ty)) = generic_args.first() {
+                            let inner_ty = self.lower_type_from_ast(arg_ty);
+                            return MirType::Option(Box::new(inner_ty));
+                        }
+                        return MirType::Option(Box::new(MirType::i32()));
+                    }
+
                     // Special-case Vec<T>: resolve to MirType::Vec(element_type)
                     if type_name == "Vec" {
                         if let Some(ast::GenericArg::Type(arg_ty)) = generic_args.first() {
@@ -389,6 +401,7 @@ impl<'ctx> MirLowerer<'ctx> {
             MirType::SampledImage(inner) => format!("sampledimg_{}", Self::mangle_type(inner)),
             MirType::TraitObject(name) => format!("dyn_{}", name),
             MirType::Vec(inner) => format!("Vec_{}", Self::mangle_type(inner)),
+            MirType::Option(inner) => format!("Option_{}", Self::mangle_type(inner)),
             MirType::Tuple(elems) => {
                 let parts: Vec<String> = elems.iter().map(|e| Self::mangle_type(e)).collect();
                 format!("tuple_{}", parts.join("_"))

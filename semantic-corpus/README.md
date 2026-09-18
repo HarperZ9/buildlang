@@ -12,9 +12,17 @@ extension into C/Rust/LLVM/WASM cross-backend receipts.
 `manifest.json` is part of the executable contract. Compiler tests validate
 its schema, unique program IDs, source paths, expected stdout, declared
 surfaces, and named Rust execution tests before trusting receipt metadata.
-The current receipt set includes Rust executable tests and a C execution
-receipt for all 8 programs. `buildc run` uses per-run temp build directories,
-so C receipt generation can be parallel-probed without shared C/PDB collisions.
+The manifest currently lists 9 programs. Execution receipts must be refreshed
+after corpus edits before they prove the full manifest. C receipt refresh runs
+`buildc run` in `--stdio-mode portable-lf` mode, records a fresh `verified_at`
+and `verification_command`, and compares raw stdout bytes to the manifest's LF
+contracts. `buildc run` uses per-run temp build directories, so C receipt
+generation can be parallel-probed without shared C/PDB collisions.
+Refresh the Rust execution receipt with
+`buildc corpus refresh-rust-receipt --root <semantic-corpus>` after corpus
+edits; the command reruns every manifest program through the generated-Rust
+path, records a fresh `verified_at`, and sets `verification_command` to the
+exact refresh command.
 Run `buildc corpus verify` from the repository to validate `manifest.json`,
 the C/Rust receipts, and real C-backend stdout against the manifest. Use
 `buildc corpus verify --root <DIR>` for copied corpus fixtures. Add `--write`
@@ -39,6 +47,8 @@ missing or inconsistent.
 ## Current Programs
 
 - `scalar_branch.bld`: function call, branch selection, stdout.
+- `integer_arithmetic_portable_lf.bld`: integer arithmetic, division,
+  remainder, unary negation, large integer literal, portable-LF stdout.
 - `references_mutation.bld`: mutable reference update, immutable readback,
   stdout.
 - `structs_arrays.bld`: struct fields, fixed arrays, function call, stdout.

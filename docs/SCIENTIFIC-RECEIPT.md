@@ -1,8 +1,9 @@
 # Scientific-Runtime Receipt (`buildlang`)
 
 > Status: **shipped 2026-07-01** (accountable compute, on top of Pillar B math syntax).
-> Additive: `buildc run` without `--emit-receipt` is byte-identical to before, and the
-> existing `buildlang-check-receipt/v1` verify path is unchanged.
+> Additive: native-mode `buildc run` without `--emit-receipt` is byte-identical
+> to before, and the existing `buildlang-check-receipt/v1` verify path is
+> unchanged.
 
 `buildc run --emit-receipt` compiles and runs a `.bld` program, captures its numeric
 stdout as a measurement series, checks a stated **invariant** over that series, and emits a
@@ -62,9 +63,16 @@ recorded in the receipt's `args` field, and `receipt verify` re-runs the program
 exactly those arguments, so an argv-parameterized kernel is re-derived under the same
 conditions it was emitted under.
 
-Flags on the `run` subcommand (all additive; absent `--emit-receipt`, none of them run):
+Flags on the `run` subcommand relevant to scientific receipts and stdio:
 
 - `--emit-receipt <PATH>` writes the receipt to `PATH` (`-` = stdout).
+- `--stdio-mode <native|portable-lf>` selects generated-program stdio behavior
+  for the C backend. `native` is the default and preserves the host C runtime's
+  text-mode behavior; on Windows, stdout and stderr `\n` writes may be emitted
+  as CRLF. `portable-lf` switches Windows stdout and stderr to CRT binary mode
+  before program output, so LF bytes are stable across Windows and POSIX. It is
+  rejected for non-C lanes such as `--gpu` or non-C compile/build targets rather
+  than ignored.
 - `--invariant <NAME>` selects the invariant to check over the series:
   `energy-monotone` (the default; the observed scalar never increases beyond
   tolerance), `conservation` (the observed scalar stays within tolerance of its
@@ -139,8 +147,13 @@ Flags on the `run` subcommand (all additive; absent `--emit-receipt`, none of th
   is captured and parsed but never echoed (only the primary's output is echoed, as always).
 
 The program's own stdout is preserved: when the receipt is written to a file, the program's
-output is echoed to real stdout byte-for-byte (identical to plain `run`); when the receipt is
-written to stdout (`-`), the program echo is routed to stderr so stdout stays pure JSON.
+output is echoed to real stdout byte-for-byte (identical to plain `run` under the same stdio
+mode); when the receipt is written to stdout (`-`), the program echo is routed to stderr so
+stdout stays pure JSON.
+If `portable-lf` is selected, the receipt seals that mode and `receipt verify`
+re-runs the program with the same mode. Native mode is omitted from
+`build_state` so receipts sealed before the field existed still parse and
+re-seal with their original bytes.
 
 Emitting the receipt is the success signal. `buildc run --emit-receipt` returns success once
 the receipt is written, even if the invariant failed or the program exited nonzero; the
@@ -154,12 +167,15 @@ The receipt is a single JSON object. Its layers, outermost meaning first:
 - `schema`, `compiler` (= `"buildc"`), `compiler_version`, `language_version`.
 - `source` (the path), `source_digest` (`{algorithm: "sha256", hex}` over the source bytes),
   `input_graph_digest` (sha256 over the resolved module graph).
-- `build_state`: `{ target: "c", compiler_status: "compiled_and_executed", flags: [...],
-  toolchain }`. The `toolchain` block is the pass-0122 `compiler_branch` contract: the
-  resolved C compiler command, the first line of its version banner, a sha256 over the full
-  version-probe output, the host `os/arch` target, a sha256 of the buildc binary that
-  emitted the receipt, and a sha256 of the compiled program executable (hashed before it
-  ran).
+- `build_state`: `{ target: "c", stdio_mode?, compiler_status:
+  "compiled_and_executed", flags: [...], toolchain }`. `stdio_mode` is omitted
+  for native mode, which preserves backward hash compatibility for older
+  receipts; when present it is `portable-lf`, and verify uses it for the replay.
+  The `toolchain` block is the pass-0122 `compiler_branch` contract: the
+  resolved C compiler command, the first line of its version banner, a sha256
+  over the full version-probe output, the host `os/arch` target, a sha256 of
+  the buildc binary that emitted the receipt, and a sha256 of the compiled
+  program executable (hashed before it ran).
 - `runtime_state`: `{ os, exit_code, wall_seconds? }`. `wall_seconds` is the receipt's first
   EXECUTED time fact: the witnessed run's wall-clock duration, measured with
   `std::time::Instant` around the primary program's run and sealed at emit. `receipt verify`
@@ -637,16 +653,19 @@ buildc receipt verify receipt.json --json    # machine-readable report
    pipeline that produced the stored digests) and compare both the source and input-graph
    digests, plus the effect/capability policy. A change to the source file since sealing
    shows up here as a mismatch.
-3. **Re-run the program with the receipt's recorded `args`**, re-parse the series, and
-   **re-check the measurement count**: the re-run must produce exactly
-   `measurement.count` values (for a non-diverged run the count is deterministic, unlike
-   the exact floats), so an edited `observed_values` array of the wrong length is caught
-   here. **Diverged runs are the exception**: there the finite-prefix length is the index
-   of the first non-finite value, a platform-dependent quantity (a 1-ULP libm difference
-   can shift the divergence step), so when the receipt records divergence AND the re-run
-   also diverges, the count and increase-count checks are skipped and the reproduced
-   divergence itself is the faithfulness signal. A recorded divergence that does NOT
-   reproduce (or a divergence the receipt never recorded) fails as non-reproduction.
+3. **Re-run the program with the receipt's recorded `args` and sealed stdio mode**,
+   re-parse the series, and **re-check the measurement count**: the re-run must
+   produce exactly `measurement.count` values (for a non-diverged run the count is
+   deterministic, unlike the exact floats), so an edited `observed_values` array
+   of the wrong length is caught here. A missing `build_state.stdio_mode` means
+   native; `portable-lf` is accepted only for target `c`. **Diverged runs are the
+   exception**: there the finite-prefix length is the index of the first
+   non-finite value, a platform-dependent quantity (a 1-ULP libm difference can
+   shift the divergence step), so when the receipt records divergence AND the
+   re-run also diverges, the count and increase-count checks are skipped and the
+   reproduced divergence itself is the faithfulness signal. A recorded divergence
+   that does NOT reproduce (or a divergence the receipt never recorded) fails as
+   non-reproduction.
 4. **Recompute the verdict** with the exact same status rule. The recomputed
    `invariant.status`, `violation_count`, and `receipt_status` must match the stored values;
    any drift is a verification failure with a clear `... drift: receipt X, re-run Y`

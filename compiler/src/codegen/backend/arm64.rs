@@ -346,6 +346,7 @@ impl Arm64Backend {
                 match op {
                     UnaryOp::Neg => self.output.push_str("    neg x0, x0\n"),
                     UnaryOp::Not => self.output.push_str("    mvn x0, x0\n"),
+                    UnaryOp::BitNot => self.output.push_str("    mvn x0, x0\n"),
                 }
                 self.store_x0_to_local(dest, func)?;
             }
@@ -503,7 +504,7 @@ impl Arm64Backend {
             BinOp::Sub | BinOp::SubChecked | BinOp::SubWrapping | BinOp::SubSaturating => {
                 self.output.push_str("    sub x0, x0, x1\n");
             }
-            BinOp::Mul | BinOp::MulChecked | BinOp::MulWrapping => {
+            BinOp::Mul | BinOp::MulChecked | BinOp::MulWrapping | BinOp::MulSaturating => {
                 self.output.push_str("    mul x0, x0, x1\n");
             }
             BinOp::Div => {
@@ -667,7 +668,8 @@ impl Arm64Backend {
             MirType::TraitObject(_) => 16, // fat pointer: data ptr + vtable ptr
             MirType::Vec(_) => 8,          // BuildVecHandle is a pointer
             MirType::Tuple(elems) => elems.iter().map(|e| self.type_size(e)).sum(),
-            MirType::Map(_, _) => 8, // BuildMapHandle is a pointer
+            MirType::Map(_, _) => 8,  // BuildMapHandle is a pointer
+            MirType::Option(_) => 16, // opaque Option payload for native backend layout
         }
     }
 
@@ -908,6 +910,7 @@ impl Arm64Backend {
                 match op {
                     UnaryOp::Neg => self.enc().neg(Reg64::X0, Reg64::X0),
                     UnaryOp::Not => self.enc().mvn(Reg64::X0, Reg64::X0),
+                    UnaryOp::BitNot => self.enc().mvn(Reg64::X0, Reg64::X0),
                 }
                 self.store_reg_to_local(Reg64::X0, dest)?;
             }
@@ -1009,7 +1012,7 @@ impl Arm64Backend {
             BinOp::Sub | BinOp::SubChecked | BinOp::SubWrapping | BinOp::SubSaturating => {
                 self.enc().sub_reg(Reg64::X0, Reg64::X0, Reg64::X1);
             }
-            BinOp::Mul | BinOp::MulChecked | BinOp::MulWrapping => {
+            BinOp::Mul | BinOp::MulChecked | BinOp::MulWrapping | BinOp::MulSaturating => {
                 self.enc().mul(Reg64::X0, Reg64::X0, Reg64::X1);
             }
             BinOp::Div => {

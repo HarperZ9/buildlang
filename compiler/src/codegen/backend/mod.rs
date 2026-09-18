@@ -20,7 +20,7 @@ pub mod wasm;
 pub mod x86_64;
 pub mod x86_64_enc;
 
-use std::fmt;
+use std::{fmt, str::FromStr};
 use thiserror::Error;
 
 use super::ir::MirModule;
@@ -101,6 +101,59 @@ impl fmt::Display for Target {
             Target::Hlsl => write!(f, "hlsl"),
             Target::Glsl => write!(f, "glsl"),
             Target::Rust => write!(f, "rust"),
+        }
+    }
+}
+
+/// Runtime stdio policy for generated programs.
+///
+/// `Native` preserves the host C runtime's normal text-mode behavior. On
+/// Windows that means `\n` emitted through stdio is translated to CRLF.
+/// `PortableLf` is a C-backend-only mode that keeps generated stdout/stderr
+/// bytes stable by disabling Windows CRT text translation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StdioMode {
+    /// Preserve the platform's native C stdio behavior.
+    Native,
+    /// Emit LF bytes on stdout/stderr across platforms.
+    PortableLf,
+}
+
+impl StdioMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StdioMode::Native => "native",
+            StdioMode::PortableLf => "portable-lf",
+        }
+    }
+
+    pub fn is_native(self) -> bool {
+        self == StdioMode::Native
+    }
+}
+
+impl Default for StdioMode {
+    fn default() -> Self {
+        StdioMode::Native
+    }
+}
+
+impl fmt::Display for StdioMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for StdioMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "native" => Ok(StdioMode::Native),
+            "portable-lf" => Ok(StdioMode::PortableLf),
+            other => Err(format!(
+                "unknown stdio mode '{other}'. Supported: native, portable-lf"
+            )),
         }
     }
 }

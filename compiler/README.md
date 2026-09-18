@@ -173,9 +173,9 @@ buildc vignette.bld --target glsl -o vignette.glsl
 | `buildc lex`   | Tokenize a file and print tokens     |
 | `buildc parse` | Parse a file and print the AST       |
 | `buildc check <file> [--receipt PATH|-] [--policy policy.json|--profile NAME]` | Type-check, optionally evaluate policy, and optionally emit a JSON accountability receipt |
-| `buildc build` | Build a project                      |
-| `buildc run`   | Compile and run a `.bld` file     |
-| `buildc run <file> --emit-receipt <path> --invariant <NAME> [--columns N]` | Run a numeric kernel and seal a re-checkable **scientific-runtime** receipt over a stated invariant (see [Accountable scientific compute](#accountable-scientific-compute)) |
+| `buildc build` | Build a project; accepts `--stdio-mode native\|portable-lf` for C output |
+| `buildc run`   | Compile and run a `.bld` file via C; accepts `--stdio-mode native\|portable-lf` |
+| `buildc run <file> --emit-receipt <path> --invariant <NAME> [--columns N]` | Run a numeric kernel and seal a re-checkable **scientific-runtime** receipt over a stated invariant; `portable-lf` stdio mode is sealed and replayed (see [Accountable scientific compute](#accountable-scientific-compute)) |
 | `buildc receipt export <receipt.json>` | Re-verify a scientific-runtime receipt and emit witnessed measurement rows |
 | `buildc doctor` | Diagnose local toolchain readiness  |
 | `buildc policy list [--json]` / `buildc policy print <name>` / `buildc policy scaffold <receipt.json>` | List, emit, or scaffold check policy profiles |
@@ -197,6 +197,14 @@ verifier that cannot fail proves nothing, so every invariant ships a paired
 negative-fixture kernel that must fail for the right reason. `buildc receipt
 export` re-verifies and emits witnessed measurement rows for downstream
 ingestion.
+
+Generated C defaults to native stdio. On Windows, that means the C runtime may
+translate `\n` to CRLF on stdout and stderr. Use `--stdio-mode portable-lf`
+when raw LF bytes are part of a cross-platform receipt or lane protocol. The
+mode is supported only by the C backend; non-C targets reject it instead of
+silently ignoring it. Scientific-runtime receipts omit native mode for backward
+hash compatibility and seal `portable-lf` when requested so verification
+replays the same output mode.
 
 The invariant family (each a fixed, re-checked tolerance with a paired
 positive/negative kernel):
@@ -603,6 +611,11 @@ Use `--target` to select a code generation backend:
 | Rust     | `--target rust` / `--target rs` | `.rs`   | Experimental |
 | x86-64   | `--target x86-64`             | `.o`    | Experimental |
 | ARM64    | `--target arm64`              | `.o`    | Experimental |
+
+`--stdio-mode native|portable-lf` is a C-backend runtime option available on
+top-level compile, `buildc build`, and `buildc run`. `native` is the default.
+`portable-lf` switches Windows stdout and stderr to CRT binary mode before
+program output; POSIX keeps the existing unbuffered stdio setup.
 
 The Rust target emits source for a subset of MIR and is validated with
 `rustc --emit=metadata` plus a small executable stdout smoke corpus. The

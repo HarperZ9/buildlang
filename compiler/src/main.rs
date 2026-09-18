@@ -31,9 +31,9 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use buildlang::ast::{self, ItemKind, Module, Visibility};
-use buildlang::codegen::{CodeGenerator, Target};
+use buildlang::codegen::{CodeGenerator, StdioMode, Target};
 use buildlang::lexer::{Lexer, SourceFile, Span};
-use buildlang::parser::Parser;
+use buildlang::parser::{ParseError, Parser};
 use buildlang::types::{
     capability_effect_names, FunctionEffectSummary, TypeChecker, TypeContext, TypeError,
     TypeErrorWithSpan,
@@ -96,6 +96,16 @@ fn target_from_extension(ext: &str) -> Option<Target> {
     }
 }
 
+fn reject_unsupported_stdio_mode(stdio_mode: StdioMode, target: Target) -> Result<(), i32> {
+    if !stdio_mode.is_native() && target != Target::C {
+        eprintln!(
+            "Error: --stdio-mode {stdio_mode} is supported only by the C backend; target `{target}` does not use the C runtime"
+        );
+        return Err(1);
+    }
+    Ok(())
+}
+
 /// BuildLang Compiler
 #[derive(ClapParser)]
 #[command(name = "buildc")]
@@ -131,6 +141,10 @@ struct Cli {
     /// Code generation target (c, llvm, wasm, spirv, rust, x86-64, arm64)
     #[arg(long)]
     target: Option<String>,
+
+    /// Generated-program stdio behavior: native, portable-lf. portable-lf is C-backend only.
+    #[arg(long, default_value_t = StdioMode::Native)]
+    stdio_mode: StdioMode,
 }
 
 #[derive(Subcommand)]
@@ -199,6 +213,10 @@ enum Commands {
         /// Code generation target: c, llvm, x86-64, arm64, wasm, spirv, hlsl, glsl, rust
         #[arg(long, default_value = "c")]
         target: String,
+
+        /// Generated-program stdio behavior: native, portable-lf. portable-lf is C-backend only.
+        #[arg(long, default_value_t = StdioMode::Native)]
+        stdio_mode: StdioMode,
     },
 
     /// Run a file directly
@@ -206,10 +224,14 @@ enum Commands {
         /// Input file
         file: PathBuf,
 
+        /// Generated-program stdio behavior: native, portable-lf. portable-lf is C-backend only.
+        #[arg(long, default_value_t = StdioMode::Native)]
+        stdio_mode: StdioMode,
+
         /// Emit a sealed scientific-runtime receipt to PATH ('-' = stdout).
         /// When set, buildc captures the program's numeric stdout as a
         /// measurement series, checks the invariant, and writes the receipt.
-        /// Without this flag, `run` behavior is byte-identical to before.
+        /// Without this flag, native-mode `run` behavior is byte-identical to before.
         #[arg(long, value_name = "PATH")]
         emit_receipt: Option<PathBuf>,
 
@@ -536,6 +558,12 @@ enum CorpusCommands {
         #[arg(long)]
         write: bool,
     },
+    /// Re-run the semantic corpus through the Rust backend and refresh its receipt
+    RefreshRustReceipt {
+        /// Semantic corpus root directory
+        #[arg(long, value_name = "DIR")]
+        root: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -650,7 +678,40 @@ enum ChainCommands {
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    let result = match cli.command {
+    // Type checking and the other AST-recursive passes recurse on the native
+    // stack in proportion to a program's nesting and size. A large but finite
+    // program -- deep expression trees, or a long function reachable from an
+    // entry point, which triggers a second whole-program effect pass -- can
+    // exceed the default 8 MB main-thread stack and abort the process. The
+    // engine must fail closed with a diagnostic and never abort, so run the
+    // whole command on a worker thread with a large stack. This is the same
+    // technique rustc uses for the same recursion. A stack this large clears
+    // every realistic program; a truly pathological input would still need a
+    // recursion-depth guard in the checker to turn a would-be overflow into a
+    // diagnostic, which this does not add.
+    let result = std::thread::Builder::new()
+        .name("buildc".into())
+        .stack_size(256 * 1024 * 1024)
+        .spawn(move || run_cli(cli))
+        .expect("failed to spawn compiler worker thread")
+        .join()
+        .unwrap_or_else(|_| {
+            eprintln!("error: internal compiler error (worker thread panicked)");
+            Err(70)
+        });
+
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(code) => ExitCode::from(code as u8),
+    }
+}
+
+/// Dispatch a parsed CLI invocation to its command handler.
+///
+/// Split out of `main` so it can run on a large-stack worker thread; see the
+/// comment there for why.
+fn run_cli(cli: Cli) -> Result<(), i32> {
+    match cli.command {
         Some(Commands::Lex { file, verbose }) => cmd_lex(&file, verbose),
         Some(Commands::Parse { file, json }) => cmd_parse(&file, json),
         Some(Commands::Check {
@@ -672,9 +733,11 @@ fn main() -> ExitCode {
             emit,
             keep_c,
             target,
-        }) => cmd_build(&path, release, &emit, keep_c, &target),
+            stdio_mode,
+        }) => cmd_build(&path, release, &emit, keep_c, &target, stdio_mode),
         Some(Commands::Run {
             file,
+            stdio_mode,
             emit_receipt,
             invariant,
             metric,
@@ -723,12 +786,18 @@ fn main() -> ExitCode {
                         "--cross-backend is not supported with --gpu (the GPU cross-check is a separate secondary lane)"
                     );
                     Err(1)
+                } else if !stdio_mode.is_native() {
+                    eprintln!(
+                        "Error: --stdio-mode {stdio_mode} is supported only by the C backend; --gpu uses the GPU lane"
+                    );
+                    Err(1)
                 } else {
                     cmd_run_gpu(&file, emit_receipt.as_deref())
                 }
             } else {
                 cmd_run(
                     &file,
+                    stdio_mode,
                     &args,
                     emit_receipt.as_deref(),
                     &invariant,
@@ -780,17 +849,13 @@ fn main() -> ExitCode {
                     cli.opt_level,
                     cli.debug,
                     cli.target.as_deref(),
+                    cli.stdio_mode,
                 )
             } else {
                 eprintln!("No input file specified. Use --help for usage information.");
                 Err(1)
             }
         }
-    };
-
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(code) => ExitCode::from(code as u8),
     }
 }
 
@@ -1076,6 +1141,14 @@ struct CheckReceiptDiagnostic {
     stage: &'static str,
     kind: String,
     message: String,
+    /// 1-based line of the diagnostic's start, when the stage resolved it.
+    /// Omitted (not `null`) when absent, so a v1 consumer that never read the
+    /// field keeps parsing unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line: Option<usize>,
+    /// 1-based column of the diagnostic's start. Omitted when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    col: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     help: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1212,6 +1285,31 @@ struct ReceiptVerificationCheck {
     message: Option<String>,
 }
 
+/// A parse diagnostic with its source location resolved once, at check time,
+/// while the `SourceFile` is still live. `CheckOutcome` outlives that borrow,
+/// so a raw `ParseError` (which only carries a byte `Span`) could not be
+/// turned into `line:col` later. Resolving here lets both the human renderer
+/// and the receipt report a location, matching the `error[path:line:col]`
+/// shape that `build`/`run` already print via `report_parse_errors`.
+struct ParseDiagnostic {
+    /// The kind message alone (`ParseError::message`), with no path, location,
+    /// help, or notes folded in. Help and notes ride their own fields so the
+    /// receipt entry matches the shape of a type diagnostic.
+    message: String,
+    /// 1-based line of the error's start.
+    line: usize,
+    /// 1-based column of the error's start.
+    col: usize,
+    /// The full source line, kept for the caret underline. `None` when the
+    /// span points past the last line (recovered EOF errors).
+    snippet: Option<String>,
+    /// Caret length under the start column (at least 1), clamped to the
+    /// snippet at render time.
+    underline: usize,
+    help: Option<String>,
+    notes: Vec<String>,
+}
+
 struct CheckOutcome {
     source: String,
     compiler_version: &'static str,
@@ -1221,8 +1319,13 @@ struct CheckOutcome {
     input_digests: Vec<CheckReceiptInputDigest>,
     items: usize,
     tokens: usize,
-    parse_errors: Vec<String>,
+    parse_errors: Vec<ParseDiagnostic>,
     type_errors: Vec<TypeErrorWithSpan>,
+    /// 1-based `(line, col)` for each `type_errors` entry, resolved while the
+    /// `SourceFile` was live (a type error carries only a byte `Span`, and
+    /// `CheckOutcome` outlives that borrow). Index-aligned with `type_errors`;
+    /// `None` where the error's span is a synthetic-node dummy (no location).
+    type_error_locations: Vec<Option<(usize, usize)>>,
     function_summaries: Vec<FunctionEffectSummary>,
 }
 
@@ -1245,6 +1348,10 @@ struct CorpusExecutionReceipt {
     command: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     execution_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verified_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verification_command: Option<String>,
     result: CorpusExecutionResult,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     declared_effects: Vec<String>,
@@ -1280,6 +1387,11 @@ struct CorpusExecutionProgram {
     path: String,
     expected_stdout: String,
 }
+
+const C_RECEIPT_COMMAND: &str = "buildc run <semantic-corpus-program> --stdio-mode portable-lf";
+const C_RECEIPT_VERIFICATION_COMMAND: &str =
+    "buildc corpus verify --write; per-program command: buildc run <program> --stdio-mode portable-lf";
+const RUST_RECEIPT_COMMAND: &str = "buildc corpus refresh-rust-receipt --root <semantic-corpus>";
 
 #[derive(serde::Deserialize)]
 struct SubstrateReceipt {
@@ -2328,12 +2440,13 @@ fn cmd_receipt_export(
                 effect_policy: derive_effect_policy(&outcome),
             })
         },
-        |source_path, args, seed, secondary_target| {
+        |source_path, args, seed, secondary_target, stdio_mode| {
             rerun_scientific_receipt(
                 source_path,
                 args,
                 seed,
                 secondary_target,
+                stdio_mode,
                 probed_toolchain.as_ref(),
             )
         },
@@ -2706,12 +2819,13 @@ fn verify_scientific_receipt_dispatch(
                 effect_policy: derive_effect_policy(&outcome),
             })
         },
-        |source_path, args, seed, secondary_target| {
+        |source_path, args, seed, secondary_target, stdio_mode| {
             rerun_scientific_receipt(
                 source_path,
                 args,
                 seed,
                 secondary_target,
+                stdio_mode,
                 probed_toolchain.as_ref(),
             )
         },
@@ -3086,11 +3200,14 @@ fn cmd_receipt_verify_json(
 fn cmd_corpus(command: CorpusCommands) -> Result<(), i32> {
     match command {
         CorpusCommands::Verify { root, write } => cmd_corpus_verify(root.as_deref(), write),
+        CorpusCommands::RefreshRustReceipt { root } => {
+            cmd_corpus_refresh_rust_receipt(root.as_deref())
+        }
     }
 }
 
-fn cmd_corpus_verify(root: Option<&Path>, write: bool) -> Result<(), i32> {
-    let corpus_root = match root {
+fn resolve_semantic_corpus_root(root: Option<&Path>) -> Result<PathBuf, i32> {
+    match root {
         Some(path) => {
             if !path.join("manifest.json").is_file() {
                 eprintln!(
@@ -3099,15 +3216,19 @@ fn cmd_corpus_verify(root: Option<&Path>, write: bool) -> Result<(), i32> {
                 );
                 return Err(1);
             }
-            path.to_path_buf()
+            Ok(path.to_path_buf())
         }
         None => find_semantic_corpus_root().ok_or_else(|| {
             eprintln!(
                 "semantic corpus not found; run from the repository or install semantic-corpus/"
             );
             1
-        })?,
-    };
+        }),
+    }
+}
+
+fn cmd_corpus_verify(root: Option<&Path>, write: bool) -> Result<(), i32> {
+    let corpus_root = resolve_semantic_corpus_root(root)?;
 
     let manifest_path = corpus_root.join("manifest.json");
     let manifest: SemanticCorpusManifest = read_json(&manifest_path)?;
@@ -3222,6 +3343,55 @@ fn cmd_corpus_verify(root: Option<&Path>, write: bool) -> Result<(), i32> {
     Ok(())
 }
 
+fn cmd_corpus_refresh_rust_receipt(root: Option<&Path>) -> Result<(), i32> {
+    let corpus_root = resolve_semantic_corpus_root(root)?;
+    let manifest_path = corpus_root.join("manifest.json");
+    let manifest: SemanticCorpusManifest = read_json(&manifest_path)?;
+    if manifest.schema != "buildlang-semantic-corpus/v1" {
+        eprintln!(
+            "semantic corpus manifest has unsupported schema '{}'",
+            manifest.schema
+        );
+        return Err(1);
+    }
+    validate_rust_receipt_manifest_contract(&corpus_root, &manifest)?;
+
+    let derived_capabilities = derive_corpus_capabilities(&corpus_root, &manifest)?;
+    verify_manifest_surfaces_match_derivation(&manifest, &derived_capabilities)?;
+
+    let rustc = probe_rustc_toolchain().ok_or_else(|| {
+        eprintln!(
+            "Error: rustc not found; install the Rust toolchain or set RUSTC to refresh the Rust corpus receipt"
+        );
+        1
+    })?;
+
+    let passed = verify_rust_corpus_stdout(&corpus_root, &manifest, &rustc.path)?;
+    let receipt_path = corpus_root
+        .join("receipts")
+        .join("rust-execution-2026-06-13.json");
+    let receipt: CorpusExecutionReceipt = read_json(&receipt_path)?;
+    let receipt = refresh_rust_receipt_from_manifest(
+        receipt,
+        &manifest,
+        &derived_capabilities,
+        passed,
+        &rustc.version_line,
+    );
+    verify_receipt("rust", &receipt, &manifest, &derived_capabilities, passed)?;
+    write_json(&receipt_path, &receipt)?;
+
+    let receipt: CorpusExecutionReceipt = read_json(&receipt_path)?;
+    verify_receipt("rust", &receipt, &manifest, &derived_capabilities, passed)?;
+
+    println!("Semantic Corpus Rust Receipt Refresh");
+    println!("manifest: {} program(s)", manifest.programs.len());
+    println!("rustc: {}", rustc.version_line);
+    println!("rust execution: {} passed", manifest.programs.len());
+    println!("rust receipt: written");
+    Ok(())
+}
+
 /// Regenerate the representation receipts (mir, memory layout, module graph,
 /// symbol graph, lsp dispatch) from current corpus source and write them back to
 /// disk. This is the sanctioned `--write` refresh mode: each receipt is rebuilt
@@ -3263,6 +3433,33 @@ fn refresh_representation_receipts(
 fn report_corpus_error(message: String) -> i32 {
     eprintln!("{message}");
     1
+}
+
+fn current_unix_verified_at() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    format!("unix-seconds:{seconds}")
+}
+
+fn verify_unix_verified_at(label: &str, verified_at: Option<&str>) -> Result<(), i32> {
+    let Some(value) = verified_at else {
+        eprintln!("{label} receipt verification metadata drift: missing verified_at");
+        return Err(1);
+    };
+    let Some(seconds) = value.strip_prefix("unix-seconds:") else {
+        eprintln!("{label} receipt verification metadata drift: malformed verified_at");
+        return Err(1);
+    };
+    if seconds.is_empty()
+        || !seconds.bytes().all(|byte| byte.is_ascii_digit())
+        || seconds.parse::<u64>().is_err()
+    {
+        eprintln!("{label} receipt verification metadata drift: malformed verified_at");
+        return Err(1);
+    }
+    Ok(())
 }
 
 fn find_semantic_corpus_root() -> Option<PathBuf> {
@@ -3603,6 +3800,10 @@ fn refresh_c_receipt_from_manifest(
     derived: &DerivedCorpusCapabilities,
     passed: usize,
 ) -> CorpusExecutionReceipt {
+    receipt.command = C_RECEIPT_COMMAND.to_string();
+    receipt.execution_mode = Some("sequential-portable-lf".to_string());
+    receipt.verified_at = Some(current_unix_verified_at());
+    receipt.verification_command = Some(C_RECEIPT_VERIFICATION_COMMAND.to_string());
     receipt.result.passed = passed;
     receipt.result.failed = 0;
     receipt.result.ignored = 0;
@@ -3615,6 +3816,131 @@ fn refresh_c_receipt_from_manifest(
             expected_stdout: program.expected_stdout.clone(),
         })
         .collect();
+    receipt.notes = vec![
+        format!(
+            "Sequential buildc run checks matched manifest stdout for all {} programs.",
+            manifest.programs.len()
+        ),
+        "Each program was rerun with --stdio-mode portable-lf and compared against the manifest LF stdout bytes.".to_string(),
+    ];
+    apply_capability_receipt_metadata(&mut receipt, derived);
+    receipt
+}
+
+fn validate_rust_receipt_manifest_contract(
+    corpus_root: &Path,
+    manifest: &SemanticCorpusManifest,
+) -> Result<(), i32> {
+    let mut ids = BTreeSet::new();
+    for program in &manifest.programs {
+        if program.id.trim().is_empty() {
+            eprintln!("semantic corpus program id must be non-empty");
+            return Err(1);
+        }
+        if !ids.insert(program.id.as_str()) {
+            eprintln!("duplicate semantic corpus program id {}", program.id);
+            return Err(1);
+        }
+        if !program.path.starts_with("programs/") || program.path.contains("..") {
+            eprintln!(
+                "semantic corpus path {} should live under programs/",
+                program.path
+            );
+            return Err(1);
+        }
+        if !corpus_root.join(&program.path).is_file() {
+            eprintln!(
+                "semantic corpus program {} should exist",
+                corpus_root.join(&program.path).display()
+            );
+            return Err(1);
+        }
+        if program.expected_stdout.is_empty() || !program.expected_stdout.ends_with('\n') {
+            eprintln!(
+                "semantic corpus program {} should declare newline-terminated stdout",
+                program.id
+            );
+            return Err(1);
+        }
+        if program.surfaces.is_empty()
+            || !program.surfaces.iter().any(|surface| surface == "stdout")
+        {
+            eprintln!(
+                "semantic corpus program {} should declare stdout surface",
+                program.id
+            );
+            return Err(1);
+        }
+    }
+    Ok(())
+}
+
+fn verify_rust_corpus_stdout(
+    corpus_root: &Path,
+    manifest: &SemanticCorpusManifest,
+    rustc_path: &str,
+) -> Result<usize, i32> {
+    for program in &manifest.programs {
+        let program_path = corpus_root.join(&program.path);
+        let captured = compile_and_capture_rust_run(&program_path, &[], rustc_path)?;
+        if captured.exit_code != 0 {
+            eprintln!(
+                "rust semantic corpus program {} failed with exit code {}\nstdout:\n{}\nstderr:\n{}",
+                program.id,
+                captured.exit_code,
+                String::from_utf8_lossy(&captured.stdout_bytes),
+                String::from_utf8_lossy(&captured.stderr_bytes)
+            );
+            return Err(1);
+        }
+        let stdout = String::from_utf8_lossy(&captured.stdout_bytes).into_owned();
+        if stdout != program.expected_stdout {
+            eprintln!(
+                "rust semantic corpus stdout drift for {}\nexpected:\n{:?}\nactual:\n{:?}",
+                program.id, program.expected_stdout, stdout
+            );
+            return Err(1);
+        }
+        if !captured.stderr_bytes.is_empty() {
+            eprintln!(
+                "rust semantic corpus stderr drift for {}\nstderr:\n{}",
+                program.id,
+                String::from_utf8_lossy(&captured.stderr_bytes)
+            );
+            return Err(1);
+        }
+    }
+    Ok(manifest.programs.len() + 1)
+}
+
+fn refresh_rust_receipt_from_manifest(
+    mut receipt: CorpusExecutionReceipt,
+    manifest: &SemanticCorpusManifest,
+    derived: &DerivedCorpusCapabilities,
+    passed: usize,
+    rustc_version: &str,
+) -> CorpusExecutionReceipt {
+    receipt.command = RUST_RECEIPT_COMMAND.to_string();
+    receipt.verification_command = Some(receipt.command.clone());
+    receipt.verified_at = Some(current_unix_verified_at());
+    receipt.result.passed = passed;
+    receipt.result.failed = 0;
+    receipt.result.ignored = 0;
+    receipt.programs = manifest
+        .programs
+        .iter()
+        .map(|program| CorpusExecutionProgram {
+            id: program.id.clone(),
+            path: format!("../{}", program.path),
+            expected_stdout: program.expected_stdout.clone(),
+        })
+        .collect();
+    receipt.notes = vec![
+        format!(
+            "Refreshed by running each manifest program through the Rust backend and rustc ({rustc_version})."
+        ),
+        "Result.passed counts the manifest contract check plus one executable Rust run per manifest program.".to_string(),
+    ];
     apply_capability_receipt_metadata(&mut receipt, derived);
     receipt
 }
@@ -3656,6 +3982,36 @@ fn verify_receipt(
         );
         return Err(1);
     }
+    if label == "c" {
+        let expected_mode = Some("sequential-portable-lf");
+        if receipt.execution_mode.as_deref() != expected_mode {
+            eprintln!(
+                "c receipt execution mode drift: expected {:?}, found {:?}",
+                expected_mode, receipt.execution_mode
+            );
+            return Err(1);
+        }
+        if receipt.command != C_RECEIPT_COMMAND {
+            eprintln!("c receipt command drift");
+            return Err(1);
+        }
+        verify_unix_verified_at(label, receipt.verified_at.as_deref())?;
+        if receipt.verification_command.as_deref() != Some(C_RECEIPT_VERIFICATION_COMMAND) {
+            eprintln!("c receipt verification metadata drift: missing verification_command");
+            return Err(1);
+        }
+    }
+    if label == "rust" {
+        if receipt.command != RUST_RECEIPT_COMMAND {
+            eprintln!("rust receipt command drift");
+            return Err(1);
+        }
+        verify_unix_verified_at(label, receipt.verified_at.as_deref())?;
+        if receipt.verification_command.as_deref() != Some(RUST_RECEIPT_COMMAND) {
+            eprintln!("rust receipt verification metadata drift: missing verification_command");
+            return Err(1);
+        }
+    }
 
     for (manifest_program, receipt_program) in manifest.programs.iter().zip(receipt.programs.iter())
     {
@@ -3694,12 +4050,12 @@ fn verify_receipt(
             derived.observed
         );
         if label == "rust" {
-            // The rust execution receipt has NO tool-supported writer: it is
-            // hand-maintained, and its capability fields are additionally
-            // pinned by unit tests. Say so, or a legitimate capability-surface
-            // change dead-ends here with no path forward.
+            // The rust execution receipt is refreshed by an explicit command,
+            // and its capability fields are additionally pinned by unit tests.
+            // Say so, or a legitimate capability-surface change dead-ends here
+            // with no path forward.
             eprintln!(
-                "note: the rust execution receipt is hand-maintained (semantic-corpus/receipts/rust-execution-*.json); update it and the pinned assertions in compiler/src/codegen/backend/rust.rs alongside any legitimate capability change"
+                "note: refresh the rust execution receipt with `buildc corpus refresh-rust-receipt --root <semantic-corpus>` and update the pinned assertions in compiler/src/codegen/backend/rust.rs alongside any legitimate capability change"
             );
         }
         return Err(1);
@@ -4345,6 +4701,8 @@ fn verify_c_corpus_stdout(
         let output = std::process::Command::new(&buildc)
             .arg("run")
             .arg(&program_path)
+            .arg("--stdio-mode")
+            .arg("portable-lf")
             .output()
             .map_err(|err| {
                 eprintln!(
@@ -4364,7 +4722,7 @@ fn verify_c_corpus_stdout(
             return Err(1);
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         if stdout != program.expected_stdout {
             eprintln!(
                 "semantic corpus stdout drift for {}\nexpected:\n{:?}\nactual:\n{:?}",
@@ -5117,6 +5475,8 @@ fn type_error_kind(error: &TypeError) -> &'static str {
         TypeError::NotAwaitable { .. } => "NotAwaitable",
         TypeError::UnitMismatch { .. } => "UnitMismatch",
         TypeError::UnitOperationMismatch { .. } => "UnitOperationMismatch",
+        TypeError::ModuleImportCycle { .. } => "ModuleImportCycle",
+        TypeError::UndefinedLoopLabel { .. } => "UndefinedLoopLabel",
         _ => "TypeError",
     }
 }
@@ -5700,26 +6060,28 @@ fn build_check_receipt(
         outcome
             .parse_errors
             .iter()
-            .map(|message| CheckReceiptDiagnostic {
+            .map(|diag| CheckReceiptDiagnostic {
                 stage: "parse",
                 kind: "ParseError".to_string(),
-                message: message.clone(),
-                help: None,
-                notes: Vec::new(),
+                message: diag.message.clone(),
+                line: Some(diag.line),
+                col: Some(diag.col),
+                help: diag.help.clone(),
+                notes: diag.notes.clone(),
             }),
     );
-    diagnostics.extend(
-        outcome
-            .type_errors
-            .iter()
-            .map(|err| CheckReceiptDiagnostic {
-                stage: "type",
-                kind: type_error_kind(&err.error).to_string(),
-                message: err.error.to_string(),
-                help: err.help.clone(),
-                notes: err.notes.clone(),
-            }),
-    );
+    diagnostics.extend(outcome.type_errors.iter().enumerate().map(|(i, err)| {
+        let loc = outcome.type_error_locations.get(i).copied().flatten();
+        CheckReceiptDiagnostic {
+            stage: "type",
+            kind: type_error_kind(&err.error).to_string(),
+            message: err.error.to_string(),
+            line: loc.map(|(line, _)| line),
+            col: loc.map(|(_, col)| col),
+            help: err.help.clone(),
+            notes: err.notes.clone(),
+        }
+    }));
 
     let policy_failed = policy
         .map(|decision| !decision.violations.is_empty())
@@ -5788,10 +6150,29 @@ fn run_check(file: &Path) -> Result<CheckOutcome, i32> {
 
     let mut parser = Parser::new(&source_file, tokens);
     let mut ast = parser.parse().unwrap();
+    // Resolve each parse error's byte span to `line:col` and grab its source
+    // line now, while `source_file` is borrowable. Same arithmetic as
+    // `report_parse_errors` (the `build`/`run` renderer), so `check` reports
+    // the identical location for the identical error.
     let parse_errors = parser
         .errors()
         .iter()
-        .map(ToString::to_string)
+        .map(|err| {
+            let line = source_file.lookup_line(err.span.start);
+            let line_start = source_file.line_start(line).unwrap_or(err.span.start);
+            let col = err.span.start.0.saturating_sub(line_start.0) as usize;
+            let snippet = source_file.source().lines().nth(line).map(str::to_string);
+            let underline = (err.span.end.0.saturating_sub(err.span.start.0) as usize).max(1);
+            ParseDiagnostic {
+                message: err.message(),
+                line: line + 1,
+                col: col + 1,
+                snippet,
+                underline,
+                help: err.help.clone(),
+                notes: err.notes.clone(),
+            }
+        })
         .collect::<Vec<_>>();
     let item_count = ast.items.len();
 
@@ -5827,6 +6208,26 @@ fn run_check(file: &Path) -> Result<CheckOutcome, i32> {
         }
     }
 
+    // Resolve each type error's byte span to 1-based `line:col` now, while
+    // `source_file` is still borrowable. Same arithmetic as the parse-error
+    // path above, so a type error reports the identical location shape. Done
+    // AFTER the codegen linear errors were appended, so the vec stays
+    // index-aligned with the final `type_errors`. A dummy span (synthetic
+    // node) has `end == 0`; it resolves to `None` so the receipt omits the
+    // field instead of reporting a false `1:1`.
+    let type_error_locations = type_errors
+        .iter()
+        .map(|err| {
+            if err.span.end.0 == 0 {
+                return None;
+            }
+            let line = source_file.lookup_line(err.span.start);
+            let line_start = source_file.line_start(line).unwrap_or(err.span.start);
+            let col = err.span.start.0.saturating_sub(line_start.0) as usize;
+            Some((line + 1, col + 1))
+        })
+        .collect::<Vec<_>>();
+
     let input_digests = input_digest_ledger.into_sorted_records();
     let input_graph_digest = input_graph_digest(&input_digests);
 
@@ -5841,6 +6242,7 @@ fn run_check(file: &Path) -> Result<CheckOutcome, i32> {
         tokens: token_count,
         parse_errors,
         type_errors,
+        type_error_locations,
         function_summaries,
     })
 }
@@ -5850,6 +6252,34 @@ fn render_check_line(receipt_to_stdout: bool, message: impl AsRef<str>) {
         eprintln!("{}", message.as_ref());
     } else {
         println!("{}", message.as_ref());
+    }
+}
+
+/// Render one parse diagnostic to stderr as `error[path:line:col]: message`
+/// with the source line and a caret underline. Mirrors `report_parse_errors`
+/// (the `build`/`run` renderer) so a parse error reads the same whether it is
+/// found by `check` or by `build`; the location was resolved in `run_check`.
+fn render_parse_diagnostic(source_path: &str, diag: &ParseDiagnostic) {
+    eprintln!(
+        "error[{}:{}:{}]: {}",
+        source_path, diag.line, diag.col, diag.message
+    );
+    if let Some(src_line) = &diag.snippet {
+        eprintln!("  {} | {}", diag.line, src_line);
+        let padding = format!("{}", diag.line).len();
+        let col0 = diag.col.saturating_sub(1);
+        eprintln!(
+            "  {} | {}{}",
+            " ".repeat(padding),
+            " ".repeat(col0),
+            "^".repeat(diag.underline.min(src_line.len().saturating_sub(col0)))
+        );
+    }
+    if let Some(help) = &diag.help {
+        eprintln!("  help: {}", help);
+    }
+    for note in &diag.notes {
+        eprintln!("  note: {}", note);
     }
 }
 
@@ -5875,15 +6305,17 @@ fn render_check_human_output(outcome: &CheckOutcome, receipt_to_stdout: bool) {
     }
 
     if !outcome.parse_errors.is_empty() {
-        eprintln!("Parse errors:");
-        for err in &outcome.parse_errors {
-            eprintln!("  {}", err);
+        for diag in &outcome.parse_errors {
+            render_parse_diagnostic(&outcome.source, diag);
         }
     }
     if !outcome.type_errors.is_empty() {
         eprintln!("Type errors found:");
-        for err in &outcome.type_errors {
-            eprintln!("  {}", err);
+        for (i, err) in outcome.type_errors.iter().enumerate() {
+            match outcome.type_error_locations.get(i).copied().flatten() {
+                Some((line, col)) => eprintln!("  {}:{}: {}", line, col, err),
+                None => eprintln!("  {}", err),
+            }
         }
     }
 
@@ -6386,12 +6818,63 @@ fn user_link_flags(libs: &[String], is_msvc: bool) -> Vec<String> {
 // BUILD COMMAND
 // =============================================================================
 
+/// Fail closed on recovered parse errors before an artifact is produced.
+///
+/// `Parser::parse` returns `Ok` even when it recovered from errors, so the type
+/// checker can still see the file's valid items. That is right for `check`,
+/// `lint`, and the LSP, but a code-producing path must never emit from a
+/// recovered (truncated) AST: a statement that fails to parse is dropped from
+/// its block, and the code that remains type-checks and compiles to a silently
+/// wrong result. Every artifact path calls this after `parse()` and returns its
+/// `Err` so the failure is located, not silent. Returns `Ok(())` when the
+/// parser recovered nothing (no errors), so a clean parse is unaffected.
+fn report_parse_errors(
+    path: &Path,
+    source_file: &SourceFile,
+    errors: &[ParseError],
+) -> Result<(), i32> {
+    if errors.is_empty() {
+        return Ok(());
+    }
+    for err in errors {
+        let line = source_file.lookup_line(err.span.start);
+        let line_start = source_file.line_start(line).unwrap_or(err.span.start);
+        let col = err.span.start.0.saturating_sub(line_start.0) as usize;
+        eprintln!(
+            "error[{}:{}:{}]: {}",
+            path.display(),
+            line + 1,
+            col + 1,
+            err.message()
+        );
+        if let Some(src_line) = source_file.source().lines().nth(line) {
+            eprintln!("  {} | {}", line + 1, src_line);
+            let padding = format!("{}", line + 1).len();
+            let underline_len = (err.span.end.0.saturating_sub(err.span.start.0) as usize).max(1);
+            eprintln!(
+                "  {} | {}{}",
+                " ".repeat(padding),
+                " ".repeat(col),
+                "^".repeat(underline_len.min(src_line.len().saturating_sub(col)))
+            );
+        }
+        if let Some(help) = &err.help {
+            eprintln!("  help: {}", help);
+        }
+        for note in &err.notes {
+            eprintln!("  note: {}", note);
+        }
+    }
+    Err(1)
+}
+
 fn cmd_build(
     path: &PathBuf,
     release: bool,
     emit: &str,
     keep_c: bool,
     target_str: &str,
+    stdio_mode: StdioMode,
 ) -> Result<(), i32> {
     // Look for Build.toml or main.bld in the project directory
     let manifest_path = path.join("Build.toml");
@@ -6423,6 +6906,7 @@ fn cmd_build(
         eprintln!("{}", err);
         1
     })?;
+    reject_unsupported_stdio_mode(stdio_mode, target)?;
     let use_llvm = target == Target::LlvmIr;
     let use_spirv = target == Target::SpirV;
     let use_native = target == Target::X86_64 || target == Target::Arm64;
@@ -6485,6 +6969,7 @@ fn cmd_build(
         }
         1
     })?;
+    report_parse_errors(&main_path, &source_file, parser.errors())?;
     println!(
         "[2/{}] Parsing... OK ({} items)",
         total_steps,
@@ -6513,6 +6998,7 @@ fn cmd_build(
 
     // Code generation - pass source for macro string extraction
     let mut codegen = CodeGenerator::with_source(&ctx, target, Arc::from(source_file.source()));
+    codegen.set_stdio_mode(stdio_mode);
     let output = codegen.generate(&ast).map_err(|e| {
         eprintln!("Code generation error: {}", e);
         1
@@ -7054,6 +7540,7 @@ fn probe_c_toolchain(hash_own_binary: bool) -> Option<ScientificToolchain> {
 /// the temp dir after running (both call sites do).
 fn compile_program_to_exe(
     file: &Path,
+    stdio_mode: StdioMode,
     compiler_override: Option<&str>,
 ) -> Result<CompiledProgram, i32> {
     // Read source file
@@ -7087,6 +7574,7 @@ fn compile_program_to_exe(
         }
         1
     })?;
+    report_parse_errors(file, &source_file, parser.errors())?;
 
     // Resolve `mod foo;` declarations - load and merge external module files
     let source_dir = file.parent().unwrap_or(Path::new("."));
@@ -7108,6 +7596,7 @@ fn compile_program_to_exe(
 
     // Generate C code - pass source for macro string extraction
     let mut codegen = CodeGenerator::with_source(&ctx, Target::C, Arc::from(source_file.source()));
+    codegen.set_stdio_mode(stdio_mode);
     let output = codegen.generate(&ast).map_err(|e| {
         eprintln!("Code generation error: {}", e);
         1
@@ -7191,10 +7680,12 @@ fn compile_program_to_exe(
 fn compile_and_capture_run(
     file: &Path,
     args: &[String],
+    stdio_mode: StdioMode,
     compiler_override: Option<&str>,
     seed: Option<u64>,
 ) -> Result<CapturedRun, i32> {
-    let CompiledProgram { temp_dir, exe_file } = compile_program_to_exe(file, compiler_override)?;
+    let CompiledProgram { temp_dir, exe_file } =
+        compile_program_to_exe(file, stdio_mode, compiler_override)?;
 
     // Hash the produced executable BEFORE running (the temp dir is removed
     // after the run). FAIL CLOSED on a read failure: a receipt must never
@@ -7340,6 +7831,7 @@ fn compile_program_to_rust_exe(file: &Path, rustc_path: &str) -> Result<Compiled
         }
         1
     })?;
+    report_parse_errors(file, &source_file, parser.errors())?;
 
     let source_dir = file.parent().unwrap_or(Path::new("."));
     resolve_modules(&mut ast, source_dir)?;
@@ -7494,11 +7986,17 @@ fn rerun_scientific_receipt(
     args: &[String],
     seed: Option<u64>,
     secondary_target: Option<&str>,
+    stdio_mode: &str,
     probed_toolchain: Option<&ScientificToolchain>,
 ) -> Result<RerunObservation, i32> {
+    let stdio_mode = stdio_mode.parse::<StdioMode>().map_err(|err| {
+        eprintln!("Error: unsupported sealed stdio mode in scientific receipt: {err}");
+        1
+    })?;
     let captured = compile_and_capture_run(
         source_path,
         args,
+        stdio_mode,
         probed_toolchain.map(|t| t.c_compiler.as_str()),
         seed,
     )?;
@@ -7569,6 +8067,7 @@ fn cmd_run_gpu(file: &Path, emit_receipt: Option<&Path>) -> Result<(), i32> {
 #[allow(clippy::too_many_arguments)]
 fn cmd_run(
     file: &PathBuf,
+    stdio_mode: StdioMode,
     args: &[String],
     emit_receipt: Option<&Path>,
     invariant: &str,
@@ -7817,7 +8316,8 @@ fn cmd_run(
     // invariant, seal, and write.
     let Some(receipt_path) = emit_receipt else {
         // No receipt: compile, then run with inherited stdout via `.status()`.
-        let CompiledProgram { temp_dir, exe_file } = compile_program_to_exe(file, None)?;
+        let CompiledProgram { temp_dir, exe_file } =
+            compile_program_to_exe(file, stdio_mode, None)?;
         let status = {
             let mut run_cmd = std::process::Command::new(&exe_file);
             run_cmd.args(args);
@@ -7973,7 +8473,8 @@ fn cmd_run(
         return Err(1);
     }
 
-    let captured = compile_and_capture_run(file, args, Some(&toolchain.c_compiler), seed)?;
+    let captured =
+        compile_and_capture_run(file, args, stdio_mode, Some(&toolchain.c_compiler), seed)?;
     toolchain.program_executable_digest = captured.executable_digest.clone();
 
     // The wall ceiling's exceeded flag is DERIVED here, from the SEALED
@@ -8099,6 +8600,9 @@ fn cmd_run(
 
     let os = std::env::consts::OS.to_string();
     let mut flags = vec![format!("invariant={invariant}"), format!("metric={metric}")];
+    if !stdio_mode.is_native() {
+        flags.push(format!("stdio-mode={stdio_mode}"));
+    }
     if negative_fixture {
         flags.push("negative-fixture".to_string());
     }
@@ -8116,6 +8620,11 @@ fn cmd_run(
             hex: outcome.input_graph_digest.hex.clone(),
         },
         target: "c",
+        stdio_mode: if stdio_mode.is_native() {
+            None
+        } else {
+            Some(stdio_mode.as_str())
+        },
         os: &os,
         exit_code,
         wall_seconds: Some(captured.wall_seconds),
@@ -8263,6 +8772,12 @@ fn cmd_test(
             let tokens = lexer.tokenize().map_err(|e| format!("lex: {}", e))?;
             let mut parser = Parser::new(&source_file, tokens);
             let mut ast = parser.parse().map_err(|e| format!("parse: {}", e))?;
+            // A recovered (truncated) AST would run tests against dropped code and
+            // could report a false pass, so treat any recovered parse error as a
+            // test error rather than compile the remainder.
+            if !parser.errors().is_empty() {
+                return Err(format!("parse: {} error(s)", parser.errors().len()));
+            }
 
             let source_dir = build_file.parent().unwrap_or(Path::new("."));
             let _ = resolve_modules(&mut ast, source_dir);
@@ -8970,7 +9485,8 @@ fn find_stdlib_path() -> Option<PathBuf> {
 
 fn resolve_modules(ast: &mut Module, source_dir: &Path) -> Result<(), i32> {
     let mut ledger = None;
-    resolve_modules_with_prefix(ast, source_dir, "", &mut ledger)
+    let mut visiting = HashSet::new();
+    resolve_modules_with_prefix(ast, source_dir, "", &mut ledger, &mut visiting)
 }
 
 fn resolve_modules_recording_inputs(
@@ -8979,24 +9495,37 @@ fn resolve_modules_recording_inputs(
     ledger: &mut InputDigestLedger,
 ) -> Result<(), i32> {
     let mut ledger = Some(ledger);
-    resolve_modules_with_prefix(ast, source_dir, "", &mut ledger)
+    let mut visiting = HashSet::new();
+    resolve_modules_with_prefix(ast, source_dir, "", &mut ledger, &mut visiting)
 }
 
 /// Resolve modules with a prefix for nested module support.
 /// The prefix is prepended to all mangled names (e.g., "utils_" for sub-modules of utils).
+///
+/// `visiting` holds the canonical paths of the module files on the current
+/// resolution stack. It turns an import cycle -- including a `mod NAME;` in a
+/// file that resolves back to a file already being resolved -- into a
+/// fail-closed diagnostic instead of unbounded recursion.
 fn resolve_modules_with_prefix(
     ast: &mut Module,
     source_dir: &Path,
     prefix: &str,
     ledger: &mut Option<&mut InputDigestLedger>,
+    visiting: &mut HashSet<PathBuf>,
 ) -> Result<(), i32> {
     // Collect module names from `mod foo;` declarations (content == None).
+    //
+    // A file-level `module NAME` header is skipped here: it names the module
+    // the file provides, it is not a request to load `NAME.bld`. Loading it
+    // would read the declaring file itself whenever the file is named after
+    // its module (e.g. `benchmarks.bld` declaring `module benchmarks`), which
+    // recurses forever.
     let mod_names: Vec<String> = ast
         .items
         .iter()
         .filter_map(|item| {
             if let ItemKind::Mod(ref m) = item.kind {
-                if m.content.is_none() {
+                if m.content.is_none() && !m.is_file_module {
                     return Some(m.name.name.to_string());
                 }
             }
@@ -9035,6 +9564,21 @@ fn resolve_modules_with_prefix(
             continue;
         };
 
+        // Fail-closed cycle guard: if this module file is already on the
+        // resolution stack, a `mod` import cycle (a->b->a, or a file importing
+        // itself) would recurse forever. Emit a diagnostic instead of hanging.
+        // Canonicalize so the same file reached by two spellings compares equal.
+        let module_key =
+            std::fs::canonicalize(&actual_file).unwrap_or_else(|_| actual_file.clone());
+        if !visiting.insert(module_key.clone()) {
+            eprintln!(
+                "error: module import cycle detected at '{}' (module '{}' is already being resolved)",
+                actual_file.display(),
+                mod_name
+            );
+            return Err(1);
+        }
+
         // Read and parse the module file
         let mod_bytes = std::fs::read(&actual_file).map_err(|e| {
             eprintln!(
@@ -9071,6 +9615,7 @@ fn resolve_modules_with_prefix(
             }
             1
         })?;
+        report_parse_errors(&actual_file, &mod_source_file, mod_parser.errors())?;
 
         // The full prefix for this module's items
         let full_prefix = if prefix.is_empty() {
@@ -9080,7 +9625,17 @@ fn resolve_modules_with_prefix(
         };
 
         // Recursively resolve sub-modules within this module
-        resolve_modules_with_prefix(&mut mod_ast, &sub_source_dir, &full_prefix, ledger)?;
+        resolve_modules_with_prefix(
+            &mut mod_ast,
+            &sub_source_dir,
+            &full_prefix,
+            ledger,
+            visiting,
+        )?;
+        // Done with this module's subtree; drop it from the stack so a sibling
+        // branch may legitimately include the same module again (a diamond is
+        // not a cycle).
+        visiting.remove(&module_key);
 
         // Collect names defined in this module (for intra-module rewriting)
         let mod_defined: std::collections::HashSet<String> = mod_ast
@@ -9573,6 +10128,7 @@ fn cmd_compile(
     opt_level: u8,
     debug: bool,
     target_override: Option<&str>,
+    stdio_mode: StdioMode,
 ) -> Result<(), i32> {
     // Read source file
     let source = std::fs::read_to_string(input).map_err(|e| {
@@ -9605,6 +10161,8 @@ fn cmd_compile(
         }
         1
     })?;
+
+    report_parse_errors(input, &source_file, parser.errors())?;
 
     // Resolve `mod foo;` declarations - load and merge external module files
     let source_dir = input.parent().unwrap_or(Path::new("."));
@@ -9667,6 +10225,7 @@ fn cmd_compile(
     } else {
         Target::C
     };
+    reject_unsupported_stdio_mode(stdio_mode, target)?;
 
     // Determine output path using target's default extension
     let output_path = output
@@ -9675,6 +10234,7 @@ fn cmd_compile(
 
     // Code generation (pass source for macro expansion)
     let mut codegen = CodeGenerator::with_source(&ctx, target, source_file.source().into());
+    codegen.set_stdio_mode(stdio_mode);
     // Enable ReShade boilerplate for .fx output files
     if output_path.extension().and_then(|e| e.to_str()) == Some("fx") {
         codegen.reshade = true;
@@ -10334,6 +10894,7 @@ mod tests {
             tokens: 1,
             parse_errors: Vec::new(),
             type_errors: Vec::new(),
+            type_error_locations: Vec::new(),
             function_summaries: vec![
                 FunctionEffectSummary {
                     function: "b".to_string(),
@@ -10420,6 +10981,7 @@ mod tests {
             tokens: 1,
             parse_errors: Vec::new(),
             type_errors: Vec::new(),
+            type_error_locations: Vec::new(),
             function_summaries: Vec::new(),
         };
 

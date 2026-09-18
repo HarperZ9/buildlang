@@ -320,6 +320,7 @@ impl WasmBackend {
             MirType::Vec(_) => "i32",         // BuildVecHandle is a pointer in wasm32
             MirType::Tuple(_) => "i32",       // Tuples are memory pointers in wasm32
             MirType::Map(_, _) => "i32",      // BuildMapHandle is a pointer in wasm32
+            MirType::Option(_) => "i32",      // opaque handle in wasm32 backend
         }
     }
 
@@ -351,6 +352,7 @@ impl WasmBackend {
             MirType::Vec(_) => 4,         // wasm32 pointer
             MirType::Tuple(elems) => elems.iter().map(|e| self.type_size(e)).sum(),
             MirType::Map(_, _) => 4, // wasm32 pointer
+            MirType::Option(_) => 8, // tag plus payload handle
         }
     }
 
@@ -968,6 +970,13 @@ impl WasmBackend {
                             self.emit_line(&format!("{}.xor", wasm_ty));
                         }
                     }
+                    UnaryOp::BitNot => {
+                        // Bitwise not: xor with -1
+                        self.gen_value(operand, func)?;
+                        let wasm_ty = self.emit_type(&ty);
+                        self.emit_line(&format!("{}.const -1", wasm_ty));
+                        self.emit_line(&format!("{}.xor", wasm_ty));
+                    }
                 }
             }
             MirRValue::Ref { place, .. } | MirRValue::AddressOf { place, .. } => {
@@ -1223,7 +1232,7 @@ impl WasmBackend {
                 PlaceProjection::Deref => {
                     self.emit_line("i32.load");
                 }
-                PlaceProjection::Field(idx, _ty) => {
+                PlaceProjection::Field(idx, _name, _ty) => {
                     self.emit_line(&format!("i32.const {}", idx * 4));
                     self.emit_line("i32.add");
                 }
@@ -1614,7 +1623,9 @@ impl WasmBackend {
             BinOp::SubChecked | BinOp::SubWrapping | BinOp::SubSaturating => {
                 format!("{}.sub", wasm_ty)
             }
-            BinOp::MulChecked | BinOp::MulWrapping => format!("{}.mul", wasm_ty),
+            BinOp::MulChecked | BinOp::MulWrapping | BinOp::MulSaturating => {
+                format!("{}.mul", wasm_ty)
+            }
             BinOp::Pow => {
                 // WASM doesn't have a native power instruction
                 // For floats, could use wasm-intrinsics when available

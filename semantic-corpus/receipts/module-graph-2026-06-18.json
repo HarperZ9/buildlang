@@ -7,7 +7,7 @@
   "source_set": {
     "kind": "semantic-corpus",
     "manifest": "manifest.json",
-    "program_count": 8
+    "program_count": 9
   },
   "module_model": {
     "resolver": "buildc source input resolver",
@@ -52,6 +52,44 @@
           "kind": "program_entry",
           "from": "program:scalar_branch",
           "to": "input:entry:programs/scalar_branch.bld"
+        }
+      ],
+      "known_gaps": [
+        "full name resolution is not claimed",
+        "package public API graph is not claimed"
+      ]
+    },
+    {
+      "id": "integer_arithmetic_portable_lf",
+      "path": "programs/integer_arithmetic_portable_lf.bld",
+      "source_digest": {
+        "algorithm": "sha256",
+        "hex": "2af555558bde2694aad80b6ab4668f91e4d5626ff1a35e872b1362ee09e22a7e"
+      },
+      "input_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "59dcec1d09c801c3a2886d458b6a7efab2ae5e70a3b3593eeea3bb0030ae5c18"
+      },
+      "module_graph_digest": {
+        "algorithm": "sha256",
+        "hex": "d36dcdfb625d8f0839f558413d01baf1b89f417764bacf79a2187ad0bbee42b3"
+      },
+      "inputs": [
+        {
+          "id": "input:entry:programs/integer_arithmetic_portable_lf.bld",
+          "role": "entry",
+          "path": "programs/integer_arithmetic_portable_lf.bld",
+          "source_digest": {
+            "algorithm": "sha256",
+            "hex": "2af555558bde2694aad80b6ab4668f91e4d5626ff1a35e872b1362ee09e22a7e"
+          }
+        }
+      ],
+      "edges": [
+        {
+          "kind": "program_entry",
+          "from": "program:integer_arithmetic_portable_lf",
+          "to": "input:entry:programs/integer_arithmetic_portable_lf.bld"
         }
       ],
       "known_gaps": [
@@ -327,8 +365,8 @@
     }
   ],
   "summary": {
-    "program_count": 8,
-    "input_count": 8,
+    "program_count": 9,
+    "input_count": 9,
     "input_roles": [
       "entry"
     ],

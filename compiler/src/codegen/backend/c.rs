@@ -15,7 +15,7 @@
 use std::fmt::Write;
 use std::sync::Arc;
 
-use super::{Backend, CodegenResult, Target};
+use super::{Backend, CodegenError, CodegenResult, StdioMode, Target};
 use crate::codegen::ir::*;
 use crate::codegen::runtime;
 use crate::codegen::{GeneratedCode, OutputFormat};
@@ -28,6 +28,8 @@ pub struct CBackend {
     indent: usize,
     /// Temp variable counter.
     temp_counter: u32,
+    /// Runtime stdio policy for generated programs.
+    stdio_mode: StdioMode,
     /// Function parameter types - indexed by function name, stores param types.
     fn_params: std::collections::HashMap<String, Vec<MirType>>,
     /// Return type of the current function being generated.
@@ -85,6 +87,7 @@ impl CBackend {
             output: String::new(),
             indent: 0,
             temp_counter: 0,
+            stdio_mode: StdioMode::Native,
             fn_params: std::collections::HashMap::new(),
             current_ret_ty: MirType::Void,
             current_fn_name: None,
@@ -97,6 +100,13 @@ impl CBackend {
             current_fn_flag_block_frees: std::collections::HashMap::new(),
             experimental_free_override_for_test: None,
         }
+    }
+
+    /// Create a C backend with an explicit runtime stdio policy.
+    pub fn with_stdio_mode(stdio_mode: StdioMode) -> Self {
+        let mut backend = Self::new();
+        backend.stdio_mode = stdio_mode;
+        backend
     }
 
     /// Whether the experimental deterministic-free path is enabled. Off by
@@ -181,8 +191,7 @@ impl CBackend {
     fn hvec_elem_suffix(elem: &MirType) -> String {
         match elem {
             MirType::Struct(n) if n.as_ref() == "BuildString" => "str".to_string(),
-            MirType::Int(IntSize::I64, _) => "i64".to_string(),
-            MirType::Int(..) => "i32".to_string(),
+            MirType::Int(size, signed) => Self::int_runtime_suffix(*size, *signed).to_string(),
             MirType::Float(..) => "f64".to_string(),
             // Aggregate element (a user struct, vector type, etc.): use a
             // monomorphized, element-sized wrapper keyed by the struct name.
@@ -199,6 +208,11 @@ impl CBackend {
     fn vec_elem_needs_sized_wrapper(elem: &MirType) -> bool {
         matches!(elem, MirType::Struct(n) if n.as_ref() != "BuildString")
             || matches!(elem, MirType::Vec(_) | MirType::Map(_, _))
+            || matches!(
+                elem,
+                MirType::Int(size, signed)
+                    if !matches!((size, signed), (IntSize::I32, true) | (IntSize::I64, true))
+            )
     }
 
     /// The directly-named callee of a `Call`, if any.
@@ -937,9 +951,16 @@ impl CBackend {
 
         // Standard includes
         self.output.push_str("#include <stdint.h>\n");
+        self.output.push_str("#include <limits.h>\n");
         self.output.push_str("#include <stdbool.h>\n");
         self.output.push_str("#include <stddef.h>\n");
         self.output.push_str("#include <stdio.h>\n");
+        if self.stdio_mode == StdioMode::PortableLf {
+            self.output.push_str("#ifdef _WIN32\n");
+            self.output.push_str("#include <fcntl.h>\n");
+            self.output.push_str("#include <io.h>\n");
+            self.output.push_str("#endif\n");
+        }
         self.output.push_str("#include <stdlib.h>\n");
         self.output.push_str("#include <string.h>\n");
         self.output.push_str("#include <math.h>\n");
@@ -1014,6 +1035,10 @@ impl CBackend {
         // Embedded runtime library
         self.output.push_str(runtime::runtime_header());
         self.output.push('\n');
+        if self.stdio_mode == StdioMode::PortableLf {
+            self.output.push_str(runtime::portable_lf_stdio_support());
+            self.output.push('\n');
+        }
 
         // Type definitions
         let mut all_types = module.types.clone();
@@ -1118,13 +1143,13 @@ impl CBackend {
         // scalars and strings; an aggregate element rides in the size-aware
         // generic BuildVec via a per-type wrapper so `Vec<P>` push/get/pop work.
         {
-            let mut vec_elem_types: std::collections::HashSet<String> =
-                std::collections::HashSet::new();
+            let mut vec_elem_types = std::collections::BTreeMap::<String, String>::new();
             for func in &module.functions {
                 for local in &func.locals {
                     if let MirType::Vec(ref elem) = local.ty {
                         if Self::vec_elem_needs_sized_wrapper(elem) {
-                            vec_elem_types.insert(self.type_to_c(elem));
+                            vec_elem_types
+                                .insert(Self::hvec_elem_suffix(elem), self.type_to_c(elem));
                         }
                     }
                 }
@@ -1133,14 +1158,11 @@ impl CBackend {
                 self.output.push_str(
                     "// Monomorphized Vec element wrappers for aggregate element types\n",
                 );
-                // Deterministic order for reproducible codegen (receipts).
-                let mut entries: Vec<&String> = vec_elem_types.iter().collect();
-                entries.sort();
-                for elem_c in entries {
-                    let suffix = elem_c.replace('*', "ptr").replace(' ', "_");
+                for (suffix, elem_c) in vec_elem_types {
                     write!(self.output, "static BuildVecHandle build_hvec_new_{suffix}(void) {{ BuildVecHandle h; h.inner = (BuildVec*)malloc(sizeof(BuildVec)); *h.inner = build_vec_new(sizeof({elem_c})); return h; }}\n").unwrap();
                     write!(self.output, "static void build_hvec_push_{suffix}(BuildVecHandle h, {elem_c} val) {{ build_vec_push(h.inner, &val); }}\n").unwrap();
                     write!(self.output, "static {elem_c} build_hvec_get_{suffix}(BuildVecHandle h, size_t index) {{ return *({elem_c}*)build_vec_get(h.inner, index); }}\n").unwrap();
+                    write!(self.output, "static void build_hvec_set_{suffix}(BuildVecHandle h, size_t i, {elem_c} val) {{ if (i >= h.inner->len) {{ fprintf(stderr, \"Vec index out of bounds: %zu >= %zu\\n\", i, h.inner->len); exit(101); }} memcpy((char*)h.inner->ptr + i * h.inner->elem_size, &val, sizeof({elem_c})); }}\n").unwrap();
                     write!(self.output, "static {elem_c} build_hvec_pop_{suffix}(BuildVecHandle h) {{ {elem_c} __z; memset(&__z, 0, sizeof(__z)); if (h.inner->len == 0) return __z; h.inner->len--; return *({elem_c}*)((char*)h.inner->ptr + h.inner->len * h.inner->elem_size); }}\n").unwrap();
                 }
                 self.output.push('\n');
@@ -1650,6 +1672,26 @@ impl CBackend {
             return Ok(());
         }
 
+        // The vtable method sigs carry `void*` as the self param (that is the
+        // C-level type stored in the function-pointer table), so they cannot say
+        // whether the concrete method takes `self` by value or `&self` by
+        // reference. Read that from the concrete function's real first parameter
+        // instead, keyed by its mangled name.
+        let concrete_self_by_ref: std::collections::HashMap<&str, bool> = module
+            .functions
+            .iter()
+            .map(|f| {
+                (
+                    f.name.as_ref(),
+                    f.sig
+                        .params
+                        .first()
+                        .map(|p| p.is_pointer())
+                        .unwrap_or(false),
+                )
+            })
+            .collect();
+
         // Generate wrapper functions that dereference void* to concrete type
         for vtable in &module.vtables {
             for (method_name, mangled_fn, sig) in &vtable.methods {
@@ -1662,10 +1704,13 @@ impl CBackend {
                 // Generate: ret wrapper(void* self, ...) { return concrete(<self>, ...); }
                 // The receiver is passed as a pointer when the method takes
                 // `&self`/`&mut self` (a pointer self param), or dereferenced to a
-                // value when it takes `self` by value. Always dereferencing broke
-                // `&self` trait methods (passing a value where a pointer was
-                // expected).
-                let self_is_ref = sig.params.first().map(|p| p.is_pointer()).unwrap_or(false);
+                // value when it takes `self` by value. The vtable sig always
+                // reports the self param as `void*`, so consult the concrete
+                // function's real first parameter to decide.
+                let self_is_ref = concrete_self_by_ref
+                    .get(mangled_fn.as_ref())
+                    .copied()
+                    .unwrap_or_else(|| sig.params.first().map(|p| p.is_pointer()).unwrap_or(false));
                 let self_arg = if self_is_ref {
                     format!("({}*)__self", vtable.type_name)
                 } else {
@@ -1773,7 +1818,7 @@ impl CBackend {
 
             if let Some(init) = &global.init {
                 decl.push_str(" = ");
-                decl.push_str(&self.const_to_c(init));
+                decl.push_str(&self.const_to_c_static(init));
             }
 
             decl.push_str(";\n");
@@ -2030,7 +2075,12 @@ impl CBackend {
         // For main(), initialize I/O and command-line args before anything else
         if func.name.as_ref() == "main" {
             self.write_indent();
-            self.output.push_str("__build_init_io();\n");
+            match self.stdio_mode {
+                StdioMode::Native => self.output.push_str("__build_init_io();\n"),
+                StdioMode::PortableLf => {
+                    self.output.push_str("__build_init_portable_lf_stdio();\n")
+                }
+            }
             self.write_indent();
             self.output.push_str("build_args_init(argc, argv);\n");
         }
@@ -2635,9 +2685,19 @@ impl CBackend {
                     base, field_name, ..
                 } = value
                 {
-                    // Special case: loading from handler_data needs cast+deref
-                    // handler_data is a void* that holds a pointer to the perform argument
-                    if field_name.as_ref() == "handler_data" {
+                    // Special case: loading from handler_data needs cast+deref.
+                    // handler_data holds a `void*[N]` argv array; slot `i` points
+                    // to the perform argument for parameter `i`. The field marker
+                    // is `handler_data#<i>` (plain `handler_data` means index 0).
+                    let hd_index = if field_name.as_ref() == "handler_data" {
+                        Some(0usize)
+                    } else {
+                        field_name
+                            .as_ref()
+                            .strip_prefix("handler_data#")
+                            .and_then(|s| s.parse::<usize>().ok())
+                    };
+                    if let Some(idx) = hd_index {
                         let base_str = self.value_to_c(base, locals);
                         let dest_type = locals
                             .get(dest.0 as usize)
@@ -2646,8 +2706,8 @@ impl CBackend {
                         self.write_indent();
                         write!(
                             self.output,
-                            "{} = *({}*){}.handler_data;\n",
-                            dest_name, dest_type, base_str
+                            "{} = *({}*)((void**){}.handler_data)[{}];\n",
+                            dest_name, dest_type, base_str, idx
                         )
                         .unwrap();
                     } else {
@@ -2757,7 +2817,8 @@ impl CBackend {
                 let ptr_name = self.local_name(*ptr, locals);
                 self.write_indent();
                 let rvalue = self.rvalue_to_c(value, locals)?;
-                write!(self.output, "{}->{} = {};\n", ptr_name, field_name, rvalue).unwrap();
+                let field = Self::escape_c_keyword(field_name);
+                write!(self.output, "{}->{} = {};\n", ptr_name, field, rvalue).unwrap();
             }
             MirStmtKind::FieldAssign {
                 base,
@@ -2767,7 +2828,8 @@ impl CBackend {
                 let base_name = self.local_name(*base, locals);
                 self.write_indent();
                 let rvalue = self.rvalue_to_c(value, locals)?;
-                write!(self.output, "{}.{} = {};\n", base_name, field_name, rvalue).unwrap();
+                let field = Self::escape_c_keyword(field_name);
+                write!(self.output, "{}.{} = {};\n", base_name, field, rvalue).unwrap();
             }
             MirStmtKind::GlobalStore { name, value } => {
                 // `GLOBAL = value;` - the C global identifier matches the
@@ -2796,12 +2858,7 @@ impl CBackend {
                     _ => false,
                 };
                 if base_is_vec {
-                    let suffix = match elem_ty {
-                        MirType::Float(_) => "f64",
-                        MirType::Int(IntSize::I64, _) => "i64",
-                        MirType::Struct(n) if n.as_ref() == "BuildString" => "str",
-                        _ => "i32",
-                    };
+                    let suffix = Self::hvec_elem_suffix(elem_ty);
                     write!(
                         self.output,
                         "build_hvec_set_{}({}, {}, {});\n",
@@ -2811,7 +2868,13 @@ impl CBackend {
                 } else if let Some(target) =
                     Self::slice_element_access(base, &base_str, &index_str, locals)
                 {
-                    // Slice / pointer-to-slice store: `base->ptr[i] = value`.
+                    // Slice / pointer-to-slice store: `base->ptr[i] = value`,
+                    // bounds-checked against the slice length.
+                    write!(self.output, "{} = {};\n", target, rvalue).unwrap();
+                } else if let Some(target) =
+                    Self::array_element_access(base, &base_str, &index_str, locals)
+                {
+                    // Fixed-array store: `base[bl_idx_chk(i, N)] = value`.
                     write!(self.output, "{} = {};\n", target, rvalue).unwrap();
                 } else {
                     write!(self.output, "{}[{}] = {};\n", base_str, index_str, rvalue).unwrap();
@@ -3126,9 +3189,11 @@ impl CBackend {
                 }
 
                 // Runtime Some(x): construct an Option with the payload in the
-                // typed 8-byte union slot (`.value.i` integer/bool, `.value.f`
-                // float, `.value.p` pointer). Previously Some lowered to an
-                // undefined `Some(x)` call into an i32-typed dest (a C2440).
+                // typed scalar union slot (`.value.i` signed integer/bool,
+                // `.value.u` unsigned integer, `.value.i128`/`.value.u128`,
+                // `.value.f` float, `.value.p` pointer). Previously Some
+                // lowered to an undefined `Some(x)` call into an i32-typed dest
+                // (a C2440).
                 if func_str == "Some" && args.len() == 1 {
                     if let Some(dest_local) = dest {
                         let dest_name = self.local_name(*dest_local, locals);
@@ -3154,17 +3219,7 @@ impl CBackend {
                             )
                             .unwrap();
                         } else {
-                            let (slot, cast) = match &args[0] {
-                                MirValue::Local(id) => {
-                                    match locals.get(id.0 as usize).map(|l| &l.ty) {
-                                        Some(MirType::Float(_)) => ("f", "(double)"),
-                                        Some(MirType::Ptr(_)) => ("p", "(void*)"),
-                                        _ => ("i", "(int64_t)"),
-                                    }
-                                }
-                                MirValue::Const(MirConst::Float(..)) => ("f", "(double)"),
-                                _ => ("i", "(int64_t)"),
-                            };
+                            let (slot, cast) = Self::option_payload_slot_and_cast(arg_ty.as_ref());
                             write!(
                                 self.output,
                                 "{}.value.{} = {}({});\n",
@@ -3181,9 +3236,11 @@ impl CBackend {
                 }
 
                 // Runtime Ok(x): construct a Result with is_ok=true and the
-                // payload in the typed 8-byte ok union slot (`.ok.ok_i`/`.ok_f`/
-                // `.ok_p`). Mirrors the Some(x) Option construction. Previously
-                // Ok lowered to an undefined `Ok(x)` call into an i32 dest.
+                // payload in the typed scalar ok union slot (`.ok.ok_i`,
+                // `.ok.ok_u`, `.ok.ok_i128`, `.ok.ok_u128`, `.ok.ok_f`,
+                // `.ok.ok_p`). Mirrors the Some(x) Option construction.
+                // Previously Ok lowered to an undefined `Ok(x)` call into an i32
+                // dest.
                 if func_str == "Ok" && args.len() == 1 {
                     if let Some(dest_local) = dest {
                         let dest_name = self.local_name(*dest_local, locals);
@@ -3209,17 +3266,8 @@ impl CBackend {
                             )
                             .unwrap();
                         } else {
-                            let (slot, cast) = match &args[0] {
-                                MirValue::Local(id) => {
-                                    match locals.get(id.0 as usize).map(|l| &l.ty) {
-                                        Some(MirType::Float(_)) => ("ok_f", "(double)"),
-                                        Some(MirType::Ptr(_)) => ("ok_p", "(void*)"),
-                                        _ => ("ok_i", "(int64_t)"),
-                                    }
-                                }
-                                MirValue::Const(MirConst::Float(..)) => ("ok_f", "(double)"),
-                                _ => ("ok_i", "(int64_t)"),
-                            };
+                            let (slot, cast) =
+                                Self::result_payload_slot_and_cast(arg_ty.as_ref(), true);
                             write!(
                                 self.output,
                                 "{}.ok.{} = {}({});\n",
@@ -3276,17 +3324,8 @@ impl CBackend {
                                 )
                                 .unwrap();
                             } else {
-                                let (slot, cast) = match &args[0] {
-                                    MirValue::Local(id) => {
-                                        match locals.get(id.0 as usize).map(|l| &l.ty) {
-                                            Some(MirType::Float(_)) => ("err_f", "(double)"),
-                                            Some(MirType::Ptr(_)) => ("err_p", "(void*)"),
-                                            _ => ("err_i", "(int64_t)"),
-                                        }
-                                    }
-                                    MirValue::Const(MirConst::Float(..)) => ("err_f", "(double)"),
-                                    _ => ("err_i", "(int64_t)"),
-                                };
+                                let (slot, cast) =
+                                    Self::result_payload_slot_and_cast(arg_ty.as_ref(), false);
                                 write!(
                                     self.output,
                                     "{}.err.{} = {}({});\n",
@@ -3326,11 +3365,11 @@ impl CBackend {
                 // Special-case setjmp: when passed a BuildHandler local,
                 // emit `setjmp(handler.env)` instead of `setjmp(handler)`.
                 //
-                // Special-case printf: bool arguments used with %s must be
-                // converted to "true"/"false" strings via a ternary.
+                // Special-case printf-style calls: bool arguments used with
+                // %s must be converted to "true"/"false" strings via a ternary.
                 // Look up target function's parameter types for auto-ref.
                 let target_params = self.fn_params.get(func_str.as_str()).cloned();
-                let is_printf = func_str == "printf";
+                let is_printf = matches!(func_str.as_str(), "printf" | "eprintf");
                 let args_str: Vec<_> = args
                     .iter()
                     .enumerate()
@@ -3372,7 +3411,8 @@ impl CBackend {
                                 }
                             }
                         }
-                        // For printf, convert bool args to "true"/"false" strings
+                        // For printf-style calls, convert bool args to
+                        // "true"/"false" strings.
                         if is_printf {
                             if let MirValue::Local(id) = a {
                                 if let Some(local) = locals.get(id.0 as usize) {
@@ -3389,7 +3429,13 @@ impl CBackend {
                     })
                     .collect();
 
-                if let Some(dest_local) = dest {
+                if func_str == "eprintf" {
+                    write!(self.output, "fprintf(stderr").unwrap();
+                    if !args_str.is_empty() {
+                        write!(self.output, ", {}", args_str.join(", ")).unwrap();
+                    }
+                    self.output.push_str(");\n");
+                } else if let Some(dest_local) = dest {
                     // Skip assignment for void-returning functions.
                     // Check both the dest type and known void functions
                     // (assert returns void but MIR may type the dest as i32).
@@ -3608,12 +3654,11 @@ impl CBackend {
     // TYPE AND VALUE CONVERSION
     // =========================================================================
 
-    /// True when a sum-type payload of this type does not fit the 8-byte
-    /// Option/Result union slot and must be boxed (malloc + store the pointer in
-    /// the `.p` / `.ok_p` slot). Scalars and pointers fit inline; aggregates
-    /// (BuildString and other structs, tuples, arrays, collection handles) are
-    /// boxed. Boxing round-trips any value; it is correctness-safe even for an
-    /// 8-byte handle.
+    /// True when a sum-type payload is an aggregate that must be boxed (malloc +
+    /// store the pointer in the `.p` / `.ok_p` slot). Scalar integer widths,
+    /// floats, pointers, and function pointers fit inline in the runtime union;
+    /// structs, tuples, arrays, collection handles, and nested Options box so
+    /// their value representation round-trips through C without truncation.
     fn payload_needs_boxing(ty: &MirType) -> bool {
         !matches!(
             ty,
@@ -3627,6 +3672,45 @@ impl CBackend {
         )
     }
 
+    fn is_option_type(ty: &MirType) -> bool {
+        matches!(ty, MirType::Option(_))
+            || matches!(ty, MirType::Struct(name) if name.as_ref() == "Option")
+    }
+
+    fn option_payload_slot_and_cast(ty: Option<&MirType>) -> (&'static str, &'static str) {
+        match ty {
+            Some(MirType::Float(_)) => ("f", "(double)"),
+            Some(MirType::Ptr(_)) | Some(MirType::FnPtr(_)) => ("p", "(void*)"),
+            Some(MirType::Int(IntSize::I128, true)) => ("i128", "(__int128)"),
+            Some(MirType::Int(IntSize::I128, false)) => ("u128", "(unsigned __int128)"),
+            Some(MirType::Int(_, false)) => ("u", "(uint64_t)"),
+            Some(MirType::Bool) | Some(MirType::Int(_, true)) => ("i", "(int64_t)"),
+            _ => ("i", "(int64_t)"),
+        }
+    }
+
+    fn result_payload_slot_and_cast(
+        ty: Option<&MirType>,
+        ok: bool,
+    ) -> (&'static str, &'static str) {
+        let (slot, cast) = Self::option_payload_slot_and_cast(ty);
+        let slot = match (ok, slot) {
+            (true, "f") => "ok_f",
+            (true, "p") => "ok_p",
+            (true, "i128") => "ok_i128",
+            (true, "u128") => "ok_u128",
+            (true, "u") => "ok_u",
+            (true, _) => "ok_i",
+            (false, "f") => "err_f",
+            (false, "p") => "err_p",
+            (false, "i128") => "err_i128",
+            (false, "u128") => "err_u128",
+            (false, "u") => "err_u",
+            (false, _) => "err_i",
+        };
+        (slot, cast)
+    }
+
     fn type_to_c(&self, ty: &MirType) -> String {
         match ty {
             MirType::Void => "void".to_string(),
@@ -3638,7 +3722,8 @@ impl CBackend {
                     IntSize::I16 => format!("{}int16_t", prefix),
                     IntSize::I32 => format!("{}int32_t", prefix),
                     IntSize::I64 => format!("{}int64_t", prefix),
-                    IntSize::I128 => format!("__int128_t"), // GCC extension
+                    IntSize::I128 if *signed => "__int128".to_string(), // GCC extension
+                    IntSize::I128 => "unsigned __int128".to_string(),   // GCC extension
                     IntSize::ISize => format!("{}intptr_t", prefix),
                 }
             }
@@ -3686,7 +3771,20 @@ impl CBackend {
             MirType::SampledImage(_) => "void*".to_string(), // Opaque GPU handle
             MirType::TraitObject(name) => format!("dyn_{}", name), // vtable struct
             MirType::Vec(_) => "BuildVecHandle".to_string(),
-            MirType::Map(_, _) => "BuildStrF64MapHandle".to_string(),
+            MirType::Option(_) => "Option".to_string(),
+            // The handle-struct name depends on key/value types. Default map is
+            // str->f64 (BuildStrF64MapHandle), which also backs the value-typed
+            // str-key families (build_hmap_*_val_*). The i64->f64 family has its
+            // own handle. The i32->i32 family never flows through here: map_new_i32
+            // returns Struct("BuildMapHandle") directly. Without this split, a
+            // `map_new_i64()` local was declared BuildStrF64MapHandle while the
+            // runtime returned BuildI64F64MapHandle, a real C2440.
+            MirType::Map(ref k, ref v) => match (k.as_ref(), v.as_ref()) {
+                (MirType::Int(IntSize::I64, _), MirType::Float(..)) => {
+                    "BuildI64F64MapHandle".to_string()
+                }
+                _ => "BuildStrF64MapHandle".to_string(),
+            },
             MirType::Tuple(ref elems) => {
                 if elems.is_empty() {
                     "void".to_string()
@@ -3792,16 +3890,43 @@ impl CBackend {
         }
     }
 
+    fn c_u128_const(value: u128) -> String {
+        let hi = value >> 64;
+        let lo = value as u64;
+        if hi == 0 {
+            format!("((unsigned __int128){}ULL)", lo)
+        } else {
+            format!(
+                "(((unsigned __int128){}ULL << 64) | (unsigned __int128){}ULL)",
+                hi, lo
+            )
+        }
+    }
+
+    fn c_i128_const(value: i128) -> String {
+        if value == i128::MIN {
+            return format!(
+                "(-((__int128)({})) - 1)",
+                Self::c_u128_const(i128::MAX as u128)
+            );
+        }
+        if value < 0 {
+            return format!("(-((__int128)({})))", Self::c_u128_const((-value) as u128));
+        }
+        format!("((__int128)({}))", Self::c_u128_const(value as u128))
+    }
+
     fn const_to_c(&self, c: &MirConst) -> String {
         match c {
             MirConst::Bool(b) => if *b { "true" } else { "false" }.to_string(),
             MirConst::Int(v, ty) => match ty {
-                MirType::Int(IntSize::I64, _) => format!("{}LL", v),
-                MirType::Int(IntSize::I128, _) => format!("((__int128){})", v),
+                MirType::Int(IntSize::I64 | IntSize::ISize, _) => format!("{}LL", v),
+                MirType::Int(IntSize::I128, _) => Self::c_i128_const(*v),
                 _ => v.to_string(),
             },
             MirConst::Uint(v, ty) => match ty {
-                MirType::Int(IntSize::I64, _) => format!("{}ULL", v),
+                MirType::Int(IntSize::I64 | IntSize::ISize, _) => format!("{}ULL", v),
+                MirType::Int(IntSize::I128, _) => Self::c_u128_const(*v),
                 _ => format!("{}U", v),
             },
             MirConst::Float(v, ty) => {
@@ -3845,6 +3970,25 @@ impl CBackend {
         }
     }
 
+    /// Emit a constant as a C static initializer (file-scope `const`/global).
+    /// Aggregate constants become plain brace-init lists `{ ... }` rather than
+    /// compound literals `(T){ ... }`: C requires the initializer of an object
+    /// with static storage duration to be a constant expression, and a compound
+    /// literal is not one, so MSVC rejects `const Color W = (Color){...};` with
+    /// C2099. Nested structs recurse the same way; scalars and strings are
+    /// already constant expressions and defer to `const_to_c`.
+    fn const_to_c_static(&self, c: &MirConst) -> String {
+        match c {
+            MirConst::Struct(_, fields) => {
+                let field_strs: Vec<String> =
+                    fields.iter().map(|f| self.const_to_c_static(f)).collect();
+                format!("{{ {} }}", field_strs.join(", "))
+            }
+            MirConst::Zeroed(_) => "{0}".to_string(),
+            _ => self.const_to_c(c),
+        }
+    }
+
     /// If `base` indexes a slice (fat pointer `{ptr, len}`) or a pointer-to-slice
     /// (`&[T]` -> `Ptr(Slice)`), return the correct element access. A slice value
     /// is `base.ptr[index]`; a pointer-to-slice (a slice/array *parameter*) is
@@ -3863,11 +4007,38 @@ impl CBackend {
             MirValue::Local(id) => &locals.get(id.0 as usize)?.ty,
             _ => return None,
         };
+        // A slice carries its length, so the index is bounds-checked against it
+        // (fail closed, Rust semantics) before the subscript on read and write.
         match ty {
-            MirType::Slice(_) => Some(format!("{}.ptr[{}]", base_str, index_str)),
-            MirType::Ptr(inner) if matches!(inner.as_ref(), MirType::Slice(_)) => {
-                Some(format!("{}->ptr[{}]", base_str, index_str))
-            }
+            MirType::Slice(_) => Some(format!(
+                "{base_str}.ptr[bl_idx_chk((long long)({index_str}), {base_str}.len)]"
+            )),
+            MirType::Ptr(inner) if matches!(inner.as_ref(), MirType::Slice(_)) => Some(format!(
+                "{base_str}->ptr[bl_idx_chk((long long)({index_str}), {base_str}->len)]"
+            )),
+            _ => None,
+        }
+    }
+
+    /// If `base` indexes a fixed array `[T; N]`, return the bounds-checked
+    /// element access `base[bl_idx_chk(index, N)]`. The length N is a compile-time
+    /// constant carried by the array type, so the check is a static bound. Returns
+    /// `None` for non-array bases (a raw pointer has no length and stays an
+    /// unchecked subscript, matching an `unsafe` pointer deref).
+    fn array_element_access(
+        base: &MirValue,
+        base_str: &str,
+        index_str: &str,
+        locals: &[MirLocal],
+    ) -> Option<String> {
+        let ty = match base {
+            MirValue::Local(id) => &locals.get(id.0 as usize)?.ty,
+            _ => return None,
+        };
+        match ty {
+            MirType::Array(_, len) => Some(format!(
+                "{base_str}[bl_idx_chk((long long)({index_str}), {len}ULL)]"
+            )),
             _ => None,
         }
     }
@@ -3880,6 +4051,85 @@ impl CBackend {
                 let r = self.value_to_c(right, locals);
                 if *op == BinOp::Pow {
                     return Ok(format!("pow({}, {})", l, r));
+                }
+                // C's `%` is integer-only. A float remainder must lower to the
+                // C library `fmod`/`fmodf`, which matches Rust's `%` on floats
+                // (5.5 % 2.0 == 1.5). Without this the backend emitted `(a % b)`
+                // on doubles, which gcc rejects outright.
+                if *op == BinOp::Rem {
+                    let float_size = |v: &MirValue| -> Option<FloatSize> {
+                        match v {
+                            MirValue::Const(MirConst::Float(_, MirType::Float(sz))) => Some(*sz),
+                            MirValue::Local(id) => {
+                                match locals.get(id.0 as usize).map(|loc| &loc.ty) {
+                                    Some(MirType::Float(sz)) => Some(*sz),
+                                    _ => None,
+                                }
+                            }
+                            _ => None,
+                        }
+                    };
+                    if let Some(sz) = float_size(left).or_else(|| float_size(right)) {
+                        let f = match sz {
+                            FloatSize::F32 => "fmodf",
+                            FloatSize::F64 => "fmod",
+                        };
+                        return Ok(format!("{}({}, {})", f, l, r));
+                    }
+                }
+                if let Some((size, signed)) = self.preferred_int_type(left, right, locals) {
+                    if let Some(stem) = Self::explicit_int_binop_helper(*op, signed) {
+                        let suffix = Self::int_runtime_suffix(size, signed);
+                        return Ok(format!("{}{}({}, {})", stem, suffix, l, r));
+                    }
+                    if let Some(stem) = Self::checked_int_binop_helper(*op, signed) {
+                        let suffix = Self::int_runtime_suffix(size, signed);
+                        return Ok(format!("{}{}({}, {})", stem, suffix, l, r));
+                    }
+                }
+                if matches!(
+                    op,
+                    BinOp::AddChecked
+                        | BinOp::SubChecked
+                        | BinOp::MulChecked
+                        | BinOp::AddWrapping
+                        | BinOp::SubWrapping
+                        | BinOp::MulWrapping
+                        | BinOp::AddSaturating
+                        | BinOp::SubSaturating
+                        | BinOp::MulSaturating
+                ) {
+                    return Err(CodegenError::Unsupported(format!(
+                        "C backend does not support explicit MIR arithmetic operator {op:?}"
+                    )));
+                }
+                // Integer division and remainder trap. Rust's `/` and `%` panic
+                // on a zero divisor and on the one signed overflow `MIN / -1`, in
+                // release as well as debug. Raw C `/`/`%` instead crash on a zero
+                // divisor, hang on i32/i64 `MIN / -1` under this toolchain, and,
+                // because a narrow operand promotes to `int`, silently return the
+                // wrong value for a narrow signed overflow ((int8_t)-128 / -1
+                // evaluates to -128 by wrap). Route every integer `/`/`%` through
+                // the runtime helper for the operand width and signedness so the
+                // result is a clean abort matching a Rust panic (exit 101). A
+                // float `/` stays IEEE (falls through to `/`) and a float `%` is
+                // handled by the fmod block above, so neither reaches here.
+                if *op == BinOp::Div || *op == BinOp::Rem {
+                    if let Some((size, signed)) = self.preferred_int_type(left, right, locals) {
+                        let suffix = Self::int_runtime_suffix(size, signed);
+                        let stem = if signed {
+                            if *op == BinOp::Div {
+                                "bl_idiv_"
+                            } else {
+                                "bl_irem_"
+                            }
+                        } else if *op == BinOp::Div {
+                            "bl_udiv_"
+                        } else {
+                            "bl_urem_"
+                        };
+                        return Ok(format!("{}{}({}, {})", stem, suffix, l, r));
+                    }
                 }
                 // String comparison: use strcmp when either operand is BuildString
                 if *op == BinOp::Eq || *op == BinOp::Ne {
@@ -3901,24 +4151,101 @@ impl CBackend {
                         });
                     }
                 }
+                // Shift-count masking. Rust wraps a shift count to the left
+                // operand's bit width (release semantics): `a << b` shifts by
+                // `b % bits`. C promotes a sub-`int` operand to 32-bit `int`
+                // before shifting, so a narrow type (i8/i16/u8/u16) shifted by
+                // a count at or past its width used the un-masked 32-bit count
+                // and printed a wrong value (255u8 >> 9 gave 0 instead of 127,
+                // 1u8 << 8 gave 0 instead of 1). Mask the count to the operand
+                // width for every integer width: for i32/i64 this equals the
+                // count-masking x86 already performs, so those stay correct
+                // while the narrow widths are fixed and the emitted C no longer
+                // depends on a target-specific shift rule. `<<`/`>>` bind
+                // tighter than `&`, so the masked count is fully parenthesized.
+                if *op == BinOp::Shl || *op == BinOp::Shr {
+                    let int_bits = |v: &MirValue| -> Option<u32> {
+                        let ty = match v {
+                            MirValue::Const(MirConst::Int(_, t))
+                            | MirValue::Const(MirConst::Uint(_, t)) => t,
+                            MirValue::Local(id) => &locals.get(id.0 as usize)?.ty,
+                            _ => return None,
+                        };
+                        match ty {
+                            MirType::Int(size, _) => Some(match size {
+                                IntSize::I8 => 8,
+                                IntSize::I16 => 16,
+                                IntSize::I32 => 32,
+                                IntSize::I64 | IntSize::ISize => 64,
+                                IntSize::I128 => 128,
+                            }),
+                            _ => None,
+                        }
+                    };
+                    if let Some(bits) = int_bits(left) {
+                        let op_str = self.binop_to_c(*op);
+                        return Ok(format!("({} {} (({}) & {}))", l, op_str, r, bits - 1));
+                    }
+                }
                 let op_str = self.binop_to_c(*op);
                 format!("({} {} {})", l, op_str, r)
             }
             MirRValue::UnaryOp { op, operand } => {
                 let v = self.value_to_c(operand, locals);
+                if *op == UnaryOp::Neg {
+                    if let Some((size, true)) = self.value_int_type(operand, locals) {
+                        let suffix = Self::int_runtime_suffix(size, true);
+                        return Ok(format!("bl_ineg_{}({})", suffix, v));
+                    }
+                }
                 let op_str = match op {
                     UnaryOp::Not => "!",
+                    UnaryOp::BitNot => "~",
                     UnaryOp::Neg => "-",
                 };
                 format!("({}{})", op_str, v)
             }
-            MirRValue::Ref { is_mut: _, place } => {
-                let local_name = self.local_name(place.local, locals);
-                format!("&{}", local_name)
+            MirRValue::Ref { is_mut: _, place } | MirRValue::AddressOf { is_mut: _, place } => {
+                // Address of the REAL location. A bare local keeps `&x`; a place
+                // with projections composes the lvalue (`&(arr[i].field)`) so a
+                // reference or a projected store writes through, never into a copy.
+                if place.projections.is_empty() {
+                    format!("&{}", self.local_name(place.local, locals))
+                } else {
+                    format!("&({})", self.place_to_c(place, locals)?)
+                }
             }
-            MirRValue::AddressOf { is_mut: _, place } => {
-                let local_name = self.local_name(place.local, locals);
-                format!("&{}", local_name)
+            MirRValue::Cast {
+                kind: CastKind::FloatToInt,
+                value,
+                ty,
+            } => {
+                // A raw C cast of a float outside the target integer's range,
+                // or of NaN, is undefined behavior. Route through a saturating
+                // helper so the result matches Rust's `as` (clamp to min/max,
+                // NaN -> 0). The outer cast pins the exact target C type, which
+                // covers isize/usize/i128 whose helper returns a wider integer.
+                let v = self.value_to_c(value, locals);
+                let t = self.type_to_c(ty);
+                let helper = match ty {
+                    MirType::Int(size, signed) => match (size, signed) {
+                        (IntSize::I8, true) => "bl_f2i_i8",
+                        (IntSize::I8, false) => "bl_f2i_u8",
+                        (IntSize::I16, true) => "bl_f2i_i16",
+                        (IntSize::I16, false) => "bl_f2i_u16",
+                        (IntSize::I32, true) => "bl_f2i_i32",
+                        (IntSize::I32, false) => "bl_f2i_u32",
+                        (IntSize::I64, true) | (IntSize::ISize, true) => "bl_f2i_i64",
+                        (IntSize::I64, false) | (IntSize::ISize, false) => "bl_f2i_u64",
+                        (IntSize::I128, _) => "bl_f2i_i128",
+                    },
+                    _ => "",
+                };
+                if helper.is_empty() {
+                    format!("(({}){})", t, v)
+                } else {
+                    format!("(({}){}({}))", t, helper, v)
+                }
             }
             MirRValue::Cast { kind: _, value, ty } => {
                 let v = self.value_to_c(value, locals);
@@ -3976,7 +4303,55 @@ impl CBackend {
                         }
                     }
                     AggregateKind::Variant(name, disc, variant_name) => {
-                        if vals.is_empty() {
+                        // Option/Result are prelude builtins with a fixed field
+                        // layout (`.has_value`/`.value`, `.is_ok`/`.ok`/`.err`)
+                        // that the runtime methods and match-lowering read. A
+                        // path-qualified construction (`Option::Some(x)`) reaches
+                        // this generic aggregate path when the program also
+                        // declares `enum Option`; emit the builtin shape so it
+                        // agrees with those readers instead of the generic
+                        // `.tag`/`.data` shape (which the Option typedef lacks).
+                        let is_builtin_sum = matches!(name.as_ref(), "Option" | "Result");
+                        if is_builtin_sum {
+                            let arg_ty = operands
+                                .first()
+                                .and_then(|operand| self.sumtype_arg_type(operand, locals));
+                            if arg_ty
+                                .as_ref()
+                                .map(Self::payload_needs_boxing)
+                                .unwrap_or(false)
+                            {
+                                return Err(CodegenError::Unsupported(format!(
+                                    "C backend cannot lower boxed {}::{} payload in expression form",
+                                    name, variant_name
+                                )));
+                            }
+                            let (option_slot, option_cast) =
+                                Self::option_payload_slot_and_cast(arg_ty.as_ref());
+                            let (ok_slot, ok_cast) =
+                                Self::result_payload_slot_and_cast(arg_ty.as_ref(), true);
+                            let (err_slot, err_cast) =
+                                Self::result_payload_slot_and_cast(arg_ty.as_ref(), false);
+                            match (name.as_ref(), variant_name.as_ref()) {
+                                ("Option", "Some") if !vals.is_empty() => format!(
+                                    "((Option){{ .has_value = true, .value = {{ .{} = {}{} }} }})",
+                                    option_slot, option_cast, vals[0]
+                                ),
+                                ("Option", "Some") => "((Option){ .has_value = true })".to_string(),
+                                ("Option", _) => "((Option){ .has_value = false })".to_string(),
+                                ("Result", "Ok") if !vals.is_empty() => format!(
+                                    "((Result){{ .is_ok = true, .ok = {{ .{} = {}{} }} }})",
+                                    ok_slot, ok_cast, vals[0]
+                                ),
+                                ("Result", "Ok") => "((Result){ .is_ok = true })".to_string(),
+                                ("Result", _) if !vals.is_empty() => format!(
+                                    "((Result){{ .is_ok = false, .err = {{ .{} = {}{} }} }})",
+                                    err_slot, err_cast, vals[0]
+                                ),
+                                ("Result", _) => "((Result){ .is_ok = false })".to_string(),
+                                _ => unreachable!(),
+                            }
+                        } else if vals.is_empty() {
                             // Unit variant - no data fields
                             format!("({}){{ .tag = {} }}", name, disc)
                         } else {
@@ -4047,11 +4422,11 @@ impl CBackend {
                 field_ty,
             } => {
                 let base_str = self.value_to_c(base, locals);
-                // Option payload read: `opt.value` is an 8-byte union; read the
-                // typed slot (`.i`/`.f`/`.p`) and cast back to the payload type.
+                // Option payload read: `opt.value` is a typed scalar union; read
+                // the width-correct slot and cast back to the payload type.
                 let base_is_option = matches!(base, MirValue::Local(id)
                     if locals.get(id.0 as usize)
-                        .map(|l| matches!(&l.ty, MirType::Struct(n) if n.as_ref() == "Option"))
+                        .map(|l| Self::is_option_type(&l.ty))
                         .unwrap_or(false));
                 if base_is_option && field_name.as_ref() == "value" {
                     // Boxed payload (>8 bytes): the .p slot holds a malloc'd
@@ -4060,11 +4435,7 @@ impl CBackend {
                         let ct = self.type_to_c(field_ty);
                         return Ok(format!("(*({}*){}.value.p)", ct, base_str));
                     }
-                    let slot = match field_ty {
-                        MirType::Float(_) => "f",
-                        MirType::Ptr(_) => "p",
-                        _ => "i",
-                    };
+                    let (slot, _) = Self::option_payload_slot_and_cast(Some(field_ty));
                     return Ok(format!(
                         "({}){}.value.{}",
                         self.type_to_c(field_ty),
@@ -4072,9 +4443,8 @@ impl CBackend {
                         slot
                     ));
                 }
-                // Result Ok payload read: `res.ok` is an 8-byte union; read the
-                // typed slot (`.ok_i`/`.ok_f`/`.ok_p`) and cast to the payload
-                // type. (`.err` is a plain BuildString field handled below.)
+                // Result Ok payload read: `res.ok` is a typed scalar union; read
+                // the width-correct slot and cast to the payload type.
                 let base_is_result = matches!(base, MirValue::Local(id)
                     if locals.get(id.0 as usize)
                         .map(|l| matches!(&l.ty, MirType::Struct(n) if n.as_ref() == "Result"))
@@ -4085,11 +4455,7 @@ impl CBackend {
                         let ct = self.type_to_c(field_ty);
                         return Ok(format!("(*({}*){}.ok.ok_p)", ct, base_str));
                     }
-                    let slot = match field_ty {
-                        MirType::Float(_) => "ok_f",
-                        MirType::Ptr(_) => "ok_p",
-                        _ => "ok_i",
-                    };
+                    let (slot, _) = Self::result_payload_slot_and_cast(Some(field_ty), true);
                     return Ok(format!(
                         "({}){}.ok.{}",
                         self.type_to_c(field_ty),
@@ -4104,11 +4470,7 @@ impl CBackend {
                         let ct = self.type_to_c(field_ty);
                         return Ok(format!("(*({}*){}.err.err_p)", ct, base_str));
                     }
-                    let slot = match field_ty {
-                        MirType::Float(_) => "err_f",
-                        MirType::Ptr(_) => "err_p",
-                        _ => "err_i",
-                    };
+                    let (slot, _) = Self::result_payload_slot_and_cast(Some(field_ty), false);
                     return Ok(format!(
                         "({}){}.err.{}",
                         self.type_to_c(field_ty),
@@ -4124,10 +4486,11 @@ impl CBackend {
                         .unwrap_or(false),
                     _ => false,
                 };
+                let field = Self::escape_c_keyword(field_name);
                 if is_ptr {
-                    format!("{}->{}", base_str, field_name)
+                    format!("{}->{}", base_str, field)
                 } else {
-                    format!("{}.{}", base_str, field_name)
+                    format!("{}.{}", base_str, field)
                 }
             }
             MirRValue::VariantField {
@@ -4169,7 +4532,8 @@ impl CBackend {
                             format!("build_hvec_get_str({}, {})", base_str, index_str)
                         }
                         MirType::Int(..) | MirType::Bool => {
-                            format!("build_hvec_get_i32({}, {})", base_str, index_str)
+                            let suffix = Self::hvec_elem_suffix(elem_ty);
+                            format!("build_hvec_get_{}({}, {})", suffix, base_str, index_str)
                         }
                         other => {
                             let ct = self.type_to_c(other);
@@ -4189,9 +4553,15 @@ impl CBackend {
                         _ => false,
                     };
                     if base_is_string {
-                        format!("((uint8_t*){}.ptr)[{}]", base_str, index_str)
+                        format!(
+                            "((uint8_t*){base_str}.ptr)[bl_idx_chk((long long)({index_str}), {base_str}.len)]"
+                        )
                     } else if let Some(access) =
                         Self::slice_element_access(base, &base_str, &index_str, locals)
+                    {
+                        access
+                    } else if let Some(access) =
+                        Self::array_element_access(base, &base_str, &index_str, locals)
                     {
                         access
                     } else {
@@ -4246,19 +4616,99 @@ impl CBackend {
         }
     }
 
+    fn value_int_type(&self, value: &MirValue, locals: &[MirLocal]) -> Option<(IntSize, bool)> {
+        match self.value_mir_type(value, locals)? {
+            MirType::Int(size, signed) => Some((*size, *signed)),
+            _ => None,
+        }
+    }
+
+    fn preferred_int_type(
+        &self,
+        left: &MirValue,
+        right: &MirValue,
+        locals: &[MirLocal],
+    ) -> Option<(IntSize, bool)> {
+        let local_ty = match left {
+            MirValue::Local(_) => self.value_int_type(left, locals),
+            _ => None,
+        }
+        .or_else(|| match right {
+            MirValue::Local(_) => self.value_int_type(right, locals),
+            _ => None,
+        });
+        local_ty
+            .or_else(|| self.value_int_type(left, locals))
+            .or_else(|| self.value_int_type(right, locals))
+    }
+
+    fn int_runtime_suffix(size: IntSize, signed: bool) -> &'static str {
+        match (size, signed) {
+            (IntSize::I8, true) => "i8",
+            (IntSize::I16, true) => "i16",
+            (IntSize::I32, true) => "i32",
+            (IntSize::I64, true) => "i64",
+            (IntSize::I128, true) => "i128",
+            (IntSize::ISize, true) => "isize",
+            (IntSize::I8, false) => "u8",
+            (IntSize::I16, false) => "u16",
+            (IntSize::I32, false) => "u32",
+            (IntSize::I64, false) => "u64",
+            (IntSize::I128, false) => "u128",
+            (IntSize::ISize, false) => "usize",
+        }
+    }
+
+    fn checked_int_binop_helper(op: BinOp, signed: bool) -> Option<&'static str> {
+        match (op, signed) {
+            (BinOp::Add, true) => Some("bl_iadd_"),
+            (BinOp::Sub, true) => Some("bl_isub_"),
+            (BinOp::Mul, true) => Some("bl_imul_"),
+            (BinOp::Add, false) => Some("bl_uadd_"),
+            (BinOp::Sub, false) => Some("bl_usub_"),
+            (BinOp::Mul, false) => Some("bl_umul_"),
+            _ => None,
+        }
+    }
+
+    fn explicit_int_binop_helper(op: BinOp, signed: bool) -> Option<&'static str> {
+        match (op, signed) {
+            (BinOp::AddChecked, true) => Some("bl_iadd_checked_"),
+            (BinOp::SubChecked, true) => Some("bl_isub_checked_"),
+            (BinOp::MulChecked, true) => Some("bl_imul_checked_"),
+            (BinOp::AddWrapping, true) => Some("bl_iadd_wrapping_"),
+            (BinOp::SubWrapping, true) => Some("bl_isub_wrapping_"),
+            (BinOp::MulWrapping, true) => Some("bl_imul_wrapping_"),
+            (BinOp::AddSaturating, true) => Some("bl_iadd_saturating_"),
+            (BinOp::SubSaturating, true) => Some("bl_isub_saturating_"),
+            (BinOp::MulSaturating, true) => Some("bl_imul_saturating_"),
+            (BinOp::AddChecked, false) => Some("bl_uadd_checked_"),
+            (BinOp::SubChecked, false) => Some("bl_usub_checked_"),
+            (BinOp::MulChecked, false) => Some("bl_umul_checked_"),
+            (BinOp::AddWrapping, false) => Some("bl_uadd_wrapping_"),
+            (BinOp::SubWrapping, false) => Some("bl_usub_wrapping_"),
+            (BinOp::MulWrapping, false) => Some("bl_umul_wrapping_"),
+            (BinOp::AddSaturating, false) => Some("bl_uadd_saturating_"),
+            (BinOp::SubSaturating, false) => Some("bl_usub_saturating_"),
+            (BinOp::MulSaturating, false) => Some("bl_umul_saturating_"),
+            _ => None,
+        }
+    }
+
     /// Resolve the MIR type of a value passed to a sum-type constructor
     /// (`Ok`/`Err`/`Some`), for deciding whether the payload must be boxed.
     /// Beyond locals, this recognizes the `None` value (a `Global`/`Function`
     /// literal that is an `Option`), so `Ok(None)` / `Some(None)` box correctly
     /// instead of casting the Option struct into the scalar slot.
     fn sumtype_arg_type(&self, value: &MirValue, locals: &[MirLocal]) -> Option<MirType> {
-        match value {
-            MirValue::Local(id) => locals.get(id.0 as usize).map(|l| l.ty.clone()),
-            MirValue::Global(n) | MirValue::Function(n) if n.as_ref() == "None" => {
-                Some(MirType::Struct(Arc::from("Option")))
-            }
-            _ => None,
-        }
+        self.value_mir_type(value, locals)
+            .cloned()
+            .or_else(|| match value {
+                MirValue::Global(n) | MirValue::Function(n) if n.as_ref() == "None" => {
+                    Some(MirType::Option(Box::new(MirType::i32())))
+                }
+                _ => None,
+            })
     }
 
     fn value_is_build_string(&self, value: &MirValue, locals: &[MirLocal]) -> bool {
@@ -4270,11 +4720,14 @@ impl CBackend {
 
     fn printf_specifier_for_value(&self, value: &MirValue, locals: &[MirLocal]) -> &'static str {
         match self.value_mir_type(value, locals) {
-            Some(MirType::Int(IntSize::I64 | IntSize::I128 | IntSize::ISize, true)) => "%lld",
-            Some(MirType::Int(IntSize::I64 | IntSize::I128 | IntSize::ISize, false)) => "%llu",
+            Some(MirType::Int(IntSize::I128, _)) => "%s",
+            Some(MirType::Int(IntSize::I64 | IntSize::ISize, true)) => "%lld",
+            Some(MirType::Int(IntSize::I64 | IntSize::ISize, false)) => "%llu",
             Some(MirType::Int(_, true)) => "%d",
             Some(MirType::Int(_, false)) => "%u",
-            Some(MirType::Float(_)) => "%g",
+            // Floats print via a runtime formatter that renders Rust's Display
+            // (shortest round-tripping decimal), passed through printf as "%s".
+            Some(MirType::Float(_)) => "%s",
             Some(MirType::Bool) => "%s",
             Some(MirType::Ptr(_)) => "%p",
             Some(MirType::Struct(name)) if name.as_ref() == "BuildString" => "%s",
@@ -4293,8 +4746,52 @@ impl CBackend {
                 MirValue::Const(MirConst::Str(idx)) => format!("__str{}", idx),
                 _ => format!("{}.ptr", rendered),
             }
+        } else if let Some(MirType::Float(size)) = self.value_mir_type(value, locals) {
+            // Render floats with the runtime shortest-round-trip formatter so
+            // printed output matches Rust's Display instead of %g's 6 digits.
+            match size {
+                FloatSize::F32 => format!("bl_fmt_f32({})", rendered),
+                FloatSize::F64 => format!("bl_fmt_f64({})", rendered),
+            }
+        } else if let Some(MirType::Int(IntSize::I128, signed)) = self.value_mir_type(value, locals)
+        {
+            if *signed {
+                format!("bl_fmt_i128({})", rendered)
+            } else {
+                format!("bl_fmt_u128({})", rendered)
+            }
         } else {
             rendered
+        }
+    }
+
+    /// Materialize an argument for a C variadic print call. 128-bit integers need
+    /// caller-owned buffers: `bl_fmt_i128`/`bl_fmt_u128` return static-ring
+    /// pointers, and a single call with more than the ring's slot count can reuse
+    /// a pointer before `printf` consumes it. This method is called after the
+    /// surrounding terminator already emitted indentation; if it emits prelude
+    /// lines, it leaves indentation ready for the final `printf`/`fprintf` line.
+    fn materialize_print_arg_to_c(&mut self, value: &MirValue, locals: &[MirLocal]) -> String {
+        let i128_signed = match self.value_mir_type(value, locals) {
+            Some(MirType::Int(IntSize::I128, signed)) => Some(*signed),
+            _ => None,
+        };
+
+        if let Some(signed) = i128_signed {
+            let rendered = self.value_to_c(value, locals);
+            let buffer = self.fresh_temp();
+            let helper = if signed {
+                "bl_fmt_i128_into"
+            } else {
+                "bl_fmt_u128_into"
+            };
+            write!(self.output, "char {}[64];\n", buffer).unwrap();
+            self.write_indent();
+            write!(self.output, "{}({}, {});\n", helper, buffer, rendered).unwrap();
+            self.write_indent();
+            buffer
+        } else {
+            self.print_arg_to_c(value, locals)
         }
     }
 
@@ -4365,11 +4862,10 @@ impl CBackend {
                 c_format.push('\n');
             }
             let escaped_format = self.escape_string(&c_format);
-            let rendered_args = args
-                .iter()
-                .skip(1)
-                .map(|arg| self.print_arg_to_c(arg, locals))
-                .collect::<Vec<_>>();
+            let mut rendered_args = Vec::new();
+            for arg in args.iter().skip(1) {
+                rendered_args.push(self.materialize_print_arg_to_c(arg, locals));
+            }
             if is_err {
                 write!(self.output, "fprintf(stderr, \"{}\"", escaped_format).unwrap();
             } else {
@@ -4386,7 +4882,7 @@ impl CBackend {
                 self.printf_specifier_for_value(&args[0], locals)
                     .to_string()
             };
-            let arg = self.print_arg_to_c(&args[0], locals);
+            let arg = self.materialize_print_arg_to_c(&args[0], locals);
             if is_err {
                 write!(self.output, "fprintf(stderr, \"{}\", {});\n", format, arg).unwrap();
             } else {
@@ -4464,7 +4960,7 @@ impl CBackend {
         match op {
             BinOp::Add | BinOp::AddChecked | BinOp::AddWrapping | BinOp::AddSaturating => "+",
             BinOp::Sub | BinOp::SubChecked | BinOp::SubWrapping | BinOp::SubSaturating => "-",
-            BinOp::Mul | BinOp::MulChecked | BinOp::MulWrapping => "*",
+            BinOp::Mul | BinOp::MulChecked | BinOp::MulWrapping | BinOp::MulSaturating => "*",
             BinOp::Div => "/",
             BinOp::Rem => "%",
             BinOp::BitAnd => "&",
@@ -4509,6 +5005,69 @@ impl CBackend {
                 }
             })
             .unwrap_or_else(|| format!("_{}", id.0))
+    }
+
+    /// Render a place (lvalue) as a C expression: the base local followed by
+    /// each projection. `&(place_to_c(p))` is the address of the REAL location,
+    /// which is what makes `&mut p.x`, `&mut arr[i]`, `arr[0].x = v`, and
+    /// `a.b.c = v` write through instead of into a copied temporary. Deref and
+    /// Field track the running type so a field through a pointer renders `->`.
+    fn place_to_c(&self, place: &MirPlace, locals: &[MirLocal]) -> CodegenResult<String> {
+        let mut expr = self.local_name(place.local, locals);
+        let mut cur_ty = locals.get(place.local.0 as usize).map(|l| l.ty.clone());
+        // Unwrap one collection layer to the element type (for an Index step).
+        let elem_of = |ty: &Option<MirType>| -> Option<MirType> {
+            match ty {
+                Some(MirType::Array(elem, _))
+                | Some(MirType::Slice(elem))
+                | Some(MirType::Vec(elem)) => Some((**elem).clone()),
+                Some(MirType::Ptr(inner)) => match inner.as_ref() {
+                    MirType::Array(elem, _) | MirType::Slice(elem) => Some((**elem).clone()),
+                    other => Some(other.clone()),
+                },
+                _ => None,
+            }
+        };
+        for proj in &place.projections {
+            match proj {
+                PlaceProjection::Deref => {
+                    expr = format!("(*{})", expr);
+                    cur_ty = match cur_ty {
+                        Some(MirType::Ptr(inner)) => Some(*inner),
+                        _ => None,
+                    };
+                }
+                PlaceProjection::Field(_idx, name, fty) => {
+                    let field = Self::escape_c_keyword(name);
+                    if matches!(cur_ty, Some(MirType::Ptr(_))) {
+                        expr = format!("{}->{}", expr, field);
+                    } else {
+                        expr = format!("({}).{}", expr, field);
+                    }
+                    cur_ty = Some(fty.clone());
+                }
+                PlaceProjection::Index(idx_local) => {
+                    let idx = self.local_name(*idx_local, locals);
+                    expr = format!("({})[{}]", expr, idx);
+                    cur_ty = elem_of(&cur_ty);
+                }
+                PlaceProjection::ConstantIndex { offset, from_end } => {
+                    if *from_end {
+                        return Err(CodegenError::Internal(
+                            "from-end constant index is not supported as a C place".to_string(),
+                        ));
+                    }
+                    expr = format!("({})[{}]", expr, offset);
+                    cur_ty = elem_of(&cur_ty);
+                }
+                PlaceProjection::Subslice { .. } | PlaceProjection::Downcast(_) => {
+                    return Err(CodegenError::Internal(
+                        "subslice/downcast is not supported as a C place".to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(expr)
     }
 
     /// Increment 5: emit a guarded free for a flag-managed owner:
@@ -4564,21 +5123,19 @@ impl CBackend {
         )
     }
 
-    /// Check if a function name is a BuildLang runtime helper or a standard
-    /// C math/stdlib function that must NOT be escaped.  These names are
-    /// Escape C reserved keywords used as identifiers by appending an underscore.
+    /// Escape a struct/field identifier that collides with a reserved C word by
+    /// appending an underscore. Delegates to `is_c_reserved` so the definition
+    /// site and every access site share one list; a narrower hand-maintained set
+    /// here let MSVC-reserved names such as `near`/`far` (Win16 legacy keywords)
+    /// leak through as `double near;`, which MSVC rejects with C2208.
     fn escape_c_keyword(name: &str) -> String {
-        match name {
-            "default" | "register" | "volatile" | "signed" | "unsigned" | "auto" | "extern"
-            | "static" | "typedef" | "union" | "enum" | "struct" | "switch" | "case" | "break"
-            | "continue" | "goto" | "return" | "if" | "else" | "while" | "do" | "for"
-            | "inline" | "restrict" | "const" => format!("{}_", name),
-            _ => name.to_string(),
+        if Self::is_c_reserved(name) {
+            format!("{}_", name)
+        } else {
+            name.to_string()
         }
     }
 
-    /// produced by the lowerer for builtin operations and should pass through
-    /// to C unchanged.
     /// Collect block IDs that need labels (targeted by non-sequential jumps).
     /// A block needs a label if ANY block other than its immediate predecessor
     /// has a jump (goto/if/switch/call) targeting it.
@@ -4651,6 +5208,13 @@ impl CBackend {
         }
         fn collect_place(place: &MirPlace, used: &mut std::collections::HashSet<LocalId>) {
             used.insert(place.local);
+            // A place can index by a local (`base[i]`); that index local is used
+            // by the emitted lvalue even though it never appears as a value here.
+            for proj in &place.projections {
+                if let PlaceProjection::Index(idx) = proj {
+                    used.insert(*idx);
+                }
+            }
         }
 
         for block in blocks {
@@ -4913,6 +5477,195 @@ mod tests {
     // =========================================================================
     // C BACKEND TESTS
     // =========================================================================
+
+    fn function_style_print_mir_module() -> MirModule {
+        let mut module = MirModule::new("function_style_print_streams");
+        let out_fmt = module.intern_string("out {}");
+        let txt = module.intern_string("txt");
+        let stdout_bool_fmt = module.intern_string(" {}");
+        let err_fmt = module.intern_string("err {}");
+        let stderr_bool_fmt = module.intern_string(" {}");
+
+        let mut func = MirFunction::new("main", MirFnSig::new(vec![], MirType::Void));
+        func.is_public = true;
+        func.linkage = Linkage::External;
+
+        let mut b0 = MirBlock::new(BlockId(0));
+        b0.set_terminator(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("print")),
+            args: vec![
+                MirValue::Const(MirConst::Str(out_fmt)),
+                MirValue::Const(MirConst::Str(txt)),
+            ],
+            dest: None,
+            target: Some(BlockId(1)),
+            unwind: None,
+        });
+        let mut b1 = MirBlock::new(BlockId(1));
+        b1.set_terminator(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("println")),
+            args: vec![
+                MirValue::Const(MirConst::Str(stdout_bool_fmt)),
+                MirValue::Const(MirConst::Bool(true)),
+            ],
+            dest: None,
+            target: Some(BlockId(2)),
+            unwind: None,
+        });
+        let mut b2 = MirBlock::new(BlockId(2));
+        b2.set_terminator(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("eprint")),
+            args: vec![
+                MirValue::Const(MirConst::Str(err_fmt)),
+                MirValue::Const(MirConst::Str(txt)),
+            ],
+            dest: None,
+            target: Some(BlockId(3)),
+            unwind: None,
+        });
+        let mut b3 = MirBlock::new(BlockId(3));
+        b3.set_terminator(MirTerminator::Call {
+            func: MirValue::Function(Arc::from("eprintln")),
+            args: vec![
+                MirValue::Const(MirConst::Str(stderr_bool_fmt)),
+                MirValue::Const(MirConst::Bool(false)),
+            ],
+            dest: None,
+            target: Some(BlockId(4)),
+            unwind: None,
+        });
+        let mut b4 = MirBlock::new(BlockId(4));
+        b4.set_terminator(MirTerminator::Return(None));
+        func.blocks = Some(vec![b0, b1, b2, b3, b4]);
+        module.add_function(func);
+        module
+    }
+
+    fn generate_c_from_mir(module: &MirModule) -> String {
+        let mut backend = CBackend::with_stdio_mode(StdioMode::PortableLf);
+        backend
+            .generate(module)
+            .expect("C backend should generate code")
+            .as_string()
+            .expect("generated C should be UTF-8")
+    }
+
+    fn c_compiler_for_test() -> Option<std::ffi::OsString> {
+        if let Some(cc) = std::env::var_os("CC") {
+            return Some(cc);
+        }
+
+        let candidates: &[&str] = if cfg!(windows) {
+            &["C:/Strawberry/c/bin/gcc.exe", "gcc", "cc"]
+        } else {
+            &["cc", "gcc"]
+        };
+        candidates
+            .iter()
+            .find(|candidate| {
+                std::process::Command::new(candidate)
+                    .arg("--version")
+                    .output()
+                    .map(|output| output.status.success())
+                    .unwrap_or(false)
+            })
+            .map(std::ffi::OsString::from)
+    }
+
+    fn assert_c_run_streams(
+        name: &str,
+        c_source: &str,
+        expected_stdout: &[u8],
+        expected_stderr: &[u8],
+    ) {
+        let Some(cc) = c_compiler_for_test() else {
+            eprintln!("skipping C backend execution test {name}: no C compiler found");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "buildlang_c_backend_run_{}_{}",
+            name,
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let source_path = dir.join("generated.c");
+        let exe_path = dir.join(format!("generated{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&source_path, c_source).expect("write generated C");
+
+        let mut compile_cmd = std::process::Command::new(&cc);
+        compile_cmd.arg(&source_path).arg("-o").arg(&exe_path);
+        compile_cmd.arg("-lm");
+        if cfg!(windows) {
+            compile_cmd.arg("-lws2_32");
+        }
+        let compile = compile_cmd.output().expect("invoke C compiler");
+        assert!(
+            compile.status.success(),
+            "C compiler failed for {name}\nstdout:\n{}\nstderr:\n{}\nsource:\n{}",
+            String::from_utf8_lossy(&compile.stdout),
+            String::from_utf8_lossy(&compile.stderr),
+            c_source
+        );
+
+        let run = std::process::Command::new(&exe_path)
+            .output()
+            .expect("run generated C executable");
+        assert!(
+            run.status.success(),
+            "generated C executable failed for {name}\nstdout:\n{}\nstderr:\n{}\nsource:\n{}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr),
+            c_source
+        );
+        assert_eq!(run.stdout, expected_stdout);
+        assert_eq!(run.stderr, expected_stderr);
+    }
+
+    #[test]
+    fn c_integer_arithmetic_helper_table_keeps_explicit_mir_ops_distinct() {
+        assert_eq!(
+            CBackend::checked_int_binop_helper(BinOp::Add, true),
+            Some("bl_iadd_")
+        );
+        assert_eq!(
+            CBackend::checked_int_binop_helper(BinOp::Sub, false),
+            Some("bl_usub_")
+        );
+        assert_eq!(
+            CBackend::checked_int_binop_helper(BinOp::Mul, true),
+            Some("bl_imul_")
+        );
+
+        for op in [BinOp::AddChecked, BinOp::SubChecked, BinOp::MulChecked] {
+            assert_eq!(CBackend::checked_int_binop_helper(op, true), None);
+            assert_eq!(CBackend::checked_int_binop_helper(op, false), None);
+        }
+
+        assert_eq!(
+            CBackend::explicit_int_binop_helper(BinOp::AddChecked, true),
+            Some("bl_iadd_checked_")
+        );
+        assert_eq!(
+            CBackend::explicit_int_binop_helper(BinOp::SubWrapping, false),
+            Some("bl_usub_wrapping_")
+        );
+        assert_eq!(
+            CBackend::explicit_int_binop_helper(BinOp::MulSaturating, true),
+            Some("bl_imul_saturating_")
+        );
+    }
+
+    #[test]
+    fn generated_c_runs_function_style_prints_on_requested_streams() {
+        let module = function_style_print_mir_module();
+        let c = generate_c_from_mir(&module);
+        assert_c_run_streams(
+            "function_style_print_streams",
+            &c,
+            b"out txt true\n",
+            b"err txt false\n",
+        );
+    }
 
     #[test]
     fn test_c_backend_simple() {
@@ -6911,14 +7664,18 @@ fn main() {
             .expect("Failed to generate C code");
         let code = output.as_string().unwrap();
 
-        // Verify struct constant globals are emitted with initializers
+        // Verify struct constant globals are emitted with initializers.
+        // Static-storage globals use a brace-init list `{ ... }`, NOT a compound
+        // literal `(Color){ ... }`: a compound literal is not a constant
+        // expression, so MSVC rejects it as a file-scope initializer with C2099.
+        // See `const_to_c_static`. Do not reintroduce the `(Color)` cast here.
         assert!(
-            code.contains("const Color WHITE = (Color)"),
+            code.contains("const Color WHITE = {"),
             "Expected const Color WHITE global in:\n{}",
             code
         );
         assert!(
-            code.contains("const Color BLACK = (Color)"),
+            code.contains("const Color BLACK = {"),
             "Expected const Color BLACK global in:\n{}",
             code
         );
@@ -7238,8 +7995,8 @@ fn main() {
         );
         // Should have an increment by 1
         assert!(
-            code.contains("+ 1)"),
-            "Expected increment by 1 in:\n{}",
+            code.contains("bl_iadd_i32(") && code.contains(", 1)"),
+            "Expected checked increment by 1 in:\n{}",
             code
         );
     }
@@ -7275,8 +8032,8 @@ fn main() {
         );
         // step_by(2): increment by 2 instead of 1
         assert!(
-            code.contains("+ 2)"),
-            "Expected increment by 2 for step_by(2) in:\n{}",
+            code.contains("bl_iadd_i32(") && code.contains(", 2)"),
+            "Expected checked increment by 2 for step_by(2) in:\n{}",
             code
         );
     }
@@ -7312,8 +8069,8 @@ fn main() {
         );
         // step_by(3): increment by 3
         assert!(
-            code.contains("+ 3)"),
-            "Expected increment by 3 for step_by(3) in:\n{}",
+            code.contains("bl_iadd_i32(") && code.contains(", 3)"),
+            "Expected checked increment by 3 for step_by(3) in:\n{}",
             code
         );
     }

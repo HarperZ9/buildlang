@@ -266,6 +266,14 @@ pub enum TypeError {
     #[error("cannot apply unary operator `{op}` to type `{ty}`")]
     InvalidUnaryOp { op: String, ty: Ty },
 
+    /// Integer literal does not fit the requested concrete integer type.
+    #[error("integer literal `{literal}` is out of range for type `{ty}`")]
+    IntegerLiteralOutOfRange { literal: String, ty: String },
+
+    /// Compile-time integer arithmetic overflow in a constant expression.
+    #[error("integer overflow in {op} for type `{ty}`")]
+    IntegerOverflow { op: String, ty: String },
+
     /// Invalid assignment target.
     #[error("invalid assignment target")]
     InvalidAssignTarget,
@@ -303,6 +311,10 @@ pub enum TypeError {
     /// Continue outside of loop.
     #[error("`continue` outside of loop")]
     ContinueOutsideLoop,
+
+    /// Reference to a loop label that is not in scope.
+    #[error("use of undefined loop label `'{label}`")]
+    UndefinedLoopLabel { label: String },
 
     /// Return outside of function.
     #[error("`return` outside of function")]
@@ -427,12 +439,25 @@ pub enum TypeError {
         left: String,
         right: String,
     },
+
+    // =========================================================================
+    // MODULE ERRORS
+    // =========================================================================
+    /// A `mod NAME;` chain resolves back to a file already being loaded.
+    /// Reported instead of recursing into a stack overflow: the module graph
+    /// has a cycle and cannot be loaded. Names the path and the module that
+    /// closed the loop.
+    #[error("module import cycle: `{path}` is already being loaded (module `{module}` imports back into it)")]
+    ModuleImportCycle { path: String, module: String },
 }
 
 impl TypeError {
     /// Check if this is a fatal error that should stop type checking.
     pub fn is_fatal(&self) -> bool {
-        matches!(self, TypeError::Internal(_))
+        matches!(
+            self,
+            TypeError::Internal(_) | TypeError::ModuleImportCycle { .. }
+        )
     }
 
     /// Get a suggested fix for this error.
@@ -481,11 +506,20 @@ impl TypeError {
                     operation, effect_name, operation, operation
                 ))
             }
+            TypeError::UndefinedLoopLabel { label } => {
+                Some(format!(
+                    "label an enclosing loop with `'{}:` (for example `'{}: loop {{ ... }}`)",
+                    label, label
+                ))
+            }
             TypeError::NonExhaustiveMatch { missing_variants } => {
                 Some(format!(
                     "add arms for the missing variants: {}, or add a wildcard `_` arm",
                     missing_variants.join(", ")
                 ))
+            }
+            TypeError::NonExhaustivePatterns => {
+                Some("add a wildcard `_` arm to cover the remaining values".to_string())
             }
             _ => None,
         }
