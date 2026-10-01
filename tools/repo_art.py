@@ -245,7 +245,7 @@ def header_svg(spec: dict) -> str:
     accent, cool = _hue_pair(rng)
     cx, cy = 1012.0, 168.0
     words = "  /  ".join(w.upper() for w in spec.get("words", []))
-    meta = f'{spec.get("publisher", "ZENTROPY LABS")}  /  {spec["role"].upper()}'
+    meta = f'{spec.get("publisher", "ZAIN DANA HARPER")}  /  {spec["role"].upper()}'
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 340" '
         f'width="1280" height="340" role="img" '
