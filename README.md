@@ -338,6 +338,13 @@ re-run beats assertions you have to trust.
 
 ## License
 
-BuildLang Fair-Source License v1.0, source-available, not open source: read
-it, run it, build on it; commercial use that competes with the project is
-reserved. See [LICENSE](LICENSE).
+Text: CC BY 4.0. Code: BuildLang Fair-Source v1.0.
+
+The paper in [`papers/`](papers/) is licensed CC BY 4.0, the same licence its
+Zenodo deposit records. Share and adapt it with credit to Zain Dana Harper; the
+terms are in [`LICENSE-TEXT`](LICENSE-TEXT).
+
+The compiler, toolchain and their documentation are under the BuildLang
+Fair-Source License v1.0, source-available, not open source: read it, run it,
+build on it; commercial use that competes with the project is reserved. See
+[LICENSE](LICENSE).
