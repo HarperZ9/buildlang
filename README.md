@@ -1,13 +1,20 @@
-<p align="center"><img src="docs/art/buildlang-header.svg" alt="buildlang: systems language with typed effects. What a program is allowed to reach is part of its type." width="100%"></p>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/HarperZ9/buildlang/main/docs/art/hero-dark.svg">
+  <img src="https://raw.githubusercontent.com/HarperZ9/buildlang/main/docs/art/hero-light.svg" alt="buildlang: Systems language with typed capability effects and native C output. A fine lattice of lines bulges outward around a bright core, as if seen through a lens, inside a ring." width="100%">
+</picture>
 
-**A real systems language: typed capability effects, sum and linear types, C FFI, native binaries.**
+# buildlang
 
-[![crates.io](https://img.shields.io/crates/v/buildlang?style=flat-square&labelColor=14041b&color=ff8334)](https://crates.io/crates/buildlang/)
-[![license: BuildLang Fair-Source](https://img.shields.io/badge/license-BuildLang_Fair--Source-8f8095?style=flat-square&labelColor=14041b)](LICENSE)
-[![downloads](https://img.shields.io/crates/dv/buildlang?label=downloads&style=flat-square&labelColor=14041b)](https://crates.io/crates/buildlang/)
-![rust](https://img.shields.io/badge/rust-edition_2021-orange?style=flat-square&labelColor=14041b)
+Systems language with typed capability effects and native C output.
+
+```
+cargo install buildlang
+```
+
+[![version: 1.4.0](https://img.shields.io/badge/version-1.4.0-e6e1d6?style=flat-square&labelColor=1a1712)](https://github.com/HarperZ9/buildlang/releases/latest)
 [![CI](https://github.com/HarperZ9/buildlang/actions/workflows/ci.yml/badge.svg)](https://github.com/HarperZ9/buildlang/actions/workflows/ci.yml)
-[![part of: Build ecosystem](https://img.shields.io/badge/part_of-Build_ecosystem-00b3a4?style=flat-square&labelColor=14041b)](https://github.com/HarperZ9/build-universe)
+[![license](https://img.shields.io/badge/license-BuildLang_Fair--Source-e6e1d6?style=flat-square&labelColor=1a1712)](https://github.com/HarperZ9/buildlang/blob/main/LICENSE)
+![rust edition 2021](https://img.shields.io/badge/rust-edition_2021-e6e1d6?style=flat-square&labelColor=1a1712)
 
 BuildLang compiles `.bld` source to native binaries through a C backend, emits
 HLSL and GLSL for shader work, and carries experimental SPIR-V, LLVM IR,
