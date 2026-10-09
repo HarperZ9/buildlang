@@ -10,6 +10,8 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+## 1.5.0 - 2026-10-09 - formatting macros fail closed
+
 - **A formatting macro with a non-literal first argument is a compile error.**
   `println!(read_file("ops.toml"))` used to compile and print the path
   `ops.toml`: the lowering took the first string literal anywhere in the macro
@@ -21,6 +23,15 @@ tracked in `STATUS.md`, `README.md`, and
   in `tests/programs`, `examples` or `semantic-corpus` changes verdict (215
   files checked before and after). Regression tests in `compiler/tests/cli.rs`
   fail on the pre-fix compiler.
+- Integer literals are range-checked against the parameter type at call sites
+  (PR #54), and the semantic arithmetic corpus gained receipt guards (PR #53).
+- Written works (docs, paper, art) are licensed CC BY 4.0; the code stays under the
+  BuildLang Fair-Source License v1.0 (PR #57). Published under the operating name
+  Zain Dana Harper (PR #56).
+- The BuildLang paper (plain-language edition) is in `papers/`; the repository
+  explainer is in `docs/explainer/` (PR #60); CI verifies the art receipt digests
+  (PR #59).
+- Dependency update: thiserror 2.0.21 (PR #55).
 
 ## 1.4.0 - 2026-09-10 - defined arithmetic and portable stdio
 
