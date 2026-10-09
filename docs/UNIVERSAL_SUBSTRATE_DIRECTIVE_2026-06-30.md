@@ -1,8 +1,13 @@
+> **Superseded 2026-10-09** by `docs/AGENTIC_LANGUAGE_DIRECTIVE_2026-10-09.md`, which
+> makes BuildLang the language for agent code whose authority must be bounded and whose
+> actions must be provable. The work this directive started stays in the language and
+> keeps its tests. This document is preserved unedited below (except this banner and the
+> status line) for the provenance trail; it no longer governs posture.
+
 # Universal Substrate Directive - 2026-06-30
 
-Status: in force. This is the named source of truth for the project's posture and
-direction. Where any in-tree document disagrees with this directive, this directive
-governs until a later dated successor replaces it.
+Status: superseded 2026-10-09. Preserved for provenance. See the successor directive for
+the current posture.
 
 ## Supersession Notice
 
