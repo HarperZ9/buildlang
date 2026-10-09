@@ -10,6 +10,18 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- **A formatting macro with a non-literal first argument is a compile error.**
+  `println!(read_file("ops.toml"))` used to compile and print the path
+  `ops.toml`: the lowering took the first string literal anywhere in the macro
+  tokens as the format string and dropped every token before it, so the
+  `read_file` call never ran. `println!(r#"text"#)` printed an empty line for the
+  same reason. `println!`, `print!`, `eprintln!`, `eprint!` and `format!` now
+  reject a first argument that is not a plain string literal, with a source
+  location and a `help:` line that suggests `println!("{}", <expr>)`. No program
+  in `tests/programs`, `examples` or `semantic-corpus` changes verdict (215
+  files checked before and after). Regression tests in `compiler/tests/cli.rs`
+  fail on the pre-fix compiler.
+
 ## 1.4.0 - 2026-09-10 - defined arithmetic and portable stdio
 
 - Release the post-`v1.3.0` mainline compiler updates from PR #49 through PR #51: portable stdio/W1 stream semantics, generated VS Code dependency lockfile repair, and checked integer arithmetic plus match-result lowering coverage.

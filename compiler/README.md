@@ -260,7 +260,7 @@ Compile-time ambient macros are gated as capability access too:
 `env!` and `option_env!` require `Environment`. Receipts record the exact macro
 source, such as `include_str!` or `env!`, under `observed_capabilities`.
 Macro argument token trees are scanned for ambient capability use as well, so
-`println!(read_file("ops.toml"))` requires both `Console` and `FileSystem` and
+`println!("{}", read_file("ops.toml"))` requires both `Console` and `FileSystem` and
 records `println!` plus `read_file` in the receipt. The scan is backed by
 `SourceId` provenance, so the same gate applies when a macro invocation lives
 inside an external `mod` file. Unknown extern calls and foreign static reads
