@@ -74,11 +74,15 @@ source is [docs/explainer/index.html](docs/explainer/index.html).
 
 ## Install
 
-From crates.io (installs the `buildc` binary):
+From crates.io (installs the `buildc` binary, version 1.5.0):
 
 ```bash
 cargo install buildlang
 ```
+
+The crate ships the compiler only. Programs that `use` the standard library
+need the `stdlib/` directory from a clone of this repository; point
+`BUILDLANG_STDLIB` at it. `buildc doctor` reports whether it was found.
 
 > Previously published as `quantalang`; that crate is deprecated and points
 > here. Use `buildlang` / `buildc`.

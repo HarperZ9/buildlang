@@ -232,9 +232,10 @@ footer.foot p{max-width:70ch;margin:0 0 .6rem}
 
 <section class="block wrap" aria-labelledby="try">
   <h2 id="try">Try it</h2>
-  <div class="measure"><p>Build from source; crates.io still carries version 1.2.0, and this page shows 1.4.0. <code>buildc run</code> needs a C compiler (gcc, clang or MSVC) on your PATH.</p></div>
-<pre class="cmd"><code>$ git clone https://github.com/HarperZ9/buildlang && cd buildlang
-$ cargo install --path compiler
+  <div class="measure"><p>Install 1.5.0 from crates.io, then clone the repository for the examples. <code>buildc run</code> needs a C compiler (gcc, clang or MSVC) on your PATH. The crate ships the compiler only, so point <code>BUILDLANG_STDLIB</code> at the clone's <code>stdlib/</code>. The page's output was recorded with 1.4.0; these commands were rerun with the crates.io 1.5.0 build and give the same results.</p></div>
+<pre class="cmd"><code>$ cargo install buildlang
+$ git clone https://github.com/HarperZ9/buildlang && cd buildlang
+$ export BUILDLANG_STDLIB="$PWD/stdlib"
 $ buildc run examples/quickstart/ledger.bld
 <span class="out">balance: 115</span>
 $ buildc check examples/quickstart/hello.bld --profile console-only --receipt -
