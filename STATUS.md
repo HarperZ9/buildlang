@@ -1,11 +1,12 @@
 # BuildLang Project Status
 
-Release verification: 2026-09-10 for 1.4.0. The broader architecture audit remains
-2026-06-15; dated findings below retain their original scope.
+Release verification: 2026-10-09 for 1.5.0. The broader architecture audit remains
+2026-06-15; dated findings below retain their original scope. Current direction:
+`docs/AGENTIC_LANGUAGE_DIRECTIVE_2026-10-09.md`.
 
 The full local `cargo test --manifest-path compiler/Cargo.toml --quiet` run with
-`RUSTFLAGS=-Dwarnings` passed: lib 1,054, bin 202, cli 390, gpu 12, lexer 53,
-parser 98, stdio_mode 9; total 1,818 passed, 0 failed, 11 ignored (3 lib, 8 doc).
+`RUSTFLAGS=-Dwarnings` passed: lib 1,054, bin 202, cli 405, gpu 12, lexer 53,
+parser 98, stdio_mode 9; total 1,833 passed, 0 failed, 11 ignored (3 lib, 8 doc).
 Formatting, repository-art verification, and the optimized strict-warning build
 also passed. These default-feature checks do not establish optional GPU device
 behavior, performance superiority, or complete experimental-backend parity.

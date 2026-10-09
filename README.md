@@ -11,7 +11,7 @@ Systems language with typed capability effects and native C output.
 cargo install buildlang
 ```
 
-[![version: 1.4.0](https://img.shields.io/badge/version-1.4.0-e6e1d6?style=flat-square&labelColor=1a1712)](https://github.com/HarperZ9/buildlang/releases/latest)
+[![version: 1.5.0](https://img.shields.io/badge/version-1.5.0-e6e1d6?style=flat-square&labelColor=1a1712)](https://github.com/HarperZ9/buildlang/releases/latest)
 [![CI](https://github.com/HarperZ9/buildlang/actions/workflows/ci.yml/badge.svg)](https://github.com/HarperZ9/buildlang/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-BuildLang_Fair--Source-e6e1d6?style=flat-square&labelColor=1a1712)](https://github.com/HarperZ9/buildlang/blob/main/LICENSE)
 ![rust edition 2021](https://img.shields.io/badge/rust-edition_2021-e6e1d6?style=flat-square&labelColor=1a1712)
@@ -286,12 +286,12 @@ correctness of the interval.
 
 ## Status and maturity
 
-BuildLang 1.4.0. The C backend, capability-effect checking, HLSL/GLSL
+BuildLang 1.5.0. The C backend, capability-effect checking, HLSL/GLSL
 output, and the receipt tooling are the verified core; SPIR-V, LLVM IR, WASM,
 Rust, x86-64, ARM64, GPU dispatch, and `#[linear]` types are labeled
 experimental and stay that way until their evidence says otherwise. The
-release-shaped baseline (2026-09-10, local `cargo test` from `compiler/`
-with `RUSTFLAGS=-Dwarnings`): 1,818 tests passing, 0 failing (11 ignored).
+release-shaped baseline (2026-10-09, local `cargo test` from `compiler/`
+with `RUSTFLAGS=-Dwarnings`): 1,833 tests passing, 0 failing (11 ignored).
 The corpus is 30 `.bld` example kernels and 8 C-execution receipts.
 Ground-truth release evidence lives in
 [STATUS.md](STATUS.md); [CHANGELOG.md](CHANGELOG.md) tracks changes.
