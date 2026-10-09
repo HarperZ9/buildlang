@@ -449,6 +449,18 @@ pub enum TypeError {
     /// closed the loop.
     #[error("module import cycle: `{path}` is already being loaded (module `{module}` imports back into it)")]
     ModuleImportCycle { path: String, module: String },
+
+    // =========================================================================
+    // MACRO ERRORS
+    // =========================================================================
+    /// A formatting macro (`println!`, `print!`, `eprintln!`, `eprint!`,
+    /// `format!`) whose first argument is not a string literal. The lowering
+    /// takes its format string from the first string literal it finds, so
+    /// `println!(read_file("ops.toml"))` used to print the path `ops.toml`
+    /// instead of the file contents, and `println!(r#"text"#)` printed an
+    /// empty line. The call is rejected instead.
+    #[error("`{macro_name}!` needs a plain string literal as its first argument, found {found}")]
+    FormatArgNotStringLiteral { macro_name: String, found: String },
 }
 
 impl TypeError {
@@ -520,6 +532,19 @@ impl TypeError {
             }
             TypeError::NonExhaustivePatterns => {
                 Some("add a wildcard `_` arm to cover the remaining values".to_string())
+            }
+            TypeError::FormatArgNotStringLiteral { macro_name, found } => {
+                if found.starts_with("a raw") {
+                    Some(format!(
+                        "raw strings are not supported as format strings yet; write a plain \"...\" literal with escapes, or pass the raw string as a value: `{}!(\"{{}}\", r#\"...\"#)`",
+                        macro_name
+                    ))
+                } else {
+                    Some(format!(
+                        "pass the value through a `{{}}` placeholder: `{}!(\"{{}}\", <expr>)`",
+                        macro_name
+                    ))
+                }
             }
             _ => None,
         }

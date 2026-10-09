@@ -624,6 +624,61 @@ impl<'ctx> TypeInfer<'ctx> {
         }
     }
 
+    /// Reject a formatting macro whose first argument is not a string literal.
+    ///
+    /// The lowering (`prepare_format_call`) takes the format string from the
+    /// first string literal anywhere in the token tree and skips every token
+    /// before it. For `println!(read_file("ops.toml"))` that literal is the
+    /// path argument, so the program printed `ops.toml` and never read the
+    /// file. A raw string (`r#"..."#`) is not recognised as a format string
+    /// at all, so it printed an empty line. Failing closed here turns both
+    /// silent miscompiles into a source-located error with a fix suggestion.
+    fn check_format_macro_first_arg(
+        &mut self,
+        macro_name: &str,
+        tokens: &[ast::TokenTree],
+        span: Span,
+    ) {
+        use crate::lexer::LiteralKind;
+
+        if !matches!(
+            macro_name,
+            "println" | "print" | "eprintln" | "eprint" | "format"
+        ) {
+            return;
+        }
+        // The parser may hand over the arguments either bare or wrapped in
+        // the macro's own delimiter group.
+        let inner: &[ast::TokenTree] = match tokens {
+            [ast::TokenTree::Delimited { tokens: inner, .. }] => inner,
+            other => other,
+        };
+        let Some(first) = inner.first() else {
+            // `println!()` prints a bare newline; nothing to check.
+            return;
+        };
+        let found = match first {
+            ast::TokenTree::Token(Token {
+                kind: TokenKind::Literal { kind, .. },
+                ..
+            }) => match kind {
+                LiteralKind::Str { .. } => return,
+                LiteralKind::RawStr { .. } => "a raw string literal",
+                _ => "a non-string literal",
+            },
+            _ => "an expression",
+        };
+        let error = TypeError::FormatArgNotStringLiteral {
+            macro_name: macro_name.to_string(),
+            found: found.to_string(),
+        };
+        let mut with_span = TypeErrorWithSpan::new(error.clone(), span);
+        if let Some(help) = error.suggestion() {
+            with_span = with_span.with_help(help);
+        }
+        self.errors.push(with_span);
+    }
+
     fn record_macro_token_capabilities(&mut self, tokens: &[ast::TokenTree]) {
         let flat_tokens = tokens
             .iter()
@@ -3025,6 +3080,7 @@ impl<'ctx> TypeInfer<'ctx> {
                 let macro_name = path.segments.last().map(|s| s.ident.as_str()).unwrap_or("");
                 self.record_macro_capability(macro_name);
                 self.record_macro_token_capabilities(tokens);
+                self.check_format_macro_first_arg(macro_name, tokens, expr.span);
                 Ty::fresh_var()
             }
 

@@ -614,7 +614,7 @@ fn check_reports_capability_effect_for_ambient_call_inside_macro_argument() {
     ));
     fs::write(
         &fixture,
-        r#"fn main() ~ Console { println!(read_file("ops.txt")); }"#,
+        r#"fn main() ~ Console { println!("{}", read_file("ops.txt")); }"#,
     )
     .expect("write macro argument capability fixture");
 
@@ -664,7 +664,7 @@ fn main() {}
     fs::write(
         &module,
         r#"fn leak() ~ Console {
-    println!(read_file("ops.txt"));
+    println!("{}", read_file("ops.txt"));
 }
 "#,
     )
@@ -742,7 +742,7 @@ fn check_receipt_records_macro_argument_capability_source() {
     ));
     fs::write(
         &fixture,
-        r#"fn main() ~ Console + FileSystem { println!(read_file("ops.txt")); }"#,
+        r#"fn main() ~ Console + FileSystem { println!("{}", read_file("ops.txt")); }"#,
     )
     .expect("write macro argument capability receipt fixture");
 
@@ -798,7 +798,7 @@ fn main() {}
     fs::write(
         &module,
         r#"fn leak() ~ Console + FileSystem {
-    println!(read_file("ops.txt"));
+    println!("{}", read_file("ops.txt"));
 }
 "#,
     )
@@ -1069,7 +1069,7 @@ fn check_reports_foreign_call_inside_macro_argument() {
 extern "C" { fn touch(); }
 
 fn main() ~ Console {
-    println!(touch());
+    println!("{}", touch());
 }
 "#,
     )
@@ -22022,4 +22022,139 @@ fn check_parse_error_reports_line_and_column() {
     );
 
     let _ = fs::remove_dir_all(&dir);
+}
+
+fn format_macro_fixture(label: &str, source: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang_format_first_arg_{}_{}",
+        label,
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).expect("create format-macro fixture dir");
+    fs::write(dir.join("ops.toml"), "key = \"value-from-file\"\n").expect("write ops.toml");
+    let path = dir.join("main.bld");
+    fs::write(&path, source).expect("write format-macro fixture");
+    path
+}
+
+#[test]
+fn check_rejects_format_macro_with_expression_first_arg() {
+    // Regression (2026-10-09): `println!(read_file("ops.toml"))` compiled and
+    // printed the path `ops.toml` instead of the file contents. The lowering
+    // took the first string literal anywhere in the macro tokens as the
+    // format string and skipped every token before it, so the call to
+    // `read_file` vanished. Every formatting macro must now reject a first
+    // argument that is not a string literal, with a fix suggestion.
+    for (label, call) in [
+        ("println", "println!(read_file(\"ops.toml\"));"),
+        ("print", "print!(read_file(\"ops.toml\"));"),
+        ("eprintln", "eprintln!(read_file(\"ops.toml\"));"),
+        ("eprint", "eprint!(read_file(\"ops.toml\"));"),
+        (
+            "format",
+            "let s = format!(read_file(\"ops.toml\")); println!(\"{}\", s);",
+        ),
+    ] {
+        let source = format!("fn main() ~ Console + FileSystem {{\n    {call}\n}}\n");
+        let fixture = format_macro_fixture(label, &source);
+        let output = buildc()
+            .arg("check")
+            .arg(&fixture)
+            .output()
+            .expect("run buildc check");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !output.status.success(),
+            "{label}: a non-literal format argument must be rejected\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        let all = format!("{stdout}{stderr}");
+        assert!(
+            all.contains(&format!("`{label}!` needs a plain string literal as its first argument, found an expression")),
+            "{label}: missing the format-argument diagnostic\n{all}"
+        );
+        assert!(
+            all.contains("placeholder"),
+            "{label}: missing the fix suggestion\n{all}"
+        );
+    }
+}
+
+#[test]
+fn check_rejects_raw_string_format_string() {
+    // Same root cause: a raw string is not recognised as a format string, so
+    // `println!(r#"text"#)` printed an empty line. Reject it until raw format
+    // strings are supported.
+    let fixture = format_macro_fixture(
+        "raw",
+        "fn main() ~ Console {\n    println!(r#\"raw text\"#);\n}\n",
+    );
+    let output = buildc()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run buildc check");
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success(),
+        "raw format string must be rejected\n{all}"
+    );
+    assert!(
+        all.contains("found a raw string literal"),
+        "missing raw-string diagnostic\n{all}"
+    );
+}
+
+#[test]
+fn check_accepts_literal_format_strings_and_empty_println() {
+    // The fix must not reject the supported forms.
+    let fixture = format_macro_fixture(
+        "ok",
+        "fn main() ~ Console + FileSystem {\n    println!(\"{}\", read_file(\"ops.toml\"));\n    let s = format!(\"{}-{}\", 1, 2);\n    print!(\"{}\", s);\n    println!();\n    eprintln!(\"done\");\n}\n",
+    );
+    let output = buildc()
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("run buildc check");
+    assert!(
+        output.status.success(),
+        "literal format strings must still check\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn run_prints_file_contents_through_placeholder() {
+    // End to end: the supported spelling prints the file contents, not the path.
+    if !c_backend_ready() {
+        eprintln!("skipping: C backend not ready");
+        return;
+    }
+    let fixture = format_macro_fixture(
+        "run",
+        "fn main() ~ Console + FileSystem {\n    println!(\"{}\", read_file(\"ops.toml\"));\n}\n",
+    );
+    let output = buildc()
+        .current_dir(fixture.parent().unwrap())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("run buildc run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "run failed\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("value-from-file"),
+        "file contents missing:\n{stdout}"
+    );
+    assert!(!stdout.contains("ops.toml"), "printed the path:\n{stdout}");
 }
