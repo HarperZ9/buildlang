@@ -232,9 +232,9 @@ footer.foot p{max-width:70ch;margin:0 0 .6rem}
 
 <section class="block wrap" aria-labelledby="try">
   <h2 id="try">Try it</h2>
-  <div class="measure"><p>Install from crates.io; <code>buildc run</code> needs a C compiler (gcc, clang or MSVC) on your PATH.</p></div>
-<pre class="cmd"><code>$ cargo install buildlang
-$ git clone https://github.com/HarperZ9/buildlang && cd buildlang
+  <div class="measure"><p>Build from source; crates.io still carries version 1.2.0, and this page shows 1.4.0. <code>buildc run</code> needs a C compiler (gcc, clang or MSVC) on your PATH.</p></div>
+<pre class="cmd"><code>$ git clone https://github.com/HarperZ9/buildlang && cd buildlang
+$ cargo install --path compiler
 $ buildc run examples/quickstart/ledger.bld
 <span class="out">balance: 115</span>
 $ buildc check examples/quickstart/hello.bld --profile console-only --receipt -
@@ -249,7 +249,7 @@ $ buildc receipt verify receipt.json</code></pre>
     <li>The C backend, effect checking, HLSL and GLSL output and the receipt tooling are the verified core. SPIR-V, LLVM IR, WebAssembly, Rust, x86-64, ARM64, GPU dispatch and <code>#[linear]</code> types are experimental.</li>
     <li>A scientific receipt shows that one run's output met the stated invariant. It claims no physical law, numerical correctness or convergence.</li>
     <li>The receipt layer refuses programs that use the Model capability: models propose, and the receipt only covers what an oracle can re-check.</li>
-    <li>While writing this page, <code>println!(read_file("ops.toml"))</code> printed the literal path ops.toml, and the file's contents were lost. Binding the value first, or passing it through <code>"{}"</code>, prints it correctly. It is reported for a fix.</li>
+    <li>While writing this page, <code>println!(read_file("ops.toml"))</code> printed the literal path ops.toml, and the file's contents were lost. The build at 1aa2b6b still does this. PR #61 makes it a compile error with a fix hint: the first argument of <code>println!</code> must be a string literal, as in <code>println!("{}", read_file("ops.toml"))</code>.</li>
   </ul>
   <p class="src">Source: README.md at 1aa2b6b, "Status and maturity" and "Scientific-runtime receipts"; the println! finding from the run above</p>
 </section>
