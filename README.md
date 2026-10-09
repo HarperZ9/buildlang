@@ -27,6 +27,12 @@ build can write a receipt you can re-check.
 
 [Landing page](https://harperz9.github.io/buildlang/) | [Build ecosystem](https://github.com/HarperZ9/build-universe) | [VS Code extension](https://github.com/HarperZ9/buildlang-vscode) | [grammar](https://github.com/HarperZ9/buildlang-tmLanguage)
 
+## See it work, step by step
+
+The [animated explainer](https://harperz9.github.io/repo-explainers/buildlang.html)
+walks through an undeclared file read rejected, a policy profile that denies it, a check receipt catching an edit, HLSL from a fragment function, and a heat-equation receipt that re-verifies while a forged one fails its seal. Every value on it is output from this repository. Its
+source is [docs/explainer/index.html](docs/explainer/index.html).
+
 ## Highlights
 
 - **Typed capability effects.** Ambient access is part of a function's type.
