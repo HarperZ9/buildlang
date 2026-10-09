@@ -1,5 +1,10 @@
 # BuildLang Development Roadmap
 
+> **Current direction (2026-10-09):** `docs/AGENTIC_LANGUAGE_DIRECTIVE_2026-10-09.md`
+> governs. The wind-down posture described below was lifted on 2026-06-29 and the
+> project's identity was reset on 2026-10-09; this file is kept as a historical
+> planning record.
+
 Updated 2026-06-15. This roadmap is now a historical planning record, not the
 active execution plan. The current posture is wind-down and preservation: keep
 the C-backed compiler core, capability/security gate, receipts, and public docs
