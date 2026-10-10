@@ -184,6 +184,16 @@ pub enum CodegenError {
     /// Missing type.
     #[error("missing type: {0}")]
     MissingType(String),
+
+    /// A program the type checker accepted but the backend cannot compile,
+    /// reported in BuildLang terms. `location` is a byte range in the entry
+    /// source when the construct could be found there; `help` is a fix hint.
+    #[error("{message}")]
+    Rejected {
+        message: String,
+        location: Option<(u32, u32)>,
+        help: Option<String>,
+    },
 }
 
 /// Result type for code generation.

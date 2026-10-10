@@ -461,6 +461,15 @@ pub enum TypeError {
     /// empty line. The call is rejected instead.
     #[error("`{macro_name}!` needs a plain string literal as its first argument, found {found}")]
     FormatArgNotStringLiteral { macro_name: String, found: String },
+
+    // =========================================================================
+    // BACKEND ERRORS
+    // =========================================================================
+    /// The program type-checks but the C backend cannot compile it. `buildc
+    /// check` lowers every program to C, so this is reported by `check` as well
+    /// as by `build` and `run`: a passing check means the program compiles.
+    #[error("{message}")]
+    BackendRejected { message: String },
 }
 
 impl TypeError {

@@ -1,0 +1,11 @@
+fn main() ~ Console + FileSystem {
+    let contents = read_file("input.txt");
+    let mut sum = 0;
+    for line in contents.lines() {
+        let t = line.trim();
+        if t.len() > 0 {
+            sum += t.parse::<i32>().unwrap();
+        }
+    }
+    println!("{}", sum);
+}

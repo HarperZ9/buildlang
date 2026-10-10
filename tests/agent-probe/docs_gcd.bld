@@ -1,0 +1,14 @@
+fn my_gcd(a: i32, b: i32) -> i32 {
+    let mut x = a;
+    let mut y = b;
+    while y != 0 {
+        let t = x % y;
+        x = y;
+        y = t;
+    }
+    x
+}
+
+fn main() ~ Console {
+    println!("{}", my_gcd(1071, 462));
+}

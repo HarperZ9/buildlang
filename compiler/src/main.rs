@@ -6203,8 +6203,15 @@ fn run_check(file: &Path) -> Result<CheckOutcome, i32> {
         // linearity (e.g. invalid MIR); `buildc check` treats that the same
         // way it always has -- surfaced separately, not folded into
         // `type_errors` -- by simply not adding linear diagnostics.
-        if let Ok(()) = codegen.generate(&ast).map(|_| ()) {
-            type_errors.extend(codegen.linear_errors().to_vec());
+        match codegen.generate(&ast) {
+            Ok(_) => type_errors.extend(codegen.linear_errors().to_vec()),
+            // A program the C backend cannot compile fails the check: a passing
+            // `buildc check` means the program compiles. Shader and GPU kernel
+            // programs target HLSL, GLSL or SPIR-V, so the C gate does not apply.
+            Err(e) if !has_gpu_entry_point(&ast) => {
+                type_errors.push(codegen_error_as_type_error(&e, &source_file))
+            }
+            Err(_) => {}
         }
     }
 
@@ -7000,7 +7007,7 @@ fn cmd_build(
     let mut codegen = CodeGenerator::with_source(&ctx, target, Arc::from(source_file.source()));
     codegen.set_stdio_mode(stdio_mode);
     let output = codegen.generate(&ast).map_err(|e| {
-        eprintln!("Code generation error: {}", e);
+        report_codegen_error(&e, &source_file);
         1
     })?;
     if !codegen.linear_errors().is_empty() {
@@ -7598,7 +7605,7 @@ fn compile_program_to_exe(
     let mut codegen = CodeGenerator::with_source(&ctx, Target::C, Arc::from(source_file.source()));
     codegen.set_stdio_mode(stdio_mode);
     let output = codegen.generate(&ast).map_err(|e| {
-        eprintln!("Code generation error: {}", e);
+        report_codegen_error(&e, &source_file);
         1
     })?;
     if !codegen.linear_errors().is_empty() {
@@ -10240,7 +10247,7 @@ fn cmd_compile(
         codegen.reshade = true;
     }
     let generated = codegen.generate(&ast).map_err(|e| {
-        eprintln!("Code generation error: {}", e);
+        report_codegen_error(&e, &source_file);
         1
     })?;
     if !codegen.linear_errors().is_empty() {
@@ -11214,4 +11221,73 @@ mod tests {
         );
         assert_eq!(surface["spirv"]["status"], "unverified");
     }
+}
+
+/// Turn a code-generation failure into a source-located type error, so `buildc
+/// check` fails on any program the C backend cannot compile.
+fn codegen_error_as_type_error(
+    err: &buildlang::codegen::backend::CodegenError,
+    source_file: &SourceFile,
+) -> TypeErrorWithSpan {
+    use buildlang::codegen::backend::CodegenError;
+    let id = source_file.id;
+    let (message, location, help) = match err {
+        CodegenError::Rejected {
+            message,
+            location,
+            help,
+        } => (message.clone(), *location, help.clone()),
+        other => (
+            format!("the C backend cannot compile this program: {other}"),
+            None,
+            None,
+        ),
+    };
+    let span = match location {
+        Some((start, end)) => Span::from_offsets(start, end, id),
+        None => Span::from_offsets(0, 0, id),
+    };
+    let mut err = TypeErrorWithSpan::new(TypeError::BackendRejected { message }, span);
+    if let Some(help) = help {
+        err = err.with_help(help);
+    }
+    err
+}
+
+/// Print a code-generation failure with its location and fix hint.
+fn report_codegen_error(err: &buildlang::codegen::backend::CodegenError, source_file: &SourceFile) {
+    let te = codegen_error_as_type_error(err, source_file);
+    if te.span.end.0 == 0 {
+        eprintln!("error: {}", te);
+    } else {
+        let line = source_file.lookup_line(te.span.start);
+        let line_start = source_file.line_start(line).unwrap_or(te.span.start);
+        let col = te.span.start.0.saturating_sub(line_start.0) as usize;
+        eprintln!(
+            "error[{}:{}:{}]: {}",
+            source_file.name(),
+            line + 1,
+            col + 1,
+            te
+        );
+    }
+}
+
+/// True when the module declares a shader stage or GPU kernel entry point
+/// (`#[fragment]`, `#[vertex]`, `#[compute]`, `#[kernel]`), at any nesting depth.
+fn has_gpu_entry_point(module: &Module) -> bool {
+    fn item_has(item: &ast::Item) -> bool {
+        let gpu_attr = item.attrs.iter().any(|attr| {
+            attr.path.segments.first().map_or(false, |seg| {
+                matches!(
+                    seg.ident.name.as_ref(),
+                    "fragment" | "vertex" | "compute" | "kernel"
+                )
+            })
+        });
+        gpu_attr
+            || matches!(&item.kind, ItemKind::Mod(m)
+                if m.content.as_ref().map_or(false, |c| c.items.iter().any(item_has)))
+    }
+    module.items.iter().any(item_has)
 }

@@ -1,0 +1,62 @@
+fn str_greater(a: String, b: String) -> bool {
+    let x = a.as_bytes();
+    let y = b.as_bytes();
+    let mut i = 0;
+    while i < a.len() && i < b.len() {
+        if x[i] > y[i] {
+            return true;
+        }
+        if x[i] < y[i] {
+            return false;
+        }
+        i = i + 1;
+    }
+    a.len() > b.len()
+}
+
+fn main() ~ Console {
+    let s = "a b a c b a";
+    let words: Vec<String> = s.split(" ");
+    let mut keys: Vec<String> = vec![];
+    let mut counts: Vec<i32> = vec![];
+    let mut wi = 0;
+    while wi < words.len() {
+        let w: String = words[wi].clone();
+        let mut found = false;
+        let mut j = 0;
+        while j < keys.len() {
+            if keys[j] == w {
+                counts[j] = counts[j] + 1;
+                found = true;
+            }
+            j = j + 1;
+        }
+        if !found {
+            keys.push(w);
+            counts.push(1);
+        }
+        wi = wi + 1;
+    }
+    let n = keys.len();
+    let mut i = 0;
+    while i < n {
+        let mut j = 0;
+        while j + 1 < n - i {
+            if str_greater(keys[j].clone(), keys[j + 1].clone()) {
+                let tk = keys[j].clone();
+                keys[j] = keys[j + 1].clone();
+                keys[j + 1] = tk;
+                let tc = counts[j];
+                counts[j] = counts[j + 1];
+                counts[j + 1] = tc;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    let mut k = 0;
+    while k < n {
+        println!("{} {}", keys[k], counts[k]);
+        k = k + 1;
+    }
+}

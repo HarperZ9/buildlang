@@ -5592,12 +5592,16 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // The C backend cannot compile function values used this way yet, so
+    // `check` rejects the program (a passing check means it compiles). The
+    // receipt still records the effect provenance this test is about.
     assert!(
-        output.status.success(),
-        "returned effectful function receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "returned effectful function receipt check should be rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -6613,12 +6617,16 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // The C backend cannot compile function values used this way yet, so
+    // `check` rejects the program (a passing check means it compiles). The
+    // receipt still records the effect provenance this test is about.
     assert!(
-        output.status.success(),
-        "slice-destructured effectful function receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "slice-destructured effectful function receipt check should be rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -6673,12 +6681,16 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // The C backend cannot compile function values used this way yet, so
+    // `check` rejects the program (a passing check means it compiles). The
+    // receipt still records the effect provenance this test is about.
     assert!(
-        output.status.success(),
-        "tuple-struct destructured selected effectful function receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "tuple-struct destructured selected effectful function receipt check should be rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -22157,4 +22169,134 @@ fn run_prints_file_contents_through_placeholder() {
         "file contents missing:\n{stdout}"
     );
     assert!(!stdout.contains("ops.toml"), "printed the path:\n{stdout}");
+}
+
+fn m1_fixture(label: &str, source: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("buildlang_m1_{}_{}", label, std::process::id()));
+    fs::create_dir_all(&dir).expect("create m1 fixture dir");
+    let path = dir.join("main.bld");
+    fs::write(&path, source).expect("write m1 fixture");
+    path
+}
+
+fn check_output(path: &Path) -> (bool, String) {
+    let output = buildc()
+        .arg("check")
+        .arg(path)
+        .output()
+        .expect("run buildc check");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (output.status.success(), text)
+}
+
+fn run_stdout(path: &Path) -> String {
+    let output = buildc()
+        .current_dir(path.parent().unwrap())
+        .arg("run")
+        .arg(path)
+        .output()
+        .expect("run buildc run");
+    assert!(
+        output.status.success(),
+        "run failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n")
+}
+
+#[test]
+fn check_rejects_a_method_the_c_backend_cannot_compile() {
+    // M1: `v.iter()` used to pass `buildc check` and then fail in gcc with
+    // "implicit declaration of function 'iter'" about generated C.
+    let fixture = m1_fixture(
+        "iter",
+        "fn main() ~ Console {\n    let v = vec![1, 2, 3];\n    let mut s = 0;\n    for x in v.iter() {\n        s += x;\n    }\n    println!(\"{}\", s);\n}\n",
+    );
+    let (ok, text) = check_output(&fixture);
+    assert!(!ok, "check must reject .iter():\n{text}");
+    assert!(text.contains("`iter` cannot be compiled"), "{text}");
+    assert!(
+        text.contains("4:"),
+        "diagnostic should point at line 4:\n{text}"
+    );
+    assert!(text.contains("help: iterators are not supported"), "{text}");
+}
+
+#[test]
+fn check_rejects_pushing_a_string_into_an_untyped_vector() {
+    let fixture = m1_fixture(
+        "vecpush",
+        "fn main() ~ Console {\n    let mut words = vec_new();\n    vec_push(words, \"a\");\n    println!(\"{}\", vec_len(words));\n}\n",
+    );
+    let (ok, text) = check_output(&fixture);
+    assert!(
+        !ok,
+        "check must reject a str pushed into an i32 vector:\n{text}"
+    );
+    assert!(
+        text.contains("adds a `str` to a vector of `i32` elements"),
+        "{text}"
+    );
+    assert!(text.contains("let mut v: Vec<str> = vec_new();"), "{text}");
+}
+
+#[test]
+fn annotated_vec_new_builds_a_string_vector() {
+    // Regression: this program passed every check and then segfaulted, because
+    // vec_new() built an i32 vector and strings were written into 4-byte slots.
+    if !c_backend_ready() {
+        eprintln!("skipping: C backend not ready");
+        return;
+    }
+    let fixture = m1_fixture(
+        "vecstr",
+        "fn main() ~ Console {\n    let mut words: Vec<str> = vec_new();\n    vec_push(words, \"alpha\");\n    vec_push(words, \"beta\");\n    let mut i = vec_len(words);\n    while i > 0 {\n        i -= 1;\n        let w: str = vec_get(words, i);\n        print!(\"{} \", w);\n    }\n    println!(\"\");\n}\n",
+    );
+    assert_eq!(run_stdout(&fixture).trim_end(), "beta alpha");
+}
+
+#[test]
+fn string_ordering_and_borrowed_concat_compile_and_run() {
+    if !c_backend_ready() {
+        eprintln!("skipping: C backend not ready");
+        return;
+    }
+    let fixture = m1_fixture(
+        "strops",
+        "fn main() ~ Console {\n    let a = \"apple\";\n    let b = \"banana\";\n    if a < b { println!(\"lt\"); }\n    if b >= a { println!(\"ge\"); }\n    if \"ab\" < \"abc\" { println!(\"prefix\"); }\n    let mut out = String::new();\n    let w = \"x\".to_string();\n    out = out + &w;\n    out = out + &w;\n    println!(\"{}\", out);\n}\n",
+    );
+    assert_eq!(run_stdout(&fixture), "lt\nge\nprefix\nxx\n");
+}
+
+#[test]
+fn user_functions_named_like_c_macros_or_keywords_are_called() {
+    // `fn max` was defined as `_max` but called as `max`, which bound to the
+    // Windows macro or to nothing at all; `fn double` did not compile.
+    if !c_backend_ready() {
+        eprintln!("skipping: C backend not ready");
+        return;
+    }
+    let fixture = m1_fixture(
+        "names",
+        "fn max(a: i32, b: i32) -> i32 { if a > b { a + 1000 } else { b + 1000 } }\nfn double(x: i32) -> i32 { x * 2 }\nfn main() ~ Console {\n    println!(\"{}\", max(1, 2));\n    println!(\"{}\", double(21));\n}\n",
+    );
+    assert_eq!(run_stdout(&fixture), "1002\n42\n");
+}
+
+#[test]
+fn trait_with_a_self_returning_method_compiles() {
+    if !c_backend_ready() {
+        eprintln!("skipping: C backend not ready");
+        return;
+    }
+    let fixture = m1_fixture(
+        "selfret",
+        "trait Grow { fn grow(self, f: f64) -> Self; }\ntrait Val { fn val(self) -> f64; }\nstruct S { v: f64 }\nimpl Grow for S { fn grow(self, f: f64) -> S { S { v: self.v * f } } }\nimpl Val for S { fn val(self) -> f64 { self.v } }\nfn twice<T: Grow + Val>(x: T) -> f64 { let y = x.grow(2.0); y.val() }\nfn main() ~ Console {\n    let s = S { v: 1.5 };\n    println!(\"{}\", twice(s));\n}\n",
+    );
+    assert_eq!(run_stdout(&fixture), "3\n");
 }

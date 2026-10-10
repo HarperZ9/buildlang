@@ -1,0 +1,33 @@
+fn parse_line(t: String) -> i64 {
+    let b = t.as_bytes();
+    let mut i = 0;
+    let mut neg = false;
+    let mut n: i64 = 0;
+    while i < t.len() {
+        let c = b[i];
+        if c == 45 {
+            neg = true;
+        } else if c >= 48 && c <= 57 {
+            n = n * 10 + ((c - 48) as i64);
+        }
+        i = i + 1;
+    }
+    if neg {
+        0 - n
+    } else {
+        n
+    }
+}
+
+fn main() ~ Console + FileSystem {
+    let contents = read_file("input.txt");
+    let lines: Vec<String> = contents.split("\n");
+    let mut sum: i64 = 0;
+    let mut i = 0;
+    while i < lines.len() {
+        let line: String = lines[i].clone();
+        sum = sum + parse_line(line);
+        i = i + 1;
+    }
+    println!("{}", sum);
+}

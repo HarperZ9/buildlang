@@ -1,0 +1,42 @@
+fn main() ~ Console {
+    let s = "a b a c b a";
+    let mut words = vec_new();
+    let mut counts = vec_new();
+    for w in s.split(" ") {
+        let mut found = false;
+        let mut j = 0;
+        while j < vec_len(words) {
+            if vec_get(words, j) == w {
+                counts[j] = counts[j] + 1;
+                found = true;
+            }
+            j += 1;
+        }
+        if !found {
+            vec_push(words, w);
+            vec_push(counts, 1);
+        }
+    }
+    let n = vec_len(words);
+    let mut i = 0;
+    while i < n {
+        let mut j = 0;
+        while j + 1 < n - i {
+            if words[j] > words[j + 1] {
+                let tw = words[j];
+                words[j] = words[j + 1];
+                words[j + 1] = tw;
+                let tc = counts[j];
+                counts[j] = counts[j + 1];
+                counts[j + 1] = tc;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    let mut k = 0;
+    while k < n {
+        println!("{} {}", words[k], counts[k]);
+        k += 1;
+    }
+}

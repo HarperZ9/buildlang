@@ -1,0 +1,17 @@
+fn main() ~ Console {
+    let s = "the quick brown fox";
+    let mut words = vec_new();
+    for w in s.split(" ") {
+        vec_push(words, w);
+    }
+    let n = vec_len(words);
+    let mut i = n;
+    while i > 0 {
+        i -= 1;
+        if i < n - 1 {
+            print!(" ");
+        }
+        print!("{}", vec_get(words, i));
+    }
+    println!("");
+}

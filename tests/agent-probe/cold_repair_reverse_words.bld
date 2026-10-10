@@ -1,0 +1,15 @@
+fn main() ~ Console {
+    let s = "the quick brown fox";
+    let words: Vec<String> = s.split(" ");
+    let mut out = String::new();
+    let mut i = words.len();
+    while i > 0 {
+        i = i - 1;
+        let w: String = words[i].clone();
+        out = out + w;
+        if i > 0 {
+            out = out + " ";
+        }
+    }
+    println!("{}", out);
+}
