@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let n = 5;
+    match n { x if x > 3 => println!("big"), _ => println!("small") }
+}

@@ -1,0 +1,10 @@
+fn main() ~ Console {
+    let p = Point::new(1, 2);
+    println!("{}", p.x);
+}
+struct Point { x: i32, y: i32 }
+impl Point {
+    fn new(x: i32, y: i32) -> Point { Point { x, y } }
+}
+fn unused() {
+}

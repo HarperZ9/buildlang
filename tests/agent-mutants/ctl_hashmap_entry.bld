@@ -1,0 +1,6 @@
+use std::collections::HashMap;
+fn main() ~ Console {
+    let mut m: HashMap<String, i32> = HashMap::new();
+    *m.entry(String::from("a")).or_insert(0) += 1;
+    println!("{}", m.len());
+}

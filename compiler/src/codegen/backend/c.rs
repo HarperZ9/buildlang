@@ -3375,7 +3375,9 @@ impl CBackend {
                 // %s must be converted to "true"/"false" strings via a ternary.
                 // Look up target function's parameter types for auto-ref.
                 let target_params = self.fn_params.get(func_str.as_str()).cloned();
-                let is_printf = matches!(func_str.as_str(), "printf" | "eprintf");
+                // `build_sprintf` backs `format!`: its bool arguments need the
+                // same "true"/"false" conversion as printf's.
+                let is_printf = matches!(func_str.as_str(), "printf" | "eprintf" | "build_sprintf");
                 let args_str: Vec<_> = args
                     .iter()
                     .enumerate()
@@ -3390,6 +3392,18 @@ impl CBackend {
                                         .unwrap_or(false)
                                 } else { false };
 
+                                // A struct value passed where `&Struct` is expected
+                                // (`for s in v.iter() { area(s) }` binds `s` by
+                                // value): pass its address.
+                                if let (MirType::Ptr(ref inner), MirValue::Local(id)) = (param_ty, a) {
+                                    if let (MirType::Struct(_), Some(local)) =
+                                        (inner.as_ref(), locals.get(id.0 as usize))
+                                    {
+                                        if &local.ty == inner.as_ref() {
+                                            return format!("&{}", s);
+                                        }
+                                    }
+                                }
                                 // BuildString → &BuildString (auto-ref for &String params)
                                 if let MirType::Ptr(ref inner) = param_ty {
                                     if let MirType::Struct(ref pname) = inner.as_ref() {

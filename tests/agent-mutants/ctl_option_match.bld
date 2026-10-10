@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let x: Option<i32> = Some(3);
+    match x { Some(v) => println!("{}", v), None => println!("none") }
+}

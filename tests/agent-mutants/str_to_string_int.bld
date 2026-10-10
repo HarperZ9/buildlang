@@ -1,0 +1,5 @@
+fn main() ~ Console {
+    let n = 5;
+    let s = n.to_string();
+    println!("{}", s);
+}

@@ -1,0 +1,9 @@
+fn main() ~ Console {
+    let c = Circle { r: 2.0 };
+    println!("{}", c.area());
+}
+trait Area { fn area(&self) -> f64; }
+struct Circle { r: f64 }
+impl Area for Circle { fn area(&self) -> f64 { 3.0 * self.r * self.r } }
+fn unused() {
+}

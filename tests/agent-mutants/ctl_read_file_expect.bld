@@ -1,0 +1,4 @@
+fn main() ~ Console + FileSystem {
+    let s = std::fs::read_to_string("input.txt").expect("read");
+    println!("{}", s.len());
+}

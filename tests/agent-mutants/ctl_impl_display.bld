@@ -1,0 +1,10 @@
+fn main() ~ Console {
+    let p = P { x: 1 };
+    println!("{}", p);
+}
+struct P { x: i32 }
+impl std::fmt::Display for P {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { write!(f, "P({})", self.x) }
+}
+fn unused() {
+}

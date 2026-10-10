@@ -1,0 +1,5 @@
+fn main() ~ Console {
+    let s = "42";
+    let n = s.parse::<i64>().unwrap();
+    println!("{}", n);
+}

@@ -1,0 +1,6 @@
+fn main() ~ Console {
+    let mut v = vec![3usize, 1usize, 2usize];
+    v.insert(0, 1usize);
+    v.remove(1);
+    println!("{}", v.len());
+}

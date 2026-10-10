@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let n = 3.14159;
+    println!("{:.2}", n);
+}

@@ -1,0 +1,5 @@
+fn main() ~ Console {
+    let mut s = String::new();
+    s.push_str("ab");
+    println!("{}", s);
+}

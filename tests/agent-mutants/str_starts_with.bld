@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let s = "hello";
+    if s.starts_with("he") { println!("yes"); }
+}

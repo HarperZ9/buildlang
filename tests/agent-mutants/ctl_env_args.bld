@@ -1,0 +1,4 @@
+fn main() ~ Console + Environment {
+    let args: Vec<String> = std::env::args().collect();
+    println!("{}", args.len());
+}

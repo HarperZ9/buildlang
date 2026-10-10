@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let s = "abc";
+    for c in s.chars() { println!("{}", c); }
+}

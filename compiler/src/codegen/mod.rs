@@ -164,12 +164,27 @@ impl<'ctx> CodeGenerator<'ctx> {
         } else {
             String::new()
         };
+        let is_value = self
+            .source
+            .as_deref()
+            .is_some_and(|src| c_verify::is_bound_variable(src, first));
+        let (message, help) = if is_value {
+            (
+                format!("`{first}` cannot be compiled: the C backend cannot call a function value{others}"),
+                c_verify::function_value_hint(first),
+            )
+        } else {
+            (
+                format!(
+                    "`{first}` cannot be compiled: the C backend has no function or method by that name{others}"
+                ),
+                c_verify::hint_for(first),
+            )
+        };
         Err(CodegenError::Rejected {
-            message: format!(
-                "`{first}` cannot be compiled: the C backend has no function or method by that name{others}"
-            ),
+            message,
             location,
-            help: Some(c_verify::hint_for(first)),
+            help: Some(help),
         })
     }
 

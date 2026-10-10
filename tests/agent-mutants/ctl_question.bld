@@ -1,0 +1,10 @@
+fn main() ~ Console {
+    match half(4) { Some(v) => println!("{}", v), None => println!("none") }
+}
+fn half(x: i32) -> Option<i32> {
+    let y = check(x)?;
+    Some(y / 2)
+}
+fn check(x: i32) -> Option<i32> {
+    if x > 0 { Some(x) } else { None }
+}

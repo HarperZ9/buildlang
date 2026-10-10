@@ -1,0 +1,5 @@
+fn main() ~ Console {
+    let s = "a,b";
+    let parts: Vec<&str> = s.split(",").collect();
+    println!("{}", parts.len());
+}

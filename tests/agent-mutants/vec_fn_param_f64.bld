@@ -1,0 +1,7 @@
+fn main() ~ Console {
+    let v = vec![3.5, 1.5, 2.0];
+    println!("{}", count(&v));
+}
+fn count(v: &Vec<f64>) -> usize {
+    v.len()
+}

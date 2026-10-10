@@ -1,0 +1,5 @@
+fn main() ~ Console {
+    let v = vec![3i64, 1i64, 2i64];
+    let n = v.iter().filter(|x| **x != 0i64).count();
+    println!("{}", n);
+}

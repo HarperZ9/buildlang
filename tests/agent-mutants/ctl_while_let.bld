@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let mut v = vec![1, 2];
+    while let Some(x) = v.pop() { println!("{}", x); }
+}

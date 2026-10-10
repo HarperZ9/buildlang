@@ -1,0 +1,5 @@
+fn main() ~ Console {
+    let c = '7';
+    let d = c as i32 - '0' as i32;
+    println!("{}", d);
+}

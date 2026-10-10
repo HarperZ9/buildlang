@@ -1,0 +1,5 @@
+fn main() ~ Console {
+    let mut v = vec![String::from("c"), String::from("a"), String::from("b")];
+    v.sort();
+    println!("{}", v[0]);
+}

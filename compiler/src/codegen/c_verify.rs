@@ -409,20 +409,16 @@ fn called_names(toks: &[Tok<'_>]) -> BTreeSet<String> {
     called
 }
 
-/// Names of local variables and parameters that hold function pointers are called
-/// like functions. Collect identifiers declared as variables (`T name;`,
-/// `T name =`, `T (*name)(`), so a call through them is not reported.
+/// Variables and parameters that hold function pointers are called like
+/// functions. Collect names declared with a `(*name)` declarator, so a call
+/// through them is not reported.
 fn variable_names(toks: &[Tok<'_>]) -> BTreeSet<String> {
     let mut vars = BTreeSet::new();
     for (k, tok) in toks.iter().enumerate() {
         if let Tok::Ident(name) = tok {
-            let prev_is_type = matches!(k.checked_sub(1).and_then(|p| toks.get(p)),
-                Some(Tok::Ident(p)) if !is_keyword(p));
             let next = toks.get(k + 1);
-            if prev_is_type && matches!(next, Some(Tok::Punct(';' | '=' | ',' | ')' | '['))) {
-                vars.insert((*name).to_string());
-            }
-            // `(*name)` function pointer declarator.
+            // `(*name)` function pointer declarator. Plain variables (`size_t
+            // len;`) are not counted: a call to their name is still undeclared.
             if matches!(
                 k.checked_sub(1).and_then(|p| toks.get(p)),
                 Some(Tok::Punct('*'))
@@ -482,6 +478,42 @@ pub fn hint_for(name: &str) -> String {
              spelling, define it as a `fn`, or declare it in an `extern \"C\"` block"
         ),
     }
+}
+
+/// Whether `name` is bound as a variable in `source` (`let name`, `let mut name`,
+/// or a `name:` parameter), which means a call to it goes through a function value.
+pub fn is_bound_variable(source: &str, name: &str) -> bool {
+    let word = |rest: &str| {
+        rest.strip_prefix(name)
+            .map(|after| !after.starts_with(|c: char| c.is_alphanumeric() || c == '_'))
+            .unwrap_or(false)
+    };
+    source.match_indices("let ").any(|(i, _)| {
+        let rest = source[i + 4..].trim_start();
+        let rest = rest
+            .strip_prefix("mut ")
+            .map(str::trim_start)
+            .unwrap_or(rest);
+        word(rest)
+    }) || source.match_indices(name).any(|(i, _)| {
+        let before_ok = i == 0 || {
+            let b = source.as_bytes()[i - 1];
+            b == b'(' || b == b',' || b == b' '
+        };
+        before_ok
+            && word(&source[i..])
+            && source[i + name.len()..].trim_start().starts_with(':')
+            && !source[i + name.len()..].trim_start().starts_with("::")
+    })
+}
+
+/// Hint for a call through a variable that holds a function.
+pub fn function_value_hint(name: &str) -> String {
+    format!(
+        "`{name}` holds a function value; calling a function stored in a variable, field or \
+         collection is not supported by the C backend yet. Call the function by its own \
+         name, or branch with `if`/`match` and call each function directly"
+    )
 }
 
 /// Byte range of the first call to `name` in `source`, as a method (`.name(`) or a
@@ -545,6 +577,24 @@ mod tests {
         let c = "// End BuildLang Runtime\nint32_t main(void) { /* iter(x) */ \
                  printf(\"parse(x)\"); return 0; }";
         assert!(undeclared_calls(c).is_empty());
+    }
+
+    #[test]
+    fn a_plain_variable_does_not_hide_an_undeclared_call() {
+        // `size_t len;` in a runtime struct must not make a call to `len` look
+        // declared: only `(*name)` function-pointer declarators count.
+        let c = "typedef struct { size_t len; } S;\n// End BuildLang Runtime\n\
+                 int32_t main(void) { return len(x); }";
+        assert_eq!(undeclared_calls(c), vec!["len".to_string()]);
+    }
+
+    #[test]
+    fn detects_function_values_bound_with_let_or_as_parameters() {
+        assert!(is_bound_variable("let loader = read_file;", "loader"));
+        assert!(is_bound_variable("let mut f = g;", "f"));
+        assert!(is_bound_variable("fn apply(cb: fn(i32) -> i32) {}", "cb"));
+        assert!(!is_bound_variable("let loaders = x;", "loader"));
+        assert!(!is_bound_variable("fn iter() {}", "iter"));
     }
 
     #[test]

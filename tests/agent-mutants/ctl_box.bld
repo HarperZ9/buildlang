@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let b = Box::new(5);
+    println!("{}", *b);
+}

@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let s = "42";
+    match s.parse::<i32>() { Ok(n) => println!("{}", n), Err(_) => println!("bad") }
+}

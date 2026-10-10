@@ -1,0 +1,10 @@
+fn main() ~ Console {
+    let v = vec![Shape::Square(2), Shape::Rect(2, 3)];
+    let mut t = 0;
+    for s in v.iter() { t += area(s); }
+    println!("{}", t);
+}
+enum Shape { Square(i32), Rect(i32, i32) }
+fn area(s: &Shape) -> i32 { match s { Shape::Square(n) => n * n, Shape::Rect(w, h) => w * h } }
+fn unused() {
+}

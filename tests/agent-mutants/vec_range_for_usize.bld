@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let v = vec![3usize, 1usize, 2usize];
+    for i in 0..v.len() { println!("{}", v[i]); }
+}

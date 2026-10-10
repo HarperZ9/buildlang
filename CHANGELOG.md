@@ -10,6 +10,37 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- **M1 slice 2: a 225-program mutation set and a rustc oracle.**
+  `tools/agent_mutants.py` generates `tests/agent-mutants/` (225 small programs
+  in the shapes agents write: iterator, string, Option, map, format and trait
+  idioms over six element types). `check_implies_compile.rs` now covers them:
+  no program passes `check` and fails to compile (34 did). Running each mutant
+  through rustc as a second oracle found 16 that compiled and printed the
+  wrong thing; all now match rustc or are rejected.
+- Format strings are parsed properly (`lower/format.rs`): `{name}` and `{0}`
+  arguments, width, `<` `>` alignment, `+`, `#`, `0`, precision, `x` `X` `o`, and
+  `{:?}` for strings, floats, chars and vectors print as Rust prints them. A spec
+  the C backend cannot honour (`^`, a fill character, `b`, `e`, `{:1$}`) is a
+  check error. Before: `{x}` printed literally, widths were ignored, unknown
+  specs printed `%d`, `{:?}` of a vector printed a pointer.
+- `while let Some(x) = v.pop()` ends at the empty vector: `pop`, `get`, `first`
+  and `last` on a vector, and `get` on a map, give an `Option` in `match`,
+  `if let` and `while let`. A `Some`/`None` match on a value that is not an
+  Option is rejected; it used to take the `Some` arm every time.
+- `for x in v.iter()` and `for x in &v` iterate the vector (the second ran zero
+  times); `for` over anything that is not iterable is rejected instead of
+  running zero times. `s.chars()` decodes UTF-8, and chars print as characters.
+- `let r = loop { ... break v; }` binds `v`; `&s[a..b]` is a substring;
+  `Vec<_>` annotations infer from the initializer; iterator closures take the
+  element's type; `sum` over strings and `impl Display` are rejected with
+  hints; `v.contains(&x)` and map keys pass the right C types; a struct value
+  passed to a `&Struct` parameter passes its address; `format!` prints bools as
+  `true`/`false`; a macro inside a format argument (`vec![1, 2]`) reads its own
+  text.
+- Calling a function held in a variable is rejected with a specific hint (the C
+  backend has no function values yet). 31 effect-receipt tests whose fixtures
+  do that now expect the rejection and still check the provenance they record.
+
 - **`buildc check` fails on programs the C backend cannot compile** (M1 slice 1).
   `check` already lowered every program to C and discarded any error; a
   code-generation failure is now a located check error. A new pass over the

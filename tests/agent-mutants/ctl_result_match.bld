@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let r: Result<i32, String> = Ok(3);
+    match r { Ok(v) => println!("{}", v), Err(e) => println!("{}", e) }
+}

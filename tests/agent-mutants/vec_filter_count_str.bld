@@ -1,0 +1,5 @@
+fn main() ~ Console {
+    let v = vec!["c", "a", "b"];
+    let n = v.iter().filter(|x| **x != "").count();
+    println!("{}", n);
+}

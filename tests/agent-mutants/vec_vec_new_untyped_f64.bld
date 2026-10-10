@@ -1,0 +1,5 @@
+fn main() ~ Console {
+    let mut v = vec_new();
+    vec_push(v, 1.0);
+    println!("{}", vec_len(v));
+}

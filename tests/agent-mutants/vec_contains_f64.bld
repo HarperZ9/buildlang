@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let v = vec![3.5, 1.5, 2.0];
+    if v.contains(&1.0) { println!("yes"); }
+}

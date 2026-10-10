@@ -1,0 +1,6 @@
+fn main() ~ Console {
+    let mut v = vec![String::from("c"), String::from("a"), String::from("b")];
+    v.insert(0, String::from("x"));
+    v.remove(1);
+    println!("{}", v.len());
+}

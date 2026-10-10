@@ -1598,218 +1598,73 @@ impl<'ctx> MirLowerer<'ctx> {
         tokens: &[ast::TokenTree],
         newline: bool,
     ) -> CodegenResult<(u32, Vec<MirValue>)> {
-        // Extract the format string from the macro tokens.
+        use super::format::{parse_format, ArgRef, Piece};
+
         let format_str = self.extract_string_from_tokens(tokens);
+        let pieces = parse_format(&format_str).map_err(|message| CodegenError::Rejected {
+            message,
+            location: None,
+            help: Some(
+                "supported: `{}`, `{:?}`, `{name}`, `{0}`, width, `<` `>` alignment, `+`, `#`, `0`, \
+                 precision, and `x` `X` `o`"
+                    .to_string(),
+            ),
+        })?;
 
-        // Extract argument source text from tokens and parse + lower each one
-        // as a full expression through the normal lowering pipeline.
+        // Lower the explicit arguments in order. A failure is an error, not a
+        // silently missing value.
         let arg_source_texts = self.extract_arg_source_texts(tokens);
-
-        // Parse and lower each argument expression, collecting the MIR values
-        // and their resolved types.
-        let mut arg_values: Vec<MirValue> = Vec::new();
-        let mut arg_types: Vec<Option<MirType>> = Vec::new();
-
-        // Pre-scan the format string so we know, per placeholder position,
-        // whether it is a plain `{}` (default Display). A plain float placeholder
-        // is rendered through the shortest-round-trip formatter instead of C's
-        // lossy `%g`, so Display matches Rust. Explicit specs like `{:.3}` keep
-        // their `%.3f` path.
-        let plain_flags = Self::placeholder_is_plain(&format_str);
-
-        for (arg_index, arg_src) in arg_source_texts.iter().enumerate() {
-            match self.parse_and_lower_macro_arg(arg_src) {
-                Ok(val) => {
-                    let ty = self.type_of_value(&val);
-                    // Plain `{}` on a float: convert to a shortest-round-trip
-                    // string (0.1 + 0.2 -> 0.30000000000000004, 1234567.0 ->
-                    // 1234567) rather than emitting C's 6-significant-digit %g.
-                    if plain_flags.get(arg_index).copied().unwrap_or(false) {
-                        if let MirType::Float(size) = ty {
-                            let conv = match size {
-                                FloatSize::F32 => "build_f32_to_string",
-                                FloatSize::F64 => "build_f64_to_string",
-                            };
-                            let builder = self.current_fn.as_mut().unwrap();
-                            let sdest =
-                                builder.create_local(MirType::Struct(Arc::from("BuildString")));
-                            let cont = builder.create_block();
-                            builder.call(
-                                MirValue::Function(Arc::from(conv)),
-                                vec![val],
-                                Some(sdest),
-                                cont,
-                            );
-                            builder.switch_to_block(cont);
-                            let ptr_local =
-                                builder.create_local(MirType::Ptr(Box::new(MirType::i8())));
-                            builder.assign(
-                                ptr_local,
-                                MirRValue::FieldAccess {
-                                    base: MirValue::Local(sdest),
-                                    field_name: Arc::from("ptr"),
-                                    field_ty: MirType::Ptr(Box::new(MirType::i8())),
-                                },
-                            );
-                            arg_types.push(Some(MirType::Ptr(Box::new(MirType::i8()))));
-                            arg_values.push(MirValue::Local(ptr_local));
-                            continue;
-                        }
-                    }
-                    // printf has no native i128/u128 format specifier. Convert
-                    // 128-bit integer macro arguments to an owned BuildString
-                    // before they enter the variadic call; static formatter
-                    // slots would alias when one call has many wide arguments.
-                    if let MirType::Int(IntSize::I128, signed) = ty {
-                        let conv = if signed {
-                            "build_i128_to_string"
-                        } else {
-                            "build_u128_to_string"
-                        };
-                        let builder = self.current_fn.as_mut().unwrap();
-                        let sdest = builder.create_local(MirType::Struct(Arc::from("BuildString")));
-                        let cont = builder.create_block();
-                        builder.call(
-                            MirValue::Function(Arc::from(conv)),
-                            vec![val],
-                            Some(sdest),
-                            cont,
-                        );
-                        builder.switch_to_block(cont);
-                        let ptr_local = builder.create_local(MirType::Ptr(Box::new(MirType::i8())));
-                        builder.assign(
-                            ptr_local,
-                            MirRValue::FieldAccess {
-                                base: MirValue::Local(sdest),
-                                field_name: Arc::from("ptr"),
-                                field_ty: MirType::Ptr(Box::new(MirType::i8())),
-                            },
-                        );
-                        arg_types.push(Some(MirType::Ptr(Box::new(MirType::i8()))));
-                        arg_values.push(MirValue::Local(ptr_local));
-                        continue;
-                    }
-                    // For BuildString values, extract .ptr for printf
-                    if let MirType::Struct(ref name) = ty {
-                        if name.as_ref() == "BuildString" {
-                            let builder = self.current_fn.as_mut().unwrap();
-                            let ptr_local =
-                                builder.create_local(MirType::Ptr(Box::new(MirType::i8())));
-                            if let MirValue::Local(local_id) = val {
-                                builder.assign(
-                                    ptr_local,
-                                    MirRValue::FieldAccess {
-                                        base: MirValue::Local(local_id),
-                                        field_name: Arc::from("ptr"),
-                                        field_ty: MirType::Ptr(Box::new(MirType::i8())),
-                                    },
-                                );
-                            }
-                            arg_types.push(Some(MirType::Ptr(Box::new(MirType::i8()))));
-                            arg_values.push(MirValue::Local(ptr_local));
-                            continue;
-                        }
-                    }
-                    arg_types.push(Some(ty));
-                    arg_values.push(val);
-                }
-                Err(_) => {
-                    // Fallback: try the old identifier-based lookup
-                    let arg_name = arg_src.trim();
-                    if let Some(&local_id) = self.var_map.get(arg_name) {
-                        let local_ty = self
-                            .current_fn
-                            .as_ref()
-                            .and_then(|b| b.local_type(local_id));
-                        arg_types.push(local_ty);
-                        arg_values.push(MirValue::Local(local_id));
-                    } else {
-                        arg_types.push(None);
-                    }
-                }
-            }
+        let mut explicit: Vec<(MirValue, String)> = Vec::new();
+        for src in &arg_source_texts {
+            let val = self.parse_and_lower_macro_arg(src)?;
+            explicit.push((val, src.trim().to_string()));
         }
 
-        // Convert {} / {:?} / {:.N} placeholders to C printf format specifiers.
         let mut c_fmt = String::new();
-        let mut placeholder_count = 0;
-        let mut chars = format_str.chars().peekable();
-        while let Some(ch) = chars.next() {
-            if ch == '{' {
-                if chars.peek() == Some(&'{') {
-                    // Escaped literal brace: {{ -> {
-                    chars.next();
-                    c_fmt.push('{');
-                } else if chars.peek() == Some(&'}') {
-                    // Simple placeholder: {}
-                    chars.next(); // consume '}'
-                    let specifier = self.format_specifier_for_type(
-                        arg_types.get(placeholder_count).and_then(|t| t.as_ref()),
-                        None,
-                    );
-                    c_fmt.push_str(&specifier);
-                    placeholder_count += 1;
-                } else if chars.peek() == Some(&':') {
-                    // Extended placeholder: {:?} or {:.N}
-                    chars.next(); // consume ':'
-                    let mut fmt_spec = String::new();
-                    while let Some(&c) = chars.peek() {
-                        if c == '}' {
-                            chars.next();
-                            break;
+        let mut values = Vec::new();
+        let mut next = 0usize;
+        for piece in &pieces {
+            match piece {
+                Piece::Text(t) => c_fmt.push_str(&t.replace('%', "%%")),
+                Piece::Arg(arg_ref, spec) => {
+                    let (val, what) = match arg_ref {
+                        ArgRef::Next => {
+                            let i = next;
+                            next += 1;
+                            explicit.get(i).cloned().ok_or_else(|| CodegenError::Rejected {
+                                message: format!(
+                                    "format string `{format_str}` has more `{{}}` placeholders than arguments"
+                                ),
+                                location: None,
+                                help: Some("pass one argument per `{}`".to_string()),
+                            })?
                         }
-                        fmt_spec.push(c);
-                        chars.next();
+                        ArgRef::Index(i) => {
+                            explicit.get(*i).cloned().ok_or_else(|| CodegenError::Rejected {
+                                message: format!(
+                                    "format string `{format_str}` refers to argument {i}, which was not passed"
+                                ),
+                                location: None,
+                                help: Some("positional arguments count from 0".to_string()),
+                            })?
+                        }
+                        ArgRef::Name(name) => {
+                            (self.parse_and_lower_macro_arg(name)?, name.clone())
+                        }
+                    };
+                    let (conv, arg) = self.fmt_placeholder(val, spec, &what)?;
+                    c_fmt.push_str(&conv);
+                    if let Some(a) = arg {
+                        values.push(a);
                     }
-                    if fmt_spec == "?" {
-                        // Debug format {:?} - print type name + value
-                        let ty = arg_types.get(placeholder_count).and_then(|t| t.as_ref());
-                        let type_name = self.type_debug_name(ty);
-                        c_fmt.push_str(&type_name);
-                        c_fmt.push('(');
-                        c_fmt.push_str(&self.format_specifier_for_type(ty, None));
-                        c_fmt.push(')');
-                    } else if fmt_spec.starts_with('.') {
-                        // Precision format {:.N} for floats
-                        let precision = &fmt_spec[1..];
-                        let specifier = self.format_specifier_for_type(
-                            arg_types.get(placeholder_count).and_then(|t| t.as_ref()),
-                            Some(precision),
-                        );
-                        c_fmt.push_str(&specifier);
-                    } else {
-                        // Unknown format spec, fall back to %d
-                        c_fmt.push_str("%d");
-                    }
-                    placeholder_count += 1;
-                } else {
-                    c_fmt.push(ch);
                 }
-            } else if ch == '}' {
-                if chars.peek() == Some(&'}') {
-                    // Escaped literal brace: }} -> }
-                    chars.next();
-                    c_fmt.push('}');
-                } else {
-                    c_fmt.push(ch);
-                }
-            } else if ch == '%' {
-                // Escape literal % for C printf: % -> %%
-                c_fmt.push_str("%%");
-            } else {
-                c_fmt.push(ch);
             }
         }
         if newline {
             c_fmt.push('\n');
         }
-
-        // Intern the C format string
         let str_idx = self.module.intern_string(c_fmt);
-
-        // Trim arg_values to the number of placeholders we actually found.
-        let arg_values: Vec<MirValue> = arg_values.into_iter().take(placeholder_count).collect();
-        Ok((str_idx, arg_values))
+        Ok((str_idx, values))
     }
 
     /// `print!`/`println!`/`eprint!`/`eprintln!`/`dbg!`: format the arguments
@@ -2028,7 +1883,17 @@ impl<'ctx> MirLowerer<'ctx> {
             CodegenError::Internal(format!("Failed to parse macro arg '{}': {:?}", src, e))
         })?;
 
-        self.lower_expr(&expr)
+        // The fragment's spans index into `src`, not the file. A nested macro
+        // (`println!("{:?}", vec![1, 2])`) reads its arguments through
+        // `self.source` and used to read the file's text at those offsets
+        // (`vec![1, 2]` became `vec![i, 0]`). Point `self.source` at the
+        // fragment while lowering it, and drop locations meant for the file.
+        let saved_source = self.source.replace(Arc::from(src));
+        let saved_fragment = std::mem::replace(&mut self.in_macro_fragment, true);
+        let result = self.lower_expr(&expr);
+        self.source = saved_source;
+        self.in_macro_fragment = saved_fragment;
+        result
     }
 
     /// Walk a Rust-style format string and report, for each placeholder in
@@ -2349,7 +2214,7 @@ impl<'ctx> MirLowerer<'ctx> {
         };
 
         // Select the correct runtime function names for the element type.
-        let (get_fn_name, len_fn_name) = Self::vec_get_len_fn_names(&elem_ty);
+        let (get_fn_name, len_fn_name) = Self::vec_get_len_fn_names(&elem_ty)?;
 
         // Store source in a local so we can reference it in the loop.
         let source_local = {
@@ -2417,6 +2282,25 @@ impl<'ctx> MirLowerer<'ctx> {
                 (acc, false)
             }
             IterTerminal::Sum => {
+                // `sum` adds numbers. Summing strings or structs has no meaning
+                // here (Rust has no `Sum` for them either) and used to emit an
+                // integer accumulator assigned to a string.
+                if !matches!(output_elem_ty, MirType::Int(..) | MirType::Float(..)) {
+                    return Err(CodegenError::Rejected {
+                        message: format!(
+                            "`sum` needs numeric elements, found `{}`",
+                            output_elem_ty.to_string().replace("BuildString", "str")
+                        ),
+                        location: self
+                            .source
+                            .as_deref()
+                            .and_then(|src| crate::codegen::c_verify::locate_call(src, "sum")),
+                        help: Some(
+                            "to join strings, loop over them and append each with `s = s + &x;`"
+                                .to_string(),
+                        ),
+                    });
+                }
                 // Accumulator of the output element type, initialized to zero.
                 let zero = match &output_elem_ty {
                     MirType::Float(_) => MirConst::Float(0.0, output_elem_ty.clone()),
@@ -2772,6 +2656,10 @@ impl<'ctx> MirLowerer<'ctx> {
         elem_val: MirValue,
         index_val: Option<MirValue>,
     ) -> CodegenResult<MirValue> {
+        // An unannotated element parameter takes the element's own type. It
+        // used to default to f64, so `|x| *x != ""` over strings compared a
+        // double with a string.
+        let elem_ty_default = self.type_of_value(&elem_val);
         if let ExprKind::Closure { params, body, .. } = &closure_expr.kind {
             // Save the current var_map entries that will be shadowed.
             let mut saved: Vec<(Arc<str>, Option<LocalId>)> = Vec::new();
@@ -2802,7 +2690,7 @@ impl<'ctx> MirLowerer<'ctx> {
                         .ty
                         .as_ref()
                         .map(|t| self.lower_type_from_ast(t))
-                        .unwrap_or(MirType::f64());
+                        .unwrap_or_else(|| elem_ty_default.clone());
                     let builder = self.current_fn.as_mut().unwrap();
                     let local = builder.create_local(param_ty);
                     builder.assign(local, MirRValue::Use(elem_val));
@@ -2843,7 +2731,7 @@ impl<'ctx> MirLowerer<'ctx> {
                         .ty
                         .as_ref()
                         .map(|t| self.lower_type_from_ast(t))
-                        .unwrap_or(MirType::f64());
+                        .unwrap_or_else(|| elem_ty_default.clone());
                     let builder = self.current_fn.as_mut().unwrap();
                     let local = builder.create_local(param_ty);
                     builder.assign(local, MirRValue::Use(elem_val));
@@ -2994,17 +2882,17 @@ impl<'ctx> MirLowerer<'ctx> {
         ty
     }
 
-    /// Select the correct C runtime function names for vec get/len
-    /// based on element type.
-    fn vec_get_len_fn_names(elem_ty: &MirType) -> (&'static str, &'static str) {
-        match elem_ty {
-            MirType::Float(FloatSize::F64) | MirType::Float(FloatSize::F32) => {
-                ("build_hvec_get_f64", "build_hvec_len")
-            }
-            MirType::Int(IntSize::I64, _) | MirType::Int(IntSize::ISize, _) => {
-                ("build_hvec_get_i64", "build_hvec_len")
-            }
-            _ => ("build_hvec_get_i32", "build_hvec_len"),
-        }
+    /// Select the C runtime accessor for the element type, with the same
+    /// element-to-suffix table every other Vec path uses. It used to know only
+    /// f64 and i64 and read every other element (strings included) through the
+    /// i32 accessor, which did not compile.
+    fn vec_get_len_fn_names(elem_ty: &MirType) -> CodegenResult<(String, &'static str)> {
+        let suffix = match elem_ty {
+            MirType::Float(_) => "f64".to_string(),
+            MirType::Int(IntSize::I64, _) | MirType::Int(IntSize::ISize, _) => "i64".to_string(),
+            MirType::Int(_, _) | MirType::Bool => "i32".to_string(),
+            other => Self::hvec_elem_suffix(other)?,
+        };
+        Ok((format!("build_hvec_get_{suffix}"), "build_hvec_len"))
     }
 }

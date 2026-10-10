@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let x: Option<i32> = None;
+    println!("{}", x.unwrap_or(7));
+}

@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let a = -3;
+    println!("{} {}", a.abs(), std::cmp::max(a, 2));
+}

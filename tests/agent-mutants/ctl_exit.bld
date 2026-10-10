@@ -1,0 +1,4 @@
+fn main() ~ Console + Process {
+    println!("bye");
+    std::process::exit(0);
+}

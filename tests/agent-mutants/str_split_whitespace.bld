@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let s = "a b c";
+    for w in s.split_whitespace() { println!("{}", w); }
+}

@@ -1,0 +1,5 @@
+fn main() ~ Console {
+    let k = 3;
+    let f = |x: i32| x * k;
+    println!("{}", f(2));
+}

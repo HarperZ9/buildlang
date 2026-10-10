@@ -1,0 +1,5 @@
+fn main() ~ Console {
+    let v = vec![3, 1, 2];
+    let w: Vec<_> = v.iter().map(|x| x.clone()).collect();
+    println!("{}", w.len());
+}

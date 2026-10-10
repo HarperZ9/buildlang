@@ -1,0 +1,4 @@
+fn main() ~ Console + FileSystem {
+    let s = read_file("input.txt");
+    println!("{}", s.len());
+}

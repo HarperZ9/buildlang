@@ -1,0 +1,5 @@
+fn main() ~ Console {
+    let v = vec!["c", "a", "b"];
+    let mut i = 0;
+    while i < v.len() { println!("{}", v[i]); i += 1; }
+}

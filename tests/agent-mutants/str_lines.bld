@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let s = "1\n2";
+    for l in s.lines() { println!("{}", l); }
+}
