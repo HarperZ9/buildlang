@@ -2187,6 +2187,94 @@ static BuildString build_model_complete(const char* prompt) {
     return reply;
 }
 
+// UTF-8 for `s.chars()` and for printing a char.
+static uint32_t build_string_utf8_at(BuildString s, int64_t i) {
+    const unsigned char* p = (const unsigned char*)s.ptr + i;
+    size_t left = s.len - (size_t)i;
+    if (p[0] < 0x80 || left < 2) return p[0];
+    if ((p[0] & 0xE0) == 0xC0) return ((p[0] & 0x1F) << 6) | (p[1] & 0x3F);
+    if ((p[0] & 0xF0) == 0xE0 && left >= 3)
+        return ((p[0] & 0x0F) << 12) | ((p[1] & 0x3F) << 6) | (p[2] & 0x3F);
+    if ((p[0] & 0xF8) == 0xF0 && left >= 4)
+        return ((uint32_t)(p[0] & 0x07) << 18) | ((p[1] & 0x3F) << 12) | ((p[2] & 0x3F) << 6) | (p[3] & 0x3F);
+    return p[0];
+}
+static int64_t build_string_utf8_width(BuildString s, int64_t i) {
+    unsigned char b = (unsigned char)s.ptr[i];
+    int64_t w = b < 0x80 ? 1 : (b & 0xE0) == 0xC0 ? 2 : (b & 0xF0) == 0xE0 ? 3 : (b & 0xF8) == 0xF0 ? 4 : 1;
+    return (size_t)(i + w) <= s.len ? w : 1;
+}
+static BuildString build_char_to_string(uint32_t c) {
+    char buf[5] = {0};
+    if (c < 0x80) { buf[0] = (char)c; }
+    else if (c < 0x800) { buf[0] = (char)(0xC0 | (c >> 6)); buf[1] = (char)(0x80 | (c & 0x3F)); }
+    else if (c < 0x10000) { buf[0] = (char)(0xE0 | (c >> 12)); buf[1] = (char)(0x80 | ((c >> 6) & 0x3F)); buf[2] = (char)(0x80 | (c & 0x3F)); }
+    else { buf[0] = (char)(0xF0 | (c >> 18)); buf[1] = (char)(0x80 | ((c >> 12) & 0x3F)); buf[2] = (char)(0x80 | ((c >> 6) & 0x3F)); buf[3] = (char)(0x80 | (c & 0x3F)); }
+    return build_format_str("%s", buf);
+}
+
+// Debug (`{:?}`) text. A float prints its shortest round-trip form with `.0`
+// added to a whole number, as Rust's Debug does. (Rust switches to exponent
+// form at 1e16 and below 1e-4; that is not reproduced here.)
+static BuildString build_f64_to_debug_string(double v) {
+    char* t = bl_fmt_f64(v);
+    int whole = 1;
+    for (char* p = t; *p; p++) {
+        if (*p == '.' || *p == 'e' || *p == 'E' || *p == 'n' || *p == 'N' || *p == 'i') { whole = 0; break; }
+    }
+    return whole ? build_format_str("%s.0", t) : build_format_str("%s", t);
+}
+static BuildString build_f32_to_debug_string(float v) {
+    return build_f64_to_debug_string((double)v);
+}
+
+// `{:?}` of a vector: `[a, b, c]`, strings quoted, as Rust prints a Vec.
+static BuildString build_hvec_debug_open(void) { return build_string_new("["); }
+static BuildString build_hvec_debug_close(BuildString acc) {
+    return build_string_concat(acc, build_string_new("]"));
+}
+static BuildString build_hvec_debug_sep(BuildString acc, size_t i) {
+    return i ? build_string_concat(acc, build_string_new(", ")) : acc;
+}
+static BuildString build_hvec_debug_i32(BuildVecHandle v) {
+    BuildString acc = build_hvec_debug_open();
+    size_t n = build_hvec_len(v);
+    for (size_t i = 0; i < n; i++) {
+        acc = build_hvec_debug_sep(acc, i);
+        acc = build_string_concat(acc, build_i64_to_string((int64_t)build_hvec_get_i32(v, i)));
+    }
+    return build_hvec_debug_close(acc);
+}
+static BuildString build_hvec_debug_i64(BuildVecHandle v) {
+    BuildString acc = build_hvec_debug_open();
+    size_t n = build_hvec_len(v);
+    for (size_t i = 0; i < n; i++) {
+        acc = build_hvec_debug_sep(acc, i);
+        acc = build_string_concat(acc, build_i64_to_string(build_hvec_get_i64(v, i)));
+    }
+    return build_hvec_debug_close(acc);
+}
+static BuildString build_hvec_debug_f64(BuildVecHandle v) {
+    BuildString acc = build_hvec_debug_open();
+    size_t n = build_hvec_len(v);
+    for (size_t i = 0; i < n; i++) {
+        acc = build_hvec_debug_sep(acc, i);
+        acc = build_string_concat(acc, build_f64_to_debug_string(build_hvec_get_f64(v, i)));
+    }
+    return build_hvec_debug_close(acc);
+}
+static BuildString build_hvec_debug_str(BuildVecHandle v) {
+    BuildString acc = build_hvec_debug_open();
+    size_t n = build_hvec_len(v);
+    for (size_t i = 0; i < n; i++) {
+        acc = build_hvec_debug_sep(acc, i);
+        acc = build_string_concat(acc, build_string_new("\""));
+        acc = build_string_concat(acc, build_hvec_get_str(v, i));
+        acc = build_string_concat(acc, build_string_new("\""));
+    }
+    return build_hvec_debug_close(acc);
+}
+
 // Vulkan host entry points, defined in runtime/vulkan_host.c and linked in by
 // GPU host programs. Declared here so a call compiles against its real
 // signature instead of an implicit declaration.

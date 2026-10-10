@@ -1,0 +1,5 @@
+fn main() ~ Console {
+    let x = 3.7;
+    let n = x as i32;
+    println!("{}", n);
+}

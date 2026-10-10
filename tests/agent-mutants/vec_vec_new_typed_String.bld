@@ -1,0 +1,5 @@
+fn main() ~ Console {
+    let mut v: Vec<String> = Vec::new();
+    v.push(String::from("x"));
+    println!("{}", v.len());
+}

@@ -1,0 +1,5 @@
+fn main() ~ Console {
+    let v = vec![3.5, 1.5, 2.0];
+    let s = &v[1..3];
+    println!("{}", s.len());
+}

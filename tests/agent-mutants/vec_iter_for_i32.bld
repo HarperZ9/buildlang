@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let v = vec![3, 1, 2];
+    for x in v.iter() { println!("{}", x); }
+}

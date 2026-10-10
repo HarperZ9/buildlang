@@ -1,0 +1,5 @@
+fn main() ~ Console {
+    let mut i = 0;
+    let r = loop { i += 1; if i == 3 { break i * 2; } };
+    println!("{}", r);
+}

@@ -1,0 +1,5 @@
+fn main() ~ Console {
+    let v = vec!["c", "a", "b"];
+    let s: str = v.iter().sum();
+    println!("{}", s);
+}

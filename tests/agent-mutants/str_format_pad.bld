@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let n = 7;
+    println!("{:>4}", n);
+}

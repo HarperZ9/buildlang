@@ -14,6 +14,7 @@
 //! - `macros`: Closure, effect, builtin macro, and iterator chain lowering
 
 mod expr;
+mod format;
 mod macros;
 #[cfg(test)]
 mod tests;
@@ -77,6 +78,15 @@ pub struct MirLowerer<'ctx> {
     /// The label lets `break 'name` / `continue 'name` target an enclosing loop
     /// instead of the innermost one.
     loop_stack: Vec<(BlockId, BlockId, Option<String>)>,
+    /// Result local of a `loop` that a `break value` assigned, keyed by the
+    /// loop's exit block, so `let r = loop { ... break v; }` binds `v`.
+    loop_break_values: HashMap<BlockId, LocalId>,
+    /// Locals that hold a `char` (MIR stores a char as a u32 code point), so
+    /// `{}` prints the character rather than its number.
+    pub(crate) char_locals: std::collections::HashSet<LocalId>,
+    /// True while lowering a re-parsed macro argument, whose spans do not
+    /// index into the file.
+    pub(crate) in_macro_fragment: bool,
     /// Current function builder.
     current_fn: Option<MirBuilder>,
     /// Source code (for extracting token text in macro expansion).
@@ -253,6 +263,9 @@ impl<'ctx> MirLowerer<'ctx> {
             module: MirModuleBuilder::new("main"),
             var_map: HashMap::new(),
             loop_stack: Vec::new(),
+            loop_break_values: HashMap::new(),
+            char_locals: std::collections::HashSet::new(),
+            in_macro_fragment: false,
             current_fn: None,
             source: None,
             closure_count: 0,
@@ -293,6 +306,9 @@ impl<'ctx> MirLowerer<'ctx> {
             module: MirModuleBuilder::new("main"),
             var_map: HashMap::new(),
             loop_stack: Vec::new(),
+            loop_break_values: HashMap::new(),
+            char_locals: std::collections::HashSet::new(),
+            in_macro_fragment: false,
             current_fn: None,
             source: Some(source),
             closure_count: 0,
@@ -1643,6 +1659,30 @@ impl<'ctx> MirLowerer<'ctx> {
                 .or_insert_with(Vec::new)
                 .push(impl_def.clone());
             return Ok(());
+        }
+
+        // Standard-library formatting traits need `std::fmt::Formatter`, which
+        // the C backend does not provide; the impl used to emit an unknown C
+        // type. Reject it with the supported alternative.
+        if let Some(tr) = impl_def.trait_ref.as_ref() {
+            let segs: Vec<&str> = tr
+                .path
+                .segments
+                .iter()
+                .map(|s| s.ident.name.as_ref())
+                .collect();
+            if let Some(last @ ("Display" | "Debug")) = segs.last().copied() {
+                let span = tr.path.span;
+                return Err(crate::codegen::CodegenError::Rejected {
+                    message: format!(
+                        "implementing `{last}` is not supported by the C backend: it has no `std::fmt::Formatter`"
+                    ),
+                    location: (span.end.0 > span.start.0).then_some((span.start.0, span.end.0)),
+                    help: Some(format!(
+                        "give `{type_name}` a method that builds the text, for example `fn to_string(&self) -> String {{ format!(\"...\", self.x) }}`, and print that"
+                    )),
+                });
+            }
         }
 
         // Track trait implementations for vtable generation

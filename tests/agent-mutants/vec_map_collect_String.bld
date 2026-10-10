@@ -1,0 +1,5 @@
+fn main() ~ Console {
+    let v = vec![String::from("c"), String::from("a"), String::from("b")];
+    let w: Vec<_> = v.iter().map(|x| x.clone()).collect();
+    println!("{}", w.len());
+}

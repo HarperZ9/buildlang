@@ -1,0 +1,6 @@
+fn main() ~ Console {
+    let x = 2;
+    assert!(x == 2);
+    assert_eq!(x, 2);
+    println!("ok");
+}

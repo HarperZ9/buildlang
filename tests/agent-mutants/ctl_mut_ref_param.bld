@@ -1,0 +1,8 @@
+fn main() ~ Console {
+    let mut x = 1;
+    bump(&mut x);
+    println!("{}", x);
+}
+fn bump(x: &mut i32) { *x += 1; }
+fn unused() {
+}

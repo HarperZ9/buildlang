@@ -1,0 +1,8 @@
+fn main() ~ Console {
+    let s = Shape::Rect(2, 3);
+    let a = match s { Shape::Square(n) => n * n, Shape::Rect(w, h) => w * h };
+    println!("{}", a);
+}
+enum Shape { Square(i32), Rect(i32, i32) }
+fn unused() {
+}

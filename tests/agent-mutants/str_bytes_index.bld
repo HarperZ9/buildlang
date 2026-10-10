@@ -1,0 +1,5 @@
+fn main() ~ Console {
+    let s = "abc";
+    let b = s.as_bytes();
+    println!("{}", b[0]);
+}

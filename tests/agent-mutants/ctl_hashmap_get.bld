@@ -1,0 +1,6 @@
+use std::collections::HashMap;
+fn main() ~ Console {
+    let mut m: HashMap<String, i32> = HashMap::new();
+    m.insert(String::from("a"), 1);
+    match m.get("a") { Some(v) => println!("{}", v), None => println!("none") }
+}

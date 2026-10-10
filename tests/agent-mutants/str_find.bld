@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let s = "hello";
+    match s.find("l") { Some(i) => println!("{}", i), None => println!("no") }
+}

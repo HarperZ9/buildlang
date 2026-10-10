@@ -1,0 +1,5 @@
+fn main() ~ Console {
+    let v = vec![String::from("c"), String::from("a"), String::from("b")];
+    let n = v.iter().filter(|x| **x != String::new()).count();
+    println!("{}", n);
+}

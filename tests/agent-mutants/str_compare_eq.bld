@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let a = "x";
+    if a == "x" { println!("eq"); }
+}

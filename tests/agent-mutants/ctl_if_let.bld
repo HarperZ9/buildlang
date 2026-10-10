@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let x: Option<i32> = Some(3);
+    if let Some(v) = x { println!("{}", v); }
+}

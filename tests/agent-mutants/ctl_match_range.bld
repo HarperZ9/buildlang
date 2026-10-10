@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let n = 5;
+    match n { 0..=3 => println!("low"), _ => println!("high") }
+}

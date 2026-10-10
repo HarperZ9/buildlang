@@ -228,8 +228,14 @@ impl<'ctx> MirLowerer<'ctx> {
             }
         }
 
-        // Compute type from annotation if present
-        let explicit_ty = local.ty.as_ref().map(|t| self.lower_type_from_ast(t));
+        // Compute type from annotation if present. An annotation with an
+        // inference placeholder (`Vec<_>`) says nothing the initializer does
+        // not, and lowering it named a C type `_`; infer from the initializer.
+        let explicit_ty = local
+            .ty
+            .as_ref()
+            .map(|t| self.lower_type_from_ast(t))
+            .filter(|t| !Self::mentions_placeholder(t));
 
         // Propagate expected type to init expression lowering so that
         // constructor calls (HashMap::new, Vec::new, etc.) can use the
@@ -321,6 +327,21 @@ impl<'ctx> MirLowerer<'ctx> {
         if let ast::PatternKind::Ident { name, .. } = &local.pattern.kind {
             let local_id = builder.create_named_local(name.name.clone(), ty.clone());
             self.var_map.insert(name.name.clone(), local_id);
+
+            // A char binding: `let c = 'a';`, `let c: char = ...;`,
+            // `let c = x as char;`, or a copy of another char local.
+            let annotated_char = local.ty.as_ref().is_some_and(|t| {
+                matches!(&t.kind, ast::TypeKind::Path(p)
+                    if p.last_ident().is_some_and(|i| i.name.as_ref() == "char"))
+            });
+            let init_is_char = local
+                .init
+                .as_ref()
+                .is_some_and(|init| Self::expr_is_char_literal_or_cast(&init.expr))
+                || matches!(&init_val, Some(MirValue::Local(src)) if self.char_locals.contains(src));
+            if annotated_char || init_is_char {
+                self.char_locals.insert(local_id);
+            }
 
             // Record the Option inner type if extracted from annotation
             if let Some(inner_ty) = option_inner {
@@ -1295,6 +1316,11 @@ impl<'ctx> MirLowerer<'ctx> {
                 // Dereference: emit a proper deref rvalue
                 let pointee_ty = match self.type_of_value(&inner_val) {
                     MirType::Ptr(inner) => *inner,
+                    // By-value closure parameters dereference to themselves
+                    // (see `lower_deref`).
+                    MirType::Int(..) | MirType::Float(..) | MirType::Bool | MirType::Struct(_) => {
+                        return Ok(inner_val)
+                    }
                     _ => MirType::i32(),
                 };
                 let builder = self
@@ -2430,6 +2456,302 @@ impl<'ctx> MirLowerer<'ctx> {
         Some(Ok(values::local(dest)))
     }
 
+    /// Load through a pointer value (`&x` passed where the runtime takes `x`).
+    /// Non-pointer values pass through unchanged.
+    pub(crate) fn deref_if_pointer(&mut self, val: MirValue) -> CodegenResult<MirValue> {
+        let MirType::Ptr(inner) = self.type_of_value(&val) else {
+            return Ok(val);
+        };
+        if matches!(*inner, MirType::Void) {
+            return Ok(val);
+        }
+        let builder = self
+            .current_fn
+            .as_mut()
+            .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+        let loaded = builder.create_local((*inner).clone());
+        builder.assign(
+            loaded,
+            MirRValue::Deref {
+                ptr: val,
+                pointee_ty: *inner,
+            },
+        );
+        Ok(values::local(loaded))
+    }
+
+    /// Whether a lowered type still contains the `_` inference placeholder.
+    fn mentions_placeholder(ty: &MirType) -> bool {
+        match ty {
+            MirType::Struct(n) => n.as_ref() == "_",
+            MirType::Ptr(inner) | MirType::Vec(inner) | MirType::Option(inner) => {
+                Self::mentions_placeholder(inner)
+            }
+            MirType::Map(k, v) => Self::mentions_placeholder(k) || Self::mentions_placeholder(v),
+            _ => false,
+        }
+    }
+
+    /// `s[start..end]` / `s[start..=end]` on a string, through
+    /// `build_string_substring(s, start, len)`. A missing start is 0 and a
+    /// missing end is the string length.
+    fn lower_substring(
+        &mut self,
+        base: MirValue,
+        start: Option<&ast::Expr>,
+        end: Option<&ast::Expr>,
+        inclusive: bool,
+    ) -> CodegenResult<MirValue> {
+        let i64_ty = MirType::i64();
+        let start_val = match start {
+            Some(e) => self.lower_expr(e)?,
+            None => MirValue::Const(MirConst::Int(0, i64_ty.clone())),
+        };
+        let end_val = match end {
+            Some(e) => self.lower_expr(e)?,
+            None => {
+                let builder = self
+                    .current_fn
+                    .as_mut()
+                    .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                let len = builder.create_local(i64_ty.clone());
+                let cont = builder.create_block();
+                builder.call(
+                    MirValue::Function(Arc::from("build_string_len")),
+                    vec![base.clone()],
+                    Some(len),
+                    cont,
+                );
+                builder.switch_to_block(cont);
+                values::local(len)
+            }
+        };
+        let builder = self
+            .current_fn
+            .as_mut()
+            .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+        let start_l = builder.create_local(i64_ty.clone());
+        builder.assign(start_l, MirRValue::Use(start_val));
+        let end_l = builder.create_local(i64_ty.clone());
+        builder.assign(end_l, MirRValue::Use(end_val));
+        if inclusive {
+            builder.binary_op(
+                end_l,
+                BinOp::Add,
+                values::local(end_l),
+                MirValue::Const(MirConst::Int(1, i64_ty.clone())),
+            );
+        }
+        let len_l = builder.create_local(i64_ty.clone());
+        builder.binary_op(
+            len_l,
+            BinOp::Sub,
+            values::local(end_l),
+            values::local(start_l),
+        );
+        let result = builder.create_local(MirType::Struct(Arc::from("BuildString")));
+        let cont = builder.create_block();
+        builder.call(
+            MirValue::Function(Arc::from("build_string_substring")),
+            vec![base, values::local(start_l), values::local(len_l)],
+            Some(result),
+            cont,
+        );
+        builder.switch_to_block(cont);
+        Ok(values::local(result))
+    }
+
+    /// Lower the scrutinee of `match`, `if let` or `while let`. `v.pop()`,
+    /// `v.get(i)`, `v.first()` and `v.last()` on a vector give an `Option` here,
+    /// as in Rust, so `while let Some(x) = v.pop()` stops when the vector is
+    /// empty. (Elsewhere they keep returning the element, which existing
+    /// BuildLang code relies on.)
+    pub(crate) fn lower_scrutinee(&mut self, scrutinee: &ast::Expr) -> CodegenResult<MirValue> {
+        if let ExprKind::MethodCall {
+            receiver,
+            method,
+            args,
+            ..
+        } = &scrutinee.kind
+        {
+            if matches!(method.name.as_ref(), "pop" | "get" | "first" | "last") {
+                let recv_ty = self.infer_expr_type(receiver);
+                if let MirType::Vec(elem) = recv_ty {
+                    return self.lower_vec_option_method(
+                        receiver,
+                        method.name.as_ref(),
+                        args,
+                        *elem,
+                    );
+                }
+                if let (MirType::Map(_, val_ty), "get") = (recv_ty, method.name.as_ref()) {
+                    return self.lower_map_get_option(receiver, method, args, *val_ty);
+                }
+            }
+        }
+        self.lower_expr(scrutinee)
+    }
+
+    /// `match m.get(k) { Some(v) => .., None => .. }`: `None` when the key is
+    /// absent. The map's plain `get` returns a zero value for a missing key,
+    /// so matching on it always took the `Some` arm.
+    fn lower_map_get_option(
+        &mut self,
+        receiver: &ast::Expr,
+        method: &ast::Ident,
+        args: &[ast::Expr],
+        val_ty: MirType,
+    ) -> CodegenResult<MirValue> {
+        let contains = ast::Ident {
+            name: Arc::from("contains_key"),
+            span: method.span,
+        };
+        let has = self.lower_method_call(receiver, &contains, args)?;
+        let builder = self
+            .current_fn
+            .as_mut()
+            .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+        let result = builder.create_local(MirType::Option(Box::new(val_ty)));
+        let some_bb = builder.create_block();
+        let none_bb = builder.create_block();
+        let merge = builder.create_block();
+        builder.branch(has, some_bb, none_bb);
+        builder.switch_to_block(some_bb);
+        let val = self.lower_method_call(receiver, method, args)?;
+        let builder = self.current_fn.as_mut().unwrap();
+        let cont = builder.create_block();
+        builder.call(
+            MirValue::Function(Arc::from("Some")),
+            vec![val],
+            Some(result),
+            cont,
+        );
+        builder.switch_to_block(cont);
+        builder.goto(merge);
+        builder.switch_to_block(none_bb);
+        builder.assign(result, MirRValue::Use(MirValue::Global(Arc::from("None"))));
+        builder.goto(merge);
+        builder.switch_to_block(merge);
+        Ok(values::local(result))
+    }
+
+    fn lower_vec_option_method(
+        &mut self,
+        receiver: &ast::Expr,
+        method: &str,
+        args: &[ast::Expr],
+        elem: MirType,
+    ) -> CodegenResult<MirValue> {
+        let recv = self.lower_expr(receiver)?;
+        let recv = self.deref_if_pointer(recv)?;
+        let suffix = Self::hvec_elem_suffix(&elem)?;
+        let index = match (method, args.first()) {
+            ("get", Some(a)) => {
+                let v = self.lower_expr(a)?;
+                Some(self.deref_if_pointer(v)?)
+            }
+            _ => None,
+        };
+        let builder = self
+            .current_fn
+            .as_mut()
+            .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+        let len = builder.create_local(MirType::i64());
+        let cont = builder.create_block();
+        builder.call(
+            MirValue::Function(Arc::from("build_hvec_len")),
+            vec![recv.clone()],
+            Some(len),
+            cont,
+        );
+        builder.switch_to_block(cont);
+        // Index of the element to read, and whether it exists.
+        let idx = builder.create_local(MirType::i64());
+        match (method, index) {
+            ("get", Some(i)) => builder.assign(idx, MirRValue::Use(i)),
+            ("last", _) | ("pop", _) => builder.binary_op(
+                idx,
+                BinOp::Sub,
+                values::local(len),
+                MirValue::Const(MirConst::Int(1, MirType::i64())),
+            ),
+            _ => builder.assign(
+                idx,
+                MirRValue::Use(MirValue::Const(MirConst::Int(0, MirType::i64()))),
+            ),
+        }
+        let nonneg = builder.create_local(MirType::Bool);
+        builder.binary_op(
+            nonneg,
+            BinOp::Ge,
+            values::local(idx),
+            MirValue::Const(MirConst::Int(0, MirType::i64())),
+        );
+        let below = builder.create_local(MirType::Bool);
+        builder.binary_op(below, BinOp::Lt, values::local(idx), values::local(len));
+        let ok = builder.create_local(MirType::Bool);
+        builder.binary_op(
+            ok,
+            BinOp::BitAnd,
+            values::local(nonneg),
+            values::local(below),
+        );
+
+        let result = builder.create_local(MirType::Option(Box::new(elem.clone())));
+        let some_bb = builder.create_block();
+        let none_bb = builder.create_block();
+        let merge = builder.create_block();
+        builder.branch(values::local(ok), some_bb, none_bb);
+
+        builder.switch_to_block(some_bb);
+        let val = builder.create_local(elem.clone());
+        let getter = if method == "pop" {
+            format!("build_hvec_pop_{suffix}")
+        } else {
+            format!("build_hvec_get_{suffix}")
+        };
+        let get_args = if method == "pop" {
+            vec![recv]
+        } else {
+            vec![recv, values::local(idx)]
+        };
+        let c1 = builder.create_block();
+        builder.call(
+            MirValue::Function(Arc::from(getter)),
+            get_args,
+            Some(val),
+            c1,
+        );
+        builder.switch_to_block(c1);
+        let c2 = builder.create_block();
+        builder.call(
+            MirValue::Function(Arc::from("Some")),
+            vec![values::local(val)],
+            Some(result),
+            c2,
+        );
+        builder.switch_to_block(c2);
+        builder.goto(merge);
+
+        builder.switch_to_block(none_bb);
+        builder.assign(result, MirRValue::Use(MirValue::Global(Arc::from("None"))));
+        builder.goto(merge);
+
+        builder.switch_to_block(merge);
+        Ok(values::local(result))
+    }
+
+    /// `'a'` or `x as char`.
+    fn expr_is_char_literal_or_cast(expr: &ast::Expr) -> bool {
+        match &expr.kind {
+            ExprKind::Literal(Literal::Char(_)) => true,
+            ExprKind::Cast { ty, .. } => matches!(&ty.kind, ast::TypeKind::Path(p)
+                if p.last_ident().is_some_and(|i| i.name.as_ref() == "char")),
+            ExprKind::Paren(inner) => Self::expr_is_char_literal_or_cast(inner),
+            _ => false,
+        }
+    }
+
     /// A MIR type as BuildLang source spells it, for diagnostics.
     fn source_type_name(ty: &MirType) -> String {
         ty.to_string().replace("BuildString", "str")
@@ -2463,7 +2785,7 @@ impl<'ctx> MirLowerer<'ctx> {
         message: String,
         help: String,
     ) -> CodegenError {
-        let location = if expr.span.end.0 > expr.span.start.0 {
+        let location = if !self.in_macro_fragment && expr.span.end.0 > expr.span.start.0 {
             Some((expr.span.start.0, expr.span.end.0))
         } else {
             None
@@ -2533,7 +2855,7 @@ impl<'ctx> MirLowerer<'ctx> {
                             Self::source_type_name(&value_ty),
                             Self::source_type_name(&elem_ty)
                         ),
-                        "give the vector its element type where it is created, for example                          `let mut v: Vec<str> = vec_new();`"
+                        "give the vector its element type where it is created, for example `let mut v: Vec<str> = vec_new();`"
                             .to_string(),
                     )));
                 }
@@ -2715,7 +3037,7 @@ impl<'ctx> MirLowerer<'ctx> {
         }
     }
 
-    fn hvec_elem_suffix(elem_ty: &MirType) -> CodegenResult<String> {
+    pub(crate) fn hvec_elem_suffix(elem_ty: &MirType) -> CodegenResult<String> {
         Ok(match elem_ty {
             MirType::Float(_) => "f64".to_string(),
             MirType::Int(IntSize::I8, true) => "i8".to_string(),
@@ -4260,7 +4582,10 @@ impl<'ctx> MirLowerer<'ctx> {
             if let Some(fn_name) = runtime_fn {
                 let mut arg_vals = vec![receiver_val];
                 for arg in args {
-                    arg_vals.push(self.lower_expr(arg)?);
+                    // `v.contains(&x)`: the runtime helpers take elements by
+                    // value, so load a borrowed argument first.
+                    let val = self.lower_expr(arg)?;
+                    arg_vals.push(self.deref_if_pointer(val)?);
                 }
                 let builder = self
                     .current_fn
@@ -4346,9 +4671,37 @@ impl<'ctx> MirLowerer<'ctx> {
                 _ => (None, MirType::i32()),
             };
             if let Some(fn_name) = runtime_fn {
+                // The native str->f64 map takes C string keys; the typed wrappers
+                // take a BuildString. Load a borrowed key, then pass `.ptr` to the
+                // native functions (as the typed wrappers already do).
+                let native_key = fn_name.ends_with("_str_f64");
                 let mut arg_vals = vec![receiver_val];
-                for arg in args {
-                    arg_vals.push(self.lower_expr(arg)?);
+                for (i, arg) in args.iter().enumerate() {
+                    let val = self.lower_expr(arg)?;
+                    let val = if i == 0 {
+                        self.deref_if_pointer(val)?
+                    } else {
+                        val
+                    };
+                    let is_string = matches!(self.type_of_value(&val),
+                        MirType::Struct(ref n) if n.as_ref() == "BuildString");
+                    if i == 0 && native_key && is_string {
+                        let builder = self.current_fn.as_mut().ok_or_else(|| {
+                            CodegenError::Internal("No current function".to_string())
+                        })?;
+                        let ptr = builder.create_local(MirType::Ptr(Box::new(MirType::i8())));
+                        builder.assign(
+                            ptr,
+                            MirRValue::FieldAccess {
+                                base: val,
+                                field_name: Arc::from("ptr"),
+                                field_ty: MirType::Ptr(Box::new(MirType::i8())),
+                            },
+                        );
+                        arg_vals.push(values::local(ptr));
+                    } else {
+                        arg_vals.push(val);
+                    }
                 }
                 let builder = self
                     .current_fn
@@ -4512,7 +4865,7 @@ impl<'ctx> MirLowerer<'ctx> {
         then_branch: &ast::Block,
         else_branch: Option<&ast::Expr>,
     ) -> CodegenResult<MirValue> {
-        let scrut_val = self.lower_expr(scrutinee)?;
+        let scrut_val = self.lower_scrutinee(scrutinee)?;
         let scrut_ty = self.type_of_value(&scrut_val);
         let is_option = Self::is_option_mir_type(&scrut_ty);
         let is_result = matches!(&scrut_ty, MirType::Struct(n) if n.as_ref() == "Result");
@@ -4789,10 +5142,21 @@ impl<'ctx> MirLowerer<'ctx> {
             );
             hv
         } else {
-            // Fallback: treat as truthy (non-zero = Some, zero = None)
-            let hv = builder.create_local(MirType::Bool);
-            builder.assign(hv, MirRValue::Use(MirValue::Const(MirConst::Bool(true))));
-            hv
+            // A `Some`/`None` match on a value that is not an Option used to
+            // take the `Some` arm unconditionally, so `None` never matched (an
+            // endless `while let`, a wrong branch). Reject it instead.
+            return Err(CodegenError::Rejected {
+                message: format!(
+                    "`match` on `Some`/`None` needs an `Option`, but this value is a `{}` in the C backend",
+                    scrutinee_ty.to_string().replace("BuildString", "str")
+                ),
+                location: None,
+                help: Some(
+                    "match on the call that returns the Option directly (for example \
+                     `match v.pop() { ... }`), or test `v.len()` first"
+                        .to_string(),
+                ),
+            });
         };
 
         let merge_block = builder.create_block();
@@ -5150,7 +5514,7 @@ impl<'ctx> MirLowerer<'ctx> {
         arms: &[ast::MatchArm],
     ) -> CodegenResult<MirValue> {
         // Evaluate the scrutinee once and store in a temporary.
-        let scrutinee_val = self.lower_expr(scrutinee)?;
+        let scrutinee_val = self.lower_scrutinee(scrutinee)?;
         let scrutinee_ty = self.type_of_value(&scrutinee_val);
 
         // If the scrutinee is a pointer to an enum (e.g. `match self` in a
@@ -6203,7 +6567,10 @@ impl<'ctx> MirLowerer<'ctx> {
 
         builder.switch_to_block(exit_block);
 
-        Ok(values::unit())
+        match self.loop_break_values.remove(&exit_block) {
+            Some(result) => Ok(values::local(result)),
+            None => Ok(values::unit()),
+        }
     }
 
     fn lower_while(
@@ -6273,7 +6640,7 @@ impl<'ctx> MirLowerer<'ctx> {
         builder.switch_to_block(cond_block);
 
         // Evaluate the scrutinee on each iteration
-        let scrut_val = self.lower_expr(scrutinee)?;
+        let scrut_val = self.lower_scrutinee(scrutinee)?;
         let scrut_ty = self.type_of_value(&scrut_val);
 
         let scrut_local = {
@@ -6447,7 +6814,37 @@ impl<'ctx> MirLowerer<'ctx> {
         //     __idx += 1;
         //     goto loop_cond
         //   exit:
+        // `for x in v.iter()` / `.into_iter()` / `.iter_mut()`: iterate the
+        // collection itself (elements bind by value).
+        let iter = match &iter.kind {
+            ExprKind::MethodCall {
+                receiver,
+                method,
+                args,
+                ..
+            } if args.is_empty()
+                && matches!(method.name.as_ref(), "iter" | "into_iter" | "iter_mut")
+                && matches!(
+                    self.infer_expr_type(receiver),
+                    MirType::Vec(_) | MirType::Array(..) | MirType::Ptr(_)
+                ) =>
+            {
+                receiver.as_ref()
+            }
+            _ => iter,
+        };
         let iter_val = self.lower_expr(iter)?;
+        // `for x in &v`: iterate the vector, array or string behind the
+        // reference. This used to fall through to an empty loop.
+        let iter_val = match self.type_of_value(&iter_val) {
+            MirType::Ptr(inner)
+                if matches!(*inner, MirType::Vec(_) | MirType::Array(..))
+                    || matches!(&*inner, MirType::Struct(n) if n.as_ref() == "BuildString") =>
+            {
+                self.deref_if_pointer(iter_val)?
+            }
+            _ => iter_val,
+        };
         let iter_ty = self.type_of_value(&iter_val);
 
         // Determine if this is an array type and extract element type + length
@@ -6464,7 +6861,9 @@ impl<'ctx> MirLowerer<'ctx> {
             // chars()/bytes() are identity ops, so the iterable is a BuildString.
             // Previously this fell to the no-op loop (zero iterations).
             MirType::Struct(n) if n.as_ref() == "BuildString" => {
-                return self.lower_for_string(pattern, iter_val, body, label);
+                let chars = matches!(&iter.kind,
+                    ExprKind::MethodCall { method, .. } if method.name.as_ref() == "chars");
+                return self.lower_for_string(pattern, iter_val, body, label, chars);
             }
             _ => {
                 // Not an array - try iterator protocol: call .next() in a loop.
@@ -6478,15 +6877,16 @@ impl<'ctx> MirLowerer<'ctx> {
                         return self.lower_for_iterator(pattern, iter_val, &iter_ty, body, label);
                     }
                 }
-                // No iterator protocol - emit a no-op loop
-                let builder = self
-                    .current_fn
-                    .as_mut()
-                    .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-                let exit_block = builder.create_block();
-                builder.goto(exit_block);
-                builder.switch_to_block(exit_block);
-                return Ok(values::unit());
+                // Nothing to iterate. This used to emit a loop that ran zero
+                // times, which silently skipped the body.
+                return Err(self.reject_at(
+                    iter,
+                    format!(
+                        "`for` cannot iterate over a `{}` in the C backend",
+                        Self::source_type_name(&iter_ty)
+                    ),
+                    "iterate a vector, array, string or range, or loop with an index".to_string(),
+                ));
             }
         };
 
@@ -6662,16 +7062,23 @@ impl<'ctx> MirLowerer<'ctx> {
         Ok(values::unit())
     }
 
-    /// Lower `for c in <string>` as a runtime-length loop over the string's
-    /// bytes, binding each byte (as i32) to the pattern variable.
+    /// Lower `for c in <string>` as a runtime-length loop over the string.
+    /// `s.bytes()` binds each byte (as i32). `s.chars()` decodes UTF-8 and binds
+    /// each code point as a char, advancing by the character's byte width; it
+    /// used to bind bytes, so `println!("{}", c)` printed numbers.
     fn lower_for_string(
         &mut self,
         pattern: &ast::Pattern,
         iter_val: MirValue,
         body: &ast::Block,
         label: Option<&ast::Ident>,
+        chars: bool,
     ) -> CodegenResult<MirValue> {
-        let byte_ty = MirType::i32();
+        let byte_ty = if chars {
+            MirType::u32()
+        } else {
+            MirType::i32()
+        };
         let builder = self
             .current_fn
             .as_mut()
@@ -6721,12 +7128,19 @@ impl<'ctx> MirLowerer<'ctx> {
         let elem_local = builder.create_local(byte_ty.clone());
         let after_get = builder.create_block();
         builder.call(
-            MirValue::Function(Arc::from("build_string_byte_at")),
+            MirValue::Function(Arc::from(if chars {
+                "build_string_utf8_at"
+            } else {
+                "build_string_byte_at"
+            })),
             vec![values::local(str_local), values::local(idx_local)],
             Some(elem_local),
             after_get,
         );
         builder.switch_to_block(after_get);
+        if chars {
+            self.char_locals.insert(elem_local);
+        }
 
         let saved_vars = self.var_map.clone();
         self.bind_for_pattern(pattern, elem_local, &byte_ty)?;
@@ -6736,7 +7150,20 @@ impl<'ctx> MirLowerer<'ctx> {
         let builder = self.current_fn.as_mut().unwrap();
         builder.goto(incr_block);
         builder.switch_to_block(incr_block);
-        let one = MirValue::Const(MirConst::Int(1, MirType::i64()));
+        let one = if chars {
+            let width = builder.create_local(MirType::i64());
+            let after_w = builder.create_block();
+            builder.call(
+                MirValue::Function(Arc::from("build_string_utf8_width")),
+                vec![values::local(str_local), values::local(idx_local)],
+                Some(width),
+                after_w,
+            );
+            builder.switch_to_block(after_w);
+            values::local(width)
+        } else {
+            MirValue::Const(MirConst::Int(1, MirType::i64()))
+        };
         let next_idx = builder.create_local(MirType::i64());
         builder.binary_op(next_idx, BinOp::Add, values::local(idx_local), one);
         builder.assign(idx_local, MirRValue::Use(values::local(next_idx)));
@@ -7380,9 +7807,9 @@ impl<'ctx> MirLowerer<'ctx> {
         value: Option<&ast::Expr>,
         label: Option<&ast::Ident>,
     ) -> CodegenResult<MirValue> {
-        // Break value (e.g. `break 42`) is evaluated but currently not
-        // assigned to a loop result local because loops do not yet propagate
-        // a result variable.  The value is lowered for side-effect correctness.
+        // Break value (e.g. `break 42`) is assigned to the loop's result
+        // local, created on the first valued break of that loop, so
+        // `let r = loop { ... break v; }` binds `v`.
         //
         // `break 'name` targets the nearest enclosing loop whose label matches;
         // a bare `break` targets the innermost loop. An unresolved label is a
@@ -7392,7 +7819,24 @@ impl<'ctx> MirLowerer<'ctx> {
 
         if let Some((_, exit_block)) = target {
             if let Some(expr) = value {
-                let _val = self.lower_expr(expr)?;
+                let val = self.lower_expr(expr)?;
+                if !matches!(val, MirValue::Const(MirConst::Unit)) {
+                    let val_ty = self.type_of_value(&val);
+                    let existing = self.loop_break_values.get(&exit_block).copied();
+                    let builder = self
+                        .current_fn
+                        .as_mut()
+                        .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                    let result = match existing {
+                        Some(local) => local,
+                        None => {
+                            let local = builder.create_local(val_ty);
+                            self.loop_break_values.insert(exit_block, local);
+                            local
+                        }
+                    };
+                    builder.assign(result, MirRValue::Use(val));
+                }
             }
             let builder = self
                 .current_fn
@@ -7695,6 +8139,22 @@ impl<'ctx> MirLowerer<'ctx> {
 
     fn lower_index(&mut self, arr: &ast::Expr, index: &ast::Expr) -> CodegenResult<MirValue> {
         let arr_val = self.lower_expr(arr)?;
+
+        // `s[a..b]` on a string is a substring (a fresh BuildString of the
+        // bytes in `a..b`). It used to lower to an array index of a struct.
+        if let ExprKind::Range {
+            start,
+            end,
+            inclusive,
+        } = &index.kind
+        {
+            let base = self.deref_if_pointer(arr_val.clone())?;
+            if matches!(self.type_of_value(&base), MirType::Struct(ref n) if n.as_ref() == "BuildString")
+            {
+                return self.lower_substring(base, start.as_deref(), end.as_deref(), *inclusive);
+            }
+        }
+
         let idx_val = self.lower_expr(index)?;
 
         // Derive element type: if the array value has type Array(elem, _)
@@ -7973,6 +8433,13 @@ impl<'ctx> MirLowerer<'ctx> {
         // Derive the pointee type from the pointer's type.
         let pointee_ty = match self.type_of_value(&inner_val) {
             MirType::Ptr(inner) => *inner,
+            // A value that is not a pointer in MIR (an iterator closure
+            // parameter such as `|x| **x != 0`, which BuildLang passes by
+            // value) dereferences to itself. Emitting a C `*` on a double or a
+            // struct did not compile.
+            MirType::Int(..) | MirType::Float(..) | MirType::Bool | MirType::Struct(_) => {
+                return Ok(inner_val)
+            }
             _ => MirType::i32(), // Fallback for non-pointer derefs
         };
 

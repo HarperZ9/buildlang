@@ -1813,12 +1813,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "ambient alias receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "ambient alias receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -1866,12 +1871,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "shadowed ambient alias receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "shadowed ambient alias receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -1923,12 +1933,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "assigned effectful alias receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "assigned effectful alias receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -2103,12 +2118,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "assigned effectful tuple field receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "assigned effectful tuple field receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -2160,12 +2180,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "assigned effectful index receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "assigned effectful index receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -2212,12 +2237,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "repeated indexed effect receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "repeated indexed effect receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -2265,12 +2295,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "assigned ambient alias receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "assigned ambient alias receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -2350,12 +2385,17 @@ fn main() {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "storing an effectful callback in a tuple struct should stay pure until call\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "storing an effectful callback in a tuple struct should stay pure until call\nstdout:\n{}\nstderr:\n{} (rejected by the C backend gate)",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -3391,12 +3431,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "destructured nested struct update effect receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "destructured nested struct update effect receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -3452,12 +3497,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "struct update expression destructured effect receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "struct update expression destructured effect receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -3514,12 +3564,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "struct update expression explicit field destructured receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "struct update expression explicit field destructured receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -3904,12 +3959,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "destructured nested if-let selected aggregate receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "destructured nested if-let selected aggregate receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -4026,12 +4086,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "direct shorthand aggregate destructuring receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "direct shorthand aggregate destructuring receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -4315,12 +4380,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "inner assignment alias receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "inner assignment alias receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -4438,12 +4508,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "conditional assignment alias receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "conditional assignment alias receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -4567,12 +4642,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "if-let assignment alias receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "if-let assignment alias receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -4702,12 +4782,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "if-else assignment alias receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "if-else assignment alias receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -4767,12 +4852,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "match assignment alias receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "match assignment alias receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -4840,12 +4930,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "guarded match assignment alias receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "guarded match assignment alias receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -4969,12 +5064,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "while assignment alias receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "while assignment alias receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -5092,12 +5192,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "for assignment alias receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "for assignment alias receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -5157,12 +5262,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "while-let assignment alias receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "while-let assignment alias receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -5290,12 +5400,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "loop break assignment alias receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "loop break assignment alias receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -5406,12 +5521,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "tuple field effect receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "tuple field effect receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -5496,12 +5616,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "indexed effect receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "indexed effect receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -5867,12 +5992,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "control-flow selected effectful function receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "control-flow selected effectful function receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -5984,12 +6114,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "match selected effectful function receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "match selected effectful function receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -6218,12 +6353,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "let-bound selected effectful function receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "let-bound selected effectful function receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -6279,12 +6419,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "if-let-bound selected effectful function receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "if-let-bound selected effectful function receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -6440,12 +6585,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "ref-deref selected effectful function receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "ref-deref selected effectful function receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -6497,12 +6647,17 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
+    // Function values held in variables, fields or collections do not
+    // compile to C yet, so `check` rejects this program (a passing check
+    // means it compiles). The receipt still records the effect
+    // provenance this test is about.
     assert!(
-        output.status.success(),
-        "tuple-destructured effectful function receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "tuple-destructured effectful function receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -22211,20 +22366,91 @@ fn run_stdout(path: &Path) -> String {
 
 #[test]
 fn check_rejects_a_method_the_c_backend_cannot_compile() {
-    // M1: `v.iter()` used to pass `buildc check` and then fail in gcc with
-    // "implicit declaration of function 'iter'" about generated C.
+    // M1: `s.parse()` used to pass `buildc check` and then fail in gcc with
+    // "implicit declaration of function 'parse'" about generated C.
     let fixture = m1_fixture(
-        "iter",
-        "fn main() ~ Console {\n    let v = vec![1, 2, 3];\n    let mut s = 0;\n    for x in v.iter() {\n        s += x;\n    }\n    println!(\"{}\", s);\n}\n",
+        "parse",
+        "fn main() ~ Console {\n    let s = \"42\";\n    let n: i32 = s.parse().unwrap();\n    println!(\"{}\", n);\n}\n",
     );
     let (ok, text) = check_output(&fixture);
-    assert!(!ok, "check must reject .iter():\n{text}");
-    assert!(text.contains("`iter` cannot be compiled"), "{text}");
+    assert!(!ok, "check must reject .parse():\n{text}");
+    assert!(text.contains("`parse` cannot be compiled"), "{text}");
     assert!(
-        text.contains("4:"),
-        "diagnostic should point at line 4:\n{text}"
+        text.contains("3:"),
+        "diagnostic should point at line 3:\n{text}"
     );
-    assert!(text.contains("help: iterators are not supported"), "{text}");
+    assert!(
+        text.contains("help: string parsing is not supported"),
+        "{text}"
+    );
+}
+
+#[test]
+fn for_over_iter_references_and_chars_runs_like_rust() {
+    // M1 oracle findings: `for x in &v` ran zero times, `for c in s.chars()`
+    // printed byte values, and `v.iter()` was an undeclared C call.
+    if !c_backend_ready() {
+        eprintln!("skipping: C backend not ready");
+        return;
+    }
+    let fixture = m1_fixture(
+        "forforms",
+        "fn main() ~ Console {\n    let v = vec![1, 2, 3];\n    let mut s = 0;\n    for x in v.iter() { s += x; }\n    for x in &v { s += x; }\n    println!(\"{}\", s);\n    for c in \"h\u{e9}!\".chars() { print!(\"{}|\", c); }\n    println!(\"\");\n}\n",
+    );
+    assert_eq!(run_stdout(&fixture), "12\nh|\u{e9}|!|\n");
+}
+
+#[test]
+fn while_let_pop_and_option_matches_stop_at_none() {
+    // `while let Some(x) = v.pop()` never ended (pop returned the element and
+    // the Some arm always matched); a missing map key matched `Some(0)`.
+    if !c_backend_ready() {
+        eprintln!("skipping: C backend not ready");
+        return;
+    }
+    let fixture = m1_fixture(
+        "whilelet",
+        "use std::collections::HashMap;\nfn main() ~ Console {\n    let mut v = vec![1, 2];\n    while let Some(x) = v.pop() { println!(\"{}\", x); }\n    match v.get(5) { Some(x) => println!(\"{}\", x), None => println!(\"none\") }\n    let mut m: HashMap<String, i32> = HashMap::new();\n    m.insert(String::from(\"a\"), 1);\n    match m.get(\"b\") { Some(x) => println!(\"{}\", x), None => println!(\"missing\") }\n}\n",
+    );
+    assert_eq!(run_stdout(&fixture), "2\n1\nnone\nmissing\n");
+}
+
+#[test]
+fn format_strings_print_like_rust() {
+    // Widths, alignment, named and positional arguments, radix and Debug.
+    // Before M1 slice 2, `{x}` printed literally, widths were ignored and
+    // `{:?}` of a vector printed `i32(<pointer>)`.
+    if !c_backend_ready() {
+        eprintln!("skipping: C backend not ready");
+        return;
+    }
+    let fixture = m1_fixture(
+        "fmt",
+        "fn main() ~ Console {\n    let x = 7;\n    let name = \"bo\";\n    println!(\"[{:>4}] [{:<4}] [{:04}] [{x}] [{0}{0}]\", x, x, x);\n    println!(\"[{:5}] [{:>5}] [{name:?}]\", name, name);\n    println!(\"{:x} {:#X} {:o} {:+}\", 255, 255, 8, 3);\n    println!(\"{:?} {:?} {:.2}\", vec![1, 2], 2.0, 3.14159);\n    let v = vec![\"a\", \"b\"];\n    println!(\"{:?} {}\", v, true);\n}\n",
+    );
+    assert_eq!(
+        run_stdout(&fixture),
+        "[   7] [7   ] [0007] [7] [77]\n[bo   ] [   bo] [\"bo\"]\nff 0xFF 10 +3\n[1, 2] 2.0 3.14\n[\"a\", \"b\"] true\n"
+    );
+}
+
+#[test]
+fn check_rejects_format_specs_the_c_backend_cannot_print() {
+    for (label, call) in [
+        ("center", "println!(\"{:^5}\", 1);"),
+        ("fill", "println!(\"{:*<5}\", 1);"),
+        ("binary", "println!(\"{:b}\", 5);"),
+        ("missing", "println!(\"{} {}\", 1);"),
+        ("display_vec", "let v = vec![1];\n    println!(\"{}\", v);"),
+    ] {
+        let fixture = m1_fixture(
+            &format!("badfmt_{label}"),
+            &format!("fn main() ~ Console {{\n    {call}\n}}\n"),
+        );
+        let (ok, text) = check_output(&fixture);
+        assert!(!ok, "{label}: check must reject\n{text}");
+        assert!(text.contains("help:"), "{label}: missing hint\n{text}");
+    }
 }
 
 #[test]

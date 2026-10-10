@@ -1,0 +1,5 @@
+fn main() ~ Console {
+    let v = vec![String::from("c"), String::from("a"), String::from("b")];
+    let s: String = v.iter().sum();
+    println!("{}", s);
+}

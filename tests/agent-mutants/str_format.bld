@@ -1,0 +1,5 @@
+fn main() ~ Console {
+    let n = 3;
+    let s = format!("n={}", n);
+    println!("{}", s);
+}

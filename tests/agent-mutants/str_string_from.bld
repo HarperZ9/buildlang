@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let s = String::from("hi");
+    println!("{}", s);
+}

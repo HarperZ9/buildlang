@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let t = (1, "a");
+    println!("{} {}", t.0, t.1);
+}

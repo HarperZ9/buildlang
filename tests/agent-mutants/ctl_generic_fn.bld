@@ -1,0 +1,6 @@
+fn main() ~ Console {
+    println!("{}", largest(3, 7));
+}
+fn largest<T: PartialOrd>(a: T, b: T) -> T { if a > b { a } else { b } }
+fn unused() {
+}

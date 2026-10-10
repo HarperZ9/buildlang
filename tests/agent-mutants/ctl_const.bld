@@ -1,0 +1,6 @@
+fn main() ~ Console {
+    println!("{}", LIMIT);
+}
+const LIMIT: i32 = 10;
+fn unused() {
+}

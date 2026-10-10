@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let v = vec![3.5, 1.5, 2.0];
+    match v.get(0) { Some(x) => println!("{}", x), None => println!("none") }
+}

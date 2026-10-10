@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let s = "";
+    if s.is_empty() { println!("empty"); }
+}

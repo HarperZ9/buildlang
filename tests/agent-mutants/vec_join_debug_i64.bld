@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let v = vec![3i64, 1i64, 2i64];
+    println!("{:?}", v);
+}

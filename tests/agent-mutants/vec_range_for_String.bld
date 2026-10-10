@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let v = vec![String::from("c"), String::from("a"), String::from("b")];
+    for i in 0..v.len() { println!("{}", v[i]); }
+}

@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let s = "abc";
+    println!("{}", s.to_uppercase());
+}

@@ -1,0 +1,5 @@
+fn main() ~ Console {
+    let a = "apple";
+    let b = "banana";
+    if a < b { println!("lt"); }
+}

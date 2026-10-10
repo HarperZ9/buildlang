@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let a: i32 = 2147483647;
+    match a.checked_add(1) { Some(v) => println!("{}", v), None => println!("overflow") }
+}
