@@ -1,0 +1,43 @@
+fn main() ~ Console {
+    let s = "a b a c b a";
+    let words: Vec<String> = s.split(" ");
+    let mut keys: Vec<String> = vec![];
+    let mut counts: Vec<i32> = vec![];
+    for w in words.iter() {
+        let mut found = false;
+        let mut j = 0;
+        while j < keys.len() {
+            if keys[j] == *w {
+                counts[j] = counts[j] + 1;
+                found = true;
+            }
+            j = j + 1;
+        }
+        if !found {
+            keys.push(w.clone());
+            counts.push(1);
+        }
+    }
+    let n = keys.len();
+    let mut i = 0;
+    while i < n {
+        let mut j = 0;
+        while j + 1 < n - i {
+            if keys[j] > keys[j + 1] {
+                let tk = keys[j].clone();
+                keys[j] = keys[j + 1].clone();
+                keys[j + 1] = tk;
+                let tc = counts[j];
+                counts[j] = counts[j + 1];
+                counts[j + 1] = tc;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    let mut k = 0;
+    while k < n {
+        println!("{} {}", keys[k], counts[k]);
+        k = k + 1;
+    }
+}

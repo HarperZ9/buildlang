@@ -10,6 +10,32 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- **`buildc check` fails on programs the C backend cannot compile** (M1 slice 1).
+  `check` already lowered every program to C and discarded any error; a
+  code-generation failure is now a located check error. A new pass over the
+  generated C rejects calls to functions nothing declares, which is how
+  `v.iter()`, `s.parse()` and `x.unwrap()` used to reach the C compiler as
+  "implicit declaration" errors about generated code. Each rejection names the
+  BuildLang call, its line and column, and a `help:` line.
+- `let v: Vec<str> = vec_new();` builds a string vector. It used to build an i32
+  vector and write strings into 4-byte slots, which type-checked and then
+  crashed with no message. Pushing a value whose type the vector cannot hold is
+  now a check error with the annotation to add.
+- Strings compare with `<`, `<=`, `>` and `>=` (byte order), and `s + &t` works
+  with a borrowed string on the right.
+- A user function named like a C macro or keyword (`max`, `min`, `abs`,
+  `double`) is called under its escaped name; calls to `fn max` bound to the
+  platform macro on Windows and to nothing on Linux.
+- Trait methods that return `Self` stay out of the `dyn` vtable (they are not
+  object safe); the vtable typedef no longer names the C type `Self`.
+- An `&mut x` argument selects an overload that takes `&T`.
+- The Vulkan host entry points are declared in the C runtime, and the void ones
+  are no longer assigned.
+- `compiler/tests/check_implies_compile.rs` runs `check`, then a C compile, over
+  every program in `tests/programs`, `examples`, `semantic-corpus` and the new
+  `tests/agent-probe` (29 programs a model wrote in the 2026-10-09 probe). It
+  fails if any program passes `check` and does not compile.
+
 ## 1.5.0 - 2026-10-09 - formatting macros fail closed
 
 - **A formatting macro with a non-literal first argument is a compile error.**

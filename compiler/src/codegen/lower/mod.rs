@@ -539,6 +539,24 @@ impl<'ctx> MirLowerer<'ctx> {
                     .map(|t| self.lower_type_from_ast(t))
                     .unwrap_or(MirType::Void);
 
+                // A method that returns or takes `Self` by value is not object
+                // safe: it cannot be called through `dyn Trait`, and C has no type
+                // named `Self` for its vtable slot. Leave it out of the vtable;
+                // static calls through `T: Trait` do not use the table.
+                let mentions_self = |t: &MirType| {
+                    fn walk(t: &MirType) -> bool {
+                        match t {
+                            MirType::Struct(n) => n.as_ref() == "Self",
+                            MirType::Ptr(inner) => walk(inner),
+                            _ => false,
+                        }
+                    }
+                    walk(t)
+                };
+                if mentions_self(&ret) || params.iter().skip(1).any(mentions_self) {
+                    continue;
+                }
+
                 // First param is self - replace with void* for vtable fn ptr
                 let mut vtable_params = vec![MirType::Ptr(Box::new(MirType::Void))];
                 vtable_params.extend(params.into_iter().skip(1));
@@ -1495,6 +1513,9 @@ impl<'ctx> MirLowerer<'ctx> {
         match (param, arg) {
             (MirType::Int(..), MirType::Int(..)) => Some(PositionMatch::Coercion),
             (MirType::Float(..), MirType::Float(..)) => Some(PositionMatch::Coercion),
+            // `&mut T` passed where `&T` is expected: MIR does not distinguish
+            // the two pointer kinds, so a pointer to the same pointee matches.
+            (MirType::Ptr(p), MirType::Ptr(a)) if p == a => Some(PositionMatch::Coercion),
             _ => None,
         }
     }

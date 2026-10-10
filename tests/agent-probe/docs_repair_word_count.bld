@@ -1,0 +1,46 @@
+fn main() ~ Console {
+    let s = "a b a c b a";
+    let mut words: Vec<str> = vec_new();
+    for w in s.split(" ") {
+        let mut found = false;
+        let mut j = 0;
+        while j < vec_len(words) {
+            let existing: str = vec_get(words, j);
+            if existing == w {
+                found = true;
+            }
+            j += 1;
+        }
+        if !found {
+            vec_push(words, w);
+        }
+    }
+    let n = vec_len(words);
+    let mut prev: str = "";
+    let mut have_prev = false;
+    let mut printed = 0;
+    while printed < n {
+        let mut best: str = "";
+        let mut have_best = false;
+        let mut j = 0;
+        while j < n {
+            let cand: str = vec_get(words, j);
+            let after_prev = !have_prev || cand > prev;
+            if after_prev && (!have_best || cand < best) {
+                best = cand;
+                have_best = true;
+            }
+            j += 1;
+        }
+        let mut count = 0;
+        for w in s.split(" ") {
+            if w == best {
+                count += 1;
+            }
+        }
+        println!("{} {}", best, count);
+        prev = best;
+        have_prev = true;
+        printed += 1;
+    }
+}

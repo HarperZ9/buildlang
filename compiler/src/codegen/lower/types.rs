@@ -814,6 +814,14 @@ impl<'ctx> MirLowerer<'ctx> {
                 }
                 MirType::i32()
             }
+            // `&x` and `&mut x` are pointers to the argument's type, so an
+            // overload taking `&T` can be selected for them.
+            ExprKind::Ref { expr: inner, .. }
+            | ExprKind::Unary {
+                op: ast::UnaryOp::Ref | ast::UnaryOp::RefMut,
+                expr: inner,
+            } => MirType::Ptr(Box::new(self.infer_single_arg_type(inner))),
+            ExprKind::Paren(inner) => self.infer_single_arg_type(inner),
             _ => MirType::i32(),
         }
     }

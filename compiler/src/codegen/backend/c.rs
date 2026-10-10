@@ -40,6 +40,11 @@ pub struct CBackend {
     string_literals: Vec<Arc<str>>,
     /// Function-local BuildString temps that originated from string literals.
     local_string_literals: std::collections::HashMap<LocalId, u32>,
+    /// User-defined functions (with a body) whose C name is escaped because it
+    /// collides with a C macro or libc function (`max` is emitted as `_max`).
+    /// Calls to them must use the escaped name too, or `max(1, 2)` binds to the
+    /// platform macro or to nothing at all.
+    escaped_user_fns: std::collections::HashSet<String>,
     /// Owned heap (BuildString) locals proven safe to free at every `return` of
     /// the current function (see `freeable_owned_string_locals`). Empty unless
     /// the experimental drop-insertion path is enabled.
@@ -93,6 +98,7 @@ impl CBackend {
             current_fn_name: None,
             string_literals: Vec::new(),
             local_string_literals: std::collections::HashMap::new(),
+            escaped_user_fns: std::collections::HashSet::new(),
             current_fn_freeable: Vec::new(),
             module_mut_global_alias_risk: false,
             current_fn_block_frees: std::collections::HashMap::new(),
@@ -3856,6 +3862,7 @@ impl CBackend {
                 "Stderr" => return "((io_Stderr){ 0 })".to_string(),
                 // A function reference in value position (a direct call's callee)
                 // must get the same stdlib-collision escape as its definition.
+                other if self.escaped_user_fns.contains(other) => Self::user_fn_emit_name(other),
                 other
                     if !Self::is_runtime_or_builtin_fn(other)
                         && Self::is_c_stdlib_collision(other) =>
@@ -3879,7 +3886,9 @@ impl CBackend {
                 // reserved words or macros - but never escape runtime helpers
                 // (build_*), standard C math/stdlib functions, or other
                 // known builtins.  These are already correct as-is.
-                if Self::is_runtime_or_builtin_fn(name) {
+                if self.escaped_user_fns.contains(name.as_ref()) {
+                    Self::user_fn_emit_name(name)
+                } else if Self::is_runtime_or_builtin_fn(name) {
                     name.to_string()
                 } else if Self::is_c_reserved(name) || Self::is_c_stdlib_collision(name) {
                     format!("_{}", name)
@@ -5347,7 +5356,10 @@ impl CBackend {
     /// Emit name for a user-defined function: prefixed with `_` when it collides
     /// with a C macro (min/max/abs) or stdlib function (div, system, ...).
     fn user_fn_emit_name(name: &str) -> String {
-        if matches!(name, "min" | "max" | "abs") || Self::is_c_stdlib_collision(name) {
+        if matches!(name, "min" | "max" | "abs")
+            || Self::is_c_reserved(name)
+            || Self::is_c_stdlib_collision(name)
+        {
             format!("_{}", name)
         } else {
             name.to_string()
@@ -5442,6 +5454,13 @@ impl Backend for CBackend {
     fn generate(&mut self, mir: &MirModule) -> CodegenResult<GeneratedCode> {
         self.output.clear();
         self.temp_counter = 0;
+        self.escaped_user_fns = mir
+            .functions
+            .iter()
+            .filter(|f| f.blocks.is_some())
+            .filter(|f| Self::user_fn_emit_name(f.name.as_ref()) != f.name.as_ref())
+            .map(|f| f.name.to_string())
+            .collect();
 
         self.generate_module(mir)?;
 

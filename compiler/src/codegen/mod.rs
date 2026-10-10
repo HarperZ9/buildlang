@@ -49,6 +49,7 @@
 pub(crate) mod analysis;
 pub mod backend;
 pub mod builder;
+pub mod c_verify;
 pub mod debug;
 pub mod ir;
 pub mod lower;
@@ -144,6 +145,34 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// second lowering pass; callers that produce an executable (`buildc
     /// build`) MUST check `linear_errors()` and refuse to emit/link when it
     /// is non-empty.
+    /// Reject C output that calls a function nothing declares. See
+    /// [`c_verify`]: the lowerer emits a bare call for a method or function it
+    /// does not recognise, which the C compiler would reject with an error about
+    /// generated code. Report it here in BuildLang terms instead.
+    fn verify_c_calls(&self, code: &GeneratedCode) -> CodegenResult<()> {
+        let text = String::from_utf8_lossy(&code.data);
+        let missing = c_verify::undeclared_calls(&text);
+        let Some(first) = missing.first() else {
+            return Ok(());
+        };
+        let location = self
+            .source
+            .as_deref()
+            .and_then(|src| c_verify::locate_call(src, first));
+        let others = if missing.len() > 1 {
+            format!(" (also: {})", missing[1..].join(", "))
+        } else {
+            String::new()
+        };
+        Err(CodegenError::Rejected {
+            message: format!(
+                "`{first}` cannot be compiled: the C backend has no function or method by that name{others}"
+            ),
+            location,
+            help: Some(c_verify::hint_for(first)),
+        })
+    }
+
     pub fn generate(&mut self, module: &ast::Module) -> CodegenResult<GeneratedCode> {
         // Lower AST to MIR
         let lowerer = if let Some(ref source) = self.source {
@@ -174,7 +203,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         match self.target {
             Target::C => {
                 let mut backend = backend::c::CBackend::with_stdio_mode(self.stdio_mode);
-                backend.generate(mir)
+                let code = backend.generate(mir)?;
+                self.verify_c_calls(&code)?;
+                Ok(code)
             }
             Target::X86_64 => {
                 let mut backend = backend::x86_64::X86_64Backend::new();

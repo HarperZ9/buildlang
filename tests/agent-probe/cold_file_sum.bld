@@ -1,0 +1,14 @@
+fn main() ~ Console + FileSystem {
+    let contents = read_file("input.txt");
+    let mut sum: i64 = 0;
+    for line in contents.lines() {
+        let t = line.trim();
+        if t.len() > 0 {
+            match t.parse::<i64>() {
+                Ok(n) => { sum = sum + n; }
+                Err(_) => {}
+            }
+        }
+    }
+    println!("{}", sum);
+}

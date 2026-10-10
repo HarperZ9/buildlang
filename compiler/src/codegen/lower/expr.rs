@@ -828,6 +828,73 @@ impl<'ctx> MirLowerer<'ctx> {
         let is_string_op =
             matches!(&left_ty, MirType::Struct(name) if name.as_ref() == "BuildString");
 
+        // `s + &t` and `a < &b`: a borrowed string on the right is passed to the
+        // runtime by value, so load it through the reference first. Without this
+        // the C call received a `BuildString*` where a `BuildString` is expected.
+        let right_val = if is_string_op {
+            match self.type_of_value(&right_val) {
+                MirType::Ptr(inner) if matches!(&*inner, MirType::Struct(n) if n.as_ref() == "BuildString") =>
+                {
+                    let builder = self
+                        .current_fn
+                        .as_mut()
+                        .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                    let loaded = builder.create_local((*inner).clone());
+                    builder.assign(
+                        loaded,
+                        MirRValue::Deref {
+                            ptr: right_val,
+                            pointee_ty: *inner,
+                        },
+                    );
+                    values::local(loaded)
+                }
+                _ => right_val,
+            }
+        } else {
+            right_val
+        };
+
+        // String ordering: `<`, `<=`, `>`, `>=` compare bytes lexicographically
+        // through build_string_cmp, then test the sign. C has no ordering on
+        // structs, so emitting the operator directly did not compile.
+        if is_string_op
+            && matches!(
+                op,
+                AstBinOp::Lt | AstBinOp::Le | AstBinOp::Gt | AstBinOp::Ge
+            )
+        {
+            let builder = self
+                .current_fn
+                .as_mut()
+                .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+            let cmp = builder.create_local(MirType::i32());
+            let cont = builder.create_block();
+            builder.call(
+                MirValue::Function(Arc::from("build_string_cmp")),
+                vec![left_val, right_val],
+                Some(cmp),
+                cont,
+            );
+            builder.switch_to_block(cont);
+            let mir_op = match op {
+                AstBinOp::Lt => BinOp::Lt,
+                AstBinOp::Le => BinOp::Le,
+                AstBinOp::Gt => BinOp::Gt,
+                _ => BinOp::Ge,
+            };
+            let result = builder.create_local(MirType::Bool);
+            builder.assign(
+                result,
+                MirRValue::BinaryOp {
+                    op: mir_op,
+                    left: values::local(cmp),
+                    right: MirValue::Const(MirConst::Int(0, MirType::i32())),
+                },
+            );
+            return Ok(values::local(result));
+        }
+
         // String concatenation: `+` on BuildString -> build_string_concat()
         if is_string_op && op == AstBinOp::Add {
             let builder = self
@@ -2324,11 +2391,98 @@ impl<'ctx> MirLowerer<'ctx> {
     /// of these builtins, when a user-defined function shadows the name, or when
     /// the first argument is not a `Vec` (which the type checker rejects for a
     /// real call, so that path is effectively unreachable for valid programs).
+    /// `let v: Vec<T> = vec_new();` builds a vector of `T`. The builtin used to
+    /// lower to the i32 constructor whatever the annotation said, so pushing
+    /// strings wrote 16-byte values into 4-byte slots. With an annotation, lower
+    /// it like `Vec::new()`, which the C backend constructs from the element
+    /// type of the destination. Without one (or for `Vec<i32>`), keep the default.
+    fn try_typed_vec_new(&mut self) -> Option<CodegenResult<MirValue>> {
+        let resolved = self.resolve_fn_name("vec_new");
+        if self.module.find_function(resolved.as_ref()).is_some() {
+            return None;
+        }
+        let Some(MirType::Vec(elem)) = self.expected_type.clone() else {
+            return None;
+        };
+        if *elem == MirType::i32() {
+            return None;
+        }
+        if let Err(err) = Self::hvec_elem_suffix(&elem) {
+            return Some(Err(err));
+        }
+        let builder = match self.current_fn.as_mut() {
+            Some(b) => b,
+            None => {
+                return Some(Err(CodegenError::Internal(
+                    "No current function".to_string(),
+                )))
+            }
+        };
+        let dest = builder.create_local(MirType::Vec(elem));
+        let cont = builder.create_block();
+        builder.call(
+            MirValue::Function(Arc::from("Vec_new")),
+            vec![],
+            Some(dest),
+            cont,
+        );
+        builder.switch_to_block(cont);
+        Some(Ok(values::local(dest)))
+    }
+
+    /// A MIR type as BuildLang source spells it, for diagnostics.
+    fn source_type_name(ty: &MirType) -> String {
+        ty.to_string().replace("BuildString", "str")
+    }
+
+    /// Whether a value of `value` type can be stored in a vector of `elem`
+    /// elements by the C runtime. Integers, bools and floats convert in C;
+    /// strings, structs and handles must match exactly.
+    fn vec_elem_accepts(elem: &MirType, value: &MirType) -> bool {
+        let scalar =
+            |t: &MirType| matches!(t, MirType::Int(..) | MirType::Float(..) | MirType::Bool);
+        if scalar(elem) && scalar(value) {
+            return true;
+        }
+        if scalar(elem) != scalar(value) {
+            return false;
+        }
+        match (elem, value) {
+            (MirType::Struct(a), MirType::Struct(b)) => a == b,
+            (MirType::Vec(_), MirType::Vec(_)) => true,
+            (MirType::Map(..), MirType::Map(..)) => true,
+            _ => true,
+        }
+    }
+
+    /// A `CodegenError::Rejected` located at `expr` when it lies in the entry
+    /// source.
+    pub(crate) fn reject_at(
+        &self,
+        expr: &ast::Expr,
+        message: String,
+        help: String,
+    ) -> CodegenError {
+        let location = if expr.span.end.0 > expr.span.start.0 {
+            Some((expr.span.start.0, expr.span.end.0))
+        } else {
+            None
+        };
+        CodegenError::Rejected {
+            message,
+            location,
+            help: Some(help),
+        }
+    }
+
     fn try_dispatch_vec_builtin(
         &mut self,
         name: &str,
         args: &[ast::Expr],
     ) -> Option<CodegenResult<MirValue>> {
+        if name == "vec_new" && args.is_empty() {
+            return self.try_typed_vec_new();
+        }
         let op = match name {
             "vec_push" | "vec_get" | "vec_pop" => name,
             _ => return None,
@@ -2365,6 +2519,24 @@ impl<'ctx> MirLowerer<'ctx> {
             match self.lower_expr(a) {
                 Ok(v) => arg_vals.push(v),
                 Err(e) => return Some(Err(e)),
+            }
+        }
+
+        if op == "vec_push" {
+            if let Some(value) = arg_vals.get(1) {
+                let value_ty = self.type_of_value(value);
+                if !Self::vec_elem_accepts(&elem_ty, &value_ty) {
+                    return Some(Err(self.reject_at(
+                        &args[0],
+                        format!(
+                            "`vec_push` adds a `{}` to a vector of `{}` elements",
+                            Self::source_type_name(&value_ty),
+                            Self::source_type_name(&elem_ty)
+                        ),
+                        "give the vector its element type where it is created, for example                          `let mut v: Vec<str> = vec_new();`"
+                            .to_string(),
+                    )));
+                }
             }
         }
 
@@ -2794,6 +2966,17 @@ impl<'ctx> MirLowerer<'ctx> {
                 "stdin_is_pipe" => return MirType::Bool,
                 // Process builtins
                 "process_exit" => return MirType::Void,
+                // Vulkan host builtins (runtime/vulkan_host.c). The void ones
+                // must not be assigned: `x = build_vk_shutdown();` is a C error.
+                "build_vk_shutdown"
+                | "build_vk_request_close"
+                | "build_vk_set_push_constant_f32" => return MirType::Void,
+                "build_vk_init"
+                | "build_vk_load_shader_file"
+                | "build_vk_run_compute"
+                | "build_vk_create_graphics_pipeline"
+                | "build_vk_draw_frame"
+                | "build_vk_should_close" => return MirType::i32(),
                 // Directory traversal builtins
                 "list_dir" => {
                     return MirType::Vec(Box::new(MirType::Struct(Arc::from("BuildString"))))
