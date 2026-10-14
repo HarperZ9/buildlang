@@ -449,6 +449,41 @@ Environment: `getenv`, `clock_ms`, `args_count`, `args_get`
 Math: `sqrt`, `sin`, `cos`, `tan`, `log`, `exp`, `pow`, `abs`, `floor`, `ceil`
 Assert: `assert`, `assert_eq`
 
+### 7.4 Vectors and strings in practice
+
+Give a vector its element type where it is created: `vec_new()` with no annotation makes a vector of `i32`, and pushing a string into it is a check error (BL0901). The free functions accept the vector by value or borrowed (`vec_push(&mut v, x)`, `vec_len(&v)`), and the method forms (`v.push(x)`, `v.len()`, `v[i]`) work the same way. Strings split with `split`, iterate with `chars`, and compare with `<` and `==`. The C backend has no `.parse()` yet; the check rejects it with BL0901, so convert digits by hand:
+
+```build
+fn parse_int(s: str) -> i64 {
+    let mut n: i64 = 0;
+    for c in s.chars() {
+        n = n * 10 + (c as i64 - 48);
+    }
+    n
+}
+
+fn main() ~ Console {
+    // Give a vector its element type where it is created.
+    let mut words: Vec<str> = vec_new();
+    for w in "b a c".split(" ") {
+        words.push(w);
+    }
+    println!("{} words, first {}", words.len(), words[0]);
+
+    // Strings compare with < and ==.
+    if words[1] < words[0] {
+        println!("{} sorts before {}", words[1], words[0]);
+    }
+
+    // There is no `.parse()` on the C backend yet: convert digits by hand.
+    let mut total: i64 = 0;
+    for line in "3\n4\n5".split("\n") {
+        total = total + parse_int(line);
+    }
+    println!("total {}", total);
+}
+```
+
 ## 8. Code Generation
 
 ### 8.1 Compilation Targets

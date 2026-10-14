@@ -117,3 +117,37 @@ fn accepted_programs_still_pass() {
         assert!(ok, "{name}: the check must pass\n{src}\n{json}");
     }
 }
+
+#[test]
+fn borrowed_vector_receivers_run() {
+    // `vec_push(&mut v, x)` and `vec_len(&v)`: written by an agent in the
+    // 2026-10-14 probe. They passed the check and failed in gcc; an
+    // annotated vector now runs, and an unannotated one pushed with strings
+    // is rejected at check time with the annotation hint.
+    let dir = std::env::temp_dir().join(format!("buildlang_vec_borrow_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ok = dir.join("ok.bld");
+    std::fs::write(
+        &ok,
+        "fn main() ~ Console {\n    let mut words: Vec<str> = vec_new();\n    vec_push(&mut words, \"a\");\n    vec_push(&mut words, \"b\");\n    let mut nums = vec_new();\n    vec_push(&mut nums, 4);\n    println!(\"{} {} {}\", vec_len(&words), vec_get(&words, 1), vec_len(&nums));\n}\n",
+    )
+    .unwrap();
+    let out = buildc().arg("run").arg(&ok).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(stdout.trim_end().lines().last(), Some("2 b 1"), "{stdout}");
+
+    let (passed, json) = check(
+        "unannotated_str_vec",
+        "fn main() ~ Console {\n    let mut words = vec_new();\n    vec_push(&mut words, \"a\");\n    println!(\"{}\", vec_len(&words));\n}\n",
+    );
+    assert!(!passed);
+    assert!(
+        json.contains("BL0901") && json.contains("Vec<str>"),
+        "{json}"
+    );
+}

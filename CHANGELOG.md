@@ -10,6 +10,11 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Vector builtins accept a borrowed receiver: `vec_push(&mut v, x)`, `vec_len(&v)`,
+  `vec_get(&v, i)` and `vec_pop(&mut v)` used to pass `check` and fail in gcc (the
+  2026-10-14 probe hit it twice). Pushing a string into an unannotated `vec_new()`
+  is a check error with the `Vec<str>` hint. SPECIFICATION.md 7.4 shows vectors,
+  strings and digit conversion in a checked example.
 - **M1: machine-readable diagnostics.** `buildc check FILE --error-format=json`
   prints one report on stdout (`buildlang.diagnostics/v1`, schema in
   `docs/schemas/`). Every lexer, parser and checker error has a stable code
