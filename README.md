@@ -80,9 +80,11 @@ From crates.io (installs the `buildc` binary, version 1.5.0):
 cargo install buildlang
 ```
 
-The crate ships the compiler only. Programs that `use` the standard library
-need the `stdlib/` directory from a clone of this repository; point
-`BUILDLANG_STDLIB` at it. `buildc doctor` reports whether it was found.
+The standard library is compiled into `buildc`. When no `stdlib/` directory
+is found beside the binary, `buildc` writes its copy to a versioned directory
+under the system temp directory and uses that; `BUILDLANG_STDLIB` overrides
+it. `buildc doctor` reports which one is in use. (1.5.0 and earlier shipped
+without it and needed `BUILDLANG_STDLIB` pointed at a clone.)
 
 > Previously published as `quantalang`; that crate is deprecated and points
 > here. Use `buildlang` / `buildc`.

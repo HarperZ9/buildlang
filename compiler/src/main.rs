@@ -21,6 +21,7 @@ mod mir_representation;
 mod model_receipt;
 mod module_graph;
 mod scientific_runtime;
+mod stdlib_embed;
 mod symbol_graph;
 mod tool_receipt;
 
@@ -9617,6 +9618,7 @@ fn cmd_pkg(cmd: PkgCommands) -> Result<(), i32> {
 /// 1. `stdlib/` relative to the compiler executable
 /// 2. `../stdlib/` relative to the compiler executable (for dev builds)
 /// 3. `BUILDLANG_STDLIB` environment variable
+/// 4. the copy compiled into `buildc`, written to a versioned temp directory
 fn find_stdlib_path() -> Option<PathBuf> {
     // Check env var first
     if let Ok(path) = std::env::var("BUILDLANG_STDLIB") {
@@ -9642,7 +9644,7 @@ fn find_stdlib_path() -> Option<PathBuf> {
             }
         }
     }
-    None
+    stdlib_embed::materialize()
 }
 
 fn resolve_modules(ast: &mut Module, source_dir: &Path) -> Result<(), i32> {

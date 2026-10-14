@@ -10,6 +10,12 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- The standard library is compiled into `buildc` (`compiler/stdlib/`, a mirror of
+  `stdlib/` kept identical by a test). With no stdlib directory on disk it is written
+  to a versioned temp directory, so `cargo install buildlang` alone runs programs that
+  `mod math;`. `tests/install_layout.rs` copies the binary to an empty directory and
+  runs a stdlib program there. `stdlib/131_stdlib_integration.bld` declares
+  `~ Console` and its expected output uses the current float formatting.
 - **M2: agent-facing toolchain.** `buildc mcp` serves the compiler as Model Context
   Protocol tools over stdio: `check` (a file path or a source buffer, returning the
   `buildlang.diagnostics/v1` report as structured content) and `explain`. It reads
