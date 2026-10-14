@@ -55,7 +55,8 @@ impl TypeErrorWithSpan {
 impl fmt::Display for TypeErrorWithSpan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.error)?;
-        if let Some(help) = &self.help {
+        let suggestion = self.error.suggestion();
+        for help in crate::diagnostics::help_lines(self.help.as_deref(), suggestion.as_deref()) {
             write!(f, "\n  help: {}", help)?;
         }
         for note in &self.notes {
@@ -485,7 +486,10 @@ impl TypeError {
     pub fn suggestion(&self) -> Option<String> {
         match self {
             TypeError::TypeMismatch { expected, .. } => {
-                Some(format!("consider adding a type annotation: `: {}`", expected))
+                Some(format!(
+                    "change this expression so it has type `{}`, or change the annotation or signature that requires `{}`",
+                    expected, expected
+                ))
             }
             TypeError::ImmutableAssignment { name } => {
                 Some(format!("consider making `{}` mutable: `let mut {}`", name, name))
@@ -509,10 +513,12 @@ impl TypeError {
                 ))
             }
             TypeError::UndeclaredEffect { func_name: _, effect_name, declared_effects } => {
-                let declared = declared_effects.join(", ");
+                let mut row = declared_effects.clone();
+                row.push(effect_name.clone());
                 Some(format!(
-                    "add `{}` to the effect annotations: ~ {}, {}",
-                    effect_name, declared, effect_name
+                    "add `{}` to the function's effect row: `~ {}`",
+                    effect_name,
+                    row.join(" + ")
                 ))
             }
             TypeError::UnknownEffectOperation { effect_name, operation } => {

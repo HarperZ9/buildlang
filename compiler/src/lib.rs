@@ -47,6 +47,7 @@
 pub mod ast;
 pub mod bdf;
 pub mod codegen;
+pub mod diagnostics;
 pub mod fmt;
 pub mod lexer;
 pub mod lsp;

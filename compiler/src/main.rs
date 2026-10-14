@@ -32,6 +32,7 @@ use std::sync::Arc;
 
 use buildlang::ast::{self, ItemKind, Module, Visibility};
 use buildlang::codegen::{CodeGenerator, StdioMode, Target};
+use buildlang::diagnostics::{codes as diag_codes, Diagnostic};
 use buildlang::lexer::{Lexer, SourceFile, Span};
 use buildlang::parser::{ParseError, Parser};
 use buildlang::types::{
@@ -189,6 +190,17 @@ enum Commands {
         /// Require the selected built-in profile to match a SHA-256 digest
         #[arg(long, value_name = "HEX")]
         expect_profile_digest: Option<String>,
+
+        /// Diagnostic output: `human` text on stderr, or one `json` report on
+        /// stdout (schema buildlang.diagnostics/v1)
+        #[arg(long, value_name = "FORMAT", default_value = "human", value_parser = ["human", "json"])]
+        error_format: String,
+    },
+
+    /// Explain a diagnostic code such as BL0301, or list every code
+    Explain {
+        /// The code to explain; omit it to list every code
+        code: Option<String>,
     },
 
     /// Build a project
@@ -720,13 +732,16 @@ fn run_cli(cli: Cli) -> Result<(), i32> {
             policy,
             profile,
             expect_profile_digest,
+            error_format,
         }) => cmd_check(
             &file,
             receipt.as_deref(),
             policy.as_deref(),
             profile.as_deref(),
             expect_profile_digest.as_deref(),
+            error_format == "json",
         ),
+        Some(Commands::Explain { code }) => cmd_explain(code.as_deref()),
         Some(Commands::Build {
             path,
             release,
@@ -1327,6 +1342,10 @@ struct CheckOutcome {
     /// `None` where the error's span is a synthetic-node dummy (no location).
     type_error_locations: Vec<Option<(usize, usize)>>,
     function_summaries: Vec<FunctionEffectSummary>,
+    /// Structured form of every parse and type error, parse errors first, in
+    /// the same order as `parse_errors` then `type_errors`. Carries the stable
+    /// code and every help line; `--error-format=json` prints these.
+    diagnostics: Vec<Diagnostic>,
 }
 
 #[derive(serde::Deserialize)]
@@ -5071,6 +5090,11 @@ fn cmd_parse(file: &PathBuf, json: bool) -> Result<(), i32> {
         }
         1
     })?;
+    // The parser recovers from errors and still returns a module; a recovered
+    // error is still an error, so `parse` fails instead of printing a partial AST.
+    if !parser.errors().is_empty() {
+        report_parse_errors(file, &source_file, parser.errors())?;
+    }
 
     // Display AST
     if json {
@@ -6121,9 +6145,22 @@ fn build_check_receipt(
 }
 
 fn run_check(file: &Path) -> Result<CheckOutcome, i32> {
+    run_check_reporting(file, &mut None)
+}
+
+/// `run_check`, but a failure that stops the check before diagnostics exist
+/// (unreadable input, a lexer error) also leaves a structured diagnostic in
+/// `early` for `--error-format=json`.
+fn run_check_reporting(file: &Path, early: &mut Option<Diagnostic>) -> Result<CheckOutcome, i32> {
+    let file_name = file.to_string_lossy().to_string();
     let mut input_digest_ledger = InputDigestLedger::default();
     let source_bytes = std::fs::read(file).map_err(|e| {
         eprintln!("Error reading file '{}': {}", file.display(), e);
+        *early = Some(Diagnostic::bare(
+            diag_codes::IO_ERROR,
+            &file_name,
+            format!("cannot read '{}': {}", file.display(), e),
+        ));
         1
     })?;
     input_digest_ledger.record("entry", file, &source_bytes);
@@ -6133,17 +6170,33 @@ fn run_check(file: &Path) -> Result<CheckOutcome, i32> {
     };
     let source = String::from_utf8(source_bytes).map_err(|e| {
         eprintln!("Error reading file '{}': {}", file.display(), e);
+        *early = Some(Diagnostic::bare(
+            diag_codes::IO_ERROR,
+            &file_name,
+            format!("'{}' is not valid UTF-8: {}", file.display(), e),
+        ));
         1
     })?;
 
-    let source = resolve_imports_recording_inputs(&source, file, &mut input_digest_ledger)?;
+    let unresolved = |early: &mut Option<Diagnostic>| {
+        *early = Some(Diagnostic::bare(
+            diag_codes::INPUT_GRAPH_ERROR,
+            &file_name,
+            "an import, include or module of this file could not be loaded; the reason is on stderr",
+        ));
+        1
+    };
+    let source = resolve_imports_recording_inputs(&source, file, &mut input_digest_ledger)
+        .map_err(|_| unresolved(early))?;
     let chk_base = file.parent().unwrap_or(Path::new("."));
-    let source = preprocess_includes_recording_inputs(&source, chk_base, &mut input_digest_ledger)?;
+    let source = preprocess_includes_recording_inputs(&source, chk_base, &mut input_digest_ledger)
+        .map_err(|_| unresolved(early))?;
     let source_file = SourceFile::new(file.to_string_lossy(), source);
 
     let mut lexer = Lexer::new(&source_file);
     let tokens = lexer.tokenize().map_err(|e| {
-        eprintln!("Lexer error: {}", e);
+        eprintln!("Lexer error [{}]: {}", diag_codes::lexer_code(&e.kind), e);
+        *early = Some(Diagnostic::from_lexer(&e, &source_file));
         1
     })?;
     let token_count = tokens.len();
@@ -6174,9 +6227,15 @@ fn run_check(file: &Path) -> Result<CheckOutcome, i32> {
             }
         })
         .collect::<Vec<_>>();
+    let mut diagnostics = parser
+        .errors()
+        .iter()
+        .map(|err| Diagnostic::from_parse(err, &source_file))
+        .collect::<Vec<_>>();
     let item_count = ast.items.len();
 
-    resolve_modules_recording_inputs(&mut ast, chk_base, &mut input_digest_ledger)?;
+    resolve_modules_recording_inputs(&mut ast, chk_base, &mut input_digest_ledger)
+        .map_err(|_| unresolved(early))?;
 
     let mut ctx = TypeContext::new();
     let mut checker = TypeChecker::new(&mut ctx);
@@ -6235,10 +6294,17 @@ fn run_check(file: &Path) -> Result<CheckOutcome, i32> {
         })
         .collect::<Vec<_>>();
 
+    diagnostics.extend(
+        type_errors
+            .iter()
+            .map(|err| Diagnostic::from_type(err, &source_file)),
+    );
+
     let input_digests = input_digest_ledger.into_sorted_records();
     let input_graph_digest = input_graph_digest(&input_digests);
 
     Ok(CheckOutcome {
+        diagnostics,
         source: file.to_string_lossy().to_string(),
         compiler_version: buildlang::VERSION,
         language_version: language_version_string(),
@@ -6266,10 +6332,10 @@ fn render_check_line(receipt_to_stdout: bool, message: impl AsRef<str>) {
 /// with the source line and a caret underline. Mirrors `report_parse_errors`
 /// (the `build`/`run` renderer) so a parse error reads the same whether it is
 /// found by `check` or by `build`; the location was resolved in `run_check`.
-fn render_parse_diagnostic(source_path: &str, diag: &ParseDiagnostic) {
+fn render_parse_diagnostic(source_path: &str, diag: &ParseDiagnostic, structured: &Diagnostic) {
     eprintln!(
-        "error[{}:{}:{}]: {}",
-        source_path, diag.line, diag.col, diag.message
+        "error[{}:{}:{}]: [{}] {}",
+        source_path, diag.line, diag.col, structured.code, diag.message
     );
     if let Some(src_line) = &diag.snippet {
         eprintln!("  {} | {}", diag.line, src_line);
@@ -6282,7 +6348,7 @@ fn render_parse_diagnostic(source_path: &str, diag: &ParseDiagnostic) {
             "^".repeat(diag.underline.min(src_line.len().saturating_sub(col0)))
         );
     }
-    if let Some(help) = &diag.help {
+    for help in &structured.help {
         eprintln!("  help: {}", help);
     }
     for note in &diag.notes {
@@ -6312,16 +6378,18 @@ fn render_check_human_output(outcome: &CheckOutcome, receipt_to_stdout: bool) {
     }
 
     if !outcome.parse_errors.is_empty() {
-        for diag in &outcome.parse_errors {
-            render_parse_diagnostic(&outcome.source, diag);
+        for (diag, structured) in outcome.parse_errors.iter().zip(&outcome.diagnostics) {
+            render_parse_diagnostic(&outcome.source, diag, structured);
         }
     }
     if !outcome.type_errors.is_empty() {
         eprintln!("Type errors found:");
+        let structured = &outcome.diagnostics[outcome.parse_errors.len()..];
         for (i, err) in outcome.type_errors.iter().enumerate() {
+            let code = structured.get(i).map_or("", |d| d.code);
             match outcome.type_error_locations.get(i).copied().flatten() {
-                Some((line, col)) => eprintln!("  {}:{}: {}", line, col, err),
-                None => eprintln!("  {}", err),
+                Some((line, col)) => eprintln!("  {}:{}: [{}] {}", line, col, code, err),
+                None => eprintln!("  [{}] {}", code, err),
             }
         }
     }
@@ -6372,8 +6440,13 @@ fn cmd_check(
     policy: Option<&Path>,
     profile: Option<&str>,
     expect_profile_digest: Option<&str>,
+    json: bool,
 ) -> Result<(), i32> {
     let receipt_to_stdout = receipt == Some(Path::new("-"));
+    if json && receipt_to_stdout {
+        eprintln!("Error: --error-format=json writes to stdout; write the receipt to a file instead of '-'");
+        return Err(1);
+    }
     if policy.is_some() && profile.is_some() {
         eprintln!("Error: --policy and --profile cannot be used together");
         return Err(1);
@@ -6404,14 +6477,50 @@ fn cmd_check(
             return Err(1);
         }
     }
-    let outcome = run_check(file)?;
+    let mut early = None;
+    let outcome = match run_check_reporting(file, &mut early) {
+        Ok(outcome) => outcome,
+        Err(code) => {
+            if json {
+                let diagnostics = early.into_iter().collect::<Vec<_>>();
+                let report =
+                    buildlang::diagnostics::Report::new(file.to_string_lossy(), diagnostics);
+                println!("{}", report.to_json());
+            }
+            return Err(code);
+        }
+    };
     let policy_decision = loaded_policy
         .as_ref()
         .map(|policy| evaluate_check_policy(policy, &outcome));
     let receipt_value = receipt.map(|_| build_check_receipt(&outcome, policy_decision.as_ref()));
 
-    render_check_human_output(&outcome, receipt_to_stdout);
-    render_check_policy_output(policy_decision.as_ref());
+    if json {
+        let mut diagnostics = outcome.diagnostics.clone();
+        if let Some(decision) = policy_decision.as_ref() {
+            for violation in &decision.violations {
+                let mut d = Diagnostic::bare(
+                    diag_codes::POLICY_VIOLATION,
+                    &outcome.source,
+                    violation.message.clone(),
+                );
+                if !violation.function.is_empty() {
+                    d.notes.push(format!(
+                        "surface `{}` in function `{}`",
+                        violation.surface, violation.function
+                    ));
+                } else {
+                    d.notes.push(format!("surface `{}`", violation.surface));
+                }
+                diagnostics.push(d);
+            }
+        }
+        let report = buildlang::diagnostics::Report::new(outcome.source.clone(), diagnostics);
+        println!("{}", report.to_json());
+    } else {
+        render_check_human_output(&outcome, receipt_to_stdout);
+        render_check_policy_output(policy_decision.as_ref());
+    }
     if let Some(receipt_value) = receipt_value {
         write_check_receipt(receipt.expect("receipt path is present"), &receipt_value)?;
     }
@@ -6848,10 +6957,11 @@ fn report_parse_errors(
         let line_start = source_file.line_start(line).unwrap_or(err.span.start);
         let col = err.span.start.0.saturating_sub(line_start.0) as usize;
         eprintln!(
-            "error[{}:{}:{}]: {}",
+            "error[{}:{}:{}]: [{}] {}",
             path.display(),
             line + 1,
             col + 1,
+            diag_codes::parse_code(&err.kind),
             err.message()
         );
         if let Some(src_line) = source_file.source().lines().nth(line) {
@@ -6865,7 +6975,7 @@ fn report_parse_errors(
                 "^".repeat(underline_len.min(src_line.len().saturating_sub(col)))
             );
         }
-        if let Some(help) = &err.help {
+        for help in buildlang::diagnostics::help_lines(err.help.as_deref(), err.kind.suggestion()) {
             eprintln!("  help: {}", help);
         }
         for note in &err.notes {
@@ -6873,6 +6983,34 @@ fn report_parse_errors(
         }
     }
     Err(1)
+}
+
+/// `buildc explain [CODE]`: print one code's title, or the whole table.
+fn cmd_explain(code: Option<&str>) -> Result<(), i32> {
+    match code {
+        None => {
+            for info in diag_codes::CODES {
+                println!("{}  {}", info.code, info.title);
+            }
+            Ok(())
+        }
+        Some(code) => match diag_codes::lookup(code) {
+            Some(info) => {
+                println!("{}: {}", info.code, info.title);
+                println!(
+                    "Codes are stable: a code never changes meaning. Run `buildc check --error-format=json` for the full diagnostic with spans and suggestions."
+                );
+                Ok(())
+            }
+            None => {
+                eprintln!(
+                    "error: unknown diagnostic code '{}'; run `buildc explain` for the list",
+                    code
+                );
+                Err(1)
+            }
+        },
+    }
 }
 
 fn cmd_build(
@@ -10902,6 +11040,7 @@ mod tests {
             parse_errors: Vec::new(),
             type_errors: Vec::new(),
             type_error_locations: Vec::new(),
+            diagnostics: Vec::new(),
             function_summaries: vec![
                 FunctionEffectSummary {
                     function: "b".to_string(),
@@ -10989,6 +11128,7 @@ mod tests {
             parse_errors: Vec::new(),
             type_errors: Vec::new(),
             type_error_locations: Vec::new(),
+            diagnostics: Vec::new(),
             function_summaries: Vec::new(),
         };
 

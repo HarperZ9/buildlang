@@ -21,7 +21,7 @@ No interfaces, no virtual dispatch, no runtime overhead. The effect handler is r
 
 An effect declares a set of operations. It does not implement them -- that is the handler's job.
 
-```build
+```build name=greeting
 effect Greeting {
     fn greet(name: str) -> (),
 }
@@ -45,7 +45,7 @@ effect Render {
 
 A function that uses an effect must declare it in its signature with `~`:
 
-```build
+```build name=welcome uses=greeting
 fn welcome() ~ Greeting {
     perform Greeting.greet("Alice");
 }
@@ -53,7 +53,7 @@ fn welcome() ~ Greeting {
 
 The `~ Greeting` annotation means: "this function performs the Greeting effect." The compiler tracks this -- if you forget the annotation, you get a compile error. If you call a function that performs effects, your function must either handle them or propagate them in its own signature.
 
-```build
+```build uses=greeting
 fn welcome_everyone() ~ Greeting {
     perform Greeting.greet("Alice");
     perform Greeting.greet("Bob");
@@ -102,7 +102,7 @@ loaded through `mod foo;` receive the same macro-argument capability gate as
 the entry source. Unknown extern calls and foreign static reads inside macro
 arguments are surfaced as direct `Foreign` boundaries too.
 
-```build
+```build fail=BL0402
 fn load_config() {
     read_file("ops.toml");
 }
@@ -488,8 +488,8 @@ changed.
 
 The caller wraps the effectful code in a `handle/with` block and provides implementations for each operation:
 
-```build
-fn main() {
+```build uses=greeting,welcome
+fn main() ~ Console {
     handle {
         welcome()
     } with {
@@ -500,7 +500,9 @@ fn main() {
 }
 ```
 
-When `welcome()` executes `perform Greeting.greet("Alice")`, control transfers to the handler. The handler runs `println!("Hello, Alice!")`, then control returns to the point after the `perform`.
+When `welcome()` executes `perform Greeting.greet("Alice")`, control transfers to the handler, which runs `println!("Hello, Alice!")`.
+
+Handlers are one-shot and do not resume today. After the handler runs, control continues after the whole `handle` expression, not after the `perform`, and the handler's value becomes the value of the `handle` expression. So `welcome_everyone()` under this handler prints only `Hello, Alice!`, and in `let a = perform Ask.number(); a + 1` the `a + 1` never runs. Resumable handlers are not implemented; write effectful code so that each `perform` is the last thing its handled computation needs.
 
 ---
 
@@ -508,7 +510,7 @@ When `welcome()` executes `perform Greeting.greet("Alice")`, control transfers t
 
 Here is the pattern that makes effects powerful for game engines:
 
-```build
+```build name=scene
 effect Render {
     fn draw(description: str) -> (),
 }
@@ -527,8 +529,9 @@ fn phong_lighting(normal: vec3, light_dir: vec3) -> vec3 {
     ambient + diffuse
 }
 
-// Scene logic -- performs the Render effect but does not know HOW rendering works
-fn render_scene() ~ Render {
+// Scene logic -- performs the Render effect but does not know HOW rendering works.
+// It also prints, so it declares Console too.
+fn render_scene() ~ Render + Console {
     let normal = vec3(0.0, 1.0, 0.0);
     let light_dir = normalize(vec3(1.0, 1.0, 0.5));
     let color = phong_lighting(normal, light_dir);
@@ -543,8 +546,8 @@ fn render_scene() ~ Render {
 
 ### Production Handler (Vulkan)
 
-```build
-fn main() {
+```build uses=scene
+fn main() ~ Console {
     handle {
         render_scene()
     } with {
@@ -558,8 +561,8 @@ fn main() {
 
 ### Test Handler (Mock)
 
-```build
-fn test_render() {
+```build uses=scene
+fn test_render() ~ Console {
     handle {
         render_scene()
     } with {
@@ -573,8 +576,8 @@ fn test_render() {
 
 ### Profiling Handler
 
-```build
-fn profile_render() {
+```build uses=scene
+fn profile_render() ~ Console {
     handle {
         render_scene()
     } with {
@@ -608,13 +611,13 @@ fn compute_something() ~ Logger {
 }
 
 // This function performs both Logger and Render
-fn render_with_logging() ~ Logger, Render {
+fn render_with_logging() ~ Logger + Render {
     perform Logger.log("Starting render");
     perform Render.draw("scene");
     perform Logger.log("Render complete");
 }
 
-fn main() {
+fn main() ~ Console {
     handle {
         handle {
             render_with_logging()
@@ -648,7 +651,7 @@ Handlers can be nested. The inner handler resolves `Render`, the outer handler r
 Effects give you:
 - **Compile-time tracking:** The type checker knows which effects a function performs.
 - **Caller control:** The handler is at the call site, not baked into the callee.
-- **Composability:** Multiple effects compose naturally -- just list them with commas.
+- **Composability:** Multiple effects compose naturally: join them with `+`, as in `~ Logger + Render`.
 - **Testability:** Swap a Vulkan handler for a mock handler in one line.
 
 ---
@@ -657,40 +660,53 @@ Effects give you:
 
 Under the hood, BuildLang compiles effects to `setjmp`/`longjmp` on the C backend. When you `perform` an effect:
 
-1. The runtime saves the current continuation (registers + stack pointer) with `setjmp`
-2. Control jumps to the nearest matching handler via `longjmp`
-3. The handler executes, then resumes the continuation
+1. The `handle` expression records its position with `setjmp`
+2. `perform` jumps to the nearest matching handler via `longjmp`
+3. The handler executes, and its value becomes the value of the `handle` expression; the code after the `perform` does not run
 
-This is efficient -- no heap allocation, no garbage collection, no virtual dispatch. The overhead is one `setjmp` per `perform`, which is comparable to a function call on modern hardware.
+There is no heap allocation, no garbage collection and no virtual dispatch. The overhead is one `setjmp` per `handle`.
 
 ---
 
 ## Quick Reference
 
 ```build
-// Define an effect
-effect EffectName {
-    fn operation(param: Type) -> ReturnType,
+// Define an effect: its operations and their types
+effect Log {
+    fn write(line: str) -> (),
+}
+
+effect Metrics {
+    fn count(name: str) -> (),
 }
 
 // Declare that a function performs an effect
-fn my_function() ~ EffectName {
-    perform EffectName.operation(value);
+fn step() ~ Log {
+    perform Log.write("step");
 }
 
-// Multiple effects
-fn my_function() ~ Effect1, Effect2 {
-    perform Effect1.op1();
-    perform Effect2.op2();
+// Multiple effects: join them with `+`
+fn step_and_count() ~ Log + Metrics {
+    perform Log.write("step");
+    perform Metrics.count("steps");
 }
 
-// Handle an effect
-handle {
-    my_function()
-} with {
-    EffectName.operation(param) => {
-        // handler body
-    },
+// Handle effects at the call site. The handler bodies print, so the
+// handling function declares Console.
+fn main() ~ Console {
+    handle {
+        handle {
+            step_and_count()
+        } with {
+            Metrics.count(name) => {
+                println!("count {}", name)
+            },
+        }
+    } with {
+        Log.write(line) => {
+            println!("log {}", line)
+        },
+    }
 }
 ```
 
@@ -711,10 +727,12 @@ fn render_frame() ~ GPU {
 }
 
 // Vulkan backend
-handle { render_frame() } with {
-    GPU.submit_draw_call(mesh, shader) => {
-        println!("vkCmdDraw: {} with {}", mesh, shader)
-    },
+fn main() ~ Console {
+    handle { render_frame() } with {
+        GPU.submit_draw_call(mesh, shader) => {
+            println!("vkCmdDraw: {} with {}", mesh, shader)
+        },
+    }
 }
 ```
 
@@ -729,20 +747,22 @@ fn game_tick() ~ Input {
     let fire = perform Input.get_key("space");
 }
 
-// Live input
-handle { game_tick() } with {
-    Input.get_key(key) => {
-        // poll real keyboard
-        println!("Polling key: {}", key)
-    },
-}
+fn main() ~ Console {
+    // Live input
+    handle { game_tick() } with {
+        Input.get_key(key) => {
+            // poll real keyboard
+            println!("Polling key: {}", key)
+        },
+    };
 
-// Replay from recording
-handle { game_tick() } with {
-    Input.get_key(key) => {
-        // return recorded value
-        println!("Replaying key: {}", key)
-    },
+    // Replay from recording
+    handle { game_tick() } with {
+        Input.get_key(key) => {
+            // return recorded value
+            println!("Replaying key: {}", key)
+        },
+    };
 }
 ```
 

@@ -285,6 +285,19 @@ impl SourceFile {
         }
     }
 
+    /// A view of an already-registered source under its existing id. Used to
+    /// re-parse tokens whose spans point into that source; it does not
+    /// register a second copy.
+    pub fn with_registered_id(id: SourceId, source: Arc<str>) -> Self {
+        let line_starts = Self::compute_line_starts(&source);
+        Self {
+            id,
+            name: Arc::from("<macro>"),
+            source,
+            line_starts,
+        }
+    }
+
     /// Create an anonymous source file (for inline code).
     pub fn anonymous(source: impl Into<Arc<str>>) -> Self {
         Self::new("<anonymous>", source)

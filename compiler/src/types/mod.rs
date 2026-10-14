@@ -48,6 +48,7 @@ mod effects;
 mod error;
 mod hkt;
 mod infer;
+mod macro_args;
 mod traits;
 mod ty;
 mod unify;

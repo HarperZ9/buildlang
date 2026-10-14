@@ -210,7 +210,7 @@
       "response_kind": "notification",
       "result_digest": {
         "algorithm": "sha256",
-        "hex": "cdb2a27f1131ef49547c5e1d9d6d1d05abb338aaed9e729fe4a8b32826ab1449"
+        "hex": "5d602f06858223dd5a6d85f327beea91432e8e0a522552277213839c1240c1bd"
       },
       "observed": {
         "diagnostics": 1,

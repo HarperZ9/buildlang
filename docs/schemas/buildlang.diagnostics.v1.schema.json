@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harperz9.github.io/buildlang/schemas/buildlang.diagnostics.v1.schema.json",
+  "title": "BuildLang diagnostics report",
+  "description": "Output of `buildc check FILE --error-format=json`: one report per run, printed on stdout.",
+  "type": "object",
+  "required": ["schema", "compiler_version", "file", "ok", "error_count", "diagnostics"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "buildlang.diagnostics/v1" },
+    "compiler_version": { "type": "string" },
+    "file": { "type": "string" },
+    "ok": { "type": "boolean", "description": "True when the program passed the check, the backend gate and any policy profile." },
+    "error_count": { "type": "integer", "minimum": 0 },
+    "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/diagnostic" } }
+  },
+  "$defs": {
+    "diagnostic": {
+      "type": "object",
+      "required": ["code", "severity", "message", "file", "span", "help", "notes", "suggestions"],
+      "additionalProperties": false,
+      "properties": {
+        "code": { "type": "string", "pattern": "^BL[0-9]{4}$", "description": "Stable code; see docs/ERROR_CODES.md." },
+        "severity": { "enum": ["error"] },
+        "message": { "type": "string" },
+        "file": { "type": "string" },
+        "span": {
+          "description": "Primary location, or null when the error has none.",
+          "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/span" }]
+        },
+        "help": { "type": "array", "items": { "type": "string" } },
+        "notes": { "type": "array", "items": { "type": "string" } },
+        "suggestions": { "type": "array", "items": { "$ref": "#/$defs/suggestion" } }
+      }
+    },
+    "span": {
+      "type": "object",
+      "required": ["line", "column", "end_line", "end_column", "byte_start", "byte_end"],
+      "additionalProperties": false,
+      "properties": {
+        "line": { "type": "integer", "minimum": 1 },
+        "column": { "type": "integer", "minimum": 1, "description": "1-based byte column." },
+        "end_line": { "type": "integer", "minimum": 1 },
+        "end_column": { "type": "integer", "minimum": 1 },
+        "byte_start": { "type": "integer", "minimum": 0 },
+        "byte_end": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "suggestion": {
+      "type": "object",
+      "required": ["message", "applicability", "widens_authority"],
+      "additionalProperties": false,
+      "properties": {
+        "message": { "type": "string" },
+        "applicability": { "enum": ["MachineApplicable", "MaybeIncorrect", "HasPlaceholders", "Unspecified"] },
+        "widens_authority": { "type": "boolean", "description": "True when applying it adds a capability or unsafe authority. Such a suggestion is never MachineApplicable." }
+      }
+    }
+  }
+}

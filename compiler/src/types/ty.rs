@@ -734,7 +734,10 @@ impl fmt::Display for Ty {
                 Ok(())
             }
             TyKind::Adt(def_id, substs) => {
-                write!(f, "{}", def_id)?;
+                match def_name(*def_id) {
+                    Some(name) => write!(f, "{}", name)?,
+                    None => write!(f, "{}", def_id)?,
+                }
                 if !substs.is_empty() {
                     write!(f, "<")?;
                     for (i, subst) in substs.iter().enumerate() {
@@ -753,7 +756,11 @@ impl fmt::Display for Ty {
             } => {
                 write!(f, "<{} as {}>::{}", trait_ref, trait_ref, item)
             }
-            TyKind::Infer(infer) => write!(f, "?{}", infer.var.0),
+            TyKind::Infer(infer) => match infer.kind {
+                InferKind::Int => write!(f, "{{integer}}"),
+                InferKind::Float => write!(f, "{{float}}"),
+                _ => write!(f, "?{}", infer.var.0),
+            },
             TyKind::TraitObject(bounds) => {
                 write!(
                     f,
@@ -1032,6 +1039,30 @@ impl DefId {
         krate: 0,
         index: u32::MAX,
     };
+}
+
+thread_local! {
+    /// Names of the types registered by the type context on this thread, so a
+    /// diagnostic prints `Point` rather than `DefId(0, 6)`. Cleared when a new
+    /// `TypeContext` is created, so names never leak between checks.
+    static DEF_NAMES: std::cell::RefCell<std::collections::HashMap<DefId, Arc<str>>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Record the source name of a type definition for display.
+pub fn register_def_name(id: DefId, name: Arc<str>) {
+    DEF_NAMES.with(|names| {
+        names.borrow_mut().insert(id, name);
+    });
+}
+
+/// Forget every recorded type name on this thread.
+pub fn clear_def_names() {
+    DEF_NAMES.with(|names| names.borrow_mut().clear());
+}
+
+fn def_name(id: DefId) -> Option<Arc<str>> {
+    DEF_NAMES.with(|names| names.borrow().get(&id).cloned())
 }
 
 impl fmt::Display for DefId {

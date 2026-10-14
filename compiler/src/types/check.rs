@@ -1083,8 +1083,7 @@ impl<'ctx> TypeChecker<'ctx> {
                             declared_effects: declared_names.clone(),
                         };
                         let mut err_with_span = TypeErrorWithSpan::new(err, span);
-                        err_with_span.help =
-                            Some(format!("add `{}` to the effect annotations", body_eff.name));
+                        err_with_span.help = err_with_span.error.suggestion();
                         if let Some(sources) = capability_sources.get(body_eff.name.as_ref()) {
                             err_with_span.notes.push(format!(
                                 "capability `{}` was triggered by ambient call(s): {}",
