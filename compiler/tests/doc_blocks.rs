@@ -24,7 +24,12 @@ use std::{
     process::Command,
 };
 
-const DOCS: &[&str] = &["SPECIFICATION.md", "docs/EFFECTS_GUIDE.md", "README.md"];
+const DOCS: &[&str] = &[
+    "SPECIFICATION.md",
+    "docs/EFFECTS_GUIDE.md",
+    "README.md",
+    "skills/buildlang/SKILL.md",
+];
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

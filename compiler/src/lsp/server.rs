@@ -665,11 +665,17 @@ fn build_diagnostics_notification(params: &PublishDiagnosticsParams) -> String {
             Some(DiagnosticSeverity::Hint) => 4,
             None => 1,
         };
+        let mut obj = JsonObjectBuilder::new()
+            .field("range", build_range_json(&d.range))
+            .field_number("severity", severity);
+        // The stable `BLxxxx` code, the same one `buildc check` prints.
+        obj = match &d.code {
+            Some(DiagnosticCode::String(code)) => obj.field_str("code", code),
+            Some(DiagnosticCode::Number(code)) => obj.field_number("code", *code),
+            None => obj,
+        };
         diag_array = diag_array.item(
-            JsonObjectBuilder::new()
-                .field("range", build_range_json(&d.range))
-                .field_number("severity", severity)
-                .field_str("message", &d.message)
+            obj.field_str("message", &d.message)
                 .field_str("source", d.source.as_deref().unwrap_or("buildlang"))
                 .build(),
         );

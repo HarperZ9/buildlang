@@ -477,7 +477,7 @@ fn main() ~ Console {
 
     // There is no `.parse()` on the C backend yet: convert digits by hand.
     let mut total: i64 = 0;
-    for line in "3\n4\n5".split("\n") {
+    for line in "12\n30\n7".split("\n") {
         total = total + parse_int(line);
     }
     println!("total {}", total);

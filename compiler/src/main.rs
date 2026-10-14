@@ -15,6 +15,7 @@ mod gpu;
 // `receipt verify` works on a gpu receipt in the default build.
 mod gpu_receipt;
 mod lsp_dispatch;
+mod mcp;
 mod memory_layout;
 mod mir_representation;
 mod model_receipt;
@@ -32,6 +33,7 @@ use std::sync::Arc;
 
 use buildlang::ast::{self, ItemKind, Module, Visibility};
 use buildlang::codegen::{CodeGenerator, StdioMode, Target};
+use buildlang::diagnostics::check::{codegen_error_as_type_error, has_gpu_entry_point};
 use buildlang::diagnostics::{codes as diag_codes, Diagnostic};
 use buildlang::lexer::{Lexer, SourceFile, Span};
 use buildlang::parser::{ParseError, Parser};
@@ -365,6 +367,9 @@ enum Commands {
 
     /// Start the Language Server Protocol server
     Lsp,
+
+    /// Serve the compiler as Model Context Protocol tools over stdio (check, explain)
+    Mcp,
 
     /// Watch shader files and recompile on change
     Watch {
@@ -836,6 +841,7 @@ fn run_cli(cli: Cli) -> Result<(), i32> {
         }
         Some(Commands::Repl) => cmd_repl(),
         Some(Commands::Lsp) => cmd_lsp(),
+        Some(Commands::Mcp) => mcp::serve(&mcp_check_path),
         Some(Commands::Watch { path, target }) => cmd_watch(&path, &target),
         Some(Commands::Fmt { file, check, write }) => cmd_fmt(&file, check, write),
         Some(Commands::Pkg { command }) => cmd_pkg(command),
@@ -6985,6 +6991,17 @@ fn report_parse_errors(
     Err(1)
 }
 
+/// The full file check behind the MCP `check` tool. Human-readable failure
+/// text from the driver goes to stderr; the report carries the diagnostics.
+fn mcp_check_path(file: &Path) -> buildlang::diagnostics::Report {
+    let mut early = None;
+    let name = file.to_string_lossy().to_string();
+    match run_check_reporting(file, &mut early) {
+        Ok(outcome) => buildlang::diagnostics::Report::new(name, outcome.diagnostics),
+        Err(_) => buildlang::diagnostics::Report::new(name, early.into_iter().collect()),
+    }
+}
+
 /// `buildc explain [CODE]`: print one code's title, or the whole table.
 fn cmd_explain(code: Option<&str>) -> Result<(), i32> {
     match code {
@@ -11363,37 +11380,6 @@ mod tests {
     }
 }
 
-/// Turn a code-generation failure into a source-located type error, so `buildc
-/// check` fails on any program the C backend cannot compile.
-fn codegen_error_as_type_error(
-    err: &buildlang::codegen::backend::CodegenError,
-    source_file: &SourceFile,
-) -> TypeErrorWithSpan {
-    use buildlang::codegen::backend::CodegenError;
-    let id = source_file.id;
-    let (message, location, help) = match err {
-        CodegenError::Rejected {
-            message,
-            location,
-            help,
-        } => (message.clone(), *location, help.clone()),
-        other => (
-            format!("the C backend cannot compile this program: {other}"),
-            None,
-            None,
-        ),
-    };
-    let span = match location {
-        Some((start, end)) => Span::from_offsets(start, end, id),
-        None => Span::from_offsets(0, 0, id),
-    };
-    let mut err = TypeErrorWithSpan::new(TypeError::BackendRejected { message }, span);
-    if let Some(help) = help {
-        err = err.with_help(help);
-    }
-    err
-}
-
 /// Print a code-generation failure with its location and fix hint.
 fn report_codegen_error(err: &buildlang::codegen::backend::CodegenError, source_file: &SourceFile) {
     let te = codegen_error_as_type_error(err, source_file);
@@ -11411,23 +11397,4 @@ fn report_codegen_error(err: &buildlang::codegen::backend::CodegenError, source_
             te
         );
     }
-}
-
-/// True when the module declares a shader stage or GPU kernel entry point
-/// (`#[fragment]`, `#[vertex]`, `#[compute]`, `#[kernel]`), at any nesting depth.
-fn has_gpu_entry_point(module: &Module) -> bool {
-    fn item_has(item: &ast::Item) -> bool {
-        let gpu_attr = item.attrs.iter().any(|attr| {
-            attr.path.segments.first().map_or(false, |seg| {
-                matches!(
-                    seg.ident.name.as_ref(),
-                    "fragment" | "vertex" | "compute" | "kernel"
-                )
-            })
-        });
-        gpu_attr
-            || matches!(&item.kind, ItemKind::Mod(m)
-                if m.content.as_ref().map_or(false, |c| c.items.iter().any(item_has)))
-    }
-    module.items.iter().any(item_has)
 }

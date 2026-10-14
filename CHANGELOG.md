@@ -10,6 +10,18 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- **M2: agent-facing toolchain.** `buildc mcp` serves the compiler as Model Context
+  Protocol tools over stdio: `check` (a file path or a source buffer, returning the
+  `buildlang.diagnostics/v1` report as structured content) and `explain`. It reads
+  and checks programs and never runs them. Tested against the stdio transport,
+  lifecycle, version negotiation, tools and error rules (`tests/mcp_server.rs`); no
+  official conformance suite was run.
+- The language server publishes the same diagnostics as `buildc check`: one shared
+  pipeline (`diagnostics::check`) including the C backend gate, the stable `BLxxxx`
+  code in each LSP diagnostic, and the help lines in its message
+  (`tests/lsp_parity.rs`). Before, it skipped the backend gate and sent no codes.
+- `skills/buildlang/SKILL.md` (an agent skill: the check loop, capabilities, what the
+  C backend supports) and `llms.txt`. The skill's code blocks are checked in CI.
 - Vector builtins accept a borrowed receiver: `vec_push(&mut v, x)`, `vec_len(&v)`,
   `vec_get(&v, i)` and `vec_pop(&mut v)` used to pass `check` and fail in gcc (the
   2026-10-14 probe hit it twice). Pushing a string into an unannotated `vec_new()`
