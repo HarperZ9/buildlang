@@ -6,7 +6,7 @@
 //! with the JSON report for the same file.
 
 use std::{
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, Write},
     path::PathBuf,
     process::{Command, Stdio},
 };
