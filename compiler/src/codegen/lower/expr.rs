@@ -2806,7 +2806,7 @@ impl<'ctx> MirLowerer<'ctx> {
             return self.try_typed_vec_new();
         }
         let op = match name {
-            "vec_push" | "vec_get" | "vec_pop" => name,
+            "vec_push" | "vec_get" | "vec_pop" | "vec_len" => name,
             _ => return None,
         };
         if args.is_empty() {
@@ -2818,8 +2818,13 @@ impl<'ctx> MirLowerer<'ctx> {
             return None;
         }
 
-        // Lower the receiver (first arg) and read its element type.
-        let recv_val = match self.lower_expr(&args[0]) {
+        // Lower the receiver (first arg) and read its element type. Agents
+        // write `vec_push(&mut v, x)` and `vec_len(&v)`; the runtime takes the
+        // handle by value, so a borrowed receiver is loaded first.
+        let recv_val = match self
+            .lower_expr(&args[0])
+            .and_then(|v| self.deref_if_pointer(v))
+        {
             Ok(v) => v,
             Err(e) => return Some(Err(e)),
         };
@@ -2863,6 +2868,7 @@ impl<'ctx> MirLowerer<'ctx> {
         }
 
         let (c_fn, ret_ty): (String, MirType) = match op {
+            "vec_len" => ("build_hvec_len".to_string(), MirType::i64()),
             "vec_push" => (format!("build_hvec_push_{}", suffix), MirType::Void),
             "vec_get" => (format!("build_hvec_get_{}", suffix), elem_ty.clone()),
             "vec_pop" => (format!("build_hvec_pop_{}", suffix), elem_ty.clone()),
