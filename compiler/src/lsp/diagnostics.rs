@@ -14,9 +14,8 @@ use super::message::PublishDiagnosticsParams;
 use super::types::*;
 use std::sync::Arc;
 
-use crate::lexer::{Lexer, SourceFile};
-use crate::parser::Parser;
-use crate::types::{TypeChecker, TypeContext};
+use crate::diagnostics::check::check_buffer;
+use crate::lexer::SourceFile;
 
 const LEXER_DIAGNOSTIC_SOURCE: &str = "buildlang/lexer";
 const PARSER_DIAGNOSTIC_SOURCE: &str = "buildlang/parser";
@@ -56,128 +55,13 @@ impl DiagnosticsProvider {
         }
     }
 
-    /// Run the full lexer → parser → type checker pipeline and convert
-    /// errors to LSP diagnostics with accurate source positions.
+    /// Run the compiler's own check (lexer, parser, type checker and the C
+    /// backend gate) and publish its diagnostics with the same stable codes
+    /// and help lines as `buildc check --error-format=json`.
     fn check_types(&self, content: &str, diagnostics: &mut Vec<Diagnostic>) {
         let source_file = SourceFile::new("buffer", content.to_string());
-
-        // Lex
-        let mut lexer = Lexer::new(&source_file);
-        let tokens = match lexer.tokenize() {
-            Ok(tokens) => tokens,
-            Err(e) => {
-                diagnostics.push(Diagnostic {
-                    range: Range {
-                        start: Position {
-                            line: 0,
-                            character: 0,
-                        },
-                        end: Position {
-                            line: 0,
-                            character: 1,
-                        },
-                    },
-                    severity: Some(DiagnosticSeverity::Error),
-                    code: None,
-                    source: Some(LEXER_DIAGNOSTIC_SOURCE.to_string()),
-                    message: format!("Lexer error: {}", e),
-                    tags: Vec::new(),
-                    related_information: Vec::new(),
-                });
-                return;
-            }
-        };
-
-        // Parse
-        let mut parser = Parser::new(&source_file, tokens);
-        let ast = match parser.parse() {
-            Ok(ast) => ast,
-            Err(e) => {
-                diagnostics.push(Diagnostic {
-                    range: Range {
-                        start: Position {
-                            line: 0,
-                            character: 0,
-                        },
-                        end: Position {
-                            line: 0,
-                            character: 1,
-                        },
-                    },
-                    severity: Some(DiagnosticSeverity::Error),
-                    code: None,
-                    source: Some(PARSER_DIAGNOSTIC_SOURCE.to_string()),
-                    message: format!("Parse error: {}", e),
-                    tags: Vec::new(),
-                    related_information: Vec::new(),
-                });
-                return;
-            }
-        };
-
-        // Report parse errors with positions
-        for err in parser.errors() {
-            diagnostics.push(Diagnostic {
-                range: Range {
-                    start: Position {
-                        line: 0,
-                        character: 0,
-                    },
-                    end: Position {
-                        line: 0,
-                        character: 1,
-                    },
-                },
-                severity: Some(DiagnosticSeverity::Error),
-                code: None,
-                source: Some(PARSER_DIAGNOSTIC_SOURCE.to_string()),
-                message: format!("{}", err),
-                tags: Vec::new(),
-                related_information: Vec::new(),
-            });
-        }
-
-        // Type check
-        let mut ctx = TypeContext::new();
-        let mut checker = TypeChecker::new(&mut ctx);
-        checker.set_source_file(&source_file);
-        checker.check_module(&ast);
-
-        // Convert type errors to diagnostics with source positions
-        for err in checker.errors() {
-            let span = err.span;
-            let (start_line, start_col, end_line, end_col) =
-                if span.start.to_usize() < content.len() {
-                    let start_pos = source_file.lookup_position(span.start);
-                    let end_pos = source_file.lookup_position(span.end);
-                    (
-                        start_pos.line.saturating_sub(1),
-                        start_pos.column.saturating_sub(1),
-                        end_pos.line.saturating_sub(1),
-                        end_pos.column.saturating_sub(1),
-                    )
-                } else {
-                    (0, 0, 0, 1)
-                };
-
-            diagnostics.push(Diagnostic {
-                range: Range {
-                    start: Position {
-                        line: start_line,
-                        character: start_col,
-                    },
-                    end: Position {
-                        line: end_line,
-                        character: end_col,
-                    },
-                },
-                severity: Some(DiagnosticSeverity::Error),
-                code: None,
-                source: Some(TYPE_CHECKER_DIAGNOSTIC_SOURCE.to_string()),
-                message: format!("{}", err),
-                tags: Vec::new(),
-                related_information: Vec::new(),
-            });
+        for d in check_buffer(&source_file) {
+            diagnostics.push(to_lsp(d));
         }
     }
 
@@ -656,5 +540,55 @@ mod tests {
             "expected type-checker diagnostic in {:#?}",
             published.diagnostics
         );
+    }
+}
+
+/// Convert a compiler diagnostic to an LSP diagnostic. Help lines follow the
+/// message, as in the CLI's human output; the code is the stable `BLxxxx`.
+pub(crate) fn to_lsp(d: crate::diagnostics::Diagnostic) -> Diagnostic {
+    let range = match &d.span {
+        Some(span) => Range {
+            start: Position {
+                line: span.line.saturating_sub(1) as u32,
+                character: span.column.saturating_sub(1) as u32,
+            },
+            end: Position {
+                line: span.end_line.saturating_sub(1) as u32,
+                character: span.end_column.saturating_sub(1) as u32,
+            },
+        },
+        None => Range {
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 0,
+                character: 1,
+            },
+        },
+    };
+    let source = match &d.code[..4] {
+        "BL01" => LEXER_DIAGNOSTIC_SOURCE,
+        "BL02" => PARSER_DIAGNOSTIC_SOURCE,
+        _ => TYPE_CHECKER_DIAGNOSTIC_SOURCE,
+    };
+    let mut message = d.message;
+    for help in &d.help {
+        message.push_str("\n  help: ");
+        message.push_str(help);
+    }
+    for note in &d.notes {
+        message.push_str("\n  note: ");
+        message.push_str(note);
+    }
+    Diagnostic {
+        range,
+        severity: Some(DiagnosticSeverity::Error),
+        code: Some(DiagnosticCode::String(d.code.to_string())),
+        source: Some(source.to_string()),
+        message,
+        tags: Vec::new(),
+        related_information: Vec::new(),
     }
 }

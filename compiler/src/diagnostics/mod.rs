@@ -17,6 +17,7 @@
 //! never `MachineApplicable`: an agent must not grant itself capabilities by
 //! applying a fix without review.
 
+pub mod check;
 pub mod codes;
 
 use serde::Serialize;

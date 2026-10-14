@@ -177,11 +177,13 @@ with a typed reason.
 | `buildc <file>` | Compile a file; `-o`, `--target`, `--stdio-mode native\|portable-lf`, `-O 0-3`, `-g` |
 | `buildc run <file>` | Compile and run via the C backend; `--stdio-mode native\|portable-lf`, `--emit-receipt`, `--invariant`, `--units`, `--gpu` |
 | `buildc build [path]` | Build a project; `--emit c\|header\|exe`, `--release`, `--target`, `--stdio-mode native\|portable-lf`, `--keep-c` |
-| `buildc check <file>` | Type-check; `--receipt`, `--policy`, `--profile`, `--expect-profile-digest` |
+| `buildc check <file>` | Type-check; `--error-format json`, `--receipt`, `--policy`, `--profile`, `--expect-profile-digest` |
+| `buildc explain [code]` | Explain a diagnostic code such as `BL0403`, or list every code |
 | `buildc test [dir]` | Run `.bld` programs against `.expected` files |
 | `buildc fmt` / `buildc lint` | Format (`--check`, `--write`) and lint source |
 | `buildc repl` | Interactive session |
-| `buildc lsp` | Bundled LSP server (completion, hover, diagnostics, go-to-definition, semantic tokens) |
+| `buildc lsp` | Bundled LSP server (completion, hover, diagnostics with the same codes as `check`, go-to-definition, semantic tokens) |
+| `buildc mcp` | The compiler as MCP tools over stdio: `check` and `explain`; it never runs programs |
 | `buildc watch [path]` | Recompile on change (`--target spirv\|c`) |
 | `buildc pkg` | Package manager (`init`, `add`, `resolve`, `search`) |
 | `buildc mir emit\|load` | Emit or load the versioned `buildlang.mir/v0` JSON interlingua |
@@ -190,6 +192,8 @@ with a typed reason.
 | `buildc receipt verify\|export` | Re-check saved receipts; export witnessed measurement rows |
 | `buildc corpus verify` | Verify the semantic corpus receipts and real C stdout |
 | `buildc doctor` / `buildc version` | Toolchain diagnosis; version info |
+
+Agents: start with [skills/buildlang/SKILL.md](skills/buildlang/SKILL.md) or [llms.txt](llms.txt).
 
 Full flags: `buildc --help` and `buildc <command> --help`. The command
 reference with expected output lives in [USAGE.md](USAGE.md).

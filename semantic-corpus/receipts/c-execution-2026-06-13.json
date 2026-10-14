@@ -6,7 +6,7 @@
   "evidence_class": "generated-artifact-execution",
   "command": "buildc run <semantic-corpus-program> --stdio-mode portable-lf",
   "execution_mode": "sequential-portable-lf",
-  "verified_at": "unix-seconds:1792007604",
+  "verified_at": "unix-seconds:1792010930",
   "verification_command": "buildc corpus verify --write; per-program command: buildc run <program> --stdio-mode portable-lf",
   "result": {
     "passed": 9,
