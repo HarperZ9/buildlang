@@ -10,6 +10,8 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+## 1.6.0 - 2026-10-14 - the checker is the truth
+
 - The standard library is compiled into `buildc` (`compiler/stdlib/`, a mirror of
   `stdlib/` kept identical by a test). With no stdlib directory on disk it is written
   to a versioned temp directory, so `cargo install buildlang` alone runs programs that
