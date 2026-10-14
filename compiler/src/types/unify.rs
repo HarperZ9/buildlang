@@ -12,6 +12,28 @@
 use super::error::{TypeError, TypeResult};
 use super::ty::*;
 
+/// True when a numeric literal of this inference kind can never have type `ty`.
+/// Only concrete non-numeric types are listed; variables, parameters,
+/// references and projections are left to the ordinary rules.
+fn literal_cannot_be(kind: &InferKind, ty: &TyKind) -> bool {
+    let non_numeric = matches!(
+        ty,
+        TyKind::Str
+            | TyKind::Bool
+            | TyKind::Char
+            | TyKind::Adt(..)
+            | TyKind::Tuple(_)
+            | TyKind::Array(..)
+            | TyKind::Slice(_)
+            | TyKind::Fn(_)
+    );
+    match kind {
+        InferKind::Int => non_numeric,
+        InferKind::Float => non_numeric || matches!(ty, TyKind::Int(_)),
+        _ => false,
+    }
+}
+
 /// Unifier for type inference.
 #[derive(Debug)]
 pub struct Unifier {
@@ -109,6 +131,18 @@ impl Unifier {
             (_, TyKind::Var(v2)) => {
                 self.bind(*v2, t1.clone())?;
                 Ok(())
+            }
+
+            // A numeric literal's inference variable only binds to a type a
+            // number can be. `let s: str = 4` and `f(3)` with `fn f(p: P)`
+            // used to bind and pass the check, then fail in the C compiler.
+            (TyKind::Infer(infer), other) | (other, TyKind::Infer(infer))
+                if literal_cannot_be(&infer.kind, other) =>
+            {
+                Err(TypeError::TypeMismatch {
+                    expected: t1.clone(),
+                    found: t2.clone(),
+                })
             }
 
             // Inference variables

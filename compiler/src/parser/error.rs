@@ -58,7 +58,7 @@ impl ParseError {
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.kind)?;
-        if let Some(help) = &self.help {
+        for help in crate::diagnostics::help_lines(self.help.as_deref(), self.kind.suggestion()) {
             write!(f, "\n  help: {}", help)?;
         }
         for note in &self.notes {

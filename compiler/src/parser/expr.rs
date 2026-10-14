@@ -62,6 +62,14 @@ impl<'a> Parser<'a> {
         self.parse_expr_with_bp(0)
     }
 
+    /// Parse the whole token stream as exactly one expression. Returns `None`
+    /// when it does not parse, leaves tokens over, or records an error. Used to
+    /// recover macro arguments from their tokens.
+    pub fn parse_standalone_expr(&mut self) -> Option<Expr> {
+        let expr = self.parse_expr().ok()?;
+        (self.is_eof() && self.errors.is_empty()).then_some(expr)
+    }
+
     /// Parse an expression in statement position under Rust's ExprWithBlock
     /// rule. A block-like leading atom (`if`, `match`, a bare `{...}` block,
     /// `loop`/`while`/`for`, `unsafe`/`async`/`handle`) is a complete statement

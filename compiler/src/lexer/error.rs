@@ -52,7 +52,7 @@ impl LexerError {
 impl fmt::Display for LexerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.kind)?;
-        if let Some(help) = &self.help {
+        for help in crate::diagnostics::help_lines(self.help.as_deref(), self.kind.help()) {
             write!(f, "\n  help: {}", help)?;
         }
         Ok(())

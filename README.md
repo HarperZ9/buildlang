@@ -7,7 +7,7 @@
 
 Systems language with typed capability effects and native C output.
 
-```
+```bash
 cargo install buildlang
 ```
 
@@ -147,7 +147,7 @@ buildc check examples/quickstart/hello.bld --profile console-only --receipt -
 
 Output (excerpt, verified against buildc 1.2.0):
 
-```
+```text
 Type checking... OK
 
 No errors found in 'examples/quickstart/hello.bld'

@@ -10,7 +10,7 @@ Source files are UTF-8 encoded. Identifiers may contain Unicode characters follo
 ### 1.2 Whitespace and Comments
 Whitespace characters (space, tab, newline, carriage return) separate tokens but are otherwise insignificant.
 
-```
+```build
 // Line comment (to end of line)
 /* Block comment (may nest) */
 /// Outer doc comment
@@ -20,7 +20,7 @@ Whitespace characters (space, tab, newline, carriage return) separate tokens but
 Block comments nest: `/* /* inner */ outer */` is valid.
 
 ### 1.3 Keywords
-```
+```text
 fn let mut const static struct enum trait impl
 if else match for while loop break continue return
 true false self Self super
@@ -33,7 +33,7 @@ effect handle perform resume
 ### 1.4 Literals
 
 **Integer literals:**
-```
+```build lex-only
 42          // decimal (inferred integer type)
 42i32       // explicitly i32
 0xFF        // hexadecimal
@@ -47,7 +47,7 @@ Integer types: `i8`, `i16`, `i32`, `i64`, `i128`, `isize`, `u8`, `u16`, `u32`, `
 Unsuffixed integer literals have type `{integer}` - a type variable constrained to resolve to a concrete integer type through inference.
 
 **Float literals:**
-```
+```build lex-only
 3.14        // inferred float type
 3.14f32     // explicitly f32
 2.5e10      // scientific notation
@@ -56,7 +56,7 @@ Unsuffixed integer literals have type `{integer}` - a type variable constrained 
 Float types: `f32`, `f64`. Unsuffixed float literals have type `{float}`.
 
 **String literals:**
-```
+```build lex-only
 "hello"         // str (owned string)
 b"bytes"        // &'static [u8; 5]
 'c'             // char
@@ -124,25 +124,26 @@ From lowest to highest binding power:
 ### 2.3 User-Defined Types
 
 **Structs:**
-```
+```build
 struct Point { x: f64, y: f64 }        // named fields
-struct Wrapper(i32)                      // tuple struct
-struct Unit                              // unit struct
+struct Wrapper(i32);                     // tuple struct
+struct Unit;                             // unit struct
 ```
 
 **Enums:**
-```
-enum Option<T> { Some(T), None }
+```build name=color
+enum Shape { Circle(f64), Square(f64) }
 enum Color { Red, Green, Blue }
 ```
 
 **Type aliases:**
-```
-type Result<T> = std::result::Result<T, Error>;
+```build
+struct ParseError { line: i32 }
+type ParseResult<T> = Result<T, ParseError>;
 ```
 
 ### 2.4 Generics
-```
+```build
 fn identity<T>(x: T) -> T { x }
 struct Pair<A, B> { first: A, second: B }
 ```
@@ -150,9 +151,18 @@ struct Pair<A, B> { first: A, second: B }
 Generic type parameters are monomorphized at each call site. Each distinct instantiation generates a separate function.
 
 ### 2.5 Trait Bounds
-```
-fn print_it<T: Display>(x: T) { ... }
-fn complex<T>(x: T) where T: Clone + Debug { ... }
+```build
+trait Describe {
+    fn describe(&self) -> str;
+}
+
+fn print_it<T: Describe>(x: T) ~ Console {
+    println!("{}", x.describe());
+}
+
+fn first_of<T>(x: T, y: T) -> T where T: Describe {
+    x
+}
 ```
 
 ### 2.6 Type Inference
@@ -165,20 +175,33 @@ Unsuffixed integer literals resolve through inference: in `let x: u64 = 42`, the
 
 ### 2.7 Type Annotations
 
-Types may carry string annotations for domain-specific checking:
-```
-type LinearRGB = @[ColorSpace:Linear] Vec3;
+Types may carry annotations for domain-specific checking, written `T with Category<Value>`:
+```build name=rgb
+struct RGB { r: f64, g: f64, b: f64 }
+type LinearRGB = RGB with ColorSpace<Linear>;
+
+fn shade(c: RGB with ColorSpace<Linear>) -> f64 {
+    c.r
+}
 ```
 
-The unifier checks annotation compatibility: if both operands carry annotations in the same category, they must match.
+The unifier checks annotation compatibility: if both types carry annotations in the same category, they must match. An unannotated value is compatible with any annotation. Passing an sRGB value where a linear one is required is rejected:
+```build uses=rgb fail=BL0301
+fn main() ~ Console {
+    let c: RGB with ColorSpace<sRGB> = RGB { r: 0.5, g: 0.5, b: 0.5 };
+    println!("{}", shade(c));
+}
+```
 
 ## 3. Ownership and Borrowing
 
 ### 3.1 References
-```
-let r: &i32 = &x;          // shared reference
-let mr: &mut i32 = &mut x; // mutable reference
+```build in-main
+let mut x: i32 = 5;
+let r: &i32 = &x;           // shared reference
 let v: i32 = *r;            // dereference
+let mr: &mut i32 = &mut x;  // mutable reference
+*mr = v + 1;
 ```
 
 ### 3.2 Borrowing Rules
@@ -188,75 +211,84 @@ let v: i32 = *r;            // dereference
 
 ### 3.3 Non-Lexical Lifetimes
 Borrows expire at last use, not at scope end:
-```
+```build in-main
+let mut x: i32 = 5;
 let r = &x;
 println!("{}", *r);  // last use of r
 let mr = &mut x;     // OK: r's borrow has expired
+*mr = 6;
 ```
 
 ### 3.4 Scope-Based Expiry
 Borrows created in an inner scope expire when that scope ends:
-```
+```build in-main
+let mut x: i32 = 5;
 {
     let r = &mut x;
+    *r = 6;
 } // r's borrow expires here
 let r2 = &x; // OK
+println!("{}", *r2);
 ```
 
 ## 4. Items
 
 ### 4.1 Functions
-```
-fn name(param: Type, ...) -> ReturnType {
-    body
+```build
+fn add(a: i32, b: i32) -> i32 {
+    a + b
 }
 ```
 The last expression in a function body is the implicit return value.
 
 ### 4.2 Structs
-```
-struct Name {
-    field: Type,
+```build
+struct Counter {
+    count: i32,
 }
 
-impl Name {
-    fn method(&self) -> Type { ... }
-    fn method_mut(&mut self) { ... }
+impl Counter {
+    fn get(&self) -> i32 { self.count }
+    fn bump(&mut self) { self.count = self.count + 1; }
 }
 ```
 
 ### 4.3 Enums
-```
-enum Name {
-    Variant,
-    Variant(Type),
-    Variant { field: Type },
+```build
+enum Shape {
+    Empty,
+    Circle(f64),
+    Rect { w: f64, h: f64 },
 }
 ```
 
 Match expressions over enum types must be exhaustive:
-```
-match color {
-    Color::Red => ...,
-    Color::Green => ...,
-    Color::Blue => ...,   // all variants covered
+```build uses=color
+fn name(color: Color) -> str {
+    match color {
+        Color::Red => "red",
+        Color::Green => "green",
+        Color::Blue => "blue",   // all variants covered
+    }
 }
 ```
 Missing variants produce a compile-time error.
 
 ### 4.4 Traits
-```
-trait Name {
-    fn method(&self) -> Type;
+```build
+trait Area {
+    fn area(&self) -> f64;
 }
 
-impl Name for ConcreteType {
-    fn method(&self) -> Type { ... }
+struct Square { side: f64 }
+
+impl Area for Square {
+    fn area(&self) -> f64 { self.side * self.side }
 }
 ```
 
 ### 4.5 Modules
-```
+```build parse-only
 mod name {          // inline module
     pub fn foo() {}
 }
@@ -271,37 +303,58 @@ use module::{a, b}; // nested import
 ## 5. Expressions
 
 ### 5.1 Control Flow
-```
-if condition { ... } else { ... }
-if let pattern = expr { ... }
-match expr { pattern => expr, ... }
-while condition { ... }
-for pattern in iterator { ... }
-loop { ... }
-break;
-break value;
-continue;
-return value;
+```build in-main
+let n = 7;
+if n > 5 { println!("big"); } else { println!("small"); }
+let found: Option<i32> = Some(n);
+if let Some(v) = found { println!("{}", v); }
+let kind = match n { 0 => "zero", _ => "other" };
+let mut i = 0;
+while i < 3 { i = i + 1; }
+for k in 0..3 { if k == 1 { continue; } }
+let first_big = loop { i = i + 1; if i > 10 { break i; } };
+println!("{} {}", kind, first_big);
 ```
 
 ### 5.2 Closures
-```
-let f = |x, y| x + y;
+```build in-main
+let f = |x: i32, y: i32| x + y;
 let g = |x: i32| -> i32 { x * 2 };
-let captured = move || use_captured_var;
+let base = 10;
+let h = move |x: i32| x + base;
+println!("{} {} {}", f(1, 2), g(3), h(4));
 ```
 
 ### 5.3 Pattern Matching
-```
-match value {
-    42 => ...,              // literal
-    x => ...,               // binding
-    _ => ...,               // wildcard
-    (a, b) => ...,          // tuple
-    Point { x, y } => ..., // struct
-    Some(v) => ...,         // enum variant
-    A | B => ...,           // or-pattern
-    x if x > 0 => ...,     // guard
+```build
+struct Point { x: i32, y: i32 }
+
+fn classify(value: i32) -> str {
+    match value {
+        42 => "the answer",     // literal
+        1 | 2 => "small",       // or-pattern
+        x if x > 100 => "big",  // guard
+        _ => "other",           // wildcard
+    }
+}
+
+fn sum_pair(pair: (i32, i32)) -> i32 {
+    match pair {
+        (a, b) => a + b,        // tuple
+    }
+}
+
+fn on_axis(p: Point) -> bool {
+    match p {
+        Point { x, y } => x == 0 || y == 0,  // struct
+    }
+}
+
+fn unwrap_or_zero(o: Option<i32>) -> i32 {
+    match o {
+        Some(v) => v,           // enum variant
+        None => 0,
+    }
 }
 ```
 
@@ -342,32 +395,36 @@ separate API surface defines them.
 ## 6. Algebraic Effects
 
 ### 6.1 Effect Declaration
-```
+```build name=error-effect
 effect Error {
-    fn raise(msg: str) -> !;
+    fn raise(msg: str) -> (),
 }
 ```
 
 ### 6.2 Performing Effects
-```
-fn might_fail() {
+```build name=might-fail uses=error-effect
+fn might_fail() ~ Error {
     perform Error.raise("something went wrong");
 }
 ```
 
 ### 6.3 Handling Effects
-```
-handle Error {
-    might_fail()
-} with {
-    raise(msg) => {
-        println!("caught: {}", msg);
-        resume(default_value)
-    }
+```build uses=error-effect,might-fail
+fn main() ~ Console {
+    let status = handle {
+        might_fail();
+        0
+    } with {
+        Error.raise(msg) => {
+            println!("caught: {}", msg);
+            1
+        },
+    };
+    println!("status {}", status);
 }
 ```
 
-Effects use one-shot continuations (setjmp/longjmp). `resume` may be called at most once per `perform`.
+Handlers are one-shot and do not resume (setjmp/longjmp on the C backend). When a handler clause runs, its value becomes the value of the `handle` expression and the code after the `perform` does not run. In the example, `status` is `1` and `might_fail` stops at its `perform`.
 
 ## 7. Standard Library
 
@@ -409,7 +466,7 @@ References compile to pointers. Structs compile to C structs. Enums compile to t
 
 ## 9. Grammar Summary (EBNF)
 
-```
+```ebnf
 module     = item* ;
 item       = function | struct_def | enum_def | trait_def | impl_def
            | type_alias | const_def | static_def | mod_def | use_def ;

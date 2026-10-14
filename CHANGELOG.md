@@ -10,6 +10,38 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- **M1: machine-readable diagnostics.** `buildc check FILE --error-format=json`
+  prints one report on stdout (`buildlang.diagnostics/v1`, schema in
+  `docs/schemas/`). Every lexer, parser and checker error has a stable code
+  (`BL0001` to `BL0901`, table in `docs/ERROR_CODES.md`), shown in human output
+  as `[BL0301]`; `buildc explain [CODE]` prints the table or one entry. Each
+  suggestion carries rustc's applicability levels and `widens_authority`: a fix
+  that adds a capability or `unsafe` is never `MachineApplicable`.
+- Every stored fix suggestion now prints. Before, `TypeError::suggestion()`,
+  the parser's suggestions and the lexer's help texts existed but nothing showed
+  them. Two were wrong and are fixed: the undeclared-effect fix joined the row
+  with a comma (the parser wants `+`), and the type-mismatch fix always advised
+  a type annotation.
+- **Check soundness.** Arguments of `println!`, `print!`, `eprintln!`,
+  `eprint!`, `format!`, `panic!`, `assert!`, `assert_eq!`, `assert_ne!` and
+  `vec!` are type-checked; `println!("{}", f("x"))` with `fn f(p: i32)` used to
+  pass `check` and fail in the C compiler. A numeric literal no longer unifies
+  with a non-numeric type (`let s: str = 4` and `f(3)` for a struct parameter
+  passed `check`), and a float literal no longer becomes an integer.
+  Diagnostics print struct names and `{integer}` instead of `DefId(0, 6)` and
+  `?8`.
+- `buildc parse` fails on recovered parse errors; it used to print a partial
+  tree and exit 0.
+- **Docs that compile.** `compiler/tests/doc_blocks.rs` runs every fenced
+  `build` block in `SPECIFICATION.md`, `docs/EFFECTS_GUIDE.md` and `README.md`
+  through `buildc` (check, or `fail=CODE`, `parse-only`, `lex-only`); an
+  unlabeled fence fails the test. Fixing the 15 failures it found: spec
+  templates became compiling examples; `~ Logger, Render` became
+  `~ Logger + Render`; handler examples declare `Console`; the annotation
+  syntax is `T with ColorSpace<Linear>`, not `@[ColorSpace:Linear]`; and the
+  effects guide no longer claims a handler resumes after `perform`. Handlers
+  are one-shot today: the handler's value becomes the value of the `handle`
+  expression and the code after the `perform` does not run.
 - **M1 slice 2: a 225-program mutation set and a rustc oracle.**
   `tools/agent_mutants.py` generates `tests/agent-mutants/` (225 small programs
   in the shapes agents write: iterator, string, Option, map, format and trait

@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use crate::ast::{self, AssignOp, BinOp, ExprKind, Literal as AstLiteral, UnaryOp};
-use crate::lexer::{source_text_for_id, Delimiter, SourceId, Span, Token, TokenKind};
+use crate::lexer::{source_text_for_id, Delimiter, SourceFile, SourceId, Span, Token, TokenKind};
 use crate::units;
 
 use super::context::{ScopeKind, TypeContext, TypeDefKind};
@@ -189,6 +189,9 @@ pub struct TypeInfer<'ctx> {
     /// `'x` here, so an undefined label is rejected at `check` rather than
     /// slipping through to codegen.
     loop_label_stack: Vec<Option<String>>,
+    /// Source files rebuilt from the source registry to re-parse macro
+    /// arguments, one per source id.
+    macro_sources: HashMap<SourceId, Arc<SourceFile>>,
 }
 
 /// Tracking state for a single `#[linear]`-typed binding.
@@ -493,6 +496,7 @@ impl<'ctx> TypeInfer<'ctx> {
             linear_loop_markers: Vec::new(),
             linear_shadow_stack: Vec::new(),
             loop_label_stack: Vec::new(),
+            macro_sources: HashMap::new(),
         }
     }
 
@@ -538,6 +542,7 @@ impl<'ctx> TypeInfer<'ctx> {
             linear_loop_markers: Vec::new(),
             linear_shadow_stack: Vec::new(),
             loop_label_stack: Vec::new(),
+            macro_sources: HashMap::new(),
         }
     }
 
@@ -622,6 +627,34 @@ impl<'ctx> TypeInfer<'ctx> {
                 .add(super::effects::Effect::new(super::capabilities::FOREIGN));
             self.record_capability_source(super::capabilities::FOREIGN, path_source);
         }
+    }
+
+    /// Type-check the argument expressions of a macro call. Format arguments
+    /// are borrowed by the macro, so a linear value is read, not consumed.
+    fn check_macro_args(&mut self, macro_name: &str, tokens: &[ast::TokenTree]) {
+        let Some(skip_first) = super::macro_args::macro_arg_policy(macro_name) else {
+            return;
+        };
+        let Some(source_id) = first_token_source(tokens) else {
+            return;
+        };
+        let file = match self.macro_sources.get(&source_id) {
+            Some(file) => file.clone(),
+            None => {
+                let Some(text) = crate::lexer::source_text_for_id(source_id) else {
+                    return;
+                };
+                let file = Arc::new(SourceFile::with_registered_id(source_id, text));
+                self.macro_sources.insert(source_id, file.clone());
+                file
+            }
+        };
+        let args = super::macro_args::macro_arg_exprs(tokens, skip_first, &file);
+        self.borrow_depth += 1;
+        for arg in &args {
+            let _ = self.infer_expr(arg);
+        }
+        self.borrow_depth = self.borrow_depth.saturating_sub(1);
     }
 
     /// Reject a formatting macro whose first argument is not a string literal.
@@ -3081,6 +3114,7 @@ impl<'ctx> TypeInfer<'ctx> {
                 self.record_macro_capability(macro_name);
                 self.record_macro_token_capabilities(tokens);
                 self.check_format_macro_first_arg(macro_name, tokens, expr.span);
+                self.check_macro_args(macro_name, tokens);
                 Ty::fresh_var()
             }
 
@@ -8500,4 +8534,14 @@ mod tests {
             panic!("expected FnTy");
         }
     }
+}
+
+/// Source id of the first token in a macro's token trees.
+fn first_token_source(trees: &[ast::TokenTree]) -> Option<SourceId> {
+    trees.iter().find_map(|tree| match tree {
+        ast::TokenTree::Token(tok) => Some(tok.span.source_id),
+        ast::TokenTree::Delimited { tokens, span, .. } => {
+            first_token_source(tokens).or(Some(span.source_id))
+        }
+    })
 }

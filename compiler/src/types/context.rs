@@ -314,6 +314,7 @@ pub struct FnSig {
 impl TypeContext {
     /// Create a new type context.
     pub fn new() -> Self {
+        super::ty::clear_def_names();
         let mut ctx = Self {
             scopes: vec![Scope::new(ScopeKind::Module)],
             types: HashMap::new(),
@@ -548,6 +549,7 @@ impl TypeContext {
 
     /// Register a type definition.
     pub fn register_type(&mut self, def: TypeDef) {
+        super::ty::register_def_name(def.def_id, def.name.clone());
         self.types.insert(def.def_id, def);
     }
 
