@@ -48,8 +48,8 @@ fn main() ~ Console + FileSystem {
 
 - An unannotated `let mut v = vec_new();` takes its element type from the
   first value pushed (`v.push(x)` or `vec_push(&mut v, x)`). Write the type
-  (`let mut v: Vec<str> = vec_new();`) when nothing is pushed before the
-  vector is used, or when you want the checker to hold you to it.
+  (`let mut v: Vec<str> = vec_new();`) when the vector is read before its
+  first push, or when you want the checker to hold you to it.
 - Strings: `split`, `chars`, `len`, `==`, `<`, and `+` between strings.
 - No `.parse()` and no `unwrap` on parsed values: convert digits by hand.
 - No `Box<T>` yet, so a type cannot contain itself. Build trees and lists as a
