@@ -2010,9 +2010,16 @@ impl<'ctx> MirLowerer<'ctx> {
                                 if start < source.len() && end <= source.len() && start < end {
                                     if let Some(raw) = source.get(start..end) {
                                         // Strip surrounding quotes
-                                        let content =
-                                            raw.trim_start_matches('"').trim_end_matches('"');
-                                        return content.to_string();
+                                        // Strip exactly one quote at each end:
+                                        // `trim_end_matches` would also eat an
+                                        // escaped quote before the closing one.
+                                        let content = raw.strip_prefix('"').unwrap_or(raw);
+                                        let content = content.strip_suffix('"').unwrap_or(content);
+                                        // The span holds the source spelling;
+                                        // the format string is its value, so
+                                        // `\n` must become a newline here (the
+                                        // C backend escapes it again).
+                                        return crate::lexer::unescape_str(content);
                                     }
                                 }
                             }

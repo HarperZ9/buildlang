@@ -1,0 +1,6 @@
+fn main() ~ Console {
+    println!("a\tb\nc {}", 1);
+    print!("x\ny\n");
+    let s = format!("p\tq\n");
+    print!("{}", s);
+}

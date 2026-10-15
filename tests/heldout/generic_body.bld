@@ -1,0 +1,22 @@
+fn rev<T>(v: Vec<T>) -> Vec<T> {
+    let mut out: Vec<T> = vec_new();
+    let mut i = v.len();
+    while i > 0 {
+        i = i - 1;
+        out.push(v[i]);
+    }
+    out
+}
+
+fn main() ~ Console {
+    let mut a: Vec<i32> = vec_new();
+    a.push(1);
+    a.push(2);
+    let r = rev(a);
+    println!("{} {}", r[0], r[1]);
+    let mut w: Vec<str> = vec_new();
+    w.push("x");
+    w.push("y");
+    let s = rev(w);
+    println!("{} {}", s[0], s[1]);
+}

@@ -47,6 +47,8 @@ fn main() ~ Console + FileSystem {
   `let mut v: Vec<str> = vec_new();`. An unannotated `vec_new()` holds `i32`.
 - Strings: `split`, `chars`, `len`, `==`, `<`, and `+` between strings.
 - No `.parse()` and no `unwrap` on parsed values: convert digits by hand.
+- No `Box<T>` yet, so a type cannot contain itself. Build trees and lists as a
+  `Vec` of nodes that refer to each other by index.
 - Effect handlers are one-shot: the handler's value becomes the value of the
   `handle` expression, and code after the `perform` does not run.
 - `println!` and `format!` take a string literal first; pass values through

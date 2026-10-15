@@ -3532,6 +3532,16 @@ impl<'ctx> TypeInfer<'ctx> {
             if self.borrow_depth == 0 {
                 self.consume_linear(name, span);
             }
+            // A reference to a top-level generic function (not a local that
+            // shadows it) instantiates the function's type parameters afresh,
+            // so `pick(1, 2)` and `pick("x", "y")` are checked independently.
+            if self
+                .ctx
+                .generic_function_type(name)
+                .is_some_and(|g| *g == ty)
+            {
+                return ty.freshen_params();
+            }
             ty
         } else {
             // Check if this is a known builtin (math functions, vector constructors, I/O)
@@ -4780,7 +4790,15 @@ impl<'ctx> TypeInfer<'ctx> {
             .method_candidates(name.as_ref())
             .map(|cs| {
                 cs.iter()
-                    .map(|c| (c.param_tys.clone(), c.ret.clone()))
+                    .map(|c| {
+                        // A generic candidate's type parameters are instantiated
+                        // afresh for this call, jointly over params and return.
+                        let f = Ty::function(c.param_tys.clone(), c.ret.clone()).freshen_params();
+                        match f.kind {
+                            TyKind::Fn(fn_ty) => (fn_ty.params, *fn_ty.ret),
+                            _ => (c.param_tys.clone(), c.ret.clone()),
+                        }
+                    })
                     .collect()
             })
             .unwrap_or_default();

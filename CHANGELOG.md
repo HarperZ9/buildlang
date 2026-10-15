@@ -10,6 +10,28 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- **Held-out probe fixes (M1 reopened).** A preregistered held-out probe of 1.6.0
+  (`bench/heldout-2026-10-15/`) found 4 programs per sample that passed
+  `buildc check` and then failed, and 3 classes of silent wrong output. Fixed, each
+  with a regression program in `tests/heldout/` (`tests/heldout_regressions.rs`):
+  - A `match` arm block ending in an `if`/`else` statement no longer emits C that
+    reads an undeclared temporary (#75). The C backend now rejects, at check time,
+    any generated function that reads a temporary it never declared.
+  - `"".split(sep)` no longer reads past the buffer (#76).
+  - Indexing a `&Vec<T>` parameter returns the element, not the vector handle (#77).
+  - Generic functions: each reference instantiates the type parameters afresh, so
+    `pick(1, 2)` and `pick("x", "y")` both check (#82); a generic over `Vec<T>`,
+    `&Vec<T>` or slices is monomorphized through the element type, including
+    `Vec<T>` annotations in the body (#78).
+  - `Vec<char>` elements (by index, in `for`, from parameters and from functions
+    returning `Vec<char>`) print as characters, and the set of char locals no longer
+    leaks from one function into the next, which printed `65` as `A` (#79, #81).
+  - `println!`, `print!` and `format!` read escapes in the format string: `\n`, `\t`
+    and the rest printed as a backslash and a letter (#80).
+  - `buildc FILE -o NAME.exe` writes an executable instead of C source under that
+    name, and `buildc run` passes a crashed program's exit code through (the full
+    NTSTATUS on Windows, 128 + signal on Unix) instead of its low byte (#84).
+
 ## 1.6.0 - 2026-10-14 - the checker is the truth
 
 - The standard library is compiled into `buildc` (`compiler/stdlib/`, a mirror of

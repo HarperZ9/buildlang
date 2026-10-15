@@ -46,6 +46,18 @@ impl<'ctx> MirLowerer<'ctx> {
     }
 
     fn lower_type_from_ast_inner(&self, ty: &ast::Type) -> MirType {
+        // Inside a monomorphized generic body, a type parameter named in a
+        // local annotation (`let out: Vec<T> = ...`) is its concrete type.
+        if let ast::TypeKind::Path(path) = &ty.kind {
+            if path.is_simple() {
+                if let Some(concrete) = path
+                    .last_ident()
+                    .and_then(|i| self.type_param_subst.get(&i.name))
+                {
+                    return concrete.clone();
+                }
+            }
+        }
         match &ty.kind {
             ast::TypeKind::Never => MirType::Never,
             ast::TypeKind::Infer => MirType::i32(), // Inference placeholder: i32 is a safe default
@@ -133,6 +145,34 @@ impl<'ctx> MirLowerer<'ctx> {
             // a miscompile pinned by a mutation check (Task 7).
             ast::TypeKind::WithUnit { base, .. } => self.lower_type_from_ast(base),
             _ => MirType::i32(),
+        }
+    }
+
+    /// True for `char`, looking through `&`, `&mut` and raw pointers.
+    pub(crate) fn ast_type_is_char(ty: &ast::Type) -> bool {
+        match &ty.kind {
+            ast::TypeKind::Ref { ty, .. } | ast::TypeKind::Ptr { ty, .. } => {
+                Self::ast_type_is_char(ty)
+            }
+            ast::TypeKind::Path(p) => {
+                p.segments.len() == 1 && p.last_ident().is_some_and(|i| i.name.as_ref() == "char")
+            }
+            _ => false,
+        }
+    }
+
+    /// True for `Vec<char>`, looking through `&`, `&mut` and raw pointers.
+    pub(crate) fn ast_type_is_char_vec(ty: &ast::Type) -> bool {
+        match &ty.kind {
+            ast::TypeKind::Ref { ty, .. } | ast::TypeKind::Ptr { ty, .. } => {
+                Self::ast_type_is_char_vec(ty)
+            }
+            ast::TypeKind::Path(p) => p.segments.last().is_some_and(|seg| {
+                seg.ident.name.as_ref() == "Vec"
+                    && matches!(seg.generics.as_slice(),
+                        [ast::GenericArg::Type(elem)] if Self::ast_type_is_char(elem))
+            }),
+            _ => false,
         }
     }
 
@@ -697,13 +737,16 @@ impl<'ctx> MirLowerer<'ctx> {
             // overwrite current_fn / var_map for the specialization.
             let saved_fn = self.current_fn.take();
             let saved_vars = std::mem::take(&mut self.var_map);
+            let saved_subst = std::mem::replace(&mut self.type_param_subst, subst.clone());
 
             // Lower the specialized function as a normal (non-generic) function.
-            self.lower_function(&specialized, &[])?;
+            let lowered = self.lower_function(&specialized, &[]);
 
             // Restore the caller's function context.
+            self.type_param_subst = saved_subst;
             self.current_fn = saved_fn;
             self.var_map = saved_vars;
+            lowered?;
         }
 
         // Now emit the call to the monomorphized function.
@@ -734,6 +777,55 @@ impl<'ctx> MirLowerer<'ctx> {
         Ok(values::local(result))
     }
 
+    /// Match a parameter's AST type against an argument's lowered type and bind
+    /// each generic type parameter found in it (first binding wins).
+    fn bind_type_params(
+        ast_ty: &ast::Type,
+        arg_ty: &MirType,
+        names: &[Arc<str>],
+        subst: &mut HashMap<Arc<str>, MirType>,
+    ) {
+        match &ast_ty.kind {
+            ast::TypeKind::Path(path) => {
+                if path.is_simple() {
+                    if let Some(ident) = path.last_ident() {
+                        if let Some(tp) = names.iter().find(|n| n.as_ref() == ident.name.as_ref()) {
+                            subst.entry(tp.clone()).or_insert(arg_ty.clone());
+                            return;
+                        }
+                    }
+                }
+                let Some(seg) = path.segments.last() else {
+                    return;
+                };
+                if seg.ident.name.as_ref() == "Vec" {
+                    if let ([ast::GenericArg::Type(elem)], MirType::Vec(e)) =
+                        (seg.generics.as_slice(), arg_ty)
+                    {
+                        Self::bind_type_params(elem, e, names, subst);
+                    }
+                }
+            }
+            ast::TypeKind::Ref { ty, .. } | ast::TypeKind::Ptr { ty, .. } => match arg_ty {
+                MirType::Ptr(inner) => Self::bind_type_params(ty, inner, names, subst),
+                other => Self::bind_type_params(ty, other, names, subst),
+            },
+            ast::TypeKind::Slice(elem) | ast::TypeKind::Array { elem, .. } => match arg_ty {
+                MirType::Slice(e) | MirType::Array(e, _) | MirType::Vec(e) => {
+                    Self::bind_type_params(elem, e, names, subst)
+                }
+                MirType::Ptr(inner) => match inner.as_ref() {
+                    MirType::Slice(e) | MirType::Array(e, _) => {
+                        Self::bind_type_params(elem, e, names, subst)
+                    }
+                    _ => {}
+                },
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
     /// Infer a full substitution map by matching generic function params against
     /// call-site argument types.  Walks each parameter type to bind all generic
     /// type parameters, not just the first.
@@ -748,18 +840,11 @@ impl<'ctx> MirLowerer<'ctx> {
         for (i, param) in fndef.sig.params.iter().enumerate() {
             if let Some(arg_expr) = args.get(i) {
                 let arg_ty = self.infer_single_arg_type(arg_expr);
-                // If the parameter type is a simple generic param name, bind it
-                if let ast::TypeKind::Path(path) = &param.ty.kind {
-                    if path.is_simple() {
-                        if let Some(ident) = path.last_ident() {
-                            for tp_name in type_param_names {
-                                if ident.name.as_ref() == tp_name.as_ref() {
-                                    subst.entry(tp_name.clone()).or_insert(arg_ty.clone());
-                                }
-                            }
-                        }
-                    }
-                }
+                // Bind type parameters wherever they sit in the parameter
+                // type: `T`, `Vec<T>`, `&Vec<T>`, `&[T]`, `[T; N]`. Binding
+                // only a bare `T` left `Vec<T>` unbound, and the C output then
+                // named the type `T` (issue #78).
+                Self::bind_type_params(&param.ty, &arg_ty, type_param_names, &mut subst);
             }
         }
 
@@ -897,8 +982,25 @@ impl<'ctx> MirLowerer<'ctx> {
                         }
                     }
                 }
-                ty.kind.clone()
+                // Substitute inside generic arguments too: `Vec<T>` must
+                // become `Vec<i32>`, or the C output names the type `T`.
+                let mut new_path = path.clone();
+                for seg in &mut new_path.segments {
+                    for arg in &mut seg.generics {
+                        if let ast::GenericArg::Type(inner) = arg {
+                            *inner =
+                                Box::new(Self::substitute_type_in_ast_type_multi(inner, subst));
+                        }
+                    }
+                }
+                ast::TypeKind::Path(new_path)
             }
+            ast::TypeKind::Tuple(elems) => ast::TypeKind::Tuple(
+                elems
+                    .iter()
+                    .map(|e| Self::substitute_type_in_ast_type_multi(e, subst))
+                    .collect(),
+            ),
             ast::TypeKind::Ref {
                 lifetime,
                 mutability,

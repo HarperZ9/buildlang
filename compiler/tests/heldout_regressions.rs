@@ -1,0 +1,203 @@
+//! Regressions from the held-out agent-writability probe of 1.6.0
+//! (`bench/heldout-2026-10-15/RESULTS.md`, issues #75 to #84).
+//!
+//! Every program in `tests/heldout` passed `buildc check` on 1.6.0 and then
+//! failed to build, crashed, printed the wrong text, or (for `generic_twice`)
+//! was rejected although it is valid. Each must now pass the check, build, run
+//! with exit status 0 and print exactly its `.expected` file.
+//!
+//! The toolchain tests at the bottom cover the two defects found while
+//! validating the probe grader: `buildc FILE -o NAME.exe` must write an
+//! executable, and `buildc run` must not shrink a crashed program's exit code
+//! to one byte.
+
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("compiler manifest should have a repository parent")
+        .to_path_buf()
+}
+
+fn buildc() -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_buildc"));
+    cmd.env("BUILDLANG_STDLIB", repo_root().join("stdlib"));
+    cmd
+}
+
+/// True when a C compiler `buildc run` can use is on PATH.
+fn have_c_compiler() -> bool {
+    let probe = |cc: &str, arg: &str| {
+        Command::new(cc)
+            .arg(arg)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    ["gcc", "clang", "cc"]
+        .iter()
+        .any(|cc| probe(cc, "--version"))
+        || probe("cl", "/?")
+}
+
+fn normalize(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .trim_end_matches('\n')
+        .to_string()
+}
+
+fn heldout_programs() -> Vec<PathBuf> {
+    let dir = repo_root().join("tests/heldout");
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .expect("tests/heldout exists")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("bld"))
+        .collect();
+    files.sort();
+    files
+}
+
+#[test]
+fn heldout_programs_check_build_and_print_the_expected_output() {
+    let files = heldout_programs();
+    assert!(
+        files.len() >= 10,
+        "held-out regressions went missing: {}",
+        files.len()
+    );
+    if !have_c_compiler() {
+        eprintln!("skipping: no C compiler on PATH");
+        return;
+    }
+    let mut failures = Vec::new();
+    for file in &files {
+        let check = buildc()
+            .arg("check")
+            .arg(file)
+            .output()
+            .expect("run buildc check");
+        if !check.status.success() {
+            failures.push(format!(
+                "{}: check failed\n{}",
+                file.display(),
+                String::from_utf8_lossy(&check.stdout)
+            ));
+            continue;
+        }
+        let run = buildc()
+            .arg("run")
+            .arg(file)
+            .output()
+            .expect("run buildc run");
+        let expected = std::fs::read_to_string(file.with_extension("expected"))
+            .unwrap_or_else(|_| panic!("{} has no .expected file", file.display()));
+        let got = String::from_utf8_lossy(&run.stdout);
+        if !run.status.success() || normalize(&got) != normalize(&expected) {
+            failures.push(format!(
+                "{}: exit {:?}\n--- stdout\n{}\n--- expected\n{}\n--- stderr\n{}",
+                file.display(),
+                run.status.code(),
+                got,
+                expected,
+                String::from_utf8_lossy(&run.stderr)
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// A control for the comparison above: a wrong expected output must be
+/// noticed, so a harness that compares nothing cannot pass.
+#[test]
+fn a_wrong_expected_output_is_detected() {
+    assert_ne!(normalize("65\n"), normalize("A\n"));
+    assert_eq!(normalize("a\r\nb\r\n"), normalize("a\nb"));
+}
+
+fn scratch(name: &str) -> PathBuf {
+    let dir =
+        std::env::temp_dir().join(format!("buildlang_heldout_{}_{}", name, std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    dir
+}
+
+fn write(dir: &Path, name: &str, src: &str) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, src).expect("write program");
+    path
+}
+
+#[test]
+fn dash_o_with_an_exe_name_writes_an_executable() {
+    if !have_c_compiler() {
+        eprintln!("skipping: no C compiler on PATH");
+        return;
+    }
+    let dir = scratch("dash_o");
+    let src = write(
+        &dir,
+        "hello.bld",
+        "fn main() ~ Console {\n    println!(\"hi\");\n}\n",
+    );
+    let exe = dir.join("hello.exe");
+    let out = buildc()
+        .arg(&src)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("run buildc");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let bytes = std::fs::read(&exe).expect("output written");
+    assert!(
+        !bytes.starts_with(b"// Generated by BuildLang"),
+        "-o hello.exe wrote C source"
+    );
+    let run = Command::new(&exe).output().expect("the output runs");
+    assert_eq!(normalize(&String::from_utf8_lossy(&run.stdout)), "hi");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn run_keeps_a_crashed_programs_exit_code() {
+    if !have_c_compiler() {
+        eprintln!("skipping: no C compiler on PATH");
+        return;
+    }
+    let dir = scratch("crash");
+    let src = write(
+        &dir,
+        "down.bld",
+        // `r - n` after the call is not an accumulator gcc can turn into a loop.
+        "fn down(n: i64) -> i64 {\n    let r = down(n + 1);\n    r - n\n}\n\nfn main() ~ Console {\n    println!(\"{}\", down(0));\n}\n",
+    );
+    let out = buildc()
+        .arg("run")
+        .arg(&src)
+        .output()
+        .expect("run buildc run");
+    let code = out.status.code();
+    // A stack overflow is 0xC00000FD on Windows and a signal on Unix (reported
+    // as 128 + signal). Before the fix, Windows reported 0xFD & 0xFF = 253.
+    if cfg!(windows) {
+        assert_eq!(code.map(|c| c as u32), Some(0xC000_00FD), "{:?}", code);
+    } else {
+        let c = code.expect("an exit code");
+        assert!(c > 128, "a signal death must read as 128 + signal, got {c}");
+    }
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("abnormally")
+            || String::from_utf8_lossy(&out.stderr).contains("signal"),
+        "stderr must say the program died: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -720,6 +720,17 @@ fn main() -> ExitCode {
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
+        // A code outside 0..=255 comes from a program `buildc run` started
+        // that terminated abnormally (on Windows an NTSTATUS such as
+        // 0xC0000005). `ExitCode::from(code as u8)` turned that into an
+        // ordinary-looking 5 (issue #84); pass the full code through.
+        Err(code) if !(0..=255).contains(&code) => {
+            eprintln!(
+                "error: the program terminated abnormally (exit code {code}, 0x{:08X})",
+                code as u32
+            );
+            std::process::exit(code)
+        }
         Err(code) => ExitCode::from(code as u8),
     }
 }
@@ -7553,6 +7564,23 @@ struct CompiledProgram {
     exe_file: PathBuf,
 }
 
+/// The exit code to report for a finished child program. A Unix signal has
+/// no exit code; report it the way shells do, 128 + signal, and say so.
+fn child_exit_code(status: &std::process::ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            eprintln!("error: the program was killed by signal {sig}");
+            return 128 + sig;
+        }
+    }
+    1
+}
+
 /// Captured result of running a compiled program with `.output()`.
 ///
 /// Used by both `run --emit-receipt` and `receipt verify` for the
@@ -8504,7 +8532,7 @@ fn cmd_run(
         return if status.success() {
             Ok(())
         } else {
-            Err(status.code().unwrap_or(1))
+            Err(child_exit_code(&status))
         };
     };
 
@@ -10390,6 +10418,32 @@ fn cmd_compile(
         Target::C
     };
     reject_unsupported_stdio_mode(stdio_mode, target)?;
+
+    // `-o NAME.exe` with no explicit target asks for an executable. It used to
+    // write C source under the .exe name (issue #84); build the program the
+    // way `buildc run` does and copy the executable there instead.
+    if target_override.is_none() {
+        if let Some(dest) = output.filter(|p| {
+            p.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("exe"))
+        }) {
+            let CompiledProgram { temp_dir, exe_file } =
+                compile_program_to_exe(input, stdio_mode, None)?;
+            let copied = std::fs::copy(&exe_file, dest);
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            copied.map_err(|e| {
+                eprintln!("Failed to write executable '{}': {}", dest.display(), e);
+                1
+            })?;
+            println!(
+                "Compiled {} -> {} (executable)",
+                input.display(),
+                dest.display()
+            );
+            return Ok(());
+        }
+    }
 
     // Determine output path using target's default extension
     let output_path = output

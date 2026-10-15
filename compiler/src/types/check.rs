@@ -703,7 +703,27 @@ impl<'ctx> TypeChecker<'ctx> {
 
     fn collect_function(&mut self, f: &ast::FnDef, _span: Span) {
         let def_id = self.ctx.fresh_def_id();
+        // Lower the signature with the function's type parameters in scope, so
+        // `T` becomes a type parameter that each reference instantiates afresh
+        // (see `infer_ident`), not one inference variable every call shares.
+        let has_type_params = f
+            .generics
+            .params
+            .iter()
+            .any(|p| matches!(p.kind, ast::GenericParamKind::Type { .. }));
+        if has_type_params {
+            self.ctx.push_scope(ScopeKind::Function);
+            for (idx, param) in f.generics.params.iter().enumerate() {
+                if let ast::GenericParamKind::Type { .. } = &param.kind {
+                    let ty = Ty::param(param.ident.name.clone(), idx as u32);
+                    self.ctx.define_type_param(param.ident.name.clone(), ty);
+                }
+            }
+        }
         let sig = self.lower_fn_sig(&f.generics, &f.sig);
+        if has_type_params {
+            self.ctx.pop_scope();
+        }
         self.ctx.register_function(def_id, sig.clone());
 
         // Add function to current scope - carry lifetime params for interprocedural analysis
@@ -734,6 +754,10 @@ impl<'ctx> TypeChecker<'ctx> {
             },
         );
         if is_first {
+            if has_type_params {
+                self.ctx
+                    .register_generic_function(f.name.name.clone(), fn_ty.clone());
+            }
             self.ctx.define_var(f.name.name.clone(), fn_ty);
         }
     }

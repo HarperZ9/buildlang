@@ -543,8 +543,106 @@ pub fn locate_call(source: &str, name: &str) -> Option<(u32, u32)> {
     None
 }
 
+/// The first MIR temporary (`_N`) that a generated C function body reads
+/// without declaring it, if any. `body` is the function's text from its
+/// signature to its closing brace; temporaries named in the signature are
+/// parameters. Otherwise a temporary counts as
+/// declared when a line ends in `<type> _N;`, `<type> _N[...];`,
+/// `<ret> (*_N)(...);` or starts with `<type> _N = ...;`.
+pub fn undeclared_temporary(body: &str) -> Option<String> {
+    let mut declared = BTreeSet::new();
+    let (signature, body) = body.split_once('{').unwrap_or(("", body));
+    for word in signature.split(|c: char| !(c == '_' || c.is_ascii_alphanumeric())) {
+        if is_temp(word) {
+            declared.insert(word.to_string());
+        }
+    }
+    for line in body.lines() {
+        let t = line.trim();
+        if !t.ends_with(';') || t.starts_with("goto") || t.starts_with("return") {
+            continue;
+        }
+        let lhs = match t.split_once('=') {
+            Some((lhs, _)) => lhs,
+            None => t.trim_end_matches(';'),
+        };
+        // A declaration has a type before the name: two or more words.
+        let words: Vec<&str> = lhs
+            .split(|c: char| c.is_whitespace() || c == '*' || c == '(' || c == ')' || c == '[')
+            .filter(|w| !w.is_empty())
+            .collect();
+        if words.len() >= 2 {
+            for w in &words[1..] {
+                if is_temp(w) {
+                    declared.insert((*w).to_string());
+                    break;
+                }
+            }
+        }
+    }
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    let mut in_str = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_str {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == b'"' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == b'"' {
+            in_str = true;
+            i += 1;
+            continue;
+        }
+        if c == b'_' || c.is_ascii_alphabetic() {
+            let start = i;
+            while i < bytes.len() && (bytes[i] == b'_' || bytes[i].is_ascii_alphanumeric()) {
+                i += 1;
+            }
+            let member = start > 0 && (bytes[start - 1] == b'.' || bytes[start - 1] == b'>');
+            let word = &body[start..i];
+            if !member && is_temp(word) && !declared.contains(word) {
+                return Some(word.to_string());
+            }
+            continue;
+        }
+        if c.is_ascii_digit() {
+            // Skip numeric literals such as `1e_` lookalikes and `0x_`.
+            while i < bytes.len() && (bytes[i] == b'_' || bytes[i].is_ascii_alphanumeric()) {
+                i += 1;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    None
+}
+
+fn is_temp(word: &str) -> bool {
+    word.len() > 1 && word.starts_with('_') && word[1..].bytes().all(|b| b.is_ascii_digit())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn undeclared_temporary_finds_a_read_of_a_missing_local() {
+        let body = "static void f(int64_t _9) {\n    int64_t _1;\n    int64_t _2;\n\n    _1 = _9;\n    _2 = _6;\n    return;\n}\n";
+        assert_eq!(super::undeclared_temporary(body).as_deref(), Some("_6"));
+    }
+
+    #[test]
+    fn undeclared_temporary_accepts_declared_and_ignores_members_and_strings() {
+        let body = "static void g(void) {\n    BuildString _3;\n    int8_t* _4;\n    int64_t _5[4];\n    int32_t (*_6)(int32_t);\n    int64_t _7 = n;\n\n    _4 = _3.ptr;\n    _5[0] = _7;\n    h._9 = 1;\n    p->_10 = 2;\n    printf(\"_11 %d\", _7);\n    _6 = f;\n}\n";
+        assert_eq!(super::undeclared_temporary(body), None);
+    }
+
     use super::*;
 
     #[test]

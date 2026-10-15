@@ -84,6 +84,9 @@ pub struct MirLowerer<'ctx> {
     /// Locals that hold a `char` (MIR stores a char as a u32 code point), so
     /// `{}` prints the character rather than its number.
     pub(crate) char_locals: std::collections::HashSet<LocalId>,
+    /// Locals (vectors, or pointers to vectors) whose elements are chars, from
+    /// a `Vec<char>` annotation on a `let` or a parameter.
+    pub(crate) char_vec_locals: std::collections::HashSet<LocalId>,
     /// True while lowering a re-parsed macro argument, whose spans do not
     /// index into the file.
     pub(crate) in_macro_fragment: bool,
@@ -177,6 +180,12 @@ pub struct MirLowerer<'ctx> {
     /// no intervening let annotation (symmetric to fn_result_ok_types). Keyed by
     /// the declared (unmangled) function name.
     pub(crate) fn_option_inner_types: HashMap<Arc<str>, MirType>,
+    /// Functions whose declared return type is `char` or `Vec<char>`, so a `let`
+    /// bound to a direct call keeps printing characters.
+    /// Type parameter -> concrete type while lowering a monomorphized body.
+    pub(crate) type_param_subst: HashMap<Arc<str>, MirType>,
+    pub(crate) fn_returns_char: std::collections::HashSet<Arc<str>>,
+    pub(crate) fn_returns_char_vec: std::collections::HashSet<Arc<str>>,
     /// Const name -> evaluated literal value, collected in a pre-pass so
     /// that const identifiers used as array lengths (`[T; MAX_DIMS]`) resolve.
     pub(crate) const_values: HashMap<Arc<str>, MirConst>,
@@ -265,6 +274,7 @@ impl<'ctx> MirLowerer<'ctx> {
             loop_stack: Vec::new(),
             loop_break_values: HashMap::new(),
             char_locals: std::collections::HashSet::new(),
+            char_vec_locals: std::collections::HashSet::new(),
             in_macro_fragment: false,
             current_fn: None,
             source: None,
@@ -293,6 +303,9 @@ impl<'ctx> MirLowerer<'ctx> {
             fn_result_ok_types: HashMap::new(),
             fn_result_err_types: HashMap::new(),
             fn_option_inner_types: HashMap::new(),
+            type_param_subst: HashMap::new(),
+            fn_returns_char: std::collections::HashSet::new(),
+            fn_returns_char_vec: std::collections::HashSet::new(),
             const_values: HashMap::new(),
             linear_type_names: HashSet::new(),
             multi_fns: HashMap::new(),
@@ -308,6 +321,7 @@ impl<'ctx> MirLowerer<'ctx> {
             loop_stack: Vec::new(),
             loop_break_values: HashMap::new(),
             char_locals: std::collections::HashSet::new(),
+            char_vec_locals: std::collections::HashSet::new(),
             in_macro_fragment: false,
             current_fn: None,
             source: Some(source),
@@ -336,6 +350,9 @@ impl<'ctx> MirLowerer<'ctx> {
             fn_result_ok_types: HashMap::new(),
             fn_result_err_types: HashMap::new(),
             fn_option_inner_types: HashMap::new(),
+            type_param_subst: HashMap::new(),
+            fn_returns_char: std::collections::HashSet::new(),
+            fn_returns_char_vec: std::collections::HashSet::new(),
             const_values: HashMap::new(),
             linear_type_names: HashSet::new(),
             multi_fns: HashMap::new(),
@@ -1313,11 +1330,15 @@ impl<'ctx> MirLowerer<'ctx> {
                     // the self param type.
                     let saved_fn = self.current_fn.take();
                     let saved_vars = std::mem::take(&mut self.var_map);
+                    let saved_chars = std::mem::take(&mut self.char_locals);
+                    let saved_char_vecs = std::mem::take(&mut self.char_vec_locals);
 
                     self.lower_generic_impl_method(mangled_type_name, &specialized)?;
 
                     self.current_fn = saved_fn;
                     self.var_map = saved_vars;
+                    self.char_locals = saved_chars;
+                    self.char_vec_locals = saved_char_vecs;
                 }
             }
         }
@@ -1582,6 +1603,11 @@ impl<'ctx> MirLowerer<'ctx> {
                 if let Some(inner_ty) = self.option_inner_from_ast(ret_ty) {
                     self.fn_option_inner_types.insert(emitted.clone(), inner_ty);
                 }
+                if Self::ast_type_is_char(ret_ty) {
+                    self.fn_returns_char.insert(emitted.clone());
+                } else if Self::ast_type_is_char_vec(ret_ty) {
+                    self.fn_returns_char_vec.insert(emitted.clone());
+                }
             }
         }
 
@@ -1758,6 +1784,11 @@ impl<'ctx> MirLowerer<'ctx> {
                     }
                     if let Some(inner_ty) = self.option_inner_from_ast(ret_ty) {
                         self.fn_option_inner_types.insert(mangled.clone(), inner_ty);
+                    }
+                    if Self::ast_type_is_char(ret_ty) {
+                        self.fn_returns_char.insert(mangled.clone());
+                    } else if Self::ast_type_is_char_vec(ret_ty) {
+                        self.fn_returns_char_vec.insert(mangled.clone());
                     }
                 }
 
@@ -2041,6 +2072,8 @@ impl<'ctx> MirLowerer<'ctx> {
             // do not clobber the enclosing function's builder and var_map.
             let saved_fn = self.current_fn.take();
             let saved_vars = std::mem::take(&mut self.var_map);
+            let saved_chars = std::mem::take(&mut self.char_locals);
+            let saved_char_vecs = std::mem::take(&mut self.char_vec_locals);
 
             // Create function builder
             let mut builder = MirBuilder::with_linear_type_names(
@@ -2078,6 +2111,11 @@ impl<'ctx> MirLowerer<'ctx> {
                         builder.set_param_annotations(i, annotations);
                     }
                     self.var_map.insert(name.name.clone(), local_id);
+                    if Self::ast_type_is_char(&param.ty) {
+                        self.char_locals.insert(local_id);
+                    } else if Self::ast_type_is_char_vec(&param.ty) {
+                        self.char_vec_locals.insert(local_id);
+                    }
                 }
             }
 
@@ -2147,6 +2185,8 @@ impl<'ctx> MirLowerer<'ctx> {
             // Restore the enclosing function context (if any).
             self.current_fn = saved_fn;
             self.var_map = saved_vars;
+            self.char_locals = saved_chars;
+            self.char_vec_locals = saved_char_vecs;
         } else {
             // Declaration only
             self.module.declare_function(f.name.name.clone(), sig);
@@ -2321,6 +2361,8 @@ impl<'ctx> MirLowerer<'ctx> {
             // Save enclosing function context for nested method definitions.
             let saved_fn = self.current_fn.take();
             let saved_vars = std::mem::take(&mut self.var_map);
+            let saved_chars = std::mem::take(&mut self.char_locals);
+            let saved_char_vecs = std::mem::take(&mut self.char_vec_locals);
 
             let mut builder = MirBuilder::with_linear_type_names(
                 mangled_name.clone(),
@@ -2334,6 +2376,11 @@ impl<'ctx> MirLowerer<'ctx> {
                     let local_id = builder.param_local(i);
                     builder.set_param_name(i, name.name.clone());
                     self.var_map.insert(name.name.clone(), local_id);
+                    if Self::ast_type_is_char(&param.ty) {
+                        self.char_locals.insert(local_id);
+                    } else if Self::ast_type_is_char_vec(&param.ty) {
+                        self.char_vec_locals.insert(local_id);
+                    }
                 }
             }
 
@@ -2357,6 +2404,8 @@ impl<'ctx> MirLowerer<'ctx> {
             // Restore enclosing function context.
             self.current_fn = saved_fn;
             self.var_map = saved_vars;
+            self.char_locals = saved_chars;
+            self.char_vec_locals = saved_char_vecs;
         }
 
         Ok(())
@@ -2402,6 +2451,8 @@ impl<'ctx> MirLowerer<'ctx> {
             // Save enclosing function context for nested definitions.
             let saved_fn = self.current_fn.take();
             let saved_vars = std::mem::take(&mut self.var_map);
+            let saved_chars = std::mem::take(&mut self.char_locals);
+            let saved_char_vecs = std::mem::take(&mut self.char_vec_locals);
 
             let mut builder = MirBuilder::with_linear_type_names(
                 fn_name.clone(),
@@ -2414,6 +2465,11 @@ impl<'ctx> MirLowerer<'ctx> {
                     let local_id = builder.param_local(i);
                     builder.set_param_name(i, name.name.clone());
                     self.var_map.insert(name.name.clone(), local_id);
+                    if Self::ast_type_is_char(&param.ty) {
+                        self.char_locals.insert(local_id);
+                    } else if Self::ast_type_is_char_vec(&param.ty) {
+                        self.char_vec_locals.insert(local_id);
+                    }
                 }
             }
 
@@ -2436,6 +2492,8 @@ impl<'ctx> MirLowerer<'ctx> {
             // Restore enclosing function context.
             self.current_fn = saved_fn;
             self.var_map = saved_vars;
+            self.char_locals = saved_chars;
+            self.char_vec_locals = saved_char_vecs;
         }
 
         Ok(())

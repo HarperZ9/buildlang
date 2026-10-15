@@ -1,0 +1,7 @@
+fn main() ~ Console {
+    let mut n: i64 = 0;
+    for p in "".split(" ") {
+        n = n + 1;
+    }
+    println!("{}", n);
+}
