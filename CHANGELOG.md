@@ -10,6 +10,12 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+## 1.7.0 - 2026-10-15 - held-out fixes and exact edits
+
+- **Measured first.** A preregistered held-out probe of 1.6.0 (27 new tasks,
+  sealed by hash before any agent saw them, `bench/heldout-2026-10-15/`) scored
+  20 of 27 and found programs that passed `buildc check` and then failed. This
+  release fixes every class it found except `Box<T>` (#83), and finishes M2.
 - **M2: exact edits in suggestions.** A suggestion can carry `edits`, each a span
   and its replacement (schema `buildlang.diagnostics/v1`, additive field, omitted
   when empty). The compiler now states exact edits for a missing `;`, a format
