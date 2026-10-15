@@ -1,0 +1,68 @@
+struct Account {
+    id: i64,
+    balance: i64,
+}
+
+enum Tx {
+    Deposit(i64, i64),
+    Withdraw(i64, i64),
+    Transfer(i64, i64, i64),
+}
+
+fn main() ~ Console {
+    let mut accts: Vec<Account> = vec_new();
+    accts.push(Account { id: 1, balance: 100 });
+    accts.push(Account { id: 2, balance: 50 });
+    accts.push(Account { id: 3, balance: 0 });
+
+    let mut txs: Vec<Tx> = vec_new();
+    txs.push(Tx::Deposit(3, 25));
+    txs.push(Tx::Withdraw(2, 80));
+    txs.push(Tx::Transfer(1, 3, 60));
+    txs.push(Tx::Withdraw(1, 50));
+    txs.push(Tx::Transfer(2, 1, 50));
+    txs.push(Tx::Deposit(2, 5));
+
+    let mut rejected: i64 = 0;
+    let mut i: i64 = 0;
+    while i < 6 {
+        match txs[i as usize] {
+            Tx::Deposit(a, amt) => {
+                let k = (a - 1) as usize;
+                let b = accts[k].balance;
+                accts[k] = Account { id: a, balance: b + amt };
+            },
+            Tx::Withdraw(a, amt) => {
+                let k = (a - 1) as usize;
+                let b = accts[k].balance;
+                if amt > b {
+                    rejected = rejected + 1;
+                } else {
+                    accts[k] = Account { id: a, balance: b - amt };
+                }
+            },
+            Tx::Transfer(from, to, amt) => {
+                let kf = (from - 1) as usize;
+                let kt = (to - 1) as usize;
+                let bf = accts[kf].balance;
+                let bt = accts[kt].balance;
+                if amt > bf {
+                    rejected = rejected + 1;
+                } else {
+                    accts[kf] = Account { id: from, balance: bf - amt };
+                    accts[kt] = Account { id: to, balance: bt + amt };
+                }
+            },
+        }
+        i = i + 1;
+    }
+
+    let mut j: i64 = 0;
+    while j < 3 {
+        let a = accts[j as usize].id;
+        let b = accts[j as usize].balance;
+        println!("{} {}", a, b);
+        j = j + 1;
+    }
+    println!("rejected {}", rejected);
+}

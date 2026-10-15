@@ -1,0 +1,94 @@
+fn trim(s: str) -> str {
+    let mut out = "";
+    if s != "" {
+        let mut first = true;
+        for p in s.split(" ") {
+            if p != "" {
+                if first {
+                    out = p;
+                    first = false;
+                } else {
+                    out = out + " " + p;
+                }
+            }
+        }
+    }
+    out
+}
+
+fn strip_cr(s: str) -> str {
+    let mut out = "";
+    if s != "" {
+        let mut got = false;
+        for part in s.split("\r") {
+            if !got {
+                out = part;
+                got = true;
+            }
+        }
+    }
+    out
+}
+
+fn first_code(s: str) -> i64 {
+    let mut code: i64 = -1;
+    if s != "" {
+        for c in s.chars() {
+            if code == -1 {
+                code = c as i64;
+            }
+        }
+    }
+    code
+}
+
+fn parse_int(s: str) -> i64 {
+    let mut n: i64 = 0;
+    if s != "" {
+        for c in s.chars() {
+            let d = c as i64 - 48;
+            if d >= 0 && d <= 9 {
+                n = n * 10 + d;
+            }
+        }
+    }
+    n
+}
+
+fn load(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn main() ~ Console + FileSystem {
+    let text = load("app.conf");
+    let mut total: i64 = 0;
+    if text != "" {
+        for raw in text.split("\n") {
+            let line = trim(strip_cr(raw));
+            if line != "" {
+                if first_code(line) != 35 {
+                    let mut key = "";
+                    let mut val = "";
+                    let mut idx: i64 = 0;
+                    for part in line.split("=") {
+                        if idx == 0 {
+                            key = part;
+                        } else if idx == 1 {
+                            val = part;
+                        } else {
+                            val = val + "=" + part;
+                        }
+                        idx = idx + 1;
+                    }
+                    let k = trim(key);
+                    let v = trim(val);
+                    println!("{}: {}", k, v);
+                    if k == "port" || k == "timeout" {
+                        total = total + parse_int(v);
+                    }
+                }
+            }
+        }
+    }
+    println!("total {}", total);
+}

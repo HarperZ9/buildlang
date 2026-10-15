@@ -1,0 +1,32 @@
+fn main() ~ Console {
+    let mut row: Vec<i64> = vec_new();
+    row.push(1);
+    let mut len: i64 = 1;
+    let mut r: i64 = 0;
+    while r < 6 {
+        let mut line = "";
+        let mut j: i64 = 0;
+        while j < len {
+            let v = row[j as usize];
+            if j == 0 {
+                line = format!("{}", v);
+            } else {
+                line = format!("{} {}", line, v);
+            }
+            j = j + 1;
+        }
+        println!("{}", line);
+
+        let mut next: Vec<i64> = vec_new();
+        next.push(1);
+        let mut k: i64 = 1;
+        while k < len {
+            next.push(row[(k - 1) as usize] + row[k as usize]);
+            k = k + 1;
+        }
+        next.push(1);
+        row = next;
+        len = len + 1;
+        r = r + 1;
+    }
+}

@@ -1,0 +1,28 @@
+fn steps(start: i64) -> i64 {
+    let mut n: i64 = start;
+    let mut s: i64 = 0;
+    while n != 1 {
+        if n % 2 == 0 {
+            n = n / 2;
+        } else {
+            n = 3 * n + 1;
+        }
+        s = s + 1;
+    }
+    s
+}
+
+fn main() ~ Console {
+    let mut best: i64 = 1;
+    let mut best_steps: i64 = 0;
+    let mut n: i64 = 1;
+    while n <= 30 {
+        let s = steps(n);
+        if s > best_steps {
+            best = n;
+            best_steps = s;
+        }
+        n = n + 1;
+    }
+    println!("{} {}", best, best_steps);
+}

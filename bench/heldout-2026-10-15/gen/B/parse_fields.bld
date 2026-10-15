@@ -1,0 +1,53 @@
+fn parse_field(s: str) -> Result<i32, str> {
+    let mut cs: Vec<char> = vec_new();
+    for c in s.chars() {
+        cs.push(c);
+    }
+    let n = cs.len();
+    if n == 0 {
+        return Err("empty");
+    }
+    let mut i = 0;
+    let mut neg = false;
+    let first = cs[0] as i32;
+    if first == 45 {
+        neg = true;
+        i = 1;
+    } else if first == 43 {
+        i = 1;
+    }
+    if i >= n {
+        return Err("sign only");
+    }
+    let mut v: i32 = 0;
+    while i < n {
+        let d = (cs[i] as i32) - 48;
+        if d < 0 || d > 9 {
+            return Err("not a digit");
+        }
+        v = v * 10 + d;
+        i = i + 1;
+    }
+    if neg {
+        Ok(-v)
+    } else {
+        Ok(v)
+    }
+}
+
+fn main() ~ Console {
+    let mut sum: i32 = 0;
+    let mut invalid: i32 = 0;
+    for f in "12,x,7,30,-4,9z".split(",") {
+        match parse_field(f) {
+            Ok(v) => {
+                sum = sum + v;
+            },
+            Err(e) => {
+                invalid = invalid + 1;
+            },
+        }
+    }
+    println!("sum {}", sum);
+    println!("invalid {}", invalid);
+}

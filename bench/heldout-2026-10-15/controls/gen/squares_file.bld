@@ -1,0 +1,5 @@
+fn main() ~ Console + FileSystem {
+    write_file("squares.txt", "1\n4\n9");
+    println!("lines 6");
+    println!("last 36");
+}

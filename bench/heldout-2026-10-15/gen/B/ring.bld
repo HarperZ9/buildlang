@@ -1,0 +1,58 @@
+struct Ring {
+    buf: Vec<i32>,
+    head: i32,
+    count: i32,
+    cap: i32,
+}
+
+impl Ring {
+    fn new() -> Ring {
+        let mut b: Vec<i32> = vec_new();
+        b.push(0);
+        b.push(0);
+        b.push(0);
+        Ring { buf: b, head: 0, count: 0, cap: 3 }
+    }
+
+    fn push(&mut self, v: i32) {
+        if self.count < self.cap {
+            let idx = (self.head + self.count) % self.cap;
+            self.buf[idx] = v;
+            self.count = self.count + 1;
+        } else {
+            let idx = self.head;
+            self.buf[idx] = v;
+            self.head = (self.head + 1) % self.cap;
+        }
+    }
+
+    fn pop(&mut self) -> i32 {
+        let v = self.buf[self.head];
+        self.head = (self.head + 1) % self.cap;
+        self.count = self.count - 1;
+        v
+    }
+}
+
+fn main() ~ Console {
+    let mut r = Ring::new();
+    r.push(1);
+    r.push(2);
+    r.push(3);
+    r.push(4);
+    r.push(5);
+    let p = r.pop();
+    println!("popped {}", p);
+    r.push(6);
+    let mut line = "";
+    let mut i: i32 = 0;
+    while i < r.count {
+        let idx = (r.head + i) % r.cap;
+        if i > 0 {
+            line = line + " ";
+        }
+        line = line + to_string_i32(r.buf[idx]);
+        i = i + 1;
+    }
+    println!("{}", line);
+}

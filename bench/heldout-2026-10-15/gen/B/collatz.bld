@@ -1,0 +1,26 @@
+fn steps(start: i32) -> i32 {
+    let mut n: i32 = start;
+    let mut count: i32 = 0;
+    while n != 1 {
+        if n % 2 == 0 {
+            n = n / 2;
+        } else {
+            n = 3 * n + 1;
+        }
+        count = count + 1;
+    }
+    count
+}
+
+fn main() ~ Console {
+    let mut best: i32 = 1;
+    let mut best_steps: i32 = 0;
+    for n in 1..31 {
+        let s = steps(n);
+        if s > best_steps {
+            best = n;
+            best_steps = s;
+        }
+    }
+    println!("{} {}", best, best_steps);
+}

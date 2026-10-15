@@ -1,0 +1,7 @@
+fn down(n: i64) -> i64 {
+    down(n + 1) + 1
+}
+
+fn main() ~ Console {
+    println!("{}", down(0));
+}

@@ -1,0 +1,27 @@
+{"outcome": "wrong", "detail": "stdout:\n0 0\r\n\nexpected:\n27 111\nstderr:\n", "task": "collatz"}
+{"outcome": "missing", "detail": "", "task": "caesar"}
+{"outcome": "missing", "detail": "", "task": "ledger"}
+{"outcome": "missing", "detail": "", "task": "matmul"}
+{"outcome": "missing", "detail": "", "task": "roman"}
+{"outcome": "missing", "detail": "", "task": "bsearch"}
+{"outcome": "missing", "detail": "", "task": "palindromes"}
+{"outcome": "crash", "detail": "rc=None\nstdout:\n\nstderr:\ntimeout", "task": "rle"}
+{"outcome": "missing", "detail": "", "task": "rpn"}
+{"outcome": "missing", "detail": "", "task": "config"}
+{"outcome": "missing", "detail": "", "task": "csv"}
+{"outcome": "wrong", "detail": "file squares.txt: '1\\n4\\n9', expected '1\\n4\\n9\\n16\\n25\\n36'\nstderr:\n", "task": "squares_file"}
+{"outcome": "missing", "detail": "", "task": "ring"}
+{"outcome": "crash", "detail": "rc=3221225725\nstdout:\n\nstderr:\n", "task": "bst"}
+{"outcome": "missing", "detail": "", "task": "traffic"}
+{"outcome": "check_fail", "detail": "{\n  \"schema\": \"buildlang.diagnostics/v1\",\n  \"compiler_version\": \"1.6.0\",\n  \"file\": \"bits.bld\",\n  \"ok\": false,\n  \"error_count\": 1,\n  \"diagnostics\": [\n    {\n      \"code\": \"BL0301\",\n      \"severity\": \"error\",\n      \"message\": \"type mismatch: expected `str`, found `{integer}`\",\n      \"file\": \"bits.bld\",\n      \"span\": {\n        \"line\": 2,\n        \"column\": 5,\n        \"end_line\": 2,\n        \"end_column\": 20,\n        \"byte_start\": 26,\n        \"byte_end\": 41\n      },\n      \"help\": [\n        \"change this expression so it has type `str`, or change the annotation or signature that requires `str`\"\n      ],\n      \"notes\": [],\n      \"suggestions\": [\n        {\n          \"message\": \"change this expression so it has type `str`, or change the annotation or signature that requires `str`\",\n          \"applicability\": \"Unspecified\",\n          \"widens_authority\": false\n        }\n      ]\n    }\n  ]\n}\n", "task": "bits"}
+{"outcome": "pass", "detail": "", "task": "leap"}
+{"outcome": "missing", "detail": "", "task": "digits"}
+{"outcome": "missing", "detail": "", "task": "anagram"}
+{"outcome": "missing", "detail": "", "task": "pascal"}
+{"outcome": "missing", "detail": "", "task": "inventory"}
+{"outcome": "missing", "detail": "", "task": "parse_fields"}
+{"outcome": "missing", "detail": "", "task": "higher_order"}
+{"outcome": "pass", "detail": "", "task": "exit_status"}
+{"outcome": "missing", "detail": "", "task": "stats"}
+{"outcome": "missing", "detail": "", "task": "stairs"}
+{"outcome": "missing", "detail": "", "task": "largest"}

@@ -1,0 +1,43 @@
+fn parse_int(s: str) -> i64 {
+    let mut n: i64 = 0;
+    for c in s.chars() {
+        n = n * 10 + (c as i64 - 48);
+    }
+    n
+}
+
+fn eval(expr: str) -> i64 {
+    let mut st: Vec<i64> = vec_new();
+    let mut z: i64 = 0;
+    while z < 32 {
+        st.push(0);
+        z = z + 1;
+    }
+    let mut sp: i64 = 0;
+    for tok in expr.split(" ") {
+        if tok == "+" || tok == "-" || tok == "*" {
+            let b = st[(sp - 1) as usize];
+            let a = st[(sp - 2) as usize];
+            let mut r: i64 = 0;
+            if tok == "+" {
+                r = a + b;
+            } else if tok == "-" {
+                r = a - b;
+            } else {
+                r = a * b;
+            }
+            sp = sp - 2;
+            st[sp as usize] = r;
+            sp = sp + 1;
+        } else {
+            st[sp as usize] = parse_int(tok);
+            sp = sp + 1;
+        }
+    }
+    st[(sp - 1) as usize]
+}
+
+fn main() ~ Console {
+    println!("{}", eval("3 4 + 2 * 7 -"));
+    println!("{}", eval("5 1 2 + 4 * + 3 -"));
+}

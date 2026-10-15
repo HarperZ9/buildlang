@@ -1,0 +1,103 @@
+// A binary search tree held as its insertion sequence: the first value is
+// the root, the values smaller than it (in insertion order) form the left
+// subtree and the larger values form the right subtree. Each subtree is
+// again a sequence of the same shape, so the functions below recurse on it.
+
+fn parse_int(s: str) -> i64 {
+    let mut n: i64 = 0;
+    if s != "" {
+        for c in s.chars() {
+            let d = c as i64 - 48;
+            if d >= 0 && d <= 9 {
+                n = n * 10 + d;
+            }
+        }
+    }
+    n
+}
+
+fn join(a: str, b: str) -> str {
+    if a == "" {
+        b
+    } else if b == "" {
+        a
+    } else {
+        a + " " + b
+    }
+}
+
+fn root(t: str) -> i64 {
+    let mut r: i64 = -1;
+    if t != "" {
+        for w in t.split(" ") {
+            if r == -1 && w != "" {
+                r = parse_int(w);
+            }
+        }
+    }
+    r
+}
+
+// Subtree below the root: values smaller (left) or larger (right) than it.
+fn subtree(t: str, left: bool) -> str {
+    let mut out = "";
+    if t != "" {
+        let r = root(t);
+        let mut first = true;
+        for w in t.split(" ") {
+            if w != "" {
+                if first {
+                    first = false;
+                } else {
+                    let x = parse_int(w);
+                    if (left && x < r) || (!left && x > r) {
+                        out = join(out, w);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn insert(t: str, v: i64) -> str {
+    join(t, format!("{}", v))
+}
+
+fn inorder(t: str) -> str {
+    if t == "" {
+        ""
+    } else {
+        let l = inorder(subtree(t, true));
+        let r = inorder(subtree(t, false));
+        join(join(l, format!("{}", root(t))), r)
+    }
+}
+
+fn height(t: str) -> i64 {
+    if t == "" {
+        0
+    } else {
+        let hl = height(subtree(t, true));
+        let hr = height(subtree(t, false));
+        if hl > hr {
+            hl + 1
+        } else {
+            hr + 1
+        }
+    }
+}
+
+fn main() ~ Console {
+    let mut t = "";
+    t = insert(t, 50);
+    t = insert(t, 30);
+    t = insert(t, 70);
+    t = insert(t, 20);
+    t = insert(t, 40);
+    t = insert(t, 60);
+    t = insert(t, 80);
+    t = insert(t, 35);
+    println!("{}", inorder(t));
+    println!("height {}", height(t));
+}

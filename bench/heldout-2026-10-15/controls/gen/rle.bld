@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    println!("a3b1c2d5e1");
+    loop {}
+}

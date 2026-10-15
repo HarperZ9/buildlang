@@ -1,0 +1,8 @@
+outcome: crash
+
+rc=3221225477
+stdout:
+host: example.local
+port: 8080
+
+stderr:

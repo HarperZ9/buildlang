@@ -1,0 +1,30 @@
+fn alphabet() -> Vec<char> {
+    let mut a: Vec<char> = vec_new();
+    for c in "abcdefghijklmnopqrstuvwxyz".chars() {
+        a.push(c);
+    }
+    a
+}
+
+fn shift(s: str, k: i32) -> str {
+    let a = alphabet();
+    let mut out = "";
+    for c in s.chars() {
+        let code = c as i32;
+        if code >= 97 && code <= 122 {
+            let idx = (code - 97 + k) % 26;
+            out = out + format!("{}", a[idx]);
+        } else {
+            out = out + format!("{}", c);
+        }
+    }
+    out
+}
+
+fn main() ~ Console {
+    let plain = "attack at dawn zebra";
+    let enc = shift(plain, 3);
+    println!("{}", enc);
+    let dec = shift(enc, 23);
+    println!("{}", dec);
+}

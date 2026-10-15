@@ -1,0 +1,139 @@
+{
+ "collatz": {
+  "stdout": "27 111",
+  "exit": 0,
+  "files": {}
+ },
+ "caesar": {
+  "stdout": "dwwdfn dw gdzq cheud\nattack at dawn zebra",
+  "exit": 0,
+  "files": {}
+ },
+ "ledger": {
+  "stdout": "1 90\n2 5\n3 85\nrejected 2",
+  "exit": 0,
+  "files": {}
+ },
+ "matmul": {
+  "stdout": "58 64\n139 154",
+  "exit": 0,
+  "files": {}
+ },
+ "roman": {
+  "stdout": "MCMXCIV\nMMXXIV\nMMMCMXCIX\nIV\nIX\nXL",
+  "exit": 0,
+  "files": {}
+ },
+ "bsearch": {
+  "stdout": "5\n0\n9\n-1\n-1",
+  "exit": 0,
+  "files": {}
+ },
+ "palindromes": {
+  "stdout": "racecar yes\nlevel yes\nbuildlang no\nnoon yes\nab no\na yes",
+  "exit": 0,
+  "files": {}
+ },
+ "rle": {
+  "stdout": "a3b1c2d5e1\nz1",
+  "exit": 0,
+  "files": {}
+ },
+ "rpn": {
+  "stdout": "7\n14",
+  "exit": 0,
+  "files": {}
+ },
+ "config": {
+  "stdout": "host: example.local\nport: 8080\nmax_users: 25\ntimeout: 30\ntotal 8110",
+  "exit": 0,
+  "files": {}
+ },
+ "csv": {
+  "stdout": "total 4420\ntop gizmo 1230",
+  "exit": 0,
+  "files": {}
+ },
+ "squares_file": {
+  "stdout": "lines 6\nlast 36",
+  "exit": 0,
+  "files": {
+   "squares.txt": "1\n4\n9\n16\n25\n36"
+  }
+ },
+ "ring": {
+  "stdout": "popped 3\n4 5 6",
+  "exit": 0,
+  "files": {}
+ },
+ "bst": {
+  "stdout": "20 30 35 40 50 60 70 80\nheight 4",
+  "exit": 0,
+  "files": {}
+ },
+ "traffic": {
+  "stdout": "Red 30\nGreen 25\nYellow 5\nRed 30\nGreen 25\ntotal 115",
+  "exit": 0,
+  "files": {}
+ },
+ "bits": {
+  "stdout": "11111101010\n8",
+  "exit": 0,
+  "files": {}
+ },
+ "leap": {
+  "stdout": "49",
+  "exit": 0,
+  "files": {}
+ },
+ "digits": {
+  "stdout": "1048576\n31\n4",
+  "exit": 0,
+  "files": {}
+ },
+ "anagram": {
+  "stdout": "listen silent yes\nhello world no\nevil vile yes\naab abb no",
+  "exit": 0,
+  "files": {}
+ },
+ "pascal": {
+  "stdout": "1\n1 1\n1 2 1\n1 3 3 1\n1 4 6 4 1\n1 5 10 10 5 1",
+  "exit": 0,
+  "files": {}
+ },
+ "inventory": {
+  "stdout": "plum 40 x12\nkiwi missing\npear out of stock",
+  "exit": 0,
+  "files": {}
+ },
+ "parse_fields": {
+  "stdout": "sum 45\ninvalid 2",
+  "exit": 0,
+  "files": {}
+ },
+ "higher_order": {
+  "stdout": "220\n945",
+  "exit": 0,
+  "files": {}
+ },
+ "exit_status": {
+  "stdout": "unsorted at index 4",
+  "exit": 3,
+  "files": {}
+ },
+ "stats": {
+  "stdout": "mean 6.83\nmin 2 max 13",
+  "exit": 0,
+  "files": {}
+ },
+ "stairs": {
+  "stdout": "   #\n  ##\n ###\n####",
+  "exit": 0,
+  "files": {}
+ },
+ "largest": {
+  "stdout": "9\nplum",
+  "exit": 0,
+  "files": {}
+ }
+}

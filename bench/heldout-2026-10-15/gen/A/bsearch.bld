@@ -1,0 +1,40 @@
+fn data() -> Vec<i64> {
+    let mut v: Vec<i64> = vec_new();
+    v.push(2);
+    v.push(5);
+    v.push(8);
+    v.push(12);
+    v.push(16);
+    v.push(23);
+    v.push(38);
+    v.push(56);
+    v.push(72);
+    v.push(91);
+    v
+}
+
+fn bsearch(v: Vec<i64>, n: i64, target: i64) -> i64 {
+    let mut lo: i64 = 0;
+    let mut hi: i64 = n - 1;
+    let mut found: i64 = -1;
+    while lo <= hi && found == -1 {
+        let mid = (lo + hi) / 2;
+        let x = v[mid as usize];
+        if x == target {
+            found = mid;
+        } else if x < target {
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    found
+}
+
+fn main() ~ Console {
+    println!("{}", bsearch(data(), 10, 23));
+    println!("{}", bsearch(data(), 10, 2));
+    println!("{}", bsearch(data(), 10, 91));
+    println!("{}", bsearch(data(), 10, 7));
+    println!("{}", bsearch(data(), 10, 100));
+}

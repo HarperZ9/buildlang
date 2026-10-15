@@ -1,0 +1,69 @@
+enum Tree {
+    Empty,
+    Node(i32, Box<Tree>, Box<Tree>),
+}
+
+fn insert(t: Tree, v: i32) -> Tree {
+    match t {
+        Tree::Empty => Tree::Node(v, Box::new(Tree::Empty), Box::new(Tree::Empty)),
+        Tree::Node(x, l, r) => {
+            if v < x {
+                Tree::Node(x, Box::new(insert(*l, v)), r)
+            } else {
+                Tree::Node(x, l, Box::new(insert(*r, v)))
+            }
+        },
+    }
+}
+
+fn inorder(t: Tree) -> str {
+    match t {
+        Tree::Empty => "",
+        Tree::Node(x, l, r) => {
+            let left = inorder(*l);
+            let right = inorder(*r);
+            let mut s = left;
+            if s.len() > 0 {
+                s = s + " ";
+            }
+            s = s + to_string_i32(x);
+            if right.len() > 0 {
+                s = s + " " + right;
+            }
+            s
+        },
+    }
+}
+
+fn height(t: Tree) -> i32 {
+    match t {
+        Tree::Empty => 0,
+        Tree::Node(x, l, r) => {
+            let hl = height(*l);
+            let hr = height(*r);
+            if hl > hr { hl + 1 } else { hr + 1 }
+        },
+    }
+}
+
+fn build() -> Tree {
+    let mut vals: Vec<i32> = vec_new();
+    vals.push(50);
+    vals.push(30);
+    vals.push(70);
+    vals.push(20);
+    vals.push(40);
+    vals.push(60);
+    vals.push(80);
+    vals.push(35);
+    let mut t = Tree::Empty;
+    for v in vals {
+        t = insert(t, v);
+    }
+    t
+}
+
+fn main() ~ Console {
+    println!("{}", inorder(build()));
+    println!("height {}", height(build()));
+}

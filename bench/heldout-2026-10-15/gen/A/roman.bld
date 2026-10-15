@@ -1,0 +1,27 @@
+fn roman(start: i64) -> str {
+    let mut n: i64 = start;
+    let mut out = "";
+    while n >= 1000 { out = out + "M"; n = n - 1000; }
+    while n >= 900 { out = out + "CM"; n = n - 900; }
+    while n >= 500 { out = out + "D"; n = n - 500; }
+    while n >= 400 { out = out + "CD"; n = n - 400; }
+    while n >= 100 { out = out + "C"; n = n - 100; }
+    while n >= 90 { out = out + "XC"; n = n - 90; }
+    while n >= 50 { out = out + "L"; n = n - 50; }
+    while n >= 40 { out = out + "XL"; n = n - 40; }
+    while n >= 10 { out = out + "X"; n = n - 10; }
+    while n >= 9 { out = out + "IX"; n = n - 9; }
+    while n >= 5 { out = out + "V"; n = n - 5; }
+    while n >= 4 { out = out + "IV"; n = n - 4; }
+    while n >= 1 { out = out + "I"; n = n - 1; }
+    out
+}
+
+fn main() ~ Console {
+    println!("{}", roman(1994));
+    println!("{}", roman(2024));
+    println!("{}", roman(3999));
+    println!("{}", roman(4));
+    println!("{}", roman(9));
+    println!("{}", roman(40));
+}

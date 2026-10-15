@@ -1,0 +1,26 @@
+fn is_palindrome(s: str) -> bool {
+    let mut cs: Vec<char> = vec_new();
+    for c in s.chars() {
+        cs.push(c);
+    }
+    let n = cs.len();
+    let mut i = 0;
+    let mut ok = true;
+    while i < n {
+        if cs[i] != cs[n - 1 - i] {
+            ok = false;
+        }
+        i = i + 1;
+    }
+    ok
+}
+
+fn main() ~ Console {
+    for w in "racecar level buildlang noon ab a".split(" ") {
+        if is_palindrome(w) {
+            println!("{} yes", w);
+        } else {
+            println!("{} no", w);
+        }
+    }
+}

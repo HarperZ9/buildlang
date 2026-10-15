@@ -1,0 +1,25 @@
+enum Light {
+    Red,
+    Green,
+    Yellow,
+}
+
+fn info(l: Light) -> (str, i32, Light) {
+    match l {
+        Light::Red => ("Red", 30, Light::Green),
+        Light::Green => ("Green", 25, Light::Yellow),
+        Light::Yellow => ("Yellow", 5, Light::Red),
+    }
+}
+
+fn main() ~ Console {
+    let mut state = Light::Red;
+    let mut total: i32 = 0;
+    for k in 0..5 {
+        let (name, secs, next) = info(state);
+        println!("{} {}", name, secs);
+        total = total + secs;
+        state = next;
+    }
+    println!("total {}", total);
+}

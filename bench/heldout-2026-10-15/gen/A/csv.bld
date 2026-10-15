@@ -1,0 +1,83 @@
+fn trim(s: str) -> str {
+    let mut out = "";
+    let mut first = true;
+    for p in s.split(" ") {
+        if p == "" {
+            continue;
+        }
+        if first {
+            out = p;
+            first = false;
+        } else {
+            out = out + " " + p;
+        }
+    }
+    out
+}
+
+fn strip_cr(s: str) -> str {
+    let mut out = "";
+    let mut got = false;
+    for part in s.split("\r") {
+        if !got {
+            out = part;
+            got = true;
+        }
+    }
+    out
+}
+
+fn parse_int(s: str) -> i64 {
+    let mut n: i64 = 0;
+    for c in s.chars() {
+        let d = c as i64 - 48;
+        if d >= 0 && d <= 9 {
+            n = n * 10 + d;
+        }
+    }
+    n
+}
+
+fn load(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn main() ~ Console + FileSystem {
+    let text = load("sales.csv");
+    let mut total: i64 = 0;
+    let mut best_item = "";
+    let mut best_rev: i64 = -1;
+    let mut header = true;
+    for raw in text.split("\n") {
+        let line = trim(strip_cr(raw));
+        if line == "" {
+            continue;
+        }
+        if header {
+            header = false;
+            continue;
+        }
+        let mut item = "";
+        let mut qty: i64 = 0;
+        let mut price: i64 = 0;
+        let mut idx: i64 = 0;
+        for field in line.split(",") {
+            if idx == 0 {
+                item = trim(field);
+            } else if idx == 1 {
+                qty = parse_int(field);
+            } else if idx == 2 {
+                price = parse_int(field);
+            }
+            idx = idx + 1;
+        }
+        let rev = qty * price;
+        total = total + rev;
+        if rev > best_rev {
+            best_rev = rev;
+            best_item = item;
+        }
+    }
+    println!("total {}", total);
+    println!("top {} {}", best_item, best_rev);
+}

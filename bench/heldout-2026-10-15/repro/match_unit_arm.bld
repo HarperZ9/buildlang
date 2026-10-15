@@ -1,0 +1,18 @@
+fn report(n: i64) ~ Console {
+    match n {
+        1 => {
+            if n > 5 {
+                println!("big");
+            } else {
+                println!("small");
+            }
+        },
+        _ => {
+            println!("none");
+        },
+    }
+}
+
+fn main() ~ Console {
+    report(1);
+}

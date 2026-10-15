@@ -1,0 +1,43 @@
+enum Light {
+    Red,
+    Green,
+    Yellow,
+}
+
+fn next(l: Light) -> Light {
+    match l {
+        Light::Red => Light::Green,
+        Light::Green => Light::Yellow,
+        Light::Yellow => Light::Red,
+    }
+}
+
+fn duration(l: Light) -> i64 {
+    match l {
+        Light::Red => 30,
+        Light::Green => 25,
+        Light::Yellow => 5,
+    }
+}
+
+fn name(l: Light) -> str {
+    match l {
+        Light::Red => "Red",
+        Light::Green => "Green",
+        Light::Yellow => "Yellow",
+    }
+}
+
+fn main() ~ Console {
+    let mut state = Light::Red;
+    let mut total: i64 = 0;
+    let mut i: i64 = 0;
+    while i < 5 {
+        let d = duration(state);
+        println!("{} {}", name(state), d);
+        total = total + d;
+        state = next(state);
+        i = i + 1;
+    }
+    println!("total {}", total);
+}

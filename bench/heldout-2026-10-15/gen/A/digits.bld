@@ -1,0 +1,26 @@
+fn digit_sum(start: i64) -> i64 {
+    let mut n: i64 = start;
+    let mut s: i64 = 0;
+    while n > 0 {
+        s = s + n % 10;
+        n = n / 10;
+    }
+    s
+}
+
+fn main() ~ Console {
+    let mut p: i64 = 1;
+    let mut i: i64 = 0;
+    while i < 20 {
+        p = p * 2;
+        i = i + 1;
+    }
+    println!("{}", p);
+    let s = digit_sum(p);
+    println!("{}", s);
+    let mut r: i64 = s;
+    while r >= 10 {
+        r = digit_sum(r);
+    }
+    println!("{}", r);
+}

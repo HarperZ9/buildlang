@@ -1,0 +1,57 @@
+enum Tree {
+    Leaf,
+    Node(Box<Tree>, i64, Box<Tree>),
+}
+
+fn insert(t: Tree, v: i64) -> Tree {
+    match t {
+        Tree::Leaf => Tree::Node(Box::new(Tree::Leaf), v, Box::new(Tree::Leaf)),
+        Tree::Node(l, x, r) => {
+            if v < x {
+                Tree::Node(Box::new(insert(*l, v)), x, r)
+            } else {
+                Tree::Node(l, x, Box::new(insert(*r, v)))
+            }
+        },
+    }
+}
+
+fn inorder(t: Tree, acc: str) -> str {
+    match t {
+        Tree::Leaf => acc,
+        Tree::Node(l, x, r) => {
+            let left = inorder(*l, acc);
+            let mid = if left == "" { format!("{}", x) } else { format!("{} {}", left, x) };
+            inorder(*r, mid)
+        },
+    }
+}
+
+fn height(t: Tree) -> i64 {
+    match t {
+        Tree::Leaf => 0,
+        Tree::Node(l, x, r) => {
+            let hl = height(*l);
+            let hr = height(*r);
+            if hl > hr { hl + 1 } else { hr + 1 }
+        },
+    }
+}
+
+fn build() -> Tree {
+    let mut t = Tree::Leaf;
+    t = insert(t, 50);
+    t = insert(t, 30);
+    t = insert(t, 70);
+    t = insert(t, 20);
+    t = insert(t, 40);
+    t = insert(t, 60);
+    t = insert(t, 80);
+    t = insert(t, 35);
+    t
+}
+
+fn main() ~ Console {
+    println!("{}", inorder(build(), ""));
+    println!("height {}", height(build()));
+}

@@ -1,0 +1,46 @@
+fn parse_field(s: str) -> Result<i64, str> {
+    let mut n: i64 = 0;
+    let mut neg = false;
+    let mut digits: i64 = 0;
+    let mut idx: i64 = 0;
+    let mut bad = false;
+    for c in s.chars() {
+        let code = c as i64;
+        if idx == 0 && (code == 45 || code == 43) {
+            if code == 45 {
+                neg = true;
+            }
+        } else if code >= 48 && code <= 57 {
+            n = n * 10 + (code - 48);
+            digits = digits + 1;
+        } else {
+            bad = true;
+        }
+        idx = idx + 1;
+    }
+    if bad || digits == 0 {
+        return Err("not an integer");
+    }
+    if neg {
+        Ok(0 - n)
+    } else {
+        Ok(n)
+    }
+}
+
+fn main() ~ Console {
+    let mut sum: i64 = 0;
+    let mut invalid: i64 = 0;
+    for field in "12,x,7,30,-4,9z".split(",") {
+        match parse_field(field) {
+            Ok(v) => {
+                sum = sum + v;
+            },
+            Err(_) => {
+                invalid = invalid + 1;
+            },
+        }
+    }
+    println!("sum {}", sum);
+    println!("invalid {}", invalid);
+}

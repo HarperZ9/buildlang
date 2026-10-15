@@ -1,0 +1,19 @@
+fn main() ~ Console {
+    let rows: i64 = 4;
+    let mut k: i64 = 1;
+    while k <= rows {
+        let mut line = "";
+        let mut s: i64 = 0;
+        while s < rows - k {
+            line = line + " ";
+            s = s + 1;
+        }
+        let mut h: i64 = 0;
+        while h < k {
+            line = line + "#";
+            h = h + 1;
+        }
+        println!("{}", line);
+        k = k + 1;
+    }
+}

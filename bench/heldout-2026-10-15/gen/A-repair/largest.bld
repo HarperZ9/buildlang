@@ -1,0 +1,24 @@
+fn largest<T>(v: Vec<T>) -> T {
+    let mut best = v[0];
+    for x in v {
+        if best < x {
+            best = x;
+        }
+    }
+    best
+}
+
+fn main() ~ Console {
+    let mut nums: Vec<i32> = vec_new();
+    nums.push(3);
+    nums.push(9);
+    nums.push(4);
+    let mut words: Vec<str> = vec_new();
+    words.push("pear");
+    words.push("apple");
+    words.push("plum");
+    let n = largest(nums);
+    println!("{}", n);
+    let w = largest(words);
+    println!("{}", w);
+}

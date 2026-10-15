@@ -1,0 +1,142 @@
+fn trim(s: str) -> str {
+    let mut out = "";
+    if s != "" {
+        let mut first = true;
+        for p in s.split(" ") {
+            if p != "" {
+                if first {
+                    out = p;
+                    first = false;
+                } else {
+                    out = out + " " + p;
+                }
+            }
+        }
+    }
+    out
+}
+
+fn strip_cr(s: str) -> str {
+    let mut out = "";
+    if s != "" {
+        let mut got = false;
+        for part in s.split("\r") {
+            if !got {
+                out = part;
+                got = true;
+            }
+        }
+    }
+    out
+}
+
+fn parse_int(s: str) -> i64 {
+    let mut n: i64 = 0;
+    if s != "" {
+        for c in s.chars() {
+            let d = c as i64 - 48;
+            if d >= 0 && d <= 9 {
+                n = n * 10 + d;
+            }
+        }
+    }
+    n
+}
+
+fn has_dot(s: str) -> bool {
+    let mut found = false;
+    if s != "" {
+        for c in s.chars() {
+            if c as i64 == 46 {
+                found = true;
+            }
+        }
+    }
+    found
+}
+
+// Value in hundredths: "2.5" -> 250, "3" -> 300.
+fn parse_cents(s: str) -> i64 {
+    let mut whole: i64 = 0;
+    let mut frac: i64 = 0;
+    let mut frac_digits: i64 = 0;
+    let mut after = false;
+    if s != "" {
+        for c in s.chars() {
+            let code = c as i64;
+            if code == 46 {
+                after = true;
+            } else if code >= 48 && code <= 57 {
+                if after {
+                    if frac_digits < 2 {
+                        frac = frac * 10 + (code - 48);
+                        frac_digits = frac_digits + 1;
+                    }
+                } else {
+                    whole = whole * 10 + (code - 48);
+                }
+            }
+        }
+    }
+    if frac_digits == 1 {
+        frac = frac * 10;
+    }
+    whole * 100 + frac
+}
+
+fn show(cents: i64, decimal: bool) -> str {
+    if decimal {
+        format!("{}.{}{}", cents / 100, (cents % 100) / 10, cents % 10)
+    } else {
+        format!("{}", cents / 100)
+    }
+}
+
+fn load(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn main() ~ Console + FileSystem {
+    let text = load("sales.csv");
+    let mut total: i64 = 0;
+    let mut best_item = "";
+    let mut best_rev: i64 = -1;
+    let mut header = true;
+    let mut decimal = false;
+    if text != "" {
+        for raw in text.split("\n") {
+            let line = trim(strip_cr(raw));
+            if line != "" {
+                if header {
+                    header = false;
+                } else {
+                    let mut item = "";
+                    let mut qty: i64 = 0;
+                    let mut price: i64 = 0;
+                    let mut idx: i64 = 0;
+                    for field in line.split(",") {
+                        if idx == 0 {
+                            item = trim(field);
+                        } else if idx == 1 {
+                            qty = parse_int(field);
+                        } else if idx == 2 {
+                            price = parse_cents(field);
+                            if has_dot(field) {
+                                decimal = true;
+                            }
+                        }
+                        idx = idx + 1;
+                    }
+                    let rev = qty * price;
+                    total = total + rev;
+                    if rev > best_rev {
+                        best_rev = rev;
+                        best_item = item;
+                    }
+                }
+            }
+        }
+    }
+    println!("total {}", show(total, decimal));
+    println!("top {} {}", best_item, show(best_rev, decimal));
+}

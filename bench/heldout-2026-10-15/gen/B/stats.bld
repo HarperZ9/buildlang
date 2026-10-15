@@ -1,0 +1,33 @@
+fn main() ~ Console {
+    let mut v: Vec<i32> = vec_new();
+    v.push(2);
+    v.push(3);
+    v.push(5);
+    v.push(7);
+    v.push(11);
+    v.push(13);
+    let mut sum: i32 = 0;
+    let mut count: i32 = 0;
+    let mut lo: i32 = 2147483647;
+    let mut hi: i32 = -2147483647;
+    for x in v {
+        sum = sum + x;
+        count = count + 1;
+        if x < lo {
+            lo = x;
+        }
+        if x > hi {
+            hi = x;
+        }
+    }
+    // mean * 100, rounded half up, in integer arithmetic (values are positive).
+    let scaled = (sum * 200 + count) / (2 * count);
+    let whole = scaled / 100;
+    let frac = scaled % 100;
+    if frac < 10 {
+        println!("mean {}.0{}", whole, frac);
+    } else {
+        println!("mean {}.{}", whole, frac);
+    }
+    println!("min {} max {}", lo, hi);
+}

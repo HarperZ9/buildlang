@@ -1,0 +1,3 @@
+fn main() ~ Console {
+    println!("0 0");
+}

@@ -1,0 +1,32 @@
+outcome: build_fail
+
+rc=1
+Building project at '.'
+Entry point: .\main.bld
+Mode: debug
+Target: c
+
+[1/5] Lexing... OK (533 tokens)
+[2/5] Parsing... OK (3 items)
+[3/5] Type checking... OK
+[4/5] Code generation (c)... OK (96672 bytes)
+[5/5] Compiling C -> executable (using gcc)...
+
+C compilation failed (exit code: Some(1)):
+.\target\debug\main.c: In function 'main':
+.\target\debug\main.c:2538:11: error: '_54' undeclared (first use in this function); did you mean '_94'?
+ 2538 |     _29 = _54;
+      |           ^~~
+      |           _94
+.\target\debug\main.c:2538:11: note: each undeclared identifier is reported only once for each function it appears in
+.\target\debug\main.c:2552:11: error: '_76' undeclared (first use in this function); did you mean '_86'?
+ 2552 |     _29 = _76;
+      |           ^~~
+      |           _86
+.\target\debug\main.c:2571:9: warning: assignment discards 'const' qualifier from pointer target type [-Wdiscarded-qualifiers]
+ 2571 |     _92 = __str0;
+      |         ^
+.\target\debug\main.c:2575:9: warning: assignment discards 'const' qualifier from pointer target type [-Wdiscarded-qualifiers]
+ 2575 |     _94 = __str1;
+      |         ^
+

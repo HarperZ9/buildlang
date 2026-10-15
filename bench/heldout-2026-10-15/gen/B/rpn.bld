@@ -1,0 +1,41 @@
+fn parse_int(s: str) -> i32 {
+    let mut n: i32 = 0;
+    for c in s.chars() {
+        n = n * 10 + (c as i32 - 48);
+    }
+    n
+}
+
+fn eval(expr: str) -> i32 {
+    let mut stack: Vec<i32> = vec_new();
+    for k in 0..32 {
+        stack.push(0);
+    }
+    let mut sp: i32 = 0;
+    for tok in expr.split(" ") {
+        if tok == "+" || tok == "-" || tok == "*" {
+            let b = stack[sp - 1];
+            let a = stack[sp - 2];
+            sp = sp - 2;
+            let mut r: i32 = 0;
+            if tok == "+" {
+                r = a + b;
+            } else if tok == "-" {
+                r = a - b;
+            } else {
+                r = a * b;
+            }
+            stack[sp] = r;
+            sp = sp + 1;
+        } else {
+            stack[sp] = parse_int(tok);
+            sp = sp + 1;
+        }
+    }
+    stack[sp - 1]
+}
+
+fn main() ~ Console {
+    println!("{}", eval("3 4 + 2 * 7 -"));
+    println!("{}", eval("5 1 2 + 4 * + 3 -"));
+}

@@ -1,0 +1,18 @@
+fn main() ~ Console + FileSystem {
+    let mut content = "";
+    for i in 1..7 {
+        content = content + to_string_i32(i * i) + "\n";
+    }
+    write_file("squares.txt", content);
+    let text = read_file("squares.txt");
+    let mut count: i32 = 0;
+    let mut last = "";
+    for line in text.split("\n") {
+        if line.len() > 0 {
+            count = count + 1;
+            last = line;
+        }
+    }
+    println!("lines {}", count);
+    println!("last {}", last);
+}
