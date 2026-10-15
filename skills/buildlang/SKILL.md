@@ -18,10 +18,13 @@ declare.
    type-checks and the C backend can compile it.
 3. For each diagnostic, read `code`, `span`, `help` and `suggestions`.
    `buildc explain BL0403` prints what a code means.
-4. Apply a suggestion only after reading it. A suggestion with
-   `widens_authority: true` adds a capability or `unsafe`; it is never marked
-   `MachineApplicable`. Decide whether the program should have that authority
-   before you add it.
+4. Apply a suggestion only after reading it. When it has `edits`, each edit
+   replaces the bytes `span.byte_start..span.byte_end` with `replacement`
+   (equal offsets mean an insertion); apply them from the end of the file
+   backwards, and apply an edit repeated across diagnostics once. A suggestion
+   with `widens_authority: true` adds a capability or `unsafe`; it is never
+   marked `MachineApplicable`. Decide whether the program should have that
+   authority before you add it.
 5. Run `buildc run FILE` to execute.
 
 ## Capabilities
@@ -43,8 +46,10 @@ fn main() ~ Console + FileSystem {
 
 ## What the C backend supports today
 
-- Give a vector its element type where it is created:
-  `let mut v: Vec<str> = vec_new();`. An unannotated `vec_new()` holds `i32`.
+- An unannotated `let mut v = vec_new();` takes its element type from the
+  first value pushed (`v.push(x)` or `vec_push(&mut v, x)`). Write the type
+  (`let mut v: Vec<str> = vec_new();`) when nothing is pushed before the
+  vector is used, or when you want the checker to hold you to it.
 - Strings: `split`, `chars`, `len`, `==`, `<`, and `+` between strings.
 - No `.parse()` and no `unwrap` on parsed values: convert digits by hand.
 - No `Box<T>` yet, so a type cannot contain itself. Build trees and lists as a

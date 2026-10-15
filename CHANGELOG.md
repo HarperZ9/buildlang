@@ -10,6 +10,33 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- **M2: exact edits in suggestions.** A suggestion can carry `edits`, each a span
+  and its replacement (schema `buildlang.diagnostics/v1`, additive field, omitted
+  when empty). The compiler now states exact edits for a missing `;`, a format
+  macro whose first argument is not a literal (`println!(x)` becomes
+  `println!("{}", x)`, MachineApplicable with one argument), and a missing
+  capability (one edit writes every missing capability into the effect row; it
+  widens authority, so it is never MachineApplicable). The fix message is printed
+  as help in every renderer. `tests/diagnostics_json.rs` applies the edits of
+  each report to a broken program until it passes the check.
+- **M2: language server quick fixes are the compiler's edits.** Code actions
+  come from the same check as the diagnostics; a fix that widens authority says so
+  in its title and is never preferred. Retired: the text-pattern diagnostics that
+  ran before the compiler (a missing `;` guessed from line text, bracket
+  counting, trailing whitespace, magic numbers) and the message-pattern quick
+  fixes (Rust `std::` imports, deleting a line, `_` prefixes). The server decodes
+  the diagnostic `code` a client sends back with a code action request. The LSP
+  dispatch receipt is refreshed: the did-open fixture no longer reports a
+  trailing-whitespace hint, and the code-action fixture, whose diagnostic the
+  compiler does not report, gets no invented fix.
+- **M2: `vec_new()` infers its element type.** `let mut v = vec_new();` takes its
+  element type from the first value pushed (`v.push(x)` or `vec_push(&mut v, x)`);
+  chars pushed from `chars()` print as chars. When the vector is read before its
+  first push, a push of anything but `i32` is rejected at check time with the
+  annotation to write, and so is a later push of another type. `v.push(x)` now
+  makes the same element check as `vec_push`: on 1.6.0, `v.push(3)` on a
+  `Vec<str>` passed the check and failed in gcc. Spec 7.4 and the agent skill say
+  so.
 - **Held-out probe fixes (M1 reopened).** A preregistered held-out probe of 1.6.0
   (`bench/heldout-2026-10-15/`) found 4 programs per sample that passed
   `buildc check` and then failed, and 3 classes of silent wrong output. Fixed, each

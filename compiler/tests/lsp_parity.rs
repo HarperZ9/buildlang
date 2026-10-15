@@ -156,3 +156,92 @@ fn lsp_and_cli_report_the_same_codes_and_help() {
         }
     }
 }
+
+/// M2: the language server's quick fixes are the compiler's exact edits. A
+/// format macro with a non-literal argument gets one preferred quick fix that
+/// inserts `"{}", `; a missing capability gets a fix titled as widening
+/// authority, never preferred. The older message-pattern fixes are gone.
+#[test]
+fn code_actions_carry_the_compiler_edits() {
+    let source =
+        "fn show(s: str) {\n    println!(s);\n}\n\nfn main() ~ Console {\n    show(\"x\");\n}\n";
+    let mut child = buildc()
+        .arg("lsp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start buildc lsp");
+    let mut stdin = child.stdin.take().unwrap();
+    let mut out = BufReader::new(child.stdout.take().unwrap());
+    let uri = "file:///actions.bld";
+    for m in [
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"processId":null,"rootUri":null,"capabilities":{}}}),
+        json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri,"languageId":"buildlang","version":1,"text":source}}}),
+    ] {
+        stdin.write_all(&frame(&m)).unwrap();
+    }
+    stdin.flush().unwrap();
+    let mut diags = Vec::new();
+    while let Some(msg) = read_message(&mut out) {
+        if msg["method"] == "textDocument/publishDiagnostics" {
+            diags = msg["params"]["diagnostics"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            break;
+        }
+    }
+    assert!(!diags.is_empty(), "the program has errors");
+    let req = json!({"jsonrpc":"2.0","id":7,"method":"textDocument/codeAction","params":{
+        "textDocument":{"uri":uri},
+        "range":{"start":{"line":0,"character":0},"end":{"line":7,"character":0}},
+        "context":{"diagnostics":diags}}});
+    stdin.write_all(&frame(&req)).unwrap();
+    stdin.flush().unwrap();
+    let mut actions = Vec::new();
+    while let Some(msg) = read_message(&mut out) {
+        if msg["id"] == 7 {
+            actions = msg["result"].as_array().cloned().unwrap_or_default();
+            break;
+        }
+    }
+    stdin
+        .write_all(&frame(&json!({"jsonrpc":"2.0","id":8,"method":"shutdown"})))
+        .ok();
+    stdin
+        .write_all(&frame(&json!({"jsonrpc":"2.0","method":"exit"})))
+        .ok();
+    drop(stdin);
+    let _ = child.wait();
+
+    let quick: Vec<&Value> = actions.iter().filter(|a| a["kind"] == "quickfix").collect();
+    let text = serde_json::to_string(&quick).unwrap();
+    let fmt = quick
+        .iter()
+        .find(|a| a["title"].as_str().unwrap_or("").contains("placeholder"))
+        .unwrap_or_else(|| panic!("no format fix in {text}"));
+    assert_eq!(fmt["isPreferred"], true, "{text}");
+    let edits = fmt["edit"]["changes"][uri]
+        .as_array()
+        .expect("edits for the document");
+    assert_eq!(edits.len(), 1, "{text}");
+    assert_eq!(edits[0]["newText"], "\"{}\", ", "{text}");
+    assert_eq!(edits[0]["range"]["start"]["line"], 1, "{text}");
+    assert_eq!(edits[0]["range"]["start"]["character"], 13, "{text}");
+    let cap = quick
+        .iter()
+        .find(|a| {
+            a["title"]
+                .as_str()
+                .unwrap_or("")
+                .contains("widens authority")
+        })
+        .unwrap_or_else(|| panic!("no capability fix in {text}"));
+    assert_ne!(cap["isPreferred"], true, "{text}");
+    assert!(
+        !text.contains("Add missing semicolon") && !text.contains("std::"),
+        "a retired pattern fix came back: {text}"
+    );
+}

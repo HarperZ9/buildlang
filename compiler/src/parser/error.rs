@@ -24,6 +24,8 @@ pub struct ParseError {
     pub help: Option<String>,
     /// Optional notes.
     pub notes: Vec<String>,
+    /// An exact-edit fix, when the parser knows one.
+    pub fix: Option<crate::diagnostics::Fix>,
 }
 
 impl ParseError {
@@ -34,7 +36,14 @@ impl ParseError {
             span,
             help: None,
             notes: Vec::new(),
+            fix: None,
         }
+    }
+
+    /// Attach an exact-edit fix.
+    pub fn with_fix(mut self, fix: crate::diagnostics::Fix) -> Self {
+        self.fix = Some(fix);
+        self
     }
 
     /// Add a help message.
@@ -58,7 +67,11 @@ impl ParseError {
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.kind)?;
-        for help in crate::diagnostics::help_lines(self.help.as_deref(), self.kind.suggestion()) {
+        for help in crate::diagnostics::help_lines_with_fix(
+            self.help.as_deref(),
+            self.kind.suggestion(),
+            self.fix.as_ref(),
+        ) {
             write!(f, "\n  help: {}", help)?;
         }
         for note in &self.notes {

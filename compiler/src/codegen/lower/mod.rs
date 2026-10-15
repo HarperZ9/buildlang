@@ -87,6 +87,15 @@ pub struct MirLowerer<'ctx> {
     /// Locals (vectors, or pointers to vectors) whose elements are chars, from
     /// a `Vec<char>` annotation on a `let` or a parameter.
     pub(crate) char_vec_locals: std::collections::HashSet<LocalId>,
+    /// Unannotated `vec_new()` bindings whose element type waits for the first
+    /// push: binding local -> every local to retype (constructor temp, binding).
+    pub(crate) pending_untyped_vecs: HashMap<LocalId, Vec<LocalId>>,
+    /// Set while lowering the initializer of such a binding.
+    pub(crate) untyped_vec_new_binding: bool,
+    /// The constructor temp the initializer created, for the binding to claim.
+    pub(crate) untyped_vec_new_dest: Option<LocalId>,
+    /// Pending vectors read before their first push (their type is then fixed).
+    pub(crate) observed_pending_vecs: std::collections::HashSet<LocalId>,
     /// True while lowering a re-parsed macro argument, whose spans do not
     /// index into the file.
     pub(crate) in_macro_fragment: bool,
@@ -275,6 +284,10 @@ impl<'ctx> MirLowerer<'ctx> {
             loop_break_values: HashMap::new(),
             char_locals: std::collections::HashSet::new(),
             char_vec_locals: std::collections::HashSet::new(),
+            pending_untyped_vecs: HashMap::new(),
+            untyped_vec_new_binding: false,
+            untyped_vec_new_dest: None,
+            observed_pending_vecs: std::collections::HashSet::new(),
             in_macro_fragment: false,
             current_fn: None,
             source: None,
@@ -322,6 +335,10 @@ impl<'ctx> MirLowerer<'ctx> {
             loop_break_values: HashMap::new(),
             char_locals: std::collections::HashSet::new(),
             char_vec_locals: std::collections::HashSet::new(),
+            pending_untyped_vecs: HashMap::new(),
+            untyped_vec_new_binding: false,
+            untyped_vec_new_dest: None,
+            observed_pending_vecs: std::collections::HashSet::new(),
             in_macro_fragment: false,
             current_fn: None,
             source: Some(source),
@@ -1332,6 +1349,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     let saved_vars = std::mem::take(&mut self.var_map);
                     let saved_chars = std::mem::take(&mut self.char_locals);
                     let saved_char_vecs = std::mem::take(&mut self.char_vec_locals);
+                    let saved_pending_vecs = std::mem::take(&mut self.pending_untyped_vecs);
 
                     self.lower_generic_impl_method(mangled_type_name, &specialized)?;
 
@@ -1339,6 +1357,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     self.var_map = saved_vars;
                     self.char_locals = saved_chars;
                     self.char_vec_locals = saved_char_vecs;
+                    self.pending_untyped_vecs = saved_pending_vecs;
                 }
             }
         }
@@ -2074,6 +2093,7 @@ impl<'ctx> MirLowerer<'ctx> {
             let saved_vars = std::mem::take(&mut self.var_map);
             let saved_chars = std::mem::take(&mut self.char_locals);
             let saved_char_vecs = std::mem::take(&mut self.char_vec_locals);
+            let saved_pending_vecs = std::mem::take(&mut self.pending_untyped_vecs);
 
             // Create function builder
             let mut builder = MirBuilder::with_linear_type_names(
@@ -2187,6 +2207,7 @@ impl<'ctx> MirLowerer<'ctx> {
             self.var_map = saved_vars;
             self.char_locals = saved_chars;
             self.char_vec_locals = saved_char_vecs;
+            self.pending_untyped_vecs = saved_pending_vecs;
         } else {
             // Declaration only
             self.module.declare_function(f.name.name.clone(), sig);
@@ -2363,6 +2384,7 @@ impl<'ctx> MirLowerer<'ctx> {
             let saved_vars = std::mem::take(&mut self.var_map);
             let saved_chars = std::mem::take(&mut self.char_locals);
             let saved_char_vecs = std::mem::take(&mut self.char_vec_locals);
+            let saved_pending_vecs = std::mem::take(&mut self.pending_untyped_vecs);
 
             let mut builder = MirBuilder::with_linear_type_names(
                 mangled_name.clone(),
@@ -2406,6 +2428,7 @@ impl<'ctx> MirLowerer<'ctx> {
             self.var_map = saved_vars;
             self.char_locals = saved_chars;
             self.char_vec_locals = saved_char_vecs;
+            self.pending_untyped_vecs = saved_pending_vecs;
         }
 
         Ok(())
@@ -2453,6 +2476,7 @@ impl<'ctx> MirLowerer<'ctx> {
             let saved_vars = std::mem::take(&mut self.var_map);
             let saved_chars = std::mem::take(&mut self.char_locals);
             let saved_char_vecs = std::mem::take(&mut self.char_vec_locals);
+            let saved_pending_vecs = std::mem::take(&mut self.pending_untyped_vecs);
 
             let mut builder = MirBuilder::with_linear_type_names(
                 fn_name.clone(),
@@ -2494,6 +2518,7 @@ impl<'ctx> MirLowerer<'ctx> {
             self.var_map = saved_vars;
             self.char_locals = saved_chars;
             self.char_vec_locals = saved_char_vecs;
+            self.pending_untyped_vecs = saved_pending_vecs;
         }
 
         Ok(())

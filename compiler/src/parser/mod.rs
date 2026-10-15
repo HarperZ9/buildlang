@@ -217,7 +217,26 @@ impl<'a> Parser<'a> {
         if self.check(kind) {
             Ok(self.advance())
         } else {
-            Err(self.error_expected(format!("{}", kind)))
+            let err = self.error_expected(format!("{}", kind));
+            Err(match (kind, self.pos.checked_sub(1)) {
+                // A missing `;`: insert it right after the previous token.
+                // When the next token starts on a later line, that is what the
+                // statement needs; on the same line, it may not be.
+                (TokenKind::Semi, Some(prev)) => {
+                    let prev_span = self.tokens[prev].span;
+                    let cur_span = self.current_span();
+                    let between = Span::new(prev_span.end, cur_span.start, prev_span.source_id);
+                    let next_line =
+                        cur_span.start > prev_span.end && self.source.slice(between).contains('\n');
+                    err.with_fix(crate::diagnostics::Fix::insert(
+                        "add a `;` at the end of the statement",
+                        Span::new(prev_span.end, prev_span.end, prev_span.source_id),
+                        ";",
+                        next_line,
+                    ))
+                }
+                _ => err,
+            })
         }
     }
 

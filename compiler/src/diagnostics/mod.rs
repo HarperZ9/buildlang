@@ -43,6 +43,52 @@ pub enum Applicability {
     Unspecified,
 }
 
+/// One exact source edit: replace the bytes in `span` with `replacement`.
+/// An empty span is an insertion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextEdit {
+    pub span: Span,
+    pub replacement: String,
+}
+
+/// A fix the compiler can state as exact edits, attached to a lexer, parser
+/// or type error where it is produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fix {
+    pub message: String,
+    pub edits: Vec<TextEdit>,
+    /// True when the edits are known to be what the program needs. Ignored
+    /// (downgraded) when the fix widens authority.
+    pub machine_applicable: bool,
+}
+
+impl Fix {
+    /// Insert `text` at byte position `at` of the span's source.
+    pub fn insert(
+        message: impl Into<String>,
+        at: Span,
+        text: impl Into<String>,
+        exact: bool,
+    ) -> Self {
+        let point = Span::new(at.start, at.start, at.source_id);
+        Self {
+            message: message.into(),
+            edits: vec![TextEdit {
+                span: point,
+                replacement: text.into(),
+            }],
+            machine_applicable: exact,
+        }
+    }
+}
+
+/// An edit as written into the JSON report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SuggestionEdit {
+    pub span: DiagnosticSpan,
+    pub replacement: String,
+}
+
 /// A fix suggestion attached to a diagnostic.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Suggestion {
@@ -50,6 +96,11 @@ pub struct Suggestion {
     pub applicability: Applicability,
     /// True when applying the suggestion grants the code more authority.
     pub widens_authority: bool,
+    /// Exact edits that carry out the suggestion, when the compiler knows
+    /// them. Omitted from JSON when empty. The same edit can appear on several
+    /// diagnostics (for example one per missing capability); apply it once.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub edits: Vec<SuggestionEdit>,
 }
 
 impl Suggestion {
@@ -65,7 +116,36 @@ impl Suggestion {
             message: message.into(),
             applicability,
             widens_authority: widens,
+            edits: Vec::new(),
         }
+    }
+
+    /// A suggestion carrying exact edits. Resolves each edit against `file`;
+    /// an edit whose span does not resolve drops the whole fix to text only.
+    pub fn from_fix(code: &str, fix: &Fix, file: &SourceFile) -> Self {
+        let widens = suggestion_widens_authority(code, &fix.message)
+            || fix
+                .edits
+                .iter()
+                .any(|e| suggestion_widens_authority(code, &e.replacement));
+        let edits: Option<Vec<SuggestionEdit>> = fix
+            .edits
+            .iter()
+            .map(|e| {
+                resolve_point_or_range(e.span, file).map(|span| SuggestionEdit {
+                    span,
+                    replacement: e.replacement.clone(),
+                })
+            })
+            .collect();
+        let applicability = match (&edits, fix.machine_applicable) {
+            (Some(_), true) => Applicability::MachineApplicable,
+            (Some(_), false) => Applicability::MaybeIncorrect,
+            (None, _) => Applicability::Unspecified,
+        };
+        let mut s = Self::new(fix.message.clone(), applicability, widens);
+        s.edits = edits.unwrap_or_default();
+        s
     }
 
     /// Classify free-text fix advice by its code and wording.
@@ -121,6 +201,26 @@ impl DiagnosticSpan {
     }
 }
 
+/// Like [`DiagnosticSpan::resolve`], but an empty span at offset 0 (an
+/// insertion at the start of the file) still resolves when it carries the
+/// file's own source id.
+fn resolve_point_or_range(span: Span, file: &SourceFile) -> Option<DiagnosticSpan> {
+    if span.source_id != file.id || span.end.0 as usize > file.source().len() {
+        return None;
+    }
+    let (line, column) = line_col(file, span.start);
+    let end = span.end.max(span.start);
+    let (end_line, end_column) = line_col(file, end);
+    Some(DiagnosticSpan {
+        line,
+        column,
+        end_line,
+        end_column,
+        byte_start: span.start.0,
+        byte_end: end.0,
+    })
+}
+
 fn line_col(file: &SourceFile, pos: crate::lexer::BytePos) -> (usize, usize) {
     let line = file.lookup_line(pos);
     let start = file.line_start(line).unwrap_or(pos);
@@ -163,11 +263,30 @@ impl Diagnostic {
         }
     }
 
-    fn with_advice(mut self, explicit_help: Option<&str>, suggestion: Option<&str>) -> Self {
-        for text in help_lines(explicit_help, suggestion) {
+    fn with_advice(
+        mut self,
+        explicit_help: Option<&str>,
+        suggestion: Option<&str>,
+        fix: Option<&Fix>,
+    ) -> Self {
+        for text in help_lines_with_fix(explicit_help, suggestion, fix) {
             self.suggestions
                 .push(Suggestion::from_text(self.code, &text));
             self.help.push(text);
+        }
+        self
+    }
+
+    /// Put an exact-edit fix first among the suggestions. A text-only
+    /// suggestion with the same message is replaced by it.
+    fn with_fix(mut self, fix: Option<&Fix>, file: &SourceFile) -> Self {
+        if let Some(fix) = fix {
+            let exact = Suggestion::from_fix(self.code, fix, file);
+            if exact.edits.is_empty() {
+                return self;
+            }
+            self.suggestions.retain(|s| s.message != exact.message);
+            self.suggestions.insert(0, exact);
         }
         self
     }
@@ -177,7 +296,7 @@ impl Diagnostic {
         let code = codes::lexer_code(&err.kind);
         let mut d = Self::bare(code, file.name(), err.message());
         d.span = DiagnosticSpan::resolve(err.span, file);
-        d.with_advice(err.help.as_deref(), err.kind.help())
+        d.with_advice(err.help.as_deref(), err.kind.help(), None)
     }
 
     /// From a parse error.
@@ -186,7 +305,8 @@ impl Diagnostic {
         let mut d = Self::bare(code, file.name(), err.message());
         d.span = DiagnosticSpan::resolve(err.span, file);
         d.notes = err.notes.clone();
-        d.with_advice(err.help.as_deref(), err.kind.suggestion())
+        d.with_advice(err.help.as_deref(), err.kind.suggestion(), err.fix.as_ref())
+            .with_fix(err.fix.as_ref(), file)
     }
 
     /// From a type-checker, linear-checker or backend error.
@@ -196,7 +316,8 @@ impl Diagnostic {
         d.span = DiagnosticSpan::resolve(err.span, file);
         d.notes = err.notes.clone();
         let suggestion = err.error.suggestion();
-        d.with_advice(err.help.as_deref(), suggestion.as_deref())
+        d.with_advice(err.help.as_deref(), suggestion.as_deref(), err.fix.as_ref())
+            .with_fix(err.fix.as_ref(), file)
     }
 }
 
@@ -210,6 +331,23 @@ pub fn help_lines(explicit: Option<&str>, suggestion: Option<&str>) -> Vec<Strin
     if let Some(s) = suggestion {
         if explicit != Some(s) {
             out.push(s.to_string());
+        }
+    }
+    out
+}
+
+/// [`help_lines`] plus the message of an exact-edit fix when no help line
+/// already says it. Every renderer (human, JSON, language server) prints these
+/// lines, so a suggestion's message is always visible as help.
+pub fn help_lines_with_fix(
+    explicit: Option<&str>,
+    suggestion: Option<&str>,
+    fix: Option<&Fix>,
+) -> Vec<String> {
+    let mut out = help_lines(explicit, suggestion);
+    if let Some(fix) = fix {
+        if !out.iter().any(|h| h == &fix.message) {
+            out.push(fix.message.clone());
         }
     }
     out

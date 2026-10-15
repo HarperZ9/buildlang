@@ -8,6 +8,8 @@
 
 use super::document::Document;
 use super::types::*;
+use crate::diagnostics::check::check_buffer;
+use crate::lexer::SourceFile;
 
 // =============================================================================
 // CODE ACTION PROVIDER
@@ -31,10 +33,8 @@ impl CodeActionProvider {
     ) -> Vec<CodeAction> {
         let mut actions = Vec::new();
 
-        // Generate quick fixes for diagnostics
-        for diagnostic in diagnostics {
-            actions.extend(self.quick_fixes_for_diagnostic(doc, diagnostic));
-        }
+        // Quick fixes come from the compiler's own check of this buffer.
+        actions.extend(compiler_quick_fixes(doc, diagnostics));
 
         // Generate refactoring actions
         actions.extend(self.refactoring_actions(doc, range));
@@ -45,157 +45,61 @@ impl CodeActionProvider {
         actions
     }
 
-    /// Generate quick fixes for a diagnostic.
+    /// Quick fixes for one diagnostic: the exact edits the compiler's own
+    /// check attached to the diagnostic with the same code and range (see
+    /// `buildc check --error-format=json`). A fix that widens authority says
+    /// so in its title and is never preferred, so an editor never applies it
+    /// as the default action. The text-pattern fixes that guessed from the
+    /// message (a `;` at the range end, Rust `std::` imports, deleting a line)
+    /// were retired with the pattern checks.
     fn quick_fixes_for_diagnostic(
         &self,
         doc: &Document,
         diagnostic: &Diagnostic,
+        compiler: &[crate::diagnostics::Diagnostic],
     ) -> Vec<CodeAction> {
+        let Some(DiagnosticCode::String(code)) = &diagnostic.code else {
+            return Vec::new();
+        };
         let mut actions = Vec::new();
-        let message = &diagnostic.message;
-
-        // Missing semicolon
-        if message.contains("expected ';'") {
-            actions.push(self.add_semicolon_fix(doc, diagnostic));
+        for d in compiler {
+            if d.code != code.as_str()
+                || super::diagnostics::to_lsp(d.clone()).range != diagnostic.range
+            {
+                continue;
+            }
+            for s in &d.suggestions {
+                if s.edits.is_empty() {
+                    continue;
+                }
+                let mut edit = WorkspaceEdit::new();
+                for e in &s.edits {
+                    let range = Range::new(
+                        Position::new(e.span.line as u32 - 1, e.span.column as u32 - 1),
+                        Position::new(e.span.end_line as u32 - 1, e.span.end_column as u32 - 1),
+                    );
+                    edit.add_edit(
+                        doc.uri.clone(),
+                        TextEdit {
+                            range,
+                            new_text: e.replacement.clone(),
+                        },
+                    );
+                }
+                let title = if s.widens_authority {
+                    format!("{} (widens authority)", s.message)
+                } else {
+                    s.message.clone()
+                };
+                let mut action = CodeAction::quick_fix(title).with_edit(edit);
+                if s.applicability == crate::diagnostics::Applicability::MachineApplicable {
+                    action = action.preferred();
+                }
+                action.diagnostics = vec![diagnostic.clone()];
+                actions.push(action);
+            }
         }
-
-        // Unused variable
-        if message.contains("unused variable") {
-            actions.push(self.prefix_underscore_fix(doc, diagnostic));
-            actions.push(self.remove_variable_fix(doc, diagnostic));
-        }
-
-        // Mismatched types
-        if message.contains("mismatched types") || message.contains("type mismatch") {
-            actions.extend(self.type_conversion_fixes(doc, diagnostic));
-        }
-
-        // Missing import
-        if message.contains("not found in this scope") || message.contains("cannot find") {
-            actions.extend(self.import_suggestions(doc, diagnostic));
-        }
-
-        // Unused import
-        if message.contains("unused import") {
-            actions.push(self.remove_import_fix(doc, diagnostic));
-        }
-
-        // Dead code
-        if message.contains("unreachable") || message.contains("dead code") {
-            actions.push(self.remove_dead_code_fix(doc, diagnostic));
-        }
-
         actions
-    }
-
-    /// Add semicolon quick fix.
-    fn add_semicolon_fix(&self, doc: &Document, diagnostic: &Diagnostic) -> CodeAction {
-        let pos = diagnostic.range.end;
-        let mut edit = WorkspaceEdit::new();
-        edit.add_edit(doc.uri.clone(), TextEdit::insert(pos, ";".to_string()));
-
-        CodeAction::quick_fix("Add missing semicolon")
-            .with_edit(edit)
-            .preferred()
-    }
-
-    /// Prefix with underscore quick fix.
-    fn prefix_underscore_fix(&self, doc: &Document, diagnostic: &Diagnostic) -> CodeAction {
-        let start = diagnostic.range.start;
-        let mut edit = WorkspaceEdit::new();
-        edit.add_edit(doc.uri.clone(), TextEdit::insert(start, "_".to_string()));
-
-        CodeAction::quick_fix("Prefix with underscore").with_edit(edit)
-    }
-
-    /// Remove unused variable quick fix.
-    fn remove_variable_fix(&self, doc: &Document, diagnostic: &Diagnostic) -> CodeAction {
-        // Find the entire let statement
-        let line = doc.line(diagnostic.range.start.line).unwrap_or("");
-        let start = Position::new(diagnostic.range.start.line, 0);
-        let end = Position::new(diagnostic.range.start.line, line.len() as u32);
-
-        let mut edit = WorkspaceEdit::new();
-        edit.add_edit(doc.uri.clone(), TextEdit::delete(Range::new(start, end)));
-
-        CodeAction::quick_fix("Remove unused variable").with_edit(edit)
-    }
-
-    /// Type conversion quick fixes.
-    fn type_conversion_fixes(&self, doc: &Document, diagnostic: &Diagnostic) -> Vec<CodeAction> {
-        let mut actions = Vec::new();
-
-        // Common type conversions
-        let conversions = [
-            ("as i32", "Convert to i32"),
-            ("as i64", "Convert to i64"),
-            ("as u32", "Convert to u32"),
-            ("as u64", "Convert to u64"),
-            ("as usize", "Convert to usize"),
-            ("as f32", "Convert to f32"),
-            ("as f64", "Convert to f64"),
-            (".to_string()", "Convert to String"),
-            (".as_str()", "Convert to &str"),
-        ];
-
-        for (suffix, title) in conversions {
-            let end = diagnostic.range.end;
-            let mut edit = WorkspaceEdit::new();
-            edit.add_edit(
-                doc.uri.clone(),
-                TextEdit::insert(end, format!(" {}", suffix)),
-            );
-            actions.push(CodeAction::quick_fix(title).with_edit(edit));
-        }
-
-        actions
-    }
-
-    /// Import suggestion quick fixes.
-    fn import_suggestions(&self, doc: &Document, diagnostic: &Diagnostic) -> Vec<CodeAction> {
-        let mut actions = Vec::new();
-
-        // Extract the name from diagnostic range
-        let name = doc.text_in_range(diagnostic.range);
-
-        // Common imports
-        let suggestions = get_import_suggestions(&name);
-
-        for suggestion in suggestions {
-            let import_line = format!("use {};\n", suggestion);
-            let mut edit = WorkspaceEdit::new();
-            edit.add_edit(
-                doc.uri.clone(),
-                TextEdit::insert(Position::new(0, 0), import_line),
-            );
-            actions.push(CodeAction::quick_fix(format!("Import {}", suggestion)).with_edit(edit));
-        }
-
-        actions
-    }
-
-    /// Remove unused import quick fix.
-    fn remove_import_fix(&self, doc: &Document, diagnostic: &Diagnostic) -> CodeAction {
-        let line = diagnostic.range.start.line;
-        let _line_text = doc.line(line).unwrap_or("");
-        let start = Position::new(line, 0);
-        // Include the newline
-        let end = Position::new(line + 1, 0);
-
-        let mut edit = WorkspaceEdit::new();
-        edit.add_edit(doc.uri.clone(), TextEdit::delete(Range::new(start, end)));
-
-        CodeAction::quick_fix("Remove unused import")
-            .with_edit(edit)
-            .preferred()
-    }
-
-    /// Remove dead code quick fix.
-    fn remove_dead_code_fix(&self, doc: &Document, diagnostic: &Diagnostic) -> CodeAction {
-        let mut edit = WorkspaceEdit::new();
-        edit.add_edit(doc.uri.clone(), TextEdit::delete(diagnostic.range));
-
-        CodeAction::quick_fix("Remove dead code").with_edit(edit)
     }
 
     /// Generate refactoring actions.
@@ -373,6 +277,21 @@ impl Default for CodeActionProvider {
     }
 }
 
+/// The compiler's exact-edit quick fixes for the diagnostics a client sent
+/// with a code action request. The buffer is checked once.
+pub(crate) fn compiler_quick_fixes(doc: &Document, diagnostics: &[Diagnostic]) -> Vec<CodeAction> {
+    if diagnostics.is_empty() {
+        return Vec::new();
+    }
+    let file = SourceFile::new("buffer", doc.content.clone());
+    let compiler = check_buffer(&file);
+    let provider = CodeActionProvider::new();
+    diagnostics
+        .iter()
+        .flat_map(|d| provider.quick_fixes_for_diagnostic(doc, d, &compiler))
+        .collect()
+}
+
 /// Get import priority for sorting.
 fn import_priority(import: &str) -> u8 {
     if import.contains("std::") {
@@ -383,53 +302,4 @@ fn import_priority(import: &str) -> u8 {
     } else {
         1 // external crates middle
     }
-}
-
-/// Get import suggestions for a name.
-fn get_import_suggestions(name: &str) -> Vec<String> {
-    let suggestions: Vec<(&str, &str)> = vec![
-        ("HashMap", "std::collections::HashMap"),
-        ("HashSet", "std::collections::HashSet"),
-        ("BTreeMap", "std::collections::BTreeMap"),
-        ("BTreeSet", "std::collections::BTreeSet"),
-        ("VecDeque", "std::collections::VecDeque"),
-        ("LinkedList", "std::collections::LinkedList"),
-        ("BinaryHeap", "std::collections::BinaryHeap"),
-        ("Vec", "std::vec::Vec"),
-        ("String", "std::string::String"),
-        ("Arc", "std::sync::Arc"),
-        ("Mutex", "std::sync::Mutex"),
-        ("RwLock", "std::sync::RwLock"),
-        ("Rc", "std::rc::Rc"),
-        ("RefCell", "std::cell::RefCell"),
-        ("Cell", "std::cell::Cell"),
-        ("Path", "std::path::Path"),
-        ("PathBuf", "std::path::PathBuf"),
-        ("File", "std::fs::File"),
-        ("Read", "std::io::Read"),
-        ("Write", "std::io::Write"),
-        ("BufReader", "std::io::BufReader"),
-        ("BufWriter", "std::io::BufWriter"),
-        ("Duration", "std::time::Duration"),
-        ("Instant", "std::time::Instant"),
-        ("SystemTime", "std::time::SystemTime"),
-        ("thread", "std::thread"),
-        ("fmt", "std::fmt"),
-        ("Display", "std::fmt::Display"),
-        ("Debug", "std::fmt::Debug"),
-        ("Default", "std::default::Default"),
-        ("Clone", "std::clone::Clone"),
-        ("Copy", "std::marker::Copy"),
-        ("Send", "std::marker::Send"),
-        ("Sync", "std::marker::Sync"),
-        ("Iterator", "std::iter::Iterator"),
-        ("IntoIterator", "std::iter::IntoIterator"),
-        ("FromIterator", "std::iter::FromIterator"),
-    ];
-
-    suggestions
-        .into_iter()
-        .filter(|(n, _)| *n == name)
-        .map(|(_, path)| path.to_string())
-        .collect()
 }

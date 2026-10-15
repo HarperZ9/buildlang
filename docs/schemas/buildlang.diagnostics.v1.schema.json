@@ -53,7 +53,22 @@
       "properties": {
         "message": { "type": "string" },
         "applicability": { "enum": ["MachineApplicable", "MaybeIncorrect", "HasPlaceholders", "Unspecified"] },
-        "widens_authority": { "type": "boolean", "description": "True when applying it adds a capability or unsafe authority. Such a suggestion is never MachineApplicable." }
+        "widens_authority": { "type": "boolean", "description": "True when applying it adds a capability or unsafe authority. Such a suggestion is never MachineApplicable." },
+        "edits": {
+          "description": "Exact edits that carry out the suggestion (added in 1.7.0; absent when the compiler knows none). Apply all of them together. The same edit can appear on several diagnostics; apply it once.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/edit" }
+        }
+      }
+    },
+    "edit": {
+      "type": "object",
+      "required": ["span", "replacement"],
+      "additionalProperties": false,
+      "properties": {
+        "span": { "$ref": "#/$defs/span", "description": "Bytes to replace; byte_start == byte_end is an insertion." },
+        "replacement": { "type": "string" }
       }
     }
   }

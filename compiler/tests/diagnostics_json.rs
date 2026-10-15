@@ -135,6 +135,13 @@ fn validate(root: &Value, schema: &Value, v: &Value, at: &str, errs: &mut Vec<St
                     }
                 }
             }
+            "minItems" => {
+                if let Some(items) = v.as_array() {
+                    if (items.len() as u64) < rule.as_u64().unwrap() {
+                        errs.push(format!("{at}: fewer than {rule} items"));
+                    }
+                }
+            }
             "items" => {
                 if let Some(items) = v.as_array() {
                     for (i, item) in items.iter().enumerate() {
@@ -402,4 +409,90 @@ fn validator_rejects_a_bad_report() {
     let mut errs = Vec::new();
     validate(&schema, &schema, &report, "$", &mut errs);
     assert_eq!(errs.len(), 3, "{errs:#?}");
+}
+
+/// Apply every distinct suggestion edit in a report to `src`, back to front.
+fn apply_edits(src: &str, report: &Value) -> (String, usize) {
+    let mut edits: Vec<(usize, usize, String)> = Vec::new();
+    for d in report["diagnostics"].as_array().unwrap() {
+        for s in d["suggestions"].as_array().unwrap() {
+            if let Some(list) = s.get("edits").and_then(Value::as_array) {
+                for e in list {
+                    let start = e["span"]["byte_start"].as_u64().unwrap() as usize;
+                    let end = e["span"]["byte_end"].as_u64().unwrap() as usize;
+                    let text = e["replacement"].as_str().unwrap().to_string();
+                    let edit = (start, end, text);
+                    if !edits.contains(&edit) {
+                        edits.push(edit);
+                    }
+                }
+            }
+        }
+    }
+    edits.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut out = src.to_string();
+    for (start, end, text) in &edits {
+        out.replace_range(*start..*end, text);
+    }
+    (out, edits.len())
+}
+
+/// M2: suggestions carry exact edits. Applying the edits of one report to a
+/// program with a missing `;`, a non-literal format argument and two missing
+/// capabilities yields a program that passes the check. A fix that widens
+/// authority carries its edit but is never MachineApplicable.
+#[test]
+fn applying_the_exact_edits_fixes_the_program() {
+    let dir = std::env::temp_dir().join(format!("buildlang_edits_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "fn load(path: str) -> str {\n    read_file(path)\n}\n\nfn shout(s: str) ~ Console {\n    println!(s);\n    let n = 3\n    println!(\"{}\", n);\n}\n\nfn main() {\n    shout(load(\"x\"));\n}\n";
+    let file = dir.join("broken.bld");
+    std::fs::write(&file, src).unwrap();
+    let schema = schema();
+    let codes = published_codes();
+
+    // The parser stops at the missing `;`, so the fixes arrive in rounds, as
+    // an agent applying them would see them. Each round must make progress.
+    let mut text = src.to_string();
+    let mut widened = 0;
+    for round in 0..4 {
+        std::fs::write(&file, &text).unwrap();
+        let run = check_json(&file, &[]);
+        assert_valid(&run, &file, &schema, &codes);
+        if run.success {
+            assert!(round >= 2, "fixed too early: round {round}");
+            assert!(
+                widened >= 2,
+                "both capability fixes must be flagged as widening"
+            );
+            assert!(text.contains("println!(\"{}\", s)"), "{text}");
+            assert!(text.contains("let n = 3;"), "{text}");
+            assert!(text.contains("-> str ~ FileSystem {"), "{text}");
+            let main_line = text.lines().find(|l| l.starts_with("fn main()")).unwrap();
+            assert!(
+                main_line.contains(" ~ ")
+                    && main_line.contains("Console")
+                    && main_line.contains("FileSystem"),
+                "{text}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        for d in run.report["diagnostics"].as_array().unwrap() {
+            for s in d["suggestions"].as_array().unwrap() {
+                if s.get("edits").is_some() && s["widens_authority"] == Value::Bool(true) {
+                    assert_ne!(s["applicability"], "MachineApplicable");
+                    widened += 1;
+                }
+            }
+        }
+        let (next, applied) = apply_edits(&text, &run.report);
+        assert!(
+            applied > 0,
+            "round {round}: a failing report offered no edit:\n{}",
+            run.report
+        );
+        text = next;
+    }
+    panic!("edits did not converge:\n{text}");
 }
