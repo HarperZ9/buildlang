@@ -451,7 +451,7 @@ Assert: `assert`, `assert_eq`
 
 ### 7.4 Vectors and strings in practice
 
-Give a vector its element type where it is created: `vec_new()` with no annotation makes a vector of `i32`, and pushing a string into it is a check error (BL0901). The free functions accept the vector by value or borrowed (`vec_push(&mut v, x)`, `vec_len(&v)`), and the method forms (`v.push(x)`, `v.len()`, `v[i]`) work the same way. Strings split with `split`, iterate with `chars`, and compare with `<` and `==`. The C backend has no `.parse()` yet; the check rejects it with BL0901, so convert digits by hand:
+A `let` bound to `vec_new()` with no annotation takes its element type from the first value pushed into it (`v.push(x)` or `vec_push(&mut v, x)`); a later push of another type is a check error (BL0901). With no push before the vector is used it holds `i32`, so annotate it there: `let mut v: Vec<str> = vec_new();`. The free functions accept the vector by value or borrowed (`vec_push(&mut v, x)`, `vec_len(&v)`), and the method forms (`v.push(x)`, `v.len()`, `v[i]`) work the same way. Strings split with `split`, iterate with `chars`, and compare with `<` and `==`. The C backend has no `.parse()` yet; the check rejects it with BL0901, so convert digits by hand:
 
 ```build
 fn parse_int(s: str) -> i64 {

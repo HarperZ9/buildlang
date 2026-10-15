@@ -11898,7 +11898,10 @@ fn corpus_verify_rejects_lsp_dispatch_code_action_observed_drift() {
             .iter_mut()
             .find(|fixture| fixture["method"] == "textDocument/codeAction")
             .expect("codeAction fixture should exist");
-        fixture["observed"]["code_actions"] = serde_json::Value::from(0);
+        // The fixture's supplied diagnostic is not one the compiler reports, so
+        // the server returns no quick fix (the retired pattern fix answered it
+        // with one). Claiming one is drift.
+        fixture["observed"]["code_actions"] = serde_json::Value::from(1);
         receipt
     });
 
@@ -22455,9 +22458,12 @@ fn check_rejects_format_specs_the_c_backend_cannot_print() {
 
 #[test]
 fn check_rejects_pushing_a_string_into_an_untyped_vector() {
+    // Since M2 the first push sets the element type of an unannotated vector,
+    // so the push itself passes. A second push of another type is what the
+    // check rejects, with the same message as before.
     let fixture = m1_fixture(
         "vecpush",
-        "fn main() ~ Console {\n    let mut words = vec_new();\n    vec_push(words, \"a\");\n    println!(\"{}\", vec_len(words));\n}\n",
+        "fn main() ~ Console {\n    let mut nums = vec_new();\n    vec_push(nums, 1);\n    vec_push(nums, \"a\");\n    println!(\"{}\", vec_len(nums));\n}\n",
     );
     let (ok, text) = check_output(&fixture);
     assert!(

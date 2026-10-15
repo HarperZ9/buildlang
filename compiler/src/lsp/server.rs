@@ -377,16 +377,8 @@ impl LanguageServer {
             return Vec::new();
         };
 
-        let mut actions = Vec::new();
-
-        // Generate quick fixes for diagnostics
-        for diagnostic in &params.context.diagnostics {
-            if let Some(fix) = self.generate_quick_fix(&doc, diagnostic) {
-                actions.push(fix);
-            }
-        }
-
-        actions
+        // Quick fixes are the exact edits of the compiler's own check.
+        super::actions::compiler_quick_fixes(&doc, &params.context.diagnostics)
     }
 
     /// Handle formatting request.
@@ -525,87 +517,12 @@ impl LanguageServer {
     // =========================================================================
     // HELPERS
     // =========================================================================
-
-    /// Generate a quick fix for a diagnostic.
-    fn generate_quick_fix(
-        &self,
-        doc: &super::document::Document,
-        diagnostic: &Diagnostic,
-    ) -> Option<CodeAction> {
-        let message = &diagnostic.message;
-
-        // Missing semicolon fix
-        if message.contains("expected ';'") {
-            let mut action = CodeAction::quick_fix("Add missing semicolon");
-            let pos = diagnostic.range.end;
-            let mut edit = WorkspaceEdit::new();
-            edit.add_edit(doc.uri.clone(), TextEdit::insert(pos, ";".to_string()));
-            action.edit = Some(edit);
-            action.is_preferred = true;
-            return Some(action);
-        }
-
-        // Unused variable fix
-        if message.contains("unused variable") {
-            let mut action = CodeAction::quick_fix("Prefix with underscore");
-            let start = diagnostic.range.start;
-            let mut edit = WorkspaceEdit::new();
-            edit.add_edit(doc.uri.clone(), TextEdit::insert(start, "_".to_string()));
-            action.edit = Some(edit);
-            return Some(action);
-        }
-
-        // Import suggestion
-        if message.contains("not found in this scope") {
-            if let Some((word, _)) = doc.word_at(diagnostic.range.start) {
-                // Suggest common imports
-                let import_suggestions = suggest_import(&word);
-                if !import_suggestions.is_empty() {
-                    let suggestion = &import_suggestions[0];
-                    let mut action = CodeAction::quick_fix(format!("Import {}", suggestion));
-                    let mut edit = WorkspaceEdit::new();
-                    edit.add_edit(
-                        doc.uri.clone(),
-                        TextEdit::insert(Position::new(0, 0), format!("use {};\n", suggestion)),
-                    );
-                    action.edit = Some(edit);
-                    return Some(action);
-                }
-            }
-        }
-
-        None
-    }
 }
 
 impl Default for LanguageServer {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Suggest imports for a name.
-fn suggest_import(name: &str) -> Vec<String> {
-    // Common stdlib imports
-    let suggestions: Vec<(&str, &str)> = vec![
-        ("HashMap", "std::collections::HashMap"),
-        ("HashSet", "std::collections::HashSet"),
-        ("Vec", "std::vec::Vec"),
-        ("String", "std::string::String"),
-        ("Arc", "std::sync::Arc"),
-        ("Mutex", "std::sync::Mutex"),
-        ("Rc", "std::rc::Rc"),
-        ("RefCell", "std::cell::RefCell"),
-        ("Path", "std::path::Path"),
-        ("PathBuf", "std::path::PathBuf"),
-        ("File", "std::fs::File"),
-    ];
-
-    suggestions
-        .into_iter()
-        .filter(|(n, _)| *n == name)
-        .map(|(_, path)| path.to_string())
-        .collect()
 }
 
 // =============================================================================
@@ -1683,49 +1600,64 @@ mod tests {
     }
 
     #[test]
-    fn raw_dispatch_code_action_returns_supplied_diagnostic_quick_fix() {
+    fn raw_dispatch_code_action_returns_the_compiler_fix_for_a_published_diagnostic() {
         let mut server = LanguageServer::new();
-        dispatch_raw_message(
+        let published = dispatch_raw_message(
             &mut server,
             r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.bld","languageId":"build","version":1,"text":"fn main() {\n    let x = 1\n}\n"}}}"#,
         )
         .expect("didOpen should publish diagnostics");
+        let published: serde_json::Value =
+            serde_json::from_str(&published).expect("parse publishDiagnostics");
+        let diagnostics = published["params"]["diagnostics"].clone();
+        assert!(diagnostics.as_array().is_some_and(|d| !d.is_empty()));
 
-        let response = dispatch_raw_message(
-            &mut server,
-            r#"{
-              "jsonrpc": "2.0",
-              "id": 10,
-              "method": "textDocument/codeAction",
-              "params": {
+        // The client sends back what the server published; the quick fix is
+        // the compiler's exact edit for that diagnostic.
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "textDocument/codeAction",
+            "params": {
                 "textDocument": { "uri": "file:///workspace/main.bld" },
-                "range": {
-                  "start": { "line": 1, "character": 13 },
-                  "end": { "line": 1, "character": 13 }
-                },
-                "context": {
-                  "diagnostics": [{
-                    "range": {
-                      "start": { "line": 1, "character": 13 },
-                      "end": { "line": 1, "character": 13 }
-                    },
-                    "severity": 1,
-                    "source": "buildlang",
-                    "message": "expected ';'"
-                  }]
-                }
-              }
-            }"#,
-        )
-        .expect("codeAction should return a response");
+                "range": { "start": { "line": 1, "character": 0 }, "end": { "line": 2, "character": 0 } },
+                "context": { "diagnostics": diagnostics }
+            }
+        });
+        let response = dispatch_raw_message(&mut server, &request.to_string())
+            .expect("codeAction should return a response");
         let json: serde_json::Value =
             serde_json::from_str(&response).expect("parse codeAction response");
-
         assert_eq!(json["id"], 10);
         let actions = json["result"].as_array().expect("code actions array");
-        assert!(actions
+        let fix = actions
             .iter()
-            .any(|action| action["title"] == "Add missing semicolon"));
+            .find(|a| a["title"] == "add a `;` at the end of the statement")
+            .unwrap_or_else(|| panic!("no semicolon fix in {json}"));
+        assert_eq!(fix["isPreferred"], true, "{json}");
+        let edit = &fix["edit"]["changes"]["file:///workspace/main.bld"][0];
+        assert_eq!(edit["newText"], ";", "{json}");
+        assert_eq!(edit["range"]["start"]["line"], 1, "{json}");
+        assert_eq!(edit["range"]["start"]["character"], 13, "{json}");
+    }
+
+    #[test]
+    fn raw_dispatch_code_action_invents_no_fix_for_an_unknown_diagnostic() {
+        let mut server = LanguageServer::new();
+        dispatch_raw_message(
+            &mut server,
+            r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/main.bld","languageId":"build","version":1,"text":"fn main() {}\n"}}}"#,
+        )
+        .expect("didOpen should publish diagnostics");
+        // A diagnostic the compiler did not report (the retired text-pattern
+        // checks used to answer this one with "Add missing semicolon").
+        let response = dispatch_raw_message(
+            &mut server,
+            r#"{"jsonrpc":"2.0","id":12,"method":"textDocument/codeAction","params":{"textDocument":{"uri":"file:///workspace/main.bld"},"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}},"context":{"diagnostics":[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}},"severity":1,"source":"buildlang","message":"expected ';'"}]}}}"#,
+        )
+        .expect("codeAction should return a response");
+        let json: serde_json::Value = serde_json::from_str(&response).expect("parse");
+        assert_eq!(json["result"].as_array().map(Vec::len), Some(0), "{json}");
     }
 
     #[test]

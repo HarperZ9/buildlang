@@ -245,12 +245,27 @@ impl<'ctx> MirLowerer<'ctx> {
             self.expected_type = Some(ty.clone());
         }
 
+        // `let v = vec_new();` with no annotation: the element type is settled
+        // by the first push (see `settle_pending_vec`).
+        let untyped_vec_new = explicit_ty.is_none()
+            && matches!(&local.pattern.kind, ast::PatternKind::Ident { .. })
+            && local.init.as_ref().is_some_and(|init| {
+                matches!(&init.expr.kind, ExprKind::Call { func, args }
+                    if args.is_empty() && self.extract_call_name(func) == Some("vec_new"))
+            });
+        self.untyped_vec_new_binding = untyped_vec_new;
+        self.untyped_vec_new_dest = None;
+
         // Compute init value if present
         let init_val = if let Some(init) = &local.init {
-            Some(self.lower_expr(&init.expr)?)
+            let lowered = self.lower_expr(&init.expr);
+            self.untyped_vec_new_binding = false;
+            Some(lowered?)
         } else {
             None
         };
+        self.untyped_vec_new_binding = false;
+        let untyped_vec_dest = self.untyped_vec_new_dest.take();
 
         // Restore previous expected type
         self.expected_type = prev_expected;
@@ -355,6 +370,10 @@ impl<'ctx> MirLowerer<'ctx> {
                 .is_some_and(|n| self.fn_returns_char_vec.contains(n));
             if annotated_char || init_is_char || call_is_char {
                 self.char_locals.insert(local_id);
+            }
+            if let Some(dest) = untyped_vec_dest {
+                self.pending_untyped_vecs
+                    .insert(local_id, vec![dest, local_id]);
             }
             // A vector of chars: `let v: Vec<char> = ...;` or a copy of one.
             let annotated_char_vec = local
@@ -652,6 +671,7 @@ impl<'ctx> MirLowerer<'ctx> {
 
     pub(crate) fn lower_ident(&mut self, ident: &ast::Ident) -> CodegenResult<MirValue> {
         if let Some(&local) = self.var_map.get(&ident.name) {
+            self.note_pending_vec_use(local);
             Ok(values::local(local))
         } else {
             // Check for math constants
@@ -1410,6 +1430,7 @@ impl<'ctx> MirLowerer<'ctx> {
         match &expr.kind {
             ExprKind::Ident(ident) => match self.var_map.get(&ident.name).copied() {
                 Some(local) => {
+                    self.note_pending_vec_use(local);
                     let ty = self
                         .current_fn
                         .as_ref()
@@ -2452,6 +2473,30 @@ impl<'ctx> MirLowerer<'ctx> {
         if self.module.find_function(resolved.as_ref()).is_some() {
             return None;
         }
+        // `let v = vec_new();` with no annotation: construct through the
+        // destination's type (`Vec_new`) so the first push can still settle
+        // the element type; until then it is a vector of i32, as before.
+        if self.expected_type.is_none() && self.untyped_vec_new_binding {
+            let builder = match self.current_fn.as_mut() {
+                Some(b) => b,
+                None => {
+                    return Some(Err(CodegenError::Internal(
+                        "No current function".to_string(),
+                    )))
+                }
+            };
+            let dest = builder.create_local(MirType::Vec(Box::new(MirType::i32())));
+            let cont = builder.create_block();
+            builder.call(
+                MirValue::Function(Arc::from("Vec_new")),
+                vec![],
+                Some(dest),
+                cont,
+            );
+            builder.switch_to_block(cont);
+            self.untyped_vec_new_dest = Some(dest);
+            return Some(Ok(values::local(dest)));
+        }
         let Some(MirType::Vec(elem)) = self.expected_type.clone() else {
             return None;
         };
@@ -2802,6 +2847,85 @@ impl<'ctx> MirLowerer<'ctx> {
         }
     }
 
+    /// The locals of an unannotated `vec_new()` binding that `expr` names
+    /// (looking through `&`, `&mut` and parentheses), removed from the
+    /// pending set: only the first push decides the element type.
+    pub(crate) fn take_pending_vec_group(
+        &mut self,
+        expr: &ast::Expr,
+    ) -> Option<(Vec<LocalId>, Arc<str>)> {
+        let mut e = expr;
+        loop {
+            match &e.kind {
+                ExprKind::Ref { expr: inner, .. } | ExprKind::Paren(inner) => e = inner,
+                _ => break,
+            }
+        }
+        let ExprKind::Ident(ident) = &e.kind else {
+            return None;
+        };
+        let local = *self.var_map.get(&ident.name)?;
+        let group = self.pending_untyped_vecs.remove(&local)?;
+        Some((group, ident.name.clone()))
+    }
+
+    /// Record that a vector still waiting for its first push was read: its
+    /// element type was fixed (as i32) by that read, so a later push may not
+    /// change it.
+    fn note_pending_vec_use(&mut self, local: LocalId) {
+        if self.pending_untyped_vecs.contains_key(&local) {
+            self.observed_pending_vecs.insert(local);
+        }
+    }
+
+    /// Give every local of an unannotated `vec_new()` binding the element
+    /// type of the first value pushed into it. A value the vector runtime
+    /// cannot hold leaves the default (i32), and the push is then rejected
+    /// with the usual BL0901 message.
+    pub(crate) fn settle_pending_vec(
+        &mut self,
+        group: &[LocalId],
+        name: &str,
+        pushed: &MirValue,
+        at: &ast::Expr,
+    ) -> CodegenResult<()> {
+        let elem = self.type_of_value(pushed);
+        if Self::hvec_elem_suffix(&elem).is_err() {
+            return Ok(());
+        }
+        // The vector was read before this push, and that code was lowered for
+        // a vector of i32. Retyping now would leave it wrong, so fail closed
+        // unless the element is i32 anyway.
+        if group
+            .iter()
+            .any(|id| self.observed_pending_vecs.contains(id))
+        {
+            if elem == MirType::i32() {
+                return Ok(());
+            }
+            return Err(self.reject_at(
+                at,
+                format!(
+                    "`{name}` is used before its first push, so its element type is not known there"
+                ),
+                format!(
+                    "write the element type where the vector is created: `let mut {name}: Vec<{}> = vec_new();`",
+                    Self::source_type_name(&elem)
+                ),
+            ));
+        }
+        let is_char = matches!(pushed, MirValue::Local(id) if self.char_locals.contains(id));
+        if let Some(builder) = self.current_fn.as_mut() {
+            for id in group {
+                builder.retype_local(*id, MirType::Vec(Box::new(elem.clone())));
+            }
+        }
+        if is_char {
+            self.char_vec_locals.extend(group.iter().copied());
+        }
+        Ok(())
+    }
+
     /// A `CodegenError::Rejected` located at `expr` when it lies in the entry
     /// source.
     pub(crate) fn reject_at(
@@ -2843,6 +2967,25 @@ impl<'ctx> MirLowerer<'ctx> {
             return None;
         }
 
+        // `vec_push(&mut v, x)` on a vector from an unannotated `vec_new()`:
+        // the first push decides the element type.
+        let mut prelowered_push_arg = None;
+        if op == "vec_push" && args.len() == 2 {
+            if let Some((group, name)) = self.take_pending_vec_group(&args[0]) {
+                let val = match self
+                    .lower_expr(&args[1])
+                    .and_then(|v| self.deref_if_pointer(v))
+                {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                if let Err(e) = self.settle_pending_vec(&group, &name, &val, &args[1]) {
+                    return Some(Err(e));
+                }
+                prelowered_push_arg = Some(val);
+            }
+        }
+
         // Lower the receiver (first arg) and read its element type. Agents
         // write `vec_push(&mut v, x)` and `vec_len(&v)`; the runtime takes the
         // handle by value, so a borrowed receiver is loaded first.
@@ -2867,10 +3010,14 @@ impl<'ctx> MirLowerer<'ctx> {
 
         // Lower the remaining args (push value / get index).
         let mut arg_vals = vec![recv_val];
-        for a in &args[1..] {
-            match self.lower_expr(a) {
-                Ok(v) => arg_vals.push(v),
-                Err(e) => return Some(Err(e)),
+        if let Some(val) = prelowered_push_arg.take() {
+            arg_vals.push(val);
+        } else {
+            for a in &args[1..] {
+                match self.lower_expr(a) {
+                    Ok(v) => arg_vals.push(v),
+                    Err(e) => return Some(Err(e)),
+                }
             }
         }
 
@@ -3636,6 +3783,18 @@ impl<'ctx> MirLowerer<'ctx> {
         ) {
             if let Some(chain) = Self::try_parse_iter_chain(receiver, method_name, args) {
                 return self.lower_iter_chain(&chain);
+            }
+        }
+
+        // `v.push(x)` on a vector from an unannotated `vec_new()`: the first
+        // push decides the element type, before the receiver is read.
+        let mut prelowered_push_arg = None;
+        if method_name == "push" && args.len() == 1 {
+            if let Some((group, name)) = self.take_pending_vec_group(receiver) {
+                let val = self.lower_expr(&args[0])?;
+                let val = self.deref_if_pointer(val)?;
+                self.settle_pending_vec(&group, &name, &val, &args[0])?;
+                prelowered_push_arg = Some(val);
             }
         }
 
@@ -4612,11 +4771,35 @@ impl<'ctx> MirLowerer<'ctx> {
 
             if let Some(fn_name) = runtime_fn {
                 let mut arg_vals = vec![receiver_val];
-                for arg in args {
-                    // `v.contains(&x)`: the runtime helpers take elements by
-                    // value, so load a borrowed argument first.
-                    let val = self.lower_expr(arg)?;
-                    arg_vals.push(self.deref_if_pointer(val)?);
+                if let Some(val) = prelowered_push_arg.take() {
+                    arg_vals.push(val);
+                } else {
+                    for arg in args {
+                        // `v.contains(&x)`: the runtime helpers take elements by
+                        // value, so load a borrowed argument first.
+                        let val = self.lower_expr(arg)?;
+                        arg_vals.push(self.deref_if_pointer(val)?);
+                    }
+                }
+                // `v.push(x)` with an `x` the vector cannot hold: the same check
+                // `vec_push` makes. Without it `v.push(3)` on a `Vec<str>` passed
+                // `buildc check` and failed in the C compiler.
+                if method_name == "push" {
+                    if let (Some(value), Some(arg)) = (arg_vals.get(1), args.first()) {
+                        let value_ty = self.type_of_value(value);
+                        if !Self::vec_elem_accepts(elem_ty, &value_ty) {
+                            return Err(self.reject_at(
+                                arg,
+                                format!(
+                                    "`push` adds a `{}` to a vector of `{}` elements",
+                                    Self::source_type_name(&value_ty),
+                                    Self::source_type_name(elem_ty)
+                                ),
+                                "push values of one type into a vector; its element type comes from its annotation or its first push"
+                                    .to_string(),
+                            ));
+                        }
+                    }
                 }
                 let builder = self
                     .current_fn

@@ -46,11 +46,9 @@
       "response_kind": "notification",
       "result_digest": {
         "algorithm": "sha256",
-        "hex": "4d52ae5744cd0a4e29a8e2664a537af56e44d1b8d305951f380bf7bbba7f2c16"
+        "hex": "ba6f49ec8b05d8be23e790e5a510a616b5b32c3c8b0819808cdaf7efa4ca45dc"
       },
-      "observed": {
-        "diagnostics": 1
-      }
+      "observed": {}
     },
     {
       "id": "semantic-tokens",
@@ -184,11 +182,10 @@
       "response_kind": "response",
       "result_digest": {
         "algorithm": "sha256",
-        "hex": "99cf8a599c71ba0e160c151de6fd6b4e4588f603321f5bfc66816648eb694694"
+        "hex": "42b1175954f0f3b3ebfb3f29063a99ad89bc17c512bdf103537991c985ba490b"
       },
       "observed": {
-        "has_result": true,
-        "code_actions": 1
+        "has_result": true
       }
     },
     {

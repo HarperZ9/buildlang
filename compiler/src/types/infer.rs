@@ -709,6 +709,11 @@ impl<'ctx> TypeInfer<'ctx> {
         if let Some(help) = error.suggestion() {
             with_span = with_span.with_help(help);
         }
+        if found != "a raw string literal" {
+            if let Some(fix) = format_arg_fix(macro_name, first, inner) {
+                with_span = with_span.with_fix(fix);
+            }
+        }
         self.errors.push(with_span);
     }
 
@@ -8562,4 +8567,54 @@ fn first_token_source(trees: &[ast::TokenTree]) -> Option<SourceId> {
             first_token_source(tokens).or(Some(span.source_id))
         }
     })
+}
+
+/// Exact fix for a format macro whose first argument is not a string literal:
+/// insert a literal with one `{}` per top-level argument. With one argument
+/// the edit is what the program needs (`println!(x)` becomes
+/// `println!("{}", x)`); with several, the original first argument may have
+/// been meant as a format string, so the fix needs review.
+fn format_arg_fix(
+    macro_name: &str,
+    first: &ast::TokenTree,
+    args: &[ast::TokenTree],
+) -> Option<crate::diagnostics::Fix> {
+    let start = match first {
+        ast::TokenTree::Token(token) => token.span,
+        ast::TokenTree::Delimited { span, .. } => *span,
+    };
+    if start.start.0 == 0 && start.end.0 == 0 {
+        return None;
+    }
+    let commas = args
+        .iter()
+        .filter(|tree| {
+            matches!(
+                tree,
+                ast::TokenTree::Token(Token {
+                    kind: TokenKind::Comma,
+                    ..
+                })
+            )
+        })
+        .count();
+    // A trailing comma does not start another argument.
+    let trailing = matches!(
+        args.last(),
+        Some(ast::TokenTree::Token(Token {
+            kind: TokenKind::Comma,
+            ..
+        }))
+    );
+    let count = commas + 1 - usize::from(trailing);
+    let placeholders = vec!["{}"; count].join(" ");
+    Some(crate::diagnostics::Fix::insert(
+        format!(
+            "pass the value through a `{{}}` placeholder: `{}!(\"{}\", ...)`",
+            macro_name, placeholders
+        ),
+        start,
+        format!("\"{}\", ", placeholders),
+        count == 1,
+    ))
 }

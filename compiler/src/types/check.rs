@@ -1066,12 +1066,19 @@ impl<'ctx> TypeChecker<'ctx> {
             });
 
             if expected_effects.is_empty() && !body_effects.is_empty() {
+                let missing: Vec<String> = body_effects
+                    .effects
+                    .iter()
+                    .map(|e| e.name.to_string())
+                    .collect();
+                let row_fix = effect_row_fix(f, &missing);
                 for body_eff in &body_effects.effects {
                     let err = TypeError::UnhandledEffect {
                         func_name: func_name.clone(),
                         effect_name: body_eff.name.to_string(),
                     };
                     let mut err_with_span = TypeErrorWithSpan::new(err, span);
+                    err_with_span.fix = row_fix.clone();
                     err_with_span.help = Some(format!(
                         "either add `~ {}` to the function signature:\n  fn {}() ~ {} {{ ... }}\n\nor handle the effect with a handler:\n  handle {{ ... }} with {{\n      {}.operation(args) => |resume| {{\n          // handle the operation\n          resume(())\n      }},\n  }}",
                         body_eff.name, func_name, body_eff.name, body_eff.name
@@ -1099,6 +1106,13 @@ impl<'ctx> TypeChecker<'ctx> {
                     .iter()
                     .map(|e| e.name.to_string())
                     .collect();
+                let missing: Vec<String> = body_effects
+                    .effects
+                    .iter()
+                    .filter(|e| !expected_effects.contains(e))
+                    .map(|e| e.name.to_string())
+                    .collect();
+                let row_fix = effect_row_fix(f, &missing);
                 for body_eff in &body_effects.effects {
                     if !expected_effects.contains(body_eff) {
                         let err = TypeError::UndeclaredEffect {
@@ -1108,6 +1122,7 @@ impl<'ctx> TypeChecker<'ctx> {
                         };
                         let mut err_with_span = TypeErrorWithSpan::new(err, span);
                         err_with_span.help = err_with_span.error.suggestion();
+                        err_with_span.fix = row_fix.clone();
                         if let Some(sources) = capability_sources.get(body_eff.name.as_ref()) {
                             err_with_span.notes.push(format!(
                                 "capability `{}` was triggered by ambient call(s): {}",
@@ -3954,4 +3969,42 @@ mod tests {
             );
         }
     }
+}
+
+/// Exact fix for a function whose body uses capabilities its signature does
+/// not declare: write every missing capability into the effect row in one
+/// edit. With no row, `~ A + B ` goes just before the body's `{`; with a row,
+/// ` + A + B` goes after its last entry. The fix widens authority, so the
+/// diagnostics layer never marks it MachineApplicable.
+fn effect_row_fix(f: &ast::FnDef, missing: &[String]) -> Option<crate::diagnostics::Fix> {
+    if missing.is_empty() {
+        return None;
+    }
+    let row = missing.join(" + ");
+    let message = format!("add `{}` to the function's effect row", row);
+    if let Some(last) = f.sig.effects.last() {
+        let end = Span::new(last.span.end, last.span.end, last.span.source_id);
+        if last.span.end.0 == 0 {
+            return None;
+        }
+        return Some(crate::diagnostics::Fix::insert(
+            message,
+            end,
+            format!(" + {}", row),
+            true,
+        ));
+    }
+    let body = f.body.as_ref()?;
+    let at = body.span;
+    if at.start.0 == 0 {
+        return None;
+    }
+    let text = crate::lexer::source_text_for_id(at.source_id)?;
+    let before = text.get(..at.start.0 as usize)?.chars().last();
+    let insert = if before.map_or(false, char::is_whitespace) {
+        format!("~ {} ", row)
+    } else {
+        format!(" ~ {} ", row)
+    };
+    Some(crate::diagnostics::Fix::insert(message, at, insert, true))
 }

@@ -141,9 +141,17 @@ fn borrowed_vector_receivers_run() {
     );
     assert_eq!(stdout.trim_end().lines().last(), Some("2 b 1"), "{stdout}");
 
+    // Since M2 an unannotated vector takes its element type from its first
+    // push, so this passes; a vector read before its first push is still
+    // rejected at check time with the annotation to write.
     let (passed, json) = check(
         "unannotated_str_vec",
         "fn main() ~ Console {\n    let mut words = vec_new();\n    vec_push(&mut words, \"a\");\n    println!(\"{}\", vec_len(&words));\n}\n",
+    );
+    assert!(passed, "{json}");
+    let (passed, json) = check(
+        "read_before_push",
+        "fn main() ~ Console {\n    let mut words = vec_new();\n    println!(\"{}\", vec_len(&words));\n    vec_push(&mut words, \"a\");\n}\n",
     );
     assert!(!passed);
     assert!(

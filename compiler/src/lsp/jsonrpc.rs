@@ -116,7 +116,14 @@ impl JsonRpcMessage {
                 .get("severity")
                 .and_then(Value::as_i64)
                 .and_then(Self::diagnostic_severity),
-            code: None,
+            // The client echoes the code back; quick fixes match on it.
+            code: match value.get("code") {
+                Some(Value::String(s)) => Some(super::types::DiagnosticCode::String(s.clone())),
+                Some(Value::Number(n)) => n
+                    .as_i64()
+                    .map(|n| super::types::DiagnosticCode::Number(n as i32)),
+                _ => None,
+            },
             source: value
                 .get("source")
                 .and_then(Value::as_str)

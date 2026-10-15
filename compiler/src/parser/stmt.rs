@@ -147,11 +147,19 @@ impl<'a> Parser<'a> {
                 // Expression is the final expression of the block
                 Ok(Stmt::new(StmtKind::Expr(Box::new(expr)), start))
             } else {
-                // Missing semicolon
-                Err(ParseError::new(
-                    ParseErrorKind::ExpectedSemicolon,
-                    self.current_span(),
-                ))
+                // Missing semicolon: the exact fix inserts it right after
+                // the expression, not at the next token.
+                let after =
+                    crate::lexer::Span::new(expr.span.end, expr.span.end, expr.span.source_id);
+                Err(
+                    ParseError::new(ParseErrorKind::ExpectedSemicolon, self.current_span())
+                        .with_fix(crate::diagnostics::Fix::insert(
+                            "add a `;` at the end of the statement",
+                            after,
+                            ";",
+                            true,
+                        )),
+                )
             }
         } else {
             // Block expression, no semicolon needed

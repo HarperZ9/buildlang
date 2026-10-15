@@ -26,6 +26,8 @@ pub struct TypeErrorWithSpan {
     pub help: Option<String>,
     /// Optional notes.
     pub notes: Vec<String>,
+    /// An exact-edit fix, when the checker knows one.
+    pub fix: Option<crate::diagnostics::Fix>,
 }
 
 impl TypeErrorWithSpan {
@@ -36,7 +38,14 @@ impl TypeErrorWithSpan {
             span,
             help: None,
             notes: Vec::new(),
+            fix: None,
         }
+    }
+
+    /// Attach an exact-edit fix.
+    pub fn with_fix(mut self, fix: crate::diagnostics::Fix) -> Self {
+        self.fix = Some(fix);
+        self
     }
 
     /// Add a help message.
@@ -56,7 +65,11 @@ impl fmt::Display for TypeErrorWithSpan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.error)?;
         let suggestion = self.error.suggestion();
-        for help in crate::diagnostics::help_lines(self.help.as_deref(), suggestion.as_deref()) {
+        for help in crate::diagnostics::help_lines_with_fix(
+            self.help.as_deref(),
+            suggestion.as_deref(),
+            self.fix.as_ref(),
+        ) {
             write!(f, "\n  help: {}", help)?;
         }
         for note in &self.notes {
