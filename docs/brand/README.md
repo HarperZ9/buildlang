@@ -26,6 +26,6 @@ The README hero image in this folder was rendered as part of the operator's flag
 - Source contract: `telos.rendering.research` (the shared flagship hero renderer).
 - Product role: the Effects Language compiler (`buildc`) and toolchain, under the operator's Build ecosystem umbrella.
 - Tool-specific motif: typed-effect tokens flowing into verified codegen.
-- Typography: rendered locally from the operator-owned Kilon and Conso font packages. The public repository carries only the exported artwork, not the purchased font files.
+- Typography: this artwork was rendered locally with Kilon and Conso. Kilon was retired on 2026-10-04, and renders after that date set display type in Hanken Grotesk. The public repository carries only the exported artwork, not the font files.
 - Accessibility floor: high-contrast foreground text, non-color-only status labels, and static PNG fallback for GitHub and low-capability hosts.
 - Provenance boundary: Reddit and community links are treated as non-evidentiary source leads; implementation claims resolve through lawful papers, standards, official repositories, and repeatable local checks.
