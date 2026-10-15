@@ -1,0 +1,10 @@
+fn get(v: &Vec<i32>, i: i32) -> i32 {
+    let x = v[i];
+    x
+}
+
+fn main() ~ Console {
+    let mut v: Vec<i32> = vec_new();
+    v.push(4);
+    println!("{}", get(&v, 0));
+}

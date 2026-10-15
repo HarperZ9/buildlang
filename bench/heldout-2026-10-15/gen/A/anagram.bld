@@ -1,0 +1,36 @@
+fn count_of(w: str, code: i64) -> i64 {
+    let mut n: i64 = 0;
+    for c in w.chars() {
+        if c as i64 == code {
+            n = n + 1;
+        }
+    }
+    n
+}
+
+fn is_anagram(a: str, b: str) -> bool {
+    let mut ok = true;
+    let mut code: i64 = 0;
+    while code < 128 {
+        if count_of(a, code) != count_of(b, code) {
+            ok = false;
+        }
+        code = code + 1;
+    }
+    ok
+}
+
+fn report(a: str, b: str) ~ Console {
+    if is_anagram(a, b) {
+        println!("{} {} yes", a, b);
+    } else {
+        println!("{} {} no", a, b);
+    }
+}
+
+fn main() ~ Console {
+    report("listen", "silent");
+    report("hello", "world");
+    report("evil", "vile");
+    report("aab", "abb");
+}

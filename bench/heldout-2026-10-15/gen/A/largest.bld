@@ -1,0 +1,30 @@
+fn largest<T>(v: Vec<T>, less: fn(T, T) -> bool) -> T {
+    let mut best = v[0];
+    for x in v {
+        if less(best, x) {
+            best = x;
+        }
+    }
+    best
+}
+
+fn less_int(a: i32, b: i32) -> bool {
+    a < b
+}
+
+fn less_str(a: str, b: str) -> bool {
+    a < b
+}
+
+fn main() ~ Console {
+    let mut nums: Vec<i32> = vec_new();
+    nums.push(3);
+    nums.push(9);
+    nums.push(4);
+    let mut words: Vec<str> = vec_new();
+    words.push("pear");
+    words.push("apple");
+    words.push("plum");
+    println!("{}", largest(nums, less_int));
+    println!("{}", largest(words, less_str));
+}

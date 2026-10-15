@@ -1,0 +1,776 @@
+# BuildLang Algebraic Effects Guide
+
+Algebraic effects are BuildLang's signature feature. Think of them as checked exceptions crossed with dependency injection: a function declares what side effects it performs, and the caller decides how to handle them. This gives you compile-time control over I/O, rendering, logging, and anything else that touches the outside world.
+
+---
+
+## Why Effects Matter for Graphics
+
+In a game engine, your rendering code calls into Vulkan, DirectX, or OpenGL. With effects, you write the rendering logic once and swap the backend at the call site:
+
+- Production: Vulkan handler
+- Testing: mock handler that logs draw calls
+- Profiling: handler that records timing
+- Replay: handler that plays back recorded frames
+
+No interfaces, no virtual dispatch, no runtime overhead. The effect handler is resolved at compile time.
+
+---
+
+## Defining an Effect
+
+An effect declares a set of operations. It does not implement them -- that is the handler's job.
+
+```build name=greeting
+effect Greeting {
+    fn greet(name: str) -> (),
+}
+```
+
+This says: "There exists a side effect called `Greeting` with one operation `greet` that takes a string and returns nothing." It is a contract, like a trait but for side effects.
+
+An effect can have multiple operations:
+
+```build
+effect Render {
+    fn draw(description: str) -> (),
+    fn clear(r: f64, g: f64, b: f64) -> (),
+    fn swap_buffers() -> (),
+}
+```
+
+---
+
+## Performing an Effect
+
+A function that uses an effect must declare it in its signature with `~`:
+
+```build name=welcome uses=greeting
+fn welcome() ~ Greeting {
+    perform Greeting.greet("Alice");
+}
+```
+
+The `~ Greeting` annotation means: "this function performs the Greeting effect." The compiler tracks this -- if you forget the annotation, you get a compile error. If you call a function that performs effects, your function must either handle them or propagate them in its own signature.
+
+```build uses=greeting
+fn welcome_everyone() ~ Greeting {
+    perform Greeting.greet("Alice");
+    perform Greeting.greet("Bob");
+    perform Greeting.greet("Charlie");
+}
+```
+
+---
+
+## Capability Effects
+
+Some effects are built into the compiler because they describe ambient runtime
+or compile-time capabilities rather than user-defined operations. `buildc
+check` surfaces these as ordinary effect requirements, so operational access has
+to appear in the function type instead of hiding behind a runtime helper or
+macro expansion.
+
+| Capability | Direct ambient surfaces |
+|------------|-------------------------|
+| `FileSystem` | `read_file`, `write_file`, `file_exists`, `read_bytes`, `write_bytes`, `append_file`, `list_dir`, `is_dir`, `file_size`, compile-time include macros such as `include!`, `include_str!`, and `include_bytes!` |
+| `Network` | `tcp_connect`, `tcp_send`, `tcp_recv`, `tcp_close` |
+| `Process` | `exit`, `process_exit` |
+| `Environment` | `getenv`, `args_count`, `args_get`, compile-time environment macros such as `env!` and `option_env!` |
+| `Clock` | `clock_ms`, `time_unix` |
+| `Console` | `read_line`, `read_all`, `stdin_is_pipe`, direct print helpers, console macros such as `println!`, `print!`, `eprintln!`, `eprint!`, and diagnostic logging macros |
+| `Foreign` | calls to unknown functions declared in `extern` blocks and reads from foreign statics |
+| `Gpu` | direct `build_vk_*` and `build_gfx_*` runtime helpers |
+| `Random` | `random_f64` (the seeded PRNG; `buildc run --seed N` supplies the seed, and an unseeded draw aborts) |
+| `Model` | `model_complete` (line-protocol shim at `BUILD_MODEL_ENDPOINT`; a Model-observing program cannot emit a scientific receipt: models propose, oracles dispose) |
+
+Known `build_*` C runtime helper aliases declared through `extern` blocks are
+classified by their specific domain capability instead of generic `Foreign`.
+For example, `build_read_file` is `FileSystem`, `build_tcp_connect` is
+`Network`, and `build_gfx_init` is `Gpu`. Unknown extern functions and
+foreign statics remain `Foreign`.
+
+Compile-time ambient macros are direct capability surfaces too. `include!`,
+`include_str!`, and `include_bytes!` require `FileSystem`; `env!` and
+`option_env!` require `Environment`; receipts record the exact macro source
+under `observed_capabilities`.
+Macro argument token trees are scanned for ambient capability surfaces as well:
+`println!("{}", read_file("ops.toml"))` requires both `Console` and `FileSystem`, and
+the receipt records `println!` under `Console` plus `read_file` under
+`FileSystem`. The scan follows `SourceId` provenance, so external module files
+loaded through `mod foo;` receive the same macro-argument capability gate as
+the entry source. Unknown extern calls and foreign static reads inside macro
+arguments are surfaced as direct `Foreign` boundaries too.
+
+```build fail=BL0402
+fn load_config() {
+    read_file("ops.toml");
+}
+```
+
+`buildc check` rejects that function because it performs `FileSystem` without
+declaring it. The fixed version makes the capability part of the signature:
+
+```build
+fn load_config() ~ FileSystem {
+    read_file("ops.toml");
+}
+```
+
+The same rule applies to FFI:
+
+```build
+extern "C" { fn touch(); }
+extern "C" { static BUILD_ERRNO: i32; }
+
+fn call_foreign() ~ Foreign {
+    touch();
+    let code = BUILD_ERRNO;
+}
+```
+
+Diagnostics include a note naming the ambient call or macro, for example
+`read_file`, `include_str!`, `env!`, `touch`, or `println`, so receipts and
+review tooling can point to the exact capability source. Qualified helper paths
+are classified by their capability leaf and recorded with their full path, so
+`io::read_file()` requires `FileSystem` and appears in receipts as
+`io::read_file`.
+Capability effects can also live on first-class function types. A parameter
+such as `loader: fn() with FileSystem` makes `loader()` an effectful call, and a
+returning callback can be written as `(fn() -> str) with FileSystem`. Receipts
+record the callback name under `propagated_effects`, which lets policy gates
+distinguish a wrapper that inherited file access through `loader` from a
+function that directly called `read_file`. Function type unification preserves
+effect rows too, so an effectful value cannot be accepted by a pure `fn(...)`
+parameter and lose its declared capability. Callers that pass effectful
+callbacks into wrappers keep that source evidence too, so `run(load_config)`
+records both `run` and `load_config` as propagated `FileSystem` evidence.
+Ambient helpers used as values keep their capability effects as well, so
+`let loader = read_file; loader("ops.toml")` requires `FileSystem` and records
+`loader` as propagated evidence. Closure literals capture body effects into
+their function type without performing them at definition time, so
+`let loader = |path: str| read_file(path);` stays pure until
+`loader("ops.toml")` is called and then records `loader` as propagated evidence.
+Immediately invoked anonymous closures record the synthetic source `<closure>`.
+Tuple-struct construction can store an effectful callback without adding
+propagated receipt evidence until the stored callback is invoked.
+Inherent methods and associated functions carry declared effects too: if
+`Config.load` declares `~ FileSystem`, then `config.load()` requires
+`FileSystem` in the caller and records `Config.load` as propagated evidence,
+while `Config::load()` records `Config::load`. Trait-object method calls are
+checked from the trait method signature as well, so `loader.load()` through
+`dyn Loader` records `Loader.load` instead of hiding behind dynamic dispatch.
+Effectful function values stored in structs, tuple structs, tuples, enum
+variants, including struct-like variants such as
+`Slot::Ready { loader: load_config }`, and indexed ops tables retain access
+evidence too:
+`(ops.loader)("ops.toml")` records `ops.loader`, `(loaders.0)("x")` records
+`loaders.0`, `(loaders[0])("x")` records `loaders[0]`, and repeated callback
+arrays such as `[load_config; 2]` preserve `load_config` alongside indexed
+access paths such as `loaders[1]`. Struct updates such as
+`Ops { ..defaults }` preserve inherited field origins such as `load_config`
+alongside new access paths such as `ops.loader`; explicit update-field
+replacements and aggregate-literal destructuring such as
+`let (ops,) = (replacement,)` refresh access paths without keeping stale
+intermediate paths such as `replacement.loader`. Stored enum-variant aggregate
+payloads such as `let slot = Slot::Ready(replacement); match slot { ... }`
+apply the same refresh rule to branch-local access paths. Whole-struct
+assignment such as `ops = defaults` refreshes member origins without keeping
+stale intermediate paths such as `defaults.loader`. Enum-variant construction
+and tuple-struct construction stay pure when they only store the callback.
+Immediate invocation of a returned effectful function records the
+factory call, such as `make_loader()`. `if`, `if let`, and `match` expressions that select
+an effectful function value record every possible branch target, for example
+`load_config` and `load_secret`; binding that selected function before calling
+it records both the binding and the possible selected targets, even when the
+selected value is explicitly cast to a typed effectful callback such as
+`(fn() -> str) with FileSystem` or called through a reference/dereference pair
+such as `let loader_ref = &loader; (*loader_ref)()`. A cast to a pure callback
+type such as `as fn() -> str` is rejected when the source carries effects, so an
+explicit cast cannot erase the capability row. Pipe application is checked as
+real function application too, so `"ops.toml" |> load_config` requires
+`FileSystem` and records `load_config` as propagated evidence. Ordinary binary
+operators reject function values, so `load_config >> load_secret` cannot pretend
+to compose callbacks while skipping the call-effect gate. Tuple, tuple-struct,
+struct, enum-variant, and slice destructuring preserve those sources as well,
+so `let (loader,) = (...)`, `let Slot(loader) = slot`,
+`let Ops { loader } = ops`, `let Slot::Ready(loader) = slot`, and
+`let Slot::Ready { loader } = slot`, and `let [loader] = loaders` still record
+the selected callees as well as `loader`; branch-local `if let` and `while let`
+destructuring enforce the same declared effect gate. The `?` operator is rejected
+on plain callback values, so `loader?()` cannot turn an effectful callback into
+an untracked unknown call. The `.await` operator is rejected on plain callback
+values too, so `loader.await` cannot launder a selected effectful callback into
+a future output.
+Assignment to that callback variable refreshes the evidence, so
+`loader = load_secret` replaces the earlier source and `loader = read_file`
+clears stale local-function provenance while keeping the call as propagated
+through `loader`. Assignment to an aggregate member or whole aggregate follows
+the same rule, so `ops.loader = load_secret`, `ops = defaults`, and
+`loaders[0] = load_secret` update later receipt evidence instead of preserving
+stale callback sources. The refresh applies when a nested block mutates an
+outer callback alias or aggregate slot, so lexical block structure does not
+roll receipt provenance back to the pre-assignment source. Conditional `if`,
+`if let`, `match`, explicit `loop`/`break`, and zero-or-more loop assignment
+are conservative: after
+`if use_secret { loader = load_secret }`, a later `loader("x")` receipt keeps
+both the original and reassigned callback origins because either value can
+reach the call site. After `if let Slot::Ready(v) = slot { loader =
+load_secret }`, a later receipt keeps the pre-branch source because the pattern
+can fail. After a `match` assigns different callbacks in different arms, later
+receipts keep each arm-assigned origin; guarded arms also retain the pre-match
+source because the guard can fail. After
+`loop { if stop { break; }; loader = load_secret; break; }`, later receipts
+keep both break-exit origins because either exit can reach the call site. After
+`while reload { loader = load_secret }`,
+`while let Slot::Ready(v) = slot { loader = load_secret }`, or
+`for item in items { loader = load_secret }`, later receipts keep the pre-loop
+source as well as the body-assigned source because the loop body can execute
+zero times.
+Async blocks are delayed effect values too. `let task = async {
+read_file("ops.toml") };` does not perform `FileSystem` at construction time;
+`task.await` inherits the stored capability effect and records both `task` and
+`task <- read_file` as propagated evidence. When `if` or `match` selects
+between async blocks with different capability effects, the selected future
+carries the union and each branch origin until await.
+
+`buildc check <file> --receipt <path>` writes a deterministic
+`buildlang-check-receipt/v1` JSON artifact with compiler/language version
+metadata, a SHA-256 digest of the entry source bytes, an `input_digests` ledger
+for every entry, import, include, and module file read by the check pipeline, an
+`input_graph_digest` fingerprint for the whole checked source graph, declared
+effects, observed capability sources, propagated effect callees, pass/fail
+status, and compact diagnostics. Use `--receipt -` when a CI step or wrapper
+wants the receipt on stdout.
+Use `buildc receipt verify receipt.json` to re-check a saved receipt against
+the current source graph. Add `--source path/to/app.bld` when the source has
+moved and the receipt's embedded source path should be overridden. Verification
+checks the receipt schema, compiler/language identity, entry source digest,
+input graph digest, file-backed policy digest, and any recorded built-in profile
+digest. It also replays the compiler check and compares the saved
+`declared_effects`, `observed_capabilities`, `propagated_effects`, diagnostics,
+and policy violations against the current compiler result. Add `--json` to emit
+a `buildlang-receipt-verification/v1` report with one pass/fail record per
+verification check.
+Add `--expect-profile ci-review` when a verification job must prove the receipt
+was accepted under a specific built-in profile, not merely under whatever policy
+metadata the receipt currently contains.
+Add `--expect-policy-digest sha256:<hex>` when a verification job must prove the
+receipt was accepted under an exact file-backed or built-in policy digest.
+
+`observed_capabilities` records direct ambient capability use inside a function,
+including direct calls and macro-argument uses such as `read_file`, `tcp_connect`,
+`include_str!`, `env!`, `println!`, process helpers, or FFI helpers.
+Raw unknown extern-block calls are direct `Foreign` entries. Known runtime
+helper aliases declared in extern blocks are recorded under their specific
+capability, such as `Gpu` for `build_gfx_init` or `FileSystem` for
+`build_read_file`; foreign static reads are direct `Foreign` entries; calls to
+local wrappers around those extern functions are propagated dependencies.
+Qualified ambient helpers keep their full source path, and ambient macros keep
+their `!` suffix, which lets `direct_capability_source_allowlist` distinguish
+`io::read_file`, `include_str!`, and `env!` from any other source. These entries
+are the accountability boundary for code that actually touches the outside
+world.
+
+`propagated_effects` records effectful callees that make a caller inherit a
+typed effect. This lets policy allow a small number of audited boundary
+functions while still proving which higher-level workflows depend on them.
+Effectful inherent methods and associated functions appear here with typed
+sources such as `Config.load` and `Config::load`, and effectful trait-object
+methods appear with sources such as `Loader.load`, so static method syntax,
+associated-function syntax, and dynamic dispatch do not bypass capability
+policy.
+Effectful callback parameters appear here as named sources too, so higher-order
+ops code keeps capability provenance instead of losing it behind `fn(...)`
+values. Effectful callback arguments supplied to wrappers also appear here, so
+`run(load_config)` keeps both the wrapper and supplied callback visible to
+policy review. Pure callback signatures remain pure boundaries:
+`fn run(loader: fn(str) -> str)` cannot accept `read_file` because that would
+erase the helper's `FileSystem` effect row. Aliases of ambient helpers follow
+the same rule: calling `loader` after
+`let loader = read_file` inherits `FileSystem` through the alias instead of
+silently becoming an untyped helper call. Effectful closures are also delayed
+function values: the closure literal is pure to define, tuple-struct and
+enum-variant construction, including struct-like enum variants, are pure when
+they only store the callback, and the call site inherits the callback body's
+capability effects through the alias, or through `<closure>` when the anonymous
+closure is invoked immediately. Calls through effectful struct fields, tuple
+slots, tuple-struct fields, and indexed ops tables record paths such as
+`ops.loader`, `loaders.0`, `slot.0`, and `loaders[0]`; repeated callback arrays
+also preserve origins such as `load_config` next to indexed paths such as
+`loaders[1]`; struct updates preserve inherited field origins next to new
+access paths such as `ops.loader`, so policy allowlists can
+pin capability-bearing registries to exact entries, and nested struct updates
+carry descendant origins next to paths such as `outer.ops.loader`; destructuring
+the nested bundle, or the update expression itself, keeps those origins next to
+paths such as `ops.loader`. Explicit update-field replacements such as
+`Outer { ops: replacement, ..defaults }` refresh the destructured access path
+without forcing policies to allow stale construction aliases such as
+`replacement.loader`.
+Enum-variant payloads keep their stored callback sources when a match, `if let`,
+or `while let` branch destructures them, and aggregate payloads refresh
+branch-local paths without forcing policies to allow stale construction aliases.
+Control-flow-selected aggregate bindings, `if let` selected aggregate fields,
+and tuple/destructuring of selected aggregates merge every branch origin into
+the receiving access path, so
+`let ops = if use_secret { secret } else { config }` and
+`Outer { ops: if let ... }` record origins such as `load_config`,
+`load_secret`, `ops.loader`, and `outer.ops.loader` without forcing policies
+to allow stale branch-local paths such as `config.loader` or `secret.loader`.
+Struct-field shorthand with aggregate values follows the same refresh rule:
+`Outer { ops }` records `outer.ops.loader` with the original callable origin
+without forcing policies to allow stale `ops.loader` evidence.
+Shadowing an aggregate with an opaque producer, such as replacing
+`Ops { loader: load_config }` with `let ops = make_ops()`, clears the old
+descendant source tree before binding the new producer, so policies do not have
+to allow stale helper origins from the previous binding. The same barrier
+applies across nested blocks and later local copies, so an inner `ops` does not
+inherit outer `ops.loader` evidence.
+Returned effectful function values invoked immediately
+record factory calls such as `make_loader()`.
+Async blocks keep the same boundary: construction is pure for type checking,
+and awaiting the future records the awaited expression, such as `task`, plus
+latent origins such as `task <- read_file`, as propagated sources of the future
+body's capability effects. Selected futures merge branch effects and origins,
+so `task.await` must declare every capability that any possible async branch
+can perform and receipts can still show which branch helper introduced it.
+Control-flow selectors keep reviewable evidence too: calling the result of an
+`if`, `if let`, or `match` expression records the possible effectful branch
+targets, such as `load_config` and `load_secret`. If the selected function is
+bound first, for example `let loader = if ...` or `let loader = if let ...`,
+a later `loader()` call records `loader` plus the possible selected targets.
+Explicit casts to typed effectful callback values preserve that same evidence,
+so a coercion such as `as (fn() -> str) with FileSystem` does not launder the
+selected origins. References and
+dereferences preserve it too, so `(*loader_ref)()` records the selected branch
+targets, `loader`, and `loader_ref`. `?` is limited to fallible values and is
+rejected on plain callback values, so `loader?()` cannot erase the selected
+callback's effect row. `.await` is limited to futures and is rejected on plain
+callback values, so `loader.await` cannot erase the selected callback's latent
+effect row. Pure function casts are checked against function effect rows, so
+`as fn() -> str` cannot launder an effectful selected callback. Pipe expressions
+such as `"ops.toml" |> load_config` use the same effect gate as
+`load_config("ops.toml")`, so operator syntax cannot bypass propagated
+capability evidence. Ordinary binary operators reject function values, so
+`load_config >> load_secret` is a type error rather than fake composition. Tuple,
+tuple-struct, struct, enum-variant, and slice destructuring, including
+`Slot::Ready { loader }` and branch-local `if let`/`while let` patterns, keep
+the same evidence, so destructured aliases do not hide which selected callee
+introduced the effect.
+Reassigning that identifier, a struct field, a tuple slot, or an indexed entry
+updates the source set, including when the assignment occurs in a nested block
+that mutates an outer binding, which lets receipts describe mutable callback
+slots without carrying stale provenance from the old value. When an assignment
+is control-flow-local in `if`, `if/else`, `match`, `while`, or `for`, receipts
+merge the possible exits rather than keeping only the last path the type
+checker visited.
+
+Policy profiles turn receipt evidence into an enforceable CI gate:
+
+```json
+{
+  "schema": "buildlang-check-policy/v1",
+  "allowed_effects": ["FileSystem", "Console"],
+  "direct_effect_allowlist": {
+    "FileSystem": ["load_config"]
+  },
+  "direct_capability_source_allowlist": {
+    "FileSystem": {
+      "load_config": ["read_file"]
+    }
+  },
+  "propagated_effect_allowlist": {
+    "FileSystem": ["main"]
+  },
+  "propagated_effect_source_allowlist": {
+    "FileSystem": {
+      "main": ["load_config"]
+    }
+  },
+  "require_source_digest": true,
+  "require_input_graph_digest": true,
+  "require_effect_allowlist": true,
+  "require_provenance_allowlists": true,
+  "require_source_allowlists": true,
+  "require_allowlist_coverage": true
+}
+```
+
+Run it with:
+
+```bash
+buildc check app.bld --policy console-only.json --receipt receipt.json
+```
+
+Denied effects always fail. If `allowed_effects` is non-empty, any declared
+effect, observed capability, or propagated effect outside the allow-list also
+fails. Set `require_effect_allowlist` to make `allowed_effects` authoritative
+even when the list is empty; this is how a pure receipt can remain pure in CI
+instead of silently accepting later effect drift. `direct_effect_allowlist`
+applies only to `observed_capabilities`;
+`direct_capability_source_allowlist` narrows approved direct boundaries to
+specific ambient helper, macro, or FFI sources; `propagated_effect_allowlist`
+applies only to `propagated_effects`; `propagated_effect_source_allowlist`
+narrows approved propagated callers to specific effectful callees.
+Effect names in those policy fields must resolve to either a built-in
+capability effect or an effect present in the checked source graph. Unknown
+names are reported as `UnknownPolicyEffect` violations, which catches policy
+typos such as `Netwrok` before they can weaken a CI gate.
+Set `require_provenance_allowlists` to require every direct capability boundary
+and propagated capability caller to be explicitly named.
+Set `require_source_allowlists` to require every approved direct capability
+boundary and propagated caller to also name its exact source entries.
+Set `require_allowlist_coverage` to reject stale direct or propagated allowlist
+entries, including source-level direct capability and propagated-effect
+entries, that are not matched by the current receipt evidence.
+
+For adoption, start from observed evidence instead of hand-copying receipt
+fields:
+
+```bash
+buildc check app.bld --receipt receipt.json
+buildc policy scaffold receipt.json --output policy.json
+```
+
+The scaffolded policy keeps digest, effect-inventory, provenance, source, and
+coverage requirements enabled, fills exact direct and propagated allowlists
+from the receipt, and should be reviewed before it becomes a CI gate.
+
+Use `buildc policy list` to see built-in starting profiles, or
+`buildc policy list --json` to emit a machine-readable
+`buildlang-policy-catalog/v1` catalog with profile names, summaries, policy
+schemas, and SHA-256 digests. Then emit one profile with:
+
+```bash
+buildc policy print pure --output policy.json
+```
+
+Or run a built-in profile directly during a check:
+
+```bash
+buildc check app.bld --profile ci-review --receipt -
+```
+
+For stored receipts, pin verification to that same built-in profile:
+
+```bash
+buildc receipt verify receipt.json --expect-profile ci-review --json
+```
+
+For file-backed policies, pin the policy document digest instead:
+
+```bash
+buildc receipt verify receipt.json --expect-policy-digest sha256:<hex> --json
+```
+
+The built-in profiles are valid `buildlang-check-policy/v1` JSON and are meant
+for CI bootstrapping: `pure` denies every built-in ambient capability,
+`console-only` permits only console access, `offline` permits local file,
+environment, clock, and console work while denying network/process/FFI/GPU, and
+`ci-review` requires source/input graph digests while denying the highest-risk
+capabilities. `strict-accountability` also requires source/input graph digests,
+an authoritative effect allow-list, direct and propagated provenance allowlists,
+exact source allowlists, and coverage for every allowlist entry; run it
+directly to reject ambient capability use by default, or print it and fill
+project-specific allowlists. Receipts from
+direct profile checks record `policy.source` as `builtin:<name>`,
+`policy.profile` as the profile name, and
+`policy.profile_digest` as the SHA-256 digest of the emitted built-in policy
+JSON.
+For locked CI gates, add `--expect-profile-digest <hex>` alongside `--profile`
+using the digest from `buildc policy list --json` or a prior trusted receipt;
+the check fails before source analysis if the selected built-in profile has
+changed.
+
+---
+
+## Handling an Effect
+
+The caller wraps the effectful code in a `handle/with` block and provides implementations for each operation:
+
+```build uses=greeting,welcome
+fn main() ~ Console {
+    handle {
+        welcome()
+    } with {
+        Greeting.greet(name) => {
+            println!("Hello, {}!", name)
+        },
+    }
+}
+```
+
+When `welcome()` executes `perform Greeting.greet("Alice")`, control transfers to the handler, which runs `println!("Hello, Alice!")`.
+
+Handlers are one-shot and do not resume today. After the handler runs, control continues after the whole `handle` expression, not after the `perform`, and the handler's value becomes the value of the `handle` expression. So `welcome_everyone()` under this handler prints only `Hello, Alice!`, and in `let a = perform Ask.number(); a + 1` the `a + 1` never runs. Resumable handlers are not implemented; write effectful code so that each `perform` is the last thing its handled computation needs.
+
+---
+
+## Full Example: Render Effect
+
+Here is the pattern that makes effects powerful for game engines:
+
+```build name=scene
+effect Render {
+    fn draw(description: str) -> (),
+}
+
+// Pure math -- no effects, no side effects
+fn phong_lighting(normal: vec3, light_dir: vec3) -> vec3 {
+    let ambient = vec3(0.1, 0.1, 0.1);
+    let n = normalize(normal);
+    let l = normalize(light_dir);
+    let diff = dot(n, l);
+    let diffuse = if diff > 0.0 {
+        vec3(diff, diff, diff)
+    } else {
+        vec3(0.0, 0.0, 0.0)
+    };
+    ambient + diffuse
+}
+
+// Scene logic -- performs the Render effect but does not know HOW rendering works.
+// It also prints, so it declares Console too.
+fn render_scene() ~ Render + Console {
+    let normal = vec3(0.0, 1.0, 0.0);
+    let light_dir = normalize(vec3(1.0, 1.0, 0.5));
+    let color = phong_lighting(normal, light_dir);
+    println!("Lighting: ({}, {}, {})", color.x, color.y, color.z);
+
+    let model = mat4_translate(vec3(5.0, 1.0, 3.0));
+    let world_pos = model * vec4(0.0, 0.0, 0.0, 1.0);
+
+    perform Render.draw("player at (5, 1, 3)")
+}
+```
+
+### Production Handler (Vulkan)
+
+```build uses=scene
+fn main() ~ Console {
+    handle {
+        render_scene()
+    } with {
+        Render.draw(desc) => {
+            // In production: submit Vulkan draw commands
+            println!("VULKAN DRAW: {}", desc)
+        },
+    }
+}
+```
+
+### Test Handler (Mock)
+
+```build uses=scene
+fn test_render() ~ Console {
+    handle {
+        render_scene()
+    } with {
+        Render.draw(desc) => {
+            // In tests: just log what would be drawn
+            println!("MOCK DRAW: {}", desc)
+        },
+    }
+}
+```
+
+### Profiling Handler
+
+```build uses=scene
+fn profile_render() ~ Console {
+    handle {
+        render_scene()
+    } with {
+        Render.draw(desc) => {
+            println!("PROFILE: draw call recorded: {}", desc)
+        },
+    }
+}
+```
+
+The `render_scene` function is identical in all three cases. Only the handler changes. This is the power of algebraic effects: the function that performs work does not decide how side effects are executed.
+
+---
+
+## Effect Propagation
+
+Effects propagate through the call stack. If function A calls function B which performs an effect, function A must either handle it or declare it:
+
+```build
+effect Logger {
+    fn log(message: str) -> (),
+}
+
+effect Render {
+    fn draw(description: str) -> (),
+}
+
+// This function performs Logger
+fn compute_something() ~ Logger {
+    perform Logger.log("Computing...");
+}
+
+// This function performs both Logger and Render
+fn render_with_logging() ~ Logger + Render {
+    perform Logger.log("Starting render");
+    perform Render.draw("scene");
+    perform Logger.log("Render complete");
+}
+
+fn main() ~ Console {
+    handle {
+        handle {
+            render_with_logging()
+        } with {
+            Render.draw(desc) => {
+                println!("DRAW: {}", desc)
+            },
+        }
+    } with {
+        Logger.log(msg) => {
+            println!("[LOG] {}", msg)
+        },
+    }
+}
+```
+
+Handlers can be nested. The inner handler resolves `Render`, the outer handler resolves `Logger`.
+
+---
+
+## Effects vs. Alternatives
+
+| Approach               | Problem                                      |
+|------------------------|----------------------------------------------|
+| Global state           | Untraceable, untestable                      |
+| Dependency injection   | Boilerplate, runtime overhead                |
+| Virtual dispatch       | Vtable indirection, allocation               |
+| Monads (Haskell)       | Complex types, hard to compose               |
+| **Algebraic effects**  | Declared in signature, handled at call site, zero-cost |
+
+Effects give you:
+- **Compile-time tracking:** The type checker knows which effects a function performs.
+- **Caller control:** The handler is at the call site, not baked into the callee.
+- **Composability:** Multiple effects compose naturally: join them with `+`, as in `~ Logger + Render`.
+- **Testability:** Swap a Vulkan handler for a mock handler in one line.
+
+---
+
+## Implementation Details
+
+Under the hood, BuildLang compiles effects to `setjmp`/`longjmp` on the C backend. When you `perform` an effect:
+
+1. The `handle` expression records its position with `setjmp`
+2. `perform` jumps to the nearest matching handler via `longjmp`
+3. The handler executes, and its value becomes the value of the `handle` expression; the code after the `perform` does not run
+
+There is no heap allocation, no garbage collection and no virtual dispatch. The overhead is one `setjmp` per `handle`.
+
+---
+
+## Quick Reference
+
+```build
+// Define an effect: its operations and their types
+effect Log {
+    fn write(line: str) -> (),
+}
+
+effect Metrics {
+    fn count(name: str) -> (),
+}
+
+// Declare that a function performs an effect
+fn step() ~ Log {
+    perform Log.write("step");
+}
+
+// Multiple effects: join them with `+`
+fn step_and_count() ~ Log + Metrics {
+    perform Log.write("step");
+    perform Metrics.count("steps");
+}
+
+// Handle effects at the call site. The handler bodies print, so the
+// handling function declares Console.
+fn main() ~ Console {
+    handle {
+        handle {
+            step_and_count()
+        } with {
+            Metrics.count(name) => {
+                println!("count {}", name)
+            },
+        }
+    } with {
+        Log.write(line) => {
+            println!("log {}", line)
+        },
+    }
+}
+```
+
+---
+
+## Patterns for Game Engines
+
+### Swap rendering backend
+
+```build
+effect GPU {
+    fn submit_draw_call(mesh: str, shader: str) -> (),
+}
+
+fn render_frame() ~ GPU {
+    perform GPU.submit_draw_call("player_mesh", "pbr_shader");
+    perform GPU.submit_draw_call("terrain_mesh", "terrain_shader");
+}
+
+// Vulkan backend
+fn main() ~ Console {
+    handle { render_frame() } with {
+        GPU.submit_draw_call(mesh, shader) => {
+            println!("vkCmdDraw: {} with {}", mesh, shader)
+        },
+    }
+}
+```
+
+### Record and replay
+
+```build
+effect Input {
+    fn get_key(key: str) -> bool,
+}
+
+fn game_tick() ~ Input {
+    let fire = perform Input.get_key("space");
+}
+
+fn main() ~ Console {
+    // Live input
+    handle { game_tick() } with {
+        Input.get_key(key) => {
+            // poll real keyboard
+            println!("Polling key: {}", key)
+        },
+    };
+
+    // Replay from recording
+    handle { game_tick() } with {
+        Input.get_key(key) => {
+            // return recorded value
+            println!("Replaying key: {}", key)
+        },
+    };
+}
+```
+
+---
+
+## Next Steps
+
+- `tests/programs/27_effects_showcase.bld` -- minimal working effect example
+- `tests/programs/38_graphics_demo.bld` -- effects + vector math + rendering
+- [SHADER_GUIDE.md](SHADER_GUIDE.md) -- write shaders that compile to CPU and GPU
+- [GETTING_STARTED.md](GETTING_STARTED.md) -- full language overview

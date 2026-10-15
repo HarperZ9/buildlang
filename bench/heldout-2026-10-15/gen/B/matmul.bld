@@ -1,0 +1,25 @@
+fn main() ~ Console {
+    let mut a: Vec<i32> = vec_new();
+    for x in 1..7 {
+        a.push(x);
+    }
+    let mut b: Vec<i32> = vec_new();
+    for x in 7..13 {
+        b.push(x);
+    }
+    // A is 2x3 row-major, B is 3x2 row-major.
+    for i in 0..2 {
+        let mut line = "";
+        for j in 0..2 {
+            let mut sum: i32 = 0;
+            for k in 0..3 {
+                sum = sum + a[i * 3 + k] * b[k * 2 + j];
+            }
+            if j > 0 {
+                line = line + " ";
+            }
+            line = line + to_string_i32(sum);
+        }
+        println!("{}", line);
+    }
+}

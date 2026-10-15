@@ -1,0 +1,12 @@
+fn main() ~ Console {
+    for k in 1..5 {
+        let mut line = "";
+        for s in 0..(4 - k) {
+            line = line + " ";
+        }
+        for h in 0..k {
+            line = line + "#";
+        }
+        println!("{}", line);
+    }
+}

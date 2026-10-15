@@ -1,0 +1,31 @@
+fn join(v: &Vec<i32>) -> str {
+    let n = v.len();
+    let mut out = "";
+    let mut i = 0;
+    while i < n {
+        if i > 0 {
+            out = out + " ";
+        }
+        out = out + to_string_i32(v[i]);
+        i = i + 1;
+    }
+    out
+}
+
+fn main() ~ Console {
+    let mut row: Vec<i32> = vec_new();
+    row.push(1);
+    for r in 0..6 {
+        println!("{}", join(&row));
+        let n = row.len();
+        let mut next: Vec<i32> = vec_new();
+        next.push(1);
+        let mut i = 1;
+        while i < n {
+            next.push(row[i - 1] + row[i]);
+            i = i + 1;
+        }
+        next.push(1);
+        row = next;
+    }
+}

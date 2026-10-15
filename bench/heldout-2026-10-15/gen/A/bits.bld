@@ -1,0 +1,15 @@
+fn main() ~ Console {
+    let mut n: i64 = 2026;
+    let mut out = "";
+    let mut ones: i64 = 0;
+    while n > 0 {
+        let b = n % 2;
+        if b == 1 {
+            ones = ones + 1;
+        }
+        out = format!("{}{}", b, out);
+        n = n / 2;
+    }
+    println!("{}", out);
+    println!("{}", ones);
+}

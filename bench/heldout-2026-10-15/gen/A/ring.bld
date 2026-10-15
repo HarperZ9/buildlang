@@ -1,0 +1,73 @@
+struct Ring {
+    s0: i64,
+    s1: i64,
+    s2: i64,
+    head: i64,
+    count: i64,
+}
+
+impl Ring {
+    fn get(&self, i: i64) -> i64 {
+        if i == 0 {
+            self.s0
+        } else if i == 1 {
+            self.s1
+        } else {
+            self.s2
+        }
+    }
+
+    fn set(&mut self, i: i64, v: i64) {
+        if i == 0 {
+            self.s0 = v;
+        } else if i == 1 {
+            self.s1 = v;
+        } else {
+            self.s2 = v;
+        }
+    }
+
+    fn push(&mut self, v: i64) {
+        if self.count < 3 {
+            let slot = (self.head + self.count) % 3;
+            self.set(slot, v);
+            self.count = self.count + 1;
+        } else {
+            let slot = self.head;
+            self.set(slot, v);
+            self.head = (self.head + 1) % 3;
+        }
+    }
+
+    fn pop(&mut self) -> i64 {
+        let slot = self.head;
+        let v = self.get(slot);
+        self.head = (self.head + 1) % 3;
+        self.count = self.count - 1;
+        v
+    }
+}
+
+fn main() ~ Console {
+    let mut r = Ring { s0: 0, s1: 0, s2: 0, head: 0, count: 0 };
+    r.push(1);
+    r.push(2);
+    r.push(3);
+    r.push(4);
+    r.push(5);
+    let p = r.pop();
+    println!("popped {}", p);
+    r.push(6);
+    let mut line = "";
+    let mut i: i64 = 0;
+    while i < r.count {
+        let v = r.get((r.head + i) % 3);
+        if i == 0 {
+            line = format!("{}", v);
+        } else {
+            line = format!("{} {}", line, v);
+        }
+        i = i + 1;
+    }
+    println!("{}", line);
+}

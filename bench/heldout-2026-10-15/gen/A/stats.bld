@@ -1,0 +1,33 @@
+fn main() ~ Console {
+    let mut v: Vec<i64> = vec_new();
+    v.push(2);
+    v.push(3);
+    v.push(5);
+    v.push(7);
+    v.push(11);
+    v.push(13);
+    let mut sum: i64 = 0;
+    let mut n: i64 = 0;
+    let mut lo: i64 = 0;
+    let mut hi: i64 = 0;
+    for x in v {
+        if n == 0 || x < lo {
+            lo = x;
+        }
+        if n == 0 || x > hi {
+            hi = x;
+        }
+        sum = sum + x;
+        n = n + 1;
+    }
+    // Mean in hundredths, rounded half up: (sum * 100 / n) rounded.
+    let hundredths = (sum * 200 + n) / (2 * n);
+    let whole = hundredths / 100;
+    let frac = hundredths % 100;
+    if frac < 10 {
+        println!("mean {}.0{}", whole, frac);
+    } else {
+        println!("mean {}.{}", whole, frac);
+    }
+    println!("min {} max {}", lo, hi);
+}

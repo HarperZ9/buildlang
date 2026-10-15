@@ -1,0 +1,36 @@
+outcome: check_fail
+
+{
+  "schema": "buildlang.diagnostics/v1",
+  "compiler_version": "1.6.0",
+  "file": "largest.bld",
+  "ok": false,
+  "error_count": 1,
+  "diagnostics": [
+    {
+      "code": "BL0301",
+      "severity": "error",
+      "message": "type mismatch: expected `i32`, found `str`",
+      "file": "largest.bld",
+      "span": {
+        "line": 29,
+        "column": 20,
+        "end_line": 29,
+        "end_column": 44,
+        "byte_start": 571,
+        "byte_end": 595
+      },
+      "help": [
+        "change this expression so it has type `i32`, or change the annotation or signature that requires `i32`"
+      ],
+      "notes": [],
+      "suggestions": [
+        {
+          "message": "change this expression so it has type `i32`, or change the annotation or signature that requires `i32`",
+          "applicability": "Unspecified",
+          "widens_authority": false
+        }
+      ]
+    }
+  ]
+}

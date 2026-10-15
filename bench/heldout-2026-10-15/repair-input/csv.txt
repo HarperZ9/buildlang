@@ -1,0 +1,6 @@
+outcome: crash
+
+rc=3221225477
+stdout:
+
+stderr:

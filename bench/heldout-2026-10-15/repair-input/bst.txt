@@ -1,0 +1,29 @@
+outcome: check_fail
+
+{
+  "schema": "buildlang.diagnostics/v1",
+  "compiler_version": "1.6.0",
+  "file": "bst.bld",
+  "ok": false,
+  "error_count": 1,
+  "diagnostics": [
+    {
+      "code": "BL0901",
+      "severity": "error",
+      "message": "`Box_new` cannot be compiled: the C backend has no function or method by that name",
+      "file": "bst.bld",
+      "span": null,
+      "help": [
+        "no function or method named `Box_new` exists for the C backend; check the spelling, define it as a `fn`, or declare it in an `extern \"C\"` block"
+      ],
+      "notes": [],
+      "suggestions": [
+        {
+          "message": "no function or method named `Box_new` exists for the C backend; check the spelling, define it as a `fn`, or declare it in an `extern \"C\"` block",
+          "applicability": "Unspecified",
+          "widens_authority": false
+        }
+      ]
+    }
+  ]
+}

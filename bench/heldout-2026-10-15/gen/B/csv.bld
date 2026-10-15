@@ -1,0 +1,71 @@
+fn is_space(c: char) -> bool {
+    let code = c as i32;
+    code == 32 || code == 9 || code == 13 || code == 10
+}
+
+fn trim(s: str) -> str {
+    let mut cs: Vec<char> = vec_new();
+    for c in s.chars() {
+        cs.push(c);
+    }
+    let n = cs.len();
+    let mut start = 0;
+    while start < n && is_space(cs[start]) {
+        start = start + 1;
+    }
+    let mut end = n;
+    while end > start && is_space(cs[end - 1]) {
+        end = end - 1;
+    }
+    let mut out = "";
+    let mut i = start;
+    while i < end {
+        out = out + format!("{}", cs[i]);
+        i = i + 1;
+    }
+    out
+}
+
+fn parse_int(s: str) -> i64 {
+    let mut n: i64 = 0;
+    for c in s.chars() {
+        let d = c as i64 - 48;
+        if d >= 0 && d <= 9 {
+            n = n * 10 + d;
+        }
+    }
+    n
+}
+
+fn main() ~ Console + FileSystem {
+    let text = read_file("sales.csv");
+    let mut total: i64 = 0;
+    let mut top_item = "";
+    let mut top_rev: i64 = -1;
+    let mut first = true;
+    for raw in text.split("\n") {
+        let line = trim(raw);
+        if line.len() == 0 {
+            continue;
+        }
+        if first {
+            first = false;
+            continue;
+        }
+        let mut fields: Vec<str> = vec_new();
+        for f in line.split(",") {
+            fields.push(f);
+        }
+        let item = trim(fields[0]);
+        let qty = parse_int(trim(fields[1]));
+        let price = parse_int(trim(fields[2]));
+        let rev = qty * price;
+        total = total + rev;
+        if rev > top_rev {
+            top_rev = rev;
+            top_item = item;
+        }
+    }
+    println!("total {}", total);
+    println!("top {} {}", top_item, top_rev);
+}

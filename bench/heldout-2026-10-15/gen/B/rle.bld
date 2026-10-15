@@ -1,0 +1,26 @@
+fn rle(s: str) -> str {
+    let mut cs: Vec<char> = vec_new();
+    for c in s.chars() {
+        cs.push(c);
+    }
+    let n = cs.len();
+    let mut out = "";
+    let mut i = 0;
+    while i < n {
+        let c = cs[i];
+        let mut j = i;
+        let mut count: i32 = 0;
+        while j < n && cs[j] == c {
+            count = count + 1;
+            j = j + 1;
+        }
+        out = out + format!("{}{}", c, count);
+        i = j;
+    }
+    out
+}
+
+fn main() ~ Console {
+    println!("{}", rle("aaabccddddde"));
+    println!("{}", rle("z"));
+}

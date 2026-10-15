@@ -1,0 +1,12 @@
+fn main() ~ Console + Process {
+    let xs = [3, 7, 7, 12, 5];
+    let mut i: i64 = 1;
+    while i < 5 {
+        if xs[i] < xs[i - 1] {
+            println!("unsorted at index {}", i);
+            exit(3);
+        }
+        i = i + 1;
+    }
+    println!("sorted");
+}

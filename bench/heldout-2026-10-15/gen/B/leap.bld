@@ -1,0 +1,13 @@
+fn is_leap(y: i32) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
+
+fn main() ~ Console {
+    let mut count: i32 = 0;
+    for y in 1900..2101 {
+        if is_leap(y) {
+            count = count + 1;
+        }
+    }
+    println!("{}", count);
+}

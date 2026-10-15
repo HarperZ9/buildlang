@@ -1,0 +1,43 @@
+struct Item {
+    name: str,
+    price: i32,
+    qty: i32,
+}
+
+fn stock() -> Vec<Item> {
+    let mut s: Vec<Item> = vec_new();
+    s.push(Item { name: "apple", price: 120, qty: 3 });
+    s.push(Item { name: "pear", price: 95, qty: 0 });
+    s.push(Item { name: "plum", price: 40, qty: 12 });
+    s
+}
+
+fn lookup(name: str) -> Option<Item> {
+    for it in stock() {
+        if it.name == name {
+            return Some(it);
+        }
+    }
+    None
+}
+
+fn report(q: str) ~ Console {
+    match lookup(q) {
+        Some(it) => {
+            if it.qty > 0 {
+                println!("{} {} x{}", it.name, it.price, it.qty);
+            } else {
+                println!("{} out of stock", it.name);
+            }
+        },
+        None => {
+            println!("{} missing", q);
+        },
+    }
+}
+
+fn main() ~ Console {
+    report("plum");
+    report("kiwi");
+    report("pear");
+}

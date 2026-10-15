@@ -1,0 +1,40 @@
+outcome: build_fail
+
+rc=1
+Building project at '.'
+Entry point: .\main.bld
+Mode: debug
+Target: c
+
+[1/5] Lexing... OK (226 tokens)
+[2/5] Parsing... OK (4 items)
+[3/5] Type checking... OK
+[4/5] Code generation (c)... OK (93139 bytes)
+[5/5] Compiling C -> executable (using gcc)...
+
+C compilation failed (exit code: Some(1)):
+.\target\debug\main.c: In function 'report':
+.\target\debug\main.c:2419:9: warning: assignment discards 'const' qualifier from pointer target type [-Wdiscarded-qualifiers]
+ 2419 |     _17 = query.ptr;
+      |         ^
+.\target\debug\main.c:2420:9: warning: assignment discards 'const' qualifier from pointer target type [-Wdiscarded-qualifiers]
+ 2420 |     _18 = __str5;
+      |         ^
+.\target\debug\main.c:2427:9: warning: assignment discards 'const' qualifier from pointer target type [-Wdiscarded-qualifiers]
+ 2427 |     _11 = _8.ptr;
+      |         ^
+.\target\debug\main.c:2428:9: warning: assignment discards 'const' qualifier from pointer target type [-Wdiscarded-qualifiers]
+ 2428 |     _12 = __str3;
+      |         ^
+.\target\debug\main.c:2433:9: warning: assignment discards 'const' qualifier from pointer target type [-Wdiscarded-qualifiers]
+ 2433 |     _15 = _14.ptr;
+      |         ^
+.\target\debug\main.c:2434:9: warning: assignment discards 'const' qualifier from pointer target type [-Wdiscarded-qualifiers]
+ 2434 |     _16 = __str4;
+      |         ^
+.\target\debug\main.c:2438:10: error: '_13' undeclared (first use in this function); did you mean '_18'?
+ 2438 |     _4 = _13;
+      |          ^~~
+      |          _18
+.\target\debug\main.c:2438:10: note: each undeclared identifier is reported only once for each function it appears in
+

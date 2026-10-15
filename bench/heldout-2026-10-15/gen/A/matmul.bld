@@ -1,0 +1,40 @@
+fn main() ~ Console {
+    let mut a: Vec<i64> = vec_new();
+    for x in "1 2 3 4 5 6".split(" ") {
+        let mut n: i64 = 0;
+        for c in x.chars() {
+            n = n * 10 + (c as i64 - 48);
+        }
+        a.push(n);
+    }
+    let mut b: Vec<i64> = vec_new();
+    for x in "7 8 9 10 11 12".split(" ") {
+        let mut n: i64 = 0;
+        for c in x.chars() {
+            n = n * 10 + (c as i64 - 48);
+        }
+        b.push(n);
+    }
+    // A is 2x3 (row-major), B is 3x2 (row-major).
+    let mut i: i64 = 0;
+    while i < 2 {
+        let mut line = "";
+        let mut j: i64 = 0;
+        while j < 2 {
+            let mut sum: i64 = 0;
+            let mut k: i64 = 0;
+            while k < 3 {
+                sum = sum + a[(i * 3 + k) as usize] * b[(k * 2 + j) as usize];
+                k = k + 1;
+            }
+            if j == 0 {
+                line = format!("{}", sum);
+            } else {
+                line = format!("{} {}", line, sum);
+            }
+            j = j + 1;
+        }
+        println!("{}", line);
+        i = i + 1;
+    }
+}

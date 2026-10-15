@@ -1,0 +1,39 @@
+fn bsearch(v: &Vec<i32>, target: i32) -> i32 {
+    let mut lo: i32 = 0;
+    let mut hi: i32 = 9;
+    while lo <= hi {
+        let mid = (lo + hi) / 2;
+        let x = v[mid];
+        if x == target {
+            return mid;
+        } else if x < target {
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    -1
+}
+
+fn main() ~ Console {
+    let mut v: Vec<i32> = vec_new();
+    v.push(2);
+    v.push(5);
+    v.push(8);
+    v.push(12);
+    v.push(16);
+    v.push(23);
+    v.push(38);
+    v.push(56);
+    v.push(72);
+    v.push(91);
+    let mut targets: Vec<i32> = vec_new();
+    targets.push(23);
+    targets.push(2);
+    targets.push(91);
+    targets.push(7);
+    targets.push(100);
+    for t in targets {
+        println!("{}", bsearch(&v, t));
+    }
+}

@@ -1,0 +1,36 @@
+fn save(path: str, text: str) ~ FileSystem {
+    write_file(path, text);
+}
+
+fn load(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn main() ~ Console + FileSystem {
+    let mut text = "";
+    let mut k: i64 = 1;
+    while k <= 6 {
+        let s = format!("{}", k * k);
+        if k == 1 {
+            text = s;
+        } else {
+            text = text + "\n" + s;
+        }
+        k = k + 1;
+    }
+    save("squares.txt", text);
+
+    let back = load("squares.txt");
+    let mut count: i64 = 0;
+    let mut last = "";
+    if back != "" {
+        for line in back.split("\n") {
+            if line != "" {
+                count = count + 1;
+                last = line;
+            }
+        }
+    }
+    println!("lines {}", count);
+    println!("last {}", last);
+}

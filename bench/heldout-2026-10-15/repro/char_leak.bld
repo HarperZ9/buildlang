@@ -1,0 +1,22 @@
+// 1.6.0 prints "A" instead of "65": the char-local set from count() leaks into show().
+fn count(s: str) -> i64 {
+    let mut n: i64 = 0;
+    for c in s.chars() {
+        n = n + 1;
+    }
+    n
+}
+
+fn show(x: i64) -> str {
+    let a0: i64 = 0;
+    let a1: i64 = 1;
+    let a2: i64 = 2;
+    let a3: i64 = 3;
+    let a4: i64 = 4;
+    format!("{}", x / 10)
+}
+
+fn main() ~ Console {
+    println!("{}", count("ab"));
+    println!("{}", show(650));
+}

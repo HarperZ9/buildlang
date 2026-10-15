@@ -1,0 +1,38 @@
+fn counts(s: str) -> Vec<i32> {
+    let mut c: Vec<i32> = vec_new();
+    for k in 0..26 {
+        c.push(0);
+    }
+    for ch in s.chars() {
+        let idx = (ch as i32) - 97;
+        c[idx] = c[idx] + 1;
+    }
+    c
+}
+
+fn is_anagram(a: str, b: str) -> bool {
+    let ca = counts(a);
+    let cb = counts(b);
+    let mut ok = true;
+    for k in 0..26 {
+        if ca[k] != cb[k] {
+            ok = false;
+        }
+    }
+    ok
+}
+
+fn check(a: str, b: str) ~ Console {
+    if is_anagram(a, b) {
+        println!("{} {} yes", a, b);
+    } else {
+        println!("{} {} no", a, b);
+    }
+}
+
+fn main() ~ Console {
+    check("listen", "silent");
+    check("hello", "world");
+    check("evil", "vile");
+    check("aab", "abb");
+}

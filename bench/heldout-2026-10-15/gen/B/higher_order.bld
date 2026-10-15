@@ -1,0 +1,61 @@
+fn map(v: Vec<i32>, f: fn(i32) -> i32) -> Vec<i32> {
+    let mut out: Vec<i32> = vec_new();
+    for x in v {
+        out.push(f(x));
+    }
+    out
+}
+
+fn filter(v: Vec<i32>, p: fn(i32) -> bool) -> Vec<i32> {
+    let mut out: Vec<i32> = vec_new();
+    for x in v {
+        if p(x) {
+            out.push(x);
+        }
+    }
+    out
+}
+
+fn fold(v: Vec<i32>, init: i32, f: fn(i32, i32) -> i32) -> i32 {
+    let mut acc: i32 = init;
+    for x in v {
+        acc = f(acc, x);
+    }
+    acc
+}
+
+fn square(x: i32) -> i32 {
+    x * x
+}
+
+fn is_even(x: i32) -> bool {
+    x % 2 == 0
+}
+
+fn is_odd(x: i32) -> bool {
+    x % 2 != 0
+}
+
+fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+fn mul(a: i32, b: i32) -> i32 {
+    a * b
+}
+
+fn one_to_ten() -> Vec<i32> {
+    let mut v: Vec<i32> = vec_new();
+    for x in 1..11 {
+        v.push(x);
+    }
+    v
+}
+
+fn main() ~ Console {
+    let evens = filter(one_to_ten(), is_even);
+    let squares = map(evens, square);
+    println!("{}", fold(squares, 0, add));
+    let odds = filter(one_to_ten(), is_odd);
+    println!("{}", fold(odds, 1, mul));
+}

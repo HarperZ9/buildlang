@@ -1,0 +1,15 @@
+fn main() ~ Console {
+    let mut n: i32 = 2026;
+    let mut bin = "";
+    let mut ones: i32 = 0;
+    while n > 0 {
+        let b = n % 2;
+        if b == 1 {
+            ones = ones + 1;
+        }
+        bin = to_string_i32(b) + bin;
+        n = n / 2;
+    }
+    println!("{}", bin);
+    println!("{}", ones);
+}

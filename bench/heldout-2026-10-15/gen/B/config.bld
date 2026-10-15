@@ -1,0 +1,86 @@
+fn is_space(c: char) -> bool {
+    let code = c as i32;
+    code == 32 || code == 9 || code == 13 || code == 10
+}
+
+fn trim(s: str) -> str {
+    let mut cs: Vec<char> = vec_new();
+    for c in s.chars() {
+        cs.push(c);
+    }
+    let n = cs.len();
+    let mut start = 0;
+    while start < n && is_space(cs[start]) {
+        start = start + 1;
+    }
+    let mut end = n;
+    while end > start && is_space(cs[end - 1]) {
+        end = end - 1;
+    }
+    let mut out = "";
+    let mut i = start;
+    while i < end {
+        out = out + format!("{}", cs[i]);
+        i = i + 1;
+    }
+    out
+}
+
+fn parse_int(s: str) -> i64 {
+    let mut n: i64 = 0;
+    for c in s.chars() {
+        let d = c as i64 - 48;
+        if d >= 0 && d <= 9 {
+            n = n * 10 + d;
+        }
+    }
+    n
+}
+
+fn starts_with_hash(s: str) -> bool {
+    let mut result = false;
+    for c in s.chars() {
+        result = (c as i32) == 35;
+        break;
+    }
+    result
+}
+
+fn main() ~ Console + FileSystem {
+    let text = read_file("app.conf");
+    let mut port: i64 = 0;
+    let mut timeout: i64 = 0;
+    for raw in text.split("\n") {
+        let line = trim(raw);
+        if line.len() == 0 {
+            continue;
+        }
+        if starts_with_hash(line) {
+            continue;
+        }
+        let mut parts: Vec<str> = vec_new();
+        for p in line.split("=") {
+            parts.push(p);
+        }
+        let key = trim(parts[0]);
+        let mut rest = "";
+        let count = parts.len();
+        let mut i = 1;
+        while i < count {
+            if i > 1 {
+                rest = rest + "=";
+            }
+            rest = rest + parts[i];
+            i = i + 1;
+        }
+        let value = trim(rest);
+        println!("{}: {}", key, value);
+        if key == "port" {
+            port = parse_int(value);
+        }
+        if key == "timeout" {
+            timeout = parse_int(value);
+        }
+    }
+    println!("total {}", port + timeout);
+}

@@ -1,0 +1,23 @@
+fn main() ~ Console + Process {
+    let mut v: Vec<i64> = vec_new();
+    v.push(3);
+    v.push(7);
+    v.push(7);
+    v.push(12);
+    v.push(5);
+    let n: i64 = 5;
+    let mut bad: i64 = -1;
+    let mut i: i64 = 1;
+    while i < n {
+        if bad == -1 && v[i as usize] < v[(i - 1) as usize] {
+            bad = i;
+        }
+        i = i + 1;
+    }
+    if bad == -1 {
+        println!("sorted");
+    } else {
+        println!("unsorted at index {}", bad);
+        exit(3);
+    }
+}

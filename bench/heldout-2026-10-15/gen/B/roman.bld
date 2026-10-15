@@ -1,0 +1,42 @@
+fn to_roman(n: i32) -> str {
+    let mut vals: Vec<i32> = vec_new();
+    let mut syms: Vec<str> = vec_new();
+    vals.push(1000); syms.push("M");
+    vals.push(900); syms.push("CM");
+    vals.push(500); syms.push("D");
+    vals.push(400); syms.push("CD");
+    vals.push(100); syms.push("C");
+    vals.push(90); syms.push("XC");
+    vals.push(50); syms.push("L");
+    vals.push(40); syms.push("XL");
+    vals.push(10); syms.push("X");
+    vals.push(9); syms.push("IX");
+    vals.push(5); syms.push("V");
+    vals.push(4); syms.push("IV");
+    vals.push(1); syms.push("I");
+    let mut rest: i32 = n;
+    let mut out = "";
+    let count = vals.len();
+    let mut i = 0;
+    while i < count {
+        while rest >= vals[i] {
+            out = out + syms[i];
+            rest = rest - vals[i];
+        }
+        i = i + 1;
+    }
+    out
+}
+
+fn main() ~ Console {
+    let mut nums: Vec<i32> = vec_new();
+    nums.push(1994);
+    nums.push(2024);
+    nums.push(3999);
+    nums.push(4);
+    nums.push(9);
+    nums.push(40);
+    for n in nums {
+        println!("{}", to_roman(n));
+    }
+}

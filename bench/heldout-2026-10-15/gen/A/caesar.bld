@@ -1,0 +1,31 @@
+fn letter(i: i64) -> str {
+    let mut out = "";
+    let mut k: i64 = 0;
+    for w in "a b c d e f g h i j k l m n o p q r s t u v w x y z".split(" ") {
+        if k == i {
+            out = w;
+        }
+        k = k + 1;
+    }
+    out
+}
+
+fn shift(s: str, by: i64) -> str {
+    let mut out = "";
+    for c in s.chars() {
+        let code = c as i64;
+        if code >= 97 && code <= 122 {
+            out = out + letter((code - 97 + by) % 26);
+        } else {
+            out = out + " ";
+        }
+    }
+    out
+}
+
+fn main() ~ Console {
+    let encoded = shift("attack at dawn zebra", 3);
+    println!("{}", encoded);
+    let decoded = shift(encoded, 23);
+    println!("{}", decoded);
+}

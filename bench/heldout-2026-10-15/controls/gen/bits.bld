@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let s: str = 4;
+    println!("{}", s);
+}
