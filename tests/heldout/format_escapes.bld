@@ -1,0 +1,6 @@
+fn main() ~ Console {
+    let s = format!("{}\n", 7);
+    println!("[{}]", s);
+    let t = format!("a\tb");
+    println!("[{}]", t);
+}

@@ -111,6 +111,7 @@ fn every_program_that_passes_check_compiles() {
         "semantic-corpus",
         "tests/agent-probe",
         "tests/agent-mutants",
+        "tests/heldout",
     ] {
         collect(&root.join(dir), &mut files);
     }

@@ -317,6 +317,12 @@ impl<'ctx> MirLowerer<'ctx> {
             None
         };
 
+        // The callee of a direct-call initializer, for char tracking below.
+        let init_callee = local
+            .init
+            .as_ref()
+            .and_then(|init| self.scrutinee_callee_name(&init.expr));
+
         // Now borrow current_fn and use it
         let builder = self
             .current_fn
@@ -339,8 +345,27 @@ impl<'ctx> MirLowerer<'ctx> {
                 .as_ref()
                 .is_some_and(|init| Self::expr_is_char_literal_or_cast(&init.expr))
                 || matches!(&init_val, Some(MirValue::Local(src)) if self.char_locals.contains(src));
-            if annotated_char || init_is_char {
+            // A direct call to a function declared `-> char` or `-> Vec<char>`.
+            let callee = init_callee;
+            let call_is_char = callee
+                .as_ref()
+                .is_some_and(|n| self.fn_returns_char.contains(n));
+            let call_is_char_vec = callee
+                .as_ref()
+                .is_some_and(|n| self.fn_returns_char_vec.contains(n));
+            if annotated_char || init_is_char || call_is_char {
                 self.char_locals.insert(local_id);
+            }
+            // A vector of chars: `let v: Vec<char> = ...;` or a copy of one.
+            let annotated_char_vec = local
+                .ty
+                .as_ref()
+                .is_some_and(|t| Self::ast_type_is_char_vec(t));
+            if annotated_char_vec
+                || call_is_char_vec
+                || matches!(&init_val, Some(MirValue::Local(src)) if self.char_vec_locals.contains(src))
+            {
+                self.char_vec_locals.insert(local_id);
             }
 
             // Record the Option inner type if extracted from annotation
@@ -6982,6 +7007,8 @@ impl<'ctx> MirLowerer<'ctx> {
         body: &ast::Block,
         label: Option<&ast::Ident>,
     ) -> CodegenResult<MirValue> {
+        let elems_are_chars =
+            matches!(&iter_val, MirValue::Local(id) if self.char_vec_locals.contains(id));
         let builder = self
             .current_fn
             .as_mut()
@@ -7043,6 +7070,9 @@ impl<'ctx> MirLowerer<'ctx> {
                 elem_ty: elem_ty.clone(),
             },
         );
+        if elems_are_chars {
+            self.char_locals.insert(elem_local);
+        }
 
         let saved_vars = self.var_map.clone();
         self.bind_for_pattern(pattern, elem_local, &elem_ty)?;
@@ -8162,6 +8192,19 @@ impl<'ctx> MirLowerer<'ctx> {
         }
 
         let idx_val = self.lower_expr(index)?;
+        let elem_is_char =
+            matches!(&arr_val, MirValue::Local(id) if self.char_vec_locals.contains(id));
+
+        // A borrowed vector (`v: &Vec<T>` or `&mut Vec<T>`) lowers to a
+        // pointer to the handle. Index the handle itself: without the deref
+        // the element type below fell through to `Vec<T>` and the load
+        // returned the handle bits instead of the element.
+        let arr_val = if matches!(self.type_of_value(&arr_val), MirType::Ptr(ref inner) if matches!(**inner, MirType::Vec(_)))
+        {
+            self.deref_if_pointer(arr_val)?
+        } else {
+            arr_val
+        };
 
         // Derive element type: if the array value has type Array(elem, _)
         // then the result is of type elem; otherwise fall back to i32.
@@ -8196,6 +8239,9 @@ impl<'ctx> MirLowerer<'ctx> {
                 elem_ty,
             },
         );
+        if elem_is_char {
+            self.char_locals.insert(result);
+        }
 
         Ok(values::local(result))
     }

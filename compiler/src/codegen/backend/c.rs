@@ -2074,6 +2074,7 @@ impl CBackend {
             self.current_fn_flag_owners = flag_frees.owners;
             self.current_fn_flag_block_frees = flag_frees.block_frees;
         }
+        let fn_body_start = self.output.len();
         self.generate_function_signature(func)?;
         self.output.push_str(" {\n");
         self.indent += 1;
@@ -2225,6 +2226,24 @@ impl CBackend {
 
         self.indent -= 1;
         self.output.push_str("}\n\n");
+
+        // Fail closed on a lowering bug: a function body that reads a MIR
+        // temporary (`_N`) the declarations above did not emit would fail in
+        // the C compiler after `buildc check` passed.
+        if let Some(name) =
+            crate::codegen::c_verify::undeclared_temporary(&self.output[fn_body_start..])
+        {
+            return Err(CodegenError::Rejected {
+                message: format!(
+                    "the C backend cannot compile `{}`: the generated C reads temporary `{}`, which has no declaration (a compiler bug; please report it with this program)",
+                    func.name, name
+                ),
+                location: None,
+                help: Some(
+                    "until it is fixed, rewrite the expression that ends the block as a statement followed by an explicit value".to_string(),
+                ),
+            });
+        }
 
         // Post-process optimizations on generated C output:
         // 1. Trivial goto elimination: remove goto→label pairs for sequential blocks
@@ -2628,6 +2647,17 @@ impl CBackend {
                 // statement-level if/else that don't produce values).
                 if let Some(local) = locals.get(dest.0 as usize) {
                     if matches!(local.ty, MirType::Void) {
+                        return Ok(());
+                    }
+                }
+                // Skip copies out of a void-typed local: a `match` or `if`
+                // whose arm ends in a statement-level `if`/`else` yields unit,
+                // and the void local is never declared (C has no `void x;`).
+                if let MirRValue::Use(MirValue::Local(src)) = value {
+                    if locals
+                        .get(src.0 as usize)
+                        .is_some_and(|l| matches!(l.ty, MirType::Void))
+                    {
                         return Ok(());
                     }
                 }

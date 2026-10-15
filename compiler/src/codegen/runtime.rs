@@ -1611,7 +1611,10 @@ static BuildVec build_string_split(BuildString s, BuildString delim) {
         return v;
     }
     size_t start = 0;
-    for (size_t i = 0; i <= s.len - delim.len; i++) {
+    /* `i + delim.len <= s.len`, not `i <= s.len - delim.len`: the size_t
+       subtraction wraps when the string is shorter than the delimiter
+       ("".split(" ")), and the loop then reads far past the buffer. */
+    for (size_t i = 0; i + delim.len <= s.len; i++) {
         if (memcmp(s.ptr + i, delim.ptr, delim.len) == 0) {
             size_t part_len = i - start;
             char* buf = (char*)malloc(part_len + 1);

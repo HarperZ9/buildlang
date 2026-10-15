@@ -1,0 +1,10 @@
+fn main() ~ Console {
+    let mut out = "";
+    for c in "ab".chars() {
+        out = out + format!("{}", c);
+    }
+    println!("{}", out);
+    let mut v: Vec<char> = vec_new();
+    for c in "xy".chars() { v.push(c); }
+    println!("{}", v[0]);
+}

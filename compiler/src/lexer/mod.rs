@@ -74,6 +74,53 @@ pub fn tokenize_with_docs(source: &str) -> LexerResult<(Vec<Token>, DocComments)
     lexer.tokenize_with_docs()
 }
 
+/// The value of a string literal's body (the text between the quotes):
+/// `\n`, `\r`, `\t`, `\\`, `\'`, `\"`, `\0`, `\xNN` and `\u{N...}` become the
+/// characters they name. The parser and the format macros share it, so
+/// `println!("a\tb")` prints a tab exactly as `let s = "a\tb"` holds one.
+pub fn unescape_str(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            result.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => result.push('\n'),
+            Some('r') => result.push('\r'),
+            Some('t') => result.push('\t'),
+            Some('\\') => result.push('\\'),
+            Some('\'') => result.push('\''),
+            Some('"') => result.push('"'),
+            Some('0') => result.push('\0'),
+            Some('x') => {
+                let hi = chars.next().unwrap_or('0');
+                let lo = chars.next().unwrap_or('0');
+                let val = u8::from_str_radix(&format!("{hi}{lo}"), 16).unwrap_or(0);
+                result.push(val as char);
+            }
+            Some('u') => {
+                chars.next(); // {
+                let mut hex = String::new();
+                while let Some(&d) = chars.peek() {
+                    chars.next();
+                    if d == '}' {
+                        break;
+                    }
+                    hex.push(d);
+                }
+                if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                    result.push(ch);
+                }
+            }
+            Some(other) => result.push(other),
+            None => {}
+        }
+    }
+    result
+}
+
 /// Convenience function to tokenize source code from a file and extract doc comments
 pub fn tokenize_file_with_docs(
     filename: &str,

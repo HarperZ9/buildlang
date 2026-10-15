@@ -65,6 +65,11 @@ pub struct TypeContext {
     /// Foreign function names declared by extern blocks.
     foreign_functions: HashSet<Arc<str>>,
 
+    /// Top-level generic functions and the type they were declared with. A
+    /// reference to one gets fresh type variables for its parameters, so each
+    /// call site is checked on its own (spec 2.4: one instantiation per call).
+    generic_function_types: HashMap<Arc<str>, Ty>,
+
     /// Foreign static names declared by extern blocks.
     foreign_statics: HashSet<Arc<str>>,
 
@@ -329,6 +334,7 @@ impl TypeContext {
             param_trait_bounds: HashMap::new(),
             module_bindings: HashMap::new(),
             foreign_functions: HashSet::new(),
+            generic_function_types: HashMap::new(),
             foreign_statics: HashSet::new(),
             multi_methods: HashMap::new(),
         };
@@ -504,6 +510,16 @@ impl TypeContext {
     /// Mark a function name as originating from an extern block.
     pub fn register_foreign_function(&mut self, name: impl Into<Arc<str>>) {
         self.foreign_functions.insert(name.into());
+    }
+
+    /// Record a top-level generic function and its declared type.
+    pub fn register_generic_function(&mut self, name: impl Into<Arc<str>>, ty: Ty) {
+        self.generic_function_types.insert(name.into(), ty);
+    }
+
+    /// The declared type of a top-level generic function, if `name` is one.
+    pub fn generic_function_type(&self, name: &str) -> Option<&Ty> {
+        self.generic_function_types.get(name)
     }
 
     /// Return true when a function name was declared in an extern block.

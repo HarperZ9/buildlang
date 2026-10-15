@@ -1,0 +1,9 @@
+fn first<T>(v: Vec<T>) -> T {
+    v[0]
+}
+
+fn main() ~ Console {
+    let mut v: Vec<i32> = vec_new();
+    v.push(5);
+    println!("{}", first(v));
+}
