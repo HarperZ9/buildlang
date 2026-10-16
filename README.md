@@ -371,3 +371,11 @@ The compiler, toolchain and their documentation are under the BuildLang
 Fair-Source License v1.0, source-available, not open source: read it, run it,
 build on it; commercial use that competes with the project is reserved. See
 [LICENSE](LICENSE).
+
+### Generated output
+
+The code BuildLang generates from your source may be shipped inside your programs and games,
+under terms of your choosing. This covers the generated C, the C header built into it, and
+the other code `buildc` generates, such as HLSL and GLSL. The Fair-Source License covers the
+compiler and toolchain; it does not restrict what you ship that they generated. This
+statement sits beside [LICENSE](LICENSE) and does not change its text.
