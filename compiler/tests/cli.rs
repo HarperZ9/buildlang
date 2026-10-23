@@ -17434,7 +17434,7 @@ fn main() ~ Console {
 }
 
 // =============================================================================
-// SCIENTIFIC-RUNTIME RECEIPT (buildlang-scientific-runtime-receipt/v0)
+// SCIENTIFIC-RUNTIME RECEIPT (buildlang-scientific-runtime-receipt/v1)
 // =============================================================================
 
 fn repo_example(name: &str) -> PathBuf {
@@ -19230,7 +19230,7 @@ fn budget_declaration_round_trips_and_pins_the_admission_contract() {
 
     // POSITIVE: the greedy kernel under the full declaration PASSes, the
     // block is sealed with the declared facts plus the boundary rule
-    // (NOT_PROVES_OPTIMALITY label, optimality not_claimed entry), and the
+    // (BEST_FOUND_WITHIN_BUDGET label, best_found_within_budget scope entry), and the
     // receipt verifies.
     let pass_receipt = dir.join("greedy.json");
     let emit_pass = buildc()
@@ -19265,12 +19265,12 @@ fn budget_declaration_round_trips_and_pins_the_admission_contract() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|l| l == "NOT_PROVES_OPTIMALITY"));
-    assert!(pass["not_claimed"]
+        .any(|l| l == "BEST_FOUND_WITHIN_BUDGET"));
+    assert!(pass["scope"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|c| c == "optimality"));
+        .any(|c| c == "best_found_within_budget"));
     let verify_pass = buildc()
         .args(["receipt", "verify"])
         .arg(&pass_receipt)
@@ -19409,7 +19409,8 @@ fn budget_declaration_round_trips_and_pins_the_admission_contract() {
         "free text claiming optimality on a budgeted run must be refused"
     );
     assert!(
-        String::from_utf8_lossy(&claims_optimal.stderr).contains("cannot contain the word `optimal`"),
+        String::from_utf8_lossy(&claims_optimal.stderr)
+            .contains("cannot contain the word `optimal`"),
         "the refusal must name the word it refuses\nstderr:\n{}",
         String::from_utf8_lossy(&claims_optimal.stderr)
     );
@@ -19911,8 +19912,8 @@ fn permitted_secondary_block_compositions_mc_plus_budget_and_budget_plus_cross_b
             .as_array()
             .unwrap()
             .iter()
-            .any(|l| l == "NOT_PROVES_OPTIMALITY"),
-        "the budget block's NOT_PROVES_OPTIMALITY label must be present"
+            .any(|l| l == "BEST_FOUND_WITHIN_BUDGET"),
+        "the budget block's BEST_FOUND_WITHIN_BUDGET label must be present"
     );
     let verify_budget_cross_backend = buildc()
         .args(["receipt", "verify"])
@@ -20382,7 +20383,7 @@ fn run_emit_receipt_stable_kernel_is_pass() {
     );
 
     let receipt = receipt_from_stdout(&output);
-    assert_eq!(receipt["schema"], "buildlang-scientific-runtime-receipt/v0");
+    assert_eq!(receipt["schema"], "buildlang-scientific-runtime-receipt/v1");
     assert_eq!(receipt["compiler"], "buildc");
     assert_eq!(receipt["receipt_status"], "PASS");
     assert_eq!(receipt["invariant"]["status"], "PASS");
@@ -20400,8 +20401,8 @@ fn run_emit_receipt_stable_kernel_is_pass() {
 
     let labels = receipt["labels"].as_array().expect("labels array");
     assert!(
-        labels.iter().any(|label| label == "NOT_A_NEW_PHYSICAL_LAW"),
-        "every receipt must carry NOT_A_NEW_PHYSICAL_LAW; got {labels:?}"
+        labels.iter().any(|label| label == "NUMERICAL_RESULT"),
+        "every receipt must carry NUMERICAL_RESULT; got {labels:?}"
     );
 
     // The source digest is a 64-hex sha256.
@@ -20448,7 +20449,7 @@ fn run_emit_receipt_unstable_negative_fixture_is_fail_expected() {
     );
 
     let labels = receipt["labels"].as_array().expect("labels array");
-    assert!(labels.iter().any(|label| label == "NOT_A_NEW_PHYSICAL_LAW"));
+    assert!(labels.iter().any(|label| label == "NUMERICAL_RESULT"));
     assert!(labels.iter().any(|label| label == "NEGATIVE_FIXTURE"));
 }
 
@@ -20650,7 +20651,7 @@ fn receipt_verify_scientific_json_reports_match() {
     let report: serde_json::Value =
         serde_json::from_slice(&verify.stdout).expect("json verify output is JSON");
     assert_eq!(report["status"], "match");
-    assert_eq!(report["schema"], "buildlang-scientific-runtime-receipt/v0");
+    assert_eq!(report["schema"], "buildlang-scientific-runtime-receipt/v1");
 }
 
 #[test]
@@ -20742,8 +20743,7 @@ fn scientific_runtime_receipt_emit_and_verify_round_trip() {
 
     // 1) Emit a receipt from the STABLE kernel. The invariant holds, so the
     //    receipt is PASS, carries a valid 64-hex seal, and is labelled
-    //    NOT_A_NEW_PHYSICAL_LAW (honest scope: an observed-series invariant,
-    //    never a physical law).
+    //    NUMERICAL_RESULT (its scope is an observed-series invariant).
     let (dir, staged) = stage_stable_kernel("roundtrip");
     let receipt = dir.join("receipt.json");
     emit_stable_receipt(&staged, &receipt);
@@ -20752,7 +20752,7 @@ fn scientific_runtime_receipt_emit_and_verify_round_trip() {
         let bytes = fs::read(&receipt).expect("read emitted round-trip receipt");
         serde_json::from_slice(&bytes).expect("emitted receipt is valid JSON")
     };
-    assert_eq!(emitted["schema"], "buildlang-scientific-runtime-receipt/v0");
+    assert_eq!(emitted["schema"], "buildlang-scientific-runtime-receipt/v1");
     assert_eq!(emitted["receipt_status"], "PASS");
     assert_eq!(emitted["invariant"]["status"], "PASS");
     assert_eq!(emitted["invariant"]["observed"]["violation_count"], 0);
@@ -20768,8 +20768,8 @@ fn scientific_runtime_receipt_emit_and_verify_round_trip() {
             .as_array()
             .expect("labels array")
             .iter()
-            .any(|label| label == "NOT_A_NEW_PHYSICAL_LAW"),
-        "every receipt must carry NOT_A_NEW_PHYSICAL_LAW"
+            .any(|label| label == "NUMERICAL_RESULT"),
+        "every receipt must carry NUMERICAL_RESULT"
     );
 
     // 2) `receipt verify` on the untouched receipt re-runs the program, re-derives
@@ -20872,8 +20872,8 @@ fn scientific_runtime_receipt_emit_and_verify_round_trip() {
     assert!(
         negative_labels
             .iter()
-            .any(|label| label == "NOT_A_NEW_PHYSICAL_LAW"),
-        "the negative fixture is still labelled NOT_A_NEW_PHYSICAL_LAW"
+            .any(|label| label == "NUMERICAL_RESULT"),
+        "the negative fixture is still labelled NUMERICAL_RESULT"
     );
     assert!(
         negative_labels

@@ -271,7 +271,7 @@ shipped slice and checker slice one do.
 
 ## Provenance
 
-The shipped slice rides on the existing `buildlang-scientific-runtime-receipt/v0`
+The shipped slice rides on the existing `buildlang-scientific-runtime-receipt/v1`
 seal without changing the schema: `measurement.units` was already an optional
 field; the change is that it is now a CHECKED canonical unit rather than an
 unvalidated free-text string when `--units` is supplied.

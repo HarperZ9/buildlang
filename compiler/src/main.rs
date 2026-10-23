@@ -59,13 +59,14 @@ use scientific_runtime::{
 use scientific_runtime::{
     build_scientific_runtime_receipt, build_self_test_cases, column_count_matches_invariant,
     compute_mc_executed, crucible_measurement_from_report, evaluate_scientific_runtime_receipt,
-    parse_numeric_series, verify_scientific_runtime_receipt, RederivedFacts, RerunObservation,
-    ScientificBudget, ScientificCrossBackend, ScientificDigest, ScientificEffectPolicy,
-    ScientificMonteCarlo, ScientificReceiptInputs, ScientificRuntimeReceipt, ScientificToolchain,
-    SecondaryObservation, BOUNDED_INVARIANT, CONSERVATION_INVARIANT, CONSERVED_BAND_INVARIANT,
-    CROSS_BACKEND_INVARIANT, CRUCIBLE_MEASUREMENT_EXPORT_SCHEMA, ENERGY_IDENTITY_INVARIANT,
-    ENERGY_MONOTONE_INVARIANT, MC_EXECUTED_ESTIMATOR_PROPORTION, NON_NEGATIVE_INVARIANT,
-    RELATION_INVARIANT, SCIENTIFIC_RUNTIME_SCHEMA,
+    is_scientific_runtime_schema, parse_numeric_series, verify_scientific_runtime_receipt,
+    RederivedFacts, RerunObservation, ScientificBudget, ScientificCrossBackend, ScientificDigest,
+    ScientificEffectPolicy, ScientificMonteCarlo, ScientificReceiptInputs,
+    ScientificRuntimeReceipt, ScientificToolchain, SecondaryObservation, BOUNDED_INVARIANT,
+    CONSERVATION_INVARIANT, CONSERVED_BAND_INVARIANT, CROSS_BACKEND_INVARIANT,
+    CRUCIBLE_MEASUREMENT_EXPORT_SCHEMA, ENERGY_IDENTITY_INVARIANT, ENERGY_MONOTONE_INVARIANT,
+    MC_EXECUTED_ESTIMATOR_PROPORTION, NON_NEGATIVE_INVARIANT, RELATION_INVARIANT,
+    SCIENTIFIC_RUNTIME_SCHEMA,
 };
 use symbol_graph::{verify_symbol_graph_receipt, SymbolGraphReceipt, SYMBOL_GRAPH_RECEIPT};
 use tool_receipt::{verify_tool_call_receipt, TOOL_RECEIPT_SCHEMA};
@@ -327,7 +328,7 @@ enum Commands {
 
         /// Declare the run a budgeted search: the step ceiling. Both
         /// --budget-* flags declare together or not at all. A budgeted
-        /// receipt carries NOT_PROVES_OPTIMALITY and refuses free text
+        /// receipt carries BEST_FOUND_WITHIN_BUDGET and refuses free text
         /// claiming optimality.
         #[arg(long, value_name = "LIMIT")]
         budget_steps: Option<u64>,
@@ -2098,7 +2099,7 @@ fn cmd_receipt_chain_build(receipts: &[PathBuf], output: &Path) -> Result<(), i3
         // zero changes beyond this: pinned seals and subprocess
         // re-verification (`buildc receipt verify <member>`) already compose
         // through the schema-agnostic dispatch this widening exercises.
-        if schema != SCIENTIFIC_RUNTIME_SCHEMA
+        if !is_scientific_runtime_schema(&schema)
             && schema != MODEL_RECEIPT_SCHEMA
             && schema != TOOL_RECEIPT_SCHEMA
         {
@@ -2455,7 +2456,7 @@ fn cmd_receipt_export(
     })?;
     let schema = receipt_field_str(&receipt, "/schema", "schema")
         .map_err(|code| receipt_load_failure(false, "SCHEMA_UNSUPPORTED", code))?;
-    if schema != SCIENTIFIC_RUNTIME_SCHEMA {
+    if !is_scientific_runtime_schema(&schema) {
         eprintln!(
             "Error: receipt export supports `{}` only (got `{}`); the check-receipt and corpus surfaces are documented follow-ons",
             SCIENTIFIC_RUNTIME_SCHEMA, schema
@@ -2918,7 +2919,7 @@ fn cmd_receipt_verify(
 
     let schema = receipt_field_str(&receipt, "/schema", "schema")
         .map_err(|code| receipt_load_failure(false, "SCHEMA_UNSUPPORTED", code))?;
-    if schema == SCIENTIFIC_RUNTIME_SCHEMA {
+    if is_scientific_runtime_schema(&schema) {
         return verify_scientific_receipt_dispatch(&receipt, source_override, false);
     }
     if schema == MODEL_RECEIPT_SCHEMA {
@@ -3052,10 +3053,10 @@ fn cmd_receipt_verify_json(
     // Route the scientific-runtime schema to its own re-run verifier BEFORE the
     // check-receipt schema guard, so the existing check-receipt path stays
     // byte-identical.
-    if receipt_field_str(&receipt, "/schema", "schema")
-        .map_err(|code| receipt_load_failure(true, "SCHEMA_UNSUPPORTED", code))?
-        == SCIENTIFIC_RUNTIME_SCHEMA
-    {
+    if is_scientific_runtime_schema(
+        &receipt_field_str(&receipt, "/schema", "schema")
+            .map_err(|code| receipt_load_failure(true, "SCHEMA_UNSUPPORTED", code))?,
+    ) {
         return verify_scientific_receipt_dispatch(&receipt, source_override, true);
     }
 
@@ -8463,7 +8464,7 @@ fn cmd_run(
     }
     // The claim-language emit gate, beside the budget declaration: a
     // budgeted search reports its incumbent, never optimality, so
-    // --method / --problem free text may not contradict NOT_PROVES_OPTIMALITY.
+    // --method / --problem free text may not use the word `optimal`.
     if budget.is_some() {
         let problem_claims_optimal = problem
             .map(|s| s.to_lowercase().contains("optimal"))

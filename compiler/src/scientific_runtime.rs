@@ -11,20 +11,104 @@
 //! captures its numeric stdout as a measurement series, checks a stated
 //! **invariant** over that series, and emits a sealed, re-checkable JSON receipt.
 //!
-//! Honest scope (read `docs/superpowers/specs/2026-07-01-scientific-runtime-receipt-design.md`):
-//! the receipt witnesses that the compiled program's observed output series
-//! satisfies (or, for a negative fixture, expectedly violates) the stated
-//! invariant. It does NOT prove the underlying PDE is solved correctly, and it
-//! does NOT claim a new physical law. Every receipt carries the label
-//! `NOT_A_NEW_PHYSICAL_LAW`. v0 is deliberately one invariant (monotone
-//! non-increasing) over one f64 series, sealed and re-derivable.
+//! Scope (read `docs/superpowers/specs/2026-07-01-scientific-runtime-receipt-design.md`):
+//! the receipt records that the compiled program's observed output series
+//! satisfies the stated invariant (or, for a negative fixture, violates it as
+//! expected). Every receipt carries the label `NUMERICAL_RESULT` and a `scope`
+//! list that names what it covers. The receipt holds one invariant over one
+//! f64 series, sealed and re-derivable.
 
 use std::path::Path;
 
 use super::{source_digest_hex, CheckReceiptSourceDigest};
 
 /// Schema id for the scientific-runtime receipt.
-pub const SCIENTIFIC_RUNTIME_SCHEMA: &str = "buildlang-scientific-runtime-receipt/v0";
+pub const SCIENTIFIC_RUNTIME_SCHEMA: &str = "buildlang-scientific-runtime-receipt/v1";
+
+/// Schema id for version 0 receipts. Version 0 named its limits in a
+/// `not_claimed` list and in negative labels. Verify still accepts version 0.
+pub const SCIENTIFIC_RUNTIME_SCHEMA_V0: &str = "buildlang-scientific-runtime-receipt/v0";
+
+/// True for a scientific-runtime schema that this verifier reads.
+pub fn is_scientific_runtime_schema(schema: &str) -> bool {
+    schema == SCIENTIFIC_RUNTIME_SCHEMA || schema == SCIENTIFIC_RUNTIME_SCHEMA_V0
+}
+
+/// The label on every receipt: the result is a numerical run checked against
+/// an invariant.
+pub const LABEL_NUMERICAL_RESULT: &str = "NUMERICAL_RESULT";
+
+/// The label on a budgeted receipt: the result is the best one that the search
+/// found within its budget.
+pub const LABEL_BEST_FOUND_WITHIN_BUDGET: &str = "BEST_FOUND_WITHIN_BUDGET";
+
+/// What every version 1 receipt covers. Verify requires
+/// [`SCOPE_REQUIRED`].
+pub const SCOPE_BASE: &[&str] = &[
+    "source_and_build_digests",
+    "observed_series_invariant",
+    "rerun_agreement",
+];
+
+/// The scope entry that every version 1 receipt must carry.
+pub const SCOPE_REQUIRED: &str = "observed_series_invariant";
+
+/// The scope entry that pairs with a budget block.
+pub const SCOPE_BUDGET: &str = "best_found_within_budget";
+
+/// The scope entries that pair with an EXECUTED monte_carlo block: the
+/// receipt re-checks the interval arithmetic and the sample denominator.
+pub const MC_EXECUTED_SCOPE: &[&str] = &["interval_arithmetic", "sample_denominator"];
+
+/// Version 0 name of [`LABEL_NUMERICAL_RESULT`].
+pub const LABEL_NUMERICAL_RESULT_V0: &str = "NOT_A_NEW_PHYSICAL_LAW";
+
+/// Version 0 name of [`LABEL_BEST_FOUND_WITHIN_BUDGET`].
+pub const LABEL_BEST_FOUND_WITHIN_BUDGET_V0: &str = "NOT_PROVES_OPTIMALITY";
+
+/// The vocabulary that one schema version uses for its labels and its
+/// coverage list. Verify reads a receipt through the vocabulary of its own
+/// version, so a version 0 receipt keeps verifying.
+pub struct ReceiptVocabulary {
+    /// The label that every receipt of this version carries.
+    pub numerical_label: &'static str,
+    /// The JSON name of the coverage list (`scope` or `not_claimed`).
+    pub list_name: &'static str,
+    /// The entry that every receipt of this version must carry.
+    pub required_entry: &'static str,
+    /// The failure class when the required entry is missing.
+    pub missing_class: &'static str,
+    /// The label and the list entry that pair with a budget block.
+    pub budget_label: &'static str,
+    pub budget_entry: &'static str,
+    /// The list entries that pair with an EXECUTED monte_carlo block.
+    pub mc_entries: &'static [&'static str],
+}
+
+/// The vocabulary for a schema id (version 1 for any id other than version 0).
+pub fn receipt_vocabulary(schema: &str) -> ReceiptVocabulary {
+    if schema == SCIENTIFIC_RUNTIME_SCHEMA_V0 {
+        ReceiptVocabulary {
+            numerical_label: LABEL_NUMERICAL_RESULT_V0,
+            list_name: "not_claimed",
+            required_entry: "physical_law",
+            missing_class: "OVERCLAIM_BOUNDARY_MISSING",
+            budget_label: LABEL_BEST_FOUND_WITHIN_BUDGET_V0,
+            budget_entry: "optimality",
+            mc_entries: MC_EXECUTED_NOT_CLAIMED,
+        }
+    } else {
+        ReceiptVocabulary {
+            numerical_label: LABEL_NUMERICAL_RESULT,
+            list_name: "scope",
+            required_entry: SCOPE_REQUIRED,
+            missing_class: "SCOPE_MISSING",
+            budget_label: LABEL_BEST_FOUND_WITHIN_BUDGET,
+            budget_entry: SCOPE_BUDGET,
+            mc_entries: MC_EXECUTED_SCOPE,
+        }
+    }
+}
 
 /// Default generated-program stdio mode for receipts sealed before the field
 /// existed, and for new receipts that preserve native host behavior.
@@ -181,10 +265,8 @@ pub const MC_INTERVAL_Z_95: f64 = 1.959963984540054;
 /// proportions, so absolute is safe.
 pub const MC_RECOMPUTE_TOLERANCE: f64 = 1e-12;
 
-/// The three `not_claimed` entries an EXECUTED monte_carlo block adds,
-/// present iff `status == "EXECUTED"` (the `NOT_PROVES_OPTIMALITY`/
-/// `optimality` pairing idiom). EXECUTED hardens the interval arithmetic
-/// and the denominator; it cannot and does not claim these.
+/// Version 0 only: the three `not_claimed` entries that an EXECUTED
+/// monte_carlo block added. Version 1 uses [`MC_EXECUTED_SCOPE`].
 pub const MC_EXECUTED_NOT_CLAIMED: &[&str] = &[
     "sample_independence",
     "interval_coverage",
@@ -196,11 +278,11 @@ pub const MC_EXECUTED_NOT_CLAIMED: &[&str] = &[
 pub const RESEARCH_SOURCE_HASH: &str =
     "b3021c14b0e5dc8adeddadf0d22e2780dbf259c349caf5cbc2ba255b591fd7d5";
 
-/// The machine-readable claims boundary every scientific-runtime receipt
-/// carries (the pass-0122 `non_promotion_boundary` field as sealed data): what
-/// a verdict does NOT witness. Verify rejects a receipt whose boundary omits
-/// "physical_law" (an emitter or hand-builder that dropped the boundary is
-/// overclaiming by omission).
+/// Version 0 only: the `not_claimed` list that every version 0 receipt
+/// carried. Verify rejects a version 0 receipt whose list omits
+/// "physical_law". Version 1 uses [`SCOPE_BASE`]. Kept as the record of the
+/// version 0 list; the legacy tests build version 0 receipts from it.
+#[cfg_attr(not(test), allow(dead_code))]
 pub const NOT_CLAIMED_BOUNDARY: &[&str] = &[
     "numerical_correctness",
     "convergence",
@@ -373,9 +455,9 @@ pub struct ScientificMonteCarlo {
 /// the ceiling is non-zero, consumption never exceeds it (a consumption
 /// above its ceiling is incoherent), and `exhausted` is DERIVED
 /// (`steps_consumed == steps_limit`), never hand-set. A budgeted receipt
-/// additionally carries `NOT_PROVES_OPTIMALITY` in `labels` and
-/// `optimality` in `not_claimed`, both re-derived at verify: a budgeted
-/// search may report its incumbent, never a proof of optimality.
+/// also carries `BEST_FOUND_WITHIN_BUDGET` in `labels` and
+/// `best_found_within_budget` in `scope`. Verify re-derives both: the result
+/// is the best one that the search found within its budget.
 ///
 /// No longer `Eq` (only `PartialEq`): the wall fields below add `f64`,
 /// which has no total order (`Eq` cannot be derived over it), matching the
@@ -779,10 +861,15 @@ pub struct ScientificRuntimeReceipt {
     /// gates the prefix-derived checks (count, violation_count) on this field
     /// and instead requires the re-run to reproduce the divergence itself.
     pub diverged: bool,
-    /// The machine-readable claims boundary (pass-0122 `non_promotion_boundary`
-    /// as sealed data; see [`NOT_CLAIMED_BOUNDARY`]). Verify rejects a receipt
-    /// whose boundary omits "physical_law".
+    /// Version 0 only: the limits list (see [`NOT_CLAIMED_BOUNDARY`]). It is
+    /// skipped when empty, so a version 0 receipt re-serializes to its sealed
+    /// bytes and a version 1 receipt never carries it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub not_claimed: Vec<String>,
+    /// Version 1: what the receipt covers (see [`SCOPE_BASE`]). Skipped when
+    /// empty, so a version 0 receipt keeps its sealed bytes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scope: Vec<String>,
     pub labels: Vec<String>,
     pub receipt_status: String,
     pub seal: ScientificDigest,
@@ -1381,7 +1468,7 @@ pub struct ScientificReceiptInputs<'a> {
 /// - invariant FAIL without `--negative-fixture`     -> `FAIL_UNEXPECTED`
 /// - empty / unparseable series                      -> `UNVERIFIABLE`
 ///
-/// Labels always include `NOT_A_NEW_PHYSICAL_LAW`; `NEGATIVE_FIXTURE` is added
+/// Labels always include `NUMERICAL_RESULT`; `NEGATIVE_FIXTURE` is added
 /// when the run is a declared negative fixture.
 pub fn build_scientific_runtime_receipt(
     inputs: ScientificReceiptInputs<'_>,
@@ -1443,7 +1530,7 @@ pub fn build_scientific_runtime_receipt(
         "FAIL_UNEXPECTED"
     };
 
-    let mut labels = vec!["NOT_A_NEW_PHYSICAL_LAW".to_string()];
+    let mut labels = vec![LABEL_NUMERICAL_RESULT.to_string()];
     if negative_fixture {
         labels.push("NEGATIVE_FIXTURE".to_string());
     }
@@ -1453,21 +1540,18 @@ pub fn build_scientific_runtime_receipt(
         // output at all".
         labels.push("NONFINITE_OBSERVED".to_string());
     }
-    // The budgeted-search boundary rule: a heuristic result carries its
-    // ceiling only if it also carries the mechanical reminder that a
-    // budgeted search may report its incumbent, never a proof of optimality.
-    let mut not_claimed: Vec<String> = NOT_CLAIMED_BOUNDARY.iter().map(|s| s.to_string()).collect();
+    // A budgeted result carries a label and a scope entry that say it is the
+    // best result the search found within its budget.
+    let mut scope: Vec<String> = SCOPE_BASE.iter().map(|s| s.to_string()).collect();
     if budget.is_some() {
-        labels.push("NOT_PROVES_OPTIMALITY".to_string());
-        not_claimed.push("optimality".to_string());
+        labels.push(LABEL_BEST_FOUND_WITHIN_BUDGET.to_string());
+        scope.push(SCOPE_BUDGET.to_string());
     }
-    // The EXECUTED monte_carlo boundary: hardening the interval arithmetic
-    // and the denominator cannot and does not harden sample independence,
-    // interval coverage, or the estimator's semantics. Sealed machine-
-    // readably (the NOT_PROVES_OPTIMALITY/optimality pairing idiom).
+    // An EXECUTED monte_carlo block adds the two checks it covers: the
+    // interval arithmetic and the sample denominator.
     if let Some(mc) = &monte_carlo {
         if mc.status == "EXECUTED" {
-            not_claimed.extend(MC_EXECUTED_NOT_CLAIMED.iter().map(|s| s.to_string()));
+            scope.extend(MC_EXECUTED_SCOPE.iter().map(|s| s.to_string()));
         }
     }
 
@@ -1547,7 +1631,8 @@ pub fn build_scientific_runtime_receipt(
         lineage_branch: ScientificFencedBranch::fenced(),
         negative_fixture,
         diverged,
-        not_claimed,
+        not_claimed: Vec::new(),
+        scope,
         labels,
         receipt_status: receipt_status.to_string(),
         // Placeholder; overwritten by `seal_receipt` below.
@@ -2321,7 +2406,7 @@ pub fn evaluate_scientific_runtime_receipt(
             verify_failure_class(json, "MALFORMED", 1)
         })?;
 
-    if receipt.schema != SCIENTIFIC_RUNTIME_SCHEMA {
+    if !is_scientific_runtime_schema(&receipt.schema) {
         eprintln!(
             "Error: unsupported scientific-runtime receipt schema `{}`",
             receipt.schema
@@ -2353,15 +2438,34 @@ pub fn evaluate_scientific_runtime_receipt(
         return Err(verify_failure_class(json, "SEAL_MISMATCH", 1));
     }
 
-    // The claims boundary is load-bearing honesty (pass-0122
-    // non_promotion_boundary): a receipt whose not_claimed omits
-    // "physical_law" is overclaiming by omission and is rejected outright.
-    if !receipt.not_claimed.iter().any(|c| c == "physical_law") {
+    // Read the labels and the coverage list through the vocabulary of the
+    // receipt's own schema version. Each version carries exactly one list.
+    let vocab = receipt_vocabulary(&receipt.schema);
+    let (entries, other) = if vocab.list_name == "scope" {
+        (&receipt.scope, &receipt.not_claimed)
+    } else {
+        (&receipt.not_claimed, &receipt.scope)
+    };
+    if !other.is_empty() {
         eprintln!(
-            "Error: receipt claims boundary missing: not_claimed must include `physical_law`, got {:?}",
-            receipt.not_claimed
+            "Error: a `{}` receipt carries only the `{}` list",
+            receipt.schema, vocab.list_name
         );
-        return Err(verify_failure_class(json, "OVERCLAIM_BOUNDARY_MISSING", 1));
+        return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
+    }
+    if !entries.iter().any(|c| c == vocab.required_entry) {
+        eprintln!(
+            "Error: the receipt's `{}` list must include `{}`, got {:?}",
+            vocab.list_name, vocab.required_entry, entries
+        );
+        return Err(verify_failure_class(json, vocab.missing_class, 1));
+    }
+    if !receipt.labels.iter().any(|l| l == vocab.numerical_label) {
+        eprintln!(
+            "Error: the receipt's labels must include {}, got {:?}",
+            vocab.numerical_label, receipt.labels
+        );
+        return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
     }
 
     // The verifier's series-extraction policy must match the sealed one BY
@@ -2910,51 +3014,52 @@ pub fn evaluate_scientific_runtime_receipt(
             }
         }
     }
-    // The label pairing, checked for EVERY receipt (not only budgeted ones):
-    // a budgetless receipt claiming NOT_PROVES_OPTIMALITY, or a budgeted one
-    // missing it, is refused. Same for the not_claimed boundary entry.
-    let has_not_proves_optimality = receipt.labels.iter().any(|l| l == "NOT_PROVES_OPTIMALITY");
-    if has_not_proves_optimality != receipt.budget.is_some() {
+    // The budget pairing, checked for every receipt: the budget label and the
+    // budget list entry are present exactly when the budget block is present.
+    let has_budget_label = receipt.labels.iter().any(|l| l == vocab.budget_label);
+    if has_budget_label != receipt.budget.is_some() {
         eprintln!(
-            "Error: NOT_PROVES_OPTIMALITY label present={} but budget block present={}: the label must pair exactly with the block",
-            has_not_proves_optimality,
+            "Error: the {} label is present={} and the budget block is present={}; they must match",
+            vocab.budget_label,
+            has_budget_label,
             receipt.budget.is_some()
         );
         return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
     }
-    let has_optimality_boundary = receipt.not_claimed.iter().any(|c| c == "optimality");
-    if has_optimality_boundary != receipt.budget.is_some() {
+    let has_budget_entry = entries.iter().any(|c| c == vocab.budget_entry);
+    if has_budget_entry != receipt.budget.is_some() {
         eprintln!(
-            "Error: not_claimed `optimality` entry present={} but budget block present={}: the boundary entry must pair exactly with the block",
-            has_optimality_boundary,
+            "Error: the `{}` entry `{}` is present={} and the budget block is present={}; they must match",
+            vocab.list_name,
+            vocab.budget_entry,
+            has_budget_entry,
             receipt.budget.is_some()
         );
         return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
     }
-    // The EXECUTED monte_carlo not_claimed triad: sample_independence,
-    // interval_coverage, and estimator_semantics must pair exactly (all
-    // three or none) with an EXECUTED monte_carlo block.
+    // The monte_carlo entries are present (all of them) exactly when the
+    // monte_carlo block is EXECUTED.
     let mc_executed = receipt
         .monte_carlo
         .as_ref()
         .is_some_and(|mc| mc.status == "EXECUTED");
-    let has_all_mc_not_claimed = MC_EXECUTED_NOT_CLAIMED
+    let has_all_mc_entries = vocab
+        .mc_entries
         .iter()
-        .all(|c| receipt.not_claimed.iter().any(|x| x == c));
-    let has_any_mc_not_claimed = MC_EXECUTED_NOT_CLAIMED
+        .all(|c| entries.iter().any(|x| x == c));
+    let has_any_mc_entry = vocab
+        .mc_entries
         .iter()
-        .any(|c| receipt.not_claimed.iter().any(|x| x == c));
-    if mc_executed != has_all_mc_not_claimed || (has_any_mc_not_claimed && !has_all_mc_not_claimed)
-    {
+        .any(|c| entries.iter().any(|x| x == c));
+    if mc_executed != has_all_mc_entries || (has_any_mc_entry && !has_all_mc_entries) {
         eprintln!(
-            "Error: not_claimed `sample_independence`/`interval_coverage`/`estimator_semantics` present={} but monte_carlo EXECUTED={}: the boundary entries must pair exactly (all three or none) with an EXECUTED block",
-            has_any_mc_not_claimed, mc_executed
+            "Error: the `{}` monte_carlo entries {:?} are present={} and the monte_carlo block is EXECUTED={}; they must match",
+            vocab.list_name, vocab.mc_entries, has_any_mc_entry, mc_executed
         );
         return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
     }
-    // The claim-language rule: a budgeted search reports its incumbent,
-    // never optimality, so the free text may not contradict
-    // NOT_PROVES_OPTIMALITY.
+    // The label rule: a budgeted search reports the best result it found, so
+    // the free text may not use the word `optimal`.
     if receipt.budget.is_some() {
         let problem_claims_optimal = receipt
             .problem
@@ -3643,10 +3748,13 @@ fn digest_is_well_formed(digest: &ScientificDigest) -> bool {
 /// report on stdout, so negative fixtures and CI consumers can pin
 /// (failure_class, exit_code) pairs instead of accepting "anything failed".
 ///
-/// The class vocabulary (stable within schema v0):
+/// The class vocabulary (stable within schema v1; v0 receipts use the same
+/// classes plus `OVERCLAIM_BOUNDARY_MISSING`):
 /// - `MALFORMED`, `SCHEMA_UNSUPPORTED`, `COMPILER_MISMATCH`: the receipt could
 ///   not be interpreted.
-/// - `OVERCLAIM_BOUNDARY_MISSING`: `not_claimed` omits "physical_law".
+/// - `SCOPE_MISSING`: a v1 receipt's `scope` omits "observed_series_invariant".
+/// - `OVERCLAIM_BOUNDARY_MISSING`: a v0 receipt's `not_claimed` omits
+///   "physical_law".
 /// - `EXTRACTION_POLICY_MISMATCH`: the sealed series-extraction policy's
 ///   version tag is not the one this verifier implements.
 /// - `DIGEST_MALFORMED`: a sealed digest field is not a real sha256 (64 hex
@@ -3665,7 +3773,7 @@ fn digest_is_well_formed(digest: &ScientificDigest) -> bool {
 /// - `EFFECT_POLICY_DRIFT`: the sealed effect/capability facts, or the
 ///   witnessed fields derived from them, do not re-derive from the source.
 /// - `CAPABILITY_INADMISSIBLE`: a capability the receipt layer refuses
-///   outright; today only `Model` (models propose, oracles dispose).
+///   outright; today only `Model`. A model proposes; an oracled kernel checks.
 /// - `TOOL_UNAVAILABLE` (exit 4): no C compiler is available for the re-run.
 /// - `REDERIVATION_FAILED`, `RERUN_FAILED`: the source could not be re-checked
 ///   or re-run (missing file, toolchain failure), distinct from drift. Exit 4
@@ -3863,9 +3971,7 @@ mod tests {
         assert_eq!(receipt.receipt_status, "PASS");
         assert_eq!(receipt.invariant.status, "PASS");
         assert_eq!(receipt.invariant.observed.violation_count, 0);
-        assert!(receipt
-            .labels
-            .contains(&"NOT_A_NEW_PHYSICAL_LAW".to_string()));
+        assert!(receipt.labels.contains(&LABEL_NUMERICAL_RESULT.to_string()));
         assert!(!receipt.labels.contains(&"NEGATIVE_FIXTURE".to_string()));
     }
 
@@ -3900,7 +4006,7 @@ mod tests {
     }
 
     #[test]
-    fn always_labels_not_a_new_physical_law() {
+    fn always_labels_numerical_result() {
         let path = Path::new("k.bld");
         for (series, parsed, neg) in [
             (vec![4.0, 3.0], true, false),
@@ -3909,10 +4015,8 @@ mod tests {
         ] {
             let receipt = build_scientific_runtime_receipt(base_inputs(path, series, parsed, neg));
             assert!(
-                receipt
-                    .labels
-                    .contains(&"NOT_A_NEW_PHYSICAL_LAW".to_string()),
-                "every receipt must carry NOT_A_NEW_PHYSICAL_LAW"
+                receipt.labels.contains(&LABEL_NUMERICAL_RESULT.to_string()),
+                "every receipt must carry NUMERICAL_RESULT"
             );
         }
     }
@@ -5670,13 +5774,13 @@ mod tests {
     }
 
     #[test]
-    fn verify_rejects_a_missing_claims_boundary() {
-        // A receipt whose not_claimed omits "physical_law" is overclaiming by
-        // omission and must be rejected before any expensive work.
+    fn verify_rejects_a_missing_scope_entry() {
+        // A receipt whose scope omits "observed_series_invariant" is rejected
+        // before any expensive work.
         let path = Path::new("k.bld");
         let mut receipt =
             build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
-        receipt.not_claimed = vec!["convergence".to_string()];
+        receipt.scope = vec!["rerun_agreement".to_string()];
         seal_receipt(&mut receipt);
         let value = serde_json::to_value(&receipt).expect("to_value");
         let src_digest = receipt.source_digest.clone();
@@ -5695,7 +5799,7 @@ mod tests {
         assert_eq!(
             result,
             Err(1),
-            "a receipt without the physical_law boundary must be rejected"
+            "a receipt without the observed_series_invariant scope entry must be rejected"
         );
     }
 
@@ -6697,15 +6801,8 @@ mod tests {
         assert_eq!(value["monte_carlo"]["status"], "EXECUTED");
         assert_eq!(value["monte_carlo"]["n_effective"], 4);
         assert_eq!(value["monte_carlo"]["successes"], 2);
-        assert!(receipt
-            .not_claimed
-            .iter()
-            .any(|c| c == "sample_independence"));
-        assert!(receipt.not_claimed.iter().any(|c| c == "interval_coverage"));
-        assert!(receipt
-            .not_claimed
-            .iter()
-            .any(|c| c == "estimator_semantics"));
+        assert!(receipt.scope.iter().any(|c| c == "interval_arithmetic"));
+        assert!(receipt.scope.iter().any(|c| c == "sample_denominator"));
         let src = receipt.source_digest.clone();
         let graph = receipt.input_graph_digest.clone();
         let series = receipt.measurement.observed_values.clone();
@@ -6913,8 +7010,70 @@ mod tests {
         assert_eq!(result, Err(1));
     }
 
+    /// A receipt in the version 0 shape: schema v0, the `not_claimed` list and
+    /// the version 0 labels, resealed.
+    fn as_version_0(receipt: &ScientificRuntimeReceipt) -> serde_json::Value {
+        let mut value = serde_json::to_value(receipt).expect("to_value");
+        value["schema"] = serde_json::Value::from(SCIENTIFIC_RUNTIME_SCHEMA_V0);
+        value.as_object_mut().unwrap().remove("scope");
+        value["not_claimed"] = serde_json::json!(NOT_CLAIMED_BOUNDARY);
+        let labels: Vec<String> = receipt
+            .labels
+            .iter()
+            .map(|l| {
+                if l == LABEL_NUMERICAL_RESULT {
+                    LABEL_NUMERICAL_RESULT_V0.to_string()
+                } else {
+                    l.clone()
+                }
+            })
+            .collect();
+        value["labels"] = serde_json::json!(labels);
+        reseal_json(&value).expect("reseal must succeed")
+    }
+
     #[test]
-    fn verify_not_claimed_triad_biconditional() {
+    fn a_version_0_receipt_still_verifies() {
+        let path = Path::new("k.bld");
+        let receipt =
+            build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
+        let run = |value: &serde_json::Value| {
+            let src = receipt.source_digest.clone();
+            let graph = receipt.input_graph_digest.clone();
+            verify_scientific_runtime_receipt(
+                value,
+                None,
+                true,
+                &receipt.compiler_version,
+                &receipt.language_version,
+                Some(&test_toolchain()),
+                move |_| Ok(rederive_facts(src, graph)),
+                |_, _, _, _, _| Ok(rerun(vec![4.0, 3.0, 2.0])),
+            )
+        };
+        let old = as_version_0(&receipt);
+        assert_eq!(old["schema"], SCIENTIFIC_RUNTIME_SCHEMA_V0);
+        assert!(old.get("scope").is_none());
+        assert_eq!(run(&old), Ok(()), "a version 0 receipt must still verify");
+
+        // A version 0 receipt without "physical_law" is still refused.
+        let mut missing = old.clone();
+        missing["not_claimed"] = serde_json::json!(["convergence"]);
+        assert_eq!(run(&reseal_json(&missing).expect("reseal")), Err(1));
+
+        // A version 0 receipt that also carries a scope list is refused.
+        let mut both = old.clone();
+        both["scope"] = serde_json::json!(SCOPE_BASE);
+        assert_eq!(run(&reseal_json(&both).expect("reseal")), Err(1));
+
+        // A version 1 receipt that carries a not_claimed list is refused.
+        let mut mixed = serde_json::to_value(&receipt).expect("to_value");
+        mixed["not_claimed"] = serde_json::json!(NOT_CLAIMED_BOUNDARY);
+        assert_eq!(run(&reseal_json(&mixed).expect("reseal")), Err(1));
+    }
+
+    #[test]
+    fn verify_mc_scope_pair_biconditional() {
         let path = Path::new("k.bld");
 
         fn check(receipt: &ScientificRuntimeReceipt, value: serde_json::Value) -> Result<(), i32> {
@@ -6934,51 +7093,44 @@ mod tests {
                         effect_policy: mc_executed_random_policy(),
                     })
                 },
-                |_, _, _, _, _| {
-                    panic!("a not_claimed triad mismatch must reject before any re-run")
-                },
+                |_, _, _, _, _| panic!("an mc scope pair mismatch must reject before any re-run"),
             )
         }
 
-        // EXECUTED with the triad ABSENT is refused.
+        // EXECUTED with the pair ABSENT is refused.
         let receipt = coherent_executed_mc_receipt(path);
         let mut value = serde_json::to_value(&receipt).expect("to_value");
-        value["not_claimed"] = serde_json::Value::Array(
+        value["scope"] = serde_json::Value::Array(
             receipt
-                .not_claimed
+                .scope
                 .iter()
-                .filter(|c| !MC_EXECUTED_NOT_CLAIMED.contains(&c.as_str()))
+                .filter(|c| !MC_EXECUTED_SCOPE.contains(&c.as_str()))
                 .map(|c| serde_json::Value::from(c.clone()))
                 .collect(),
         );
         let value = reseal_json(&value).expect("reseal must succeed");
         assert_eq!(check(&receipt, value), Err(1));
 
-        // DECLARED with the triad PRESENT is refused.
+        // DECLARED with the pair PRESENT is refused.
         let plain =
             build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
         let mut value = serde_json::to_value(&plain).expect("to_value");
-        let mut not_claimed: Vec<serde_json::Value> = value["not_claimed"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .cloned()
-            .collect();
-        for c in MC_EXECUTED_NOT_CLAIMED {
-            not_claimed.push(serde_json::Value::from(*c));
+        let mut scope: Vec<serde_json::Value> = value["scope"].as_array().unwrap().to_vec();
+        for c in MC_EXECUTED_SCOPE {
+            scope.push(serde_json::Value::from(*c));
         }
-        value["not_claimed"] = serde_json::Value::Array(not_claimed);
+        value["scope"] = serde_json::Value::Array(scope);
         let value = reseal_json(&value).expect("reseal must succeed");
         assert_eq!(check(&plain, value), Err(1));
 
-        // EXECUTED with only two of three present is refused.
+        // EXECUTED with only one of the two present is refused.
         let receipt = coherent_executed_mc_receipt(path);
         let mut value = serde_json::to_value(&receipt).expect("to_value");
-        value["not_claimed"] = serde_json::Value::Array(
+        value["scope"] = serde_json::Value::Array(
             receipt
-                .not_claimed
+                .scope
                 .iter()
-                .filter(|c| c.as_str() != "interval_coverage")
+                .filter(|c| c.as_str() != "interval_arithmetic")
                 .map(|c| serde_json::Value::from(c.clone()))
                 .collect(),
         );
@@ -7039,8 +7191,8 @@ mod tests {
         assert_eq!(value["budget"]["exhausted"], false);
         assert!(receipt
             .labels
-            .contains(&"NOT_PROVES_OPTIMALITY".to_string()));
-        assert!(receipt.not_claimed.contains(&"optimality".to_string()));
+            .contains(&LABEL_BEST_FOUND_WITHIN_BUDGET.to_string()));
+        assert!(receipt.scope.contains(&SCOPE_BUDGET.to_string()));
         assert_eq!(
             run(&receipt, test_effect_policy()),
             Ok(()),
@@ -7082,7 +7234,9 @@ mod tests {
         // whose NOT_PROVES_OPTIMALITY label is stripped after building is
         // refused.
         let mut stripped = receipt.clone();
-        stripped.labels.retain(|l| l != "NOT_PROVES_OPTIMALITY");
+        stripped
+            .labels
+            .retain(|l| l != LABEL_BEST_FOUND_WITHIN_BUDGET);
         seal_receipt(&mut stripped);
         assert_eq!(run(&stripped, test_effect_policy()), Err(1));
 
@@ -7090,7 +7244,9 @@ mod tests {
         // re-sealed is refused.
         let mut faked =
             build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
-        faked.labels.push("NOT_PROVES_OPTIMALITY".to_string());
+        faked
+            .labels
+            .push(LABEL_BEST_FOUND_WITHIN_BUDGET.to_string());
         seal_receipt(&mut faked);
         assert_eq!(run(&faked, test_effect_policy()), Err(1));
 
@@ -7100,7 +7256,9 @@ mod tests {
             build_scientific_runtime_receipt(base_inputs(path, vec![4.0, 3.0, 2.0], true, false));
         let value = serde_json::to_value(&plain).unwrap();
         assert!(value.get("budget").is_none());
-        assert!(!plain.labels.contains(&"NOT_PROVES_OPTIMALITY".to_string()));
+        assert!(!plain
+            .labels
+            .contains(&LABEL_BEST_FOUND_WITHIN_BUDGET.to_string()));
     }
 
     #[test]
