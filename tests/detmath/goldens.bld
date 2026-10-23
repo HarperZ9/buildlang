@@ -1,0 +1,240 @@
+// DETMATH (Low Water design/DETMATH.md, section 2) in BuildLang. Prints the bit
+// pattern of the twelve golden calls in section 3; goldens.expected holds the
+// table, copied from the spec. Any differing bit fails compiler/tests/detmath.rs.
+const DPI: f64 = 3.141592653589793;
+const PIO2_HI: f64 = 1.57079632673412561417;
+const PIO2_LO: f64 = 6.07710050650619224932e-11;
+const INV_PIO2: f64 = 6.36619772367581382433e-1;
+const LN2_HI: f64 = 6.93147180369123816490e-1;
+const LN2_LO: f64 = 1.90821492927058770002e-10;
+const INV_LN2: f64 = 1.44269504088896338700;
+
+const S1: f64 = -1.66666666666666324348e-1;
+const S2: f64 = 8.33333333332248946124e-3;
+const S3: f64 = -1.98412698298579493134e-4;
+const S4: f64 = 2.75573137070700676789e-6;
+const S5: f64 = -2.50507602534068634195e-8;
+const S6: f64 = 1.58969099521155010221e-10;
+const C1: f64 = 4.16666666666666019037e-2;
+const C2: f64 = -1.38888888888741095749e-3;
+const C3: f64 = 2.48015872894767294178e-5;
+const C4: f64 = -2.75573143513906633035e-7;
+const C5: f64 = 2.08757232129817482790e-9;
+const C6: f64 = -1.13596475577881948265e-11;
+
+fn pio2() -> f64 { DPI / 2.0 }
+fn pio6() -> f64 { DPI / 6.0 }
+fn sqrt3() -> f64 { (3.0).sqrt() }
+
+fn ksin(r: f64) -> f64 {
+    let z = r * r;
+    r + r * z * (S1 + z * (S2 + z * (S3 + z * (S4 + z * (S5 + z * S6)))))
+}
+
+fn kcos(r: f64) -> f64 {
+    let z = r * r;
+    1.0 - 0.5 * z + z * z * (C1 + z * (C2 + z * (C3 + z * (C4 + z * (C5 + z * C6)))))
+}
+
+fn is_finite(x: f64) -> bool {
+    x == x && x - x == 0.0
+}
+
+fn quadrant(x: f64) -> f64 {
+    let k = (x * INV_PIO2 + 0.5).floor();
+    ((k % 4.0) + 4.0) % 4.0
+}
+
+fn reduced(x: f64) -> f64 {
+    let k = (x * INV_PIO2 + 0.5).floor();
+    (x - k * PIO2_HI) - k * PIO2_LO
+}
+
+fn dsin(x: f64) -> f64 {
+    if !is_finite(x) {
+        return 0.0 / 0.0;
+    }
+    let r = reduced(x);
+    let q = quadrant(x);
+    if q == 0.0 {
+        ksin(r)
+    } else if q == 1.0 {
+        kcos(r)
+    } else if q == 2.0 {
+        -ksin(r)
+    } else {
+        -kcos(r)
+    }
+}
+
+fn dcos(x: f64) -> f64 {
+    if !is_finite(x) {
+        return 0.0 / 0.0;
+    }
+    let r = reduced(x);
+    let q = quadrant(x);
+    if q == 0.0 {
+        kcos(r)
+    } else if q == 1.0 {
+        -ksin(r)
+    } else if q == 2.0 {
+        -kcos(r)
+    } else {
+        ksin(r)
+    }
+}
+
+fn at(n: i64) -> f64 {
+    let s = if n % 2 == 1 { -1.0 } else { 1.0 };
+    s / ((2 * n + 1) as f64)
+}
+
+fn katan(t: f64) -> f64 {
+    let z = t * t;
+    let mut p = at(15);
+    let mut n: i64 = 14;
+    while n >= 0 {
+        p = at(n) + z * p;
+        n = n - 1;
+    }
+    t * p
+}
+
+fn datan(x0: f64) -> f64 {
+    if x0 != x0 {
+        return x0;
+    }
+    if x0 < 0.0 {
+        return -datan(-x0);
+    }
+    if x0 == 1.0 / 0.0 {
+        return pio2();
+    }
+    let mut x = x0;
+    let mut base = 0.0;
+    let mut sign = 1.0;
+    if x > 1.0 {
+        x = 1.0 / x;
+        base = pio2();
+        sign = -1.0;
+    }
+    let s3 = sqrt3();
+    let mut r = 0.0;
+    if x > 2.0 - s3 {
+        r = pio6() + katan((x * s3 - 1.0) / (x + s3));
+    } else {
+        r = katan(x);
+    }
+    base + sign * r
+}
+
+fn neg_or_negzero(y: f64) -> bool {
+    y < 0.0 || (y == 0.0 && 1.0 / y < 0.0)
+}
+
+fn datan2(y: f64, x: f64) -> f64 {
+    if x != x || y != y {
+        return 0.0 / 0.0;
+    }
+    let yneg = neg_or_negzero(y);
+    if y == 0.0 {
+        if x > 0.0 || (x == 0.0 && 1.0 / x > 0.0) {
+            return y;
+        }
+        if yneg {
+            return -DPI;
+        }
+        return DPI;
+    }
+    if x == 0.0 {
+        if yneg {
+            return -pio2();
+        }
+        return pio2();
+    }
+    let a = datan((y / x).abs());
+    if x > 0.0 {
+        if yneg {
+            return -a;
+        }
+        return a;
+    }
+    if yneg {
+        return -(DPI - a);
+    }
+    DPI - a
+}
+
+fn dasin(x: f64) -> f64 {
+    datan2(x, ((1.0 - x) * (1.0 + x)).sqrt())
+}
+
+fn dacos(x: f64) -> f64 {
+    datan2(((1.0 - x) * (1.0 + x)).sqrt(), x)
+}
+
+fn ec(n: i64) -> f64 {
+    let mut c = 1.0;
+    let mut i: i64 = 1;
+    while i <= n {
+        c = c / (i as f64);
+        i = i + 1;
+    }
+    c
+}
+
+fn pow2(k: i64) -> f64 {
+    let bits = ((k + 1023) as u64) << 52;
+    f64::from_bits(bits)
+}
+
+fn dexp(x: f64) -> f64 {
+    if x != x {
+        return x;
+    }
+    if x > 709.782712893384 {
+        return 1.0 / 0.0;
+    }
+    if x < -745.1332191019412 {
+        return 0.0;
+    }
+    let kf = (x * INV_LN2 + 0.5).floor();
+    let r = (x - kf * LN2_HI) - kf * LN2_LO;
+    let mut p = ec(13);
+    let mut n: i64 = 12;
+    while n >= 0 {
+        p = ec(n) + r * p;
+        n = n - 1;
+    }
+    let k = kf as i64;
+    if k > 1023 {
+        return p * pow2(1023) * pow2(k - 1023);
+    }
+    if k < -1000 {
+        return p * pow2(k + 1000) * pow2(-1000);
+    }
+    p * pow2(k)
+}
+
+fn dhypot(x: f64, y: f64) -> f64 {
+    (x * x + y * y).sqrt()
+}
+
+fn show(name: str, v: f64) ~ Console {
+    println!("{} {:016x}", name, v.to_bits());
+}
+
+fn main() ~ Console {
+    show("dsin(0.5)", dsin(0.5));
+    show("dsin(-2.75)", dsin(-2.75));
+    show("dcos(1.25)", dcos(1.25));
+    show("dcos(10)", dcos(10.0));
+    show("datan2(1,3)", datan2(1.0, 3.0));
+    show("datan2(-2,-0.5)", datan2(-2.0, -0.5));
+    show("dasin(0.3)", dasin(0.3));
+    show("dacos(-0.7)", dacos(-0.7));
+    show("dexp(-0.0333)", dexp(-0.0333));
+    show("dexp(4.2)", dexp(4.2));
+    show("dhypot(1.5,2.25)", dhypot(1.5, 2.25));
+    show("dsin(1000)", dsin(1000.0));
+}

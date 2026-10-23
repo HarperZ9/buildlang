@@ -1,0 +1,12 @@
+dsin(0.5) 3fdeaee8744b05f0
+dsin(-2.75) bfd86d2239c183fb
+dcos(1.25) 3fd42e3dd88bd952
+dcos(10) bfead9ac890c6b1f
+datan2(1,3) 3fd4978fa3269ee0
+datan2(-2,-0.5) bffd0d6a1369bd34
+dasin(0.3) 3fd380159e14f6fe
+dacos(-0.7) 4002c501446cd5f2
+dexp(-0.0333) 3feef3b2cb42fd44
+dexp(4.2) 4050abecd907c034
+dhypot(1.5,2.25) 4005a22073490377
+dsin(1000) 3fea75cc150a206c

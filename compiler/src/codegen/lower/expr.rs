@@ -2015,6 +2015,31 @@ impl<'ctx> MirLowerer<'ctx> {
                 .iter()
                 .map(|s| s.ident.name.as_ref())
                 .collect();
+            // f64::from_bits(u) / f32::from_bits(u): a bit cast (DETMATH's pow2).
+            let from_bits = match segs.as_slice() {
+                ["f64", "from_bits"] => Some(("build_f64_from_bits", MirType::f64())),
+                ["f32", "from_bits"] => {
+                    Some(("build_f32_from_bits", MirType::Float(FloatSize::F32)))
+                }
+                _ => None,
+            };
+            if let (Some((helper, ty)), 1) = (from_bits, args.len()) {
+                let bits = self.lower_expr(&args[0])?;
+                let builder = self
+                    .current_fn
+                    .as_mut()
+                    .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                let result = builder.create_local(ty);
+                let cont = builder.create_block();
+                builder.call(
+                    MirValue::Function(Arc::from(helper)),
+                    vec![bits],
+                    Some(result),
+                    cont,
+                );
+                builder.switch_to_block(cont);
+                return Ok(values::local(result));
+            }
             if segs == ["Box", "new"] && args.len() == 1 && self.module.find_type("Box").is_none() {
                 let value = self.lower_expr(&args[0])?;
                 let pointee = self.type_of_value(&value);
@@ -2200,7 +2225,7 @@ impl<'ctx> MirLowerer<'ctx> {
         };
 
         // Try to resolve the function's return type from declared signatures
-        let ret_ty = self.resolve_call_return_type(func);
+        let mut ret_ty = self.resolve_call_return_type(func);
 
         // Resolve the callee's declared parameter types (direct user functions
         // only) so each argument is lowered with its parameter type as the
@@ -2213,6 +2238,46 @@ impl<'ctx> MirLowerer<'ctx> {
             .map(|f| f.sig.params.clone());
         let mut arg_vals: Vec<_> =
             self.lower_args_with_param_hints(param_types.as_deref(), args)?;
+
+        // Free `min`/`max` resolve by name to the i32 helpers. Pick the helper
+        // for the arguments' real type: before M4 `min(2.5, -1.25)` truncated
+        // both floats to i32 and printed -1. Float min and max follow DETMATH
+        // (IEEE 754 minimum and maximum, as JS `Math.min`/`Math.max`).
+        let mut func_val = func_val;
+        if let MirValue::Function(name) = &func_val {
+            let is_min = name.as_ref() == "build_min_i32";
+            if (is_min || name.as_ref() == "build_max_i32") && arg_vals.len() == 2 {
+                let tys: Vec<MirType> = arg_vals.iter().map(|v| self.type_of_value(v)).collect();
+                let pick = if tys
+                    .iter()
+                    .any(|t| matches!(t, MirType::Float(FloatSize::F64)))
+                {
+                    Some(("f64", MirType::f64()))
+                } else if tys
+                    .iter()
+                    .any(|t| matches!(t, MirType::Float(FloatSize::F32)))
+                {
+                    Some(("f32", MirType::Float(FloatSize::F32)))
+                } else if tys
+                    .iter()
+                    .all(|t| matches!(t, MirType::Int(IntSize::I64, true)))
+                {
+                    Some(("i64", MirType::i64()))
+                } else if tys
+                    .iter()
+                    .all(|t| matches!(t, MirType::Int(IntSize::I32, true)))
+                {
+                    Some(("i32", MirType::i32()))
+                } else {
+                    None
+                };
+                if let Some((suffix, ty)) = pick {
+                    let stem = if is_min { "build_min_" } else { "build_max_" };
+                    func_val = MirValue::Function(Arc::from(format!("{stem}{suffix}")));
+                    ret_ty = ty;
+                }
+            }
+        }
 
         // ---- Guard: a reference argument's pointee width must match the
         // callee's declared parameter pointee. ----
@@ -4294,10 +4359,42 @@ impl<'ctx> MirLowerer<'ctx> {
                 "atan2" => Some("atan2"),
                 "hypot" => Some("hypot"),
                 "copysign" => Some("copysign"),
-                "max" => Some("fmax"),
-                "min" => Some("fmin"),
+                // DETMATH: IEEE 754 minimum/maximum (NaN propagates, -0 < +0),
+                // the same as JS Math.min/Math.max. C fmin/fmax drop a NaN.
+                "max" if matches!(receiver_ty, MirType::Float(FloatSize::F32)) => {
+                    Some("build_max_f32")
+                }
+                "min" if matches!(receiver_ty, MirType::Float(FloatSize::F32)) => {
+                    Some("build_min_f32")
+                }
+                "max" => Some("build_max_f64"),
+                "min" => Some("build_min_f64"),
+                // An explicit fused multiply-add is a single rounding, by request.
+                "mul_add" if args.len() == 2 => Some("fma"),
                 _ => None,
             };
+
+            // to_bits: the IEEE 754 bit pattern as an unsigned integer.
+            if method_name == "to_bits" && args.is_empty() {
+                let (helper, ty) = match &receiver_ty {
+                    MirType::Float(FloatSize::F32) => ("build_f32_to_bits", MirType::u32()),
+                    _ => ("build_f64_to_bits", MirType::u64()),
+                };
+                let builder = self
+                    .current_fn
+                    .as_mut()
+                    .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                let result = builder.create_local(ty);
+                let cont = builder.create_block();
+                builder.call(
+                    MirValue::Function(Arc::from(helper)),
+                    vec![receiver_val],
+                    Some(result),
+                    cont,
+                );
+                builder.switch_to_block(cont);
+                return Ok(values::local(result));
+            }
 
             // Handle simple single-arg methods: val.method() → c_fn(val)
             if let Some(c_fn) = simple_c_fn {
@@ -4427,21 +4524,6 @@ impl<'ctx> MirLowerer<'ctx> {
                     cont2,
                 );
                 builder.switch_to_block(cont2);
-                return Ok(values::local(result));
-            }
-
-            // mul_add(a, b): val * a + b  (fused multiply-add)
-            if method_name == "mul_add" && args.len() == 2 {
-                let a_val = self.lower_expr(&args[0])?;
-                let b_val = self.lower_expr(&args[1])?;
-                let builder = self
-                    .current_fn
-                    .as_mut()
-                    .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-                let mul_result = builder.create_local(receiver_ty.clone());
-                builder.binary_op(mul_result, BinOp::Mul, receiver_val, a_val);
-                let result = builder.create_local(receiver_ty.clone());
-                builder.binary_op(result, BinOp::Add, values::local(mul_result), b_val);
                 return Ok(values::local(result));
             }
 

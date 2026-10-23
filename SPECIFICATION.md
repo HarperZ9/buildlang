@@ -380,7 +380,7 @@ overflow aborts through the arithmetic panic path.
 
 Integer division and remainder trap on a zero divisor. Signed integer division
 and remainder also trap for the minimum value divided or remaindered by `-1`.
-Floating-point arithmetic keeps the target backend's IEEE behavior.
+Floating-point arithmetic follows section 5.5.
 
 Explicit wrapping, saturating, and checked arithmetic operations are distinct
 from plain arithmetic. They are not aliases for the plain checked operators.
@@ -391,6 +391,29 @@ The checked methods return `Option<T>`: `Some(value)` when the result is
 representable, `None` on overflow or unsigned subtraction underflow. Other
 explicit primitive integer arithmetic families remain unsupported unless a
 separate API surface defines them.
+
+### 5.5 Floating-point arithmetic
+
+`f64` is IEEE 754 binary64 and `f32` is binary32, both rounding to nearest, ties to even. On the C backend every `+`, `-`, `*` and `/` rounds once, in the order the source writes it:
+
+- No contraction. `a * b + c` rounds the product, then the sum. The C backend passes `-ffp-contract=off` and `-fno-fast-math` to gcc and clang and `/fp:precise` to MSVC, and the generated C carries pragmas that keep contraction off when a host compiles it with its own flags.
+- No reassociation. The compiler does not fold or reorder float expressions.
+- `sqrt`, `floor`, `abs`, `min` and `max` give the same bits as JavaScript's `Math.sqrt`, `Math.floor`, `Math.abs`, `Math.min` and `Math.max`. `sqrt` is correctly rounded; the rest are exact. `min` and `max` are IEEE 754 minimum and maximum: a NaN operand gives NaN, and `-0.0` counts as less than `0.0`. Both forms work: `x.min(y)` and `min(x, y)`.
+- `x.mul_add(a, b)` is the one explicit fused multiply-add: one rounding, by request.
+- `x.to_bits()` gives the bit pattern as `u64` (`u32` for `f32`) and `f64::from_bits(u)` builds a value from one.
+- `%` on floats is C `fmod`: the result has the dividend's sign, and a zero divisor gives NaN.
+
+These are the rules Low Water's DETMATH spec asks of a port, so a BuildLang implementation of a JS algorithm gives the same bits. `tests/detmath/goldens.bld` reproduces DETMATH's twelve golden calls bit for bit.
+
+```build in-main
+let x = 0.1 * 3.0;
+let b = x.to_bits();
+let y = f64::from_bits(b);
+println!("{:016x} {}", b, y == x);
+println!("{}", (0.0).min(-0.0).to_bits() == (-0.0).to_bits());
+```
+
+The transcendental functions (`sin`, `exp`, `atan2` and the rest) call the platform's C library, which is not correctly rounded and differs between platforms. Code that must replay bit for bit implements them from the operations above, as DETMATH does.
 
 ## 6. Algebraic Effects
 

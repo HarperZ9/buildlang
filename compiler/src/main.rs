@@ -6843,10 +6843,11 @@ fn invoke_c_compiler(
                 .collect();
             all_libs.extend(user_link_flags(user_libs, true));
             let bat_content = format!(
-                "set \"INCLUDE={}\"\r\nset \"LIB={}\"\r\nset \"PATH={};%PATH%\"\r\ncl.exe /nologo /W0 /std:c11 {} \"{}\" /Fe\"{}\" {} 1>&2\r\n",
+                "set \"INCLUDE={}\"\r\nset \"LIB={}\"\r\nset \"PATH={};%PATH%\"\r\ncl.exe /nologo /W0 /std:c11 {} {} \"{}\" /Fe\"{}\" {} 1>&2\r\n",
                 inc,
                 lib,
                 bin,
+                c_fp_flags(true).join(" "),
                 opt_flag,
                 c_path,
                 exe_path,
@@ -6874,6 +6875,7 @@ fn invoke_c_compiler(
             }
             cmd.arg("/nologo");
             cmd.arg("/W0");
+            cmd.args(c_fp_flags(true));
             cmd.args(host_c_link_libraries(true));
             cmd.args(user_link_flags(user_libs, true));
         }
@@ -6883,6 +6885,7 @@ fn invoke_c_compiler(
         cmd.arg("-o");
         cmd.arg(exe_file);
         cmd.arg("-std=c99");
+        cmd.args(c_fp_flags(false));
         if release {
             cmd.arg("-O2");
         } else {
@@ -6919,6 +6922,18 @@ fn invoke_c_compiler(
             eprintln!("{}", stdout);
         }
         Err(1)
+    }
+}
+
+/// Floating-point flags for every C compile the backend drives (DETMATH):
+/// no contraction into fused multiply-add and no fast-math, so each `+ - * /`
+/// rounds once, in the order written. The generated C repeats this with
+/// pragmas for hosts that compile it themselves.
+pub(crate) fn c_fp_flags(is_msvc: bool) -> &'static [&'static str] {
+    if is_msvc {
+        &["/fp:precise"]
+    } else {
+        &["-ffp-contract=off", "-fno-fast-math"]
     }
 }
 

@@ -73,7 +73,8 @@ pub(crate) fn build_static_library(
         let lib = out_dir.join("main.lib");
         run(
             Command::new(&compiler)
-                .args(["/nologo", "/c", "/std:c11", "/W0", "/fp:precise"])
+                .args(["/nologo", "/c", "/std:c11", "/W0"])
+                .args(crate::c_fp_flags(true))
                 .arg(if release { "/O2" } else { "/Zi" })
                 .arg(c_file)
                 .arg(format!("/Fo{}", obj.display())),
@@ -95,6 +96,7 @@ pub(crate) fn build_static_library(
     run(
         Command::new(&compiler)
             .args(["-c", "-std=c99"])
+            .args(crate::c_fp_flags(false))
             .arg(if release { "-O2" } else { "-g" })
             .arg(c_file)
             .arg("-o")

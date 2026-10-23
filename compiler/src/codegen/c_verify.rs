@@ -177,6 +177,7 @@ const C_STDLIB: &[&str] = &[
     "fmod",
     "fmodf",
     "fmin",
+    "fma",
     "fmax",
     "fminf",
     "fmaxf",

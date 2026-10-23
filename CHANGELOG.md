@@ -10,6 +10,21 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- **DETMATH float rules (M4).** Every C compile the backend drives passes
+  `-ffp-contract=off -fno-fast-math` (gcc, clang) or `/fp:precise` (MSVC), and
+  the generated C carries pragmas that keep `a * b + c` unfused when a host
+  compiles it with `-O2 -mfma`. `sqrt`, `floor`, `abs`, `min` and `max` match JS
+  bit for bit. `x.to_bits()` and `f64::from_bits(u)` are new. Spec section 5.5.
+  Tests: `compiler/tests/detmath.rs` reproduces Low Water's twelve DETMATH
+  goldens from a BuildLang implementation (`tests/detmath/goldens.bld`), checks
+  19 operations against bits JS wrote, and compiles the generated C with GNU C
+  and `-mfma` beside a control copy without the pragmas, which fuses.
+- **Behavior changes.** Float `min` and `max` are IEEE 754 minimum and maximum:
+  a NaN operand now gives NaN (C `fmin` dropped it) and `-0.0` is below `0.0`.
+  `mul_add` is now one fused rounding (it was a plain multiply and add).
+- **Silent truncation fixed.** A free `min(2.5, -1.25)` called the i32 helper and
+  printed `-1`; it now picks the helper for the argument type.
+
 - **C ABI export (M4).** `buildc build --emit staticlib` builds a static library
   (`libmain.a`, or `main.lib` with MSVC) and a header `main.h` that a C or C++
   host links. The header defines every `#[repr(C)]` struct an `extern "C"`
