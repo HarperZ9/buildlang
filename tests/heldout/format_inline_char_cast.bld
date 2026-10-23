@@ -1,0 +1,14 @@
+// #100: a `x as char` written inline in a format argument prints the
+// character, as it does when bound with `let` first.
+fn letter(i: u32) -> char {
+    (65 + i) as char
+}
+
+fn main() ~ Console {
+    let a: u32 = 65;
+    let s = format!("{}{}", "x", a as char);
+    println!("{}", s);
+    println!("{}{}{}", a as char, (a + 1) as char, letter(2));
+    println!("{:?} {}", 'q', (a + 25) as char);
+    println!("{}", a);
+}

@@ -40,6 +40,11 @@ expression: code
 #elif defined(__GNUC__)
 #pragma GCC optimize("fp-contract=off")
 #endif
+#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
+#include <emmintrin.h>
+static inline double build_sqrt_sse2(double x) { __m128d v = _mm_set_sd(x); return _mm_cvtsd_f64(_mm_sqrt_sd(v, v)); }
+#define sqrt(x) build_sqrt_sse2(x)
+#endif
 
 #ifdef _WIN32
 #undef DeviceCapabilities

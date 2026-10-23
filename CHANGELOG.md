@@ -20,6 +20,56 @@ tracked in `STATUS.md`, `README.md`, and
   receipts still verify. A v1 receipt without `observed_series_invariant` fails with the new
   `SCOPE_MISSING` class. The Model-capability and budgeted-search refusals use plain words.
 
+## 1.10.0 - 2026-10-23 - M4 pilot fixes
+
+Compiler fixes found while porting the Low Water combat step. Each program
+below passed `buildc check` on 1.9.0 and then failed to compile or gave a wrong
+result.
+
+- **Match arms and `Vec::new()` (#98).** `let v = match r { Ok(k) => k, Err(_) => Vec::new() }`
+  passed check and then failed in the C compiler: the `Vec::new()` arm built a
+  `Vec<i32>` into an `int32_t`. An arm that returns its `Ok`, `Err` or `Some`
+  binding now fixes the match's type before the arms are lowered, in either arm
+  order. Test: `tests/heldout/match_vec_new_arm.bld`.
+- **Diverging arms (#99).** A block that ends in `return`, `break`, `continue` or
+  `panic!` has type `!`, and a `!` arm no longer sets the match's type. Before, a
+  `let` bound to such a match got type `()` whenever the matched function was
+  defined later in the file. Test: `tests/heldout/diverging_arm_later_fn.bld`.
+- **Early `return` in `main`.** A `return;` inside `main` wrote a bare
+  `return;` in the C `int32_t main`, which GCC 14 rejects. It now writes
+  `return 0;`. Tests: `tests/heldout/diverging_arm_later_fn.bld` through
+  `compiler/tests/check_implies_compile.rs`, and
+  `test_c_backend_main_early_return_returns_zero` in
+  `compiler/src/codegen/backend/c.rs`.
+- **`as char` inside a format argument (#100).** `format!("{}", a as char)`
+  printed the number. An inline cast or a call to a `-> char` function now prints
+  the character. Test: `tests/heldout/format_inline_char_cast.bld`.
+- **Module calls inside macro arguments.** `println!("{}", json_quote(s))` and
+  any other call to a module function inside a formatting or assert macro now
+  resolve; 1.9.0 reported them as undefined and needed a `let` first. A
+  parameter named like a module function still wins. Tests:
+  `tests/heldout/module_macro_args.bld`, `tests/modmacro/`.
+- **Stores into vector elements.** `v[i].x = e`, `w.items[i].a.b += e` and
+  `v[i] = e` through a `&mut Vec<T>` passed check and lost the write: the field
+  store went to a copy of the element. A store into an element's field is now a
+  read-modify-write that puts the element back, and a borrowed vector's setter
+  is called through the borrow. The same holds for a vector inside an element
+  (`rs[i].items[j].x = e`), and the index runs once. Test:
+  `tests/heldout/vec_element_stores.bld`.
+- **Struct literal fields.** Fields written out of declaration order were
+  assigned by position: `Q { c: "hi", a: 3, b: 2.5 }` failed in the C compiler,
+  and two fields of one type were swapped silently. A `Vec::new()` field built a
+  `Vec<i32>`. Fields now go to their declared slots and each value is lowered
+  against its field's type; values still run in the order written. Test:
+  `tests/heldout/struct_literal_fields.bld`.
+- **`sqrt` rounds correctly on MinGW.** Generated C sends f64 `sqrt` to the SSE2
+  instruction. MinGW's library `sqrt` ran on the x87 unit and rounded twice, so
+  without `-O2` some results were one unit too high, against DETMATH.
+- **f64 constants are floats.** `f64::INFINITY`, `NAN`, `MAX`, `EPSILON` and
+  `MIN_POSITIVE` lowered as untyped globals: `f64::INFINITY.to_json()` printed
+  `9223372036854775807`, `f64::EPSILON` printed `0` and `NAN != NAN` was false.
+  Test: `tests/heldout/float_sqrt_constants.bld`.
+
 ## 1.9.0 - 2026-10-23 - M4: what a game port needs
 
 Six features the Low Water combat sim port needs, each in its own PR (#95,

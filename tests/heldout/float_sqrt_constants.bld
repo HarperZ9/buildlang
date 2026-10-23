@@ -1,0 +1,15 @@
+// f64 sqrt is correctly rounded on every C compiler buildc drives (MinGW's
+// library sqrt rounded twice and gave one unit too high), and the f64
+// constants are floats (f64::INFINITY printed as an integer before).
+fn main() ~ Console {
+    let s = f64::from_bits(4607182418800017463_u64);
+    println!("{}", s.sqrt().to_bits());
+    let a = f64::from_bits(0xc08ec25b5ad48000_u64).abs();
+    let b = f64::from_bits(0xbf1c7f7e978d4fdf_u64).abs();
+    let n = b / a;
+    println!("{}", ((1.0 + n * n).sqrt() * a).to_json());
+    println!("{} {} {}", f64::INFINITY.to_json(), f64::NEG_INFINITY < 0.0, f64::MAX.to_json());
+    let nan = f64::NAN;
+    println!("{} {} {}", nan != nan, f64::EPSILON.to_json(), f64::MIN_POSITIVE.to_json());
+    println!("{}", (1.0 / f64::INFINITY).to_json());
+}

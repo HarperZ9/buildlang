@@ -852,9 +852,19 @@ impl TypeContext {
         // multiple dispatch a second same-signature definition silently
         // overwrote the first, so this preserves the historical single-method
         // behavior for that case.)
+        // Unresolved type variables are compared by position, not by number:
+        // the two loads of one module give a parameter whose type is not known
+        // yet a fresh variable each time (`?T96` and `?T310`), and those copies
+        // made `jnum_at(items, 0, 0.0)` ambiguous with itself.
+        let shape = |tys: &[Ty]| -> Vec<String> {
+            tys.iter()
+                .map(|t| erase_type_vars(&t.to_string()))
+                .collect()
+        };
+        let new_shape = shape(&candidate.param_tys);
         if candidates
             .iter()
-            .any(|c| c.param_tys == candidate.param_tys)
+            .any(|c| c.param_tys == candidate.param_tys || shape(&c.param_tys) == new_shape)
         {
             return;
         }
@@ -936,4 +946,22 @@ mod tests {
         let scheme = ctx.generalize(&ty);
         assert_eq!(scheme.vars.len(), 1);
     }
+}
+
+/// A type's text with every inference variable (`?T12`) written as `?`.
+fn erase_type_vars(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '?' && chars.peek() == Some(&'T') {
+            chars.next();
+            while chars.peek().is_some_and(|d| d.is_ascii_digit()) {
+                chars.next();
+            }
+            out.push('?');
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }

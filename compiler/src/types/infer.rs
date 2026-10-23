@@ -6000,9 +6000,13 @@ impl<'ctx> TypeInfer<'ctx> {
                 let _ = self.unify(&guard_ty, &Ty::bool(), span);
             }
 
-            // Infer body type
+            // Infer body type. A diverging arm (`!`) adds nothing to the
+            // match's type, so it is not unified: binding the result variable
+            // to `!` would hide the other arms' type.
             let body_ty = self.infer_expr(&arm.body);
-            let _ = self.unify(&result_ty, &body_ty, span);
+            if !matches!(self.apply(&body_ty).kind, TyKind::Never) {
+                let _ = self.unify(&result_ty, &body_ty, span);
+            }
             result_ty = self.merge_future_effect_annotations(&result_ty, &body_ty);
 
             self.source_bindings.pop();
@@ -6279,6 +6283,7 @@ impl<'ctx> TypeInfer<'ctx> {
         self.borrow_state.push_scope();
 
         let mut result_ty = Ty::unit();
+        let mut diverges = false;
 
         for (i, stmt) in block.stmts.iter().enumerate() {
             // NLL: before processing each statement, release borrows whose
@@ -6287,6 +6292,17 @@ impl<'ctx> TypeInfer<'ctx> {
             self.release_dead_borrows(remaining);
 
             result_ty = self.infer_stmt(stmt);
+            if stmt_diverges(stmt) {
+                diverges = true;
+            }
+        }
+        // A block that runs `return`, `break`, `continue` or `panic!` as a
+        // statement never produces a value, so it has type `!` and unifies
+        // with any other arm. Typing it `()` made `let x = match .. { Ok(v)
+        // => v, Err(_) => { ..; return; } }` give `x` the type `()` whenever
+        // the arms were checked before `v`'s type was known (#99).
+        if diverges {
+            result_ty = Ty::never();
         }
 
         let dying_borrows = self.borrow_state.pop_scope();
@@ -8608,6 +8624,31 @@ mod tests {
 }
 
 /// Source id of the first token in a macro's token trees.
+/// A statement that always leaves the enclosing block: `return`, `break`,
+/// `continue`, or a `panic!`-family macro, as an expression statement.
+fn stmt_diverges(stmt: &ast::Stmt) -> bool {
+    let expr = match &stmt.kind {
+        ast::StmtKind::Expr(e) | ast::StmtKind::Semi(e) => e,
+        _ => return false,
+    };
+    expr_diverges(expr)
+}
+
+fn expr_diverges(expr: &ast::Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Return(_) | ExprKind::Break { .. } | ExprKind::Continue { .. } => true,
+        ExprKind::Paren(inner) => expr_diverges(inner),
+        ExprKind::Macro { path, .. } => path.segments.last().is_some_and(|s| {
+            matches!(
+                s.ident.name.as_ref(),
+                "panic" | "unreachable" | "todo" | "unimplemented"
+            )
+        }),
+        ExprKind::Block(b) => b.stmts.iter().any(stmt_diverges),
+        _ => false,
+    }
+}
+
 fn first_token_source(trees: &[ast::TokenTree]) -> Option<SourceId> {
     trees.iter().find_map(|tree| match tree {
         ast::TokenTree::Token(tok) => Some(tok.span.source_id),

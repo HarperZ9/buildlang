@@ -792,19 +792,16 @@ impl<'ctx> MirLowerer<'ctx> {
             let type_seg = path.segments[0].ident.name.as_ref();
             let const_seg = path.segments[1].ident.name.as_ref();
             match (type_seg, const_seg) {
-                ("f64", "INFINITY") => return Ok(values::global("INFINITY".to_string())),
-                ("f64", "NEG_INFINITY") => return Ok(values::global("(-INFINITY)".to_string())),
-                ("f64", "NAN") => return Ok(values::global("NAN".to_string())),
-                ("f64", "MIN") => {
-                    return Ok(values::global("(-1.7976931348623157e+308)".to_string()))
-                }
-                ("f64", "MAX") => return Ok(values::global("1.7976931348623157e+308".to_string())),
-                ("f64", "EPSILON") => {
-                    return Ok(values::global("2.2204460492503131e-16".to_string()))
-                }
-                ("f64", "MIN_POSITIVE") => {
-                    return Ok(values::global("2.2250738585072014e-308".to_string()))
-                }
+                // Typed float constants: as untyped globals they read as
+                // integers, so `f64::INFINITY.to_json()` printed
+                // 9223372036854775807.
+                ("f64", "INFINITY") => return Ok(values::f64(f64::INFINITY)),
+                ("f64", "NEG_INFINITY") => return Ok(values::f64(f64::NEG_INFINITY)),
+                ("f64", "NAN") => return Ok(values::f64(f64::NAN)),
+                ("f64", "MIN") => return Ok(values::f64(f64::MIN)),
+                ("f64", "MAX") => return Ok(values::f64(f64::MAX)),
+                ("f64", "EPSILON") => return Ok(values::f64(f64::EPSILON)),
+                ("f64", "MIN_POSITIVE") => return Ok(values::f64(f64::MIN_POSITIVE)),
                 ("f32", "INFINITY") => return Ok(values::global("INFINITY".to_string())),
                 ("f32", "NEG_INFINITY") => return Ok(values::global("(-INFINITY)".to_string())),
                 ("f32", "NAN") => return Ok(values::global("NAN".to_string())),
@@ -1597,13 +1594,155 @@ impl<'ctx> MirLowerer<'ctx> {
         Ok(())
     }
 
+    /// A store into a field of a vector element (`v[i].x = e`, `w.f[i].a.b += e`).
+    /// A `Vec` element has no in-place address here, so the store used to land
+    /// in a copy of the element and was lost with no diagnostic. Lower it as a
+    /// read-modify-write: the value and the index are evaluated once, the
+    /// element is read into a local, the field store goes to the local, and the
+    /// local is written back with the vector's setter. Returns `None` when the
+    /// target is not of this shape.
+    fn lower_vec_element_field_assign(
+        &mut self,
+        op: ast::AssignOp,
+        target: &ast::Expr,
+        value: &ast::Expr,
+    ) -> CodegenResult<Option<MirValue>> {
+        // Find the innermost index under a chain of field projections.
+        let mut cur = target;
+        let mut fields = 0usize;
+        let index_node = loop {
+            match &cur.kind {
+                ExprKind::Field { expr, .. } | ExprKind::TupleField { expr, .. } => {
+                    fields += 1;
+                    cur = expr;
+                }
+                ExprKind::Paren(inner) => cur = inner,
+                ExprKind::Index { .. } if fields > 0 => break cur,
+                _ => return Ok(None),
+            }
+        };
+        let ExprKind::Index { expr: base, index } = &index_node.kind else {
+            return Ok(None);
+        };
+        // The vector may itself sit in a field of another element
+        // (`rs[i].items[j].x = e`); that base is not a place, so fall back to
+        // its inferred type. The write-back below stores through the vector
+        // handle, which shares its buffer with the element it was read from.
+        let base_ty = match self.lower_place(base)? {
+            Some((_, ty)) => ty,
+            None => self.infer_expr_type(base),
+        };
+        let elem_ty = match base_ty {
+            MirType::Vec(elem) => *elem,
+            MirType::Ptr(inner) => match *inner {
+                MirType::Vec(elem) => *elem,
+                _ => return Ok(None),
+            },
+            _ => return Ok(None),
+        };
+
+        let n = self.vec_store_counter;
+        self.vec_store_counter += 1;
+        let span = target.span;
+        let ident = |name: &str| ast::Expr::new(ExprKind::Ident(ast::Ident::new(name, span)), span);
+        let (val_name, idx_name, el_name) = (
+            format!("__vst_val{n}"),
+            format!("__vst_idx{n}"),
+            format!("__vst_el{n}"),
+        );
+
+        let target_ty = self.infer_expr_type(target);
+        let prev_expected = if target_ty != MirType::i32() && op == ast::AssignOp::Assign {
+            self.expected_type.replace(target_ty)
+        } else {
+            self.expected_type.clone()
+        };
+        let val = self.lower_expr(value);
+        self.expected_type = prev_expected;
+        let val = val?;
+        let val_ty = self.type_of_value(&val);
+        let idx = self.lower_expr(index)?;
+        let idx_ty = self.type_of_value(&idx);
+        let builder = self.current_fn.as_mut().unwrap();
+        let val_local = builder.create_local(val_ty);
+        builder.assign(val_local, MirRValue::Use(val));
+        let idx_local = builder.create_local(idx_ty);
+        builder.assign(idx_local, MirRValue::Use(idx));
+        self.var_map.insert(Arc::from(val_name.as_str()), val_local);
+        self.var_map.insert(Arc::from(idx_name.as_str()), idx_local);
+
+        let read = ast::Expr::new(
+            ExprKind::Index {
+                expr: base.clone(),
+                index: Box::new(ident(&idx_name)),
+            },
+            index_node.span,
+        );
+        let el = self.lower_expr(&read)?;
+        let builder = self.current_fn.as_mut().unwrap();
+        let el_local = builder.create_local(elem_ty);
+        builder.assign(el_local, MirRValue::Use(el));
+        self.var_map.insert(Arc::from(el_name.as_str()), el_local);
+
+        let inner_target = Self::replace_expr_node(target, index_node, &ident(&el_name));
+        let result = self.lower_assign(op, &inner_target, &ident(&val_name));
+        let result =
+            result.and_then(|_| self.lower_assign(ast::AssignOp::Assign, &read, &ident(&el_name)));
+        for name in [&val_name, &idx_name, &el_name] {
+            self.var_map.remove(name.as_str());
+        }
+        result?;
+        Ok(Some(values::unit()))
+    }
+
+    /// A copy of `expr` with the node at `target` (by address) replaced.
+    fn replace_expr_node(expr: &ast::Expr, target: &ast::Expr, with: &ast::Expr) -> ast::Expr {
+        if std::ptr::eq(expr, target) {
+            return with.clone();
+        }
+        let kind = match &expr.kind {
+            ExprKind::Field { expr: e, field } => ExprKind::Field {
+                expr: Box::new(Self::replace_expr_node(e, target, with)),
+                field: field.clone(),
+            },
+            ExprKind::TupleField {
+                expr: e,
+                index,
+                span,
+            } => ExprKind::TupleField {
+                expr: Box::new(Self::replace_expr_node(e, target, with)),
+                index: *index,
+                span: *span,
+            },
+            ExprKind::Paren(e) => {
+                ExprKind::Paren(Box::new(Self::replace_expr_node(e, target, with)))
+            }
+            other => other.clone(),
+        };
+        ast::Expr::new(kind, expr.span)
+    }
+
     fn lower_assign(
         &mut self,
         op: ast::AssignOp,
         target: &ast::Expr,
         value: &ast::Expr,
     ) -> CodegenResult<MirValue> {
-        let val = self.lower_expr(value)?;
+        if let Some(done) = self.lower_vec_element_field_assign(op, target, value)? {
+            return Ok(done);
+        }
+        // The stored value takes the target's type as its expected type, so
+        // `s.items = Vec::new()` builds the field's vector type. Before, the
+        // new vector was a `Vec<i32>` in an `int32_t` and the C compile failed.
+        let target_ty = self.infer_expr_type(target);
+        let prev_expected = if target_ty != MirType::i32() && op == ast::AssignOp::Assign {
+            self.expected_type.replace(target_ty)
+        } else {
+            self.expected_type.clone()
+        };
+        let val = self.lower_expr(value);
+        self.expected_type = prev_expected;
+        let val = val?;
 
         // Handle dereference assignment: `*ptr = value` and `*ptr OP= value`.
         if let ExprKind::Deref(inner) = &target.kind {
@@ -1809,8 +1948,26 @@ impl<'ctx> MirLowerer<'ctx> {
         // write fell through every target arm and was silently dropped (the
         // element kept its old value). Dispatches to a typed runtime setter.
         if let ExprKind::Index { expr: arr, index } = &target.kind {
-            let recv_val = self.lower_expr(arr)?;
-            let recv_ty = self.type_of_value(&recv_val);
+            let mut recv_val = self.lower_expr(arr)?;
+            let mut recv_ty = self.type_of_value(&recv_val);
+            // `v: &mut Vec<T>`: load the vector handle, then store through it.
+            // Without this `v[i] = x` on a borrowed vector was dropped.
+            if let MirType::Ptr(inner) = &recv_ty {
+                if let MirType::Vec(_) = inner.as_ref() {
+                    let pointee = (**inner).clone();
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let loaded = builder.create_local(pointee.clone());
+                    builder.assign(
+                        loaded,
+                        MirRValue::Deref {
+                            ptr: recv_val,
+                            pointee_ty: pointee.clone(),
+                        },
+                    );
+                    recv_val = values::local(loaded);
+                    recv_ty = pointee;
+                }
+            }
             if let MirType::Vec(ref elem_ty) = recv_ty {
                 let suffix = Self::hvec_elem_suffix(elem_ty.as_ref())?;
                 let idx_val = self.lower_expr(index)?;
@@ -2911,7 +3068,7 @@ impl<'ctx> MirLowerer<'ctx> {
     }
 
     /// `'a'` or `x as char`.
-    fn expr_is_char_literal_or_cast(expr: &ast::Expr) -> bool {
+    pub(super) fn expr_is_char_literal_or_cast(expr: &ast::Expr) -> bool {
         match &expr.kind {
             ExprKind::Literal(Literal::Char(_)) => true,
             ExprKind::Cast { ty, .. } => matches!(&ty.kind, ast::TypeKind::Path(p)
@@ -3403,6 +3560,16 @@ impl<'ctx> MirLowerer<'ctx> {
                     }
                 }
                 MirType::i32()
+            }
+            ExprKind::Index { expr: base, .. } => {
+                let mut bt = self.infer_expr_type(base);
+                if let MirType::Ptr(inner) = bt {
+                    bt = *inner;
+                }
+                match bt {
+                    MirType::Vec(e) | MirType::Array(e, _) | MirType::Slice(e) => *e,
+                    _ => MirType::i32(),
+                }
             }
             ExprKind::If { then_branch, .. } => self.infer_block_type(then_branch),
             ExprKind::Match { arms, .. } => {
@@ -4707,7 +4874,12 @@ impl<'ctx> MirLowerer<'ctx> {
                     return Ok(values::local(val));
                 }
                 "unwrap_or" if args.len() == 1 => {
-                    let default_val = self.lower_expr(&args[0])?;
+                    // The default is lowered against the payload type, so
+                    // `opt.unwrap_or(Vec::new())` builds the payload's vector.
+                    let prev_expected = self.expected_type.replace(inner_ty.clone());
+                    let default_val = self.lower_expr(&args[0]);
+                    self.expected_type = prev_expected;
+                    let default_val = default_val?;
                     let builder = self.current_fn.as_mut().unwrap();
                     let scrut = builder.create_local(receiver_ty.clone());
                     builder.assign(scrut, MirRValue::Use(receiver_val));
@@ -4751,22 +4923,11 @@ impl<'ctx> MirLowerer<'ctx> {
         // unwrap/unwrap_or read the typed ok slot; unwrap_err reads the err slot.
         if matches!(&receiver_ty, MirType::Struct(n) if n.as_ref() == "Result") {
             let method_name = method.name.as_ref();
-            let ok_ty = match &receiver_val {
-                MirValue::Local(id) => self
-                    .result_ok_types
-                    .get(id)
-                    .cloned()
-                    .unwrap_or_else(MirType::i32),
-                _ => MirType::i32(),
-            };
-            let err_ty = match &receiver_val {
-                MirValue::Local(id) => self
-                    .result_err_types
-                    .get(id)
-                    .cloned()
-                    .unwrap_or_else(|| MirType::Struct(Arc::from("BuildString"))),
-                _ => MirType::Struct(Arc::from("BuildString")),
-            };
+            // The payload types: a local's annotation, else the callee's
+            // signature (`json_items(x).unwrap_or(...)`), as a match reads them.
+            // Before, a call receiver always read the ok slot as i32.
+            let ok_ty = self.result_ok_type_for(receiver, &receiver_val);
+            let err_ty = self.result_err_type_for(receiver, &receiver_val);
             match method_name {
                 "is_ok" | "is_err" => {
                     let builder = self.current_fn.as_mut().unwrap();
@@ -4809,7 +4970,12 @@ impl<'ctx> MirLowerer<'ctx> {
                     return Ok(values::local(val));
                 }
                 "unwrap_or" if args.len() == 1 => {
-                    let default_val = self.lower_expr(&args[0])?;
+                    // As for Option: the default takes the Ok type
+                    // (`res.unwrap_or(Vec::new())`).
+                    let prev_expected = self.expected_type.replace(ok_ty.clone());
+                    let default_val = self.lower_expr(&args[0]);
+                    self.expected_type = prev_expected;
+                    let default_val = default_val?;
                     let builder = self.current_fn.as_mut().unwrap();
                     let scrut = builder.create_local(MirType::Struct(Arc::from("Result")));
                     builder.assign(scrut, MirRValue::Use(receiver_val));
@@ -5513,6 +5679,46 @@ impl<'ctx> MirLowerer<'ctx> {
         arms: &[ast::MatchArm],
         inner_ty_override: Option<MirType>,
     ) -> CodegenResult<MirValue> {
+        // As for Result (#98): `Some(k) => k` fixes the match's type, so a
+        // `None => Vec::new()` arm builds the payload's vector type.
+        let (_, no_expected) = self.runtime_match_result_seed_type();
+        let payload = if Self::is_option_mir_type(scrutinee_ty) {
+            Self::option_inner_from_mir_type(scrutinee_ty).or_else(|| inner_ty_override.clone())
+        } else {
+            None
+        };
+        let hint = match payload {
+            Some(p) if no_expected => {
+                Self::result_arm_payload_type(arms, &p, &MirType::i32()).filter(|_| {
+                    arms.iter().any(|arm| {
+                        matches!(&arm.pattern.kind, ast::PatternKind::TupleStruct { path, .. }
+                            if path.segments.last().is_some_and(|s| s.ident.name.as_ref() == "Some"))
+                    })
+                })
+            }
+            _ => None,
+        };
+        let prev_expected = match hint {
+            Some(ty) => self.expected_type.replace(ty),
+            None => self.expected_type.clone(),
+        };
+        let lowered = self.lower_runtime_option_match_arms(
+            scrutinee_val,
+            scrutinee_ty,
+            arms,
+            inner_ty_override,
+        );
+        self.expected_type = prev_expected;
+        lowered
+    }
+
+    fn lower_runtime_option_match_arms(
+        &mut self,
+        scrutinee_val: MirValue,
+        scrutinee_ty: &MirType,
+        arms: &[ast::MatchArm],
+        inner_ty_override: Option<MirType>,
+    ) -> CodegenResult<MirValue> {
         let (result_ty, mut may_retype_result_from_arm) = self.runtime_match_result_seed_type();
         let builder = self
             .current_fn
@@ -5681,7 +5887,80 @@ impl<'ctx> MirLowerer<'ctx> {
         ok_ty: MirType,
         err_ty: MirType,
     ) -> CodegenResult<MirValue> {
-        let (result_ty, mut may_retype_result_from_arm) = self.runtime_match_result_seed_type();
+        let (mut result_ty, mut may_retype_result_from_arm) = self.runtime_match_result_seed_type();
+        // With no expected type, an arm that returns its payload binding
+        // (`Ok(k) => k`) fixes the match's type before any arm is lowered. The
+        // other arms are then lowered against it, so `Err(_) => Vec::new()`
+        // builds a vector of the payload's element type in either arm order.
+        // Before, that arm built a `Vec<i32>` into an `int32_t` (#98).
+        let mut arm_expected = None;
+        if may_retype_result_from_arm {
+            if let Some(ty) = Self::result_arm_payload_type(arms, &ok_ty, &err_ty) {
+                result_ty = ty.clone();
+                may_retype_result_from_arm = false;
+                arm_expected = Some(ty);
+            }
+        }
+        let prev_expected = match arm_expected {
+            Some(ty) => self.expected_type.replace(ty),
+            None => self.expected_type.clone(),
+        };
+        let lowered = self.lower_runtime_result_match_arms(
+            scrutinee_val,
+            scrutinee_ty,
+            arms,
+            ok_ty,
+            err_ty,
+            result_ty,
+            may_retype_result_from_arm,
+        );
+        self.expected_type = prev_expected;
+        lowered
+    }
+
+    /// The payload type an arm returns when its body is just the binding of
+    /// an `Ok(x)` or `Err(x)` pattern.
+    fn result_arm_payload_type(
+        arms: &[ast::MatchArm],
+        ok_ty: &MirType,
+        err_ty: &MirType,
+    ) -> Option<MirType> {
+        arms.iter().find_map(|arm| {
+            let ast::PatternKind::TupleStruct { path, patterns, .. } = &arm.pattern.kind else {
+                return None;
+            };
+            let variant = path.segments.last()?.ident.name.clone();
+            let [pat] = patterns.as_slice() else {
+                return None;
+            };
+            let ast::PatternKind::Ident { name, .. } = &pat.kind else {
+                return None;
+            };
+            let ExprKind::Ident(body) = &arm.body.kind else {
+                return None;
+            };
+            if body.name != name.name {
+                return None;
+            }
+            match variant.as_ref() {
+                "Ok" | "Some" if *ok_ty != MirType::i32() => Some(ok_ty.clone()),
+                "Err" if *err_ty != MirType::i32() => Some(err_ty.clone()),
+                _ => None,
+            }
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn lower_runtime_result_match_arms(
+        &mut self,
+        scrutinee_val: MirValue,
+        scrutinee_ty: &MirType,
+        arms: &[ast::MatchArm],
+        ok_ty: MirType,
+        err_ty: MirType,
+        result_ty: MirType,
+        mut may_retype_result_from_arm: bool,
+    ) -> CodegenResult<MirValue> {
         let builder = self
             .current_fn
             .as_mut()

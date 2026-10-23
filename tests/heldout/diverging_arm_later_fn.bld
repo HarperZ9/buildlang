@@ -1,0 +1,67 @@
+// #99: a match arm whose block ends in `return`, `break`, `continue` or
+// `panic!` has type `!`, so the `let` takes the other arm's type even when
+// the matched function is defined later in the file.
+fn main() ~ Console {
+    let h = match half(4) {
+        Ok(v) => v,
+        Err(e) => {
+            println!("{}", e);
+            return;
+        },
+    };
+    let d = h + 1;
+    println!("{}", d);
+    let mut total = 0;
+    let mut i = 0;
+    while i < 6 {
+        i += 1;
+        let q = match half(i) {
+            Err(_) => {
+                continue;
+            },
+            Ok(v) => v,
+        };
+        if q > 2 {
+            let stop = match first_even(q) {
+                Some(x) => x,
+                None => {
+                    break;
+                },
+            };
+            total += stop * 100;
+        }
+        total += q;
+    }
+    println!("{}", total);
+    let w = match half(10) {
+        Ok(v) => v * 2,
+        Err(_) => {
+            panic!("unreachable");
+        },
+    };
+    println!("{}", w + 1);
+    let x = match half(7) {
+        Ok(v) => v,
+        Err(e) => {
+            println!("odd: {}", e);
+            return;
+        },
+    };
+    println!("not printed {}", x);
+}
+
+fn half(n: i64) -> Result<i64, str> {
+    if n % 2 == 0 {
+        Ok(n / 2)
+    } else {
+        Err("odd")
+    }
+}
+
+fn first_even(n: i64) -> Option<i64> {
+    if n % 2 == 0 {
+        Some(n)
+    } else {
+        None
+    }
+}

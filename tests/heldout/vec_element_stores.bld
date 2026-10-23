@@ -1,0 +1,78 @@
+// Stores into a vector element's fields and into a borrowed vector. Each of
+// these passed check on 1.9.0 and the write was lost: the field store went to
+// a copy of the element, and `v[i] = x` through `&mut Vec` did nothing.
+struct Act {
+    id: str,
+    f: f64,
+}
+
+struct P {
+    x: f64,
+    n: i64,
+    act: Act,
+}
+
+struct W {
+    ps: Vec<P>,
+}
+
+struct C {
+    x: i64,
+}
+
+struct R {
+    items: Vec<C>,
+}
+
+fn next(n: &mut i64) -> usize {
+    *n += 1;
+    0
+}
+
+fn bump(w: &mut W, i: usize) {
+    w.ps[i].x = w.ps[i].x + 1.0;
+    w.ps[i].n += 1;
+    w.ps[i].act.f += 0.5;
+    w.ps[i].act.id = "moved";
+}
+
+fn set_first(ps: &mut Vec<P>) {
+    ps[0].x = 9.0;
+}
+
+fn set_k(v: &mut Vec<f64>, k: usize) {
+    v[k] = 9.0;
+    v[k + 1] += 2.0;
+}
+
+fn main() ~ Console {
+    let mut v: Vec<P> = Vec::new();
+    v.push(P { x: 1.0, n: 1, act: Act { id: "a", f: 0.0 } });
+    v[0].x = 5.0;
+    v[0].n += 2;
+    println!("{} {}", v[0].x, v[0].n);
+    let mut w = W { ps: v };
+    bump(&mut w, 0);
+    bump(&mut w, 0);
+    println!("{} {} {} {}", w.ps[0].x, w.ps[0].n, w.ps[0].act.f, w.ps[0].act.id);
+    set_first(&mut w.ps);
+    println!("{}", w.ps[0].x);
+    let mut f: Vec<f64> = vec![1.0, 2.0, 3.0];
+    set_k(&mut f, 1);
+    println!("{} {} {}", f[0], f[1], f[2]);
+    // A vector inside an element of another vector.
+    let mut a: Vec<C> = Vec::new();
+    a.push(C { x: 1 });
+    a.push(C { x: 2 });
+    let mut rs: Vec<R> = Vec::new();
+    rs.push(R { items: a });
+    rs[0].items[1].x = 40;
+    rs[0].items[1].x += 2;
+    println!("{} {}", rs[0].items[0].x, rs[0].items[1].x);
+    // The index expression runs once.
+    let mut calls: i64 = 0;
+    let mut cs: Vec<C> = Vec::new();
+    cs.push(C { x: 10 });
+    cs[next(&mut calls)].x += 5;
+    println!("{} {}", cs[0].x, calls);
+}

@@ -1,0 +1,43 @@
+// #98: an unannotated `let` bound to a match whose other arm is `Vec::new()`
+// takes the payload's vector type, in either arm order, for Result and Option.
+fn keys(ok: bool) -> Result<Vec<str>, str> {
+    let mut v: Vec<str> = Vec::new();
+    v.push("a");
+    if ok {
+        Ok(v)
+    } else {
+        Err("no")
+    }
+}
+
+fn pick(ok: bool) -> Option<Vec<str>> {
+    let mut v: Vec<str> = Vec::new();
+    v.push("z");
+    if ok {
+        Some(v)
+    } else {
+        None
+    }
+}
+
+fn main() ~ Console {
+    let a = match keys(false) {
+        Ok(k) => k,
+        Err(_) => Vec::new(),
+    };
+    let b = match keys(true) {
+        Err(_) => Vec::new(),
+        Ok(k) => k,
+    };
+    println!("{} {} {}", a.len(), b.len(), b[0]);
+    let c = match pick(false) {
+        Some(k) => k,
+        None => Vec::new(),
+    };
+    let mut d = match pick(true) {
+        None => Vec::new(),
+        Some(k) => k,
+    };
+    d.push("y");
+    println!("{} {} {}{}", c.len(), d.len(), d[0], d[1]);
+}

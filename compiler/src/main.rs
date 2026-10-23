@@ -699,6 +699,7 @@ enum ChainCommands {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    buildlang::types::set_stdlib_dir_finder(find_stdlib_path);
 
     // Type checking and the other AST-recursive passes recurse on the native
     // stack in proportion to a program's nesting and size. A large but finite
@@ -10109,9 +10110,9 @@ fn rewrite_intra_module_calls(
 /// `scope` tracks the lexical bindings in force at each call site (function
 /// params, `let`, closure params, and loop/match patterns), so a callee that
 /// names a parameter or local is never mistaken for a free module-function
-/// reference and mis-rewritten. NOTE: calls inside a `macro!(...)` invocation's
-/// argument tokens are NOT rewritten - macro args are unstructured tokens, so
-/// `println!("{}", vec_dot(a, b))` still needs the let-bind idiom.
+/// reference and mis-rewritten. Calls inside a formatting or assert macro's
+/// arguments are renamed through the source-position table in the lexer,
+/// because those arguments are re-parsed from tokens later.
 fn walk_calls_in_block(
     block: &mut ast::Block,
     scope: &mut ShadowScope,
@@ -10349,12 +10350,33 @@ fn walk_calls_in_expr(
         // Leaves and un-rewritable contexts: identifiers/paths/literals hold no
         // nested calls; `break`/`continue` labels are not exprs; macro argument
         // tokens are unstructured and cannot be structurally rewritten here.
-        E::Literal(_)
-        | E::Ident(_)
-        | E::Path(_)
-        | E::Continue { .. }
-        | E::Macro { .. }
-        | E::Error => {}
+        E::Macro { path, tokens, .. } => {
+            // Macro arguments stay raw tokens until the checker and the
+            // lowering re-parse them. Parse them here, rename their calls
+            // with the same scope, and record each new name by its source
+            // position so both re-parses pick it up.
+            let name = path
+                .segments
+                .last()
+                .map(|s| s.ident.name.clone())
+                .unwrap_or_else(|| Arc::from(""));
+            let mut args = buildlang::types::macro_call_arg_exprs(&name, tokens);
+            for arg in &mut args {
+                walk_calls_in_expr(arg, scope, &mut |ident: &mut ast::Ident| {
+                    let before = ident.name.clone();
+                    rename(ident);
+                    if ident.name != before {
+                        buildlang::lexer::register_macro_ident_rename(
+                            ident.span,
+                            ident.name.clone(),
+                        );
+                    }
+                });
+            }
+        }
+        // Leaves: identifiers, paths and literals hold no nested calls;
+        // `break`/`continue` labels are not exprs.
+        E::Literal(_) | E::Ident(_) | E::Path(_) | E::Continue { .. } | E::Error => {}
     }
 }
 

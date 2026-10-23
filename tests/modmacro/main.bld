@@ -1,0 +1,20 @@
+// Module calls inside macro arguments, from the main file and inside the
+// module, and a fn-pointer parameter that shadows a module function.
+mod util;
+
+fn thrice(n: i64) -> i64 {
+    n * 3
+}
+
+fn apply(twice: fn(i64) -> i64, v: i64) ~ Console {
+    println!("param {}", twice(v));
+}
+
+fn main() ~ Console {
+    println!("{} {}", twice(3), tag("a"));
+    let s = format!("{}-{}", twice(twice(1)), tag(tag("b")));
+    println!("{}", s);
+    println!("{}", show(5));
+    apply(thrice, 2);
+    assert_eq!(twice(2), 4);
+}
