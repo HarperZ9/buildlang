@@ -1,0 +1,5 @@
+// Issue #83: Rc::new would lower to an uncounted pointer, so check refuses it.
+fn main() ~ Console {
+    let r = Rc::new(5);
+    println!("{}", *r);
+}

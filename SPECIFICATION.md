@@ -484,6 +484,51 @@ fn main() ~ Console {
 }
 ```
 
+### 7.5 Boxes and recursive types
+
+`Box<T>` is an owned pointer to a `T` on the heap. `Box::new(x)` moves `x` into a new box and `*b` reads the value back. A struct or enum that holds itself must hold itself through a `Box`, because a type that contains itself by value has no finite size; the check rejects it with BL0384 and names the cycle. A cycle through `Option` or `Result` counts too, since both store their payload inline. `Vec<T>` also breaks a cycle.
+
+```build
+enum Tree {
+    Leaf,
+    Node(Box<Tree>, i64, Box<Tree>),
+}
+
+fn insert(t: Tree, v: i64) -> Tree {
+    match t {
+        Tree::Leaf => Tree::Node(Box::new(Tree::Leaf), v, Box::new(Tree::Leaf)),
+        Tree::Node(l, x, r) => {
+            if v < x {
+                Tree::Node(Box::new(insert(*l, v)), x, r)
+            } else {
+                Tree::Node(l, x, Box::new(insert(*r, v)))
+            }
+        },
+    }
+}
+
+fn size(t: Tree) -> i64 {
+    match t {
+        Tree::Leaf => 0,
+        Tree::Node(l, _, r) => size(*l) + 1 + size(*r),
+    }
+}
+
+fn main() ~ Console {
+    let t = insert(insert(insert(Tree::Leaf, 2), 1), 3);
+    println!("{} nodes", size(t));
+}
+```
+
+```build fail=BL0384
+enum Chain {
+    End,
+    Link(i64, Chain),
+}
+```
+
+Limits in this release: boxed memory is not freed until the program exits; `Rc::new` and `Arc::new` are rejected (BL0383) because reference counting does not exist yet; `Box<dyn Trait>` is not supported.
+
 ## 8. Code Generation
 
 ### 8.1 Compilation Targets

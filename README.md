@@ -11,7 +11,7 @@ Systems language with typed capability effects and native C output.
 cargo install buildlang
 ```
 
-[![version: 1.7.0](https://img.shields.io/badge/version-1.7.0-e6e1d6?style=flat-square&labelColor=1a1712)](https://github.com/HarperZ9/buildlang/releases/latest)
+[![version: 1.8.0](https://img.shields.io/badge/version-1.8.0-e6e1d6?style=flat-square&labelColor=1a1712)](https://github.com/HarperZ9/buildlang/releases/latest)
 [![CI](https://github.com/HarperZ9/buildlang/actions/workflows/ci.yml/badge.svg)](https://github.com/HarperZ9/buildlang/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-BuildLang_Fair--Source-e6e1d6?style=flat-square&labelColor=1a1712)](https://github.com/HarperZ9/buildlang/blob/main/LICENSE)
 ![rust edition 2021](https://img.shields.io/badge/rust-edition_2021-e6e1d6?style=flat-square&labelColor=1a1712)
@@ -74,7 +74,7 @@ source is [docs/explainer/index.html](docs/explainer/index.html).
 
 ## Install
 
-From crates.io (installs the `buildc` binary, version 1.7.0):
+From crates.io (installs the `buildc` binary, version 1.8.0):
 
 ```bash
 cargo install buildlang
@@ -296,7 +296,7 @@ correctness of the interval.
 
 ## Status and maturity
 
-BuildLang 1.7.0. The C backend, capability-effect checking, HLSL/GLSL
+BuildLang 1.8.0. The C backend, capability-effect checking, HLSL/GLSL
 output, and the receipt tooling are the verified core; SPIR-V, LLVM IR, WASM,
 Rust, x86-64, ARM64, GPU dispatch, and `#[linear]` types are labeled
 experimental and stay that way until their evidence says otherwise. The

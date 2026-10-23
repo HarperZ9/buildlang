@@ -16,3 +16,4 @@ compares its standard output with the `.expected` file beside it, and
 | format_escapes.bld, println_escapes.bld | #80 |
 | char_leak.bld | #81 |
 | generic_twice.bld | #82 |
+| box_scalar.bld, box_list.bld, box_bst.bld | #83 |

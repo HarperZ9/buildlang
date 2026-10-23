@@ -170,6 +170,11 @@ impl<'ctx> TypeChecker<'ctx> {
         // types are collected so every field type's linearity is known.
         self.validate_linear_containment(module);
 
+        // A struct or enum that holds itself by value has no finite size
+        // (issue #83); without this the C compiler failed after a clean check.
+        self.errors
+            .extend(super::recursive::infinite_size_errors(module));
+
         // Register built-in trait stubs AFTER user types so DefIds are consistent
         self.ctx.register_builtin_traits();
 

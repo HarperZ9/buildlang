@@ -1,6 +1,6 @@
 # Box<T> and recursive types (issue #83)
 
-Status: design, 2026-10-22. Implementation not merged yet. Target release 1.8.0.
+Status: implemented for 1.8.0 (2026-10-22). Field access through a box needs `(*b).x`.
 
 ## What 1.7.0 does
 

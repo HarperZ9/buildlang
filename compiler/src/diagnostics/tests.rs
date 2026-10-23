@@ -154,6 +154,10 @@ fn type_samples() -> Vec<TypeError> {
             construct: s("yield"),
             detail: s("not lowered"),
         },
+        E::InfiniteSizeType {
+            name: s("Tree"),
+            path: s("Tree -> Tree"),
+        },
         E::WrongTypeArgCount {
             expected: 1,
             found: 2,
