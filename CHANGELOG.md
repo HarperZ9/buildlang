@@ -10,6 +10,17 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- **JS integer and division rules (M4).** `x.to_int32()` and `x.to_uint32()`
+  are ECMAScript ToInt32 and ToUint32; `x.fmod_or_zero(y)` and
+  `x.div_or_zero(y)` give 0 for a zero divisor, as the Low Water trace format
+  asks. `i32`/`u32` `wrapping_mul` is `Math.imul`. Test:
+  `compiler/tests/int32_js_rules.rs` runs a program that
+  `tools/int32_fixture.mjs` generates with its expected output: the game's
+  `hashStr` over 54 string and seed pairs, 20 conversions and 8 zero-divisor
+  cases. Spec sections 5.4 and 5.5.
+- **Lexer fix.** `0_u32` (a separator after a leading zero) failed with
+  "invalid suffix `_u32`"; it now lexes as `0u32`.
+
 - **JSON number text (M4).** `x.to_json()` writes a float as JS
   `JSON.stringify` does: shortest round-trip digits, exponent form below 1e-6
   and from 1e21, `-0` as `0`, NaN and infinities as `null`. On an integer it

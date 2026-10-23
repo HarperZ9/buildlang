@@ -1395,8 +1395,10 @@ impl<'a> Lexer<'a> {
                     let empty = !self.scan_digits(2);
                     (IntBase::Binary, empty)
                 }
-                // Could be 0, 0.5, 0e10, etc.
-                '0'..='9' | '.' | 'e' | 'E' => {
+                // Could be 0, 0.5, 0e10, 0_u32, etc. A `_` separator after the
+                // leading zero (`0_u32`, `0_000`) was left out before M4, so
+                // `0_u32` lexed as `0` with an invalid suffix `_u32`.
+                '0'..='9' | '.' | 'e' | 'E' | '_' => {
                     self.scan_digits(10);
                     (IntBase::Decimal, false)
                 }

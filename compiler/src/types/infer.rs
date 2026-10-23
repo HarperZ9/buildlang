@@ -5747,6 +5747,9 @@ impl<'ctx> TypeInfer<'ctx> {
             "total_cmp" if is_float => {
                 return Ty::fresh_var(); // Returns Ordering
             }
+            "to_int32" if is_float => return Ty::int(IntTy::I32),
+            "to_uint32" if is_float => return Ty::int(IntTy::U32),
+            "fmod_or_zero" | "div_or_zero" if is_float => return receiver_ty.clone(),
             "to_bits" if is_float => {
                 return if matches!(receiver_ty.kind, TyKind::Float(FloatTy::F32)) {
                     Ty::int(IntTy::U32)

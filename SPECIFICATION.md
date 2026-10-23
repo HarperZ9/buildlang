@@ -388,7 +388,10 @@ Primitive integer `.wrapping_add`, `.wrapping_sub`, `.wrapping_mul`,
 `.saturating_add`, `.saturating_sub`, `.saturating_mul`, `.checked_add`,
 `.checked_sub`, and `.checked_mul` are defined for fixed-width integer types.
 The checked methods return `Option<T>`: `Some(value)` when the result is
-representable, `None` on overflow or unsigned subtraction underflow. Other
+representable, `None` on overflow or unsigned subtraction underflow.
+`wrapping_mul` on `i32` is JavaScript's `Math.imul`, and on `u32` it is
+`Math.imul(a, b) >>> 0`. Bitwise `^`, `&`, `|` and shifts never overflow; `>>`
+on an unsigned type is a logical shift, like JavaScript's `>>>`. Other
 explicit primitive integer arithmetic families remain unsupported unless a
 separate API surface defines them.
 
@@ -402,6 +405,8 @@ separate API surface defines them.
 - `x.mul_add(a, b)` is the one explicit fused multiply-add: one rounding, by request.
 - `x.to_bits()` gives the bit pattern as `u64` (`u32` for `f32`) and `f64::from_bits(u)` builds a value from one.
 - `%` on floats is C `fmod`: the result has the dividend's sign, and a zero divisor gives NaN.
+- `x.fmod_or_zero(y)` and `x.div_or_zero(y)` are `%` and `/` except that a zero divisor gives `0.0`, the rule Low Water's trace format uses.
+- `x.to_int32()` and `x.to_uint32()` are JavaScript's ToInt32 and ToUint32 (`x | 0` and `x >>> 0`): truncate toward zero and wrap modulo 2^32; NaN and the infinities give 0.
 
 Text. `{}` in a format string writes a float the way Rust's `Display` does: the shortest digits that read back to the same value, always in positional notation (`1e21` prints as `1000000000000000000000`). `x.to_json()` writes the text JavaScript's `JSON.stringify` writes: the same shortest digits, exponent form below `1e-6` and from `1e21` (`1.5e-7`, `1e+21`), `-0.0` as `0`, and NaN or an infinity as `null`. On an integer, `to_json()` gives its decimal form. Traces that another implementation compares byte for byte use `to_json()`.
 
