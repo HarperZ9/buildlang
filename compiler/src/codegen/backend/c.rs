@@ -7555,13 +7555,13 @@ fn main() {
             code
         );
         assert!(
-            code.contains("fmax("),
-            "Expected fmax() for .max() in:\n{}",
+            code.contains("build_max_f64("),
+            "Expected build_max_f64() (IEEE maximum) for .max() in:\n{}",
             code
         );
         assert!(
-            code.contains("fmin("),
-            "Expected fmin() for .min() in:\n{}",
+            code.contains("build_min_f64("),
+            "Expected build_min_f64() (IEEE minimum) for .min() in:\n{}",
             code
         );
         assert!(

@@ -32,6 +32,15 @@ expression: code
 #include <assert.h>
 #include <stdarg.h>
 
+#if defined(_MSC_VER) && !defined(__clang__)
+#pragma fp_contract(off)
+#pragma float_control(precise, on)
+#elif defined(__clang__)
+#pragma STDC FP_CONTRACT OFF
+#elif defined(__GNUC__)
+#pragma GCC optimize("fp-contract=off")
+#endif
+
 #ifdef _WIN32
 #undef DeviceCapabilities
 #undef Rectangle
@@ -1238,10 +1247,33 @@ static int32_t build_min_i32(int32_t a, int32_t b) { return a < b ? a : b; }
 static int32_t build_max_i32(int32_t a, int32_t b) { return a > b ? a : b; }
 static int64_t build_min_i64(int64_t a, int64_t b) { return a < b ? a : b; }
 static int64_t build_max_i64(int64_t a, int64_t b) { return a > b ? a : b; }
-static double build_min_f64(double a, double b) { return a < b ? a : b; }
-static double build_max_f64(double a, double b) { return a > b ? a : b; }
-static float build_min_f32(float a, float b) { return a < b ? a : b; }
-static float build_max_f32(float a, float b) { return a > b ? a : b; }
+// Float min and max follow IEEE 754 minimum/maximum, which is also JS
+// Math.min/Math.max (DETMATH): a NaN operand gives NaN, and -0 is below +0.
+static double build_min_f64(double a, double b) {
+    if (a != a || b != b) return a + b;
+    if (a == b) return signbit(a) ? a : b;
+    return a < b ? a : b;
+}
+static double build_max_f64(double a, double b) {
+    if (a != a || b != b) return a + b;
+    if (a == b) return signbit(a) ? b : a;
+    return a > b ? a : b;
+}
+static float build_min_f32(float a, float b) {
+    if (a != a || b != b) return a + b;
+    if (a == b) return signbit(a) ? a : b;
+    return a < b ? a : b;
+}
+static float build_max_f32(float a, float b) {
+    if (a != a || b != b) return a + b;
+    if (a == b) return signbit(a) ? b : a;
+    return a > b ? a : b;
+}
+// Bit casts: f64::to_bits / f64::from_bits (and f32), by memcpy.
+static uint64_t build_f64_to_bits(double v) { uint64_t b; memcpy(&b, &v, sizeof b); return b; }
+static double build_f64_from_bits(uint64_t b) { double v; memcpy(&v, &b, sizeof v); return v; }
+static uint32_t build_f32_to_bits(float v) { uint32_t b; memcpy(&b, &v, sizeof b); return b; }
+static float build_f32_from_bits(uint32_t b) { float v; memcpy(&v, &b, sizeof v); return v; }
 
 // --- Vector Math Types ---
 
