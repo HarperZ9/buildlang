@@ -1,7 +1,8 @@
 // ===============================================================================
 // BUILDLANG GPU RECEIPT - Layer C sealed, re-checkable GPU cross-check receipt
 // ===============================================================================
-// Copyright (c) 2026 Zain Dana Harper. BuildLang Fair-Source License v1.0.
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 Zain Dana Harper.
 // ===============================================================================
 //
 //! Layer C: emit a sealed, third-party-re-checkable receipt for a GPU cross-check

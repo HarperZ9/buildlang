@@ -2,7 +2,8 @@
 // BUILDLANG COMPILER
 // "The Language That Evolves"
 // ===============================================================================
-// Copyright (c) 2022-2026 Zain Dana Harper. BuildLang Fair-Source License v1.0 (see LICENSE).
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2022-2026 Zain Dana Harper.
 // ===============================================================================
 //
 // BuildLang is a multi-paradigm systems programming language featuring:
@@ -70,7 +71,7 @@ pub const AUTHOR: &str = "Zain Dana Harper";
 
 /// Copyright notice
 pub const COPYRIGHT: &str =
-    "Copyright (c) 2022-2026 Zain Dana Harper. BuildLang Fair-Source License v1.0 (see LICENSE).";
+    "Copyright (c) 2022-2026 Zain Dana Harper. Licensed under AGPL-3.0-only (see LICENSE).";
 
 // Re-export commonly used types
 pub use codegen::{CodeGenerator, GeneratedCode, OutputFormat, Target};

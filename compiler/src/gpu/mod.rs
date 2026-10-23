@@ -1,7 +1,8 @@
 // ===============================================================================
 // BUILDLANG GPU PATH - device dispatch + cross-check (feature "gpu")
 // ===============================================================================
-// Copyright (c) 2026 Zain Dana Harper. BuildLang Fair-Source License v1.0.
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 Zain Dana Harper.
 // ===============================================================================
 //
 //! Layer B/C: compile a `#[compute]` kernel to SPIR-V, dispatch it on the

@@ -2,7 +2,7 @@ Creative Commons Attribution 4.0 International (CC BY 4.0)
 
 Copyright (c) 2026 Zain Dana Harper
 
-Text: CC BY 4.0. Code: BuildLang Fair-Source v1.0.
+Text: CC BY 4.0. Code: AGPL-3.0-only.
 
 This licence covers the written works in this repository, in every format
 they are published in:
@@ -25,4 +25,4 @@ The Zenodo deposit at the DOI above records the same licence.
 
 Quoted material from other authors stays under its owners' terms.
 Everything else in this repository, including all code and the software
-documentation, stays under BuildLang Fair-Source v1.0. Those terms are in LICENSE.
+documentation, is under AGPL-3.0-only. Those terms are in LICENSE.

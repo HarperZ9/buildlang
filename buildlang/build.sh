@@ -291,7 +291,7 @@ dist() {
     cp "$TARGET_DIR/release/lib/"* "$pkg_dir/lib/"
     cp -r "$DOCS_DIR/"* "$pkg_dir/doc/"
     cp -r "$ROOT_DIR/examples/"* "$pkg_dir/examples/"
-    cp "$ROOT_DIR/LICENSE-MIT" "$ROOT_DIR/LICENSE-APACHE" "$pkg_dir/"
+    cp "$ROOT_DIR/LICENSE" "$pkg_dir/"
     cp "$ROOT_DIR/README.md" "$pkg_dir/"
     
     # Create archive

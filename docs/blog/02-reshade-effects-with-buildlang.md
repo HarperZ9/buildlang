@@ -370,4 +370,4 @@ runtime validation inside ReShade.
 
 ---
 
-*BuildLang is source-available under the BuildLang Fair-Source License v1.0. GitHub: [BuildLang compiler repo](https://github.com/HarperZ9/buildlang)*
+*BuildLang is open source under the GNU Affero General Public License, version 3 only (AGPL-3.0-only). GitHub: [BuildLang compiler repo](https://github.com/HarperZ9/buildlang)*
