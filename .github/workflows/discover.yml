@@ -19,8 +19,8 @@ jobs:
   discover:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: HarperZ9/discover@v0.1.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: HarperZ9/discover@98138514412bbe283e5f70dfd9139d34382dad35 # v0.1.2
         with:
           mode: repo
           gate: ${{ startsWith(github.ref, 'refs/tags/') && 'true' || 'false' }}
