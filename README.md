@@ -22,16 +22,17 @@ WebAssembly, Rust, x86-64, and ARM64 backends. The type system pairs
 Hindley-Milner inference with typed algebraic effects and an opt-in
 experimental `#[linear]` attribute for no-cloning values. The `buildc` CLI
 covers build, run, test, repl, fmt, pkg, watch, and doctor, plus a bundled LSP
-server with completion, hover, diagnostics, and go-to-definition. Every checked
-build can write a receipt you can re-check.
+server with completion, hover, diagnostics, and go-to-definition.
 
 [Landing page](https://harperz9.github.io/buildlang/) | [Build ecosystem](https://github.com/HarperZ9/build-universe) | [VS Code extension](https://github.com/HarperZ9/buildlang-vscode) | [grammar](https://github.com/HarperZ9/buildlang-tmLanguage)
 
 ## See it work, step by step
 
 The [animated explainer](https://harperz9.github.io/repo-explainers/buildlang.html)
-walks through an undeclared file read rejected, a policy profile that denies it, a check receipt catching an edit, HLSL from a fragment function, and a heat-equation receipt that re-verifies while a forged one fails its seal. Every value on it is output from this repository. Its
-source is [docs/explainer/index.html](docs/explainer/index.html).
+shows an undeclared file read being rejected, a policy profile that denies it,
+a check receipt catching an edit, HLSL from a fragment function, and a
+heat-equation receipt that verifies while a forged one fails. Its source is
+[docs/explainer/index.html](docs/explainer/index.html).
 
 ## Highlights
 
@@ -40,8 +41,7 @@ source is [docs/explainer/index.html](docs/explainer/index.html).
   requires `~ Network`, an `extern` call requires `~ Foreign`, and
   compile-time macros like `include_str!` and `env!` are gated the same way.
   The checker tracks effects through function values, closures, struct fields,
-  control flow, and async blocks, so a callback cannot silently launder a
-  capability. See [docs/EFFECTS_GUIDE.md](docs/EFFECTS_GUIDE.md).
+  control flow, and async blocks, so a callback cannot hide one. See [docs/EFFECTS_GUIDE.md](docs/EFFECTS_GUIDE.md).
 - **Native binaries through C.** The C backend is the production execution
   path: `buildc run` compiles to C, invokes your system C compiler (gcc,
   clang, or MSVC), and runs the result. One command, one binary.
@@ -62,16 +62,16 @@ source is [docs/explainer/index.html](docs/explainer/index.html).
 - **Experimental linear types.** An opt-in `#[linear]` attribute marks a
   struct or enum as no-cloning: a value should be moved at most once, the
   shared foundation of qubit, no-double-spend, and resource-handle
-  disciplines. It rejects a large regression-tested set of escapes but is not
-  yet fully sound; honest scope in
-  [docs/LINEAR-TYPES.md](docs/LINEAR-TYPES.md).
+  disciplines. The check is not yet complete: some escapes still compile. See
+  [docs/LINEAR-TYPES.md](docs/LINEAR-TYPES.md) for what it catches.
 - **Full toolchain in one binary.** `buildc` bundles build, run, check, test,
   repl, fmt, lint, pkg, watch, doctor, an LSP server, MIR and BDF utilities,
   and receipt tooling. No separate installs.
-- **Re-checkable receipts.** `buildc check --receipt` seals what a build
-  observed (effects, capabilities, source digests) into JSON that
-  `buildc receipt verify` re-derives later; a second receipt family witnesses
-  numeric program output against stated invariants.
+- **Build receipts.** `buildc check --receipt` writes the effects,
+  capabilities and source digests of a check to JSON, and
+  `buildc receipt verify` re-runs the check later and fails if the source
+  changed. `buildc run --emit-receipt` does the same for a numeric program's
+  output against a stated invariant.
 
 ## Install
 
@@ -140,8 +140,8 @@ cc hello.c -o hello && ./hello
 
 ## Worked example: effects and a policy gate
 
-`buildc check` reports the capability surface of a program and can enforce a
-policy over it. Check the hello program against the built-in `console-only`
+`buildc check` lists the effects a program uses and can enforce a policy over
+them. Check the hello program against the built-in `console-only`
 profile and print a receipt:
 
 ```bash
@@ -168,10 +168,9 @@ No errors found in 'examples/quickstart/hello.bld'
 If the program also read a file, the check would fail until `main` declared
 `~ FileSystem` and the policy allowed it. Built-in profiles: `pure`,
 `console-only`, `offline`, `ci-review`, and `strict-accountability`
-(`buildc policy list`). Save a receipt to a file and re-verify it later with
-`buildc receipt verify receipt.json --expect-profile ci-review`; verification
-re-runs the check against current source bytes and digests, so drift fails
-with a typed reason.
+(`buildc policy list`). Save a receipt to a file and check it later with
+`buildc receipt verify receipt.json --expect-profile ci-review`. If the source
+changed since, verify fails and says why.
 
 ## The buildc CLI
 
@@ -217,116 +216,58 @@ reference with expected output lives in [USAGE.md](USAGE.md).
 | x86-64 | `--target x86-64` | `.o` | Experimental |
 | ARM64 | `--target arm64` | `.o` | Experimental |
 
-An 8-program semantic corpus pins C-backend behavior: `buildc corpus verify`
-checks the manifest, the C and Rust execution receipts, and real C-backend
-stdout together.
+`buildc corpus verify` runs an 8-program corpus through the C backend and
+compares its output.
 
 The generated C runtime defaults to native stdio behavior. On Windows, native
 C stdio translates `\n` written through stdout or stderr to CRLF. Use
-`--stdio-mode portable-lf` on the C backend when a receipt or lane protocol
-needs byte-stable LF output across platforms. The portable mode is rejected for
-non-C targets rather than ignored.
+`--stdio-mode portable-lf` on the C backend when you need the same LF bytes on
+every platform. Other targets reject the flag.
 
-## Scientific-runtime receipts
+## Numeric output receipts
 
-`buildc run --emit-receipt <path> --invariant <name>` captures a numeric
-program's stdout as a measurement series, checks a stated invariant over it,
-and seals a re-checkable JSON receipt; `buildc receipt verify` re-derives it
-by re-running the program. The invariant family has eight members
-(`energy-monotone`, `conservation`, `bounded`, `energy-identity`, `relation`,
-`conserved-band`, `non-negative`, `cross_backend_columns_agree`), each with a
-paired negative-fixture kernel that must fail for the right reason.
-`--units m/s` canonicalizes a declared physical unit through a
-dependency-free SI dimensional-analysis core before sealing.
-If `--stdio-mode portable-lf` is used, the receipt seals that mode and
-verification replays it. Native mode is the default and is omitted from the
-receipt so older missing-field receipts continue to verify as native.
+`buildc run --emit-receipt <path> --invariant <name>` records a numeric
+program's stdout as a series, checks an invariant over it, and writes a JSON
+receipt. `buildc receipt verify` re-runs the program and compares. Eight
+invariants are built in: `energy-monotone`, `conservation`, `bounded`,
+`energy-identity`, `relation`, `conserved-band`, `non-negative`, and
+`cross_backend_columns_agree`. `--units m/s` normalizes a declared SI unit
+before the receipt is written.
 
-The same schema seals five distinct computation modes end to end:
-deterministic, exact-probabilistic (a quantum amplitude), seeded stochastic
-(the `Random` capability, witnessed seed), Monte Carlo (`--mc-estimator` /
-`--mc-samples` / `--mc-interval`, sealing the estimator's declared
-denominator and interval method), and budgeted heuristic search
-(`--budget-steps` / `--budget-consumed`, sealing the step ceiling and a
-derived exhaustion flag), plus a cross-backend bonus mode that runs one
-kernel through both the C and Rust backends and checks their agreement.
-`buildc receipt chain` binds any number of receipts into one ordered,
-tamper-evident bundle. A `Model` capability exists for calling out to a
-model over TCP; the receipt layer refuses outright to emit or verify a
-receipt over a Model-observing program, because models propose and oracles
-dispose.
+```bash
+buildc run examples/heat_equation_energy.bld --emit-receipt receipt.json   --invariant energy-monotone --problem 1d-heat-equation-energy
+buildc receipt verify receipt.json
+
+# the 30-kernel example corpus, each passing kernel paired with one that must fail
+buildc receipt corpus examples/scientific-corpus.json
+```
 
 <p align="center"><img src="docs/art/receipt-lane.svg" alt="Eight stages from kernel to re-derive, ending in verified, failed, or refused." width="100%"></p>
 
-The mode is not decoration on the seal. A Monte Carlo receipt carries its
-estimator, its sample count, and the interval method that produced the interval;
-a budgeted-search receipt carries the step ceiling and whether the search
-exhausted it. A number without the terms it was measured under is not a result,
-so those terms are sealed beside it rather than left in the prose around it.
+Receipts cover deterministic, exact-probabilistic, seeded stochastic, Monte
+Carlo (`--mc-estimator`, `--mc-samples`, `--mc-interval`) and budgeted search
+(`--budget-steps`, `--budget-consumed`) programs, plus a mode that runs one
+kernel through the C and Rust backends and checks they agree.
+`buildc receipt chain` bundles several receipts into one file. A receipt
+covers one run of the compiled program. A program that uses the `Model`
+capability cannot get one. With `--stdio-mode portable-lf` the mode is stored
+in the receipt and used again on verify.
 
-Run it now:
-
-```bash
-# emit a receipt from the flagship kernel, then verify it
-buildc run examples/heat_equation_energy.bld --emit-receipt receipt.json \
-  --invariant energy-monotone --problem 1d-heat-equation-energy
-buildc receipt verify receipt.json
-
-# run the full 30-member example corpus (paired PASS / FAIL_EXPECTED kernels)
-buildc receipt corpus examples/scientific-corpus.json
-
-# emit one receipt per mode (docs/FIVE-MODES-TOUR.md has all six commands),
-# then chain and verify the bundle
-buildc receipt chain build det.json prob.json stoch.json mc.json heur.json cross.json -o chain.json
-buildc receipt chain verify chain.json
-```
-
-Walk all five modes plus the cross-backend bonus one command at a time:
-[docs/FIVE-MODES-TOUR.md](docs/FIVE-MODES-TOUR.md). Full schema, flags, and
-failure-class reference:
+[docs/FIVE-MODES-TOUR.md](docs/FIVE-MODES-TOUR.md) runs every mode one command
+at a time. Schema and flags:
 [docs/SCIENTIFIC-RECEIPT.md](docs/SCIENTIFIC-RECEIPT.md) and
 [docs/DIMENSIONAL-ANALYSIS.md](docs/DIMENSIONAL-ANALYSIS.md).
 
-Honest scope: a receipt witnesses that the compiled program's observed
-output series satisfies the stated invariant over that one run, never a
-physical law (`NOT_A_NEW_PHYSICAL_LAW`); a budgeted-search receipt reports an
-incumbent under its declared step ceiling and never claims optimality
-(`NOT_PROVES_OPTIMALITY`); a Monte Carlo receipt seals the estimator's
-declaration discipline (denominator, seed, interval method), not the
-correctness of the interval.
+`buildc receipt verify` also reads two receipt kinds written by other tools:
+model boundary receipts (`buildlang-model-boundary-receipt/v0`) from a model
+harness shim, and Flywheel tool-call receipts (`flywheel.tool-call-receipt/v1`).
 
-## Status and maturity
+## Status
 
-BuildLang 1.10.0. The C backend, capability-effect checking, HLSL/GLSL
-output, and the receipt tooling are the verified core; SPIR-V, LLVM IR, WASM,
-Rust, x86-64, ARM64, GPU dispatch, and `#[linear]` types are labeled
-experimental and stay that way until their evidence says otherwise. The
-release-shaped baseline (2026-10-23, local `cargo test` from `compiler/`
-with `RUSTFLAGS=-Dwarnings`): 1,907 tests passing, 0 failing (11 ignored).
-The corpus is 30 `.bld` example kernels and 8 C-execution receipts.
-Ground-truth release evidence lives in
-[STATUS.md](STATUS.md); [CHANGELOG.md](CHANGELOG.md) tracks changes.
-
-## Boundary receipts
-
-BuildLang verifies computation through sealed, re-checkable receipts. Two
-boundary receipt kinds extend this discipline beyond the compiler itself:
-
-- **Model boundary receipts** (`buildlang-model-boundary-receipt/v0`): witness
-  that a `Model`-capability call crossed the boundary between the harness and a
-  model daemon. The harness-side shim emits the receipt; `buildc receipt verify`
-  reads it. A model-observing program is refused a scientific receipt with
-  `CAPABILITY_INADMISSIBLE` (models propose, oracles dispose).
-- **Tool-call receipts** (`flywheel.tool-call-receipt/v1`): witness that an agent
-  tool invocation occurred, binding the tool name, capability class (read / write
-  / exec / external-mcp), admission decision, and witnessed args/output digests.
-  The Flywheel harness emits these; `buildc receipt verify` reads them with a
-  golden-pinned cross-language seal contract (Rust serde_json agrees byte-for-byte
-  with Python json.dumps). This is the enforced AgentRiskBOM primitive.
-
-Both share a seal idiom and the closed failure taxonomy
-(`MALFORMED`, `SEAL_MISMATCH`, `DIGEST_MALFORMED`, `FIELD_CONTRACT_VIOLATION`)
-with the scientific receipt verifier, and compose into receipt chains.
+BuildLang 1.10.0. The C backend, effect checking, HLSL and GLSL output, and
+receipts are the supported core. SPIR-V, LLVM IR, WASM, Rust, x86-64, ARM64, GPU dispatch
+and `#[linear]` types are experimental. Release test results are in
+[STATUS.md](STATUS.md) and changes in [CHANGELOG.md](CHANGELOG.md).
 
 ## Documentation and ecosystem
 
@@ -334,7 +275,7 @@ with the scientific receipt verifier, and compose into receipt chains.
 - [USAGE.md](USAGE.md): full command reference with verified output
 - [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md): tutorial from install to shaders
 - [docs/EFFECTS_GUIDE.md](docs/EFFECTS_GUIDE.md): the capability-effect system
-- [docs/LINEAR-TYPES.md](docs/LINEAR-TYPES.md): linear types, enforced vs open
+- [docs/LINEAR-TYPES.md](docs/LINEAR-TYPES.md): linear types
 - [DESIGN.md](DESIGN.md) and [ARCHITECTURE.md](ARCHITECTURE.md): pipeline and rationale
 - Peers: [build-universe](https://github.com/HarperZ9/build-universe),
   [buildlang-vscode](https://github.com/HarperZ9/buildlang-vscode),
@@ -342,23 +283,9 @@ with the scientific receipt verifier, and compose into receipt chains.
 
 <p align="center"><img src=".github/assets/banner.svg" alt="buildlang: A real systems language: typed capability effects, sum and linear types, C FFI, native binaries." width="100%"></p>
 
-The mark at the top of this page is generated from the repository name, so every
-tool in this family carries a different one. The banner above is buildlang's own,
-drawn by hand and kept. The mark and the two diagrams on this page are rendered
-from `docs/art/buildlang.art.json` by `tools/render_repo_art.py`, and a gate
-re-renders each drawing and compares it against what is committed, so a label
-edited without a re-render fails CI instead of shipping.
-
 Contributor checks before changing public behavior: `cargo test` and
 `cargo fmt --check` from `compiler/`, `buildc doctor`, and
 `buildc corpus verify`. See [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## Why receipts
-
-Every claim above that could drift, backend maturity, corpus behavior,
-capability surfaces, numeric invariants, is backed by a receipt a third party
-can re-check with one command. That is the design stance: evidence you can
-re-run beats assertions you have to trust.
 
 ## License
 
