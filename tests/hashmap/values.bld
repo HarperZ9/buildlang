@@ -1,0 +1,93 @@
+// HashMap<str, T> for value types beyond the old few: unsigned and narrow
+// integers, tuples, enums, structs, vectors of structs, nested maps, and a
+// map inside a struct, read and written through references.
+use std::collections::HashMap;
+
+enum Shape {
+    Dot,
+    Circle(f64),
+    Rect(f64, f64),
+}
+
+struct Hit {
+    frame: i64,
+    damage: f64,
+}
+
+struct Book {
+    moves: HashMap<str, Vec<Hit>>,
+    names: HashMap<str, str>,
+}
+
+fn area(s: Shape) -> f64 {
+    match s {
+        Shape::Dot => 0.0,
+        Shape::Circle(r) => r * r * 3.0,
+        Shape::Rect(w, h) => w * h,
+    }
+}
+
+fn total(b: &Book, key: str) -> f64 {
+    let hits = b.moves.get(key);
+    let mut t = 0.0;
+    let mut i: usize = 0;
+    while i < hits.len() {
+        t = t + hits[i].damage;
+        i = i + 1;
+    }
+    t
+}
+
+fn bump(m: &mut HashMap<str, i64>, key: str) {
+    let v = m.get(key);
+    m.insert(key, v + 1);
+}
+
+fn main() ~ Console {
+    let mut wide: HashMap<str, u64> = HashMap::new();
+    wide.insert("max", 18446744073709551615_u64);
+    let mut small: HashMap<str, u8> = HashMap::new();
+    small.insert("b", 200_u8);
+    let mut narrow: HashMap<str, i32> = HashMap::new();
+    narrow.insert("n", -7);
+    let mut flags: HashMap<str, bool> = HashMap::new();
+    flags.insert("t", true);
+    flags.insert("f", false);
+    println!("{} {} {} {} {}", wide.get("max"), small.get("b"), narrow.get("n"), flags.get("t"), flags.get("f"));
+
+    let mut pairs: HashMap<str, (i64, f64)> = HashMap::new();
+    pairs.insert("p", (3, 2.5));
+    let p = pairs.get("p");
+    println!("{} {}", p.0, p.1);
+
+    let mut shapes: HashMap<str, Shape> = HashMap::new();
+    shapes.insert("c", Shape::Circle(2.0));
+    shapes.insert("r", Shape::Rect(2.0, 3.5));
+    shapes.insert("d", Shape::Dot);
+    for k in shapes.keys() {
+        let s = shapes.get(k);
+        println!("{} {}", k, area(s));
+    }
+
+    let mut hits: Vec<Hit> = Vec::new();
+    hits.push(Hit { frame: 4, damage: 3.5 });
+    hits.push(Hit { frame: 9, damage: 1.25 });
+    let mut b = Book { moves: HashMap::new(), names: HashMap::new() };
+    b.moves.insert("jab", hits);
+    b.names.insert("jab", "Jab");
+    println!("{} {}", total(&b, "jab"), b.names.get("jab"));
+
+    let mut nested: HashMap<str, HashMap<str, Hit>> = HashMap::new();
+    let mut inner: HashMap<str, Hit> = HashMap::new();
+    inner.insert("h", Hit { frame: 2, damage: 0.5 });
+    nested.insert("o", inner);
+    let i2 = nested.get("o");
+    let h = i2.get("h");
+    println!("{} {}", h.frame, h.damage);
+
+    let mut counts: HashMap<str, i64> = HashMap::new();
+    counts.insert("x", 0);
+    bump(&mut counts, "x");
+    bump(&mut counts, "x");
+    println!("{}", counts.get("x"));
+}

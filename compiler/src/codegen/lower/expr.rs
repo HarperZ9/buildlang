@@ -3299,21 +3299,6 @@ impl<'ctx> MirLowerer<'ctx> {
     /// Attempt to resolve the return type of a function call by looking up
     /// already-lowered function declarations in the module.
     /// Convert a MirType to a C-safe identifier suffix for monomorphized functions.
-    fn type_to_c_name(ty: &MirType) -> String {
-        match ty {
-            MirType::Int(IntSize::I32, true) => "int32_t".to_string(),
-            MirType::Int(IntSize::I64, true) => "int64_t".to_string(),
-            MirType::Int(IntSize::ISize, false) => "uintptr_t".to_string(),
-            MirType::Float(FloatSize::F64) => "double".to_string(),
-            MirType::Float(FloatSize::F32) => "float".to_string(),
-            MirType::Bool => "bool".to_string(),
-            MirType::Struct(name) => name.replace("::", "_").replace(" ", "_"),
-            MirType::Vec(_) => "BuildVecHandle".to_string(),
-            MirType::Map(_, _) => "BuildStrF64MapHandle".to_string(),
-            _ => "int32_t".to_string(),
-        }
-    }
-
     pub(crate) fn hvec_elem_suffix(elem_ty: &MirType) -> CodegenResult<String> {
         Ok(match elem_ty {
             MirType::Float(_) => "f64".to_string(),
@@ -4966,6 +4951,18 @@ impl<'ctx> MirLowerer<'ctx> {
 
         // HashMap<K,V> / Map method dispatch → typed runtime calls.
         // Select runtime function based on the Map's value type parameter.
+        // A map reached through a reference (`m: &HashMap<str, T>`): load the
+        // handle. The handle points at the shared table, so reads and writes
+        // through the copy act on the caller's map. Before M4 a method on a
+        // `&HashMap` fell through to the default arm and `for k in m.keys()`
+        // failed to build.
+        let (receiver_val, receiver_ty) = match &receiver_ty {
+            MirType::Ptr(inner) if matches!(inner.as_ref(), MirType::Map(..)) => {
+                let loaded = self.deref_if_pointer(receiver_val)?;
+                (loaded, inner.as_ref().clone())
+            }
+            _ => (receiver_val, receiver_ty),
+        };
         if let MirType::Map(ref _key_ty, ref val_ty) = receiver_ty {
             let method_name = method.name.as_ref();
 
@@ -4977,17 +4974,14 @@ impl<'ctx> MirLowerer<'ctx> {
                     // used str->f64, passing a BuildString to a `double` param (C2440).
                     let fn_name = match val_ty.as_ref() {
                         MirType::Float(_) => "build_hmap_insert_str_f64".to_string(),
-                        _ => format!("build_hmap_insert_val_{}", Self::type_to_c_name(val_ty)),
+                        _ => format!("build_hmap_insert_val_{}", map_value_mangle(val_ty)),
                     };
                     (Some(fn_name), MirType::Void)
                 }
                 "get" => {
                     let val_c = match val_ty.as_ref() {
                         MirType::Float(_) => None,
-                        _ => Some(format!(
-                            "build_hmap_get_val_{}",
-                            Self::type_to_c_name(val_ty)
-                        )),
+                        _ => Some(format!("build_hmap_get_val_{}", map_value_mangle(val_ty))),
                     };
                     let fn_name = val_c.unwrap_or_else(|| "build_hmap_get_str_f64".to_string());
                     (Some(fn_name), *val_ty.clone())
@@ -5041,7 +5035,16 @@ impl<'ctx> MirLowerer<'ctx> {
                 let native_key = fn_name.ends_with("_str_f64");
                 let mut arg_vals = vec![receiver_val];
                 for (i, arg) in args.iter().enumerate() {
-                    let val = self.lower_expr(arg)?;
+                    // The inserted value takes the map's value type, so a
+                    // literal like `(3, 2.5)` is built as `(i64, f64)` for a
+                    // `HashMap<str, (i64, f64)>` instead of `(i32, f64)`.
+                    let prev_expected = self.expected_type.take();
+                    if i == 1 && method_name == "insert" {
+                        self.expected_type = Some(val_ty.as_ref().clone());
+                    }
+                    let lowered = self.lower_expr(arg);
+                    self.expected_type = prev_expected;
+                    let val = lowered?;
                     let val = if i == 0 {
                         self.deref_if_pointer(val)?
                     } else {

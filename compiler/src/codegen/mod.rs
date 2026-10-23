@@ -1101,11 +1101,11 @@ mod tests {
              let r = m.get(String::from(\"k\")); }",
         );
         assert!(
-            code.contains("build_hmap_insert_val_BuildString("),
+            code.contains("build_hmap_insert_val_s_BuildString("),
             "insert must dispatch to the value-typed wrapper:\n{code}"
         );
         assert!(
-            code.contains("build_hmap_get_val_BuildString("),
+            code.contains("build_hmap_get_val_s_BuildString("),
             "get must dispatch to the value-typed wrapper:\n{code}"
         );
         // The value wrapper must box (malloc) the BuildString rather than memcpy it

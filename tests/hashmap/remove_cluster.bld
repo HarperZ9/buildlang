@@ -1,0 +1,16 @@
+use std::collections::HashMap;
+
+fn main() ~ Console {
+    // These five keys share a bucket in a 16-slot table, so they form one
+    // probe cluster. Removing the first must leave the other four findable.
+    let mut m: HashMap<str, i64> = HashMap::new();
+    m.insert("k4", 4);
+    m.insert("k26", 26);
+    m.insert("k35", 35);
+    m.insert("k44", 44);
+    m.insert("k53", 53);
+    m.remove("k4");
+    println!("{} {} {} {} {}", m.contains_key("k26"), m.contains_key("k35"), m.contains_key("k44"), m.contains_key("k53"), m.len());
+    m.remove("k35");
+    println!("{} {} {} {}", m.get("k26"), m.get("k44"), m.get("k53"), m.len());
+}

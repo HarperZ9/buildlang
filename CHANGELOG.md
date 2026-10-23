@@ -10,6 +10,18 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- **`HashMap<str, T>` for any `T` (M4).** Lowering and the C backend now name
+  the per-type wrappers with one shared function, so unsigned and narrow
+  integers, tuples and the rest build; a map inside a struct or behind
+  `&HashMap`/`&mut HashMap` takes its methods; an inserted literal takes the
+  map's value type. `keys()` returns insertion order (as a JS `Map` does).
+  Spec section 7.7. Test: `compiler/tests/hashmap_any.rs` runs three programs
+  in `tests/hashmap`, each of which fails on 1.8.0.
+- **Map removal fixed.** Removing a key cleared its slot and cut the probe
+  chain, so other keys in the same cluster were no longer found
+  (`tests/hashmap/remove_cluster.bld`: four of four lost on 1.8.0). Removal
+  now moves the rest of the cluster back.
+
 - **JSON module (M4).** `mod json;` gives `json_parse` into a `Json` enum,
   checked typed accessors (`field_f64`, `field_i64`, `field_str`, `field_bool`,
   `field_items`, `field_f64_or`) whose errors name the key, and a writer

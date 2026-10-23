@@ -950,6 +950,8 @@ typedef struct {
     char** keys;       // heap-allocated copies of key strings
     double* values;
     uint8_t* occupied;
+    uint64_t* seq;     // insertion sequence per slot; the key list comes back in insertion order
+    uint64_t next_seq;
     size_t cap;
     size_t len;
 } BuildStrF64Map;
@@ -971,21 +973,37 @@ static BuildStrF64MapHandle build_hmap_new_str_f64(void) {
     h.inner->keys = (char**)calloc(16, sizeof(char*));
     h.inner->values = (double*)calloc(16, sizeof(double));
     h.inner->occupied = (uint8_t*)calloc(16, sizeof(uint8_t));
+    h.inner->seq = (uint64_t*)calloc(16, sizeof(uint64_t));
+    h.inner->next_seq = 0;
     return h;
 }
 
+typedef struct { uint64_t seq; const char* key; } __BuildSeqKey;
+static int __build_seq_key_cmp(const void* a, const void* b) {
+    uint64_t x = ((const __BuildSeqKey*)a)->seq, y = ((const __BuildSeqKey*)b)->seq;
+    return x < y ? -1 : x > y ? 1 : 0;
+}
+
 // Collect a string-keyed map's keys into a Vec<String> handle, backing
-// `m.keys()` (iteration order is bucket order, unspecified like Rust's).
+// `m.keys()`. The order is insertion order (a key keeps its first position
+// when its value is replaced), so it is the same on every run and platform,
+// and the same order JS gives for an object's string keys.
 static BuildVecHandle build_hmap_keys_str_f64(BuildStrF64MapHandle h) {
     BuildVecHandle v;
     v.inner = (BuildVec*)malloc(sizeof(BuildVec));
     *v.inner = build_vec_new(sizeof(BuildString));
-    for (size_t __i = 0; __i < h.inner->cap; __i++) {
-        if (h.inner->occupied[__i]) {
-            BuildString __kbuf = build_string_new(h.inner->keys[__i]);
-            build_vec_push(v.inner, &__kbuf);
-        }
+    BuildStrF64Map* m = h.inner;
+    __BuildSeqKey* all = (__BuildSeqKey*)malloc((m->len + 1) * sizeof(__BuildSeqKey));
+    size_t n = 0;
+    for (size_t __i = 0; __i < m->cap; __i++) {
+        if (m->occupied[__i]) { all[n].seq = m->seq[__i]; all[n].key = m->keys[__i]; n++; }
     }
+    qsort(all, n, sizeof(__BuildSeqKey), __build_seq_key_cmp);
+    for (size_t __i = 0; __i < n; __i++) {
+        BuildString __kbuf = build_string_new(all[__i].key);
+        build_vec_push(v.inner, &__kbuf);
+    }
+    free(all);
     return v;
 }
 
@@ -994,11 +1012,13 @@ static void __build_hmap_grow_str_f64(BuildStrF64Map* m) {
     char** old_keys = m->keys;
     double* old_values = m->values;
     uint8_t* old_occ = m->occupied;
+    uint64_t* old_seq = m->seq;
     m->cap *= 2;
     m->len = 0;
     m->keys = (char**)calloc(m->cap, sizeof(char*));
     m->values = (double*)calloc(m->cap, sizeof(double));
     m->occupied = (uint8_t*)calloc(m->cap, sizeof(uint8_t));
+    m->seq = (uint64_t*)calloc(m->cap, sizeof(uint64_t));
     for (size_t i = 0; i < old_cap; i++) {
         if (old_occ[i]) {
             uint32_t hash = __build_hash_str(old_keys[i]);
@@ -1006,11 +1026,12 @@ static void __build_hmap_grow_str_f64(BuildStrF64Map* m) {
             while (m->occupied[idx]) idx = (idx + 1) % m->cap;
             m->keys[idx] = old_keys[i]; // transfer ownership
             m->values[idx] = old_values[i];
+            m->seq[idx] = old_seq[i];
             m->occupied[idx] = 1;
             m->len++;
         }
     }
-    free(old_keys); free(old_values); free(old_occ);
+    free(old_keys); free(old_values); free(old_occ); free(old_seq);
 }
 
 static void build_hmap_insert_str_f64(BuildStrF64MapHandle h, const char* key, double value) {
@@ -1026,6 +1047,7 @@ static void build_hmap_insert_str_f64(BuildStrF64MapHandle h, const char* key, d
     m->keys[idx] = (char*)malloc(klen + 1);
     memcpy(m->keys[idx], key, klen + 1);
     m->values[idx] = value;
+    m->seq[idx] = m->next_seq++;
     m->occupied[idx] = 1;
     m->len++;
 }
@@ -1067,6 +1089,24 @@ static bool build_hmap_remove_str_f64(BuildStrF64MapHandle h, const char* key) {
             m->keys[idx] = NULL;
             m->occupied[idx] = 0;
             m->len--;
+            // Linear probing: a cleared slot would cut the probe chain of the
+            // keys after it in the same cluster, so `get` stopped finding them.
+            // Move each later entry of the cluster back to where it belongs.
+            size_t j = (idx + 1) % m->cap;
+            while (m->occupied[j]) {
+                char* k = m->keys[j];
+                double v = m->values[j];
+                uint64_t q = m->seq[j];
+                m->occupied[j] = 0;
+                m->keys[j] = NULL;
+                size_t t = __build_hash_str(k) % m->cap;
+                while (m->occupied[t]) t = (t + 1) % m->cap;
+                m->keys[t] = k;
+                m->values[t] = v;
+                m->seq[t] = q;
+                m->occupied[t] = 1;
+                j = (j + 1) % m->cap;
+            }
             return true;
         }
         idx = (idx + 1) % m->cap;

@@ -1069,6 +1069,48 @@ pub enum MirType {
     Tuple(Vec<MirType>),
 }
 
+/// A C-identifier-safe name for a type, used for the per-value-type HashMap
+/// wrappers (`build_hmap_get_val_<name>`). Lowering names the call and the C
+/// backend names the definition with this one function, so the two always
+/// agree. Before M4 they used different spellings for every type but a few,
+/// and `HashMap<str, u64>` or `HashMap<str, (i64, f64)>` failed to build.
+pub fn map_value_mangle(ty: &MirType) -> String {
+    fn clean(text: &str) -> String {
+        text.chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect()
+    }
+    match ty {
+        MirType::Void => "void".to_string(),
+        MirType::Bool => "bool".to_string(),
+        MirType::Int(size, signed) => {
+            let bits = match size {
+                IntSize::I8 => "8",
+                IntSize::I16 => "16",
+                IntSize::I32 => "32",
+                IntSize::I64 => "64",
+                IntSize::I128 => "128",
+                IntSize::ISize => "size",
+            };
+            format!("{}{}", if *signed { "i" } else { "u" }, bits)
+        }
+        MirType::Float(FloatSize::F32) => "f32".to_string(),
+        MirType::Float(FloatSize::F64) => "f64".to_string(),
+        MirType::Ptr(inner) => format!("ptr_{}", map_value_mangle(inner)),
+        MirType::Array(elem, n) => format!("arr{}_{}", n, map_value_mangle(elem)),
+        MirType::Slice(elem) => format!("slice_{}", map_value_mangle(elem)),
+        MirType::Struct(name) => format!("s_{}", clean(name)),
+        MirType::Vec(elem) => format!("vec_{}", map_value_mangle(elem)),
+        MirType::Map(k, v) => format!("map_{}_{}", map_value_mangle(k), map_value_mangle(v)),
+        MirType::Option(inner) => format!("opt_{}", map_value_mangle(inner)),
+        MirType::Tuple(elems) => {
+            let parts: Vec<String> = elems.iter().map(map_value_mangle).collect();
+            format!("tup{}_{}", elems.len(), parts.join("_"))
+        }
+        other => clean(&format!("{other:?}")),
+    }
+}
+
 impl MirType {
     /// Create an i8 type.
     pub fn i8() -> Self {

@@ -593,6 +593,41 @@ That program prints ``json: missing key `damage` ``. The writer builds compact t
 
 Module functions are renamed when the module merges, and a call inside a macro's arguments is not renamed, so bind the result first: `let line = json_stringify(j); println!("{}", line);`. The check reports the direct form as an undefined name.
 
+### 7.7 Maps
+
+`HashMap<str, T>` holds any value type `T`: integers of every width, floats, `bool`, `str`, tuples, structs, enums, `Vec<T>` and other maps. Values wider than eight bytes are stored in their own heap copy, so they come back whole. `m.insert(k, v)` adds or replaces, `m.get(k)` returns the value (or the zero value when the key is missing; `match m.get(k) { Some(v) => ..., None => ... }` tells the two apart), `m.contains_key(k)`, `m.remove(k)`, `m.len()` and `m.is_empty()` do what their names say, and `m.keys()` returns a `Vec<str>`. The methods work on a map held directly, in a struct field, or through `&HashMap` and `&mut HashMap`.
+
+`keys()` returns the keys in insertion order. Replacing a value keeps the key's place, and a key that is removed and inserted again moves to the end, as in a JavaScript `Map`. The order is the same on every run, so a trace that walks a map is byte-stable.
+
+```build
+use std::collections::HashMap;
+
+struct Tool {
+    reach: f64,
+    weight: f64,
+}
+
+fn heaviest(tools: &HashMap<str, Tool>) -> str {
+    let mut best = "";
+    let mut most = -1.0;
+    for k in tools.keys() {
+        let t = tools.get(k);
+        if t.weight > most {
+            most = t.weight;
+            best = k;
+        }
+    }
+    best
+}
+
+fn main() ~ Console {
+    let mut tools: HashMap<str, Tool> = HashMap::new();
+    tools.insert("pipe", Tool { reach: 1.75, weight: 2.0 });
+    tools.insert("axe", Tool { reach: 1.25, weight: 3.5 });
+    println!("{}", heaviest(&tools));
+}
+```
+
 ## 8. Code Generation
 
 ### 8.1 Compilation Targets
