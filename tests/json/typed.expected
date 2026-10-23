@@ -1,0 +1,8 @@
+jab startup 4 reach 1.5 heavy false hits 1 damage 3.5
+smash startup 18 reach 2.25 heavy true hits 2 damage 12.5
+json: missing key `startup`
+json: expected an integer, found a string (key `startup`)
+json: expected an integer, found 4.5 (key `startup`)
+json: missing key `damage`
+json: expected an array, found a number (key `moves`)
+json: expected ',' or ']' at byte 5

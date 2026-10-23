@@ -1,0 +1,31 @@
+// Reads tests/json/docs.txt (path in argument 1), one JSON document a line.
+// For each, prints json_stringify and json_stringify_sorted of the parsed
+// value, or "error" twice when json_parse refuses it. The expected output
+// is what JS JSON.parse and JSON.stringify give (tools/json_fixture.mjs).
+mod json;
+
+fn main() ~ Console + FileSystem + Environment {
+    let path = args_get(1);
+    let text = read_file(path);
+    let lines = text.split("\n");
+    let mut i: usize = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let last = i + 1 == lines.len();
+        if !(last && line.len() == 0) {
+            match json_parse(line) {
+                Ok(j) => {
+                    let a = json_stringify(j);
+                    let b = json_stringify_sorted(j);
+                    println!("{}", a);
+                    println!("{}", b);
+                },
+                Err(e) => {
+                    println!("error");
+                    println!("error");
+                },
+            }
+        }
+        i = i + 1;
+    }
+}

@@ -2053,7 +2053,29 @@ impl<'ctx> MirLowerer<'ctx> {
         result
     }
 
+    /// Lower one function with `self.source` set to the text of the file the
+    /// function came from. Macro arguments (`println!`, `format!`, `vec!`) are
+    /// re-read from source text by span; a function merged in from a `mod`
+    /// file has spans into that file, and before M4 they were read against the
+    /// main file, so `format!("hello {}", n)` in a module printed unrelated
+    /// text from the main program.
     fn lower_function(&mut self, f: &ast::FnDef, attrs: &[ast::Attribute]) -> CodegenResult<()> {
+        let own = crate::lexer::source_text_for_id(f.name.span.source_id)
+            .filter(|_| f.name.span.source_id != crate::lexer::SourceId::ANONYMOUS);
+        let Some(text) = own else {
+            return self.lower_function_body(f, attrs);
+        };
+        let saved = self.source.replace(text);
+        let result = self.lower_function_body(f, attrs);
+        self.source = saved;
+        result
+    }
+
+    fn lower_function_body(
+        &mut self,
+        f: &ast::FnDef,
+        attrs: &[ast::Attribute],
+    ) -> CodegenResult<()> {
         // Skip generic functions - they are monomorphized on demand at call sites.
         if self.fn_has_type_generics(f) {
             return Ok(());

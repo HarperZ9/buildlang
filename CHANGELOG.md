@@ -10,6 +10,21 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- **JSON module (M4).** `mod json;` gives `json_parse` into a `Json` enum,
+  checked typed accessors (`field_f64`, `field_i64`, `field_str`, `field_bool`,
+  `field_items`, `field_f64_or`) whose errors name the key, and a writer
+  (`json_quote`, `json_obj`, `json_obj_sorted`, `json_arr`, `json_stringify`,
+  `json_stringify_sorted`) with no spaces and numbers as `JSON.stringify` writes
+  them. The module is written in BuildLang (`stdlib/json.bld`) and ships inside
+  `buildc`. Tests: `compiler/tests/json_stdlib.rs` compares 54 documents (18
+  invalid) with JS `JSON.parse` and `JSON.stringify`, reads typed structs with
+  five error cases, and writes five trace-shaped JSON lines that must equal the
+  JS bytes on two runs. Fixtures come from `tools/json_fixture.mjs` and
+  `tools/json_lines_fixture.mjs`. Spec section 7.6.
+- **Module macros fixed.** A `format!` or `println!` inside a `mod` file read its
+  arguments from the main file's text, so `format!("hello {}", n)` in a module
+  printed unrelated text. It passed check on 1.8.0. Lowering now reads each
+  function's macros from its own file.
 - **Licence change to AGPL-3.0-only (2026-10-23).** On the author's decision
   of that date, the compiler, toolchain, editor extension and their
   documentation move from the BuildLang Fair-Source License v1.0 to the GNU

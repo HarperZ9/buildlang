@@ -482,7 +482,7 @@ Assert: `assert`, `assert_eq`
 
 ### 7.4 Vectors and strings in practice
 
-A `let` bound to `vec_new()` with no annotation takes its element type from the first value pushed into it (`v.push(x)` or `vec_push(&mut v, x)`); a later push of another type is a check error (BL0901). With no push before the vector is used it holds `i32`, so annotate it there: `let mut v: Vec<str> = vec_new();`. The free functions accept the vector by value or borrowed (`vec_push(&mut v, x)`, `vec_len(&v)`), and the method forms (`v.push(x)`, `v.len()`, `v[i]`) work the same way. Strings split with `split`, iterate with `chars`, and compare with `<` and `==`. The C backend has no `.parse()` yet; the check rejects it with BL0901, so convert digits by hand:
+A `let` bound to `vec_new()` with no annotation takes its element type from the first value pushed into it (`v.push(x)` or `vec_push(&mut v, x)`); a later push of another type is a check error (BL0901). With no push before the vector is used it holds `i32`, so annotate it there: `let mut v: Vec<str> = vec_new();`. The free functions accept the vector by value or borrowed (`vec_push(&mut v, x)`, `vec_len(&v)`), and the method forms (`v.push(x)`, `v.len()`, `v[i]`) work the same way. Strings split with `split`, iterate with `chars`, and compare with `<` and `==`. `s.substring(start, len)` takes a byte offset and a length: `"hello".substring(1, 3)` is `"ell"`. The C backend has no `.parse()` yet; the check rejects it with BL0901, so convert digits by hand:
 
 ```build
 fn parse_int(s: str) -> i64 {
@@ -559,6 +559,39 @@ enum Chain {
 ```
 
 Limits in this release: boxed memory is not freed until the program exits; `Rc::new` and `Arc::new` are rejected (BL0383) because reference counting does not exist yet; `Box<dyn Trait>` is not supported.
+
+### 7.6 JSON
+
+`mod json;` loads the JSON module from the standard library. `json_parse(text)` returns `Result<Json, str>`, where `Json` is an enum (`Null`, `Bool`, `Num`, `Str`, `Arr`, `Obj`). It accepts exactly the JSON grammar: a trailing comma, a leading zero, a bare word or text after the value is an `Err` with the byte offset. A repeated key keeps its first position and its last value, as `JSON.parse` does.
+
+Typed reads go through checked accessors that name the key in their error: `field_f64`, `field_i64` (refuses a fraction), `field_str`, `field_bool`, `field_items` (an array as `Vec<Json>`), and `field_f64_or` for an optional number. A struct reader is a function that returns `Result<T, str>` and uses `?` on each field.
+
+```build
+mod json;
+
+struct Hit {
+    frame: i64,
+    damage: f64,
+}
+
+fn read_hit(j: Json) -> Result<Hit, str> {
+    Ok(Hit { frame: field_i64(j, "frame")?, damage: field_f64(j, "damage")? })
+}
+
+fn main() ~ Console {
+    match json_parse("{\"frame\": 4}") {
+        Ok(j) => match read_hit(j) {
+            Ok(h) => println!("{} {}", h.frame, h.damage),
+            Err(e) => println!("{}", e),
+        },
+        Err(e) => println!("{}", e),
+    }
+}
+```
+
+That program prints ``json: missing key `damage` ``. The writer builds compact text with no spaces: `json_quote(s)` escapes a string as `JSON.stringify` does, `x.to_json()` writes a number, `json_arr(values)` and `json_obj(keys, values)` join already-written values with keys in the order given, and `json_obj_sorted(keys, values)` sorts the keys by byte order. `json_stringify(j)` and `json_stringify_sorted(j)` write a parsed value back. One record a line with fixed key order is a JSON-lines trace that another implementation can compare byte for byte.
+
+Module functions are renamed when the module merges, and a call inside a macro's arguments is not renamed, so bind the result first: `let line = json_stringify(j); println!("{}", line);`. The check reports the direct form as an undefined name.
 
 ## 8. Code Generation
 
