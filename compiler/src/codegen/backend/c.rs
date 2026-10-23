@@ -3750,6 +3750,11 @@ impl CBackend {
                     } else {
                         write!(self.output, "return {};\n", val_str).unwrap();
                     }
+                } else if self.current_fn_name.as_deref() == Some("main") {
+                    // C `main` returns `int32_t`, so an early `return;` in a
+                    // BuildLang `main` exits with status 0. A bare `return;`
+                    // is an error under GCC 14 (-Wreturn-mismatch).
+                    self.output.push_str("return 0;\n");
                 } else {
                     self.output.push_str("return;\n");
                 }
@@ -5912,6 +5917,24 @@ mod tests {
 
         let code = output.as_string().unwrap();
         assert!(code.contains("MY_CONST"));
+    }
+
+    #[test]
+    fn test_c_backend_main_early_return_returns_zero() {
+        let mut module_builder = MirModuleBuilder::new("test");
+        let sig = MirFnSig::new(vec![], MirType::Void);
+        let mut builder = MirBuilder::new("main", sig);
+        builder.ret_void();
+        module_builder.add_function(builder.build());
+        let module = module_builder.build();
+
+        let mut backend = CBackend::new();
+        let output = backend.generate(&module).unwrap();
+
+        let code = output.as_string().unwrap();
+        let main_body = &code[code.find(" main(int argc, char** argv) {").unwrap()..];
+        assert!(main_body.contains("return 0;"));
+        assert!(!main_body.contains("return;"));
     }
 
     #[test]

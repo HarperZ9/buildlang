@@ -25,6 +25,12 @@ result.
   `panic!` has type `!`, and a `!` arm no longer sets the match's type. Before, a
   `let` bound to such a match got type `()` whenever the matched function was
   defined later in the file. Test: `tests/heldout/diverging_arm_later_fn.bld`.
+- **Early `return` in `main`.** A `return;` inside `main` wrote a bare
+  `return;` in the C `int32_t main`, which GCC 14 rejects. It now writes
+  `return 0;`. Tests: `tests/heldout/diverging_arm_later_fn.bld` through
+  `compiler/tests/check_implies_compile.rs`, and
+  `test_c_backend_main_early_return_returns_zero` in
+  `compiler/src/codegen/backend/c.rs`.
 - **`as char` inside a format argument (#100).** `format!("{}", a as char)`
   printed the number. An inline cast or a call to a `-> char` function now prints
   the character. Test: `tests/heldout/format_inline_char_cast.bld`.
