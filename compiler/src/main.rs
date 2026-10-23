@@ -21,6 +21,7 @@ mod mir_representation;
 mod model_receipt;
 mod module_graph;
 mod scientific_runtime;
+mod staticlib;
 mod stdlib_embed;
 mod symbol_graph;
 mod tool_receipt;
@@ -217,6 +218,7 @@ enum Commands {
         release: bool,
 
         /// Emit type: 'c' for C source only, 'header' for a C export header,
+        /// 'staticlib' for a static library plus header (no `fn main`),
         /// 'exe' for executable (default)
         #[arg(long, default_value = "exe")]
         emit: String,
@@ -7074,6 +7076,7 @@ fn cmd_build(
 
     let emit_c_only = emit == "c";
     let emit_header = emit == "header";
+    let emit_staticlib = emit == "staticlib";
 
     // Resolve the code generation target.
     let target = parse_codegen_target(target_str).map_err(|err| {
@@ -7202,13 +7205,22 @@ fn cmd_build(
 
     // --emit=header: write a C header declaring the `extern "C"` exports so
     // other languages can call into the compiled BuildLang code.
-    if emit_header {
+    if emit_staticlib && codegen.defines_main() {
+        eprintln!(
+            "error: a static library cannot define `fn main`; remove it, or build an executable"
+        );
+        return Err(1);
+    }
+    if emit_header || emit_staticlib {
         let header = codegen.c_export_header().unwrap_or_default();
         let header_file = output_dir.join("main.h");
         std::fs::write(&header_file, header.as_bytes()).map_err(|e| {
             eprintln!("Failed to write header file: {}", e);
             1
         })?;
+    }
+    if emit_header {
+        let header_file = output_dir.join("main.h");
         println!("\nHeader generated!");
         println!("Output: {}", header_file.display());
         return Ok(());
@@ -7450,6 +7462,39 @@ fn cmd_build(
         eprintln!("Failed to write C output: {}", e);
         1
     })?;
+
+    // --emit=staticlib: archive the C into a library beside main.h.
+    if emit_staticlib {
+        let (lib, msvc) = staticlib::build_static_library(
+            &c_output_file,
+            &output_dir,
+            release,
+            find_c_compiler(),
+        )?;
+        // The runtime inside the library uses host libraries (sockets on
+        // Windows, libm elsewhere); the host's link line needs them too.
+        let mut flags: Vec<String> = host_c_link_libraries(msvc)
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        flags.extend(user_link_flags(&output.link_libraries, msvc));
+        let link_file = output_dir.join("main.link");
+        let mut link_text = flags.join("\n");
+        link_text.push('\n');
+        std::fs::write(&link_file, link_text).map_err(|e| {
+            eprintln!("Failed to write {}: {}", link_file.display(), e);
+            1
+        })?;
+        if !keep_c {
+            let _ = std::fs::remove_file(&c_output_file);
+        }
+        println!();
+        println!("Build successful!");
+        println!("Library: {}", lib.display());
+        println!("Header: {}", output_dir.join("main.h").display());
+        println!("Link flags: {}", output_dir.join("main.link").display());
+        return Ok(());
+    }
 
     // If --emit=c, stop here
     if emit_c_only {

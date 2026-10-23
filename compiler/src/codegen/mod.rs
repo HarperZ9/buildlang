@@ -276,6 +276,13 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Generate a C header declaring the last-generated module's `extern "C"`
     /// exports. Returns `None` if no module has been generated yet.
+    /// True when the lowered module defines `fn main` (a static library must not).
+    pub fn defines_main(&self) -> bool {
+        self.mir
+            .as_ref()
+            .is_some_and(|m| m.functions.iter().any(|f| f.name.as_ref() == "main"))
+    }
+
     pub fn c_export_header(&self) -> Option<String> {
         let mir = self.mir.as_ref()?;
         Some(backend::c::CBackend::new().generate_c_header(mir))

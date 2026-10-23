@@ -10,6 +10,20 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- **C ABI export (M4).** `buildc build --emit staticlib` builds a static library
+  (`libmain.a`, or `main.lib` with MSVC) and a header `main.h` that a C or C++
+  host links. The header defines every `#[repr(C)]` struct an `extern "C"`
+  export reaches, in dependency order. `main.link` lists the runtime's link
+  flags. An export whose signature has no C layout (a `str`, a `Vec`, an enum, a
+  struct without `#[repr(C)]`) is refused at check time with BL0901 and a fix,
+  and a library that defines `fn main` is refused. Test:
+  `compiler/tests/c_abi_export.rs` links `tests/c-abi/driver.c` and compares its
+  output. Guide: `docs/C-ABI.md`; spec section 8.3.
+- **Two silent drops fixed.** The body of an `unsafe { ... }` block was dropped
+  by the C backend with no diagnostic, and a store through `(*p).a.b` landed in a
+  copy because the parentheses hid the place. Both passed `buildc check` on 1.8.0.
+  Tests: `tests/heldout/unsafe_block_runs.bld`, `tests/heldout/deref_field_store.bld`.
+
 ## 1.8.0 - 2026-10-22 - Box and recursive types
 
 - **`Box<T>` on the C backend (#83).** `Box::new(x)` allocates a `T`, stores `x`

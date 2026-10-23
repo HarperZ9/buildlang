@@ -20,6 +20,8 @@ use crate::codegen::ir::*;
 use crate::codegen::runtime;
 use crate::codegen::{GeneratedCode, OutputFormat};
 
+mod header;
+
 /// C backend for code generation.
 pub struct CBackend {
     /// Output buffer.
@@ -2489,12 +2491,17 @@ impl CBackend {
         out.push_str("#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n");
 
         let mut seen: Vec<&str> = Vec::new();
+        let mut exports: Vec<&MirFunction> = Vec::new();
         for func in &module.functions {
             if func.is_c_export && !seen.contains(&func.name.as_ref()) {
                 seen.push(func.name.as_ref());
-                out.push_str(&self.c_callable_prototype(func));
-                out.push_str(";\n");
+                exports.push(func);
             }
+        }
+        out.push_str(&self.export_struct_defs(module, &exports));
+        for func in exports {
+            out.push_str(&self.c_callable_prototype(func));
+            out.push_str(";\n");
         }
 
         out.push_str("\n#ifdef __cplusplus\n}\n#endif\n");

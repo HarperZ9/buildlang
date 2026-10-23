@@ -1,0 +1,8 @@
+// A struct in an extern "C" signature must promise its layout with #[repr(C)].
+struct P {
+    x: i32,
+}
+
+extern "C" fn lw_px(p: P) -> i32 {
+    p.x
+}

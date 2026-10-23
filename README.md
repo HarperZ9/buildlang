@@ -49,7 +49,8 @@ source is [docs/explainer/index.html](docs/explainer/index.html).
   third-party C-ABI library and links it in one build; `extern "C" fn`
   exports a BuildLang function with a stable symbol, and
   `buildc build --emit header` writes the matching `.h` for C and C++
-  consumers.
+  consumers. `--emit staticlib` builds a static library a C or C++ host
+  links, with `#[repr(C)]` structs defined in the header.
 - **Shader output.** `#[fragment]` functions compile directly to HLSL (for
   ReShade and DirectX) or GLSL (for OpenGL and Vulkan). See
   [docs/SHADER_GUIDE.md](docs/SHADER_GUIDE.md).
@@ -178,7 +179,7 @@ with a typed reason.
 |---|---|
 | `buildc <file>` | Compile a file; `-o`, `--target`, `--stdio-mode native\|portable-lf`, `-O 0-3`, `-g` |
 | `buildc run <file>` | Compile and run via the C backend; `--stdio-mode native\|portable-lf`, `--emit-receipt`, `--invariant`, `--units`, `--gpu` |
-| `buildc build [path]` | Build a project; `--emit c\|header\|exe`, `--release`, `--target`, `--stdio-mode native\|portable-lf`, `--keep-c` |
+| `buildc build [path]` | Build a project; `--emit c\|header\|staticlib\|exe`, `--release`, `--target`, `--stdio-mode native\|portable-lf`, `--keep-c` |
 | `buildc check <file>` | Type-check; `--error-format json`, `--receipt`, `--policy`, `--profile`, `--expect-profile-digest` |
 | `buildc explain [code]` | Explain a diagnostic code such as `BL0403`, or list every code |
 | `buildc test [dir]` | Run `.bld` programs against `.expected` files |

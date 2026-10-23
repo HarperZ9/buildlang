@@ -1,0 +1,9 @@
+// An unsafe block's statements must run. Through 1.8.0 the C backend dropped
+// the body of `unsafe { ... }` without a diagnostic.
+fn main() ~ Console {
+    let mut n: i64 = 1;
+    unsafe {
+        n = n + 41;
+    }
+    println!("{}", n);
+}
