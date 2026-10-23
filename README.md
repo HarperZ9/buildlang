@@ -5,7 +5,8 @@
 
 # buildlang
 
-Systems language with typed capability effects and native C output.
+A compiled language where each function's type lists the side effects it may
+perform, such as reading files, opening sockets or calling C.
 
 ```bash
 cargo install buildlang
@@ -16,75 +17,118 @@ cargo install buildlang
 [![license](https://img.shields.io/badge/license-BuildLang_Fair--Source-e6e1d6?style=flat-square&labelColor=1a1712)](https://github.com/HarperZ9/buildlang/blob/main/LICENSE)
 ![rust edition 2021](https://img.shields.io/badge/rust-edition_2021-e6e1d6?style=flat-square&labelColor=1a1712)
 
-BuildLang compiles `.bld` source to native binaries through a C backend, emits
-HLSL and GLSL for shader work, and carries experimental SPIR-V, LLVM IR,
-WebAssembly, Rust, x86-64, and ARM64 backends. The type system pairs
-Hindley-Milner inference with typed algebraic effects and an opt-in
-experimental `#[linear]` attribute for no-cloning values. The `buildc` CLI
-covers build, run, test, repl, fmt, pkg, watch, and doctor, plus a bundled LSP
-server with completion, hover, diagnostics, and go-to-definition. Every checked
-build can write a receipt you can re-check.
+You write `.bld` files and compile them with `buildc`. The compiler turns your
+program into C and hands that C to gcc, clang or MSVC, so `buildc run` gives
+you a native binary in one step. A function that reads a file must say
+`~ FileSystem` in its signature. One that opens a socket says `~ Network`, and
+one that calls into C says `~ Foreign`. Leave an effect out and the program
+does not compile. On top of that, `buildc check --profile` can forbid a
+capability for a whole program, so a CI job can refuse any code that touches
+the network. The same source language also compiles small fragment functions
+to HLSL or GLSL for shaders.
+
+It is for people who write native tools, plugins or shader code and want the
+compiler to show and limit what each part of a program can touch. It also
+suits anyone who wants to try an effect system in a language that ends up as
+plain C.
 
 [Landing page](https://harperz9.github.io/buildlang/) | [Build ecosystem](https://github.com/HarperZ9/build-universe) | [VS Code extension](https://github.com/HarperZ9/buildlang-vscode) | [grammar](https://github.com/HarperZ9/buildlang-tmLanguage)
 
 ## See it work, step by step
 
 The [animated explainer](https://harperz9.github.io/repo-explainers/buildlang.html)
-walks through an undeclared file read rejected, a policy profile that denies it, a check receipt catching an edit, HLSL from a fragment function, and a heat-equation receipt that re-verifies while a forged one fails its seal. Every value on it is output from this repository. Its
-source is [docs/explainer/index.html](docs/explainer/index.html).
+walks through an undeclared file read being rejected, a policy profile that
+denies it, a saved check report catching a later edit, HLSL from a fragment
+function, and a numeric run whose saved report checks out while a forged one
+fails. Every value on it is output from this repository. Its source is
+[docs/explainer/index.html](docs/explainer/index.html).
 
-## Highlights
+## What you get
 
-- **Typed capability effects.** Ambient access is part of a function's type.
-  Calling `read_file` requires `~ FileSystem` in the signature, `tcp_connect`
-  requires `~ Network`, an `extern` call requires `~ Foreign`, and
-  compile-time macros like `include_str!` and `env!` are gated the same way.
-  The checker tracks effects through function values, closures, struct fields,
-  control flow, and async blocks, so a callback cannot silently launder a
-  capability. See [docs/EFFECTS_GUIDE.md](docs/EFFECTS_GUIDE.md).
-- **Native binaries through C.** The C backend is the production execution
-  path: `buildc run` compiles to C, invokes your system C compiler (gcc,
-  clang, or MSVC), and runs the result. One command, one binary.
+- **Effects in the type.** Calling `read_file` requires `~ FileSystem` in the
+  signature, `tcp_connect` requires `~ Network`, an `extern` call requires
+  `~ Foreign`, and compile-time macros like `include_str!` and `env!` are
+  gated the same way. The checker follows effects through function values,
+  closures, struct fields, control flow and async blocks, so passing a
+  callback around does not hide what it does. You can also declare your own
+  effects and handle them with `handle`/`with`. Handlers are one-shot today:
+  after a handler runs, control continues after the whole `handle` block and
+  never resumes at the `perform`. See [docs/EFFECTS_GUIDE.md](docs/EFFECTS_GUIDE.md).
+- **Native binaries through C.** The C backend is the one production path:
+  `buildc run` compiles to C, invokes your system C compiler and runs the
+  result.
 - **Two-way C FFI.** `extern "C" link "sqlite3" header "<sqlite3.h>"` calls a
-  third-party C-ABI library and links it in one build; `extern "C" fn`
-  exports a BuildLang function with a stable symbol, and
-  `buildc build --emit header` writes the matching `.h` for C and C++
-  consumers.
-- **Shader output.** `#[fragment]` functions compile directly to HLSL (for
-  ReShade and DirectX) or GLSL (for OpenGL and Vulkan). See
+  C library and links it in the same build (`examples/ffi/main.bld`).
+  `extern "C" fn` exports a BuildLang function with a stable symbol, and
+  `buildc build --emit header` writes the matching `.h` for C and C++ callers.
+- **Shader output.** `#[fragment]` functions compile to HLSL (for ReShade and
+  DirectX) or GLSL (for OpenGL and Vulkan). See
   [docs/SHADER_GUIDE.md](docs/SHADER_GUIDE.md).
-- **GPU compute (experimental).** `#[compute]` kernels compile to
-  dispatchable SPIR-V validated by spirv-val, and a build with
-  `--features gpu` adds `buildc run --gpu`, which dispatches the kernel on a
-  physical Vulkan device and cross-checks the readback against the CPU
-  scalar loop. Workgroup shared memory and barriers are supported.
-- **Experimental linear types.** An opt-in `#[linear]` attribute marks a
-  struct or enum as no-cloning: a value should be moved at most once, the
-  shared foundation of qubit, no-double-spend, and resource-handle
-  disciplines. It rejects a large regression-tested set of escapes but is not
-  yet fully sound; honest scope in
-  [docs/LINEAR-TYPES.md](docs/LINEAR-TYPES.md).
-- **Full toolchain in one binary.** `buildc` bundles build, run, check, test,
-  repl, fmt, lint, pkg, watch, doctor, an LSP server, MIR and BDF utilities,
-  and receipt tooling. No separate installs.
-- **Re-checkable receipts.** `buildc check --receipt` seals what a build
-  observed (effects, capabilities, source digests) into JSON that
-  `buildc receipt verify` re-derives later; a second receipt family witnesses
-  numeric program output against stated invariants.
+- **A capability report you can save.** `buildc check --receipt file.json`
+  writes the effects each function declared, the capabilities it used and a
+  SHA-256 of every source file. `buildc receipt verify` re-runs the check
+  later and fails with a named reason when the source or the policy changed.
+- **One binary for the toolchain.** `buildc` bundles build, run, check, test,
+  repl, fmt, lint, pkg, watch, doctor and an LSP server with completion, hover,
+  diagnostics and go-to-definition.
+- **GPU compute, experimental.** `#[compute]` kernels compile to SPIR-V that
+  passes `spirv-val`. A build with `--features gpu` adds `buildc run --gpu`,
+  which runs the kernel on a Vulkan device and compares the result with the
+  CPU loop. A plain `cargo install buildlang` leaves this feature out.
+- **Linear types, experimental.** `#[linear]` marks a struct or enum as a
+  value that may be moved at most once. It rejects a large tested set of
+  escapes and is not yet sound; [docs/LINEAR-TYPES.md](docs/LINEAR-TYPES.md)
+  lists what it does and does not catch.
+
+## Limits
+
+- Only the C backend is production quality. HLSL and GLSL output works for
+  shader functions. SPIR-V, LLVM IR, WebAssembly, Rust, x86-64 and ARM64
+  output are experimental, and `buildc doctor` prints each backend's level.
+- Effect handlers do not resume (see above), so patterns such as generators
+  or async built from resumable handlers are out of reach for now.
+- `buildc pkg` works with local and path packages. The public package
+  registry does not exist yet ([docs/PACKAGES.md](docs/PACKAGES.md)).
+- The standard library is small: maths, strings, iterators, option and result
+  types, I/O, sorting and linear algebra (`stdlib/`).
+- The compiler is under the BuildLang Fair-Source License, which is
+  source-available and reserves competing commercial use. Code that `buildc`
+  generates from your source is yours to ship (see [License](#license)).
+
+## How it compares
+
+- **Koka** and **Effekt** also put effects in function types, and Koka also
+  compiles to C. Both support resumable handlers, which BuildLang does not.
+  BuildLang's effects centre on built-in host capabilities such as files,
+  network, processes, FFI and GPU, with program-wide policy profiles and a
+  saved check report.
+- **Nim** compiles to C and infers effects, which you can restrict with the
+  `raises` and `tags` pragmas on the procs you choose. BuildLang requires every
+  function that touches the host to declare it.
+- **OCaml 5** has effect handlers that do not appear in function types, so the
+  compiler does not tell you which functions perform I/O.
+- **Rust** and **Zig** give you native code and C interop with no effect
+  tracking for I/O. They are far more mature, with large ecosystems that
+  BuildLang does not have.
+- **Deno** enforces file and network permissions at run time for JavaScript.
+  BuildLang checks the same kind of rule at compile time.
 
 ## Install
 
-From crates.io (installs the `buildc` binary, version 1.7.0):
+From crates.io (installs the `buildc` binary, version 1.7.0). You also need a C
+compiler on your PATH (gcc, clang or MSVC) for `buildc run`:
 
 ```bash
 cargo install buildlang
+buildc doctor
 ```
 
-The standard library is compiled into `buildc`. When no `stdlib/` directory
-is found beside the binary, `buildc` writes its copy to a versioned directory
-under the system temp directory and uses that; `BUILDLANG_STDLIB` overrides
-it. `buildc doctor` reports which one is in use. (1.5.0 and earlier shipped
-without it and needed `BUILDLANG_STDLIB` pointed at a clone.)
+`buildc doctor` reports the C compiler it found, the standard library in use
+and each backend's maturity. The standard library is compiled into `buildc`.
+When no `stdlib/` directory is found beside the binary, `buildc` writes its
+copy to a versioned directory under the system temp directory and uses that;
+`BUILDLANG_STDLIB` overrides it. (1.5.0 and earlier shipped without it and
+needed `BUILDLANG_STDLIB` pointed at a clone.)
 
 > Previously published as `quantalang`; that crate is deprecated and points
 > here. Use `buildlang` / `buildc`.
@@ -96,12 +140,8 @@ cd compiler
 cargo build --release
 ```
 
-Add `compiler/target/release/buildc` (`buildc.exe` on Windows) to your PATH,
-then verify the local toolchain (C compiler, stdlib, optional backend tools):
-
-```bash
-buildc doctor
-```
+Then add `compiler/target/release/buildc` (`buildc.exe` on Windows) to your
+PATH.
 
 ## Quick start
 
@@ -121,20 +161,38 @@ buildc run hello.bld
 # Hello from BuildLang!
 ```
 
-The repository ships tested quickstart programs:
+Now add a file read without declaring it:
+
+```build fail=BL0403
+fn main() ~ Console {
+    let s = read_file("x.txt");
+    println!("{}", s);
+}
+```
+
+```text
+$ buildc check bad.bld
+Type errors found:
+  1:1: [BL0403] function performs undeclared effect `FileSystem`
+  help: add `FileSystem` to the function's effect row: `~ Console + FileSystem`
+```
+
+From a clone of this repository, the tested quickstart programs:
 
 ```bash
 buildc run examples/quickstart/hello.bld
 buildc run examples/quickstart/ledger.bld          # prints: balance: 115
-buildc run examples/quickstart/effects_greeting.bld
+buildc run examples/quickstart/effects_greeting.bld  # prints: Hello, teammate!
 buildc examples/quickstart/vignette_shader.bld --target hlsl -o vignette.hlsl
 ```
 
-Or emit C and build it yourself:
+Or emit C and build it yourself. The generated C uses the maths library, and
+on Windows its socket code needs Winsock:
 
 ```bash
 buildc hello.bld -o hello.c
-cc hello.c -o hello && ./hello
+cc hello.c -o hello -lm && ./hello        # Linux
+gcc hello.c -o hello.exe -lws2_32         # Windows with MinGW
 ```
 
 ## Worked example: effects and a policy gate
@@ -147,7 +205,7 @@ profile and print a receipt:
 buildc check examples/quickstart/hello.bld --profile console-only --receipt -
 ```
 
-Output (excerpt, verified against buildc 1.2.0):
+Output (excerpt, buildc 1.7.0):
 
 ```text
 Type checking... OK
@@ -155,7 +213,7 @@ Type checking... OK
 No errors found in 'examples/quickstart/hello.bld'
 {
   "schema": "buildlang-check-receipt/v1",
-  "compiler_version": "1.2.0",
+  "compiler_version": "1.7.0",
   "status": "passed",
   "declared_effects": { "main": ["Console"] },
   ...
@@ -222,7 +280,7 @@ stdout together.
 
 The generated C runtime defaults to native stdio behavior. On Windows, native
 C stdio translates `\n` written through stdout or stderr to CRLF. Use
-`--stdio-mode portable-lf` on the C backend when a receipt or lane protocol
+`--stdio-mode portable-lf` on the C backend when a receipt or a test
 needs byte-stable LF output across platforms. The portable mode is rejected for
 non-C targets rather than ignored.
 
