@@ -1,0 +1,33 @@
+// Struct literal fields may be written in any order, and each takes its
+// declared type: fields out of order were assigned by position (a silent
+// swap for two fields of one type), and `Vec::new()` in a field built a
+// `Vec<i32>`. Field values still run in the order written.
+struct Pair {
+    a: f64,
+    b: f64,
+}
+
+struct Bag {
+    n: i64,
+    tags: Vec<str>,
+    pos: Pair,
+    name: str,
+}
+
+fn loud(label: str, v: f64) -> f64 ~ Console {
+    println!("eval {}", label);
+    v
+}
+
+fn make(name: str) -> Bag {
+    Bag { name, tags: Vec::new(), pos: Pair { b: 2.0, a: 1.0 }, n: 7 }
+}
+
+fn main() ~ Console {
+    let p = Pair { b: loud("b", 20.0), a: loud("a", 10.0) };
+    println!("{} {}", p.a, p.b);
+    let mut g = make("bag");
+    g.tags.push("x");
+    g.tags.push("y");
+    println!("{} {} {} {} {}{}", g.name, g.n, g.pos.a, g.pos.b, g.tags[0], g.tags[1]);
+}

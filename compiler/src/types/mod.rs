@@ -50,6 +50,7 @@ mod error;
 mod hkt;
 mod infer;
 mod macro_args;
+pub use macro_args::macro_call_arg_exprs;
 mod recursive;
 mod traits;
 mod ty;

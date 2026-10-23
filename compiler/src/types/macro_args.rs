@@ -114,3 +114,30 @@ pub(crate) fn macro_arg_exprs(
     }
     out
 }
+
+/// The argument expressions of a macro call, parsed from the file its tokens
+/// came from. The module merge walks these to find module calls inside macro
+/// arguments. Empty when the macro's arguments are not expressions or the
+/// source text is not registered.
+pub fn macro_call_arg_exprs(macro_name: &str, trees: &[ast::TokenTree]) -> Vec<Expr> {
+    let Some(skip_first) = macro_arg_policy(macro_name) else {
+        return Vec::new();
+    };
+    let Some(source_id) = first_source(trees) else {
+        return Vec::new();
+    };
+    let Some(text) = crate::lexer::source_text_for_id(source_id) else {
+        return Vec::new();
+    };
+    let file = SourceFile::with_registered_id(source_id, text);
+    macro_arg_exprs(trees, skip_first, &file)
+}
+
+fn first_source(trees: &[ast::TokenTree]) -> Option<crate::lexer::SourceId> {
+    trees.iter().find_map(|tree| match tree {
+        ast::TokenTree::Token(tok) => Some(tok.span.source_id),
+        ast::TokenTree::Delimited { tokens, span, .. } => {
+            first_source(tokens).or(Some(span.source_id))
+        }
+    })
+}

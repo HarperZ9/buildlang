@@ -26,6 +26,9 @@ mod header;
 /// Floating-point pragmas at the top of every generated C file (DETMATH): each
 /// `a * b + c` rounds twice, as written, under gcc, clang and MSVC alike, even
 /// when a host compiles the file with its own flags (`-O2 -mfma`, `-march=native`).
+/// `sqrt` goes to the SSE2 instruction, which IEEE 754 rounds correctly. MinGW's
+/// library `sqrt` runs on the x87 unit and rounds twice: without `-O2` it gave
+/// `sqrt(1.0000000000000122)` one unit too high, where JS and the hardware agree.
 pub(crate) const DETMATH_PRAGMAS: &str = "\
 #if defined(_MSC_VER) && !defined(__clang__)
 #pragma fp_contract(off)
@@ -34,6 +37,11 @@ pub(crate) const DETMATH_PRAGMAS: &str = "\
 #pragma STDC FP_CONTRACT OFF
 #elif defined(__GNUC__)
 #pragma GCC optimize(\"fp-contract=off\")
+#endif
+#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
+#include <emmintrin.h>
+static inline double build_sqrt_sse2(double x) { __m128d v = _mm_set_sd(x); return _mm_cvtsd_f64(_mm_sqrt_sd(v, v)); }
+#define sqrt(x) build_sqrt_sse2(x)
 #endif
 ";
 
@@ -4072,6 +4080,23 @@ impl CBackend {
                 MirType::Int(IntSize::I128, _) => Self::c_u128_const(*v),
                 _ => format!("{}U", v),
             },
+            MirConst::Float(v, ty) if !v.is_finite() => {
+                let f32_ty = matches!(ty, MirType::Float(FloatSize::F32));
+                if v.is_nan() {
+                    if f32_ty { "NAN" } else { "((double)NAN)" }.to_string()
+                } else if *v > 0.0 {
+                    if f32_ty {
+                        "INFINITY"
+                    } else {
+                        "((double)INFINITY)"
+                    }
+                    .to_string()
+                } else if f32_ty {
+                    "(-INFINITY)".to_string()
+                } else {
+                    "(-(double)INFINITY)".to_string()
+                }
+            }
             MirConst::Float(v, ty) => {
                 // Ensure float constants always have a decimal point in C
                 // so that `1.0 / 3.0` doesn't become `1 / 3` (integer division).

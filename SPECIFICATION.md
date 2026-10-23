@@ -591,7 +591,7 @@ fn main() ~ Console {
 
 That program prints ``json: missing key `damage` ``. The writer builds compact text with no spaces: `json_quote(s)` escapes a string as `JSON.stringify` does, `x.to_json()` writes a number, `json_arr(values)` and `json_obj(keys, values)` join already-written values with keys in the order given, and `json_obj_sorted(keys, values)` sorts the keys by byte order. `json_stringify(j)` and `json_stringify_sorted(j)` write a parsed value back. One record a line with fixed key order is a JSON-lines trace that another implementation can compare byte for byte.
 
-Module functions are renamed when the module merges, and a call inside a macro's arguments is not renamed, so bind the result first: `let line = json_stringify(j); println!("{}", line);`. The check reports the direct form as an undefined name.
+A module function can be called inside a macro's arguments, as in `println!("{}", json_stringify(j))`. From 1.10.0 the merge renames those calls with the module's other calls; 1.9.0 reported them as undefined names and needed a `let` first.
 
 ### 7.7 Maps
 

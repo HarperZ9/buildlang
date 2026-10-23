@@ -17,6 +17,16 @@ use std::sync::Arc;
 use crate::ast::{self, ImplItemKind, ItemKind, StructFields, TraitItemKind};
 use crate::lexer::{SourceId, Span};
 
+/// How the checker finds the standard library directory (set once by
+/// `buildc`, which can write the embedded copy to disk).
+static STDLIB_DIR_FINDER: std::sync::OnceLock<fn() -> Option<PathBuf>> =
+    std::sync::OnceLock::new();
+
+/// Tell the checker where `mod NAME;` finds a standard library module.
+pub fn set_stdlib_dir_finder(finder: fn() -> Option<PathBuf>) {
+    let _ = STDLIB_DIR_FINDER.set(finder);
+}
+
 use super::context::*;
 use super::error::*;
 use super::infer::{TypeInfer, WellKnownTypes};
@@ -352,6 +362,21 @@ impl<'ctx> TypeChecker<'ctx> {
         }
     }
 
+    /// The file a `mod NAME;` loads: `NAME.bld` beside the source, else the
+    /// standard library's copy. The module merge in `buildc` searches the same
+    /// two places; without the second, a module that called a standard library
+    /// module (`json_quote` from `mod json;`) failed its separate check here
+    /// with an undefined name, though the merged program resolved it.
+    fn module_file(dir: &std::path::Path, name: &str) -> Option<PathBuf> {
+        let local = dir.join(format!("{}.bld", name));
+        if local.exists() {
+            return Some(local);
+        }
+        let finder = STDLIB_DIR_FINDER.get()?;
+        let std_file = finder()?.join(format!("{}.bld", name));
+        std_file.exists().then_some(std_file)
+    }
+
     /// Collect module items during the first pass.
     /// For inline modules, collect their items recursively.
     /// For external modules (`mod foo;`), load and parse the file.
@@ -369,8 +394,7 @@ impl<'ctx> TypeChecker<'ctx> {
         } else if let Some(ref dir) = self.source_dir.clone() {
             // External submodule: `mod NAME;` loads NAME.bld from disk.
             let mod_name = m.name.name.as_ref();
-            let mod_path = dir.join(format!("{}.bld", mod_name));
-            if mod_path.exists() {
+            if let Some(mod_path) = Self::module_file(dir, mod_name) {
                 let key = std::fs::canonicalize(&mod_path).unwrap_or_else(|_| mod_path.clone());
                 if !self.loading_modules.insert(key.clone()) {
                     // Already on the load stack: a cycle. Fail closed with a
@@ -1734,8 +1758,11 @@ impl<'ctx> TypeChecker<'ctx> {
             }
             if let Some(ref dir) = self.source_dir {
                 let mod_name = m.name.name.as_ref();
-                let mod_path = dir.join(format!("{}.bld", mod_name));
-                if mod_path.exists() {
+                // Only a module beside the source is checked here; a standard
+                // library module's signatures are collected (collect_mod) and
+                // its bodies are checked in the merged program.
+                let local = dir.join(format!("{}.bld", mod_name));
+                if let Some(mod_path) = local.exists().then_some(local) {
                     let key = std::fs::canonicalize(&mod_path).unwrap_or_else(|_| mod_path.clone());
                     if !self.loading_modules.insert(key.clone()) {
                         // Already on the load stack: fail closed with a cycle
