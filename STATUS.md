@@ -1,16 +1,19 @@
 # BuildLang Project Status
 
-Release verification: 2026-10-22 for 1.8.0. The broader architecture audit remains
+Release verification: 2026-10-23 for 1.9.0. The broader architecture audit remains
 2026-06-15; dated findings below retain their original scope. Current direction:
-`docs/AGENTIC_LANGUAGE_DIRECTIVE_2026-10-09.md`.
+`docs/STRATEGY-2026-10.md`.
 
-The full local `cargo test --manifest-path compiler/Cargo.toml --quiet` run with
-`RUSTFLAGS=-Dwarnings` passed: lib 1,076, bin 204, check_implies_compile 1,
-check_soundness 3, cli 415, diagnostics_json 6, doc_blocks 2, gpu 12,
-heldout_regressions 4, install_layout 1, lexer 53, lsp_parity 2, mcp_server 3,
-parser 98, reject_programs 2, stdio_mode 9, vec_new_inference 3; total 1,894
-passed, 0 failed, 11 ignored (3 lib, 8 doc). 1.8.0 adds `Box<T>` and recursive
-types (#83) and BL0384; direction: `docs/STRATEGY-2026-10.md`.
+The full local `cargo test --manifest-path compiler/Cargo.toml` run with
+`RUSTFLAGS=-Dwarnings` passed: lib 1,076, bin 204, c_abi_export 2,
+check_implies_compile 1, check_soundness 3, cli 415, detmath 3, diagnostics_json 6,
+doc_blocks 2, gpu 12, hashmap_any 1, heldout_regressions 4, install_layout 1,
+int32_js_rules 1, json_float_format 1, json_stdlib 4, lexer 53, lsp_parity 2,
+mcp_server 3, parser 98, reject_programs 2, stdio_mode 9, vec_new_inference 3; total
+1,906 passed, 0 failed, 11 ignored (3 lib, 8 doc). 1.9.0 adds the M4 features a game
+port needs: C ABI export with a static library and header, the DETMATH float rules,
+`to_json` number text, JS integer conversions, the JSON module and `HashMap<str, T>`
+for any `T`.
 Formatting, repository-art verification, and the optimized strict-warning build
 also passed. These default-feature checks do not establish optional GPU device
 behavior, performance superiority, or complete experimental-backend parity.

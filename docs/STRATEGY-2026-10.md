@@ -152,6 +152,13 @@ features, in the order they land:
    and a static library output. BuildLang can call C today; the pilot needs the other direction.
 9. Multi-shot or resumable handlers are not required by the sim. Handlers stay one-shot for the pilot.
 
+Status 2026-10-23: items 2 to 8 shipped in 1.9.0 (#95, #96, #97, #101, #102, #103). The pilot has
+started outside this repository. Against the JS sim's 40-fight corpus, BuildLang reads and rewrites
+every trace record byte for byte, reproduces the 40 `cbegin` records, gives the same world hash as
+JS for all 611 `cstate` and `cend` states (given JS's state text), and expands `moves.json` to the
+168,234-byte golden exactly. The combat step itself (the `cin`, `cev`, `cstate` and `cend`
+records) is not ported yet, so the trace check of M4 is not met.
+
 ## 6. What this document does not prove
 
 It records a direction, a field survey and checks. It does not show BuildLang ahead of any language
