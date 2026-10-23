@@ -1,0 +1,26 @@
+name: Discover
+
+# A discoverability check from HarperZ9/discover: README opening and run
+# command, GitHub description and topics, package keywords, CITATION.cff and a
+# summary at the top of the release notes. Pull requests get the report; a
+# version tag fails on a blocking item.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: HarperZ9/discover@98138514412bbe283e5f70dfd9139d34382dad35 # v0.1.2
+        with:
+          mode: repo
+          gate: ${{ startsWith(github.ref, 'refs/tags/') && 'true' || 'false' }}

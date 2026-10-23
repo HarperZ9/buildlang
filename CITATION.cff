@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using these metadata."
+type: software
+title: "BuildLang"
+abstract: "A compiled language where function types list side effects such as file, network and C access. Builds native binaries through C and emits HLSL/GLSL shaders; other backends are experimental."
+version: "1.10.0"
+date-released: 2026-10-23
+authors:
+  - family-names: "Harper"
+    given-names: "Zain Dana"
+    orcid: "https://orcid.org/0009-0001-7175-5393"
+repository-code: "https://github.com/HarperZ9/buildlang"
+url: "https://harperz9.github.io/buildlang.html"
+license: AGPL-3.0-only
+keywords:
+  - compiler
+  - glsl
+  - hlsl
+  - programming-language
+  - shaders
+  - systems-programming
+  - algebraic-effects
+  - capability-security
