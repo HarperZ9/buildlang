@@ -10,6 +10,12 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+## 1.9.0 - 2026-10-23 - M4: what a game port needs
+
+Six features the Low Water combat sim port needs, each in its own PR (#95,
+#96, #97, #101, #102, #103), the bugs found while building them, and the
+licence change to AGPL-3.0-only (#104), which applies from this release.
+
 - **`HashMap<str, T>` for any `T` (M4).** Lowering and the C backend now name
   the per-type wrappers with one shared function, so unsigned and narrow
   integers, tuples and the rest build; a map inside a struct or behind
@@ -21,7 +27,6 @@ tracked in `STATUS.md`, `README.md`, and
   chain, so other keys in the same cluster were no longer found
   (`tests/hashmap/remove_cluster.bld`: four of four lost on 1.8.0). Removal
   now moves the rest of the cluster back.
-
 - **JSON module (M4).** `mod json;` gives `json_parse` into a `Json` enum,
   checked typed accessors (`field_f64`, `field_i64`, `field_str`, `field_bool`,
   `field_items`, `field_f64_or`) whose errors name the key, and a writer
