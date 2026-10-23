@@ -96,6 +96,8 @@ pub struct MirLowerer<'ctx> {
     pub(crate) untyped_vec_new_binding: bool,
     /// The constructor temp the initializer created, for the binding to claim.
     pub(crate) untyped_vec_new_dest: Option<LocalId>,
+    /// Counter for the temporaries of a store into a vector element's field.
+    pub(crate) vec_store_counter: u32,
     /// Pending vectors read before their first push (their type is then fixed).
     pub(crate) observed_pending_vecs: std::collections::HashSet<LocalId>,
     /// True while lowering a re-parsed macro argument, whose spans do not
@@ -291,6 +293,7 @@ impl<'ctx> MirLowerer<'ctx> {
             pending_untyped_vecs: HashMap::new(),
             untyped_vec_new_binding: false,
             untyped_vec_new_dest: None,
+            vec_store_counter: 0,
             observed_pending_vecs: std::collections::HashSet::new(),
             in_macro_fragment: false,
             current_fn: None,
@@ -343,6 +346,7 @@ impl<'ctx> MirLowerer<'ctx> {
             pending_untyped_vecs: HashMap::new(),
             untyped_vec_new_binding: false,
             untyped_vec_new_dest: None,
+            vec_store_counter: 0,
             observed_pending_vecs: std::collections::HashSet::new(),
             in_macro_fragment: false,
             current_fn: None,

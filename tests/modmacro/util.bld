@@ -1,0 +1,11 @@
+pub fn twice(n: i64) -> i64 {
+    n * 2
+}
+
+pub fn tag(s: str) -> str {
+    format!("<{}>", s)
+}
+
+pub fn show(n: i64) -> str {
+    format!("{}:{}", tag("n"), twice(n))
+}

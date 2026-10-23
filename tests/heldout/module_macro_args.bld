@@ -1,0 +1,10 @@
+// A call to a module function inside a macro's arguments is renamed like any
+// other call, so it no longer needs a `let` first.
+mod json;
+
+fn main() ~ Console {
+    println!("{}", json_quote("hi"));
+    let s = format!("[{},{}]", json_quote("a"), json_quote("b\"c"));
+    println!("{}", s);
+    assert_eq!(json_quote("x"), "\"x\"");
+}

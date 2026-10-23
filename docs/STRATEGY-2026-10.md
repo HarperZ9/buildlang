@@ -159,6 +159,11 @@ JS for all 611 `cstate` and `cend` states (given JS's state text), and expands `
 168,234-byte golden exactly. The combat step itself (the `cin`, `cev`, `cstate` and `cend`
 records) is not ported yet, so the trace check of M4 is not met.
 
+Status 2026-10-23, 1.10.0: the combat step is ported, still outside this repository. Built with
+1.10.0, its traces for the 40 corpus fights equal the JS traces byte for byte: 40 of 40 files;
+20,290 `cin`, 5,350 `cev`, 571 `cstate` and 40 `cend` lines. A mutation control (one hit
+constant changed) makes the comparison fail. The compiler fixes the port needed are in 1.10.0.
+
 ## 6. What this document does not prove
 
 It records a direction, a field survey and checks. It does not show BuildLang ahead of any language

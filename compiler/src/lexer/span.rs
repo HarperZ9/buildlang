@@ -56,6 +56,52 @@ pub fn source_text_for_id(source_id: SourceId) -> Option<Arc<str>> {
     SOURCE_REGISTRY.get()?.lock().ok()?.get(&source_id).cloned()
 }
 
+/// Renames for identifiers inside macro arguments, keyed by source and start
+/// offset. Macro arguments stay raw tokens until the checker and the lowering
+/// re-parse them, so the module merge cannot rename a call there in the AST.
+/// It records the new name here instead, and both re-parses apply it.
+type MacroRenames = HashMap<(SourceId, u32), (u32, Arc<str>)>;
+
+static MACRO_IDENT_RENAMES: OnceLock<Mutex<MacroRenames>> = OnceLock::new();
+
+/// Record that the identifier at `span`, inside a macro argument, names `name`.
+pub fn register_macro_ident_rename(span: Span, name: Arc<str>) {
+    let map = MACRO_IDENT_RENAMES.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut map) = map.lock() {
+        map.insert((span.source_id, span.start.0), (span.end.0, name));
+    }
+}
+
+/// The recorded new name for the identifier at `span`, if any.
+pub fn macro_ident_rename(span: Span) -> Option<Arc<str>> {
+    let map = MACRO_IDENT_RENAMES.get()?.lock().ok()?;
+    map.get(&(span.source_id, span.start.0))
+        .filter(|(end, _)| *end == span.end.0)
+        .map(|(_, name)| name.clone())
+}
+
+/// Every recorded rename inside `start..end` of a source, as
+/// `(start, end, name)` sorted by start.
+pub fn macro_ident_renames_in(
+    source_id: SourceId,
+    start: u32,
+    end: u32,
+) -> Vec<(u32, u32, Arc<str>)> {
+    let Some(map) = MACRO_IDENT_RENAMES.get() else {
+        return Vec::new();
+    };
+    let Ok(map) = map.lock() else {
+        return Vec::new();
+    };
+    let mut out: Vec<(u32, u32, Arc<str>)> = map
+        .iter()
+        .filter(|((id, s), (e, _))| *id == source_id && *s >= start && *e <= end)
+        .map(|((_, s), (e, name))| (*s, *e, name.clone()))
+        .collect();
+    out.sort_by_key(|(s, _, _)| *s);
+    out
+}
+
 /// An absolute byte position in source code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct BytePos(pub u32);

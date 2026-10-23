@@ -381,19 +381,6 @@ impl<'ctx> MirLowerer<'ctx> {
         fields: &[ast::FieldExpr],
         _rest: Option<&ast::Expr>,
     ) -> CodegenResult<MirValue> {
-        // Lower all field values FIRST before borrowing the builder.
-        let field_vals: Vec<_> = fields
-            .iter()
-            .map(|f| {
-                if let Some(val) = &f.value {
-                    self.lower_expr(val)
-                } else {
-                    // Field shorthand: `name` means `name: name`
-                    self.lower_ident(&f.name)
-                }
-            })
-            .collect::<CodegenResult<_>>()?;
-
         let mut raw_name = path
             .last_ident()
             .map(|i| i.name.clone())
@@ -413,6 +400,31 @@ impl<'ctx> MirLowerer<'ctx> {
             if self.module.find_type(prefixed.as_ref()).is_some() {
                 raw_name = prefixed;
             }
+        }
+
+        // Lower the field values in the order written (their side effects run
+        // in that order), each against its declared type, so `tags: Vec::new()`
+        // builds the field's vector type and not a `Vec<i32>` (M4 pilot).
+        let declared = self.struct_field_types(raw_name.as_ref());
+        let mut field_vals: Vec<MirValue> = Vec::with_capacity(fields.len());
+        for f in fields {
+            let expected = declared.as_ref().and_then(|d| {
+                d.iter()
+                    .find(|(n, _)| n.as_deref() == Some(f.name.name.as_ref()))
+                    .map(|(_, t)| t.clone())
+            });
+            let prev_expected = match expected {
+                Some(t) => self.expected_type.replace(t),
+                None => self.expected_type.take(),
+            };
+            let val = if let Some(val) = &f.value {
+                self.lower_expr(val)
+            } else {
+                // Field shorthand: `name` means `name: name`
+                self.lower_ident(&f.name)
+            };
+            self.expected_type = prev_expected;
+            field_vals.push(val?);
         }
 
         // Check if this is a generic struct that needs monomorphization
@@ -437,6 +449,33 @@ impl<'ctx> MirLowerer<'ctx> {
             raw_name
         };
 
+        // The aggregate is positional: put the values in declaration order.
+        // Written out of order, `Q { c: "hi", a: 3, b: 2.5 }` assigned `a`
+        // the string, and with two fields of one type it swapped them silently.
+        let field_vals = match self.struct_field_types(struct_name.as_ref()) {
+            Some(decl) if decl.len() == fields.len() => {
+                let mut ordered = Vec::with_capacity(decl.len());
+                for (name, _) in &decl {
+                    let pos = fields
+                        .iter()
+                        .position(|f| Some(f.name.name.as_ref()) == name.as_deref());
+                    match pos {
+                        Some(i) => ordered.push(field_vals[i].clone()),
+                        None => {
+                            ordered.clear();
+                            break;
+                        }
+                    }
+                }
+                if ordered.len() == decl.len() {
+                    ordered
+                } else {
+                    field_vals
+                }
+            }
+            _ => field_vals,
+        };
+
         let builder = self
             .current_fn
             .as_mut()
@@ -445,6 +484,14 @@ impl<'ctx> MirLowerer<'ctx> {
         builder.aggregate(result, AggregateKind::Struct(struct_name), field_vals);
 
         Ok(values::local(result))
+    }
+
+    /// The named fields of a struct type in declaration order, if it is one.
+    fn struct_field_types(&self, name: &str) -> Option<Vec<(Option<Arc<str>>, MirType)>> {
+        match &self.module.find_type(name)?.kind {
+            TypeDefKind::Struct { fields, .. } => Some(fields.clone()),
+            _ => None,
+        }
     }
 
     /// Infer generic type parameters for a struct from the types of field values
@@ -1425,7 +1472,14 @@ impl<'ctx> MirLowerer<'ctx> {
                 && src.is_char_boundary(first_start)
                 && src.is_char_boundary(last_end)
             {
-                let candidate = src[first_start..last_end].to_string();
+                // With the module merge's renames applied (a module call in a
+                // `vec![...]` element).
+                let candidate = renamed_slice(
+                    src,
+                    first_start,
+                    last_end,
+                    tokens.first().map(|t| t.span.source_id),
+                );
                 // Validate: re-tokenize and check it produces a similar token count
                 if let Ok(re_tokens) = crate::lexer::tokenize(candidate.as_str()) {
                     // If re-tokenization gives roughly the same number of tokens, use it
@@ -1756,6 +1810,10 @@ impl<'ctx> MirLowerer<'ctx> {
 
         // Walk the token list, tracking delimiter depth to distinguish
         // top-level argument-separating commas from commas inside nested expressions.
+        let source_id = inner.iter().find_map(|tree| match tree {
+            ast::TokenTree::Token(tok) => Some(tok.span.source_id),
+            ast::TokenTree::Delimited { span, .. } => Some(span.source_id),
+        });
         let mut args = Vec::new();
         let mut past_format_string = false;
         let mut depth: i32 = 0;
@@ -1821,11 +1879,8 @@ impl<'ctx> MirLowerer<'ctx> {
                             // Top-level comma: flush current argument
                             if let Some(start) = current_arg_start {
                                 if current_arg_end > start && current_arg_end <= source.len() {
-                                    let text = source
-                                        .get(start..current_arg_end)
-                                        .unwrap_or("")
-                                        .trim()
-                                        .to_string();
+                                    let text =
+                                        renamed_slice(source, start, current_arg_end, source_id);
                                     if !text.is_empty() {
                                         args.push(text);
                                     }
@@ -1853,11 +1908,7 @@ impl<'ctx> MirLowerer<'ctx> {
         // Flush any remaining argument
         if let Some(start) = current_arg_start {
             if current_arg_end > start && current_arg_end <= source.len() {
-                let text = source
-                    .get(start..current_arg_end)
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
+                let text = renamed_slice(source, start, current_arg_end, source_id);
                 if !text.is_empty() {
                     args.push(text);
                 }
@@ -1894,7 +1945,30 @@ impl<'ctx> MirLowerer<'ctx> {
         let result = self.lower_expr(&expr);
         self.source = saved_source;
         self.in_macro_fragment = saved_fragment;
-        result
+        let val = result?;
+        // `x as char` or a call to a `-> char` function prints as a character.
+        // A `let` marks its local as a char; an argument written inline has no
+        // `let`, so mark its value here (`format!("{}", 65u32 as char)` gave
+        // `65` before).
+        let call_is_char = match &expr.kind {
+            ExprKind::Call { func, .. } => match &func.kind {
+                ExprKind::Ident(id) => self.fn_returns_char.contains(&id.name),
+                _ => false,
+            },
+            _ => false,
+        };
+        if Self::expr_is_char_literal_or_cast(&expr) || call_is_char {
+            let ty = self.type_of_value(&val);
+            let builder = self
+                .current_fn
+                .as_mut()
+                .ok_or_else(|| CodegenError::Internal("No current function for macro".into()))?;
+            let local = builder.create_local(ty);
+            builder.assign(local, MirRValue::Use(val));
+            self.char_locals.insert(local);
+            return Ok(MirValue::Local(local));
+        }
+        Ok(val)
     }
 
     /// Walk a Rust-style format string and report, for each placeholder in
@@ -2903,4 +2977,37 @@ impl<'ctx> MirLowerer<'ctx> {
         };
         Ok((format!("build_hvec_get_{suffix}"), "build_hvec_len"))
     }
+}
+
+/// The source text of one macro argument, with the module merge's renames
+/// applied (see `register_macro_ident_rename`), trimmed.
+fn renamed_slice(
+    source: &str,
+    start: usize,
+    end: usize,
+    source_id: Option<crate::lexer::SourceId>,
+) -> String {
+    let Some(text) = source.get(start..end) else {
+        return String::new();
+    };
+    let renames = match source_id {
+        Some(id) => crate::lexer::macro_ident_renames_in(id, start as u32, end as u32),
+        None => Vec::new(),
+    };
+    if renames.is_empty() {
+        return text.trim().to_string();
+    }
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut at = start;
+    for (s, e, name) in renames {
+        let (s, e) = (s as usize, e as usize);
+        if s < at {
+            continue;
+        }
+        out.push_str(&source[at..s]);
+        out.push_str(&name);
+        at = e;
+    }
+    out.push_str(&source[at..end]);
+    out.trim().to_string()
 }

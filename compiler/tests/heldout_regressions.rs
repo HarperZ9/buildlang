@@ -111,6 +111,37 @@ fn heldout_programs_check_build_and_print_the_expected_output() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
+/// Module calls inside macro arguments are renamed with the module's other
+/// calls. On 1.9.0 the check reported `twice` as undefined. The program also
+/// passes a fn-pointer parameter named like a module function, which must
+/// stay the parameter.
+#[test]
+fn module_calls_inside_macro_arguments_run() {
+    if !have_c_compiler() {
+        eprintln!("skipping: no C compiler on PATH");
+        return;
+    }
+    let dir = repo_root().join("tests/modmacro");
+    let run = buildc()
+        .arg("run")
+        .arg(dir.join("main.bld"))
+        .output()
+        .expect("run buildc run");
+    let expected = std::fs::read_to_string(dir.join("main.expected")).expect("expected output");
+    let got = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        run.status.success() && normalize(&got) == normalize(&expected),
+        "exit {:?}
+--- stdout
+{}
+--- stderr
+{}",
+        run.status.code(),
+        got,
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
 /// A control for the comparison above: a wrong expected output must be
 /// noticed, so a harness that compares nothing cannot pass.
 #[test]

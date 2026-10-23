@@ -261,6 +261,9 @@ impl<'a> Parser<'a> {
             let name = self.source.slice(token_span);
             // Strip r# prefix for raw identifiers
             let name = if is_raw { &name[2..] } else { name };
+            if let Some(renamed) = crate::lexer::macro_ident_rename(token_span) {
+                return Ok(Ident::new(renamed.as_ref(), token_span));
+            }
             Ok(Ident::new(name, token_span))
         } else if self.is_contextual_keyword() {
             // Allow contextual keywords as identifiers
