@@ -52,8 +52,10 @@ fn main() ~ Console + FileSystem {
   first push, or when you want the checker to hold you to it.
 - Strings: `split`, `chars`, `len`, `==`, `<`, and `+` between strings.
 - No `.parse()` and no `unwrap` on parsed values: convert digits by hand.
-- No `Box<T>` yet, so a type cannot contain itself. Build trees and lists as a
-  `Vec` of nodes that refer to each other by index.
+- Recursive types go through `Box<T>`: `enum Tree { Leaf, Node(Box<Tree>, i64,
+  Box<Tree>) }`, build with `Box::new(x)`, read with `*b`. A type that holds
+  itself by value is rejected (BL0384). Boxes are never freed, and `Rc`/`Arc`
+  are rejected (BL0383).
 - Effect handlers are one-shot: the handler's value becomes the value of the
   `handle` expression, and code after the `perform` does not run.
 - `println!` and `format!` take a string literal first; pass values through

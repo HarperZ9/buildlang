@@ -2002,6 +2002,34 @@ impl<'ctx> MirLowerer<'ctx> {
     }
 
     fn lower_call(&mut self, func: &ast::Expr, args: &[ast::Expr]) -> CodegenResult<MirValue> {
+        // Box::new(x) -> a heap copy of x; the C backend emits the allocation
+        // for `Box_new` (issue #83).
+        if let ExprKind::Path(path) = &func.kind {
+            let segs: Vec<&str> = path
+                .segments
+                .iter()
+                .map(|s| s.ident.name.as_ref())
+                .collect();
+            if segs == ["Box", "new"] && args.len() == 1 && self.module.find_type("Box").is_none() {
+                let value = self.lower_expr(&args[0])?;
+                let pointee = self.type_of_value(&value);
+                let builder = self
+                    .current_fn
+                    .as_mut()
+                    .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                let result = builder.create_local(MirType::Ptr(Box::new(pointee)));
+                let cont = builder.create_block();
+                builder.call(
+                    MirValue::Function(Arc::from("Box_new")),
+                    vec![value],
+                    Some(result),
+                    cont,
+                );
+                builder.switch_to_block(cont);
+                return Ok(values::local(result));
+            }
+        }
+
         // Check for enum variant construction: Shape::Circle(5.0)
         if let Some((enum_name, variant_name)) = self.try_resolve_enum_variant_path(func) {
             return self.lower_enum_variant_construct(&enum_name, &variant_name, args);

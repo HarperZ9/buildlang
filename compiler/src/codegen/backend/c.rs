@@ -3175,6 +3175,37 @@ impl CBackend {
                 // is a BuildString here, whose char buffer is its `.ptr` field;
                 // anything else is already a `const char*`. (Without this,
                 // String::from lowered to an undefined `String_from` symbol.)
+                // Box::new(x) -> malloc a T, store x, keep the pointer (issue #83).
+                // Boxed memory is never freed in this release.
+                if func_str == "Box_new" && args.len() == 1 {
+                    if let Some(dest_local) = dest {
+                        let pointee = locals
+                            .get(dest_local.0 as usize)
+                            .and_then(|l| match &l.ty {
+                                MirType::Ptr(inner) => Some((**inner).clone()),
+                                _ => None,
+                            })
+                            .ok_or_else(|| {
+                                CodegenError::Internal(
+                                    "Box_new destination is not a pointer".to_string(),
+                                )
+                            })?;
+                        let cty = self.type_to_c(&pointee);
+                        let dest_name = self.local_name(*dest_local, locals);
+                        let arg = self.value_to_c(&args[0], locals);
+                        write!(
+                            self.output,
+                            "{{ {cty}* _bx = ({cty}*)malloc(sizeof({cty})); if (!_bx) abort(); *_bx = {arg}; {dest_name} = _bx; }}\n"
+                        )
+                        .unwrap();
+                    }
+                    if let Some(target) = target {
+                        self.write_indent();
+                        write!(self.output, "goto bb{};\n", target.0).unwrap();
+                    }
+                    return Ok(());
+                }
+
                 if func_str == "String_from" && args.len() == 1 {
                     if let Some(dest_local) = dest {
                         let dest_name = self.local_name(*dest_local, locals);

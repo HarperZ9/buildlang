@@ -3726,6 +3726,29 @@ impl<'ctx> TypeInfer<'ctx> {
             return ty;
         }
 
+        // Box::new(T) -> Box<T> (issue #83). Rc and Arc would lower to the same
+        // uncounted pointer, so they are refused until reference counting exists.
+        if segments.len() == 2
+            && segments[1] == "new"
+            && matches!(segments[0], "Box" | "Rc" | "Arc")
+            && self.ctx.lookup_type_by_name(segments[0]).is_none()
+        {
+            if segments[0] != "Box" {
+                self.error(
+                    TypeError::UnsupportedConstruct {
+                        construct: format!("{}::new", segments[0]),
+                        detail:
+                            "reference counting is not implemented; use Box::new for a single owner"
+                                .to_string(),
+                    },
+                    span,
+                );
+                return Ty::error();
+            }
+            let t = Ty::fresh_var();
+            return Ty::function(vec![t.clone()], Ty::ptr(Mutability::Mutable, t));
+        }
+
         // Check for associated function: Type::func (2-segment path)
         if segments.len() == 2 {
             let mut type_name = segments[0];
@@ -7508,6 +7531,15 @@ impl<'ctx> TypeInfer<'ctx> {
             // Check type parameters in scope
             if let Some(ty) = self.ctx.lookup_type_param(name) {
                 return ty.clone();
+            }
+
+            // Box<T>: an owned heap pointer to T (issue #83). A user type
+            // named Box takes priority.
+            if name == "Box" && self.ctx.lookup_type_by_name(name).is_none() {
+                if let Some([ast::GenericArg::Type(inner)]) = path.last_generics() {
+                    let inner_ty = self.lower_type(inner);
+                    return Ty::ptr(Mutability::Mutable, inner_ty);
+                }
             }
 
             // Look up type definition by name

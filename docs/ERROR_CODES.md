@@ -153,6 +153,7 @@ A test in `compiler/src/diagnostics/tests.rs` fails if this table and the compil
 | BL0381 | type annotation needed |
 | BL0382 | unsafe operation outside an `unsafe` block |
 | BL0383 | construct not supported yet |
+| BL0384 | recursive type has infinite size |
 | BL0398 | internal checker error |
 | BL0399 | internal type error |
 

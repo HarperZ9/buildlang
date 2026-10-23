@@ -1,0 +1,11 @@
+struct A {
+    b: B,
+}
+
+struct B {
+    a: Option<A>,
+}
+
+fn main() ~ Console {
+    println!("x");
+}

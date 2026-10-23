@@ -49,6 +49,7 @@ mod error;
 mod hkt;
 mod infer;
 mod macro_args;
+mod recursive;
 mod traits;
 mod ty;
 mod unify;

@@ -371,6 +371,11 @@ pub enum TypeError {
     #[error("`{construct}` is not yet supported: {detail}")]
     UnsupportedConstruct { construct: String, detail: String },
 
+    /// A struct or enum holds itself by value, so it has no finite size and
+    /// the C backend cannot lay it out. A `Box<T>` field breaks the cycle.
+    #[error("recursive type `{name}` has infinite size: {path}")]
+    InfiniteSizeType { name: String, path: String },
+
     // =========================================================================
     // GENERICS ERRORS
     // =========================================================================

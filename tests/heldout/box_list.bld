@@ -1,0 +1,38 @@
+// Issue #83: a cons list through Box, built, summed and measured.
+enum List {
+    Nil,
+    Cons(i64, Box<List>),
+}
+
+fn push(rest: List, v: i64) -> List {
+    List::Cons(v, Box::new(rest))
+}
+
+fn sum(l: List) -> i64 {
+    match l {
+        List::Nil => 0,
+        List::Cons(v, rest) => v + sum(*rest),
+    }
+}
+
+fn len(l: List) -> i64 {
+    match l {
+        List::Nil => 0,
+        List::Cons(_, rest) => 1 + len(*rest),
+    }
+}
+
+fn build(n: i64) -> List {
+    let mut l = List::Nil;
+    let mut i = 1;
+    while i <= n {
+        l = push(l, i);
+        i = i + 1;
+    }
+    l
+}
+
+fn main() ~ Console {
+    println!("sum {}", sum(build(100)));
+    println!("len {}", len(build(100)));
+}

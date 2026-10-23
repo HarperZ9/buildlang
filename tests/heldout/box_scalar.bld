@@ -1,0 +1,14 @@
+// Issue #83: Box::new on a scalar and on a struct, read back through `*`.
+struct Point {
+    x: i64,
+    y: i64,
+}
+
+fn main() ~ Console {
+    let b = Box::new(41);
+    let n = *b + 1;
+    println!("{}", n);
+    let p = Box::new(Point { x: 3, y: 4 });
+    let q = *p;
+    println!("{} {}", q.x, q.y);
+}

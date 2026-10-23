@@ -26,6 +26,9 @@ fn literal_cannot_be(kind: &InferKind, ty: &TyKind) -> bool {
             | TyKind::Array(..)
             | TyKind::Slice(_)
             | TyKind::Fn(_)
+            // A pointer (and `Box<T>`, issue #83) is never an integer literal;
+            // `let b: Box<i64> = 5` passed check and segfaulted in 1.7.0.
+            | TyKind::Ptr(..)
     );
     match kind {
         InferKind::Int => non_numeric,

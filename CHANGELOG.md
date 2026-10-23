@@ -10,6 +10,31 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+## 1.8.0 - 2026-10-22 - Box and recursive types
+
+- **`Box<T>` on the C backend (#83).** `Box::new(x)` allocates a `T`, stores `x`
+  and yields a `Box<T>`; `*b` reads it. Recursive structs and enums (trees, cons
+  lists) now check, build and run. The held-out probe's `bst` task, refused with
+  BL0901 in 1.7.0, passes as written (`tests/heldout/box_bst.bld`).
+- **Two check-pass-but-fail holes closed.** In 1.7.0 the checker left `Box<T>`
+  unresolved, so `let b: Box<i64> = 5;` passed check and segfaulted; it is now a
+  type mismatch, and an integer literal never has a pointer type. A type that
+  holds itself by value (directly, or through tuples, arrays, `Option` or
+  `Result`) passed check and then failed in the C compiler; it is now BL0384
+  ("recursive type has infinite size") with the cycle and a `Box` hint.
+- **`Rc::new` and `Arc::new` are rejected (BL0383)** until reference counting
+  exists, rather than lowering to an uncounted pointer.
+- **Tests.** `tests/reject/` holds programs `buildc check` must reject with a BL
+  code (`compiler/tests/reject_programs.rs`, with a negative control for the code
+  detector). Three Box programs join `tests/heldout/`. Spec section 7.5 and
+  SKILL.md document the feature; both blocks are checked in CI.
+- **Limits.** Boxed memory is never freed; `Box<dyn Trait>` is unsupported; a
+  cycle through a user generic type is not detected.
+- **Direction.** `docs/STRATEGY-2026-10.md` records the author's 2026-10-23
+  direction (an agent-first creative language, run in parallel with the game),
+  the field survey, milestones M3 to M6 with failing checks, and the Low Water
+  pilot's feature list. Design note: `docs/design/BOX-AND-RECURSIVE-TYPES.md`.
+
 ## 1.7.0 - 2026-10-15 - held-out fixes and exact edits
 
 - **Measured first.** A preregistered held-out probe of 1.6.0 (27 new tasks,
