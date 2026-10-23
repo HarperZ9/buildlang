@@ -1100,37 +1100,69 @@ impl CBackend {
             // (<= 8 bytes) ride in the map's native 8-byte slot; non-scalars (e.g.
             // BuildString, 24 bytes) are BOXED (a heap pointer rides in the slot)
             // so the full value round-trips instead of being truncated.
-            let mut map_val_types: std::collections::HashMap<String, bool> =
-                std::collections::HashMap::new();
+            // Keyed by the shared mangle (`map_value_mangle`) that lowering
+            // also uses for the call, so the names cannot drift apart. Map
+            // types are gathered from every local and every struct field, at
+            // any depth (a map inside a struct, a Vec of maps, a map of maps).
+            fn gather_maps(ty: &MirType, out: &mut Vec<MirType>) {
+                match ty {
+                    MirType::Map(k, v) => {
+                        out.push(ty.clone());
+                        gather_maps(k, out);
+                        gather_maps(v, out);
+                    }
+                    MirType::Ptr(t)
+                    | MirType::Array(t, _)
+                    | MirType::Slice(t)
+                    | MirType::Vec(t)
+                    | MirType::Option(t) => gather_maps(t, out),
+                    MirType::Tuple(ts) => ts.iter().for_each(|t| gather_maps(t, out)),
+                    _ => {}
+                }
+            }
+            let mut found: Vec<MirType> = Vec::new();
             for func in &module.functions {
                 for local in &func.locals {
-                    if let MirType::Map(_, ref val_ty) = local.ty {
-                        let val_c = self.type_to_c(val_ty);
-                        if val_c != "double" {
-                            let is_scalar = matches!(
-                                val_ty.as_ref(),
-                                MirType::Int(..)
-                                    | MirType::Float(..)
-                                    | MirType::Bool
-                                    | MirType::Ptr(..)
-                            );
-                            map_val_types.insert(val_c, is_scalar);
-                        }
+                    gather_maps(&local.ty, &mut found);
+                }
+                gather_maps(&func.sig.ret, &mut found);
+            }
+            for def in &module.types {
+                if let TypeDefKind::Struct { fields, .. } = &def.kind {
+                    for (_, field_ty) in fields {
+                        gather_maps(field_ty, &mut found);
                     }
                 }
+            }
+            // mangle -> (C type, is-scalar)
+            let mut map_val_types: std::collections::BTreeMap<String, (String, bool)> =
+                std::collections::BTreeMap::new();
+            for map_ty in &found {
+                let MirType::Map(_, val_ty) = map_ty else {
+                    continue;
+                };
+                if matches!(val_ty.as_ref(), MirType::Float(FloatSize::F64)) {
+                    continue;
+                }
+                let is_scalar = matches!(
+                    val_ty.as_ref(),
+                    MirType::Int(..) | MirType::Float(..) | MirType::Bool | MirType::Ptr(..)
+                );
+                map_val_types.insert(
+                    crate::codegen::ir::map_value_mangle(val_ty),
+                    (self.type_to_c(val_ty), is_scalar),
+                );
             }
             if !map_val_types.is_empty() {
                 self.output
                     .push_str("// Monomorphized HashMap wrappers for non-f64 value types\n");
-                // Deterministic order for reproducible codegen (receipts).
-                let mut entries: Vec<(&String, &bool)> = map_val_types.iter().collect();
-                entries.sort_by(|a, b| a.0.cmp(b.0));
+                // BTreeMap order: deterministic codegen (receipts).
                 // The key is a `BuildString` (string-keyed map family), passed by
                 // value by the method dispatch; the wrappers use its `.ptr`. Taking
                 // `BuildString key` avoids a key coercion the generated wrappers
                 // would otherwise need.
-                for (val_c, &is_scalar) in entries {
-                    let safe_name = val_c.replace("*", "ptr").replace(" ", "_");
+                for (safe_name, (val_c, is_scalar)) in &map_val_types {
+                    let is_scalar = *is_scalar;
                     // get
                     write!(self.output, "static {val_c} build_hmap_get_val_{safe_name}(BuildStrF64MapHandle h, BuildString key) {{\n").unwrap();
                     write!(self.output, "    if (!build_hmap_contains_str_f64(h, key.ptr)) {{ {val_c} __z; memset(&__z, 0, sizeof(__z)); return __z; }}\n").unwrap();

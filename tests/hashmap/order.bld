@@ -1,0 +1,32 @@
+// keys() returns insertion order: a replaced value keeps its key's place,
+// and a removed key that comes back goes to the end (as in a JS Map).
+use std::collections::HashMap;
+
+fn show(m: &HashMap<str, i64>) ~ Console {
+    let mut line = "";
+    for k in m.keys() {
+        line = line + k + " ";
+    }
+    println!("{}", line);
+}
+
+fn main() ~ Console {
+    let mut m: HashMap<str, i64> = HashMap::new();
+    m.insert("zeta", 1);
+    m.insert("alpha", 2);
+    m.insert("mid", 3);
+    m.insert("beta", 4);
+    show(&m);
+    m.insert("zeta", 10);
+    show(&m);
+    m.remove("alpha");
+    m.insert("alpha", 20);
+    show(&m);
+    let mut i: i64 = 0;
+    while i < 40 {
+        m.insert(format!("n{}", i), i);
+        i = i + 1;
+    }
+    let ks = m.keys();
+    println!("{} {} {} {}", ks.len(), ks[0], ks[3], ks[43]);
+}
