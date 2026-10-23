@@ -143,7 +143,7 @@ v1**; the design marks it optional and not required for v1 acceptance.
 
 `receipt chain build`'s member-schema gate
 (`compiler/src/main.rs::cmd_receipt_chain_build`) is an allowlist of two
-schemas: `buildlang-scientific-runtime-receipt/v0` and
+schemas: `buildlang-scientific-runtime-receipt/v1` (and `/v0`) and
 `buildlang-model-boundary-receipt/v0`. Nothing else about chain build or
 chain verify changed: `source` extraction already reads a top-level `source`
 field present on both schemas, chain seal computation only ever touches

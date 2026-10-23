@@ -73,7 +73,7 @@ buildc run examples/greedy_change_budget.bld --emit-receipt heur.json \
 
 Greedy coin change is not optimal for every denomination set, run under a
 calibrated step budget. The receipt witnesses that the search stayed inside
-its declared budget and carries `NOT_PROVES_OPTIMALITY` in its labels; a
+its declared budget and carries `BEST_FOUND_WITHIN_BUDGET` in its labels; a
 budgeted heuristic reports its incumbent, never a proof no better answer
 exists.
 

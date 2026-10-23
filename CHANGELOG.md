@@ -10,6 +10,16 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- Scientific-runtime receipts move to `buildlang-scientific-runtime-receipt/v1`. A v1
+  receipt lists what it covers in a `scope` field (`source_and_build_digests`,
+  `observed_series_invariant`, `rerun_agreement`, plus `best_found_within_budget` for a
+  budget and `interval_arithmetic` and `sample_denominator` for an EXECUTED monte_carlo
+  block). The labels are `NUMERICAL_RESULT` and `BEST_FOUND_WITHIN_BUDGET`. Version 0 used
+  a `not_claimed` list and the labels `NOT_A_NEW_PHYSICAL_LAW` and `NOT_PROVES_OPTIMALITY`.
+  `buildc receipt verify` reads each receipt with its own version's vocabulary, so sealed v0
+  receipts still verify. A v1 receipt without `observed_series_invariant` fails with the new
+  `SCOPE_MISSING` class. The Model-capability and budgeted-search refusals use plain words.
+
 ## 1.10.0 - 2026-10-23 - M4 pilot fixes
 
 Compiler fixes found while porting the Low Water combat step. Each program

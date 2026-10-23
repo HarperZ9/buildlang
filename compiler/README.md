@@ -31,7 +31,7 @@ experimental research surfaces.
 - **Release:** BuildLang 1.1.x; compiler binary `buildc`; built with Rust (edition 2021). C is the production-grade verified backend; HLSL and GLSL ship for shader work; SPIR-V, LLVM IR, WebAssembly, Rust, x86-64, and ARM64 stay labeled experimental.
 - **Type system:** Hindley-Milner inference with typed algebraic effects, plus an **experimental** opt-in `#[linear]` attribute toward **no-cloning** — a `#[linear]` struct/enum value should be moved/consumed at most once (the foundation shared by quantum qubits, on-chain no-double-spend, and resource handles). It conservatively rejects a large, regression-tested set of compositional escapes, but it is **not yet fully sound** (a few known-open classes remain; full soundness needs an affine/borrow checker on MIR). Borrows do not consume; ordinary types keep copy-like reuse. Honest scope, what's enforced, and what's open: [docs/LINEAR-TYPES.md](docs/LINEAR-TYPES.md); also `examples/linear/`, [CHANGELOG.md](CHANGELOG.md), `docs/QUANTUM-HOST.md`.
 - **Operator surface:** the `buildc` CLI exposes `lex`, `parse`, `check` (with `--receipt` / `--policy`), `build`, `run`, `test`, `repl`, `fmt`, `pkg`, `watch`, `doctor`, `corpus`, `policy`, `receipt`, and an `lsp` subcommand that starts a bundled LSP server (completion, hover, diagnostics, go-to-definition, semantic tokens). The CLI and the LSP server are the two integration surfaces; accountability receipts (`buildlang-receipt-verification/v1`) carry SHA-256 source digests for re-checkable codegen.
-- **Accountable scientific compute:** a second receipt family (`buildlang-scientific-runtime-receipt/v0`) seals a re-checkable proof that a numeric kernel's output series satisfies a stated invariant, verified by RE-RUNNING the program. Seven invariants ship (energy-monotone, conservation, bounded, energy-identity, relation, conserved-band, non-negative), each with a paired negative-fixture kernel, spanning physical simulation, cross-column relations, and algorithmic complexity bounds; `buildc receipt export` emits witnessed measurement rows. Honest scope: it witnesses the observed series, not the model or any physical law. See [Accountable scientific compute](#accountable-scientific-compute) and [docs/SCIENTIFIC-RECEIPT.md](docs/SCIENTIFIC-RECEIPT.md).
+- **Accountable scientific compute:** a second receipt family (`buildlang-scientific-runtime-receipt/v1`) seals a re-checkable proof that a numeric kernel's output series satisfies a stated invariant, verified by RE-RUNNING the program. Seven invariants ship (energy-monotone, conservation, bounded, energy-identity, relation, conserved-band, non-negative), each with a paired negative-fixture kernel, spanning physical simulation, cross-column relations, and algorithmic complexity bounds; `buildc receipt export` emits witnessed measurement rows. Honest scope: it witnesses the observed series, not the model or any physical law. See [Accountable scientific compute](#accountable-scientific-compute) and [docs/SCIENTIFIC-RECEIPT.md](docs/SCIENTIFIC-RECEIPT.md).
 - **Umbrella:** part of the operator's Build ecosystem alongside `build-universe`, the VS Code extension, and the TextMate grammar; standalone and not dependent on any single host.
 - **Repository naming:** public product names are BuildLang, `buildc`, and `.bld`; the crate is [`buildlang`](https://crates.io/crates/buildlang) on crates.io and the repo is [`HarperZ9/buildlang`](https://github.com/HarperZ9/buildlang) on GitHub. The former `quantalang` crate is deprecated and points here.
 - **Housekeeping:** ground-truth release evidence lives in `STATUS.md`; [CHANGELOG.md](CHANGELOG.md) tracks the current presentation pass under Unreleased.
@@ -186,7 +186,7 @@ buildc vignette.bld --target glsl -o vignette.glsl
 
 Beyond the capability (check) receipts described below, `buildc` emits a second,
 independent receipt family for **numeric** programs: a **scientific-runtime
-receipt** (`buildlang-scientific-runtime-receipt/v0`).
+receipt** (`buildlang-scientific-runtime-receipt/v1`).
 
 `buildc run --emit-receipt <path>` compiles and runs a `.bld` kernel, captures
 its numeric stdout as a measurement series, checks a stated **invariant** over
@@ -222,7 +222,7 @@ positive/negative kernel):
 Honest scope: the receipt witnesses that the compiled program's OBSERVED OUTPUT
 SERIES satisfies (or expectedly violates) the invariant. It does **not** prove
 the underlying model correct and does **not** claim a physical law (every
-receipt carries a `NOT_A_NEW_PHYSICAL_LAW` label). Full field reference,
+receipt carries a `NUMERICAL_RESULT` label and a `scope` list). Full field reference,
 exit-code semantics, and the failure-class vocabulary:
 [docs/SCIENTIFIC-RECEIPT.md](docs/SCIENTIFIC-RECEIPT.md).
 

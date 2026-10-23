@@ -24,8 +24,8 @@
 // measured total coins used across all 60 amounts): because a heuristic
 // result without its budget ceiling hides whether it stopped at the limit,
 // the sealed `budget` block carries the ceiling and consumption, and the
-// receipt additionally carries `NOT_PROVES_OPTIMALITY` in `labels` and
-// `optimality` in `not_claimed` (a budgeted search reports its incumbent,
+// receipt also carries `BEST_FOUND_WITHIN_BUDGET` in `labels` and
+// `best_found_within_budget` in `scope` (a budgeted search reports its incumbent,
 // never a proof of optimality -- the amount-6 witness above is exactly
 // why: greedy's 3 coins is a valid result, not the optimal 2).
 // Deterministic kernel: no Random capability, no seed needed.

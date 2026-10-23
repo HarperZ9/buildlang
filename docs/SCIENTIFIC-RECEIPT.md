@@ -7,7 +7,7 @@
 
 `buildc run --emit-receipt` compiles and runs a `.bld` program, captures its numeric
 stdout as a measurement series, checks a stated **invariant** over that series, and emits a
-sealed, re-checkable JSON receipt (`buildlang-scientific-runtime-receipt/v0`). `buildc
+sealed, re-checkable JSON receipt (`buildlang-scientific-runtime-receipt/v1`). `buildc
 receipt verify` re-runs the program, re-derives the source digest, and re-checks the
 invariant verdict.
 
@@ -20,10 +20,10 @@ The receipt witnesses one thing and states it plainly: **the compiled program's 
 output series satisfies the stated invariant** (or, for a negative fixture, expectedly
 violates it). That is the whole claim.
 
-It does **not** prove the underlying PDE is solved correctly, and it does **not** claim a
-new physical law. buildc checks a mathematical monotonicity property of a numeric series;
-the physics lives in the `.bld` program, not in the compiler. Every receipt carries the
-label `NOT_A_NEW_PHYSICAL_LAW` so a reader cannot mistake the artifact for more than it is.
+buildc checks a mathematical property of a numeric series. The physics lives in the `.bld`
+program. Every receipt carries the label `NUMERICAL_RESULT` and a `scope` list that names
+what the receipt covers: the source and build digests, the invariant over the observed
+series, and the agreement of a re-run.
 
 Concretely, a PASS says: "buildc ran this exact source, captured this series, and the series
 was monotone non-increasing within tolerance." It does not say the discretization is
@@ -127,10 +127,10 @@ Flags on the `run` subcommand relevant to scientific receipts and stdio:
   `budget` block. Both declare together or not at all (a result without its budget ceiling
   hides whether it stopped at the limit). A zero ceiling is refused, and consumption above
   the ceiling is refused as incoherent. Unlike `--mc-*`, this declaration is deterministic
-  and does not require `Random` or a seed. A budgeted receipt additionally carries
-  `NOT_PROVES_OPTIMALITY` in `labels` and `optimality` in `not_claimed`, and `--method` /
-  `--problem` text containing `optimal` (case-insensitively) is refused: a budgeted search
-  may report its incumbent, never a proof of optimality.
+  and does not require `Random` or a seed. A budgeted receipt also carries
+  `BEST_FOUND_WITHIN_BUDGET` in `labels` and `best_found_within_budget` in `scope`. The
+  result is the best one that the search found within its budget, so buildc refuses
+  `--method` or `--problem` text that contains `optimal` in any case.
 - `--budget-wall-seconds <LIMIT>` declares an OPTIONAL wall-clock ceiling on top of the step
   budget: a member of the budget declaration, not a freestanding knob, so it requires the
   `--budget-steps`/`--budget-consumed` pair and refuses without it. `LIMIT` must be a
@@ -160,7 +160,14 @@ the receipt is written, even if the invariant failed or the program exited nonze
 observed exit code and the PASS/FAIL verdict are recorded **in** the receipt, not in the
 process exit code.
 
-## 2. The schema (`buildlang-scientific-runtime-receipt/v0`) and its layers
+## 2. The schema (`buildlang-scientific-runtime-receipt/v1`) and its layers
+
+Version 1 replaced the version 0 limits list with a positive coverage list. In version 0,
+`not_claimed` listed what a receipt left out, and the labels were `NOT_A_NEW_PHYSICAL_LAW`
+and `NOT_PROVES_OPTIMALITY`. In version 1, `scope` lists what a receipt covers, and the
+labels are `NUMERICAL_RESULT` and `BEST_FOUND_WITHIN_BUDGET`. `buildc receipt verify` reads
+each receipt with the vocabulary of its own version, so a sealed version 0 receipt still
+verifies. A receipt carries one list only: `not_claimed` for v0, `scope` for v1.
 
 The receipt is a single JSON object. Its layers, outermost meaning first:
 
@@ -250,7 +257,7 @@ crossing: harness-side, emitted by `harness/model_shim.py` (the local-model
 repo), never by buildc. It carries no invariant, no oracle, and no verdict, so
 it cannot masquerade as a scientific-runtime receipt, and the reverse is
 enforced structurally too: `receipt chain build`'s allowlist accepts exactly
-`buildlang-scientific-runtime-receipt/v0` and
+`buildlang-scientific-runtime-receipt/v1` (and `/v0`) and
 `buildlang-model-boundary-receipt/v0`, nothing else. Full schema, field-tag
 table (SHIM-WITNESSED vs. DECLARED), and the verify arm's failure classes are
 documented in [MODEL-RECEIPT.md](MODEL-RECEIPT.md). Two consequences worth
@@ -311,13 +318,11 @@ stating here, beside the scientific schema they sit next to:
     increments in `{0, 1}`, `successes <= trials` on every row), and the final row's
     `trials` MUST equal the declared `samples`: the witnessed-denominator equality, the
     single biggest honesty gain of the EXECUTED shape. Float fields are compared within a
-    pinned absolute tolerance (`1e-12`) in both stages. An EXECUTED block additionally adds
-    three `not_claimed` entries -- `sample_independence`, `interval_coverage`,
-    `estimator_semantics` -- present if and only if `status == "EXECUTED"` (the
-    `NOT_PROVES_OPTIMALITY`/`optimality` pairing idiom): EXECUTED hardens the interval
-    arithmetic and the denominator, but it cannot and does not harden that the draws are
-    independent, that the named confidence level covers the true value, or that the
-    indicator counts what the author says it counts.
+    pinned absolute tolerance (`1e-12`) in both stages. An EXECUTED block also adds two
+    `scope` entries, `interval_arithmetic` and `sample_denominator`, present if and only if
+    `status == "EXECUTED"`. They name what EXECUTED re-checks: the interval arithmetic and
+    the denominator. Draw independence, interval coverage and the meaning of the indicator
+    stay with the author.
 
   This is the admission rule for the weakest-promise mode: deterministic work needs only a
   hash, but an MC number without its denominator, seed, and interval method is
@@ -330,11 +335,11 @@ stating here, beside the scientific schema they sit next to:
   Author-declared like `monte_carlo`, but with hard shape contracts verify re-checks
   (`FIELD_CONTRACT_VIOLATION`): `steps_limit` is non-zero, `steps_consumed` never exceeds it,
   `exhausted` is DERIVED (`steps_consumed == steps_limit`, never hand-set), and `status` is
-  `DECLARED`. The label pairing is checked for EVERY receipt: `labels` must contain
-  `NOT_PROVES_OPTIMALITY` and `not_claimed` must contain `optimality` if and only if the
-  receipt carries a `budget` block. The claim-language rule keeps the free text honest: on a
-  budgeted receipt, `problem.label` or `numerical_method.description` containing `optimal`
-  (case-insensitively) is refused, because a budgeted search reports its incumbent, never a
+  `DECLARED`. The label pairing is checked for every receipt: `labels` must contain
+  `BEST_FOUND_WITHIN_BUDGET` and `scope` must contain `best_found_within_budget` if and only
+  if the receipt carries a `budget` block. On a budgeted receipt, `problem.label` or
+  `numerical_method.description` that contains `optimal` in any case is refused, because a
+  budgeted search reports the best result it found, never a
   proof of optimality. A result without its budget ceiling hides whether it stopped at the
   limit, so the receipt refuses to exist without it. `wall_seconds_limit` (from
   `--budget-wall-seconds`) is the OPTIONAL declared wall-clock ceiling in seconds, present
@@ -371,11 +376,11 @@ stating here, beside the scientific schema they sit next to:
   contract names these branches; buildc does not produce them and says so in-band rather
   than omitting the fields (absence of evidence is witnessed, never implied).
 - `negative_fixture`: whether `--negative-fixture` was set.
-- `not_claimed`: the machine-readable claims boundary (the honest-scope section as sealed
-  data); must include `"physical_law"` or verify rejects the receipt outright.
+- `scope`: what the receipt covers, as sealed data. It must include
+  `"observed_series_invariant"`, or verify refuses the receipt with `SCOPE_MISSING`.
 - `diverged`: whether the run produced a non-finite value (sealed in-band, not just as a
   label, because verify's re-check rules branch on it; see section 6).
-- `labels`: always includes `"NOT_A_NEW_PHYSICAL_LAW"`; adds `"NEGATIVE_FIXTURE"` when the
+- `labels`: always includes `"NUMERICAL_RESULT"`; adds `"NEGATIVE_FIXTURE"` when the
   fixture flag is set and `"NONFINITE_OBSERVED"` when the run diverged.
 - `receipt_status`: `PASS` | `FAIL_EXPECTED` | `FAIL_UNEXPECTED` | `UNVERIFIABLE`.
 - `seal`: `{algorithm: "sha256", hex}` over the canonical receipt with the seal hex blanked.
@@ -597,7 +602,7 @@ band of 0.3 of pi, calibrated against the corpus seed 42 whose measured worst er
 through the band and FAILs: the harness catches a biased estimator, not just an unlucky
 one), and a BUDGETED-SEARCH instance in `examples/greedy_change_budget.bld` (greedy coin
 change over denominations {4, 3, 1}, a genuine heuristic: amount 6 takes greedy's 3 coins
-(4+1+1) where 3+3 is the optimal 2, so the receipt carries `NOT_PROVES_OPTIMALITY`. Under
+(4+1+1) where 3+3 is the optimal 2, so the receipt carries `BEST_FOUND_WITHIN_BUDGET`. Under
 the full `--budget-*` declaration, the measured worst coin count over amounts 1..60 is 16
 (at amount 58); the per-amount step_budget is calibrated to 23, a margin of ~1.4x, so the
 slack stays non-negative and it PASSes; the run declares `--budget-steps 60000
@@ -711,12 +716,13 @@ fixtures and CI pin the *specific* failure instead of accepting "anything failed
 | `MALFORMED` | unreadable file, invalid JSON, duplicate object key, or fields that do not deserialize | 1 |
 | `SCHEMA_UNSUPPORTED` | missing or unrecognized `schema` | 1 |
 | `COMPILER_MISMATCH` | `compiler` is not `buildc` | 1 |
-| `OVERCLAIM_BOUNDARY_MISSING` | `not_claimed` omits `physical_law` | 1 |
+| `SCOPE_MISSING` | a v1 receipt's `scope` omits `observed_series_invariant` | 1 |
+| `OVERCLAIM_BOUNDARY_MISSING` | a v0 receipt's `not_claimed` omits `physical_law` | 1 |
 | `EXTRACTION_POLICY_MISMATCH` | the sealed series-extraction policy's version tag is not the one this verifier implements (prose after the tag is display text) | 1 |
 | `DIGEST_MALFORMED` | a sealed digest field is not a real sha256 (64 hex chars); an absent hash cannot masquerade as witnessed provenance | 1 |
 | `ORACLE_KIND_UNSUPPORTED`, `ORACLE_STATUS_UNSUPPORTED`, `ORACLE_BINDING_MISMATCH`, `INVARIANT_UNSUPPORTED` | the oracle/invariant block names a kind, status, or criterion this verifier does not implement; binding is pinned to the implementation, never to another sealed field | 1 |
 | `FENCE_STATUS_UNEXPECTED` | a telemetry/lineage fence was edited to claim availability v0 does not produce | 1 |
-| `FIELD_CONTRACT_VIOLATION` | a sealed field claims something the program cannot express (a `seed_value` when nothing observes `Random`, a Random-using program with no sealed seed, a `monte_carlo` block without a seeded Random run or with a zero/nameless denominator, estimator, or interval method, a status outside `DECLARED`/`EXECUTED`, a `budget` block with a zero ceiling, consumption above its ceiling, a hand-set `exhausted`, or a non-`DECLARED` status, a `budget.wall_seconds_limit` that is non-positive or non-finite, present without a sealed `runtime_state.wall_seconds`, or paired with a `wall_exceeded` that disagrees with the SEALED `wall_seconds > wall_seconds_limit` comparison, a `wall_exceeded` present without `wall_seconds_limit`, a `cross_backend` block present without the `cross_backend_columns_agree` invariant or that invariant without the block (the biconditional), a non-`rust` `cross_backend.secondary_target`, a non-`EXECUTED` `cross_backend.status`, a `cross_backend` block whose RE-DERIVED capabilities include `Random` (the Rust lane has no seeded PRNG, so the streams could not agree; this transitively excludes a `monte_carlo` block riding along too, since MC requires `Random`), or a `NOT_PROVES_OPTIMALITY`/`optimality` pairing or claim-language mismatch), is internally inconsistent (DECLARED method, no description), or resealed a non-canonical `invariant.tolerance`. The EXECUTED `monte_carlo` sub-cases: an executed field (`estimate`/`interval_low`/`interval_high`/`n_effective`/`successes`) present on a DECLARED block, or one of the five ABSENT on an EXECUTED block; an EXECUTED `estimator`/`interval_method` outside the v1 executable vocabulary (`proportion`; `normal-approx-95`, `wilson-95`); a `column_count` other than 3 on an EXECUTED block; an incoherent aggregate successes/trials stream (non-integer, a trials step other than +1, a successes step outside `{0, 1}`, `successes > trials`); a witnessed final `trials` that disagrees with the declared `samples` (the denominator is not witnessed); the Stage A recompute (over the sealed series) disagreeing with the sealed `estimate`/`interval_low`/`interval_high`/`n_effective`/`successes`; and the `sample_independence`/`interval_coverage`/`estimator_semantics` `not_claimed` triad biconditional | 1 |
+| `FIELD_CONTRACT_VIOLATION` | a sealed field claims something the program cannot express (a `seed_value` when nothing observes `Random`, a Random-using program with no sealed seed, a `monte_carlo` block without a seeded Random run or with a zero/nameless denominator, estimator, or interval method, a status outside `DECLARED`/`EXECUTED`, a `budget` block with a zero ceiling, consumption above its ceiling, a hand-set `exhausted`, or a non-`DECLARED` status, a `budget.wall_seconds_limit` that is non-positive or non-finite, present without a sealed `runtime_state.wall_seconds`, or paired with a `wall_exceeded` that disagrees with the SEALED `wall_seconds > wall_seconds_limit` comparison, a `wall_exceeded` present without `wall_seconds_limit`, a `cross_backend` block present without the `cross_backend_columns_agree` invariant or that invariant without the block (the biconditional), a non-`rust` `cross_backend.secondary_target`, a non-`EXECUTED` `cross_backend.status`, a `cross_backend` block whose RE-DERIVED capabilities include `Random` (the Rust lane has no seeded PRNG, so the streams could not agree; this transitively excludes a `monte_carlo` block riding along too, since MC requires `Random`), or a `BEST_FOUND_WITHIN_BUDGET`/`best_found_within_budget` pairing or label-word mismatch, or a missing `NUMERICAL_RESULT` label), is internally inconsistent (DECLARED method, no description), or resealed a non-canonical `invariant.tolerance`. The EXECUTED `monte_carlo` sub-cases: an executed field (`estimate`/`interval_low`/`interval_high`/`n_effective`/`successes`) present on a DECLARED block, or one of the five ABSENT on an EXECUTED block; an EXECUTED `estimator`/`interval_method` outside the v1 executable vocabulary (`proportion`; `normal-approx-95`, `wilson-95`); a `column_count` other than 3 on an EXECUTED block; an incoherent aggregate successes/trials stream (non-integer, a trials step other than +1, a successes step outside `{0, 1}`, `successes > trials`); a witnessed final `trials` that disagrees with the declared `samples` (the denominator is not witnessed); the Stage A recompute (over the sealed series) disagreeing with the sealed `estimate`/`interval_low`/`interval_high`/`n_effective`/`successes`; and the `interval_arithmetic`/`sample_denominator` `scope` pair biconditional (v0: the `not_claimed` triad); a receipt that carries the other version's list | 1 |
 | `EFFECT_POLICY_DRIFT` | the sealed effect/capability facts, or the witnessed fields derived from them, do not re-derive from the source | 1 |
 | `CAPABILITY_INADMISSIBLE` | the RE-DERIVED capabilities include `Model`: a scientific receipt cannot witness a model-mediated run (models propose, oracles dispose) | 1 |
 | `TOOL_UNAVAILABLE` | no C compiler available for the re-run | 4 |
