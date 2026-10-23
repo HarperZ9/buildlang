@@ -8473,7 +8473,7 @@ fn cmd_run(
             .unwrap_or(false);
         if problem_claims_optimal || method_claims_optimal {
             eprintln!(
-                "Error: a budgeted search reports its incumbent, never optimality; the free text may not contradict NOT_PROVES_OPTIMALITY (the check is a plain case-insensitive substring: even a word like `suboptimal` trips it, so reword the label rather than weakening the gate)"
+                "Error: a budgeted search reports the best result it found within its budget, so the problem and method text cannot contain the word `optimal` in any case, including inside a word such as `suboptimal`. Rename the label and run again."
             );
             return Err(1);
         }
@@ -8691,7 +8691,7 @@ fn cmd_run(
         .any(|cap| cap == "Model");
     if uses_model {
         eprintln!(
-            "Error: this program observes the Model capability and cannot emit a scientific receipt: models propose, oracles dispose. Run the model as a proposer and verify its output with a model-free oracled kernel."
+            "Error: this program uses the Model capability, so it cannot emit a scientific receipt. Run the model as a proposer, then check its output with a model-free oracled kernel."
         );
         return Err(1);
     }

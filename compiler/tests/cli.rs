@@ -19409,8 +19409,8 @@ fn budget_declaration_round_trips_and_pins_the_admission_contract() {
         "free text claiming optimality on a budgeted run must be refused"
     );
     assert!(
-        String::from_utf8_lossy(&claims_optimal.stderr).contains("optimality"),
-        "the refusal must name the optimality claim\nstderr:\n{}",
+        String::from_utf8_lossy(&claims_optimal.stderr).contains("cannot contain the word `optimal`"),
+        "the refusal must name the word it refuses\nstderr:\n{}",
         String::from_utf8_lossy(&claims_optimal.stderr)
     );
 
@@ -21329,8 +21329,8 @@ fn model_capability_is_fail_closed_and_inadmissible_on_the_receipt_path() {
         "--emit-receipt on a Model-observing kernel must be refused"
     );
     assert!(
-        String::from_utf8_lossy(&refused.stderr).contains("models propose, oracles dispose"),
-        "the refusal must state the propose/dispose rule\nstderr:\n{}",
+        String::from_utf8_lossy(&refused.stderr).contains("uses the Model capability"),
+        "the refusal must name the Model capability\nstderr:\n{}",
         String::from_utf8_lossy(&refused.stderr)
     );
     assert!(

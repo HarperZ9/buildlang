@@ -2631,7 +2631,7 @@ pub fn evaluate_scientific_runtime_receipt(
         .any(|cap| cap == "Model")
     {
         eprintln!(
-            "Error: the program observes the Model capability; a scientific receipt cannot witness a model-mediated run (models propose, oracles dispose)"
+            "Error: the program uses the Model capability, so a scientific receipt cannot cover this run. Check the model output with a model-free oracled kernel."
         );
         return Err(verify_failure_class(json, "CAPABILITY_INADMISSIBLE", 1));
     }
@@ -2968,7 +2968,7 @@ pub fn evaluate_scientific_runtime_receipt(
             .is_some_and(|s| s.to_lowercase().contains("optimal"));
         if problem_claims_optimal || method_claims_optimal {
             eprintln!(
-                "Error: a budgeted search reports its incumbent, never optimality; the free text may not contradict NOT_PROVES_OPTIMALITY (the check is a plain case-insensitive substring: even a word like `suboptimal` trips it, so reword the label rather than weakening the gate)"
+                "Error: a budgeted search reports the best result it found within its budget, so the problem and method text cannot contain the word `optimal` in any case, including inside a word such as `suboptimal`. Rename the label and run again."
             );
             return Err(verify_failure_class(json, "FIELD_CONTRACT_VIOLATION", 1));
         }
