@@ -3783,6 +3783,12 @@ impl<'ctx> TypeInfer<'ctx> {
                 ) => {
                     return Ty::float(FloatTy::F32);
                 }
+                ("f64", "from_bits") => {
+                    return Ty::function(vec![Ty::int(IntTy::U64)], Ty::float(FloatTy::F64));
+                }
+                ("f32", "from_bits") => {
+                    return Ty::function(vec![Ty::int(IntTy::U32)], Ty::float(FloatTy::F32));
+                }
                 ("i32", "MIN" | "MAX") => return Ty::int(IntTy::I32),
                 ("i64", "MIN" | "MAX") => return Ty::int(IntTy::I64),
                 ("u32", "MIN" | "MAX") => return Ty::int(IntTy::U32),
@@ -5741,7 +5747,13 @@ impl<'ctx> TypeInfer<'ctx> {
             "total_cmp" if is_float => {
                 return Ty::fresh_var(); // Returns Ordering
             }
-            "to_bits" if is_float => return Ty::int(IntTy::U64),
+            "to_bits" if is_float => {
+                return if matches!(receiver_ty.kind, TyKind::Float(FloatTy::F32)) {
+                    Ty::int(IntTy::U32)
+                } else {
+                    Ty::int(IntTy::U64)
+                };
+            }
             "to_int_unchecked" if is_float => return Ty::fresh_var(),
             "classify" if is_float => return Ty::fresh_var(),
 

@@ -22,6 +22,20 @@ use crate::codegen::{GeneratedCode, OutputFormat};
 
 mod header;
 
+/// Floating-point pragmas at the top of every generated C file (DETMATH): each
+/// `a * b + c` rounds twice, as written, under gcc, clang and MSVC alike, even
+/// when a host compiles the file with its own flags (`-O2 -mfma`, `-march=native`).
+pub(crate) const DETMATH_PRAGMAS: &str = "\
+#if defined(_MSC_VER) && !defined(__clang__)
+#pragma fp_contract(off)
+#pragma float_control(precise, on)
+#elif defined(__clang__)
+#pragma STDC FP_CONTRACT OFF
+#elif defined(__GNUC__)
+#pragma GCC optimize(\"fp-contract=off\")
+#endif
+";
+
 /// C backend for code generation.
 pub struct CBackend {
     /// Output buffer.
@@ -977,6 +991,10 @@ impl CBackend {
         self.output.push_str("#include <assert.h>\n");
         self.output.push_str("#include <stdarg.h>\n");
         self.output.push('\n');
+        // DETMATH: no contraction into fused multiply-add, whoever compiles
+        // this file. buildc also passes -ffp-contract=off or /fp:precise.
+        self.output.push_str(DETMATH_PRAGMAS);
+        self.output.push('\n');
 
         // FFI headers named by extern blocks' `header "..."` clauses. These let
         // BuildLang call into any C-ABI library natively: the header supplies
@@ -1928,6 +1946,7 @@ impl CBackend {
                 "fmod",
                 "fmax",
                 "fmin",
+                "fma",
                 "hypot",
                 "copysign",
                 "sinf",
@@ -5481,6 +5500,7 @@ impl CBackend {
                 | "trunc"
                 | "fmax"
                 | "fmin"
+                | "fma"
                 | "fmod"
                 | "hypot"
                 | "copysign"
@@ -7535,13 +7555,13 @@ fn main() {
             code
         );
         assert!(
-            code.contains("fmax("),
-            "Expected fmax() for .max() in:\n{}",
+            code.contains("build_max_f64("),
+            "Expected build_max_f64() (IEEE maximum) for .max() in:\n{}",
             code
         );
         assert!(
-            code.contains("fmin("),
-            "Expected fmin() for .min() in:\n{}",
+            code.contains("build_min_f64("),
+            "Expected build_min_f64() (IEEE minimum) for .min() in:\n{}",
             code
         );
         assert!(

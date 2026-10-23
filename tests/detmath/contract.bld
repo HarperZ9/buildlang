@@ -1,0 +1,12 @@
+// a * b + c must round twice, as written. The input comes from stdin so the C
+// compiler cannot fold it; with "0123456789" the line length is 10 or 11.
+fn mad(a: f64, b: f64, c: f64) -> f64 {
+    a * b + c
+}
+
+fn main() ~ Console {
+    let line = read_line();
+    let n = line.len() as f64;
+    let x = mad(0.1, n, -1.0);
+    println!("{:016x}", x.to_bits());
+}
