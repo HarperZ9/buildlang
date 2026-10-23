@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let b: Box<i64> = 5;
+    println!("{}", b);
+}

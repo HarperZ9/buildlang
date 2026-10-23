@@ -1,0 +1,8 @@
+enum T {
+    Leaf,
+    Node(T),
+}
+fn main() ~ Console {
+    let t = T::Node(T::Leaf);
+    println!("x");
+}

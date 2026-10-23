@@ -1,3 +1,11 @@
+> **Reopened 2026-10-23.** The author, verbatim: "BuildLang can be a direct competitor to Bend as
+> a next generation AI and agent first creative language - it is built for AI in the loop
+> programming, and since AI is taking over software design entirely; we should focus on building
+> BuildLang to fill that niche and become a monolithic power language." Then: "Lets work on the game
+> and engine first, and BuildLang perhaps in parallel." The remaining freeze on parallel and GPU
+> backend work is lifted for the milestones in `docs/STRATEGY-2026-10.md`. Maturity labels stay as
+> they are until each milestone's check passes.
+
 > **Superseded 2026-06-29** by `docs/UNIVERSAL_SUBSTRATE_DIRECTIVE_2026-06-29.md`.
 > The wind-down is lifted for the MIR-interlingua, effects/data substrate, C-path
 > hardening, and self-hosting lanes, and kept in force only for full native/GPU
