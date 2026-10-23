@@ -4374,6 +4374,40 @@ impl<'ctx> MirLowerer<'ctx> {
                 _ => None,
             };
 
+            // JS-compatible conversions and division rules (M4, the Low Water
+            // trace format): `to_int32`/`to_uint32` are ECMAScript ToInt32 and
+            // ToUint32 (truncate, wrap modulo 2^32, NaN and infinities give 0);
+            // `fmod_or_zero`/`div_or_zero` give 0 for a zero divisor.
+            let js_rule: Option<(&str, MirType, usize)> = match method_name {
+                "to_int32" => Some(("build_f64_to_int32", MirType::i32(), 0)),
+                "to_uint32" => Some(("build_f64_to_uint32", MirType::u32(), 0)),
+                "fmod_or_zero" => Some(("build_f64_fmod_or_zero", MirType::f64(), 1)),
+                "div_or_zero" => Some(("build_f64_div_or_zero", MirType::f64(), 1)),
+                _ => None,
+            };
+            if let Some((helper, ty, arity)) = js_rule {
+                if args.len() == arity {
+                    let mut call_args = vec![receiver_val];
+                    for arg in args {
+                        call_args.push(self.lower_expr(arg)?);
+                    }
+                    let builder = self
+                        .current_fn
+                        .as_mut()
+                        .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                    let result = builder.create_local(ty);
+                    let cont = builder.create_block();
+                    builder.call(
+                        MirValue::Function(Arc::from(helper)),
+                        call_args,
+                        Some(result),
+                        cont,
+                    );
+                    builder.switch_to_block(cont);
+                    return Ok(values::local(result));
+                }
+            }
+
             // to_bits: the IEEE 754 bit pattern as an unsigned integer.
             if method_name == "to_bits" && args.is_empty() {
                 let (helper, ty) = match &receiver_ty {

@@ -1313,6 +1313,23 @@ static float build_max_f32(float a, float b) {
     if (a == b) return signbit(a) ? b : a;
     return a > b ? a : b;
 }
+// ECMAScript ToUint32 / ToInt32: truncate toward zero, wrap modulo 2^32;
+// NaN and the infinities give 0. Exact: fmod and trunc do not round.
+static uint32_t build_f64_to_uint32(double v) {
+    if (v != v || v - v != 0.0) return 0;
+    double m = fmod(trunc(v), 4294967296.0);
+    if (m < 0) m += 4294967296.0;
+    return (uint32_t)m;
+}
+static int32_t build_f64_to_int32(double v) {
+    uint32_t u = build_f64_to_uint32(v);
+    int32_t i;
+    memcpy(&i, &u, sizeof i);
+    return i;
+}
+// The trace format's rules: a zero divisor gives 0 instead of NaN or infinity.
+static double build_f64_fmod_or_zero(double a, double b) { return b == 0.0 ? 0.0 : fmod(a, b); }
+static double build_f64_div_or_zero(double a, double b) { return b == 0.0 ? 0.0 : a / b; }
 // Bit casts: f64::to_bits / f64::from_bits (and f32), by memcpy.
 static uint64_t build_f64_to_bits(double v) { uint64_t b; memcpy(&b, &v, sizeof b); return b; }
 static double build_f64_from_bits(uint64_t b) { double v; memcpy(&v, &b, sizeof v); return v; }
