@@ -10,6 +10,21 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- **Licence change to AGPL-3.0-only (2026-10-23).** On the author's decision
+  of that date, the compiler, toolchain, editor extension and their
+  documentation move from the BuildLang Fair-Source License v1.0 to the GNU
+  Affero General Public License, version 3 only. The legacy `buildlang/`
+  tree, which carried MIT OR Apache-2.0, moves to AGPL-3.0-only too. Every
+  commit in the history is the author's own. Version 1.8.0 and every earlier
+  release, on crates.io and as GitHub tags, keep the licence they were
+  published under; AGPL-3.0-only applies from the next release. Output that
+  `buildc` generates stays yours, now stated as an additional permission
+  under section 7. The paper stays CC BY 4.0. Changed: `LICENSE` and its
+  copies, the SPDX headers in 112 source files, `license` in
+  `compiler/Cargo.toml` and both `package.json` files, `NOTICE`,
+  `LICENSE-TEXT`, the READMEs, the website, the explainer and the blog
+  footers.
+
 - **JS integer and division rules (M4).** `x.to_int32()` and `x.to_uint32()`
   are ECMAScript ToInt32 and ToUint32; `x.fmod_or_zero(y)` and
   `x.div_or_zero(y)` give 0 for a zero divisor, as the Low Water trace format

@@ -132,6 +132,6 @@ We can't wait to see what you build with BuildLang!
 
 **Historical planned download**: https://releases.buildlang.org/v1.0.0/
 **Documentation**: https://docs.buildlang.org
-**License**: MIT OR Apache-2.0
+**License**: AGPL-3.0-only (earlier releases: MIT OR Apache-2.0)
 
 #BuildLang #ProgrammingLanguage #SystemsProgramming #OpenSource

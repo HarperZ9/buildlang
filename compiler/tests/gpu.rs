@@ -1,7 +1,8 @@
 // ===============================================================================
 // BUILDLANG GPU PATH - INTEGRATION TESTS
 // ===============================================================================
-// Copyright (c) 2026 Zain Dana Harper. BuildLang Fair-Source License v1.0.
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 Zain Dana Harper.
 // ===============================================================================
 //
 //! End-to-end tests for the real GPU path (`buildc ... --target spirv` compute

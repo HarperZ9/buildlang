@@ -1,7 +1,8 @@
 // ===============================================================================
 // BUILDLANG DIAGNOSTICS - SHARED CHECK
 // ===============================================================================
-// Copyright (c) 2022-2026 Zain Dana Harper. BuildLang Fair-Source License v1.0 (see LICENSE).
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2022-2026 Zain Dana Harper.
 // ===============================================================================
 
 //! One check pipeline for a single source buffer: lex, parse, type-check, then

@@ -3,7 +3,9 @@ NOTICE - Third-Party Attributions
 
 BuildLang (formerly QuantaLang)
 Copyright (c) 2024-2026 Zain Dana Harper.
-Licensed under the BuildLang Fair-Source License v1.0 (see LICENSE).
+Licensed under the GNU Affero General Public License, version 3 only
+(AGPL-3.0-only); see LICENSE. Releases up to and including 1.8.0 were
+published under the BuildLang Fair-Source License v1.0 and keep it.
 
 This product includes original software whose API design was informed by, but
 which does not copy the source of, the following project:

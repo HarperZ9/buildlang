@@ -24,7 +24,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/version-1.0.0-blue" alt="Version"/>
-  <img src="https://img.shields.io/badge/license-MIT-green" alt="License"/>
+  <img src="https://img.shields.io/badge/license-AGPL--3.0--only-blue" alt="License"/>
   <img src="https://img.shields.io/badge/tests-passing-brightgreen" alt="Tests"/>
   <img src="https://img.shields.io/badge/docs-complete-blue" alt="Docs"/>
 </p>
@@ -352,7 +352,7 @@ cd buildlang
 
 ## License
 
-BuildLang is dual-licensed under MIT and Apache 2.0. See [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
+BuildLang is licensed under the GNU Affero General Public License, version 3 only (AGPL-3.0-only). See [LICENSE](LICENSE). Earlier releases published under MIT or Apache-2.0 keep those licences.
 
 ## Acknowledgments
 

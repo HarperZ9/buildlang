@@ -2,7 +2,8 @@
 // BUILDLANG TOOL-CALL RECEIPT - offline verify arm for a Flywheel-harness-emitted
 // provenance artifact over an agent tool-call boundary
 // ===============================================================================
-// Copyright (c) 2026 Zain Dana Harper. BuildLang Fair-Source License v1.0.
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 Zain Dana Harper.
 // ===============================================================================
 //
 //! `flywheel.tool-call-receipt/v1`: a receipt about a tool invocation the

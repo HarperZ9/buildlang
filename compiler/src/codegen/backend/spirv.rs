@@ -1,7 +1,8 @@
 // ===============================================================================
 // BUILDLANG CODE GENERATOR - SPIR-V BACKEND
 // ===============================================================================
-// Copyright (c) 2022-2026 Zain Dana Harper. BuildLang Fair-Source License v1.0 (see LICENSE).
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2022-2026 Zain Dana Harper.
 // ===============================================================================
 
 //! SPIR-V code generation backend for GPU compute shaders.

@@ -9,7 +9,7 @@
 
 [Build ecosystem](https://github.com/HarperZ9/build-universe) | [buildlang](https://github.com/HarperZ9/buildlang) | [build-universe](https://github.com/HarperZ9/build-universe) | [VS Code extension](https://github.com/HarperZ9/buildlang-vscode) | [grammar](https://github.com/HarperZ9/buildlang-tmLanguage)
 
-[![license: fair-source](https://img.shields.io/badge/license-fair--source-blue.svg)](LICENSE)
+[![license: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-blue.svg)](LICENSE)
 ![rust](https://img.shields.io/badge/rust-edition_2021-orange.svg)
 [![crates.io](https://img.shields.io/badge/crates.io-buildlang-blue.svg)](https://crates.io/crates/buildlang)
 ![version](https://img.shields.io/badge/version-1.1.x-informational.svg)
@@ -782,7 +782,8 @@ See [DESIGN.md](DESIGN.md) for full architectural documentation including:
 
 ## License
 
-BuildLang Fair-Source License v1.0 — source-available, **not** open source: the
-source is published so you can read it, run it, and build on it, while commercial
-use that competes with the project is reserved. See [LICENSE](LICENSE) for the
-full terms.
+GNU Affero General Public License, version 3 only (AGPL-3.0-only). You may use,
+study, change and share the compiler. If you run a changed version as a network
+service, you must offer its users the source of that version. See
+[LICENSE](LICENSE) for the full terms. Releases up to and including 1.8.0 were
+published under the BuildLang Fair-Source License v1.0 and keep it.

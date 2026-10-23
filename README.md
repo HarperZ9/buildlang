@@ -13,7 +13,7 @@ cargo install buildlang
 
 [![version: 1.8.0](https://img.shields.io/badge/version-1.8.0-e6e1d6?style=flat-square&labelColor=1a1712)](https://github.com/HarperZ9/buildlang/releases/latest)
 [![CI](https://github.com/HarperZ9/buildlang/actions/workflows/ci.yml/badge.svg)](https://github.com/HarperZ9/buildlang/actions/workflows/ci.yml)
-[![license](https://img.shields.io/badge/license-BuildLang_Fair--Source-e6e1d6?style=flat-square&labelColor=1a1712)](https://github.com/HarperZ9/buildlang/blob/main/LICENSE)
+[![license](https://img.shields.io/badge/license-AGPL--3.0--only-e6e1d6?style=flat-square&labelColor=1a1712)](https://github.com/HarperZ9/buildlang/blob/main/LICENSE)
 ![rust edition 2021](https://img.shields.io/badge/rust-edition_2021-e6e1d6?style=flat-square&labelColor=1a1712)
 
 BuildLang compiles `.bld` source to native binaries through a C backend, emits
@@ -362,21 +362,26 @@ re-run beats assertions you have to trust.
 
 ## License
 
-Text: CC BY 4.0. Code: BuildLang Fair-Source v1.0.
+Text: CC BY 4.0. Code: AGPL-3.0-only.
 
 The paper in [`papers/`](papers/) is licensed CC BY 4.0, the same licence its
 Zenodo deposit records. Share and adapt it with credit to Zain Dana Harper; the
 terms are in [`LICENSE-TEXT`](LICENSE-TEXT).
 
-The compiler, toolchain and their documentation are under the BuildLang
-Fair-Source License v1.0, source-available, not open source: read it, run it,
-build on it; commercial use that competes with the project is reserved. See
-[LICENSE](LICENSE).
+The compiler, toolchain and their documentation are under the GNU Affero General
+Public License, version 3 only (AGPL-3.0-only). You may use, study, change and
+share them. If you run a changed version as a network service, you must offer its
+users the source of that version. See [LICENSE](LICENSE).
+
+Releases up to and including 1.8.0 were published under the BuildLang Fair-Source
+License v1.0 and keep it. AGPL-3.0-only applies from the next release.
 
 ### Generated output
 
 The code BuildLang generates from your source may be shipped inside your programs and games,
 under terms of your choosing. This covers the generated C, the C header built into it, and
-the other code `buildc` generates, such as HLSL and GLSL. The Fair-Source License covers the
-compiler and toolchain; it does not restrict what you ship that they generated. This
-statement sits beside [LICENSE](LICENSE) and does not change its text.
+the other code `buildc` generates, such as HLSL and GLSL. AGPL-3.0-only covers the compiler
+and toolchain. As an additional permission under section 7 of that licence, its terms do not
+extend to output that `buildc` generates, including the parts of the compiler's runtime and
+header it copies into that output. This statement sits beside [LICENSE](LICENSE) and does not
+change its text.

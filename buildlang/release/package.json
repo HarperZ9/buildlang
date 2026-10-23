@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "description": "Historical aspirational BuildLang v1.0.0 package manifest; not a current published release artifact",
-  "license": "MIT OR Apache-2.0",
+  "license": "AGPL-3.0-only",
   "repository": {
     "type": "git",
     "url": "https://github.com/HarperZ9/buildlang"
