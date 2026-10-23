@@ -1,0 +1,84 @@
+// Reads JSON into typed structs with the checked field accessors. A missing
+// key and a wrong kind come back as an Err that names the key.
+mod json;
+
+struct Hit {
+    frame: i64,
+    damage: f64,
+}
+
+struct Move {
+    id: str,
+    startup: i64,
+    reach: f64,
+    heavy: bool,
+    hits: Vec<Hit>,
+}
+
+fn read_hit(j: Json) -> Result<Hit, str> {
+    Ok(Hit { frame: field_i64(j, "frame")?, damage: field_f64(j, "damage")? })
+}
+
+fn read_move(j: Json) -> Result<Move, str> {
+    let mut hits: Vec<Hit> = Vec::new();
+    let items = field_items(j, "hits")?;
+    let mut i: usize = 0;
+    while i < items.len() {
+        hits.push(read_hit(items[i])?);
+        i = i + 1;
+    }
+    Ok(Move {
+        id: field_str(j, "id")?,
+        startup: field_i64(j, "startup")?,
+        reach: field_f64_or(j, "reach", 1.5)?,
+        heavy: field_bool(j, "heavy")?,
+        hits: hits,
+    })
+}
+
+fn read_moves(text: str) -> Result<Vec<Move>, str> {
+    let root = json_parse(text)?;
+    let items = field_items(root, "moves")?;
+    let mut out: Vec<Move> = Vec::new();
+    let mut i: usize = 0;
+    while i < items.len() {
+        out.push(read_move(items[i])?);
+        i = i + 1;
+    }
+    Ok(out)
+}
+
+fn report(text: str) ~ Console {
+    match read_moves(text) {
+        Ok(moves) => {
+            let mut i: usize = 0;
+            while i < moves.len() {
+                let m = &moves[i];
+                let total = total_damage(m);
+                println!("{} startup {} reach {} heavy {} hits {} damage {}", m.id, m.startup, m.reach, m.heavy, m.hits.len(), total);
+                i = i + 1;
+            }
+        },
+        Err(e) => println!("{}", e),
+    }
+}
+
+fn total_damage(m: &Move) -> f64 {
+    let mut t = 0.0;
+    let mut i: usize = 0;
+    while i < m.hits.len() {
+        t = t + m.hits[i].damage;
+        i = i + 1;
+    }
+    t
+}
+
+fn main() ~ Console {
+    report("{\"moves\": [{\"id\": \"jab\", \"startup\": 4, \"heavy\": false, \"hits\": [{\"frame\": 4, \"damage\": 3.5}]}, {\"id\": \"smash\", \"startup\": 18, \"reach\": 2.25, \"heavy\": true, \"hits\": [{\"frame\": 18, \"damage\": 12}, {\"frame\": 22, \"damage\": 0.5}]}]}");
+    report("{\"moves\": [{\"id\": \"jab\", \"heavy\": false, \"hits\": []}]}");
+    report("{\"moves\": [{\"id\": \"jab\", \"startup\": \"4\", \"heavy\": false, \"hits\": []}]}");
+    report("{\"moves\": [{\"id\": \"jab\", \"startup\": 4.5, \"heavy\": false, \"hits\": []}]}");
+    report("{\"moves\": [{\"id\": \"jab\", \"startup\": 4, \"heavy\": false, \"hits\": [{\"frame\": 1}]}]}");
+    report("{\"moves\": 3}");
+    report("[1, 2");
+}

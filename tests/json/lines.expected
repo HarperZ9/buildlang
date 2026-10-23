@@ -1,0 +1,5 @@
+{"t":"cbegin","s":"h","v":1,"seed":7,"arena":"yard \"east\"","fighters":[{"face":0,"id":1,"kind":"lamb","team":0,"x":0.5,"z":-2},{"face":3.141592653589793,"id":2,"kind":"hound","team":1,"x":3.25,"z":1e-7}]}
+{"t":"cin","s":"h","tick":12,"lamb":{"hold":"guard","mx":0,"mz":0.30000000000000004,"press":"heavy"}}
+{"t":"cev","s":"h","tick":13,"n":"hit","d":{"at":[1e+21,-1.5e-7,null],"by":1,"dmg":12.5,"to":2}}
+{"t":"cstate","s":"h","tick":60,"hash":3855992735,"f":[[1,0.5,-2,100,0],[2,3.25,1e-7,87.5,null]]}
+{"t":"cend","s":"h","tick":900,"outcome":"win","reason":"line\nbreak\ttab\\slash","hash":123456789}

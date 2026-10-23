@@ -1,0 +1,592 @@
+// BuildLang Standard Library - JSON
+// A reader into a Json tree with checked accessors (a missing key or a wrong
+// kind is an Err that names the key), and a writer whose output is
+// byte-stable: keys in the order given, or sorted, no spaces, numbers as JS
+// JSON.stringify writes them (`x.to_json()`). Use it with `mod json;`.
+
+enum Json {
+    Null,
+    Bool(bool),
+    Num(f64),
+    Str(str),
+    Arr(Vec<Json>),
+    Obj(Vec<str>, Vec<Json>),
+}
+
+// ---------------------------------------------------------------- reading
+
+// The bytes [a, b) of s. `substring` takes a start and a length.
+fn json_slice(s: str, a: i64, b: i64) -> str {
+    s.substring(a as usize, (b - a) as usize)
+}
+
+fn json_err(msg: str, pos: i64) -> str {
+    format!("json: {} at byte {}", msg, pos)
+}
+
+fn json_skip_ws(s: str, pos: i64) -> i64 {
+    let b = s.as_bytes();
+    let n = s.len() as i64;
+    let mut p = pos;
+    while p < n {
+        let c = b[p as usize];
+        if c == 32 || c == 10 || c == 13 || c == 9 {
+            p = p + 1;
+        } else {
+            return p;
+        }
+    }
+    p
+}
+
+fn json_is_digit(c: u8) -> bool {
+    c >= 48 && c <= 57
+}
+
+fn json_scan_digits(s: str, pos: i64) -> i64 {
+    let b = s.as_bytes();
+    let n = s.len() as i64;
+    let mut p = pos;
+    while p < n && json_is_digit(b[p as usize]) {
+        p = p + 1;
+    }
+    p
+}
+
+// A number by the JSON grammar: -?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?
+fn json_parse_number(s: str, pos: i64) -> Result<(Json, i64), str> {
+    let b = s.as_bytes();
+    let n = s.len() as i64;
+    let mut p = pos;
+    if p < n && b[p as usize] == 45 {
+        p = p + 1;
+    }
+    let int_end = json_scan_digits(s, p);
+    if int_end == p {
+        return Err(json_err("expected a value", p));
+    }
+    if b[p as usize] == 48 && int_end > p + 1 {
+        return Err(json_err("leading zero in a number", p));
+    }
+    p = int_end;
+    if p < n && b[p as usize] == 46 {
+        let frac_end = json_scan_digits(s, p + 1);
+        if frac_end == p + 1 {
+            return Err(json_err("expected a digit after '.'", p + 1));
+        }
+        p = frac_end;
+    }
+    if p < n && (b[p as usize] == 101 || b[p as usize] == 69) {
+        p = p + 1;
+        if p < n && (b[p as usize] == 43 || b[p as usize] == 45) {
+            p = p + 1;
+        }
+        let exp_end = json_scan_digits(s, p);
+        if exp_end == p {
+            return Err(json_err("expected a digit in the exponent", p));
+        }
+        p = exp_end;
+    }
+    let text = json_slice(s, pos, p);
+    Ok((Json::Num(text.parse_float()), p))
+}
+
+fn json_hex4(s: str, pos: i64) -> Result<u32, str> {
+    let b = s.as_bytes();
+    if pos + 4 > (s.len() as i64) {
+        return Err(json_err("short unicode escape", pos));
+    }
+    let mut v: u32 = 0;
+    let mut i: i64 = 0;
+    while i < 4 {
+        let c = b[(pos + i) as usize] as u32;
+        let mut d: u32 = 16;
+        if c >= 48 && c <= 57 {
+            d = c - 48;
+        }
+        if c >= 97 && c <= 102 {
+            d = c - 87;
+        }
+        if c >= 65 && c <= 70 {
+            d = c - 55;
+        }
+        if d == 16 {
+            return Err(json_err("bad hex digit in a unicode escape", pos + i));
+        }
+        v = v * 16 + d;
+        i = i + 1;
+    }
+    Ok(v)
+}
+
+fn json_code_point_text(cp: u32) -> str {
+    let c = cp as char;
+    format!("{}", c)
+}
+
+// A string starting at its opening quote. Returns the text and the position
+// after the closing quote.
+fn json_parse_string(s: str, pos: i64) -> Result<(str, i64), str> {
+    let b = s.as_bytes();
+    let n = s.len() as i64;
+    let mut out = "";
+    let mut p = pos + 1;
+    let mut run = p;
+    while p < n {
+        let c = b[p as usize];
+        if c == 34 {
+            out = out + json_slice(s, run, p);
+            return Ok((out, p + 1));
+        }
+        if c < 32 {
+            return Err(json_err("control character in a string", p));
+        }
+        if c == 92 {
+            out = out + json_slice(s, run, p);
+            if p + 1 >= n {
+                return Err(json_err("unfinished escape", p));
+            }
+            let e = b[(p + 1) as usize];
+            p = p + 2;
+            if e == 34 {
+                out = out + "\"";
+            } else if e == 92 {
+                out = out + "\\";
+            } else if e == 47 {
+                out = out + "/";
+            } else if e == 98 {
+                out = out + json_code_point_text(8);
+            } else if e == 102 {
+                out = out + json_code_point_text(12);
+            } else if e == 110 {
+                out = out + "\n";
+            } else if e == 114 {
+                out = out + "\r";
+            } else if e == 116 {
+                out = out + "\t";
+            } else if e == 117 {
+                let mut cp = json_hex4(s, p)?;
+                p = p + 4;
+                let high = cp >= 55296 && cp <= 56319;
+                if high && p + 6 <= n && b[p as usize] == 92 && b[(p + 1) as usize] == 117 {
+                    let lo = json_hex4(s, p + 2)?;
+                    if lo >= 56320 && lo <= 57343 {
+                        cp = 65536 + (cp - 55296) * 1024 + (lo - 56320);
+                        p = p + 6;
+                    }
+                }
+                out = out + json_code_point_text(cp);
+            } else {
+                return Err(json_err("unknown escape", p - 1));
+            }
+            run = p;
+        } else {
+            p = p + 1;
+        }
+    }
+    Err(json_err("unterminated string", pos))
+}
+
+fn json_at_word(s: str, pos: i64, word: str) -> bool {
+    let end = pos + (word.len() as i64);
+    end <= (s.len() as i64) && json_slice(s, pos, end) == word
+}
+
+fn json_parse_value(s: str, pos: i64) -> Result<(Json, i64), str> {
+    let n = s.len() as i64;
+    let p = json_skip_ws(s, pos);
+    if p >= n {
+        return Err(json_err("unexpected end of input", p));
+    }
+    let b = s.as_bytes();
+    let c = b[p as usize];
+    if c == 123 {
+        let mut keys: Vec<str> = Vec::new();
+        let mut vals: Vec<Json> = Vec::new();
+        let mut q = json_skip_ws(s, p + 1);
+        if q < n && b[q as usize] == 125 {
+            return Ok((Json::Obj(keys, vals), q + 1));
+        }
+        loop {
+            if q >= n || b[q as usize] != 34 {
+                return Err(json_err("expected a key", q));
+            }
+            let k = json_parse_string(s, q)?;
+            q = json_skip_ws(s, k.1);
+            if q >= n || b[q as usize] != 58 {
+                return Err(json_err("expected ':'", q));
+            }
+            let v = json_parse_value(s, q + 1)?;
+            // A repeated key keeps its first position and its last value, as
+            // JSON.parse does.
+            let mut found: i64 = -1;
+            let mut d: usize = 0;
+            while d < keys.len() {
+                if keys[d] == k.0 {
+                    found = d as i64;
+                }
+                d = d + 1;
+            }
+            if found >= 0 {
+                vals[found as usize] = v.0;
+            } else {
+                keys.push(k.0);
+                vals.push(v.0);
+            }
+            q = json_skip_ws(s, v.1);
+            if q < n && b[q as usize] == 44 {
+                q = json_skip_ws(s, q + 1);
+            } else if q < n && b[q as usize] == 125 {
+                return Ok((Json::Obj(keys, vals), q + 1));
+            } else {
+                return Err(json_err("expected ',' or '}'", q));
+            }
+        }
+    }
+    if c == 91 {
+        let mut items: Vec<Json> = Vec::new();
+        let mut q = json_skip_ws(s, p + 1);
+        if q < n && b[q as usize] == 93 {
+            return Ok((Json::Arr(items), q + 1));
+        }
+        loop {
+            let v = json_parse_value(s, q)?;
+            items.push(v.0);
+            q = json_skip_ws(s, v.1);
+            if q < n && b[q as usize] == 44 {
+                q = q + 1;
+            } else if q < n && b[q as usize] == 93 {
+                return Ok((Json::Arr(items), q + 1));
+            } else {
+                return Err(json_err("expected ',' or ']'", q));
+            }
+        }
+    }
+    if c == 34 {
+        let t = json_parse_string(s, p)?;
+        return Ok((Json::Str(t.0), t.1));
+    }
+    if json_at_word(s, p, "true") {
+        return Ok((Json::Bool(true), p + 4));
+    }
+    if json_at_word(s, p, "false") {
+        return Ok((Json::Bool(false), p + 5));
+    }
+    if json_at_word(s, p, "null") {
+        return Ok((Json::Null, p + 4));
+    }
+    json_parse_number(s, p)
+}
+
+/// Parse a whole JSON document. Text after the value is an error.
+fn json_parse(text: str) -> Result<Json, str> {
+    let r = json_parse_value(text, 0)?;
+    let end = json_skip_ws(text, r.1);
+    if end != (text.len() as i64) {
+        return Err(json_err("trailing text after the value", end));
+    }
+    Ok(r.0)
+}
+
+fn json_kind(j: Json) -> str {
+    match j {
+        Json::Null => "null",
+        Json::Bool(_) => "a boolean",
+        Json::Num(_) => "a number",
+        Json::Str(_) => "a string",
+        Json::Arr(_) => "an array",
+        Json::Obj(_, _) => "an object",
+    }
+}
+
+/// True when `j` is an object with `key`.
+fn json_has(j: Json, key: str) -> bool {
+    match j {
+        Json::Obj(keys, _) => {
+            let mut i: usize = 0;
+            while i < keys.len() {
+                if keys[i] == key {
+                    return true;
+                }
+                i = i + 1;
+            }
+            false
+        },
+        _ => false,
+    }
+}
+
+/// The value at `key`. A missing key is an Err that names it.
+fn json_get(j: Json, key: str) -> Result<Json, str> {
+    match j {
+        Json::Obj(keys, vals) => {
+            let mut i: usize = 0;
+            while i < keys.len() {
+                if keys[i] == key {
+                    return Ok(vals[i]);
+                }
+                i = i + 1;
+            }
+            Err(format!("json: missing key `{}`", key))
+        },
+        other => {
+            let kind = json_kind(other);
+            Err(format!("json: looked up `{}` in {}", key, kind))
+        },
+    }
+}
+
+fn json_f64(j: Json) -> Result<f64, str> {
+    match j {
+        Json::Num(x) => Ok(x),
+        other => {
+            let kind = json_kind(other);
+            Err(format!("json: expected a number, found {}", kind))
+        },
+    }
+}
+
+fn json_i64(j: Json) -> Result<i64, str> {
+    match j {
+        Json::Num(x) => {
+            let i = x as i64;
+            if (i as f64) == x {
+                Ok(i)
+            } else {
+                Err(format!("json: expected an integer, found {}", x))
+            }
+        },
+        other => {
+            let kind = json_kind(other);
+            Err(format!("json: expected an integer, found {}", kind))
+        },
+    }
+}
+
+fn json_bool(j: Json) -> Result<bool, str> {
+    match j {
+        Json::Bool(v) => Ok(v),
+        other => {
+            let kind = json_kind(other);
+            Err(format!("json: expected a boolean, found {}", kind))
+        },
+    }
+}
+
+fn json_str(j: Json) -> Result<str, str> {
+    match j {
+        Json::Str(v) => Ok(v),
+        other => {
+            let kind = json_kind(other);
+            Err(format!("json: expected a string, found {}", kind))
+        },
+    }
+}
+
+fn json_items(j: Json) -> Result<Vec<Json>, str> {
+    match j {
+        Json::Arr(items) => Ok(items),
+        other => {
+            let kind = json_kind(other);
+            Err(format!("json: expected an array, found {}", kind))
+        },
+    }
+}
+
+fn json_keys(j: Json) -> Result<Vec<str>, str> {
+    match j {
+        Json::Obj(keys, _) => Ok(keys),
+        other => {
+            let kind = json_kind(other);
+            Err(format!("json: expected an object, found {}", kind))
+        },
+    }
+}
+
+/// Typed fields: `field_f64(j, "reach")?` reads a required key and checks its kind.
+fn field_f64(j: Json, key: str) -> Result<f64, str> {
+    match json_f64(json_get(j, key)?) {
+        Ok(v) => Ok(v),
+        Err(e) => Err(format!("{} (key `{}`)", e, key)),
+    }
+}
+
+fn field_i64(j: Json, key: str) -> Result<i64, str> {
+    match json_i64(json_get(j, key)?) {
+        Ok(v) => Ok(v),
+        Err(e) => Err(format!("{} (key `{}`)", e, key)),
+    }
+}
+
+fn field_bool(j: Json, key: str) -> Result<bool, str> {
+    match json_bool(json_get(j, key)?) {
+        Ok(v) => Ok(v),
+        Err(e) => Err(format!("{} (key `{}`)", e, key)),
+    }
+}
+
+fn field_str(j: Json, key: str) -> Result<str, str> {
+    match json_str(json_get(j, key)?) {
+        Ok(v) => Ok(v),
+        Err(e) => Err(format!("{} (key `{}`)", e, key)),
+    }
+}
+
+fn field_items(j: Json, key: str) -> Result<Vec<Json>, str> {
+    match json_items(json_get(j, key)?) {
+        Ok(v) => Ok(v),
+        Err(e) => Err(format!("{} (key `{}`)", e, key)),
+    }
+}
+
+/// An optional number: `default` when the key is absent, an Err when it holds another kind.
+fn field_f64_or(j: Json, key: str, default: f64) -> Result<f64, str> {
+    if json_has(j, key) {
+        field_f64(j, key)
+    } else {
+        Ok(default)
+    }
+}
+
+// ---------------------------------------------------------------- writing
+
+fn json_hex_digit(d: u32) -> str {
+    let digits = "0123456789abcdef";
+    digits.substring(d as usize, 1)
+}
+
+/// A string as JSON.stringify writes it: quotes, `\"`, `\\`, `\b \f \n \r \t`,
+/// other control characters as `\u00XX`, everything else as is.
+fn json_quote(s: str) -> str {
+    let b = s.as_bytes();
+    let n = s.len();
+    let mut out = "\"";
+    let mut run: usize = 0;
+    let mut i: usize = 0;
+    while i < n {
+        let c = b[i] as u32;
+        if c == 34 || c == 92 || c < 32 {
+            out = out + json_slice(s, run as i64, i as i64);
+            if c == 34 {
+                out = out + "\\\"";
+            } else if c == 92 {
+                out = out + "\\\\";
+            } else if c == 8 {
+                out = out + "\\b";
+            } else if c == 12 {
+                out = out + "\\f";
+            } else if c == 10 {
+                out = out + "\\n";
+            } else if c == 13 {
+                out = out + "\\r";
+            } else if c == 9 {
+                out = out + "\\t";
+            } else {
+                out = out + "\\u00" + json_hex_digit(c / 16) + json_hex_digit(c % 16);
+            }
+            run = i + 1;
+        }
+        i = i + 1;
+    }
+    out + json_slice(s, run as i64, n as i64) + "\""
+}
+
+/// An object from keys and already-written values, in the order given.
+fn json_obj(keys: Vec<str>, vals: Vec<str>) -> str {
+    let mut out = "{";
+    let mut i: usize = 0;
+    while i < keys.len() {
+        if i > 0 {
+            out = out + ",";
+        }
+        out = out + json_quote(keys[i]) + ":" + vals[i];
+        i = i + 1;
+    }
+    out + "}"
+}
+
+/// The same object with its keys in byte order (a stable insertion sort).
+fn json_obj_sorted(keys: Vec<str>, vals: Vec<str>) -> str {
+    let mut order: Vec<i64> = Vec::new();
+    let mut i: usize = 0;
+    while i < keys.len() {
+        order.push(i as i64);
+        let mut j = order.len() - 1;
+        while j > 0 && keys[i] < keys[order[j - 1] as usize] {
+            order[j] = order[j - 1];
+            j = j - 1;
+        }
+        order[j] = i as i64;
+        i = i + 1;
+    }
+    let mut ks: Vec<str> = Vec::new();
+    let mut vs: Vec<str> = Vec::new();
+    let mut k: usize = 0;
+    while k < order.len() {
+        ks.push(keys[order[k] as usize]);
+        vs.push(vals[order[k] as usize]);
+        k = k + 1;
+    }
+    json_obj(ks, vs)
+}
+
+/// An array from already-written values.
+fn json_arr(vals: Vec<str>) -> str {
+    let mut out = "[";
+    let mut i: usize = 0;
+    while i < vals.len() {
+        if i > 0 {
+            out = out + ",";
+        }
+        out = out + vals[i];
+        i = i + 1;
+    }
+    out + "]"
+}
+
+fn json_write_value(j: Json, sorted: bool) -> str {
+    match j {
+        Json::Null => "null",
+        Json::Bool(v) => {
+            if v {
+                "true"
+            } else {
+                "false"
+            }
+        },
+        Json::Num(x) => x.to_json(),
+        Json::Str(t) => json_quote(t),
+        Json::Arr(items) => {
+            let mut vals: Vec<str> = Vec::new();
+            let mut i: usize = 0;
+            while i < items.len() {
+                vals.push(json_write_value(items[i], sorted));
+                i = i + 1;
+            }
+            json_arr(vals)
+        },
+        Json::Obj(keys, items) => {
+            let mut vals: Vec<str> = Vec::new();
+            let mut i: usize = 0;
+            while i < items.len() {
+                vals.push(json_write_value(items[i], sorted));
+                i = i + 1;
+            }
+            if sorted {
+                json_obj_sorted(keys, vals)
+            } else {
+                json_obj(keys, vals)
+            }
+        },
+    }
+}
+
+/// Compact JSON text with keys in document order.
+fn json_stringify(j: Json) -> str {
+    json_write_value(j, false)
+}
+
+/// Compact JSON text with every object's keys sorted.
+fn json_stringify_sorted(j: Json) -> str {
+    json_write_value(j, true)
+}

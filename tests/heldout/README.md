@@ -17,3 +17,4 @@ compares its standard output with the `.expected` file beside it, and
 | char_leak.bld | #81 |
 | generic_twice.bld | #82 |
 | box_scalar.bld, box_list.bld, box_bst.bld | #83 |
+| unsafe_block_runs.bld, deref_field_store.bld | M4 (found while building the C ABI export) |
