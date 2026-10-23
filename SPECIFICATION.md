@@ -403,6 +403,8 @@ separate API surface defines them.
 - `x.to_bits()` gives the bit pattern as `u64` (`u32` for `f32`) and `f64::from_bits(u)` builds a value from one.
 - `%` on floats is C `fmod`: the result has the dividend's sign, and a zero divisor gives NaN.
 
+Text. `{}` in a format string writes a float the way Rust's `Display` does: the shortest digits that read back to the same value, always in positional notation (`1e21` prints as `1000000000000000000000`). `x.to_json()` writes the text JavaScript's `JSON.stringify` writes: the same shortest digits, exponent form below `1e-6` and from `1e21` (`1.5e-7`, `1e+21`), `-0.0` as `0`, and NaN or an infinity as `null`. On an integer, `to_json()` gives its decimal form. Traces that another implementation compares byte for byte use `to_json()`.
+
 These are the rules Low Water's DETMATH spec asks of a port, so a BuildLang implementation of a JS algorithm gives the same bits. `tests/detmath/goldens.bld` reproduces DETMATH's twelve golden calls bit for bit.
 
 ```build in-main
@@ -411,6 +413,7 @@ let b = x.to_bits();
 let y = f64::from_bits(b);
 println!("{:016x} {}", b, y == x);
 println!("{}", (0.0).min(-0.0).to_bits() == (-0.0).to_bits());
+println!("{} {} {}", (1.5e-7).to_json(), (-0.0).to_json(), (0.1 + 0.2).to_json());
 ```
 
 The transcendental functions (`sin`, `exp`, `atan2` and the rest) call the platform's C library, which is not correctly rounded and differs between platforms. Code that must replay bit for bit implements them from the operations above, as DETMATH does.

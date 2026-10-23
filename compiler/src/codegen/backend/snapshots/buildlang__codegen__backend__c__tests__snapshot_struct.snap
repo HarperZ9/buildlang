@@ -802,6 +802,50 @@ static BuildString build_u128_to_string(unsigned __int128 v) {
     return build_format_str("%s", buf);
 }
 static BuildString build_f64_to_string(double v) { return build_format_str("%s", bl_fmt_f64(v)); }
+// JSON.stringify text for a double: ECMAScript Number::toString for finite
+// values (shortest round-trip digits; exponent form below 1e-6 and from 1e21),
+// "0" for both zeros, "null" for NaN and the infinities.
+static void bl_json_f64_into(double v, char* out) {
+    if (v != v || v - v != 0.0) { strcpy(out, "null"); return; }
+    if (v == 0.0) { strcpy(out, "0"); return; }
+    char sci[40];
+    int p = 17;
+    for (int q = 1; q <= 17; ++q) {
+        snprintf(sci, sizeof sci, "%.*e", q - 1, v);
+        if (strtod(sci, NULL) == v) { p = q; break; }
+    }
+    snprintf(sci, sizeof sci, "%.*e", p - 1, v);
+    const char* s = sci;
+    char* o = out;
+    if (*s == '-') { *o++ = '-'; s++; }
+    char d[24]; int k = 0;
+    d[k++] = *s++;
+    if (*s == '.') { s++; while (*s >= '0' && *s <= '9') d[k++] = *s++; }
+    while (k > 1 && d[k - 1] == '0') k--;
+    int n = atoi(s + 1) + 1; /* value = 0.d1d2...dk x 10^n */
+    if (k <= n && n <= 21) {
+        for (int i = 0; i < k; ++i) *o++ = d[i];
+        for (int i = 0; i < n - k; ++i) *o++ = '0';
+    } else if (0 < n && n <= 21) {
+        for (int i = 0; i < n; ++i) *o++ = d[i];
+        *o++ = '.';
+        for (int i = n; i < k; ++i) *o++ = d[i];
+    } else if (-6 < n && n <= 0) {
+        *o++ = '0'; *o++ = '.';
+        for (int i = 0; i < -n; ++i) *o++ = '0';
+        for (int i = 0; i < k; ++i) *o++ = d[i];
+    } else {
+        *o++ = d[0];
+        if (k > 1) { *o++ = '.'; for (int i = 1; i < k; ++i) *o++ = d[i]; }
+        o += sprintf(o, "e%c%d", n - 1 < 0 ? '-' : '+', n - 1 < 0 ? 1 - n : n - 1);
+    }
+    *o = '\0';
+}
+static BuildString build_f64_to_json(double v) {
+    char buf[64];
+    bl_json_f64_into(v, buf);
+    return build_format_str("%s", buf);
+}
 static BuildString build_f32_to_string(float v) { return build_format_str("%s", bl_fmt_f32(v)); }
 
 // Variadic sprintf into a heap-owned BuildString. Backs the `format!` macro:

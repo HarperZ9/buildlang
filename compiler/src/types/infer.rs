@@ -5576,7 +5576,7 @@ impl<'ctx> TypeInfer<'ctx> {
             "is_empty" => return Ty::bool(),
             "contains" | "starts_with" | "ends_with" => return Ty::bool(),
             "clone" | "copy" => return receiver_ty.clone(),
-            "to_string" | "to_owned" => return Ty::str(),
+            "to_string" | "to_owned" | "to_json" => return Ty::str(),
             "as_str" | "as_ref" => return Ty::str(),
             "parse_int" => return Ty::int(IntTy::I64),
             "parse_float" => return Ty::float(FloatTy::F64),
