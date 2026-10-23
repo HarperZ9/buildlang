@@ -1,6 +1,7 @@
 # BuildLang strategy, October 2026
 
-Written 2026-10-22. Baseline: release 1.7.0 (crates.io and GitHub Latest), C backend as the
+Written 2026-10-22; section 7 added after the 1.8.0 release, which closed #83. Baseline at
+writing: release 1.7.0 (crates.io and GitHub Latest), C backend as the
 product path, HLSL and GLSL emit, other backends experimental, held-out agent probe on 1.6.0
 at 20/27 for generator A and 17/27 for generator B.
 
@@ -157,6 +158,13 @@ It records a direction, a field survey and checks. It does not show BuildLang ah
 listed, and no vendor benchmark above was reproduced. The research table's UNKNOWN cells need a
 primary source before any public comparison uses them.
 
+## 7. Surpass targets and parity (author, 2026-10-23)
+
+The author's targets ("We want BuildLang to beat and surpass both of these" and "Feature parity in
+where the competitors excel as well") are milestones in `docs/STRATEGY-2026-10-SURPASS.md`: parity
+rows P1 to P8, verification targets V1 to V8 and spec milestones S1 to S4, each with a check that can
+fail, ordered by what the game rebuild needs first.
+
 ## Sources (fetched 2026-10-22)
 
 - Bend 2 repository README: https://github.com/bendlang/bend
@@ -170,3 +178,4 @@ primary source before any public comparison uses them.
 - Slang: https://www.khronos.org/blog/khronos-at-siggraph-2026
 - Rust releases: https://blog.rust-lang.org/releases
 - Pel: https://arxiv.org/abs/2505.13453
+- Anthropic formal verification (read 2026-10-23 per the targets note): https://www.anthropic.com/research/formal-verification
