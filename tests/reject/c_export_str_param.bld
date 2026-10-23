@@ -1,0 +1,4 @@
+// An extern "C" export cannot take a BuildLang str; pass a pointer and a length.
+extern "C" fn lw_name(s: str) -> i32 {
+    0
+}

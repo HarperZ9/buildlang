@@ -473,7 +473,9 @@ impl<'ctx> MirLowerer<'ctx> {
                 label,
             } => self.lower_for(pattern, iter, body, label.as_ref()),
 
-            ExprKind::Block(block) => {
+            // `unsafe { ... }` lowers like a plain block. Before M4 it fell to the
+            // catch-all arm below and its body was dropped without a diagnostic.
+            ExprKind::Block(block) | ExprKind::Unsafe(block) => {
                 // Explicit blocks create a new scope -- save and restore
                 // var_map so `let` bindings don't leak outward.
                 let saved_vars = self.var_map.clone();
@@ -1517,6 +1519,9 @@ impl<'ctx> MirLowerer<'ctx> {
                 };
                 Ok(Some((place.index(idx_local), elem_ty)))
             }
+            // `(*p).x`: parentheses are transparent. Without this arm the store
+            // fell back to a copy of the struct and the write was lost.
+            ExprKind::Paren(inner) => self.lower_place(inner),
             ExprKind::Deref(inner) => {
                 let (place, base_ty) = match self.lower_place(inner)? {
                     Some(p) => p,

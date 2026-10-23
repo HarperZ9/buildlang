@@ -1,0 +1,29 @@
+// M4 C ABI export: a library a C or C++ host links through a generated header.
+#[repr(C)]
+struct Vec2 {
+    x: f64,
+    z: f64,
+}
+
+#[repr(C)]
+struct Fighter {
+    id: i32,
+    pos: Vec2,
+    hp: f64,
+    alive: bool,
+}
+
+extern "C" fn lw_add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+extern "C" fn lw_damage(f: Fighter, amount: f64) -> Fighter {
+    let hp = f.hp - amount;
+    Fighter { id: f.id, pos: f.pos, hp: hp, alive: hp > 0.0 }
+}
+
+extern "C" fn lw_step(f: *mut Fighter, dx: f64) {
+    unsafe {
+        (*f).pos.x = (*f).pos.x + dx;
+    }
+}

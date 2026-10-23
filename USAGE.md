@@ -48,7 +48,7 @@ authoritative list and `buildc <command> --help` for per-command flags):
 |--------------------|-------------------------------------------------------------|
 | `buildc <file>`   | Compile a file (no subcommand); honors `-o`, `--target`, `--stdio-mode`, `-O`, `-g` |
 | `buildc run`      | Compile and run a `.bld` file via the C backend; `--stdio-mode portable-lf` gives byte-stable LF stdout/stderr; `--emit-receipt`/`--invariant`/`--units` seal a scientific-runtime receipt; `--gpu` (with a `--features gpu` build) dispatches a `#[compute]` kernel on Vulkan |
-| `buildc build`    | Build a project (`--emit c|header|exe`, `--release`, `--target`, `--stdio-mode`, `--keep-c`) |
+| `buildc build`    | Build a project (`--emit c|header|staticlib|exe`, `--release`, `--target`, `--stdio-mode`, `--keep-c`) |
 | `buildc check`    | Type-check; optional `--receipt`, `--policy`, `--profile`   |
 | `buildc lex`      | Tokenize a file and print tokens                            |
 | `buildc parse`    | Parse a file and print the AST (`--json` for JSON)          |

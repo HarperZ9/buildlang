@@ -544,6 +544,36 @@ Limits in this release: boxed memory is not freed until the program exits; `Rc::
 ### 8.2 C Backend
 References compile to pointers. Structs compile to C structs. Enums compile to tagged unions. The runtime library (~190 C functions) is embedded in every output.
 
+### 8.3 C ABI export
+
+An `extern "C" fn` definition exports a function under its own name with the C calling convention. Its parameters and return type must have a C layout: integers, floats, `bool`, raw pointers, and structs marked `#[repr(C)]` whose fields are those types or fixed arrays of them. Any other type in an export signature, such as `str`, `Vec`, an enum or a struct without `#[repr(C)]`, is refused at check time with BL0901 and a fix.
+
+```build name=c-abi-export
+#[repr(C)]
+struct Vec2 {
+    x: f64,
+    z: f64,
+}
+
+extern "C" fn lw_len2(v: Vec2) -> f64 {
+    v.x * v.x + v.z * v.z
+}
+
+extern "C" fn lw_shift(v: *mut Vec2, dx: f64) {
+    unsafe {
+        (*v).x = (*v).x + dx;
+    }
+}
+```
+
+```build fail=BL0901
+extern "C" fn lw_name(s: str) -> i32 {
+    0
+}
+```
+
+`buildc build --emit staticlib DIR` compiles a project with no `fn main` into a static library (`libmain.a` with gcc or clang, `main.lib` with MSVC) in `DIR/target/debug`, next to a generated header `main.h` and a file `main.link`. The header defines every `#[repr(C)]` struct the exports reach, in an order C accepts, and declares each export inside `extern "C"` guards for C++ hosts. `main.link` lists the libraries the BuildLang runtime needs, one flag a line; the host adds them to its link line. A project that defines `fn main` is refused, because the host owns `main`. `BUILDLANG_CC` picks the C compiler. `--emit header` writes only the header. See `docs/C-ABI.md` for a full host example.
+
 ## 9. Grammar Summary (EBNF)
 
 ```ebnf

@@ -1,0 +1,24 @@
+// A store through `(*p).a.b` must reach the pointee. Through 1.8.0 the
+// parentheses hid the place and the write landed in a copy.
+struct Vec2 {
+    x: f64,
+    z: f64,
+}
+
+struct Body {
+    pos: Vec2,
+    hp: f64,
+}
+
+fn push(b: *mut Body, dx: f64) {
+    unsafe {
+        (*b).pos.x = (*b).pos.x + dx;
+        (*b).hp = 7.5;
+    }
+}
+
+fn main() ~ Console {
+    let mut b = Body { pos: Vec2 { x: 1.5, z: -2.0 }, hp: 10.0 };
+    push(&mut b as *mut Body, 0.5);
+    println!("{} {} {}", b.pos.x, b.pos.z, b.hp);
+}

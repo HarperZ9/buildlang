@@ -13,6 +13,7 @@
 //! - `types`: Type lowering, const evaluation, and generic monomorphization
 //! - `macros`: Closure, effect, builtin macro, and iterator chain lowering
 
+mod c_abi;
 mod expr;
 mod format;
 mod macros;
@@ -206,6 +207,8 @@ pub struct MirLowerer<'ctx> {
     /// uniformly. Generic/monomorphized linear ADTs are intentionally out of
     /// scope here (deferred to the 2b checker, which sees monomorphized MIR).
     pub(crate) linear_type_names: HashSet<Arc<str>>,
+    /// Structs marked `#[repr(C)]`, which `extern "C"` exports may use.
+    pub(crate) repr_c_structs: HashSet<Arc<str>>,
     /// Multiple-dispatch registry (codegen mirror of the checker's
     /// `multi_methods`): resolved function name -> a candidate signature per
     /// definition sharing that name, in declaration order. GENERIC definitions
@@ -321,6 +324,7 @@ impl<'ctx> MirLowerer<'ctx> {
             fn_returns_char_vec: std::collections::HashSet::new(),
             const_values: HashMap::new(),
             linear_type_names: HashSet::new(),
+            repr_c_structs: HashSet::new(),
             multi_fns: HashMap::new(),
         }
     }
@@ -372,6 +376,7 @@ impl<'ctx> MirLowerer<'ctx> {
             fn_returns_char_vec: std::collections::HashSet::new(),
             const_values: HashMap::new(),
             linear_type_names: HashSet::new(),
+            repr_c_structs: HashSet::new(),
             multi_fns: HashMap::new(),
         }
     }
@@ -463,6 +468,7 @@ impl<'ctx> MirLowerer<'ctx> {
         // their definitions) while leaving single-def names on their plain name.
         for item in &module.items {
             self.collect_multi_fn_signatures(item);
+            self.collect_repr_c(item);
         }
 
         // First pass: collect type definitions and function signatures
@@ -2191,6 +2197,7 @@ impl<'ctx> MirLowerer<'ctx> {
             if f.sig.abi.is_some() {
                 func.linkage = Linkage::External;
                 func.is_c_export = true;
+                self.check_c_export_signature(f, &func)?;
             }
             func.is_public = is_main || self.current_item_vis.unwrap_or(true);
 
