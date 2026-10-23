@@ -1,22 +1,18 @@
 # An Introduction to BuildLang
 
 BuildLang is a systems programming language whose type system tells you what a
-program touches. Every ambient capability, file IO, network, process control,
-environment, clock, GPU, console, foreign code, is a typed effect in a
-function's signature, checked by the compiler, and recordable in a receipt you
-can re-verify later. Programs compile to native binaries through a C backend,
+program touches. File IO, network, process control, environment, clock, GPU,
+console and foreign code are typed effects in a function's signature, checked
+by the compiler. Programs compile to native binaries through a C backend,
 to HLSL or GLSL for shader work, and experimentally to SPIR-V, LLVM IR, WASM,
 Rust, x86-64, and ARM64. The whole toolchain is one binary, `buildc`.
 
 ## Why it exists
 
-Most languages treat IO as invisible: any function can open a socket and
-nothing in its type says so. BuildLang makes ambient access part of the
-contract, and then goes one step further: the compiler can seal what it
-observed into a machine-readable receipt bound to source digests, so a
-reviewer, a CI gate, or a future you can re-check the claim instead of
-trusting it. Capability effects are the language feature; receipts are the
-paper trail.
+In most languages any function can open a socket and nothing in its type
+says so. In BuildLang the signature has to name it. `buildc check --receipt`
+can also write the effects it found, with source digests, to a JSON file that
+a CI job checks again later.
 
 ## Core concepts
 
