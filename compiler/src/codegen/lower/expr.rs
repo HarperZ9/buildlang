@@ -5115,6 +5115,35 @@ impl<'ctx> MirLowerer<'ctx> {
             }
         }
 
+        // `.to_json()` on a number: the text JSON.stringify writes. A float is
+        // its shortest round-trip form with `-0` as `0` and non-finite values as
+        // `null`; an integer is its decimal form.
+        if method.name.as_ref() == "to_json" && args.is_empty() {
+            let runtime = match &receiver_ty {
+                MirType::Float(..) => Some("build_f64_to_json"),
+                MirType::Int(IntSize::I128, _) => None,
+                MirType::Int(_, true) => Some("build_i64_to_string"),
+                MirType::Int(_, false) => Some("build_u64_to_string"),
+                _ => None,
+            };
+            if let Some(rt) = runtime {
+                let builder = self
+                    .current_fn
+                    .as_mut()
+                    .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                let result = builder.create_local(MirType::Struct(Arc::from("BuildString")));
+                let cont = builder.create_block();
+                builder.call(
+                    MirValue::Function(Arc::from(rt)),
+                    vec![receiver_val.clone()],
+                    Some(result),
+                    cont,
+                );
+                builder.switch_to_block(cont);
+                return Ok(values::local(result));
+            }
+        }
+
         // Numeric / string `.to_string()`: dispatch to the type-specific runtime
         // formatter (each returns a fresh owned BuildString), or return the
         // receiver unchanged for a String. Without this, `to_string` fell through

@@ -10,6 +10,14 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- **JSON number text (M4).** `x.to_json()` writes a float as JS
+  `JSON.stringify` does: shortest round-trip digits, exponent form below 1e-6
+  and from 1e21, `-0` as `0`, NaN and infinities as `null`. On an integer it
+  gives the decimal form. Test: `compiler/tests/json_float_format.rs` compares
+  3,308 doubles against the text node wrote (`tests/json-float/corpus.txt`,
+  from `tools/json_float_corpus.mjs`), with a control that a single wrong line
+  is caught. Spec section 5.5.
+
 - **DETMATH float rules (M4).** Every C compile the backend drives passes
   `-ffp-contract=off -fno-fast-math` (gcc, clang) or `/fp:precise` (MSVC), and
   the generated C carries pragmas that keep `a * b + c` unfused when a host
