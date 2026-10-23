@@ -10,6 +10,12 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+## 1.10.0 - 2026-10-23 - M4 pilot fixes
+
+Compiler fixes found while porting the Low Water combat step. Each program
+below passed `buildc check` on 1.9.0 and then failed to compile or gave a wrong
+result.
+
 - **Match arms and `Vec::new()` (#98).** `let v = match r { Ok(k) => k, Err(_) => Vec::new() }`
   passed check and then failed in the C compiler: the `Vec::new()` arm built a
   `Vec<i32>` into an `int32_t`. An arm that returns its `Ok`, `Err` or `Some`

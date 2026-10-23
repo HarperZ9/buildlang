@@ -1,16 +1,17 @@
 # BuildLang Project Status
 
-Release verification: 2026-10-23 for 1.9.0. The broader architecture audit remains
+Release verification: 2026-10-23 for 1.10.0. The broader architecture audit remains
 2026-06-15; dated findings below retain their original scope. Current direction:
 `docs/STRATEGY-2026-10.md`.
 
 The full local `cargo test --manifest-path compiler/Cargo.toml` run with
 `RUSTFLAGS=-Dwarnings` passed: lib 1,076, bin 204, c_abi_export 2,
 check_implies_compile 1, check_soundness 3, cli 415, detmath 3, diagnostics_json 6,
-doc_blocks 2, gpu 12, hashmap_any 1, heldout_regressions 4, install_layout 1,
+doc_blocks 2, gpu 12, hashmap_any 1, heldout_regressions 5, install_layout 1,
 int32_js_rules 1, json_float_format 1, json_stdlib 4, lexer 53, lsp_parity 2,
 mcp_server 3, parser 98, reject_programs 2, stdio_mode 9, vec_new_inference 3; total
-1,906 passed, 0 failed, 11 ignored (3 lib, 8 doc). 1.9.0 adds the M4 features a game
+1,907 passed, 0 failed, 11 ignored (3 lib, 8 doc). 1.10.0 fixes the check-pass-but-wrong
+cases the combat-step port found (CHANGELOG 1.10.0). 1.9.0 added the M4 features a game
 port needs: C ABI export with a static library and header, the DETMATH float rules,
 `to_json` number text, JS integer conversions, the JSON module and `HashMap<str, T>`
 for any `T`.
