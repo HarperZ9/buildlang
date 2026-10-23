@@ -1686,9 +1686,8 @@ impl<'ctx> MirLowerer<'ctx> {
 
         let inner_target = Self::replace_expr_node(target, index_node, &ident(&el_name));
         let result = self.lower_assign(op, &inner_target, &ident(&val_name));
-        let result = result.and_then(|_| {
-            self.lower_assign(ast::AssignOp::Assign, &read, &ident(&el_name))
-        });
+        let result =
+            result.and_then(|_| self.lower_assign(ast::AssignOp::Assign, &read, &ident(&el_name)));
         for name in [&val_name, &idx_name, &el_name] {
             self.var_map.remove(name.as_str());
         }
@@ -1715,7 +1714,9 @@ impl<'ctx> MirLowerer<'ctx> {
                 index: *index,
                 span: *span,
             },
-            ExprKind::Paren(e) => ExprKind::Paren(Box::new(Self::replace_expr_node(e, target, with))),
+            ExprKind::Paren(e) => {
+                ExprKind::Paren(Box::new(Self::replace_expr_node(e, target, with)))
+            }
             other => other.clone(),
         };
         ast::Expr::new(kind, expr.span)

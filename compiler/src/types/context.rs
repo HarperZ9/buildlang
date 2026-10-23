@@ -857,7 +857,9 @@ impl TypeContext {
         // yet a fresh variable each time (`?T96` and `?T310`), and those copies
         // made `jnum_at(items, 0, 0.0)` ambiguous with itself.
         let shape = |tys: &[Ty]| -> Vec<String> {
-            tys.iter().map(|t| erase_type_vars(&t.to_string())).collect()
+            tys.iter()
+                .map(|t| erase_type_vars(&t.to_string()))
+                .collect()
         };
         let new_shape = shape(&candidate.param_tys);
         if candidates

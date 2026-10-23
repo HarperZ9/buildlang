@@ -19,8 +19,7 @@ use crate::lexer::{SourceId, Span};
 
 /// How the checker finds the standard library directory (set once by
 /// `buildc`, which can write the embedded copy to disk).
-static STDLIB_DIR_FINDER: std::sync::OnceLock<fn() -> Option<PathBuf>> =
-    std::sync::OnceLock::new();
+static STDLIB_DIR_FINDER: std::sync::OnceLock<fn() -> Option<PathBuf>> = std::sync::OnceLock::new();
 
 /// Tell the checker where `mod NAME;` finds a standard library module.
 pub fn set_stdlib_dir_finder(finder: fn() -> Option<PathBuf>) {
