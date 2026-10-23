@@ -31,7 +31,9 @@ tracked in `STATUS.md`, `README.md`, and
   `v[i] = e` through a `&mut Vec<T>` passed check and lost the write: the field
   store went to a copy of the element. A store into an element's field is now a
   read-modify-write that puts the element back, and a borrowed vector's setter
-  is called through the borrow. Test: `tests/heldout/vec_element_stores.bld`.
+  is called through the borrow. The same holds for a vector inside an element
+  (`rs[i].items[j].x = e`), and the index runs once. Test:
+  `tests/heldout/vec_element_stores.bld`.
 - **Struct literal fields.** Fields written out of declaration order were
   assigned by position: `Q { c: "hi", a: 3, b: 2.5 }` failed in the C compiler,
   and two fields of one type were swapped silently. A `Vec::new()` field built a

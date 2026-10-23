@@ -1624,9 +1624,17 @@ impl<'ctx> MirLowerer<'ctx> {
         let ExprKind::Index { expr: base, index } = &index_node.kind else {
             return Ok(None);
         };
-        let elem_ty = match self.lower_place(base)? {
-            Some((_, MirType::Vec(elem))) => *elem,
-            Some((_, MirType::Ptr(inner))) => match *inner {
+        // The vector may itself sit in a field of another element
+        // (`rs[i].items[j].x = e`); that base is not a place, so fall back to
+        // its inferred type. The write-back below stores through the vector
+        // handle, which shares its buffer with the element it was read from.
+        let base_ty = match self.lower_place(base)? {
+            Some((_, ty)) => ty,
+            None => self.infer_expr_type(base),
+        };
+        let elem_ty = match base_ty {
+            MirType::Vec(elem) => *elem,
+            MirType::Ptr(inner) => match *inner {
                 MirType::Vec(elem) => *elem,
                 _ => return Ok(None),
             },
