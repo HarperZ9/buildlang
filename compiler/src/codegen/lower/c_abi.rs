@@ -96,6 +96,12 @@ impl<'ctx> MirLowerer<'ctx> {
                 "is a fixed array, which C passes as a pointer".to_string(),
                 "wrap the array in a #[repr(C)] struct, or pass a pointer and a length".to_string(),
             )),
+            MirType::Slice(elem) => Some((
+                format!("is a slice `&[{elem}]`, which has no C layout"),
+                format!(
+                    "take `p: *const {elem}, n: usize` and read it with `unsafe {{ slice::from_raw_parts(p, n) }}`"
+                ),
+            )),
             MirType::Struct(name) if name.as_ref() == "BuildString" => Some((
                 "is a BuildLang `str`, which has no C layout".to_string(),
                 "pass a `*const u8` pointer and an `i64` length instead".to_string(),

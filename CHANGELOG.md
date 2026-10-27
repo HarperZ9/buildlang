@@ -10,6 +10,23 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- **Slices across the C ABI.** A C host passes a pointer and a length, and
+  `unsafe { slice::from_raw_parts(p, n) }` reads them as a `&[T]` whose indexing
+  is checked against `n` (exit 101 past the end). Table sizes are now run-time
+  values; the fixed-array struct workaround is no longer needed. Outside `unsafe`
+  the call is refused with BL0382, the first check that raises that code. A `&[T]`
+  in an export signature is refused with BL0901 and this fix. Guide:
+  `docs/C-ABI.md`; spec section 8.3. Test: `compiler/tests/c_abi_slices.rs`.
+- **Slices on the C backend.** Three faults behind a passing `buildc check`:
+  - **Distinct C types.** Each `&[T]` was emitted as its own anonymous C struct,
+    so passing one between functions did not compile. Slices now have one named
+    type per element type (`BlSlice_f64`).
+  - **`len()` and `is_empty()`.** These did not exist for slices on the C backend.
+  - **`&arr` to a `&[T]` parameter.** This produced C that did not compile. It
+    now passes the array with its length. An array of another element type (an
+    `i32` literal array into `&[i64]`) is refused with a fix rather than
+    reinterpreted. Test: `tests/heldout/slice_from_array.bld`.
+
 - Scientific-runtime receipts move to `buildlang-scientific-runtime-receipt/v1`. A v1
   receipt lists what it covers in a `scope` field (`source_and_build_digests`,
   `observed_series_invariant`, `rerun_agreement`, plus `best_found_within_budget` for a

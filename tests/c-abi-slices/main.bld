@@ -1,0 +1,34 @@
+// C ABI slices: a C host passes a pointer and a length; BuildLang reads them
+// as a `&[T]` whose indexing is checked against that length.
+
+fn total_of(xs: &[f32]) -> f64 {
+    let mut s = 0.0;
+    let mut i: usize = 0;
+    while i < xs.len() {
+        s = s + xs[i] as f64;
+        i = i + 1;
+    }
+    s
+}
+
+extern "C" fn sl_total(p: *const f32, n: usize) -> f64 {
+    let xs = unsafe { slice::from_raw_parts(p, n) };
+    total_of(xs)
+}
+
+extern "C" fn sl_at(p: *const f32, n: usize, i: usize) -> f64 {
+    let xs = unsafe { slice::from_raw_parts(p, n) };
+    xs[i] as f64
+}
+
+extern "C" fn sl_is_empty(p: *const f32, n: usize) -> bool {
+    let xs = unsafe { slice::from_raw_parts(p, n) };
+    xs.is_empty()
+}
+
+// A grid whose side is known only at run time: the value at (x, y, z) of an
+// n x n x n table, row-major with x fastest.
+extern "C" fn sl_grid_at(p: *const f32, side: usize, x: usize, y: usize, z: usize) -> f64 {
+    let t = unsafe { slice::from_raw_parts(p, side * side * side) };
+    t[(z * side + y) * side + x] as f64
+}

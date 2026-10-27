@@ -1,0 +1,24 @@
+// `&arr` passed to a `&[T]` parameter: the slice carries the array's length,
+// `len()` reads it, and indexing is checked against it.
+fn sum(xs: &[f64]) -> f64 {
+    let mut s = 0.0;
+    let mut i = 0;
+    while i < xs.len() {
+        s = s + xs[i];
+        i = i + 1;
+    }
+    s
+}
+
+fn last(xs: &[i64]) -> i64 {
+    xs[xs.len() - 1]
+}
+
+fn main() ~ Console {
+    let a = [1.0, 2.0, 3.5];
+    let b = [0.25];
+    let c: [i64; 4] = [4, 9, 16, 25];
+    println!("{}", sum(&a));
+    println!("{}", sum(&b));
+    println!("{}", last(&c));
+}

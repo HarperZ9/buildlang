@@ -171,6 +171,9 @@ pub struct TypeInfer<'ctx> {
     /// Per-binding linear-resource state for `#[linear]`-typed locals/params
     /// (no-cloning / no-double-spend / resource-handle tracking).
     linear_slots: HashMap<String, LinearSlot>,
+    /// Enclosing `unsafe` blocks, plus one inside an `unsafe fn`. An operation
+    /// that trusts a raw pointer (`slice::from_raw_parts`) needs it above 0.
+    unsafe_depth: u32,
     /// Active borrow-context depth. When `> 0`, a use of a value is a borrow
     /// (`&x`) and must NOT consume a linear value; when `0`, it is a move.
     borrow_depth: u32,
@@ -492,6 +495,7 @@ impl<'ctx> TypeInfer<'ctx> {
             source_text: None,
             source_id: None,
             linear_slots: HashMap::new(),
+            unsafe_depth: 0,
             borrow_depth: 0,
             loop_depth: 0,
             linear_loop_markers: Vec::new(),
@@ -538,6 +542,7 @@ impl<'ctx> TypeInfer<'ctx> {
             source_text: None,
             source_id: None,
             linear_slots: HashMap::new(),
+            unsafe_depth: 0,
             borrow_depth: 0,
             loop_depth: 0,
             linear_loop_markers: Vec::new(),
@@ -2426,6 +2431,11 @@ impl<'ctx> TypeInfer<'ctx> {
     /// When set, `infer_return` will unify the returned expression's type
     /// with this expected type, catching type mismatches inside nested
     /// control flow (e.g. `return` inside `while { if { ... } }`).
+    /// Check the body of an `unsafe fn`: the whole body is an unsafe context.
+    pub fn set_unsafe_body(&mut self, is_unsafe: bool) {
+        self.unsafe_depth = u32::from(is_unsafe);
+    }
+
     pub fn set_return_ty(&mut self, ty: Ty) {
         self.return_ty = Some(ty);
     }
@@ -3034,7 +3044,12 @@ impl<'ctx> TypeInfer<'ctx> {
             } => self.infer_for(pattern, iter, body, label.as_ref(), expr.span),
 
             ExprKind::Block(block) => self.infer_block(block),
-            ExprKind::Unsafe(block) => self.infer_block(block),
+            ExprKind::Unsafe(block) => {
+                self.unsafe_depth += 1;
+                let ty = self.infer_block(block);
+                self.unsafe_depth -= 1;
+                ty
+            }
             ExprKind::Async { body, .. } => {
                 // Async blocks return impl Future<Output = T>
                 let outer_effects = self.current_effects.clone();
@@ -3748,6 +3763,28 @@ impl<'ctx> TypeInfer<'ctx> {
             }
             let t = Ty::fresh_var();
             return Ty::function(vec![t.clone()], Ty::ptr(Mutability::Mutable, t));
+        }
+
+        // slice::from_raw_parts(p, n): a `&[T]` over `n` elements at `p`, the way a
+        // C host hands over an array. Indexing the slice is bounds-checked against
+        // `n`; the call itself trusts `p` and `n`, so it needs an `unsafe` context.
+        if segments.len() == 2 && segments[0] == "slice" && segments[1] == "from_raw_parts" {
+            // a call's callee path is typed more than once; report it once
+            let reported = self
+                .errors
+                .iter()
+                .any(|e| e.span == span && matches!(e.error, TypeError::UnsafeOutsideUnsafe));
+            if self.unsafe_depth == 0 && !reported {
+                self.error(TypeError::UnsafeOutsideUnsafe, span);
+            }
+            let t = Ty::fresh_var();
+            return Ty::function(
+                vec![
+                    Ty::ptr(Mutability::Immutable, t.clone()),
+                    Ty::int(IntTy::Usize),
+                ],
+                Ty::reference(None, Mutability::Immutable, Ty::slice(t)),
+            );
         }
 
         // Check for associated function: Type::func (2-segment path)

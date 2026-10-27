@@ -671,6 +671,28 @@ extern "C" fn lw_name(s: str) -> i32 {
 }
 ```
 
+A slice has no C layout, so an array crosses the boundary as a pointer and a length. Inside the export, `slice::from_raw_parts(p, n)` reads them as a `&[T]` of `n` elements. Indexing that slice is checked against `n` and stops the program with exit code 101 when the index is out of range. The call trusts `p` and `n`, so it needs an `unsafe` block or an `unsafe fn`; elsewhere it is refused with BL0382. A `&[T]` parameter in an export signature is refused with BL0901, and its fix names this form.
+
+```build name=c-abi-slice
+extern "C" fn lw_sum(p: *const f32, n: usize) -> f64 {
+    let xs = unsafe { slice::from_raw_parts(p, n) };
+    let mut s = 0.0;
+    let mut i: usize = 0;
+    while i < xs.len() {
+        s = s + xs[i] as f64;
+        i = i + 1;
+    }
+    s
+}
+```
+
+```build fail=BL0382
+extern "C" fn lw_first(p: *const f32, n: usize) -> f32 {
+    let xs = slice::from_raw_parts(p, n);
+    xs[0]
+}
+```
+
 `buildc build --emit staticlib DIR` compiles a project with no `fn main` into a static library (`libmain.a` with gcc or clang, `main.lib` with MSVC) in `DIR/target/debug`, next to a generated header `main.h` and a file `main.link`. The header defines every `#[repr(C)]` struct the exports reach, in an order C accepts, and declares each export inside `extern "C"` guards for C++ hosts. `main.link` lists the libraries the BuildLang runtime needs, one flag a line; the host adds them to its link line. A project that defines `fn main` is refused, because the host owns `main`. `BUILDLANG_CC` picks the C compiler. `--emit header` writes only the header. See `docs/C-ABI.md` for a full host example.
 
 ## 9. Grammar Summary (EBNF)
