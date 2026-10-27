@@ -1018,6 +1018,7 @@ impl<'ctx> TypeChecker<'ctx> {
                 // inside nested control flow (while/if/match) are properly
                 // type-checked against the function signature.
                 infer.set_return_ty(expected_ret.clone());
+                infer.set_unsafe_body(f.sig.is_unsafe);
                 // Hand linear-typed parameters to the inferer so consuming a
                 // linear parameter more than once is rejected (no-cloning).
                 for (name, ty) in &param_bindings {

@@ -1218,6 +1218,12 @@ impl MirType {
     }
 
     /// Generate the canonical C typedef name for a tuple type.
+    /// The C name of a slice of `elem`: one named `{ T* ptr; size_t len; }`
+    /// per element type, so every `&[T]` in a program is the same C type.
+    pub fn slice_type_name(elem: &MirType) -> Arc<str> {
+        Arc::from(format!("BlSlice_{}", map_value_mangle(elem)))
+    }
+
     pub fn tuple_type_name(elems: &[MirType]) -> Arc<str> {
         let parts: Vec<&str> = elems
             .iter()

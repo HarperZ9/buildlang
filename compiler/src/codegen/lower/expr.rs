@@ -2152,6 +2152,10 @@ impl<'ctx> MirLowerer<'ctx> {
         let mut vals = Vec::with_capacity(args.len());
         for (i, a) in args.iter().enumerate() {
             self.expected_type = params.and_then(|p| p.get(i)).cloned();
+            if let Some(fat) = self.array_ref_as_slice(self.expected_type.clone(), a)? {
+                vals.push(fat);
+                continue;
+            }
             match self.lower_expr(a) {
                 Ok(v) => vals.push(v),
                 Err(e) => {
@@ -2162,6 +2166,69 @@ impl<'ctx> MirLowerer<'ctx> {
         }
         self.expected_type = prev_expected;
         Ok(vals)
+    }
+
+    /// `&arr` passed where a `&[T]` is expected: build the fat pointer
+    /// `{ arr, N }` from the array's static length and pass its address, so the
+    /// callee's indexing checks against `N`. `None` when the argument is not a
+    /// reference to a fixed array or the parameter is not a slice.
+    fn array_ref_as_slice(
+        &mut self,
+        expected: Option<MirType>,
+        arg: &ast::Expr,
+    ) -> CodegenResult<Option<MirValue>> {
+        let Some(MirType::Ptr(target)) = expected else {
+            return Ok(None);
+        };
+        let MirType::Slice(elem) = target.as_ref() else {
+            return Ok(None);
+        };
+        let ExprKind::Ref { expr: inner, .. } = &arg.kind else {
+            return Ok(None);
+        };
+        if !matches!(inner.kind, ExprKind::Ident(_) | ExprKind::Path(_)) {
+            return Ok(None);
+        }
+        let arr = self.lower_expr(inner)?;
+        let MirType::Array(have, n) = self.type_of_value(&arr) else {
+            // not an array: lower the reference the ordinary way
+            return self.lower_expr(arg).map(Some);
+        };
+        if *have != **elem {
+            // Reading `[i32; N]` storage as `&[i64]` would reinterpret the bytes.
+            let span = inner.span;
+            return Err(CodegenError::Rejected {
+                message: format!(
+                    "this array holds `{have}` but the parameter is a slice of `{elem}`"
+                ),
+                location: (span.end.0 > span.start.0).then_some((span.start.0, span.end.0)),
+                help: Some(format!(
+                    "annotate the array's element type: `let name: [{elem}; {n}] = ...`"
+                )),
+            });
+        }
+        let builder = self
+            .current_fn
+            .as_mut()
+            .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+        let fat = builder.create_local((*target).clone());
+        builder.aggregate(
+            fat,
+            AggregateKind::Struct(MirType::slice_type_name(elem)),
+            vec![
+                arr,
+                MirValue::Const(MirConst::Int(n as i128, MirType::usize())),
+            ],
+        );
+        let result = builder.create_local(MirType::Ptr(target.clone()));
+        builder.assign(
+            result,
+            MirRValue::AddressOf {
+                is_mut: false,
+                place: MirPlace::local(fat),
+            },
+        );
+        Ok(Some(values::local(result)))
     }
 
     fn lower_call(&mut self, func: &ast::Expr, args: &[ast::Expr]) -> CodegenResult<MirValue> {
@@ -2181,6 +2248,44 @@ impl<'ctx> MirLowerer<'ctx> {
                 }
                 _ => None,
             };
+            // slice::from_raw_parts(p, n): the fat pointer `{ p, n }`, as a
+            // `&[T]` (a pointer to it), so indexing checks against `n`.
+            if segs.as_slice() == ["slice", "from_raw_parts"] && args.len() == 2 {
+                let ptr = self.lower_expr(&args[0])?;
+                let len = self.lower_expr(&args[1])?;
+                let elem = match self.type_of_value(&ptr) {
+                    MirType::Ptr(inner) => *inner,
+                    other => {
+                        return Err(CodegenError::Rejected {
+                            message: format!(
+                                "slice::from_raw_parts needs a raw pointer, found `{other:?}`"
+                            ),
+                            location: None,
+                            help: Some("pass a `*const T` and a `usize` length".to_string()),
+                        })
+                    }
+                };
+                let slice_ty = MirType::Slice(Box::new(elem.clone()));
+                let builder = self
+                    .current_fn
+                    .as_mut()
+                    .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                let fat = builder.create_local(slice_ty.clone());
+                builder.aggregate(
+                    fat,
+                    AggregateKind::Struct(MirType::slice_type_name(&elem)),
+                    vec![ptr, len],
+                );
+                let result = builder.create_local(MirType::Ptr(Box::new(slice_ty)));
+                builder.assign(
+                    result,
+                    MirRValue::AddressOf {
+                        is_mut: false,
+                        place: MirPlace::local(fat),
+                    },
+                );
+                return Ok(values::local(result));
+            }
             if let (Some((helper, ty)), 1) = (from_bits, args.len()) {
                 let bits = self.lower_expr(&args[0])?;
                 let builder = self
@@ -4052,6 +4157,42 @@ impl<'ctx> MirLowerer<'ctx> {
         // Lower the receiver first to determine its type
         let receiver_val = self.lower_expr(receiver)?;
         let receiver_ty = self.type_of_value(&receiver_val);
+
+        // A slice (`&[T]` lowers to `Ptr(Slice(T))`) carries its length:
+        // `xs.len()` reads it and `xs.is_empty()` compares it with 0.
+        let is_slice = match &receiver_ty {
+            MirType::Slice(_) => true,
+            MirType::Ptr(inner) => matches!(inner.as_ref(), MirType::Slice(_)),
+            _ => false,
+        };
+        if is_slice && args.is_empty() && matches!(method.name.as_ref(), "len" | "is_empty") {
+            let builder = self
+                .current_fn
+                .as_mut()
+                .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+            let len = builder.create_local(MirType::usize());
+            builder.assign(
+                len,
+                MirRValue::FieldAccess {
+                    base: receiver_val,
+                    field_name: Arc::from("len"),
+                    field_ty: MirType::usize(),
+                },
+            );
+            if method.name.as_ref() == "len" {
+                return Ok(values::local(len));
+            }
+            let empty = builder.create_local(MirType::Bool);
+            builder.assign(
+                empty,
+                MirRValue::BinaryOp {
+                    op: BinOp::Eq,
+                    left: values::local(len),
+                    right: MirValue::Const(MirConst::Int(0, MirType::usize())),
+                },
+            );
+            return Ok(values::local(empty));
+        }
 
         if let Some((mir_op, returns_option)) =
             Self::explicit_integer_method_binop(method.name.as_ref())

@@ -1284,10 +1284,27 @@ impl CBackend {
                         visit(e, existing, seen, out);
                     }
                 }
-                MirType::Array(inner, _)
-                | MirType::Slice(inner)
-                | MirType::Ptr(inner)
-                | MirType::Vec(inner) => visit(inner, existing, seen, out),
+                MirType::Slice(inner) => {
+                    // A slice is a named fat pointer, `{ T* ptr; size_t len; }`.
+                    let name = MirType::slice_type_name(inner);
+                    let key = name.to_string();
+                    if !existing.contains(&key) && seen.insert(key) {
+                        out.push(MirTypeDef {
+                            name,
+                            kind: TypeDefKind::Struct {
+                                fields: vec![
+                                    (Some(Arc::from("ptr")), MirType::Ptr(inner.clone())),
+                                    (Some(Arc::from("len")), MirType::Int(IntSize::ISize, false)),
+                                ],
+                                packed: false,
+                            },
+                        });
+                    }
+                    visit(inner, existing, seen, out);
+                }
+                MirType::Array(inner, _) | MirType::Ptr(inner) | MirType::Vec(inner) => {
+                    visit(inner, existing, seen, out)
+                }
                 MirType::Map(k, v) => {
                     visit(k, existing, seen, out);
                     visit(v, existing, seen, out);
@@ -1461,8 +1478,15 @@ impl CBackend {
                         out.push(name.to_string());
                     }
                 }
-                MirType::Array(inner, _) | MirType::Slice(inner) => {
+                MirType::Array(inner, _) => {
                     collect_type_deps(inner, type_names, out);
+                }
+                MirType::Slice(inner) => {
+                    // the slice typedef holds a pointer, so only the typedef itself orders
+                    let name = MirType::slice_type_name(inner);
+                    if type_names.contains(name.as_ref()) {
+                        out.push(name.to_string());
+                    }
                 }
                 MirType::Tuple(elems) => {
                     // A tuple used by value (e.g. as a struct field) depends on its
@@ -3893,8 +3917,9 @@ impl CBackend {
                 format!("{}[{}]", self.type_to_c(elem), len)
             }
             MirType::Slice(elem) => {
-                // Slice as fat pointer struct
-                format!("struct {{ {}* ptr; size_t len; }}", self.type_to_c(elem))
+                // A fat pointer, one named typedef per element type (an inline
+                // anonymous struct made every use a distinct, incompatible C type).
+                MirType::slice_type_name(elem).to_string()
             }
             MirType::Struct(name) => {
                 // Resolve unresolved Self to the enclosing function's impl type.

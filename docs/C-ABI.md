@@ -32,6 +32,40 @@ with fixed arrays allowed inside struct fields. The check refuses anything else 
 `str` has no C layout, so pass a `*const u8` and a length; an enum has no stable layout, so pass an
 integer tag.
 
+## Pass arrays
+
+A `&[T]` has no C layout, so the host passes a pointer and a length, and the export reads them as
+a slice:
+
+```text
+extern "C" fn lw_total(p: *const f32, n: usize) -> f64 {
+    let xs = unsafe { slice::from_raw_parts(p, n) };
+    let mut s = 0.0;
+    let mut i: usize = 0;
+    while i < xs.len() {
+        s = s + xs[i] as f64;
+        i = i + 1;
+    }
+    s
+}
+```
+
+- **Checked reads.** `xs[i]` is checked against `n`. An index at or past `n` stops the program
+  with exit code 101 and `index out of bounds: the len is N but the index is I`, instead of
+  reading past the host's array.
+- **Run-time sizes.** The length is a value, so one library serves tables of any size. The
+  earlier workaround, a `#[repr(C)]` struct holding one fixed array, fixed the size at compile time.
+- **`unsafe`.** `slice::from_raw_parts` trusts the pointer and the length the host passed, so it
+  must sit in an `unsafe` block or an `unsafe fn` (BL0382 otherwise). Everything after it is checked.
+- **Inside BuildLang.** A `&[T]` parameter accepts `&arr` for a fixed array of the same element
+  type, with the array's length. An array of another element type is refused rather than
+  reinterpreted: `let c = [4, 9];` holds `i32`, so passing `&c` to a `&[i64]` needs
+  `let c: [i64; 2] = [4, 9];`.
+
+The header declares the pointer as `float*`; a C host holding a `const float*` passes it with a
+cast. `compiler/tests/c_abi_slices.rs` links `tests/c-abi-slices/driver.c`, checks its output,
+and checks that an index equal to the length traps.
+
 ## Build the library
 
 ```bash
@@ -78,3 +112,5 @@ disagreement between the header and the library changes the output.
 
 - One library per project, named `main`. Symbol names are the function names, so pick a prefix.
 - Exports cannot take or return heap data such as `str` or `Vec`; the check refuses them.
+- Exports cannot take or return a slice; pass a pointer and a length (see "Pass arrays").
+- A slice made by `slice::from_raw_parts` lives in the function that made it. Do not return it.

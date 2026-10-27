@@ -25,3 +25,4 @@ compares its standard output with the `.expected` file beside it, and
 | float_sqrt_constants.bld | f64 `sqrt` rounding on MinGW, and the f64 constants (M4 pilot) |
 | struct_literal_fields.bld | struct literal fields out of order, and `Vec::new()` in a field (M4 pilot) |
 | vec_element_stores.bld | stores into vector element fields and through `&mut Vec` (M4 pilot) |
+| slice_from_array.bld | `&arr` into a `&[T]` parameter, and slice `len()` on the C backend (C ABI slices) |
