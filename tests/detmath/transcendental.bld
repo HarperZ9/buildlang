@@ -1,0 +1,50 @@
+// DETMATH section 5.5: exp, log and pow are the runtime's portable fdlibm
+// versions. Each line prints a bit pattern (or "nan"); transcendental.expected
+// was written by the JS twin tools/detmath/transcendental.mjs with
+// tools/detmath_transcendental_expected.mjs. Rows 0 to 399 are a seeded corpus
+// (the same generator in both files); the rest are special and boundary cases.
+fn bits(label: str, v: f64) ~ Console {
+    if v != v {
+        println!("{} nan", label);
+    } else {
+        println!("{} {:016x}", label, v.to_bits());
+    }
+}
+
+fn row(i: i64, x: f64, y: f64, e: f64) ~ Console {
+    bits(format!("{} pow", i), x.powf(y));
+    bits(format!("{} exp", i), e.exp());
+    bits(format!("{} log", i), x.ln());
+}
+
+fn main() ~ Console {
+    let mut s: i64 = 12345;
+    let mut i: i64 = 0;
+    while i < 400 {
+        s = (s * 48271) % 2147483647;
+        let x = (s as f64) / 2147483647.0 * 4.0 + 0.000000001;
+        s = (s * 48271) % 2147483647;
+        let y = (s as f64) / 2147483647.0 * 16.0 - 8.0;
+        row(i, x, y, y * 4.0);
+        i = i + 1;
+    }
+    let inf = f64::INFINITY;
+    let nan = 0.0 / 0.0;
+    let tiny = f64::from_bits(1);
+    row(400, 0.0, -1.0, 0.0);
+    row(401, -0.0, 3.0, -0.0);
+    row(402, 1.0, inf, 1.0);
+    row(403, -1.0, -inf, -1.0);
+    row(404, -2.0, 3.0, 709.7);
+    row(405, -2.0, 0.5, -745.2);
+    row(406, 0.9999999, 1075.0, 700.0);
+    row(407, 0.9999999, -1076.0, -700.0);
+    row(408, 2.0, -1074.5, 2.0);
+    row(409, 10.0, 308.0, 0.5);
+    row(410, 3.0, 40.0, 1.0);
+    row(411, tiny, 0.5, tiny);
+    row(412, 1e-310, 2.4, 1e-310);
+    row(413, inf, -0.5, inf);
+    row(414, nan, 0.0, nan);
+    row(415, 0.7529411764705882, 1.0 / 2.2, 0.0000000001);
+}

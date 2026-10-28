@@ -10,6 +10,18 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- **`exp`, `ln` and `pow` are portable (DETMATH).** On the C backend they are
+  now the fdlibm 5.3 algorithms, carried in the runtime. They used to call the
+  host C library, and the same program then gave different bits on different
+  systems. The new results are the same everywhere, within 1 ulp, and match a
+  JavaScript twin (`tools/detmath/transcendental.mjs`) bit for bit.
+  - **Behavior change.** Results can move by 1 ulp from the old libm values.
+    `pow(1.0, inf)` and `pow(-1.0, inf)` are now NaN, as in JavaScript.
+  - **Found while measuring.** MinGW's `pow(0.9999999, 1075.0)` was 125 ulp
+    from the exact value; the new `pow` is within 1 ulp of it.
+  - **Tests.** `compiler/tests/detmath.rs` checks 1248 results against the
+    twin. Its control routes the same program to the host C library and must
+    differ from the table (123 lines differ with MinGW). Spec section 5.5.
 - **Slices across the C ABI.** A C host passes a pointer and a length, and
   `unsafe { slice::from_raw_parts(p, n) }` reads them as a `&[T]` whose indexing
   is checked against `n` (exit 101 past the end). Table sizes are now run-time

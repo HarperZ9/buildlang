@@ -421,7 +421,14 @@ println!("{}", (0.0).min(-0.0).to_bits() == (-0.0).to_bits());
 println!("{} {} {}", (1.5e-7).to_json(), (-0.0).to_json(), (0.1 + 0.2).to_json());
 ```
 
-The transcendental functions (`sin`, `exp`, `atan2` and the rest) call the platform's C library, which is not correctly rounded and differs between platforms. Code that must replay bit for bit implements them from the operations above, as DETMATH does.
+`exp`, `ln` and `pow` on `f64` (`x.exp()`, `x.ln()`, `x.powf(y)`, `x.powi(n)`, free `exp` and `pow`, and the `**` operator) are the fdlibm 5.3 algorithms, built from the operations above and 32-bit word operations. They give the same bits on every C library and compiler, so they are specified to the bit rather than by an error bound:
+
+- **The reference.** `tools/detmath/transcendental.mjs` is the same algorithm in JavaScript and gives the same bits. `tests/detmath/transcendental.bld` checks 1248 results against it.
+- **Accuracy.** Each result is within 1 ulp of the exact value. On a corpus of 20,000 inputs, measured against 200-bit arithmetic: `exp` and `log` are correctly rounded on about 90 percent of inputs, and `pow` has a largest error of 0.79 ulp. `pow` of an integer to an integer power is exact when the result fits.
+- **JavaScript engines.** `exp` and `ln` equal Node 25's `Math.exp` and `Math.log` on that corpus. `exp(1.0)` is `e` correctly rounded, as in V8. Engines do not promise these bits and newer V8 releases compute them another way, so an implementation that must agree with BuildLang imports the twin rather than calling `Math`.
+- **Special cases follow JavaScript.** `pow(1.0, inf)`, `pow(1.0, NaN)` and `pow(-1.0, inf)` are NaN, where C99 gives 1.
+
+The other transcendental functions (`sin`, `cos`, `atan2`, `cbrt` and the rest), and the `f32` versions, still call the platform's C library, which is not correctly rounded and differs between platforms. Code that must replay them bit for bit implements them from the operations above, as DETMATH does.
 
 ## 6. Algebraic Effects
 
