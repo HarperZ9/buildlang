@@ -4060,6 +4060,10 @@ impl CBackend {
                 // known builtins.  These are already correct as-is.
                 if self.escaped_user_fns.contains(name.as_ref()) {
                     Self::user_fn_emit_name(name)
+                } else if let Some(det) = Self::detmath_name(name) {
+                    // DETMATH: exp, log and pow are the runtime's portable
+                    // fdlibm versions, the same bits on every C library.
+                    det.to_string()
                 } else if Self::is_runtime_or_builtin_fn(name) {
                     name.to_string()
                 } else if Self::is_c_reserved(name) || Self::is_c_stdlib_collision(name) {
@@ -4068,6 +4072,17 @@ impl CBackend {
                     name.to_string()
                 }
             }
+        }
+    }
+
+    /// The portable runtime function for an f64 `exp`, `log` or `pow` (spec
+    /// section 5.5), or `None` for any other name.
+    fn detmath_name(name: &str) -> Option<&'static str> {
+        match name {
+            "exp" => Some("build_det_exp"),
+            "log" => Some("build_det_log"),
+            "pow" => Some("build_det_pow"),
+            _ => None,
         }
     }
 
@@ -4248,7 +4263,7 @@ impl CBackend {
                 let l = self.value_to_c(left, locals);
                 let r = self.value_to_c(right, locals);
                 if *op == BinOp::Pow {
-                    return Ok(format!("pow({}, {})", l, r));
+                    return Ok(format!("build_det_pow({}, {})", l, r));
                 }
                 // C's `%` is integer-only. A float remainder must lower to the
                 // C library `fmod`/`fmodf`, which matches Rust's `%` on floats

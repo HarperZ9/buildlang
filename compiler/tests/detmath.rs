@@ -6,6 +6,11 @@
 //! - `tests/detmath/ops.bld` prints sqrt, floor, abs, min and max results whose
 //!   expected bits JS wrote (`tools/detmath_ops_expected.mjs`). On 1.8.0 a free
 //!   `min(2.5, -1.25)` truncated to i32 and `max` dropped a NaN.
+//! - `tests/detmath/transcendental.bld` prints exp, log and pow over a seeded
+//!   corpus and special cases; the expected bits come from the JS twin
+//!   `tools/detmath/transcendental.mjs`. Control: the same generated C with the
+//!   calls pointed at the host C library's exp, log and pow must differ, which
+//!   shows the table tells the implementations apart.
 //! - The generated C must keep `a * b + c` unfused even when a host compiles it
 //!   with GNU C, `-O2` and `-mfma`. A control copy with the pragmas removed must
 //!   fuse under the same flags, which shows the test can fail on this machine;
@@ -69,6 +74,91 @@ fn detmath_goldens_match_bit_for_bit() {
 #[test]
 fn sqrt_floor_abs_min_max_match_js_bit_for_bit() {
     expect_lines("ops");
+}
+
+#[test]
+fn exp_log_pow_match_the_js_twin_bit_for_bit() {
+    expect_lines("transcendental");
+}
+
+#[test]
+fn control_host_libm_exp_log_pow_differ_from_the_table() {
+    let Some(cc) = gcc() else {
+        eprintln!("skipping: no gcc on PATH");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("buildlang-detmath-libm-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::copy(
+        repo_root().join("tests/detmath/transcendental.bld"),
+        dir.join("main.bld"),
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_buildc"))
+        .env("BUILDLANG_STDLIB", repo_root().join("stdlib"))
+        .args(["build", "--emit", "c"])
+        .arg(&dir)
+        .output()
+        .expect("buildc runs");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let c_text = std::fs::read_to_string(dir.join("target/debug/main.c")).expect("main.c written");
+    // The runtime defines the portable versions; the program after it calls them.
+    let split = c_text
+        .find("End BuildLang Runtime")
+        .expect("the runtime end marker");
+    let (runtime, program) = c_text.split_at(split);
+    assert!(program.contains("build_det_pow(") && program.contains("build_det_exp("));
+    let control = format!(
+        "{runtime}{}",
+        program
+            .replace("build_det_pow(", "pow(")
+            .replace("build_det_exp(", "exp(")
+            .replace("build_det_log(", "log(")
+    );
+    let control_file = dir.join("control.c");
+    std::fs::write(&control_file, control).unwrap();
+    let ext = if cfg!(windows) { ".exe" } else { "" };
+    let exe = dir.join(format!("control{ext}"));
+    let mut cmd = Command::new(cc);
+    cmd.args(["-w", "-O0", "-std=gnu99"])
+        .arg(&control_file)
+        .arg("-o")
+        .arg(&exe)
+        .arg("-lm");
+    if cfg!(windows) {
+        cmd.arg("-lws2_32");
+    }
+    let built = cmd.output().expect("C compiler runs");
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let run = Command::new(&exe).output().expect("control runs");
+    let got = normalize(&String::from_utf8_lossy(&run.stdout));
+    let want = normalize(
+        &std::fs::read_to_string(repo_root().join("tests/detmath/transcendental.expected"))
+            .unwrap(),
+    );
+    let differing = got
+        .lines()
+        .zip(want.lines())
+        .filter(|(g, w)| g != w)
+        .count();
+    assert!(
+        differing > 0,
+        "the host C library matched the fdlibm table on every line; the table does not tell them apart here"
+    );
+    eprintln!(
+        "control: host libm differs from the table on {differing} of {} lines",
+        want.lines().count()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 fn gcc() -> Option<&'static str> {
