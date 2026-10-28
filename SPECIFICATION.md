@@ -421,14 +421,17 @@ println!("{}", (0.0).min(-0.0).to_bits() == (-0.0).to_bits());
 println!("{} {} {}", (1.5e-7).to_json(), (-0.0).to_json(), (0.1 + 0.2).to_json());
 ```
 
-`exp`, `ln` and `pow` on `f64` (`x.exp()`, `x.ln()`, `x.powf(y)`, `x.powi(n)`, free `exp` and `pow`, and the `**` operator) are the fdlibm 5.3 algorithms, built from the operations above and 32-bit word operations. They give the same bits on every C library and compiler, so they are specified to the bit rather than by an error bound:
+`exp`, `ln`, `pow`, `sin` and `cos` on `f64` (`x.exp()`, `x.ln()`, `x.powf(y)`, `x.powi(n)`, `x.sin()`, `x.cos()`, free `exp`, `pow`, `sin` and `cos`, and the `**` operator) are the fdlibm 5.3 algorithms, built from the operations above and 32-bit word operations. They give the same bits on every C library and compiler, so they are specified to the bit rather than by an error bound:
 
-- **The reference.** `tools/detmath/transcendental.mjs` is the same algorithm in JavaScript and gives the same bits. `tests/detmath/transcendental.bld` checks 1248 results against it.
+- **The reference.** `tools/detmath/transcendental.mjs` is the same algorithm in JavaScript and gives the same bits. `tests/detmath/transcendental.bld` checks 1248 `exp`, `ln` and `pow` results against it.
 - **Accuracy.** Each result is within 1 ulp of the exact value. On a corpus of 20,000 inputs, measured against 200-bit arithmetic: `exp` and `log` are correctly rounded on about 90 percent of inputs, and `pow` has a largest error of 0.79 ulp. `pow` of an integer to an integer power is exact when the result fits.
 - **JavaScript engines.** `exp` and `ln` equal Node 25's `Math.exp` and `Math.log` on that corpus. `exp(1.0)` is `e` correctly rounded, as in V8. Engines do not promise these bits and newer V8 releases compute them another way, so an implementation that must agree with BuildLang imports the twin rather than calling `Math`.
+- **`sin` and `cos`.** These reduce the argument by pi/2 exactly, using Payne-Hanek reduction above 2^19 pi/2, so large arguments stay accurate. `tests/detmath/trig.bld` checks 828 results, from small arguments to 1e308.
+  - **Measured.** Against 1200-bit arithmetic on 20,803 inputs, the largest errors are 0.75 ulp (`sin`) and 0.78 ulp (`cos`). The twin and Node 25's `Math.sin` and `Math.cos` agree bit for bit on 104,017 inputs.
+  - **MinGW's C library, for comparison.** Its `sin` is off by more than 1e-6 on 19,428 of 20,000 arguments between 1e7 and 1e308.
 - **Special cases follow JavaScript.** `pow(1.0, inf)`, `pow(1.0, NaN)` and `pow(-1.0, inf)` are NaN, where C99 gives 1.
 
-The other transcendental functions (`sin`, `cos`, `atan2`, `cbrt` and the rest), and the `f32` versions, still call the platform's C library, which is not correctly rounded and differs between platforms. Code that must replay them bit for bit implements them from the operations above, as DETMATH does.
+The other transcendental functions (`tan`, `atan2`, `cbrt` and the rest), and the `f32` versions, still call the platform's C library, which is not correctly rounded and differs between platforms. Code that must replay them bit for bit implements them from the operations above, as DETMATH does.
 
 ## 6. Algebraic Effects
 
