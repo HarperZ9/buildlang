@@ -1,0 +1,55 @@
+// DETMATH section 5.5: sin and cos are the runtime's portable fdlibm versions.
+// Each line prints a bit pattern (or "nan"); trig.expected was written by the JS
+// twin tools/detmath/transcendental.mjs with tools/detmath_trig_expected.mjs.
+// Rows 0 to 399 cycle through four ranges: |x| < 0.8, |x| < 100, |x| < 1e6, and
+// 1e7 to 1e308 (Payne-Hanek reduction). The rest are special and hard cases.
+fn bits(label: str, v: f64) ~ Console {
+    if v != v {
+        println!("{} nan", label);
+    } else {
+        println!("{} {:016x}", label, v.to_bits());
+    }
+}
+
+fn row(i: i64, x: f64) ~ Console {
+    bits(format!("{} sin", i), x.sin());
+    bits(format!("{} cos", i), x.cos());
+}
+
+fn main() ~ Console {
+    let mut s: i64 = 99991;
+    let mut i: i64 = 0;
+    while i < 400 {
+        s = (s * 48271) % 2147483647;
+        let u = (s as f64) / 2147483647.0;
+        s = (s * 48271) % 2147483647;
+        let sign = if (s as f64) / 2147483647.0 < 0.5 { -1.0 } else { 1.0 };
+        let k = i % 4;
+        let x = if k == 0 {
+            sign * u * 0.8
+        } else if k == 1 {
+            sign * u * 100.0
+        } else if k == 2 {
+            sign * u * 1000000.0
+        } else {
+            sign * (10.0).powf(7.0 + u * 301.0)
+        };
+        row(i, x);
+        i = i + 1;
+    }
+    let pi = 3.141592653589793;
+    row(400, 0.0);
+    row(401, -0.0);
+    row(402, f64::from_bits(1));
+    row(403, 0.0000000000000001);
+    row(404, pi / 4.0);
+    row(405, pi / 2.0);
+    row(406, pi);
+    row(407, 1000.0 * pi / 2.0);
+    row(408, 1e22);
+    row(409, 894075887953458.8);
+    row(410, 1.7976931348623157e308);
+    row(411, -1e300);
+    row(412, f64::INFINITY);
+    row(413, 0.0 / 0.0);
+}

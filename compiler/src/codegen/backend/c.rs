@@ -3187,7 +3187,7 @@ impl CBackend {
                     "intrinsic_cosh" => "cosh".to_string(),
                     "intrinsic_tanh" => "tanh".to_string(),
                     "intrinsic_cbrt" => "cbrt".to_string(),
-                    "intrinsic_log" => "log".to_string(),
+                    "intrinsic_log" => "build_det_log".to_string(),
                     "intrinsic_log2" => "log2".to_string(),
                     "intrinsic_log10" => "log10".to_string(),
                     "intrinsic_fabs" => "fabs".to_string(),
@@ -3195,7 +3195,7 @@ impl CBackend {
                     "intrinsic_ceil" => "ceil".to_string(),
                     "intrinsic_floor" => "floor".to_string(),
                     "intrinsic_round" => "round".to_string(),
-                    "intrinsic_pow" => "pow".to_string(),
+                    "intrinsic_pow" => "build_det_pow".to_string(),
                     "intrinsic_fmin" => "fmin".to_string(),
                     "intrinsic_fmax" => "fmax".to_string(),
                     "intrinsic_copysign" => "copysign".to_string(),
@@ -4061,7 +4061,7 @@ impl CBackend {
                 if self.escaped_user_fns.contains(name.as_ref()) {
                     Self::user_fn_emit_name(name)
                 } else if let Some(det) = Self::detmath_name(name) {
-                    // DETMATH: exp, log and pow are the runtime's portable
+                    // DETMATH: exp, log, pow, sin and cos are the runtime's portable
                     // fdlibm versions, the same bits on every C library.
                     det.to_string()
                 } else if Self::is_runtime_or_builtin_fn(name) {
@@ -4075,13 +4075,15 @@ impl CBackend {
         }
     }
 
-    /// The portable runtime function for an f64 `exp`, `log` or `pow` (spec
+    /// The portable runtime function for an f64 `exp`, `log`, `pow`, `sin` or `cos` (spec
     /// section 5.5), or `None` for any other name.
     fn detmath_name(name: &str) -> Option<&'static str> {
         match name {
             "exp" => Some("build_det_exp"),
             "log" => Some("build_det_log"),
             "pow" => Some("build_det_pow"),
+            "sin" => Some("build_det_sin"),
+            "cos" => Some("build_det_cos"),
             _ => None,
         }
     }

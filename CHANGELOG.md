@@ -10,6 +10,18 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- **`sin` and `cos` are portable (DETMATH).** They use fdlibm 5.3 on the C
+  backend and in the JavaScript twin, including Payne-Hanek argument reduction.
+  - **Agreement.** The runtime, the twin and Node 25's `Math.sin` and `Math.cos`
+    agree bit for bit on 104,017 inputs. The largest error against 1200-bit
+    arithmetic is 0.78 ulp.
+  - **Found while measuring.** MinGW's `sin(894075887953458.8)` is wrong in
+    the sixth decimal place. Its `sin` is off by more than 1e-6 on 19,428 of
+    20,000 arguments between 1e7 and 1e308.
+  - **Tests.** `tests/detmath/trig.bld` checks 828 results against the twin;
+    its libm control differs on 393 lines.
+  - **Fix.** `intrinsic_log` and `intrinsic_pow` now also use the portable
+    versions; they had bypassed them.
 - **`exp`, `ln` and `pow` are portable (DETMATH).** On the C backend they are
   now the fdlibm 5.3 algorithms, carried in the runtime. They used to call the
   host C library, and the same program then gave different bits on different

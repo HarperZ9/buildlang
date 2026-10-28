@@ -11,6 +11,8 @@
 //!   `tools/detmath/transcendental.mjs`. Control: the same generated C with the
 //!   calls pointed at the host C library's exp, log and pow must differ, which
 //!   shows the table tells the implementations apart.
+//! - `tests/detmath/trig.bld` does the same for sin and cos, from small
+//!   arguments to 1e308 (Payne-Hanek reduction), with its own libm control.
 //! - The generated C must keep `a * b + c` unfused even when a host compiles it
 //!   with GNU C, `-O2` and `-mfma`. A control copy with the pragmas removed must
 //!   fuse under the same flags, which shows the test can fail on this machine;
@@ -82,16 +84,47 @@ fn exp_log_pow_match_the_js_twin_bit_for_bit() {
 }
 
 #[test]
+fn sin_cos_match_the_js_twin_bit_for_bit() {
+    expect_lines("trig");
+}
+
+#[test]
 fn control_host_libm_exp_log_pow_differ_from_the_table() {
+    libm_control(
+        "transcendental",
+        &[
+            ("build_det_pow(", "pow("),
+            ("build_det_exp(", "exp("),
+            ("build_det_log(", "log("),
+        ],
+    );
+}
+
+#[test]
+fn control_host_libm_sin_cos_differ_from_the_table() {
+    // pow stays portable: it builds the inputs, which must not change
+    libm_control(
+        "trig",
+        &[("build_det_sin(", "sin("), ("build_det_cos(", "cos(")],
+    );
+}
+
+/// Build `tests/detmath/{name}.bld` to C, point the listed portable calls at the
+/// host C library, run it, and require at least one line to differ from the
+/// table: the table must tell the two implementations apart.
+fn libm_control(name: &str, swaps: &[(&str, &str)]) {
     let Some(cc) = gcc() else {
         eprintln!("skipping: no gcc on PATH");
         return;
     };
-    let dir = std::env::temp_dir().join(format!("buildlang-detmath-libm-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "buildlang-detmath-libm-{name}-{}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::copy(
-        repo_root().join("tests/detmath/transcendental.bld"),
+        repo_root().join(format!("tests/detmath/{name}.bld")),
         dir.join("main.bld"),
     )
     .unwrap();
@@ -112,16 +145,16 @@ fn control_host_libm_exp_log_pow_differ_from_the_table() {
         .find("End BuildLang Runtime")
         .expect("the runtime end marker");
     let (runtime, program) = c_text.split_at(split);
-    assert!(program.contains("build_det_pow(") && program.contains("build_det_exp("));
-    let control = format!(
-        "{runtime}{}",
-        program
-            .replace("build_det_pow(", "pow(")
-            .replace("build_det_exp(", "exp(")
-            .replace("build_det_log(", "log(")
-    );
+    let mut program = program.to_string();
+    for (from, to) in swaps {
+        assert!(
+            program.contains(from),
+            "{name}: the program never calls {from}"
+        );
+        program = program.replace(from, to);
+    }
     let control_file = dir.join("control.c");
-    std::fs::write(&control_file, control).unwrap();
+    std::fs::write(&control_file, format!("{runtime}{program}")).unwrap();
     let ext = if cfg!(windows) { ".exe" } else { "" };
     let exe = dir.join(format!("control{ext}"));
     let mut cmd = Command::new(cc);
@@ -142,7 +175,7 @@ fn control_host_libm_exp_log_pow_differ_from_the_table() {
     let run = Command::new(&exe).output().expect("control runs");
     let got = normalize(&String::from_utf8_lossy(&run.stdout));
     let want = normalize(
-        &std::fs::read_to_string(repo_root().join("tests/detmath/transcendental.expected"))
+        &std::fs::read_to_string(repo_root().join(format!("tests/detmath/{name}.expected")))
             .unwrap(),
     );
     let differing = got
@@ -152,10 +185,10 @@ fn control_host_libm_exp_log_pow_differ_from_the_table() {
         .count();
     assert!(
         differing > 0,
-        "the host C library matched the fdlibm table on every line; the table does not tell them apart here"
+        "{name}: the host C library matched the fdlibm table on every line; the table does not tell them apart here"
     );
     eprintln!(
-        "control: host libm differs from the table on {differing} of {} lines",
+        "control: host libm differs from the {name} table on {differing} of {} lines",
         want.lines().count()
     );
     let _ = std::fs::remove_dir_all(&dir);
