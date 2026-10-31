@@ -4351,7 +4351,26 @@ impl<'ctx> MirLowerer<'ctx> {
                     let func = MirValue::Function(Arc::from("build_string_concat"));
                     builder.call(func, vec![receiver_val, arg_val], Some(result), cont);
                     builder.switch_to_block(cont);
-                    // Write the concatenated string back to the receiver local.
+                    // Write the concatenated string back to the receiver. A
+                    // plain local takes it directly. A field (`self.ir`,
+                    // `d.ir`, `o.doc.ir`) lowered to a COPY in a temporary,
+                    // so the write must go through the field's real place;
+                    // writing the temporary dropped every append to a field.
+                    let receiver_is_local = matches!(
+                        &receiver.kind,
+                        ExprKind::Ident(id) if self.var_map.contains_key(&id.name)
+                    );
+                    if !receiver_is_local {
+                        if let Some((place, place_ty)) = self.lower_place(receiver)? {
+                            self.store_through_place(
+                                place,
+                                place_ty,
+                                MirRValue::Use(values::local(result)),
+                            )?;
+                            return Ok(values::unit());
+                        }
+                    }
+                    let builder = self.current_fn.as_mut().unwrap();
                     if let Some(id) = receiver_local {
                         builder.assign(id, MirRValue::Use(values::local(result)));
                     }
