@@ -787,11 +787,14 @@ fn saxpy_c_output_compiles_and_runs_under_the_host_cc() {
         "slice parameters must use a named type, not an inline anonymous struct: {proto}"
     );
 
+    // No header may come before saxpy.c. The emitted file opens with the
+    // feature macros glibc needs under -std=c11, and the first system header
+    // fixes the feature set, so an earlier #include hides getaddrinfo and
+    // clock_gettime from the runtime. Hence `unsigned int` for the global.
     let driver = dir.join("driver.c");
     std::fs::write(
         &driver,
-        "#include <stdint.h>\n\
-         uint32_t buildc_gl_global_invocation_x;\n\
+        "unsigned int buildc_gl_global_invocation_x;\n\
          #include \"saxpy.c\"\n\
          int main(void) {\n\
          \x20   float a[4] = {1, 2, 3, 4}, b[4] = {10, 20, 30, 40}, o[4] = {0};\n\
