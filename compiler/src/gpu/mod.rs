@@ -447,15 +447,7 @@ fn cpu_c_reference(
         .ok_or_else(|| "kernel has no writable output buffer".to_string())?;
 
     let driver = format!(
-        r#"#include <stdio.h>
-#include <stdint.h>
-#include <stddef.h>
-
-/* Ambient GPU thread-index the kernel body reads; the driver sets it per step. */
-uint32_t buildc_gl_global_invocation_x;
-
-typedef struct {{ float* ptr; size_t len; }} bl_slice_f32;
-
+        r#"{prelude}
 {kernel}
 
 int main(void) {{
@@ -470,6 +462,7 @@ int main(void) {{
 }}
 "#,
         kernel = kernel_fn_c,
+        prelude = driver_prelude(),
         decls = decls,
         entry = sig.entry,
         args = call_args.join(", "),
@@ -477,11 +470,9 @@ int main(void) {{
         n = n,
     );
 
-    // The emitted kernel declares its own anonymous-struct slice params
-    // (`struct {{ float* ptr; size_t len; }}*`), which is layout-compatible with
-    // `bl_slice_f32*`; C lets us pass `&a` because the call is by pointer and the
-    // struct layouts match. If the compiler complains about the anonymous type,
-    // that is a hard error surfaced to the user.
+    // The emitted kernel takes `BlSlice_f32*` parameters; the prelude makes that
+    // name an alias of `bl_slice_f32`, so `&a` passes with no cast. A C compiler
+    // error here is a hard error surfaced to the user.
     let dir = std::env::temp_dir().join(format!("buildlang_gpu_cpu_{}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|e| format!("create temp dir: {e}"))?;
     let c_path = dir.join("cpu_ref.c");
@@ -521,6 +512,43 @@ int main(void) {{
         ));
     }
     Ok(values)
+}
+
+/// The declarations every CPU-C reference driver puts ahead of the kernel: the
+/// headers, the ambient thread-index variables, and the slice fat pointer under
+/// both spellings (the driver's `bl_slice_f32` and the C backend's named
+/// `BlSlice_f32`). The runtime the kernel calls into comes with the kernel, from
+/// [`extract_kernel_with_runtime`].
+fn driver_prelude() -> &'static str {
+    r#"#include <stdio.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+
+/* Ambient GPU thread-index vars the kernel body reads; the driver sets them per invocation. */
+uint32_t buildc_gl_global_invocation_x;
+uint32_t buildc_gl_global_invocation_y;
+
+typedef struct { float* ptr; size_t len; } bl_slice_f32;
+typedef bl_slice_f32 BlSlice_f32;
+"#
+}
+
+/// The emitted C's headers and embedded runtime, followed by the `entry` kernel
+/// function. A kernel body calls runtime helpers (`bl_idx_chk` on every
+/// subscript, `bl_uadd_u32` and the other checked-arithmetic helpers), so the
+/// CPU reference carries the same runtime the generated program links, rather
+/// than a hand-kept copy of the helpers it happens to need today.
+fn extract_kernel_with_runtime(c_source: &str, entry: &str) -> Option<String> {
+    let marker = c_source.find("// End BuildLang Runtime")?;
+    let line_end = |from: usize| c_source[from..].find('\n').map(|i| from + i + 1);
+    // The marker line, then the closing `// ====` rule under it.
+    let runtime_end = line_end(line_end(marker)?)?;
+    // Only the kernel is normalized (an older inline `struct { float* ptr;
+    // size_t len; }` parameter becomes `bl_slice_f32`). The runtime's own
+    // `ptr`/`len` structs, BuildString and BuildVec, keep their names.
+    let kernel = normalize_slice_type(&extract_c_function(c_source, entry)?);
+    Some(format!("{}\n{}", &c_source[..runtime_end], kernel))
 }
 
 /// Compile a single C file to an executable, reusing the compiler's own
@@ -615,18 +643,7 @@ fn cpu_c_matmul_reference(
         .collect();
 
     let driver = format!(
-        r#"#include <stdio.h>
-#include <stdint.h>
-#include <stddef.h>
-#include <stdbool.h>
-
-/* Ambient GPU thread-index vars the kernel body reads; the driver sets them
-   per invocation over the nested 2D grid. */
-uint32_t buildc_gl_global_invocation_x;
-uint32_t buildc_gl_global_invocation_y;
-
-typedef struct {{ float* ptr; size_t len; }} bl_slice_f32;
-
+        r#"{prelude}
 {kernel}
 
 int main(void) {{
@@ -644,6 +661,7 @@ int main(void) {{
 }}
 "#,
         kernel = kernel_fn_c,
+        prelude = driver_prelude(),
         decls = decls,
         entry = sig.entry,
         args = call_args.join(", "),
@@ -810,8 +828,7 @@ fn run_matmul_cross_check(
         1
     })?;
     let c_source = String::from_utf8_lossy(&c_bytes);
-    let c_source = normalize_slice_type(&c_source);
-    let kernel_fn = extract_c_function(&c_source, &sig.entry).ok_or_else(|| {
+    let kernel_fn = extract_kernel_with_runtime(&c_source, &sig.entry).ok_or_else(|| {
         eprintln!(
             "GPU: could not extract the `{}` function from the emitted C",
             sig.entry
@@ -978,16 +995,7 @@ fn cpu_c_stencil_reference(
         .collect();
 
     let driver = format!(
-        r#"#include <stdio.h>
-#include <stdint.h>
-#include <stddef.h>
-#include <stdbool.h>
-
-/* Ambient GPU thread-index the kernel body reads; the driver sets it per step. */
-uint32_t buildc_gl_global_invocation_x;
-
-typedef struct {{ float* ptr; size_t len; }} bl_slice_f32;
-
+        r#"{prelude}
 {kernel}
 
 int main(void) {{
@@ -1002,6 +1010,7 @@ int main(void) {{
 }}
 "#,
         kernel = kernel_fn_c,
+        prelude = driver_prelude(),
         decls = decls,
         entry = sig.entry,
         args = call_args.join(", "),
@@ -1116,8 +1125,7 @@ fn run_stencil_cross_check(
         1
     })?;
     let c_source = String::from_utf8_lossy(&c_bytes);
-    let c_source = normalize_slice_type(&c_source);
-    let kernel_fn = extract_c_function(&c_source, &sig.entry).ok_or_else(|| {
+    let kernel_fn = extract_kernel_with_runtime(&c_source, &sig.entry).ok_or_else(|| {
         eprintln!(
             "GPU: could not extract the `{}` function from the emitted C",
             sig.entry
@@ -1337,11 +1345,7 @@ pub fn run_gpu_cross_check(file: &Path, emit_receipt: Option<&Path>) -> Result<(
         1
     })?;
     let c_source = String::from_utf8_lossy(&c_bytes);
-    // Rewrite the anonymous slice struct to the named `bl_slice_f32` BEFORE
-    // extraction: the anonymous `struct { .. }` in the parameter list contains
-    // braces that would otherwise confuse the balanced-brace body extractor.
-    let c_source = normalize_slice_type(&c_source);
-    let kernel_fn = extract_c_function(&c_source, &sig.entry).ok_or_else(|| {
+    let kernel_fn = extract_kernel_with_runtime(&c_source, &sig.entry).ok_or_else(|| {
         eprintln!(
             "GPU: could not extract the `{}` function from the emitted C",
             sig.entry
@@ -1402,3 +1406,6 @@ pub fn run_gpu_cross_check(file: &Path, emit_receipt: Option<&Path>) -> Result<(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod cpu_ref_tests;
