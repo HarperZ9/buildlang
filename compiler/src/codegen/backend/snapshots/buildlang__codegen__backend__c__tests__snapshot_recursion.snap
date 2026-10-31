@@ -3061,7 +3061,6 @@ bb2:
     _5 = factorial(_4);
     goto bb4;
 bb3:
-    fflush(stdout);
     return _3;
 bb4:
     _6 = bl_imul_i32(n, _5);

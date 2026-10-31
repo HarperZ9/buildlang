@@ -3714,10 +3714,16 @@ impl CBackend {
                         self.emit_flag_guarded_free(owner, locals);
                     }
                 }
-                // Flush stdout before returning to ensure all output is visible,
-                // especially when running as a child process on Windows.
-                self.write_indent();
-                self.output.push_str("fflush(stdout);\n");
+                // Flush stdout once, as `main` returns, so all output is visible
+                // when the program runs as a child process on Windows. The
+                // runtime already makes stdout unbuffered at startup, so a flush
+                // in every other function bought nothing and cost a library call
+                // per invocation: a kernel called once per element paid it per
+                // element.
+                if self.current_fn_name.as_deref() == Some("main") {
+                    self.write_indent();
+                    self.output.push_str("fflush(stdout);\n");
+                }
                 self.write_indent();
                 // Array return: the caller passed a pointer-to-array out-param;
                 // copy the result array into it and return `void`. C cannot
@@ -8490,6 +8496,55 @@ fn main() {
             code.contains("printf(\"{}\\n\");"),
             "missing format args should keep braces literal instead of emitting a printf specifier:\n{}",
             code
+        );
+    }
+
+    /// The runtime makes stdout unbuffered at startup, so a flush on every
+    /// return is a library call per invocation and no extra visibility. A
+    /// kernel called once per element (the GPU path's CPU stand-in) paid it
+    /// per element: saxpy at n = 2^22 ran 15 ms against 4 ms for plain C.
+    /// Only `main` flushes, once, on its way out.
+    #[test]
+    fn only_main_flushes_stdout_on_return() {
+        let source = r#"
+fn add_one(x: i32) -> i32 {
+    return x + 1;
+}
+
+fn shout(x: i32) {
+    println!("{}", x);
+}
+
+fn main() {
+    shout(add_one(1));
+}
+"#;
+        let code = snapshot_codegen(source);
+        let body = |name: &str| -> String {
+            let sig = code
+                .find(&format!(" {name}(int32_t x) {{"))
+                .unwrap_or_else(|| panic!("no definition of {name}:\n{code}"));
+            let end = code[sig..].find("\n}").expect("function end") + sig;
+            code[sig..end].to_string()
+        };
+        assert!(
+            !body("add_one").contains("fflush"),
+            "a non-main function must not flush on return:\n{}",
+            body("add_one")
+        );
+        assert!(
+            !body("shout").contains("fflush"),
+            "a printing non-main function must not flush on return either:\n{}",
+            body("shout")
+        );
+        let main_at = code
+            .find("int32_t main(int argc, char** argv) {")
+            .expect("main");
+        assert_eq!(
+            code[main_at..].matches("fflush(stdout);").count(),
+            1,
+            "main flushes once on return:\n{}",
+            &code[main_at..]
         );
     }
 
