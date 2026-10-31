@@ -1,0 +1,21 @@
+// Repro: a String field written through `&mut self` is lost (buildc 1.10, C backend).
+// Expected output: "count=2 ir=[ab]". Observed: count=2 with ir empty, or the
+// push_str writes lost. The same writes through a free fn over `&mut Doc` work.
+pub struct Doc {
+    ir: String,
+    count: i32,
+}
+
+impl Doc {
+    pub fn add(&mut self, s: str) {
+        self.ir.push_str(s);
+        self.count = self.count + 1;
+    }
+}
+
+fn main() ~ Console {
+    let mut d = Doc { ir: String::new(), count: 0 };
+    d.add("a");
+    d.add("b");
+    println!("count={} ir=[{}]", d.count, d.ir);
+}
