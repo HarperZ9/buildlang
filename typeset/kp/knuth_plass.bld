@@ -1,0 +1,194 @@
+// Knuth-Plass optimal line breaking in BuildLang.
+//
+// Reads an item list (scaled points, as TeX keeps them) and prints the
+// chosen breakpoints and total demerits. Same integer badness and
+// demerits as engine/breaker.py and tex.web, so the two can be checked
+// against each other on the same input.
+//
+// Input file, one record per line:
+//   w <line width>  t <tolerance>
+//   b <width>                    box
+//   g <width> <stretch> <shrink>  glue
+//   p <width> <penalty> <flag>    penalty (flag 1 = hyphen)
+//
+//   buildc run knuth_plass.bld   (reads items.txt, writes breaks.txt)
+
+fn badness(t: i64, s: i64) -> i64 {
+    if t == 0 { return 0; }
+    if s <= 0 { return 10000; }
+    let mut r: i64 = 0;
+    if t <= 7230584 {
+        r = (t * 297) / s;
+    } else if s >= 1663497 {
+        r = t / (s / 297);
+    } else {
+        r = t;
+    }
+    if r > 1290 { return 10000; }
+    (r * r * r + 131072) / 262144
+}
+
+fn parse_int(s: String) -> i64 {
+    let mut v: i64 = 0;
+    let mut neg = false;
+    for c in s.chars() {
+        if c == '-' { neg = true; } else { v = v * 10 + (c as i64 - 48); }
+    }
+    if neg { return -v; }
+    v
+}
+
+fn main() ~ Console + FileSystem {
+    let text = read_file("items.txt");
+    let mut kind: Vec<i64> = Vec::new();
+    let mut wid: Vec<i64> = Vec::new();
+    let mut stre: Vec<i64> = Vec::new();
+    let mut shri: Vec<i64> = Vec::new();
+    let mut pen: Vec<i64> = Vec::new();
+    let mut flag: Vec<i64> = Vec::new();
+    let mut line_width: i64 = 0;
+    let mut tolerance: i64 = 200;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.len() == 0 { continue; }
+        let parts: Vec<String> = line.split(" ");
+        let tag = parts[0].clone();
+        if tag == "w" { line_width = parse_int(parts[1].clone()); continue; }
+        if tag == "t" { tolerance = parse_int(parts[1].clone()); continue; }
+        let a = parse_int(parts[1].clone());
+        if tag == "b" {
+            kind.push(0); wid.push(a); stre.push(0); shri.push(0); pen.push(0); flag.push(0);
+        } else if tag == "f" {
+            kind.push(3); wid.push(a); stre.push(0); shri.push(0); pen.push(0); flag.push(0);
+        } else if tag == "g" {
+            kind.push(1); wid.push(a);
+            stre.push(parse_int(parts[2].clone())); shri.push(parse_int(parts[3].clone()));
+            pen.push(0); flag.push(0);
+        } else {
+            kind.push(2); wid.push(a); stre.push(0); shri.push(0);
+            pen.push(parse_int(parts[2].clone())); flag.push(parse_int(parts[3].clone()));
+        }
+    }
+    let n = kind.len();
+    // prefix sums
+    let mut sw: Vec<i64> = Vec::new();
+    let mut sy: Vec<i64> = Vec::new();
+    let mut sz: Vec<i64> = Vec::new();
+    let mut sf: Vec<i64> = Vec::new();
+    sw.push(0); sy.push(0); sz.push(0); sf.push(0);
+    let mut i = 0;
+    while i < n {
+        let k = kind[i];
+        let mut dw: i64 = 0;
+        let mut dy: i64 = 0;
+        let mut dz: i64 = 0;
+        let mut df: i64 = 0;
+        if k != 2 { dw = wid[i]; dy = stre[i]; dz = shri[i]; }
+        if k == 3 { df = 1; }
+        sw.push(sw[i] + dw); sy.push(sy[i] + dy); sz.push(sz[i] + dz); sf.push(sf[i] + df);
+        i += 1;
+    }
+    // active nodes: position, line, fitness, demerits, flagged, prev node index
+    let mut a_pos: Vec<i64> = Vec::new();
+    let mut a_line: Vec<i64> = Vec::new();
+    let mut a_fit: Vec<i64> = Vec::new();
+    let mut a_dem: Vec<i64> = Vec::new();
+    let mut a_flag: Vec<i64> = Vec::new();
+    let mut a_prev: Vec<i64> = Vec::new();
+    let mut a_live: Vec<i64> = Vec::new();
+    a_pos.push(-1); a_line.push(0); a_fit.push(2); a_dem.push(0); a_flag.push(0); a_prev.push(-1); a_live.push(1);
+    let mut b = 0;
+    while b < n {
+        let k = kind[b];
+        let mut legal = false;
+        let mut p: i64 = 0;
+        let mut fl: i64 = 0;
+        let mut extra: i64 = 0;
+        if k == 2 && pen[b] < 10000 { legal = true; p = pen[b]; fl = flag[b]; extra = wid[b]; }
+        if (k == 1 || k == 3) && b > 0 && kind[b - 1] == 0 { legal = true; }
+        if legal {
+            let mut best_d: Vec<i64> = Vec::new();
+            let mut best_a: Vec<i64> = Vec::new();
+            let mut f = 0;
+            while f < 4 { best_d.push(-1); best_a.push(-1); f += 1; }
+            let mut ai = 0;
+            let count = a_pos.len();
+            while ai < count {
+                if a_live[ai] == 1 {
+                    let mut start = a_pos[ai] + 1;
+                    while start < (n as i64) - 1 && kind[start as usize] != 0 { start += 1; }
+                    let s = start as usize;
+                    let width = sw[b] - sw[s] + extra;
+                    let mut bad: i64 = 0;
+                    let mut fit: i64 = 2;
+                    if width < line_width && sf[b] - sf[s] > 0 {
+                        bad = 0;
+                    } else if width < line_width {
+                        bad = badness(line_width - width, sy[b] - sy[s]);
+                        if bad > 99 { fit = 0; } else if bad > 12 { fit = 1; }
+                    } else {
+                        let shrink = sz[b] - sz[s];
+                        if width - line_width > shrink { bad = 10001; } else { bad = badness(width - line_width, shrink); }
+                        if bad > 12 { fit = 3; }
+                    }
+                    if bad > 10000 || p == -10000 { a_live[ai] = 0; }
+                    if bad <= tolerance {
+                        let mut d = 10 + bad;
+                        d = d * d;
+                        if p > 0 { d += p * p; } else if p > -10000 { d -= p * p; }
+                        if fl == 1 && a_flag[ai] == 1 { d += 10000; }
+                        let gap = fit - a_fit[ai];
+                        if gap > 1 || gap < -1 { d += 10000; }
+                        if p == -10000 && a_flag[ai] == 1 { d += 5000; }
+                        d += a_dem[ai];
+                        let fu = fit as usize;
+                        if best_d[fu] < 0 || d < best_d[fu] { best_d[fu] = d; best_a[fu] = ai as i64; }
+                    }
+                }
+                ai += 1;
+            }
+            let mut least: i64 = -1;
+            f = 0;
+            while f < 4 {
+                if best_d[f] >= 0 && (least < 0 || best_d[f] < least) { least = best_d[f]; }
+                f += 1;
+            }
+            f = 0;
+            while f < 4 {
+                if best_d[f] >= 0 && best_d[f] <= least + 10000 {
+                    let from = best_a[f] as usize;
+                    a_pos.push(b as i64); a_line.push(a_line[from] + 1); a_fit.push(f as i64);
+                    a_dem.push(best_d[f]); a_flag.push(fl); a_prev.push(best_a[f]); a_live.push(1);
+                }
+                f += 1;
+            }
+        }
+        b += 1;
+    }
+    // best node ending at the last item
+    let mut best: i64 = -1;
+    let mut j = 0;
+    while j < a_pos.len() {
+        if a_pos[j] == (n as i64) - 1 && (best < 0 || a_dem[j] < a_dem[best as usize]) { best = j as i64; }
+        j += 1;
+    }
+    if best < 0 {
+        println!("no feasible breaks at tolerance {}", tolerance);
+        return;
+    }
+    let mut chain: Vec<i64> = Vec::new();
+    let mut cur = best;
+    while cur > 0 {
+        chain.push(a_pos[cur as usize]);
+        cur = a_prev[cur as usize];
+    }
+    let mut out = String::new();
+    let mut c = chain.len();
+    while c > 0 {
+        c -= 1;
+        out = format!("{}{}\n", out, chain[c]);
+    }
+    out = format!("{}demerits {}\n", out, a_dem[best as usize]);
+    write_file("breaks.txt", out);
+    println!("{} lines, demerits {}", chain.len(), a_dem[best as usize]);
+}

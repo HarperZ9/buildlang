@@ -1,0 +1,136 @@
+// BuildLang document layer: buildlang.doc/v0
+//
+// The author writes structure: blocks, inline spans, references and
+// measured annotations. The theme, chosen by name, decides the look.
+// A program builds a Doc and saves it as line-oriented IR that the
+// typesetting engine (typeset/engine) lays out into PDF, SVG and HTML.
+//
+// Inline span syntax inside block text:
+//   {i:..} emphasis   {b:..} strong   {sc:..} small caps   {tt:..} mono
+//   {m:..} inline math   {ref:label}   {cite:key}   {{ and }} for braces
+//
+// Methods with `&mut self` lose String field writes in buildc 1.10 (see
+// typeset/FINDINGS.md), so the builders are free functions over &mut Doc.
+
+pub struct Doc {
+    ir: String,
+    blocks: i32,
+    marks: i32,
+}
+
+pub enum Device {
+    Symbol,
+    Motif,
+    Theme,
+    Analogy,
+    Irony,
+    Metaphor,
+    Hypocrisy,
+    Contrarian,
+}
+
+pub enum Layer {
+    Physical,
+    Potential,
+    Metaphorical,
+}
+
+pub fn device_name(d: Device) -> str {
+    match d {
+        Device::Symbol => "symbol",
+        Device::Motif => "motif",
+        Device::Theme => "theme",
+        Device::Analogy => "analogy",
+        Device::Irony => "irony",
+        Device::Metaphor => "metaphor",
+        Device::Hypocrisy => "hypocrisy",
+        Device::Contrarian => "contrarian",
+    }
+}
+
+pub fn layer_name(l: Layer) -> str {
+    match l {
+        Layer::Physical => "physical",
+        Layer::Potential => "potential",
+        Layer::Metaphorical => "metaphorical",
+    }
+}
+
+pub fn doc_new(title: str) -> Doc {
+    let ir = format!("#buildlang.doc/v0\nmeta\ttitle\t{}\n", title);
+    Doc { ir: ir, blocks: 0, marks: 0 }
+}
+
+pub fn meta(d: &mut Doc, key: str, value: str) {
+    d.ir = format!("{}meta\t{}\t{}\n", d.ir, key, value);
+}
+
+pub fn theme(d: &mut Doc, name: str) {
+    d.ir = format!("{}theme\t{}\n", d.ir, name);
+}
+
+// A block: h1 h2 h3 subtitle contact meta p li pagebreak title author date
+// abstract section subsection paragraph item enum bib eq label
+pub fn blk(d: &mut Doc, kind: str, text: str) -> i32 {
+    d.ir = format!("{}block\t{}\t{}\n", d.ir, kind, text);
+    d.blocks = d.blocks + 1;
+    d.blocks - 1
+}
+
+pub fn labelled(d: &mut Doc, kind: str, label: str, text: str) -> i32 {
+    d.ir = format!("{}block\t{}\t{}\t{}\n", d.ir, kind, text, label);
+    d.blocks = d.blocks + 1;
+    d.blocks - 1
+}
+
+// A measured annotation over characters [start, end) of block `b`.
+// score and err are in bits; meter names the instrument that scored it.
+pub fn mark(d: &mut Doc, dev: Device, lay: Layer, b: i32, start: i32, end: i32,
+            score: f64, err: f64, meter: str, group: str) {
+    d.ir = format!("{}mark\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n", d.ir,
+        device_name(dev), layer_name(lay), b, start, end, score, err, meter, group);
+    d.marks = d.marks + 1;
+}
+
+// A link between two marks of the same group (analogy relations, motif arcs).
+pub fn relate(d: &mut Doc, group: str, a: str, b: str, mapped: bool, lay: Layer) {
+    let m = if mapped { "mapped" } else { "unmapped" };
+    d.ir = format!("{}rel\t{}\t{}\t{}\t{}\t{}\n", d.ir, group, a, b, m, layer_name(lay));
+}
+
+pub fn em(s: str) -> String { format!("{{i:{}}}", s) }
+pub fn strong(s: str) -> String { format!("{{b:{}}}", s) }
+pub fn sc(s: str) -> String { format!("{{sc:{}}}", s) }
+pub fn tt(s: str) -> String { format!("{{tt:{}}}", s) }
+pub fn math(s: str) -> String { format!("{{m:{}}}", s) }
+pub fn ref_to(label: str) -> String { format!("{{ref:{}}}", label) }
+pub fn cite(key: str) -> String { format!("{{cite:{}}}", key) }
+
+pub fn save(d: &Doc, path: str) -> bool ~ FileSystem {
+    write_file(path, d.ir)
+}
+
+// Character offset of the nth (0-based) occurrence of `needle` in `hay`, or -1.
+pub fn find_nth(hay: str, needle: str, nth: i32) -> i32 {
+    let n = needle.len() as i32;
+    let total = hay.len() as i32;
+    let mut seen = 0;
+    let mut i = 0;
+    while i + n <= total {
+        if hay.substring(i as usize, n as usize) == needle {  // substring(start, length)
+            if seen == nth { return i; }
+            seen = seen + 1;
+        }
+        i = i + 1;
+    }
+    -1
+}
+
+// Mark the nth occurrence of `phrase` in block `b` whose plain text is `text`.
+pub fn mark_phrase(d: &mut Doc, dev: Device, lay: Layer, b: i32, text: str, phrase: str, nth: i32,
+                   score: f64, err: f64, meter: str, group: str) {
+    let at = find_nth(text, phrase, nth);
+    if at >= 0 {
+        mark(d, dev, lay, b, at, at + (phrase.len() as i32), score, err, meter, group);
+    }
+}

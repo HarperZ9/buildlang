@@ -1,0 +1,9 @@
+kp/*.exe
+kp/*.c
+__pycache__/
+*.pyc
+# Conso is not licensed for redistribution, and harvested Latin Modern data stays out too.
+Conso*
+data/lm/
+proof/
+out/

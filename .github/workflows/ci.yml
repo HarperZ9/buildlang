@@ -168,3 +168,17 @@ jobs:
       - uses: actions/checkout@v7
       - name: Verify art receipt digests
         run: python3 scripts/check_art_receipts.py
+
+  typeset:
+    # The typeset engine's own tests and the rounding-class seed. Python standard library only.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Typeset engine
+        working-directory: typeset
+        run: python -m unittest discover -s tests
+      - name: Rounding classes of saxpy
+        run: python tests/differential/test_saxpy_rounding.py

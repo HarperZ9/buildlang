@@ -1,0 +1,15 @@
+{
+  "extends": "living",
+  "name": "lens",
+  "purpose": "The living look with room in both margins for the measured-annotation layer: meters and error bars on the right, symbol glyphs and the theme mode on the left.",
+  "page": {"left": 84, "right": 150, "top": 60, "bottom": 70},
+  "annotation_font": "tt",
+  "art": [
+    {"kind": "aperture", "cx": 540, "cy": 74, "r": 40, "rings": 30, "color": "navy", "alpha": 0.8, "width": 0.3}
+  ],
+  "blocks": {
+    "h1": {"size": 24, "leading": 28},
+    "p": {"after": 5, "leading": 14.2},
+    "eq": {"display_math": true, "size": 11, "leading": 16, "before": 8, "after": 8, "align": "center"}
+  }
+}

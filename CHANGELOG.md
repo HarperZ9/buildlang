@@ -8,6 +8,12 @@ tracked in `STATUS.md`, `README.md`, and
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
 `108/108` or `132/132` are not the current release gate.
 
+## Unreleased: typeset and the field spec
+
+- `typeset/`: BuildLang as a document language: Knuth-Plass in BuildLang, a stdlib Python layout engine, and themes as data.
+- `docs/FIELD.md`: the contract for a field type, whose reference implementation is superframe `packages/field`. Spec only; nothing in the compiler yet.
+- `tests/differential/test_saxpy_rounding.py`: exact answers for both float32 rounding classes of saxpy, the seed of a backend differential test.
+
 ## Unreleased
 
 - **`sin` and `cos` are portable (DETMATH).** They use fdlibm 5.3 on the C
