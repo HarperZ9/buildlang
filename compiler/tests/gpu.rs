@@ -728,6 +728,106 @@ fn left_literal_unsigned_binop_emits_valid_spirv() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The first C compiler on PATH, or `None` (the caller skips).
+fn host_cc() -> Option<&'static str> {
+    ["gcc", "cc", "clang"].into_iter().find(|cc| {
+        Command::new(cc)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    })
+}
+
+/// The C backend's output for a slice-taking kernel compiles as C and computes
+/// the kernel. buildc 1.4.0 wrote each `&[f32]` parameter as an inline
+/// anonymous struct, so the forward declaration and the definition named
+/// different types and gcc 13 rejected the file with "conflicting types". The
+/// named `BlSlice_f32` typedef fixed that; this pins it with a real compile
+/// and run of `examples/gpu/saxpy.bld` called once per element, as a dispatch
+/// would. Inputs are small integers, so fused and unfused rounding agree.
+#[test]
+fn saxpy_c_output_compiles_and_runs_under_the_host_cc() {
+    let Some(cc) = host_cc() else {
+        eprintln!("skipping saxpy_c_output_compiles_and_runs_under_the_host_cc: no C compiler");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("buildlang_gpu_saxpy_c_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let c_path = dir.join("saxpy.c");
+    let output = buildc()
+        .arg(saxpy_example())
+        .arg("--target")
+        .arg("c")
+        .arg("-o")
+        .arg(&c_path)
+        .output()
+        .expect("run buildc --target c");
+    assert!(
+        output.status.success(),
+        "buildc should emit C for saxpy:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let c = std::fs::read_to_string(&c_path).expect("read emitted C");
+    let proto = c
+        .lines()
+        .find(|l| l.starts_with("static void saxpy(") && l.ends_with(';'))
+        .expect("a forward declaration of saxpy");
+    let def = c
+        .lines()
+        .find(|l| l.starts_with("static void saxpy(") && l.ends_with('{'))
+        .expect("a definition of saxpy");
+    assert_eq!(
+        proto.trim_end_matches(';'),
+        def.trim_end_matches(" {"),
+        "the forward declaration and the definition must spell the same parameter types"
+    );
+    assert!(
+        !proto.contains("struct {"),
+        "slice parameters must use a named type, not an inline anonymous struct: {proto}"
+    );
+
+    let driver = dir.join("driver.c");
+    std::fs::write(
+        &driver,
+        "#include <stdint.h>\n\
+         uint32_t buildc_gl_global_invocation_x;\n\
+         #include \"saxpy.c\"\n\
+         int main(void) {\n\
+         \x20   float a[4] = {1, 2, 3, 4}, b[4] = {10, 20, 30, 40}, o[4] = {0};\n\
+         \x20   BlSlice_f32 sa = {a, 4}, sb = {b, 4}, so = {o, 4};\n\
+         \x20   for (uint32_t i = 0; i < 4; ++i) { buildc_gl_global_invocation_x = i; saxpy(2.5f, &sa, &sb, &so); }\n\
+         \x20   for (int i = 0; i < 4; ++i) printf(\"%g\\n\", (double)o[i]);\n\
+         \x20   return 0;\n\
+         }\n",
+    )
+    .expect("write driver");
+    let exe = dir.join(if cfg!(windows) {
+        "driver.exe"
+    } else {
+        "driver"
+    });
+    let built = Command::new(cc)
+        .arg("-std=c11")
+        .arg("-O2")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&driver)
+        .arg("-lm")
+        .output()
+        .expect("run the C compiler");
+    assert!(
+        built.status.success(),
+        "{cc} must accept the emitted C:\n{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let ran = Command::new(&exe).output().expect("run the driver");
+    assert!(ran.status.success(), "driver exited non-zero");
+    let got = String::from_utf8_lossy(&ran.stdout).replace("\r\n", "\n");
+    assert_eq!(got, "12.5\n25\n37.5\n50\n", "saxpy over four elements");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------------------------------------------------------------------------
 // LAYER B/C: device execution + sealed receipt. Gated on the `gpu` feature and
 // an actual Vulkan device. Compiled in only under `--features gpu`.
