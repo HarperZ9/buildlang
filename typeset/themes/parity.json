@@ -1,0 +1,21 @@
+{
+  "name": "parity",
+  "purpose": "Reproduce the site's ReportLab career PDFs (US letter, Helvetica metrics via Arial, greedy lines) so agreement can be measured.",
+  "page": {"width": 612, "height": 792, "left": 49.2, "right": 49.2, "top": 45.6, "bottom": 45.6, "top_skip": 0, "ragged_bottom": true, "max_depth": 0},
+  "fonts": {"rm": "arial.ttf", "bf": "arialbd.ttf"},
+  "kerning": false, "ligatures": false, "hyphenate": false, "tex_spacing": false,
+  "space": {"width": 0.2778, "stretch": 0, "shrink": 0.01389, "extra": 0},
+  "spacing": "max", "keep_next_whole": true,
+  "club_penalty": 10000, "widow_penalty": 0,
+  "base": {"size": 10.5, "leading": 12.6, "align": "firstfit", "fonts": {"rm": "rm", "b": "bf", "i": "rm"}},
+  "blocks": {
+    "h1": {"size": 20, "leading": 23, "after": 4, "keep_next": true, "fonts": {"rm": "bf"}},
+    "h2": {"size": 11.5, "leading": 14, "before": 6, "after": 3, "keep_next": true, "fonts": {"rm": "bf"}},
+    "h3": {"size": 11, "leading": 12.8, "before": 5, "after": 2, "keep_next": true, "fonts": {"rm": "bf"}},
+    "subtitle": {"size": 11, "leading": 13.2, "before": 4, "after": 5, "keep_next": true, "fonts": {"rm": "bf"}},
+    "contact": {"leading": 12, "after": 2, "keep_next": true},
+    "meta": {"leading": 12, "after": 2, "keep_next": true},
+    "p": {"after": 3},
+    "li": {"after": 3, "left": 12, "hang": -9, "label": "\u2022 ", "label_sep": 0}
+  }
+}

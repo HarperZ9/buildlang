@@ -1,0 +1,399 @@
+{
+ "comment": "every file this change adds or edits, its source and sha256 (text hashed with LF line endings)",
+ "snapshot": "HarperZ9/workstation-tools@d82f57f",
+ "base": "001ef5050ef51721d6198a4b79c9b7cdba1d6e9b",
+ "sourcesHashedOn": "2026-11-02",
+ "files": [
+  {
+   "path": ".github/workflows/ci.yml",
+   "sha256": "1a0e8026c277fbc58026bb5cce4e3aeb69b34de56f4b6cb0b0736a362b93465e",
+   "source": "new in this change"
+  },
+  {
+   "path": "CHANGELOG.md",
+   "sha256": "825bc947b66ab845083e975225e05552f0ca32208f7e65bc391888ac69dc1764",
+   "source": "new in this change"
+  },
+  {
+   "path": "docs/FIELD.md",
+   "sha256": "11b8f68fb797cbfd7512e5dd5edc9219d5f5e097870a945eb343afda6017c48f",
+   "source": "new in this change"
+  },
+  {
+   "path": "tests/differential/test_saxpy_rounding.py",
+   "sha256": "8964cb6a3a25698851be657dce36d5ba7fe481dbd785eb3dacbbfcc3de09ba2d",
+   "source": "new in this change"
+  },
+  {
+   "path": "typeset/.gitignore",
+   "sha256": "cff7c6ee0a84ab79f25f291a9af56723e2739560ecfd0da18c5d236a67202e1e",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/.gitignore",
+   "sourceSha256": "651db0c35cd818fd53f82ba69f3a2502e75c23f443ad99a32b84378761b5a5e7",
+   "identical": false
+  },
+  {
+   "path": "typeset/README.md",
+   "sha256": "b5b2bf6a9e5fe4a7e96ed1a3f5f58dbc2793ebfc7509038e8c277b722c292b49",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/README.md",
+   "sourceSha256": "71c9daabd5b395bc853eea25ea84b7d1e3fc3f10904d87e3b3a6bbdfc3548503",
+   "identical": false
+  },
+  {
+   "path": "typeset/data/fonts/AccessionDisplay.ttf",
+   "sha256": "542b37c0c4c566c6ea5e2bc3830a86bca6153097882d7975b2af8c3123cd4c34",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/data/fonts/AccessionDisplay.ttf",
+   "sourceSha256": "542b37c0c4c566c6ea5e2bc3830a86bca6153097882d7975b2af8c3123cd4c34",
+   "identical": true
+  },
+  {
+   "path": "typeset/data/fonts/HankenGrotesk-Bold.ttf",
+   "sha256": "e27d982e5ee6ab41dcb000703d9d6f85c9b408125eecaaaf6820c0d6cc0dcc56",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/data/fonts/HankenGrotesk-Bold.ttf",
+   "sourceSha256": "e27d982e5ee6ab41dcb000703d9d6f85c9b408125eecaaaf6820c0d6cc0dcc56",
+   "identical": true
+  },
+  {
+   "path": "typeset/data/fonts/HankenGrotesk-Italic.ttf",
+   "sha256": "dd21ab609c3fdf5348c1bbd44bbb5ab65cbb4aea2f9df367e1259286de57a339",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/data/fonts/HankenGrotesk-Italic.ttf",
+   "sourceSha256": "dd21ab609c3fdf5348c1bbd44bbb5ab65cbb4aea2f9df367e1259286de57a339",
+   "identical": true
+  },
+  {
+   "path": "typeset/data/fonts/HankenGrotesk-Regular.ttf",
+   "sha256": "a31c2c0c958165cb5e4d634a15821b68ce1008a2e9b553bd97020ede97b1fc65",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/data/fonts/HankenGrotesk-Regular.ttf",
+   "sourceSha256": "a31c2c0c958165cb5e4d634a15821b68ce1008a2e9b553bd97020ede97b1fc65",
+   "identical": true
+  },
+  {
+   "path": "typeset/data/fonts/HankenGrotesk-SemiBold.ttf",
+   "sha256": "2bc195d9516390644114e140dfcad3daf3a7a8d6a5defc512961cf99d890ad89",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/data/fonts/HankenGrotesk-SemiBold.ttf",
+   "sourceSha256": "2bc195d9516390644114e140dfcad3daf3a7a8d6a5defc512961cf99d890ad89",
+   "identical": true
+  },
+  {
+   "path": "typeset/data/fonts/OFL-accession.txt",
+   "sha256": "b03d6d12bf3847fee4d7bd435245e6859926758806c0b3548633a144a5d2cd98",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/data/fonts/OFL-accession.txt",
+   "sourceSha256": "b03d6d12bf3847fee4d7bd435245e6859926758806c0b3548633a144a5d2cd98",
+   "identical": true
+  },
+  {
+   "path": "typeset/data/fonts/OFL-hanken-grotesk.txt",
+   "sha256": "e02ccb89a86839b22feff7872ff5cc355cc0f58318d29eee20e2cf83a612f16d",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/data/fonts/OFL-hanken-grotesk.txt",
+   "sourceSha256": "e02ccb89a86839b22feff7872ff5cc355cc0f58318d29eee20e2cf83a612f16d",
+   "identical": true
+  },
+  {
+   "path": "typeset/data/hyph/README_hyph_en_US.txt",
+   "sha256": "9bcae072bff45cc0333d6b3c508c92d85b9065fc861c743c1506b303eba3f4a1",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/data/hyph/README_hyph_en_US.txt",
+   "sourceSha256": "9bcae072bff45cc0333d6b3c508c92d85b9065fc861c743c1506b303eba3f4a1",
+   "identical": true
+  },
+  {
+   "path": "typeset/data/hyph/hyph_en_US.dic",
+   "sha256": "486fb6840b1049d5d252ef784be11cd4dc2be0bf296568b74b41e4f4e17cba7d",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/data/hyph/hyph_en_US.dic",
+   "sourceSha256": "486fb6840b1049d5d252ef784be11cd4dc2be0bf296568b74b41e4f4e17cba7d",
+   "identical": true
+  },
+  {
+   "path": "typeset/doc/doc.bld",
+   "sha256": "10ad59d69e71e8e8e0b6744ce698b1396e72f29b1e43d0d4d1d33e98ba8caf96",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/doc/doc.bld",
+   "sourceSha256": "10ad59d69e71e8e8e0b6744ce698b1396e72f29b1e43d0d4d1d33e98ba8caf96",
+   "identical": true
+  },
+  {
+   "path": "typeset/engine/__init__.py",
+   "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/__init__.py",
+   "sourceSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "identical": true
+  },
+  {
+   "path": "typeset/engine/annotate.py",
+   "sha256": "f85e82ba37e4396ad1e64575e7bd5d9aa5c5fafd7ef832fa98fd1443bd47a980",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/annotate.py",
+   "sourceSha256": "f85e82ba37e4396ad1e64575e7bd5d9aa5c5fafd7ef832fa98fd1443bd47a980",
+   "identical": true
+  },
+  {
+   "path": "typeset/engine/art.py",
+   "sha256": "d3b44b28e51632c11bf7a46a2da755bbbb8e4538b9a5e6ac3be1c832a9352fc1",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/art.py",
+   "sourceSha256": "d3b44b28e51632c11bf7a46a2da755bbbb8e4538b9a5e6ac3be1c832a9352fc1",
+   "identical": true
+  },
+  {
+   "path": "typeset/engine/breaker.py",
+   "sha256": "8d273004c006a8bea813d0b410ba948f195e9e5966825771106af7a69044ab17",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/breaker.py",
+   "sourceSha256": "8d273004c006a8bea813d0b410ba948f195e9e5966825771106af7a69044ab17",
+   "identical": true
+  },
+  {
+   "path": "typeset/engine/cmap.py",
+   "sha256": "a6c3860c2b1d48157be095aa26326c055c6e6aa01b231153645415b7d4f42c2a",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/cmap.py",
+   "sourceSha256": "a6c3860c2b1d48157be095aa26326c055c6e6aa01b231153645415b7d4f42c2a",
+   "identical": true
+  },
+  {
+   "path": "typeset/engine/docir.py",
+   "sha256": "694c39d7e4c15565c77c79357824bbb0f9ecc05549e306e0cd97950950e4b95e",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/docir.py",
+   "sourceSha256": "694c39d7e4c15565c77c79357824bbb0f9ecc05549e306e0cd97950950e4b95e",
+   "identical": true
+  },
+  {
+   "path": "typeset/engine/emboss.py",
+   "sha256": "ad724be02ba9353827a0a76912537906d919472d00afffe1c7542a0c57c5c768",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/emboss.py",
+   "sourceSha256": "e501bdd7d52df9458e4c16790c11d8be9849732586b0a5bc531f4e4ed26aa33e",
+   "identical": false
+  },
+  {
+   "path": "typeset/engine/fonts.py",
+   "sha256": "f34211830f418ba21d317a3297624b8b2349256f1408e7df64ff7517b20457a1",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/fonts.py",
+   "sourceSha256": "d8e4d6e7ade291105f6a67e78a94bfd822eea2bff9ab7003353daa296a68f0ce",
+   "identical": false
+  },
+  {
+   "path": "typeset/engine/footer.py",
+   "sha256": "b04a6ab7c2e6cfb0ce083fec154654294a0fb5a3ffb893c6f7516728cff91608",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/footer.py",
+   "sourceSha256": "b04a6ab7c2e6cfb0ce083fec154654294a0fb5a3ffb893c6f7516728cff91608",
+   "identical": true
+  },
+  {
+   "path": "typeset/engine/glyf.py",
+   "sha256": "8beea935dcb690a5849c734762b414f604757316ac76b6230b4056d222e7a5ab",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/glyf.py",
+   "sourceSha256": "8beea935dcb690a5849c734762b414f604757316ac76b6230b4056d222e7a5ab",
+   "identical": true
+  },
+  {
+   "path": "typeset/engine/hlist.py",
+   "sha256": "730facc72ca0356de8c3115b30bfec7fc2708e4c45dce78f4876b8f16a2e154d",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/hlist.py",
+   "sourceSha256": "730facc72ca0356de8c3115b30bfec7fc2708e4c45dce78f4876b8f16a2e154d",
+   "identical": true
+  },
+  {
+   "path": "typeset/engine/hyph.py",
+   "sha256": "54421941e4523341b0962756be16d1316c5087870f9a646833ea241889c71304",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/hyph.py",
+   "sourceSha256": "54421941e4523341b0962756be16d1316c5087870f9a646833ea241889c71304",
+   "identical": true
+  },
+  {
+   "path": "typeset/engine/icc.py",
+   "sha256": "3f2f7a3cf27a96862ef734bca60f826964f10082f7353d8e0746258ee7d106e8",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/icc.py",
+   "sourceSha256": "3f2f7a3cf27a96862ef734bca60f826964f10082f7353d8e0746258ee7d106e8",
+   "identical": true
+  },
+  {
+   "path": "typeset/engine/layout.py",
+   "sha256": "ba75581640e44ad25b5e6343645b1fefb9f321d7375feb4e6165242f22b22b5c",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/layout.py",
+   "sourceSha256": "ba75581640e44ad25b5e6343645b1fefb9f321d7375feb4e6165242f22b22b5c",
+   "identical": true
+  },
+  {
+   "path": "typeset/engine/mathfont.py",
+   "sha256": "90486d8251fba4dc6023cc7f3048cf5f6da34010ca1db0d85086ea82a6fbbb9d",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/mathfont.py",
+   "sourceSha256": "90486d8251fba4dc6023cc7f3048cf5f6da34010ca1db0d85086ea82a6fbbb9d",
+   "identical": true
+  },
+  {
+   "path": "typeset/engine/mathlayout.py",
+   "sha256": "916eb8036f038d3c38f14198417c4dc0045dac28f00a8a4e88b10155696d3264",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/mathlayout.py",
+   "sourceSha256": "916eb8036f038d3c38f14198417c4dc0045dac28f00a8a4e88b10155696d3264",
+   "identical": true
+  },
+  {
+   "path": "typeset/engine/mathparse.py",
+   "sha256": "d9f7b36d06e4c5e9c4c448a3a0a1028ad6d9b41079a480567c29b56fbd97ab5d",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/mathparse.py",
+   "sourceSha256": "d9f7b36d06e4c5e9c4c448a3a0a1028ad6d9b41079a480567c29b56fbd97ab5d",
+   "identical": true
+  },
+  {
+   "path": "typeset/engine/metricfont.py",
+   "sha256": "ba979fdc908a340d3c23a57b962baf3f66e4cfc8e4ffc5417e138b8eadf700f7",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/metricfont.py",
+   "sourceSha256": "84cab4dabc200615dd43c171919a75325a8dc81eddf715ab4cdf3eb5566c9b3e",
+   "identical": false
+  },
+  {
+   "path": "typeset/engine/pages.py",
+   "sha256": "d435aab358dca4577aea7704c5e2ce76489f6d4d789044c3e2a66e1f4caa677a",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/pages.py",
+   "sourceSha256": "d435aab358dca4577aea7704c5e2ce76489f6d4d789044c3e2a66e1f4caa677a",
+   "identical": true
+  },
+  {
+   "path": "typeset/engine/pdfgfx.py",
+   "sha256": "8a3f63b8a874f1e29a61e52fe89a7e8c5e742c8d5789481030b0cd62dc831904",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/pdfgfx.py",
+   "sourceSha256": "8a3f63b8a874f1e29a61e52fe89a7e8c5e742c8d5789481030b0cd62dc831904",
+   "identical": true
+  },
+  {
+   "path": "typeset/engine/pdfout.py",
+   "sha256": "ad05789e0632b0fac97fead3c0de62b4e6bed71b502cab51da9e4d25beb9933a",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/pdfout.py",
+   "sourceSha256": "ad05789e0632b0fac97fead3c0de62b4e6bed71b502cab51da9e4d25beb9933a",
+   "identical": true
+  },
+  {
+   "path": "typeset/engine/pdfread.py",
+   "sha256": "24b711a028052dbbfaa10a791e1e6fc7b54fc7644f11ccd0e1991c352e104353",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/pdfread.py",
+   "sourceSha256": "24b711a028052dbbfaa10a791e1e6fc7b54fc7644f11ccd0e1991c352e104353",
+   "identical": true
+  },
+  {
+   "path": "typeset/engine/raster.py",
+   "sha256": "d2a865d8b5b230556b9ad0c6345168777decb827f921e1cff6797bc34c93ea0e",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/raster.py",
+   "sourceSha256": "d2a865d8b5b230556b9ad0c6345168777decb827f921e1cff6797bc34c93ea0e",
+   "identical": true
+  },
+  {
+   "path": "typeset/engine/refs.py",
+   "sha256": "5d031d7364506e2f307189755ef6abe7bed3d1d99d5b9ba76e0f467e33a8e177",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/refs.py",
+   "sourceSha256": "5d031d7364506e2f307189755ef6abe7bed3d1d99d5b9ba76e0f467e33a8e177",
+   "identical": true
+  },
+  {
+   "path": "typeset/engine/render.py",
+   "sha256": "3b85fbf93328b321bd7e6ad93e67924effe2ad050539446fc4b274628f1edf71",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/render.py",
+   "sourceSha256": "3b85fbf93328b321bd7e6ad93e67924effe2ad050539446fc4b274628f1edf71",
+   "identical": true
+  },
+  {
+   "path": "typeset/engine/sfnt.py",
+   "sha256": "88fa6ab4eb449ed9233207a790a2450f2fd9b5a9024ff7ea5c5715f910a417a4",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/sfnt.py",
+   "sourceSha256": "88fa6ab4eb449ed9233207a790a2450f2fd9b5a9024ff7ea5c5715f910a417a4",
+   "identical": true
+  },
+  {
+   "path": "typeset/engine/shape.py",
+   "sha256": "790f6254ab8e66646cdc218bc72f5f91a608f2a9c7d0325713452252a9951c00",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/shape.py",
+   "sourceSha256": "790f6254ab8e66646cdc218bc72f5f91a608f2a9c7d0325713452252a9951c00",
+   "identical": true
+  },
+  {
+   "path": "typeset/engine/subset.py",
+   "sha256": "aa8ca4a9cf2f01285e5dd04d03595e7c4fd98f8d7117092892e0e1b0b15cb6f3",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/subset.py",
+   "sourceSha256": "aa8ca4a9cf2f01285e5dd04d03595e7c4fd98f8d7117092892e0e1b0b15cb6f3",
+   "identical": true
+  },
+  {
+   "path": "typeset/engine/svgout.py",
+   "sha256": "c305eb4dca9c15b72d6b5f50deb25b0df2cc67890965db75e2cf2531104a3240",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/svgout.py",
+   "sourceSha256": "c305eb4dca9c15b72d6b5f50deb25b0df2cc67890965db75e2cf2531104a3240",
+   "identical": true
+  },
+  {
+   "path": "typeset/engine/theme.py",
+   "sha256": "1e2d99242f896d9de38b355f3e797a112e42becb3c2aae8b2290ab578b7566df",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/engine/theme.py",
+   "sourceSha256": "1e2d99242f896d9de38b355f3e797a112e42becb3c2aae8b2290ab578b7566df",
+   "identical": true
+  },
+  {
+   "path": "typeset/findings/self_string_field.bld",
+   "sha256": "6685b0a238558d8d3dfa7377fa9aa0c90b62a11f87ab717379ca0364287a5e7d",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/findings/self_string_field.bld",
+   "sourceSha256": "6685b0a238558d8d3dfa7377fa9aa0c90b62a11f87ab717379ca0364287a5e7d",
+   "identical": true
+  },
+  {
+   "path": "typeset/kp/crosscheck.py",
+   "sha256": "e64c424cb0d70d3627528c65c49322a3b794217448f1f66fbf1136bb7a00915b",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/kp/crosscheck.py",
+   "sourceSha256": "e64c424cb0d70d3627528c65c49322a3b794217448f1f66fbf1136bb7a00915b",
+   "identical": true
+  },
+  {
+   "path": "typeset/kp/dump_items.py",
+   "sha256": "97cb9b9d5315a17b258f81abb31bfbe950e9d0469b3be91dbbd41c57e5f9a496",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/kp/dump_items.py",
+   "sourceSha256": "97cb9b9d5315a17b258f81abb31bfbe950e9d0469b3be91dbbd41c57e5f9a496",
+   "identical": true
+  },
+  {
+   "path": "typeset/kp/knuth_plass.bld",
+   "sha256": "d28a98b8606e5f92ef27f301ae65b4a396c5110f685e30cb4b95779009fb6023",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/kp/knuth_plass.bld",
+   "sourceSha256": "d28a98b8606e5f92ef27f301ae65b4a396c5110f685e30cb4b95779009fb6023",
+   "identical": true
+  },
+  {
+   "path": "typeset/tests/test_breaker.py",
+   "sha256": "9b872a8f08906698d4f8f39910821737748c63a63b481b04833413f2c48772ce",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/tests/test_breaker.py",
+   "sourceSha256": "9b872a8f08906698d4f8f39910821737748c63a63b481b04833413f2c48772ce",
+   "identical": true
+  },
+  {
+   "path": "typeset/tests/test_engine.py",
+   "sha256": "6adac2ee342bd2d753501c7f89bdd2e543f41e4f433e2d7dfb477d58f1b7819e",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/tests/test_engine.py",
+   "sourceSha256": "4bf32ce0db8dae85146e67e36159b7b48cb00b0ad03f5ad8271a6355d49d0161",
+   "identical": false
+  },
+  {
+   "path": "typeset/themes/latex-article.json",
+   "sha256": "b9affe85c6f610cee1a8c3c281566587f34e4f834ff3461cc9def04c1bea6ee1",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/themes/latex-article.json",
+   "sourceSha256": "b9affe85c6f610cee1a8c3c281566587f34e4f834ff3461cc9def04c1bea6ee1",
+   "identical": true
+  },
+  {
+   "path": "typeset/themes/lens.json",
+   "sha256": "27fb33553abff3ca8606a76e8b5628b43975d4300e2d03dcc9758ba5eb835c6e",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/themes/lens.json",
+   "sourceSha256": "27fb33553abff3ca8606a76e8b5628b43975d4300e2d03dcc9758ba5eb835c6e",
+   "identical": true
+  },
+  {
+   "path": "typeset/themes/living.json",
+   "sha256": "b6696b2cbf3bd31d0ff421a49d1a410dec69c2a6157fc28f385cc2b29fd4ad6f",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/themes/living.json",
+   "sourceSha256": "c8f882dd5961ab81834e35e0f863144d88d9b168f0575eb51da641b96ca1cab8",
+   "identical": false
+  },
+  {
+   "path": "typeset/themes/parity-cv.json",
+   "sha256": "4e98a60a81554455d7037856c1cfdd12d76b500841a0693ef3ad56c107acf506",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/themes/parity-cv.json",
+   "sourceSha256": "4e98a60a81554455d7037856c1cfdd12d76b500841a0693ef3ad56c107acf506",
+   "identical": true
+  },
+  {
+   "path": "typeset/themes/parity.json",
+   "sha256": "47035b88b91399e4f73a2d465f9206afcfd515be4afd1930354525e7ec3d39c8",
+   "source": "typeset worktree on buildlang feat/typeset, uncommitted: typeset/themes/parity.json",
+   "sourceSha256": "47035b88b91399e4f73a2d465f9206afcfd515be4afd1930354525e7ec3d39c8",
+   "identical": true
+  }
+ ]
+}

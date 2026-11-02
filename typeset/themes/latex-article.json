@@ -1,0 +1,243 @@
+{
+ "name": "latex-article",
+ "purpose": "LaTeX article class, 11pt, A4, 1in margins, as the site's papers are set. Lengths are TeX's, converted to bp; vertical skips follow the class defaults (3.5ex, 2.3ex, topsep, itemsep).",
+ "page": {
+  "width": 595.28,
+  "height": 841.89,
+  "left": 72,
+  "right": 72,
+  "top": 72,
+  "bottom": 72,
+  "top_skip": 10.959,
+  "ragged_bottom": true,
+  "max_depth": 4.98
+ },
+ "fonts": {
+  "rm": "lm:LMRoman10-Regular",
+  "it": "lm:LMRoman10-Italic",
+  "bf": "lm:LMRoman10-Bold",
+  "bi": "lm:LMRoman10-BoldItalic",
+  "sc": "lm:LMRomanCaps10-Regular",
+  "tt": "lm:LMMono10-Regular",
+  "rm12": "lm:LMRoman12-Regular",
+  "bf12": "lm:LMRoman12-Bold",
+  "rm8": "lm:LMRoman8-Regular"
+ },
+ "kerning": true,
+ "ligatures": true,
+ "hyphenate": true,
+ "tex_spacing": true,
+ "space": {
+  "width": 0.333333,
+  "stretch": 0.166667,
+  "shrink": 0.111111,
+  "extra": 0.111111
+ },
+ "linebreak": {
+  "tolerance": 200,
+  "pretolerance": 100,
+  "line_penalty": 10,
+  "adj_demerits": 10000,
+  "double_hyphen_demerits": 10000,
+  "final_hyphen_demerits": 5000
+ },
+ "hyphenpenalty": 50,
+ "exhyphenpenalty": 50,
+ "club_penalty": 150,
+ "widow_penalty": 150,
+ "spacing": "addvspace",
+ "numbered": [
+  "section"
+ ],
+ "cite_format": "[{n}]",
+ "base": {
+  "size": 10.909,
+  "leading": 13.549,
+  "align": "justify",
+  "indent": 16.936,
+  "fonts": {
+   "rm": "rm",
+   "i": "it",
+   "b": "bf",
+   "bi": "bi",
+   "sc": "sc",
+   "tt": "tt"
+  },
+  "before_stretch": 0.996
+ },
+ "blocks": {
+  "title": {
+   "size": 17.215,
+   "leading": 21.918,
+   "align": "center",
+   "indent": 0,
+   "null_before": 43.74,
+   "hyphenate": false,
+   "fonts": {
+    "rm": "bf12",
+    "b": "bf12"
+   }
+  },
+  "author": {
+   "size": 11.955,
+   "leading": 13.948,
+   "before": 16.36,
+   "align": "center",
+   "indent": 0,
+   "fonts": {
+    "rm": "rm12"
+   }
+  },
+  "affil": {
+   "size": 9.963,
+   "leading": 11.955,
+   "before": 3.985,
+   "align": "center",
+   "indent": 0
+  },
+  "affil_tt": {
+   "size": 9.963,
+   "leading": 11.955,
+   "before": 3.985,
+   "align": "center",
+   "indent": 0,
+   "color": "0 0 0.6"
+  },
+  "date": {
+   "size": 11.955,
+   "leading": 13.948,
+   "before": 10.44,
+   "align": "center",
+   "indent": 0,
+   "fonts": {
+    "rm": "rm12"
+   }
+  },
+  "abstract_head": {
+   "size": 9.963,
+   "leading": 11.955,
+   "before": 28.32,
+   "align": "center",
+   "indent": 0,
+   "fonts": {
+    "rm": "bf"
+   }
+  },
+  "abstract": {
+   "size": 9.963,
+   "leading": 11.955,
+   "before": 6.97,
+   "left": 27.27,
+   "right": 27.27,
+   "indent": 14.944,
+   "after": 8.97,
+   "before_stretch": 0.996
+  },
+  "section_star": {
+   "size": 14.346,
+   "leading": 17.933,
+   "before": 16.44,
+   "after": 10.8,
+   "indent": 0,
+   "align": "ragged",
+   "keep_next": true,
+   "penalty_before": -300,
+   "hyphenate": false,
+   "fonts": {
+    "rm": "bf12"
+   },
+   "before_stretch": 4.7,
+   "before_shrink": 0.94
+  },
+  "section": {
+   "size": 14.346,
+   "leading": 17.933,
+   "before": 16.44,
+   "after": 10.8,
+   "indent": 0,
+   "align": "ragged",
+   "keep_next": true,
+   "penalty_before": -300,
+   "hyphenate": false,
+   "label": "{n}",
+   "label_width": 0,
+   "label_sep": 14.346,
+   "fonts": {
+    "rm": "bf12",
+    "label": "bf12"
+   },
+   "before_stretch": 4.7,
+   "before_shrink": 0.94
+  },
+  "paragraph": {
+   "before": 15.27,
+   "indent": 0,
+   "align": "ragged",
+   "keep_next": true,
+   "fonts": {
+    "rm": "bf"
+   },
+   "run_in": [
+    "p",
+    "p_first"
+   ],
+   "before_stretch": 4.7,
+   "before_shrink": 0.94
+  },
+  "p_first": {
+   "indent": 0
+  },
+  "item": {
+   "before": 6.48,
+   "first_before": 8.97,
+   "after": 8.97,
+   "left": 13.94,
+   "hang": -13.94,
+   "indent": 0,
+   "label": "{n}.",
+   "label_width": 8.385,
+   "label_sep": 5.555,
+   "before_stretch": 3.98,
+   "before_shrink": 1.99
+  },
+  "bullet": {
+   "before": 5.48,
+   "first_before": 8.97,
+   "after": 8.97,
+   "left": 13.94,
+   "hang": -13.94,
+   "indent": 0,
+   "label": "•",
+   "label_width": 8.385,
+   "label_sep": 5.555,
+   "fallbacks": [
+    "rm"
+   ],
+   "before_stretch": 3.98,
+   "before_shrink": 1.99
+  },
+  "bib": {
+   "size": 9.963,
+   "leading": 11.955,
+   "before": 4.48,
+   "first_before": 8.97,
+   "left": 16.97,
+   "hang": -15.97,
+   "indent": 0,
+   "label": "[{n}]",
+   "label_width": 10.52,
+   "label_sep": 5.45,
+   "before_stretch": 3.98,
+   "before_shrink": 1.99
+  }
+ },
+ "footer": {
+  "text_font": "rm8",
+  "size": 7.97,
+  "color": "0.4 0.4 0.4",
+  "baseline": 727.78,
+  "width": 412.3,
+  "page_font": "rm",
+  "page_size": 9.963
+ }
+}

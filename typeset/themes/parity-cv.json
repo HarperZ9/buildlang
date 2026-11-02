@@ -1,0 +1,13 @@
+{
+  "extends": "parity",
+  "name": "parity-cv",
+  "purpose": "The CV variant of the site's ReportLab settings: fixed 10.5 pt body, no widows.",
+  "widow_penalty": 10000,
+  "blocks": {
+    "p": {"size": 10.5, "leading": 12.5},
+    "li": {"size": 10.5, "leading": 12.5, "after": 1},
+    "h3": {"size": 10.5, "leading": 12.5, "before": 5},
+    "subtitle": {"size": 10.5, "leading": 12.5},
+    "h2": {"before": 7}
+  }
+}
