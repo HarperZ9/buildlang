@@ -9,6 +9,7 @@ the BuildLang compiler `buildc` for a .bld source).
 """
 import contextlib
 import os
+import re
 import shlex
 import subprocess
 
@@ -34,7 +35,8 @@ def program(argv):
         parts = shlex.split(argv, posix=os.name != "nt") or [""]
     else:
         parts = [os.fsdecode(a) for a in argv] or [""]
-    name = os.path.basename(parts[0].strip('"')).lower()
+    # split on both separators so a Windows path is named the same on every host
+    name = re.split(r"[\\/]",parts[0].strip('"'))[-1].lower()
     for ext in (".exe", ".cmd", ".bat", ".com"):
         if name.endswith(ext):
             name = name[: -len(ext)]
