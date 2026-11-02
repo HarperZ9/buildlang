@@ -86,7 +86,7 @@ The aim: a math claim in a document carries a proof, and a build fails when the 
 
 **Importing Lean, one way.** For a useful subset: `def` and `theorem` statements translate to declared symbols and formulas; term proofs and simple tactic proofs (`intro`, `apply`, `exact`, `rw` with named lemmas, `simp only [..]` with a listed set) are replayed into explicit steps. A Lean proof that needs elaboration the importer cannot replay is reported, not translated, and the claim stays unchecked in the document. Lean never runs; the importer reads `.lean` text.
 
-**What exists in BuildLang today.** The compiler checks capability effects and seals accountability receipts (`buildlang-receipt-verification/v1`), and scientific-runtime receipts check a stated invariant by re-running a kernel (`docs/SCIENTIFIC-RECEIPT.md`). Those are checks of programs and measured series, not of proofs. A Metamath-format proof kernel written in BuildLang exists as separate research work; it is not in this repository and is not wired into BuildTeX. The proof form, the document hook and the Lean importer above are design only.
+**What exists in BuildLang today.** The compiler checks capability effects and seals accountability receipts (`buildlang-receipt-verification/v1`), and scientific-runtime receipts check a stated invariant by re-running a kernel (`docs/SCIENTIFIC-RECEIPT.md`). Those are checks of programs and measured series, not of proofs. The checker candidate is `tools/proofkernel` (mmk), a Metamath verifier written in BuildLang, proposed in HarperZ9/buildlang#117. BuildTeX does not call it; wiring it in waits until #117 merges. The proof form, the document hook and the Lean importer above are design only.
 
 ## Native port
 
@@ -113,4 +113,4 @@ Each step lands with a differential test against the Python engine on real docum
 - Math needs an OpenType MATH font. The `press` and `ats` themes carry none, so they set math source as plain text and record a note in the receipt; a math-heavy document uses a theme with a MATH font, such as `latex-article` where Cambria Math is installed.
 - PDF/A-2b metadata is written but no validator has run; tagged PDF structure (for screen readers beyond the text layer) is not written.
 - The relief is a raster at the theme's dpi (150 for `press`); text and rules stay vector.
-- The proof checker, the proof hook in documents and the Lean importer are design only.
+- The proof hook in documents and the Lean importer are design only. The checker candidate is mmk in #117, not yet merged or wired in.
