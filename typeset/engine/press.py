@@ -14,6 +14,7 @@ Theme keys, under "emboss":
   "deboss_blocks", "region"   as for the plates path
   "deboss_finish": "inked"    the debossed line also prints in ink (default); "blind" prints relief only
   "match_paper": true         flat paper in the relief keeps the page paper colour
+  "clear_body": ["h2"]        the relief stops above the first line of these block kinds
 Theme key "paper_fill": true paints the theme's paper colour on every page.
 """
 from . import pdfgfx
@@ -36,11 +37,22 @@ def apply(layout, pages, theme):
     spec = theme.get("emboss") or {}
     if spec.get("mode") != "inline" or not pages:
         return notes
+    page = pages[0]
+    if spec.get("clear_body"):
+        # The relief stops above the first body block (for example the first section heading), so
+        # no decoration sits behind body text however long the header runs.
+        x0, y0, x1, y1 = spec["region"]
+        for y, line in page.items:
+            kind = layout.doc.blocks[line.block].kind
+            if kind in spec["clear_body"]:
+                top = page.top + y - 1.2 * layout.style(kind)["size"]
+                spec = dict(spec, region=[x0, y0, x1, min(y1, top - 2)])
+                theme = dict(theme, emboss=spec)
+                break
     w, h, height, foil, _ = height_map(layout, pages, theme)
     lut, source = metal_lut(spec["foil"].get("material", "gold"))
     rows = render_relief(None, w, h, height, foil, theme, lut)
     x0, y0, x1, y1 = spec["region"]
-    page = pages[0]
     roles = set(spec.get("emboss_roles", [])) | set(spec["foil"].get("roles", []))
     keep = lambda g: not (g.get("type") == "path" and g.get("role") in roles and g.get("emboss", True))
     page.furniture_under = [g for g in page.furniture_under if keep(g)]

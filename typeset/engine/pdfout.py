@@ -73,12 +73,13 @@ def write_pdf(path, pages, registry, meta, plates=None, graphics_only=False, pdf
     for page in pages:
         ops = []
         for g in page.furniture_under if hasattr(page, "furniture_under") else []:
-            ops.append(pdfgfx.draw(g, page.height))
+            ops.append(_artifact(pdfgfx.draw(g, page.height)))
         if not graphics_only:
             for y, line in page.items:
                 ops.append(_line_ops(line, y, page, registry, uses))
         for g in page.furniture:
-            ops.append(pdfgfx.draw(g, page.height, registry, uses, _line_ops))
+            drawn = pdfgfx.draw(g, page.height, registry, uses, _line_ops)
+            ops.append(drawn if g.get("type") == "line" else _artifact(drawn))
         contents.append("\n".join(o for o in ops if o))
     pages_n = w.reserve()
     font_refs = {}
@@ -114,6 +115,11 @@ def write_pdf(path, pages, registry, meta, plates=None, graphics_only=False, pdf
     with open(path, "wb") as fh:
         fh.write(data)
     return data
+
+
+def _artifact(ops):
+    """Mark decoration as a PDF artifact so text extraction and assistive technology skip it."""
+    return "/Artifact BMC\n" + ops + "\nEMC" if ops else ops
 
 
 def _line_ops(line, y, page, registry, uses, left=None):

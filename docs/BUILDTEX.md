@@ -69,7 +69,8 @@ The finish is theme data, so a document changes look without changing source.
 |---|---|---|
 | `ats` | Black on white, one sans family, no art, no relief, ragged right, no hyphenation | Applicant tracking systems and plain printing |
 | `living` | The site look: paper ground, Hanken Grotesk, Accession Display name, generative aperture, halftone band, hairline rule | Screen reading |
-| `press` | `living` plus the press finish inside the page | The designed resume and CV |
+| `press` | `living` plus the press finish inside the page | Letters, covers and art pieces |
+| `press-resume` | `press` held to resume standards: 10 pt body, round bullets, headings larger than body, the relief cut off above the first section heading (`clear_body`), the name inked | The designed resumes and CV, shipped beside a plain edition they must parse identically to |
 | `latex-article` | Article class, 11 pt, A4, Latin Modern metrics | Matching an existing LaTeX paper |
 
 The press finish (`engine/press.py`) lights the emboss height map and places it on page one as an image: the aperture rings stand up from the paper with a foil core, and the name sits in a debossed well. `deboss_finish` picks `inked` (the default: the name also prints in ink, as letterpress does, so it keeps full contrast) or `blind` (relief only; the name stays in the text layer through PDF render mode 3, so search, copy and screen readers still get it). `match_paper` keeps flat paper in the relief at the page's paper colour so the relief has no band edge. For a real press run, `--plates` on `engine.render` still writes the separate die, foil and spot plates.
@@ -111,6 +112,6 @@ Each step lands with a differential test against the Python engine on real docum
 
 - The engine is Python; only line breaking also runs as BuildLang.
 - Math needs an OpenType MATH font. The `press` and `ats` themes carry none, so they set math source as plain text and record a note in the receipt; a math-heavy document uses a theme with a MATH font, such as `latex-article` where Cambria Math is installed.
-- PDF/A-2b metadata is written but no validator has run; tagged PDF structure (for screen readers beyond the text layer) is not written.
+- PDF/A-2b metadata is written but no validator has run. Decoration is marked as `/Artifact` content so extraction and assistive technology skip it, but no structure tree (tagged PDF) is written.
 - The relief is a raster at the theme's dpi (150 for `press`); text and rules stay vector.
 - The proof hook in documents and the Lean importer are design only. The checker candidate is mmk in #117, not yet merged or wired in.

@@ -164,6 +164,31 @@ class Builds(unittest.TestCase):
         content = pdf.stream(pdf.ref(pdf.pages()[0], b"Contents"))
         self.assertIn(b"0 Tr", content)  # the render mode is reset, so later text is inked
 
+    def test_resume_finish_marks_decoration_and_clears_the_body(self):
+        from engine.render import render
+        from engine.theme import load_theme
+        out = os.path.join(self.dir, "press-resume")
+        r = build(RESUME, out, "press-resume", LOW_DPI, html=False)
+        self.assertEqual(r["failed"], [])
+        with open(out + ".pdf", "rb") as fh:
+            pdf = PDF(fh.read())
+        self.assertIn(b"/Artifact BMC", pdf.stream(pdf.ref(pdf.pages()[0], b"Contents")))
+        with open(RESUME, encoding="utf-8") as fh:
+            meta, blocks = texin.Importer().convert(fh.read())
+        ir = os.path.join(self.dir, "pr.tsv")
+        with open(ir, "w", encoding="utf-8") as fh:
+            fh.write(texin.to_ir(meta, blocks, "press-resume"))
+        theme = load_theme("press-resume")
+        theme["emboss"]["dpi"] = 36
+        path = os.path.join(self.dir, "pr-theme.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(theme, fh)
+        _, lay, pages = render(ir, os.path.join(self.dir, "pr"), path, formats=("pdf",))
+        page = pages[0]
+        relief = [g for g in page.furniture_under if g.get("role") == "relief"][0]
+        first_h2 = min(page.top + y for y, line in page.items if lay.doc.blocks[line.block].kind == "h2")
+        self.assertLess(relief["y"] + relief["h"], first_h2 - 10.6)  # clear of the heading's ascent
+
     def test_html_comes_from_the_same_layout(self):
         with open(os.path.join(self.dir, "resume-press.html"), encoding="utf-8") as fh:
             page = fh.read()
