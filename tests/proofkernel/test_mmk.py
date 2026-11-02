@@ -21,7 +21,7 @@ def _buildc():
     env = os.environ.get("BUILDC")
     for cand in ([env] if env else []) + [str(ROOT / "compiler/target/release/buildc"), str(ROOT / "compiler/target/release/buildc.exe")]:
         if cand and Path(cand).is_file():
-            return cand
+            return str(Path(cand).resolve())  # the build runs in a temp folder, so a relative path breaks
     return None
 
 

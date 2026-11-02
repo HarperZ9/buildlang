@@ -21,7 +21,7 @@
   },
   {
    "path": "tests/proofkernel/test_mmk.py",
-   "sha256": "22b1059cbdc4ec4989ce2f20a3cd9cafdb6219695d8d55bfcea0713614f387d0",
+   "sha256": "1b28aff990823483d3cae0e4de9df9321323d240f973d6decfa0e2452e59f0c7",
    "source": "new in this change"
   },
   {
