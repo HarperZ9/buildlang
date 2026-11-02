@@ -162,6 +162,11 @@ jobs:
             exit 1
           fi
           echo "=== Cross-module import test PASSED ==="
+      - name: Proof kernel (mmk accepts a valid database, refuses planted faults)
+        if: runner.os == 'Linux'
+        env:
+          BUILDC: compiler/target/release/buildc
+        run: python3 tests/proofkernel/test_mmk.py -v
   art-receipts:
     runs-on: ubuntu-latest
     steps:

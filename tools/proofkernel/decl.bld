@@ -1,0 +1,218 @@
+const DECL_KA: i32 = 2;
+const DECL_KE: i32 = 1;
+const DECL_KF: i32 = 0;
+const DECL_KP: i32 = 3;
+
+// ---- declarations
+pub fn decl_c(k: &mut state::K, b: &str, s: &str) ~ Console + Process {
+    if k.depth > 0 { state::report(k, s, "const-in-block", "-"); }
+    loop {
+        if !tokens::next_tok(k, b, s) { state::fatal(k, s, "unterminated-statement", "$c"); }
+        if tokens::tok_is(k, b, 46u8) { return; }
+        let t = tokens::intern(k, b);
+        if k.sym[t] != 0 || k.lab[t] >= 0 {
+            state::report(k, s, "redeclared-symbol", state::tok_str(k, s, t));
+        }
+        k.sym[t] = 1;
+    }
+}
+
+pub fn decl_v(k: &mut state::K, b: &str, s: &str) ~ Console + Process {
+    loop {
+        if !tokens::next_tok(k, b, s) { state::fatal(k, s, "unterminated-statement", "$v"); }
+        if tokens::tok_is(k, b, 46u8) { return; }
+        let t = tokens::intern(k, b);
+        if k.sym[t] == 1 || k.vact[t] != 0 || k.lab[t] >= 0 {
+            state::report(k, s, "redeclared-symbol", state::tok_str(k, s, t));
+        } else {
+            k.sym[t] = 2;
+            k.vact[t] = 1;
+            if k.nvar >= (vec_len(k.vars) as i64) { state::grow(k.vars, k.nvar * 2); }
+            k.vars[k.nvar] = t as i32;
+            k.nvar = k.nvar + 1;
+        }
+    }
+}
+
+pub fn decl_d(k: &mut state::K, b: &str, s: &str) ~ Console + Process {
+    let first = k.top;
+    loop {
+        if !tokens::next_tok(k, b, s) { state::fatal(k, s, "unterminated-statement", "$d"); }
+        if tokens::tok_is(k, b, 46u8) { break; }
+        let t = tokens::lookup(k, b);
+        if t < 0 || k.sym[t] != 2 || k.vact[t] == 0 {
+            k.top = first;
+            state::report(k, s, "inactive-variable", "$d");
+            proof::skip_to_end(k, b, s);
+            return;
+        }
+        table::push_a(k, t as i32);
+    }
+    let n = k.top - first;
+    if n < 2 { state::report(k, s, "short-disjoint", "$d"); }
+    let mut i: i64 = 0;
+    while i < n {
+        let mut j = i + 1;
+        while j < n {
+            let x = k.a[first + i];
+            let y = k.a[first + j];
+            if x == y { state::report(k, s, "repeated-disjoint", "$d"); }
+            else {
+                if k.ndv + 2 > (vec_len(k.dvs) as i64) { state::grow(k.dvs, k.ndv * 2 + 2); }
+                k.dvs[k.ndv] = x;
+                k.dvs[k.ndv + 1] = y;
+                k.ndv = k.ndv + 2;
+                table::dv_add(k, x, y);
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    k.top = first;
+}
+
+// Reads an expression to `$.` or `$=`. Returns true when it stopped state::at `$=`.
+pub fn read_expr(k: &mut state::K, b: &str, s: &str, want_eq: bool, label: &str) -> bool ~ Console + Process {
+    let mut first = true;
+    loop {
+        if !tokens::next_tok(k, b, s) { state::fatal(k, s, "unterminated-statement", label); }
+        if tokens::tok_is(k, b, 46u8) {
+            if want_eq { state::report(k, s, "missing-proof", label); }
+            if first { state::report(k, s, "empty-expression", label); table::push_a(k, 0); }
+            return false;
+        }
+        if tokens::tok_is(k, b, 61u8) {
+            if !want_eq { state::report(k, s, "unexpected-proof", label); }
+            if first { state::report(k, s, "empty-expression", label); table::push_a(k, 0); }
+            return true;
+        }
+        let t = tokens::lookup(k, b);
+        let bad = t < 0 || k.sym[t] == 0 || (k.sym[t] == 2 && (k.vact[t] == 0 || k.varf[t] < 0));
+        if bad || (first && k.sym[t] != 1) {
+            if first { state::report(k, s, "bad-typecode", label); } else { state::report(k, s, "undeclared-symbol", label); }
+            table::push_a(k, 0);
+        } else {
+            table::push_a(k, t as i32);
+        }
+        first = false;
+    }
+    false
+}
+
+pub fn decl_f(k: &mut state::K, b: &str, s: &str, t: i64) ~ Console + Process {
+    let label = state::tok_str(k, s, t);
+    let off = k.top;
+    if !tokens::next_tok(k, b, s) { state::fatal(k, s, "unterminated-statement", label); }
+    let c = tokens::lookup(k, b);
+    if c < 0 || k.sym[c] != 1 { state::report(k, s, "bad-typecode", label); }
+    if !tokens::next_tok(k, b, s) { state::fatal(k, s, "unterminated-statement", label); }
+    let v = tokens::lookup(k, b);
+    let good = c >= 0 && v >= 0 && k.sym[v] == 2 && k.vact[v] != 0 && k.varf[v] < 0;
+    if !good { state::report(k, s, "bad-floating", label); }
+    if !tokens::next_tok(k, b, s) { state::fatal(k, s, "unterminated-statement", label); }
+    if !tokens::tok_is(k, b, 46u8) {
+        state::report(k, s, "bad-floating", label);
+        proof::skip_to_end(k, b, s);
+    }
+    if good {
+        table::push_a(k, c as i32);
+        table::push_a(k, v as i32);
+        let st = table::new_stmt(k, DECL_KF, t, off, 2);
+        k.varf[v] = st as i32;
+        table::push_hyp(k, st);
+    }
+}
+
+pub fn labeled(k: &mut state::K, b: &str, s: &str) ~ Console + Process {
+    let t = tokens::intern(k, b);
+    let lbl = state::tok_str(k, s, t);
+    let mut i = k.ts;
+    while i < k.te {
+        let c = state::at(b, i);
+        let good = (c >= 48u8 && c <= 57u8) || (c >= 65u8 && c <= 90u8) || (c >= 97u8 && c <= 122u8)
+            || c == 45u8 || c == 46u8 || c == 95u8;
+        if !good { state::report(k, s, "bad-label", lbl); break; }
+        i = i + 1;
+    }
+    if k.lab[t] >= 0 || k.sym[t] != 0 { state::report(k, s, "duplicate-label", lbl); }
+    if !tokens::next_tok(k, b, s) { state::fatal(k, s, "unterminated-statement", lbl); }
+    if tokens::tok_is(k, b, 102u8) { decl_f(k, b, s, t); return; }
+    let off = k.top;
+    if tokens::tok_is(k, b, 101u8) {
+        read_expr(k, b, s, false, lbl);
+        let st = table::new_stmt(k, DECL_KE, t, off, k.top - off);
+        table::push_hyp(k, st);
+    } else if tokens::tok_is(k, b, 97u8) {
+        read_expr(k, b, s, false, lbl);
+        let st = table::new_stmt(k, DECL_KA, t, off, k.top - off);
+        table::build_frame(k, st);
+    } else if tokens::tok_is(k, b, 112u8) {
+        let eq = read_expr(k, b, s, true, lbl);
+        let len = k.top - off;
+        let saved = k.lab[t];
+        let st = table::new_stmt(k, DECL_KP, t, off, len);
+        k.lab[t] = saved; // a proof may not cite its own label
+        table::build_frame(k, st);
+        if eq { proof::verify(k, b, s, st); }
+        k.lab[t] = st as i32;
+    } else {
+        state::fatal(k, s, "expected-statement", lbl);
+    }
+}
+
+pub fn open_scope(k: &mut state::K) {
+    if k.depth >= (vec_len(k.sc_h) as i64) {
+        state::grow(k.sc_h, k.depth * 2); state::grow(k.sc_v, k.depth * 2); state::grow(k.sc_d, k.depth * 2);
+    }
+    k.sc_h[k.depth] = k.nhyp as i32;
+    k.sc_v[k.depth] = k.nvar as i32;
+    k.sc_d[k.depth] = k.ndv as i32;
+    k.depth = k.depth + 1;
+}
+
+pub fn close_scope(k: &mut state::K) {
+    k.depth = k.depth - 1;
+    let nh = k.sc_h[k.depth] as i64;
+    while k.nhyp > nh {
+        k.nhyp = k.nhyp - 1;
+        let st = k.hyps[k.nhyp] as i64;
+        k.st_act[st] = 0;
+        if k.st_kind[st] == DECL_KF {
+            k.varf[k.a[(k.st_off[st] as i64) + 1] as i64] = -1;
+        }
+    }
+    let nv = k.sc_v[k.depth] as i64;
+    while k.nvar > nv {
+        k.nvar = k.nvar - 1;
+        k.vact[k.vars[k.nvar] as i64] = 0;
+    }
+    let nd = k.sc_d[k.depth] as i64;
+    while k.ndv > nd {
+        k.ndv = k.ndv - 2;
+        table::dv_drop(k, k.dvs[k.ndv], k.dvs[k.ndv + 1]);
+    }
+}
+
+pub fn parse_all(k: &mut state::K, b: &str, s: &str) ~ Console + Process {
+    while tokens::next_tok(k, b, s) {
+        if k.te - k.ts == 2 && state::at(b, k.ts) == 36u8 {
+            let c = state::at(b, k.ts + 1);
+            if c == 123u8 { open_scope(k); }
+            else if c == 125u8 {
+                if k.depth == 0 { state::fatal(k, s, "unmatched-close", "-"); }
+                close_scope(k);
+            }
+            else if c == 99u8 { decl_c(k, b, s); }
+            else if c == 118u8 { decl_v(k, b, s); }
+            else if c == 100u8 { decl_d(k, b, s); }
+            else if c == 91u8 { state::fatal(k, s, "include-unsupported", "-"); }
+            else { state::fatal(k, s, "unexpected-keyword", "-"); }
+        } else if state::at(b, k.ts) == 36u8 {
+            state::fatal(k, s, "unexpected-keyword", "-");
+        } else {
+            labeled(k, b, s);
+        }
+    }
+    if k.depth != 0 { state::fatal(k, s, "unclosed-block", "-"); }
+}
+

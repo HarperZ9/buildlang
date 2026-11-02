@@ -8,6 +8,10 @@ tracked in `STATUS.md`, `README.md`, and
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
 `108/108` or `132/132` are not the current release gate.
 
+## Unreleased: proof kernel
+
+- `tools/proofkernel`: mmk, a Metamath database verifier written in BuildLang, built through the C target. `tests/proofkernel/test_mmk.py` holds it to a valid database and four planted faults; CI runs it on Linux.
+
 ## Unreleased: typeset and the field spec
 
 - `typeset/`: BuildLang as a document language: Knuth-Plass in BuildLang, a stdlib Python layout engine, and themes as data.
