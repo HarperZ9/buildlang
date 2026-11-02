@@ -138,6 +138,9 @@ def render_relief(path, w, h, height, foil, theme, lut):
     paper = theme.get("paper", "#f6f1e3").lstrip("#")
     pr, pg, pb = (int(paper[i:i + 2], 16) / 255 for i in (0, 2, 4))
     k = spec.get("dpi", 200) / 72 * 0.9
+    # match_paper: scale the light so flat paper keeps the page's paper colour, and the
+    # relief sits in the page without a visible band edge.
+    gain = 1.0 / (0.55 + 0.5 * max(0.0, lz)) if spec.get("match_paper") else 1.0
     rows = []
     for y in range(h):
         row = bytearray()
@@ -146,6 +149,9 @@ def render_relief(path, w, h, height, foil, theme, lut):
             dx = (height[i + 1] if x + 1 < w else height[i]) - (height[i - 1] if x > 0 else height[i])
             dy = (height[i + w] if y + 1 < h else height[i]) - (height[i - w] if y > 0 else height[i])
             px, py = paper_normal(x, y)
+            if gain != 1.0:  # fade the fibre out toward the region's lower edge
+                fade = min(1.0, (h - 1 - y) / (0.3 * h))
+                px, py = px * fade, py * fade
             nx, ny, nz = -dx * k + px, -dy * k + py, 1.0
             nn = math.sqrt(nx * nx + ny * ny + nz * nz)
             nx, ny, nz = nx / nn, ny / nn, nz / nn
@@ -153,7 +159,8 @@ def render_relief(path, w, h, height, foil, theme, lut):
             spec_d = max(0.0, nx * hx + ny * hy + nz * hz)
             f = foil[i]
             ambient = 0.55
-            r, g, b = (pr * (ambient + 0.5 * diff), pg * (ambient + 0.5 * diff), pb * (ambient + 0.5 * diff))
+            lit = (ambient + 0.5 * diff) * gain
+            r, g, b = pr * lit, pg * lit, pb * lit
             if f > 0:
                 ang = int(min(85, math.degrees(math.acos(max(min(nz, 1.0), 0.0)))) / 5)
                 mr, mg, mb = lut[ang]
@@ -166,7 +173,9 @@ def render_relief(path, w, h, height, foil, theme, lut):
                 r, g, b = r + s, g + s, b + s
             row += bytes((min(255, int(r * 255)), min(255, int(g * 255)), min(255, int(b * 255))))
         rows.append(bytes(row))
-    write_png(path, w, h, rows)
+    if path:
+        write_png(path, w, h, rows)
+    return rows
 
 
 def export_plates(base, layout, pages, theme):

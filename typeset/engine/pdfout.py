@@ -87,7 +87,8 @@ def write_pdf(path, pages, registry, meta, plates=None, graphics_only=False, pdf
         font_refs[use.name] = _embed_font(w, use)
     gs = pdfgfx.extgstates(w)
     font_dict = " ".join(f"/{n} {r} 0 R" for n, r in font_refs.items())
-    res = f"<< /Font << {font_dict} >> /ExtGState {gs} /ColorSpace {pdfgfx.colorspaces(w)} >>"
+    res = (f"<< /Font << {font_dict} >> /ExtGState {gs} /ColorSpace {pdfgfx.colorspaces(w)} "
+           f"/XObject {pdfgfx.xobjects(w)} >>")
     kids = []
     for page, ops in zip(pages, contents):
         for key, use in uses.items():
@@ -118,7 +119,8 @@ def write_pdf(path, pages, registry, meta, plates=None, graphics_only=False, pdf
 def _line_ops(line, y, page, registry, uses, left=None):
     pg_left = page.left if hasattr(page, "left") else 0
     base_y = page.height - (page.top if hasattr(page, "top") else 0) - y
-    out = ["BT"]
+    # render mode 3 (invisible) keeps a blind-embossed line in the text layer without ink
+    out = ["BT", "3 Tr"] if getattr(line, "blind", False) else ["BT"]
     cur = None
     color = None
     prev_end = None
@@ -156,6 +158,8 @@ def _line_ops(line, y, page, registry, uses, left=None):
             parts.append(_hex(buf))
         out.append("[" + " ".join(parts) + "] TJ")
         prev_end = x + pc.width * hs
+    if getattr(line, "blind", False):
+        out.append("0 Tr")  # the render mode is graphics state and outlives ET
     out.append("ET")
     for rx, ry, rw, rh in line.graphics:
         out.append(f"0 0 0 rg {pg_left + rx:.3f} {base_y + ry:.3f} {rw:.3f} {rh:.3f} re f")

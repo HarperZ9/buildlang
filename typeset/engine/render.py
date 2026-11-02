@@ -39,6 +39,8 @@ def render(doc_path, out_base, theme_name=None, annotations=False, plates=False,
     lay = Layout(doc, theme)
     pages = lay.run()
     furnish(lay, pages, theme)
+    from .press import apply as press
+    lay.diag.notes += press(lay, pages, theme)
     if annotations and doc.marks:
         from .annotate import overlay
         overlay(lay, pages, doc, theme)

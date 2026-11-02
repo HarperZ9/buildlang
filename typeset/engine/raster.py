@@ -125,6 +125,11 @@ def box_blur(px, w, h, r):
 
 def write_png(path, w, h, rows, mode="RGB", bits=8):
     """rows: list of bytes per row. mode RGB (3 ch) or L (1 ch); bits 8 or 16."""
+    with open(path, "wb") as fh:
+        fh.write(png_bytes(w, h, rows, mode, bits))
+
+
+def png_bytes(w, h, rows, mode="RGB", bits=8):
     ctype = {"RGB": 2, "L": 0}[mode]
     raw = b"".join(b"\0" + r for r in rows)
 
@@ -134,5 +139,4 @@ def write_png(path, w, h, rows, mode="RGB", bits=8):
 
     png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, bits, ctype, 0, 0, 0))
     png += chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b"")
-    with open(path, "wb") as fh:
-        fh.write(png)
+    return png
