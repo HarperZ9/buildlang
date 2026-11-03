@@ -34,22 +34,27 @@
 //     struct field assignments on local variables. All state passes through
 //     &mut DB references to a single top-level struct.
 //
-//   - String pool pattern: The DB stores all strings in a contiguous `pool`
-//     buffer, with parallel Vec<i32> arrays for starts and lengths. This
-//     avoids Vec<String> which has incomplete codegen support.
+//   - String pool: every string is interned once in `pool`, a Vec<String>,
+//     and referred to by its integer id. sp_add and sp_get are O(1). A
+//     Vec<String> must be created from a typed local (`let v: Vec<String> =
+//     vec![];`); a bare vec![] in a struct literal is built as Vec<i32>.
 //
 //   - Text-based file format: Each line is a DDL statement or pipe-delimited
 //     data row. Simple and human-readable. Not page-based like SQLite.
 //
 //   - Sorted-array indexes with binary search: Simpler than B-trees. Each
 //     index maintains sorted key+rowid pairs. Equality uses binary search;
-//     range queries scan the sorted array.
+//     range queries scan the sorted array. Indexes are brought up to date
+//     lazily, on the next index read: rows appended by INSERT are sorted and
+//     merged in, and any other mutation triggers one full merge-sort rebuild.
 //
-//   - Selection sort for ORDER BY / index rebuilds: O(n^2) but simple and
-//     correct. Adequate for the datasets this engine targets.
+//   - Selection sort for ORDER BY: O(n^2) but simple and correct. Index
+//     builds use a stable merge sort (sort_positions), O(n log n).
 //
-//   - WAL for crash recovery: Append-only log of mutations. On startup,
-//     committed transactions are replayed. ROLLBACK restores from snapshot.
+//   - WAL for crash recovery: Append-only log of mutations, written with
+//     append_file. On startup, committed transactions are replayed. The .db
+//     is rewritten at a checkpoint, which runs when the WAL outgrows the .db
+//     and at a clean exit. ROLLBACK restores from snapshot. See SECTION 3.
 //
 // SQL Support:
 //   CREATE TABLE, INSERT, SELECT, UPDATE, DELETE, DROP TABLE
@@ -113,10 +118,8 @@ struct DB {
     // Database file path
     db_path: String,
 
-    // String pool
-    pool: String,
-    ps: Vec<i32>,
-    pl: Vec<i32>,
+    // String pool: one entry per interned string, id = position.
+    pool: Vec<String>,
     pn: i32,
 
     // Tables: parallel arrays indexed by table index
@@ -265,6 +268,15 @@ struct DB {
     in_transaction: bool,
     txn_id: i32,
     wal_buf: String,
+    // Bytes appended to the WAL since the last checkpoint, and the size of
+    // the .db file that checkpoint wrote. maybe_checkpoint compares the two.
+    wal_bytes: i64,
+    db_bytes: i64,
+    // Set by any mutation that moves or rewrites existing rows (UPDATE,
+    // DELETE, DROP, ALTER, ROLLBACK). The next index read then rebuilds
+    // every index from scratch. INSERT leaves it alone: appended rows are
+    // folded into each index incrementally by refresh_index.
+    idx_stale: bool,
     // Snapshot for rollback (saved at BEGIN)
     snap_cells: Vec<i32>,
     snap_row_starts: Vec<i32>,
@@ -301,9 +313,12 @@ struct DB {
 // id) starts at 0. The WAL path is derived by appending ".wal" to the db path.
 fn db_new(db_path: String) -> DB {
     let wp = db_path + ".wal";
+    // Typed local: a bare vec![] in the struct literal is built as a Vec<i32>
+    // by the C backend, and pushing strings into that corrupts memory.
+    let pool0: Vec<String> = vec![];
     DB {
         db_path: db_path,
-        pool: "", ps: vec![], pl: vec![], pn: 0,
+        pool: pool0, pn: 0,
         tbl_names: vec![], tbl_count: 0,
         col_names: vec![], col_types: vec![],
         tbl_col_starts: vec![], tbl_col_counts: vec![],
@@ -343,6 +358,8 @@ fn db_new(db_path: String) -> DB {
         in_transaction: false,
         txn_id: 0,
         wal_buf: "",
+        wal_bytes: 0, db_bytes: 0,
+        idx_stale: false,
         snap_cells: vec![], snap_row_starts: vec![], snap_row_counts: vec![],
         snap_tbl_names: vec![], snap_tbl_count: 0,
         snap_col_names: vec![], snap_col_types: vec![],
@@ -355,27 +372,22 @@ fn db_new(db_path: String) -> DB {
 }
 
 // --- String Pool ---
-// All strings in the engine are interned into a single contiguous buffer
-// (d.pool). sp_add appends text and returns an integer ID. sp_get retrieves
-// text by ID. This avoids Vec<String> which has incomplete codegen in
-// BuildLang. Pool IDs are used everywhere: table names, column names,
-// cell values, parsed tokens.
+// All strings in the engine are interned in d.pool, a Vec<String>. sp_add
+// pushes the text and returns its integer ID; sp_get returns the text by ID.
+// Pool IDs are used everywhere: table names, column names, cell values,
+// parsed tokens. Both calls are O(1). The pool used to be one contiguous
+// String grown by concatenation, which copied the whole pool on every
+// sp_add, so loading N rows cost O(N^2) time and memory.
 fn sp_add(d: &mut DB, text: String) -> i32 {
     let id = d.pn;
-    let st = d.pool.len();
-    d.pool = d.pool + text;
-    let en = d.pool.len();
-    vec_push(d.ps, st);
-    vec_push(d.pl, en - st);
+    vec_push(d.pool, text);
     d.pn = d.pn + 1;
     id
 }
 
 fn sp_get(d: &DB, id: i32) -> String {
     if id < 0 { return ""; }
-    let st = vec_get(d.ps, id);
-    let ln = vec_get(d.pl, id);
-    d.pool.substring(st, ln)
+    vec_get(d.pool, id)
 }
 
 // =========================================================================
@@ -396,10 +408,39 @@ fn sp_get(d: &DB, id: i32) -> String {
 // There is no incremental I/O; the full file is read/written each time.
 // =========================================================================
 
+// Join strings pairwise, round by round, so each byte is copied O(log parts)
+// times. Appending every line to one growing String copied the whole output
+// per line, O(size^2) per save.
+fn concat_parts(parts: Vec<String>) -> String {
+    let mut cur: Vec<String> = parts;
+    let mut n = vec_len(cur);
+    if n == 0 { return ""; }
+    while n > 1 {
+        let mut next: Vec<String> = vec![];
+        let mut i = 0;
+        while i < n {
+            let a: String = vec_get(cur, i);
+            if i + 1 < n {
+                let b: String = vec_get(cur, i + 1);
+                vec_push(next, a + b);
+            } else {
+                vec_push(next, a);
+            }
+            i = i + 2;
+        }
+        cur = next;
+        n = vec_len(cur);
+    }
+    vec_get(cur, 0)
+}
+
 // Serialize the entire database (all tables, rows, and index declarations)
-// to the text-based file format and write to d.db_path.
+// to the text-based file format and write to d.db_path. Returns the number
+// of bytes written, which the checkpoint policy compares the WAL against.
 // Does NOT write WAL — this is the "clean" checkpoint format.
-fn db_save(d: &DB) ~ FileSystem {
+// Output is built in chunks of about 64 KB, joined once by concat_parts.
+fn db_save(d: &DB) -> i64 ~ FileSystem {
+    let mut parts: Vec<String> = vec![];
     let mut out = "";
     let mut t = 0;
     while t < d.tbl_count {
@@ -432,6 +473,10 @@ fn db_save(d: &DB) ~ FileSystem {
                 ci = ci + 1;
             }
             out = out + row_str + "\n";
+            if out.len() > 65536 {
+                vec_push(parts, out);
+                out = "";
+            }
             r = r + 1;
         }
         out = out + "END\n";
@@ -452,7 +497,10 @@ fn db_save(d: &DB) ~ FileSystem {
         out = out + "\nINDEX " + iname + " ON " + tname + " (" + cname + ")\n";
         ix = ix + 1;
     }
-    write_file(d.db_path, out);
+    vec_push(parts, out);
+    let all = concat_parts(parts);
+    write_file(d.db_path, all);
+    all.len()
 }
 
 // Load the database from the text file at d.db_path.
@@ -466,15 +514,18 @@ fn db_load(d: &mut DB) ~ FileSystem {
     let clen = content.len();
     if clen == 0 { return; }
 
-    let mut fpos: i64 = 0;
+    d.db_bytes = clen;
+    // Split once. Slicing off the rest of the content for every line copied
+    // the remainder of the file per line, O(size^2) for a large .db.
+    let lines: Vec<String> = content.lines();
+    let nlines = vec_len(lines);
+    let mut li: i64 = 0;
     let mut go = true;
     while go {
-        if fpos >= clen { go = false; }
+        if li >= nlines { go = false; }
         else {
-            let rest = content.substring(fpos, clen - fpos);
-            let nl = rest.index_of("\n");
-            let line = if nl < 0 { rest } else { rest.substring(0, nl) };
-            if nl < 0 { fpos = clen; } else { fpos = fpos + nl + 1; }
+            let line: String = vec_get(lines, li);
+            li = li + 1;
 
             // Strip \r
             let llen = line.len();
@@ -652,47 +703,109 @@ fn db_load(d: &mut DB) ~ FileSystem {
 // =========================================================================
 // The WAL provides crash recovery and transaction support.
 //
-// WAL file format (append-only):
+// WAL file format (append-only; every write opens the file in append mode):
 //   TXID <n>        — start of transaction n
 //   OP <sql>        — a mutation SQL statement within the transaction
 //   COMMIT          — marks transaction n as committed
 //
 // Recovery flow (wal_replay):
-//   1. Parse all WAL lines, identify which TXIDs have COMMIT markers
-//   2. Replay only OP lines from committed TXIDs via exec_sql_no_wal
-//   3. Checkpoint (save + clear WAL)
+//   1. Read the WAL in one pass. A TXID line opens a transaction; a COMMIT
+//      line replays that transaction's OP lines via exec_sql_no_wal.
+//      A transaction with no COMMIT (a crash mid-transaction, a torn final
+//      record, a ROLLBACK, or a process that exited inside BEGIN) is skipped.
+//   2. Checkpoint (save + clear WAL)
 //
 // Transaction flow:
-//   BEGIN    -> take_snapshot() + write TXID to WAL
-//   mutations-> each logs "OP <sql>" to WAL
-//   COMMIT   -> write COMMIT to WAL + checkpoint
+//   BEGIN    -> take_snapshot() + append TXID
+//   mutations-> each appends "OP <sql>"
+//   COMMIT   -> append COMMIT, then maybe_checkpoint()
 //   ROLLBACK -> restore_snapshot() + checkpoint (discards WAL entries)
 //
-// Auto-commit: mutations outside an explicit transaction are wrapped in
-// a single-statement transaction (TXID + OP + COMMIT + checkpoint).
+// Auto-commit: a mutation outside an explicit transaction appends one
+// record "TXID n / OP sql / COMMIT" in a single append, then calls
+// maybe_checkpoint().
+//
+// Durability contract. A statement is durable once its COMMIT line is in the
+// WAL: the next startup replays it whether or not a checkpoint ran. The
+// engine has always relied on that point. Before this change the WAL was
+// rewritten in full for every line and the .db after every statement; both
+// writes truncate and refill a file, so a crash during either could lose
+// committed data. An append never touches bytes already written, so a crash
+// can at worst tear the last record, and a torn record lacks its COMMIT and
+// is skipped. The .db rewrite in db_save is still truncate-and-write, as
+// before; it now runs far less often. No write calls fsync, before or after:
+// durability is to the OS file cache.
+//
+// Checkpoint policy. maybe_checkpoint rewrites the .db only once the WAL
+// holds more bytes than the .db plus wal_checkpoint_slack(), and never inside
+// an open transaction. A checkpoint then costs at most the bytes appended
+// since the previous one, so the save cost of a load grows linearly with its
+// size. A clean exit (end of a single statement, or the REPL's .quit) also
+// checkpoints, so the .db on disk is current between processes, as before.
 // =========================================================================
+
+fn wal_checkpoint_slack() -> i64 { 65536 }
+
+// Append newline-terminated text to the WAL in a single write.
+fn wal_append(d: &mut DB, text: String) ~ FileSystem {
+    append_file(d.wal_path, text);
+    d.wal_bytes = d.wal_bytes + text.len();
+}
 
 // Append a line to the WAL file
 fn wal_write(d: &mut DB, line: String) ~ FileSystem {
-    let existing = if file_exists(d.wal_path) { read_file(d.wal_path) } else { "" };
-    write_file(d.wal_path, existing + line + "\n");
+    wal_append(d, line + "\n");
 }
 
 // Checkpoint: merge WAL into main .db file, then clear WAL
 fn wal_checkpoint(d: &mut DB) ~ FileSystem {
-    db_save(d);
+    d.db_bytes = db_save(d);
     // Clear the WAL file
     if file_exists(d.wal_path) {
         write_file(d.wal_path, "");
     }
+    d.wal_bytes = 0;
+}
+
+// Checkpoint once the WAL has grown past the .db it would be merged into.
+// Never inside an explicit transaction: db_save would persist uncommitted
+// in-memory changes.
+fn maybe_checkpoint(d: &mut DB) ~ FileSystem {
+    if d.in_transaction { return; }
+    if d.wal_bytes > d.db_bytes + wal_checkpoint_slack() {
+        wal_checkpoint(d);
+    }
+}
+
+// Checkpoint at a clean exit so the .db file is current between processes.
+// Skipped inside an open transaction, which stays uncommitted as before.
+fn wal_close(d: &mut DB) ~ FileSystem {
+    if d.in_transaction { return; }
+    if d.wal_bytes > 0 { wal_checkpoint(d); }
+}
+
+// Strip one trailing carriage return (a WAL or .db written on Windows).
+fn strip_cr(line: String) -> String {
+    let llen = line.len();
+    if llen > 0 {
+        let last = line.char_at(llen - 1);
+        if last == "\r" { return line.substring(0, llen - 1); }
+    }
+    line
 }
 
 // Replay committed transactions from WAL into a freshly-loaded DB.
 //
-// Called once at startup after db_load(). Two-pass algorithm:
-//   Pass 1: Scan all lines, collect TXID values that have a matching COMMIT.
-//   Pass 2: For each OP line whose TXID is in the committed set, execute
-//           the SQL via exec_sql_no_wal (no re-logging).
+// Called once at startup after db_load(). One pass over the lines:
+//   TXID   opens a transaction at the next line;
+//   COMMIT replays the open transaction's OP lines, in order, through
+//          exec_sql_no_wal (no re-logging), then closes it;
+//   a later TXID before any COMMIT abandons the open transaction.
+// An OP line outside any TXID, and every OP line of a transaction that never
+// reached COMMIT, is skipped. Within one process transaction ids only grow,
+// and every replay ends by clearing the WAL, so on any WAL the engine writes
+// this replays exactly what the older two-pass rule did ("replay an OP if its
+// TXID has a COMMIT"), in time linear in the WAL instead of quadratic.
 // After replay, checkpoints to merge into the .db file and clears the WAL.
 //
 // Assumes: DB is already loaded from the .db file. WAL contains only
@@ -703,74 +816,27 @@ fn wal_replay(d: &mut DB) ~ Console + FileSystem + Process {
     let clen = content.len();
     if clen == 0 { return; }
 
-    // First pass: collect lines and find which TXIDs have COMMIT markers
-    let mut all_lines: Vec<i32> = vec![];
-    let mut line_count = 0;
-    let mut fpos: i64 = 0;
-    let mut go = true;
-    while go {
-        if fpos >= clen { go = false; }
-        else {
-            let rest = content.substring(fpos, clen - fpos);
-            let nl = rest.index_of("\n");
-            let line = if nl < 0 { rest } else { rest.substring(0, nl) };
-            if nl < 0 { fpos = clen; } else { fpos = fpos + nl + 1; }
-            // Strip \r
-            let llen = line.len();
-            let clean = if llen > 0 {
-                let last = line.char_at(llen - 1);
-                if last == "\r" { line.substring(0, llen - 1) } else { line }
-            } else { line };
-            let lid = sp_add(d, clean);
-            vec_push(all_lines, lid);
-            line_count = line_count + 1;
-        }
-    }
-
-    // Find committed transaction IDs
-    // We track which TXID values appear before a COMMIT line
-    let mut committed_ids: Vec<i32> = vec![];
-    let mut committed_count = 0;
-    let mut current_txid: i32 = -1;
-    let mut li = 0;
-    while li < line_count {
-        let wl: String = sp_get(d, vec_get(all_lines, li));
-        let wlen = wl.len();
+    let lines: Vec<String> = content.lines();
+    let n = vec_len(lines);
+    let mut txn_start: i64 = 0 - 1;
+    let mut li: i64 = 0;
+    while li < n {
+        let wl = strip_cr(vec_get(lines, li));
         if wl.starts_with("TXID ") {
-            let id_part: String = wl.substring(5, wlen - 5);
-            current_txid = id_part.parse_int();
+            txn_start = li + 1;
         } else if wl.starts_with("COMMIT") {
-            if current_txid >= 0 {
-                vec_push(committed_ids, current_txid);
-                committed_count = committed_count + 1;
-            }
-        }
-        li = li + 1;
-    }
-
-    // Second pass: replay only OP lines from committed TXIDs
-    current_txid = -1;
-    li = 0;
-    while li < line_count {
-        let rl: String = sp_get(d, vec_get(all_lines, li));
-        let rlen = rl.len();
-        if rl.starts_with("TXID ") {
-            let id_part2: String = rl.substring(5, rlen - 5);
-            current_txid = id_part2.parse_int();
-        } else if rl.starts_with("OP ") {
-            // Check if current_txid is in committed list
-            let mut is_committed = false;
-            let mut ci = 0;
-            while ci < committed_count {
-                if vec_get(committed_ids, ci) == current_txid {
-                    is_committed = true;
+            if txn_start >= 0 {
+                let mut j = txn_start;
+                while j < li {
+                    let rl = strip_cr(vec_get(lines, j));
+                    if rl.starts_with("OP ") {
+                        let rlen = rl.len();
+                        let sql: String = rl.substring(3, rlen - 3);
+                        exec_sql_no_wal(d, sql);
+                    }
+                    j = j + 1;
                 }
-                ci = ci + 1;
-            }
-            if is_committed {
-                // Extract the SQL from "OP <sql>"
-                let sql: String = rl.substring(3, rlen - 3);
-                exec_sql_no_wal(d, sql);
+                txn_start = 0 - 1;
             }
         }
         li = li + 1;
@@ -902,6 +968,9 @@ fn restore_snapshot(d: &mut DB) {
     d.idx_rowids = d.snap_idx_rowids;
     d.idx_key_starts = d.snap_idx_key_starts;
     d.idx_key_counts = d.snap_idx_key_counts;
+    // The snapshot's index entries may predate rows that were appended and
+    // not yet folded in; rebuild from the restored rows on the next read.
+    d.idx_stale = true;
 }
 
 // BEGIN — start a new explicit transaction
@@ -924,7 +993,7 @@ fn wal_commit(d: &mut DB) ~ Console + FileSystem {
     }
     wal_write(d, "COMMIT");
     d.in_transaction = false;
-    wal_checkpoint(d);
+    maybe_checkpoint(d);
 }
 
 // ROLLBACK — discard changes since BEGIN
@@ -945,12 +1014,11 @@ fn wal_log_mutation(d: &mut DB, sql: String) ~ FileSystem {
         // In explicit transaction — just append OP to WAL
         wal_write(d, "OP " + sql);
     } else {
-        // Auto-commit: wrap in a single-statement transaction
+        // Auto-commit: wrap in a single-statement transaction, written as one
+        // append so a torn write cannot leave a COMMIT without its OP.
         d.txn_id = d.txn_id + 1;
-        wal_write(d, "TXID " + to_string_i32(d.txn_id));
-        wal_write(d, "OP " + sql);
-        wal_write(d, "COMMIT");
-        wal_checkpoint(d);
+        wal_append(d, "TXID " + to_string_i32(d.txn_id) + "\nOP " + sql + "\nCOMMIT\n");
+        maybe_checkpoint(d);
     }
 }
 
@@ -969,24 +1037,15 @@ fn cmd_wal(d: &DB) ~ Console + FileSystem {
     let mut op_count = 0;
     let mut pending = 0;
     let mut in_txn = false;
-    let mut fpos: i64 = 0;
-    let mut go = true;
-    while go {
-        if fpos >= clen { go = false; }
-        else {
-            let rest = content.substring(fpos, clen - fpos);
-            let nl = rest.index_of("\n");
-            let line = if nl < 0 { rest } else { rest.substring(0, nl) };
-            if nl < 0 { fpos = clen; } else { fpos = fpos + nl + 1; }
-            let llen = line.len();
-            let clean = if llen > 0 {
-                let last = line.char_at(llen - 1);
-                if last == "\r" { line.substring(0, llen - 1) } else { line }
-            } else { line };
-            if clean.starts_with("OP ") { op_count = op_count + 1; }
-            if clean.starts_with("TXID ") { in_txn = true; }
-            if clean == "COMMIT" { in_txn = false; }
-        }
+    let lines: Vec<String> = content.lines();
+    let n = vec_len(lines);
+    let mut li: i64 = 0;
+    while li < n {
+        let clean = strip_cr(vec_get(lines, li));
+        if clean.starts_with("OP ") { op_count = op_count + 1; }
+        if clean.starts_with("TXID ") { in_txn = true; }
+        if clean == "COMMIT" { in_txn = false; }
+        li = li + 1;
     }
     if in_txn { pending = 1; }
     println!("WAL status: {} entries, {} pending transaction", op_count, pending);
@@ -2689,27 +2748,38 @@ fn exec_insert(d: &mut DB) ~ Console {
     }
 
     // Splice row_cells into the flat cells array after this table's rows.
+    // When this table's rows end the array (the last table, the common load
+    // case) the new cells are appended in place, O(row). Otherwise the array
+    // is rebuilt around the insertion point, O(all cells), as before.
     let rs = vec_get(d.tbl_row_starts, tidx);
     let rc = vec_get(d.tbl_row_counts, tidx);
     let insert_at = rs + rc * cc;
     let added = nrows * cc;
     let total_cells = vec_len(d.cells);
-    let mut new_cells: Vec<i32> = vec![];
-    let mut ci: i64 = 0;
-    while ci < insert_at {
-        vec_push(new_cells, vec_get(d.cells, ci));
-        ci = ci + 1;
+    if insert_at == total_cells {
+        let mut ai = 0;
+        while ai < added {
+            vec_push(d.cells, vec_get(row_cells, ai));
+            ai = ai + 1;
+        }
+    } else {
+        let mut new_cells: Vec<i32> = vec![];
+        let mut ci: i64 = 0;
+        while ci < insert_at {
+            vec_push(new_cells, vec_get(d.cells, ci));
+            ci = ci + 1;
+        }
+        let mut wi = 0;
+        while wi < added {
+            vec_push(new_cells, vec_get(row_cells, wi));
+            wi = wi + 1;
+        }
+        while ci < total_cells {
+            vec_push(new_cells, vec_get(d.cells, ci));
+            ci = ci + 1;
+        }
+        d.cells = new_cells;
     }
-    let mut wi = 0;
-    while wi < added {
-        vec_push(new_cells, vec_get(row_cells, wi));
-        wi = wi + 1;
-    }
-    while ci < total_cells {
-        vec_push(new_cells, vec_get(d.cells, ci));
-        ci = ci + 1;
-    }
-    d.cells = new_cells;
 
     // Update row count for this table (all nrows added).
     let mut new_rc: Vec<i32> = vec![];
@@ -2734,8 +2804,9 @@ fn exec_insert(d: &mut DB) ~ Console {
     }
     d.tbl_row_starts = new_rs;
 
-    // Update any indexes on this table
-    update_indexes_for_table(d, tidx);
+    // Indexes need no work here. The new rows carry the highest row ids, so
+    // an index whose key count is below the table's row count is behind by
+    // exactly those rows, and refresh_index folds them in on the next read.
 }
 
 // Resolve a column reference: could be "col", "table.col", or "alias.col"
@@ -3013,6 +3084,7 @@ fn exec_select(d: &mut DB) ~ Console + Process {
                             if wcol >= 0 {
                                 let ix_id = find_index_for(d, tidx, wcol);
                                 if ix_id >= 0 {
+                                    refresh_index(d, ix_id);
                                     let wr = sp_get(d, vec_get(d.wc_right, 0));
                                     match_rows = index_scan(d, ix_id, op0, wr);
                                     match_count = vec_len(match_rows);
@@ -6398,9 +6470,10 @@ fn print_result_row(d: &DB, headers: Vec<i32>, results: Vec<i32>, count: i32) ~ 
 //
 // Key operations:
 //   find_index_for()  — look up whether an index exists for a table+column
-//   rebuild_index()   — reconstruct sorted pairs from table rows (selection sort)
+//   rebuild_index()   — reconstruct sorted pairs from table rows (merge sort)
+//   refresh_index()   — bring an index up to date before a read (lazy)
 //   index_scan()      — binary search (equality) or linear scan (range)
-//   update_indexes_for_table() — rebuild all indexes for a table after mutation
+//   update_indexes_for_table() — mark indexes for rebuild after UPDATE/DELETE/ALTER
 //   exec_create_index() — CREATE INDEX handler
 // =========================================================================
 
@@ -6418,10 +6491,11 @@ fn find_index_for(d: &DB, tidx: i32, col_idx: i32) -> i32 {
     0 - 1
 }
 
-// Rebuild index data from table rows. Called after db_load, CREATE INDEX,
-// INSERT, UPDATE, or DELETE. Collects all (key, rowid) pairs for the
-// indexed column, sorts them via selection sort, then replaces this index's
-// entries in the flattened idx_keys/idx_rowids arrays.
+// Rebuild index data from table rows. Called by db_load, CREATE INDEX, and
+// refresh_index after UPDATE, DELETE, ALTER or ROLLBACK. Collects all
+// (key, rowid) pairs for the indexed column, sorts them with the stable merge
+// sort in sort_positions, then replaces this index's entries in the
+// flattened idx_keys/idx_rowids arrays.
 fn rebuild_index(d: &mut DB, ix_id: i32) {
     let tidx = vec_get(d.idx_tables, ix_id);
     let col_i = vec_get(d.idx_col_indices, ix_id);
@@ -6441,94 +6515,19 @@ fn rebuild_index(d: &mut DB, ix_id: i32) {
         r = r + 1;
     }
 
-    // Sort by key value (numeric if possible, else string) using selection sort
+    // Sort by key value (numeric if possible, else string), stable
     let col_type = vec_get(d.col_types, cs + col_i);
+    let perm = sort_positions(d, keys, rc, col_type);
     let mut sorted_keys: Vec<i32> = vec![];
     let mut sorted_rowids: Vec<i32> = vec![];
-    let mut used: Vec<i32> = vec![];
-    let mut ui = 0;
-    while ui < rc {
-        vec_push(used, 0);
-        ui = ui + 1;
+    let mut pi = 0;
+    while pi < rc {
+        let p = vec_get(perm, pi);
+        vec_push(sorted_keys, vec_get(keys, p));
+        vec_push(sorted_rowids, vec_get(rowids, p));
+        pi = pi + 1;
     }
-    let mut picked = 0;
-    while picked < rc {
-        let mut best = 0 - 1;
-        let mut best_val = "";
-        let mut j = 0;
-        while j < rc {
-            if vec_get(used, j) == 0 {
-                let kval = sp_get(d, vec_get(keys, j));
-                if best < 0 {
-                    best = j;
-                    best_val = kval;
-                } else {
-                    let cmp = compare_vals(kval, best_val, col_type);
-                    if cmp < 0 { best = j; best_val = kval; }
-                }
-            }
-            j = j + 1;
-        }
-        let mut new_used: Vec<i32> = vec![];
-        let mut k = 0;
-        while k < rc {
-            if k == best { vec_push(new_used, 1); }
-            else { vec_push(new_used, vec_get(used, k)); }
-            k = k + 1;
-        }
-        used = new_used;
-        vec_push(sorted_keys, vec_get(keys, best));
-        vec_push(sorted_rowids, vec_get(rowids, best));
-        picked = picked + 1;
-    }
-
-    // Replace this index's key data in the flattened arrays
-    // Since we can't do random writes, rebuild the entire idx_keys/idx_rowids arrays
-    let old_start = vec_get(d.idx_key_starts, ix_id);
-    let old_count = vec_get(d.idx_key_counts, ix_id);
-    let total_keys = vec_len(d.idx_keys);
-
-    let mut new_keys: Vec<i32> = vec![];
-    let mut new_rowids: Vec<i32> = vec![];
-    // Copy keys before this index
-    let mut ci2 = 0;
-    while ci2 < old_start {
-        vec_push(new_keys, vec_get(d.idx_keys, ci2));
-        vec_push(new_rowids, vec_get(d.idx_rowids, ci2));
-        ci2 = ci2 + 1;
-    }
-    // Insert new sorted keys
-    let mut ni = 0;
-    while ni < rc {
-        vec_push(new_keys, vec_get(sorted_keys, ni));
-        vec_push(new_rowids, vec_get(sorted_rowids, ni));
-        ni = ni + 1;
-    }
-    // Copy keys after this index
-    ci2 = old_start + old_count;
-    while ci2 < total_keys {
-        vec_push(new_keys, vec_get(d.idx_keys, ci2));
-        vec_push(new_rowids, vec_get(d.idx_rowids, ci2));
-        ci2 = ci2 + 1;
-    }
-    d.idx_keys = new_keys;
-    d.idx_rowids = new_rowids;
-
-    // Update key count
-    let size_diff = rc - old_count;
-    d.idx_key_counts = vec_replace(d.idx_key_counts, d.idx_count, ix_id, rc);
-    // Update starts for indexes after this one
-    let mut si2 = 0;
-    let mut new_starts: Vec<i32> = vec![];
-    while si2 < d.idx_count {
-        if si2 > ix_id {
-            vec_push(new_starts, vec_get(d.idx_key_starts, si2) + size_diff);
-        } else {
-            vec_push(new_starts, vec_get(d.idx_key_starts, si2));
-        }
-        si2 = si2 + 1;
-    }
-    d.idx_key_starts = new_starts;
+    splice_index(d, ix_id, sorted_keys, sorted_rowids, rc);
 }
 
 // Scan an index for rows matching a WHERE condition.
@@ -6607,15 +6606,177 @@ fn index_scan(d: &DB, ix_id: i32, op: i32, rval: String) -> Vec<i32> {
     result
 }
 
-// Update all indexes for a table after INSERT (rebuild affected indexes)
+// Mark indexes for a full rebuild after a mutation that moves or rewrites
+// existing rows (UPDATE, DELETE, ALTER). The rebuild runs on the next index
+// read, so a run of mutations pays for one rebuild, not one per statement.
+// tidx is kept for the call sites; every index is invalidated, which is the
+// simple safe choice because row ids are table-relative and DELETE shifts them.
 fn update_indexes_for_table(d: &mut DB, tidx: i32) {
-    let mut i = 0;
-    while i < d.idx_count {
-        if vec_get(d.idx_tables, i) == tidx {
-            rebuild_index(d, i);
+    if tidx >= 0 { d.idx_stale = true; }
+}
+
+// Bring one index up to date before a read. Two cases:
+//   - d.idx_stale: some mutation moved or rewrote rows. Rebuild every index
+//     from its table (O(n log n) each) and clear the flag.
+//   - the index covers fewer keys than the table has rows: only INSERTs ran
+//     since the last refresh, and they appended rows with the highest row
+//     ids. Sort just the new rows and merge them after equal existing keys,
+//     O(n + k log k). The order matches a full stable rebuild exactly.
+fn refresh_index(d: &mut DB, ix_id: i32) {
+    if d.idx_stale {
+        let mut i = 0;
+        while i < d.idx_count {
+            // DROP TABLE leaves its indexes behind (a known gap); skip any
+            // whose table index no longer exists instead of reading past it.
+            if vec_get(d.idx_tables, i) < d.tbl_count { rebuild_index(d, i); }
+            i = i + 1;
         }
+        d.idx_stale = false;
+        return;
+    }
+    let tidx = vec_get(d.idx_tables, ix_id);
+    if tidx >= d.tbl_count { return; }
+    let rc = vec_get(d.tbl_row_counts, tidx);
+    let kc = vec_get(d.idx_key_counts, ix_id);
+    if kc < rc { merge_new_rows(d, ix_id, kc); }
+}
+
+// Stable merge sort of positions 0..n by the pool strings keys[pos], using
+// compare_vals. Equal keys keep their input order, which is row-id order, so
+// the result equals the selection sort this replaced (it took the first
+// minimum on each pick) at O(n log n) instead of O(n^2).
+fn sort_positions(d: &DB, keys: Vec<i32>, n: i32, col_type: i32) -> Vec<i32> {
+    let mut src: Vec<i32> = vec![];
+    let mut dst: Vec<i32> = vec![];
+    let mut i = 0;
+    while i < n {
+        vec_push(src, i);
+        vec_push(dst, i);
         i = i + 1;
     }
+    let mut width = 1;
+    while width < n {
+        let mut lo = 0;
+        while lo < n {
+            let mid = if lo + width < n { lo + width } else { n };
+            let hi = if lo + 2 * width < n { lo + 2 * width } else { n };
+            let mut a = lo;
+            let mut b = mid;
+            let mut o = lo;
+            while o < hi {
+                let mut take_a = false;
+                if a < mid {
+                    if b >= hi { take_a = true; }
+                    else {
+                        let ka = sp_get(d, vec_get(keys, vec_get(src, a)));
+                        let kb = sp_get(d, vec_get(keys, vec_get(src, b)));
+                        // <= keeps the left (lower row id) element first on ties
+                        if compare_vals(ka, kb, col_type) <= 0 { take_a = true; }
+                    }
+                }
+                if take_a { dst[o] = vec_get(src, a); a = a + 1; }
+                else { dst[o] = vec_get(src, b); b = b + 1; }
+                o = o + 1;
+            }
+            lo = lo + 2 * width;
+        }
+        let tmp = src;
+        src = dst;
+        dst = tmp;
+        width = width * 2;
+    }
+    src
+}
+
+// Replace index ix_id's entries in the flattened idx_keys/idx_rowids arrays
+// with new_keys/new_rowids (count entries), shifting later indexes' starts.
+fn splice_index(d: &mut DB, ix_id: i32, new_keys: Vec<i32>, new_rowids: Vec<i32>, count: i32) {
+    let old_start = vec_get(d.idx_key_starts, ix_id);
+    let old_count = vec_get(d.idx_key_counts, ix_id);
+    let total_keys = vec_len(d.idx_keys);
+    let mut out_keys: Vec<i32> = vec![];
+    let mut out_rowids: Vec<i32> = vec![];
+    let mut ci2 = 0;
+    while ci2 < old_start {
+        vec_push(out_keys, vec_get(d.idx_keys, ci2));
+        vec_push(out_rowids, vec_get(d.idx_rowids, ci2));
+        ci2 = ci2 + 1;
+    }
+    let mut ni = 0;
+    while ni < count {
+        vec_push(out_keys, vec_get(new_keys, ni));
+        vec_push(out_rowids, vec_get(new_rowids, ni));
+        ni = ni + 1;
+    }
+    ci2 = old_start + old_count;
+    while ci2 < total_keys {
+        vec_push(out_keys, vec_get(d.idx_keys, ci2));
+        vec_push(out_rowids, vec_get(d.idx_rowids, ci2));
+        ci2 = ci2 + 1;
+    }
+    d.idx_keys = out_keys;
+    d.idx_rowids = out_rowids;
+    let size_diff = count - old_count;
+    d.idx_key_counts = vec_replace(d.idx_key_counts, d.idx_count, ix_id, count);
+    let mut si2 = 0;
+    let mut new_starts: Vec<i32> = vec![];
+    while si2 < d.idx_count {
+        if si2 > ix_id {
+            vec_push(new_starts, vec_get(d.idx_key_starts, si2) + size_diff);
+        } else {
+            vec_push(new_starts, vec_get(d.idx_key_starts, si2));
+        }
+        si2 = si2 + 1;
+    }
+    d.idx_key_starts = new_starts;
+}
+
+// Fold rows kc..rc-1 (appended since the last refresh) into index ix_id:
+// sort them, then merge with the existing sorted entries. On equal keys an
+// existing entry goes first, since its row id is lower.
+fn merge_new_rows(d: &mut DB, ix_id: i32, kc: i32) {
+    let tidx = vec_get(d.idx_tables, ix_id);
+    let col_i = vec_get(d.idx_col_indices, ix_id);
+    let cs = vec_get(d.tbl_col_starts, tidx);
+    let cc = vec_get(d.tbl_col_counts, tidx);
+    let rs = vec_get(d.tbl_row_starts, tidx);
+    let rc = vec_get(d.tbl_row_counts, tidx);
+    let col_type = vec_get(d.col_types, cs + col_i);
+    let k = rc - kc;
+    let mut add_keys: Vec<i32> = vec![];
+    let mut r = kc;
+    while r < rc {
+        vec_push(add_keys, vec_get(d.cells, rs + r * cc + col_i));
+        r = r + 1;
+    }
+    let perm = sort_positions(d, add_keys, k, col_type);
+    let ks = vec_get(d.idx_key_starts, ix_id);
+    let mut m_keys: Vec<i32> = vec![];
+    let mut m_rowids: Vec<i32> = vec![];
+    let mut a = 0;
+    let mut b = 0;
+    while a < kc || b < k {
+        let mut take_old = false;
+        if a < kc {
+            if b >= k { take_old = true; }
+            else {
+                let ko = sp_get(d, vec_get(d.idx_keys, ks + a));
+                let kn = sp_get(d, vec_get(add_keys, vec_get(perm, b)));
+                if compare_vals(ko, kn, col_type) <= 0 { take_old = true; }
+            }
+        }
+        if take_old {
+            vec_push(m_keys, vec_get(d.idx_keys, ks + a));
+            vec_push(m_rowids, vec_get(d.idx_rowids, ks + a));
+            a = a + 1;
+        } else {
+            let p = vec_get(perm, b);
+            vec_push(m_keys, vec_get(add_keys, p));
+            vec_push(m_rowids, kc + p);
+            b = b + 1;
+        }
+    }
+    splice_index(d, ix_id, m_keys, m_rowids, rc);
 }
 
 // Execute CREATE INDEX. Registers a new index entry and rebuilds its sorted data.
@@ -6910,4 +7071,6 @@ fn main() ~ Console + Environment + FileSystem + Process {
         // REPL mode
         run_repl(&mut d);
     }
+    // Clean exit: fold the WAL into the .db (skipped inside an open BEGIN).
+    wal_close(&mut d);
 }

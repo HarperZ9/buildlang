@@ -46,19 +46,22 @@ The struct fields are grouped into:
 | Group | Fields | Purpose |
 |-------|--------|---------|
 | File | `db_path` | Path to the `.db` file |
-| String Pool | `pool`, `ps`, `pl`, `pn` | Interned string buffer + start/length arrays |
+| String Pool | `pool`, `pn` | Interned strings (`Vec<String>`) and the next id |
 | Tables | `tbl_names`, `tbl_count`, `tbl_col_starts`, `tbl_col_counts` | Table metadata |
 | Columns | `col_names`, `col_types` | Flattened column schema |
 | Rows | `cells`, `tbl_row_starts`, `tbl_row_counts` | Flattened cell data |
 | Indexes | `idx_names`, `idx_tables`, `idx_col_indices`, `idx_keys`, `idx_rowids`, ... | Sorted-array index data |
 | Parser | `input`, `pos`, `tk_type`, `tk_val`, `stmt_type`, `p_table`, `p_cols`, ... | Tokenizer + AST state |
 | WHERE | `has_where`, `w_left`, `w_op`, `w_right`, `w_logic`, `w_in_vals1`, ... | Parsed WHERE conditions |
-| WAL | `wal_path`, `in_transaction`, `txn_id`, `wal_buf` | WAL state |
+| WAL | `wal_path`, `in_transaction`, `txn_id`, `wal_bytes`, `db_bytes` | WAL state and checkpoint policy inputs |
+| Index upkeep | `idx_stale` | Set when a mutation moved or rewrote rows; the next index read rebuilds |
 | Snapshot | `snap_cells`, `snap_row_starts`, `snap_tbl_names`, ... | Rollback snapshot |
 
 ### String Pool Pattern
 
-All strings are interned into a contiguous buffer (`d.pool`). `sp_add(text)` appends to the buffer and returns an integer ID. `sp_get(id)` retrieves text by ID. This avoids `Vec<String>` which has incomplete codegen support in BuildLang.
+All strings are interned in `d.pool`, a `Vec<String>`. `sp_add(text)` pushes the text and returns its integer ID; `sp_get(id)` returns it. Both are O(1).
+
+Until 2026-11-02 the pool was one contiguous `String` grown by concatenation, with parallel start and length arrays. The C backend's concatenation allocates a new buffer and copies both sides, so every `sp_add` copied the whole pool: loading N rows cost O(N^2) time and memory. One caveat for `Vec<String>`: create it from a typed local (`let v: Vec<String> = vec![];`). A bare `vec![]` inside a struct literal is built as a `Vec<i32>`, and pushing strings into it corrupts memory.
 
 Pool IDs are used everywhere: table names, column names, cell values, parsed tokens, index keys.
 
@@ -87,7 +90,7 @@ END
 INDEX idx_age ON users (age)
 ```
 
-Each `ROW` uses pipe-delimited values. The entire file is read/written atomically (no incremental I/O).
+Each `ROW` uses pipe-delimited values. The entire file is read or written in one call (no incremental I/O). A write truncates and refills the file, so it is not atomic; the WAL is what makes committed data survive a crash (below).
 
 ## WAL (Write-Ahead Log)
 
@@ -100,11 +103,17 @@ OP INSERT INTO users VALUES (4, 'Bob', 32)
 COMMIT
 ```
 
-**Recovery**: On startup, `wal_replay()` scans for committed TXIDs and replays their OPs.
+Every write opens the file in append mode (`append_file`); nothing already written is rewritten.
 
-**Transactions**: `BEGIN` takes a snapshot. `COMMIT` writes the COMMIT marker and checkpoints. `ROLLBACK` restores from snapshot.
+**Recovery**: On startup, `wal_replay()` reads the WAL in one pass. A `TXID` line opens a transaction, and a `COMMIT` line replays that transaction's `OP` lines. A transaction without a `COMMIT` (a crash, a torn final record, a ROLLBACK, a process that exited inside BEGIN) is skipped. Replay then checkpoints and clears the WAL.
 
-**Auto-commit**: Mutations outside explicit transactions are wrapped in single-statement transactions.
+**Transactions**: `BEGIN` takes a snapshot and appends `TXID`. `COMMIT` appends the marker. `ROLLBACK` restores from snapshot and checkpoints.
+
+**Auto-commit**: A mutation outside an explicit transaction appends one `TXID / OP / COMMIT` record in a single write.
+
+**Checkpoints**: The .db is rewritten when the WAL holds more bytes than the .db plus 64 KB, never inside an open transaction, and at a clean exit (after a single statement, or at `.quit`). Each checkpoint costs at most the bytes appended since the last one, so saving a load of N rows costs O(N) in total.
+
+**Durability**: A statement is durable once its `COMMIT` line is in the WAL, the same point as before. The old code rewrote the whole WAL for every line and the whole .db after every statement; both truncate a file, so a crash during either could lose committed data. An append can only tear the last record, and a torn record has no `COMMIT`, so it is skipped. No write calls fsync, before or after this change. `programs/tests/test_qdb_wal_recovery.py` truncates a crash-left WAL at every byte offset and checks the recovered rows against this rule.
 
 ## Query Execution Flow
 
@@ -143,18 +152,56 @@ Sorted-array indexes with binary search:
 - Each index stores sorted `(key, rowid)` pairs in flattened parallel arrays
 - **Equality lookup**: Binary search to find key, scan left/right for duplicates
 - **Range queries**: Linear scan of sorted array (could be optimized)
-- **Maintenance**: Full rebuild after any mutation (INSERT/UPDATE/DELETE)
-- **Sort algorithm**: Selection sort (O(n^2) but simple and correct)
+- **Maintenance**: Lazy, on the next index read (`refresh_index`). Rows appended by INSERT carry the highest row ids, so they are sorted alone and merged in, O(n + k log k). UPDATE, DELETE, ALTER and ROLLBACK set `idx_stale`, and the next read rebuilds every index once.
+- **Sort algorithm**: Stable bottom-up merge sort (`sort_positions`), O(n log n). Ties keep row-id order, which is the order the earlier selection sort produced.
+
+## Write Cost
+
+Loading N rows used to cost at least O(N^2), from five places: the string pool
+copied itself on every intern; the WAL was read and rewritten for every line;
+the .db was rewritten after every auto-commit statement; INSERT copied the whole
+cells array; and every INSERT re-sorted each index on the table with a selection
+sort. With an index, the load was closer to O(N^3). Each path now costs
+O(statement) or is amortized (see String Pool, WAL and Index Implementation
+above).
+
+Measured with `programs/benchmarks/bench_qdb_load.py`: one REPL process per run,
+a fresh database, rows inserted in a fixed scrambled order, a row-count check
+after each run. k is the least-squares slope of log(time) against log(N).
+Windows 11, buildc 1.4.0, gcc 13.2 -O2, one run per size, so treat single
+timings as rough to about 2x; the old-build runs shared the machine with other
+work. The before column stops where one run passed a few minutes.
+
+| Scenario | Before: time at N | Before: k | After: time at N | After: k |
+|----------|-------------------|-----------|------------------|----------|
+| autocommit | 15.0 s at 1k, 97.8 s at 2k | 1.78 (N=500..2k) | 0.13 s at 1k, 27.6 s at 100k | 1.16 (N=1k..100k) |
+| txn | 10.0 s at 1k, 40.6 s at 4k | 1.01 (N=1k..4k) | 0.14 s at 1k, 18.5 s at 100k | 1.07 (N=1k..100k) |
+| txn_indexed | 21.3 s at 1k | 1.94 (N=250..1k) | 0.14 s at 1k, 15.0 s at 100k | 1.02 (N=1k..100k) |
+| interleaved | 32.7 s at 1k | 1.61 (N=250..1k) | 0.20 s at 1k, 13.3 s at 16k | 1.52 (N=1k..16k) |
+
+`autocommit` is N single-row INSERTs, `txn` wraps them in BEGIN/COMMIT,
+`txn_indexed` adds two indexes and one indexed SELECT after COMMIT (so lazy
+index work is inside the timing), and `interleaved` follows every INSERT with an
+indexed SELECT. Before the change the `txn` run looks linear only because about
+10 ms per statement of file rewriting hides the quadratic term below N=4,000.
+
+What is still superlinear: `interleaved` (each read folds one new row into a
+flattened index array, an O(n) splice, so the pair costs O(n)); INSERT into a
+table that is not the last one created (the cells array is rebuilt, O(all
+cells)); UPDATE and DELETE (they rebuild arrays, as before); and ORDER BY
+(selection sort). The remaining per-row cost after the change, about 130 to
+280 us, is mostly one `append_file` open and close per statement.
 
 ## Design Tradeoffs
 
 | Decision | Rationale |
 |----------|-----------|
 | Single flat struct | Retained pattern; buildc 1.2.0 now supports local struct field assignment |
-| String pool | `Vec<String>` codegen is incomplete |
+| String pool in a `Vec<String>` | O(1) intern and lookup; ids keep cells as `Vec<i32>` |
 | Text file format | Human-readable, simple parsing, adequate for target scale |
-| Selection sort | O(n^2) but trivial to implement correctly without stdlib sort |
-| Full array rebuilds | No in-place Vec mutation in BuildLang, so arrays are reconstructed |
+| Selection sort for ORDER BY | O(n^2) but trivial to implement correctly without stdlib sort; index builds use a merge sort |
+| Append-only WAL, deferred checkpoint | A write costs O(statement); the .db rewrite is amortized against WAL growth |
+| Full array rebuilds | Most mutations rebuild their arrays; INSERT into the last table appends in place (`vec_push` and index assignment work on the runtime's heap vectors) |
 | No B-tree | Sorted arrays sufficient; B-tree in flat arrays not justified |
 | Embedded parser state | No separate AST struct; parsed state lives in DB fields |
 
