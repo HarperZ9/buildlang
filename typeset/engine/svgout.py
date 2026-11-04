@@ -31,6 +31,16 @@ def _rgb(col):
 
 
 def _gfx(g):
+    if g.get("type") == "image":
+        import base64
+        from .raster import png_bytes
+        pw, ph = g["px"]
+        rows = [g["rgb"][y * pw * 3:(y + 1) * pw * 3] for y in range(ph)]
+        uri = "data:image/png;base64," + base64.b64encode(png_bytes(pw, ph, rows)).decode("ascii")
+        return (f'<image x="{g["x"]:.2f}" y="{g["y"]:.2f}" width="{g["w"]:.2f}" height="{g["h"]:.2f}" '
+                f'preserveAspectRatio="none" href="{uri}"/>')
+    if g.get("type") == "rect":
+        return f'<rect width="{g["w"]:.2f}" height="{g["h"]:.2f}" fill="{_rgb(g["fill"])}"/>'
     if g.get("type", "path") != "path":
         return ""
     d = []
@@ -69,6 +79,9 @@ def page_svg(page, registry, defs_cache):
             s = pc.size / font.upem
             gx = left + x
             fill = _rgb(pc.color)
+            if getattr(ln, "blind", False):
+                text_layer.append(_text(left + x, y - dy, pc, hs, "transparent"))
+                continue
             if font.outline(pc.gids[0] if pc.gids else 0) or getattr(font, "kind", "ttf") == "ttf":
                 for gid, adv in zip(pc.gids, pc.advs):
                     key = "g" + "".join(ch for ch in pc.font if ch.isalnum()) + f"_{gid}"

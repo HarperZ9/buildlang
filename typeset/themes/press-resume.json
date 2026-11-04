@@ -1,0 +1,46 @@
+{
+ "extends": "press",
+ "name": "press-resume",
+ "purpose": "The press finish held to resume standards: body text at 10 pt in Hanken Grotesk, standard round bullets, headings larger than body text, every decoration in the header band or the margins and marked as a PDF artifact, the name inked inside its deboss. The relief stops above the first section heading (clear_body).",
+ "base": {
+  "size": 10.0,
+  "leading": 13.4
+ },
+ "blocks": {
+  "contact": {
+   "size": 9.4,
+   "leading": 12.2
+  },
+  "subtitle": {
+   "size": 10.8,
+   "leading": 14
+  },
+  "h2": {
+   "size": 10.6,
+   "leading": 13.6,
+   "before": 9,
+   "after": 2,
+   "fonts": {
+    "rm": "sb"
+   }
+  },
+  "h3": {
+   "size": 10.2,
+   "leading": 13.2,
+   "before": 5
+  },
+  "meta": {
+   "size": 9.4,
+   "leading": 12.2
+  },
+  "li": {
+   "label": "\u2022"
+  }
+ },
+ "emboss": {
+  "deboss_finish": "inked",
+  "clear_body": [
+   "h2"
+  ]
+ }
+}

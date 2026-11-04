@@ -73,12 +73,13 @@ def write_pdf(path, pages, registry, meta, plates=None, graphics_only=False, pdf
     for page in pages:
         ops = []
         for g in page.furniture_under if hasattr(page, "furniture_under") else []:
-            ops.append(pdfgfx.draw(g, page.height))
+            ops.append(_artifact(pdfgfx.draw(g, page.height)))
         if not graphics_only:
             for y, line in page.items:
                 ops.append(_line_ops(line, y, page, registry, uses))
         for g in page.furniture:
-            ops.append(pdfgfx.draw(g, page.height, registry, uses, _line_ops))
+            drawn = pdfgfx.draw(g, page.height, registry, uses, _line_ops)
+            ops.append(drawn if g.get("type") == "line" else _artifact(drawn))
         contents.append("\n".join(o for o in ops if o))
     pages_n = w.reserve()
     font_refs = {}
@@ -87,7 +88,8 @@ def write_pdf(path, pages, registry, meta, plates=None, graphics_only=False, pdf
         font_refs[use.name] = _embed_font(w, use)
     gs = pdfgfx.extgstates(w)
     font_dict = " ".join(f"/{n} {r} 0 R" for n, r in font_refs.items())
-    res = f"<< /Font << {font_dict} >> /ExtGState {gs} /ColorSpace {pdfgfx.colorspaces(w)} >>"
+    res = (f"<< /Font << {font_dict} >> /ExtGState {gs} /ColorSpace {pdfgfx.colorspaces(w)} "
+           f"/XObject {pdfgfx.xobjects(w)} >>")
     kids = []
     for page, ops in zip(pages, contents):
         for key, use in uses.items():
@@ -115,10 +117,16 @@ def write_pdf(path, pages, registry, meta, plates=None, graphics_only=False, pdf
     return data
 
 
+def _artifact(ops):
+    """Mark decoration as a PDF artifact so text extraction and assistive technology skip it."""
+    return "/Artifact BMC\n" + ops + "\nEMC" if ops else ops
+
+
 def _line_ops(line, y, page, registry, uses, left=None):
     pg_left = page.left if hasattr(page, "left") else 0
     base_y = page.height - (page.top if hasattr(page, "top") else 0) - y
-    out = ["BT"]
+    # render mode 3 (invisible) keeps a blind-embossed line in the text layer without ink
+    out = ["BT", "3 Tr"] if getattr(line, "blind", False) else ["BT"]
     cur = None
     color = None
     prev_end = None
@@ -156,6 +164,8 @@ def _line_ops(line, y, page, registry, uses, left=None):
             parts.append(_hex(buf))
         out.append("[" + " ".join(parts) + "] TJ")
         prev_end = x + pc.width * hs
+    if getattr(line, "blind", False):
+        out.append("0 Tr")  # the render mode is graphics state and outlives ET
     out.append("ET")
     for rx, ry, rw, rh in line.graphics:
         out.append(f"0 0 0 rg {pg_left + rx:.3f} {base_y + ry:.3f} {rw:.3f} {rh:.3f} re f")

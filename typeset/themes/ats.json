@@ -1,0 +1,127 @@
+{
+ "name": "ats",
+ "purpose": "Plain single-column output for applicant tracking systems: black ink on white, one sans family, no art, no relief, no hyphenation, ragged right, Letter size.",
+ "page": {
+  "width": 612,
+  "height": 792,
+  "left": 54,
+  "right": 54,
+  "top": 50,
+  "bottom": 50,
+  "top_skip": 0,
+  "ragged_bottom": true,
+  "max_depth": 0
+ },
+ "fonts": {
+  "rm": "HankenGrotesk-Regular.ttf",
+  "it": "HankenGrotesk-Italic.ttf",
+  "bf": "HankenGrotesk-Bold.ttf",
+  "sb": "HankenGrotesk-SemiBold.ttf"
+ },
+ "kerning": true,
+ "ligatures": false,
+ "hyphenate": false,
+ "tex_spacing": false,
+ "microtype": {
+  "protrusion": false,
+  "expansion": 0.0
+ },
+ "space": {
+  "width": 0.26,
+  "stretch": 0.12,
+  "shrink": 0.06,
+  "extra": 0
+ },
+ "linebreak": {
+  "tolerance": 1000,
+  "pretolerance": -1,
+  "line_penalty": 10,
+  "emergency_stretch": 24
+ },
+ "spacing": "max",
+ "keep_next_whole": true,
+ "club_penalty": 10000,
+ "widow_penalty": 10000,
+ "base": {
+  "size": 10.0,
+  "leading": 13.0,
+  "align": "ragged",
+  "color": "0 0 0",
+  "fonts": {
+   "rm": "rm",
+   "i": "it",
+   "b": "bf",
+   "tt": "rm"
+  }
+ },
+ "blocks": {
+  "h1": {
+   "size": 18,
+   "leading": 22,
+   "after": 2,
+   "keep_next": true,
+   "fonts": {
+    "rm": "bf"
+   }
+  },
+  "contact": {
+   "size": 9.5,
+   "leading": 12,
+   "after": 1,
+   "keep_next": true
+  },
+  "subtitle": {
+   "size": 10.5,
+   "leading": 13.5,
+   "before": 6,
+   "after": 4,
+   "keep_next": true,
+   "fonts": {
+    "rm": "sb"
+   }
+  },
+  "h2": {
+   "size": 11,
+   "leading": 14,
+   "before": 9,
+   "after": 2,
+   "keep_next": true,
+   "fonts": {
+    "rm": "bf"
+   }
+  },
+  "h3": {
+   "size": 10.2,
+   "leading": 13,
+   "before": 5,
+   "after": 1,
+   "keep_next": true,
+   "fonts": {
+    "rm": "sb"
+   }
+  },
+  "meta": {
+   "size": 9.5,
+   "leading": 12,
+   "after": 2,
+   "keep_next": true,
+   "fonts": {
+    "rm": "it"
+   }
+  },
+  "p": {
+   "after": 3
+  },
+  "li": {
+   "after": 2,
+   "left": 11,
+   "hang": -11,
+   "label": "\u2022",
+   "label_width": 6,
+   "label_sep": 5,
+   "fonts": {
+    "label": "rm"
+   }
+  }
+ }
+}

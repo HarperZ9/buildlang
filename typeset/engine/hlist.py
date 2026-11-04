@@ -92,6 +92,10 @@ class ParagraphBuilder:
                 else:
                     items.append(Glue(sp(w), sp(st), sp(sh), payload="space"))
             for si, (sty, text, color) in enumerate(word):
+                if sty == "m" and style["fonts"].get("math", "math") not in self.shaper.reg:
+                    # a theme without a math font sets the source as text and says so
+                    self.shaper.diag.notes.append(f"no math font in this theme; math set as text: {text}")
+                    sty = "tt"
                 if sty == "m":
                     items.append(self.math_box(text, style))
                     continue
