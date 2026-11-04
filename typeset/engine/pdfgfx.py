@@ -2,11 +2,36 @@
 
 _ALPHAS = set()
 _SEPS = {}
+_IMAGES = []     # (name, width_px, height_px, rgb bytes)
 
 
 def reset():
     _ALPHAS.clear()
     _SEPS.clear()
+    _IMAGES.clear()
+
+
+def image(x, y, w, h, px_w, px_h, rgb, role="image"):
+    """A raster placed at (x, y) top-left in page points, size w x h; rgb is px_w * px_h * 3 bytes."""
+    if len(rgb) != px_w * px_h * 3:
+        raise ValueError(f"image data is {len(rgb)} bytes, expected {px_w * px_h * 3}")
+    return {"type": "image", "x": x, "y": y, "w": w, "h": h, "px": (px_w, px_h), "rgb": bytes(rgb), "role": role}
+
+
+def _image_ops(g, H):
+    name = "Im%d" % (len(_IMAGES) + 1)
+    _IMAGES.append((name, g["px"][0], g["px"][1], g["rgb"]))
+    return f"q {g['w']:.3f} 0 0 {g['h']:.3f} {g['x']:.3f} {H - g['y'] - g['h']:.3f} cm /{name} Do Q"
+
+
+def xobjects(w):
+    """Write the registered images as Image XObjects; returns the resource dictionary."""
+    refs = []
+    for name, pw, ph, rgb in _IMAGES:
+        n = w.stream(rgb, f" /Type /XObject /Subtype /Image /Width {pw} /Height {ph} "
+                          f"/ColorSpace /DeviceRGB /BitsPerComponent 8")
+        refs.append(f"/{name} {n} 0 R")
+    return "<< " + " ".join(refs) + " >>"
 
 
 def spot(name, cmyk):
@@ -41,6 +66,10 @@ def draw(g, H, registry=None, uses=None, line_ops=None):
     if t == "line" and line_ops:
         page = g["page"]
         return line_ops(g["line"], g["y"], page, registry, uses)
+    if t == "image":
+        return _image_ops(g, H)
+    if t == "rect":
+        return f"q {g['fill']} rg 0 0 {g['w']:.3f} {g['h']:.3f} re f Q"
     if t != "path":
         return ""
     ops = ["q"]

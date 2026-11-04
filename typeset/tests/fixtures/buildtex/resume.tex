@@ -1,0 +1,42 @@
+% A fictional one-page resume in the LaTeX subset buildtex.texin imports.
+% The person, places and projects are invented for the tests.
+\documentclass[11pt]{article}
+\usepackage[margin=0.75in]{geometry}
+\usepackage{hyperref}
+\title{Avery Example}
+\author{Portland, Oregon | avery@example.org | example.org \\ github.com/avery-example}
+\begin{document}
+\maketitle
+
+\section*{Summary}
+Software builder who writes \emph{test harnesses} and release tooling, with ten years of field operations
+before that. Ships small command-line tools with \textbf{planted-fault checks} and plain-text receipts.
+
+\section{Experience}
+\subsection{Release Engineer | Example Tools}
+\begin{itemize}
+  \item Built a release pipeline in Python that signs every artifact and records its SHA-256; 40 releases
+        shipped with no manual step.
+  \item Wrote 1,200 regression cases for a parser, each paired with a planted fault that must fail.
+  \item Cut median CI time from 14 to 6 minutes by splitting the suite by changed module.
+\end{itemize}
+\subsection{Field Operations Lead | Riverside Grounds}
+\begin{itemize}
+  \item Ran crews of four to six on site assessments, estimates and safety briefings, 2014--2024.
+  \item Kept the scope a client signed and the work done on site in step, with written change orders.
+\end{itemize}
+
+\section{Projects}
+\begin{itemize}
+  \item \textbf{tally}: a command-line counter for log lines with \texttt{--json} output;
+        on PyPI as \texttt{tally-lines}. \href{https://example.org/tally}{example.org/tally}
+  \item \textbf{gauge}: renders benchmark intervals as text tables, so a reader sees the spread,
+        not only the mean.
+\end{itemize}
+
+\section{Skills}
+Python, Rust, C, shell; Git and CI; packaging for PyPI and crates.io; technical writing.
+
+\section{Education}
+Self-directed study in compilers, typesetting and numerical methods.
+\end{document}

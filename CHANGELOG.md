@@ -12,6 +12,13 @@ tracked in `STATUS.md`, `README.md`, and
 
 - `tools/proofkernel`: mmk, a Metamath database verifier written in BuildLang, built through the C target. `tests/proofkernel/test_mmk.py` holds it to a valid database and four planted faults; CI runs it on Linux.
 
+## Unreleased: BuildTeX
+
+- `typeset/buildtex`: one build command from a BuildLang document program, its IR, or a LaTeX subset (one-way import) to PDF and HTML, with a receipt of layout facts: page count, overfull lines, missing glyphs, embedded fonts and reading order. No TeX or Lean program runs; a guard refuses them and the receipt lists every program a build started.
+- The press finish inside the page (`engine/press.py`): the emboss and deboss relief as an image on page one, the name inked or blind with its text layer kept. The PDF writer gains image XObjects and invisible-text runs; SVG and HTML draw the same images.
+- Themes `press` and `ats`. A theme without a math font sets math source as text and records a note.
+- Design note: `docs/BUILDTEX.md`, covering the document syntax, the LaTeX migration path, outputs, finishes, and the native proof checker that replaces Lean (design only).
+
 ## Unreleased: typeset and the field spec
 
 - `typeset/`: BuildLang as a document language: Knuth-Plass in BuildLang, a stdlib Python layout engine, and themes as data.
