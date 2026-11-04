@@ -1,0 +1,114 @@
+const TABLE_DV_TABLE: i64 = 1048576;
+const TABLE_KE: i32 = 1;
+
+// ---- arena
+pub fn push_a(k: &mut state::K, v: i32) {
+    if k.top >= (vec_len(k.a) as i64) { state::grow(k.a, k.top * 2); }
+    k.a[k.top] = v;
+    k.top = k.top + 1;
+}
+
+// ---- disjoint pairs, a counted set so scope exit is a decrement
+pub fn dv_slot(k: &state::K, x: i32, y: i32) -> i64 {
+    let lo = if x < y { x } else { y };
+    let hi = if x < y { y } else { x };
+    let mut h = (((lo as i64) * 31337 + (hi as i64)) * 2654435761) & (TABLE_DV_TABLE - 1);
+    loop {
+        if k.dk1[h] == 0 || (k.dk1[h] == lo + 1 && k.dk2[h] == hi + 1) { return h; }
+        h = (h + 1) & (TABLE_DV_TABLE - 1);
+    }
+    0
+}
+
+pub fn dv_add(k: &mut state::K, x: i32, y: i32) {
+    let h = dv_slot(k, x, y);
+    k.dk1[h] = (if x < y { x } else { y }) + 1;
+    k.dk2[h] = (if x < y { y } else { x }) + 1;
+    k.dc[h] = k.dc[h] + 1;
+}
+
+pub fn dv_drop(k: &mut state::K, x: i32, y: i32) {
+    let h = dv_slot(k, x, y);
+    k.dc[h] = k.dc[h] - 1;
+}
+
+pub fn dv_has(k: &state::K, x: i32, y: i32) -> bool {
+    k.dc[dv_slot(k, x, y)] > 0
+}
+
+// ---- statements
+pub fn new_stmt(k: &mut state::K, kind: i32, label: i64, off: i64, len: i64) -> i64 {
+    let n = k.nst;
+    k.nst = n + 1;
+    if n >= (vec_len(k.st_kind) as i64) {
+        let w = n * 2;
+        state::grow(k.st_kind, w); state::grow(k.st_lab, w); state::grow(k.st_off, w); state::grow(k.st_len, w);
+        state::grow(k.st_fr, w); state::grow(k.st_nh, w); state::grow(k.st_dv, w); state::grow(k.st_nd, w);
+        state::grow(k.st_act, w); state::grow(k.st_mand, w);
+    }
+    k.st_kind[n] = kind;
+    k.st_lab[n] = label as i32;
+    k.st_off[n] = off as i32;
+    k.st_len[n] = len as i32;
+    k.st_act[n] = 1;
+    k.lab[label] = n as i32;
+    n
+}
+
+pub fn push_hyp(k: &mut state::K, st: i64) {
+    if k.nhyp >= (vec_len(k.hyps) as i64) { state::grow(k.hyps, k.nhyp * 2); }
+    k.hyps[k.nhyp] = st as i32;
+    k.nhyp = k.nhyp + 1;
+}
+
+pub fn push_fr(k: &mut state::K, v: i32) {
+    if k.frn >= (vec_len(k.fr) as i64) { state::grow(k.fr, k.frn * 2); }
+    k.fr[k.frn] = v;
+    k.frn = k.frn + 1;
+}
+
+// Builds the frame of an assertion whose expression is the slice off..off+len.
+pub fn build_frame(k: &mut state::K, st: i64) {
+    k.stamp = k.stamp + 1;
+    let stamp = k.stamp;
+    let off = k.st_off[st] as i64;
+    let len = k.st_len[st] as i64;
+    let mut i: i64 = 1;
+    while i < len { k.mark[k.a[off + i] as i64] = stamp; i = i + 1; }
+    let mut h: i64 = 0;
+    while h < k.nhyp {
+        let hs = k.hyps[h] as i64;
+        if k.st_kind[hs] == TABLE_KE {
+            let o2 = k.st_off[hs] as i64;
+            let l2 = k.st_len[hs] as i64;
+            let mut j: i64 = 1;
+            while j < l2 { k.mark[k.a[o2 + j] as i64] = stamp; j = j + 1; }
+        }
+        h = h + 1;
+    }
+    let fr0 = k.frn;
+    h = 0;
+    while h < k.nhyp {
+        let hs = k.hyps[h] as i64;
+        if k.st_kind[hs] == TABLE_KE || k.mark[k.a[(k.st_off[hs] as i64) + 1] as i64] == stamp {
+            push_fr(k, hs as i32);
+        }
+        h = h + 1;
+    }
+    k.st_fr[st] = fr0 as i32;
+    k.st_nh[st] = (k.frn - fr0) as i32;
+    let dv0 = k.frn;
+    let mut d: i64 = 0;
+    while d < k.ndv {
+        let x = k.dvs[d];
+        let y = k.dvs[d + 1];
+        if k.mark[x as i64] == stamp && k.mark[y as i64] == stamp {
+            push_fr(k, x);
+            push_fr(k, y);
+        }
+        d = d + 2;
+    }
+    k.st_dv[st] = dv0 as i32;
+    k.st_nd[st] = ((k.frn - dv0) / 2) as i32;
+}
+

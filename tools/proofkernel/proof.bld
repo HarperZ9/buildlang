@@ -1,0 +1,158 @@
+const PROOF_KE: i32 = 1;
+const PROOF_KF: i32 = 0;
+
+// Looks up a proof label token. Returns its statement, or -1 if out of scope.
+pub fn usable(k: &state::K, b: &str) -> i64 {
+    let t = tokens::lookup(k, b);
+    if t < 0 { return -1; }
+    let st = k.lab[t] as i64;
+    if st < 0 { return -1; }
+    let kind = k.st_kind[st];
+    if (kind == PROOF_KF || kind == PROOF_KE) && k.st_act[st] == 0 { return -1; }
+    st
+}
+
+pub fn proof_plain(k: &mut state::K, b: &str, s: &str, label: &str) -> i32 ~ Console + Process {
+    loop {
+        if !tokens::next_tok(k, b, s) { state::fatal(k, s, "unterminated-proof", label); }
+        if tokens::tok_is(k, b, 46u8) { return 0; }
+        if k.te - k.ts == 1 && state::at(b, k.ts) == 63u8 { state::report(k, s, "incomplete-proof", label); return -1; }
+        let st = usable(k, b);
+        if st < 0 { state::report(k, s, "bad-proof-label", label); return -1; }
+        let c = machine::step(k, st);
+        if c != 0 { let cname = machine::step_class(c);
+        state::report(k, s, cname, label); return -1; }
+    }
+    -1
+}
+
+pub fn read_label_list(k: &mut state::K, b: &str, s: &str, st0: i64, label: &str) -> i32 ~ Console + Process {
+    k.nlist = 0;
+    loop {
+        if !tokens::next_tok(k, b, s) { state::fatal(k, s, "unterminated-proof", label); }
+        if k.te - k.ts == 1 && state::at(b, k.ts) == 41u8 { return 0; }
+        let st = usable(k, b);
+        if st < 0 { state::report(k, s, "bad-proof-label", label); return -1; }
+        if k.st_mand[st] == (st0 as i32) + 1 { state::report(k, s, "mandatory-in-list", label); return -1; }
+        if k.nlist >= (vec_len(k.list) as i64) { state::grow(k.list, k.nlist * 2); }
+        k.list[k.nlist] = st as i32;
+        k.nlist = k.nlist + 1;
+    }
+    -1
+}
+
+// Runs decoded machine::step number n (from 1). Returns a fault class or 0.
+pub fn compressed_step(k: &mut state::K, st0: i64, n: i64) -> i32 {
+    let m = k.st_nh[st0] as i64;
+    if n <= m { return machine::step(k, k.fr[(k.st_fr[st0] as i64) + n - 1] as i64); }
+    if n <= m + k.nlist { return machine::step(k, k.list[n - m - 1] as i64); }
+    let i = n - m - k.nlist - 1;
+    if i >= k.nsv { return 5; }
+    k.steps = k.steps + 1;
+    machine::push_s(k, k.vs[i], k.vl[i]);
+    0
+}
+
+pub fn save_top(k: &mut state::K) {
+    if k.nsv >= (vec_len(k.vs) as i64) { state::grow(k.vs, k.nsv * 2); state::grow(k.vl, k.nsv * 2); }
+    k.vs[k.nsv] = k.ss[k.sp - 1];
+    k.vl[k.nsv] = k.sl[k.sp - 1];
+    k.nsv = k.nsv + 1;
+}
+
+pub fn letters(k: &mut state::K, b: &str, st0: i64) -> i32 {
+    let mut i = k.ts;
+    while i < k.te {
+        let c = state::at(b, i) as i64;
+        i = i + 1;
+        if c >= 65 && c <= 84 {
+            let f = compressed_step(k, st0, k.cn * 20 + (c - 65) + 1);
+            if f != 0 { return f; }
+            k.cn = 0;
+            k.cz = true;
+        } else if c >= 85 && c <= 89 {
+            k.cn = k.cn * 5 + (c - 85) + 1;
+            k.cz = false;
+            if k.cn > 100000000 { return 6; }
+        } else if c == 90 && k.cn == 0 && k.cz && k.sp > 0 {
+            save_top(k);
+            k.cz = false;
+        } else {
+            return if c == 63 { 7 } else { 6 };
+        }
+    }
+    0
+}
+
+pub fn letter_class(c: i32) -> str {
+    if c == 5 { return "bad-saved-index"; }
+    if c == 6 { return "bad-compressed-letter"; }
+    if c == 7 { return "incomplete-proof"; }
+    machine::step_class(c)
+}
+
+pub fn proof_compressed(k: &mut state::K, b: &str, s: &str, st0: i64, label: &str) -> i32 ~ Console + Process {
+    if read_label_list(k, b, s, st0, label) != 0 { return -1; }
+    k.nsv = 0;
+    k.cn = 0;
+    k.cz = false;
+    loop {
+        if !tokens::next_tok(k, b, s) { state::fatal(k, s, "unterminated-proof", label); }
+        if tokens::tok_is(k, b, 46u8) {
+            if k.cn != 0 { state::report(k, s, "bad-compressed-letter", label); return -1; }
+            return 0;
+        }
+        let f = letters(k, b, st0);
+        if f != 0 {
+            let cname = letter_class(f);
+            state::report(k, s, cname, label);
+            return -1;
+        }
+    }
+    -1
+}
+
+pub fn skip_to_end(k: &mut state::K, b: &str, s: &str) ~ Console + Process {
+    while !tokens::tok_is(k, b, 46u8) {
+        if !tokens::next_tok(k, b, s) { state::fatal(k, s, "unterminated-statement", "-"); }
+    }
+}
+
+// Verifies the proof of statement st0, whose $= was just read.
+pub fn verify(k: &mut state::K, b: &str, s: &str, st0: i64) ~ Console + Process {
+    let label = state::tok_str(k, s, k.st_lab[st0] as i64);
+    k.proofs = k.proofs + 1;
+    let heap = k.top;
+    k.sp = 0;
+    machine::stamp_mand(k, st0);
+    if !tokens::next_tok(k, b, s) { state::fatal(k, s, "unterminated-proof", label); }
+    let mut r: i32 = 0;
+    if k.te - k.ts == 1 && state::at(b, k.ts) == 40u8 {
+        r = proof_compressed(k, b, s, st0, label);
+    } else {
+        k.pos = k.ts;
+        r = proof_plain(k, b, s, label);
+    }
+    if r != 0 {
+        skip_to_end(k, b, s);
+    } else if k.sp != 1 {
+        state::report(k, s, "stack-not-one", label);
+    } else if !same_expr(k, st0) {
+        state::report(k, s, "wrong-conclusion", label);
+    }
+    k.top = heap;
+}
+
+pub fn same_expr(k: &state::K, st0: i64) -> bool {
+    let n = k.st_len[st0] as i64;
+    if (k.sl[0] as i64) != n { return false; }
+    let o = k.st_off[st0] as i64;
+    let p = k.ss[0] as i64;
+    let mut i: i64 = 0;
+    while i < n {
+        if k.a[o + i] != k.a[p + i] { return false; }
+        i = i + 1;
+    }
+    true
+}
+

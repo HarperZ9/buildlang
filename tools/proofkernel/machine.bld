@@ -1,0 +1,148 @@
+const MACHINE_KE: i32 = 1;
+const MACHINE_KF: i32 = 0;
+
+// ---- proof machine
+pub fn push_s(k: &mut state::K, off: i32, len: i32) {
+    if k.sp >= (vec_len(k.ss) as i64) { state::grow(k.ss, k.sp * 2); state::grow(k.sl, k.sp * 2); }
+    k.ss[k.sp] = off;
+    k.sl[k.sp] = len;
+    k.sp = k.sp + 1;
+}
+
+// Compares the slice (o, l) with the substitution instance of expression st.
+pub fn subst_eq(k: &state::K, st: i64, o: i64, l: i64) -> bool {
+    let e0 = k.st_off[st] as i64;
+    let n = k.st_len[st] as i64;
+    let mut p = o;
+    let end = o + l;
+    let mut i: i64 = 0;
+    while i < n {
+        let c = k.a[e0 + i];
+        if i > 0 && k.sym[c as i64] == 2 {
+            let sl = k.sub_l[c as i64] as i64;
+            if p + sl > end { return false; }
+            let so = k.sub_s[c as i64] as i64;
+            let mut j: i64 = 0;
+            while j < sl {
+                if k.a[so + j] != k.a[p + j] { return false; }
+                j = j + 1;
+            }
+            p = p + sl;
+        } else {
+            if p >= end || k.a[p] != c { return false; }
+            p = p + 1;
+        }
+        i = i + 1;
+    }
+    p == end
+}
+
+// Checks the disjoint conditions of assertion st under the current substitution.
+pub fn dv_ok(k: &state::K, st: i64) -> bool {
+    let d0 = k.st_dv[st] as i64;
+    let nd = k.st_nd[st] as i64;
+    let mut d: i64 = 0;
+    while d < nd {
+        let x = k.fr[d0 + 2 * d] as i64;
+        let y = k.fr[d0 + 2 * d + 1] as i64;
+        let xo = k.sub_s[x] as i64;
+        let xl = k.sub_l[x] as i64;
+        let yo = k.sub_s[y] as i64;
+        let yl = k.sub_l[y] as i64;
+        let mut i: i64 = 0;
+        while i < xl {
+            let a0 = k.a[xo + i];
+            if k.sym[a0 as i64] == 2 {
+                let mut j: i64 = 0;
+                while j < yl {
+                    let b0 = k.a[yo + j];
+                    if k.sym[b0 as i64] == 2 {
+                        if a0 == b0 || !table::dv_has(k, a0, b0) { return false; }
+                    }
+                    j = j + 1;
+                }
+            }
+            i = i + 1;
+        }
+        d = d + 1;
+    }
+    true
+}
+
+// Writes the substitution instance of st to the arena, pushes it on the stack.
+pub fn push_instance(k: &mut state::K, st: i64) {
+    let e0 = k.st_off[st] as i64;
+    let n = k.st_len[st] as i64;
+    let start = k.top;
+    let mut i: i64 = 0;
+    while i < n {
+        let c = k.a[e0 + i];
+        if i > 0 && k.sym[c as i64] == 2 {
+            let sl = k.sub_l[c as i64] as i64;
+            let so = k.sub_s[c as i64] as i64;
+            let mut j: i64 = 0;
+            while j < sl { table::push_a(k, k.a[so + j]); j = j + 1; }
+        } else {
+            table::push_a(k, c);
+        }
+        i = i + 1;
+    }
+    push_s(k, start as i32, (k.top - start) as i32);
+}
+
+// One proof step. Returns 0, or a fault class number.
+pub fn step(k: &mut state::K, st: i64) -> i32 {
+    k.steps = k.steps + 1;
+    let kind = k.st_kind[st];
+    if kind == MACHINE_KF || kind == MACHINE_KE {
+        push_s(k, k.st_off[st], k.st_len[st]);
+        return 0;
+    }
+    let fo = k.st_fr[st] as i64;
+    let nh = k.st_nh[st] as i64;
+    if k.sp < nh { return 1; }
+    let base = k.sp - nh;
+    let mut i: i64 = 0;
+    while i < nh {
+        let h = k.fr[fo + i] as i64;
+        if k.st_kind[h] == MACHINE_KF {
+            let o = k.st_off[h] as i64;
+            let so = k.ss[base + i] as i64;
+            let sl = k.sl[base + i] as i64;
+            if sl < 1 || k.a[so] != k.a[o] { return 2; }
+            let v = k.a[o + 1] as i64;
+            k.sub_s[v] = (so + 1) as i32;
+            k.sub_l[v] = (sl - 1) as i32;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while i < nh {
+        let h = k.fr[fo + i] as i64;
+        if k.st_kind[h] == MACHINE_KE {
+            if !subst_eq(k, h, k.ss[base + i] as i64, k.sl[base + i] as i64) { return 3; }
+        }
+        i = i + 1;
+    }
+    if !dv_ok(k, st) { return 4; }
+    k.sp = base;
+    push_instance(k, st);
+    0
+}
+
+pub fn step_class(c: i32) -> str {
+    if c == 1 { return "stack-underflow"; }
+    if c == 2 { return "typecode-mismatch"; }
+    if c == 3 { return "hypothesis-mismatch"; }
+    if c == 4 { return "disjoint-violation"; }
+    "step-fault"
+}
+
+// Marks the frame's hypotheses so a compressed label list cannot name them.
+pub fn stamp_mand(k: &mut state::K, st: i64) {
+    let fo = k.st_fr[st] as i64;
+    let nh = k.st_nh[st] as i64;
+    let mut i: i64 = 0;
+    while i < nh { k.st_mand[k.fr[fo + i] as i64] = st as i32 + 1; i = i + 1; }
+}
+

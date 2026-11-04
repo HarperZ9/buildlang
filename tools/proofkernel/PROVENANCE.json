@@ -1,0 +1,82 @@
+{
+ "comment": "every file this change adds or edits, its source and sha256 (text hashed with LF line endings)",
+ "snapshot": "HarperZ9/workstation-tools@d82f57f",
+ "base": "7886bf37989cbf0fbfd265f3dd4d6139fa41c6d8",
+ "sourcesHashedOn": "2026-11-02",
+ "files": [
+  {
+   "path": ".github/workflows/ci.yml",
+   "sha256": "12a389725a30234394ee2cf72eed0f9ecf487a8a2951e2e5dcf20b61111b7f24",
+   "source": "new in this change"
+  },
+  {
+   "path": "CHANGELOG.md",
+   "sha256": "f20efc41361dd9979b4d3fff7fa37f8f442259658ac9b1501504c59a6f49fa35",
+   "source": "new in this change"
+  },
+  {
+   "path": "tests/proofkernel/ok.mm",
+   "sha256": "20560504233ed92b63ed8d2a53d5859d838eb170cea78ca32c51bff78dfc6df5",
+   "source": "new in this change"
+  },
+  {
+   "path": "tests/proofkernel/test_mmk.py",
+   "sha256": "1b28aff990823483d3cae0e4de9df9321323d240f973d6decfa0e2452e59f0c7",
+   "source": "new in this change"
+  },
+  {
+   "path": "tools/proofkernel/README.md",
+   "sha256": "48dcd045ebd8e9d4277920b0358679f4b93a3e23631daad1511485f91c4ea8ed",
+   "source": "new in this change"
+  },
+  {
+   "path": "tools/proofkernel/decl.bld",
+   "sha256": "229771e0f5e20628e7d7875f5b2fc5b80447f261f5c78b22dc254560e8266aa1",
+   "source": "buildlang worktree on feat/proof-kernel-mm-20261031, uncommitted: tools/proofkernel/decl.bld",
+   "sourceSha256": "229771e0f5e20628e7d7875f5b2fc5b80447f261f5c78b22dc254560e8266aa1",
+   "identical": true
+  },
+  {
+   "path": "tools/proofkernel/machine.bld",
+   "sha256": "3cd769ef6dfcc9894d5ca3ed464e137b6c18c6504a81de3c05951e2c060292a2",
+   "source": "buildlang worktree on feat/proof-kernel-mm-20261031, uncommitted: tools/proofkernel/machine.bld",
+   "sourceSha256": "3cd769ef6dfcc9894d5ca3ed464e137b6c18c6504a81de3c05951e2c060292a2",
+   "identical": true
+  },
+  {
+   "path": "tools/proofkernel/mmk.bld",
+   "sha256": "2254cc75ae48b6e311b31fd632385f041077fa520fbe0472621a58f9cf603631",
+   "source": "buildlang worktree on feat/proof-kernel-mm-20261031, uncommitted: tools/proofkernel/mmk.bld",
+   "sourceSha256": "2254cc75ae48b6e311b31fd632385f041077fa520fbe0472621a58f9cf603631",
+   "identical": true
+  },
+  {
+   "path": "tools/proofkernel/proof.bld",
+   "sha256": "8fcdbe6644433858b20fee5af651f49aa7b4ca7d1451c0a24f59a5fa600e62c2",
+   "source": "buildlang worktree on feat/proof-kernel-mm-20261031, uncommitted: tools/proofkernel/proof.bld",
+   "sourceSha256": "8fcdbe6644433858b20fee5af651f49aa7b4ca7d1451c0a24f59a5fa600e62c2",
+   "identical": true
+  },
+  {
+   "path": "tools/proofkernel/state.bld",
+   "sha256": "6ec6a03756636f25067ed742be8d64e289d215e66073853a2dd1639ab620a42c",
+   "source": "buildlang worktree on feat/proof-kernel-mm-20261031, uncommitted: tools/proofkernel/state.bld",
+   "sourceSha256": "6ec6a03756636f25067ed742be8d64e289d215e66073853a2dd1639ab620a42c",
+   "identical": true
+  },
+  {
+   "path": "tools/proofkernel/table.bld",
+   "sha256": "1d732f3bfd699f3420b3947d1f9fc88a39d8ef747c4c13f8b91b26626bd83f02",
+   "source": "buildlang worktree on feat/proof-kernel-mm-20261031, uncommitted: tools/proofkernel/table.bld",
+   "sourceSha256": "1d732f3bfd699f3420b3947d1f9fc88a39d8ef747c4c13f8b91b26626bd83f02",
+   "identical": true
+  },
+  {
+   "path": "tools/proofkernel/tokens.bld",
+   "sha256": "3c6a7d16eaa3e361c5f0239ea220dbdc6e871646c6e8fc1f558047fda4231224",
+   "source": "buildlang worktree on feat/proof-kernel-mm-20261031, uncommitted: tools/proofkernel/tokens.bld",
+   "sourceSha256": "3c6a7d16eaa3e361c5f0239ea220dbdc6e871646c6e8fc1f558047fda4231224",
+   "identical": true
+  }
+ ]
+}

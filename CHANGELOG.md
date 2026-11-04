@@ -8,6 +8,10 @@ tracked in `STATUS.md`, `README.md`, and
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
 `108/108` or `132/132` are not the current release gate.
 
+## Unreleased: proof kernel
+
+- `tools/proofkernel`: mmk, a Metamath database verifier written in BuildLang, built through the C target. `tests/proofkernel/test_mmk.py` holds it to a valid database and four planted faults; CI runs it on Linux.
+
 ## Unreleased: BuildTeX
 
 - `typeset/buildtex`: one build command from a BuildLang document program, its IR, or a LaTeX subset (one-way import) to PDF and HTML, with a receipt of layout facts: page count, overfull lines, missing glyphs, embedded fonts and reading order. No TeX or Lean program runs; a guard refuses them and the receipt lists every program a build started.

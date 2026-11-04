@@ -1,0 +1,40 @@
+// mmk: a Metamath database verifier written in BuildLang.
+// All state sits in flat i32 vectors indexed by token or statement id. Proof
+// stack entries are (offset, length) slices of one arena, so hypotheses and
+// saved subproofs push without copying. Every index is bounds checked by the
+// language; the source holds no raw pointers.
+//
+// Usage: mmk FILE.mm   prints ERR lines for faults, then a summary line.
+// Exit status 0 means no fault was found.
+
+mod state;
+mod tokens;
+mod table;
+mod machine;
+mod proof;
+mod decl;
+
+fn main() ~ FileSystem + Console + Process + Environment {
+    if args_count() < 2 {
+        println!("usage: mmk FILE.mm");
+        process_exit(2);
+    }
+    let path = args_get(1);
+    if !file_exists(path) || file_size(path) == 0 {
+        println!("FAIL cannot read input");
+        process_exit(2);
+    }
+    let s = read_bytes(path);
+    if (s.as_bytes().len() as i64) != file_size(path) {
+        println!("FAIL short read");
+        process_exit(2);
+    }
+    let mut k = state::new_k();
+    k.ntok = 1; // id 0 stands in for a rejected symbol
+    decl::parse_all(&mut k, &s, &s);
+    if k.errs > 0 {
+        println!("FAIL errors={} statements={} proofs={}", k.errs, k.nst, k.proofs);
+        process_exit(1);
+    }
+    println!("OK statements={} proofs={} steps={}", k.nst, k.proofs, k.steps);
+}
