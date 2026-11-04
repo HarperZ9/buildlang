@@ -27,6 +27,21 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+- **`buildc bql`: a compiled program as BuildDB tables.** The compiler writes one
+  program as four tables (`functions`, `calls`, `effects`, `items`) built from MIR, the
+  type checker's effect summaries and the AST.
+  - `bql export` writes them in qdb's file format, so qdb runs its full SQL dialect over
+    a program.
+  - `bql query` runs the SELECT, WHERE, ORDER BY and LIMIT subset of that dialect in
+    process and refuses the rest with a message that names qdb.
+  - `bql rename` renames a top-level function and every reference, lowers the result
+    again and checks that MIR differs only in the name. Where the name is also a local,
+    field or method, it refuses. A receipt records the digests before and after.
+  - Single-file programs only in this version.
+- **`ROADMAP_VISION.md` rewritten** around BuildDB and BuildQL, language migration,
+  self-hosting and the hardware work, with a prior-art section, measurable targets per
+  area and milestones H1 to H12. Design documents: `docs/design/BUILDDB-BUILDQL.md` and
+  `docs/design/LANGUAGE-MIGRATION.md`.
 - **`sin` and `cos` are portable (DETMATH).** They use fdlibm 5.3 on the C
   backend and in the JavaScript twin, including Payne-Hanek argument reduction.
   - **Agreement.** The runtime, the twin and Node 25's `Math.sin` and `Math.cos`

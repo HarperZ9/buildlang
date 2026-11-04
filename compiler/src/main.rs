@@ -9,6 +9,7 @@
 //!
 //! This is the main entry point for the BuildLang compiler command-line tool.
 
+mod bql_cli;
 #[cfg(feature = "gpu")]
 mod gpu;
 // GPU cross-check receipt (Layer C): emit + verify. Verification is pure JSON +
@@ -459,6 +460,13 @@ enum Commands {
         command: MirCommands,
     },
 
+    /// BuildDB/BuildQL: a compiled program as tables (qdb format), queries over
+    /// them, and checked transforms
+    Bql {
+        #[command(subcommand)]
+        command: bql_cli::BqlCommands,
+    },
+
     /// Build Data Format (BDF): convert between the canonical JSON projection
     /// and the canonical binary form, or validate a file
     Bdf {
@@ -869,6 +877,7 @@ fn run_cli(cli: Cli) -> Result<(), i32> {
         Some(Commands::Doctor) => cmd_doctor(),
         Some(Commands::Mir { command }) => cmd_mir(command),
         Some(Commands::Bdf { command }) => cmd_bdf(command),
+        Some(Commands::Bql { command }) => bql_cli::cmd_bql(command),
         Some(Commands::Test {
             directory,
             filter,
