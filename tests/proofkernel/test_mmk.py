@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""mmk, the Metamath verifier in tools/proofkernel, on a database it must accept and planted faults it must refuse.
+"""mmk, the Metamath verifier in tools/proofkernel, on databases it must accept and planted faults it must refuse.
 
 Run from the repository root:  BUILDC=compiler/target/release/buildc python tests/proofkernel/test_mmk.py
 It builds mmk through the C target and gcc, and skips when either is missing.
@@ -15,6 +15,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 KERNEL = ROOT / "tools" / "proofkernel"
 OK = (Path(__file__).with_name("ok.mm")).read_text(encoding="utf-8")
+PTX_MP = (Path(__file__).with_name("ptx_mp.mm")).read_text(encoding="utf-8")
+
+# The same program without its fences: thread 0 writes x then y, thread 1 reads y then x.
+UNFENCED = """
+${
+  mpu.1 $e |- po Wx Wy $.
+  mpu.2 $e |- rf Wy Ry $.
+  mpu.3 $e |- po Ry Rx $.
+  mp-unfenced $p |- sees Rx Wx $=
+    %s $.
+$}
+"""
 
 
 def _buildc():
@@ -73,6 +85,39 @@ class Mmk(unittest.TestCase):
     def test_refuses_a_swapped_hypothesis_order(self):
         rc, out = self.check(OK.replace("$= wp wq h1 h2 mp $.", "$= wp wq h2 h1 mp $."))
         self.assertNotEqual(rc, 0, out)
+
+    # PTX message passing (ptx_mp.mm): the causality axiom proves the fenced
+    # program safe; a proof of the unfenced program must not get through.
+
+    def test_accepts_the_fenced_message_passing_proof(self):
+        rc, out = self.check(PTX_MP)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("OK statements=29 proofs=1", out)
+
+    def test_refuses_the_unfenced_proof_that_passes_program_order_as_fenced(self):
+        proof = "tWx tRx tWx tWy tRy tRx mpu.1 mpu.2 mpu.3 ax-causality ax-visible"
+        rc, out = self.check(PTX_MP + UNFENCED % proof)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("hypothesis-mismatch mp-unfenced", out)
+
+    def test_refuses_an_unfenced_proof_that_cites_a_missing_axiom(self):
+        # ax-po-cause ("program order alone orders the threads") is not in the model.
+        proof = "tWx tRx tWx tRx mpu.1 mpu.2 mpu.3 ax-po-cause ax-visible"
+        rc, out = self.check(PTX_MP + UNFENCED % proof)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("bad-proof-label mp-unfenced", out)
+
+    def test_refuses_the_fenced_proof_when_the_causality_axiom_is_removed(self):
+        start = PTX_MP.index("${\n  cau.1")
+        end = PTX_MP.index("$}", start) + 2
+        rc, out = self.check(PTX_MP[:start] + PTX_MP[end:])
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("mp-fenced", out)
+
+    def test_refuses_the_fenced_proof_when_the_reader_has_no_fence(self):
+        rc, out = self.check(PTX_MP.replace("  mpf.6 $e |- isfence Fb $.\n", ""))
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("mp-fenced", out)
 
 
 if __name__ == "__main__":

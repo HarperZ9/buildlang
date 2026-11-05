@@ -8,6 +8,10 @@ tracked in `STATUS.md`, `README.md`, and
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
 `108/108` or `132/132` are not the current release gate.
 
+## Unreleased: PTX litmus test for mmk
+
+- `tests/proofkernel/ptx_mp.mm`: message passing under a simplified PTX memory model, with the causality axiom as a Metamath axiom. mmk accepts the fenced proof and refuses four faults: an unfenced proof that passes program order as a fence, an unfenced proof that cites an axiom the model lacks, the fenced proof without the causality axiom, and the fenced proof without the reader's fence. The limits of the encoding are in `tools/proofkernel/README.md`.
+
 ## Unreleased: BQL drift check
 
 - `buildc bql verify FILE STORE.json`: rebuild the store from FILE and compare it with a stored JSON store table by table. It lists missing and extra rows and exits 1 on any drift.
