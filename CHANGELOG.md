@@ -8,6 +8,12 @@ tracked in `STATUS.md`, `README.md`, and
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
 `108/108` or `132/132` are not the current release gate.
 
+## Unreleased: BuildTeX publish metadata
+
+- BuildTeX PDFs carry no `/Author`, `/Creator` or XMP packet and pass Flywheel's `check_publish_metadata.py`. The date comes from `SOURCE_DATE_EPOCH` and is absent without it; the writer no longer stamps a fixed `D:20261031000000Z`. `layout.json` lists output files by name, not by the build directory. The receipt gains `pdf_metadata`.
+- **Behavior change.** BuildTeX writes the PDF/A-2b XMP packet only with `--pdfa`, and that packet no longer holds `dc:creator` or `CreatorTool`. `engine.render` keeps PDF/A on by default, without the author.
+- Measured on the fixture resume with the `ats` theme: the build from main had 5 findings under the check (`/Creator`, the XMP packet and 3 local paths in `layout.json`); this build has 0. Test: `typeset/tests/test_publish_metadata.py`.
+
 ## Unreleased: PTX litmus test for mmk
 
 - `tests/proofkernel/ptx_mp.mm`: message passing under a simplified PTX memory model, with the causality axiom as a Metamath axiom. mmk accepts the fenced proof and refuses four faults: an unfenced proof that passes program order as a fence, an unfenced proof that cites an axiom the model lacks, the fenced proof without the causality axiom, and the fenced proof without the reader's fence. The limits of the encoding are in `tools/proofkernel/README.md`.

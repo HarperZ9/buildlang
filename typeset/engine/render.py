@@ -31,7 +31,8 @@ def furnish(layout, pages, theme):
             (page.furniture_under if layer.get("under", True) else page.furniture).extend(g)
 
 
-def render(doc_path, out_base, theme_name=None, annotations=False, plates=False, formats=("pdf", "svg", "html")):
+def render(doc_path, out_base, theme_name=None, annotations=False, plates=False, formats=("pdf", "svg", "html"),
+           pdfa=True):
     doc = docir.load(doc_path)
     theme = load_theme(theme_name or doc.theme)
     theme["_seed_text"] = doc.meta.get("title", "")
@@ -47,7 +48,7 @@ def render(doc_path, out_base, theme_name=None, annotations=False, plates=False,
     meta = {"title": doc.meta.get("title", ""), "author": doc.meta.get("author", "")}
     out = {"pages": len(pages), "diagnostics": lay.diag.report(), "files": []}
     if "pdf" in formats:
-        write_pdf(out_base + ".pdf", pages, lay.reg, meta)
+        write_pdf(out_base + ".pdf", pages, lay.reg, meta, pdfa=pdfa)
         out["files"].append(out_base + ".pdf")
     if "svg" in formats or "html" in formats:
         from .svgout import write_svg_pages
@@ -56,9 +57,10 @@ def render(doc_path, out_base, theme_name=None, annotations=False, plates=False,
         from .emboss import export_plates
         out["files"] += export_plates(out_base, lay, pages, theme)
     out["lines"] = lay.line_log
+    listed = dict(out, files=[os.path.basename(f) for f in out["files"]])  # no build directory in the file
     out["page_breaks"] = [p.breaks for p in pages]
     with open(out_base + ".layout.json", "w", encoding="utf-8") as fh:
-        json.dump(out, fh, indent=1)
+        json.dump(listed, fh, indent=1)
     return out, lay, pages
 
 
