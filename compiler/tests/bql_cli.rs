@@ -120,3 +120,43 @@ fn renamed_program_runs_with_the_same_output() {
     assert!(String::from_utf8_lossy(&after.stdout).contains("balance: 115"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn verify_passes_a_fresh_store_and_fails_a_stale_one() {
+    let dir = scratch("verify");
+    let prog = dir.join("p.bld");
+    let store = dir.join("p.json");
+    std::fs::write(
+        &prog,
+        "fn one() -> i64 { 1 }\nfn main() ~ Console { println!(\"{}\", one()); }\n",
+    )
+    .unwrap();
+    let p = prog.to_str().unwrap();
+    let s = store.to_str().unwrap();
+    let out = buildc(&["bql", "export", p, "--json", "-o", s]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let fresh = buildc(&["bql", "verify", p, s]);
+    assert!(
+        fresh.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fresh.stdout)
+    );
+    assert!(String::from_utf8_lossy(&fresh.stdout).contains("agree"));
+
+    std::fs::write(
+        &prog,
+        "fn one() -> i64 { 1 }\nfn two() -> i64 { 2 }\n\
+         fn main() ~ Console { println!(\"{}\", one() + two()); }\n",
+    )
+    .unwrap();
+    let stale = buildc(&["bql", "verify", p, s]);
+    assert_eq!(stale.status.code(), Some(1));
+    let text = String::from_utf8_lossy(&stale.stdout);
+    assert!(text.contains("DRIFT"), "{text}");
+    assert!(text.contains("\"name\":\"two\""), "{text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use buildlang::bql::{export, rename_function, run_query, Store};
+use buildlang::bql::{export, rename_function, run_query, verify_against_source, Store};
 use clap::Subcommand;
 
 #[derive(Subcommand)]
@@ -42,6 +42,13 @@ pub(crate) enum BqlCommands {
         /// Where to write the JSON receipt (defaults to stderr)
         #[arg(long, value_name = "FILE")]
         receipt: Option<PathBuf>,
+    },
+    /// Compare a stored JSON store with a full rebuild from FILE; exit 1 on drift
+    Verify {
+        /// Input BuildLang source file (single file, no imports)
+        file: PathBuf,
+        /// A store written by `bql export --json`
+        store: PathBuf,
     },
 }
 
@@ -99,6 +106,18 @@ pub(crate) fn cmd_bql(command: BqlCommands) -> Result<(), i32> {
             let result = run_query(&store, &sql).map_err(fail)?;
             print!("{}", result.render());
             Ok(())
+        }
+        BqlCommands::Verify { file, store } => {
+            let stored: Store = serde_json::from_str(&read(&store)?).map_err(fail)?;
+            let source = read(&file)?;
+            let report =
+                verify_against_source(&stored, &module_name(&file), &source).map_err(fail)?;
+            print!("{}", report.render());
+            if report.is_clean() {
+                Ok(())
+            } else {
+                Err(1)
+            }
         }
         BqlCommands::Rename {
             file,

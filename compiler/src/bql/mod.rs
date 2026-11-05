@@ -18,17 +18,24 @@
 //! - [`rename`] is the first transform: rename a free function and every
 //!   reference to it, then re-lower the result and check that MIR is
 //!   unchanged apart from the name. A receipt records both digests.
+//! - [`drift`] is the reference route for incremental views: the store after
+//!   a rename made from the old rows, and a table-by-table diff of any store
+//!   against a full rebuild.
 
+pub mod drift;
 pub mod export;
 pub mod query;
 pub mod rename;
 pub mod store;
 
 #[cfg(test)]
+mod drift_tests;
+#[cfg(test)]
 mod tests;
 
+pub use drift::{diff_stores, verify_against_source, DriftReport};
 pub use query::{run_query, QueryResult};
-pub use rename::{rename_function, RenameReceipt};
+pub use rename::{rename_checked, rename_function, RenameOutcome, RenameReceipt};
 pub use store::{lower_source, Store, BDB_SCHEMA};
 
 /// Errors from loading, querying or transforming a program store.

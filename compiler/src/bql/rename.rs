@@ -18,6 +18,7 @@ use crate::codegen::{MirModule, MirRValue, MirStmtKind, MirTerminator, MirValue}
 use crate::lexer::{Lexer, SourceFile, TokenKind};
 use crate::types::FunctionEffectSummary;
 
+use super::drift::rename_rows;
 use super::store::{lower_source, mir_sha256, sha256_hex, Store};
 use super::BqlError;
 
@@ -41,6 +42,17 @@ pub struct RenameReceipt {
     pub store_sha256_after: String,
     /// The check that passed: MIR after equals MIR before with the name substituted.
     pub check: String,
+    /// Whether the incremental store (old rows renamed, see `drift::rename_rows`)
+    /// equals the rebuilt store. The rebuild is the authority either way.
+    pub store_incremental_agrees: bool,
+}
+
+/// A checked rename with both stores, for callers that measure the incremental path.
+pub struct RenameOutcome {
+    pub source: String,
+    pub receipt: RenameReceipt,
+    pub store_incremental: Store,
+    pub store_rebuilt: Store,
 }
 
 fn swap(name: &mut Arc<str>, old: &str, new: &str) {
@@ -182,6 +194,16 @@ pub fn rename_function(
     old: &str,
     new: &str,
 ) -> Result<(String, RenameReceipt), BqlError> {
+    rename_checked(module_name, source, old, new).map(|o| (o.source, o.receipt))
+}
+
+/// [`rename_function`], returning the incremental and rebuilt stores as well.
+pub fn rename_checked(
+    module_name: &str,
+    source: &str,
+    old: &str,
+    new: &str,
+) -> Result<RenameOutcome, BqlError> {
     let before = lower_source(module_name, source)?;
     let store_before = Store::from_lowered(module_name, &before)?;
     let row = store_before
@@ -249,6 +271,16 @@ pub fn rename_function(
         ));
     }
     let store_after = Store::from_lowered(module_name, &after)?;
+    let source_sha256_after = sha256_hex(after_src.as_bytes());
+    let mir_sha256_after = mir_sha256(&expected)?;
+    let store_incremental = rename_rows(
+        &store_before,
+        old,
+        new,
+        &edits,
+        &source_sha256_after,
+        &mir_sha256_after,
+    );
     let receipt = RenameReceipt {
         schema: RENAME_RECEIPT_SCHEMA.to_string(),
         transform: "rename-function".to_string(),
@@ -256,12 +288,18 @@ pub fn rename_function(
         new_name: new.to_string(),
         edits,
         source_sha256_before: sha256_hex(source.as_bytes()),
-        source_sha256_after: sha256_hex(after_src.as_bytes()),
+        source_sha256_after,
         mir_sha256_before: mir_sha256(&before.mir)?,
-        mir_sha256_after: mir_sha256(&after.mir)?,
+        mir_sha256_after,
         store_sha256_before: store_before.digest(),
         store_sha256_after: store_after.digest(),
         check: "mir-equal-under-rename".to_string(),
+        store_incremental_agrees: store_incremental == store_after,
     };
-    Ok((after_src, receipt))
+    Ok(RenameOutcome {
+        source: after_src,
+        receipt,
+        store_incremental,
+        store_rebuilt: store_after,
+    })
 }
