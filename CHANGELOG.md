@@ -12,6 +12,12 @@ tracked in `STATUS.md`, `README.md`, and
 
 - `tests/proofkernel/ptx_mp.mm`: message passing under a simplified PTX memory model, with the causality axiom as a Metamath axiom. mmk accepts the fenced proof and refuses four faults: an unfenced proof that passes program order as a fence, an unfenced proof that cites an axiom the model lacks, the fenced proof without the causality axiom, and the fenced proof without the reader's fence. The limits of the encoding are in `tools/proofkernel/README.md`.
 
+## Unreleased: BQL drift check
+
+- `buildc bql verify FILE STORE.json`: rebuild the store from FILE and compare it with a stored JSON store table by table. It lists missing and extra rows and exits 1 on any drift.
+- The first incremental view: the store after a rename, made from the old rows with spans shifted, without lowering again. `bql rename` receipts gain `store_incremental_agrees`; the rebuild stays the authority.
+- Acceptance rule, after CodeNib (arXiv 2607.25431, 13 of 24 incremental repairs matched a rebuild): no incremental view ships without sampled agreement against a rebuild. `compiler/src/bql/drift_tests.rs` samples renames over `tests/programs` (35 of 35 agree, 1 refused) and plants two faults the diff must catch.
+
 ## Unreleased: proof kernel
 
 - `tools/proofkernel`: mmk, a Metamath database verifier written in BuildLang, built through the C target. `tests/proofkernel/test_mmk.py` holds it to a valid database and four planted faults; CI runs it on Linux.

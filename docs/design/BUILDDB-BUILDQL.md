@@ -112,6 +112,31 @@ as a language construct.
 | Sorting | selection sort, O(n^2) | whole-program stores of 10^5 rows | Replace with merge sort once a measured store shows the cost |
 | Transforms | UPDATE on rows | checked rewrites of programs | Transform statements dispatched to the compiler, with receipts |
 
+## Incremental views and the reference route
+
+A cheap path that reports success can still be wrong. CodeNib's incremental symbol repair
+finished every held-out change without an error and matched a full rebuild on 13 of 24
+(Yu et al. 2026, arXiv 2607.25431). The acceptance rule for BuildDB follows from that:
+
+**No incremental view ships without sampled agreement against a full rebuild.** Every
+incremental path has a reference route, a rebuild from source, and the rebuild is the
+authority.
+
+The first incremental view is the store after a rename (`drift::rename_rows`): the old rows
+with the name substituted and the definition spans shifted by the edits before them,
+without lowering the program again. `bql rename` builds both stores and records
+`store_incremental_agrees` in its receipt. The sampled test
+(`compiler/src/bql/drift_tests.rs`) draws up to 48 programs from `tests/programs` and one
+function from each with a seeded generator, renames it both ways and requires agreement on
+every sample; it prints the denominator. On 2026-11-04 it was 35 of 35, with 1 rename
+refused by the MIR check. Two planted faults (the calls table left unrenamed, spans left
+unshifted) must be caught by the diff, so the check is shown to see a wrong store.
+
+`buildc bql verify FILE STORE.json` rebuilds FILE and compares it with a store written by
+`bql export --json`, table by table. It prints stored and rebuilt row counts and every
+missing or extra row, and exits 1 on any drift, header digests included. A stale store
+(one exported before the source changed) is drift.
+
 ## Known limits of version 0
 
 Single-file programs only; a program with `use`, `mod name;` or an include is refused. No
