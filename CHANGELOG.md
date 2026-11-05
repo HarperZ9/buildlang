@@ -14,6 +14,10 @@ tracked in `STATUS.md`, `README.md`, and
 - **Behavior change.** BuildTeX writes the PDF/A-2b XMP packet only with `--pdfa`, and that packet no longer holds `dc:creator` or `CreatorTool`. `engine.render` keeps PDF/A on by default, without the author.
 - Measured on the fixture resume with the `ats` theme: the build from main had 5 findings under the check (`/Creator`, the XMP packet and 3 local paths in `layout.json`); this build has 0. Test: `typeset/tests/test_publish_metadata.py`.
 
+## Unreleased: PTX litmus test for mmk
+
+- `tests/proofkernel/ptx_mp.mm`: message passing under a simplified PTX memory model, with the causality axiom as a Metamath axiom. mmk accepts the fenced proof and refuses four faults: an unfenced proof that passes program order as a fence, an unfenced proof that cites an axiom the model lacks, the fenced proof without the causality axiom, and the fenced proof without the reader's fence. The limits of the encoding are in `tools/proofkernel/README.md`.
+
 ## Unreleased: BQL drift check
 
 - `buildc bql verify FILE STORE.json`: rebuild the store from FILE and compare it with a stored JSON store table by table. It lists missing and extra rows and exits 1 on any drift.
