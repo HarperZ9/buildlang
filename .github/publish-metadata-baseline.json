@@ -1,0 +1,46 @@
+{
+ "schema": "flywheel.publish-metadata-baseline/1",
+ "patterns": "generic only (check_publish_metadata GENERIC)",
+ "total": 30,
+ "files": {
+  "bench/heldout-2026-10-15/PROMPT.md": {
+   "local-path": 9
+  },
+  "build_test.bat": {
+   "local-path": 1
+  },
+  "docs/superpowers/plans/2026-06-12-rust-backend-hardening.md": {
+   "local-path": 7
+  },
+  "docs/superpowers/plans/2026-06-12-rust-target-backend.md": {
+   "local-path": 3
+  },
+  "docs/superpowers/plans/2026-06-14-capability-effect-security-gate.md": {
+   "local-path": 1
+  },
+  "docs/superpowers/plans/2026-06-14-check-policy-profiles.md": {
+   "local-path": 1
+  },
+  "docs/superpowers/plans/2026-06-14-check-receipts.md": {
+   "local-path": 1
+  },
+  "docs/superpowers/plans/2026-06-14-console-macro-capability-receipts.md": {
+   "local-path": 1
+  },
+  "docs/superpowers/plans/2026-06-14-effect-provenance-contracts.md": {
+   "local-path": 2
+  },
+  "docs/superpowers/plans/2026-06-14-input-bound-check-receipts.md": {
+   "local-path": 1
+  },
+  "docs/superpowers/plans/2026-06-14-source-bound-check-receipts.md": {
+   "local-path": 1
+  },
+  "docs/superpowers/plans/2026-07-02-buildlang-expansion-carcassi-funnel-hashing.md": {
+   "local-path": 1
+  },
+  "papers/buildlang-capability-effects.pdf": {
+   "pdf-metadata": 1
+  }
+ }
+}

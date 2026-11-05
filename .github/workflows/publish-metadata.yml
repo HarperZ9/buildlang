@@ -1,0 +1,31 @@
+name: publish-metadata
+# Blocks a change that adds personal metadata to a published file: a local
+# user folder or workspace path, a consumer mail address, a contact address in
+# a fetch header, or author fields in images, PDFs and Office files. Findings
+# that already existed are frozen in .github/publish-metadata-baseline.json,
+# which may only shrink. The checker is Flywheel's, pinned by commit.
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: HarperZ9/flywheel
+          ref: 006685ba24e8cc35c7b261256b22b2a485ef29c6
+          path: .publish-metadata-checker
+          sparse-checkout: scripts
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Publish metadata gate
+        run: >-
+          python .publish-metadata-checker/scripts/publish_metadata_gate.py .
+          --baseline .github/publish-metadata-baseline.json
