@@ -26,6 +26,14 @@ On 2026-10-31, built from BuildLang at 4ce772b, mmk accepted `set.mm`, `iset.mm`
 
 `tests/proofkernel/test_mmk.py` builds mmk and checks a small database it must accept and four planted faults it must refuse: a proof of the wrong statement, a missing hypothesis, an undeclared label and a swapped hypothesis order. CI runs it on Linux.
 
+## A memory-model litmus test
+
+`tests/proofkernel/ptx_mp.mm` encodes message passing under a simplified PTX memory model: thread 0 writes `x`, fences and writes `y`; thread 1 reads `y`, fences and reads `x`. Three axioms carry the model: a fence between two events in program order orders them, base causality runs from a release pattern through an observation to an acquire pattern, and the causality axiom makes a read see any write that precedes it in causality order (or a coherence-later one). The theorem `mp-fenced` proves that the read of `x` sees the write of `x`, which forbids the outcome where it returns the initial value.
+
+The test holds mmk to five cases. It accepts the fenced proof. It refuses a proof of the unfenced program that passes program order where a fence is required (`hypothesis-mismatch`), a proof that cites an axiom the model does not have (`bad-proof-label`), the fenced proof once the causality axiom is removed, and the fenced proof once the reader's fence is gone.
+
+The encoding follows the shape of the PTX causality axiom; it is not a full PTX model. It has one scope, treats every access as strong, collapses coherence order to "this write or a later one", and leaves out the other axioms. A refused unfenced proof shows that this one attempt fails, and the model offers no other route: `ax-fence` is the only axiom that concludes `fenced`, and it needs an `isfence` fact the unfenced program does not have. The test follows a lead from Koska, Koska and Koska, "Formalizing PTX in Lean to Prove GPU Kernel Correctness" (2026), which models the full PTX memory consistency model in Lean.
+
 ## Limits
 
 Building mmk found four compiler gaps: a loop tail in a value function emits `return void`, an `as_bytes` slice type mismatches across functions, pointer arithmetic is missing, and `s.len` on `&str` fails. The kernel works around them. Under heavy memory pressure the Windows build crashed intermittently with an access violation, inferred to come from an unchecked `realloc` in the runtime; treat a crash as no verdict.
