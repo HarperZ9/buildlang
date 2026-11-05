@@ -5,6 +5,8 @@ extraction (pdftotext, ATS parsers) reads the document in order. Every
 glyph code maps back to its source characters through ToUnicode.
 """
 import hashlib
+import os
+import time
 import zlib
 
 from .icc import srgb_profile
@@ -20,6 +22,27 @@ def _pdfstr(s):
     if any(ord(c) > 126 for c in s):
         return "<FEFF" + s.encode("utf-16-be").hex().upper() + ">"
     return "(" + s.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)") + ")"
+
+
+def source_date():
+    """The build date from SOURCE_DATE_EPOCH as (PDF date, XMP date), or None when it is unset.
+
+    The writer never reads the clock: a PDF carries a date only when the build
+    names one, so two builds of the same source give the same bytes.
+    """
+    raw = os.environ.get("SOURCE_DATE_EPOCH", "").strip()
+    if not raw:
+        return None
+    if not raw.isdigit():
+        raise ValueError(f"SOURCE_DATE_EPOCH must be a non-negative integer, got {raw!r}")
+    t = time.gmtime(int(raw))
+    return time.strftime("D:%Y%m%d%H%M%SZ", t), time.strftime("%Y-%m-%dT%H:%M:%SZ", t)
+
+
+def _info(title, date):
+    """The document information dictionary: title and producer, no author or creator."""
+    stamp = f" /CreationDate ({date[0]}) /ModDate ({date[0]})" if date else ""
+    return f"<< /Title {_pdfstr(title)} /Producer (buildlang typeset){stamp} >>"
 
 
 class Writer:
@@ -67,6 +90,8 @@ class FontUse:
 
 
 def write_pdf(path, pages, registry, meta, plates=None, graphics_only=False, pdfa=True):
+    """Write the pages as a PDF. Neither /Author nor /Creator is written; the XMP packet,
+    which PDF/A needs, only when pdfa is set."""
     w = Writer()
     uses = {}
     contents = []
@@ -99,17 +124,18 @@ def write_pdf(path, pages, registry, meta, plates=None, graphics_only=False, pdf
                           f"/Resources {res} /Contents {c} 0 R >>"))
     w.put(pages_n, f"<< /Type /Pages /Kids [{' '.join(f'{k} 0 R' for k in kids)}] /Count {len(kids)} >>")
     title = meta.get("title", "")
-    author = meta.get("author", "")
-    xmp = _xmp(title, author, pdfa).encode("utf-8")
-    md = w.stream(xmp, " /Type /Metadata /Subtype /XML", compress=False)
+    date = source_date()
+    metadata = ""
+    if pdfa:
+        xmp = _xmp(title, date).encode("utf-8")
+        metadata = f" /Metadata {w.stream(xmp, ' /Type /Metadata /Subtype /XML', compress=False)} 0 R"
     icc = srgb_profile()
     icc_n = w.stream(icc, " /N 3")
     intent = w.add(f"<< /Type /OutputIntent /S /GTS_PDFA1 /OutputConditionIdentifier (sRGB) "
                    f"/Info (sRGB IEC61966-2.1) /DestOutputProfile {icc_n} 0 R >>")
-    root = w.add(f"<< /Type /Catalog /Pages {pages_n} 0 R /Metadata {md} 0 R /OutputIntents [{intent} 0 R] "
+    root = w.add(f"<< /Type /Catalog /Pages {pages_n} 0 R{metadata} /OutputIntents [{intent} 0 R] "
                  f"/MarkInfo << /Marked false >> /Lang (en-US) >>")
-    info = w.add(f"<< /Title {_pdfstr(title)} /Author {_pdfstr(author)} /Producer (buildlang typeset) "
-                 f"/Creator (buildlang typeset) /CreationDate (D:20261031000000Z) >>")
+    info = w.add(_info(title, date))
     ident = hashlib.md5("\n".join(contents).encode("latin-1", "replace")).hexdigest()
     data = w.serialize(root, info, ident)
     with open(path, "wb") as fh:
@@ -216,16 +242,16 @@ def _tounicode(used):
     return "\n".join(lines)
 
 
-def _xmp(title, author, pdfa=True):
+def _xmp(title, date):
+    """The PDF/A identification packet: title, producer and, with SOURCE_DATE_EPOCH, the date."""
     esc = lambda s: s.replace("&", "&amp;").replace("<", "&lt;")
+    created = f"<xmp:CreateDate>{date[1]}</xmp:CreateDate><xmp:ModifyDate>{date[1]}</xmp:ModifyDate>" if date else ""
     return f"""<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
 <x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
 <rdf:Description rdf:about="" xmlns:pdfaid="http://www.aiim.org/pdfa/ns/id/" xmlns:dc="http://purl.org/dc/elements/1.1/"
  xmlns:pdf="http://ns.adobe.com/pdf/1.3/" xmlns:xmp="http://ns.adobe.com/xap/1.0/">
-{"<pdfaid:part>2</pdfaid:part><pdfaid:conformance>B</pdfaid:conformance>" if pdfa else ""}
+<pdfaid:part>2</pdfaid:part><pdfaid:conformance>B</pdfaid:conformance>
 <dc:title><rdf:Alt><rdf:li xml:lang="x-default">{esc(title)}</rdf:li></rdf:Alt></dc:title>
-<dc:creator><rdf:Seq><rdf:li>{esc(author)}</rdf:li></rdf:Seq></dc:creator>
-<pdf:Producer>buildlang typeset</pdf:Producer><xmp:CreatorTool>buildlang typeset</xmp:CreatorTool>
-<xmp:CreateDate>2026-10-31T00:00:00Z</xmp:CreateDate>
+<pdf:Producer>buildlang typeset</pdf:Producer>{created}
 </rdf:Description></rdf:RDF></x:xmpmeta>
 <?xpacket end="w"?>"""

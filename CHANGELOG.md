@@ -8,6 +8,12 @@ tracked in `STATUS.md`, `README.md`, and
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
 `108/108` or `132/132` are not the current release gate.
 
+## Unreleased: BuildTeX publish metadata
+
+- BuildTeX PDFs carry no `/Author`, `/Creator` or XMP packet and pass Flywheel's `check_publish_metadata.py`. The date comes from `SOURCE_DATE_EPOCH` and is absent without it; the writer no longer stamps a fixed `D:20261031000000Z`. `layout.json` lists output files by name, not by the build directory. The receipt gains `pdf_metadata`.
+- **Behavior change.** BuildTeX writes the PDF/A-2b XMP packet only with `--pdfa`, and that packet no longer holds `dc:creator` or `CreatorTool`. `engine.render` keeps PDF/A on by default, without the author.
+- Measured on the fixture resume with the `ats` theme: the build from main had 5 findings under the check (`/Creator`, the XMP packet and 3 local paths in `layout.json`); this build has 0. Test: `typeset/tests/test_publish_metadata.py`.
+
 ## Unreleased: BQL drift check
 
 - `buildc bql verify FILE STORE.json`: rebuild the store from FILE and compare it with a stored JSON store table by table. It lists missing and extra rows and exits 1 on any drift.

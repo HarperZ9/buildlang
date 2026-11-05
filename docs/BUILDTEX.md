@@ -16,7 +16,7 @@ The engine in `typeset/engine` came out of the typeset field work (PR #115). Its
 | Math | TeXbook Appendix G with OpenType MATH constants: scripts, fractions, radicals, display limits. Not done: `\left`/`\right` sizing, accents, matrices, MathVariants growth. | `tests/test_engine.py` MathBoxes |
 | Pages | TeX's page builder with club, widow and keep penalties, ragged or justified bottoms. | `engine/pages.py` |
 | Fonts | TrueType parsing and subsetting, CID fonts with ToUnicode so text extracts, CFF passthrough for harvested Latin Modern. | PDF round trip test |
-| Output | PDF with XMP and an sRGB OutputIntent for PDF/A-2b (not validated by veraPDF), SVG and HTML with a selectable text layer, all from one layout. | `engine/pdfout.py`, `engine/svgout.py` |
+| Output | PDF with an sRGB OutputIntent, SVG and HTML with a selectable text layer, all from one layout. The PDF has no author, creator or XMP packet and is dated only by `SOURCE_DATE_EPOCH`; `--pdfa` adds the PDF/A-2b packet (not validated by veraPDF). | `engine/pdfout.py`, `engine/svgout.py` |
 | Finishes | Emboss and deboss as a height map: the aperture rings rise, the name sinks, a lit relief render on a fibre normal map, gold foil from measured n and k when the materials library is present, and separate die, foil and spot plates for a press. | `engine/emboss.py` |
 
 The engine is stdlib Python today. Knuth-Plass is the first part that also exists in BuildLang. Moving the rest into BuildLang is the main open work (see "Native port").
@@ -108,10 +108,20 @@ Each step lands with a differential test against the Python engine on real docum
 - `typeset/themes/press.json` and `ats.json`.
 - `typeset/tests/test_buildtex.py`: a fictional resume and CV from `.tex` through both themes, asserting one page for the resume, a multi-page CV whose PDF and layout agree, no overfull line, no missing glyph, every font embedded, reading order, the relief in the PDF, the blind finish's text layer, HTML from the same layout, byte-identical rebuilds, and that no TeX or Lean program starts.
 
+## Publish metadata
+
+A BuildTeX PDF carries the title and the producer and nothing that names a person or a machine. There is no `/Author`, no `/Creator` and no XMP packet, so Flywheel's `scripts/check_publish_metadata.py` reports nothing on it. The date is `SOURCE_DATE_EPOCH` when that is set and absent otherwise; the writer never reads the clock, so a rebuild gives the same bytes. `layout.json` lists output files by name, never by directory. The receipt records the choice as `pdf_metadata`: `pdfa` and `creation_date`.
+
+```
+SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) python -m buildtex resume.tex out/resume
+```
+
+`--pdfa` adds the XMP packet that PDF/A-2b needs, with the title, the producer and the date. The check reports any XMP packet, so a file meant to pass it is built without `--pdfa`. `tests/test_publish_metadata.py` holds these rules.
+
 ## Limits
 
 - The engine is Python; only line breaking also runs as BuildLang.
 - Math needs an OpenType MATH font. The `press` and `ats` themes carry none, so they set math source as plain text and record a note in the receipt; a math-heavy document uses a theme with a MATH font, such as `latex-article` where Cambria Math is installed.
-- PDF/A-2b metadata is written but no validator has run. Decoration is marked as `/Artifact` content so extraction and assistive technology skip it, but no structure tree (tagged PDF) is written.
+- PDF/A-2b metadata is written only with `--pdfa`, and no validator has run. A publish-metadata check reports that packet even though it holds no author. Decoration is marked as `/Artifact` content so extraction and assistive technology skip it, but no structure tree (tagged PDF) is written.
 - The relief is a raster at the theme's dpi (150 for `press`); text and rules stay vector.
 - The proof hook in documents and the Lean importer are design only. The checker candidate is mmk in #117, not yet merged or wired in.

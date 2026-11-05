@@ -36,4 +36,4 @@ The annotation layer runs only with `--annotations`; without it, output is byte-
 - Latin Modern is not installed here, so the LaTeX comparison uses metrics and CFF subsets harvested from the shipped LaTeX PDFs; kerning pairs come from those PDFs and cover only pairs that occur in them.
 - SVG and HTML draw TrueType outlines; CFF fonts (Latin Modern) fall back to browser text, so the HTML of the LaTeX port is a reading view, not a proof.
 - Math covers scripts, fractions, radicals and display limits. Delimiters sized by `\left`/`\right`, accents, matrices and MathVariants glyph growth are not done.
-- PDF/A-2b: the metadata, embedded fonts and OutputIntent are written; no validator (veraPDF) was run.
+- PDF/A-2b: the embedded fonts and OutputIntent are always written and the XMP packet only when asked (`pdfa=True`, the default for `engine.render`; `--pdfa` for BuildTeX); no validator (veraPDF) was run. No PDF carries `/Author` or `/Creator`, and the date comes only from `SOURCE_DATE_EPOCH`.

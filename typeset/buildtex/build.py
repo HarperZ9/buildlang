@@ -1,6 +1,6 @@
 """BuildTeX: one source, laid out once, written as PDF and HTML, checked, with a receipt.
 
-    python -m buildtex SOURCE OUT_BASE [--theme NAME] [--set key.path=value ...] [--no-html]
+    python -m buildtex SOURCE OUT_BASE [--theme NAME] [--set key.path=value ...] [--no-html] [--pdfa]
 
 SOURCE is one of:
   .bld   a BuildLang document program; `buildc run` executes it and it saves buildlang.doc/v0
@@ -10,6 +10,10 @@ SOURCE is one of:
 Writes OUT_BASE.pdf, OUT_BASE.html (and per-page SVG), OUT_BASE.layout.json and
 OUT_BASE.buildtex.json, the receipt: source and output SHA-256, theme, the layout
 facts from buildtex.check, and the external programs the build started.
+
+The PDF carries no /Author, /Creator or XMP packet, so it passes a publish-metadata
+check. It is dated only when SOURCE_DATE_EPOCH is set. --pdfa adds the XMP packet that
+PDF/A-2b needs; that packet holds the title, the producer and the date, never the author.
 """
 import argparse
 import hashlib
@@ -26,6 +30,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from engine import docir  # noqa: E402
+from engine.pdfout import source_date  # noqa: E402
 from engine.render import render  # noqa: E402
 from engine.theme import load_theme  # noqa: E402
 
@@ -85,7 +90,7 @@ def to_ir(source, work, theme_name):
     raise SystemExit(f"buildtex: unknown source type {ext!r}")
 
 
-def build(source, out_base, theme_name=None, overrides=(), html=True):
+def build(source, out_base, theme_name=None, overrides=(), html=True, pdfa=False):
     os.makedirs(os.path.dirname(os.path.abspath(out_base)) or ".", exist_ok=True)
     work = tempfile.mkdtemp(prefix="buildtex-")
     try:
@@ -97,7 +102,7 @@ def build(source, out_base, theme_name=None, overrides=(), html=True):
                 key, _, raw = item.partition("=")
                 set_path(theme, key, raw)
             fmts = ("pdf", "svg", "html") if html else ("pdf",)
-            out, lay, pages = render_with(ir, out_base, theme, fmts)
+            out, lay, pages = render_with(ir, out_base, theme, fmts, pdfa)
         facts = check.facts(out_base + ".pdf", {"pages": out["pages"], "layout": lay}, doc)
         receipt = {
             "schema": SCHEMA,
@@ -106,6 +111,7 @@ def build(source, out_base, theme_name=None, overrides=(), html=True):
             "theme": theme.get("name", theme_name),
             "overrides": list(overrides),
             "outputs": {os.path.basename(f): sha256(f) for f in out["files"]},
+            "pdf_metadata": {"pdfa": pdfa, "creation_date": (source_date() or [None])[0]},
             "facts": facts,
             "failed": check.passed(facts),
             "notes": notes + [d for d in out["diagnostics"] if not d.startswith("overfull")],
@@ -119,13 +125,13 @@ def build(source, out_base, theme_name=None, overrides=(), html=True):
         shutil.rmtree(work, ignore_errors=True)
 
 
-def render_with(ir, out_base, theme, fmts):
+def render_with(ir, out_base, theme, fmts, pdfa=False):
     """engine.render.render with an already loaded (and overridden) theme."""
     path = os.path.join(tempfile.mkdtemp(prefix="buildtex-theme-"), theme.get("name", "theme") + ".json")
     try:
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(theme, fh)
-        return render(ir, out_base, path, formats=fmts)
+        return render(ir, out_base, path, formats=fmts, pdfa=pdfa)
     finally:
         shutil.rmtree(os.path.dirname(path), ignore_errors=True)
 
@@ -137,8 +143,10 @@ def main(argv=None):
     ap.add_argument("--theme")
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
     ap.add_argument("--no-html", action="store_true")
+    ap.add_argument("--pdfa", action="store_true",
+                    help="write the XMP packet for PDF/A-2b (a publish-metadata check reports it)")
     a = ap.parse_args(argv)
-    r = build(a.source, a.out, a.theme, a.set, html=not a.no_html)
+    r = build(a.source, a.out, a.theme, a.set, html=not a.no_html, pdfa=a.pdfa)
     f = r["facts"]
     print(f"{f['pages']} page(s), {len(f['overfull'])} overfull, {len(f['fonts'])} fonts embedded="
           f"{all(x['embedded'] for x in f['fonts'])}, reading order {'ok' if f['reading_order'] else 'BROKEN'}; "
