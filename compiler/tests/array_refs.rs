@@ -73,5 +73,8 @@ fn deferred_and_mutable_lets_assign_but_a_fixed_let_does_not() {
     assert!(ok && text.lines().any(|l| l.trim() == "3 4"), "{text}");
     let bad = "fn main() ~ Console {\n    let x = 1;\n    x = 2;\n    println!(\"{}\", x);\n}\n";
     let (ok, text) = run("fixed", bad);
-    assert!(!ok && text.contains("cannot assign to immutable variable `x`"), "{text}");
+    assert!(
+        !ok && text.contains("cannot assign to immutable variable `x`"),
+        "{text}"
+    );
 }
