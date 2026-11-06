@@ -197,6 +197,10 @@ fn type_samples() -> Vec<TypeError> {
             left: s("m"),
             right: s("s"),
         },
+        E::MeasuredConstantInvalid {
+            name: s("G"),
+            reason: s("no source"),
+        },
         E::ModuleImportCycle {
             path: s("a.bld"),
             module: s("b"),

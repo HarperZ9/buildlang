@@ -464,6 +464,11 @@ pub enum TypeError {
         right: String,
     },
 
+    /// A `#[measured]` constant without a source, with an unknown key, or on
+    /// an item that is not a `const`.
+    #[error("measured constant `{name}`: {reason}")]
+    MeasuredConstantInvalid { name: String, reason: String },
+
     // =========================================================================
     // MODULE ERRORS
     // =========================================================================

@@ -187,6 +187,7 @@ A test in `compiler/src/diagnostics/tests.rs` fails if this table and the compil
 |---|---|
 | BL0601 | unit mismatch |
 | BL0602 | unit mismatch in an operation |
+| BL0605 | measured constant without a valid source |
 | BL0610 | module import cycle |
 | BL0620 | formatting macro needs a string literal first |
 

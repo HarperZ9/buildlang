@@ -142,6 +142,19 @@ impl<'ctx> TypeChecker<'ctx> {
     pub fn check_module(&mut self, module: &ast::Module) {
         self.function_effect_summaries.clear();
 
+        // `#[measured(source = "...")]` constants must name their source.
+        if let Some(source) = self.source_text.clone() {
+            for err in super::measured::collect(module, &source).1 {
+                self.errors.push(TypeErrorWithSpan::new(
+                    TypeError::MeasuredConstantInvalid {
+                        name: err.name,
+                        reason: err.reason,
+                    },
+                    err.span,
+                ));
+            }
+        }
+
         // Register built-in vector/matrix struct types so that type annotations
         // like `vec3` resolve to known struct types with accessible fields.
         self.register_builtin_vec_types();
