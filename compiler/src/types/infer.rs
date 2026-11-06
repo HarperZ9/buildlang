@@ -3768,7 +3768,14 @@ impl<'ctx> TypeInfer<'ctx> {
         // slice::from_raw_parts(p, n): a `&[T]` over `n` elements at `p`, the way a
         // C host hands over an array. Indexing the slice is bounds-checked against
         // `n`; the call itself trusts `p` and `n`, so it needs an `unsafe` context.
-        if segments.len() == 2 && segments[0] == "slice" && segments[1] == "from_raw_parts" {
+        // slice::from_raw_parts_mut(p, n) is the same over a `*mut T`, giving a `&mut [T]`
+        // the host's buffer can be written through (an audio callback's output, say).
+        let raw_parts_mut =
+            segments.len() == 2 && segments[0] == "slice" && segments[1] == "from_raw_parts_mut";
+        if segments.len() == 2
+            && segments[0] == "slice"
+            && (segments[1] == "from_raw_parts" || raw_parts_mut)
+        {
             // a call's callee path is typed more than once; report it once
             let reported = self
                 .errors
@@ -3778,12 +3785,14 @@ impl<'ctx> TypeInfer<'ctx> {
                 self.error(TypeError::UnsafeOutsideUnsafe, span);
             }
             let t = Ty::fresh_var();
+            let m = if raw_parts_mut {
+                Mutability::Mutable
+            } else {
+                Mutability::Immutable
+            };
             return Ty::function(
-                vec![
-                    Ty::ptr(Mutability::Immutable, t.clone()),
-                    Ty::int(IntTy::Usize),
-                ],
-                Ty::reference(None, Mutability::Immutable, Ty::slice(t)),
+                vec![Ty::ptr(m, t.clone()), Ty::int(IntTy::Usize)],
+                Ty::reference(None, m, Ty::slice(t)),
             );
         }
 

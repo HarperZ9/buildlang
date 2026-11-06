@@ -32,3 +32,19 @@ extern "C" fn sl_grid_at(p: *const f32, side: usize, x: usize, y: usize, z: usiz
     let t = unsafe { slice::from_raw_parts(p, side * side * side) };
     t[(z * side + y) * side + x] as f64
 }
+
+// A host buffer the export writes into: slice::from_raw_parts_mut gives a `&mut [T]`
+// whose writes are checked against `n` the same way reads are.
+extern "C" fn sl_scale(p: *mut f32, n: usize, k: f32) {
+    let xs = unsafe { slice::from_raw_parts_mut(p, n) };
+    let mut i: usize = 0;
+    while i < xs.len() {
+        xs[i] = xs[i] * k;
+        i = i + 1;
+    }
+}
+
+extern "C" fn sl_put(p: *mut f32, n: usize, i: usize, v: f32) {
+    let xs = unsafe { slice::from_raw_parts_mut(p, n) };
+    xs[i] = v;
+}

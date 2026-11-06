@@ -2250,7 +2250,9 @@ impl<'ctx> MirLowerer<'ctx> {
             };
             // slice::from_raw_parts(p, n): the fat pointer `{ p, n }`, as a
             // `&[T]` (a pointer to it), so indexing checks against `n`.
-            if segs.as_slice() == ["slice", "from_raw_parts"] && args.len() == 2 {
+            let raw_parts_mut = segs.as_slice() == ["slice", "from_raw_parts_mut"];
+            if (segs.as_slice() == ["slice", "from_raw_parts"] || raw_parts_mut) && args.len() == 2
+            {
                 let ptr = self.lower_expr(&args[0])?;
                 let len = self.lower_expr(&args[1])?;
                 let elem = match self.type_of_value(&ptr) {
@@ -2280,7 +2282,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 builder.assign(
                     result,
                     MirRValue::AddressOf {
-                        is_mut: false,
+                        is_mut: raw_parts_mut,
                         place: MirPlace::local(fat),
                     },
                 );
