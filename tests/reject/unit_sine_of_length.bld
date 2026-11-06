@@ -1,0 +1,7 @@
+// The sine of a length has no meaning: `sin` needs a dimensionless value.
+// Divide by a reference length in the same unit first.
+fn main() ~ Console {
+    let d: f64<m> = 2.0;
+    let r = d.sin();
+    println!("{}", r);
+}

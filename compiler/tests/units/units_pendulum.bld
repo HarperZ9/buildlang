@@ -1,0 +1,30 @@
+// Units through roots and powers (checker slice two). This program and its
+// sibling `units_pendulum_plain.bld` differ ONLY in the `<...>` annotations:
+// the emitted C must be byte-identical and both must print the same lines.
+//
+// Small-angle pendulum: period T = 2 pi sqrt(L / g), frequency f = 1 / T,
+// stored energy of a spring E = k x^2 / 2.
+
+fn period(length: f64<m>, g: f64<m/s^2>) -> f64<s> {
+    6.283185307179586 * (length / g).sqrt()
+}
+
+fn spring_energy(k: f64<N/m>, x: f64<m>) -> f64<J> {
+    0.5 * k * x ** 2
+}
+
+fn main() ~ Console {
+    let length: f64<m> = 1.0;
+    let g: f64<m/s^2> = 9.80665;
+    let t: f64<s> = period(length, g);
+    let f: f64<Hz> = t.powi(-1);
+    let area: f64<m^2> = 2.25;
+    let side: f64<m> = sqrt(area);
+    let e: f64<J> = spring_energy(200.0, 0.05);
+    let ratio = (side / length).sin();
+    println!("{}", t);
+    println!("{}", f);
+    println!("{}", side);
+    println!("{}", e);
+    println!("{}", ratio);
+}

@@ -5546,6 +5546,8 @@ fn type_error_kind(error: &TypeError) -> &'static str {
         TypeError::NotAwaitable { .. } => "NotAwaitable",
         TypeError::UnitMismatch { .. } => "UnitMismatch",
         TypeError::UnitOperationMismatch { .. } => "UnitOperationMismatch",
+        TypeError::UnitNotDimensionless { .. } => "UnitNotDimensionless",
+        TypeError::UnitRootNotExact { .. } => "UnitRootNotExact",
         TypeError::MeasuredConstantInvalid { .. } => "MeasuredConstantInvalid",
         TypeError::ModuleImportCycle { .. } => "ModuleImportCycle",
         TypeError::UndefinedLoopLabel { .. } => "UndefinedLoopLabel",

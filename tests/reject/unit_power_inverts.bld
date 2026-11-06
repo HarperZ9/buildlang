@@ -1,0 +1,7 @@
+// A power inverts the unit: the reciprocal of a period in seconds is a
+// frequency in hertz, so annotating `t ** -1` as seconds must not check.
+fn main() ~ Console {
+    let t: f64<s> = 0.02;
+    let f: f64<s> = t ** -1;
+    println!("{}", f);
+}

@@ -12,6 +12,13 @@ tracked in `STATUS.md`, `README.md`, and
 
 - `#[measured(source = "...", uncertainty = ...)]` on a `const` records where a measured value came from. `buildc check` refuses a missing or empty source, an unknown key, a negative uncertainty, or the attribute on anything but a `const` (BL0605). The check receipt lists each measured constant (name, value as written, canonical unit, source, uncertainty) under `measured_constants`, and `receipt verify` re-derives the list, so an edited source fails verification. Programs without measured constants get byte-identical receipts. The attribute changes no emitted C. Docs: `docs/MEASURED-CONSTANTS.md`. Tests: `compiler/tests/measured_constants.rs`, `tests/reject/measured_without_source.bld`.
 
+## Unreleased: units through roots and powers; typed maths builtins
+
+- Unit-carrying values now go through `**`, `.powi()`, `.powf()` and `pow` with an integer-literal exponent, and through `.sqrt()`, `.cbrt()` and `sqrt`, with the exponents scaled. Slice one refused all of these. A root that leaves a fraction is BL0604; a runtime exponent on a unit is still refused (BL0383).
+- `.recip()` inverts the unit (it kept it), and trigonometric, exponential and logarithmic methods and builtins need a dimensionless value (BL0603); `d.sin()` on metres checked before. `.min`, `.max`, `.clamp`, `.hypot`, `.atan2`, `.rem_euclid` and `.mul_add` check their arguments' units (BL0602).
+- Free maths builtins (`sin`, `sqrt`, `pow`, `clamp`, ...) had no signature: `sin(true)` and `pow(2.0)` checked and then failed in the C compiler. They now check the argument count (BL0305) and refuse bool, string, char, unit and function arguments (BL0301).
+- Tests: `compiler/tests/units_powers.rs` (a pendulum fixture pair that checks, emits byte-identical C to its unannotated twin and runs; a one-annotation mutation fails with BL0601), unit tests in `types/unit_methods.rs` and `types/check.rs`, and four programs in `tests/reject`. `docs/DIMENSIONAL-ANALYSIS.md` has the rule table.
+
 ## Unreleased: `x.log(base)` builds
 
 - `x.log(base)` on an f64 checked and then failed in the C compiler, because the lowering passed two arguments to the one-argument portable `log`. It now calls `build_det_log_base`, which is `build_det_log(x) / build_det_log(base)`, so the result keeps DETMATH's same-bits-everywhere rule. Test: `compiler/tests/float_methods_compile.rs` checks, builds and runs every f64 method the checker accepts (35 calls) and compares each value with Rust's; it failed on `log(3.0)` before the fix.

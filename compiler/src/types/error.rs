@@ -464,6 +464,17 @@ pub enum TypeError {
         right: String,
     },
 
+    /// A trigonometric, exponential or logarithmic operation got a value
+    /// with a dimension. `sin(3 m)` has no meaning; divide by a reference
+    /// quantity in the same unit first.
+    #[error("unit mismatch: `{operation}` needs a dimensionless value, found `{found}`")]
+    UnitNotDimensionless { operation: String, found: String },
+
+    /// A root of a unit whose exponents do not divide (`.sqrt()` of `m`),
+    /// which has no unit with integer exponents.
+    #[error("unit mismatch: `.{method}()` of `{found}` has no unit with integer exponents")]
+    UnitRootNotExact { method: String, found: String },
+
     /// A `#[measured]` constant without a source, with an unknown key, or on
     /// an item that is not a `const`.
     #[error("measured constant `{name}`: {reason}")]

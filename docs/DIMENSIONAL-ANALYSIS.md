@@ -1,7 +1,7 @@
 # Compile-time dimensional analysis (typed physical units)
 
-Status: **first slice shipped; checker slice one shipped (experimental);
-remaining passes specced.** This document describes BuildLang's
+Status: **first slice shipped; checker slices one and two shipped
+(experimental); remaining passes specced.** This document describes BuildLang's
 dimensional-analysis feature. The parts marked SHIPPED are implemented and
 tested on `main`. The parts marked SPEC are the staged plan for the remaining
 passes, precise enough to build against.
@@ -203,6 +203,43 @@ before this slice, so no existing corpus program, test fixture, or example
 is affected by the one behavior change (`f64<zebra>`, previously
 meaningless and accepted, now correctly rejected).
 
+## SHIPPED: checker slice two, roots, powers and maths methods (2026-11-06)
+
+Slice one refused `**`, `.sqrt()`, `.cbrt()`, `.powi()` and `.powf()` on a
+unit-carrying value and let every other float method keep the receiver's
+unit. Two of those kept units were wrong (`t.recip()` on seconds stayed
+seconds; `d.sin()` on metres checked), and the free maths builtins (`sin`,
+`sqrt`, `pow`, ...) had no signature at all, so `sin(true)` and `pow(2.0)`
+checked and then failed in the C compiler. The rules now live in
+`compiler/src/types/unit_methods.rs`:
+
+| Operation | Rule |
+|---|---|
+| `d ** n`, `d.powi(n)`, `d.powf(n)`, `pow(d, n)` | `n` an integer literal (`2`, `-1`, `3.0`): the exponents scale by `n`. Any other exponent on a unit-carrying base: BL0383. A unit-carrying exponent: BL0603 |
+| `.sqrt()`, `.cbrt()`, `sqrt(d)` | exponents halve or third; a remainder (`.sqrt()` of `m`) is BL0604 |
+| `.recip()` | the dimension inverts |
+| `.signum()` | dimensionless |
+| `sin`, `cos`, `tan`, their inverses and hyperbolics, `exp`, `exp2`, `ln`, `log2`, `log10`, `log`, `to_radians`, `to_degrees`, `sin_cos` | the value must be dimensionless (BL0603); the result is dimensionless |
+| `.atan2(x)`, `atan2(y, x)` | same dimension (BL0602); dimensionless result |
+| `.min`, `.max`, `.clamp`, `.hypot`, `.rem_euclid` and the free `min`, `max`, `clamp` | arguments in the receiver's dimension (BL0602) |
+| `.mul_add(a, b)` | `self * a` and `b` must agree |
+| `.div_euclid(x)` | the quotient's dimension |
+| `.abs`, `.floor`, `.ceil`, `.round`, `.trunc`, `.fract`, `.copysign` | the receiver's dimension |
+
+Free maths builtins also get an argument count (`pow`, `atan2`, `min`, `max`
+take two, `clamp` three, `atan` one or two, the rest one; BL0305) and refuse a
+bool, string, char, unit or function argument (BL0301). Vector arguments for
+shader code are untouched. Weak mode is unchanged: an unannotated float is
+compatible with any unit, and every rule above runs only when an operand
+carries a unit, so an unannotated program checks as before.
+
+Tests: the unit tests in `unit_methods.rs` and `types/check.rs`;
+`compiler/tests/units_powers.rs` (the pendulum fixture pair checks, emits
+byte-identical C to its unannotated twin, prints the expected period, and a
+one-annotation mutation fails with BL0601); and four programs in
+`tests/reject` (`math_builtin_bool_arg`, `math_builtin_wrong_arity`,
+`unit_sine_of_length`, `unit_power_inverts`).
+
 ## SPEC: remaining passes (staged, not yet built)
 
 Checker slice one (above) ships enforcement; these are the follow-ups it
@@ -217,6 +254,8 @@ intermediate binding no longer hides a unit bug. This is the generalization
 of checker slice one's weak-mode rule.
 
 ### `powi` lifting for `**`, `.sqrt()`, `.cbrt()`, `.powi()`, `.powf()`
+
+Shipped in checker slice two (above). The original spec follows.
 
 An integer-literal exponent in `d ** 2` should scale `d`'s dimension
 (`Dimension::powi`) rather than being rejected. Requires recognizing the
@@ -255,19 +294,9 @@ shipped slice and checker slice one do.
   slice" gate, and the derivation/multiply-divide arms flow mechanically
   through arrays and broadcast ops without a miscompile, but neither is a
   tested, claimed surface).
-- Dimensional correctness of inherent numeric methods beyond `.sqrt()`,
-  `.cbrt()`, `.powi()`, `.powf()`. Those four now loudly refuse
-  (`UnsupportedConstruct`) on a unit-carrying receiver -- the same principle
-  that makes `**` a refusal, not the silently wrong (unscaled) dimension an
-  earlier build of this slice returned (`infer.rs`'s FLOAT METHODS arm,
-  guarded on `unit_dim.is_some()`). `.abs()`, `.floor()`, `.ceil()`,
-  `.round()`, `.trunc()`, `.fract()` remain identity-shaped and correct
-  as-is. Every other float method in that arm (`.recip()`, `.signum()`,
-  trig/log/exp, `.hypot()`, `.clamp()`, ...) is unaudited by this document
-  for dimensional correctness and unchanged by this fix: unclaimed. A future
-  pass would compute the actual scaled dimension (`Dimension::powi`/
-  `reciprocal` already exist) once a per-method exponent rule is wired at
-  the call site, rather than refuse.
+- Unit rules for float methods not in the slice-two table (`is_nan`,
+  `to_bits`, `to_int32` and the other predicates and conversions): they
+  carry no unit and are typed as before.
 
 ## Provenance
 
