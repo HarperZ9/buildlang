@@ -8,6 +8,10 @@ tracked in `STATUS.md`, `README.md`, and
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
 `108/108` or `132/132` are not the current release gate.
 
+## Unreleased: `x.log(base)` builds
+
+- `x.log(base)` on an f64 checked and then failed in the C compiler, because the lowering passed two arguments to the one-argument portable `log`. It now calls `build_det_log_base`, which is `build_det_log(x) / build_det_log(base)`, so the result keeps DETMATH's same-bits-everywhere rule. Test: `compiler/tests/float_methods_compile.rs` checks, builds and runs every f64 method the checker accepts (35 calls) and compares each value with Rust's; it failed on `log(3.0)` before the fix.
+
 ## Unreleased: audio binding, performance cores, shorter periods and events
 
 - `bl_audio_pin_performance_cores()` restricts the audio thread to the cores of the highest efficiency class (the performance cores of a hybrid CPU), read from `GetLogicalProcessorInformationEx`.
