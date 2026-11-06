@@ -15,6 +15,11 @@ tracked in `STATUS.md`, `README.md`, and
 - `bl_events_start()` and `bl_events_pop()`: events from another process, one line of six numbers on standard input, read by a thread into a lock-free single-producer single-consumer ring the audio thread pops without blocking. `bl_audio_now()` is the shared monotonic clock. `examples/audio-events` and a test in `extern_c_source.rs` check three events and a skipped bad line.
 - `bl_audio.c` now includes `bl_audio_win.c` and `bl_events.c` from its own directory; a program still names only `bl_audio.c`.
 
+## Unreleased: pointers to fixed arrays; no reassigning a fixed `let`
+
+- A reference or raw pointer to a fixed array (`&[f64; 4]`, `&mut buf`, `p as *mut [f64; 4]`) is now a pointer to the first element in C. The C backend wrote `double[4]*`, which no C compiler accepts, after the check had passed, so any function taking `&[T; N]` failed to build; and `&mut arr as *mut [f64; N] as *mut f64` likewise. Indexing through such a pointer was already written `p[i]`, and the address of an array local is now the array name. Test: `compiler/tests/array_refs.rs` runs `&[f64; 4]`, `&mut [f64; 4]` and the cast through C.
+- `let x = 1; x = 2;` is refused with BL0333 ("cannot assign to immutable variable"). `let mut` assigns as before, and a `let` declared without a value may be assigned (deferred initialisation). Tests: `tests/reject/assign_to_immutable_let.bld` and `array_refs.rs`.
+
 ## Unreleased: maths builtins keep f64; no writes through read-only slices
 
 - `exp`, `exp2`, `log`, `log2`, `log10`, `sinh`, `cosh`, `tanh`, `asin`, `acos`, `atan` and `atan2` now type their result as f64 in the C lowering. Before, `let r = exp(x);` bound an `int32_t` and truncated, and the program still checked. Test: `compiler/tests/math_builtin_types.rs` runs all twelve through an unannotated binding.

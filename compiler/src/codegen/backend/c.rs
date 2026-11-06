@@ -3914,9 +3914,14 @@ impl CBackend {
                 FloatSize::F32 => "float".to_string(),
                 FloatSize::F64 => "double".to_string(),
             },
-            MirType::Ptr(inner) => {
-                format!("{}*", self.type_to_c(inner))
-            }
+            // A pointer to a fixed array is a pointer to its first element: C has
+            // no `double[4]*`, and every index through it is already written as
+            // `p[i]`. Taking the address of an array local emits the array name,
+            // which decays to the same pointer.
+            MirType::Ptr(inner) => match inner.as_ref() {
+                MirType::Array(elem, _) => format!("{}*", self.type_to_c(elem)),
+                _ => format!("{}*", self.type_to_c(inner)),
+            },
             MirType::Array(elem, len) => {
                 // C doesn't allow array types directly in most contexts
                 // This is handled specially in declarations
@@ -4431,7 +4436,15 @@ impl CBackend {
                 // with projections composes the lvalue (`&(arr[i].field)`) so a
                 // reference or a projected store writes through, never into a copy.
                 if place.projections.is_empty() {
-                    format!("&{}", self.local_name(place.local, locals))
+                    let is_array = matches!(
+                        locals.get(place.local.0 as usize).map(|l| &l.ty),
+                        Some(MirType::Array(..))
+                    );
+                    if is_array {
+                        self.local_name(place.local, locals)
+                    } else {
+                        format!("&{}", self.local_name(place.local, locals))
+                    }
                 } else {
                     format!("&({})", self.place_to_c(place, locals)?)
                 }

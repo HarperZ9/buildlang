@@ -4464,6 +4464,16 @@ impl<'ctx> TypeInfer<'ctx> {
         let value_ty = self.infer_expr(value);
         let _ = self.unify(&target_ty, &value_ty, span);
         self.check_write_through_shared_ref(target, span);
+        if let ExprKind::Ident(ident) = &target.kind {
+            if self.ctx.var_is_immutable(ident.name.as_ref()) {
+                self.error(
+                    TypeError::ImmutableAssignment {
+                        name: ident.name.to_string(),
+                    },
+                    span,
+                );
+            }
+        }
 
         // Borrow check: if assigning a reference to a named variable,
         // track the borrow (same as check_borrow_at_binding for let).
@@ -6579,6 +6589,15 @@ impl<'ctx> TypeInfer<'ctx> {
 
         // Bind pattern variables
         self.bind_pattern(&local.pattern, &self.apply(&ty));
+        // A `let` without `mut` and with a value cannot be assigned again;
+        // one without a value may be assigned once later (deferred init).
+        if let ast::PatternKind::Ident {
+            name, mutability, ..
+        } = &local.pattern.kind
+        {
+            let fixed = local.init.is_some() && matches!(mutability, ast::Mutability::Immutable);
+            self.ctx.set_var_immutable(name.name.as_ref(), fixed);
+        }
     }
 
     // =========================================================================
