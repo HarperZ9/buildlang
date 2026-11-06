@@ -1,0 +1,15 @@
+// Measured constants with provenance. This program and `gravity_plain.bld`
+// differ only in the `#[measured(...)]` attributes: the emitted C must be
+// byte-identical, and the check receipt of this one lists both constants.
+
+#[measured(source = "CODATA 2018", uncertainty = 1.5e-15)]
+const G: f64<m^3*kg^-1*s^-2> = 6.67430e-11;
+
+#[measured(source = "test fixture: a round value, not a measurement")]
+const EARTH_RADIUS: f64<m> = 6.371e6;
+
+fn main() ~ Console {
+    let earth_mass: f64<kg> = 5.972e24;
+    let g = G * earth_mass / (EARTH_RADIUS * EARTH_RADIUS);
+    println!("{}", g);
+}
