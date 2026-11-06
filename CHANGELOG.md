@@ -8,6 +8,12 @@ tracked in `STATUS.md`, `README.md`, and
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
 `108/108` or `132/132` are not the current release gate.
 
+## Unreleased: writable slices over host buffers
+
+- `slice::from_raw_parts_mut(p, n)` over a `*mut T` gives a `&mut [T]`. A C host can hand an export an output buffer, such as an audio period, and the export writes it with every index checked against `n`. Like `from_raw_parts`, it needs `unsafe`; a `*const T` is refused (BL0303).
+- Tests: `compiler/tests/c_abi_slices.rs` scales a host buffer, writes one index, and checks that a write at `n` traps with exit 101.
+- Found while writing the first real-time audio kernel, and not fixed here: `let r = exp(x);` with no annotation is typed `i32`, so the C output truncates the result and the program still checks; annotating `let r: f64` gives the right code. Writing through a slice from `from_raw_parts` (immutable) also checks.
+
 ## Unreleased: BuildTeX publish metadata
 
 - BuildTeX PDFs carry no `/Author`, `/Creator` or XMP packet and pass Flywheel's `check_publish_metadata.py`. The date comes from `SOURCE_DATE_EPOCH` and is absent without it; the writer no longer stamps a fixed `D:20261031000000Z`. `layout.json` lists output files by name, not by the build directory. The receipt gains `pdf_metadata`.

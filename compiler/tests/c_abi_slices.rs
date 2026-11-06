@@ -7,6 +7,8 @@
 //! Accept: the driver's output matches `driver.expected`, and an index inside
 //! the slice reads. Control: an index equal to the length the host passed
 //! traps (exit 101, "index out of bounds") instead of reading past the end.
+//! Writes: `slice::from_raw_parts_mut(p, n)` over a `*mut T` gives a `&mut [T]`;
+//! a write inside lands in the host's buffer and a write at `n` traps.
 //! Refusals: `from_raw_parts` outside `unsafe` (BL0382), a `&[T]` in an
 //! export signature (BL0901, with the pointer-and-length fix), and `&arr`
 //! where the array's element type differs from the slice's.
@@ -138,7 +140,86 @@ fn a_pointer_and_length_from_c_read_as_a_checked_slice() {
         text(&past)
     );
     assert!(!String::from_utf8_lossy(&past.stdout).contains("read "));
+
+    // writes through slice::from_raw_parts_mut: inside the buffer they land, past it they trap
+    let wrote = Command::new(&exe)
+        .args(["0", "2"])
+        .output()
+        .expect("driver runs");
+    assert!(
+        wrote.status.success(),
+        "index 2 of 3 must write: {}",
+        text(&wrote)
+    );
+    assert!(String::from_utf8_lossy(&wrote.stdout).contains("wrote 9.0"));
+    let over = Command::new(&exe)
+        .args(["0", "3"])
+        .output()
+        .expect("driver runs");
+    assert_eq!(
+        over.status.code(),
+        Some(101),
+        "write at 3 of 3 must trap: {}",
+        text(&over)
+    );
+    assert!(
+        text(&over).contains("index out of bounds: the len is 3 but the index is 3"),
+        "trap message: {}",
+        text(&over)
+    );
+    assert!(!String::from_utf8_lossy(&over.stdout).contains("wrote "));
     let _ = std::fs::remove_dir_all(&project);
+}
+
+#[test]
+fn from_raw_parts_mut_needs_unsafe_and_a_mutable_pointer() {
+    let out = check_source(
+        "mut-unsafe",
+        "extern \"C\" fn put(p: *mut f32, n: usize) {
+    let xs = slice::from_raw_parts_mut(p, n);
+    xs[0] = 1.0;
+}
+",
+    );
+    let log = text(&out);
+    assert!(
+        !out.status.success(),
+        "must not check:
+{log}"
+    );
+    assert_eq!(
+        log.matches("BL0382").count(),
+        1,
+        "reported once:
+{log}"
+    );
+
+    let ok = check_source(
+        "mut-ok",
+        "extern \"C\" fn put(p: *mut f32, n: usize) {
+    let xs = unsafe { slice::from_raw_parts_mut(p, n) };
+    xs[0] = 1.0;
+}
+",
+    );
+    assert!(ok.status.success(), "{}", text(&ok));
+
+    // a *const pointer cannot become a writable slice
+    let konst = check_source(
+        "mut-const",
+        "extern \"C\" fn put(p: *const f32, n: usize) {
+    let xs = unsafe { slice::from_raw_parts_mut(p, n) };
+    xs[0] = 1.0;
+}
+",
+    );
+    let log = text(&konst);
+    assert!(
+        !konst.status.success(),
+        "must not check:
+{log}"
+    );
+    assert!(log.contains("BL0303"), "{log}");
 }
 
 fn check_source(name: &str, source: &str) -> Output {

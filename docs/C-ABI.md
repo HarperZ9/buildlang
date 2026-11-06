@@ -62,6 +62,24 @@ extern "C" fn lw_total(p: *const f32, n: usize) -> f64 {
   reinterpreted: `let c = [4, 9];` holds `i32`, so passing `&c` to a `&[i64]` needs
   `let c: [i64; 2] = [4, 9];`.
 
+## Write into a host buffer
+
+`slice::from_raw_parts_mut(p, n)` over a `*mut T` gives a `&mut [T]`, so an export can fill a buffer
+the host owns, such as an audio period:
+
+```text
+extern "C" fn lw_scale(p: *mut f32, n: usize, k: f32) {
+    let xs = unsafe { slice::from_raw_parts_mut(p, n) };
+    let mut i: usize = 0;
+    while i < xs.len() {
+        xs[i] = xs[i] * k;
+        i = i + 1;
+    }
+}
+```
+
+Writes are checked against `n` the same way reads are, and a `*const T` is refused (BL0303).
+
 The header declares the pointer as `float*`; a C host holding a `const float*` passes it with a
 cast. `compiler/tests/c_abi_slices.rs` links `tests/c-abi-slices/driver.c`, checks its output,
 and checks that an index equal to the length traps.
