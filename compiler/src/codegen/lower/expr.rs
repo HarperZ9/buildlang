@@ -4684,7 +4684,9 @@ impl<'ctx> MirLowerer<'ctx> {
             let two_arg_c_fn: Option<&str> = match method_name {
                 "powi" => Some("pow"),
                 "powf" => Some("pow"),
-                "log" => Some("log"), // Rust log(base) - but C log is ln; handle specially
+                // Rust `x.log(base)` is ln(x) / ln(base). C `log` takes one
+                // argument, so a two-argument call needs its own helper.
+                "log" => Some("build_det_log_base"),
                 "atan2" => Some("atan2"),
                 "hypot" => Some("hypot"),
                 "copysign" => Some("copysign"),
