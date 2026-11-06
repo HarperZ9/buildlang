@@ -26,6 +26,12 @@ tracked in `STATUS.md`, `README.md`, and
 - `bl_events_start()` and `bl_events_pop()`: events from another process, one line of six numbers on standard input, read by a thread into a lock-free single-producer single-consumer ring the audio thread pops without blocking. `bl_audio_now()` is the shared monotonic clock. `examples/audio-events` and a test in `extern_c_source.rs` check three events and a skipped bad line.
 - `bl_audio.c` now includes `bl_audio_win.c` and `bl_events.c` from its own directory; a program still names only `bl_audio.c`.
 
+## Unreleased: unchecked slice access and vectorised release builds
+
+- `xs.get_unchecked(i)` and `xs.set_unchecked(i, v)` on slices: element access with no bounds check, for a loop whose range the program checked once before it (the check hoisted by hand). The C is a plain subscript. It needs `unsafe` (BL0382), and the write needs a `&mut [T]`. Test: `compiler/tests/unchecked_slices.rs`.
+- Release builds with gcc or clang add `-ftree-vectorize -fvect-cost-model=dynamic`. At plain `-O2` gcc's "very cheap" cost model will not version a loop for aliasing, so a loop over several slices stayed scalar. DETMATH (`-ffp-contract=off -fno-fast-math`) stays, so vectorising reassociates and fuses nothing and every result is unchanged. In the superframe voice bank the f32 path runs 0.41 ns per mode-sample against 0.67 for the f64 scalar loop.
+- Found, not fixed: an `extern "C" fn` inside a module gets the module prefix in its C name (`dsp_daw_modal_coeffs`), so a host linking against it by its declared name fails.
+
 ## Unreleased: pointers to fixed arrays; no reassigning a fixed `let`
 
 - A reference or raw pointer to a fixed array (`&[f64; 4]`, `&mut buf`, `p as *mut [f64; 4]`) is now a pointer to the first element in C. The C backend wrote `double[4]*`, which no C compiler accepts, after the check had passed, so any function taking `&[T; N]` failed to build; and `&mut arr as *mut [f64; N] as *mut f64` likewise. Indexing through such a pointer was already written `p[i]`, and the address of an array local is now the array name. Test: `compiler/tests/array_refs.rs` runs `&[f64; 4]`, `&mut [f64; 4]` and the cast through C.

@@ -98,6 +98,11 @@ pub(crate) fn build_static_library(
             .args(["-c", "-std=c99"])
             .args(crate::c_fp_flags(false))
             .arg(if release { "-O2" } else { "-g" })
+            .args(if release {
+                crate::c_vector_flags()
+            } else {
+                &[]
+            })
             .arg(c_file)
             .arg("-o")
             .arg(&obj),
