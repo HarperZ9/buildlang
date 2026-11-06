@@ -488,6 +488,15 @@ pub struct ExternBlockDef {
     /// invocation (`-lname` for gcc/clang/cc, `name.lib` for MSVC), so a
     /// program that calls into the library links in one command.
     pub link: Option<String>,
+    /// C source named by an optional `source "file.c"` clause, resolved
+    /// against the directory of the file that declares the block.
+    ///
+    /// When present, the C backend appends `#include "<path>"` to the
+    /// generated C, so the source is compiled in the same translation unit
+    /// by every build path (`run`, `build`, `--emit staticlib`) with no extra
+    /// compiler arguments. This is how a BuildLang program carries a small C
+    /// binding, such as an audio device, without a prebuilt library.
+    pub source: Option<String>,
     /// Items.
     pub items: Vec<ForeignItem>,
 }

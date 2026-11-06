@@ -687,6 +687,9 @@ impl<'ctx> MirLowerer<'ctx> {
                 // Carry the `link "..."` clause so the build driver can pass
                 // the library to the C compiler.
                 func.link_lib = eb.link.as_deref().map(Arc::from);
+                // Carry the `source "..."` clause so the C backend can compile
+                // the binding into the same translation unit.
+                func.link_source = eb.source.as_deref().map(Arc::from);
 
                 // Set parameter names on the declaration so the C backend can
                 // emit readable prototypes.
