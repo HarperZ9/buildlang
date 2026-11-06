@@ -132,3 +132,19 @@ disagreement between the header and the library changes the output.
 - Exports cannot take or return heap data such as `str` or `Vec`; the check refuses them.
 - Exports cannot take or return a slice; pass a pointer and a length (see "Pass arrays").
 - A slice made by `slice::from_raw_parts` lives in the function that made it. Do not return it.
+
+## Carry a C source
+
+An extern block can name a C file to compile with the program:
+
+```text
+extern "C" source "binding.c" {
+    fn add3(x: i32) -> i32;
+}
+```
+
+The path resolves against the directory of the `.bld` file that declares the block. The generated C
+ends with `#include "<absolute path>"`, so the source shares the program's translation unit and needs no
+extra compiler arguments in `run`, `build` or `--emit staticlib`. The prototypes BuildLang writes for the
+block's functions come first, and the source's definitions must match them. `runtime/audio/bl_audio.c`
+is a real-time audio binding written this way; `examples/audio` uses it.

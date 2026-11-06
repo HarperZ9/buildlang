@@ -287,6 +287,10 @@ pub struct MirFunction {
     /// serialization when absent so non-FFI MIR stays backward compatible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_lib: Option<Arc<str>>,
+    /// C source compiled into the same translation unit, from an extern
+    /// block's `source "..."` clause (an absolute path). Skipped when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_source: Option<Arc<str>>,
     /// Whether this function is a C-ABI export (an `extern "C" fn` definition).
     /// Exports get external linkage and are declared in the generated C header
     /// so other languages can call them. Skipped when false.
@@ -317,6 +321,7 @@ impl PartialEq for MirFunction {
             && self.bindings == other.bindings
             && self.link_header == other.link_header
             && self.link_lib == other.link_lib
+            && self.link_source == other.link_source
             && self.is_c_export == other.is_c_export
     }
 }
@@ -348,6 +353,7 @@ impl MirFunction {
             bindings: Vec::new(),
             link_header: None,
             link_lib: None,
+            link_source: None,
             is_c_export: false,
             spans: MirSpanTable::default(),
         }
@@ -366,6 +372,7 @@ impl MirFunction {
             bindings: Vec::new(),
             link_header: None,
             link_lib: None,
+            link_source: None,
             is_c_export: false,
             spans: MirSpanTable::default(),
         }

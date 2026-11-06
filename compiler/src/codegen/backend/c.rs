@@ -5677,6 +5677,21 @@ impl Backend for CBackend {
 
         self.generate_module(mir)?;
 
+        // C sources named by `source "..."` clauses: compiled into this
+        // translation unit after everything else, so their definitions meet
+        // the prototypes declared above and no build path needs extra files.
+        let mut sources: Vec<&str> = mir
+            .functions
+            .iter()
+            .filter_map(|f| f.link_source.as_deref())
+            .collect();
+        sources.sort_unstable();
+        sources.dedup();
+        for src in sources {
+            self.output
+                .push_str(&format!("\n// buildc-source: {src}\n#include \"{src}\"\n"));
+        }
+
         // Collect the libraries named by `link "..."` clauses, sorted and
         // de-duplicated, so the build driver can pass them to the C compiler.
         let mut link_libraries: Vec<String> = mir

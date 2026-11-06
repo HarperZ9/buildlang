@@ -1,0 +1,37 @@
+// A sine through the audio binding for a fixed number of periods, then the
+// deadline report. `buildc run examples/audio` uses the null device;
+// `buildc run examples/audio -- wasapi` plays through the default output.
+mod audio;
+
+fn render(buf: &mut [f64], n: usize, phase: f64, step: f64) -> f64 {
+    let mut p = phase;
+    let mut i: usize = 0;
+    while i < n {
+        buf[i] = 0.1 * sin(p);
+        p = p + step;
+        i = i + 1;
+    }
+    p
+}
+
+fn main() ~ Console + Foreign + Environment {
+    let device: i32 = if args_count() > 1 { 1 } else { 0 };
+    let rc = bl_audio_open(device, 48000, 480, 0);
+    if rc != 0 {
+        println!("open failed {}", rc);
+        return;
+    }
+    let out = bl_audio_buffer();
+    let step: f64 = 6.283185307179586 * 440.0 / (bl_audio_rate() as f64);
+    let mut phase: f64 = 0.0;
+    let mut k: i32 = 0;
+    while k < 50 {
+        let n = bl_audio_wait() as usize;
+        let buf = unsafe { slice::from_raw_parts_mut(out, n) };
+        phase = render(buf, n, phase, step);
+        bl_audio_write(out, n);
+        k = k + 1;
+    }
+    println!("periods {} misses {}", bl_audio_periods(), bl_audio_misses());
+    bl_audio_close();
+}

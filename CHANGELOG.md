@@ -14,6 +14,13 @@ tracked in `STATUS.md`, `README.md`, and
 - `xs[i] = v` where `xs` is a shared `&[T]` or `&[T; N]` (including a slice from `slice::from_raw_parts`) is refused with BL0303, naming the variable and the `&mut [T]` fix. Tests: `tests/reject/write_through_shared_slice.bld`, `tests/reject/write_through_from_raw_parts.bld`; the GPU read-only buffer check still names writability.
 - Known and not changed here: assignment to an immutable `let` binding still checks.
 
+## Unreleased: C sources in extern blocks, and a real-time audio binding
+
+- `extern "C" source "file.c" { ... }` compiles a C file into the program's own translation unit: the generated C ends with `#include "<absolute path>"`, so `run`, `build` and `--emit staticlib` all carry it with no extra arguments. The path resolves against the directory of the file that declares the block.
+- `runtime/audio/bl_audio.c` and `bl_audio.h`: an audio output with a deadline counter. Device 0 is a clock-paced null device for any OS and for CI; device 1 is WASAPI shared mode on Windows (event driven, pro-audio thread class, ole32 and avrt loaded at run time so no link flags are needed). The program waits for each period, renders into the binding's buffer, writes, and every period over its deadline counts as a miss. `bl_audio_loopback_ms` times a click through WASAPI loopback; `bl_audio_roundtrip_ms` times one to the default input. `examples/audio` plays a sine through it.
+- Tests: `compiler/tests/extern_c_source.rs` (a C source beside the program returns its value; a missing source fails the build; the audio example runs 50 null-device periods with 0 misses).
+- Found, not fixed: casting `&mut arr as *mut [f64; N] as *mut f64` checks and then emits `double[4096]*`, which C rejects. The binding hands out its own buffer instead.
+
 ## Unreleased: writable slices over host buffers
 
 - `slice::from_raw_parts_mut(p, n)` over a `*mut T` gives a `&mut [T]`. A C host can hand an export an output buffer, such as an audio period, and the export writes it with every index checked against `n`. Like `from_raw_parts`, it needs `unsafe`; a `*const T` is refused (BL0303).

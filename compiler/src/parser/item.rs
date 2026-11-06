@@ -1443,13 +1443,15 @@ impl<'a> Parser<'a> {
         // block body opens with `{`, never a bare identifier.
         let mut link = None;
         let mut header = None;
+        let mut source = None;
         loop {
             if !self.check_ident() {
                 break;
             }
             let is_link = self.source.slice(self.current_span()) == "link";
             let is_header = self.source.slice(self.current_span()) == "header";
-            if !is_link && !is_header {
+            let is_source = self.source.slice(self.current_span()) == "source";
+            if !is_link && !is_header && !is_source {
                 break;
             }
             self.advance(); // consume `link` or `header`
@@ -1461,6 +1463,8 @@ impl<'a> Parser<'a> {
             };
             if is_link {
                 link = Some(value);
+            } else if is_source {
+                source = Some(self.resolve_extern_source(&value));
             } else {
                 header = Some(value);
             }
@@ -1480,8 +1484,26 @@ impl<'a> Parser<'a> {
             abi,
             header,
             link,
+            source,
             items,
         })
+    }
+
+    /// A `source "file.c"` path, made absolute against the directory of the
+    /// file being parsed (unless it is already absolute or the file is
+    /// anonymous), with forward slashes so it can sit in a C `#include`.
+    fn resolve_extern_source(&self, value: &str) -> String {
+        let given = std::path::Path::new(value);
+        let file = std::path::Path::new(self.source.name.as_ref());
+        let joined = match file.parent() {
+            Some(dir) if !given.is_absolute() && !self.source.name.starts_with('<') => {
+                dir.join(given)
+            }
+            _ => given.to_path_buf(),
+        };
+        let full = std::fs::canonicalize(&joined).unwrap_or(joined);
+        let text = full.to_string_lossy().replace('\\', "/");
+        text.strip_prefix("//?/").unwrap_or(&text).to_string()
     }
 
     /// Parse a foreign item.
