@@ -4181,6 +4181,17 @@ impl<'ctx> MirLowerer<'ctx> {
             MirType::Ptr(inner) => matches!(inner.as_ref(), MirType::Slice(_)),
             _ => false,
         };
+        // `xs.get_unchecked(i)` / `xs.set_unchecked(i, v)`: index the slice's data
+        // pointer directly, so the C is a plain subscript with no bounds check
+        // (the checker has required `unsafe`).
+        if is_slice && matches!(method.name.as_ref(), "get_unchecked" | "set_unchecked") {
+            return self.lower_unchecked_slice_access(
+                receiver_val,
+                &receiver_ty,
+                method.name.as_ref(),
+                args,
+            );
+        }
         if is_slice && args.is_empty() && matches!(method.name.as_ref(), "len" | "is_empty") {
             let builder = self
                 .current_fn
@@ -8991,6 +9002,64 @@ impl<'ctx> MirLowerer<'ctx> {
         let slot = builder.create_local(arr_ty);
         builder.annotate_local(slot, Arc::from(format!("Workgroup:{}", len)));
         Ok(values::local(slot))
+    }
+
+    fn lower_unchecked_slice_access(
+        &mut self,
+        receiver_val: MirValue,
+        receiver_ty: &MirType,
+        method: &str,
+        args: &[ast::Expr],
+    ) -> CodegenResult<MirValue> {
+        let elem = match receiver_ty {
+            MirType::Slice(e) => (**e).clone(),
+            MirType::Ptr(inner) => match inner.as_ref() {
+                MirType::Slice(e) => (**e).clone(),
+                _ => {
+                    return Err(CodegenError::Internal(
+                        "unchecked access on a non-slice".to_string(),
+                    ))
+                }
+            },
+            _ => {
+                return Err(CodegenError::Internal(
+                    "unchecked access on a non-slice".to_string(),
+                ))
+            }
+        };
+        let index = self.lower_expr(&args[0])?;
+        let value = if method == "set_unchecked" {
+            Some(self.lower_expr(&args[1])?)
+        } else {
+            None
+        };
+        let builder = self
+            .current_fn
+            .as_mut()
+            .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+        let data = builder.create_local(MirType::Ptr(Box::new(elem.clone())));
+        builder.assign(
+            data,
+            MirRValue::FieldAccess {
+                base: receiver_val,
+                field_name: Arc::from("ptr"),
+                field_ty: MirType::Ptr(Box::new(elem.clone())),
+            },
+        );
+        if let Some(v) = value {
+            builder.push_index_store(values::local(data), index, elem, MirRValue::Use(v));
+            return Ok(MirValue::Const(MirConst::Unit));
+        }
+        let out = builder.create_local(elem.clone());
+        builder.assign(
+            out,
+            MirRValue::IndexAccess {
+                base: values::local(data),
+                index,
+                elem_ty: elem,
+            },
+        );
+        Ok(values::local(out))
     }
 
     fn lower_index(&mut self, arr: &ast::Expr, index: &ast::Expr) -> CodegenResult<MirValue> {
