@@ -13,10 +13,15 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-/* device: 0 null, 1 wasapi. rate and period_frames are requests; the device may change them.
+/* device: 0 null, 1 wasapi. rate and period_frames are requests; the device may change them. On WASAPI a
+ * period_frames below the engine's default asks for a shorter shared-mode period (IAudioClient3), rounded up
+ * to the engine's step; bl_audio_period() reports what was granted.
  * silent != 0 sends silence to the speakers while still timing and accepting the samples.
  * Returns 0 on success, a negative code on failure. */
 int32_t bl_audio_open(int32_t device, int32_t rate, int32_t period_frames, int32_t silent);
+/* Pin the calling thread to the performance cores of a hybrid CPU (Windows; 0 elsewhere). Returns the number
+ * of logical processors it may run on, or a negative code. Call it from the audio thread before the loop. */
+int32_t bl_audio_pin_performance_cores(void);
 int32_t bl_audio_rate(void);
 int32_t bl_audio_channels(void);
 int32_t bl_audio_period(void);
@@ -45,6 +50,13 @@ double bl_audio_loopback_ms(double click_level);
 /* Acoustic or cabled round trip: renders one click on the output and times its arrival at the default
  * input device, detected above `threshold`. Plays an audible click. Negative when there is no input. */
 double bl_audio_roundtrip_ms(double click_level, double threshold);
+/* Events from another process, one line of six numbers per event on standard input, read by a thread into a
+ * lock-free ring. bl_events_pop copies one into out[0..5] and returns 1, 0 if none is waiting, -1 once the
+ * input has closed and the ring is empty. */
+int32_t bl_events_start(void);
+int32_t bl_events_pop(double* out);
+/* Seconds on the system monotonic clock (QueryPerformanceCounter on Windows), shared across processes. */
+double bl_audio_now(void);
 void bl_audio_close(void);
 #ifdef __cplusplus
 }
