@@ -1,0 +1,6 @@
+// A maths builtin with a bool argument must not check: `sin(true)` passed
+// `buildc check` and the C compiler then rejected the call.
+fn main() ~ Console {
+    let r = sin(true);
+    println!("{}", r);
+}

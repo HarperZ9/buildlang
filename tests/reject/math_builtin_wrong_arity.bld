@@ -1,0 +1,6 @@
+// `pow` takes two arguments. `pow(2.0)` passed `buildc check` and the C
+// compiler then refused `build_det_pow` with too few arguments.
+fn main() ~ Console {
+    let p = pow(2.0);
+    println!("{}", p);
+}

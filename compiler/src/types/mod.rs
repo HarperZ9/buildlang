@@ -55,6 +55,7 @@ mod recursive;
 mod traits;
 mod ty;
 mod unify;
+mod unit_methods;
 
 pub use builtins::*;
 pub use capabilities::*;

@@ -1,0 +1,30 @@
+// Plain twin of `units_pendulum.bld`: the same program with every unit
+// annotation removed. The emitted C must be byte-identical to the annotated one.
+// the emitted C must be byte-identical and both must print the same lines.
+//
+// Small-angle pendulum: period T = 2 pi sqrt(L / g), frequency f = 1 / T,
+// stored energy of a spring E = k x^2 / 2.
+
+fn period(length: f64, g: f64) -> f64 {
+    6.283185307179586 * (length / g).sqrt()
+}
+
+fn spring_energy(k: f64, x: f64) -> f64 {
+    0.5 * k * x ** 2
+}
+
+fn main() ~ Console {
+    let length: f64 = 1.0;
+    let g: f64 = 9.80665;
+    let t: f64 = period(length, g);
+    let f: f64 = t.powi(-1);
+    let area: f64 = 2.25;
+    let side: f64 = sqrt(area);
+    let e: f64 = spring_energy(200.0, 0.05);
+    let ratio = (side / length).sin();
+    println!("{}", t);
+    println!("{}", f);
+    println!("{}", side);
+    println!("{}", e);
+    println!("{}", ratio);
+}
