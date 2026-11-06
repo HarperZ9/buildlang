@@ -8,6 +8,12 @@ tracked in `STATUS.md`, `README.md`, and
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
 `108/108` or `132/132` are not the current release gate.
 
+## Unreleased: maths builtins keep f64; no writes through read-only slices
+
+- `exp`, `exp2`, `log`, `log2`, `log10`, `sinh`, `cosh`, `tanh`, `asin`, `acos`, `atan` and `atan2` now type their result as f64 in the C lowering. Before, `let r = exp(x);` bound an `int32_t` and truncated, and the program still checked. Test: `compiler/tests/math_builtin_types.rs` runs all twelve through an unannotated binding.
+- `xs[i] = v` where `xs` is a shared `&[T]` or `&[T; N]` (including a slice from `slice::from_raw_parts`) is refused with BL0303, naming the variable and the `&mut [T]` fix. Tests: `tests/reject/write_through_shared_slice.bld`, `tests/reject/write_through_from_raw_parts.bld`; the GPU read-only buffer check still names writability.
+- Known and not changed here: assignment to an immutable `let` binding still checks.
+
 ## Unreleased: writable slices over host buffers
 
 - `slice::from_raw_parts_mut(p, n)` over a `*mut T` gives a `&mut [T]`. A C host can hand an export an output buffer, such as an audio period, and the export writes it with every index checked against `n`. Like `from_raw_parts`, it needs `unsafe`; a `*const T` is refused (BL0303).

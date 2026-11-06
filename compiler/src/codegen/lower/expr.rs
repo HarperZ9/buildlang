@@ -3751,7 +3751,9 @@ impl<'ctx> MirLowerer<'ctx> {
                 }
             }
         }
-        // Check if it's a math/graphics builtin - these return f64
+        // Check if it's a math/graphics builtin - these return f64. Every
+        // scalar maths builtin the checker accepts must be listed: one missing
+        // here (exp was) types its result as i32, and the C output truncates.
         if let Some(ref fn_name) = name {
             let is_f64_builtin = matches!(
                 fn_name.as_str(),
@@ -3759,6 +3761,18 @@ impl<'ctx> MirLowerer<'ctx> {
                     | "sin"
                     | "cos"
                     | "tan"
+                    | "sinh"
+                    | "cosh"
+                    | "tanh"
+                    | "asin"
+                    | "acos"
+                    | "atan"
+                    | "atan2"
+                    | "log"
+                    | "log2"
+                    | "log10"
+                    | "exp"
+                    | "exp2"
                     | "pow"
                     | "abs"
                     | "floor"

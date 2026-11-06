@@ -103,6 +103,10 @@ pub enum TypeError {
         found: Mutability,
     },
 
+    /// A write through a shared (read-only) reference to a slice or array.
+    #[error("cannot write through `{name}`: it is a read-only `&[T]`; take a `&mut [T]` (or use `slice::from_raw_parts_mut`) to write")]
+    WriteThroughReadOnly { name: String },
+
     /// Array length mismatch.
     #[error("array length mismatch: expected `{expected}`, found `{found}`")]
     ArrayLengthMismatch { expected: usize, found: usize },

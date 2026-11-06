@@ -5522,6 +5522,7 @@ fn type_error_kind(error: &TypeError) -> &'static str {
         TypeError::TypeMismatch { .. } => "TypeMismatch",
         TypeError::InfiniteType { .. } => "InfiniteType",
         TypeError::MutabilityMismatch { .. } => "MutabilityMismatch",
+        TypeError::WriteThroughReadOnly { .. } => "WriteThroughReadOnly",
         TypeError::UnknownEffect { .. } => "UnknownEffect",
         TypeError::UnhandledEffect { .. } => "UnhandledEffect",
         TypeError::UndeclaredEffect { .. } => "UndeclaredEffect",

@@ -4463,6 +4463,7 @@ impl<'ctx> TypeInfer<'ctx> {
         let value_sources = self.call_sources(value);
         let value_ty = self.infer_expr(value);
         let _ = self.unify(&target_ty, &value_ty, span);
+        self.check_write_through_shared_ref(target, span);
 
         // Borrow check: if assigning a reference to a named variable,
         // track the borrow (same as check_borrow_at_binding for let).
@@ -4475,6 +4476,34 @@ impl<'ctx> TypeInfer<'ctx> {
         }
 
         Ty::unit()
+    }
+
+    /// `xs[i] = v` where `xs` is a shared reference to a slice or an array
+    /// (`&[T]`, `&[T; N]`, for example from `slice::from_raw_parts`) writes
+    /// through memory the reference does not own for writing: refuse it, the
+    /// way a `*const T` is refused by `slice::from_raw_parts_mut`.
+    fn check_write_through_shared_ref(&mut self, target: &ast::Expr, span: Span) {
+        let ExprKind::Index { expr: base, .. } = &target.kind else {
+            return;
+        };
+        let ExprKind::Ident(ident) = &base.kind else {
+            return;
+        };
+        let Some(ty) = self.ctx.lookup_var(ident.name.as_ref()) else {
+            return;
+        };
+        let ty = self.apply(&ty);
+        if let TyKind::Ref(_, Mutability::Immutable, inner) = &ty.kind {
+            let inner = self.apply(inner);
+            if matches!(inner.kind, TyKind::Slice(_) | TyKind::Array(..)) {
+                self.error(
+                    TypeError::WriteThroughReadOnly {
+                        name: ident.name.to_string(),
+                    },
+                    span,
+                );
+            }
+        }
     }
 
     // =========================================================================
