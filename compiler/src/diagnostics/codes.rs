@@ -131,6 +131,7 @@ pub fn type_code(error: &TypeError) -> &'static str {
         E::TypeMismatch { .. } => "BL0301",
         E::InfiniteType { .. } => "BL0302",
         E::MutabilityMismatch { .. } => "BL0303",
+        E::WriteThroughReadOnly { .. } => "BL0303",
         E::ArrayLengthMismatch { .. } => "BL0304",
         E::ArityMismatch { .. } => "BL0305",
         E::UnsafetyMismatch => "BL0306",

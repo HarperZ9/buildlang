@@ -1,0 +1,9 @@
+// Writing through a shared slice reference must not check: `xs` is `&[f64]`.
+fn put(xs: &[f64]) {
+    xs[0] = 1.0;
+}
+
+fn main() ~ Console {
+    let mut a: [f64; 2] = [0.0, 0.0];
+    put(&a);
+}

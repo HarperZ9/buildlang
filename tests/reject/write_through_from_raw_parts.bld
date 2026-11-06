@@ -1,0 +1,5 @@
+// A slice from slice::from_raw_parts is read-only: use from_raw_parts_mut to write.
+extern "C" fn w(p: *const f64, n: usize) {
+    let xs = unsafe { slice::from_raw_parts(p, n) };
+    xs[0] = 1.0;
+}
