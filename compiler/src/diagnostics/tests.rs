@@ -197,6 +197,14 @@ fn type_samples() -> Vec<TypeError> {
             left: s("m"),
             right: s("s"),
         },
+        E::UnitNotDimensionless {
+            operation: s(".sin()"),
+            found: s("m"),
+        },
+        E::UnitRootNotExact {
+            method: s("sqrt"),
+            found: s("m"),
+        },
         E::ModuleImportCycle {
             path: s("a.bld"),
             module: s("b"),

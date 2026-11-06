@@ -3783,16 +3783,28 @@ mod tests {
         }
 
         #[test]
-        fn pow_on_unit_carrying_operand_is_loudly_unsupported() {
-            let errors = check_source("fn main() { let d: f64<m> = 3.0; let bad = d ** 2.0; }");
+        fn pow_with_literal_exponent_scales_the_unit() {
+            let errors = check_source(
+                "fn main() { let d: f64<m> = 3.0; let a: f64<m^2> = d ** 2.0;                  let b: f64<m^-1> = d ** -1; }",
+            );
+            assert!(errors.is_empty(), "{errors:#?}");
+            let errors =
+                check_source("fn main() { let d: f64<m> = 3.0; let bad: f64<m> = d ** 2.0; }");
+            assert_eq!(unit_errors(&errors).len(), 1, "{errors:#?}");
+        }
+
+        #[test]
+        fn pow_with_runtime_exponent_on_a_unit_is_refused() {
+            let errors = check_source(
+                "fn main() { let d: f64<m> = 3.0; let n: f64 = 2.0; let bad = d ** n; }",
+            );
             assert!(
                 errors.iter().any(|e| matches!(
                     &e.error,
                     TypeError::UnsupportedConstruct { construct, .. }
-                        if construct.contains("unit-carrying")
+                        if construct.contains("non-literal exponent")
                 )),
-                "expected UnsupportedConstruct for `**` on a unit-carrying \
-                 operand: {errors:#?}"
+                "{errors:#?}"
             );
         }
 
@@ -3904,61 +3916,88 @@ mod tests {
         // claim: units are not lost passing through, nothing stronger.
 
         // =====================================================================
-        // Review follow-up: `.sqrt()`/`.cbrt()`/`.powi()`/`.powf()` on a
-        // unit-carrying receiver used to silently return the receiver's
-        // unchanged (and therefore wrong) dimension. Now a loud
-        // `UnsupportedConstruct` refusal, matching `**`'s principle.
+        // Root and power lifting: `.sqrt()`, `.cbrt()`, `.powi()`, `.powf()`
+        // scale the exponents; a root that leaves a fraction is refused.
         // =====================================================================
 
         #[test]
-        fn sqrt_on_unit_carrying_receiver_is_loudly_unsupported() {
-            let errors =
-                check_source("fn main() { let area: f64<m*m> = 9.0; let side = area.sqrt(); }");
-            assert!(
-                errors.iter().any(|e| matches!(
-                    &e.error,
-                    TypeError::UnsupportedConstruct { construct, .. }
-                        if construct.contains("unit-carrying") && construct.contains("sqrt")
-                )),
-                "expected UnsupportedConstruct for `.sqrt()` on a unit-carrying \
-                 receiver: {errors:#?}"
-            );
-        }
-
-        #[test]
-        fn cbrt_on_unit_carrying_receiver_is_loudly_unsupported() {
-            let errors =
-                check_source("fn main() { let vol: f64<m*m*m> = 27.0; let side = vol.cbrt(); }");
-            assert!(
-                errors.iter().any(|e| matches!(
-                    &e.error,
-                    TypeError::UnsupportedConstruct { construct, .. }
-                        if construct.contains("unit-carrying") && construct.contains("cbrt")
-                )),
-                "expected UnsupportedConstruct for `.cbrt()` on a unit-carrying \
-                 receiver: {errors:#?}"
-            );
-        }
-
-        #[test]
-        fn powi_and_powf_on_unit_carrying_receiver_are_loudly_unsupported() {
+        fn roots_and_powers_scale_the_unit() {
             let errors = check_source(
-                "fn main() { \
-                    let d: f64<m> = 3.0; \
-                    let a = d.powi(2); \
-                    let b = d.powf(2.0); \
-                 }",
+                "fn main() {                     let area: f64<m*m> = 9.0; let side: f64<m> = area.sqrt();                     let vol: f64<m^3> = 27.0; let edge: f64<m> = vol.cbrt();                     let d: f64<m> = 3.0; let a: f64<m^2> = d.powi(2);                     let t: f64<s> = 2.0; let f: f64<Hz> = t.powf(-1.0);                     let g: f64<Hz> = t.recip();                  }",
             );
-            let refusals: Vec<_> = errors
-                .iter()
-                .filter(|e| matches!(&e.error, TypeError::UnsupportedConstruct { construct, .. } if construct.contains("unit-carrying")))
-                .collect();
-            assert_eq!(
-                refusals.len(),
-                2,
-                "expected UnsupportedConstruct for both `.powi()` and `.powf()` \
-                 on a unit-carrying receiver: {errors:#?}"
+            assert!(errors.is_empty(), "{errors:#?}");
+        }
+
+        #[test]
+        fn root_with_a_fractional_result_is_refused() {
+            let errors = check_source("fn main() { let d: f64<m> = 4.0; let bad = d.sqrt(); }");
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| matches!(&e.error, TypeError::UnitRootNotExact { .. })),
+                "{errors:#?}"
             );
+        }
+
+        #[test]
+        fn powi_with_runtime_exponent_on_a_unit_is_refused() {
+            let errors = check_source(
+                "fn main() { let d: f64<m> = 3.0; let n: i32 = 2; let bad = d.powi(n); }",
+            );
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| matches!(&e.error, TypeError::UnsupportedConstruct { .. })),
+                "{errors:#?}"
+            );
+        }
+
+        #[test]
+        fn recip_inverts_the_unit() {
+            let errors =
+                check_source("fn main() { let t: f64<s> = 2.0; let bad: f64<s> = t.recip(); }");
+            assert_eq!(unit_errors(&errors).len(), 1, "{errors:#?}");
+        }
+
+        #[test]
+        fn trigonometry_of_a_dimensioned_value_is_refused() {
+            for call in ["d.sin()", "d.exp()", "d.ln()", "d.log10()", "d.tanh()"] {
+                let src = format!("fn main() {{ let d: f64<m> = 1.0; let bad = {call}; }}");
+                let errors = check_source(&src);
+                assert!(
+                    errors
+                        .iter()
+                        .any(|e| matches!(&e.error, TypeError::UnitNotDimensionless { .. })),
+                    "{call}: {errors:#?}"
+                );
+            }
+            // A ratio of like quantities is dimensionless and is accepted.
+            let errors = check_source(
+                "fn main() { let d: f64<m> = 1.0; let r: f64<m> = 2.0; let ok = (d / r).sin(); }",
+            );
+            assert!(errors.is_empty(), "{errors:#?}");
+        }
+
+        #[test]
+        fn binary_float_methods_need_matching_units() {
+            for call in [
+                "d.hypot(t)",
+                "d.min(t)",
+                "d.max(t)",
+                "d.atan2(t)",
+                "d.clamp(d, t)",
+            ] {
+                let src = format!(
+                    "fn main() {{ let d: f64<m> = 1.0; let t: f64<s> = 2.0; let bad = {call}; }}"
+                );
+                let errors = check_source(&src);
+                assert!(
+                    errors
+                        .iter()
+                        .any(|e| matches!(&e.error, TypeError::UnitOperationMismatch { .. })),
+                    "{call}: {errors:#?}"
+                );
+            }
         }
 
         #[test]

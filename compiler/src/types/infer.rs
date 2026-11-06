@@ -4101,6 +4101,115 @@ impl<'ctx> TypeInfer<'ctx> {
         None
     }
 
+    /// The unit of a float type (through one reference), or `None` for an
+    /// unannotated float or any other type.
+    fn float_unit_dim(&self, ty: &Ty) -> Option<units::Dimension> {
+        let applied = self.apply(ty);
+        match &applied.kind {
+            TyKind::Float(_) => applied.unit_dim,
+            TyKind::Ref(_, _, inner) if matches!(inner.kind, TyKind::Float(_)) => inner.unit_dim,
+            _ => None,
+        }
+    }
+
+    /// Checks a call to a free maths builtin (`sqrt`, `sin`, `pow`, `clamp`,
+    /// ...). These resolve to no signature, so before this check `sin(true)`
+    /// and `pow(2.0)` passed and then failed in the C compiler. Checked here:
+    /// the argument count, that no argument is a bool, string, char, unit or
+    /// function, and the unit rule of the method form (`sqrt(area)` is
+    /// `area.sqrt()`, `sin(d)` needs a dimensionless `d`). Returns `None` when
+    /// the call is not a maths builtin or nothing decides its type, so the
+    /// caller keeps its old result.
+    fn free_math_builtin_type(
+        &mut self,
+        func: &ast::Expr,
+        args: &[ast::Expr],
+        arg_tys: &[Ty],
+        span: Span,
+    ) -> Option<Ty> {
+        let ExprKind::Ident(ident) = &func.kind else {
+            return None;
+        };
+        let name = ident.name.as_ref();
+        let (method, arities): (&str, &[usize]) = match name {
+            "pow" => ("powf", &[2]),
+            "log" => ("ln", &[1]),
+            "atan" => ("atan", &[1, 2]),
+            "atan2" | "min" | "max" => (name, &[2]),
+            "clamp" => (name, &[3]),
+            "sqrt" | "sin" | "cos" | "tan" | "abs" | "sinh" | "cosh" | "tanh" | "asin" | "acos"
+            | "log2" | "log10" | "exp" | "exp2" | "floor" | "ceil" | "round" | "fract" => {
+                (name, &[1])
+            }
+            _ => return None,
+        };
+        if self.ctx.lookup_var(name).is_some() {
+            return None;
+        }
+        if !arities.contains(&args.len()) {
+            self.error(
+                TypeError::ArityMismatch {
+                    expected: arities[0],
+                    found: args.len(),
+                },
+                span,
+            );
+            return Some(Ty::error());
+        }
+        for (arg, ty) in args.iter().zip(arg_tys) {
+            let applied = self.apply(ty);
+            let wrong = match &applied.kind {
+                TyKind::Bool | TyKind::Str | TyKind::Char | TyKind::Fn(_) => true,
+                TyKind::Tuple(elems) => elems.is_empty(),
+                _ => false,
+            };
+            if wrong {
+                self.error(
+                    TypeError::TypeMismatch {
+                        expected: Ty::float(FloatTy::F64),
+                        found: applied,
+                    },
+                    arg.span,
+                );
+                return Some(Ty::error());
+            }
+        }
+        let dims: Vec<_> = arg_tys.iter().map(|t| self.float_unit_dim(t)).collect();
+        // atan with two arguments is atan2 (GLSL's `atan(y, x)`).
+        let method = if name == "atan" && args.len() == 2 {
+            "atan2"
+        } else {
+            method
+        };
+        let exponent = args
+            .get(1)
+            .and_then(super::unit_methods::literal_integer_exponent);
+        match super::unit_methods::float_method(method, dims[0], &dims[1..], exponent)? {
+            Ok(dim) => {
+                let first = self.apply(&arg_tys[0]);
+                let mut out = match (&first.kind, method) {
+                    (TyKind::Float(_), _) => first,
+                    _ => Ty::float(FloatTy::F64),
+                };
+                out.unit_dim = dim;
+                Some(out)
+            }
+            Err(e) => {
+                let e = match e {
+                    TypeError::UnitNotDimensionless { found, .. } => {
+                        TypeError::UnitNotDimensionless {
+                            operation: format!("{name}()"),
+                            found,
+                        }
+                    }
+                    other => other,
+                };
+                self.error(e, span);
+                Some(Ty::error())
+            }
+        }
+    }
+
     /// The same pre-check as [`Self::unit_binop_precheck`], for comparison
     /// operators (`checked_compare`).
     fn unit_compare_precheck(&self, left_ty: &Ty, right_ty: &Ty) -> Option<TypeError> {
@@ -4404,36 +4513,54 @@ impl<'ctx> TypeInfer<'ctx> {
                 }
             }
 
-            // Power operator: dimensional exponentiation (`powi` lifting,
-            // scaling a unit's exponents by an integer power) is a specced
-            // follow-up (`docs/DIMENSIONAL-ANALYSIS.md`), not this slice.
-            // Loudly refuse `**` on a unit-carrying operand rather than
-            // silently producing a wrong dimension.
+            // Power operator. A unit-carrying base raised to an integer
+            // literal scales the unit's exponents (`d ** 2` on metres is
+            // `m^2`); any other exponent on a unit-carrying base is refused,
+            // because the result's unit would depend on a runtime value. The
+            // exponent itself must be dimensionless.
             BinOp::Pow => {
-                let left_applied = self.apply(&left_ty);
-                let right_applied = self.apply(&right_ty);
-                let has_unit = matches!(
-                    (&left_applied.kind, left_applied.unit_dim),
-                    (TyKind::Float(_), Some(_))
-                ) || matches!(
-                    (&right_applied.kind, right_applied.unit_dim),
-                    (TyKind::Float(_), Some(_))
-                );
-                if has_unit {
+                let left_dim = match &self.apply(&left_ty).kind {
+                    TyKind::Float(_) => self.float_unit_dim(&left_ty),
+                    _ => None,
+                };
+                let right_dim = match &self.apply(&right_ty).kind {
+                    TyKind::Float(_) => self.float_unit_dim(&right_ty),
+                    _ => None,
+                };
+                if left_dim.is_none() && right_dim.is_none() {
+                    let _ = self.unify(&left_ty, &right_ty, span);
+                    return self.apply(&left_ty);
+                }
+                if let Some(d) = right_dim.filter(|d| !d.is_dimensionless()) {
                     self.error(
-                        TypeError::UnsupportedConstruct {
-                            construct: "`**` on unit-carrying operands".to_string(),
-                            detail: "dimensional exponentiation (powi lifting) is a \
-                                     specced follow-up in docs/DIMENSIONAL-ANALYSIS.md; \
-                                     compute the power with `*`, or drop the annotation"
-                                .to_string(),
+                        TypeError::UnitNotDimensionless {
+                            operation: "the exponent of `**`".to_string(),
+                            found: d.to_canonical_string(),
                         },
                         span,
                     );
                     return Ty::error();
                 }
-                let _ = self.unify(&left_ty, &right_ty, span);
-                self.apply(&left_ty)
+                let mut left_stripped = self.apply(&left_ty);
+                left_stripped.unit_dim = None;
+                let mut right_stripped = self.apply(&right_ty);
+                right_stripped.unit_dim = None;
+                let _ = self.unify(&left_stripped, &right_stripped, span);
+                let mut result = self.apply(&left_stripped);
+                match left_dim {
+                    Some(base) => {
+                        let exponent = super::unit_methods::literal_integer_exponent(right);
+                        match super::unit_methods::power(base, exponent, "`**`") {
+                            Ok(dim) => result.unit_dim = dim,
+                            Err(e) => {
+                                self.error(e, span);
+                                return Ty::error();
+                            }
+                        }
+                    }
+                    None => result.unit_dim = None,
+                }
+                result
             }
 
             // Range operators
@@ -5199,11 +5326,14 @@ impl<'ctx> TypeInfer<'ctx> {
                 // Builtins (vec_push, map_insert, ...) resolve to `Error` here and
                 // are dispatched by codegen. A linear value passed to such an
                 // untracked builtin (e.g. stored into a Vec) escapes no-cloning.
+                let mut arg_tys = Vec::with_capacity(args.len());
                 for arg in args {
                     let ty = self.infer_expr(arg);
                     self.reject_linear_escape(&ty, arg.span, "a builtin call (e.g. a collection)");
+                    arg_tys.push(ty);
                 }
-                Ty::fresh_var()
+                self.free_math_builtin_type(func, args, &arg_tys, span)
+                    .unwrap_or_else(Ty::fresh_var)
             }
             // Unit type - cascading from a failed function lookup; suppress error
             TyKind::Tuple(elems) if elems.is_empty() => Ty::fresh_var(),
@@ -5589,6 +5719,38 @@ impl<'ctx> TypeInfer<'ctx> {
         };
         let is_numeric = is_int || is_float;
 
+        // Units: when the receiver or an argument carries a unit, the method's
+        // dimension rule decides the result (`types/unit_methods.rs`).
+        if is_float {
+            let receiver_dim = self.float_unit_dim(&receiver_ty);
+            let arg_dims: Vec<_> = arg_tys.iter().map(|t| self.float_unit_dim(t)).collect();
+            let exponent = args
+                .first()
+                .and_then(super::unit_methods::literal_integer_exponent);
+            if let Some(rule) =
+                super::unit_methods::float_method(method_name, receiver_dim, &arg_dims, exponent)
+            {
+                return match rule {
+                    Ok(dim) => {
+                        let mut out = match &receiver_ty.kind {
+                            TyKind::Ref(_, _, inner) => inner.as_ref().clone(),
+                            _ => receiver_ty.clone(),
+                        };
+                        out.unit_dim = dim;
+                        if method_name == "sin_cos" {
+                            Ty::tuple(vec![out.clone(), out])
+                        } else {
+                            out
+                        }
+                    }
+                    Err(e) => {
+                        self.error(e, span);
+                        Ty::error()
+                    }
+                };
+            }
+        }
+
         if let Some(returns_option) =
             supported_explicit_integer_arithmetic_method_returns_option(method_name)
         {
@@ -5777,33 +5939,6 @@ impl<'ctx> TypeInfer<'ctx> {
             // =================================================================
             // FLOAT METHODS
             // =================================================================
-
-            // Root/power-taking on a unit-carrying receiver: `.sqrt()`/`.cbrt()`
-            // need to halve/third the exponents, `.powi()`/`.powf()` need to
-            // scale them by the (possibly runtime) exponent -- dimensional
-            // root/power lifting is a specced follow-up
-            // (`docs/DIMENSIONAL-ANALYSIS.md`), not this slice. Loudly refuse
-            // rather than silently returning the receiver's unchanged (and
-            // therefore wrong) dimension: the same principle that makes `**`
-            // (`BinOp::Pow`) a loud refusal on unit-carrying operands.
-            // Guarded on `unit_dim.is_some()` and placed before the identity
-            // arm below, so an unannotated (`unit_dim: None`) receiver keeps
-            // matching that arm unchanged.
-            "sqrt" | "cbrt" | "powi" | "powf" if is_float && receiver_ty.unit_dim.is_some() => {
-                self.error(
-                    TypeError::UnsupportedConstruct {
-                        construct: format!("`.{method_name}()` on a unit-carrying receiver"),
-                        detail: "dimensional root/power lifting (scaling the exponents) is a \
-                                 specced follow-up in docs/DIMENSIONAL-ANALYSIS.md; drop the \
-                                 annotation, or re-annotate the result via the `as f64<UNIT>` \
-                                 cast escape hatch"
-                            .to_string(),
-                    },
-                    span,
-                );
-                return Ty::error();
-            }
-
             "abs" | "sqrt" | "cbrt" | "ceil" | "floor" | "round" | "trunc" | "fract" | "signum"
             | "recip" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh"
             | "tanh" | "asinh" | "acosh" | "atanh" | "exp" | "exp2" | "ln" | "log2" | "log10"
