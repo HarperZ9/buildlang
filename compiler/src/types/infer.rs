@@ -5491,6 +5491,51 @@ impl<'ctx> TypeInfer<'ctx> {
             .map(|def_id| Ty::adt(def_id, vec![payload]))
     }
 
+    fn unchecked_slice_access(
+        &mut self,
+        receiver_ty: &Ty,
+        method_name: &str,
+        args: &[ast::Expr],
+        arg_tys: &[Ty],
+        span: Span,
+    ) -> Option<Ty> {
+        let (mutability, elem) = match &receiver_ty.kind {
+            TyKind::Ref(_, m, inner) => match &self.apply(inner).kind {
+                TyKind::Slice(e) => (*m, (**e).clone()),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        if self.unsafe_depth == 0 {
+            self.error(TypeError::UnsafeOutsideUnsafe, span);
+        }
+        let want = if method_name == "get_unchecked" { 1 } else { 2 };
+        if args.len() != want {
+            self.error(
+                TypeError::ArityMismatch {
+                    expected: want,
+                    found: args.len(),
+                },
+                span,
+            );
+            return Some(Ty::error());
+        }
+        let _ = self.coerce_arg(&Ty::int(IntTy::Usize), &arg_tys[0], span);
+        if method_name == "get_unchecked" {
+            return Some(elem);
+        }
+        if matches!(mutability, Mutability::Immutable) {
+            self.error(
+                TypeError::WriteThroughReadOnly {
+                    name: "the slice".to_string(),
+                },
+                span,
+            );
+        }
+        let _ = self.unify(&elem, &arg_tys[1], span);
+        Some(Ty::unit())
+    }
+
     fn infer_method_call(
         &mut self,
         receiver: &ast::Expr,
@@ -5637,6 +5682,19 @@ impl<'ctx> TypeInfer<'ctx> {
                 span,
             );
             return Ty::error();
+        }
+
+        // `xs.get_unchecked(i)` / `xs.set_unchecked(i, v)` on a slice: an element
+        // access with no bounds check, for loops whose range the program has
+        // already checked once (the check hoisted by hand). Like any access the
+        // compiler cannot prove in bounds, it needs `unsafe`; the write needs a
+        // `&mut [T]`.
+        if matches!(method_name, "get_unchecked" | "set_unchecked") {
+            if let Some(ty) =
+                self.unchecked_slice_access(&receiver_ty, method_name, args, &arg_tys, span)
+            {
+                return ty;
+            }
         }
 
         match method_name {

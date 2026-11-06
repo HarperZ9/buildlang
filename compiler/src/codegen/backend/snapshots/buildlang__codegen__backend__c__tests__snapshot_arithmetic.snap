@@ -1531,6 +1531,12 @@ static double build_det_log(double x) {
     return dk * ln2_hi - ((s * (f - R) - dk * ln2_lo) - f);
 }
 
+/* `x.log(base)`: the logarithm of x in the given base, ln(x) / ln(base), both
+ * through the portable log so the result has the same bits on every C library. */
+static double build_det_log_base(double x, double base) {
+    return build_det_log(x) / build_det_log(base);
+}
+
 static double build_det_pow(double x, double y) {
     static const double bp[] = {1.0, 1.5},
         dp_h[] = {0.0, 5.84962487220764160156e-01}, dp_l[] = {0.0, 1.35003920212974897128e-08},

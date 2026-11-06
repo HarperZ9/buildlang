@@ -6919,6 +6919,7 @@ fn invoke_c_compiler(
         cmd.args(c_fp_flags(false));
         if release {
             cmd.arg("-O2");
+            cmd.args(c_vector_flags());
         } else {
             cmd.arg("-g");
         }
@@ -6966,6 +6967,15 @@ pub(crate) fn c_fp_flags(is_msvc: bool) -> &'static [&'static str] {
     } else {
         &["-ffp-contract=off", "-fno-fast-math"]
     }
+}
+
+/// Release builds also let gcc and clang vectorize loops that need a runtime alias
+/// check: at plain `-O2` gcc uses its "very cheap" cost model, which refuses to
+/// version a loop for aliasing, so a loop over several slices stayed scalar. This
+/// changes no result: with `-ffp-contract=off -fno-fast-math` (DETMATH) the
+/// vectorizer never reassociates or fuses floating-point operations.
+pub(crate) fn c_vector_flags() -> &'static [&'static str] {
+    &["-ftree-vectorize", "-fvect-cost-model=dynamic"]
 }
 
 fn host_c_link_libraries(is_msvc: bool) -> &'static [&'static str] {
@@ -11085,6 +11095,16 @@ mod tests {
         assert_eq!(c_link_libraries("windows", true), &["ws2_32.lib"]);
         assert_eq!(c_link_libraries("linux", false), &["-lm"]);
         assert_eq!(c_link_libraries("macos", true), &[] as &[&str]);
+    }
+
+    #[test]
+    fn release_c_builds_vectorize_without_changing_floating_point() {
+        assert_eq!(
+            c_vector_flags(),
+            &["-ftree-vectorize", "-fvect-cost-model=dynamic"]
+        );
+        // DETMATH stays: no contraction, no fast maths, so vectorising reorders nothing.
+        assert_eq!(c_fp_flags(false), &["-ffp-contract=off", "-fno-fast-math"]);
     }
 
     #[test]

@@ -12,12 +12,22 @@ tracked in `STATUS.md`, `README.md`, and
 
 - `#[measured(source = "...", uncertainty = ...)]` on a `const` records where a measured value came from. `buildc check` refuses a missing or empty source, an unknown key, a negative uncertainty, or the attribute on anything but a `const` (BL0605). The check receipt lists each measured constant (name, value as written, canonical unit, source, uncertainty) under `measured_constants`, and `receipt verify` re-derives the list, so an edited source fails verification. Programs without measured constants get byte-identical receipts. The attribute changes no emitted C. Docs: `docs/MEASURED-CONSTANTS.md`. Tests: `compiler/tests/measured_constants.rs`, `tests/reject/measured_without_source.bld`.
 
+## Unreleased: `x.log(base)` builds
+
+- `x.log(base)` on an f64 checked and then failed in the C compiler, because the lowering passed two arguments to the one-argument portable `log`. It now calls `build_det_log_base`, which is `build_det_log(x) / build_det_log(base)`, so the result keeps DETMATH's same-bits-everywhere rule. Test: `compiler/tests/float_methods_compile.rs` checks, builds and runs every f64 method the checker accepts (35 calls) and compares each value with Rust's; it failed on `log(3.0)` before the fix.
+
 ## Unreleased: audio binding, performance cores, shorter periods and events
 
 - `bl_audio_pin_performance_cores()` restricts the audio thread to the cores of the highest efficiency class (the performance cores of a hybrid CPU), read from `GetLogicalProcessorInformationEx`.
 - A period below the engine default is requested through `IAudioClient3` and rounded to the engine's step; drivers whose shared-mode engine period is fixed keep their default, and `bl_audio_period()` says what was granted.
 - `bl_events_start()` and `bl_events_pop()`: events from another process, one line of six numbers on standard input, read by a thread into a lock-free single-producer single-consumer ring the audio thread pops without blocking. `bl_audio_now()` is the shared monotonic clock. `examples/audio-events` and a test in `extern_c_source.rs` check three events and a skipped bad line.
 - `bl_audio.c` now includes `bl_audio_win.c` and `bl_events.c` from its own directory; a program still names only `bl_audio.c`.
+
+## Unreleased: unchecked slice access and vectorised release builds
+
+- `xs.get_unchecked(i)` and `xs.set_unchecked(i, v)` on slices: element access with no bounds check, for a loop whose range the program checked once before it (the check hoisted by hand). The C is a plain subscript. It needs `unsafe` (BL0382), and the write needs a `&mut [T]`. Test: `compiler/tests/unchecked_slices.rs`.
+- Release builds with gcc or clang add `-ftree-vectorize -fvect-cost-model=dynamic`. At plain `-O2` gcc's "very cheap" cost model will not version a loop for aliasing, so a loop over several slices stayed scalar. DETMATH (`-ffp-contract=off -fno-fast-math`) stays, so vectorising reassociates and fuses nothing and every result is unchanged. In the superframe voice bank the f32 path runs 0.41 ns per mode-sample against 0.67 for the f64 scalar loop.
+- Found, not fixed: an `extern "C" fn` inside a module gets the module prefix in its C name (`dsp_daw_modal_coeffs`), so a host linking against it by its declared name fails.
 
 ## Unreleased: pointers to fixed arrays; no reassigning a fixed `let`
 
