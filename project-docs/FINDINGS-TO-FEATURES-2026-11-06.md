@@ -48,8 +48,8 @@ so they are not new features here:
 |---|---|---|---|---|---|---|
 | 1 | Own: #124, #127 | #124 and #127 fixed four holes where a program checked and then failed in C: maths builtins typed i32 in the lowering, writes through a read-only slice, `&[T; N]` emitted as `double[4]*`, and reassigning an immutable `let` | Hunt the same class: a probe per builtin family, where every accepted form must build | P1 | A sweep test that checks, builds and runs every accepted form and compares values | f64 methods done in #128, which found row 2. Free maths builtins done in #130 |
 | 2 | Own: probe of 2026-11-06 | `x.log(base)` checked, then the C compiler refused `build_det_log(x, base)` | Lower to `build_det_log(x) / build_det_log(base)` | P1 | `compiler/tests/float_methods_compile.rs`: 35 f64 method calls build and match Rust within 1e-12 | Shipped in #128 |
-| 3 | Own: probe of 2026-11-06 | Free maths builtins (`sin`, `sqrt`, `pow`, `clamp` and the rest) had no signature, so `sin(true)` and `pow(2.0)` checked and then failed in C | Check the argument count and argument kinds of each builtin | P1 | `tests/reject/math_builtin_bool_arg.bld` and `math_builtin_wrong_arity.bld` | #130 |
-| 4 | Q29; row 846 (Zed: units in types); our physics lanes | Physics lanes mix quantities. Slice one refused every root and power on a unit, and two methods gave the wrong unit: `t.recip()` on seconds stayed seconds, and `d.sin()` on metres checked | Roots and powers lift the unit when the exponent is an integer literal. `recip` inverts the unit. Trigonometric, exponential and logarithmic operations need a dimensionless value. Binary methods check the units of their arguments | P1 | `compiler/tests/units_powers.rs`: a pendulum program checks, and its C is byte-identical to its unannotated twin. One wrong annotation fails with BL0601. Reject programs cover `sin` of a length and a power that inverts | #130 |
+| 3 | Own: probe of 2026-11-06 | Free maths builtins (`sin`, `sqrt`, `pow`, `clamp` and the rest) had no signature, so `sin(true)` and `pow(2.0)` checked and then failed in C | Check the argument count and argument kinds of each builtin | P1 | `tests/reject/math_builtin_bool_arg.bld` and `math_builtin_wrong_arity.bld` | Shipped in #130 |
+| 4 | Q29; row 846 (Zed: units in types); our physics lanes | Physics lanes mix quantities. Slice one refused every root and power on a unit, and two methods gave the wrong unit: `t.recip()` on seconds stayed seconds, and `d.sin()` on metres checked | Roots and powers lift the unit when the exponent is an integer literal. `recip` inverts the unit. Trigonometric, exponential and logarithmic operations need a dimensionless value. Binary methods check the units of their arguments | P1 | `compiler/tests/units_powers.rs`: a pendulum program checks, and its C is byte-identical to its unannotated twin. One wrong annotation fails with BL0601. Reject programs cover `sin` of a length and a power that inverts | Shipped in #130 |
 | 5 | Rows 1299, 1266; Q29 | Constants travel without a source or an uncertainty: a Strouhal number and a Kármán spacing in a caption, an energy budget with no source | `#[measured(source = "...", uncertainty = ...)] const`. The checker refuses one without a source (BL0605). The check receipt lists each one, and `receipt verify` re-derives the list | P2 | `compiler/tests/measured_constants.rs`: the receipt lists G with CODATA 2018 and its uncertainty. An edited source fails verification. The emitted C is unchanged | #131 |
 | 6 | Q29; our colour and audio work | Dimensions cannot see scale. `ms` against `s`, `kHz` against `Hz`, and `Hz` against `rad/s` (both s^-1) all pass | Scaled units (`f64<ms>`, `f64<kHz>`) with explicit conversion, and an angle kind that keeps `rad/s` apart from `Hz` | P1 | Adding `f64<ms>` to `f64<s>` is refused. A conversion carries its factor, which the receipt seals. `2 pi f` is the only way from `Hz` to `rad/s` | Not started |
 | 7 | Weak mode, `docs/DIMENSIONAL-ANALYSIS.md` | A unit bug can hide in an unannotated intermediate binding | Dimension variables: an unannotated literal infers its dimension | P2 | `let p = 1.0; d + p` with `d: f64<m>` infers `p: f64<m>`; `let p: f64 = t; d + p` is refused | Not started |
@@ -62,19 +62,24 @@ so they are not new features here:
 | 14 | Row 973 (Verus); rows 1300, 1146, 1147 | Trusted escapes such as `assume` and `external_body` must be visible. Drift between a spec and its code fails no build | The check receipt lists every `unsafe`, `extern "C"` and `#[trusted]` site, plus a hash of each doc-comment contract | P3 | The receipt lists every trusted site. Weakening a contract changes its hash, and a pinned policy fails | Partly done: capability provenance lists ambient sources |
 | 15 | Own: a probe of 2026-11-06 | The canonical unit string `m^3/kg*s^2` reads as m^3 s^2 / kg, though it means m^3 / (kg s^2), and the unit grammar rejects parentheses | Group the denominator in the canonical form (`m^3/(kg*s^2)`), and accept parentheses in the unit grammar | P2 | `canonicalize_unit("m^3*kg^-1*s^-2")` returns an unambiguous string, and that string parses back to the same dimension | Not started |
 | 16 | Own: CI on #128 | `run_keeps_a_crashed_programs_exit_code` expects 0xC00000FD on Windows. One CI run got 0xC0000005 (an access violation) from the same deep recursion | Accept either code, or make the overflow deterministic with a guard page | P2 | The test passes across 20 Windows CI runs | Not started; a rerun passed |
-| 17 | Own: the DAW session | A DSP inner loop cannot vectorise because of per-index bounds checks | Bounds-check hoisting and an f32 SIMD path | P1 | Owned by the DAW session (#129) | Not touched here |
+| 17 | Own: the DAW session | A DSP inner loop could not vectorise because of per-index bounds checks | `get_unchecked`, `set_unchecked` and vectorised release builds | P1 | `compiler/tests/unchecked_slices.rs` | Shipped in #129 by the DAW session |
+| 18 | Own: the DAW session, after #129 | Programs hoist bounds checks by hand. gcc removes a check only when the loop is bounded by the length of the same slice it indexes | A compiler pass that proves the index range once before the loop, for loops bounded by anything else (a parameter, another slice's length), so safe code vectorises without `get_unchecked` | P1 | The DAW's `daw_bank` loops written with plain indexing emit no per-iteration check in the C and match the hand-hoisted timing within noise; an out-of-range bound still traps before the loop | Not started |
+| 19 | Own: the DAW session, CHANGELOG | An `extern "C" fn` inside a module gets the module prefix in its C name (`dsp_daw_modal_coeffs`), so a host that links against the declared name fails | Keep the plain C name for `extern "C"` items in any module | P1 | A module-level `extern "C" fn` exports its declared name in `--emit staticlib`, and a C host links against it | Not started |
 
 ## Order of work after 2026-11-06
 
-1. Scaled units and an angle kind (row 6). The physics, audio and colour
+1. The module prefix on `extern "C"` names (row 19). A host cannot link
+   against a module's exports today.
+2. Automatic bounds-check hoisting (row 18), measured on `daw_bank`.
+3. Scaled units and an angle kind (row 6). The physics, audio and colour
    lanes need `ms`, `kHz` and `rad/s` more than any other unit feature.
-2. Dimension variables (row 7), which closes the weak-mode gap.
-3. A builtin sweep for the remaining families: string, Vec and HashMap
+4. Dimension variables (row 7), which closes the weak-mode gap.
+5. A builtin sweep for the remaining families: string, Vec and HashMap
    builtins, the way #128 swept the f64 methods (row 1).
-4. An unambiguous canonical unit string (row 15).
-5. A layout hash and a fixed reduction order for `#[compute]` (row 8).
-6. A rounding mode on narrowing casts (row 9).
-7. `scope` in check receipts (row 10), then the kernel obligations (row 11).
+6. An unambiguous canonical unit string (row 15).
+7. A layout hash and a fixed reduction order for `#[compute]` (row 8).
+8. A rounding mode on narrowing casts (row 9).
+9. `scope` in check receipts (row 10), then the kernel obligations (row 11).
 
 ## Verified
 
