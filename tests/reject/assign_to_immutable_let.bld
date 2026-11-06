@@ -1,0 +1,6 @@
+// A `let` without `mut` cannot be assigned again.
+fn main() ~ Console {
+    let x = 1;
+    x = 2;
+    println!("{}", x);
+}

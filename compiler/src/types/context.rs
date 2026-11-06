@@ -109,6 +109,9 @@ struct Scope {
     type_params: HashMap<Arc<str>, Ty>,
     /// Kind of scope.
     kind: ScopeKind,
+    /// Bindings in this scope declared without `mut` and initialised, which
+    /// an assignment may not change.
+    immutable: std::collections::HashSet<Arc<str>>,
 }
 
 /// Kind of scope.
@@ -132,6 +135,7 @@ impl Scope {
             bindings: HashMap::new(),
             type_params: HashMap::new(),
             kind,
+            immutable: std::collections::HashSet::new(),
         }
     }
 }
@@ -486,6 +490,28 @@ impl TypeContext {
         if let Some(scope) = self.scopes.last_mut() {
             scope.bindings.insert(name, scheme);
         }
+    }
+
+    /// Mark whether the binding `name` in the current scope may be assigned.
+    pub fn set_var_immutable(&mut self, name: &str, immutable: bool) {
+        if let Some(scope) = self.scopes.last_mut() {
+            if immutable {
+                scope.immutable.insert(Arc::from(name));
+            } else {
+                scope.immutable.remove(name);
+            }
+        }
+    }
+
+    /// Whether the nearest binding of `name` was declared without `mut` and
+    /// initialised (so `name = v` is refused).
+    pub fn var_is_immutable(&self, name: &str) -> bool {
+        for scope in self.scopes.iter().rev() {
+            if scope.bindings.contains_key(name) {
+                return scope.immutable.contains(name);
+            }
+        }
+        false
     }
 
     /// Look up a variable.
