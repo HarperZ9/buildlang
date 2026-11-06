@@ -108,3 +108,41 @@ fn the_audio_binding_meets_every_deadline_on_the_null_device() {
     assert!(ok, "{text}");
     assert!(text.contains("periods 50 misses 0"), "{text}");
 }
+
+#[test]
+fn events_from_standard_input_reach_the_program_through_the_ring() {
+    if !has_cc() {
+        eprintln!("skipping: no C compiler");
+        return;
+    }
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_buildc"))
+        .env("BUILDLANG_STDLIB", repo_root().join("stdlib"))
+        .arg("run")
+        .arg(repo_root().join("examples/audio-events/main.bld"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("buildc runs");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            b"1 0 0 0 0 0
+2.5 1 2 3 4 5
+not an event
+4 9 9 9 9 9
+",
+        )
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{text}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("events 3 sum 7.5"), "{text}");
+}

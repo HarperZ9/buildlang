@@ -4,6 +4,7 @@
 // Windows. Every period's render time is checked against the period.
 extern "C" source "../../runtime/audio/bl_audio.c" {
     fn bl_audio_open(device: i32, rate: i32, period_frames: i32, silent: i32) -> i32;
+    fn bl_audio_pin_performance_cores() -> i32;
     fn bl_audio_rate() -> i32;
     fn bl_audio_period() -> i32;
     fn bl_audio_buffer() -> *mut f64;
@@ -15,5 +16,8 @@ extern "C" source "../../runtime/audio/bl_audio.c" {
     fn bl_audio_render_ms_max() -> f64;
     fn bl_audio_buffer_ms() -> f64;
     fn bl_audio_loopback_ms(click_level: f64) -> f64;
+    fn bl_events_start() -> i32;
+    fn bl_events_pop(out: *mut f64) -> i32;
+    fn bl_audio_now() -> f64;
     fn bl_audio_close();
 }

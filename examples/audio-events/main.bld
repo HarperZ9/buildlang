@@ -1,0 +1,24 @@
+// Events from another process through the audio binding's ring: each line of six numbers on standard
+// input becomes one event. Prints how many arrived and the sum of their first fields once input closes.
+extern "C" source "../../runtime/audio/bl_audio.c" {
+    fn bl_audio_alloc(count: usize) -> *mut f64;
+    fn bl_events_start() -> i32;
+    fn bl_events_pop(out: *mut f64) -> i32;
+}
+
+fn main() ~ Console + Foreign {
+    let ev = bl_audio_alloc(6);
+    bl_events_start();
+    let mut count: i32 = 0;
+    let mut sum: f64 = 0.0;
+    let mut state: i32 = 0;
+    while state >= 0 {
+        state = bl_events_pop(ev);
+        if state == 1 {
+            let e = unsafe { slice::from_raw_parts_mut(ev, 6) };
+            count = count + 1;
+            sum = sum + e[0];
+        }
+    }
+    println!("events {} sum {}", count, sum);
+}

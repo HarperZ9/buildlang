@@ -8,6 +8,13 @@ tracked in `STATUS.md`, `README.md`, and
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
 `108/108` or `132/132` are not the current release gate.
 
+## Unreleased: audio binding, performance cores, shorter periods and events
+
+- `bl_audio_pin_performance_cores()` restricts the audio thread to the cores of the highest efficiency class (the performance cores of a hybrid CPU), read from `GetLogicalProcessorInformationEx`.
+- A period below the engine default is requested through `IAudioClient3` and rounded to the engine's step; drivers whose shared-mode engine period is fixed keep their default, and `bl_audio_period()` says what was granted.
+- `bl_events_start()` and `bl_events_pop()`: events from another process, one line of six numbers on standard input, read by a thread into a lock-free single-producer single-consumer ring the audio thread pops without blocking. `bl_audio_now()` is the shared monotonic clock. `examples/audio-events` and a test in `extern_c_source.rs` check three events and a skipped bad line.
+- `bl_audio.c` now includes `bl_audio_win.c` and `bl_events.c` from its own directory; a program still names only `bl_audio.c`.
+
 ## Unreleased: maths builtins keep f64; no writes through read-only slices
 
 - `exp`, `exp2`, `log`, `log2`, `log10`, `sinh`, `cosh`, `tanh`, `asin`, `acos`, `atan` and `atan2` now type their result as f64 in the C lowering. Before, `let r = exp(x);` bound an `int32_t` and truncated, and the program still checked. Test: `compiler/tests/math_builtin_types.rs` runs all twelve through an unannotated binding.
