@@ -57,7 +57,8 @@ A package is the files at the top of its folder plus everything under `src/`
 and `tests/`; hidden files and `target/` are left out. Its hash is SHA-256
 over each file in byte order of its relative path: the line
 `file <path> <length>`, the bytes, then a newline. It is written
-`sha256:<hex>`. `publish` writes text files with LF endings, and
+`sha256:<hex>`. `publish` writes text files outside `tests/` with LF
+endings (test inputs keep their bytes), and
 `.gitattributes` keeps git from rewriting `registry/`, so a clone on any
 platform hashes the same bytes.
 

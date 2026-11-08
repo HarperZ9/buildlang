@@ -15,8 +15,9 @@
 //!
 //! The hash is SHA-256 over, for each file in byte order of its `/`-joined
 //! relative path: `file <path> <length>\n`, the bytes, then `\n`. The result
-//! is written `sha256:<64 hex digits>`. The bytes are hashed as stored;
-//! `publish` writes text files with LF line endings so a checkout on any
+//! is written `sha256:<64 hex digits>`. The bytes are hashed as stored.
+//! `publish` writes text files outside `tests/` with LF line endings, and
+//! the repository keeps git from converting `registry/`, so a checkout on any
 //! platform hashes the same.
 
 use super::{PkgError, PkgResult};
@@ -116,13 +117,15 @@ pub fn is_text(rel: &str) -> bool {
 }
 
 /// Copy a package's files into `dest`, writing text files with LF endings.
+/// Files under `tests/` are copied byte for byte: a test input may hold CR LF
+/// on purpose.
 /// Returns the relative paths copied.
 pub fn copy_package(src: &Path, dest: &Path) -> PkgResult<Vec<String>> {
     let files = package_files(src)?;
     let mut copied = Vec::new();
     for (rel, path) in &files {
         let mut bytes = std::fs::read(path).map_err(|e| PkgError::io(path, e))?;
-        if is_text(rel) {
+        if is_text(rel) && !rel.starts_with("tests/") {
             bytes = crlf_to_lf(&bytes);
         }
         let target = dest.join(rel);
