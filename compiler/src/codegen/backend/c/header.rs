@@ -4,7 +4,9 @@
 //! struct those signatures reach, by value or through a pointer, in an order a
 //! C compiler accepts: a struct embedded by value comes before the struct that
 //! embeds it. The lowering pass already refused any export type without a C
-//! ABI, so only structs, scalars, pointers and fixed arrays arrive here.
+//! ABI, so only structs, scalars, pointers and fixed arrays arrive here. A
+//! struct without `#[repr(C)]` arrives only behind a pointer; it is an opaque
+//! handle and gets a forward declaration (`typedef struct S S;`), no fields.
 
 use super::CBackend;
 use crate::codegen::ir::{MirFunction, MirModule, MirType, TypeDefKind};
@@ -24,7 +26,23 @@ impl CBackend {
             Self::visit_struct_deps(module, &func.sig.ret, &mut order, &mut Vec::new());
         }
         let mut out = String::new();
+        // Opaque handles first: a struct without `#[repr(C)]` that an export
+        // reaches through a pointer gets a forward declaration and no layout.
         for name in &order {
+            if !module.repr_c.iter().any(|r| r.as_ref() == name) {
+                out.push_str(&format!("typedef struct {name} {name};\n"));
+            }
+        }
+        if order
+            .iter()
+            .any(|n| !module.repr_c.iter().any(|r| r.as_ref() == n))
+        {
+            out.push('\n');
+        }
+        for name in &order {
+            if !module.repr_c.iter().any(|r| r.as_ref() == name) {
+                continue;
+            }
             let Some(def) = module.types.iter().find(|t| t.name.as_ref() == name) else {
                 continue;
             };
@@ -73,11 +91,14 @@ impl CBackend {
                     return;
                 };
                 if let TypeDefKind::Struct { fields, .. } = &def.kind {
-                    stack.push(name.clone());
-                    for (_, field_ty) in fields {
-                        Self::visit_struct_deps(module, field_ty, order, stack);
+                    // An opaque handle's fields stay out of the header.
+                    if module.repr_c.iter().any(|r| r.as_ref() == name) {
+                        stack.push(name.clone());
+                        for (_, field_ty) in fields {
+                            Self::visit_struct_deps(module, field_ty, order, stack);
+                        }
+                        stack.pop();
                     }
-                    stack.pop();
                     order.push(name);
                 }
             }

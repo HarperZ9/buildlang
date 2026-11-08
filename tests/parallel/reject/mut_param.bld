@@ -1,0 +1,14 @@
+// expect: BL0515
+// A body that takes `&mut` can write state every index shares.
+struct Acc { total: f64 }
+
+fn add(a: &mut Acc, i: i64) -> f64 {
+    a.total = a.total + (i as f64);
+    a.total
+}
+
+fn main() ~ Console {
+    let mut acc = Acc { total: 0.0 };
+    let out = par_for(8, &mut acc, add);
+    println!("{}", out[7]);
+}

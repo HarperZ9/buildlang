@@ -1,0 +1,11 @@
+// expect: BL0406
+// A parallel closure that prints.
+fn main() ~ Console {
+    let mut xs: Vec<f64> = Vec::new();
+    xs.push(2.0);
+    let ys = par_map(&xs, |v: f64| -> f64 {
+        println!("{}", v);
+        v * v
+    });
+    println!("{}", ys[0]);
+}

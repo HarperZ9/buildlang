@@ -1,0 +1,29 @@
+// `v.insert(i, x)` and `v.remove(i)` on strings, structs and integers.
+// Refused with BL0901 on 1.10.0.
+struct P {
+    a: i64,
+    s: str,
+}
+
+fn main() ~ Console {
+    let mut v: Vec<str> = Vec::new();
+    v.push("a");
+    v.push("c");
+    v.insert(1, "b");
+    v.insert(3, "d");
+    v.insert(0, "z");
+    let r = v.remove(0);
+    let mut out = String::new();
+    for x in v {
+        out.push_str(x);
+    }
+    let mut ps: Vec<P> = Vec::new();
+    ps.push(P { a: 1, s: "x" });
+    ps.push(P { a: 3, s: "y" });
+    ps.insert(1, P { a: 2, s: "w" });
+    let q = ps.remove(2);
+    let mut n: Vec<i64> = Vec::new();
+    n.push(5);
+    n.insert(0, 4);
+    println!("{} {} {} {} {} {} {}", r, out, ps.len(), ps[1].a, q.s, n[0], n[1]);
+}

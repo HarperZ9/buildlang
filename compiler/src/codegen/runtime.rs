@@ -221,6 +221,14 @@ static unsigned __int128 bl_urem_u128(unsigned __int128 a, unsigned __int128 b){
 static intptr_t bl_irem_isize(intptr_t a, intptr_t b){ if(b==0) bl_arith_panic("attempt to calculate the remainder with a divisor of zero"); if(a==INTPTR_MIN && b==-1) bl_arith_panic("attempt to calculate the remainder with overflow"); return a%b; }
 static uintptr_t bl_urem_usize(uintptr_t a, uintptr_t b){ if(b==0) bl_arith_panic("attempt to calculate the remainder with a divisor of zero"); return a%b; }
 
+// Per-thread storage for the formatters' rotating buffers: a par_for /
+// par_map body may format numbers on several threads at once (M5).
+#if defined(_MSC_VER) && !defined(__clang__)
+#define BL_TLS __declspec(thread)
+#else
+#define BL_TLS __thread
+#endif
+
 // Decimal formatting for 128-bit integers. printf has no standard format
 // specifier for __int128. The `_into` helpers write into caller-owned
 // storage so variadic calls can safely pass any number of i128/u128 arguments.
@@ -261,8 +269,8 @@ static void bl_fmt_i128_into(char* out, __int128 v) {
 }
 
 static char* bl_fmt_u128(unsigned __int128 v) {
-    static char pool[16][64];
-    static unsigned slot = 0;
+    static BL_TLS char pool[16][64];
+    static BL_TLS unsigned slot = 0;
     char* out = pool[slot];
     slot = (slot + 1u) & 15u;
     bl_fmt_u128_into(out, v);
@@ -270,8 +278,8 @@ static char* bl_fmt_u128(unsigned __int128 v) {
 }
 
 static char* bl_fmt_i128(__int128 v) {
-    static char pool[16][64];
-    static unsigned slot = 0;
+    static BL_TLS char pool[16][64];
+    static BL_TLS unsigned slot = 0;
     char* out = pool[slot];
     slot = (slot + 1u) & 15u;
     bl_fmt_i128_into(out, v);
@@ -311,8 +319,8 @@ static void bl_sci_to_plain(const char* sci, char* out) {
 // signed zero. Returns a pointer into a small rotating pool of static buffers
 // so several float arguments in one printf keep distinct text.
 static char* bl_fmt_f64(double v) {
-    static char pool[16][512];
-    static unsigned slot = 0;
+    static BL_TLS char pool[16][512];
+    static BL_TLS unsigned slot = 0;
     char* out = pool[slot];
     slot = (slot + 1u) & 15u;
     if (v != v) { strcpy(out, "NaN"); return out; }
@@ -334,8 +342,8 @@ static char* bl_fmt_f64(double v) {
 // Shortest round-tripping decimal for a float, matching Rust's f32 Display:
 // the round-trip is checked in f32 precision so 0.1_f32 prints "0.1".
 static char* bl_fmt_f32(float x) {
-    static char pool[16][512];
-    static unsigned slot = 0;
+    static BL_TLS char pool[16][512];
+    static BL_TLS unsigned slot = 0;
     char* out = pool[slot];
     slot = (slot + 1u) & 15u;
     if (x != x) { strcpy(out, "NaN"); return out; }
@@ -708,6 +716,27 @@ static BuildVecHandle build_hvec_new_i64(void) {
 }
 static void build_hvec_push_i64(BuildVecHandle h, int64_t val) { build_vec_push(h.inner, &val); }
 static int64_t build_hvec_get_i64(BuildVecHandle h, size_t index) { return *(int64_t*)build_vec_get(h.inner, index); }
+// `v.remove(i)` closes the gap at `i`; `v.insert(i, x)` pushes `x`, then
+// moves the last element to `i`. Both stop on an index past the length.
+static void build_vec_remove_at(BuildVecHandle h, size_t i) {
+    BuildVec* v = h.inner;
+    if (i >= v->len) bl_index_oob((long long)i, v->len);
+    memmove((char*)v->ptr + i * v->elem_size, (char*)v->ptr + (i + 1) * v->elem_size,
+            (v->len - i - 1) * v->elem_size);
+    v->len--;
+}
+static void build_vec_move_last_to(BuildVecHandle h, size_t i) {
+    BuildVec* v = h.inner;
+    size_t n = v->len, es = v->elem_size;
+    if (i > n - 1) bl_index_oob((long long)i, n - 1);
+    if (i == n - 1) return;
+    char* base = (char*)v->ptr;
+    void* t = malloc(es);
+    memcpy(t, base + (n - 1) * es, es);
+    memmove(base + (i + 1) * es, base + i * es, (n - 1 - i) * es);
+    memcpy(base + i * es, t, es);
+    free(t);
+}
 static int64_t build_hvec_pop_i64(BuildVecHandle h) {
     if (h.inner->len == 0) return 0;
     h.inner->len--;

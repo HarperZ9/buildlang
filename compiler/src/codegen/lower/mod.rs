@@ -18,6 +18,7 @@ mod c_abi;
 mod expr;
 mod format;
 mod macros;
+pub(crate) mod parallel;
 #[cfg(test)]
 mod tests;
 mod types;
@@ -489,6 +490,9 @@ impl<'ctx> MirLowerer<'ctx> {
             self.lower_item(item)?;
         }
 
+        let mut repr_c: Vec<Arc<str>> = self.repr_c_structs.iter().cloned().collect();
+        repr_c.sort();
+        self.module.module_mut().repr_c = repr_c;
         Ok(self.module.build())
     }
 

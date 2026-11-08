@@ -1,0 +1,19 @@
+// expect: BL0515
+// A body that writes a `static mut` through a helper it calls.
+static mut HITS: i64 = 0;
+
+fn bump() {
+    unsafe { HITS = HITS + 1; }
+}
+
+fn work(i: i64) -> i64 {
+    bump();
+    i * i
+}
+
+fn main() ~ Console {
+    let mut xs: Vec<i64> = Vec::new();
+    xs.push(4);
+    let ys = par_map(&xs, work);
+    println!("{}", ys[0]);
+}

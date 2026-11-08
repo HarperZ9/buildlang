@@ -1,0 +1,176 @@
+nbody r0 serial: kernel 1764 ms, wall 2.112 s, cpu 41.6->38.6 %
+nbody r0 par1: kernel 1781 ms, wall 2.098 s, cpu 53.4->45.8 %
+nbody r0 par8: kernel 320 ms, wall 0.643 s, cpu 38.1->45.8 %
+nbody r1 par8: kernel 312 ms, wall 0.637 s, cpu 49.3->40.7 %
+nbody r1 serial: kernel 1708 ms, wall 2.035 s, cpu 38.4->43.9 %
+nbody r1 par1: kernel 1812 ms, wall 2.120 s, cpu 46.3->38.6 %
+nbody r2 par8: kernel 318 ms, wall 0.627 s, cpu 42.0->46.4 %
+nbody r2 par1: kernel 1770 ms, wall 2.089 s, cpu 40.3->46.5 %
+nbody r2 serial: kernel 1730 ms, wall 2.082 s, cpu 44.2->43.2 %
+nbody r3 par1: kernel 1801 ms, wall 2.139 s, cpu 41.5->38.3 %
+nbody r3 par8: kernel 315 ms, wall 0.634 s, cpu 40.7->44.6 %
+nbody r3 serial: kernel 1710 ms, wall 2.059 s, cpu 38.0->35.1 %
+nbody r4 par1: kernel 1792 ms, wall 2.148 s, cpu 38.8->47.0 %
+nbody r4 serial: kernel 1957 ms, wall 2.314 s, cpu 56.4->55.3 %
+nbody r4 par8: kernel 352 ms, wall 0.711 s, cpu 59.3->52.4 %
+nbody r5 serial: kernel 1983 ms, wall 2.355 s, cpu 56.0->64.5 %
+nbody r5 par1: kernel 1934 ms, wall 2.288 s, cpu 62.0->53.8 %
+nbody r5 par8: kernel 344 ms, wall 0.683 s, cpu 54.2->54.7 %
+nbody r6 par1: kernel 1967 ms, wall 2.313 s, cpu 46.0->59.4 %
+nbody r6 par8: kernel 353 ms, wall 0.726 s, cpu 59.2->46.5 %
+nbody r6 serial: kernel 1874 ms, wall 2.219 s, cpu 46.8->49.0 %
+nbody r7 par8: kernel 357 ms, wall 0.727 s, cpu 47.2->47.0 %
+nbody r7 par1: kernel 1980 ms, wall 2.337 s, cpu 49.4->53.4 %
+nbody r7 serial: kernel 1898 ms, wall 2.262 s, cpu 49.0->73.1 %
+nbody r8 par8: kernel 355 ms, wall 0.705 s, cpu 66.8->50.2 %
+nbody r8 par1: kernel 1934 ms, wall 2.289 s, cpu 42.1->54.1 %
+nbody r8 serial: kernel 1926 ms, wall 2.270 s, cpu 50.3->49.2 %
+nbody r9 par8: kernel 347 ms, wall 0.702 s, cpu 53.2->49.9 %
+nbody r9 par1: kernel 1844 ms, wall 2.174 s, cpu 48.1->40.3 %
+nbody r9 serial: kernel 1706 ms, wall 2.033 s, cpu 31.7->40.1 %
+{
+ "rounds": 10,
+ "kernel_speedup": [
+  5.434411500449237,
+  5.3165266106442575,
+  5.517009032634032
+ ],
+ "wall_speedup": [
+  3.235025182142759,
+  3.1106493500723293,
+  3.2868532557531314
+ ],
+ "par1_over_serial_kernel": [
+  1.033162379626866,
+  0.9924635764542832,
+  1.0552581985958476
+ ],
+ "kernel_ms": {
+  "serial": [
+   1819.0,
+   1710.0,
+   1927.5
+  ],
+  "par1": [
+   1828.0,
+   1791.0,
+   1934.0
+  ],
+  "par8": [
+   345.5,
+   317.5,
+   353.5
+  ]
+ },
+ "cpu_percent_before": [
+  47.0,
+  42.05,
+  49.849999999999994
+ ],
+ "cpu_percent_after": [
+  46.75,
+  45.2,
+  50.2
+ ],
+ "distinct_stdout": [
+  "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6"
+ ],
+ "gpu_percent_before": [
+  96.0,
+  95.5,
+  96.0
+ ],
+ "byte_identical": true
+}
+shade r0 par1: kernel 1347 ms, wall 1.455 s, cpu 34.9->34.8 %
+shade r0 par8: kernel 221 ms, wall 0.300 s, cpu 35.1->35.6 %
+shade r0 serial: kernel 1423 ms, wall 1.496 s, cpu 43.1->40.4 %
+shade r1 par8: kernel 218 ms, wall 0.298 s, cpu 40.0->39.6 %
+shade r1 serial: kernel 1401 ms, wall 1.479 s, cpu 39.1->34.5 %
+shade r1 par1: kernel 1351 ms, wall 1.429 s, cpu 32.9->37.8 %
+shade r2 par8: kernel 212 ms, wall 0.285 s, cpu 33.3->36.1 %
+shade r2 serial: kernel 1434 ms, wall 1.519 s, cpu 40.3->43.5 %
+shade r2 par1: kernel 1376 ms, wall 1.456 s, cpu 43.1->41.2 %
+shade r3 par1: kernel 1339 ms, wall 1.415 s, cpu 61.1->36.5 %
+shade r3 par8: kernel 219 ms, wall 0.293 s, cpu 40.1->36.8 %
+shade r3 serial: kernel 1389 ms, wall 1.471 s, cpu 42.7->46.8 %
+shade r4 par1: kernel 1475 ms, wall 1.551 s, cpu 42.2->42.3 %
+shade r4 par8: kernel 231 ms, wall 0.311 s, cpu 37.8->38.4 %
+shade r4 serial: kernel 1423 ms, wall 1.505 s, cpu 46.4->40.1 %
+shade r5 serial: kernel 1434 ms, wall 1.511 s, cpu 42.3->35.4 %
+shade r5 par1: kernel 1226 ms, wall 1.304 s, cpu 31.7->40.5 %
+shade r5 par8: kernel 222 ms, wall 0.306 s, cpu 44.1->42.8 %
+shade r6 par1: kernel 1432 ms, wall 1.517 s, cpu 42.0->43.2 %
+shade r6 serial: kernel 1375 ms, wall 1.453 s, cpu 49.9->42.3 %
+shade r6 par8: kernel 220 ms, wall 0.297 s, cpu 52.2->44.6 %
+shade r7 par8: kernel 225 ms, wall 0.306 s, cpu 39.8->49.8 %
+shade r7 serial: kernel 1418 ms, wall 1.494 s, cpu 40.5->37.5 %
+shade r7 par1: kernel 1360 ms, wall 1.438 s, cpu 38.2->47.8 %
+shade r8 par1: kernel 1396 ms, wall 1.473 s, cpu 45.9->36.6 %
+shade r8 serial: kernel 1426 ms, wall 1.497 s, cpu 35.7->36.1 %
+shade r8 par8: kernel 215 ms, wall 0.296 s, cpu 39.5->38.6 %
+shade r9 par1: kernel 1295 ms, wall 1.369 s, cpu 33.8->35.6 %
+shade r9 par8: kernel 220 ms, wall 0.300 s, cpu 41.1->47.4 %
+shade r9 serial: kernel 1329 ms, wall 1.404 s, cpu 45.3->29.0 %
+{
+ "rounds": 10,
+ "kernel_speedup": [
+  6.3845356290059065,
+  6.231197691197691,
+  6.535736083342103
+ ],
+ "wall_speedup": [
+  4.951105004689131,
+  4.866100072009114,
+  5.028851170631841
+ ],
+ "par1_over_serial_kernel": [
+  0.964157043025423,
+  0.9530727018076215,
+  1.005479685294847
+ ],
+ "kernel_ms": {
+  "serial": [
+   1420.5,
+   1389.0,
+   1428.5
+  ],
+  "par1": [
+   1355.5,
+   1321.0,
+   1404.0
+  ],
+  "par8": [
+   220.0,
+   217.0,
+   223.0
+  ]
+ },
+ "cpu_percent_before": [
+  40.4,
+  39.1,
+  42.5
+ ],
+ "cpu_percent_after": [
+  39.1,
+  36.7,
+  41.75
+ ],
+ "distinct_stdout": [
+  "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572"
+ ],
+ "gpu_percent_before": [
+  96.0,
+  95.5,
+  96.0
+ ],
+ "byte_identical": true,
+ "full_image": {
+  "serial_full": "ffa54cf8edbf5d5ba3d86f18f72fe885a787b2a9a2253e23393ba2e1f4808333",
+  "par_full": "ffa54cf8edbf5d5ba3d86f18f72fe885a787b2a9a2253e23393ba2e1f4808333",
+  "bytes": 70340458,
+  "identical": true
+ }
+}
+wrote results\bench-20261107-195507.json
+EXIT 0

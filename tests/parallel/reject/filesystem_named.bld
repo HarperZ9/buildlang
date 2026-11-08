@@ -1,0 +1,13 @@
+// expect: BL0406
+// A parallel body that writes a file.
+fn save(x: f64) -> f64 ~ FileSystem {
+    write_file("out.txt", "x");
+    x + 1.0
+}
+
+fn main() ~ Console + FileSystem {
+    let mut xs: Vec<f64> = Vec::new();
+    xs.push(1.0);
+    let ys = par_map(&xs, save);
+    println!("{}", ys[0]);
+}
