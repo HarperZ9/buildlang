@@ -2657,6 +2657,11 @@ impl CBackend {
         let array_ret_out = self.array_ret_out_param(&func.sig.ret);
         let ret_type = if array_ret_out.is_some() {
             "void".to_string()
+        } else if func.name.as_ref() == "main" && matches!(func.sig.ret, MirType::Void) {
+            // C's `main` returns `int`. A MIR `main` with no return type wrote
+            // `void main`, and its early `return 0;` is an error under GCC 14
+            // (-Wreturn-mismatch), which failed CI on ubuntu-latest.
+            "int".to_string()
         } else {
             self.type_to_c(&func.sig.ret)
         };
@@ -5919,6 +5924,9 @@ mod tests {
     fn generated_c_runs_function_style_prints_on_requested_streams() {
         let module = function_style_print_mir_module();
         let c = generate_c_from_mir(&module);
+        // The fixture's `main` has no return type; C's `main` still returns int.
+        assert!(c.contains("int main(int argc, char** argv)"), "{c}");
+        assert!(!c.contains("void main("), "{c}");
         assert_c_run_streams(
             "function_style_print_streams",
             &c,
