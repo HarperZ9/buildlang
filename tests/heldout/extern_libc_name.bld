@@ -1,0 +1,29 @@
+// An `extern "C"` function named like a C library function (`strtod`) calls
+// that function. On 1.10.0 the call was renamed `_strtod` and refused (BL0901).
+extern "C" {
+    fn strtod(p: *const u8, end: *mut *mut u8) -> f64;
+    fn malloc(n: usize) -> *mut u8;
+    fn free(p: *mut u8);
+}
+
+fn c_text(s: str) -> *mut u8 ~ Foreign {
+    let n = s.len();
+    let p = unsafe { malloc(n + 1) };
+    let buf = unsafe { slice::from_raw_parts_mut(p, n + 1) };
+    let mut i: usize = 0;
+    for c in s.chars() {
+        buf[i] = c as u8;
+        i = i + 1;
+    }
+    buf[n] = 0;
+    p
+}
+
+fn main() ~ Console + Foreign {
+    let p = c_text("2.5e1xyz");
+    let mut end: *mut u8 = 0 as *mut u8;
+    let x = unsafe { strtod(p as *const u8, &mut end as *mut *mut u8) };
+    let used = end as usize - p as usize;
+    unsafe { free(p) };
+    println!("{} {}", x, used);
+}

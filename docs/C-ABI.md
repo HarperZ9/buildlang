@@ -126,10 +126,45 @@ cc host.c -I target/debug target/debug/libmain.a $(cat target/debug/main.link) -
 The driver prints `sizeof(Fighter)` and a nested field written through a pointer, so a layout
 disagreement between the header and the library changes the output.
 
+## Keep state behind a handle
+
+A library with state hands the host an opaque handle: a raw pointer to a struct without
+`#[repr(C)]`. The struct may hold anything (`str`, `Vec`, maps), because the host never sees its
+fields. The header forward-declares it, so C code can hold and pass the pointer and nothing else:
+
+```text
+struct Counter { name: str, hits: Vec<i64> }
+
+extern "C" fn ct_new() -> *mut Counter {
+    let b = Box::new(Counter { name: "c", hits: Vec::new() });
+    b as *mut Counter
+}
+
+extern "C" fn ct_hit(c: *mut Counter, n: i64) -> i64 {
+    unsafe {
+        (*c).hits.push(n);
+        (*c).hits.len() as i64
+    }
+}
+```
+
+The header says `typedef struct Counter Counter;` and declares `Counter* ct_new(void);`. A struct
+passed by value still needs `#[repr(C)]`.
+
+Strings cross as NUL-terminated bytes. Declare the C library functions in an `extern "C"` block
+(`strlen`, `malloc`, `free`, and any other, `strtod` included) and copy: read `strlen(p)` bytes
+with `slice::from_raw_parts`, and hand text out as a `malloc` buffer with a 0 byte at the end that
+the handle frees on its next call. A `str` cannot be cast to a pointer (BL0383): its bytes need not
+end in NUL.
+
+`examples/lowwater-rules` is a full module written this way: raw-native's Low Water rules behind
+`rules_c.h`, with a `static mut` for the last error. `compiler/tests/c_abi_rules.rs` links it.
+
 ## Limits
 
 - One library per project, named `main`. Symbol names are the function names, so pick a prefix.
-- Exports cannot take or return heap data such as `str` or `Vec`; the check refuses them.
+- Exports cannot take or return heap data such as `str` or `Vec` by value; the check refuses them.
+  Put it in a struct behind an opaque handle instead.
 - Exports cannot take or return a slice; pass a pointer and a length (see "Pass arrays").
 - A slice made by `slice::from_raw_parts` lives in the function that made it. Do not return it.
 

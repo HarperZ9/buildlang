@@ -1,0 +1,8 @@
+// A `str` need not end in NUL and has no C layout. On 1.10.0 this cast passed
+// `buildc check` and then failed in the C compiler ("cannot convert to a
+// pointer type").
+fn main() ~ Console {
+    let p = "2.5" as *const u8;
+    let n = p as usize;
+    println!("{}", n > 0);
+}

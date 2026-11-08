@@ -492,7 +492,7 @@ Assert: `assert`, `assert_eq`
 
 ### 7.4 Vectors and strings in practice
 
-A `let` bound to `vec_new()` with no annotation takes its element type from the first value pushed into it (`v.push(x)` or `vec_push(&mut v, x)`); a later push of another type is a check error (BL0901). With no push before the vector is used it holds `i32`, so annotate it there: `let mut v: Vec<str> = vec_new();`. The free functions accept the vector by value or borrowed (`vec_push(&mut v, x)`, `vec_len(&v)`), and the method forms (`v.push(x)`, `v.len()`, `v[i]`) work the same way. Strings split with `split`, iterate with `chars`, and compare with `<` and `==`. `s.substring(start, len)` takes a byte offset and a length: `"hello".substring(1, 3)` is `"ell"`. The C backend has no `.parse()` yet; the check rejects it with BL0901, so convert digits by hand:
+A `let` bound to `vec_new()` with no annotation takes its element type from the first value pushed into it (`v.push(x)` or `vec_push(&mut v, x)`); a later push of another type is a check error (BL0901). With no push before the vector is used it holds `i32`, so annotate it there: `let mut v: Vec<str> = vec_new();`. The free functions accept the vector by value or borrowed (`vec_push(&mut v, x)`, `vec_len(&v)`), and the method forms (`v.push(x)`, `v.len()`, `v[i]`) work the same way, on a vector held directly or through a `&Vec<T>` or `&mut Vec<T>` parameter. `v.insert(i, x)` puts `x` at index `i` and `v.remove(i)` takes the element at `i` out and returns it; both stop the program on an index past the length. `s.push(c)` appends a char to a string and `s.push_str(t)` appends a string. Strings split with `split`, iterate with `chars`, and compare with `<` and `==`. `s.substring(start, len)` takes a byte offset and a length: `"hello".substring(1, 3)` is `"ell"`. The C backend has no `.parse()` yet; the check rejects it with BL0901, so convert digits by hand:
 
 ```build
 fn parse_int(s: str) -> i64 {
@@ -655,7 +655,7 @@ References compile to pointers. Structs compile to C structs. Enums compile to t
 
 ### 8.3 C ABI export
 
-An `extern "C" fn` definition exports a function under its own name with the C calling convention. Its parameters and return type must have a C layout: integers, floats, `bool`, raw pointers, and structs marked `#[repr(C)]` whose fields are those types or fixed arrays of them. Any other type in an export signature, such as `str`, `Vec`, an enum or a struct without `#[repr(C)]`, is refused at check time with BL0901 and a fix.
+An `extern "C" fn` definition exports a function under its own name with the C calling convention. Its parameters and return type must have a C layout: integers, floats, `bool`, raw pointers, and structs marked `#[repr(C)]` whose fields are those types or fixed arrays of them. Any other type in an export signature, such as `str`, `Vec`, an enum or a struct without `#[repr(C)]` passed by value, is refused at check time with BL0901 and a fix. A raw pointer to a struct without `#[repr(C)]` is an opaque handle: allowed, and forward-declared in the header with no fields, so a library can keep state of any type behind it.
 
 ```build name=c-abi-export
 #[repr(C)]
@@ -678,6 +678,33 @@ extern "C" fn lw_shift(v: *mut Vec2, dx: f64) {
 ```build fail=BL0901
 extern "C" fn lw_name(s: str) -> i32 {
     0
+}
+```
+
+```build name=c-abi-handle
+struct Counter {
+    name: str,
+    hits: Vec<i64>,
+}
+
+extern "C" fn ct_new() -> *mut Counter {
+    let b = Box::new(Counter { name: "c", hits: Vec::new() });
+    b as *mut Counter
+}
+
+extern "C" fn ct_hit(c: *mut Counter, n: i64) -> i64 {
+    unsafe {
+        (*c).hits.push(n);
+        (*c).hits.len() as i64
+    }
+}
+```
+
+A `str` has no C layout and need not end in NUL, so a cast from `str` to a pointer or a number is refused with BL0383. Text crosses as NUL-terminated bytes copied by the program (see `docs/C-ABI.md`).
+
+```build fail=BL0383
+fn main() {
+    let p = "text" as *const u8;
 }
 ```
 
