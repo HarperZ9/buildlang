@@ -168,7 +168,13 @@ fn hoisting_the_effect_out_gives_a_program_that_prints_the_serial_bytes() {
     std::fs::create_dir_all(&dir).expect("temp dir");
     let mut failures = Vec::new();
     for (name, want) in cases {
-        let file = repo_root().join("tests/parallel/reject").join(name);
+        // Byte offsets in the JSON report index the source after CRLF is
+        // folded to LF, so the edits are applied to an LF copy (a Windows
+        // checkout has CRLF).
+        let original = repo_root().join("tests/parallel/reject").join(name);
+        let file = dir.join(format!("lf-{name}"));
+        let text = std::fs::read_to_string(&original).expect("program");
+        std::fs::write(&file, text.replace("\r\n", "\n")).expect("write LF copy");
         let fixed = dir.join(name);
         std::fs::write(&fixed, apply_hoist(&file)).expect("write fixed program");
         for threads in [1, 3] {
