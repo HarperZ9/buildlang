@@ -240,6 +240,23 @@ const C_STDLIB: &[&str] = &[
     "_isatty",
     "write",
     "read",
+    // Thread pool for par_for / par_map (M5): Win32 and POSIX threads
+    "CreateThread",
+    "CloseHandle",
+    "GetSystemInfo",
+    "InitializeCriticalSection",
+    "InitializeConditionVariable",
+    "EnterCriticalSection",
+    "LeaveCriticalSection",
+    "SleepConditionVariableCS",
+    "WakeAllConditionVariable",
+    "pthread_create",
+    "pthread_detach",
+    "pthread_mutex_lock",
+    "pthread_mutex_unlock",
+    "pthread_cond_wait",
+    "pthread_cond_broadcast",
+    "sysconf",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

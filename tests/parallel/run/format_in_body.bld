@@ -1,0 +1,25 @@
+// A parallel body that formats numbers. The runtime's formatters keep their
+// rotating buffers per thread, so concurrent bodies cannot overwrite each
+// other's text.
+struct Ctx { scale: f64 }
+
+fn label(c: &Ctx, i: i64) -> str {
+    let x = (i as f64) * c.scale;
+    format!("{}:{}:{}", i, x.to_string(), (x * 3.0).to_string())
+}
+
+fn main() ~ Console {
+    let c = Ctx { scale: 0.1 };
+    let ls = par_for(2000, &c, label);
+    let mut bad = 0;
+    let mut i = 0;
+    while i < 2000 {
+        let x = (i as f64) * 0.1;
+        let want = format!("{}:{}:{}", i, x.to_string(), (x * 3.0).to_string());
+        if ls[i] != want {
+            bad = bad + 1;
+        }
+        i = i + 1;
+    }
+    println!("{} {} {}", ls[7], ls[1999], bad);
+}

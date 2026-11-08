@@ -1,0 +1,14 @@
+// expect: BL0406
+// A parallel body that prints. The fix hoists the print into a serial loop.
+struct Scene { scale: f64 }
+
+fn shade(s: &Scene, i: i64) -> f64 ~ Console {
+    println!("pixel {}", i);
+    (i as f64) * s.scale
+}
+
+fn main() ~ Console {
+    let scene = Scene { scale: 0.5 };
+    let img = par_for(4, &scene, shade);
+    println!("{}", img[3]);
+}

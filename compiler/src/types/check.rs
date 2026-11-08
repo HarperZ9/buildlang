@@ -205,6 +205,11 @@ impl<'ctx> TypeChecker<'ctx> {
         for item in &module.items {
             self.check_item(item);
         }
+
+        // M5: a `par_for` / `par_map` body must have an empty effect row and
+        // no way to write shared state.
+        self.errors
+            .extend(super::parallel::parallel_body_errors(module));
     }
 
     /// Register built-in vector and matrix struct types (vec2, vec3, vec4, mat4)
@@ -4061,7 +4066,10 @@ mod tests {
 /// edit. With no row, `~ A + B ` goes just before the body's `{`; with a row,
 /// ` + A + B` goes after its last entry. The fix widens authority, so the
 /// diagnostics layer never marks it MachineApplicable.
-fn effect_row_fix(f: &ast::FnDef, missing: &[String]) -> Option<crate::diagnostics::Fix> {
+pub(super) fn effect_row_fix(
+    f: &ast::FnDef,
+    missing: &[String],
+) -> Option<crate::diagnostics::Fix> {
     if missing.is_empty() {
         return None;
     }

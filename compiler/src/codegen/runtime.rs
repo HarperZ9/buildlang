@@ -221,6 +221,14 @@ static unsigned __int128 bl_urem_u128(unsigned __int128 a, unsigned __int128 b){
 static intptr_t bl_irem_isize(intptr_t a, intptr_t b){ if(b==0) bl_arith_panic("attempt to calculate the remainder with a divisor of zero"); if(a==INTPTR_MIN && b==-1) bl_arith_panic("attempt to calculate the remainder with overflow"); return a%b; }
 static uintptr_t bl_urem_usize(uintptr_t a, uintptr_t b){ if(b==0) bl_arith_panic("attempt to calculate the remainder with a divisor of zero"); return a%b; }
 
+// Per-thread storage for the formatters' rotating buffers: a par_for /
+// par_map body may format numbers on several threads at once (M5).
+#if defined(_MSC_VER) && !defined(__clang__)
+#define BL_TLS __declspec(thread)
+#else
+#define BL_TLS __thread
+#endif
+
 // Decimal formatting for 128-bit integers. printf has no standard format
 // specifier for __int128. The `_into` helpers write into caller-owned
 // storage so variadic calls can safely pass any number of i128/u128 arguments.
@@ -261,8 +269,8 @@ static void bl_fmt_i128_into(char* out, __int128 v) {
 }
 
 static char* bl_fmt_u128(unsigned __int128 v) {
-    static char pool[16][64];
-    static unsigned slot = 0;
+    static BL_TLS char pool[16][64];
+    static BL_TLS unsigned slot = 0;
     char* out = pool[slot];
     slot = (slot + 1u) & 15u;
     bl_fmt_u128_into(out, v);
@@ -270,8 +278,8 @@ static char* bl_fmt_u128(unsigned __int128 v) {
 }
 
 static char* bl_fmt_i128(__int128 v) {
-    static char pool[16][64];
-    static unsigned slot = 0;
+    static BL_TLS char pool[16][64];
+    static BL_TLS unsigned slot = 0;
     char* out = pool[slot];
     slot = (slot + 1u) & 15u;
     bl_fmt_i128_into(out, v);
@@ -311,8 +319,8 @@ static void bl_sci_to_plain(const char* sci, char* out) {
 // signed zero. Returns a pointer into a small rotating pool of static buffers
 // so several float arguments in one printf keep distinct text.
 static char* bl_fmt_f64(double v) {
-    static char pool[16][512];
-    static unsigned slot = 0;
+    static BL_TLS char pool[16][512];
+    static BL_TLS unsigned slot = 0;
     char* out = pool[slot];
     slot = (slot + 1u) & 15u;
     if (v != v) { strcpy(out, "NaN"); return out; }
@@ -334,8 +342,8 @@ static char* bl_fmt_f64(double v) {
 // Shortest round-tripping decimal for a float, matching Rust's f32 Display:
 // the round-trip is checked in f32 precision so 0.1_f32 prints "0.1".
 static char* bl_fmt_f32(float x) {
-    static char pool[16][512];
-    static unsigned slot = 0;
+    static BL_TLS char pool[16][512];
+    static BL_TLS unsigned slot = 0;
     char* out = pool[slot];
     slot = (slot + 1u) & 15u;
     if (x != x) { strcpy(out, "NaN"); return out; }
