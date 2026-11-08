@@ -1,0 +1,218 @@
+// =============================================================================
+// canonical-record: ECMAScript Number-to-String for a finite double
+// =============================================================================
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright 2026 Zain Dana Harper.
+// =============================================================================
+//
+// RFC 8785 section 3.2.2.3: the shortest decimal that reads back as the same
+// double, and of two such the one closer to the double, an exact tie going to
+// the even digit. Python's repr() makes the same choice. The double's exact
+// decimal expansion is computed with a small bignum (base 10^9 limbs), so
+// ties are decided on exact digits; candidates are checked by reading them
+// back with parse_float. The layout (plain, fraction or exponent) follows
+// number() in the Python module.
+
+/// a * m + carry over base-10^9 limbs (little-endian).
+fn cr_big_mul(a: Vec<u64>, m: u64) -> Vec<u64> {
+    let mut out: Vec<u64> = Vec::new();
+    let mut carry: u64 = 0;
+    let mut k: usize = 0;
+    while k < vec_len(a) {
+        let t = a[k] * m + carry;
+        out.push(t % 1000000000_u64);
+        carry = t / 1000000000_u64;
+        k = k + 1;
+    }
+    while carry > 0 {
+        out.push(carry % 1000000000_u64);
+        carry = carry / 1000000000_u64;
+    }
+    out
+}
+
+/// Decimal digits of a bignum, no leading zeros.
+fn cr_big_text(a: Vec<u64>) -> str {
+    let n = vec_len(a);
+    let mut s = format!("{}", a[n - 1]);
+    let mut k = n - 1;
+    while k > 0 {
+        k = k - 1;
+        let limb = format!("{}", a[k]);
+        let mut pad = 9 - limb.len();
+        while pad > 0 {
+            s.push_str("0");
+            pad = pad - 1;
+        }
+        s.push_str(limb);
+    }
+    s
+}
+
+/// Exact decimal expansion of a positive finite double:
+/// [digits without trailing zeros, point], value = 0.digits * 10^point.
+struct CrDigits {
+    digits: str,
+    point: i64,
+}
+
+fn cr_exact_digits(f: f64) -> CrDigits {
+    let bits = f.to_bits();
+    let field = ((bits >> 52_u64) & 2047_u64) as i64;
+    let mut mant = bits & 4503599627370495_u64;
+    let mut e2: i64 = -1074;
+    if field > 0 {
+        mant = mant | 4503599627370496_u64;
+        e2 = field - 1075;
+    }
+    let mut big: Vec<u64> = Vec::new();
+    big.push(mant % 1000000000_u64);
+    big.push(mant / 1000000000_u64);
+    let mut k: i64 = 0;
+    let mut steps = e2;
+    let mut factor: u64 = 2;
+    if e2 < 0 {
+        steps = -e2;
+        factor = 5;
+    }
+    while k < steps {
+        big = cr_big_mul(big, factor);
+        k = k + 1;
+    }
+    let mut text = cr_big_text(cr_big_trim(big));
+    let mut point = text.len() as i64;
+    if e2 < 0 {
+        point = point + e2;
+    }
+    let mut end = text.len();
+    while end > 1 && text.substring(end - 1, 1) == "0" {
+        end = end - 1;
+    }
+    text = text.substring(0, end);
+    CrDigits { digits: text, point: point }
+}
+
+fn cr_big_trim(a: Vec<u64>) -> Vec<u64> {
+    let mut n = vec_len(a);
+    while n > 1 && a[n - 1] == 0 {
+        n = n - 1;
+    }
+    let mut out: Vec<u64> = Vec::new();
+    let mut k: usize = 0;
+    while k < n {
+        out.push(a[k]);
+        k = k + 1;
+    }
+    out
+}
+
+/// digits + 1 in the last place, as [digits, carried] (carried = 1 when the
+/// result is one digit longer, e.g. 999 -> 1000).
+fn cr_digits_inc(d: str) -> CrDigits {
+    let mut k = d.len();
+    let mut tail = "";
+    while k > 0 {
+        let c = d.as_bytes()[k - 1];
+        if c != 57_u8 {
+            let up = format!("{}{}", d.substring(0, k - 1), ((c as u32) + 1_u32) as char);
+            return CrDigits { digits: format!("{}{}", up, tail), point: 0 };
+        }
+        tail.push_str("0");
+        k = k - 1;
+    }
+    CrDigits { digits: format!("1{}", tail), point: 1 }
+}
+
+fn cr_strip_zeros(d: str) -> str {
+    let mut end = d.len();
+    while end > 1 && d.substring(end - 1, 1) == "0" {
+        end = end - 1;
+    }
+    d.substring(0, end)
+}
+
+/// True when 0.digits * 10^point reads back as `f`.
+fn cr_reads_back(digits: str, point: i64, f: f64) -> bool {
+    let text = format!("{}e{}", digits, point - (digits.len() as i64));
+    text.parse_float().to_bits() == f.to_bits()
+}
+
+/// Shortest round-trip digits of a positive finite double, closest on ties.
+fn cr_shortest(f: f64) -> CrDigits {
+    let ex = cr_exact_digits(f);
+    let s = ex.digits;
+    let mut k: usize = 1;
+    while k < s.len() {
+        let low = s.substring(0, k);
+        let inc = cr_digits_inc(low);
+        let high = inc.digits;
+        let hpoint = ex.point + inc.point;
+        let low_ok = cr_reads_back(low, ex.point, f);
+        let high_ok = cr_reads_back(high, hpoint, f);
+        let mut take_high = high_ok && !low_ok;
+        if low_ok && high_ok {
+            let rest = s.substring(k, s.len() - k);
+            let half = rest.as_bytes()[0];
+            if half > 53_u8 || (half == 53_u8 && rest.len() > 1) {
+                take_high = true;
+            } else if half == 53_u8 {
+                // An exact tie goes to the even last digit.
+                take_high = (low.as_bytes()[k - 1] - 48_u8) % 2_u8 == 1_u8;
+            }
+        }
+        if take_high {
+            return CrDigits { digits: cr_strip_zeros(high), point: hpoint };
+        }
+        if low_ok {
+            return CrDigits { digits: cr_strip_zeros(low), point: ex.point };
+        }
+        k = k + 1;
+    }
+    ex
+}
+
+fn cr_zeros(n: i64) -> str {
+    let mut s = "";
+    let mut k: i64 = 0;
+    while k < n {
+        s.push_str("0");
+        k = k + 1;
+    }
+    s
+}
+
+/// number() in the Python module for a finite double.
+fn cr_es_number(f: f64) -> str {
+    if f == 0.0 {
+        return "0";
+    }
+    if f < 0.0 {
+        return format!("-{}", cr_es_number(0.0 - f));
+    }
+    let sd = cr_shortest(f);
+    let digits = sd.digits;
+    let point = sd.point;
+    let k = digits.len() as i64;
+    if k <= point && point <= 21 {
+        return format!("{}{}", digits, cr_zeros(point - k));
+    }
+    if 0 < point && point <= 21 {
+        let p = point as usize;
+        return format!("{}.{}", digits.substring(0, p), digits.substring(p, digits.len() - p));
+    }
+    if -6 < point && point <= 0 {
+        return format!("0.{}{}", cr_zeros(0 - point), digits);
+    }
+    let e = point - 1;
+    let mut mant = digits.substring(0, 1);
+    if k > 1 {
+        mant = format!("{}.{}", mant, digits.substring(1, digits.len() - 1));
+    }
+    let mut sign = "+";
+    let mut mag = e;
+    if e < 0 {
+        sign = "-";
+        mag = 0 - e;
+    }
+    format!("{}e{}{}", mant, sign, mag)
+}

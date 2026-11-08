@@ -1,0 +1,1 @@
+no canonical form: NaN has no canonical form

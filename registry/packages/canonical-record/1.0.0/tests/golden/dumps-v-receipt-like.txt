@@ -1,0 +1,1 @@
+{"inputs":{"x":"ab12"},"kind":"kernel-receipt","n":3,"sealed":false}

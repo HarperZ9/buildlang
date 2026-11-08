@@ -1,0 +1,182 @@
+// =============================================================================
+// repo-art: number and text formatting shared by the flow and card renderers
+// =============================================================================
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2022-2026 Zain Dana Harper.
+// =============================================================================
+//
+// Port of `_num` and `_esc` from BuildLang's tools/repo_art.py, plus the
+// string helpers Python gives the originals for free (str.split, str.upper,
+// f"{n:02d}", and the float sum() of CPython 3.12).
+//
+// `_num` is f"{v:.2f}" with trailing zeros cut. Python rounds the exact binary
+// value of v, half-to-even on an exact tie. The host printf behind `{:.2}`
+// rounds 0.125 to 0.13 under MinGW, so this file rounds by integer arithmetic
+// on the IEEE-754 bits instead and never calls printf for a fraction.
+
+/// Round |v| * 100 to the nearest integer, ties to even, from v's exact bits.
+fn ra_round_hundredths(v: f64) -> u64 {
+    let bits: u64 = v.to_bits();
+    let ex: i64 = ((bits >> 52_u64) & 2047_u64) as i64;
+    let frac: u64 = bits & 4503599627370495_u64;
+    let mut m: u64 = frac;
+    let mut e: i64 = -1074;
+    if ex != 0 {
+        m = frac | 4503599627370496_u64;
+        e = ex - 1075;
+    }
+    if m == 0_u64 {
+        return 0_u64;
+    }
+    // |v| = m * 2^e with m < 2^53, so m * 100 < 2^60 fits in a u64.
+    let p: u64 = m * 100_u64;
+    if e >= 0 {
+        // An integer already. Values this renderer draws stay far below 2^63.
+        return p << (e as u64);
+    }
+    let k: i64 = 0 - e;
+    if k >= 61 {
+        // p < 2^60 <= 2^(k-1): the scaled value is below one half.
+        return 0_u64;
+    }
+    let ku: u64 = k as u64;
+    let mut q: u64 = p >> ku;
+    let r: u64 = p & ((1_u64 << ku) - 1_u64);
+    let half: u64 = 1_u64 << (ku - 1_u64);
+    if r > half || (r == half && (q & 1_u64) == 1_u64) {
+        q = q + 1_u64;
+    }
+    q
+}
+
+/// `_num`: two decimal places, correctly rounded, trailing zeros removed.
+fn ra_num(v: f64) -> str {
+    let bits: u64 = v.to_bits();
+    let neg = (bits >> 63_u64) == 1_u64;
+    let q = ra_round_hundredths(v);
+    let whole = q / 100_u64;
+    let cents = q % 100_u64;
+    let mut out = format!("{}", whole);
+    if cents != 0_u64 {
+        if cents % 10_u64 == 0_u64 {
+            out = format!("{}.{}", whole, cents / 10_u64);
+        } else if cents < 10_u64 {
+            out = format!("{}.0{}", whole, cents);
+        } else {
+            out = format!("{}.{}", whole, cents);
+        }
+    }
+    if neg {
+        // Python keeps the sign of a negative that rounds to zero: "-0".
+        return format!("-{}", out);
+    }
+    out
+}
+
+/// `_num` of an integer: the integer itself.
+fn ra_int(n: i64) -> str {
+    format!("{}", n)
+}
+
+/// f"{n:02d}" for a non-negative n.
+fn ra_pad2(n: i64) -> str {
+    if n < 10 {
+        return format!("0{}", n);
+    }
+    format!("{}", n)
+}
+
+/// `_esc`: the four characters an SVG attribute or text node cannot hold raw.
+fn ra_esc(text: str) -> str {
+    text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
+}
+
+/// str.upper() for ASCII text. Bytes outside a-z pass through unchanged, so a
+/// non-ASCII letter stays lower case where Python would upper-case it.
+fn ra_upper(text: str) -> str {
+    let caps = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let b = text.as_bytes();
+    let n = text.len();
+    let mut out = "";
+    let mut i: usize = 0;
+    while i < n {
+        let c = b[i];
+        if c >= 97 && c <= 122 {
+            out = out + caps.substring((c - 97) as usize, 1);
+        } else {
+            out = out + text.substring(i, 1);
+        }
+        i = i + 1;
+    }
+    out
+}
+
+fn ra_is_space(c: u8) -> bool {
+    c == 32 || c == 9 || c == 10 || c == 11 || c == 12 || c == 13 || c == 28 || c == 29 || c == 30 || c == 31
+}
+
+/// str.split() with no argument: the runs of non-whitespace, in order.
+/// ASCII whitespace only; Python also splits on Unicode spaces.
+fn ra_words(text: str) -> Vec<str> {
+    let b = text.as_bytes();
+    let n = text.len();
+    let mut out: Vec<str> = Vec::new();
+    let mut i: usize = 0;
+    while i < n {
+        while i < n && ra_is_space(b[i]) {
+            i = i + 1;
+        }
+        let start = i;
+        while i < n && !ra_is_space(b[i]) {
+            i = i + 1;
+        }
+        if i > start {
+            out.push(text.substring(start, i - start));
+        }
+    }
+    out
+}
+
+/// " ".join(words)
+fn ra_join_space(words: Vec<str>) -> str {
+    let mut out = "";
+    let mut i: usize = 0;
+    while i < vec_len(words) {
+        if i > 0 {
+            out = out + " ";
+        }
+        out = out + words[i];
+        i = i + 1;
+    }
+    out
+}
+
+fn ra_fabs(x: f64) -> f64 {
+    if x < 0.0 {
+        return 0.0 - x;
+    }
+    x
+}
+
+/// sum() over floats as CPython 3.12 computes it: Neumaier's compensated sum,
+/// with the compensation added once at the end when it is non-zero.
+fn ra_fsum(xs: Vec<f64>) -> f64 {
+    let mut f: f64 = 0.0;
+    let mut c: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < vec_len(xs) {
+        let x = xs[i];
+        let t = f + x;
+        if ra_fabs(f) >= ra_fabs(x) {
+            c = c + ((f - t) + x);
+        } else {
+            c = c + ((x - t) + f);
+        }
+        f = t;
+        i = i + 1;
+    }
+    if c != 0.0 {
+        f = f + c;
+    }
+    f
+}

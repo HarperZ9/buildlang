@@ -1,0 +1,1 @@
+no canonical form: non-finite value in a float array

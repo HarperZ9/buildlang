@@ -1,0 +1,299 @@
+// =============================================================================
+// color: colour space conversions
+// =============================================================================
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright 2026 Zain Dana Harper.
+// =============================================================================
+//
+// A BuildLang port of build_color/spaces.py (sRGB, XYZ, xyY, CIELAB, LCh,
+// Oklab, Oklch). Each function works on one colour and mirrors the Python
+// operation order term by term, so the results match the numpy original to
+// a few units in the last place. Matrix-vector products sum left to right.
+//
+// Python computes the inverse Oklab matrices with np.linalg.inv (LAPACK LU).
+// Here color_mat3_inv computes them by the adjugate, which agrees with LAPACK
+// to rounding; the differential bound in tests/cases.txt covers the gap.
+
+struct ColorV3 {
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+struct ColorM3 {
+    m00: f64, m01: f64, m02: f64,
+    m10: f64, m11: f64, m12: f64,
+    m20: f64, m21: f64, m22: f64,
+}
+
+fn color_v3(x: f64, y: f64, z: f64) -> ColorV3 {
+    ColorV3 { x: x, y: y, z: z }
+}
+
+fn color_m3(m00: f64, m01: f64, m02: f64, m10: f64, m11: f64, m12: f64, m20: f64, m21: f64, m22: f64) -> ColorM3 {
+    ColorM3 { m00: m00, m01: m01, m02: m02, m10: m10, m11: m11, m12: m12, m20: m20, m21: m21, m22: m22 }
+}
+
+fn color_mat_vec(m: ColorM3, v: ColorV3) -> ColorV3 {
+    color_v3(
+        m.m00 * v.x + m.m01 * v.y + m.m02 * v.z,
+        m.m10 * v.x + m.m11 * v.y + m.m12 * v.z,
+        m.m20 * v.x + m.m21 * v.y + m.m22 * v.z,
+    )
+}
+
+fn color_mat3_inv(m: ColorM3) -> ColorM3 {
+    let c00 = m.m11 * m.m22 - m.m12 * m.m21;
+    let c01 = m.m12 * m.m20 - m.m10 * m.m22;
+    let c02 = m.m10 * m.m21 - m.m11 * m.m20;
+    let det = m.m00 * c00 + m.m01 * c01 + m.m02 * c02;
+    color_m3(
+        c00 / det, (m.m02 * m.m21 - m.m01 * m.m22) / det, (m.m01 * m.m12 - m.m02 * m.m11) / det,
+        c01 / det, (m.m00 * m.m22 - m.m02 * m.m20) / det, (m.m02 * m.m10 - m.m00 * m.m12) / det,
+        c02 / det, (m.m01 * m.m20 - m.m00 * m.m21) / det, (m.m00 * m.m11 - m.m01 * m.m10) / det,
+    )
+}
+
+// numpy `%` on floats is floored (result takes the divisor's sign);
+// BuildLang `%` is C fmod. This is numpy's npy_divmod remainder.
+fn color_floor_mod(x: f64, m: f64) -> f64 {
+    let mut r = x % m;
+    if r != 0.0 {
+        if (m < 0.0) != (r < 0.0) {
+            r = r + m;
+        }
+    } else {
+        r = 0.0;
+        if m < 0.0 {
+            r = -0.0;
+        }
+    }
+    r
+}
+
+// np.degrees and np.radians multiply by a precomputed constant.
+fn color_degrees(x: f64) -> f64 {
+    x * (180.0 / 3.141592653589793)
+}
+
+fn color_radians(x: f64) -> f64 {
+    x * (3.141592653589793 / 180.0)
+}
+
+fn color_srgb_to_xyz_m() -> ColorM3 {
+    color_m3(0.4124564, 0.3575761, 0.1804375, 0.2126729, 0.7151522, 0.0721750, 0.0193339, 0.1191920, 0.9503041)
+}
+
+fn color_xyz_to_srgb_m() -> ColorM3 {
+    color_m3(3.2404542, -1.5371385, -0.4985314, -0.9692660, 1.8760108, 0.0415560, 0.0556434, -0.2040259, 1.0572252)
+}
+
+fn color_oklab_m1() -> ColorM3 {
+    color_m3(
+        0.4122214708, 0.5363325363, 0.0514459929,
+        0.2119034982, 0.6806995451, 0.1073969566,
+        0.0883024619, 0.2817188376, 0.6299787005,
+    )
+}
+
+fn color_oklab_m2() -> ColorM3 {
+    color_m3(
+        0.2104542553, 0.7936177850, -0.0040720468,
+        1.9779984951, -2.4285922050, 0.4505937099,
+        0.0259040371, 0.7827717662, -0.8086757660,
+    )
+}
+
+fn color_d50() -> ColorV3 {
+    color_v3(0.96422, 1.0, 0.82521)
+}
+
+fn color_d65() -> ColorV3 {
+    color_v3(0.95047, 1.0, 1.08883)
+}
+
+// ---- sRGB gamma -------------------------------------------------------------
+
+fn color_srgb_to_linear1(s: f64) -> f64 {
+    if s <= 0.04045 {
+        return s / 12.92;
+    }
+    ((s + 0.055) / 1.055).powf(2.4)
+}
+
+fn color_linear_to_srgb1(c: f64) -> f64 {
+    if c <= 0.0031308 {
+        return c * 12.92;
+    }
+    let mut p = c;
+    if p < 0.0 {
+        p = 0.0;
+    }
+    1.055 * p.powf(1.0 / 2.4) - 0.055
+}
+
+fn color_srgb_to_linear(s: ColorV3) -> ColorV3 {
+    color_v3(color_srgb_to_linear1(s.x), color_srgb_to_linear1(s.y), color_srgb_to_linear1(s.z))
+}
+
+fn color_linear_to_srgb(c: ColorV3) -> ColorV3 {
+    color_v3(color_linear_to_srgb1(c.x), color_linear_to_srgb1(c.y), color_linear_to_srgb1(c.z))
+}
+
+fn color_clip01(x: f64) -> f64 {
+    if x < 0.0 {
+        return 0.0;
+    }
+    if x > 1.0 {
+        return 1.0;
+    }
+    x
+}
+
+fn color_clip3(v: ColorV3) -> ColorV3 {
+    color_v3(color_clip01(v.x), color_clip01(v.y), color_clip01(v.z))
+}
+
+// ---- XYZ and xyY ------------------------------------------------------------
+
+fn color_srgb_to_xyz(srgb: ColorV3) -> ColorV3 {
+    color_mat_vec(color_srgb_to_xyz_m(), color_srgb_to_linear(srgb))
+}
+
+fn color_xyz_to_srgb(xyz: ColorV3, clip: bool) -> ColorV3 {
+    let result = color_linear_to_srgb(color_mat_vec(color_xyz_to_srgb_m(), xyz));
+    if clip {
+        return color_clip3(result);
+    }
+    result
+}
+
+fn color_xyz_to_xyy(xyz: ColorV3) -> ColorV3 {
+    let mut s = 0.0 + xyz.x + xyz.y + xyz.z;
+    if s == 0.0 {
+        s = 1.0;
+    }
+    color_v3(xyz.x / s, xyz.y / s, xyz.y)
+}
+
+fn color_xyy_to_xyz(xyy: ColorV3) -> ColorV3 {
+    let mut safe_y = xyy.y;
+    if safe_y == 0.0 {
+        safe_y = 1.0;
+    }
+    let big_x = (xyy.z / safe_y) * xyy.x;
+    let big_z = (xyy.z / safe_y) * (1.0 - xyy.x - xyy.y);
+    color_v3(big_x, xyy.z, big_z)
+}
+
+// ---- CIELAB and LCh ---------------------------------------------------------
+
+fn color_lab_f(t: f64) -> f64 {
+    let delta = 6.0 / 29.0;
+    if t > delta.powf(3.0) {
+        return t.cbrt();
+    }
+    t / (3.0 * (delta * delta)) + 4.0 / 29.0
+}
+
+fn color_lab_f_inv(t: f64) -> f64 {
+    let delta = 6.0 / 29.0;
+    if t > delta {
+        return t.powf(3.0);
+    }
+    3.0 * (delta * delta) * (t - 4.0 / 29.0)
+}
+
+fn color_xyz_to_lab_white(xyz: ColorV3, white: ColorV3) -> ColorV3 {
+    let f0 = color_lab_f(xyz.x / white.x);
+    let f1 = color_lab_f(xyz.y / white.y);
+    let f2 = color_lab_f(xyz.z / white.z);
+    color_v3(116.0 * f1 - 16.0, 500.0 * (f0 - f1), 200.0 * (f1 - f2))
+}
+
+fn color_lab_to_xyz_white(lab: ColorV3, white: ColorV3) -> ColorV3 {
+    let fy = (lab.x + 16.0) / 116.0;
+    let fx = lab.y / 500.0 + fy;
+    let fz = fy - lab.z / 200.0;
+    color_v3(color_lab_f_inv(fx) * white.x, color_lab_f_inv(fy) * white.y, color_lab_f_inv(fz) * white.z)
+}
+
+// The Python defaults: white point D50 (ICC).
+fn color_xyz_to_lab(xyz: ColorV3) -> ColorV3 {
+    color_xyz_to_lab_white(xyz, color_d50())
+}
+
+fn color_lab_to_xyz(lab: ColorV3) -> ColorV3 {
+    color_lab_to_xyz_white(lab, color_d50())
+}
+
+fn color_to_polar(v: ColorV3) -> ColorV3 {
+    let c = (v.y * v.y + v.z * v.z).sqrt();
+    let h = color_floor_mod(color_degrees(atan2(v.z, v.y)), 360.0);
+    color_v3(v.x, c, h)
+}
+
+fn color_from_polar(v: ColorV3) -> ColorV3 {
+    let a = v.y * color_radians(v.z).cos();
+    let b = v.y * color_radians(v.z).sin();
+    color_v3(v.x, a, b)
+}
+
+fn color_lab_to_lch(lab: ColorV3) -> ColorV3 {
+    color_to_polar(lab)
+}
+
+fn color_lch_to_lab(lch: ColorV3) -> ColorV3 {
+    color_from_polar(lch)
+}
+
+// ---- Oklab and Oklch --------------------------------------------------------
+
+fn color_signed_cbrt_pow(x: f64) -> f64 {
+    let mut sign = 0.0;
+    if x > 0.0 {
+        sign = 1.0;
+    }
+    if x < 0.0 {
+        sign = -1.0;
+    }
+    sign * x.abs().powf(1.0 / 3.0)
+}
+
+fn color_linear_srgb_to_oklab(rgb: ColorV3) -> ColorV3 {
+    let lms = color_mat_vec(color_oklab_m1(), rgb);
+    let g = color_v3(color_signed_cbrt_pow(lms.x), color_signed_cbrt_pow(lms.y), color_signed_cbrt_pow(lms.z));
+    color_mat_vec(color_oklab_m2(), g)
+}
+
+fn color_oklab_to_linear_srgb(oklab: ColorV3) -> ColorV3 {
+    let g = color_mat_vec(color_mat3_inv(color_oklab_m2()), oklab);
+    let lms = color_v3(g.x.powf(3.0), g.y.powf(3.0), g.z.powf(3.0));
+    color_mat_vec(color_mat3_inv(color_oklab_m1()), lms)
+}
+
+fn color_srgb_to_oklab(srgb: ColorV3) -> ColorV3 {
+    color_linear_srgb_to_oklab(color_srgb_to_linear(srgb))
+}
+
+fn color_oklab_to_srgb(oklab: ColorV3, clip: bool) -> ColorV3 {
+    let result = color_linear_to_srgb(color_oklab_to_linear_srgb(oklab));
+    if clip {
+        return color_clip3(result);
+    }
+    result
+}
+
+fn color_oklab_to_oklch(oklab: ColorV3) -> ColorV3 {
+    color_to_polar(oklab)
+}
+
+fn color_oklch_to_oklab(oklch: ColorV3) -> ColorV3 {
+    color_from_polar(oklch)
+}
+
+// Relative luminance from sRGB (BT.709 coefficients).
+fn color_luminance(srgb: ColorV3) -> f64 {
+    let lin = color_srgb_to_linear(srgb);
+    0.2126 * lin.x + 0.7152 * lin.y + 0.0722 * lin.z
+}

@@ -1,0 +1,10 @@
+# mode golden args... (run from the package folder; see docs/PACKAGES.md)
+# Bounds are about 3x the largest difference measured against the original
+# (numpy 2.4.5, Windows x64): de max abs 2.84e-14, max rel 3.9e-16; convert
+# max abs 6.42e-12 (Oklch hue of a low-chroma colour, rel 2.6e-14); neutral
+# rows: Oklch hue of a grey (chroma 2.2e-8) differs by 4.32e-7 deg, rel 4.8e-9,
+# every other token by at most 2.84e-13 abs.
+float:1e-13:1e-15 tests/golden-sharma.txt de tests/sharma.txt
+float:1e-13:1e-15 tests/golden-pairs.txt de tests/pairs.txt
+float:2e-11:1e-13 tests/golden-srgb.txt convert tests/srgb.txt
+float:1e-12:1e-8 tests/golden-srgb-grey.txt convert tests/srgb-grey.txt
