@@ -1,20 +1,17 @@
 # BuildLang Project Status
 
-Release verification: 2026-10-23 for 1.10.0. The broader architecture audit remains
+Release verification: 2026-11-08 for 1.11.0. The broader architecture audit remains
 2026-06-15; dated findings below retain their original scope. Current direction:
-`docs/STRATEGY-2026-10.md`.
+`docs/STRATEGY-2026-10.md`; what finished means and how far it is: `docs/LANGUAGE-COMPLETE.md`.
 
-The full local `cargo test --manifest-path compiler/Cargo.toml` run with
-`RUSTFLAGS=-Dwarnings` passed: lib 1,077, bin 204, c_abi_export 2,
-check_implies_compile 1, check_soundness 3, cli 415, detmath 3, diagnostics_json 6,
-doc_blocks 2, gpu 12, hashmap_any 1, heldout_regressions 5, install_layout 1,
-int32_js_rules 1, json_float_format 1, json_stdlib 4, lexer 53, lsp_parity 2,
-mcp_server 3, parser 98, reject_programs 2, stdio_mode 9, vec_new_inference 3; total
-1,908 passed, 0 failed, 11 ignored (3 lib, 8 doc). 1.10.0 fixes the check-pass-but-wrong
-cases the combat-step port found (CHANGELOG 1.10.0). 1.9.0 added the M4 features a game
-port needs: C ABI export with a static library and header, the DETMATH float rules,
-`to_json` number text, JS integer conversions, the JSON module and `HashMap<str, T>`
-for any `T`.
+The full local `cargo test --manifest-path compiler/Cargo.toml --no-fail-fast` run with
+`RUSTFLAGS=-Dwarnings` on the release head passed: 1,972 passed, 0 failed, 11 ignored. 1.11.0 adds opaque handles
+across the C ABI and a stateful C library written in BuildLang (raw-native's Low Water rules,
+M4's C ABI check), Vec insert and remove, string push, methods through borrowed vectors, units
+through roots and powers, measured constants, BuildTeX, the mmk proof kernel and BQL
+(CHANGELOG 1.11.0). Earlier: 1.10.0 fixed the check-pass-but-wrong cases the combat-step port
+found; 1.9.0 added the M4 features a game port needs (C ABI export, DETMATH float rules,
+`to_json` number text, JS integer conversions, the JSON module, `HashMap<str, T>` for any `T`).
 Formatting, repository-art verification, and the optimized strict-warning build
 also passed. These default-feature checks do not establish optional GPU device
 behavior, performance superiority, or complete experimental-backend parity.

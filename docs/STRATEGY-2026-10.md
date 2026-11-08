@@ -164,6 +164,14 @@ Status 2026-10-23, 1.10.0: the combat step is ported, still outside this reposit
 20,290 `cin`, 5,350 `cev`, 571 `cstate` and 40 `cend` lines. A mutation control (one hit
 constant changed) makes the comparison fail. The compiler fixes the port needed are in 1.10.0.
 
+Status 2026-11-08, 1.11.0: the trace check ran against crates.io 1.10.0 with the 40-fight corpus
+regenerated from Low Water `origin/dev` 8b49bdd (2,944,071 bytes, manifest sha256 `6579830126...ae9f19`):
+40 of 40 manifest hashes equal, and both planted faults caught. The C ABI check: raw-native's Low
+Water rules module rebuilt in BuildLang (`examples/lowwater-rules`) passes raw-native's own
+`tests/test_lowwater_c.cpp`, 16 of 16 checks, as the C++ module does; it needed opaque handles,
+which ship in 1.11.0. Both are scored against the 1.11.0 release in `docs/LANGUAGE-COMPLETE.md`,
+which also stages everything past M6.
+
 ## 6. What this document does not prove
 
 It records a direction, a field survey and checks. It does not show BuildLang ahead of any language
