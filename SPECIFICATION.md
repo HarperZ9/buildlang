@@ -467,6 +467,98 @@ fn main() ~ Console {
 
 Handlers are one-shot and do not resume (setjmp/longjmp on the C backend). When a handler clause runs, its value becomes the value of the `handle` expression and the code after the `perform` does not run. In the example, `status` is `1` and `might_fail` stops at its `perform`.
 
+### 6.4 Parallel map and for
+
+`par_for(n, &ctx, f)` calls `f(&ctx, i)` for every `i` in `0..n` and returns a `Vec` whose
+element `i` is that call's result. `par_map(xs, f)` calls `f(x)` for every element of the
+`Vec` `xs` (by value or `&xs`) and returns the results in the same order. On the C backend
+both run on a fixed thread pool: each index writes its own slot, so the vector equals the one a
+serial loop builds, byte for byte, at every thread count. `BUILD_PAR_THREADS` sets the pool
+size (default: the logical processor count); `1` runs every index on the calling thread, in
+order. A `par_for` inside a parallel body runs serially on its own thread.
+
+```build
+struct Grid { w: i64, scale: f64 }
+
+fn cell(g: &Grid, i: i64) -> f64 {
+    ((i % g.w) as f64) * g.scale
+}
+
+fn double(x: f64) -> f64 {
+    x * 2.0
+}
+
+fn main() ~ Console {
+    let g = Grid { w: 4, scale: 0.5 };
+    let cells = par_for(8, &g, cell);
+    let twice = par_map(&cells, double);
+    println!("{} {}", cells[5], twice[7]);
+}
+```
+
+That program prints `0.5 3`. The checker proves from the source that the body can run on
+any thread, in any order, with no lock:
+
+- The body's effect row is empty. A body that prints, touches a file, performs a user effect
+  or calls a function with a non-empty row is `BL0406`. The fix moves the effectful top-level
+  statements into a serial `for` loop after the call, which binds the body's parameters for
+  each index, removes the body's effect row and, if needed, adds the effect to the enclosing
+  function. The output keeps the serial order. Because it widens the enclosing function's row,
+  the fix is never machine-applicable.
+
+```build fail=BL0406
+struct Scene { scale: f64 }
+
+fn shade(s: &Scene, i: i64) -> f64 ~ Console {
+    println!("pixel {}", i);
+    (i as f64) * s.scale
+}
+
+fn main() ~ Console {
+    let scene = Scene { scale: 0.5 };
+    let img = par_for(4, &scene, shade);
+    println!("{}", img[3]);
+}
+```
+
+- The body cannot write shared state: no `&mut` or `*mut` parameter, no write to a
+  `static mut` (directly or through any function it calls), and in a closure no write to a
+  variable from outside it. Any of these is `BL0515`.
+
+```build fail=BL0515
+struct Acc { total: f64 }
+
+fn add(a: &mut Acc, i: i64) -> f64 {
+    a.total = a.total + (i as f64);
+    a.total
+}
+
+fn main() ~ Console {
+    let mut acc = Acc { total: 0.0 };
+    let out = par_for(8, &mut acc, add);
+    println!("{}", out[7]);
+}
+```
+
+- The checker can see the body: a named function, or a closure that captures nothing and
+  writes its parameter and return types. A function value or a capturing closure is `BL0407`;
+  pass the data through `par_for`'s context argument instead.
+
+```build fail=BL0407
+fn main() ~ Console {
+    let k = 3.0;
+    let mut xs: Vec<f64> = Vec::new();
+    xs.push(1.0);
+    let ys = par_map(&xs, |v: f64| -> f64 { v * k });
+    println!("{}", ys[0]);
+}
+```
+
+A panic inside a body ends the program. When several indices would panic, which message
+prints first can depend on the schedule. The other backends do not lower `par_for` or
+`par_map` and refuse the program. `docs/PARALLEL.md` describes the model and its measured
+speed-ups.
+
 ## 7. Standard Library
 
 ### 7.1 Core Module (`core.bld`)

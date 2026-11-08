@@ -7006,7 +7006,8 @@ fn c_link_libraries(target_os: &str, is_msvc: bool) -> &'static [&'static str] {
     match (target_os, is_msvc) {
         ("windows", true) => &["ws2_32.lib"],
         ("windows", false) => &["-lws2_32"],
-        (_, false) => &["-lm"],
+        // -pthread: the par_for / par_map pool (M5) uses POSIX threads.
+        (_, false) => &["-lm", "-pthread"],
         _ => &[],
     }
 }
@@ -11113,7 +11114,7 @@ mod tests {
     fn c_link_libraries_cover_host_runtime_dependencies() {
         assert_eq!(c_link_libraries("windows", false), &["-lws2_32"]);
         assert_eq!(c_link_libraries("windows", true), &["ws2_32.lib"]);
-        assert_eq!(c_link_libraries("linux", false), &["-lm"]);
+        assert_eq!(c_link_libraries("linux", false), &["-lm", "-pthread"]);
         assert_eq!(c_link_libraries("macos", true), &[] as &[&str]);
     }
 

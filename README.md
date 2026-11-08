@@ -275,6 +275,7 @@ and `#[linear]` types are experimental. Release test results are in
 - [USAGE.md](USAGE.md): full command reference with verified output
 - [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md): tutorial from install to shaders
 - [docs/EFFECTS_GUIDE.md](docs/EFFECTS_GUIDE.md): the capability-effect system
+- [docs/PARALLEL.md](docs/PARALLEL.md): `par_for` and `par_map`, the checks that make a body safe to run in parallel, and measured speed-ups
 - [docs/LINEAR-TYPES.md](docs/LINEAR-TYPES.md): linear types
 - [DESIGN.md](DESIGN.md) and [ARCHITECTURE.md](ARCHITECTURE.md): pipeline and rationale
 - Peers: [build-universe](https://github.com/HarperZ9/build-universe),

@@ -188,6 +188,20 @@ fn type_samples() -> Vec<TypeError> {
             effect_name: s("Logger"),
             operation: s("log"),
         },
+        E::ParallelBodyEffect {
+            call: s("par_for"),
+            body: s("shade"),
+            effects: s("Console"),
+        },
+        E::ParallelBodyUnknown {
+            call: s("par_map"),
+            detail: s("the closure captures `k`"),
+        },
+        E::ParallelSharedWrite {
+            call: s("par_for"),
+            body: s("add"),
+            detail: s("parameter `a` is `&mut`"),
+        },
         E::UnitMismatch {
             expected: s("m"),
             found: s("s"),

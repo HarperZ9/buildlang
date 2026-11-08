@@ -277,6 +277,16 @@ pub enum TypeError {
     #[error("linear value cannot be used in {context}: it could be duplicated there (linear values must stay in tracked positions: a local, a parameter, a borrow, or a by-value argument of its own type)")]
     LinearInUnsupportedPosition { context: String },
 
+    /// A `par_for` / `par_map` body could write state another index reads
+    /// (M5): a `&mut` or `*mut` parameter, a `static mut`, or a variable from
+    /// outside a closure.
+    #[error("`{call}` body `{body}` can write shared state: {detail}")]
+    ParallelSharedWrite {
+        call: String,
+        body: String,
+        detail: String,
+    },
+
     /// Invalid binary operation.
     #[error("cannot apply binary operator `{op}` to types `{left}` and `{right}`")]
     InvalidBinaryOp { op: String, left: Ty, right: Ty },
@@ -439,6 +449,19 @@ pub enum TypeError {
         effect_name: String,
         operation: String,
     },
+
+    /// A `par_for` / `par_map` body performs an effect (M5). A parallel body
+    /// runs on any thread in any order, so its effect row must be empty.
+    #[error("`{call}` body `{body}` performs `{effects}`; a parallel body must have an empty effect row")]
+    ParallelBodyEffect {
+        call: String,
+        body: String,
+        effects: String,
+    },
+
+    /// A `par_for` / `par_map` body the checker cannot see into (M5).
+    #[error("the `{call}` body cannot be checked: {detail}")]
+    ParallelBodyUnknown { call: String, detail: String },
 
     /// Missing handler clause: a handle block does not cover all operations.
     #[error("handler for effect `{effect_name}` is missing operation `{operation}`")]

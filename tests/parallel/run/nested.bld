@@ -1,0 +1,30 @@
+// A parallel body that itself calls par_for: the inner call runs serially
+// on the thread that made it, and the result is the serial result.
+struct Row { n: i64 }
+
+fn inner(r: &Row, j: i64) -> i64 {
+    j * r.n
+}
+
+fn row_sum(r: &Row, i: i64) -> i64 {
+    let rr = Row { n: r.n + i };
+    let parts = par_for(10, &rr, inner);
+    let mut s = 0;
+    let mut j = 0;
+    while j < 10 {
+        s = s + parts[j];
+        j = j + 1;
+    }
+    s
+}
+
+fn main() ~ Console {
+    let r = Row { n: 1 };
+    let sums = par_for(20, &r, row_sum);
+    let mut i = 0;
+    while i < 20 {
+        print!("{} ", sums[i]);
+        i = i + 1;
+    }
+    println!("");
+}

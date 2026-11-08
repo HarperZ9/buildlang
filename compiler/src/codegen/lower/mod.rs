@@ -18,6 +18,7 @@ mod c_abi;
 mod expr;
 mod format;
 mod macros;
+pub(crate) mod parallel;
 #[cfg(test)]
 mod tests;
 mod types;
