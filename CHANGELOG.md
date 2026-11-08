@@ -15,6 +15,10 @@ tracked in `STATUS.md`, `README.md`, and
 - Fixed while writing it, each refused with BL0901 on 1.10.0, each with a program in `tests/heldout`: `v.len()` and `v.push(x)` on a `&Vec<T>` or `&mut Vec<T>` parameter (`borrowed_vec_methods`); `v.insert(i, x)` and `v.remove(i)` (`vec_insert_remove`); `s.push(c)` on a string (`string_push_char`); a call to an `extern "C"` function named like a C library function, such as `strtod`, which was renamed `_strtod` (`extern_libc_name`).
 - Check-pass-but-fail fixed: `"2.5" as *const u8` passed `buildc check` and failed in the C compiler. A cast from `str` to a pointer or a number is now BL0383 with a fix. Test: `tests/reject/str_cast_to_c_pointer.bld`.
 
+## Unreleased: measured constants with provenance
+
+- `#[measured(source = "...", uncertainty = ...)]` on a `const` records where a measured value came from. `buildc check` refuses a missing or empty source, an unknown key, a negative uncertainty, or the attribute on anything but a `const` (BL0605). The check receipt lists each measured constant (name, value as written, canonical unit, source, uncertainty) under `measured_constants`, and `receipt verify` re-derives the list, so an edited source fails verification. Programs without measured constants get byte-identical receipts. The attribute changes no emitted C. Docs: `docs/MEASURED-CONSTANTS.md`. Tests: `compiler/tests/measured_constants.rs`, `tests/reject/measured_without_source.bld`.
+
 ## Unreleased: units through roots and powers; typed maths builtins
 
 - Unit-carrying values now go through `**`, `.powi()`, `.powf()` and `pow` with an integer-literal exponent, and through `.sqrt()`, `.cbrt()` and `sqrt`, with the exponents scaled. Slice one refused all of these. A root that leaves a fraction is BL0604; a runtime exponent on a unit is still refused (BL0383).

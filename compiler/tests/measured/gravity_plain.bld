@@ -1,0 +1,12 @@
+// Plain twin of `gravity.bld`: the same program without the attributes.
+// The emitted C must be byte-identical to the annotated one.
+
+const G: f64<m^3*kg^-1*s^-2> = 6.67430e-11;
+
+const EARTH_RADIUS: f64<m> = 6.371e6;
+
+fn main() ~ Console {
+    let earth_mass: f64<kg> = 5.972e24;
+    let g = G * earth_mass / (EARTH_RADIUS * EARTH_RADIUS);
+    println!("{}", g);
+}

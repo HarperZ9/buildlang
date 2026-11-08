@@ -189,6 +189,7 @@ A test in `compiler/src/diagnostics/tests.rs` fails if this table and the compil
 | BL0602 | unit mismatch in an operation |
 | BL0603 | operation needs a dimensionless value |
 | BL0604 | root of a unit has no integer exponents |
+| BL0605 | measured constant without a valid source |
 | BL0610 | module import cycle |
 | BL0620 | formatting macro needs a string literal first |
 
