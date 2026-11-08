@@ -1,0 +1,70 @@
+// Functions inside the translation-validation subset: integers, bool,
+// branches, loops, calls. Each must be certified.
+fn maxi(a: i64, b: i64) -> i64 {
+    if a > b { a } else { b }
+}
+
+fn absi(x: i32) -> i32 {
+    if x < 0 { -x } else { x }
+}
+
+fn sum_to(n: i64) -> i64 {
+    let mut s: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        i = i + 1;
+        s = s + i;
+    }
+    s
+}
+
+fn gcd(a: u64, b: u64) -> u64 {
+    let mut x = a;
+    let mut y = b;
+    while y != 0 {
+        let t = x % y;
+        x = y;
+        y = t;
+    }
+    x
+}
+
+fn classify(n: i32) -> i32 {
+    match n {
+        0 => 10,
+        1 | 2 => 20,
+        _ => n * 3,
+    }
+}
+
+fn clamp_add(a: i64, b: i64, hi: i64) -> i64 {
+    let s = a + b;
+    if s > hi {
+        return hi;
+    }
+    s
+}
+
+fn first_over(limit: u32) -> u32 {
+    let mut k: u32 = 1;
+    loop {
+        if k > limit {
+            break;
+        }
+        k = k * 2;
+    }
+    k
+}
+
+fn both(a: bool, b: bool) -> bool {
+    a && !b
+}
+
+fn twice_max(a: i64, b: i64) -> i64 {
+    maxi(a, b) + maxi(b, a)
+}
+
+fn main() ~ Console {
+    println!("{} {} {} {} {}", maxi(3, 4), absi(-5), sum_to(10), gcd(12, 18), classify(2));
+    println!("{} {} {} {}", clamp_add(1, 2, 10), first_over(100), both(true, false), twice_max(1, 2));
+}

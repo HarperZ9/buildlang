@@ -11,7 +11,7 @@ use super::ty::Ty;
 use crate::ast::*;
 
 /// The term for `a op b` at integer type `ty`, adding its definedness facts.
-pub(super) fn apply(op: BinOp, ty: Ty, a: Term, b: Term, s: &mut St) -> Result<Term, String> {
+pub fn apply(op: BinOp, ty: Ty, a: Term, b: Term, s: &mut St) -> Result<Term, String> {
     let r = match op {
         BinOp::Add => arith(AOp::Add, a, b),
         BinOp::Sub => arith(AOp::Sub, a, b),
@@ -69,7 +69,14 @@ pub(super) fn apply(op: BinOp, ty: Ty, a: Term, b: Term, s: &mut St) -> Result<T
         BinOp::Shr => bits(BOp::Shr, ty, a, b),
         _ => return Err("an operator outside the subset".into()),
     };
-    s.assume(in_range(&r, ty));
+    if matches!(
+        op,
+        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
+    ) {
+        s.assume(in_range(&r, ty));
+    } else {
+        s.fact(in_range(&r, ty));
+    }
     Ok(r)
 }
 

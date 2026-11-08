@@ -30,6 +30,9 @@ pub struct SideOb {
 #[derive(Clone, Debug)]
 pub struct St {
     pub conds: Vec<Term>,
+    /// Facts true on every input (the range of a bit operation, a cast or a
+    /// call's result). They never decide whether a path traps.
+    pub facts: Vec<Term>,
     pub vars: Vec<(String, Term, Ty)>,
     pub ret: Option<Ty>,
 }
@@ -54,7 +57,21 @@ impl St {
             None => false,
         }
     }
-    pub(super) fn assume(&mut self, t: Term) {
+    /// Record a fact that holds for every input.
+    pub fn fact(&mut self, t: Term) {
+        if t != Term::Bool(true) && !self.facts.contains(&t) {
+            self.facts.push(t);
+        }
+    }
+
+    /// The path conditions and the facts, as one hypothesis list.
+    pub fn hyps(&self) -> Vec<Term> {
+        let mut h = self.conds.clone();
+        h.extend(self.facts.iter().cloned());
+        h
+    }
+
+    pub fn assume(&mut self, t: Term) {
         if t != Term::Bool(true) && !self.conds.contains(&t) {
             self.conds.push(t);
         }
@@ -68,6 +85,10 @@ pub enum Out {
     Val(Term, Option<Ty>),
     /// A `return`.
     Ret(Term, Option<Ty>),
+    /// A `break` out of the innermost loop (translation validation only).
+    Break,
+    /// A `continue` of the innermost loop (translation validation only).
+    Continue,
 }
 
 pub type Res = Result<Vec<(St, Out)>, String>;
@@ -79,6 +100,10 @@ pub struct Sym<'a> {
     pub stack: Vec<String>,
     pub side: Vec<SideOb>,
     pub max_paths: usize,
+    /// Inline calls (verification) or keep each call as an uninterpreted
+    /// term constrained only to its return type's range (translation
+    /// validation, where both sides call the same function).
+    pub inline_calls: bool,
 }
 
 impl<'a> Sym<'a> {
@@ -89,6 +114,7 @@ impl<'a> Sym<'a> {
             stack: Vec::new(),
             side: Vec::new(),
             max_paths: 2048,
+            inline_calls: true,
         }
     }
 
@@ -126,6 +152,7 @@ impl<'a> Sym<'a> {
         let body = f.body.as_deref().ok_or(format!("`{name}` has no body"))?;
         let mut inner = St {
             conds: st.conds.clone(),
+            facts: st.facts.clone(),
             vars: params
                 .iter()
                 .zip(args)
@@ -135,16 +162,19 @@ impl<'a> Sym<'a> {
         };
         for (n, t) in &params {
             let (v, _) = inner.get(n).unwrap();
-            inner.assume(in_range(&v, *t));
+            inner.fact(in_range(&v, *t));
         }
         self.stack.push(name.to_string());
         let res = self.block(body, inner, ret);
         self.stack.pop();
         let mut out = Vec::new();
         for (s, o) in res? {
-            let (Out::Val(v, t) | Out::Ret(v, t)) = o;
+            let (Out::Val(v, t) | Out::Ret(v, t)) = o else {
+                return Err(format!("`break` or `continue` escapes `{name}`"));
+            };
             let back = St {
                 conds: s.conds,
+                facts: s.facts,
                 vars: st.vars.clone(),
                 ret: st.ret,
             };
@@ -156,17 +186,18 @@ impl<'a> Sym<'a> {
     /// The paths of a call, honouring contracts and recursion.
     pub(super) fn user_call(&mut self, name: &str, args: Vec<Term>, st: St) -> Res {
         let req = format!("{REQUIRES_PREFIX}{name}");
-        if self.fns.contains_key(&req) && !self.stack.contains(&req) {
+        if self.inline_calls && self.fns.contains_key(&req) && !self.stack.contains(&req) {
             for (s, o) in self.call(&req, args.clone(), st.clone())? {
                 let Out::Val(goal, _) = o else { continue };
                 self.side.push(SideOb {
                     label: format!("call to `{name}` meets its requires"),
-                    hyps: s.conds,
+                    hyps: s.hyps(),
                     goal,
                 });
             }
         }
-        let recursive = self.stack.iter().any(|s| s == name) || self.stack.len() > 24;
+        let recursive =
+            !self.inline_calls || self.stack.iter().any(|s| s == name) || self.stack.len() > 24;
         if !recursive {
             return self.call(name, args, st);
         }
@@ -176,9 +207,9 @@ impl<'a> Sym<'a> {
         };
         let app = Term::App(name.to_string(), args.clone());
         let mut st = st;
-        st.assume(in_range(&app, rty));
+        st.fact(in_range(&app, rty));
         let ens = format!("{ENSURES_PREFIX}{name}");
-        if !self.fns.contains_key(&ens) || self.stack.contains(&ens) {
+        if !self.inline_calls || !self.fns.contains_key(&ens) || self.stack.contains(&ens) {
             return Ok(vec![(st, Out::Val(app, Some(rty)))]);
         }
         let mut eargs = args;
@@ -200,23 +231,10 @@ impl<'a> Sym<'a> {
             let tail = i + 1 == b.stmts.len();
             let mut next = Vec::new();
             for (state, _) in live {
-                let res = match &s.kind {
-                    StmtKind::Local(l) => self.local(l, &b.stmts[i + 1..], state)?,
-                    StmtKind::Expr(e) => self.expr(e, state, if tail { expect } else { None })?,
-                    StmtKind::Semi(e) => self
-                        .expr(e, state, None)?
-                        .into_iter()
-                        .map(|(s, o)| match o {
-                            Out::Val(..) => (s, Out::Val(Term::Int(0), None)),
-                            r => (s, r),
-                        })
-                        .collect(),
-                    StmtKind::Empty => vec![(state, Out::Val(Term::Int(0), None))],
-                    _ => return Err("an item or macro statement".into()),
-                };
+                let res = self.stmt(s, &b.stmts[i + 1..], state, tail, expect)?;
                 for (s2, o) in res {
                     match o {
-                        Out::Ret(..) => done.push((s2, o)),
+                        Out::Ret(..) | Out::Break | Out::Continue => done.push((s2, o)),
                         v => next.push((s2, v)),
                     }
                 }
@@ -240,6 +258,32 @@ impl<'a> Sym<'a> {
             s.vars.truncate(depth.min(s.vars.len()));
         }
         Ok(done)
+    }
+
+    /// Run one statement; `rest` is what follows it in its block (for the
+    /// types of unannotated `let`s), `tail` whether it is the block's value.
+    pub fn stmt(
+        &mut self,
+        s: &Stmt,
+        rest: &[Stmt],
+        state: St,
+        tail: bool,
+        expect: Option<Ty>,
+    ) -> Res {
+        Ok(match &s.kind {
+            StmtKind::Local(l) => self.local(l, rest, state)?,
+            StmtKind::Expr(e) => self.expr(e, state, if tail { expect } else { None })?,
+            StmtKind::Semi(e) => self
+                .expr(e, state, None)?
+                .into_iter()
+                .map(|(s, o)| match o {
+                    Out::Val(..) => (s, Out::Val(Term::Int(0), None)),
+                    r => (s, r),
+                })
+                .collect(),
+            StmtKind::Empty => vec![(state, Out::Val(Term::Int(0), None))],
+            _ => return Err("an item or macro statement".into()),
+        })
     }
 
     fn local(&mut self, l: &Local, rest: &[Stmt], st: St) -> Res {
