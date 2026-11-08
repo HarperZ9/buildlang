@@ -1,0 +1,135 @@
+// =============================================================================
+// sha256: SHA-256 (FIPS 180-4) in BuildLang
+// =============================================================================
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2022-2026 Zain Dana Harper.
+// =============================================================================
+//
+// Pure BuildLang over Vec<u8>: no C library, no FFI. Known answers: the FIPS
+// 180-4 vectors in tests/vectors.txt, checked by tests/check.py against
+// Python's hashlib on the same inputs.
+
+/// Rotate a 32-bit word right by `n` bits (0 < n < 32).
+fn sha256_rotr(x: u32, n: u32) -> u32 {
+    (x >> n) | (x << (32_u32 - n))
+}
+
+/// The SHA-256 digest of `msg`: 32 bytes.
+fn sha256_digest(msg: Vec<u8>) -> Vec<u8> {
+    let k: [u32; 64] = [
+        0x428a2f98_u32, 0x71374491_u32, 0xb5c0fbcf_u32, 0xe9b5dba5_u32, 0x3956c25b_u32, 0x59f111f1_u32, 0x923f82a4_u32, 0xab1c5ed5_u32,
+        0xd807aa98_u32, 0x12835b01_u32, 0x243185be_u32, 0x550c7dc3_u32, 0x72be5d74_u32, 0x80deb1fe_u32, 0x9bdc06a7_u32, 0xc19bf174_u32,
+        0xe49b69c1_u32, 0xefbe4786_u32, 0x0fc19dc6_u32, 0x240ca1cc_u32, 0x2de92c6f_u32, 0x4a7484aa_u32, 0x5cb0a9dc_u32, 0x76f988da_u32,
+        0x983e5152_u32, 0xa831c66d_u32, 0xb00327c8_u32, 0xbf597fc7_u32, 0xc6e00bf3_u32, 0xd5a79147_u32, 0x06ca6351_u32, 0x14292967_u32,
+        0x27b70a85_u32, 0x2e1b2138_u32, 0x4d2c6dfc_u32, 0x53380d13_u32, 0x650a7354_u32, 0x766a0abb_u32, 0x81c2c92e_u32, 0x92722c85_u32,
+        0xa2bfe8a1_u32, 0xa81a664b_u32, 0xc24b8b70_u32, 0xc76c51a3_u32, 0xd192e819_u32, 0xd6990624_u32, 0xf40e3585_u32, 0x106aa070_u32,
+        0x19a4c116_u32, 0x1e376c08_u32, 0x2748774c_u32, 0x34b0bcb5_u32, 0x391c0cb3_u32, 0x4ed8aa4a_u32, 0x5b9cca4f_u32, 0x682e6ff3_u32,
+        0x748f82ee_u32, 0x78a5636f_u32, 0x84c87814_u32, 0x8cc70208_u32, 0x90befffa_u32, 0xa4506ceb_u32, 0xbef9a3f7_u32, 0xc67178f2_u32];
+    let mut h: [u32; 8] = [0x6a09e667_u32, 0xbb67ae85_u32, 0x3c6ef372_u32, 0xa54ff53a_u32, 0x510e527f_u32, 0x9b05688c_u32, 0x1f83d9ab_u32, 0x5be0cd19_u32];
+    let n = vec_len(msg);
+    let mut m: Vec<u8> = Vec::new();
+    let mut i: usize = 0;
+    while i < n {
+        m.push(msg[i]);
+        i = i + 1;
+    }
+    m.push(0x80_u8);
+    while vec_len(m) % 64 != 56 {
+        m.push(0_u8);
+    }
+    let bits: u64 = (n as u64) * 8_u64;
+    let mut s: i64 = 56;
+    while s >= 0 {
+        m.push(((bits >> (s as u64)) & 255_u64) as u8);
+        s = s - 8;
+    }
+    let mut w: [u32; 64] = [0_u32; 64];
+    let mut off: usize = 0;
+    while off < vec_len(m) {
+        let mut t: usize = 0;
+        while t < 16 {
+            let j = off + t * 4;
+            w[t] = ((m[j] as u32) << 24) | ((m[j + 1] as u32) << 16) | ((m[j + 2] as u32) << 8) | (m[j + 3] as u32);
+            t = t + 1;
+        }
+        while t < 64 {
+            let s0 = sha256_rotr(w[t - 15], 7) ^ sha256_rotr(w[t - 15], 18) ^ (w[t - 15] >> 3);
+            let s1 = sha256_rotr(w[t - 2], 17) ^ sha256_rotr(w[t - 2], 19) ^ (w[t - 2] >> 10);
+            w[t] = w[t - 16].wrapping_add(s0).wrapping_add(w[t - 7]).wrapping_add(s1);
+            t = t + 1;
+        }
+        let mut a = h[0];
+        let mut b = h[1];
+        let mut c = h[2];
+        let mut d = h[3];
+        let mut e = h[4];
+        let mut f = h[5];
+        let mut g = h[6];
+        let mut hh = h[7];
+        t = 0;
+        while t < 64 {
+            let big_s1 = sha256_rotr(e, 6) ^ sha256_rotr(e, 11) ^ sha256_rotr(e, 25);
+            let ch = (e & f) ^ ((!e) & g);
+            let t1 = hh.wrapping_add(big_s1).wrapping_add(ch).wrapping_add(k[t]).wrapping_add(w[t]);
+            let big_s0 = sha256_rotr(a, 2) ^ sha256_rotr(a, 13) ^ sha256_rotr(a, 22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let t2 = big_s0.wrapping_add(maj);
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(t1);
+            d = c;
+            c = b;
+            b = a;
+            a = t1.wrapping_add(t2);
+            t = t + 1;
+        }
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+        h[5] = h[5].wrapping_add(f);
+        h[6] = h[6].wrapping_add(g);
+        h[7] = h[7].wrapping_add(hh);
+        off = off + 64;
+    }
+    let mut out: Vec<u8> = Vec::new();
+    let mut q: usize = 0;
+    while q < 8 {
+        out.push((h[q] >> 24) as u8);
+        out.push(((h[q] >> 16) & 255_u32) as u8);
+        out.push(((h[q] >> 8) & 255_u32) as u8);
+        out.push((h[q] & 255_u32) as u8);
+        q = q + 1;
+    }
+    out
+}
+
+/// Lowercase hex of a byte vector.
+fn bytes_hex(v: Vec<u8>) -> str {
+    let mut s = "";
+    let mut i: usize = 0;
+    while i < vec_len(v) {
+        s = s + format!("{:02x}", v[i]);
+        i = i + 1;
+    }
+    s
+}
+
+/// The bytes of a string (UTF-8 as stored).
+fn str_bytes(s: str) -> Vec<u8> {
+    let b = s.as_bytes();
+    let mut out: Vec<u8> = Vec::new();
+    let mut i: usize = 0;
+    while i < s.len() {
+        out.push(b[i]);
+        i = i + 1;
+    }
+    out
+}
+
+/// SHA-256 of a string's bytes as lowercase hex.
+fn sha256_hex(s: str) -> str {
+    bytes_hex(sha256_digest(str_bytes(s)))
+}

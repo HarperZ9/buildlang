@@ -1,0 +1,261 @@
+// =============================================================================
+// merkle: RFC 6962 Merkle tree, inclusion and consistency proofs
+// =============================================================================
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright 2026 Zain Dana Harper.
+// =============================================================================
+//
+// A BuildLang port of Flywheel's harness/merkle.py. Leaves are hashed with a
+// 0x00 prefix and inner nodes with 0x01 (RFC 6962 domain separation). The
+// function names follow the Python module; a range (lo, hi) over the leaf
+// hashes stands in for a Python slice.
+//
+// Python raises MerkleError for a request that is not well posed. Here
+// `merkle_consistency_ok` returns 1 for a valid proof, 0 for an invalid one,
+// and -1 for a request Python would refuse.
+
+use sha256;
+
+fn merkle_cat(prefix: u8, a: Vec<u8>, b: Vec<u8>) -> Vec<u8> {
+    let mut o: Vec<u8> = Vec::new();
+    o.push(prefix);
+    let mut i: usize = 0;
+    while i < vec_len(a) {
+        o.push(a[i]);
+        i = i + 1;
+    }
+    i = 0;
+    while i < vec_len(b) {
+        o.push(b[i]);
+        i = i + 1;
+    }
+    o
+}
+
+fn merkle_leaf_hash(data: Vec<u8>) -> Vec<u8> {
+    let empty: Vec<u8> = Vec::new();
+    sha256_digest(merkle_cat(0_u8, data, empty))
+}
+
+fn merkle_node(left: Vec<u8>, right: Vec<u8>) -> Vec<u8> {
+    sha256_digest(merkle_cat(1_u8, left, right))
+}
+
+fn merkle_pow2_below(n: usize) -> usize {
+    let mut k: usize = 1;
+    while k * 2 < n {
+        k = k * 2;
+    }
+    k
+}
+
+fn merkle_bytes_eq(a: Vec<u8>, b: Vec<u8>) -> bool {
+    if vec_len(a) != vec_len(b) {
+        return false;
+    }
+    let mut i: usize = 0;
+    while i < vec_len(a) {
+        if a[i] != b[i] {
+            return false;
+        }
+        i = i + 1;
+    }
+    true
+}
+
+/// Merkle Tree Hash over leaf hashes hs[lo..hi].
+fn merkle_mth(hs: Vec<Vec<u8>>, lo: usize, hi: usize) -> Vec<u8> {
+    let n = hi - lo;
+    if n == 0 {
+        let empty: Vec<u8> = Vec::new();
+        return sha256_digest(empty);
+    }
+    if n == 1 {
+        return hs[lo];
+    }
+    let k = merkle_pow2_below(n);
+    merkle_node(merkle_mth(hs, lo, lo + k), merkle_mth(hs, lo + k, hi))
+}
+
+fn merkle_leaf_hashes(leaves: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    let mut hs: Vec<Vec<u8>> = Vec::new();
+    let mut i: usize = 0;
+    while i < vec_len(leaves) {
+        hs.push(merkle_leaf_hash(leaves[i]));
+        i = i + 1;
+    }
+    hs
+}
+
+/// Root over raw leaf byte strings.
+fn merkle_root(leaves: Vec<Vec<u8>>) -> Vec<u8> {
+    let hs = merkle_leaf_hashes(leaves);
+    merkle_mth(hs, 0, vec_len(hs))
+}
+
+/// "sha256:<hex>" of the root.
+fn merkle_root_hex(leaves: Vec<Vec<u8>>) -> str {
+    "sha256:" + bytes_hex(merkle_root(leaves))
+}
+
+/// Audit path for hs[lo + m] within hs[lo..hi], leaf level first, appended to out.
+fn merkle_proof_into(hs: Vec<Vec<u8>>, lo: usize, hi: usize, m: usize, out: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    let n = hi - lo;
+    if n <= 1 {
+        return out;
+    }
+    let k = merkle_pow2_below(n);
+    let mut acc = out;
+    if m < k {
+        acc = merkle_proof_into(hs, lo, lo + k, m, acc);
+        acc.push(merkle_mth(hs, lo + k, hi));
+    } else {
+        acc = merkle_proof_into(hs, lo + k, hi, m - k, acc);
+        acc.push(merkle_mth(hs, lo, lo + k));
+    }
+    acc
+}
+
+/// The audit path proving leaves[index]. The caller checks index < len.
+fn merkle_inclusion_proof(leaves: Vec<Vec<u8>>, index: usize) -> Vec<Vec<u8>> {
+    let hs = merkle_leaf_hashes(leaves);
+    let out: Vec<Vec<u8>> = Vec::new();
+    merkle_proof_into(hs, 0, vec_len(hs), index, out)
+}
+
+fn merkle_proof_len(n: usize, m: usize) -> usize {
+    if n <= 1 {
+        return 0;
+    }
+    let k = merkle_pow2_below(n);
+    if m < k {
+        return merkle_proof_len(k, m) + 1;
+    }
+    merkle_proof_len(n - k, m - k) + 1
+}
+
+/// Root rebuilt from a target hash and proof[0..end].
+fn merkle_root_from_proof(target: Vec<u8>, m: usize, n: usize, proof: Vec<Vec<u8>>, end: usize) -> Vec<u8> {
+    if n <= 1 {
+        return target;
+    }
+    let k = merkle_pow2_below(n);
+    if m < k {
+        return merkle_node(merkle_root_from_proof(target, m, k, proof, end - 1), proof[end - 1]);
+    }
+    merkle_node(proof[end - 1], merkle_root_from_proof(target, m - k, n - k, proof, end - 1))
+}
+
+/// True iff leaf_data at index in a tree of size leaves verifies against root.
+fn merkle_verify_inclusion(leaf_data: Vec<u8>, index: i64, size: i64, proof: Vec<Vec<u8>>, root: Vec<u8>) -> bool {
+    if size <= 0 || index < 0 || index >= size {
+        return false;
+    }
+    let n = size as usize;
+    let m = index as usize;
+    if vec_len(proof) != merkle_proof_len(n, m) {
+        return false;
+    }
+    let got = merkle_root_from_proof(merkle_leaf_hash(leaf_data), m, n, proof, vec_len(proof));
+    merkle_bytes_eq(got, root)
+}
+
+/// RFC 6962 SUBPROOF(m, hs[lo..hi], b), appended to out.
+fn merkle_subproof_into(hs: Vec<Vec<u8>>, lo: usize, hi: usize, m: usize, b: bool, out: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    let n = hi - lo;
+    let mut acc = out;
+    if m == n {
+        if !b {
+            acc.push(merkle_mth(hs, lo, hi));
+        }
+        return acc;
+    }
+    let k = merkle_pow2_below(n);
+    if m <= k {
+        acc = merkle_subproof_into(hs, lo, lo + k, m, b, acc);
+        acc.push(merkle_mth(hs, lo + k, hi));
+    } else {
+        acc = merkle_subproof_into(hs, lo + k, hi, m - k, false, acc);
+        acc.push(merkle_mth(hs, lo, lo + k));
+    }
+    acc
+}
+
+/// Consistency proof that leaves keeps its first old_size leaves. The caller
+/// checks 0 < old_size <= len (Python raises MerkleError otherwise).
+fn merkle_consistency_proof(leaves: Vec<Vec<u8>>, old_size: usize) -> Vec<Vec<u8>> {
+    let out: Vec<Vec<u8>> = Vec::new();
+    if old_size == vec_len(leaves) {
+        return out;
+    }
+    let hs = merkle_leaf_hashes(leaves);
+    merkle_subproof_into(hs, 0, vec_len(hs), old_size, true, out)
+}
+
+/// Result of rebuilding (old subtree hash, new subtree hash) from a proof.
+struct MerkleRebuild {
+    ok: bool,
+    old_hash: Vec<u8>,
+    new_hash: Vec<u8>,
+    end: usize,
+}
+
+fn merkle_fail() -> MerkleRebuild {
+    let e1: Vec<u8> = Vec::new();
+    let e2: Vec<u8> = Vec::new();
+    MerkleRebuild { ok: false, old_hash: e1, new_hash: e2, end: 0 }
+}
+
+/// Mirror of Python's _reconstruct, consuming proof[0..end] from the end.
+fn merkle_reconstruct(m: usize, n: usize, proof: Vec<Vec<u8>>, end: usize, b: bool, old_root: Vec<u8>) -> MerkleRebuild {
+    if m == n {
+        if b {
+            return MerkleRebuild { ok: true, old_hash: old_root, new_hash: old_root, end: end };
+        }
+        if end == 0 {
+            return merkle_fail();
+        }
+        let h = proof[end - 1];
+        return MerkleRebuild { ok: true, old_hash: h, new_hash: h, end: end - 1 };
+    }
+    let k = merkle_pow2_below(n);
+    if end == 0 {
+        return merkle_fail();
+    }
+    if m <= k {
+        let right = proof[end - 1];
+        let r = merkle_reconstruct(m, k, proof, end - 1, b, old_root);
+        if !r.ok {
+            return r;
+        }
+        return MerkleRebuild { ok: true, old_hash: r.old_hash, new_hash: merkle_node(r.new_hash, right), end: r.end };
+    }
+    let left = proof[end - 1];
+    let r = merkle_reconstruct(m - k, n - k, proof, end - 1, false, old_root);
+    if !r.ok {
+        return r;
+    }
+    MerkleRebuild { ok: true, old_hash: merkle_node(left, r.old_hash), new_hash: merkle_node(left, r.new_hash), end: r.end }
+}
+
+/// 1 if new_root's tree holds old_root's tree as an unchanged prefix, 0 if
+/// the claim is well posed and wrong, -1 if Python would raise MerkleError.
+fn merkle_consistency_ok(old_size: i64, new_size: i64, old_root: Vec<u8>, new_root: Vec<u8>, proof: Vec<Vec<u8>>) -> i64 {
+    if old_size <= 0 || old_size > new_size {
+        return -1;
+    }
+    if old_size == new_size {
+        if vec_len(proof) == 0 && merkle_bytes_eq(old_root, new_root) {
+            return 1;
+        }
+        return 0;
+    }
+    let r = merkle_reconstruct(old_size as usize, new_size as usize, proof, vec_len(proof), true, old_root);
+    if !r.ok || r.end != 0 {
+        return 0;
+    }
+    if merkle_bytes_eq(r.old_hash, old_root) && merkle_bytes_eq(r.new_hash, new_root) {
+        return 1;
+    }
+    0
+}

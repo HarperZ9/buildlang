@@ -1,0 +1,10 @@
+[package]
+name = "merkle"
+version = "1.0.0"
+edition = "2026"
+description = "RFC 6962 Merkle roots, inclusion and consistency proofs (port of Flywheel harness/merkle.py)"
+author = "Zain Dana Harper"
+license = "FSL-1.1-MIT"
+
+[dependencies]
+sha256 = "^1.0"

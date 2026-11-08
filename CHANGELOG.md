@@ -8,6 +8,12 @@ tracked in `STATUS.md`, `README.md`, and
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
 `108/108` or `132/132` are not the current release gate.
 
+## Unreleased: a working package manager, and our first tools as packages
+
+- `buildc pkg publish`, `resolve`, `verify`, `build`, `check-registry`, plus `init --lib` and a fixed `add`: publish into the in-repo registry with a SHA-256 content hash per version, resolve versions, write `Build.lock`, and build offline from it. `registry/index.json` moves to format 2 (a `versions` map per package; the first-format fields stay). The three existing packages now carry checksums. Codes BL0701 to BL0708. `docs/PACKAGES.md` describes the flow.
+- Published `sha256` and `merkle` 1.0.0, both pure BuildLang. `merkle` ports Flywheel's RFC 6962 tree (FSL-1.1-MIT) and matches the original byte for byte on every root, inclusion and consistency proof for trees of 0 to 40 leaves.
+- Tests: `compiler/tests/pkg_flow.rs` (two clean copies build the same C artifact from one lock; a tampered package fails with BL0702; an unmeetable range fails with BL0701; stale lock BL0703; missing version BL0704; republish BL0707) and `compiler/tests/registry_packages.rs` (every tool package builds from its own lock and matches the goldens its original wrote).
+
 ## Unreleased: measured constants with provenance
 
 - `#[measured(source = "...", uncertainty = ...)]` on a `const` records where a measured value came from. `buildc check` refuses a missing or empty source, an unknown key, a negative uncertainty, or the attribute on anything but a `const` (BL0605). The check receipt lists each measured constant (name, value as written, canonical unit, source, uncertainty) under `measured_constants`, and `receipt verify` re-derives the list, so an edited source fails verification. Programs without measured constants get byte-identical receipts. The attribute changes no emitted C. Docs: `docs/MEASURED-CONSTANTS.md`. Tests: `compiler/tests/measured_constants.rs`, `tests/reject/measured_without_source.bld`.

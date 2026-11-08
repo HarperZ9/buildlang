@@ -1,0 +1,28 @@
+// =============================================================================
+// sha256: print the SHA-256 of each file, in sha256sum's format
+// =============================================================================
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2022-2026 Zain Dana Harper.
+// =============================================================================
+//
+// Usage: sha256 FILE...      prints "<hex>  FILE" per file
+//        sha256 --text WORD  prints the hex digest of WORD's bytes
+
+fn main() ~ Console + FileSystem + Process + Environment {
+    let n_args = args_count();
+    if n_args < 2 {
+        println!("usage: sha256 FILE... | sha256 --text WORD");
+        exit(2);
+    }
+    if args_get(1) == "--text" {
+        println!("{}", sha256_hex(args_get(2)));
+        return;
+    }
+    let mut i: i64 = 1;
+    while i < n_args {
+        let path = args_get(i);
+        let data = read_bytes(path);
+        println!("{}  {}", bytes_hex(sha256_digest(str_bytes(data))), path);
+        i = i + 1;
+    }
+}

@@ -30,6 +30,7 @@
 //! criterion = "0.4"
 //! ```
 
+pub mod local;
 pub mod lockfile;
 pub mod manifest;
 pub mod registry;

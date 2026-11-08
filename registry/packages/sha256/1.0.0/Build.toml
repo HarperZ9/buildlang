@@ -1,0 +1,9 @@
+[package]
+name = "sha256"
+version = "1.0.0"
+edition = "2026"
+description = "SHA-256 (FIPS 180-4) in pure BuildLang, with a sha256sum-style command"
+author = "Zain Dana Harper"
+license = "AGPL-3.0-only"
+
+[dependencies]
