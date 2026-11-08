@@ -1,4 +1,152 @@
-# BuildLang Package Ecosystem Design
+# BuildLang packages
+
+`buildc pkg` creates packages, publishes them into the registry in this
+repository, resolves versions, writes `Build.lock` with a content hash per
+package, and builds offline from that lock. Nothing in the flow opens a
+network connection: the registry is the `registry/` folder.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `buildc pkg init [DIR] [--lib]` | Writes `Build.toml` and `src/main.bld` (or `src/lib.bld`). |
+| `buildc pkg add NAME [--version REQ]` | Adds a registry dependency under `[dependencies]`; the default requirement is `^` the newest published version. |
+| `buildc pkg publish [DIR]` | Copies the package into `registry/packages/NAME/VERSION/` and records its hash in `registry/index.json`. |
+| `buildc pkg resolve [DIR]` | Picks a version of every dependency and writes `Build.lock`. |
+| `buildc pkg verify [DIR]` | Re-hashes every locked package and compares it with the lock. |
+| `buildc pkg build [DIR] [--emit c\|exe] [--release]` | Builds offline from `Build.lock` into `target/pkg/`. |
+| `buildc pkg check-registry` | Re-hashes every published version against the index. |
+| `buildc pkg search QUERY` | Lists packages whose name or description matches. |
+
+Every command takes `--registry DIR`. Without it, `buildc` uses
+`BUILDLANG_REGISTRY`, then the nearest `registry/index.json` above the
+package folder.
+
+## A package
+
+```text
+my-tool/
+  Build.toml      name, version, license, [dependencies]
+  Build.lock      written by `pkg resolve`
+  LICENSE         the licence text, when it is not the repository's
+  src/lib.bld     library: every src/*.bld except main.bld, joined in name order
+  src/main.bld    the program, when the package is a tool
+  tests/          inputs, goldens and tests/cases.txt
+```
+
+```toml
+[package]
+name = "merkle"
+version = "1.0.0"
+description = "RFC 6962 Merkle roots and proofs"
+author = "Zain Dana Harper"
+license = "FSL-1.1-MIT"
+
+[dependencies]
+sha256 = "^1.0"
+```
+
+A name is lowercase letters, digits and `-`. Publishing needs `license`.
+Requirements take `^1.2`, `~1.2.3`, `=1.2.3`, `>=1.0, <2.0`, `1.*` and `*`.
+Only registry dependencies are supported; a `path` or `git` dependency is
+refused with BL0705.
+
+## Content hash
+
+A package is the files at the top of its folder plus everything under `src/`
+and `tests/`; hidden files and `target/` are left out. Its hash is SHA-256
+over each file in byte order of its relative path: the line
+`file <path> <length>`, the bytes, then a newline. It is written
+`sha256:<hex>`. `publish` writes text files outside `tests/` with LF
+endings (test inputs keep their bytes), and
+`.gitattributes` keeps git from rewriting `registry/`, so a clone on any
+platform hashes the same bytes.
+
+A published version is immutable. Publishing it again with the same files
+does nothing; with other files it fails with BL0707.
+
+## Resolution
+
+Each round collects the requirements of the root and of every package picked
+so far, and picks the newest published version that meets all of a name's
+requirements. Rounds repeat until the picks stop changing. There is one
+version per name, and no backtracking: when two requirements on one name have
+no common version, resolution fails with BL0701 and names both requirements
+and every published version.
+
+## Build.lock
+
+```toml
+lock-version = 1
+
+[root]
+name = "app"
+version = "0.1.0"
+requires = ["merkle ^1.0.0"]
+
+[[package]]
+name = "merkle"
+version = "1.0.0"
+checksum = "sha256:..."
+dependencies = ["sha256 1.0.0"]
+```
+
+`requires` repeats the manifest's requirements. When the manifest changes
+after the lock was written, `build` and `verify` fail with BL0703 until
+`resolve` runs again. The same resolution always writes the same bytes.
+
+## Offline build
+
+`buildc pkg build` reads only `Build.toml`, `Build.lock` and the registry
+folder. It checks that every locked version is in the registry (BL0704) and
+that its files hash to the locked checksum (BL0702). It then joins the
+library files of each package in dependency order, the project's own library
+files and `src/main.bld` into one source. Lines that import a locked package
+by name (`use merkle;`) are dropped, because the joined source already holds
+it. The C backend compiles that source.
+
+Outputs in `target/pkg/`: `NAME.c`, the executable, and `build-receipt.json`
+with the lock's hash, each package's checksum, the joined source's hash and
+the C artifact's hash. The C artifact is the reproducible output: two clean
+copies of the registry and a project give the same hash
+(`compiler/tests/pkg_flow.rs`). The executable's hash is recorded too, but the
+C compiler may stamp it, so it is not compared.
+
+Generated programs use LF on stdout by default (`--stdio-mode portable-lf`).
+
+Package sources share one namespace. Library functions carry a package
+prefix (`merkle_`, `cr_`, `color_`) so two packages do not collide.
+
+## Tool packages and their tests
+
+A tool package carries `tests/cases.txt`. Each line is
+`MODE GOLDEN ARGS...`: run the program with ARGS from the package folder and
+compare stdout with GOLDEN. `exact` wants the same bytes. `float:ABS:REL`
+compares whitespace-separated tokens, numbers within ABS or within REL of the
+golden value. `tests/reference.py` in each package runs the original tool on
+the same inputs and wrote the goldens. `compiler/tests/registry_packages.rs`
+builds every such package from its own lock and runs every case.
+
+## Codes
+
+| Code | When |
+|---|---|
+| BL0701 | no published version meets every requirement |
+| BL0702 | a locked package's files or index entry do not match the lock |
+| BL0703 | `Build.lock` is missing, malformed or older than `Build.toml` |
+| BL0704 | a locked version is not in the registry |
+| BL0705 | the manifest is invalid, or a published package lacks `license` or sources |
+| BL0706 | no registry was found, or its index is invalid |
+| BL0707 | that version is already published with other files |
+| BL0708 | a package file could not be read or written |
+
+---
+
+# Design draft (2026-03-21)
+
+The rest of this file is the original design draft. Workspaces, features,
+git and path dependencies, a remote registry and namespaced imports are not
+built. The sections above describe what is.
 
 Version: 0.1 (Draft)
 Date: 2026-03-21

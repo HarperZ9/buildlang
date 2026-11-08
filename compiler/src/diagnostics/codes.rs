@@ -19,6 +19,7 @@
 //! - `BL0400`..`BL0499`: effects and capabilities
 //! - `BL0500`..`BL0599`: ownership, borrows and linear values
 //! - `BL0600`..`BL0699`: units, modules and macros
+//! - `BL0700`..`BL0799`: packages, the registry and the lockfile
 //! - `BL0900`..`BL0999`: backend
 
 use crate::lexer::LexerErrorKind;
@@ -33,6 +34,30 @@ pub const INPUT_GRAPH_ERROR: &str = "BL0002";
 
 /// A check policy profile rejected the program.
 pub const POLICY_VIOLATION: &str = "BL0090";
+
+/// No published version meets every version requirement.
+pub const PKG_UNRESOLVABLE: &str = "BL0701";
+
+/// A locked package's files do not hash to its locked checksum.
+pub const PKG_CHECKSUM: &str = "BL0702";
+
+/// The lockfile is missing, malformed or older than the manifest.
+pub const PKG_LOCK: &str = "BL0703";
+
+/// A locked package version is not in the registry.
+pub const PKG_MISSING: &str = "BL0704";
+
+/// The package manifest is invalid or incomplete.
+pub const PKG_MANIFEST: &str = "BL0705";
+
+/// The registry index is missing or invalid.
+pub const PKG_REGISTRY: &str = "BL0706";
+
+/// That version is already published with different contents.
+pub const PKG_PUBLISHED: &str = "BL0707";
+
+/// A package file could not be read or written.
+pub const PKG_IO: &str = "BL0708";
 
 /// Code for a lexer error kind.
 pub fn lexer_code(kind: &LexerErrorKind) -> &'static str {
@@ -377,6 +402,23 @@ pub const CODES: &[CodeInfo] = &[
     c("BL0605", "measured constant without a valid source"),
     c("BL0610", "module import cycle"),
     c("BL0620", "formatting macro needs a string literal first"),
+    c(
+        "BL0701",
+        "no published version meets every version requirement",
+    ),
+    c("BL0702", "a locked package does not match its checksum"),
+    c(
+        "BL0703",
+        "the lockfile is missing, malformed or out of date",
+    ),
+    c("BL0704", "a locked package is not in the registry"),
+    c("BL0705", "the package manifest is invalid"),
+    c("BL0706", "the registry index is missing or invalid"),
+    c(
+        "BL0707",
+        "that package version is already published with other contents",
+    ),
+    c("BL0708", "a package file could not be read or written"),
     c("BL0901", "the C backend cannot compile the program"),
 ];
 

@@ -1,18 +1,79 @@
 {
+  "format": 2,
   "packages": {
-    "std-math": {
+    "merkle": {
       "version": "1.0.0",
-      "description": "Standard math functions for BuildLang",
+      "description": "RFC 6962 Merkle roots, inclusion and consistency proofs (port of Flywheel harness/merkle.py)",
       "author": "Zain Dana Harper",
-      "checksum": "",
-      "path": "packages/std-math"
+      "license": "FSL-1.1-MIT",
+      "checksum": "sha256:89ff0270f2953b410ca0768eb497fc01bec78f363d520ba2d71aea95f0a56ed8",
+      "path": "packages/merkle/1.0.0",
+      "versions": {
+        "1.0.0": {
+          "path": "packages/merkle/1.0.0",
+          "checksum": "sha256:89ff0270f2953b410ca0768eb497fc01bec78f363d520ba2d71aea95f0a56ed8",
+          "dependencies": {
+            "sha256": "^1.0.0"
+          }
+        }
+      }
+    },
+    "sha256": {
+      "version": "1.0.0",
+      "description": "SHA-256 (FIPS 180-4) in pure BuildLang, with a sha256sum-style command",
+      "author": "Zain Dana Harper",
+      "license": "AGPL-3.0-only",
+      "checksum": "sha256:49354c89cbc959f5ea61b7b248e5442ad1f3fda8968e24eb0064f21bd4ff8676",
+      "path": "packages/sha256/1.0.0",
+      "versions": {
+        "1.0.0": {
+          "path": "packages/sha256/1.0.0",
+          "checksum": "sha256:49354c89cbc959f5ea61b7b248e5442ad1f3fda8968e24eb0064f21bd4ff8676",
+          "dependencies": {}
+        }
+      }
     },
     "shader-utils": {
       "version": "1.0.0",
       "description": "Common shader utility functions",
       "author": "Zain Dana Harper",
-      "checksum": "",
-      "path": "packages/shader-utils"
+      "checksum": "sha256:1711e988f12f0db22b748b39dcb6d03d120c6dfce8632e423b8cd22120180117",
+      "path": "packages/shader-utils",
+      "versions": {
+        "1.0.0": {
+          "path": "packages/shader-utils",
+          "checksum": "sha256:1711e988f12f0db22b748b39dcb6d03d120c6dfce8632e423b8cd22120180117",
+          "dependencies": {}
+        }
+      }
+    },
+    "std-collections": {
+      "version": "0.1.0",
+      "description": "Fixed-capacity collections for BuildLang (no heap allocation)",
+      "author": "Zain Dana Harper",
+      "checksum": "sha256:02a265e104f30276856fe5187c8278cc862612f619fe9dfc1096f77514a87a23",
+      "path": "packages/std-collections",
+      "versions": {
+        "0.1.0": {
+          "path": "packages/std-collections",
+          "checksum": "sha256:02a265e104f30276856fe5187c8278cc862612f619fe9dfc1096f77514a87a23",
+          "dependencies": {}
+        }
+      }
+    },
+    "std-math": {
+      "version": "1.0.0",
+      "description": "Standard math functions for BuildLang",
+      "author": "Zain Dana Harper",
+      "checksum": "sha256:6bc34224ff7335ae95137b0c53bc06ee6c859a377c84743f9464d9091730584b",
+      "path": "packages/std-math",
+      "versions": {
+        "1.0.0": {
+          "path": "packages/std-math",
+          "checksum": "sha256:6bc34224ff7335ae95137b0c53bc06ee6c859a377c84743f9464d9091730584b",
+          "dependencies": {}
+        }
+      }
     }
   }
 }
