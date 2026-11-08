@@ -1,0 +1,7 @@
+// A measured constant must say where its value came from: `source` is missing.
+#[measured(uncertainty = 1.5e-15)]
+const G: f64 = 6.67430e-11;
+
+fn main() ~ Console {
+    println!("{}", G);
+}

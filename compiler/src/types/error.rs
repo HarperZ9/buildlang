@@ -475,6 +475,11 @@ pub enum TypeError {
     #[error("unit mismatch: `.{method}()` of `{found}` has no unit with integer exponents")]
     UnitRootNotExact { method: String, found: String },
 
+    /// A `#[measured]` constant without a source, with an unknown key, or on
+    /// an item that is not a `const`.
+    #[error("measured constant `{name}`: {reason}")]
+    MeasuredConstantInvalid { name: String, reason: String },
+
     // =========================================================================
     // MODULE ERRORS
     // =========================================================================

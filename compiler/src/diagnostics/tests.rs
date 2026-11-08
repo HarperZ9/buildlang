@@ -205,6 +205,10 @@ fn type_samples() -> Vec<TypeError> {
             method: s("sqrt"),
             found: s("m"),
         },
+        E::MeasuredConstantInvalid {
+            name: s("G"),
+            reason: s("no source"),
+        },
         E::ModuleImportCycle {
             path: s("a.bld"),
             module: s("b"),

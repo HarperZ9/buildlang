@@ -1193,6 +1193,11 @@ struct CheckReceipt {
     observed_capabilities: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     propagated_effects: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     diagnostics: Vec<CheckReceiptDiagnostic>,
+    /// Every `#[measured]` constant: value as written, unit, source and
+    /// uncertainty. Omitted when there are none, so receipts of programs
+    /// without measured constants are byte-identical to before.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    measured_constants: Vec<buildlang::types::measured::MeasuredConstant>,
     #[serde(skip_serializing_if = "Option::is_none")]
     policy: Option<CheckReceiptPolicy>,
 }
@@ -1392,6 +1397,8 @@ struct CheckOutcome {
     /// the same order as `parse_errors` then `type_errors`. Carries the stable
     /// code and every help line; `--error-format=json` prints these.
     diagnostics: Vec<Diagnostic>,
+    /// The `#[measured]` constants of the root file, for the check receipt.
+    measured_constants: Vec<buildlang::types::measured::MeasuredConstant>,
 }
 
 #[derive(serde::Deserialize)]
@@ -2778,6 +2785,13 @@ fn receipt_replay_fields(
         ("/propagated_effects", "propagated_effects"),
         ("/diagnostics", "diagnostics"),
     ];
+    // Present only when the program has `#[measured]` constants; a receipt
+    // edited to change a value's source or uncertainty no longer verifies.
+    if receipt.pointer("/measured_constants").is_some()
+        || current_receipt.pointer("/measured_constants").is_some()
+    {
+        fields.push(("/measured_constants", "measured_constants"));
+    }
     if receipt.pointer("/policy").is_some() || current_receipt.pointer("/policy").is_some() {
         fields.push(("/policy/status", "policy_status"));
         fields.push(("/policy/violations", "policy_violations"));
@@ -5548,6 +5562,7 @@ fn type_error_kind(error: &TypeError) -> &'static str {
         TypeError::UnitOperationMismatch { .. } => "UnitOperationMismatch",
         TypeError::UnitNotDimensionless { .. } => "UnitNotDimensionless",
         TypeError::UnitRootNotExact { .. } => "UnitRootNotExact",
+        TypeError::MeasuredConstantInvalid { .. } => "MeasuredConstantInvalid",
         TypeError::ModuleImportCycle { .. } => "ModuleImportCycle",
         TypeError::UndefinedLoopLabel { .. } => "UndefinedLoopLabel",
         _ => "TypeError",
@@ -6189,6 +6204,7 @@ fn build_check_receipt(
         observed_capabilities,
         propagated_effects,
         diagnostics,
+        measured_constants: outcome.measured_constants.clone(),
         policy: receipt_policy,
     }
 }
@@ -6282,6 +6298,7 @@ fn run_check_reporting(file: &Path, early: &mut Option<Diagnostic>) -> Result<Ch
         .map(|err| Diagnostic::from_parse(err, &source_file))
         .collect::<Vec<_>>();
     let item_count = ast.items.len();
+    let measured_constants = buildlang::types::measured::collect(&ast, source_file.source()).0;
 
     resolve_modules_recording_inputs(&mut ast, chk_base, &mut input_digest_ledger)
         .map_err(|_| unresolved(early))?;
@@ -6370,6 +6387,7 @@ fn run_check_reporting(file: &Path, early: &mut Option<Diagnostic>) -> Result<Ch
         type_errors,
         type_error_locations,
         function_summaries,
+        measured_constants,
     })
 }
 
@@ -11262,6 +11280,7 @@ mod tests {
                     propagated_effects: BTreeMap::new(),
                 },
             ],
+            measured_constants: Vec::new(),
         };
 
         let decision = evaluate_check_policy(&policy, &outcome);
@@ -11337,6 +11356,7 @@ mod tests {
             type_error_locations: Vec::new(),
             diagnostics: Vec::new(),
             function_summaries: Vec::new(),
+            measured_constants: Vec::new(),
         };
 
         let decision = evaluate_check_policy(&policy, &outcome);

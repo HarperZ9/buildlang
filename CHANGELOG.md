@@ -15,6 +15,10 @@ tracked in `STATUS.md`, `README.md`, and
 - `buildc check` fails on a refuted claim (BL0701) and on a verifier that disagrees with itself (BL0702).
 - `tests/verify`: Bend 2's published numeric, parallel-sum and Pong laws ported, BuildLang's own DETMATH integer, trace-codec and conservation laws, and planted checks. Details and limits: `docs/VERIFY.md`.
 
+## Unreleased: measured constants with provenance
+
+- `#[measured(source = "...", uncertainty = ...)]` on a `const` records where a measured value came from. `buildc check` refuses a missing or empty source, an unknown key, a negative uncertainty, or the attribute on anything but a `const` (BL0605). The check receipt lists each measured constant (name, value as written, canonical unit, source, uncertainty) under `measured_constants`, and `receipt verify` re-derives the list, so an edited source fails verification. Programs without measured constants get byte-identical receipts. The attribute changes no emitted C. Docs: `docs/MEASURED-CONSTANTS.md`. Tests: `compiler/tests/measured_constants.rs`, `tests/reject/measured_without_source.bld`.
+
 ## Unreleased: units through roots and powers; typed maths builtins
 
 - Unit-carrying values now go through `**`, `.powi()`, `.powf()` and `pow` with an integer-literal exponent, and through `.sqrt()`, `.cbrt()` and `sqrt`, with the exponents scaled. Slice one refused all of these. A root that leaves a fraction is BL0604; a runtime exponent on a unit is still refused (BL0383).
