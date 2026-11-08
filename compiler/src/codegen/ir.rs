@@ -143,6 +143,10 @@ pub struct MirModule {
     pub trait_methods: HashMap<Arc<str>, Vec<(Arc<str>, MirFnSig)>>,
     /// Shader uniform declarations (#[uniform] on module-level constants).
     pub uniforms: Vec<MirUniform>,
+    /// Structs marked `#[repr(C)]`. The C export header defines these and
+    /// forward-declares any other struct an export reaches through a pointer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repr_c: Vec<Arc<str>>,
 }
 
 /// A shader uniform declaration.
@@ -169,6 +173,7 @@ impl MirModule {
             vtables: Vec::new(),
             trait_methods: HashMap::new(),
             uniforms: Vec::new(),
+            repr_c: Vec::new(),
         }
     }
 

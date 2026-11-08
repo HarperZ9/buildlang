@@ -1,0 +1,20 @@
+// Methods on a borrowed vector parameter: `len` through `&Vec<T>`, `push` and
+// `len` through `&mut Vec<T>`. Refused with BL0901 on 1.10.0.
+fn count(xs: &Vec<str>) -> usize {
+    xs.len()
+}
+
+fn add(xs: &mut Vec<i64>, n: i64) {
+    xs.push(n);
+    xs.push(n * 2);
+}
+
+fn main() ~ Console {
+    let mut words: Vec<str> = Vec::new();
+    words.push("a");
+    words.push("b");
+    let mut nums: Vec<i64> = Vec::new();
+    add(&mut nums, 4);
+    add(&mut nums, 5);
+    println!("{} {} {} {}", count(&words), nums.len(), nums[1], nums[3]);
+}

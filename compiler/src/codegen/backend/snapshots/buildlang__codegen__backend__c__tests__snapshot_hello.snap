@@ -745,6 +745,27 @@ static BuildVecHandle build_hvec_new_i64(void) {
 }
 static void build_hvec_push_i64(BuildVecHandle h, int64_t val) { build_vec_push(h.inner, &val); }
 static int64_t build_hvec_get_i64(BuildVecHandle h, size_t index) { return *(int64_t*)build_vec_get(h.inner, index); }
+// `v.remove(i)` closes the gap at `i`; `v.insert(i, x)` pushes `x`, then
+// moves the last element to `i`. Both stop on an index past the length.
+static void build_vec_remove_at(BuildVecHandle h, size_t i) {
+    BuildVec* v = h.inner;
+    if (i >= v->len) bl_index_oob((long long)i, v->len);
+    memmove((char*)v->ptr + i * v->elem_size, (char*)v->ptr + (i + 1) * v->elem_size,
+            (v->len - i - 1) * v->elem_size);
+    v->len--;
+}
+static void build_vec_move_last_to(BuildVecHandle h, size_t i) {
+    BuildVec* v = h.inner;
+    size_t n = v->len, es = v->elem_size;
+    if (i > n - 1) bl_index_oob((long long)i, n - 1);
+    if (i == n - 1) return;
+    char* base = (char*)v->ptr;
+    void* t = malloc(es);
+    memcpy(t, base + (n - 1) * es, es);
+    memmove(base + (i + 1) * es, base + i * es, (n - 1 - i) * es);
+    memcpy(base + i * es, t, es);
+    free(t);
+}
 static int64_t build_hvec_pop_i64(BuildVecHandle h) {
     if (h.inner->len == 0) return 0;
     h.inner->len--;

@@ -4363,12 +4363,29 @@ impl<'ctx> MirLowerer<'ctx> {
                 // `s.push_str(x)` reassigns `s` to `build_string_concat(s, x)`.
                 // String literals already lower to BuildString, so the argument
                 // needs no coercion. Returns unit.
-                if method_name == "push_str" && args.len() == 1 {
+                // `s.push(c)` appends one char the same way, after encoding it
+                // as UTF-8 (before 1.11.0 it was refused with BL0901).
+                if (method_name == "push_str" || method_name == "push") && args.len() == 1 {
                     let receiver_local = match receiver_val {
                         MirValue::Local(id) => Some(id),
                         _ => None,
                     };
-                    let arg_val = self.lower_expr(&args[0])?;
+                    let mut arg_val = self.lower_expr(&args[0])?;
+                    let arg_is_string = matches!(
+                        self.type_of_value(&arg_val),
+                        MirType::Struct(ref n) if n.as_ref() == "BuildString"
+                    );
+                    if method_name == "push" && !arg_is_string {
+                        let builder = self.current_fn.as_mut().ok_or_else(|| {
+                            CodegenError::Internal("No current function".to_string())
+                        })?;
+                        let text = builder.create_local(MirType::Struct(Arc::from("BuildString")));
+                        let cont = builder.create_block();
+                        let func = MirValue::Function(Arc::from("build_char_to_string"));
+                        builder.call(func, vec![arg_val], Some(text), cont);
+                        builder.switch_to_block(cont);
+                        arg_val = values::local(text);
+                    }
                     let builder = self
                         .current_fn
                         .as_mut()
@@ -5202,11 +5219,88 @@ impl<'ctx> MirLowerer<'ctx> {
             }
         }
 
+        // A vector reached through a reference (`v: &Vec<T>`, `v: &mut Vec<T>`):
+        // load the handle, as for maps below. The handle points at the shared
+        // vector, so `v.push(x)` through a `&mut Vec<T>` grows the caller's
+        // vector. Before 1.11.0 `v.len()` and `v.push(x)` on a borrowed vector
+        // parameter were refused with BL0901 (no method `len`).
+        let (receiver_val, receiver_ty) = match &receiver_ty {
+            MirType::Ptr(inner) if matches!(inner.as_ref(), MirType::Vec(..)) => {
+                let loaded = self.deref_if_pointer(receiver_val)?;
+                (loaded, inner.as_ref().clone())
+            }
+            _ => (receiver_val, receiver_ty),
+        };
         // Vec<T> method dispatch: map .push/.len/.get/.pop/.is_empty/.clear
         // to typed runtime functions (build_hvec_*).
         if let MirType::Vec(ref elem_ty) = receiver_ty {
             let method_name = method.name.as_ref();
             let type_suffix = Self::hvec_elem_suffix(elem_ty.as_ref())?;
+
+            // `v.remove(i)` returns the element at `i` and closes the gap;
+            // `v.insert(i, x)` pushes `x` and moves it to `i`. Both check `i`
+            // against the length. Before 1.11.0 both were refused with BL0901.
+            if (method_name == "remove" && args.len() == 1)
+                || (method_name == "insert" && args.len() == 2)
+            {
+                let idx = self.lower_expr(&args[0])?;
+                let idx = self.deref_if_pointer(idx)?;
+                if method_name == "remove" {
+                    let builder = self
+                        .current_fn
+                        .as_mut()
+                        .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                    let elem = builder.create_local(*elem_ty.clone());
+                    let cont = builder.create_block();
+                    let get = MirValue::Function(Arc::from(
+                        format!("build_hvec_get_{}", type_suffix).as_str(),
+                    ));
+                    builder.call(
+                        get,
+                        vec![receiver_val.clone(), idx.clone()],
+                        Some(elem),
+                        cont,
+                    );
+                    builder.switch_to_block(cont);
+                    let done = builder.create_local(MirType::Void);
+                    let cont = builder.create_block();
+                    let remove = MirValue::Function(Arc::from("build_vec_remove_at"));
+                    builder.call(remove, vec![receiver_val, idx], Some(done), cont);
+                    builder.switch_to_block(cont);
+                    return Ok(values::local(elem));
+                }
+                let val = self.lower_expr(&args[1])?;
+                let val = self.deref_if_pointer(val)?;
+                let value_ty = self.type_of_value(&val);
+                if !Self::vec_elem_accepts(elem_ty, &value_ty) {
+                    return Err(self.reject_at(
+                        &args[1],
+                        format!(
+                            "`insert` adds a `{}` to a vector of `{}` elements",
+                            Self::source_type_name(&value_ty),
+                            Self::source_type_name(elem_ty)
+                        ),
+                        "insert values of the vector's element type".to_string(),
+                    ));
+                }
+                let builder = self
+                    .current_fn
+                    .as_mut()
+                    .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                let done = builder.create_local(MirType::Void);
+                let cont = builder.create_block();
+                let push = MirValue::Function(Arc::from(
+                    format!("build_hvec_push_{}", type_suffix).as_str(),
+                ));
+                builder.call(push, vec![receiver_val.clone(), val], Some(done), cont);
+                builder.switch_to_block(cont);
+                let done = builder.create_local(MirType::Void);
+                let cont = builder.create_block();
+                let mv = MirValue::Function(Arc::from("build_vec_move_last_to"));
+                builder.call(mv, vec![receiver_val, idx], Some(done), cont);
+                builder.switch_to_block(cont);
+                return Ok(values::unit());
+            }
 
             let (runtime_fn, ret_ty): (Option<String>, MirType) = match method_name {
                 "push" => (

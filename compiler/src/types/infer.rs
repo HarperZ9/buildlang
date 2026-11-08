@@ -7023,6 +7023,32 @@ impl<'ctx> TypeInfer<'ctx> {
             let _ = self.unify(&target_ty, &expr_ty, span);
         }
 
+        // A `str` is a pointer, a length and a capacity, and its bytes need not
+        // end in NUL, so no cast turns it into a C pointer or a number. Before
+        // 1.11.0 `"2.5" as *const u8` passed check and failed in the C compiler.
+        let is_str = |t: &Ty| match &t.kind {
+            TyKind::Str => true,
+            TyKind::Ref(_, _, inner) => matches!(inner.kind, TyKind::Str),
+            _ => false,
+        };
+        if is_str(&expr_ty)
+            && matches!(
+                target_ty.kind,
+                TyKind::Ptr(..) | TyKind::Int(_) | TyKind::Float(_)
+            )
+        {
+            self.error(
+                TypeError::UnsupportedConstruct {
+                    construct: "a cast from `str` to a pointer or a number".to_string(),
+                    detail: "a `str` has no C layout and need not end in NUL; to hand text to C, \
+                             copy its bytes into a buffer from `malloc` and add the 0 byte"
+                        .to_string(),
+                },
+                span,
+            );
+            return Ty::error();
+        }
+
         target_ty
     }
 
