@@ -144,8 +144,8 @@ def main():
     ap.add_argument("--combat", nargs=4, metavar=("EXE", "INPUTS", "JS_DIR", "OUT_DIR"),
                     help="also time the private Low Water combat port (40 fights)")
     opts = ap.parse_args()
-    out_dir = Path(opts.out)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    results_dir = Path(opts.out)
+    results_dir.mkdir(parents=True, exist_ok=True)
     rng = random.Random(20261107)
     report = {"machine": {"logical_cpus": psutil.cpu_count(),
                           "physical_cores": psutil.cpu_count(logical=False)},
@@ -180,7 +180,7 @@ def main():
         report["benches"][name] = {"args": args, "summary": summary, "rows": rows}
         print(json.dumps(summary, indent=1), flush=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    path = out_dir / f"bench-{stamp}.json"
+    path = results_dir / f"bench-{stamp}.json"
     path.write_text(json.dumps(report, indent=1))
     print(f"wrote {path}")
 
