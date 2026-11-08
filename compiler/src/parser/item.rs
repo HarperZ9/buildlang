@@ -65,6 +65,10 @@ impl<'a> Parser<'a> {
         let is_async = self.eat_keyword(Keyword::Async);
         let is_const = self.eat_keyword(Keyword::Const);
 
+        if !is_unsafe && !is_async && !is_const && self.at_law_decl() {
+            return self.parse_law(attrs, vis, start);
+        }
+
         match self.current_kind().clone() {
             // =================================================================
             // FUNCTION
@@ -362,7 +366,16 @@ impl<'a> Parser<'a> {
     /// Parse a function definition.
     fn parse_fn(&mut self, is_unsafe: bool, is_async: bool, is_const: bool) -> ParseResult<FnDef> {
         self.expect_keyword(Keyword::Fn)?;
+        self.parse_fn_after_keyword(is_unsafe, is_async, is_const)
+    }
 
+    /// Parse a function after its introducing keyword (`fn` or `law`).
+    pub(super) fn parse_fn_after_keyword(
+        &mut self,
+        is_unsafe: bool,
+        is_async: bool,
+        is_const: bool,
+    ) -> ParseResult<FnDef> {
         let name = self.expect_ident()?;
         let generics = self.parse_generics()?;
 
@@ -416,6 +429,8 @@ impl<'a> Parser<'a> {
             generics
         };
 
+        let clauses = self.parse_contract_clauses()?;
+
         let body = if self.check(&TokenKind::OpenDelim(Delimiter::Brace)) {
             Some(Box::new(self.parse_block()?))
         } else {
@@ -425,7 +440,7 @@ impl<'a> Parser<'a> {
 
         let abi = None; // TODO: Handle extern fn
 
-        Ok(FnDef {
+        let fn_def = FnDef {
             name,
             generics,
             sig: FnSig {
@@ -439,7 +454,11 @@ impl<'a> Parser<'a> {
                 effects,
             },
             body,
-        })
+        };
+        if !clauses.requires.is_empty() || !clauses.ensures.is_empty() {
+            self.queue_contract_items(&fn_def, clauses);
+        }
+        Ok(fn_def)
     }
 
     /// Parse a function parameter.
@@ -1219,6 +1238,7 @@ impl<'a> Parser<'a> {
                         self.recover_to_item();
                     }
                 }
+                self.drain_pending_items(&mut items);
             }
 
             let brace_end = self.expect(&TokenKind::CloseDelim(Delimiter::Brace))?.span;
@@ -1269,6 +1289,7 @@ impl<'a> Parser<'a> {
                         self.recover_to_item();
                     }
                 }
+                self.drain_pending_items(&mut items);
             }
             let brace_end = self.expect(&TokenKind::CloseDelim(Delimiter::Brace))?.span;
             Some(ModContent {

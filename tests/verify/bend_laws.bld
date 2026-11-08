@@ -1,0 +1,113 @@
+// Bend 2's published laws, ported to BuildLang laws.
+// Source: github.com/bendlang/bend at 9a4223d (Apache-2.0), files
+// demos/proof_numerics/LAWS.bend, demos/pure_par_sum/LAWS.bend and
+// demos/app_pong_game_2d/LAWS.bend, with the functions they name.
+// Bend states these over unbounded Nat; here each law runs over a fixed-width
+// type, and the recursive forms are kept as Bend writes them.
+
+// ---- proof_numerics: add, mul and divmod by structural recursion --------
+
+fn add(a: u32, b: u32) -> u32 {
+    if a == 0 { b } else { add(a - 1, b) + 1 }
+}
+
+fn mul(a: u32, b: u32) -> u32 {
+    if a == 0 { 0 } else { add(b, mul(a - 1, b)) }
+}
+
+// Bend's divmod.go returns the pair (q, r); here the pair is packed as
+// q * 65536 + r. One step bumps r while r < m, else wraps r to 0 and bumps q.
+fn divmod_go(n: u32, m: u32) -> u32 {
+    if n == 0 {
+        0
+    } else {
+        let qr = divmod_go(n - 1, m);
+        let q = qr / 65536;
+        let r = qr % 65536;
+        if r < m { q * 65536 + r + 1 } else { (q + 1) * 65536 }
+    }
+}
+
+// The recursive forms over small inputs: every input in the requires is run
+// (exhaustive), so each holds there; the bounds keep the runs short.
+law add_comm_rec(a: u8, b: u8) requires a < 64 && b < 64 {
+    add(a as u32, b as u32) == add(b as u32, a as u32)
+}
+
+law add_assoc_rec(a: u8, b: u8, c: u8) requires a < 16 && b < 16 && c < 16 {
+    add(a as u32, add(b as u32, c as u32)) == add(add(a as u32, b as u32), c as u32)
+}
+
+law mul_comm_rec(a: u8, b: u8) requires a < 32 && b < 32 {
+    mul(a as u32, b as u32) == mul(b as u32, a as u32)
+}
+
+law mul_dist_rec(a: u8, b: u8, c: u8) requires a < 8 && b < 8 && c < 8 {
+    add(mul(a as u32, c as u32), mul(b as u32, c as u32)) == mul(add(a as u32, b as u32), c as u32)
+}
+
+// Euclid's division: dividing n by 1 + m gives q and r with r < 1 + m and
+// n == r + q * (1 + m).
+law divmod_ok_rec(n: u8, m: u8) requires n < 64 && m < 64 {
+    let d = (m as u32) + 1;
+    let qr = divmod_go(n as u32, m as u32);
+    let q = qr / 65536;
+    let r = qr % 65536;
+    r < d && (n as u32) == r + q * d
+}
+
+// The recursive form over the full u32 domain: true, but it needs induction
+// the stage-1 engine does not do. Expected: unknown, never proved.
+law add_comm_rec_u32(a: u32, b: u32) {
+    add(a, b) == add(b, a)
+}
+
+// The same laws in the language's own arithmetic, for every u64 input.
+law add_comm(a: u64, b: u64) { a + b == b + a }
+law add_assoc(a: u64, b: u64, c: u64) { a + (b + c) == (a + b) + c }
+law mul_comm(a: u64, b: u64) { a * b == b * a }
+law mul_dist(a: u64, b: u64, c: u64) { a * c + b * c == (a + b) * c }
+law divmod_ok(n: u64, m: u64) requires m < 18446744073709551615 {
+    let q = n / (m + 1);
+    let r = n % (m + 1);
+    r < m + 1 && n == r + q * (m + 1)
+}
+
+// ---- pure_par_sum: the fork/join tree adds what the sequential loop adds --
+
+fn pow2(d: u32) -> u32 {
+    if d == 0 { 1 } else { let h = pow2(d - 1); h + h }
+}
+
+fn tree_sum(d: u32, i: u32) -> u32 {
+    if d == 0 { i } else { tree_sum(d - 1, i) + tree_sum(d - 1, pow2(d - 1) + i) }
+}
+
+fn seq(n: u32, i: u32) -> u32 {
+    if n == 0 { 0 } else { seq(n - 1, i) + ((n - 1) + i) }
+}
+
+law tree_is_seq(d: u8, i: u8) requires d <= 6 && i < 64 {
+    tree_sum(d as u32, i as u32) == seq(pow2(d as u32), i as u32)
+}
+
+// ---- app_pong_game_2d: the last press of a key wins ---------------------
+
+fn set(hit: bool, down: bool, old: bool) -> bool {
+    if hit { down } else { old }
+}
+
+// Pong.press sets each of four keys (w, s, up, down) when the code names it.
+fn press_key(code: u32, key: u32, down: bool, old: bool) -> bool {
+    set(code == key, down, old)
+}
+
+law last_press(code: u32, d1: bool, d2: bool, w: bool, s: bool, up: bool, dn: bool) {
+    press_key(code, 119, d2, press_key(code, 119, d1, w)) == press_key(code, 119, d2, w)
+        && press_key(code, 115, d2, press_key(code, 115, d1, s)) == press_key(code, 115, d2, s)
+        && press_key(code, 63232, d2, press_key(code, 63232, d1, up)) == press_key(code, 63232, d2, up)
+        && press_key(code, 63233, d2, press_key(code, 63233, d1, dn)) == press_key(code, 63233, d2, dn)
+}
+
+fn main() {
+}

@@ -27,6 +27,7 @@ mod staticlib;
 mod stdlib_embed;
 mod symbol_graph;
 mod tool_receipt;
+mod verify_cli;
 
 use clap::{Parser as ClapParser, Subcommand};
 use sha2::{Digest, Sha256};
@@ -37,7 +38,9 @@ use std::sync::Arc;
 
 use buildlang::ast::{self, ItemKind, Module, Visibility};
 use buildlang::codegen::{CodeGenerator, StdioMode, Target};
-use buildlang::diagnostics::check::{codegen_error_as_type_error, has_gpu_entry_point};
+use buildlang::diagnostics::check::{
+    codegen_error_as_type_error, has_gpu_entry_point, spec_errors,
+};
 use buildlang::diagnostics::{codes as diag_codes, Diagnostic};
 use buildlang::lexer::{Lexer, SourceFile, Span};
 use buildlang::parser::{ParseError, Parser};
@@ -453,6 +456,16 @@ enum Commands {
 
     /// Diagnose local compiler, toolchain, backend, and package readiness
     Doctor,
+
+    /// Verify the laws and contracts in a file: proved, refuted or unknown
+    Verify {
+        /// Input file
+        file: PathBuf,
+
+        /// Print the `buildlang-verify/v1` JSON report
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Mid-level IR (MIR) interlingua: emit and load the versioned JSON form
     Mir {
@@ -875,6 +888,7 @@ fn run_cli(cli: Cli) -> Result<(), i32> {
         Some(Commands::Receipt { command }) => cmd_receipt(command),
         Some(Commands::Lint { file }) => cmd_lint(&file),
         Some(Commands::Doctor) => cmd_doctor(),
+        Some(Commands::Verify { file, json }) => verify_cli::cmd_verify(&file, json),
         Some(Commands::Mir { command }) => cmd_mir(command),
         Some(Commands::Bdf { command }) => cmd_bdf(command),
         Some(Commands::Bql { command }) => bql_cli::cmd_bql(command),
@@ -6307,6 +6321,10 @@ fn run_check_reporting(file: &Path, early: &mut Option<Diagnostic>) -> Result<Ch
             }
             Err(_) => {}
         }
+    }
+    // Laws and contracts: a counterexample fails the check (BL0701).
+    if parse_errors.is_empty() && type_errors.is_empty() {
+        type_errors.extend(spec_errors(&ast, &source_file));
     }
 
     // Resolve each type error's byte span to 1-based `line:col` now, while

@@ -19,6 +19,7 @@
 //! - `BL0400`..`BL0499`: effects and capabilities
 //! - `BL0500`..`BL0599`: ownership, borrows and linear values
 //! - `BL0600`..`BL0699`: units, modules and macros
+//! - `BL0700`..`BL0799`: laws and contracts (`buildc verify`)
 //! - `BL0900`..`BL0999`: backend
 
 use crate::lexer::LexerErrorKind;
@@ -199,6 +200,8 @@ pub fn type_code(error: &TypeError) -> &'static str {
         E::UnitRootNotExact { .. } => "BL0604",
         E::ModuleImportCycle { .. } => "BL0610",
         E::FormatArgNotStringLiteral { .. } => "BL0620",
+        E::SpecRefuted { .. } => "BL0701",
+        E::SpecInconsistent { .. } => "BL0702",
         E::BackendRejected { .. } => "BL0901",
     }
 }
@@ -369,6 +372,11 @@ pub const CODES: &[CodeInfo] = &[
     c("BL0604", "root of a unit has no integer exponents"),
     c("BL0610", "module import cycle"),
     c("BL0620", "formatting macro needs a string literal first"),
+    c("BL0701", "a law or contract is false on a concrete input"),
+    c(
+        "BL0702",
+        "the verifier's proof and a counterexample disagree",
+    ),
     c("BL0901", "the C backend cannot compile the program"),
 ];
 

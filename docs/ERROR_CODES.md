@@ -192,6 +192,13 @@ A test in `compiler/src/diagnostics/tests.rs` fails if this table and the compil
 | BL0610 | module import cycle |
 | BL0620 | formatting macro needs a string literal first |
 
+## Laws and contracts
+
+| Code | Meaning |
+|---|---|
+| BL0701 | a law or contract is false on a concrete input |
+| BL0702 | the verifier's proof and a counterexample disagree |
+
 ## Backend
 
 | Code | Meaning |

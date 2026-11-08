@@ -62,6 +62,9 @@ pub fn check_buffer(file: &SourceFile) -> Vec<Diagnostic> {
             Err(_) => {}
         }
     }
+    if out.is_empty() && type_errors.is_empty() {
+        type_errors.extend(spec_errors(&ast, file));
+    }
     out.extend(type_errors.iter().map(|e| Diagnostic::from_type(e, file)));
     out
 }
@@ -95,6 +98,67 @@ pub fn codegen_error_as_type_error(
         err = err.with_help(help);
     }
     err
+}
+
+/// Laws and contracts that `buildc verify` refutes, as check errors. A proved
+/// or unknown obligation adds nothing: `check` fails only on a counterexample
+/// the evaluator re-ran, or on a verifier that disagrees with itself.
+pub fn spec_errors(module: &Module, source_file: &SourceFile) -> Vec<TypeErrorWithSpan> {
+    use crate::verify::{Kind, Verdict};
+    let has_specs = module.items.iter().any(|item| match &item.kind {
+        ast::ItemKind::Function(f) => {
+            f.name.name.starts_with(crate::parser::ENSURES_PREFIX)
+                || item.attrs.iter().any(|a| {
+                    a.path.segments.len() == 1
+                        && &*a.path.segments[0].ident.name == crate::parser::LAW_ATTR
+                })
+        }
+        _ => false,
+    });
+    if !has_specs {
+        return Vec::new();
+    }
+    let span_of = |name: &str| {
+        module
+            .items
+            .iter()
+            .find_map(|item| match &item.kind {
+                ast::ItemKind::Function(f) if &*f.name.name == name => Some(f.name.span),
+                _ => None,
+            })
+            .unwrap_or_else(|| Span::from_offsets(0, 0, source_file.id))
+    };
+    let mut out = Vec::new();
+    for o in crate::verify::verify_module(module) {
+        let what = match o.kind {
+            Kind::Law => format!("law `{}`", o.name),
+            Kind::Ensures => format!("the ensures of `{}`", o.name),
+        };
+        let show = |input: &[(String, String)]| {
+            input
+                .iter()
+                .map(|(n, v)| format!("{n} = {v}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let err = match &o.verdict {
+            Verdict::Refuted { input, why } => TypeError::SpecRefuted {
+                message: format!("{what} is refuted at {}: {why}", show(input)),
+            },
+            Verdict::Inconsistent { input } => TypeError::SpecInconsistent {
+                message: format!(
+                    "{what}: the prover claimed it, yet {} is a counterexample",
+                    show(input)
+                ),
+            },
+            _ => continue,
+        };
+        out.push(
+            TypeErrorWithSpan::new(err, span_of(&o.name))
+                .with_help("run `buildc verify` on this file for every obligation's verdict"),
+        );
+    }
+    out
 }
 
 /// True when the module declares a shader stage or GPU kernel entry point

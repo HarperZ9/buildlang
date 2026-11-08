@@ -8,6 +8,13 @@ tracked in `STATUS.md`, `README.md`, and
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
 `108/108` or `132/132` are not the current release gate.
 
+## Unreleased: laws and contracts
+
+- `law name(params) requires P { body }` and `fn f(..) -> T requires P ensures Q { .. }`: claims beside the code, type-checked like any function. `law`, `requires`, `ensures` and `result` are contextual words.
+- `buildc verify FILE [--json]`: each claim is proved, refuted with a counterexample the evaluator re-ran, or unknown with the reason. Two looks per claim: a concrete run (every input of a domain up to 2^20 points, else boundary values and a fixed sample) and a symbolic proof (path-by-path execution, polynomial normal form over Z, case splitting with Fourier-Motzkin and integer tightening). Trapping inputs are listed apart from the verdict.
+- `buildc check` fails on a refuted claim (BL0701) and on a verifier that disagrees with itself (BL0702).
+- `tests/verify`: Bend 2's published numeric, parallel-sum and Pong laws ported, BuildLang's own DETMATH integer, trace-codec and conservation laws, and planted checks. Details and limits: `docs/VERIFY.md`.
+
 ## Unreleased: units through roots and powers; typed maths builtins
 
 - Unit-carrying values now go through `**`, `.powi()`, `.powf()` and `pow` with an integer-literal exponent, and through `.sqrt()`, `.cbrt()` and `sqrt`, with the exponents scaled. Slice one refused all of these. A root that leaves a fraction is BL0604; a runtime exponent on a unit is still refused (BL0383).

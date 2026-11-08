@@ -1,0 +1,32 @@
+// Planted checks for `buildc verify`, written before the first run.
+// P1: false; must be refuted with a counterexample.
+law bad_sub_comm(a: i64, b: i64) {
+    a - b == b - a
+}
+
+// P2: true; must be proved.
+law add_comm(a: i64, b: i64) {
+    a + b == b + a
+}
+
+// P3: true, but the recursion needs induction the engine does not do;
+// must be unknown, never proved.
+fn nat_add(a: u32, b: u32) -> u32 {
+    if a == 0 { b } else { nat_add(a - 1, b) + 1 }
+}
+
+law nat_add_comm(a: u32, b: u32) {
+    nat_add(a, b) == nat_add(b, a)
+}
+
+// P4: a false ensures and a true one.
+fn bad_abs(x: i64) -> i64 ensures result >= 0 {
+    if x > 0 { x } else { x }
+}
+
+fn max2(a: i64, b: i64) -> i64 ensures result >= a && result >= b && (result == a || result == b) {
+    if a > b { a } else { b }
+}
+
+fn main() {
+}

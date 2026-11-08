@@ -60,6 +60,7 @@ pub mod runtime;
 pub mod serde_float;
 pub mod types;
 pub mod units;
+pub mod verify;
 
 /// The compiler version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
