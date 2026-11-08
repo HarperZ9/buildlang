@@ -1,0 +1,29 @@
+// =============================================================================
+// art-receipts: check committed art against docs/art/receipts.json
+// =============================================================================
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2022-2026 Zain Dana Harper.
+// =============================================================================
+//
+// Usage: art-receipts [ROOT | RECEIPTS.json]
+//
+// ROOT is a repository root (its docs/art/receipts.json is read); with no
+// argument the receipts are docs/art/receipts.json under the current folder.
+// Exit 1 on any digest mismatch, malformed receipt, or when no listed file
+// could be checked; 0 otherwise.
+
+mod json;
+
+fn main() ~ Console + FileSystem + Process + Environment {
+    let mut path = "docs/art/receipts.json";
+    if args_count() > 1 {
+        path = ar_receipts_path(args_get(1));
+    }
+    let r = ar_check(path, ar_windows());
+    let mut i: usize = 0;
+    while i < vec_len(r.lines) {
+        println!("{}", r.lines[i]);
+        i = i + 1;
+    }
+    exit(r.code);
+}

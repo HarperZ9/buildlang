@@ -1,0 +1,9 @@
+[package]
+name = "readability"
+version = "1.0.0"
+edition = "2026"
+description = "Flesch reading ease with word, sentence and syllable counts, ported from Flywheel's writing linter"
+author = "Zain Dana Harper"
+license = "FSL-1.1-MIT"
+
+[dependencies]

@@ -1,6 +1,23 @@
 {
   "format": 2,
   "packages": {
+    "art-receipts": {
+      "version": "1.0.0",
+      "description": "Checks committed art files against the SHA-256 digests in docs/art/receipts.json",
+      "author": "Zain Dana Harper",
+      "license": "AGPL-3.0-only",
+      "checksum": "sha256:ef66a0003e14c06bb865b69071a7768a85580eaf50bdd631cbfb63964192ce97",
+      "path": "packages/art-receipts/1.0.0",
+      "versions": {
+        "1.0.0": {
+          "path": "packages/art-receipts/1.0.0",
+          "checksum": "sha256:ef66a0003e14c06bb865b69071a7768a85580eaf50bdd631cbfb63964192ce97",
+          "dependencies": {
+            "sha256": "^1.0.0"
+          }
+        }
+      }
+    },
     "canonical-record": {
       "version": "1.0.0",
       "description": "RFC 8785 (JCS) canonical JSON, its SHA-256, and the cr1 numeric-array digest (port of Flywheel harness/canonical_record.py)",
@@ -47,6 +64,21 @@
           "dependencies": {
             "sha256": "^1.0.0"
           }
+        }
+      }
+    },
+    "readability": {
+      "version": "1.0.0",
+      "description": "Flesch reading ease with word, sentence and syllable counts, ported from Flywheel's writing linter",
+      "author": "Zain Dana Harper",
+      "license": "FSL-1.1-MIT",
+      "checksum": "sha256:10785caef30da9e0c24aad37cb45fcd1673cf36939d04281fc9463f7a1d15ffe",
+      "path": "packages/readability/1.0.0",
+      "versions": {
+        "1.0.0": {
+          "path": "packages/readability/1.0.0",
+          "checksum": "sha256:10785caef30da9e0c24aad37cb45fcd1673cf36939d04281fc9463f7a1d15ffe",
+          "dependencies": {}
         }
       }
     },

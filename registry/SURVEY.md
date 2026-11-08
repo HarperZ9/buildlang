@@ -15,6 +15,8 @@ original on the same inputs (`tests/cases.txt`, run by
 | `canonical-record` 1.0.0 | Flywheel `harness/canonical_record.py` (RFC 8785) | FSL-1.1-MIT; vectors CC0-1.0 | 1,622 | 190 of 190 cases identical (canonical text, SHA-256, array digest, refusals); 75 of 75 published vector fields; 8,000 random documents identical |
 | `color` 1.0.0 | build-color `difference.py` and `spaces.py` | FSL-1.1-MIT | 606 | 34 Sharma CIEDE2000 pairs identical to the original and to the published 4 decimals; 608 random pairs within 2.84e-14; 103 sRGB rows of 17 conversions within 6.42e-12 (bounds 2 to 4 times the measured maximum) |
 | `repo-art` 1.0.0 | BuildLang `tools/repo_flow.py` and `tools/repo_card.py` | AGPL-3.0-only | 727 | the three committed artworks and 7 stress artworks: identical bytes |
+| `readability` 1.0.0 | Flywheel `harness/writing_lint/readability.py` | FSL-1.1-MIT | 234 | 9 of 9 cases identical, Unicode whitespace included; 400 random texts identical |
+| `art-receipts` 1.0.0 | BuildLang `scripts/check_art_receipts.py` | AGPL-3.0-only | 356 | 10 of 10 cases identical with equal exit codes (7 kept in `cases.txt`; 3 print a platform path separator); this repository's art: `2 match, 0 mismatch, 22 not committed` from both |
 
 Each package keeps its source's licence: its `Build.toml` names it, and the
 FSL packages carry the licence text in `LICENSE`.
@@ -33,11 +35,11 @@ original run on the same inputs).
 | BuildLang `tools/repo_flow.py`, `repo_card.py` | ported | above |
 | BuildLang `tools/repo_art.py` `header_svg` | later | needs Python's MT19937 `random`, `colorsys`, and libm `sin`/`cos` bit-equal with the CRT Python uses |
 | Flywheel writing linter (`harness/writing_lint/*`, `scripts/check_writing.py`) | blocked | 38 `re` calls with lookbehind, lookahead and flags; BuildLang has no regular expressions |
-| Flywheel `writing_lint/readability.py` | next wave | portable with a hand-written tokenizer; not done in this wave |
+| Flywheel `writing_lint/readability.py` | ported | hand-written tokenizer in place of `re` |
 | Flywheel `hash_chain.py`, `canonical_bytes.py`, `byte_witness*.py` | next wave | build on `canonical-record`; need their own byte-form spec |
 | Flywheel `ed25519_verify.py` | later | needs SHA-512 and 255-bit field arithmetic; u128 multiply not probed |
-| BuildLang `scripts/check_art_receipts.py` | next wave | small: `read_bytes`, `sha256`, JSON |
-| Low Water hash, trace codec, cbegin, move tables (2026-10-23 pilot) | held | already in BuildLang and still byte-identical on 1.10.0, but the Low Water repository is private with no licence; needs the author's ruling before it goes into this public repository |
+| BuildLang `scripts/check_art_receipts.py` | ported | malformed-JSON messages are the port's own wording after the shared `FAIL cannot read` prefix |
+| Low Water hash, trace codec, cbegin, move tables (2026-10-23 pilot) | packaged privately | the game is private with no public licence, so these packages live in a private registry outside this repository until its licence is decided |
 | Low Water DETMATH | done earlier | already in `tests/detmath` |
 | build-color adaptation, appearance, tonemap, spectral | next wave | numpy matrix code; float bounds as in `color` |
 | build-color ICC, LUT and image I/O | later | binary I/O through `str`-typed bytes |
@@ -66,3 +68,4 @@ Each is an issue on HarperZ9/buildlang.
 | #151 | `HashMap<str, i64>` is a C-string-keyed f64 map; `.get(k).unwrap()` does not compile | canonical-record |
 | #152 | package sources share one namespace (imports are joined text) | every package (name prefixes) |
 | #153 | executables from `pkg build` are not byte-reproducible with MinGW gcc; the C artifact is | the package manager |
+| #157 | `s.as_bytes()` passed to a `Vec<u8>` parameter checks, then fails in gcc | art-receipts |

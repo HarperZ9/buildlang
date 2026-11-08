@@ -1,0 +1,1 @@
+tests/no-stop.txt: words 32 sentences 1 syllables 62 ease 10.442500000000024

@@ -1,0 +1,1 @@
+tests/getting-started.md: words 1090 sentences 19 syllables 1751 ease 12.702749879285392
