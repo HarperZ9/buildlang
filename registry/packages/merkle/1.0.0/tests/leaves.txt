@@ -1,0 +1,5 @@
+receipt-0001 {"verdict":"pass"}
+
+receipt-0002 café ✓
+receipt-0003	tab
+receipt-0004 last line without newline

@@ -123,7 +123,7 @@ Every row of the parity table in `SURPASS-TARGETS.md` and `docs/STRATEGY-2026-10
 | P3 | Julia: numerics and dispatch | DETMATH goldens bit for bit, and dot, GEMM, FFT and stencil medians over 10 runs beside Julia's on the same machine and date; parity only within 1.25x (any golden bit; parity claimed outside 1.25x) | 2.4.0 | NOT BUILT | DETMATH library shipped (M4a); multiple dispatch exists (`docs/MULTIPLE-DISPATCH.md`); no Julia comparison run |
 | P4 | Bend 2: GPU and automatic parallelism | the same program on CPU and GPU, integers identical and floats within ULP bound; Bend 2's published examples ported and timed against Bend 2 on one machine (any output difference) | 2.5.0 | NOT BUILT | needs M5 and M6 |
 | P6 | Mojo: Python interop | import a pure Python library and NumPy, and round-trip ints, floats, strings, lists and arrays both ways (any round-trip difference) | 2.6.0 | NOT BUILT | |
-| P7 | Rust: packages and a registry | publish, resolve and build a three-package graph offline from the lockfile twice with identical output hashes (any hash difference or network access) | 2.6.0 | NOT BUILT | `docs/PACKAGES.md` is a design draft; open PR #137 (publish, resolve, lock and build offline) |
+| P7 | Rust: packages and a registry | publish, resolve and build a three-package graph offline from the lockfile twice with identical output hashes (any hash difference or network access) | 2.6.0 | PENDING 1.11.0 | `buildc pkg` merged in #137 and ships in 1.11.0: two clean registry copies built offline from one lock give the same C artifact hash (`compiler/tests/pkg_flow.rs`), on the branch compiler. Still to run on the crates.io build: the three-package graph twice, with network access checked |
 | P8 | Elixir: supervised actors | one-for-one and one-for-all crash-and-restart tests restart the right children within a bounded number of attempts with message order kept (any lost or reordered message) | 2.6.0 | NOT BUILT | |
 | V6 | BendTorch: differentiable types | MNIST and a small transformer trained in BuildLang match a PyTorch twin within a stated loss tolerance per step, on CPU and the M6 GPU path (any step out of tolerance) | 2.7.0 | NOT BUILT | |
 | V7 | Anthropic's skill: verification in the developer loop | the held-out probe includes verification tasks scored like the rest, at the M3 bar (below the bar) | 2.7.0 | NOT BUILT | `buildc mcp`, the language server and `skills/buildlang` exist; no verification tasks |
@@ -148,7 +148,7 @@ value carries what it means.
 
 | Release | Ships when | Rows |
 |---|---|---|
-| 1.11.0 | now | M4a to M4d scored; M3 measured; M5 shipped, rerun on the release |
+| 1.11.0 | now | M4a to M4d scored; M3 measured; M5 and P7 shipped, rerun on the release |
 | 1.12.0 | M3 failures fixed (if any) | M3 re-measured on a new probe |
 | 1.13.0 | M6 passes | M6 |
 | 2.0.0 | stages 1 to 4 pass and F1 to F3 pass | the frozen language |

@@ -1,0 +1,13 @@
+# Build.lock: written by `buildc pkg resolve`. Do not edit by hand.
+lock-version = 1
+
+[root]
+name = "merkle"
+version = "1.0.0"
+requires = ["sha256 ^1.0.0"]
+
+[[package]]
+name = "sha256"
+version = "1.0.0"
+checksum = "sha256:49354c89cbc959f5ea61b7b248e5442ad1f3fda8968e24eb0064f21bd4ff8676"
+dependencies = []

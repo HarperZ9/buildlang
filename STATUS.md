@@ -5,7 +5,7 @@ Release verification: 2026-11-08 for 1.11.0. The broader architecture audit rema
 `docs/STRATEGY-2026-10.md`; what finished means and how far it is: `docs/LANGUAGE-COMPLETE.md`.
 
 The full local `cargo test --manifest-path compiler/Cargo.toml --no-fail-fast` run with
-`RUSTFLAGS=-Dwarnings` on the release head passed: 1,975 passed, 0 failed, 11 ignored. 1.11.0 adds `par_for` and `par_map` (M5, checked by the effect row), opaque handles
+`RUSTFLAGS=-Dwarnings` on the release head passed: 1,975 passed, 0 failed, 11 ignored. 1.11.0 adds `par_for` and `par_map` (M5, checked by the effect row), `buildc pkg` (a package manager with a lockfile and offline builds), opaque handles
 across the C ABI and a stateful C library written in BuildLang (raw-native's Low Water rules,
 M4's C ABI check), Vec insert and remove, string push, methods through borrowed vectors, units
 through roots and powers, measured constants, BuildTeX, the mmk proof kernel and BQL
