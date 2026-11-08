@@ -1,0 +1,2 @@
+# mode golden args... (run from the package folder; see docs/PACKAGES.md)
+exact tests/golden-files.txt tests/empty.bin tests/abc.txt tests/fips-448.txt tests/all-bytes.bin

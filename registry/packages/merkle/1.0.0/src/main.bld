@@ -1,0 +1,163 @@
+// =============================================================================
+// merkle: Merkle roots and proofs from the command line
+// =============================================================================
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright 2026 Zain Dana Harper.
+// =============================================================================
+//
+// Usage:
+//   merkle root FILE          root over FILE's lines (LF-split, bytes as stored)
+//   merkle prove FILE INDEX   audit path of line INDEX, one hex hash per line
+//   merkle table N            every root, inclusion proof and consistency proof
+//                             for trees of 0..N leaves "leaf-<i>", with checks
+//                             that tampered proofs fail (the differential table)
+
+fn file_leaves(path: str) -> Vec<Vec<u8>> ~ FileSystem {
+    let data = str_bytes(read_bytes(path));
+    let mut leaves: Vec<Vec<u8>> = Vec::new();
+    let mut cur: Vec<u8> = Vec::new();
+    let mut i: usize = 0;
+    while i < vec_len(data) {
+        if data[i] == 10_u8 {
+            leaves.push(cur);
+            cur = Vec::new();
+        } else {
+            cur.push(data[i]);
+        }
+        i = i + 1;
+    }
+    if vec_len(cur) > 0 {
+        leaves.push(cur);
+    }
+    leaves
+}
+
+fn join_hex(proof: Vec<Vec<u8>>) -> str {
+    if vec_len(proof) == 0 {
+        return "-";
+    }
+    let mut s = "";
+    let mut i: usize = 0;
+    while i < vec_len(proof) {
+        if i > 0 {
+            s = s + ",";
+        }
+        s = s + bytes_hex(proof[i]);
+        i = i + 1;
+    }
+    s
+}
+
+fn flip_first(v: Vec<u8>) -> Vec<u8> {
+    let mut o: Vec<u8> = Vec::new();
+    let mut i: usize = 0;
+    while i < vec_len(v) {
+        if i == 0 {
+            o.push(v[i] ^ 1_u8);
+        } else {
+            o.push(v[i]);
+        }
+        i = i + 1;
+    }
+    o
+}
+
+fn tamper_first(proof: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    let mut o: Vec<Vec<u8>> = Vec::new();
+    let mut i: usize = 0;
+    while i < vec_len(proof) {
+        if i == 0 {
+            o.push(flip_first(proof[i]));
+        } else {
+            o.push(proof[i]);
+        }
+        i = i + 1;
+    }
+    o
+}
+
+fn bit(b: bool) -> i64 {
+    if b {
+        return 1;
+    }
+    0
+}
+
+fn named_leaves(n: usize) -> Vec<Vec<u8>> {
+    let mut leaves: Vec<Vec<u8>> = Vec::new();
+    let mut i: usize = 0;
+    while i < n {
+        leaves.push(str_bytes(format!("leaf-{}", i)));
+        i = i + 1;
+    }
+    leaves
+}
+
+fn table(max_n: usize) ~ Console {
+    let mut n: usize = 0;
+    while n <= max_n {
+        let leaves = named_leaves(n);
+        let root = merkle_root(leaves);
+        println!("root {} {}", n, bytes_hex(root));
+        let mut i: usize = 0;
+        while i < n {
+            let proof = merkle_inclusion_proof(leaves, i);
+            let ok = merkle_verify_inclusion(leaves[i], i as i64, n as i64, proof, root);
+            let bad_leaf = merkle_verify_inclusion(str_bytes("x"), i as i64, n as i64, proof, root);
+            let mut bad_proof = "-";
+            if vec_len(proof) > 0 {
+                bad_proof = format!("{}", bit(merkle_verify_inclusion(leaves[i], i as i64, n as i64, tamper_first(proof), root)));
+            }
+            println!("incl {} {} {} ok={} bad_leaf={} bad_proof={}", n, i, join_hex(proof), bit(ok), bit(bad_leaf), bad_proof);
+            i = i + 1;
+        }
+        let mut m: usize = 1;
+        while m <= n {
+            let old_root = merkle_root(named_leaves(m));
+            let proof = merkle_consistency_proof(leaves, m);
+            let ok = merkle_consistency_ok(m as i64, n as i64, old_root, root, proof);
+            let mut bad = 0;
+            if vec_len(proof) > 0 {
+                bad = merkle_consistency_ok(m as i64, n as i64, old_root, root, tamper_first(proof));
+            } else {
+                bad = merkle_consistency_ok(m as i64, n as i64, flip_first(old_root), root, proof);
+            }
+            println!("cons {} {} {} ok={} bad={}", m, n, join_hex(proof), ok, bad);
+            m = m + 1;
+        }
+        let none: Vec<Vec<u8>> = Vec::new();
+        let zero = merkle_consistency_ok(0, n as i64, root, root, none);
+        let grow = merkle_consistency_ok((n + 1) as i64, n as i64, root, root, none);
+        println!("refuse {} zero={} shrink={}", n, zero, grow);
+        n = n + 1;
+    }
+}
+
+fn main() ~ Console + FileSystem + Process + Environment {
+    let cmd = args_get(1);
+    if cmd == "table" {
+        table(args_get(2).parse_int() as usize);
+        return;
+    }
+    if cmd == "root" {
+        println!("{}", merkle_root_hex(file_leaves(args_get(2))));
+        return;
+    }
+    if cmd == "prove" {
+        let leaves = file_leaves(args_get(2));
+        let index = args_get(3).parse_int();
+        if index < 0 || index >= (vec_len(leaves) as i64) {
+            println!("error: index out of range");
+            exit(1);
+        }
+        let proof = merkle_inclusion_proof(leaves, index as usize);
+        let mut i: usize = 0;
+        while i < vec_len(proof) {
+            println!("{}", bytes_hex(proof[i]));
+            i = i + 1;
+        }
+        return;
+    }
+    println!("usage: merkle root FILE | merkle prove FILE INDEX | merkle table N");
+    exit(2);
+}

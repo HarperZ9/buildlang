@@ -1,0 +1,7 @@
+# Build.lock: written by `buildc pkg resolve`. Do not edit by hand.
+lock-version = 1
+
+[root]
+name = "sha256"
+version = "1.0.0"
+requires = []

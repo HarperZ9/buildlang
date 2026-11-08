@@ -1,0 +1,4 @@
+# mode golden args... (run from the package folder; see docs/PACKAGES.md)
+exact tests/golden-table-24.txt table 24
+exact tests/golden-root.txt root tests/leaves.txt
+exact tests/golden-prove-2.txt prove tests/leaves.txt 2
