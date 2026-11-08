@@ -3540,6 +3540,12 @@ impl CBackend {
                 // `build_sprintf` backs `format!`: its bool arguments need the
                 // same "true"/"false" conversion as printf's.
                 let is_printf = matches!(func_str.as_str(), "printf" | "eprintf" | "build_sprintf");
+                // A function from the program's `extern "C"` blocks may have its
+                // prototype from a system header (`strtod` takes `char**`, the
+                // program says `*mut *mut u8`). Pointer arguments go through
+                // `void*`, which C converts to any object pointer; GCC 14 makes
+                // the mismatch an error (-Wincompatible-pointer-types).
+                let is_extern_c = self.extern_decl_fns.contains(func_str.as_str());
                 let args_str: Vec<_> = args
                     .iter()
                     .enumerate()
@@ -3605,6 +3611,15 @@ impl CBackend {
                             }
                             if let MirValue::Const(MirConst::Bool(_)) = a {
                                 return format!("{} ? \"true\" : \"false\"", s);
+                            }
+                        }
+                        if is_extern_c {
+                            if let MirValue::Local(id) = a {
+                                if let Some(MirType::Ptr(_)) =
+                                    locals.get(id.0 as usize).map(|l| &l.ty)
+                                {
+                                    return format!("(void*){}", s);
+                                }
                             }
                         }
                         s
