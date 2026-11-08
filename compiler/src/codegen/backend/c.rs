@@ -70,6 +70,10 @@ pub struct CBackend {
     /// Calls to them must use the escaped name too, or `max(1, 2)` binds to the
     /// platform macro or to nothing at all.
     escaped_user_fns: std::collections::HashSet<String>,
+    /// Functions the program declares in `extern "C"` blocks. A call to one is
+    /// a call to the C symbol of that name, so it is never escaped, even when
+    /// the name is a C library function such as `strtod` or `atof`.
+    extern_decl_fns: std::collections::HashSet<String>,
     /// Owned heap (BuildString) locals proven safe to free at every `return` of
     /// the current function (see `freeable_owned_string_locals`). Empty unless
     /// the experimental drop-insertion path is enabled.
@@ -124,6 +128,7 @@ impl CBackend {
             string_literals: Vec::new(),
             local_string_literals: std::collections::HashMap::new(),
             escaped_user_fns: std::collections::HashSet::new(),
+            extern_decl_fns: std::collections::HashSet::new(),
             current_fn_freeable: Vec::new(),
             module_mut_global_alias_risk: false,
             current_fn_block_frees: std::collections::HashMap::new(),
@@ -3535,6 +3540,12 @@ impl CBackend {
                 // `build_sprintf` backs `format!`: its bool arguments need the
                 // same "true"/"false" conversion as printf's.
                 let is_printf = matches!(func_str.as_str(), "printf" | "eprintf" | "build_sprintf");
+                // A function from the program's `extern "C"` blocks may have its
+                // prototype from a system header (`strtod` takes `char**`, the
+                // program says `*mut *mut u8`). Pointer arguments go through
+                // `void*`, which C converts to any object pointer; GCC 14 makes
+                // the mismatch an error (-Wincompatible-pointer-types).
+                let is_extern_c = self.extern_decl_fns.contains(func_str.as_str());
                 let args_str: Vec<_> = args
                     .iter()
                     .enumerate()
@@ -3600,6 +3611,15 @@ impl CBackend {
                             }
                             if let MirValue::Const(MirConst::Bool(_)) = a {
                                 return format!("{} ? \"true\" : \"false\"", s);
+                            }
+                        }
+                        if is_extern_c {
+                            if let MirValue::Local(id) = a {
+                                if let Some(MirType::Ptr(_)) =
+                                    locals.get(id.0 as usize).map(|l| &l.ty)
+                                {
+                                    return format!("(void*){}", s);
+                                }
                             }
                         }
                         s
@@ -4051,6 +4071,7 @@ impl CBackend {
                 // A function reference in value position (a direct call's callee)
                 // must get the same stdlib-collision escape as its definition.
                 other if self.escaped_user_fns.contains(other) => Self::user_fn_emit_name(other),
+                other if self.extern_decl_fns.contains(other) => other.to_string(),
                 other
                     if !Self::is_runtime_or_builtin_fn(other)
                         && Self::is_c_stdlib_collision(other) =>
@@ -4076,6 +4097,8 @@ impl CBackend {
                 // known builtins.  These are already correct as-is.
                 if self.escaped_user_fns.contains(name.as_ref()) {
                     Self::user_fn_emit_name(name)
+                } else if self.extern_decl_fns.contains(name.as_ref()) {
+                    name.to_string()
                 } else if let Some(det) = Self::detmath_name(name) {
                     // DETMATH: exp, log, pow, sin and cos are the runtime's portable
                     // fdlibm versions, the same bits on every C library.
@@ -5690,6 +5713,12 @@ impl Backend for CBackend {
             .iter()
             .filter(|f| f.blocks.is_some())
             .filter(|f| Self::user_fn_emit_name(f.name.as_ref()) != f.name.as_ref())
+            .map(|f| f.name.to_string())
+            .collect();
+        self.extern_decl_fns = mir
+            .functions
+            .iter()
+            .filter(|f| f.blocks.is_none() && f.sig.calling_conv == CallingConv::C)
             .map(|f| f.name.to_string())
             .collect();
 

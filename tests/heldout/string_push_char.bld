@@ -1,0 +1,10 @@
+// `s.push(c)` appends one char, ASCII or not. Refused with BL0901 on 1.10.0.
+fn main() ~ Console {
+    let mut s = String::new();
+    s.push_str("ab");
+    s.push('c');
+    for c in "xé".chars() {
+        s.push(c);
+    }
+    println!("{} {}", s, s.len());
+}

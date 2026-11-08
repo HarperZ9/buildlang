@@ -8,9 +8,12 @@
 //! that uses one is refused at `buildc check` (BL0901) with a fix, rather than
 //! producing a header the host cannot use.
 //!
-//! `#[repr(C)]` is required on every struct an export reaches, so the layout is
-//! an explicit promise that later layout work cannot silently break. The C
-//! backend already lays out fields in declaration order with C alignment.
+//! `#[repr(C)]` is required on every struct an export reaches by value or
+//! through a `#[repr(C)]` struct, so the layout is an explicit promise that
+//! later layout work cannot silently break. The C backend already lays out
+//! fields in declaration order with C alignment. A struct without
+//! `#[repr(C)]` may appear only behind a raw pointer, as an opaque handle: the
+//! header forward-declares it and states no layout.
 
 use std::sync::Arc;
 
@@ -76,6 +79,17 @@ impl<'ctx> MirLowerer<'ctx> {
         })
     }
 
+    /// A user struct without `#[repr(C)]`, which an export may reach only
+    /// through a pointer.
+    fn is_opaque_struct(&self, name: &Arc<str>) -> bool {
+        name.as_ref() != "BuildString"
+            && !self.repr_c_structs.contains(name)
+            && self
+                .module
+                .find_type(name)
+                .is_some_and(|def| matches!(def.kind, TypeDefKind::Struct { .. }))
+    }
+
     /// Why `ty` has no C ABI, with a fix, or `None` when it does.
     fn c_abi_problem(
         &self,
@@ -89,6 +103,11 @@ impl<'ctx> MirLowerer<'ctx> {
             MirType::Int(..) | MirType::Float(..) | MirType::Bool => None,
             MirType::Ptr(inner) => match inner.as_ref() {
                 MirType::Void => None,
+                // A pointer to a struct without `#[repr(C)]` is an opaque
+                // handle: the header forward-declares the struct, so the host
+                // can hold and pass the pointer but cannot see or rely on the
+                // layout. This is how a C library keeps state behind a handle.
+                MirType::Struct(name) if self.is_opaque_struct(name) => None,
                 other => self.c_abi_problem(other, true, seen),
             },
             MirType::Array(elem, _) if in_field => self.c_abi_problem(elem, true, seen),
