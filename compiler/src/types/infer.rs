@@ -3652,6 +3652,8 @@ impl<'ctx> TypeInfer<'ctx> {
                 "map_new_i64" | "map_insert_i64" | "map_get_i64" | "map_contains_i64" | "map_len_i64" | "map_remove_i64" |
                 // Vulkan runtime builtins
                 "build_vk_init" | "build_vk_load_shader_file" | "build_vk_run_compute" | "build_vk_shutdown" |
+                // M5 parallel map and for (checked by types::parallel)
+                "par_for" | "par_map" |
                 // Math constants
                 "PI" | "E" | "TAU"
             );

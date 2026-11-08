@@ -2232,6 +2232,13 @@ impl<'ctx> MirLowerer<'ctx> {
     }
 
     fn lower_call(&mut self, func: &ast::Expr, args: &[ast::Expr]) -> CodegenResult<MirValue> {
+        // M5: par_for(n, &ctx, f) / par_map(xs, f) lower to a thread-pool
+        // wrapper; a user function of the same name keeps its meaning.
+        if let Some(kind) = super::parallel::par_callee(func) {
+            if self.module.find_function(kind).is_none() {
+                return self.lower_par_call(kind, args);
+            }
+        }
         // Box::new(x) -> a heap copy of x; the C backend emits the allocation
         // for `Box_new` (issue #83).
         if let ExprKind::Path(path) = &func.kind {
