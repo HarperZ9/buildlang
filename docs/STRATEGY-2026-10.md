@@ -108,6 +108,12 @@ The pilot (section 5) lists them. The check is the pilot's own goldens:
   that. The claim it can test is deterministic parallelism whose safety the checker proves from the
   effect row.
 
+Status 2026-11-07: `par_for` and `par_map` shipped on the C backend with the checks above
+(BL0406 with a hoisting edit, BL0515, BL0407). Kernel speed-up at 8 threads on a shared
+i7-13700KF, median of 10 rounds with 95 % interval: n-body 5.34x [5.07, 5.63], pixel shading
+5.87x [5.57, 6.05], the 40-fight corpus 5.09x [4.94, 5.37]; byte-identical in every run. The
+bar holds for the kernels. `docs/PARALLEL.md` has the table, the load and the controls.
+
 ### M6. A production GPU path
 
 - Design: `#[compute]` kernels emitted as WGSL (the source of truth on the Low Water side) and HLSL,

@@ -1,0 +1,27 @@
+// expect: BL0406
+// A user-defined effect is an effect too.
+effect Log {
+    fn note(n: i64) -> (),
+}
+
+fn work(n: i64) -> i64 ~ Log {
+    perform Log.note(n);
+    n * 2
+}
+
+fn run(xs: &Vec<i64>) -> i64 ~ Log {
+    let ys = par_map(xs, work);
+    ys[0]
+}
+
+fn main() ~ Console {
+    let mut xs: Vec<i64> = Vec::new();
+    xs.push(3);
+    handle {
+        println!("{}", run(&xs))
+    } with {
+        Log.note(n) => {
+            println!("note {}", n)
+        },
+    }
+}

@@ -1,0 +1,13 @@
+// expect: BL0515
+// A closure that writes a variable from outside itself.
+fn main() ~ Console {
+    let mut xs: Vec<f64> = Vec::new();
+    xs.push(1.0);
+    xs.push(2.0);
+    let mut sum = 0.0;
+    let ys = par_map(&xs, |v: f64| -> f64 {
+        sum = sum + v;
+        v
+    });
+    println!("{} {}", ys[1], sum);
+}

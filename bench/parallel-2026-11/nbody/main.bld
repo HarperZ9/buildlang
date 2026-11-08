@@ -1,0 +1,85 @@
+// M5 benchmark: one n-body step per frame, every body's next state computed
+// by `par_for` (mode `par`) or by a serial loop over the same function (mode
+// `serial`). Prints every body's final position, so a byte comparison of two
+// runs compares the whole state. The kernel's milliseconds go to stderr.
+// Usage: main.exe <par|serial> <bodies> <steps>
+struct Body { x: f64, y: f64, z: f64, vx: f64, vy: f64, vz: f64, m: f64 }
+
+struct World { bodies: Vec<Body>, dt: f64, soft: f64 }
+
+// The next state of body i: velocity from the softened pull of every body,
+// then position from the new velocity (semi-implicit Euler).
+fn advance(w: &World, i: i64) -> Body {
+    let b = w.bodies[i];
+    let n = w.bodies.len() as i64;
+    let mut ax = 0.0;
+    let mut ay = 0.0;
+    let mut az = 0.0;
+    let mut j = 0;
+    while j < n {
+        let o = w.bodies[j];
+        let dx = o.x - b.x;
+        let dy = o.y - b.y;
+        let dz = o.z - b.z;
+        let d2 = dx * dx + dy * dy + dz * dz + w.soft;
+        let inv = 1.0 / (d2 * sqrt(d2));
+        ax = ax + dx * o.m * inv;
+        ay = ay + dy * o.m * inv;
+        az = az + dz * o.m * inv;
+        j = j + 1;
+    }
+    let vx = b.vx + ax * w.dt;
+    let vy = b.vy + ay * w.dt;
+    let vz = b.vz + az * w.dt;
+    Body { x: b.x + vx * w.dt, y: b.y + vy * w.dt, z: b.z + vz * w.dt, vx: vx, vy: vy, vz: vz, m: b.m }
+}
+
+// A fixed pseudo-random start: a 64-bit LCG, no Random capability needed.
+fn start(n: i64) -> Vec<Body> {
+    let mut out: Vec<Body> = Vec::new();
+    let mut s: i64 = 12345;
+    let mut i = 0;
+    while i < n {
+        let mut r: Vec<f64> = Vec::new();
+        let mut k = 0;
+        while k < 4 {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            r.push(((s >> 11) & 1048575) as f64 / 1048576.0);
+            k = k + 1;
+        }
+        out.push(Body { x: r[0] * 2.0 - 1.0, y: r[1] * 2.0 - 1.0, z: r[2] * 2.0 - 1.0, vx: 0.0, vy: 0.0, vz: 0.0, m: 0.5 + r[3] });
+        i = i + 1;
+    }
+    out
+}
+
+fn main() ~ Console + Environment + Clock {
+    let mode = args_get(1);
+    let n = args_get(2).parse_int();
+    let steps = args_get(3).parse_int();
+    let mut w = World { bodies: start(n), dt: 0.001, soft: 0.01 };
+    let t0 = clock_ms();
+    let mut t = 0;
+    while t < steps {
+        let next = if mode == "par" {
+            par_for(n, &w, advance)
+        } else {
+            let mut v: Vec<Body> = Vec::new();
+            let mut i = 0;
+            while i < n {
+                v.push(advance(&w, i));
+                i = i + 1;
+            }
+            v
+        };
+        w = World { bodies: next, dt: w.dt, soft: w.soft };
+        t = t + 1;
+    }
+    eprintln!("kernel_ms {}", clock_ms() - t0);
+    let mut i = 0;
+    while i < n {
+        let b = w.bodies[i];
+        println!("{} {} {}", b.x, b.y, b.z);
+        i = i + 1;
+    }
+}

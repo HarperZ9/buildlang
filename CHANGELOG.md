@@ -8,9 +8,18 @@ tracked in `STATUS.md`, `README.md`, and
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
 `108/108` or `132/132` are not the current release gate.
 
-## 1.11.0 - 2026-11-08 - opaque handles, units through powers, BuildTeX and the proof kernel
+## 1.11.0 - 2026-11-08 - parallel by default, opaque handles, units through powers, BuildTeX and the proof kernel
 
-Everything merged since 1.10.0. M4's last two checks run on this release: the combat-step traces and the C ABI check (`docs/LANGUAGE-COMPLETE.md`, stage 1).
+Everything merged since 1.10.0, M5 (`par_for` and `par_map`) included. M4's last two checks run on this release: the combat-step traces and the C ABI check (`docs/LANGUAGE-COMPLETE.md`, stage 1).
+
+### `par_for` and `par_map` (M5, parallel by default)
+
+- `par_for(n, &ctx, f)` and `par_map(xs, f)` run `f` over every index on a fixed thread pool on the C backend and return a `Vec` in index order. Each index writes its own slot, so the result equals the serial loop's byte for byte at every thread count. `BUILD_PAR_THREADS` sets the pool size; `1` runs in order on the calling thread. On Linux and macOS the C compile now links `-pthread`.
+- The checker proves a parallel body safe from the source. BL0406: its effect row must be empty; the fix is exact edits that move the effectful top-level statements into a serial loop after the call (`MaybeIncorrect`, since it adds the effect to the enclosing function). BL0515: no `&mut` or `*mut` parameter, no `static mut` write (also through called functions), no closure write to an outer variable. BL0407: the body must be a named function or a capture-free closure with written types.
+- Fixed: the runtime's float and 128-bit integer formatters kept their rotating buffers in shared statics. They are per thread now, so a parallel body can call `to_string()`. A control with the shared buffers corrupted 2 strings in 1 of 5 runs at 3 threads.
+- Measured on an i7-13700KF shared with GPU training, 10 rounds at 8 threads, kernel speed-up over the serial loop with 95 % intervals: n-body 5.34x [5.07, 5.63], per-pixel shading 5.87x [5.57, 6.05], the Low Water 40-fight corpus 5.09x [4.94, 5.37]. Output was byte-identical to the serial run in all 90 runs. The n-body whole-process speed-up is 3.20x, below 4x, because its output loop is serial. Details in `docs/PARALLEL.md`.
+- BuildLang does not claim Bend's annotation-free parallelism: the parallel call is explicit, and the claim is that its safety is checked.
+- Tests: `compiler/tests/parallel.rs` (3 programs at 1, 2 and 3 threads; 9 planted unsafe bodies with their codes; the BL0406 edits applied to 3 of them build and print the serial bytes), `SPECIFICATION.md` 6.4 doc blocks, `docs/PARALLEL.md`, benchmarks and a planted completion-order reduction control in `bench/parallel-2026-11`.
 
 ### Opaque handles across the C ABI; a stateful C library in BuildLang
 

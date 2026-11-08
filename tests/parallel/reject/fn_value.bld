@@ -1,0 +1,13 @@
+// expect: BL0407
+// A function value hides its effect row from the checker.
+fn sq(x: f64) -> f64 {
+    x * x
+}
+
+fn main() ~ Console {
+    let f = sq;
+    let mut xs: Vec<f64> = Vec::new();
+    xs.push(3.0);
+    let ys = par_map(&xs, f);
+    println!("{}", ys[0]);
+}

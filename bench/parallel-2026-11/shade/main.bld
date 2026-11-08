@@ -1,0 +1,186 @@
+// M5 benchmark: per-pixel CPU shading. Each pixel casts one ray into a
+// scene of spheres over a checkered ground, with two lights, shadow rays and
+// Blinn-Phong highlights. `par_for` (mode `par`) or a serial loop over the
+// same function (mode `serial`) computes every pixel. Prints an FNV-1a hash
+// of the whole image and every 4099th pixel; mode suffix `-full` prints
+// every pixel instead. The kernel's milliseconds go to stderr.
+// Usage: main.exe <par|serial|par-full|serial-full> <width> <height>
+struct Sphere { cx: f64, cy: f64, cz: f64, r: f64, red: f64, green: f64, blue: f64, shine: f64 }
+
+struct Scene { spheres: Vec<Sphere>, w: i64, h: i64 }
+
+struct Hit { t: f64, k: i64 }
+
+// The nearest hit along the ray from (ox, oy, oz) in unit direction (dx, dy, dz):
+// k is the sphere index, -2 the ground plane y = -1, -1 nothing.
+fn nearest(s: &Scene, ox: f64, oy: f64, oz: f64, dx: f64, dy: f64, dz: f64) -> Hit {
+    let mut best = 1.0e30;
+    let mut k = -1;
+    let n = s.spheres.len() as i64;
+    let mut i = 0;
+    while i < n {
+        let sp = s.spheres[i];
+        let lx = ox - sp.cx;
+        let ly = oy - sp.cy;
+        let lz = oz - sp.cz;
+        let b = lx * dx + ly * dy + lz * dz;
+        let c = lx * lx + ly * ly + lz * lz - sp.r * sp.r;
+        let disc = b * b - c;
+        if disc > 0.0 {
+            let t = -b - sqrt(disc);
+            if t > 0.0001 && t < best {
+                best = t;
+                k = i;
+            }
+        }
+        i = i + 1;
+    }
+    if dy < 0.0 {
+        let t = (-1.0 - oy) / dy;
+        if t > 0.0001 && t < best {
+            best = t;
+            k = -2;
+        }
+    }
+    Hit { t: best, k: k }
+}
+
+fn channel(v: f64) -> i64 {
+    let c = if v < 0.0 { 0.0 } else if v > 1.0 { 1.0 } else { v };
+    (c * 255.0 + 0.5) as i64
+}
+
+// The packed 0xRRGGBB colour of pixel p (row-major).
+fn shade(s: &Scene, p: i64) -> i64 {
+    let px = p % s.w;
+    let py = p / s.w;
+    let u = ((px as f64) + 0.5) / (s.w as f64) * 2.0 - 1.0;
+    let v = 1.0 - ((py as f64) + 0.5) / (s.h as f64) * 2.0;
+    let aspect = (s.w as f64) / (s.h as f64);
+    let rx = u * aspect;
+    let ry = v;
+    let rz = 1.5;
+    let len = sqrt(rx * rx + ry * ry + rz * rz);
+    let dx = rx / len;
+    let dy = ry / len;
+    let dz = rz / len;
+    let ox = 0.0;
+    let oy = 0.3;
+    let oz = -3.0;
+    let hit = nearest(s, ox, oy, oz, dx, dy, dz);
+    if hit.k == -1 {
+        return channel(0.2 + 0.3 * dy) * 65536 + channel(0.3 + 0.3 * dy) * 256 + channel(0.6 + 0.3 * dy);
+    }
+    let hx = ox + dx * hit.t;
+    let hy = oy + dy * hit.t;
+    let hz = oz + dz * hit.t;
+    let mut nx = 0.0;
+    let mut ny = 1.0;
+    let mut nz = 0.0;
+    let mut cr = 0.8;
+    let mut cg = 0.8;
+    let mut cb = 0.8;
+    let mut shine = 8.0;
+    if hit.k >= 0 {
+        let sp = s.spheres[hit.k];
+        nx = (hx - sp.cx) / sp.r;
+        ny = (hy - sp.cy) / sp.r;
+        nz = (hz - sp.cz) / sp.r;
+        cr = sp.red;
+        cg = sp.green;
+        cb = sp.blue;
+        shine = sp.shine;
+    } else {
+        let check = ((floor(hx * 2.0) + floor(hz * 2.0)) as i64) % 2;
+        if check == 0 {
+            cr = 0.25;
+            cg = 0.25;
+            cb = 0.3;
+        }
+    }
+    let mut r = 0.08 * cr;
+    let mut g = 0.08 * cg;
+    let mut b = 0.08 * cb;
+    let mut li = 0;
+    while li < 2 {
+        let lx0 = if li == 0 { -4.0 } else { 3.0 };
+        let ly0 = if li == 0 { 5.0 } else { 3.0 };
+        let lz0 = if li == 0 { -2.0 } else { -4.0 };
+        let power = if li == 0 { 0.9 } else { 0.5 };
+        let qx = lx0 - hx;
+        let qy = ly0 - hy;
+        let qz = lz0 - hz;
+        let ql = sqrt(qx * qx + qy * qy + qz * qz);
+        let lx = qx / ql;
+        let ly = qy / ql;
+        let lz = qz / ql;
+        let blocker = nearest(s, hx, hy, hz, lx, ly, lz);
+        if blocker.k == -1 || blocker.t > ql {
+            let diff = nx * lx + ny * ly + nz * lz;
+            if diff > 0.0 {
+                let mut hxv = lx - dx;
+                let mut hyv = ly - dy;
+                let mut hzv = lz - dz;
+                let hl = sqrt(hxv * hxv + hyv * hyv + hzv * hzv);
+                hxv = hxv / hl;
+                hyv = hyv / hl;
+                hzv = hzv / hl;
+                let ndoth = nx * hxv + ny * hyv + nz * hzv;
+                let spec = if ndoth > 0.0 { pow(ndoth, shine) } else { 0.0 };
+                r = r + power * (diff * cr + 0.4 * spec);
+                g = g + power * (diff * cg + 0.4 * spec);
+                b = b + power * (diff * cb + 0.4 * spec);
+            }
+        }
+        li = li + 1;
+    }
+    channel(r) * 65536 + channel(g) * 256 + channel(b)
+}
+
+fn scene(w: i64, h: i64) -> Scene {
+    let mut sp: Vec<Sphere> = Vec::new();
+    let mut i = 0;
+    while i < 24 {
+        let a = (i as f64) * 0.7;
+        let ring = 1.2 + 0.25 * ((i % 4) as f64);
+        sp.push(Sphere { cx: ring * cos(a), cy: -0.6 + 0.15 * ((i % 3) as f64), cz: 1.5 + ring * sin(a), r: 0.25 + 0.05 * ((i % 5) as f64), red: 0.3 + 0.1 * ((i % 7) as f64), green: 0.9 - 0.1 * ((i % 6) as f64), blue: 0.4 + 0.1 * ((i % 4) as f64), shine: 16.0 + 8.0 * ((i % 4) as f64) });
+        i = i + 1;
+    }
+    sp.push(Sphere { cx: 0.0, cy: 0.0, cz: 1.5, r: 1.0, red: 0.9, green: 0.3, blue: 0.2, shine: 64.0 });
+    Scene { spheres: sp, w: w, h: h }
+}
+
+fn main() ~ Console + Environment + Clock {
+    let mode = args_get(1);
+    let w = args_get(2).parse_int();
+    let h = args_get(3).parse_int();
+    let s = scene(w, h);
+    let n = w * h;
+    let t0 = clock_ms();
+    let img = if mode == "par" || mode == "par-full" {
+        par_for(n, &s, shade)
+    } else {
+        let mut v: Vec<i64> = Vec::new();
+        let mut p = 0;
+        while p < n {
+            v.push(shade(&s, p));
+            p = p + 1;
+        }
+        v
+    };
+    eprintln!("kernel_ms {}", clock_ms() - t0);
+    let full = mode == "par-full" || mode == "serial-full";
+    let mut hash: i64 = -3750763034362895579;
+    let mut p = 0;
+    while p < n {
+        let c = img[p];
+        hash = (hash ^ c).wrapping_mul(1099511628211);
+        if full {
+            println!("{}", c);
+        } else if p % 4099 == 0 {
+            println!("{} {}", p, c);
+        }
+        p = p + 1;
+    }
+    println!("fnv {}", hash);
+}

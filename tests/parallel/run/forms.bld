@@ -1,0 +1,53 @@
+// par_for over a struct context, par_map over a vector value, a borrowed
+// vector and a closure, with empty and one-element inputs. The output must
+// not depend on BUILD_PAR_THREADS.
+struct Grid { w: i64, scale: f64 }
+
+struct Cell { i: i64, v: f64 }
+
+fn cell(g: &Grid, i: i64) -> Cell {
+    let x = i % g.w;
+    let y = i / g.w;
+    Cell { i: i, v: (x as f64) * g.scale - (y as f64) }
+}
+
+fn sq(x: i64) -> i64 {
+    x * x + 1
+}
+
+fn half(x: f64) -> f64 {
+    x / 2.0
+}
+
+fn main() ~ Console {
+    let g = Grid { w: 7, scale: 0.25 };
+    let cells = par_for(50, &g, cell);
+    let mut k = 0;
+    let mut acc = 0.0;
+    while k < 50 {
+        let c = cells[k];
+        acc = acc + c.v * (c.i as f64);
+        k = k + 1;
+    }
+    println!("cells {} {}", cells.len(), acc);
+
+    let mut xs: Vec<i64> = Vec::new();
+    let mut i = 0;
+    while i < 33 {
+        xs.push(i - 10);
+        i = i + 1;
+    }
+    let ys = par_map(&xs, sq);
+    println!("sq {} {} {}", ys[0], ys[10], ys[32]);
+
+    let mut fs: Vec<f64> = Vec::new();
+    fs.push(3.0);
+    let one = par_map(&fs, half);
+    println!("one {} {}", one.len(), one[0]);
+
+    let empty = par_for(0, &g, cell);
+    println!("empty {}", empty.len());
+
+    let cubes = par_map(&xs, |v: i64| -> i64 { v * v * v });
+    println!("cubes {} {}", cubes[0], cubes[32]);
+}

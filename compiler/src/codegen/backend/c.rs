@@ -22,6 +22,7 @@ use crate::codegen::runtime;
 use crate::codegen::{GeneratedCode, OutputFormat};
 
 mod header;
+mod parallel;
 
 /// Floating-point pragmas at the top of every generated C file (DETMATH): each
 /// `a * b + c` rounds twice, as written, under gcc, clang and MSVC alike, even
@@ -1240,6 +1241,10 @@ impl CBackend {
                 self.output.push('\n');
             }
         }
+
+        // M5: the thread pool and one wrapper per parallel body, only when
+        // the program calls `par_for` or `par_map`.
+        self.generate_par_wrappers(module);
 
         // Function definitions
         for func in &module.functions {

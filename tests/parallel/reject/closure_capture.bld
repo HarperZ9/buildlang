@@ -1,0 +1,9 @@
+// expect: BL0407
+// A closure that reads an outer variable; pass it through par_for's context.
+fn main() ~ Console {
+    let k = 3.0;
+    let mut xs: Vec<f64> = Vec::new();
+    xs.push(1.0);
+    let ys = par_map(&xs, |v: f64| -> f64 { v * k });
+    println!("{}", ys[0]);
+}

@@ -166,6 +166,8 @@ A test in `compiler/src/diagnostics/tests.rs` fails if this table and the compil
 | BL0403 | undeclared effect in the function body |
 | BL0404 | unknown effect operation |
 | BL0405 | handler missing an operation |
+| BL0406 | effect in a parallel body |
+| BL0407 | parallel body the checker cannot see |
 
 ## Ownership, borrows and linear values
 
@@ -180,6 +182,7 @@ A test in `compiler/src/diagnostics/tests.rs` fails if this table and the compil
 | BL0512 | linear value moved out of a shared borrow |
 | BL0513 | linear field in a non-linear type |
 | BL0514 | linear value in an untracked position |
+| BL0515 | parallel body can write shared state |
 
 ## Units, modules and macros
 

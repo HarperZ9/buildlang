@@ -72,11 +72,11 @@ game, not in this repository.
 |---|---|---|---|
 | M3 Held-out pass rate | a new held-out probe of at least 30 tasks (at least 6 game-shaped), sealed by hash and pushed before any generator sees it, graded with the `bench/heldout-2026-10-15` harness against the current crates.io release, two generators: pass@1 at least 25/30 each (scaled: 29/34) and zero check-pass-but-fail (either generator below the bar, or any program that passes `buildc check` and then fails to build, crashes or prints the wrong output) | PENDING | bench5, preregistered in `bench/heldout-2026-11-08` |
 
-## Stage 3: parallel by default (target 1.12.0)
+## Stage 3: parallel by default (shipped in 1.11.0; scored on its crates.io build)
 
 | Row | Check (fails if) | Status | Evidence |
 |---|---|---|---|
-| M5 Deterministic parallelism | n-body step, CPU per-pixel shading and the 40-fight corpus run fight by fight, at least 10 timed runs each with median and 95% interval: at least 4x on 8 cores for n-body and pixels, byte-identical output to the serial run everywhere (any output difference, or a lower interval bound below 4x) | NOT BUILT | open PR #136 (`par_for`, `par_map` with a checked empty effect row); nothing on `main` |
+| M5 Deterministic parallelism | n-body step, CPU per-pixel shading and the 40-fight corpus run fight by fight, at least 10 timed runs each with median and 95% interval: at least 4x on 8 cores for n-body and pixels, byte-identical output to the serial run everywhere (any output difference, or a lower interval bound below 4x) | PENDING 1.11.0 | `par_for` and `par_map` merged in #136 and ship in 1.11.0. The run of record used the branch compiler (`bench/parallel-2026-11`): kernel speed-ups n-body 5.34x [5.07, 5.63], shading 5.87x [5.57, 6.05], 40-fight corpus 5.09x [4.94, 5.37], byte-identical in 30 of 30 runs each. The bar holds on that run; it counts once rerun against 1.11.0 from crates.io |
 
 ## Stage 4: a production GPU path (target 1.13.0)
 
@@ -148,8 +148,8 @@ value carries what it means.
 
 | Release | Ships when | Rows |
 |---|---|---|
-| 1.11.0 | now | M4a to M4d scored; M3 measured |
-| 1.12.0 | M3 failures fixed (if any) and M5 passes | M3 re-measured on a new probe, M5 |
+| 1.11.0 | now | M4a to M4d scored; M3 measured; M5 shipped, rerun on the release |
+| 1.12.0 | M3 failures fixed (if any) | M3 re-measured on a new probe |
 | 1.13.0 | M6 passes | M6 |
 | 2.0.0 | stages 1 to 4 pass and F1 to F3 pass | the frozen language |
 | 2.1.0 to 2.3.0 | each verification row passes | V1, V3, S1 to S3; V2, S4; V4, V5 |

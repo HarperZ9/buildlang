@@ -1,0 +1,1220 @@
+{
+ "machine": {
+  "logical_cpus": 24,
+  "physical_cores": 16
+ },
+ "threads": 8,
+ "runs": 10,
+ "benches": {
+  "nbody": {
+   "args": [
+    "4096",
+    "40"
+   ],
+   "summary": {
+    "rounds": 10,
+    "kernel_speedup": [
+     5.434411500449237,
+     5.3165266106442575,
+     5.517009032634032
+    ],
+    "wall_speedup": [
+     3.235025182142759,
+     3.1106493500723293,
+     3.2868532557531314
+    ],
+    "par1_over_serial_kernel": [
+     1.033162379626866,
+     0.9924635764542832,
+     1.0552581985958476
+    ],
+    "kernel_ms": {
+     "serial": [
+      1819.0,
+      1710.0,
+      1927.5
+     ],
+     "par1": [
+      1828.0,
+      1791.0,
+      1934.0
+     ],
+     "par8": [
+      345.5,
+      317.5,
+      353.5
+     ]
+    },
+    "cpu_percent_before": [
+     47.0,
+     42.05,
+     49.849999999999994
+    ],
+    "cpu_percent_after": [
+     46.75,
+     45.2,
+     50.2
+    ],
+    "distinct_stdout": [
+     "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6"
+    ],
+    "gpu_percent_before": [
+     96.0,
+     95.5,
+     96.0
+    ],
+    "byte_identical": true
+   },
+   "rows": [
+    {
+     "mode": "serial",
+     "threads": 1,
+     "wall_s": 2.1123164999953588,
+     "kernel_ms": 1764,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 41.6,
+      "gpu_percent": 72
+     },
+     "load_after": {
+      "cpu_percent": 38.6,
+      "gpu_percent": 97
+     },
+     "round": 0,
+     "label": "serial"
+    },
+    {
+     "mode": "par",
+     "threads": 1,
+     "wall_s": 2.0975442999988445,
+     "kernel_ms": 1781,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 53.4,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 45.8,
+      "gpu_percent": 96
+     },
+     "round": 0,
+     "label": "par1"
+    },
+    {
+     "mode": "par",
+     "threads": 8,
+     "wall_s": 0.6434377999976277,
+     "kernel_ms": 320,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 38.1,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 45.8,
+      "gpu_percent": 96
+     },
+     "round": 0,
+     "label": "par8"
+    },
+    {
+     "mode": "par",
+     "threads": 8,
+     "wall_s": 0.6371263000037288,
+     "kernel_ms": 312,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 49.3,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 40.7,
+      "gpu_percent": 96
+     },
+     "round": 1,
+     "label": "par8"
+    },
+    {
+     "mode": "serial",
+     "threads": 1,
+     "wall_s": 2.0347868999961065,
+     "kernel_ms": 1708,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 38.4,
+      "gpu_percent": 95
+     },
+     "load_after": {
+      "cpu_percent": 43.9,
+      "gpu_percent": 94
+     },
+     "round": 1,
+     "label": "serial"
+    },
+    {
+     "mode": "par",
+     "threads": 1,
+     "wall_s": 2.120021300004737,
+     "kernel_ms": 1812,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 46.3,
+      "gpu_percent": 97
+     },
+     "load_after": {
+      "cpu_percent": 38.6,
+      "gpu_percent": 96
+     },
+     "round": 1,
+     "label": "par1"
+    },
+    {
+     "mode": "par",
+     "threads": 8,
+     "wall_s": 0.6273923000044306,
+     "kernel_ms": 318,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 42.0,
+      "gpu_percent": 97
+     },
+     "load_after": {
+      "cpu_percent": 46.4,
+      "gpu_percent": 96
+     },
+     "round": 2,
+     "label": "par8"
+    },
+    {
+     "mode": "par",
+     "threads": 1,
+     "wall_s": 2.08921339999506,
+     "kernel_ms": 1770,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 40.3,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 46.5,
+      "gpu_percent": 93
+     },
+     "round": 2,
+     "label": "par1"
+    },
+    {
+     "mode": "serial",
+     "threads": 1,
+     "wall_s": 2.0824178000038955,
+     "kernel_ms": 1730,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 44.2,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 43.2,
+      "gpu_percent": 95
+     },
+     "round": 2,
+     "label": "serial"
+    },
+    {
+     "mode": "par",
+     "threads": 1,
+     "wall_s": 2.1394937000004575,
+     "kernel_ms": 1801,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 41.5,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 38.3,
+      "gpu_percent": 96
+     },
+     "round": 3,
+     "label": "par1"
+    },
+    {
+     "mode": "par",
+     "threads": 8,
+     "wall_s": 0.6335175000058371,
+     "kernel_ms": 315,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 40.7,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 44.6,
+      "gpu_percent": 96
+     },
+     "round": 3,
+     "label": "par8"
+    },
+    {
+     "mode": "serial",
+     "threads": 1,
+     "wall_s": 2.059229000005871,
+     "kernel_ms": 1710,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 38.0,
+      "gpu_percent": 95
+     },
+     "load_after": {
+      "cpu_percent": 35.1,
+      "gpu_percent": 94
+     },
+     "round": 3,
+     "label": "serial"
+    },
+    {
+     "mode": "par",
+     "threads": 1,
+     "wall_s": 2.1475202000001445,
+     "kernel_ms": 1792,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 38.8,
+      "gpu_percent": 95
+     },
+     "load_after": {
+      "cpu_percent": 47.0,
+      "gpu_percent": 96
+     },
+     "round": 4,
+     "label": "par1"
+    },
+    {
+     "mode": "serial",
+     "threads": 1,
+     "wall_s": 2.3137973000048078,
+     "kernel_ms": 1957,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 56.4,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 55.3,
+      "gpu_percent": 95
+     },
+     "round": 4,
+     "label": "serial"
+    },
+    {
+     "mode": "par",
+     "threads": 8,
+     "wall_s": 0.710943899997801,
+     "kernel_ms": 352,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 59.3,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 52.4,
+      "gpu_percent": 96
+     },
+     "round": 4,
+     "label": "par8"
+    },
+    {
+     "mode": "serial",
+     "threads": 1,
+     "wall_s": 2.355382900001132,
+     "kernel_ms": 1983,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 56.0,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 64.5,
+      "gpu_percent": 95
+     },
+     "round": 5,
+     "label": "serial"
+    },
+    {
+     "mode": "par",
+     "threads": 1,
+     "wall_s": 2.287903299999016,
+     "kernel_ms": 1934,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 62.0,
+      "gpu_percent": 93
+     },
+     "load_after": {
+      "cpu_percent": 53.8,
+      "gpu_percent": 94
+     },
+     "round": 5,
+     "label": "par1"
+    },
+    {
+     "mode": "par",
+     "threads": 8,
+     "wall_s": 0.6832689000002574,
+     "kernel_ms": 344,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 54.2,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 54.7,
+      "gpu_percent": 96
+     },
+     "round": 5,
+     "label": "par8"
+    },
+    {
+     "mode": "par",
+     "threads": 1,
+     "wall_s": 2.3130062999989605,
+     "kernel_ms": 1967,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 46.0,
+      "gpu_percent": 99
+     },
+     "load_after": {
+      "cpu_percent": 59.4,
+      "gpu_percent": 96
+     },
+     "round": 6,
+     "label": "par1"
+    },
+    {
+     "mode": "par",
+     "threads": 8,
+     "wall_s": 0.7257939999981318,
+     "kernel_ms": 353,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 59.2,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 46.5,
+      "gpu_percent": 95
+     },
+     "round": 6,
+     "label": "par8"
+    },
+    {
+     "mode": "serial",
+     "threads": 1,
+     "wall_s": 2.218914800003404,
+     "kernel_ms": 1874,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 46.8,
+      "gpu_percent": 97
+     },
+     "load_after": {
+      "cpu_percent": 49.0,
+      "gpu_percent": 96
+     },
+     "round": 6,
+     "label": "serial"
+    },
+    {
+     "mode": "par",
+     "threads": 8,
+     "wall_s": 0.7272641000017757,
+     "kernel_ms": 357,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 47.2,
+      "gpu_percent": 95
+     },
+     "load_after": {
+      "cpu_percent": 47.0,
+      "gpu_percent": 97
+     },
+     "round": 7,
+     "label": "par8"
+    },
+    {
+     "mode": "par",
+     "threads": 1,
+     "wall_s": 2.3370094999991124,
+     "kernel_ms": 1980,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 49.4,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 53.4,
+      "gpu_percent": 95
+     },
+     "round": 7,
+     "label": "par1"
+    },
+    {
+     "mode": "serial",
+     "threads": 1,
+     "wall_s": 2.262263600001461,
+     "kernel_ms": 1898,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 49.0,
+      "gpu_percent": 78
+     },
+     "load_after": {
+      "cpu_percent": 73.1,
+      "gpu_percent": 96
+     },
+     "round": 7,
+     "label": "serial"
+    },
+    {
+     "mode": "par",
+     "threads": 8,
+     "wall_s": 0.705143200000748,
+     "kernel_ms": 355,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 66.8,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 50.2,
+      "gpu_percent": 94
+     },
+     "round": 8,
+     "label": "par8"
+    },
+    {
+     "mode": "par",
+     "threads": 1,
+     "wall_s": 2.288981199999398,
+     "kernel_ms": 1934,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 42.1,
+      "gpu_percent": 99
+     },
+     "load_after": {
+      "cpu_percent": 54.1,
+      "gpu_percent": 96
+     },
+     "round": 8,
+     "label": "par1"
+    },
+    {
+     "mode": "serial",
+     "threads": 1,
+     "wall_s": 2.270265899998776,
+     "kernel_ms": 1926,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 50.3,
+      "gpu_percent": 95
+     },
+     "load_after": {
+      "cpu_percent": 49.2,
+      "gpu_percent": 93
+     },
+     "round": 8,
+     "label": "serial"
+    },
+    {
+     "mode": "par",
+     "threads": 8,
+     "wall_s": 0.7023802000039723,
+     "kernel_ms": 347,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 53.2,
+      "gpu_percent": 95
+     },
+     "load_after": {
+      "cpu_percent": 49.9,
+      "gpu_percent": 95
+     },
+     "round": 9,
+     "label": "par8"
+    },
+    {
+     "mode": "par",
+     "threads": 1,
+     "wall_s": 2.174363899997843,
+     "kernel_ms": 1844,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 48.1,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 40.3,
+      "gpu_percent": 92
+     },
+     "round": 9,
+     "label": "par1"
+    },
+    {
+     "mode": "serial",
+     "threads": 1,
+     "wall_s": 2.0325085000004037,
+     "kernel_ms": 1706,
+     "stdout_sha256": "ba9c9593b981222e55a880471046926c7d40d0cd2c094a95ec5357f117f70cf6",
+     "stdout_bytes": 250996,
+     "load_before": {
+      "cpu_percent": 31.7,
+      "gpu_percent": 95
+     },
+     "load_after": {
+      "cpu_percent": 40.1,
+      "gpu_percent": 96
+     },
+     "round": 9,
+     "label": "serial"
+    }
+   ]
+  },
+  "shade": {
+   "args": [
+    "3200",
+    "2400"
+   ],
+   "summary": {
+    "rounds": 10,
+    "kernel_speedup": [
+     6.3845356290059065,
+     6.231197691197691,
+     6.535736083342103
+    ],
+    "wall_speedup": [
+     4.951105004689131,
+     4.866100072009114,
+     5.028851170631841
+    ],
+    "par1_over_serial_kernel": [
+     0.964157043025423,
+     0.9530727018076215,
+     1.005479685294847
+    ],
+    "kernel_ms": {
+     "serial": [
+      1420.5,
+      1389.0,
+      1428.5
+     ],
+     "par1": [
+      1355.5,
+      1321.0,
+      1404.0
+     ],
+     "par8": [
+      220.0,
+      217.0,
+      223.0
+     ]
+    },
+    "cpu_percent_before": [
+     40.4,
+     39.1,
+     42.5
+    ],
+    "cpu_percent_after": [
+     39.1,
+     36.7,
+     41.75
+    ],
+    "distinct_stdout": [
+     "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572"
+    ],
+    "gpu_percent_before": [
+     96.0,
+     95.5,
+     96.0
+    ],
+    "byte_identical": true,
+    "full_image": {
+     "serial_full": "ffa54cf8edbf5d5ba3d86f18f72fe885a787b2a9a2253e23393ba2e1f4808333",
+     "par_full": "ffa54cf8edbf5d5ba3d86f18f72fe885a787b2a9a2253e23393ba2e1f4808333",
+     "bytes": 70340458,
+     "identical": true
+    }
+   },
+   "rows": [
+    {
+     "mode": "par",
+     "threads": 1,
+     "wall_s": 1.4553473000050872,
+     "kernel_ms": 1347,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 34.9,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 34.8,
+      "gpu_percent": 96
+     },
+     "round": 0,
+     "label": "par1"
+    },
+    {
+     "mode": "par",
+     "threads": 8,
+     "wall_s": 0.2996780999965267,
+     "kernel_ms": 221,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 35.1,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 35.6,
+      "gpu_percent": 96
+     },
+     "round": 0,
+     "label": "par8"
+    },
+    {
+     "mode": "serial",
+     "threads": 1,
+     "wall_s": 1.4964094999959343,
+     "kernel_ms": 1423,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 43.1,
+      "gpu_percent": 97
+     },
+     "load_after": {
+      "cpu_percent": 40.4,
+      "gpu_percent": 97
+     },
+     "round": 0,
+     "label": "serial"
+    },
+    {
+     "mode": "par",
+     "threads": 8,
+     "wall_s": 0.2977533000012045,
+     "kernel_ms": 218,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 40.0,
+      "gpu_percent": 95
+     },
+     "load_after": {
+      "cpu_percent": 39.6,
+      "gpu_percent": 93
+     },
+     "round": 1,
+     "label": "par8"
+    },
+    {
+     "mode": "serial",
+     "threads": 1,
+     "wall_s": 1.478623900002276,
+     "kernel_ms": 1401,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 39.1,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 34.5,
+      "gpu_percent": 96
+     },
+     "round": 1,
+     "label": "serial"
+    },
+    {
+     "mode": "par",
+     "threads": 1,
+     "wall_s": 1.4294671000025119,
+     "kernel_ms": 1351,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 32.9,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 37.8,
+      "gpu_percent": 99
+     },
+     "round": 1,
+     "label": "par1"
+    },
+    {
+     "mode": "par",
+     "threads": 8,
+     "wall_s": 0.28530940000200644,
+     "kernel_ms": 212,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 33.3,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 36.1,
+      "gpu_percent": 93
+     },
+     "round": 2,
+     "label": "par8"
+    },
+    {
+     "mode": "serial",
+     "threads": 1,
+     "wall_s": 1.5191611000045668,
+     "kernel_ms": 1434,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 40.3,
+      "gpu_percent": 95
+     },
+     "load_after": {
+      "cpu_percent": 43.5,
+      "gpu_percent": 96
+     },
+     "round": 2,
+     "label": "serial"
+    },
+    {
+     "mode": "par",
+     "threads": 1,
+     "wall_s": 1.4556757999962429,
+     "kernel_ms": 1376,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 43.1,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 41.2,
+      "gpu_percent": 94
+     },
+     "round": 2,
+     "label": "par1"
+    },
+    {
+     "mode": "par",
+     "threads": 1,
+     "wall_s": 1.4154563999982201,
+     "kernel_ms": 1339,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 61.1,
+      "gpu_percent": 93
+     },
+     "load_after": {
+      "cpu_percent": 36.5,
+      "gpu_percent": 96
+     },
+     "round": 3,
+     "label": "par1"
+    },
+    {
+     "mode": "par",
+     "threads": 8,
+     "wall_s": 0.2930578000014066,
+     "kernel_ms": 219,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 40.1,
+      "gpu_percent": 95
+     },
+     "load_after": {
+      "cpu_percent": 36.8,
+      "gpu_percent": 97
+     },
+     "round": 3,
+     "label": "par8"
+    },
+    {
+     "mode": "serial",
+     "threads": 1,
+     "wall_s": 1.4713110000011511,
+     "kernel_ms": 1389,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 42.7,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 46.8,
+      "gpu_percent": 93
+     },
+     "round": 3,
+     "label": "serial"
+    },
+    {
+     "mode": "par",
+     "threads": 1,
+     "wall_s": 1.5507992999991984,
+     "kernel_ms": 1475,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 42.2,
+      "gpu_percent": 95
+     },
+     "load_after": {
+      "cpu_percent": 42.3,
+      "gpu_percent": 97
+     },
+     "round": 4,
+     "label": "par1"
+    },
+    {
+     "mode": "par",
+     "threads": 8,
+     "wall_s": 0.3112884000001941,
+     "kernel_ms": 231,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 37.8,
+      "gpu_percent": 95
+     },
+     "load_after": {
+      "cpu_percent": 38.4,
+      "gpu_percent": 95
+     },
+     "round": 4,
+     "label": "par8"
+    },
+    {
+     "mode": "serial",
+     "threads": 1,
+     "wall_s": 1.5052119999963907,
+     "kernel_ms": 1423,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 46.4,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 40.1,
+      "gpu_percent": 96
+     },
+     "round": 4,
+     "label": "serial"
+    },
+    {
+     "mode": "serial",
+     "threads": 1,
+     "wall_s": 1.5112106000015046,
+     "kernel_ms": 1434,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 42.3,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 35.4,
+      "gpu_percent": 95
+     },
+     "round": 5,
+     "label": "serial"
+    },
+    {
+     "mode": "par",
+     "threads": 1,
+     "wall_s": 1.3035975000020699,
+     "kernel_ms": 1226,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 31.7,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 40.5,
+      "gpu_percent": 93
+     },
+     "round": 5,
+     "label": "par1"
+    },
+    {
+     "mode": "par",
+     "threads": 8,
+     "wall_s": 0.3061440000019502,
+     "kernel_ms": 222,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 44.1,
+      "gpu_percent": 94
+     },
+     "load_after": {
+      "cpu_percent": 42.8,
+      "gpu_percent": 62
+     },
+     "round": 5,
+     "label": "par8"
+    },
+    {
+     "mode": "par",
+     "threads": 1,
+     "wall_s": 1.5167168000043603,
+     "kernel_ms": 1432,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 42.0,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 43.2,
+      "gpu_percent": 95
+     },
+     "round": 6,
+     "label": "par1"
+    },
+    {
+     "mode": "serial",
+     "threads": 1,
+     "wall_s": 1.4528733999977703,
+     "kernel_ms": 1375,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 49.9,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 42.3,
+      "gpu_percent": 93
+     },
+     "round": 6,
+     "label": "serial"
+    },
+    {
+     "mode": "par",
+     "threads": 8,
+     "wall_s": 0.29670009999972535,
+     "kernel_ms": 220,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 52.2,
+      "gpu_percent": 94
+     },
+     "load_after": {
+      "cpu_percent": 44.6,
+      "gpu_percent": 96
+     },
+     "round": 6,
+     "label": "par8"
+    },
+    {
+     "mode": "par",
+     "threads": 8,
+     "wall_s": 0.306206099994597,
+     "kernel_ms": 225,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 39.8,
+      "gpu_percent": 92
+     },
+     "load_after": {
+      "cpu_percent": 49.8,
+      "gpu_percent": 94
+     },
+     "round": 7,
+     "label": "par8"
+    },
+    {
+     "mode": "serial",
+     "threads": 1,
+     "wall_s": 1.4943196999956854,
+     "kernel_ms": 1418,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 40.5,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 37.5,
+      "gpu_percent": 96
+     },
+     "round": 7,
+     "label": "serial"
+    },
+    {
+     "mode": "par",
+     "threads": 1,
+     "wall_s": 1.438418099998671,
+     "kernel_ms": 1360,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 38.2,
+      "gpu_percent": 56
+     },
+     "load_after": {
+      "cpu_percent": 47.8,
+      "gpu_percent": 96
+     },
+     "round": 7,
+     "label": "par1"
+    },
+    {
+     "mode": "par",
+     "threads": 1,
+     "wall_s": 1.473026599996956,
+     "kernel_ms": 1396,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 45.9,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 36.6,
+      "gpu_percent": 95
+     },
+     "round": 8,
+     "label": "par1"
+    },
+    {
+     "mode": "serial",
+     "threads": 1,
+     "wall_s": 1.4965104999937466,
+     "kernel_ms": 1426,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 35.7,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 36.1,
+      "gpu_percent": 95
+     },
+     "round": 8,
+     "label": "serial"
+    },
+    {
+     "mode": "par",
+     "threads": 8,
+     "wall_s": 0.29550120000203606,
+     "kernel_ms": 215,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 39.5,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 38.6,
+      "gpu_percent": 96
+     },
+     "round": 8,
+     "label": "par8"
+    },
+    {
+     "mode": "par",
+     "threads": 1,
+     "wall_s": 1.368601399997715,
+     "kernel_ms": 1295,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 33.8,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 35.6,
+      "gpu_percent": 95
+     },
+     "round": 9,
+     "label": "par1"
+    },
+    {
+     "mode": "par",
+     "threads": 8,
+     "wall_s": 0.3000702999997884,
+     "kernel_ms": 220,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 41.1,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 47.4,
+      "gpu_percent": 95
+     },
+     "round": 9,
+     "label": "par8"
+    },
+    {
+     "mode": "serial",
+     "threads": 1,
+     "wall_s": 1.4044581000052858,
+     "kernel_ms": 1329,
+     "stdout_sha256": "0fd93f22dbce5790f695f5ccf07dd56a5a7696830ee0ff2d389f8016a79dd572",
+     "stdout_bytes": 31922,
+     "load_before": {
+      "cpu_percent": 45.3,
+      "gpu_percent": 96
+     },
+     "load_after": {
+      "cpu_percent": 29.0,
+      "gpu_percent": 97
+     },
+     "round": 9,
+     "label": "serial"
+    }
+   ]
+  }
+ }
+}
