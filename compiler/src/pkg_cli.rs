@@ -345,7 +345,8 @@ fn build(
         let bytes = std::fs::read(&exe).map_err(|e| fail(PkgError::io(&exe, e)))?;
         exe_sha = sha256_hex(&bytes);
         let target = out_dir.join(exe_name.replace("main", name));
-        std::fs::write(&target, &bytes).map_err(|e| fail(PkgError::io(&target, e)))?;
+        // copy, not write: it keeps the executable bit on Unix.
+        std::fs::copy(&exe, &target).map_err(|e| fail(PkgError::io(&target, e)))?;
         println!("Executable: {}", target.display());
     }
     let receipt = serde_json::json!({
