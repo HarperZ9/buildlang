@@ -225,6 +225,32 @@ reported. Guards: test_qdb.sh no FAIL, P1 8,921, P2 2,000, text, WAL, library an
 differential unchanged. Planted check: a build that renames before the `.tmp` write completes
 (rename, then write) shows violations in the crash test. Power loss itself (dropped or reordered
 unflushed writes) is not simulated here; that is the seeded-fault work that follows.
+**P15. Seeded power cuts (scoreboard target 2), written 2026-11-09 04:10 PT before any run.** A new
+harness, `bdb/tests/test_qdb_faults.py`, simulates a power cut in the operating system's file cache,
+seeded, with no change to the engine. It learns each step of the `test_qdb_crash.py` workload (18
+steps) by stopping the step at every durable operation (`QDB_CRASH_AT=k`) and comparing the files
+before and after: a whole-file write, an append at an offset, a flush of one file, or a rename. A
+seed then picks a step, a cut point c in 0..n (operations 1..c were issued; c = n is a cut after the
+process exited and before the cache was written back), and for every issued write that no flush of
+its file follows before the cut: dropped (probability 1/2) or kept, and a kept write is torn with
+probability 1/4 (a seeded prefix of its bytes lands). Kept writes land in issue order at their
+recorded offsets; a range left by a dropped earlier append is zero-filled, which is the outcome of a
+later write reaching the device before an earlier one (reordering). Flushed writes always land. A
+completed rename always lands (the runtime's `rename_file` flushes the directory on Linux and
+writes through on Windows). Each step starts from a fully written-back image of the state before it,
+so a cut never loses an earlier step's unflushed writes; that is a stated limit of this model. One
+qdb process then opens the image, issues ROLLBACK, reads both tables and quits. Rule: the process
+exits 0, and the state read equals the state after the step if a commit-tagged write (`wal_auto`,
+`wal_commit`) was followed by a `wal_sync` before the cut (the commit was acknowledged as durable),
+and equals the state before or after the step otherwise. Determinism: the sha256 of every file left
+after recovery (`.db`, `.wal`, `.tmp`, `.ckpt`), per seed, and one digest over seeds 1 to 10,000.
+The same generated `qdb.c` is compiled on Windows (gcc, MinGW) and on Linux (WSL Ubuntu 24.04,
+gcc), and CI on ubuntu-latest checks the digest against the one committed from the Windows run.
+Predictions: 0 violations of 10,000 seeds; the per-seed hashes equal on Windows and Linux for 10,000
+of 10,000. Planted checks: (a) with `--plant-ignore-flush` every unflushed and flushed write alike
+may be dropped, and the harness must report violations (acknowledged commits lost), or it cannot see
+a lost commit; (b) one per-seed hash altered in the Linux manifest must be reported as a difference.
+Cost (seeds per second on each platform) is reported; no bound.
 
 ### Amendments
 
