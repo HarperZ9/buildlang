@@ -45,7 +45,7 @@ def facts(pdf_path, result, doc):
     # Letters, not words: a hyphenated line end, an inline variable before a suffix ("{m:n}th") and implicit
     # products in math ("b n") all join or split words without changing the characters a reader gets.
     pos, order_ok, lost = 0, True, []
-    for block in doc.blocks:
+    for block in reading_order(doc.blocks, getattr(result["layout"], "float_moves", [])):
         want = _letters(_plain_for_text(block))
         if not want:
             continue
@@ -69,6 +69,21 @@ def facts(pdf_path, result, doc):
         "blocks_missing_from_text": lost,
         "pdf_bytes": len(data),
     }
+
+
+def reading_order(blocks, moves):
+    """The blocks in the order a reader meets them: source order, except that a float (a figure, a table) the
+    page builder set later reads after the block the layout names. Only floats move; everything else keeps
+    source order, so a lost or misplaced paragraph still fails the check."""
+    out, placed = list(blocks), {}
+    for moved, anchor in moves:
+        group = [b for b in out if b.index in moved]
+        out = [b for b in out if b.index not in moved]
+        after = {anchor} | placed.setdefault(anchor, set())   # floats moved to one anchor keep their order
+        k = max((n for n, b in enumerate(out) if b.index in after), default=len(out) - 1)
+        out[k + 1:k + 1] = group
+        placed[anchor] |= set(moved)
+    return out
 
 
 def _plain_for_text(block):
