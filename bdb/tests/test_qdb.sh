@@ -310,7 +310,8 @@ chksel "group_concat_distinct" "SELECT group_concat(DISTINCT v) FROM ds" "1,2"
 chksel "group_concat_sep" "SELECT group_concat(g, ';') FROM ds NOT INDEXED" "a;a;a;b;b"
 chksel "postfix_not_null" "SELECT COUNT(*) FROM ds WHERE v NOT NULL" "4"
 chksel "postfix_isnull"  "SELECT COUNT(*) FROM ds WHERE v ISNULL" "1"
-chk "group_concat_distinct_sep" "$($QDB "$DB" "SELECT group_concat(DISTINCT v, ';') FROM ds" 2>&1 | tr -d '' | grep -c 'exactly one argument')" "1"
+chk "group_concat_distinct_sep" "$($QDB "$DB" "SELECT group_concat(DISTINCT v, ';') FROM ds" 2>&1 | tr -d '
+' | grep -c 'exactly one argument')" "1"
 reseed
 
 echo "== subqueries (scalar + IN) =="
@@ -761,6 +762,25 @@ chksel "insel_self"      "SELECT count(*) FROM cp" "8"
 errk "insel_batch_dup"   "INSERT INTO cp SELECT 400 + id / 2, name FROM emp WHERE id < 4" "UNIQUE constraint failed: cp.id"
 chksel "insel_atomic"    "SELECT count(*) FROM cp" "8"
 errk "insel_width"       "INSERT INTO cp SELECT id FROM emp" "has 2 columns but 1 values"
+rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
+
+
+echo "== REPLACE (P24) =="
+rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
+$QDB "$DB" "CREATE TABLE u (id INTEGER PRIMARY KEY, name TEXT UNIQUE, n INTEGER NOT NULL)" >/dev/null
+$QDB "$DB" "INSERT INTO u VALUES (1,'a',1),(2,'b',2),(3,'c',3)" >/dev/null
+$QDB "$DB" "REPLACE INTO u VALUES (4,'b',4)" >/dev/null
+chksel "replace_unique"   "SELECT id FROM u ORDER BY id" "$(printf '1
+3
+4')"
+$QDB "$DB" "INSERT OR REPLACE INTO u VALUES (1,'c',9)" >/dev/null
+chksel "replace_two_rows" "SELECT id, name FROM u ORDER BY id" "$(printf '1 | c
+4 | b')"
+errk "replace_not_null"   "REPLACE INTO u VALUES (4,'z',NULL)" "NOT NULL constraint failed: u.n"
+chksel "replace_atomic"   "SELECT count(*) FROM u" "2"
+$QDB "$DB" "REPLACE INTO u VALUES (6,'q',1),(6,'r',2)" >/dev/null
+chksel "replace_in_batch" "SELECT name FROM u WHERE id = 6" "r"
+chksel "replace_new_row"  "SELECT count(*) FROM u" "3"
 rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
 
 

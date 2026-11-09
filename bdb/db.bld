@@ -176,6 +176,8 @@ struct DB {
     p_vals: Vec<i32>,
     p_val_count: i32,
     p_row_count: i32,
+    // REPLACE INTO or INSERT OR REPLACE INTO (P24).
+    ins_replace: bool,
     has_where: i32,
     // WHERE leaf conditions. Each entry is one comparison / LIKE / IN /
     // IS [NOT] NULL predicate; the boolean structure over them lives in the
@@ -438,7 +440,7 @@ fn db_new(db_path: String) -> DB {
         stmt_type: 0, p_table: -1,
         p_cols: vec![], p_col_count: 0,
         p_types: vec![],
-        p_vals: vec![], p_val_count: 0, p_row_count: 0,
+        p_vals: vec![], p_val_count: 0, p_row_count: 0, ins_replace: false,
         has_where: 0, wc_count: 0,
         wc_left: vec![], wc_op: vec![], wc_right: vec![],
         wc_neg: vec![],
@@ -1976,6 +1978,7 @@ fn reset_parser(d: &mut DB, input: String) {
     d.xn = 0;
     d.xq_n = 0;
     d.xq_root = -1;
+    d.ins_replace = false;
 }
 
 fn parse_sql(d: &mut DB) ~ Console + Process {
@@ -1987,6 +1990,7 @@ fn parse_sql(d: &mut DB) ~ Console + Process {
         return;
     }
     if tk_is_kw(d, "INSERT") == 1 { parse_insert(d); return; }
+    if tk_word(d) == "REPLACE" { d.ins_replace = true; parse_insert(d); return; }
     if tk_is_kw(d, "CREATE") == 1 {
         // Peek: CREATE TABLE or CREATE INDEX?
         next_token(d);
@@ -2238,6 +2242,15 @@ fn is_compound_kw(d: &DB) -> i32 {
 fn parse_insert(d: &mut DB) ~ Console + Process {
     d.stmt_type = 1;
     next_token(d);
+    if tk_is_kw(d, "OR") == 1 {
+        next_token(d);
+        if tk_word(d) != "REPLACE" {
+            println!("Error: only INSERT OR REPLACE is supported, got INSERT OR {}", d.tk_val);
+            process_exit(1);
+        }
+        d.ins_replace = true;
+        next_token(d);
+    }
     expect_kw(d, "INTO");
     let tname = d.tk_val;
     d.p_table = sp_add(d, tname);
@@ -3485,6 +3498,15 @@ fn exec_insert(d: &mut DB) ~ Console + Process {
             c2 = c2 + 1;
         }
         r = r + 1;
+    }
+
+    let mut row_cells = row_cells;
+    let mut nrows = nrows;
+    if d.ins_replace {
+        let kept = replace_prepare(d, tidx, row_cells, nrows);
+        if d.stmt_failed { return; }
+        row_cells = kept;
+        nrows = vec_len(kept) / cc;
     }
 
     // Constraints (P13), before any cell changes.
@@ -6805,6 +6827,99 @@ fn exec_update(d: &mut DB) ~ Console {
     }
 }
 
+// REPLACE (P24), in SQLite's order: each new row in turn removes every row
+// whose UNIQUE or PRIMARY KEY key equals its own (NULL keys never clash),
+// then goes in. Here the batch is settled first: a row that a later row of
+// the same statement clashes with is dropped, then the table rows the
+// remaining rows clash with are deleted. NOT NULL is checked before anything
+// is deleted, so a failing REPLACE changes nothing. Returns the kept rows.
+fn replace_prepare(d: &mut DB, t: i32, rows: Vec<i32>, nrows: i32) -> Vec<i32> ~ Console {
+    let cc = vec_get(d.tbl_col_counts, t);
+    let mut k = 0;
+    while k < vec_len(d.con_tbl) {
+        if vec_get(d.con_tbl, k) == t && vec_get(d.con_kind, k) == 2 && !con_is_ipk(d, k) {
+            let c0 = vec_get(d.con_cols, vec_get(d.con_cs, k));
+            let mut r = 0;
+            while r < nrows {
+                if is_null(sp_get(d, vec_get(rows, r * cc + c0))) {
+                    d.stmt_failed = true;
+                    println!("Error: {}", con_fail_text(d, k, t));
+                    return rows;
+                }
+                r = r + 1;
+            }
+        }
+        k = k + 1;
+    }
+    // keys[k] of each batch row, and whether a later row clashes with it.
+    let mut keep: Vec<i32> = vec![];
+    let mut r = 0;
+    while r < nrows { vec_push(keep, 1); r = r + 1; }
+    k = 0;
+    while k < vec_len(d.con_tbl) {
+        if vec_get(d.con_tbl, k) == t && vec_get(d.con_kind, k) != 2 {
+            let last: HashMap<String, f64> = map_new();
+            r = nrows - 1;
+            while r >= 0 {
+                let key = con_key(d, k, rows, r * cc);
+                if key.len() > 0 {
+                    if map_contains(last, key) { keep[r] = 0; }
+                    else { map_insert(last, key, 1.0); }
+                }
+                r = r - 1;
+            }
+        }
+        k = k + 1;
+    }
+    let mut out: Vec<i32> = vec![];
+    r = 0;
+    while r < nrows {
+        if vec_get(keep, r) == 1 {
+            let mut c = 0;
+            while c < cc { vec_push(out, vec_get(rows, r * cc + c)); c = c + 1; }
+        }
+        r = r + 1;
+    }
+    let nout = vec_len(out) / cc;
+    // Table rows whose key equals a kept row's key, by one scan per constraint.
+    let rs = vec_get(d.tbl_row_starts, t);
+    let rc = vec_get(d.tbl_row_counts, t);
+    let mut hit: Vec<i32> = vec![];
+    r = 0;
+    while r < rc { vec_push(hit, 0); r = r + 1; }
+    let mut any = false;
+    k = 0;
+    while k < vec_len(d.con_tbl) {
+        if vec_get(d.con_tbl, k) == t && vec_get(d.con_kind, k) != 2 {
+            let want: HashMap<String, f64> = map_new();
+            r = 0;
+            while r < nout {
+                let key = con_key(d, k, out, r * cc);
+                if key.len() > 0 { map_insert(want, key, 1.0); }
+                r = r + 1;
+            }
+            if map_len(want) > 0 {
+                r = 0;
+                while r < rc {
+                    let key = con_key(d, k, d.cells, rs + r * cc);
+                    if key.len() > 0 && map_contains(want, key) { hit[r] = 1; any = true; }
+                    r = r + 1;
+                }
+            }
+        }
+        k = k + 1;
+    }
+    if any {
+        let mut del: Vec<i32> = vec![];
+        r = 0;
+        while r < rc { if vec_get(hit, r) == 1 { vec_push(del, r); } r = r + 1; }
+        delete_rows(d, t, del);
+        // The deleted rows' keys leave the key map with a rebuild.
+        d.con_map_ok = false;
+    }
+    out
+}
+
 // Execute DELETE FROM in place (P20): compact the table's rows and every
 // later cell down over the deleted ones, truncate the array, and renumber
 // the row ids in the table's indexes in one integer pass (no sort).
@@ -6826,6 +6941,16 @@ fn exec_delete(d: &mut DB) ~ Console {
     if !where_cols_ok(d, cs, cc, tname, d.alias1) { return; }
 
     let del = where_rows(d, tidx, cs, cc, rs, rc, tname);
+    delete_rows(d, tidx, del);
+}
+
+// Delete rows del (ascending row numbers) of table tidx in place: compact
+// the table's rows and every later cell, truncate the array, and renumber
+// the table's index row ids (P20).
+fn delete_rows(d: &mut DB, tidx: i32, del: Vec<i32>) {
+    let cc = vec_get(d.tbl_col_counts, tidx);
+    let rs = vec_get(d.tbl_row_starts, tidx);
+    let rc = vec_get(d.tbl_row_counts, tidx);
     let deleted = vec_len(del);
     if deleted == 0 { return; }
 
