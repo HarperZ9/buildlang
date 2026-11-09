@@ -138,7 +138,7 @@ pub(super) fn binary(
     );
     let shift = matches!(op, BinOp::Shl | BinOp::Shr);
     let ty = if shift {
-        let env = |n: &str| st.ty_of(n);
+        let env = |n: &str| sym.env_ty(&st, n);
         static_ty(l, &env, sym.sigs).or(expect).unwrap_or(Ty::I32)
     } else {
         operand_ty(sym, l, r, &st, if is_cmp { None } else { expect })
@@ -152,7 +152,10 @@ pub(super) fn binary(
     let left = expr(sym, l, st, Some(ty))?;
     then(sym, left, |sym, s, a, aty| {
         let right = expr(sym, r, s, if shift { None } else { Some(ty) })?;
-        then(sym, right, |_, mut s2, b, _| {
+        then(sym, right, |_, mut s2, b, bty| {
+            if [aty, bty].iter().any(|t| t.is_some_and(|t| t.is_float())) {
+                return Err("mixed integer and float arithmetic (outside the subset)".into());
+            }
             if is_cmp {
                 let c = match op {
                     BinOp::Eq => COp::Eq,

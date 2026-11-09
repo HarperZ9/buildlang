@@ -15,6 +15,9 @@ pub enum Ty {
     Bool,
     /// An IEEE 754 float of `bits` width (translation validation only).
     Float { bits: u8 },
+    /// A struct of subset values, by interned name (translation validation
+    /// only; see `super::agg`).
+    Struct(u16),
 }
 
 impl Ty {
@@ -38,7 +41,7 @@ impl Ty {
                 bits,
                 signed: false,
             } => Some((0, (1i128 << bits) - 1)),
-            Ty::Bool | Ty::Float { .. } => None,
+            Ty::Bool | Ty::Float { .. } | Ty::Struct(_) => None,
         }
     }
 
@@ -64,7 +67,7 @@ impl Ty {
                 }
             }
             Ty::Bool => (v != 0) as i128,
-            Ty::Float { .. } => v,
+            Ty::Float { .. } | Ty::Struct(_) => v,
         }
     }
 
@@ -72,6 +75,7 @@ impl Ty {
         match self {
             Ty::Int { bits, .. } | Ty::Float { bits } => bits,
             Ty::Bool => 1,
+            Ty::Struct(_) => 0,
         }
     }
 
@@ -148,6 +152,7 @@ impl Ty {
             Ty::Int { bits, signed } => {
                 format!("{}int{}_t", if signed { "" } else { "u" }, bits)
             }
+            Ty::Struct(id) => super::agg::name_of(id),
         }
     }
 }
@@ -158,6 +163,7 @@ impl std::fmt::Display for Ty {
             Ty::Bool => write!(f, "bool"),
             Ty::Float { bits } => write!(f, "f{bits}"),
             Ty::Int { bits, signed } => write!(f, "{}{}", if *signed { "i" } else { "u" }, bits),
+            Ty::Struct(id) => write!(f, "{}", super::agg::name_of(*id)),
         }
     }
 }

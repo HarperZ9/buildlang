@@ -15,6 +15,7 @@
 //! run by the concrete side only. Floats, heap values and effects are outside
 //! the subset and make an obligation unknown.
 
+pub mod agg;
 pub mod effects;
 pub mod eval;
 mod eval_expr;
@@ -31,6 +32,7 @@ mod roots;
 pub mod search;
 pub mod smt;
 pub mod sym;
+mod sym_agg;
 mod sym_effects;
 mod sym_expr;
 mod sym_match;

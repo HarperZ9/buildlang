@@ -134,6 +134,8 @@ pub struct Sym<'a> {
     /// The source text, for the arguments of print macros (translation
     /// validation, where prints are effects).
     pub source: Option<&'a str>,
+    /// Structs that are values (translation validation).
+    pub structs: super::agg::Structs,
 }
 
 impl<'a> Sym<'a> {
@@ -148,16 +150,31 @@ impl<'a> Sym<'a> {
             floats: false,
             consts: HashMap::new(),
             source: None,
+            structs: super::agg::Structs::default(),
         }
     }
 
     /// The subset type of an AST type under this executor's mode.
     pub fn ty_of_ast(&self, t: &Type) -> Option<Ty> {
         if self.floats {
-            Ty::from_ast_tv(t)
+            self.structs.ty_of_ast(t)
         } else {
             Ty::from_ast(t)
         }
+    }
+
+    /// The type of a variable, a named constant, or a dotted field path of a
+    /// struct variable.
+    pub fn env_ty(&self, st: &St, n: &str) -> Option<Ty> {
+        let mut parts = n.split('.');
+        let head = parts.next()?;
+        let mut ty = st
+            .ty_of(head)
+            .or_else(|| self.consts.get(head).map(|c| c.1))?;
+        for f in parts {
+            ty = self.structs.field(ty, f)?.1;
+        }
+        Some(ty)
     }
 
     /// The parameters of `name` as typed variables.
@@ -340,10 +357,11 @@ impl<'a> Sym<'a> {
         };
         let init = l.init.as_ref().ok_or("a let without a value")?;
         let ty = {
-            let env = |n: &str| st.ty_of(n).or_else(|| self.consts.get(n).map(|c| c.1));
+            let env = |n: &str| self.env_ty(&st, n);
             match l.ty.as_deref() {
                 Some(t) => Some(self.ty_of_ast(t).ok_or("a let type outside the subset")?),
-                None => static_ty(&init.expr, &env, self.sigs),
+                None => static_ty(&init.expr, &env, self.sigs)
+                    .or_else(|| super::sym_agg::agg_ty(self, &init.expr, &st)),
             }
             .unwrap_or_else(|| {
                 let fallback = if self.floats && is_float_lit(&init.expr) {

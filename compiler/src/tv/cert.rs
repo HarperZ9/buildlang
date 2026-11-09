@@ -12,7 +12,6 @@
 
 use crate::ast::{ItemKind, Module, PatternKind};
 use crate::lexer::SourceFile;
-use crate::verify::ty::Ty;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
@@ -120,6 +119,7 @@ fn local_names(block: &crate::ast::Block, out: &mut Vec<String>) {
 /// (parsed from `sf`) that `c` defines.
 pub fn generate(file: &str, sf: &SourceFile, module: &Module, c: &str) -> Value {
     let mut fns = Vec::new();
+    let structs = crate::verify::agg::Structs::from_items(&module.items);
     for item in &module.items {
         let ItemKind::Function(f) = &item.kind else {
             continue;
@@ -139,11 +139,11 @@ pub fn generate(file: &str, sf: &SourceFile, module: &Module, c: &str) -> Value 
             .sig
             .params
             .iter()
-            .all(|p| Ty::from_ast_tv(&p.ty).is_some())
+            .all(|p| structs.ty_of_ast(&p.ty).is_some())
             && f.sig
                 .return_ty
                 .as_deref()
-                .map_or(true, |t| Ty::from_ast_tv(t).is_some())
+                .map_or(true, |t| structs.ty_of_ast(t).is_some())
             && f.generics.params.is_empty();
         let mut entry = Map::new();
         entry.insert("name".into(), json!(name));
@@ -156,7 +156,7 @@ pub fn generate(file: &str, sf: &SourceFile, module: &Module, c: &str) -> Value 
         if !scalar_sig {
             entry.insert(
                 "reason".into(),
-                json!("a parameter or the return type is not an integer, float or bool"),
+                json!("a parameter or the return type is not an integer, float, bool or such a struct"),
             );
         }
         entry.insert("loop_heads".into(), json!(back_edge_targets(c_text)));

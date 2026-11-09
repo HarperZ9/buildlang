@@ -45,7 +45,8 @@ relative to every other call and print. Each callee is certified on its own.
 
 ## Scope
 
-Functions whose parameters, return and locals are integers up to 64 bits, `f32`, `f64` or `bool`,
+Functions whose parameters, return and locals are integers up to 64 bits, `f32`, `f64`, `bool`, or
+structs of such values (below),
 with `let`, assignment, `if`, `match`, `while`, `loop`, `break`, `continue`, `return` and calls.
 Named constants with a literal value, and the built-in `PI`, `E` and `TAU`, are their values; the C
 side's constants are read from the C file's top-level definitions. Functions may return nothing,
@@ -88,14 +89,14 @@ that compiles and every module in `stdlib`:
 
 | Corpus | Compiled | Certified | Not certified | Outside the subset |
 |---|---|---|---|---|
-| `tests/programs` (147 of 154 programs compile) | 437 | 194 (44 %) | 0 | 243 |
+| `tests/programs` (147 of 154 programs compile) | 437 | 247 (57 %) | 1 (issue #203) | 189 |
 | `stdlib` (14 of 16 modules compile) | 139 | 58 (42 %) | 0 | 81 |
 
 Before floats (main 7038d3d): 31 (7 %) and 22 (16 %); after floats 152 and 58; after constants 159
-and 58; after the #178 fix 160; after effects 194 of 437 and 58. Of the 243 functions still outside
-the subset in `tests/programs`, 120 take or return structs, arrays, references, tuples, `Result` or
-`Option`; most of the 108 remaining `main` functions build struct values, arrays or strings, or call
-the runtime (`vec!`, file and argument builtins).
+and 58; after the #178 fix 160; after effects 194 of 437 and 58; after structs 247 and 58. Of the
+189 functions still outside the subset in `tests/programs`, 76 take or return arrays, references,
+tuples, enums, `Result`, `Option` or strings; most of the rest are `main` functions that take
+addresses, index arrays, call methods or the runtime (`vec!`, file and argument builtins).
 
 ## Planted checks
 
@@ -287,6 +288,67 @@ Planted checks, each must hold or the change does not merge. Each is a rewrite o
 - A refusal found on the way: a source macro other than the four print macros (`vec!`, `assert!`)
   can expand to C loops the source does not show, which first surfaced as "0 source loops but 2
   loop heads". Such a function is now reported outside the subset, by name of the macro.
+
+## Widening 4: structs (preregistered 2026-11-09, before the run)
+
+After effects, `tests/programs` stands at 194 of 437 certified. 120 of the functions outside the
+subset are refused by signature, about 44 of them for a struct whose fields are integers, floats,
+bools or such structs; most of the 108 remaining `main` functions build struct values.
+
+The change: a struct whose fields are all scalars or such structs (no generics, no tuple structs,
+no enums) is a value of the subset. A struct value is a term `agg$Name` over its fields in source
+declaration order, and two struct values are equal when every field is. On the source side a struct
+literal evaluates its fields in the order written and builds the value in declaration order; a field
+read selects a component; a field assignment (also nested, also compound) rebuilds the value; a
+struct parameter, local or loop-carried variable is a value of fresh field variables. On the C side
+the checker reads each `struct Name { ... };` definition from the C file: a compound literal
+`(Name){ a, b }` assigns fields in the C declaration order, `x.f` reads a member and `x.f = e`
+writes one, and a whole-struct assignment copies. A C struct whose fields differ from the source
+struct by name or type makes its functions mismatch. A call returning a struct is a value of one
+uninterpreted term per field, the same on both sides. Field order in C is read, never assumed.
+
+Prediction: `tests/programs` from 194 to between 215 and 260 of 437; the 50 % target is 219. 0 not
+certified on corpus programs; any not-certified function is investigated first.
+
+Planted checks, each must hold or the change does not merge (rewrites of the emitted C of
+`tests/tv/structs.bld` with the function hash rewritten, except where the edit is outside a
+function):
+
+- S1. Two fields of the same type swapped in a compound literal.
+- S2. A member read of the wrong field of the same type.
+- S3. A member write to the wrong field.
+- S4. The C struct definition with two fields of the same type swapped in declaration order, the
+  functions unchanged (a positional literal then fills the other field).
+- S5. A struct argument replaced by another struct value of the same type.
+- S6. A field of a returned struct left as the parameter's value instead of the computed one.
+- S7. `add-to-sub` on the struct fixture: every function that adds becomes not certified.
+- S8. The effects, float, constant and integer plants are still caught.
+
+### Results (2026-11-09)
+
+- Coverage: `tests/programs` 194 to 247 of 437 certified (57 %), past the 50 % target and inside the
+  predicted 215 to 260. 53 functions gained, 39 of all certified functions are now `main`, and none
+  of the 194 certified before was lost. `stdlib` unchanged at 58 of 139: its remaining signatures
+  are generic, string, array or `Option` types.
+- One corpus function is not certified, and it is a real miscompile, filed as issue #203: in
+  `tests/programs/84_benchmark.bld`, `let mut i = 0;` is unified with a float by a later
+  `raw * 1.0`, so `i` is a float and the backend declares it `double`, but lowers `i + 1` through
+  the integer helper `bl_iadd_i32`, which truncates. A three-line reproducer prints `1` where the
+  source means `1.5`. The prediction of 0 not certified missed by this one, and the miss is the
+  checker doing its job.
+- Two refusals were the checker's own, fixed before the final run: a `let` initialised from a
+  field read took the integer fallback type (field types now reach the checker's inference), and
+  the backend renames C-reserved field names (`near` to `near_`), which the C struct check now maps
+  back. Source arithmetic that mixes an integer operand with a float is reported outside the subset
+  instead of being modelled as integer arithmetic.
+- S1 to S6 held: all six rewrites are refused as not certified (`compiler/tests/tv_structs.rs`). S4
+  shows that the C field order is read from the C text: swapping two `int32_t` fields in the C
+  definition, with the function text unchanged, changes what `(Point){ x, y }` means, and `make` is
+  refused.
+- S7 held: with `add-to-sub`, the four functions that add (`sum`, `span`, `bump`, `twice`) are not
+  certified and the other four stay certified.
+- S8 held: `tv_c`, `tv_float`, `tv_consts` and `tv_effects` pass, as do `verify_laws`, `verify_smt`
+  and the `verify::` and `tv::` unit tests.
 
 ## Verified
 

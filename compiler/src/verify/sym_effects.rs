@@ -19,7 +19,7 @@ pub(super) fn opaque_call(sym: &mut Sym<'_>, name: &str, args: Vec<Term>, st: St
         .get(name)
         .ok_or(format!("call to `{name}` outside the subset"))?;
     let unit = f.sig.return_ty.is_none();
-    let rty = sym.sigs.fns.get(name).and_then(|s| s.1);
+    let rty = f.sig.return_ty.as_deref().and_then(|t| sym.ty_of_ast(t));
     if !unit && rty.is_none() {
         return Err(format!("`{name}` returns a type outside the subset"));
     }
@@ -27,6 +27,14 @@ pub(super) fn opaque_call(sym: &mut Sym<'_>, name: &str, args: Vec<Term>, st: St
     st.event(call_event(name, &args));
     st.assume(finish_atom(name, &args));
     match rty {
+        Some(rty @ Ty::Struct(_)) => {
+            let mut facts = Vec::new();
+            let v = sym.structs.opaque(name, &args, rty, &mut facts);
+            for f in facts {
+                st.fact(f);
+            }
+            val(st, v, Some(rty))
+        }
         Some(rty) if !unit => {
             let app = Term::App(name.to_string(), args);
             st.fact(in_range(&app, rty));

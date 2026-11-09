@@ -19,7 +19,7 @@ pub(super) fn method_call(
     expect: Option<Ty>,
 ) -> Res {
     let ty = {
-        let env = |n: &str| st.ty_of(n);
+        let env = |n: &str| sym.env_ty(&st, n);
         static_ty(recv, &env, sym.sigs)
             .or(expect)
             .unwrap_or(Ty::I32)

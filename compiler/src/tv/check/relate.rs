@@ -17,7 +17,7 @@
 //! Induction over the sequence of cuts then gives equal results, equal
 //! traps and equal non-termination for every input.
 
-use super::c_exec::{c_ty, CExec, CExit};
+use super::c_exec::{CExec, CExit};
 use super::c_parse::CFunc;
 use super::src_exec::{loops, SExit, SrcExec};
 use crate::ast::FnDef;
@@ -41,6 +41,9 @@ pub struct Consts {
     /// C function names the backend gave a renamed source function, to the
     /// source name (`_max` to `max`).
     pub c_names: HashMap<String, String>,
+    /// The source's struct values, and the C definitions checked against them.
+    pub structs: crate::verify::agg::Structs,
+    pub cstructs: super::structs::CStructs,
 }
 
 /// The relation a certificate claims for one function.
@@ -84,13 +87,20 @@ pub fn check(
     let body = src.body.as_deref().ok_or("no body")?;
     let ret = match src.sig.return_ty.as_deref() {
         None => None,
-        Some(t) => Some(Ty::from_ast_tv(t).ok_or("return type outside the subset")?),
+        Some(t) => Some(
+            consts
+                .structs
+                .ty_of_ast(t)
+                .ok_or("return type outside the subset")?,
+        ),
     };
     let mut sym = Sym::new(fns, sigs);
     sym.inline_calls = false;
     sym.floats = true;
     sym.consts = consts.source.clone();
     sym.source = Some(consts.text.as_str());
+    sym.structs = consts.structs.clone();
+    let cty = |t: &str| consts.cstructs.ty(t);
     let params = sym.params(&src.name.name)?;
     let is_main = src.name.name.as_ref() == "main" && params.is_empty() && ret.is_none();
     let c_params: Vec<_> = if is_main {
@@ -111,14 +121,14 @@ pub fn check(
         return Err("mismatch: parameter count differs".into());
     }
     for ((n, t), (cn, ct)) in params.iter().zip(&c_params) {
-        if n != cn || c_ty(ct) != Some(*t) {
+        if n != cn || cty(ct) != Some(*t) {
             return Err(format!(
                 "mismatch: parameter `{n}: {t}` is `{ct} {cn}` in C"
             ));
         }
     }
     let c_ret_ok = match ret {
-        Some(r) => c_ty(&c.ret) == Some(r),
+        Some(r) => cty(&c.ret) == Some(r),
         None if is_main => c.ret == "int32_t",
         None => c.ret == "void",
     };
@@ -175,23 +185,24 @@ pub fn check(
         let mut s_st = St::new(Vec::new(), Vec::new(), ret);
         let mut c_st = St::new(Vec::new(), Vec::new(), ret);
         let mut c_bound: HashSet<String> = HashSet::new();
+        let st = &consts.structs;
         for (n, t) in &related {
-            let v = Term::Var(n.clone(), *t);
-            base.push(in_range(&v, *t));
+            let v = st.fresh(n, *t);
+            base.push(st.in_range(&v, *t));
             s_st.vars.push((n.clone(), v.clone(), *t));
             let cn = hints.vars.get(n).cloned().unwrap_or_else(|| n.clone());
             let ct = cexec
                 .ty_of(&cn)
                 .ok_or(format!("source `{n}` has no C variable `{cn}`"))?;
-            base.push(in_range(&v, ct));
+            base.push(st.in_range(&v, ct));
             c_st.vars.push((cn.clone(), v, ct));
             c_bound.insert(cn);
         }
         for (n, t) in c_params.iter().chain(&c.locals) {
             if !c_bound.contains(n) && !super::c_effects::is_string_ty(t) {
-                let ty = c_ty(t).ok_or("C local type")?;
+                let ty = cty(t).ok_or("C local type")?;
                 c_st.vars
-                    .push((n.clone(), Term::Var(format!("c${n}"), ty), ty));
+                    .push((n.clone(), st.fresh(&format!("c${n}"), ty), ty));
             }
         }
         s_st.conds = base.clone();
@@ -239,7 +250,9 @@ pub fn check(
                 hyps.extend(cs.facts.iter().cloned());
                 let goal = match (se, ce) {
                     _ if ss.trace.len() != cs.trace.len() => Term::Bool(false),
-                    (SExit::Ret(v), CExit::Ret(Some(w))) if ret.is_some() => eq(v, w, ret),
+                    (SExit::Ret(v), CExit::Ret(Some(w))) if ret.is_some() => {
+                        st.eq(v, w, ret.unwrap())
+                    }
                     (SExit::Ret(_), CExit::Ret(Some(w))) if is_main => {
                         cmp(COp::Eq, w.clone(), Term::Int(0))
                     }
@@ -266,7 +279,7 @@ pub fn check(
                                 .find(|v| v.0 == cn)
                                 .map(|v| v.1.clone())
                                 .ok_or("C scope")?;
-                            g = and(g, eq(&sv, &cv, Some(*t)));
+                            g = and(g, st.eq(&sv, &cv, *t));
                         }
                         g
                     }

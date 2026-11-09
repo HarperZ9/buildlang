@@ -57,6 +57,9 @@ pub struct CExec<'a> {
     pub strings: &'a HashMap<String, String>,
     /// Renamed functions: C name to source name.
     pub c_names: &'a HashMap<String, String>,
+    /// Source struct definitions and the C structs checked against them.
+    pub(super) structs: &'a crate::verify::agg::Structs,
+    pub(super) cstructs: &'a super::structs::CStructs,
     labels: HashMap<String, usize>,
     types: HashMap<String, Ty>,
     /// Locals that hold strings.
@@ -88,7 +91,14 @@ impl<'a> CExec<'a> {
             if is_main_arg(f, n, t) {
                 continue;
             }
-            let ty = c_ty(t)
+            if consts.cstructs.bad.contains(t) {
+                return Err(format!(
+                    "mismatch: C struct `{t}` differs from the source struct"
+                ));
+            }
+            let ty = consts
+                .cstructs
+                .ty(t)
                 .ok_or_else(|| format!("C local `{n}` has type `{t}`, outside the subset"))?;
             types.insert(n.clone(), ty);
         }
@@ -99,6 +109,8 @@ impl<'a> CExec<'a> {
             globals: &consts.c,
             strings: &consts.strings,
             c_names: &consts.c_names,
+            structs: &consts.structs,
+            cstructs: &consts.cstructs,
             labels,
             types,
             strs,
@@ -149,6 +161,10 @@ impl<'a> CExec<'a> {
                         pc += 1;
                     }
                     CStmt::Eval(CExpr::Call(name, args)) if self.effect(name, args, &mut s)? => {
+                        pc += 1;
+                    }
+                    CStmt::Assign(x, e) if x.contains('.') => {
+                        self.assign_member(x, e, &mut s)?;
                         pc += 1;
                     }
                     CStmt::Assign(x, e) => {
@@ -212,7 +228,7 @@ impl<'a> CExec<'a> {
                         break;
                     }
                     CStmt::Ret(e) => {
-                        let rty = c_ty(&self.f.ret);
+                        let rty = self.cstructs.ty(&self.f.ret);
                         let v = match e {
                             None => None,
                             Some(e) => {
@@ -310,8 +326,10 @@ impl<'a> CExec<'a> {
             }
             CExpr::Bin(op, a, b) => self.binary(op, a, b, s, want, top)?,
             CExpr::Call(name, args) => self.call(name, args, s)?,
-            CExpr::Str(_) | CExpr::Cond(..) | CExpr::Member(..) => {
-                return Err("a C string or member expression outside the model".into())
+            CExpr::Member(inner, f) => self.member(inner, f, s)?,
+            CExpr::Compound(name, items) => self.compound(name, items, s)?,
+            CExpr::Str(_) | CExpr::Cond(..) => {
+                return Err("a C string expression outside the model".into())
             }
         })
     }
@@ -468,6 +486,14 @@ impl<'a> CExec<'a> {
         let Some(rty) = rty else {
             return Ok((Term::Int(0), None));
         };
+        if let Ty::Struct(_) = rty {
+            let mut facts = Vec::new();
+            let v = self.structs.opaque(name, &vals, rty, &mut facts);
+            for f in facts {
+                s.fact(f);
+            }
+            return Ok((v, Some(rty)));
+        }
         let app = Term::App(name.to_string(), vals);
         s.fact(in_range(&app, rty));
         Ok((app, Some(rty)))
@@ -479,7 +505,7 @@ fn is_main_arg(f: &CFunc, n: &str, t: &str) -> bool {
     f.name == "main" && matches!((n, t), ("argc", "int") | ("argv", "char**"))
 }
 
-fn set(s: &mut St, n: &str, v: Term, ty: Ty) {
+pub(super) fn set(s: &mut St, n: &str, v: Term, ty: Ty) {
     match s.vars.iter_mut().rev().find(|x| x.0 == n) {
         Some(slot) => slot.1 = v,
         None => s.vars.push((n.to_string(), v, ty)),
