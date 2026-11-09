@@ -13,11 +13,13 @@
 //! no statement writes through a pointer to a vector handle. Anything that can
 //! push, pop, insert, remove, clear or reassign a vector is a call or such a
 //! write, so it disqualifies the function and its accesses stay on the runtime
-//! path. Only vectors reached from a parameter (`&Vec<T>`, `&mut Vec<T>` or
-//! `Vec<T>`) are hoisted.
+//! path. So does a store that could swap a handle behind a parameter through an
+//! aliasing pointer (`vec_hoist_stores.rs`). Only vectors reached from a
+//! parameter (`&Vec<T>`, `&mut Vec<T>` or `Vec<T>`) are hoisted.
 
 use std::collections::{HashMap, HashSet};
 
+use super::vec_hoist_stores::store_may_replace_handle;
 use super::CBackend;
 use crate::codegen::ir::{
     FloatSize, LocalId, MirFunction, MirModule, MirRValue, MirStmtKind, MirTerminator, MirType,
@@ -135,7 +137,11 @@ pub(super) fn hoistable_elem(elem: &MirType) -> bool {
 
 impl VecHoist {
     /// Plan `func`, or `None` when it may resize or replace a vector.
-    pub(super) fn plan(func: &MirFunction, vector_free: &HashSet<String>) -> Option<VecHoist> {
+    pub(super) fn plan(
+        func: &MirFunction,
+        vector_free: &HashSet<String>,
+        plain_structs: &HashSet<String>,
+    ) -> Option<VecHoist> {
         let blocks = func.blocks.as_ref()?;
         let ty_of = |id: LocalId| func.locals.get(id.0 as usize).map(|l| &l.ty);
         let is_vec_param = |id: LocalId| {
@@ -152,6 +158,9 @@ impl VecHoist {
         let mut poisoned: Vec<LocalId> = Vec::new();
         for block in blocks {
             for stmt in &block.stmts {
+                if store_may_replace_handle(&stmt.kind, func, plain_structs) {
+                    return None;
+                }
                 match &stmt.kind {
                     MirStmtKind::Assign { dest, value } => {
                         if is_vec_param(*dest) {
@@ -179,14 +188,6 @@ impl VecHoist {
                                 }
                             }
                             _ => poisoned.push(*dest),
-                        }
-                    }
-                    MirStmtKind::DerefAssign { ptr, .. } => {
-                        // `*h = other` replaces the handle a parameter points to.
-                        if let Some(MirType::Ptr(inner)) = ty_of(*ptr) {
-                            if matches!(**inner, MirType::Vec(_)) {
-                                return None;
-                            }
                         }
                     }
                     _ => {}
