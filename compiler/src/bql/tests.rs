@@ -223,7 +223,7 @@ fn multi_file_programs_are_refused() {
 }
 
 /// Differential check against qdb itself. Set `QDB_BIN` to a qdb binary built
-/// from `programs/db.bld` to run it; without it the test returns early.
+/// from `bdb/db.bld` to run it (the bdb workflow does); without it the test returns early.
 #[test]
 fn in_process_subset_matches_qdb() {
     let Ok(bin) = std::env::var("QDB_BIN") else {
