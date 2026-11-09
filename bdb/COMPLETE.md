@@ -353,6 +353,14 @@ history on; `AS OF` replays the history from the base on every query.
   (a small query costs about 50 microseconds and its result is a few hundred bytes); Windows
   reported, no prediction (its output path costs per byte). Planted checks as in P16. Guards:
   test_qdb.sh no FAIL, P15 digest unchanged, P2 2,000.
+- **A9 (2026-11-09 05:50 PT, during P16b exploration, before its full runs).** With the runtime
+  SHA-256 alone, a 2-seed pilot on Windows still showed 256 percent. A build that printed a fixed
+  receipt and hashed nothing showed 78 percent, so the cost was the print: the receipt was one
+  `println!` with four arguments, which the C backend lowers to one `printf` with four `%s`
+  conversions, and on Windows (MinGW, unbuffered stdout) that costs several writes. P16b now builds
+  the receipt line as one string and prints it with one argument; the bytes printed are the same.
+  The 2-seed pilot of that build gave 3.5 percent on Windows. The full P16b runs (5 seeds, 5
+  repetitions, Windows and Linux) cover both changes; the A8 predictions stand.
 
 ## Baseline (qdb at the move, 2026-11-08, buildc 1.11.0)
 
