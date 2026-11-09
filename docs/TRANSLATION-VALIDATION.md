@@ -45,15 +45,25 @@ certified on its own.
 
 ## Scope
 
-Functions whose parameters, return and locals are integers up to 64 bits or `bool`, with `let`,
-assignment, `if`, `match`, `while`, `loop`, `break`, `continue`, `return` and calls. Everything else
-is reported as outside the subset with the reason: heap values, strings, floats, effects, `for`,
-loops nested inside expressions, and C the parser does not read.
+Functions whose parameters, return and locals are integers up to 64 bits, `f32`, `f64` or `bool`,
+with `let`, assignment, `if`, `match`, `while`, `loop`, `break`, `continue`, `return` and calls.
+Everything else is reported as outside the subset with the reason: heap values, strings, effects,
+`for`, loops nested inside expressions, constants, and C the parser does not read.
+
+Floats are opaque IEEE values. Each float operation is an uninterpreted function named by operator
+and width, each comparison an uninterpreted predicate (never rewritten: with NaN, `!(a < b)` is not
+`a >= b`), each literal its exact bit pattern, each conversion an uninterpreted function of the
+value. Maths methods and builtins go through one table in `compiler/src/verify/float.rs` that names
+the C function each one lowers to. The two sides agree only when they apply the same operations to
+the same operands in the same order, so no algebraic identity of real numbers is ever assumed.
 
 Trusted base, in plain words: the runtime helpers' C text matches the checker's table; the C
 compiler compiles the certified C faithfully; signed left shift wraps as two's complement (the
 backend emits `x << (n & 31)` on signed types); a call whose result is dropped is assumed to be
-dropped on both sides alike.
+dropped on both sides alike; the C compiler evaluates `double` and `float` arithmetic in IEEE 754
+binary64 and binary32 with no contraction (the prelude sets `FP_CONTRACT OFF`) and no excess
+precision; each C maths function named in the float table is the meaning of the source builtin that
+lowers to it.
 
 ## Coverage
 
@@ -62,13 +72,15 @@ that compiles and every module in `stdlib`:
 
 | Corpus | Compiled | Certified | Not certified | Outside the subset |
 |---|---|---|---|---|
-| `tests/programs` (147 of 154 programs compile) | 435 | 31 (7 %) | 0 | 404 |
-| `stdlib` (14 of 16 modules compile) | 139 | 22 (16 %) | 0 | 117 |
+| `tests/programs` (147 of 154 programs compile) | 435 | 152 (35 %) | 0 | 283 |
+| `stdlib` (14 of 16 modules compile) | 139 | 58 (42 %) | 0 | 81 |
 
-Most functions fall outside the subset because they print, or take or return strings, floats or
-structs (397 of 404 in `tests/programs`). Of the functions whose signature is inside the subset, 31
-of 38 are certified in `tests/programs` and 22 of 26 in `stdlib`; the rest use constructs the
-checker does not model yet (match patterns, enum constants, field access, a loop inside an `if` expression).
+Before floats (main 7038d3d): 31 (7 %) and 22 (16 %). Most functions still outside the subset
+print, or take or return strings, structs, arrays, tuples, `Result` or `Option` (266 of 283 in
+`tests/programs`; about 140 of them are `main` with `~ Console`). The other 17 use constructs the
+checker does not model yet: named constants (7), match patterns (4), C lines the parser does not
+read (3), a loop inside an expression, a callee that is not a name, and one implicit float to
+integer conversion (below).
 
 ## Planted checks
 
@@ -79,6 +91,9 @@ checker does not model yet (match patterns, enum constants, field access, a loop
   other six stay certified.
 - A forged certificate (a wrong variable map, a wrong loop head) and tampered C (an add turned into a
   subtract, with and without a rewritten hash) are refused.
+- `tests/tv/floats.bld`: seventeen float functions, all certified; with
+  `BUILDLANG_PLANT_MISCOMPILE=fadd-to-fsub` the six that add floats are not certified; eight C
+  rewrites that are wrong under IEEE 754 are refused (`compiler/tests/tv_float.rs`).
 
 ## A mismatch the checker found
 
@@ -90,9 +105,65 @@ overflow". Filed as issue #159 and fixed: the checker now records the integer ty
 unannotated `let`, lowering emits that type when it is a wider signed integer, and `lp` is certified.
 The regression tests are in `compiler/tests/int_let_inference.rs`.
 
+## Widening 1: floats (preregistered 2026-11-09, before the run)
+
+Re-measured on main 7038d3d (after #162, #167 and #172) before any change: `tests/programs` 31 of 435
+certified, 0 not certified; `stdlib` 22 of 139, 0 not certified. The counts did not move. The top
+refusal by far is the signature: 397 of 404 in `tests/programs`. A signature survey puts about 146 of
+them at `main` with effects (printing), about 160 at signatures with `f32` or `f64`, and the rest at
+structs, arrays, references, tuples, `Result` and `Option`.
+
+The change: `f32` and `f64` parameters, locals and returns. Each float operation (`+ - * / %`,
+negation) is an uninterpreted IEEE operation on both sides, named by operator and width; each float
+comparison is an uninterpreted predicate, never folded or rewritten into another comparison (NaN makes
+`!(a < b)` differ from `a >= b`); a literal is its exact bit pattern; a conversion (int to float,
+float to float, `bl_f2i_T`) is an uninterpreted function of the value. Maths methods and builtins map
+through a fixed table to the C function each lowers to (`x.sqrt()` to `sqrt`, `sin(x)` to
+`build_det_sin`, `x.min(y)` to `build_min_f64`, and so on). Two sides agree only when they apply the
+same operations to the same operands in the same order. The trusted base grows by one line: the C
+compiler evaluates `double` and `float` arithmetic in IEEE 754 binary64 and binary32 with no
+contraction (the prelude sets `FP_CONTRACT OFF`) and no excess precision.
+
+Predictions: `tests/programs` from 31 to between 110 and 180 of 435; `stdlib` up by fewer than 20.
+Any not-certified function is investigated as a possible real miscompile before the feature merges.
+
+Planted checks, each must hold or the change does not merge:
+
+- F1. `BUILDLANG_PLANT_MISCOMPILE=fadd-to-fsub` (new, test only) makes the backend emit a float `-`
+  for a float `+`. Every certified function in the float fixture that adds floats becomes not
+  certified; the others stay certified.
+- F2. The integer plant `add-to-sub` is still caught exactly as before.
+- F3. A refusal set of C rewrites that look harmless but change IEEE results, each fed to `tv-check`
+  with a rewritten hash, must all be refused: `x == x` to `true`, `x - x` to `0.0`, `(a + b) + c` to
+  `a + (b + c)`, `x * 0.0` to `0.0`, `!(a < b)` to `a >= b`, `-(a - b)` to `b - a`, a literal off by
+  one unit in the last place, and a round trip through `float` dropped.
+
+### Results (2026-11-09)
+
+- Coverage: `tests/programs` 31 to 152 of 435, inside the predicted 110 to 180. `stdlib` 22 to 58
+  of 139: the prediction of fewer than 20 more missed, because `stdlib/math.bld` and
+  `stdlib/graphics.bld` are mostly scalar float functions.
+- F1 held: with `fadd-to-fsub`, the six functions of `tests/tv/floats.bld` that add floats are not
+  certified and the other eleven stay certified (`compiler/tests/tv_float.rs`).
+- F2 held: `compiler/tests/tv_c.rs` passes unchanged.
+- F3 held: all eight IEEE-unsafe rewrites are refused as not certified, each with its hash rewritten.
+- `buildc verify` keeps floats outside its subset: a float law is reported unknown, never proved.
+- One function was not certified on the first run, `lab_f` in `tests/programs/86_color_spaces_port.bld`.
+  The cause was the checker's own inference: `let delta = 6.0 / 29.0` took the integer fallback type.
+  Arithmetic over float literals now types as `f64`, and `lab_f` is certified.
+- Refused, and correctly so: `to_fixed_16_16` in `tests/programs/80_icc_profile.bld` returns
+  `floor(fixed)`, an `f64`, from a function declared `-> i32`. `buildc check` accepts it and the C
+  converts with a plain assignment (truncation, undefined out of range), not the saturating
+  `bl_f2i_i32` that `as i32` uses. The type checker should reject the implicit conversion.
+- Found while probing the backend, not by the checker (constants are outside the subset): a user
+  `const PI: f64 = 3.0;` is ignored, and every use of `PI` compiles to the built-in
+  3.141592653589793 (`lower_ident` checks `PI`, `E` and `TAU` before user constants). Modelling
+  constants in the checker is the next widening; it turns this into a refusal.
+
 ## Verified
 
-- `compiler/tests/tv_c.rs`: the planted checks above and the import boundary.
+- `compiler/tests/tv_c.rs` and `compiler/tests/tv_float.rs`: the planted checks above and the
+  import boundary.
 - The coverage table: `buildc tv --json` over `tests/programs/*.bld` and `stdlib/*.bld`, counts summed
   from the reports.
 

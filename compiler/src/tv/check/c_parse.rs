@@ -12,6 +12,8 @@
 pub enum CExpr {
     Var(String),
     Int(i128),
+    /// A float literal as written, `f` suffix included for `float`.
+    Float(String),
     Bool(bool),
     Bin(&'static str, Box<CExpr>, Box<CExpr>),
     Un(char, Box<CExpr>),
@@ -53,6 +55,8 @@ pub fn is_scalar(ty: &str) -> bool {
             | "uint16_t"
             | "uint32_t"
             | "uint64_t"
+            | "double"
+            | "float"
     )
 }
 
@@ -172,6 +176,7 @@ fn is_ident(s: &str) -> bool {
 enum Tok {
     Id(String),
     Num(i128),
+    Flt(String),
     Op(&'static str),
 }
 
@@ -188,6 +193,10 @@ fn lex(s: &str) -> Result<Vec<Tok>, String> {
         let c = b[i] as char;
         if c.is_whitespace() {
             i += 1;
+        } else if c.is_ascii_digit() && float_end(b, i).is_some() {
+            let end = float_end(b, i).unwrap_or(i);
+            out.push(Tok::Flt(s[i..end].to_string()));
+            i = end;
         } else if c.is_ascii_digit() {
             let start = i;
             while i < b.len() && (b[i] as char).is_ascii_digit() {
@@ -216,6 +225,43 @@ fn lex(s: &str) -> Result<Vec<Tok>, String> {
         }
     }
     Ok(out)
+}
+
+/// The end of a decimal float literal starting at `i` (digits, then a `.`
+/// or an exponent, then an optional `f`), or `None` for an integer.
+fn float_end(b: &[u8], i: usize) -> Option<usize> {
+    let mut j = i;
+    while j < b.len() && b[j].is_ascii_digit() {
+        j += 1;
+    }
+    let mut is_float = false;
+    if j < b.len() && b[j] == b'.' {
+        is_float = true;
+        j += 1;
+        while j < b.len() && b[j].is_ascii_digit() {
+            j += 1;
+        }
+    }
+    if j < b.len() && (b[j] == b'e' || b[j] == b'E') {
+        let mut k = j + 1;
+        if k < b.len() && (b[k] == b'+' || b[k] == b'-') {
+            k += 1;
+        }
+        if k < b.len() && b[k].is_ascii_digit() {
+            is_float = true;
+            j = k;
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+        }
+    }
+    if !is_float {
+        return None;
+    }
+    if j < b.len() && (b[j] == b'f' || b[j] == b'F') {
+        j += 1;
+    }
+    Some(j)
 }
 
 /// Parse one C expression.
@@ -283,6 +329,7 @@ impl P {
                 let inner = self.unary()?;
                 return Ok(match (op, inner) {
                     ('-', CExpr::Int(v)) => CExpr::Int(-v),
+                    ('-', CExpr::Float(t)) if !t.starts_with('-') => CExpr::Float(format!("-{t}")),
                     (o, e) => CExpr::Un(o, Box::new(e)),
                 });
             }
@@ -295,6 +342,10 @@ impl P {
             Some(Tok::Num(v)) => {
                 self.i += 1;
                 Ok(CExpr::Int(v))
+            }
+            Some(Tok::Flt(t)) => {
+                self.i += 1;
+                Ok(CExpr::Float(t))
             }
             Some(Tok::Id(name)) => {
                 self.i += 1;

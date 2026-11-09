@@ -64,7 +64,7 @@ pub fn check(source: &str, c: &str, cert: &Value) -> Result<Vec<FnResult>, Strin
             spans.insert(f.name.name.to_string(), item.span);
         }
     }
-    let sigs = Sigs::from_module(&module.items);
+    let sigs = Sigs::from_module_tv(&module.items);
     let entries = cert["functions"]
         .as_array()
         .ok_or("certificate has no functions")?;

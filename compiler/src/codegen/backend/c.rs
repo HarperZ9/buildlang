@@ -4446,7 +4446,17 @@ impl CBackend {
                         return Ok(format!("({} {} (({}) & {}))", l, op_str, r, bits - 1));
                     }
                 }
-                let op_str = self.binop_to_c(*op);
+                // A planted miscompilation for the translation-validation checks:
+                // with BUILDLANG_PLANT_MISCOMPILE=fadd-to-fsub, a float `+` (the
+                // only `+` left here; integer adds went to helpers above) emits
+                // `-`. Never set outside those tests.
+                let op_str = if *op == BinOp::Add
+                    && std::env::var("BUILDLANG_PLANT_MISCOMPILE").as_deref() == Ok("fadd-to-fsub")
+                {
+                    "-"
+                } else {
+                    self.binop_to_c(*op)
+                };
                 format!("({} {} {})", l, op_str, r)
             }
             MirRValue::UnaryOp { op, operand } => {

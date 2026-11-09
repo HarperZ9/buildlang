@@ -23,11 +23,20 @@ pub struct Sigs {
 
 impl Sigs {
     pub fn from_module(items: &[Item]) -> Sigs {
+        Sigs::build(items, Ty::from_ast)
+    }
+
+    /// Signatures with `f32` and `f64` admitted (translation validation).
+    pub fn from_module_tv(items: &[Item]) -> Sigs {
+        Sigs::build(items, Ty::from_ast_tv)
+    }
+
+    fn build(items: &[Item], conv: fn(&Type) -> Option<Ty>) -> Sigs {
         let mut fns = HashMap::new();
         for item in items {
             if let ItemKind::Function(f) = &item.kind {
-                let params = f.sig.params.iter().map(|p| Ty::from_ast(&p.ty)).collect();
-                let ret = f.sig.return_ty.as_deref().and_then(Ty::from_ast);
+                let params = f.sig.params.iter().map(|p| conv(&p.ty)).collect();
+                let ret = f.sig.return_ty.as_deref().and_then(conv);
                 fns.insert(f.name.name.to_string(), (params, ret));
             }
         }
@@ -77,6 +86,11 @@ pub fn static_ty(e: &Expr, env: &dyn Fn(&str) -> Option<Ty>, sigs: &Sigs) -> Opt
     match &e.kind {
         ExprKind::Literal(Literal::Int { suffix, .. }) => suffix.and_then(Ty::from_suffix),
         ExprKind::Literal(Literal::Bool(_)) => Some(Ty::Bool),
+        ExprKind::Literal(Literal::Float { suffix, .. }) => match suffix {
+            Some(FloatSuffix::F32) => Some(Ty::F32),
+            Some(FloatSuffix::F64) => Some(Ty::F64),
+            _ => None,
+        },
         ExprKind::Ident(_) | ExprKind::Path(_) => {
             if let Some((ty, _)) = assoc_const(e) {
                 return Some(ty);
@@ -84,7 +98,7 @@ pub fn static_ty(e: &Expr, env: &dyn Fn(&str) -> Option<Ty>, sigs: &Sigs) -> Opt
             env(&var_name(e)?)
         }
         ExprKind::Paren(inner) => static_ty(inner, env, sigs),
-        ExprKind::Cast { ty, .. } => Ty::from_ast(ty),
+        ExprKind::Cast { ty, .. } => Ty::from_ast_tv(ty),
         ExprKind::Unary { op, expr } => match op {
             UnaryOp::Not | UnaryOp::Neg | UnaryOp::BitNot => static_ty(expr, env, sigs),
             _ => None,
@@ -95,14 +109,23 @@ pub fn static_ty(e: &Expr, env: &dyn Fn(&str) -> Option<Ty>, sigs: &Sigs) -> Opt
             BinOp::Shl | BinOp::Shr => static_ty(left, env, sigs),
             _ => static_ty(left, env, sigs).or_else(|| static_ty(right, env, sigs)),
         },
-        ExprKind::Call { func, .. } => sigs.fns.get(&callee_name(func)?)?.1,
+        ExprKind::Call { func, args } => {
+            let name = callee_name(func)?;
+            match sigs.fns.get(&name) {
+                Some(s) => s.1,
+                None => super::float::builtin_c_name(&name, args.len()).map(|_| Ty::F64),
+            }
+        }
         ExprKind::MethodCall {
             receiver, method, ..
         } => match &*method.name {
             "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "abs" | "min" | "max" => {
                 static_ty(receiver, env, sigs)
             }
-            _ => None,
+            m => static_ty(receiver, env, sigs).filter(|t| {
+                super::float::method_c_name(m, 1, *t).is_some()
+                    || super::float::method_c_name(m, 0, *t).is_some()
+            }),
         },
         ExprKind::If {
             then_branch,
@@ -113,6 +136,29 @@ pub fn static_ty(e: &Expr, env: &dyn Fn(&str) -> Option<Ty>, sigs: &Sigs) -> Opt
             .or_else(|| else_branch.as_deref().and_then(|e| static_ty(e, env, sigs))),
         ExprKind::Block(b) => block_tail(b).and_then(|t| static_ty(t, env, sigs)),
         _ => None,
+    }
+}
+
+/// Whether `e` is an unsuffixed float literal, possibly negated or in
+/// parentheses, or arithmetic with one as an operand.
+pub fn is_float_lit(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Literal(Literal::Float { .. }) => true,
+        ExprKind::Paren(inner) => is_float_lit(inner),
+        ExprKind::Unary {
+            op: UnaryOp::Neg,
+            expr,
+        } => is_float_lit(expr),
+        // Arithmetic over float literals is a float.
+        ExprKind::Binary { op, left, right }
+            if matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
+            ) =>
+        {
+            is_float_lit(left) || is_float_lit(right)
+        }
+        _ => false,
     }
 }
 

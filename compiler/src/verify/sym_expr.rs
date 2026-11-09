@@ -3,7 +3,8 @@
 
 //! Expression cases of the symbolic executor.
 
-use super::infer::{assoc_const, callee_name, static_ty, var_name};
+use super::float;
+use super::infer::{assoc_const, callee_name, is_float_lit, static_ty, var_name};
 use super::sym::{Out, Res, St, Sym};
 use super::sym_match::{match_arms, method_call};
 use super::sym_ops::{apply, binary};
@@ -39,7 +40,11 @@ pub(super) fn operand_ty(sym: &Sym<'_>, l: &Expr, r: &Expr, st: &St, expect: Opt
     static_ty(l, &env, sym.sigs)
         .or_else(|| static_ty(r, &env, sym.sigs))
         .or(expect)
-        .unwrap_or(Ty::I32)
+        .unwrap_or(if sym.floats && (is_float_lit(l) || is_float_lit(r)) {
+            Ty::F64
+        } else {
+            Ty::I32
+        })
 }
 
 pub(super) fn expr(sym: &mut Sym<'_>, e: &Expr, st: St, expect: Option<Ty>) -> Res {
@@ -53,6 +58,18 @@ pub(super) fn expr(sym: &mut Sym<'_>, e: &Expr, st: St, expect: Option<Ty>) -> R
             val(st, Term::Int(v), Some(ty))
         }
         ExprKind::Literal(Literal::Bool(b)) => val(st, Term::Bool(*b), Some(Ty::Bool)),
+        ExprKind::Literal(Literal::Float { value, suffix }) => {
+            if !sym.floats {
+                return Err("a float literal (outside the subset)".into());
+            }
+            let ty = match suffix {
+                Some(FloatSuffix::F32) => Ty::F32,
+                Some(FloatSuffix::F64) => Ty::F64,
+                Some(FloatSuffix::F16) => return Err("an f16 literal".into()),
+                None => expect.filter(|t| t.is_float()).unwrap_or(Ty::F64),
+            };
+            val(st, float::fconst(ty, *value), Some(ty))
+        }
         ExprKind::Paren(inner) => expr(sym, inner, st, expect),
         ExprKind::Ident(_) | ExprKind::Path(_) => {
             if let Some((ty, v)) = assoc_const(e) {
@@ -72,6 +89,9 @@ pub(super) fn expr(sym: &mut Sym<'_>, e: &Expr, st: St, expect: Option<Ty>) -> R
                     s.fact(in_range(&r, it));
                     val(s, r, ty)
                 }
+                (UnaryOp::Neg, Some(ft @ Ty::Float { .. })) => {
+                    val(s, float::fop("neg", ft, vec![t]), ty)
+                }
                 (UnaryOp::Neg, Some(it @ Ty::Int { .. })) => {
                     let r = neg(t);
                     s.assume(in_range(&r, it));
@@ -85,6 +105,9 @@ pub(super) fn expr(sym: &mut Sym<'_>, e: &Expr, st: St, expect: Option<Ty>) -> R
             let n = var_name(target).ok_or("an assignment target")?;
             let ty = st.ty_of(&n).ok_or("an assignment target")?;
             let bop = op.to_bin_op();
+            if ty.is_float() && bop.is_some() {
+                return Err("a compound float assignment".into());
+            }
             let r = expr(sym, value, st, Some(ty))?;
             then(sym, r, |_, mut s, t, _| {
                 let nv = match bop {
@@ -133,6 +156,9 @@ pub(super) fn expr(sym: &mut Sym<'_>, e: &Expr, st: St, expect: Option<Ty>) -> R
                 let env = |n: &str| st.ty_of(n);
                 static_ty(scrutinee, &env, sym.sigs).unwrap_or(Ty::I32)
             };
+            if sty.is_float() {
+                return Err("a match on a float".into());
+            }
             let r = expr(sym, scrutinee, st, Some(sty))?;
             then(sym, r, |sym, s, v, _| {
                 match_arms(sym, arms, 0, s, &v, sty, expect)
@@ -149,9 +175,14 @@ pub(super) fn expr(sym: &mut Sym<'_>, e: &Expr, st: St, expect: Option<Ty>) -> R
             }
         }
         ExprKind::Cast { expr: inner, ty } => {
-            let to = Ty::from_ast(ty).ok_or("a cast type outside the subset")?;
+            let to = sym.ty_of_ast(ty).ok_or("a cast type outside the subset")?;
             let r = expr(sym, inner, st, None)?;
             then(sym, r, move |_, mut s, t, from| {
+                if to.is_float() || from.is_some_and(|f| f.is_float()) {
+                    let t = float::conv(to, from, t)?;
+                    s.fact(in_range(&t, to));
+                    return val(s, t, Some(to));
+                }
                 let t = match from {
                     Some(Ty::Bool) => t,
                     _ => cast(to, from, t),
@@ -163,6 +194,12 @@ pub(super) fn expr(sym: &mut Sym<'_>, e: &Expr, st: St, expect: Option<Ty>) -> R
         ExprKind::Call { func, args } => {
             let name = callee_name(func).ok_or("a callee that is not a name")?;
             if !sym.fns.contains_key(&name) {
+                if let (true, Some(c)) = (sym.floats, float::builtin_c_name(&name, args.len())) {
+                    let ptys = vec![Some(Ty::F64); args.len()];
+                    return eval_args(sym, args, &ptys, 0, st, Vec::new(), &mut |_, s, terms| {
+                        val(s, float::math_call(c, terms), Some(Ty::F64))
+                    });
+                }
                 return Err(format!("call to `{name}` outside the subset"));
             }
             let ptys = sym
