@@ -25,6 +25,8 @@ pub enum CExpr {
     Cond(Box<CExpr>, Box<CExpr>, Box<CExpr>),
     /// `e.field`.
     Member(Box<CExpr>, String),
+    /// `(Name){ a, b }`: a struct compound literal, fields in C order.
+    Compound(String, Vec<CExpr>),
 }
 
 /// A C statement.
@@ -161,7 +163,7 @@ fn parse_line(line: &str, locals: &mut Vec<(String, String)>) -> Result<Vec<CStm
         return Ok(Vec::new());
     }
     if let Some((lhs, rhs)) = stmt.split_once(" = ") {
-        if is_ident(lhs.trim()) {
+        if lhs.trim().split('.').all(is_ident) {
             return Ok(vec![CStmt::Assign(
                 lhs.trim().to_string(),
                 parse_expr(rhs)?,
@@ -187,9 +189,9 @@ enum Tok {
     Op(&'static str),
 }
 
-const OPS: [&str; 26] = [
+const OPS: [&str; 28] = [
     "<<", ">>", "<=", ">=", "==", "!=", "&&", "||", "+", "-", "*", "/", "%", "<", ">", "&", "|",
-    "^", "!", "~", "(", ")", ",", "?", ":", ".",
+    "^", "!", "~", "(", ")", ",", "?", ":", ".", "{", "}",
 ];
 
 fn lex(s: &str) -> Result<Vec<Tok>, String> {
@@ -422,6 +424,23 @@ impl P {
                         let inner = self.unary()?;
                         return Ok(CExpr::Cast(ty, Box::new(inner)));
                     }
+                    if self.t.get(self.i + 2) == Some(&Tok::Op("{")) {
+                        let ty = ty.clone();
+                        self.i += 3;
+                        let mut items = Vec::new();
+                        if !self.eat("}") {
+                            loop {
+                                items.push(self.ternary()?);
+                                if self.eat("}") {
+                                    break;
+                                }
+                                if !self.eat(",") {
+                                    return Err("compound literal items".into());
+                                }
+                            }
+                        }
+                        return Ok(CExpr::Compound(ty, items));
+                    }
                 }
                 let e = self.ternary()?;
                 if !self.eat(")") {
@@ -486,6 +505,44 @@ pub fn c_consts(
             _ => continue,
         };
         out.insert(name.to_string(), (term, t));
+    }
+    out
+}
+
+/// The C file's struct definitions: `struct Name {` then one `type field;`
+/// per line, then `};`. Name to fields (name, C type) in C order.
+pub fn c_structs(c: &str) -> std::collections::HashMap<String, Vec<(String, String)>> {
+    let mut out = std::collections::HashMap::new();
+    let mut cur: Option<(String, Vec<(String, String)>)> = None;
+    for line in c.lines() {
+        let t = line.trim();
+        if let Some((name, fields)) = cur.take() {
+            if t == "};" {
+                out.insert(name, fields);
+                continue;
+            }
+            let words: Vec<&str> = t
+                .strip_suffix(';')
+                .unwrap_or("")
+                .split_whitespace()
+                .collect();
+            if let [ty, f] = words.as_slice() {
+                if is_ident(f) && line.starts_with(' ') {
+                    let mut fields = fields;
+                    fields.push((f.to_string(), ty.to_string()));
+                    cur = Some((name, fields));
+                }
+            }
+            continue;
+        }
+        if let Some(name) = line
+            .strip_prefix("struct ")
+            .and_then(|r| r.strip_suffix(" {"))
+        {
+            if is_ident(name) {
+                cur = Some((name.to_string(), Vec::new()));
+            }
+        }
     }
     out
 }

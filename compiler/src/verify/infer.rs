@@ -63,6 +63,15 @@ pub fn var_name(e: &Expr) -> Option<String> {
     }
 }
 
+/// `v.f.g` for a field read of a variable, as a dotted name.
+pub fn field_path(e: &Expr) -> Option<String> {
+    match &e.kind {
+        ExprKind::Field { expr, field } => Some(format!("{}.{}", field_path(expr)?, field.name)),
+        ExprKind::Paren(inner) => field_path(inner),
+        _ => var_name(e),
+    }
+}
+
 /// `T::MAX` / `T::MIN` for an integer type `T`.
 pub fn assoc_const(e: &Expr) -> Option<(Ty, i128)> {
     let ExprKind::Path(p) = &e.kind else {
@@ -98,6 +107,7 @@ pub fn static_ty(e: &Expr, env: &dyn Fn(&str) -> Option<Ty>, sigs: &Sigs) -> Opt
             env(&var_name(e)?)
         }
         ExprKind::Paren(inner) => static_ty(inner, env, sigs),
+        ExprKind::Field { .. } => env(&field_path(e)?),
         ExprKind::Cast { ty, .. } => Ty::from_ast_tv(ty),
         ExprKind::Unary { op, expr } => match op {
             UnaryOp::Not | UnaryOp::Neg | UnaryOp::BitNot => static_ty(expr, env, sigs),

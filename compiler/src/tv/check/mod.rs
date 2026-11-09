@@ -11,11 +11,13 @@
 //! and AST, and the verifier's term and proof modules. A test holds that
 //! boundary.
 
+mod c_agg;
 pub mod c_effects;
 pub mod c_exec;
 pub mod c_parse;
 pub mod relate;
 pub mod src_exec;
+pub mod structs;
 pub mod trace;
 
 use crate::ast::{FnDef, ItemKind};
@@ -69,6 +71,8 @@ pub fn check(source: &str, c: &str, cert: &Value) -> Result<Vec<FnResult>, Strin
         }
     }
     let sigs = Sigs::from_module_tv(&module.items);
+    let src_structs = crate::verify::agg::Structs::from_items(&module.items);
+    let cstructs = structs::CStructs::validate(&src_structs, &c_parse::c_structs(c));
     let entries = cert["functions"]
         .as_array()
         .ok_or("certificate has no functions")?;
@@ -87,7 +91,7 @@ pub fn check(source: &str, c: &str, cert: &Value) -> Result<Vec<FnResult>, Strin
             if let Ok(f) = c_parse::parse_function(text) {
                 if f.ret == "void" {
                     callees.insert(name.to_string(), None);
-                } else if let Some(t) = c_exec::c_ty(&f.ret) {
+                } else if let Some(t) = cstructs.ty(&f.ret) {
                     callees.insert(name.to_string(), Some(t));
                 }
             }
@@ -99,6 +103,8 @@ pub fn check(source: &str, c: &str, cert: &Value) -> Result<Vec<FnResult>, Strin
         strings: c_effects::string_table(c),
         text: source.to_string(),
         c_names,
+        structs: src_structs,
+        cstructs,
     };
     let mut out = Vec::new();
     for e in entries {

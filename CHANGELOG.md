@@ -19,6 +19,11 @@ tracked in `STATUS.md`, `README.md`, and
 - `buildc tv` certifies functions that print and functions that return nothing, `main` included. Each print and each call of a user function is an event; the checker proves that source and C write the same events in the same order on every input, including the output written before a trap. A call is a sync point, so calls in a different order are refused even when nothing prints. A function the backend renames (`max` to `_max`) is certified under its own name.
 - Coverage: `tests/programs` 160 of 435 to 194 of 437 (44 %), 0 not certified; `stdlib` unchanged at 58 of 139. Sixteen planted C rewrites (prints swapped, dropped, duplicated or moved after a trapping add; a changed literal, conversion, stream, precision or bool rendering; calls swapped or duplicated; `main` returning 1) are all refused. `compiler/tests/tv_effects.rs`, `docs/TRANSLATION-VALIDATION.md`.
 
+### Translation validation with struct values
+
+- A struct whose fields are integers, floats, bools or such structs is a value of the `buildc tv` subset: literals, field reads, field writes (nested and compound), struct parameters, returns and locals. The C struct definitions are read from the C file and checked against the source's by field name and type; field order is read, never assumed.
+- Coverage: `tests/programs` 194 to 247 of 437 (57 %); `stdlib` unchanged at 58 of 139. Six planted struct rewrites are refused. One corpus function is not certified because of a real miscompile, issue #203: an integer-literal local unified with a float is declared `double` but incremented through `bl_iadd_i32`, which truncates. `compiler/tests/tv_structs.rs`.
+
 ### Word-level rules in buildc verify (V3)
 
 - Exact division (`(a * b) / b` is `a` when the divisor is a monomial that divides every term), the wrapping identity (`x.wrapping_mul(1)` is `x`, a folded 0 makes the product 0), and a root search that proposes counterexample inputs for polynomial (dis)equalities, each re-run on the concrete evaluator. `tests/verify/smt_true.bld`: 16 of 16 proved (12 of 16 before); `smt_false.bld`: 29 of 29 refuted (28 before), none proved. A planted inexact division rule is caught by the refusal set. `docs/VERIFY.md`, V3.

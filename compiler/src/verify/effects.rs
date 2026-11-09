@@ -88,6 +88,17 @@ pub fn is_bool_term(t: &Term) -> bool {
 }
 
 fn value_eq(a: &Term, b: &Term) -> Term {
+    if let (Term::App(na, xa), Term::App(nb, xb)) = (a, b) {
+        if na.starts_with("agg$") || nb.starts_with("agg$") {
+            if na != nb || xa.len() != xb.len() {
+                return Term::Bool(false);
+            }
+            return xa
+                .iter()
+                .zip(xb)
+                .fold(Term::Bool(true), |g, (x, y)| and(g, value_eq(x, y)));
+        }
+    }
     match (is_bool_term(a), is_bool_term(b)) {
         (true, true) => iff(a.clone(), b.clone()),
         (false, false) => cmp(COp::Eq, a.clone(), b.clone()),

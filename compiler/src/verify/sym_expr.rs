@@ -36,7 +36,7 @@ pub(super) fn then(
 }
 
 pub(super) fn operand_ty(sym: &Sym<'_>, l: &Expr, r: &Expr, st: &St, expect: Option<Ty>) -> Ty {
-    let env = |n: &str| st.ty_of(n).or_else(|| sym.consts.get(n).map(|c| c.1));
+    let env = |n: &str| sym.env_ty(st, n);
     static_ty(l, &env, sym.sigs)
         .or_else(|| static_ty(r, &env, sym.sigs))
         .or(expect)
@@ -104,6 +104,13 @@ pub(super) fn expr(sym: &mut Sym<'_>, e: &Expr, st: St, expect: Option<Ty>) -> R
             })
         }
         ExprKind::Binary { op, left, right } => binary(sym, *op, left, right, st, expect),
+        ExprKind::Assign { op, target, value } if matches!(target.kind, ExprKind::Field { .. }) => {
+            super::sym_agg::assign_field(sym, *op, target, value, st)
+        }
+        ExprKind::Struct { path, fields, rest } => {
+            super::sym_agg::literal(sym, path, fields, rest.as_deref(), st)
+        }
+        ExprKind::Field { expr: base, field } => super::sym_agg::field(sym, base, field, st),
         ExprKind::Assign { op, target, value } => {
             let n = var_name(target).ok_or("an assignment target")?;
             let ty = st.ty_of(&n).ok_or("an assignment target")?;
@@ -156,7 +163,7 @@ pub(super) fn expr(sym: &mut Sym<'_>, e: &Expr, st: St, expect: Option<Ty>) -> R
         ExprKind::Block(b) => sym.block(b, st, expect),
         ExprKind::Match { scrutinee, arms } => {
             let sty = {
-                let env = |n: &str| st.ty_of(n);
+                let env = |n: &str| sym.env_ty(&st, n);
                 static_ty(scrutinee, &env, sym.sigs).unwrap_or(Ty::I32)
             };
             if sty.is_float() {

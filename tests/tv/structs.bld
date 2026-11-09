@@ -1,0 +1,60 @@
+// Translation validation with struct values (docs/TRANSLATION-VALIDATION.md,
+// "Widening 4: structs"). Every function here is certified, and
+// compiler/tests/tv_structs.rs plants C rewrites that swap, misread or
+// miswrite fields.
+
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+struct Color {
+    r: f64,
+    g: f64,
+    b: f64,
+}
+
+struct Seg {
+    a: Point,
+    b: Point,
+}
+
+fn make(x: i32, y: i32) -> Point {
+    Point { x: x, y: y }
+}
+
+fn sum(p: Point) -> i32 {
+    p.x + p.y
+}
+
+fn diff(p: Point) -> i32 {
+    p.x - p.y
+}
+
+fn scale(c: Color, k: f64) -> Color {
+    Color { r: c.r * k, g: c.g * k, b: c.b * k }
+}
+
+fn span(s: Seg) -> i32 {
+    let dx = s.b.x - s.a.x;
+    let dy = s.b.y - s.a.y;
+    dx * dx + dy * dy
+}
+
+fn bump(p: Point) -> Point {
+    let mut q = p;
+    q.x = q.x + 1;
+    q
+}
+
+fn twice(p: Point, q: Point) -> i32 {
+    sum(p) + diff(q)
+}
+
+fn main() ~ Console {
+    let p = make(3, 1);
+    let q = bump(p);
+    let s = Seg { a: p, b: q };
+    let c = scale(Color { r: 0.5, g: 0.25, b: 1.0 }, 2.0);
+    println!("{} {} {} {}", sum(p), twice(p, q), span(s), c.g);
+}
