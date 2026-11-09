@@ -276,6 +276,9 @@ struct DB {
     wal_path: String,
     in_transaction: bool,
     txn_id: i32,
+    // FNV-1a hash of the open transaction's TXID and OP lines; its COMMIT
+    // record carries it so replay can tell a whole transaction from a torn one.
+    txn_hash: i64,
     wal_buf: String,
     // Bytes appended to the WAL since the last checkpoint, and the size of
     // the .db file that checkpoint wrote. maybe_checkpoint compares the two.
@@ -434,6 +437,7 @@ fn db_new(db_path: String) -> DB {
         wal_path: wp,
         in_transaction: false,
         txn_id: 0,
+        txn_hash: 0,
         wal_buf: "",
         wal_bytes: 0, db_bytes: 0,
         fmt_escaped: false, fmt_nulls: false, applied_txid: 0, ckpt_path: cp,
@@ -932,7 +936,9 @@ fn db_load(d: &mut DB) ~ FileSystem {
 //
 // Recovery flow (wal_replay):
 //   1. Read the WAL in one pass. A TXID line opens a transaction; a COMMIT
-//      line replays that transaction's OP lines via exec_sql_no_wal.
+//      record whose hash matches the TXID and OP lines (P15b) replays the
+//      transaction's OP lines via exec_sql_no_wal. A torn record, or one
+//      left after a power cut dropped an earlier record, does not match.
 //      A transaction with no COMMIT (a crash mid-transaction, a torn final
 //      record, a ROLLBACK, or a process that ended inside BEGIN without a
 //      clean exit) is skipped. A transaction whose id is at or below the
@@ -943,11 +949,11 @@ fn db_load(d: &mut DB) ~ FileSystem {
 // Transaction flow:
 //   BEGIN    -> take_snapshot() + append TXID
 //   mutations-> each appends "OP <sql>"
-//   COMMIT   -> append COMMIT, then maybe_checkpoint()
+//   COMMIT   -> append COMMIT <hash>, flush the WAL, then maybe_checkpoint()
 //   ROLLBACK -> restore_snapshot() + checkpoint (discards WAL entries)
 //
 // Auto-commit: a mutation outside an explicit transaction appends one
-// record "TXID n / OP sql / COMMIT" in a single append, then calls
+// record "TXID n / OP sql / COMMIT <hash>" in a single append, then calls
 // maybe_checkpoint().
 //
 // Durability contract. A statement is durable once its COMMIT line is in the
@@ -1016,6 +1022,39 @@ fn durable_rename(d: &mut DB, from: String, to: String, tag: String) ~ Console +
         process_exit(1);
     }
 }
+
+// FNV-1a, 32 bits, over the bytes of s, continuing from h0. The commit record
+// carries this hash of its transaction (P15b): a power cut can tear a record or
+// leave a zero-filled hole before a later one, and replay must not mistake the
+// survivors for a whole transaction.
+fn fnv_init() -> i64 { 2166136261 }
+
+fn fnv_extend(h0: i64, s: String) -> i64 {
+    let b = s.as_bytes();
+    let n = s.len();
+    let mut h = h0;
+    let mut i: i64 = 0;
+    while i < n {
+        h = ((h ^ (b[i] as i64)) * 16777619) % 4294967296;
+        i = i + 1;
+    }
+    h
+}
+
+fn hex32(h: i64) -> String {
+    let digits = "0123456789abcdef";
+    let mut out = "";
+    let mut k = 0;
+    let mut v = h;
+    while k < 8 {
+        out = digits.char_at(v % 16) + out;
+        v = v / 16;
+        k = k + 1;
+    }
+    out
+}
+
+fn commit_line(h: i64) -> String { "COMMIT " + hex32(h) }
 
 // Append newline-terminated text to the WAL in a single write.
 fn wal_append(d: &mut DB, text: String, tag: String) ~ Console + FileSystem + Process {
@@ -1107,11 +1146,19 @@ fn wal_replay(d: &mut DB) ~ Console + FileSystem + Process {
     let mut txn_open_id = 0;
     let mut max_id = d.txn_id;
     let mut last_line = "";
+    let mut txn_h = fnv_init();
+    // A bare COMMIT (written by builds before P15b) counts only when its line
+    // break survived.
+    let ends_nl = content.substring(clen - 1, 1) == "\n";
     let mut li: i64 = 0;
     while li < n {
         let wl = strip_cr(vec_get(lines, li));
         if wl.len() > 0 { last_line = wl; }
+        if wl.starts_with("OP ") || wl.starts_with("OPX ") {
+            txn_h = fnv_extend(txn_h, wl + "\n");
+        }
         if wl.starts_with("TXID ") {
+            txn_h = fnv_extend(fnv_init(), wl + "\n");
             let id = parse_int_str(wl.substring(5, wl.len() - 5));
             if id > max_id { max_id = id; }
             // A transaction at or below the .db's applied id is already in
@@ -1120,7 +1167,11 @@ fn wal_replay(d: &mut DB) ~ Console + FileSystem + Process {
             if id > d.applied_txid { txn_start = li + 1; txn_open_id = id; }
             else { txn_start = 0 - 1; }
         } else if wl.starts_with("COMMIT") {
-            if txn_start >= 0 {
+            let whole = wl == commit_line(txn_h) || (wl == "COMMIT" && (li + 1 < n || ends_nl));
+            if !whole {
+                // Torn, or its transaction lost a record: not a commit.
+                txn_start = 0 - 1;
+            } else if txn_start >= 0 {
                 let mut j = txn_start;
                 while j < li {
                     let sql = wal_op_sql(strip_cr(vec_get(lines, j)));
@@ -1148,6 +1199,7 @@ fn wal_replay(d: &mut DB) ~ Console + FileSystem + Process {
         }
         d.in_transaction = true;
         d.txn_id = txn_open_id;
+        d.txn_hash = txn_h;
         d.wal_bytes = clen;
         // Mark the resume, so the WAL no longer ends in HOLD: if this
         // process does not exit cleanly, the transaction is dropped.
@@ -1313,7 +1365,9 @@ fn wal_begin(d: &mut DB) ~ Console + FileSystem + Process {
     d.in_transaction = true;
     d.txn_id = d.txn_id + 1;
     take_snapshot(d);
-    wal_write(d, "TXID " + to_string_i32(d.txn_id), "wal_begin");
+    let tl = "TXID " + to_string_i32(d.txn_id);
+    d.txn_hash = fnv_extend(fnv_init(), tl + "\n");
+    wal_write(d, tl, "wal_begin");
 }
 
 // COMMIT — finalize the current transaction
@@ -1322,7 +1376,7 @@ fn wal_commit(d: &mut DB) ~ Console + FileSystem + Process {
         println!("Error: no transaction in progress");
         return;
     }
-    wal_write(d, "COMMIT", "wal_commit");
+    wal_write(d, commit_line(d.txn_hash), "wal_commit");
     durable_sync(d, d.wal_path, "wal_sync");
     d.in_transaction = false;
     maybe_checkpoint(d);
@@ -1359,12 +1413,15 @@ fn wal_op_sql(line: String) -> String {
 fn wal_log_mutation(d: &mut DB, sql: String) ~ Console + FileSystem + Process {
     if d.in_transaction {
         // In explicit transaction — just append OP to WAL
-        wal_write(d, wal_op_line(sql), "wal_op");
+        let ol = wal_op_line(sql);
+        d.txn_hash = fnv_extend(d.txn_hash, ol + "\n");
+        wal_write(d, ol, "wal_op");
     } else {
         // Auto-commit: wrap in a single-statement transaction, written as one
         // append so a torn write cannot leave a COMMIT without its OP.
         d.txn_id = d.txn_id + 1;
-        wal_append(d, "TXID " + to_string_i32(d.txn_id) + "\n" + wal_op_line(sql) + "\nCOMMIT\n", "wal_auto");
+        let body = "TXID " + to_string_i32(d.txn_id) + "\n" + wal_op_line(sql) + "\n";
+        wal_append(d, body + commit_line(fnv_extend(fnv_init(), body)) + "\n", "wal_auto");
         durable_sync(d, d.wal_path, "wal_sync");
         maybe_checkpoint(d);
     }
@@ -1392,7 +1449,7 @@ fn cmd_wal(d: &DB) ~ Console + FileSystem {
         let clean = strip_cr(vec_get(lines, li));
         if clean.starts_with("OP ") || clean.starts_with("OPX ") { op_count = op_count + 1; }
         if clean.starts_with("TXID ") { in_txn = true; }
-        if clean == "COMMIT" { in_txn = false; }
+        if clean.starts_with("COMMIT") { in_txn = false; }
         li = li + 1;
     }
     if in_txn { pending = 1; }

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- 2026-11-09: seeded power cuts (`bdb/tests/test_qdb_faults.py`). The harness learns every durable
+  write of the crash workload and, from a seed, drops, tears and reorders the writes no flush had
+  covered. It found a torn transaction replayed as committed (2 of 10,000 seeds, the recovering
+  process exited 1). A `COMMIT` record now carries an FNV-1a hash of its `TXID` and `OP` lines, and
+  replay applies only a transaction whose hash matches: 0 of 10,000 after. The recovered files hash
+  the same on Windows and Linux for 10,000 of 10,000 seeds, checked in CI against the Windows digest.
+
 - 2026-11-08: crash-safe checkpoints, transactions across processes, escaped text (file format 1).
   A crash between the `.db` rewrite and the WAL clear no longer replays the WAL a second time
   (duplicate rows), and a torn `.db` rewrite no longer loses rows: the checkpoint writes

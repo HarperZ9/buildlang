@@ -486,13 +486,34 @@ harness unchanged. Before: 1,251 of 2,000 on this branch, re-run before the chan
 - Not covered: a power cut can drop or reorder writes that were never flushed; this run stops
   processes only. The seeded-fault simulation is next.
 
+## After P15: seeded power cuts (2026-11-09, feat/bdb-faults)
+
+- **First run, main 3aa051c (no engine change):** 10,000 seeds, 2 violations (seeds 9,351 and
+  9,570; amendment A7), 38 distinct recovered images. The per-seed hashes are equal on Windows
+  (MinGW gcc) and Linux (WSL Ubuntu 24.04, gcc) for 10,000 of 10,000, both from one generated
+  `qdb.c`; digest `913f72f4...`. Prediction 0 violations: missed. Prediction equal hashes: held.
+- **After P15b (the COMMIT record carries a hash):** 0 violations in 10,000 seeds, 35 distinct
+  recovered images; Windows and Linux equal for 10,000 of 10,000, digest `cd3ccf9f...`, now a CI
+  gate on ubuntu-latest. 97 durable operations learned over the 18 steps. Speed: 78 seeds per
+  second on Windows, 232 on Linux (2 workers each).
+- **Planted checks:** flushes ignored, 79 violations in 300 seeds: caught. One altered hash in
+  the compared manifest: reported. The build that accepts any line starting with `COMMIT`: 1
+  violation in 10,000 (seed 9,570): caught, at a lower count than the 2 of the first run.
+- **Guards:** test_qdb.sh 290 pass, 0 fail; crash test 194 points, 0 violations; WAL truncation
+  0 failures with the reference engine compared (no offset needed the COMMIT skip); text 0
+  changed; library 0 failures; reference differential 16 of 16; P2 2,000 of 2,000.
+- Limits: each step starts from a fully written-back image, so a cut never reaches back into an
+  earlier step's unflushed writes; a lost range reads as zeros, never as stale bytes; the model
+  treats a completed rename as durable. 10,000 seeds cover 35 to 38 distinct outcomes of one
+  18-step workload, so the count of seeds overstates the variety.
+
 ## Stage 1: a correct, durable single-file engine
 
 | Row | Check (fails if) | Status | Evidence |
 |---|---|---|---|
 | 1a Regression gate | `bdb/tests/test_qdb.sh` reports any FAIL | PASS | 290 pass, 0 fail after P13; 277 after P12; 274 after P11; 257 after P10; 250 after P9; 244 after P8; 241 after P7; 222 after the completion changes (214/0/1 at the move) |
 | 1b SQLite differential | any of the P2 queries disagrees, with numbers compared as numbers | PASS | 2,000 of 2,000 after P8, a CI gate; 1,944 after P7; 1,251 at the move (519 null_vs_empty, 230 rows, 46 number_text) |
-| 1c Crash recovery | any P3 crash point breaks the rule | PASS | 0 violations of 194 after P14 (checkpoint by rename, WAL flushed at commit); 0 of 170 with `.ckpt`; 24 of 104 at the move. Process stops only; power cuts are not simulated |
+| 1c Crash recovery | any P3 crash point breaks the rule, or any P15 seed does | PASS | P15: 0 violations in 10,000 seeded power cuts (dropped, torn and reordered unflushed writes) after P15b, 2 before; hashes equal on Windows and Linux for 10,000 of 10,000. Process stops: 0 violations of 194 after P14; 0 of 170 with `.ckpt`; 24 of 104 at the move |
 | 1d Cross-process transaction | either P4 case misses | PASS | four checks in test_qdb.sh (`xproc_*`), differential process mode equals REPL mode on 8 seeds |
 | 1e Text round trip | any P5 value changes | PASS | 2,000 of 2,000 (`test_qdb_text.py`); format 0 files still load |
 | 1f NULL apart from '' | `INSERT (NULL)` and `INSERT ('')` are indistinguishable by `IS NULL`, or `NOT (NULL = x)` is true | PASS | P7: NULL is its own value with three-valued logic; 19 checks in test_qdb.sh; P2 null_vs_empty 519 to 0. Before: both stored an empty cell |
