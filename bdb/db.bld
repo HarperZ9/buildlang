@@ -181,6 +181,17 @@ struct DB {
     upd_old: Vec<i32>,
 
     // SQL parser state
+    // true: the next reset_parser gives every parser vector a new buffer
+    // (a caller saved the old ones). false: an empty vector is kept (P29).
+    reset_fresh: bool,
+    // The 256 one-byte strings, built at the first library statement:
+    // bdb/lib turns a C string into a String with them (P29).
+    byte_strs: Vec<String>,
+    // Constraint k's number as text, its "M<k>" key, and the texts of
+    // 0..63: read by con_key so a key costs one lasting allocation (P29).
+    con_kp: Vec<String>,
+    con_mk: Vec<String>,
+    int_strs: Vec<String>,
     input: String,
     ilen: i32,
     pos: i32,
@@ -466,7 +477,7 @@ fn db_new(db_path: String) -> DB {
         idx_names: vec![], idx_tables: vec![], idx_col_indices: vec![], idx_count: 0,
         idx_keys: vec![], idx_rowids: vec![], idx_key_starts: vec![], idx_key_counts: vec![],
         idx_num: vec![], idx_num_ok: false, int_ids: vec![], upd_old: vec![],
-        input: "", ilen: 0, pos: 0,
+        reset_fresh: false, byte_strs: vec![], con_kp: vec![], con_mk: vec![], int_strs: vec![], input: "", ilen: 0, pos: 0,
         tk_type: 7, tk_val: "",
         stmt_type: 0, p_table: -1,
         p_cols: vec![], p_col_count: 0,
@@ -711,78 +722,71 @@ fn unescape_text(s: String) -> String {
 }
 
 fn concat_parts(parts: Vec<String>) -> String {
-    let mut cur: Vec<String> = parts;
-    let mut n = vec_len(cur);
-    if n == 0 { return ""; }
-    while n > 1 {
-        let mut next: Vec<String> = vec![];
-        let mut i = 0;
-        while i < n {
-            let a: String = vec_get(cur, i);
-            if i + 1 < n {
-                let b: String = vec_get(cur, i + 1);
-                vec_push(next, a + b);
-            } else {
-                vec_push(next, a);
-            }
-            i = i + 2;
-        }
-        cur = next;
-        n = vec_len(cur);
-    }
-    vec_get(cur, 0)
+    // One allocation of the final size (Vec<String>.join, buildlang #224).
+    // The pairwise tree this replaces copied every byte once per level and
+    // kept every level: the runtime frees no string.
+    parts.join("")
 }
 
 // Serialize the entire database (all tables, rows, and index declarations)
 // to the text-based file format and write to d.db_path. Returns the number
 // of bytes written, which the checkpoint policy compares the WAL against.
 // Does NOT write WAL — this is the "clean" checkpoint format.
-// Output is built in chunks of about 64 KB, joined once by concat_parts.
 fn db_text(d: &DB) -> String {
+    // Every piece of the file is pushed once and joined once (P29). No piece
+    // is copied before the join: a cell with nothing to escape is the pool's
+    // own string.
     let mut parts: Vec<String> = vec![];
     // Format 2 header: every transaction up to txn_id is in this file.
-    let mut out = "QDB 2 " + to_string_i32(d.txn_id) + "\n";
+    vec_push(parts, "QDB 2 ");
+    vec_push(parts, to_string_i32(d.txn_id));
+    vec_push(parts, "
+");
     let mut t = 0;
     while t < d.tbl_count {
         let tname = sp_get(d, vec_get(d.tbl_names, t));
-        out = out + "TABLE " + tname + "\n";
+        vec_push(parts, "TABLE ");
+        vec_push(parts, tname);
+        vec_push(parts, "
+SCHEMA");
         // Schema line
         let cs = vec_get(d.tbl_col_starts, t);
         let cc = vec_get(d.tbl_col_counts, t);
-        let mut schema = "SCHEMA";
         let mut c = 0;
         while c < cc {
             let cname = sp_get(d, vec_get(d.col_names, cs + c));
             let ctype = vec_get(d.col_types, cs + c);
-            let tstr = if ctype == 0 { "INTEGER" } else if ctype == 1 { "REAL" } else { "TEXT" };
-            schema = schema + " " + cname + ":" + tstr;
+            let tstr = if ctype == 0 { ":INTEGER" } else if ctype == 1 { ":REAL" } else { ":TEXT" };
+            vec_push(parts, " ");
+            vec_push(parts, cname);
+            vec_push(parts, tstr);
             c = c + 1;
         }
-        out = out + schema + "\n";
-        out = out + con_text(d, t, cs);
+        vec_push(parts, "
+");
+        vec_push(parts, con_text(d, t, cs));
         // Rows
         let rs = vec_get(d.tbl_row_starts, t);
         let rc = vec_get(d.tbl_row_counts, t);
         let mut r = 0;
         while r < rc {
-            let mut row_str = "ROW ";
             let mut ci = 0;
             while ci < cc {
-                if ci > 0 { row_str = row_str + "|"; }
+                if ci == 0 { vec_push(parts, "ROW "); } else { vec_push(parts, "|"); }
                 let cell = sp_get(d, vec_get(d.cells, rs + r * cc + ci));
-                row_str = row_str + escape_cell(cell);
+                vec_push(parts, escape_cell(cell));
                 ci = ci + 1;
             }
-            out = out + row_str + "\n";
-            if out.len() > 65536 {
-                vec_push(parts, out);
-                out = "";
-            }
+            if cc == 0 { vec_push(parts, "ROW "); }
+            vec_push(parts, "
+");
             r = r + 1;
         }
-        out = out + "END\n";
+        vec_push(parts, "END
+");
         if t + 1 < d.tbl_count {
-            out = out + "\n";
+            vec_push(parts, "
+");
         }
         t = t + 1;
     }
@@ -795,11 +799,22 @@ fn db_text(d: &DB) -> String {
         let col_i = vec_get(d.idx_col_indices, ix);
         let tcs = vec_get(d.tbl_col_starts, tbl_idx);
         let cname = sp_get(d, vec_get(d.col_names, tcs + col_i));
-        out = out + "\nINDEX " + iname + " ON " + tname + " (" + cname + ")\n";
+        vec_push(parts, "
+INDEX ");
+        vec_push(parts, iname);
+        vec_push(parts, " ON ");
+        vec_push(parts, tname);
+        vec_push(parts, " (");
+        vec_push(parts, cname);
+        vec_push(parts, ")
+");
         ix = ix + 1;
     }
-    vec_push(parts, out);
-    concat_parts(parts)
+    let all = parts.join("");
+    // The vector's buffer goes back to the allocator (Vec.clear frees it);
+    // parts is not used again.
+    parts.clear();
+    all
 }
 
 // Rewrite the .db from memory. Returns the bytes written, which the
@@ -1627,7 +1642,15 @@ fn wal_hold_op(d: &mut DB, oln: String) {
 fn wal_log_mutation(d: &mut DB, sql: String) ~ Console + FileSystem + Process {
     if d.in_transaction {
         // In explicit transaction — just append OP to WAL
-        wal_hold_op(d, wal_op_line(sql) + "\n");
+        if needs_escape(sql, false) {
+            wal_hold_op(d, wal_op_line(sql) + "\n");
+        } else {
+            // Held as three pieces: the closing append joins them, and the
+            // running hash takes the same bytes in the same order (P29).
+            wal_hold_op(d, "OP ");
+            wal_hold_op(d, sql);
+            wal_hold_op(d, "\n");
+        }
     } else {
         // Auto-commit: wrap in a single-statement transaction, written as one
         // append so a torn write cannot leave a COMMIT without its OP.
@@ -1702,15 +1725,129 @@ fn find_table(d: &DB, name: String) -> i32 {
 // The tokenizer recognizes all SQL keywords via is_keyword() and
 // automatically uppercases them. Identifiers are NOT uppercased.
 // =========================================================================
+// The tokenizer reads bytes of the statement and takes one substring per
+// token (P29). The runtime frees nothing, so a one-character string per byte
+// and a concat per step were a permanent cost on every statement.
 fn skip_ws_sql(d: &mut DB) {
+    let b = d.input.as_bytes();
+    let n = d.ilen;
+    let mut p = d.pos;
     let mut go = true;
     while go {
-        if d.pos >= d.ilen { go = false; }
+        if p >= n { go = false; }
         else {
-            let c = d.input.char_at(d.pos);
-            if is_ws(c) { d.pos = d.pos + 1; } else { go = false; }
+            let c = b[p];
+            if c == 32 || c == 10 || c == 13 || c == 9 { p = p + 1; } else { go = false; }
         }
     }
+    d.pos = p;
+}
+
+fn byte_digit(c: u8) -> bool { c >= 48 && c <= 57 }
+fn byte_alpha(c: u8) -> bool { (c >= 97 && c <= 122) || (c >= 65 && c <= 90) }
+fn byte_alnum(c: u8) -> bool { byte_alpha(c) || byte_digit(c) || c == 95 }
+
+// The canonical upper-case keyword spelled by n bytes of s at st, compared
+// without case, or "" when the word is no keyword. It allocates nothing.
+fn kw_ieq(s: String, st: i32, n: i32, k: String) -> bool {
+    let b = s.as_bytes();
+    let kb = k.as_bytes();
+    let mut i = 0;
+    while i < n {
+        let mut c = b[st + i];
+        if c >= 97 && c <= 122 { c = c - 32; }
+        if c != kb[i] { return false; }
+        i = i + 1;
+    }
+    true
+}
+
+fn kw_at(s: String, st: i32, n: i32) -> String {
+    if n == 2 {
+        if kw_ieq(s, st, n, "BY") { return "BY"; }
+        if kw_ieq(s, st, n, "OR") { return "OR"; }
+        if kw_ieq(s, st, n, "ON") { return "ON"; }
+        if kw_ieq(s, st, n, "AS") { return "AS"; }
+        if kw_ieq(s, st, n, "IN") { return "IN"; }
+        if kw_ieq(s, st, n, "IS") { return "IS"; }
+        return "";
+    }
+    if n == 3 {
+        if kw_ieq(s, st, n, "SET") { return "SET"; }
+        if kw_ieq(s, st, n, "ASC") { return "ASC"; }
+        if kw_ieq(s, st, n, "AND") { return "AND"; }
+        if kw_ieq(s, st, n, "NOT") { return "NOT"; }
+        if kw_ieq(s, st, n, "KEY") { return "KEY"; }
+        if kw_ieq(s, st, n, "SUM") { return "SUM"; }
+        if kw_ieq(s, st, n, "AVG") { return "AVG"; }
+        if kw_ieq(s, st, n, "MIN") { return "MIN"; }
+        if kw_ieq(s, st, n, "MAX") { return "MAX"; }
+        if kw_ieq(s, st, n, "ADD") { return "ADD"; }
+        if kw_ieq(s, st, n, "ALL") { return "ALL"; }
+        return "";
+    }
+    if n == 4 {
+        if kw_ieq(s, st, n, "FROM") { return "FROM"; }
+        if kw_ieq(s, st, n, "INTO") { return "INTO"; }
+        if kw_ieq(s, st, n, "DROP") { return "DROP"; }
+        if kw_ieq(s, st, n, "DESC") { return "DESC"; }
+        if kw_ieq(s, st, n, "NULL") { return "NULL"; }
+        if kw_ieq(s, st, n, "REAL") { return "REAL"; }
+        if kw_ieq(s, st, n, "TEXT") { return "TEXT"; }
+        if kw_ieq(s, st, n, "BLOB") { return "BLOB"; }
+        if kw_ieq(s, st, n, "JOIN") { return "JOIN"; }
+        if kw_ieq(s, st, n, "LEFT") { return "LEFT"; }
+        if kw_ieq(s, st, n, "FULL") { return "FULL"; }
+        if kw_ieq(s, st, n, "LIKE") { return "LIKE"; }
+        return "";
+    }
+    if n == 5 {
+        if kw_ieq(s, st, n, "WHERE") { return "WHERE"; }
+        if kw_ieq(s, st, n, "TABLE") { return "TABLE"; }
+        if kw_ieq(s, st, n, "ORDER") { return "ORDER"; }
+        if kw_ieq(s, st, n, "LIMIT") { return "LIMIT"; }
+        if kw_ieq(s, st, n, "COUNT") { return "COUNT"; }
+        if kw_ieq(s, st, n, "INDEX") { return "INDEX"; }
+        if kw_ieq(s, st, n, "RIGHT") { return "RIGHT"; }
+        if kw_ieq(s, st, n, "INNER") { return "INNER"; }
+        if kw_ieq(s, st, n, "OUTER") { return "OUTER"; }
+        if kw_ieq(s, st, n, "CROSS") { return "CROSS"; }
+        if kw_ieq(s, st, n, "GROUP") { return "GROUP"; }
+        if kw_ieq(s, st, n, "BEGIN") { return "BEGIN"; }
+        if kw_ieq(s, st, n, "ALTER") { return "ALTER"; }
+        if kw_ieq(s, st, n, "UNION") { return "UNION"; }
+        return "";
+    }
+    if n == 6 {
+        if kw_ieq(s, st, n, "SELECT") { return "SELECT"; }
+        if kw_ieq(s, st, n, "INSERT") { return "INSERT"; }
+        if kw_ieq(s, st, n, "VALUES") { return "VALUES"; }
+        if kw_ieq(s, st, n, "CREATE") { return "CREATE"; }
+        if kw_ieq(s, st, n, "UPDATE") { return "UPDATE"; }
+        if kw_ieq(s, st, n, "DELETE") { return "DELETE"; }
+        if kw_ieq(s, st, n, "OFFSET") { return "OFFSET"; }
+        if kw_ieq(s, st, n, "COMMIT") { return "COMMIT"; }
+        if kw_ieq(s, st, n, "COLUMN") { return "COLUMN"; }
+        if kw_ieq(s, st, n, "HAVING") { return "HAVING"; }
+        if kw_ieq(s, st, n, "EXCEPT") { return "EXCEPT"; }
+        return "";
+    }
+    if n == 7 {
+        if kw_ieq(s, st, n, "INTEGER") { return "INTEGER"; }
+        if kw_ieq(s, st, n, "PRIMARY") { return "PRIMARY"; }
+        if kw_ieq(s, st, n, "BETWEEN") { return "BETWEEN"; }
+        return "";
+    }
+    if n == 8 {
+        if kw_ieq(s, st, n, "ROLLBACK") { return "ROLLBACK"; }
+        if kw_ieq(s, st, n, "DISTINCT") { return "DISTINCT"; }
+        return "";
+    }
+    if n == 9 {
+        if kw_ieq(s, st, n, "INTERSECT") { return "INTERSECT"; }
+        return "";
+    }
+    ""
 }
 
 fn is_keyword(word: String) -> i32 {
@@ -1783,109 +1920,120 @@ fn next_token(d: &mut DB) {
     if d.pos >= d.ilen {
         d.tk_type = 7; d.tk_val = ""; return;
     }
-    let c = d.input.char_at(d.pos);
+    let b = d.input.as_bytes();
+    let n = d.ilen;
+    let c = b[d.pos];
 
-    // String literal
-    if c == "'" {
-        d.pos = d.pos + 1;
+    // String literal. '' inside it is one quote; the text between quotes is
+    // copied a segment at a time.
+    if c == 39 {
+        let mut p = d.pos + 1;
+        let mut seg = p;
         let mut val = "";
+        let mut pieces = 0;
         let mut go = true;
         while go {
-            if d.pos >= d.ilen { go = false; }
-            else {
-                let qc = d.input.char_at(d.pos);
-                if qc == "'" {
-                    if d.pos + 1 < d.ilen {
-                        let nx = d.input.char_at(d.pos + 1);
-                        if nx == "'" { val = val + "'"; d.pos = d.pos + 2; }
-                        else { d.pos = d.pos + 1; go = false; }
-                    } else { d.pos = d.pos + 1; go = false; }
-                } else { val = val + qc; d.pos = d.pos + 1; }
-            }
+            if p >= n {
+                if pieces == 0 { val = d.input.substring(seg, p - seg); }
+                else { val = val + d.input.substring(seg, p - seg); }
+                go = false;
+            } else if b[p] == 39 {
+                if p + 1 < n && b[p + 1] == 39 {
+                    val = val + d.input.substring(seg, p - seg) + "'";
+                    pieces = pieces + 1;
+                    p = p + 2;
+                    seg = p;
+                } else {
+                    if pieces == 0 { val = d.input.substring(seg, p - seg); }
+                    else { val = val + d.input.substring(seg, p - seg); }
+                    p = p + 1;
+                    go = false;
+                }
+            } else { p = p + 1; }
         }
+        d.pos = p;
         d.tk_type = 2; d.tk_val = val; return;
     }
 
     // Number literal
-    if is_digit(c) || (c == "-" && d.pos + 1 < d.ilen) {
+    if byte_digit(c) || (c == 45 && d.pos + 1 < n) {
         let mut is_neg = false;
-        if c == "-" {
-            let nx = d.input.char_at(d.pos + 1);
-            if is_digit(nx) { is_neg = true; }
+        if c == 45 {
+            if byte_digit(b[d.pos + 1]) { is_neg = true; }
         }
-        if is_digit(c) || is_neg {
-            let mut val = "";
-            if is_neg { val = "-"; d.pos = d.pos + 1; }
+        if byte_digit(c) || is_neg {
+            let st = d.pos;
+            let mut p = d.pos;
+            if is_neg { p = p + 1; }
             let mut ngo = true;
             while ngo {
-                if d.pos >= d.ilen { ngo = false; }
+                if p >= n { ngo = false; }
                 else {
-                    let nc = d.input.char_at(d.pos);
-                    if is_digit(nc) { val = val + nc; d.pos = d.pos + 1; }
-                    else if nc == "." { val = val + nc; d.pos = d.pos + 1; }
+                    let nc = b[p];
+                    if byte_digit(nc) || nc == 46 { p = p + 1; }
                     else { ngo = false; }
                 }
             }
-            d.tk_type = 3; d.tk_val = val; return;
+            d.pos = p;
+            d.tk_type = 3; d.tk_val = d.input.substring(st, p - st); return;
         }
     }
 
     // Identifier or keyword
-    if is_alpha(c) || c == "_" {
-        let mut val = "";
+    if byte_alpha(c) || c == 95 {
+        let st = d.pos;
+        let mut p = d.pos;
         let mut go = true;
         while go {
-            if d.pos >= d.ilen { go = false; }
-            else {
-                let ic = d.input.char_at(d.pos);
-                if is_alnum(ic) { val = val + ic; d.pos = d.pos + 1; }
-                else { go = false; }
-            }
+            if p >= n { go = false; }
+            else if byte_alnum(b[p]) { p = p + 1; }
+            else { go = false; }
         }
-        let kw = is_keyword(val);
-        if kw == 1 { d.tk_type = 0; d.tk_val = val.to_uppercase(); }
-        else { d.tk_type = 1; d.tk_val = val; }
+        d.pos = p;
+        let kw = kw_at(d.input, st, p - st);
+        if kw.len() > 0 { d.tk_type = 0; d.tk_val = kw; }
+        else { d.tk_type = 1; d.tk_val = d.input.substring(st, p - st); }
         return;
     }
 
     // Operators
-    if c == "<" {
+    if c == 60 {
         d.pos = d.pos + 1;
         if d.pos < d.ilen {
-            let nx = d.input.char_at(d.pos);
-            if nx == "=" { d.pos = d.pos + 1; d.tk_type = 4; d.tk_val = "<="; return; }
-            if nx == ">" { d.pos = d.pos + 1; d.tk_type = 4; d.tk_val = "<>"; return; }
+            let nx = b[d.pos];
+            if nx == 61 { d.pos = d.pos + 1; d.tk_type = 4; d.tk_val = "<="; return; }
+            if nx == 62 { d.pos = d.pos + 1; d.tk_type = 4; d.tk_val = "<>"; return; }
         }
         d.tk_type = 4; d.tk_val = "<"; return;
     }
-    if c == ">" {
+    if c == 62 {
         d.pos = d.pos + 1;
         if d.pos < d.ilen {
-            let nx = d.input.char_at(d.pos);
-            if nx == "=" { d.pos = d.pos + 1; d.tk_type = 4; d.tk_val = ">="; return; }
+            let nx = b[d.pos];
+            if nx == 61 { d.pos = d.pos + 1; d.tk_type = 4; d.tk_val = ">="; return; }
         }
         d.tk_type = 4; d.tk_val = ">"; return;
     }
-    if c == "!" {
+    if c == 33 {
         d.pos = d.pos + 1;
         if d.pos < d.ilen {
-            let nx = d.input.char_at(d.pos);
-            if nx == "=" { d.pos = d.pos + 1; d.tk_type = 4; d.tk_val = "!="; return; }
+            let nx = b[d.pos];
+            if nx == 61 { d.pos = d.pos + 1; d.tk_type = 4; d.tk_val = "!="; return; }
         }
         d.tk_type = 4; d.tk_val = "!"; return;
     }
-    if c == "=" { d.pos = d.pos + 1; d.tk_type = 4; d.tk_val = "="; return; }
-    if c == "+" { d.pos = d.pos + 1; d.tk_type = 4; d.tk_val = "+"; return; }
-    if c == "-" { d.pos = d.pos + 1; d.tk_type = 4; d.tk_val = "-"; return; }
-    if c == "/" { d.pos = d.pos + 1; d.tk_type = 4; d.tk_val = "/"; return; }
-    if c == "*" { d.pos = d.pos + 1; d.tk_type = 6; d.tk_val = "*"; return; }
-    if c == "(" { d.pos = d.pos + 1; d.tk_type = 5; d.tk_val = "("; return; }
-    if c == ")" { d.pos = d.pos + 1; d.tk_type = 5; d.tk_val = ")"; return; }
-    if c == "," { d.pos = d.pos + 1; d.tk_type = 5; d.tk_val = ","; return; }
-    if c == ";" { d.pos = d.pos + 1; d.tk_type = 5; d.tk_val = ";"; return; }
-    if c == "." { d.pos = d.pos + 1; d.tk_type = 5; d.tk_val = "."; return; }
+    if c == 61 { d.pos = d.pos + 1; d.tk_type = 4; d.tk_val = "="; return; }
+    if c == 43 { d.pos = d.pos + 1; d.tk_type = 4; d.tk_val = "+"; return; }
+    if c == 45 { d.pos = d.pos + 1; d.tk_type = 4; d.tk_val = "-"; return; }
+    if c == 47 { d.pos = d.pos + 1; d.tk_type = 4; d.tk_val = "/"; return; }
+    if c == 42 { d.pos = d.pos + 1; d.tk_type = 6; d.tk_val = "*"; return; }
+    if c == 40 { d.pos = d.pos + 1; d.tk_type = 5; d.tk_val = "("; return; }
+    if c == 41 { d.pos = d.pos + 1; d.tk_type = 5; d.tk_val = ")"; return; }
+    if c == 44 { d.pos = d.pos + 1; d.tk_type = 5; d.tk_val = ","; return; }
+    if c == 59 { d.pos = d.pos + 1; d.tk_type = 5; d.tk_val = ";"; return; }
+    if c == 46 { d.pos = d.pos + 1; d.tk_type = 5; d.tk_val = "."; return; }
 
-    d.pos = d.pos + 1; d.tk_type = 1; d.tk_val = c;
+    d.tk_type = 1; d.tk_val = d.input.substring(d.pos, 1); d.pos = d.pos + 1;
 }
 
 // The value of the current token in a value position: the NULL keyword is
@@ -1963,28 +2111,38 @@ fn op_encode(op: String) -> i32 {
 // setting up the tokenizer; the UNION executor calls it between branches to
 // clear branch 1's parse before parsing branch 2 while keeping the tokenizer
 // where it stopped (just past UNION) and the accumulated rows intact.
+// Empty a list in place: the handle and its buffer stay, so the next
+// statement fills the same memory. The runtime frees nothing on its own,
+// and a new list per parser field per statement was about 2 KB of garbage
+// per SELECT (P29). In place is safe outside a subquery because no local
+// and no call holds a parser list across reset_parser; the subquery path
+// does (its save_ locals), and sets reset_fresh to get new lists there.
+fn vec_empty(v: Vec<i32>) {
+    while vec_len(v) > 0 { vec_pop(v); }
+}
+
 fn reset_select_fields(d: &mut DB) {
     d.stmt_type = 0;
     d.p_table = -1;
-    d.p_cols = vec![];
+    if d.reset_fresh { d.p_cols = vec![]; } else { vec_empty(d.p_cols); }
     d.p_col_count = 0;
-    d.p_types = vec![];
-    d.p_con_kind = vec![];
-    d.p_con_cs = vec![];
-    d.p_con_cn = vec![];
-    d.p_con_names = vec![];
-    d.p_vals = vec![];
+    if d.reset_fresh { d.p_types = vec![]; } else { vec_empty(d.p_types); }
+    if d.reset_fresh { d.p_con_kind = vec![]; } else { vec_empty(d.p_con_kind); }
+    if d.reset_fresh { d.p_con_cs = vec![]; } else { vec_empty(d.p_con_cs); }
+    if d.reset_fresh { d.p_con_cn = vec![]; } else { vec_empty(d.p_con_cn); }
+    if d.reset_fresh { d.p_con_names = vec![]; } else { vec_empty(d.p_con_names); }
+    if d.reset_fresh { d.p_vals = vec![]; } else { vec_empty(d.p_vals); }
     d.p_val_count = 0;
     d.p_row_count = 0;
     d.has_where = 0;
     d.wc_count = 0;
-    d.wc_left = vec![];
-    d.wc_op = vec![];
-    d.wc_right = vec![];
-    d.wc_neg = vec![];
-    d.wn_kind = vec![];
-    d.wn_a = vec![];
-    d.wn_b = vec![];
+    if d.reset_fresh { d.wc_left = vec![]; } else { vec_empty(d.wc_left); }
+    if d.reset_fresh { d.wc_op = vec![]; } else { vec_empty(d.wc_op); }
+    if d.reset_fresh { d.wc_right = vec![]; } else { vec_empty(d.wc_right); }
+    if d.reset_fresh { d.wc_neg = vec![]; } else { vec_empty(d.wc_neg); }
+    if d.reset_fresh { d.wn_kind = vec![]; } else { vec_empty(d.wn_kind); }
+    if d.reset_fresh { d.wn_a = vec![]; } else { vec_empty(d.wn_a); }
+    if d.reset_fresh { d.wn_b = vec![]; } else { vec_empty(d.wn_b); }
     d.wn_count = 0;
     d.wc_root = -1;
     d.has_order = 0;
@@ -2002,8 +2160,8 @@ fn reset_select_fields(d: &mut DB) {
     d.set_op = -1;
     d.set_operand = -1;
     d.select_star = 0;
-    d.p_agg_funcs = vec![];
-    d.p_agg_cols = vec![];
+    if d.reset_fresh { d.p_agg_funcs = vec![]; } else { vec_empty(d.p_agg_funcs); }
+    if d.reset_fresh { d.p_agg_cols = vec![]; } else { vec_empty(d.p_agg_cols); }
     d.p_agg_count = 0;
     d.has_group_by = 0;
     d.group_col = -1;
@@ -2017,10 +2175,10 @@ fn reset_select_fields(d: &mut DB) {
     d.idx_name = -1;
     d.idx_table_name = -1;
     d.idx_col_name = -1;
-    d.wc_in_start = vec![];
-    d.wc_in_len = vec![];
-    d.wc_in_pool = vec![];
-    d.subq_vals = vec![];
+    if d.reset_fresh { d.wc_in_start = vec![]; } else { vec_empty(d.wc_in_start); }
+    if d.reset_fresh { d.wc_in_len = vec![]; } else { vec_empty(d.wc_in_len); }
+    if d.reset_fresh { d.wc_in_pool = vec![]; } else { vec_empty(d.wc_in_pool); }
+    if d.reset_fresh { d.subq_vals = vec![]; } else { vec_empty(d.subq_vals); }
     d.subq_count = 0;
     d.has_distinct = 0;
     d.has_having = 0;
@@ -2028,8 +2186,8 @@ fn reset_select_fields(d: &mut DB) {
     d.having_agg_col = -1;
     d.having_op = -1;
     d.having_val = -1;
-    d.p_aliases = vec![];
-    d.p_agg_distinct = vec![];
+    if d.reset_fresh { d.p_aliases = vec![]; } else { vec_empty(d.p_aliases); }
+    if d.reset_fresh { d.p_agg_distinct = vec![]; } else { vec_empty(d.p_agg_distinct); }
     d.alter_col_name = -1;
     d.alter_col_type = -1;
 }
@@ -2044,40 +2202,41 @@ fn reset_parser(d: &mut DB, input: String) {
     d.tk_type = 7;
     d.tk_val = "";
     reset_select_fields(d);
-    d.union_vals = vec![];
-    d.union_headers = vec![];
-    d.union_coltypes = vec![];
+    if d.reset_fresh { d.union_vals = vec![]; } else { vec_empty(d.union_vals); }
+    if d.reset_fresh { d.union_headers = vec![]; } else { vec_empty(d.union_headers); }
+    if d.reset_fresh { d.union_coltypes = vec![]; } else { vec_empty(d.union_coltypes); }
     d.union_ncol = -1;
     d.union_rows = 0;
     d.union_started = 0;
-    d.x_kind = vec![];
-    d.x_a = vec![];
-    d.x_b = vec![];
-    d.x_c = vec![];
-    d.x_s = vec![];
-    d.x_as = vec![];
-    d.x_an = vec![];
-    d.x_args = vec![];
-    d.qf_tbl = vec![];
-    d.qf_alias = vec![];
-    d.qs_expr = vec![];
-    d.qs_name = vec![];
-    d.qo_expr = vec![];
-    d.qo_desc = vec![];
-    d.q_fs = vec![];
-    d.q_fn = vec![];
-    d.q_ss = vec![];
-    d.q_sn = vec![];
-    d.q_where = vec![];
-    d.q_os = vec![];
-    d.q_on = vec![];
-    d.q_limit = vec![];
-    d.q_offset = vec![];
-    d.q_distinct = vec![];
+    if d.reset_fresh { d.x_kind = vec![]; } else { vec_empty(d.x_kind); }
+    if d.reset_fresh { d.x_a = vec![]; } else { vec_empty(d.x_a); }
+    if d.reset_fresh { d.x_b = vec![]; } else { vec_empty(d.x_b); }
+    if d.reset_fresh { d.x_c = vec![]; } else { vec_empty(d.x_c); }
+    if d.reset_fresh { d.x_s = vec![]; } else { vec_empty(d.x_s); }
+    if d.reset_fresh { d.x_as = vec![]; } else { vec_empty(d.x_as); }
+    if d.reset_fresh { d.x_an = vec![]; } else { vec_empty(d.x_an); }
+    if d.reset_fresh { d.x_args = vec![]; } else { vec_empty(d.x_args); }
+    if d.reset_fresh { d.qf_tbl = vec![]; } else { vec_empty(d.qf_tbl); }
+    if d.reset_fresh { d.qf_alias = vec![]; } else { vec_empty(d.qf_alias); }
+    if d.reset_fresh { d.qs_expr = vec![]; } else { vec_empty(d.qs_expr); }
+    if d.reset_fresh { d.qs_name = vec![]; } else { vec_empty(d.qs_name); }
+    if d.reset_fresh { d.qo_expr = vec![]; } else { vec_empty(d.qo_expr); }
+    if d.reset_fresh { d.qo_desc = vec![]; } else { vec_empty(d.qo_desc); }
+    if d.reset_fresh { d.q_fs = vec![]; } else { vec_empty(d.q_fs); }
+    if d.reset_fresh { d.q_fn = vec![]; } else { vec_empty(d.q_fn); }
+    if d.reset_fresh { d.q_ss = vec![]; } else { vec_empty(d.q_ss); }
+    if d.reset_fresh { d.q_sn = vec![]; } else { vec_empty(d.q_sn); }
+    if d.reset_fresh { d.q_where = vec![]; } else { vec_empty(d.q_where); }
+    if d.reset_fresh { d.q_os = vec![]; } else { vec_empty(d.q_os); }
+    if d.reset_fresh { d.q_on = vec![]; } else { vec_empty(d.q_on); }
+    if d.reset_fresh { d.q_limit = vec![]; } else { vec_empty(d.q_limit); }
+    if d.reset_fresh { d.q_offset = vec![]; } else { vec_empty(d.q_offset); }
+    if d.reset_fresh { d.q_distinct = vec![]; } else { vec_empty(d.q_distinct); }
     d.xn = 0;
     d.xq_n = 0;
     d.xq_root = -1;
     d.ins_replace = false;
+    d.reset_fresh = false;
 }
 
 fn parse_sql(d: &mut DB) ~ Console + Process {
@@ -3070,6 +3229,8 @@ fn parse_and_exec_subquery(d: &mut DB) -> String ~ Console + Process {
     let save_p_agg_distinct = d.p_agg_distinct;
 
     // Execute the subquery to get a scalar result
+    // The saved vectors above must not be shared with the inner parse.
+    d.reset_fresh = true;
     let result = exec_subquery_scalar(d, sub_sql);
 
     // Restore main parser state
@@ -3651,28 +3812,20 @@ fn exec_insert(d: &mut DB) ~ Console + Process {
         d.cells = new_cells;
     }
 
-    // Update row count for this table (all nrows added).
-    let mut new_rc: Vec<i32> = vec![];
-    let mut ri = 0;
-    while ri < d.tbl_count {
-        if ri == tidx { vec_push(new_rc, rc + nrows); }
-        else { vec_push(new_rc, vec_get(d.tbl_row_counts, ri)); }
-        ri = ri + 1;
-    }
-    d.tbl_row_counts = new_rc;
-
-    // Shift row_starts for tables after this one by the cells we inserted.
-    let mut new_rs: Vec<i32> = vec![];
-    let mut si = 0;
+    // Row count for this table, and the row starts of the tables after it,
+    // changed in place (P29: two fresh vectors per INSERT were never freed).
+    let rcv = d.tbl_row_counts;
+    rcv[tidx] = rc + nrows;
+    let rsv = d.tbl_row_starts;
+    let mut si = tidx + 1;
     while si < d.tbl_count {
-        if si > tidx {
-            vec_push(new_rs, vec_get(d.tbl_row_starts, si) + added);
-        } else {
-            vec_push(new_rs, vec_get(d.tbl_row_starts, si));
-        }
+        rsv[si] = vec_get(rsv, si) + added;
         si = si + 1;
     }
-    d.tbl_row_starts = new_rs;
+    // Both are local to this call and held nowhere else; clear() returns
+    // their memory to the allocator.
+    row_cells.clear();
+    src_for_col.clear();
 
     // Indexes need no work here. The new rows carry the highest row ids, so
     // an index whose key count is below the table's row count is behind by
@@ -4180,6 +4333,12 @@ fn exec_select(d: &mut DB) ~ Console + Process {
         emit_line(d, row_line);
         ri = ri + 1;
     }
+    // The work lists are local and held nowhere else; free them, or every
+    // SELECT leaves four lists behind (P29).
+    show_cols.clear();
+    match_rows.clear();
+    hdr_names.clear();
+    widths.clear();
 }
 
 // --- 6c-union: SELECT ... UNION [ALL] ... ---
@@ -7507,34 +7666,13 @@ fn eval_like(cell_val: String, pattern: String) -> bool {
 }
 
 fn is_numeric_str(s: String) -> bool {
-    let slen = s.len();
-    if slen == 0 { return false; }
-    let mut i = 0;
-    let first = s.char_at(0);
-    if first == "-" { i = 1; }
-    if i >= slen { return false; }
-    let d0 = s.char_at(i);
-    if !is_digit(d0) { return false; }
-    let mut has_dot = false;
-    while i < slen {
-        let ch = s.char_at(i);
-        if is_digit(ch) { i = i + 1; }
-        else if ch == "." {
-            if has_dot { return false; }
-            has_dot = true;
-            i = i + 1;
-        }
-        else { return false; }
-    }
-    true
+    numeric_bytes(s) != 3
 }
 
 // True only for a signed decimal integer (no dot). parse_int_str ignores a
 // dot, so integer-only UPDATE arithmetic gates on this, not is_numeric_str.
 fn is_int_str(s: String) -> bool {
-    if is_numeric_str(s) == false { return false; }
-    if s.index_of(".") >= 0 { return false; }
-    true
+    numeric_bytes(s) == 1
 }
 
 // Map a declared column type name to its internal storage code:
@@ -8309,8 +8447,28 @@ fn xp_new_args(d: &mut DB, kind: i32, a: i32, b: i32, c: i32, s: i32, args: Vec<
 fn x_arg(d: &DB, e: i32, i: i32) -> i32 { vec_get(d.x_args, vec_get(d.x_as, e) + i) }
 
 // The current token as an upper-case word, or "" when it is not a word.
+// True when s has no lower-case ASCII letter, so to_uppercase would return
+// the same bytes. Bytes at or above 128 count as not plain, which sends the
+// word down the copying path unchanged.
+fn is_upper_plain(s: String) -> bool {
+    let b = s.as_bytes();
+    let n = s.len() as i32;
+    let mut i = 0;
+    while i < n {
+        let ch = b[i] as i32;
+        if (ch >= 97 && ch <= 122) || ch >= 128 { return false; }
+        i = i + 1;
+    }
+    true
+}
+
 fn tk_word(d: &DB) -> String {
-    if d.tk_type == 0 || d.tk_type == 1 { return d.tk_val.to_uppercase(); }
+    if d.tk_type == 0 || d.tk_type == 1 {
+        // A keyword typed in upper case needs no copy; the parser asks for
+        // the word several times per token (P29).
+        if is_upper_plain(d.tk_val) { return d.tk_val; }
+        return d.tk_val.to_uppercase();
+    }
     ""
 }
 
@@ -9895,17 +10053,46 @@ fn con_int_digits(f: f64) -> String {
     out
 }
 
+// The value part of a numeric key cell (nb is numeric_bytes(v), not 3).
+// Integer text with no leading zero and at most 15 bytes is already the
+// digits con_int_digits would produce, so it is returned as is: no
+// allocation for the common key (P29).
+fn con_num_body(v: String, nb: i32) -> String {
+    let f = v.parse_float();
+    if f == 0.0 { return "0"; }
+    if nb == 1 && v.len() <= 15 {
+        let b = v.as_bytes();
+        let mut i: i64 = 0;
+        if b[0] == 45 { i = 1; }
+        if b[i] != 48 { return v; }
+    }
+    if f == x_trunc(f) && f < 1000000000000000.0 && f > 0.0 - 1000000000000000.0 {
+        return con_int_digits(f);
+    }
+    to_string_f64(f)
+}
+
+// Extend the cached constraint texts to every constraint (P29).
+fn con_names_fill(d: &mut DB) {
+    let n = vec_len(d.con_tbl);
+    let mut k = vec_len(d.con_kp);
+    while k < n {
+        vec_push(d.con_kp, to_string_i32(k));
+        vec_push(d.con_mk, "M" + to_string_i32(k));
+        k = k + 1;
+    }
+    let mut i = vec_len(d.int_strs);
+    while i < 64 {
+        vec_push(d.int_strs, to_string_i32(i));
+        i = i + 1;
+    }
+}
+
 // One key cell as text that is equal for two cells exactly when xv_cmp_nn
 // calls them equal: a number by its value (so 1 and 1.0 match), text as is.
 fn con_part(v: String) -> String {
-    if is_numeric_str(v) {
-        let f = v.parse_float();
-        if f == 0.0 { return "N0"; }
-        if f == x_trunc(f) && f < 1000000000000000.0 && f > 0.0 - 1000000000000000.0 {
-            return "N" + con_int_digits(f);
-        }
-        return "N" + to_string_f64(f);
-    }
+    let nb = numeric_bytes(v);
+    if nb != 3 { return "N" + con_num_body(v, nb); }
     "T" + v
 }
 
@@ -9914,15 +10101,34 @@ fn con_part(v: String) -> String {
 fn con_key(d: &DB, k: i32, cells: Vec<i32>, base: i32) -> String {
     let n = vec_get(d.con_cn, k);
     let st = vec_get(d.con_cs, k);
-    let mut key = to_string_i32(k);
+    // The pieces are joined once and the list goes back to the allocator.
+    let parts: Vec<String> = vec![];
+    if k < vec_len(d.con_kp) { vec_push(parts, vec_get(d.con_kp, k)); }
+    else { vec_push(parts, to_string_i32(k)); }
     let mut j = 0;
     while j < n {
         let v = sp_get(d, vec_get(cells, base + vec_get(d.con_cols, st + j)));
-        if is_null(v) { return ""; }
-        let part = con_part(v);
-        key = key + "|" + to_string_i32(part.len()) + ":" + part;
+        if is_null(v) {
+            parts.clear();
+            return "";
+        }
+        let nb = numeric_bytes(v);
+        let mut body = v;
+        let mut tag = ":T";
+        if nb != 3 {
+            body = con_num_body(v, nb);
+            tag = ":N";
+        }
+        let ln = body.len() + 1;
+        vec_push(parts, "|");
+        if ln < 64 && vec_len(d.int_strs) == 64 { vec_push(parts, vec_get(d.int_strs, ln)); }
+        else { vec_push(parts, to_string_i32(ln)); }
+        vec_push(parts, tag);
+        vec_push(parts, body);
         j = j + 1;
     }
+    let key = parts.join("");
+    parts.clear();
     key
 }
 
@@ -9936,11 +10142,12 @@ fn con_is_ipk(d: &DB, k: i32) -> bool {
 // Add rows (row-major in cells from base, nrows of them, cc columns) of
 // table t to the key map.
 fn con_map_add(d: &mut DB, t: i32, cells: Vec<i32>, base: i32, nrows: i32, cc: i32) {
+    con_names_fill(d);
     let mut k = 0;
     while k < vec_len(d.con_tbl) {
         if vec_get(d.con_tbl, k) == t && vec_get(d.con_kind, k) != 2 {
             let ipk = con_is_ipk(d, k);
-            let mk = "M" + to_string_i32(k);
+            let mk = vec_get(d.con_mk, k);
             let c0 = vec_get(d.con_cols, vec_get(d.con_cs, k));
             let mut mx = 0.0;
             if map_contains(d.con_map, mk) { mx = map_get(d.con_map, mk); }
@@ -9955,6 +10162,30 @@ fn con_map_add(d: &mut DB, t: i32, cells: Vec<i32>, base: i32, nrows: i32, cc: i
                 r = r + 1;
             }
             if ipk { map_insert(d.con_map, mk, mx); }
+        }
+        k = k + 1;
+    }
+}
+
+// con_map_add for one row whose keys con_check_insert already built, in
+// the same constraint order, so no key is built twice (P29).
+fn con_map_add_keys(d: &mut DB, t: i32, cells: Vec<i32>, keys: Vec<String>) {
+    let mut k = 0;
+    let mut q = 0;
+    while k < vec_len(d.con_tbl) {
+        if vec_get(d.con_tbl, k) == t && vec_get(d.con_kind, k) != 2 {
+            let key = vec_get(keys, q);
+            q = q + 1;
+            if key.len() > 0 { map_insert(d.con_map, key, 1.0); }
+            if con_is_ipk(d, k) {
+                let mk = vec_get(d.con_mk, k);
+                let c0 = vec_get(d.con_cols, vec_get(d.con_cs, k));
+                let mut mx = 0.0;
+                if map_contains(d.con_map, mk) { mx = map_get(d.con_map, mk); }
+                let v = sp_get(d, vec_get(cells, c0));
+                if is_numeric_str(v) && v.parse_float() > mx { mx = v.parse_float(); }
+                map_insert(d.con_map, mk, mx);
+            }
         }
         k = k + 1;
     }
@@ -9979,6 +10210,11 @@ fn con_check_insert(d: &mut DB, t: i32, rows: Vec<i32>, nrows: i32) -> String {
     let cs = vec_get(d.tbl_col_starts, t);
     let cc = vec_get(d.tbl_col_counts, t);
     if !d.con_map_ok { con_map_build(d); }
+    con_names_fill(d);
+    // One row: its keys are kept for the map. stale marks a key that was
+    // built before a later constraint numbered a NULL key cell.
+    let keys: Vec<String> = vec![];
+    let mut stale = false;
     let mut k = 0;
     while k < vec_len(d.con_tbl) {
         if vec_get(d.con_tbl, k) == t {
@@ -9987,7 +10223,7 @@ fn con_check_insert(d: &mut DB, t: i32, rows: Vec<i32>, nrows: i32) -> String {
             let c0 = vec_get(d.con_cols, st);
             if con_is_ipk(d, k) {
                 // INTEGER PRIMARY KEY: number NULLs after the largest key.
-                let mk = "M" + to_string_i32(k);
+                let mk = vec_get(d.con_mk, k);
                 let mut mx = 0.0;
                 if map_contains(d.con_map, mk) { mx = map_get(d.con_map, mk); }
                 let mut r = 0;
@@ -10001,6 +10237,7 @@ fn con_check_insert(d: &mut DB, t: i32, rows: Vec<i32>, nrows: i32) -> String {
                     let v = sp_get(d, vec_get(rows, r * cc + c0));
                     if is_null(v) {
                         mx = mx + 1.0;
+                        if vec_len(keys) > 0 { stale = true; }
                         rows[r * cc + c0] = sp_add(d, xv_int(mx));
                     }
                     r = r + 1;
@@ -10013,22 +10250,36 @@ fn con_check_insert(d: &mut DB, t: i32, rows: Vec<i32>, nrows: i32) -> String {
                     r = r + 1;
                 }
             } else {
-                let batch: HashMap<String, f64> = map_new();
-                let mut r = 0;
-                while r < nrows {
-                    let key = con_key(d, k, rows, r * cc);
+                if nrows == 1 {
+                    // One row cannot collide with itself: no batch map (P29).
+                    let key = con_key(d, k, rows, 0);
                     if key.len() > 0 {
-                        if map_contains(d.con_map, key) || map_contains(batch, key) { return con_fail_text(d, k, t); }
-                        map_insert(batch, key, 1.0);
+                        if map_contains(d.con_map, key) {
+                            keys.clear();
+                            return con_fail_text(d, k, t);
+                        }
                     }
-                    r = r + 1;
+                    vec_push(keys, key);
+                } else {
+                    let batch: HashMap<String, f64> = map_new();
+                    let mut r = 0;
+                    while r < nrows {
+                        let key = con_key(d, k, rows, r * cc);
+                        if key.len() > 0 {
+                            if map_contains(d.con_map, key) || map_contains(batch, key) { return con_fail_text(d, k, t); }
+                            map_insert(batch, key, 1.0);
+                        }
+                        r = r + 1;
+                    }
                 }
             }
         }
         k = k + 1;
     }
     // Every constraint holds: the rows go in, and so do their keys.
-    con_map_add(d, t, rows, 0, nrows, cc);
+    if nrows == 1 && !stale { con_map_add_keys(d, t, rows, keys); }
+    else { con_map_add(d, t, rows, 0, nrows, cc); }
+    keys.clear();
     ""
 }
 
@@ -10064,22 +10315,22 @@ fn exec_sql_no_wal(d: &mut DB, input: String) ~ Console + FileSystem + Process {
 
 // Position of a trailing "AS OF <digits>" (the space before AS), or -1.
 fn as_of_pos(s: String) -> i64 {
-    let digits = "0123456789";
+    let b = s.as_bytes();
     let n = s.len();
     let mut i = n;
-    while i > 0 && digits.index_of(s.char_at(i - 1)) >= 0 { i = i - 1; }
+    while i > 0 && b[i - 1] >= 48 && b[i - 1] <= 57 { i = i - 1; }
     if i == n { return 0 - 1; }
     let mut j = i;
-    while j > 0 && s.char_at(j - 1) == " " { j = j - 1; }
+    while j > 0 && b[j - 1] == 32 { j = j - 1; }
     if j == i || j < 2 { return 0 - 1; }
     if s.substring(j - 2, 2).to_uppercase() != "OF" { return 0 - 1; }
     j = j - 2;
     let k = j;
-    while j > 0 && s.char_at(j - 1) == " " { j = j - 1; }
+    while j > 0 && b[j - 1] == 32 { j = j - 1; }
     if j == k || j < 3 { return 0 - 1; }
     if s.substring(j - 2, 2).to_uppercase() != "AS" { return 0 - 1; }
     j = j - 2;
-    if s.char_at(j - 1) != " " { return 0 - 1; }
+    if b[j - 1] != 32 { return 0 - 1; }
     j - 1
 }
 
@@ -10238,7 +10489,11 @@ fn exec_sql(d: &mut DB, input: String) ~ Console + FileSystem + Process {
         return;
     }
     // Handle transaction control keywords before parsing
-    let trimmed_upper = input.to_uppercase();
+    // BEGIN, COMMIT and ROLLBACK are 5, 6 and 8 bytes; no other statement
+    // pays for an upper-case copy (P29).
+    let mut trimmed_upper = "";
+    let iln = input.len();
+    if iln == 5 || iln == 6 || iln == 8 { trimmed_upper = input.to_uppercase(); }
     if trimmed_upper == "BEGIN" {
         wal_begin(d);
         return;
