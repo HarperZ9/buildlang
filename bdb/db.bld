@@ -8207,13 +8207,51 @@ fn xq_run(d: &mut DB, q: i32, outer: Vec<i32>, onf: i32, want: i32) -> Vec<i32> 
     if wh >= 0 {
         x_collect_conj(d, wh, conj);
         nc = vec_len(conj);
-        let mut ci = 0;
-        while ci < nc { vec_push(cdepth, x_depth(d, vec_get(conj, ci), fs, nf, onf)); ci = ci + 1; }
     }
-    // Odometer over the FROM tables; level is the table being advanced.
-    let mut rows_of: Vec<i32> = vec![];
+    // The FROM tables each conjunct names (P12): crefs[cs[ci] .. + cn[ci]],
+    // positions among this query's tables; -2 stands for all of them.
+    let mut crefs: Vec<i32> = vec![];
+    let mut cs: Vec<i32> = vec![];
+    let mut cn: Vec<i32> = vec![];
+    let mut ci0 = 0;
+    while ci0 < nc {
+        let st = vec_len(crefs);
+        x_refs(d, vec_get(conj, ci0), fs, nf, onf, crefs);
+        vec_push(cs, st);
+        vec_push(cn, vec_len(crefs) - st);
+        ci0 = ci0 + 1;
+    }
+    let perm = x_join_order(d, conj, nc, crefs, cs, cn, nloc);
+    let mut pos_of: Vec<i32> = vec![];
     i = 0;
-    while i < nloc { vec_push(rows_of, vec_get(d.tbl_row_counts, vec_get(d.qf_tbl, fs0 + i))); i = i + 1; }
+    while i < nloc { vec_push(pos_of, 0); i = i + 1; }
+    i = 0;
+    while i < nloc { pos_of[vec_get(perm, i)] = i; i = i + 1; }
+    // A conjunct is checked at the step that binds the last table it names.
+    ci0 = 0;
+    while ci0 < nc {
+        let mut dmax = -1;
+        let mut j = 0;
+        while j < vec_get(cn, ci0) {
+            let r = vec_get(crefs, vec_get(cs, ci0) + j);
+            let p = if r == -2 { nloc - 1 } else { vec_get(pos_of, r) };
+            if p > dmax { dmax = p; }
+            j = j + 1;
+        }
+        vec_push(cdepth, dmax);
+        ci0 = ci0 + 1;
+    }
+    // Odometer over the FROM tables in join order; level is the step being
+    // advanced, slot the table's place in the frames.
+    let mut rows_of: Vec<i32> = vec![];
+    let mut slot_of: Vec<i32> = vec![];
+    i = 0;
+    while i < nloc {
+        let t = vec_get(perm, i);
+        vec_push(rows_of, vec_get(d.tbl_row_counts, vec_get(d.qf_tbl, fs0 + t)));
+        vec_push(slot_of, onf + t);
+        i = i + 1;
+    }
     let mut level = 0;
     let mut done = false;
     if nloc == 0 {
@@ -8227,12 +8265,13 @@ fn xq_run(d: &mut DB, q: i32, outer: Vec<i32>, onf: i32, want: i32) -> Vec<i32> 
             full = true;
             done = true;
         } else {
-            let cur = vec_get(fs, (onf + level) * 3 + 2) + 1;
+            let slot = vec_get(slot_of, level);
+            let cur = vec_get(fs, slot * 3 + 2) + 1;
             if cur >= vec_get(rows_of, level) {
-                fs[(onf + level) * 3 + 2] = -1;
+                fs[slot * 3 + 2] = -1;
                 if level == 0 { done = true; } else { level = level - 1; }
             } else {
-                fs[(onf + level) * 3 + 2] = cur;
+                fs[slot * 3 + 2] = cur;
                 // Conjuncts whose deepest table is this one.
                 let mut ok = true;
                 let mut ci = 0;
@@ -8345,32 +8384,79 @@ fn x_collect_conj(d: &DB, e: i32, conj: Vec<i32>) {
     vec_push(conj, e);
 }
 
-// Deepest FROM position of this query (0-based among its own tables) that
-// expression e names, -1 when it names none of them. A subquery counts as
-// naming the deepest table, so it runs once every table is bound.
-fn x_depth(d: &DB, e: i32, fs: Vec<i32>, nf: i32, onf: i32) -> i32 {
-    if e < 0 { return -1; }
+// Push the positions (among this query's FROM tables) of the tables that
+// expression e names; -2 for a subquery, which may name any of them.
+fn x_refs(d: &DB, e: i32, fs: Vec<i32>, nf: i32, onf: i32, out: Vec<i32>) {
+    if e < 0 { return; }
     let k = vec_get(d.x_kind, e);
     if k == 1 {
         let r = x_resolve(d, sp_get(d, vec_get(d.x_s, e)), fs, nf);
         let f = vec_get(r, 0);
-        if f >= onf { return f - onf; }
-        return -1;
+        if f >= onf { vec_push(out, f - onf); }
+        return;
     }
-    if k == 14 || k == 15 || k == 16 { return nf - onf - 1; }
-    let mut m = x_depth(d, vec_get(d.x_a, e), fs, nf, onf);
-    if k != 8 && k != 16 {
-        let b = x_depth(d, vec_get(d.x_b, e), fs, nf, onf);
-        if b > m { m = b; }
-    }
+    if k == 14 || k == 15 || k == 16 { vec_push(out, -2); }
+    if k == 14 || k == 15 { return; }
+    x_refs(d, vec_get(d.x_a, e), fs, nf, onf, out);
+    if k != 8 && k != 16 { x_refs(d, vec_get(d.x_b, e), fs, nf, onf, out); }
     let n = vec_get(d.x_an, e);
     let mut i = 0;
-    while i < n {
-        let a = x_depth(d, x_arg(d, e, i), fs, nf, onf);
-        if a > m { m = a; }
-        i = i + 1;
+    while i < n { x_refs(d, x_arg(d, e, i), fs, nf, onf, out); i = i + 1; }
+}
+
+// Greedy join order (P12): each step takes the unplaced table with the best
+// score, the lowest FROM position on a tie. 4: an equality conjunct links it
+// to a placed table; 2: a conjunct names it alone; 1: another conjunct links
+// it to a placed table; 0: none. A conjunct naming a subquery links nothing.
+fn x_join_order(d: &DB, conj: Vec<i32>, nc: i32, crefs: Vec<i32>, cs: Vec<i32>, cn: Vec<i32>, nloc: i32) -> Vec<i32> {
+    let mut placed: Vec<i32> = vec![];
+    let mut i = 0;
+    while i < nloc { vec_push(placed, 0); i = i + 1; }
+    let mut perm: Vec<i32> = vec![];
+    let mut step = 0;
+    while step < nloc {
+        let mut best = -1;
+        let mut best_score = -1;
+        let mut t = 0;
+        while t < nloc {
+            if vec_get(placed, t) == 0 {
+                let mut score = 0;
+                let mut ci = 0;
+                while ci < nc {
+                    let n = vec_get(cn, ci);
+                    let st = vec_get(cs, ci);
+                    let mut names_t = false;
+                    let mut others_placed = true;
+                    let mut has_other = false;
+                    let mut sub = false;
+                    let mut j = 0;
+                    while j < n {
+                        let r = vec_get(crefs, st + j);
+                        if r == -2 { sub = true; }
+                        else if r == t { names_t = true; }
+                        else {
+                            has_other = true;
+                            if vec_get(placed, r) == 0 { others_placed = false; }
+                        }
+                        j = j + 1;
+                    }
+                    if names_t && !sub && others_placed {
+                        let c = vec_get(conj, ci);
+                        let eq = vec_get(d.x_kind, c) == 4 && vec_get(d.x_c, c) == 0;
+                        let sc = if has_other { if eq { 4 } else { 1 } } else { 2 };
+                        if sc > score { score = sc; }
+                    }
+                    ci = ci + 1;
+                }
+                if score > best_score { best_score = score; best = t; }
+            }
+            t = t + 1;
+        }
+        placed[best] = 1;
+        vec_push(perm, best);
+        step = step + 1;
     }
-    m
+    perm
 }
 
 // Evaluate the select list (and the ORDER BY keys) for the bound tuple.
