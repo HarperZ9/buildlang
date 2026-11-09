@@ -22,6 +22,7 @@ tracked in `STATUS.md`, `README.md`, and
 - BuildDB: AVG divides by the count as a float (an unannotated integer divisor was lowered as an integer division, so AVG printed truncated values), and SUM, AVG, MIN and MAX print shortest round-trip digits instead of two decimals. The SQLite differential agrees on 2,000 of 2,000 queries and is now a CI gate (`bdb/COMPLETE.md` P8).
 - BuildDB: a column type may carry arguments (`VARCHAR(30)`), and a comparison may put the literal first (`272 = e3`). sqllogictest 33 to 199 of 9,202 query records, statements 134 to 1,918 of 1,993 (`bdb/COMPLETE.md` P9).
 - BuildDB: INTERSECT and EXCEPT, applied left to right with UNION and UNION ALL; compound rows no longer collide when a cell holds `|`. sqllogictest 199 to 1,084 of 9,202 query records (`bdb/COMPLETE.md` P10).
+- BuildDB: expressions in the select list, WHERE and ORDER BY (arithmetic with SQLite's integer rules, CASE, `abs`, `coalesce`, correlated scalar, EXISTS and IN subqueries, comma-separated FROM lists), on a second SELECT path chosen by a token scan; `WHERE c > d` no longer compares c with the text 'd'. sqllogictest 1,084 to 8,186 of 9,202 query records with `select5.test` not yet run (`bdb/COMPLETE.md` P11).
 
 ## Unreleased: unannotated integer `let` takes the checked type (#159)
 

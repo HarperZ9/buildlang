@@ -335,6 +335,35 @@ struct DB {
     union_ncol: i32,
     union_rows: i32,
     union_started: i32,
+    // Expression queries (SECTION 6h): expression nodes, query records.
+    x_kind: Vec<i32>,
+    x_a: Vec<i32>,
+    x_b: Vec<i32>,
+    x_c: Vec<i32>,
+    x_s: Vec<i32>,
+    x_as: Vec<i32>,
+    x_an: Vec<i32>,
+    x_args: Vec<i32>,
+    qf_tbl: Vec<i32>,
+    qf_alias: Vec<i32>,
+    qs_expr: Vec<i32>,
+    qs_name: Vec<i32>,
+    qo_expr: Vec<i32>,
+    qo_desc: Vec<i32>,
+    q_fs: Vec<i32>,
+    q_fn: Vec<i32>,
+    q_ss: Vec<i32>,
+    q_sn: Vec<i32>,
+    q_where: Vec<i32>,
+    q_os: Vec<i32>,
+    q_on: Vec<i32>,
+    q_limit: Vec<i32>,
+    q_offset: Vec<i32>,
+    q_distinct: Vec<i32>,
+    xn: i32,
+    xq_n: i32,
+    xq_root: i32,
+    x_ncol: i32,
 }
 
 // Initialize a new empty DB. All parallel arrays start empty; pn (pool next
@@ -399,6 +428,8 @@ fn db_new(db_path: String) -> DB {
         snap_idx_keys: vec![], snap_idx_rowids: vec![], snap_idx_key_starts: vec![], snap_idx_key_counts: vec![],
         union_vals: vec![], union_headers: vec![], union_coltypes: vec![],
         union_ncol: -1, union_rows: 0, union_started: 0,
+        x_kind: vec![], x_a: vec![], x_b: vec![], x_c: vec![], x_s: vec![], x_as: vec![], x_an: vec![], x_args: vec![], qf_tbl: vec![], qf_alias: vec![], qs_expr: vec![], qs_name: vec![], qo_expr: vec![], qo_desc: vec![], q_fs: vec![], q_fn: vec![], q_ss: vec![], q_sn: vec![], q_where: vec![], q_os: vec![], q_on: vec![], q_limit: vec![], q_offset: vec![], q_distinct: vec![],
+        xn: 0, xq_n: 0, xq_root: -1, x_ncol: 0,
     }
 }
 
@@ -1666,11 +1697,42 @@ fn reset_parser(d: &mut DB, input: String) {
     d.union_ncol = -1;
     d.union_rows = 0;
     d.union_started = 0;
+    d.x_kind = vec![];
+    d.x_a = vec![];
+    d.x_b = vec![];
+    d.x_c = vec![];
+    d.x_s = vec![];
+    d.x_as = vec![];
+    d.x_an = vec![];
+    d.x_args = vec![];
+    d.qf_tbl = vec![];
+    d.qf_alias = vec![];
+    d.qs_expr = vec![];
+    d.qs_name = vec![];
+    d.qo_expr = vec![];
+    d.qo_desc = vec![];
+    d.q_fs = vec![];
+    d.q_fn = vec![];
+    d.q_ss = vec![];
+    d.q_sn = vec![];
+    d.q_where = vec![];
+    d.q_os = vec![];
+    d.q_on = vec![];
+    d.q_limit = vec![];
+    d.q_offset = vec![];
+    d.q_distinct = vec![];
+    d.xn = 0;
+    d.xq_n = 0;
+    d.xq_root = -1;
 }
 
 fn parse_sql(d: &mut DB) ~ Console + Process {
     next_token(d);
-    if tk_is_kw(d, "SELECT") == 1 { parse_select(d); return; }
+    if tk_is_kw(d, "SELECT") == 1 {
+        if x_wanted(d) { parse_xselect(d); return; }
+        parse_select(d);
+        return;
+    }
     if tk_is_kw(d, "INSERT") == 1 { parse_insert(d); return; }
     if tk_is_kw(d, "CREATE") == 1 {
         // Peek: CREATE TABLE or CREATE INDEX?
@@ -7160,11 +7222,1355 @@ fn exec_create_index(d: &mut DB) ~ Console {
 // =========================================================================
 
 // exec_sql_no_wal: used during WAL replay — executes + saves directly, no WAL logging
+// =========================================================================
+// SECTION 6h: EXPRESSION QUERIES (P11, P12)
+// =========================================================================
+// A SELECT whose select list, WHERE or ORDER BY holds an expression the
+// condition parser above cannot read (arithmetic, a column compared with a
+// column, CASE, a function, a correlated subquery, EXISTS) or whose FROM
+// lists several tables is parsed here into an expression tree and run by
+// xq_run. x_wanted decides which path a SELECT takes, before either parses,
+// so a query the older path answers keeps its answer.
+//
+// Values are cell texts, NULL the reserved nullv(). Arithmetic follows
+// SQLite: two integers give an integer (division truncates toward zero, by
+// zero is NULL), anything else a real, printed with a decimal point.
+//
+// Expression kinds (x_kind): 0 literal (x_s), 1 column (x_s), 2 arithmetic
+// (x_c: 0 + 1 - 2 * 3 / 4 %), 3 unary minus, 4 comparison (x_c as
+// op_encode), 5 AND, 6 OR, 7 NOT, 8 IS [NOT] NULL (x_c 1 = NOT), 9 BETWEEN
+// (args lo, hi; x_c 1 = NOT), 10 IN list (args; x_c 1 = NOT), 11 searched
+// CASE (args cond, res, ...; x_b ELSE or -1), 12 simple CASE (x_a base),
+// 13 function (x_s name, args), 14 scalar subquery (x_c query), 15 EXISTS
+// (x_c query), 16 IN subquery (x_c query, x_b 1 = NOT), 17 LIKE (x_c 1 =
+// NOT), 18 aggregate (x_s name, x_a argument or -1 for *, x_c DISTINCT).
+// =========================================================================
+
+fn xp_new(d: &mut DB, kind: i32, a: i32, b: i32, c: i32, s: i32) -> i32 {
+    vec_push(d.x_kind, kind);
+    vec_push(d.x_a, a);
+    vec_push(d.x_b, b);
+    vec_push(d.x_c, c);
+    vec_push(d.x_s, s);
+    vec_push(d.x_as, vec_len(d.x_args));
+    vec_push(d.x_an, 0);
+    d.xn = d.xn + 1;
+    d.xn - 1
+}
+
+fn xp_new_args(d: &mut DB, kind: i32, a: i32, b: i32, c: i32, s: i32, args: Vec<i32>, n: i32) -> i32 {
+    let start = vec_len(d.x_args);
+    let mut i = 0;
+    while i < n { vec_push(d.x_args, vec_get(args, i)); i = i + 1; }
+    vec_push(d.x_kind, kind);
+    vec_push(d.x_a, a);
+    vec_push(d.x_b, b);
+    vec_push(d.x_c, c);
+    vec_push(d.x_s, s);
+    vec_push(d.x_as, start);
+    vec_push(d.x_an, n);
+    d.xn = d.xn + 1;
+    d.xn - 1
+}
+
+fn x_arg(d: &DB, e: i32, i: i32) -> i32 { vec_get(d.x_args, vec_get(d.x_as, e) + i) }
+
+// The current token as an upper-case word, or "" when it is not a word.
+fn tk_word(d: &DB) -> String {
+    if d.tk_type == 0 || d.tk_type == 1 { return d.tk_val.to_uppercase(); }
+    ""
+}
+
+fn is_agg_name(w: String) -> bool {
+    w == "COUNT" || w == "SUM" || w == "AVG" || w == "MIN" || w == "MAX" || w == "TOTAL"
+}
+
+// Words that end an expression or a select item; never an alias.
+fn x_reserved(w: String) -> bool {
+    w == "FROM" || w == "WHERE" || w == "ORDER" || w == "LIMIT" || w == "OFFSET" || w == "AND" ||
+    w == "OR" || w == "NOT" || w == "WHEN" || w == "THEN" || w == "ELSE" || w == "END" ||
+    w == "AS" || w == "ASC" || w == "DESC" || w == "IS" || w == "IN" || w == "BETWEEN" ||
+    w == "LIKE" || w == "GROUP" || w == "HAVING" || w == "UNION" || w == "INTERSECT" ||
+    w == "EXCEPT" || w == "JOIN" || w == "ON" || w == "BY"
+}
+
+fn x_expect(d: &mut DB, p: String) ~ Console + Process {
+    if tk_is_punct(d, p) == 0 {
+        println!("Error: expected '{}', got '{}'", p, d.tk_val);
+        process_exit(1);
+    }
+    next_token(d);
+}
+
+fn x_expect_word(d: &mut DB, w: String) ~ Console + Process {
+    if tk_word(d) != w {
+        println!("Error: expected '{}', got '{}'", w, d.tk_val);
+        process_exit(1);
+    }
+    next_token(d);
+}
+
+fn xp_expr(d: &mut DB) -> i32 ~ Console + Process { xp_or(d) }
+
+fn xp_or(d: &mut DB) -> i32 ~ Console + Process {
+    let mut l = xp_and(d);
+    while tk_word(d) == "OR" {
+        next_token(d);
+        let r = xp_and(d);
+        l = xp_new(d, 6, l, r, 0, -1);
+    }
+    l
+}
+
+fn xp_and(d: &mut DB) -> i32 ~ Console + Process {
+    let mut l = xp_not(d);
+    while tk_word(d) == "AND" {
+        next_token(d);
+        let r = xp_not(d);
+        l = xp_new(d, 5, l, r, 0, -1);
+    }
+    l
+}
+
+fn xp_not(d: &mut DB) -> i32 ~ Console + Process {
+    if tk_word(d) == "NOT" {
+        next_token(d);
+        let a = xp_not(d);
+        return xp_new(d, 7, a, -1, 0, -1);
+    }
+    xp_pred(d)
+}
+
+fn xp_pred(d: &mut DB) -> i32 ~ Console + Process {
+    let l = xp_add(d);
+    if d.tk_type == 4 {
+        let mut op = op_encode(d.tk_val);
+        if d.tk_val == "==" { op = 0; }
+        if op >= 0 {
+            next_token(d);
+            let r = xp_add(d);
+            return xp_new(d, 4, l, r, op, -1);
+        }
+    }
+    if tk_word(d) == "IS" {
+        next_token(d);
+        let mut neg = 0;
+        if tk_word(d) == "NOT" { neg = 1; next_token(d); }
+        x_expect_word(d, "NULL");
+        return xp_new(d, 8, l, -1, neg, -1);
+    }
+    let mut neg = 0;
+    if tk_word(d) == "NOT" { neg = 1; next_token(d); }
+    let w = tk_word(d);
+    if w == "BETWEEN" {
+        next_token(d);
+        let lo = xp_add(d);
+        x_expect_word(d, "AND");
+        let hi = xp_add(d);
+        let mut args: Vec<i32> = vec![];
+        vec_push(args, lo);
+        vec_push(args, hi);
+        return xp_new_args(d, 9, l, -1, neg, -1, args, 2);
+    }
+    if w == "IN" {
+        next_token(d);
+        x_expect(d, "(");
+        if tk_word(d) == "SELECT" {
+            let q = xp_query(d);
+            x_expect(d, ")");
+            return xp_new(d, 16, l, neg, q, -1);
+        }
+        let mut args: Vec<i32> = vec![];
+        let mut n = 0;
+        if tk_is_punct(d, ")") == 0 {
+            let mut go = true;
+            while go {
+                let a = xp_expr(d);
+                vec_push(args, a);
+                n = n + 1;
+                if tk_is_punct(d, ",") == 1 { next_token(d); } else { go = false; }
+            }
+        }
+        x_expect(d, ")");
+        return xp_new_args(d, 10, l, -1, neg, -1, args, n);
+    }
+    if w == "LIKE" {
+        next_token(d);
+        let r = xp_add(d);
+        return xp_new(d, 17, l, r, neg, -1);
+    }
+    if neg == 1 {
+        println!("Error: expected BETWEEN, IN or LIKE after NOT, got '{}'", d.tk_val);
+        process_exit(1);
+    }
+    l
+}
+
+fn xp_add(d: &mut DB) -> i32 ~ Console + Process {
+    let mut l = xp_mul(d);
+    let mut go = true;
+    while go {
+        if d.tk_type == 4 && (d.tk_val == "+" || d.tk_val == "-") {
+            let op = if d.tk_val == "+" { 0 } else { 1 };
+            next_token(d);
+            let r = xp_mul(d);
+            l = xp_new(d, 2, l, r, op, -1);
+        } else if d.tk_type == 3 && d.tk_val.starts_with("-") {
+            // `b-3` lexes as `b` and the number `-3`: a binary minus.
+            let digits = d.tk_val.substring(1, d.tk_val.len() - 1);
+            let lit = xp_new(d, 0, -1, -1, 0, sp_add(d, digits));
+            next_token(d);
+            let r = xp_mul_tail(d, lit);
+            l = xp_new(d, 2, l, r, 1, -1);
+        } else {
+            go = false;
+        }
+    }
+    l
+}
+
+fn xp_mul(d: &mut DB) -> i32 ~ Console + Process {
+    let l = xp_unary(d);
+    xp_mul_tail(d, l)
+}
+
+fn xp_mul_tail(d: &mut DB, left: i32) -> i32 ~ Console + Process {
+    let mut l = left;
+    let mut go = true;
+    while go {
+        let mut op = -1;
+        if d.tk_type == 6 { op = 2; }
+        if d.tk_type == 4 && d.tk_val == "/" { op = 3; }
+        if d.tk_type == 1 && d.tk_val == "%" { op = 4; }
+        if op >= 0 {
+            next_token(d);
+            let r = xp_unary(d);
+            l = xp_new(d, 2, l, r, op, -1);
+        } else {
+            go = false;
+        }
+    }
+    l
+}
+
+fn xp_unary(d: &mut DB) -> i32 ~ Console + Process {
+    if d.tk_type == 4 && d.tk_val == "-" {
+        next_token(d);
+        let a = xp_unary(d);
+        return xp_new(d, 3, a, -1, 0, -1);
+    }
+    if d.tk_type == 4 && d.tk_val == "+" {
+        next_token(d);
+        return xp_unary(d);
+    }
+    xp_primary(d)
+}
+
+fn xp_primary(d: &mut DB) -> i32 ~ Console + Process {
+    if d.tk_type == 3 || d.tk_type == 2 {
+        let v = tok_value(d);
+        next_token(d);
+        return xp_new(d, 0, -1, -1, 0, sp_add(d, v));
+    }
+    let w = tk_word(d);
+    if w == "NULL" {
+        next_token(d);
+        return xp_new(d, 0, -1, -1, 0, sp_add(d, nullv()));
+    }
+    if tk_is_punct(d, "(") == 1 {
+        next_token(d);
+        if tk_word(d) == "SELECT" {
+            let q = xp_query(d);
+            x_expect(d, ")");
+            return xp_new(d, 14, -1, -1, q, -1);
+        }
+        let e = xp_expr(d);
+        x_expect(d, ")");
+        return e;
+    }
+    if w == "CASE" {
+        next_token(d);
+        let mut base = -1;
+        if tk_word(d) != "WHEN" { base = xp_expr(d); }
+        let mut args: Vec<i32> = vec![];
+        let mut n = 0;
+        while tk_word(d) == "WHEN" {
+            next_token(d);
+            let c = xp_expr(d);
+            x_expect_word(d, "THEN");
+            let r = xp_expr(d);
+            vec_push(args, c);
+            vec_push(args, r);
+            n = n + 2;
+        }
+        if n == 0 {
+            println!("Error: CASE needs at least one WHEN");
+            process_exit(1);
+        }
+        let mut els = -1;
+        if tk_word(d) == "ELSE" { next_token(d); els = xp_expr(d); }
+        x_expect_word(d, "END");
+        if base >= 0 { return xp_new_args(d, 12, base, els, 0, -1, args, n); }
+        return xp_new_args(d, 11, -1, els, 0, -1, args, n);
+    }
+    if w == "EXISTS" {
+        next_token(d);
+        x_expect(d, "(");
+        let q = xp_query(d);
+        x_expect(d, ")");
+        return xp_new(d, 15, -1, -1, q, -1);
+    }
+    if d.tk_type == 0 || d.tk_type == 1 {
+        let name = d.tk_val;
+        let save_pos = d.pos;
+        let save_type = d.tk_type;
+        next_token(d);
+        if tk_is_punct(d, "(") == 1 {
+            next_token(d);
+            let fname = name.to_uppercase();
+            if is_agg_name(fname) {
+                let mut dist = 0;
+                if tk_word(d) == "DISTINCT" { dist = 1; next_token(d); }
+                let mut arg = -1;
+                if d.tk_type == 6 { next_token(d); }
+                else { arg = xp_expr(d); }
+                x_expect(d, ")");
+                return xp_new(d, 18, arg, -1, dist, sp_add(d, fname));
+            }
+            let mut args: Vec<i32> = vec![];
+            let mut n = 0;
+            if tk_is_punct(d, ")") == 0 {
+                let mut go = true;
+                while go {
+                    let a = xp_expr(d);
+                    vec_push(args, a);
+                    n = n + 1;
+                    if tk_is_punct(d, ",") == 1 { next_token(d); } else { go = false; }
+                }
+            }
+            x_expect(d, ")");
+            return xp_new_args(d, 13, -1, -1, 0, sp_add(d, fname), args, n);
+        }
+        if save_type == 0 && x_reserved(name) {
+            println!("Error: expected an expression, got '{}'", name);
+            process_exit(1);
+        }
+        if tk_is_punct(d, ".") == 1 {
+            next_token(d);
+            let col = d.tk_val;
+            next_token(d);
+            return xp_new(d, 1, -1, -1, 0, sp_add(d, name + "." + col));
+        }
+        return xp_new(d, 1, -1, -1, 0, sp_add(d, name));
+    }
+    println!("Error: expected an expression, got '{}'", d.tk_val);
+    process_exit(1);
+    -1
+}
+
+// Parse one SELECT (the current token is SELECT) into a query record and
+// return its id. Subqueries parse their own records first.
+fn xp_query(d: &mut DB) -> i32 ~ Console + Process {
+    x_expect_word(d, "SELECT");
+    let mut distinct = 0;
+    if tk_word(d) == "DISTINCT" { distinct = 1; next_token(d); }
+    else if tk_word(d) == "ALL" { next_token(d); }
+    let mut sel: Vec<i32> = vec![];
+    let mut names: Vec<i32> = vec![];
+    let mut ns = 0;
+    let mut go = true;
+    while go {
+        if d.tk_type == 6 {
+            next_token(d);
+            vec_push(sel, -1);
+            vec_push(names, -1);
+        } else {
+            let e = xp_expr(d);
+            let mut nm = -1;
+            if vec_get(d.x_kind, e) == 1 { nm = vec_get(d.x_s, e); }
+            if tk_word(d) == "AS" {
+                next_token(d);
+                nm = sp_add(d, d.tk_val);
+                next_token(d);
+            } else if d.tk_type == 1 && !x_reserved(tk_word(d)) {
+                nm = sp_add(d, d.tk_val);
+                next_token(d);
+            }
+            vec_push(sel, e);
+            vec_push(names, nm);
+        }
+        ns = ns + 1;
+        if tk_is_punct(d, ",") == 1 { next_token(d); } else { go = false; }
+    }
+    let mut ftab: Vec<i32> = vec![];
+    let mut falias: Vec<i32> = vec![];
+    let mut nf = 0;
+    if tk_word(d) == "FROM" {
+        next_token(d);
+        let mut fgo = true;
+        while fgo {
+            let tname = d.tk_val;
+            let ti = find_table(d, tname);
+            if ti < 0 {
+                println!("Error: table '{}' not found", tname);
+                process_exit(1);
+            }
+            next_token(d);
+            let mut al = -1;
+            if tk_word(d) == "AS" {
+                next_token(d);
+                al = sp_add(d, d.tk_val);
+                next_token(d);
+            } else if d.tk_type == 1 && !x_reserved(tk_word(d)) {
+                al = sp_add(d, d.tk_val);
+                next_token(d);
+            }
+            vec_push(ftab, ti);
+            vec_push(falias, al);
+            nf = nf + 1;
+            if tk_is_punct(d, ",") == 1 { next_token(d); } else { fgo = false; }
+        }
+    }
+    let mut wh = -1;
+    if tk_word(d) == "WHERE" { next_token(d); wh = xp_expr(d); }
+    let mut oexp: Vec<i32> = vec![];
+    let mut odesc: Vec<i32> = vec![];
+    let mut no = 0;
+    if tk_word(d) == "ORDER" {
+        next_token(d);
+        x_expect_word(d, "BY");
+        let mut ogo = true;
+        while ogo {
+            let e = xp_expr(d);
+            let mut ds = 0;
+            if tk_word(d) == "DESC" { ds = 1; next_token(d); }
+            else if tk_word(d) == "ASC" { next_token(d); }
+            vec_push(oexp, e);
+            vec_push(odesc, ds);
+            no = no + 1;
+            if tk_is_punct(d, ",") == 1 { next_token(d); } else { ogo = false; }
+        }
+    }
+    let mut lim = -1;
+    let mut off = 0;
+    if tk_word(d) == "LIMIT" {
+        next_token(d);
+        lim = parse_int_str(d.tk_val);
+        next_token(d);
+        if tk_word(d) == "OFFSET" {
+            next_token(d);
+            off = parse_int_str(d.tk_val);
+            next_token(d);
+        }
+    }
+    // Push the record: lists first, then the per-query fields.
+    let fs = vec_len(d.qf_tbl);
+    let mut i = 0;
+    while i < nf { vec_push(d.qf_tbl, vec_get(ftab, i)); vec_push(d.qf_alias, vec_get(falias, i)); i = i + 1; }
+    let ss = vec_len(d.qs_expr);
+    i = 0;
+    while i < ns { vec_push(d.qs_expr, vec_get(sel, i)); vec_push(d.qs_name, vec_get(names, i)); i = i + 1; }
+    let os = vec_len(d.qo_expr);
+    i = 0;
+    while i < no { vec_push(d.qo_expr, vec_get(oexp, i)); vec_push(d.qo_desc, vec_get(odesc, i)); i = i + 1; }
+    vec_push(d.q_fs, fs);
+    vec_push(d.q_fn, nf);
+    vec_push(d.q_ss, ss);
+    vec_push(d.q_sn, ns);
+    vec_push(d.q_where, wh);
+    vec_push(d.q_os, os);
+    vec_push(d.q_on, no);
+    vec_push(d.q_limit, lim);
+    vec_push(d.q_offset, off);
+    vec_push(d.q_distinct, distinct);
+    d.xq_n = d.xq_n + 1;
+    d.xq_n - 1
+}
+
+fn parse_xselect(d: &mut DB) ~ Console + Process {
+    d.stmt_type = 20;
+    d.xq_root = xp_query(d);
+    if tk_is_punct(d, ";") == 1 { next_token(d); }
+    if d.tk_type != 7 {
+        println!("Error: unexpected trailing input near '{}'", d.tk_val);
+        process_exit(1);
+    }
+}
+
+// Which path a SELECT takes: the expression path when the statement uses a
+// form only it reads and nothing only the older path reads (GROUP BY,
+// HAVING, JOIN, a compound operator, at the top level). Scans the tokens and
+// puts the tokenizer back at the start.
+fn x_wanted(d: &mut DB) -> bool {
+    d.pos = 0;
+    next_token(d);
+    if tk_word(d) != "SELECT" { x_rewind(d); return false; }
+    let mut feature = false;
+    let mut legacy = false;
+    let mut depth = 0;
+    let mut section = 0;     // 0 select list, 1 FROM, 2 WHERE, 3 ORDER BY, 4 after
+    let mut order_commas = 0;
+    let mut prev_type = 3;   // previous token: 1 operand, 2 comparison, 3 other
+    let mut prev_word = "SELECT";
+    let mut prev_ident = false;
+    let mut prev_comma = false;
+    next_token(d);
+    while d.tk_type != 7 && !legacy {
+        let w = tk_word(d);
+        if depth == 0 {
+            if w == "GROUP" || w == "HAVING" || w == "JOIN" || w == "UNION" || w == "INTERSECT" ||
+               w == "EXCEPT" || w == "LEFT" || w == "INNER" || w == "CROSS" {
+                legacy = true;
+            }
+            if w == "FROM" { section = 1; }
+            if w == "WHERE" { section = 2; }
+            if w == "ORDER" { section = 3; }
+            if w == "LIMIT" { section = 4; }
+            if section == 1 && tk_is_punct(d, ",") == 1 { feature = true; }
+            if section == 3 && tk_is_punct(d, ",") == 1 { order_commas = order_commas + 1; }
+        }
+        if w == "CASE" || w == "EXISTS" { feature = true; }
+        if d.tk_type == 4 && (d.tk_val == "+" || d.tk_val == "/" || d.tk_val == "-") { feature = true; }
+        if d.tk_type == 1 && d.tk_val == "%" { feature = true; }
+        if d.tk_type == 3 && d.tk_val.starts_with("-") && prev_type == 1 { feature = true; }
+        if d.tk_type == 6 && prev_type == 1 { feature = true; }
+        if tk_is_punct(d, "(") == 1 {
+            // SELECT (expr, a function call, or `, (expr` in the select list;
+            // an aggregate, IN ( and a grouping parenthesis are the older path's.
+            if prev_word == "SELECT" { feature = true; }
+            if prev_ident && !is_agg_name(prev_word) && !x_reserved(prev_word) { feature = true; }
+            if prev_comma && section == 0 { feature = true; }
+            depth = depth + 1;
+        }
+        if tk_is_punct(d, ")") == 1 { depth = depth - 1; }
+        // A comparison whose right side is a column, an expression or a
+        // parenthesis: the condition parser reads only a literal there.
+        if prev_type == 2 && (d.tk_type == 1 || tk_is_punct(d, "(") == 1) && !x_reserved(w) && w != "NULL" {
+            if w != "SELECT" { feature = true; }
+        }
+        let is_operand = d.tk_type == 1 || d.tk_type == 2 || d.tk_type == 3 || tk_is_punct(d, ")") == 1;
+        let is_cmp = d.tk_type == 4 && op_encode(d.tk_val) >= 0;
+        if is_operand && !(d.tk_type == 1 && x_reserved(w)) { prev_type = 1; }
+        else if is_cmp { prev_type = 2; }
+        else { prev_type = 3; }
+        prev_word = w;
+        prev_ident = d.tk_type == 1;
+        prev_comma = tk_is_punct(d, ",") == 1;
+        next_token(d);
+    }
+    if order_commas >= 2 { feature = true; }
+    x_rewind(d);
+    feature && !legacy
+}
+
+// Put the tokenizer back on the first token of the statement.
+fn x_rewind(d: &mut DB) {
+    d.pos = 0;
+    d.tk_type = 7;
+    d.tk_val = "";
+    next_token(d);
+}
+
+// ---- values ----
+
+fn xv_isnum(s: String) -> bool { is_numeric_str(s) }
+
+fn xv_num(s: String) -> f64 { if is_numeric_str(s) { s.parse_float() } else { 0.0 } }
+
+fn x_trunc(f: f64) -> f64 { if f < 0.0 { 0.0 - floor(0.0 - f) } else { floor(f) } }
+
+fn xv_int(f: f64) -> String {
+    let t = x_trunc(f);
+    if t == 0.0 { return "0"; }
+    to_string_f64(t)
+}
+
+fn xv_real(f: f64) -> String {
+    if f == 0.0 { return "0.0"; }
+    let s = to_string_f64(f);
+    if s.index_of(".") < 0 && s.index_of("e") < 0 && s.index_of("n") < 0 { return s + ".0"; }
+    s
+}
+
+// An integer value: a signed decimal integer, or non-numeric text (SQLite
+// reads text with no number in it as 0).
+fn xv_is_intlike(s: String) -> bool { is_int_str(s) || !is_numeric_str(s) }
+
+fn xv_arith(a: String, b: String, op: i32) -> String {
+    if is_null(a) || is_null(b) { return nullv(); }
+    let x = xv_num(a);
+    let y = xv_num(b);
+    if xv_is_intlike(a) && xv_is_intlike(b) {
+        if op == 0 { return xv_int(x + y); }
+        if op == 1 { return xv_int(x - y); }
+        if op == 2 { return xv_int(x * y); }
+        if y == 0.0 { return nullv(); }
+        if op == 3 { return xv_int(x_trunc(x / y)); }
+        return xv_int(x - x_trunc(x / y) * y);
+    }
+    if op == 0 { return xv_real(x + y); }
+    if op == 1 { return xv_real(x - y); }
+    if op == 2 { return xv_real(x * y); }
+    if y == 0.0 { return nullv(); }
+    if op == 3 { return xv_real(x / y); }
+    xv_real(x - x_trunc(x / y) * y)
+}
+
+// Order two non-NULL values: numbers before text, numbers by value.
+fn xv_cmp_nn(a: String, b: String) -> i64 {
+    let an = is_numeric_str(a);
+    let bn = is_numeric_str(b);
+    if an && bn {
+        let x = a.parse_float();
+        let y = b.parse_float();
+        if x < y { return 0 - 1; }
+        if x > y { return 1; }
+        return 0;
+    }
+    if an { return 0 - 1; }
+    if bn { return 1; }
+    a.compare(b)
+}
+
+// Sort order: NULL first, then as xv_cmp_nn.
+fn xv_cmp(a: String, b: String) -> i64 {
+    let an = is_null(a);
+    let bn = is_null(b);
+    if an && bn { return 0; }
+    if an { return 0 - 1; }
+    if bn { return 1; }
+    xv_cmp_nn(a, b)
+}
+
+fn xv_bool(t: i32) -> String {
+    if t == 2 { return nullv(); }
+    if t == 1 { return "1"; }
+    "0"
+}
+
+// Truth of a value: 1 true, 0 false, 2 unknown (NULL).
+fn xv_truth(s: String) -> i32 {
+    if is_null(s) { return 2; }
+    if xv_num(s) != 0.0 { return 1; }
+    0
+}
+
+fn xv_compare_op(a: String, b: String, op: i32) -> i32 {
+    if is_null(a) || is_null(b) { return 2; }
+    let c = xv_cmp_nn(a, b);
+    let r = if op == 0 { c == 0 } else if op == 1 { c < 0 } else if op == 2 { c > 0 }
+            else if op == 3 { c <= 0 } else if op == 4 { c >= 0 } else { c != 0 };
+    if r { 1 } else { 0 }
+}
+
+// ---- evaluation ----
+// A scope is a Vec<i32> of triples (table, alias id or -1, row), outermost
+// first. ag is the aggregate context of the innermost query: [base frame,
+// width, count, then count tuples of width rows], or [-1] outside one.
+
+fn x_frame_col(d: &DB, fs: Vec<i32>, k: i32, col: String) -> i32 {
+    let t = vec_get(fs, k * 3);
+    let cs = vec_get(d.tbl_col_starts, t);
+    let cc = vec_get(d.tbl_col_counts, t);
+    find_col(d, cs, cc, col)
+}
+
+fn x_frame_val(d: &DB, fs: Vec<i32>, k: i32, ci: i32) -> String {
+    let t = vec_get(fs, k * 3);
+    let row = vec_get(fs, k * 3 + 2);
+    if row < 0 { return nullv(); }
+    let cc = vec_get(d.tbl_col_counts, t);
+    let rs = vec_get(d.tbl_row_starts, t);
+    sp_get(d, vec_get(d.cells, rs + row * cc + ci))
+}
+
+// Frame and column of a column reference, innermost frame first; -1 if none.
+// A table with an alias answers only to the alias, as in SQLite.
+fn x_resolve(d: &DB, name: String, fs: Vec<i32>, nf: i32) -> Vec<i32> {
+    let mut out: Vec<i32> = vec![];
+    let dot = name.index_of(".");
+    let mut k = nf - 1;
+    while k >= 0 {
+        let t = vec_get(fs, k * 3);
+        let al = vec_get(fs, k * 3 + 1);
+        if dot > 0 {
+            let q = name.substring(0, dot);
+            let col = name.substring(dot + 1, name.len() - dot - 1);
+            let label = if al >= 0 { sp_get(d, al) } else { sp_get(d, vec_get(d.tbl_names, t)) };
+            if label == q {
+                let ci = x_frame_col(d, fs, k, col);
+                if ci >= 0 { vec_push(out, k); vec_push(out, ci); return out; }
+            }
+        } else {
+            let ci = x_frame_col(d, fs, k, name);
+            if ci >= 0 { vec_push(out, k); vec_push(out, ci); return out; }
+        }
+        k = k - 1;
+    }
+    vec_push(out, -1);
+    vec_push(out, -1);
+    out
+}
+
+fn x_col(d: &DB, e: i32, fs: Vec<i32>, nf: i32) -> String ~ Console + Process {
+    let name = sp_get(d, vec_get(d.x_s, e));
+    let r = x_resolve(d, name, fs, nf);
+    let k = vec_get(r, 0);
+    if k < 0 {
+        println!("Error: no such column: {}", name);
+        process_exit(1);
+    }
+    x_frame_val(d, fs, k, vec_get(r, 1))
+}
+
+fn x_no_agg() -> Vec<i32> {
+    let mut v: Vec<i32> = vec![];
+    vec_push(v, -1);
+    v
+}
+
+fn x_eval(d: &mut DB, e: i32, fs: Vec<i32>, nf: i32, ag: Vec<i32>) -> String ~ Console + Process {
+    let k = vec_get(d.x_kind, e);
+    if k == 0 { return sp_get(d, vec_get(d.x_s, e)); }
+    if k == 1 { return x_col(d, e, fs, nf); }
+    if k == 2 {
+        let a = x_eval(d, vec_get(d.x_a, e), fs, nf, ag);
+        let b = x_eval(d, vec_get(d.x_b, e), fs, nf, ag);
+        return xv_arith(a, b, vec_get(d.x_c, e));
+    }
+    if k == 3 {
+        let a = x_eval(d, vec_get(d.x_a, e), fs, nf, ag);
+        return xv_arith("0", a, 1);
+    }
+    if k == 4 {
+        let a = x_eval(d, vec_get(d.x_a, e), fs, nf, ag);
+        let b = x_eval(d, vec_get(d.x_b, e), fs, nf, ag);
+        return xv_bool(xv_compare_op(a, b, vec_get(d.x_c, e)));
+    }
+    if k == 5 || k == 6 {
+        let a = xv_truth(x_eval(d, vec_get(d.x_a, e), fs, nf, ag));
+        if k == 5 && a == 0 { return "0"; }
+        if k == 6 && a == 1 { return "1"; }
+        let b = xv_truth(x_eval(d, vec_get(d.x_b, e), fs, nf, ag));
+        if k == 5 { return xv_bool(and3(a, b)); }
+        return xv_bool(or3(a, b));
+    }
+    if k == 7 {
+        let a = xv_truth(x_eval(d, vec_get(d.x_a, e), fs, nf, ag));
+        return xv_bool(not3(a));
+    }
+    if k == 8 {
+        let a = x_eval(d, vec_get(d.x_a, e), fs, nf, ag);
+        let r = if is_null(a) { 1 } else { 0 };
+        if vec_get(d.x_c, e) == 1 { return xv_bool(1 - r); }
+        return xv_bool(r);
+    }
+    if k == 9 {
+        let a = x_eval(d, vec_get(d.x_a, e), fs, nf, ag);
+        let lo = x_eval(d, x_arg(d, e, 0), fs, nf, ag);
+        let hi = x_eval(d, x_arg(d, e, 1), fs, nf, ag);
+        let r = and3(xv_compare_op(a, lo, 4), xv_compare_op(a, hi, 3));
+        if vec_get(d.x_c, e) == 1 { return xv_bool(not3(r)); }
+        return xv_bool(r);
+    }
+    if k == 10 {
+        let a = x_eval(d, vec_get(d.x_a, e), fs, nf, ag);
+        let n = vec_get(d.x_an, e);
+        let mut r = 0;
+        if is_null(a) { r = 2; }
+        let mut i = 0;
+        while i < n && r != 1 && !is_null(a) {
+            let v = x_eval(d, x_arg(d, e, i), fs, nf, ag);
+            let c = xv_compare_op(a, v, 0);
+            if c == 1 { r = 1; } else if c == 2 { r = 2; }
+            i = i + 1;
+        }
+        if vec_get(d.x_c, e) == 1 { return xv_bool(not3(r)); }
+        return xv_bool(r);
+    }
+    if k == 11 || k == 12 {
+        let n = vec_get(d.x_an, e);
+        let mut base = "";
+        if k == 12 { base = x_eval(d, vec_get(d.x_a, e), fs, nf, ag); }
+        let mut i = 0;
+        while i < n {
+            let c = x_eval(d, x_arg(d, e, i), fs, nf, ag);
+            let hit = if k == 11 { xv_truth(c) == 1 } else { xv_compare_op(base, c, 0) == 1 };
+            if hit { return x_eval(d, x_arg(d, e, i + 1), fs, nf, ag); }
+            i = i + 2;
+        }
+        let els = vec_get(d.x_b, e);
+        if els >= 0 { return x_eval(d, els, fs, nf, ag); }
+        return nullv();
+    }
+    if k == 13 { return x_func(d, e, fs, nf, ag); }
+    if k == 14 {
+        let rows = xq_run(d, vec_get(d.x_c, e), fs, nf, 1);
+        if vec_len(rows) == 0 { return nullv(); }
+        return sp_get(d, vec_get(rows, 0));
+    }
+    if k == 15 {
+        let rows = xq_run(d, vec_get(d.x_c, e), fs, nf, 1);
+        if vec_len(rows) > 0 { return "1"; }
+        return "0";
+    }
+    if k == 16 {
+        let a = x_eval(d, vec_get(d.x_a, e), fs, nf, ag);
+        let rows = xq_run(d, vec_get(d.x_c, e), fs, nf, -1);
+        let w = d.x_ncol;
+        let nr = if w > 0 { vec_len(rows) / w } else { 0 };
+        let mut r = 0;
+        if is_null(a) && nr > 0 { r = 2; }
+        let mut i = 0;
+        while i < nr && r != 1 && !is_null(a) {
+            let c = xv_compare_op(a, sp_get(d, vec_get(rows, i * w)), 0);
+            if c == 1 { r = 1; } else if c == 2 { r = 2; }
+            i = i + 1;
+        }
+        if vec_get(d.x_b, e) == 1 { return xv_bool(not3(r)); }
+        return xv_bool(r);
+    }
+    if k == 17 {
+        let a = x_eval(d, vec_get(d.x_a, e), fs, nf, ag);
+        let p = x_eval(d, vec_get(d.x_b, e), fs, nf, ag);
+        if is_null(a) || is_null(p) { return nullv(); }
+        let r = if eval_like(a, p) { 1 } else { 0 };
+        if vec_get(d.x_c, e) == 1 { return xv_bool(1 - r); }
+        return xv_bool(r);
+    }
+    if k == 18 { return x_agg(d, e, fs, nf, ag); }
+    nullv()
+}
+
+fn x_func(d: &mut DB, e: i32, fs: Vec<i32>, nf: i32, ag: Vec<i32>) -> String ~ Console + Process {
+    let name = sp_get(d, vec_get(d.x_s, e));
+    let n = vec_get(d.x_an, e);
+    if name == "ABS" && n == 1 {
+        let a = x_eval(d, x_arg(d, e, 0), fs, nf, ag);
+        if is_null(a) { return a; }
+        let x = xv_num(a);
+        let y = if x < 0.0 { 0.0 - x } else { x };
+        if xv_is_intlike(a) { return xv_int(y); }
+        return xv_real(y);
+    }
+    if (name == "COALESCE" && n >= 2) || (name == "IFNULL" && n == 2) {
+        let mut i = 0;
+        while i < n {
+            let v = x_eval(d, x_arg(d, e, i), fs, nf, ag);
+            if !is_null(v) { return v; }
+            i = i + 1;
+        }
+        return nullv();
+    }
+    if name == "NULLIF" && n == 2 {
+        let a = x_eval(d, x_arg(d, e, 0), fs, nf, ag);
+        let b = x_eval(d, x_arg(d, e, 1), fs, nf, ag);
+        if xv_compare_op(a, b, 0) == 1 { return nullv(); }
+        return a;
+    }
+    println!("Error: no such function: {}", name.to_lowercase());
+    process_exit(1);
+    nullv()
+}
+
+// An aggregate over the tuples of the innermost query's aggregate context.
+fn x_agg(d: &mut DB, e: i32, fs: Vec<i32>, nf: i32, ag: Vec<i32>) -> String ~ Console + Process {
+    if vec_get(ag, 0) < 0 {
+        println!("Error: misuse of aggregate function {}()", sp_get(d, vec_get(d.x_s, e)).to_lowercase());
+        process_exit(1);
+    }
+    let name = sp_get(d, vec_get(d.x_s, e));
+    let arg = vec_get(d.x_a, e);
+    let dist = vec_get(d.x_c, e);
+    let base = vec_get(ag, 0);
+    let width = vec_get(ag, 1);
+    let count = vec_get(ag, 2);
+    let mut cnt = 0;
+    let mut all_int = true;
+    let mut sum = 0.0;
+    let mut best = nullv();
+    let mut seen: Vec<String> = vec![];
+    let mut sn = 0;
+    let none = x_no_agg();
+    let mut t = 0;
+    while t < count {
+        let mut f2: Vec<i32> = vec![];
+        let mut i = 0;
+        while i < nf * 3 { vec_push(f2, vec_get(fs, i)); i = i + 1; }
+        let mut j = 0;
+        while j < width {
+            f2[(base + j) * 3 + 2] = vec_get(ag, 3 + t * width + j);
+            j = j + 1;
+        }
+        if arg < 0 {
+            cnt = cnt + 1;
+        } else {
+            let v = x_eval(d, arg, f2, nf, none);
+            let mut take = !is_null(v);
+            if take && dist == 1 {
+                let mut si = 0;
+                while si < sn {
+                    let sv: String = vec_get(seen, si);
+                    if sv == v { take = false; }
+                    si = si + 1;
+                }
+                if take { vec_push(seen, v); sn = sn + 1; }
+            }
+            if take {
+                cnt = cnt + 1;
+                sum = sum + xv_num(v);
+                if !xv_is_intlike(v) { all_int = false; }
+                if name == "MIN" { if is_null(best) || xv_cmp_nn(v, best) < 0 { best = v; } }
+                if name == "MAX" { if is_null(best) || xv_cmp_nn(v, best) > 0 { best = v; } }
+            }
+        }
+        t = t + 1;
+    }
+    if name == "COUNT" { return xv_int(cnt as f64); }
+    if name == "MIN" || name == "MAX" { return best; }
+    if name == "TOTAL" { return xv_real(sum); }
+    if cnt == 0 { return nullv(); }
+    if name == "SUM" { if all_int { return xv_int(sum); } return xv_real(sum); }
+    xv_real(sum / (cnt as f64))
+}
+
+fn x_has_agg(d: &DB, e: i32) -> bool {
+    if e < 0 { return false; }
+    let k = vec_get(d.x_kind, e);
+    if k == 18 { return true; }
+    if k == 14 || k == 15 { return false; }
+    if x_has_agg(d, vec_get(d.x_a, e)) { return true; }
+    if k != 16 && k != 8 && k != 17 && x_has_agg(d, vec_get(d.x_b, e)) { return true; }
+    if k == 17 && x_has_agg(d, vec_get(d.x_b, e)) { return true; }
+    let n = vec_get(d.x_an, e);
+    let mut i = 0;
+    while i < n {
+        if x_has_agg(d, x_arg(d, e, i)) { return true; }
+        i = i + 1;
+    }
+    false
+}
+
+// Run query q in the scope (outer, onf) and return its rows as pool ids,
+// row-major; d.x_ncol is the column count. want > 0 stops after that many
+// rows when there is no ORDER BY, DISTINCT or aggregate.
+fn xq_run(d: &mut DB, q: i32, outer: Vec<i32>, onf: i32, want: i32) -> Vec<i32> ~ Console + Process {
+    let fs0 = vec_get(d.q_fs, q);
+    let nloc = vec_get(d.q_fn, q);
+    let ss = vec_get(d.q_ss, q);
+    let ns = vec_get(d.q_sn, q);
+    let wh = vec_get(d.q_where, q);
+    let os = vec_get(d.q_os, q);
+    let no = vec_get(d.q_on, q);
+    let distinct = vec_get(d.q_distinct, q);
+    let nf = onf + nloc;
+    let mut fs: Vec<i32> = vec![];
+    let mut i = 0;
+    while i < onf * 3 { vec_push(fs, vec_get(outer, i)); i = i + 1; }
+    i = 0;
+    while i < nloc {
+        vec_push(fs, vec_get(d.qf_tbl, fs0 + i));
+        vec_push(fs, vec_get(d.qf_alias, fs0 + i));
+        vec_push(fs, -1);
+        i = i + 1;
+    }
+    let mut is_agg = false;
+    i = 0;
+    while i < ns {
+        if x_has_agg(d, vec_get(d.qs_expr, ss + i)) { is_agg = true; }
+        i = i + 1;
+    }
+    // Output columns: a star expands to every column of every FROM table.
+    let mut ncol = 0;
+    i = 0;
+    while i < ns {
+        if vec_get(d.qs_expr, ss + i) < 0 {
+            let mut t = 0;
+            while t < nloc { ncol = ncol + vec_get(d.tbl_col_counts, vec_get(d.qf_tbl, fs0 + t)); t = t + 1; }
+        } else { ncol = ncol + 1; }
+        i = i + 1;
+    }
+    let early = want > 0 && no == 0 && distinct == 0 && !is_agg;
+    let none = x_no_agg();
+    let mut out: Vec<i32> = vec![];
+    let mut keys: Vec<i32> = vec![];
+    let mut nrows = 0;
+    let mut tuples: Vec<i32> = vec![];
+    let mut ntup = 0;
+    let mut first_rows: Vec<i32> = vec![];
+    // The conjuncts of WHERE, each checked at the shallowest FROM depth
+    // where every column it names is bound (P12): a filter on t1 alone is
+    // not re-checked for every row of t2 .. t8.
+    let mut conj: Vec<i32> = vec![];
+    let mut cdepth: Vec<i32> = vec![];
+    let mut nc = 0;
+    if wh >= 0 {
+        x_collect_conj(d, wh, conj);
+        nc = vec_len(conj);
+        let mut ci = 0;
+        while ci < nc { vec_push(cdepth, x_depth(d, vec_get(conj, ci), fs, nf, onf)); ci = ci + 1; }
+    }
+    // Odometer over the FROM tables; level is the table being advanced.
+    let mut rows_of: Vec<i32> = vec![];
+    i = 0;
+    while i < nloc { vec_push(rows_of, vec_get(d.tbl_row_counts, vec_get(d.qf_tbl, fs0 + i))); i = i + 1; }
+    let mut level = 0;
+    let mut done = false;
+    if nloc == 0 {
+        // SELECT with no FROM: one tuple of no rows.
+        level = 0;
+    }
+    let mut stop = false;
+    while !done && !stop {
+        let mut full = false;
+        if nloc == 0 {
+            full = true;
+            done = true;
+        } else {
+            let cur = vec_get(fs, (onf + level) * 3 + 2) + 1;
+            if cur >= vec_get(rows_of, level) {
+                fs[(onf + level) * 3 + 2] = -1;
+                if level == 0 { done = true; } else { level = level - 1; }
+            } else {
+                fs[(onf + level) * 3 + 2] = cur;
+                // Conjuncts whose deepest table is this one.
+                let mut ok = true;
+                let mut ci = 0;
+                while ci < nc && ok {
+                    if vec_get(cdepth, ci) == level {
+                        if xv_truth(x_eval(d, vec_get(conj, ci), fs, nf, none)) != 1 { ok = false; }
+                    }
+                    ci = ci + 1;
+                }
+                if ok {
+                    if level == nloc - 1 { full = true; } else { level = level + 1; }
+                }
+            }
+        }
+        if full {
+            // Conjuncts that name no FROM table of this query (outer columns
+            // or constants) are checked here, once per tuple.
+            let mut ok = true;
+            let mut ci = 0;
+            while ci < nc && ok {
+                if vec_get(cdepth, ci) < 0 || nloc == 0 {
+                    if xv_truth(x_eval(d, vec_get(conj, ci), fs, nf, none)) != 1 { ok = false; }
+                }
+                ci = ci + 1;
+            }
+            if ok {
+                if is_agg {
+                    let mut j = 0;
+                    while j < nloc { vec_push(tuples, vec_get(fs, (onf + j) * 3 + 2)); j = j + 1; }
+                    if ntup == 0 {
+                        j = 0;
+                        while j < nloc { vec_push(first_rows, vec_get(fs, (onf + j) * 3 + 2)); j = j + 1; }
+                    }
+                    ntup = ntup + 1;
+                } else {
+                    x_emit(d, q, fs, nf, nloc, onf, none, out, keys);
+                    nrows = nrows + 1;
+                    if early && nrows >= want { stop = true; }
+                }
+            }
+        }
+    }
+    if is_agg {
+        let mut ag: Vec<i32> = vec![];
+        vec_push(ag, onf);
+        vec_push(ag, nloc);
+        vec_push(ag, ntup);
+        i = 0;
+        while i < ntup * nloc { vec_push(ag, vec_get(tuples, i)); i = i + 1; }
+        i = 0;
+        while i < nloc {
+            fs[(onf + i) * 3 + 2] = if ntup > 0 { vec_get(first_rows, i) } else { -1 };
+            i = i + 1;
+        }
+        x_emit(d, q, fs, nf, nloc, onf, ag, out, keys);
+        nrows = 1;
+    }
+    // DISTINCT, then ORDER BY, then OFFSET and LIMIT.
+    let mut idx: Vec<i32> = vec![];
+    let mut nidx = 0;
+    if distinct == 1 {
+        let mut seen: Vec<String> = vec![];
+        let mut r = 0;
+        while r < nrows {
+            let mut key = "";
+            let mut c = 0;
+            while c < ncol {
+                if c > 0 { key = key + "\x1f"; }
+                key = key + sp_get(d, vec_get(out, r * ncol + c));
+                c = c + 1;
+            }
+            let mut dup = false;
+            let mut si = 0;
+            while si < nidx {
+                let sk: String = vec_get(seen, si);
+                if sk == key { dup = true; }
+                si = si + 1;
+            }
+            if !dup { vec_push(seen, key); vec_push(idx, r); nidx = nidx + 1; }
+            r = r + 1;
+        }
+    } else {
+        let mut r = 0;
+        while r < nrows { vec_push(idx, r); nidx = nidx + 1; r = r + 1; }
+    }
+    if no > 0 { idx = x_sort(d, idx, nidx, keys, no, os); }
+    let lim = vec_get(d.q_limit, q);
+    let off = vec_get(d.q_offset, q);
+    let mut res: Vec<i32> = vec![];
+    let mut r = off;
+    let mut taken = 0;
+    while r < nidx && (lim < 0 || taken < lim) {
+        let src = vec_get(idx, r);
+        let mut c = 0;
+        while c < ncol { vec_push(res, vec_get(out, src * ncol + c)); c = c + 1; }
+        taken = taken + 1;
+        r = r + 1;
+    }
+    d.x_ncol = ncol;
+    res
+}
+
+// Split an AND chain into its conjuncts, in order.
+fn x_collect_conj(d: &DB, e: i32, conj: Vec<i32>) {
+    if vec_get(d.x_kind, e) == 5 {
+        x_collect_conj(d, vec_get(d.x_a, e), conj);
+        x_collect_conj(d, vec_get(d.x_b, e), conj);
+        return;
+    }
+    vec_push(conj, e);
+}
+
+// Deepest FROM position of this query (0-based among its own tables) that
+// expression e names, -1 when it names none of them. A subquery counts as
+// naming the deepest table, so it runs once every table is bound.
+fn x_depth(d: &DB, e: i32, fs: Vec<i32>, nf: i32, onf: i32) -> i32 {
+    if e < 0 { return -1; }
+    let k = vec_get(d.x_kind, e);
+    if k == 1 {
+        let r = x_resolve(d, sp_get(d, vec_get(d.x_s, e)), fs, nf);
+        let f = vec_get(r, 0);
+        if f >= onf { return f - onf; }
+        return -1;
+    }
+    if k == 14 || k == 15 || k == 16 { return nf - onf - 1; }
+    let mut m = x_depth(d, vec_get(d.x_a, e), fs, nf, onf);
+    if k != 8 && k != 16 {
+        let b = x_depth(d, vec_get(d.x_b, e), fs, nf, onf);
+        if b > m { m = b; }
+    }
+    let n = vec_get(d.x_an, e);
+    let mut i = 0;
+    while i < n {
+        let a = x_depth(d, x_arg(d, e, i), fs, nf, onf);
+        if a > m { m = a; }
+        i = i + 1;
+    }
+    m
+}
+
+// Evaluate the select list (and the ORDER BY keys) for the bound tuple.
+fn x_emit(d: &mut DB, q: i32, fs: Vec<i32>, nf: i32, nloc: i32, onf: i32, ag: Vec<i32>,
+          out: Vec<i32>, keys: Vec<i32>) ~ Console + Process {
+    let ss = vec_get(d.q_ss, q);
+    let ns = vec_get(d.q_sn, q);
+    let fs0 = vec_get(d.q_fs, q);
+    let mut row: Vec<i32> = vec![];
+    let mut i = 0;
+    while i < ns {
+        let e = vec_get(d.qs_expr, ss + i);
+        if e < 0 {
+            let mut t = 0;
+            while t < nloc {
+                let cc = vec_get(d.tbl_col_counts, vec_get(d.qf_tbl, fs0 + t));
+                let mut c = 0;
+                while c < cc {
+                    let v = x_frame_val(d, fs, onf + t, c);
+                    vec_push(out, sp_add(d, v));
+                    vec_push(row, vec_len(out) - 1);
+                    c = c + 1;
+                }
+                t = t + 1;
+            }
+        } else {
+            let v = x_eval(d, e, fs, nf, ag);
+            vec_push(out, sp_add(d, v));
+            vec_push(row, vec_len(out) - 1);
+        }
+        i = i + 1;
+    }
+    let os = vec_get(d.q_os, q);
+    let no = vec_get(d.q_on, q);
+    let mut j = 0;
+    while j < no {
+        let e = vec_get(d.qo_expr, os + j);
+        let mut v = "";
+        let mut done = false;
+        // ORDER BY 2 names the second output column; a name that is an
+        // output alias names that column.
+        if vec_get(d.x_kind, e) == 0 {
+            let lit = sp_get(d, vec_get(d.x_s, e));
+            if is_int_str(lit) {
+                let pos = parse_int_str(lit);
+                if pos < 1 || pos > vec_len(row) {
+                    println!("Error: ORDER BY term out of range: {}", lit);
+                    process_exit(1);
+                }
+                v = sp_get(d, vec_get(out, vec_get(row, pos - 1)));
+                done = true;
+            }
+        }
+        if !done && vec_get(d.x_kind, e) == 1 {
+            let nm = sp_get(d, vec_get(d.x_s, e));
+            let r = x_resolve(d, nm, fs, nf);
+            if vec_get(r, 0) < 0 {
+                let mut si = 0;
+                while si < ns && !done {
+                    let an = vec_get(d.qs_name, ss + si);
+                    if an >= 0 && sp_get(d, an) == nm && vec_get(d.qs_expr, ss + si) >= 0 {
+                        v = sp_get(d, vec_get(out, vec_get(row, si)));
+                        done = true;
+                    }
+                    si = si + 1;
+                }
+            }
+        }
+        if !done { v = x_eval(d, e, fs, nf, ag); }
+        vec_push(keys, sp_add(d, v));
+        j = j + 1;
+    }
+}
+
+// Stable merge sort of the row positions idx by the ORDER BY keys.
+fn x_sort(d: &DB, idx: Vec<i32>, n: i32, keys: Vec<i32>, no: i32, os: i32) -> Vec<i32> {
+    let mut src: Vec<i32> = vec![];
+    let mut dst: Vec<i32> = vec![];
+    let mut i = 0;
+    while i < n { vec_push(src, vec_get(idx, i)); vec_push(dst, vec_get(idx, i)); i = i + 1; }
+    let mut width = 1;
+    while width < n {
+        let mut lo = 0;
+        while lo < n {
+            let mid = if lo + width < n { lo + width } else { n };
+            let hi = if lo + 2 * width < n { lo + 2 * width } else { n };
+            let mut a = lo;
+            let mut b = mid;
+            let mut o = lo;
+            while o < hi {
+                let mut take_a = false;
+                if a < mid {
+                    if b >= hi { take_a = true; }
+                    else {
+                        let ra = vec_get(src, a);
+                        let rb = vec_get(src, b);
+                        let mut c = 0;
+                        let mut k = 0;
+                        while k < no && c == 0 {
+                            c = xv_cmp(sp_get(d, vec_get(keys, ra * no + k)), sp_get(d, vec_get(keys, rb * no + k)));
+                            if vec_get(d.qo_desc, os + k) == 1 { c = 0 - c; }
+                            k = k + 1;
+                        }
+                        if c <= 0 { take_a = true; }
+                    }
+                }
+                if take_a { dst[o] = vec_get(src, a); a = a + 1; }
+                else { dst[o] = vec_get(src, b); b = b + 1; }
+                o = o + 1;
+            }
+            lo = lo + 2 * width;
+        }
+        let tmp = src;
+        src = dst;
+        dst = tmp;
+        width = width * 2;
+    }
+    src
+}
+
+fn exec_xselect(d: &mut DB) ~ Console + Process {
+    let q = d.xq_root;
+    let none: Vec<i32> = vec![];
+    let rows = xq_run(d, q, none, 0, -1);
+    let ncol = d.x_ncol;
+    let nrows = if ncol > 0 { vec_len(rows) / ncol } else { 0 };
+    // Header names: the alias, the column name, or the column's position.
+    let ss = vec_get(d.q_ss, q);
+    let ns = vec_get(d.q_sn, q);
+    let fs0 = vec_get(d.q_fs, q);
+    let nloc = vec_get(d.q_fn, q);
+    let mut hdr: Vec<String> = vec![];
+    let mut i = 0;
+    while i < ns {
+        let e = vec_get(d.qs_expr, ss + i);
+        if e < 0 {
+            let mut t = 0;
+            while t < nloc {
+                let ti = vec_get(d.qf_tbl, fs0 + t);
+                let cs = vec_get(d.tbl_col_starts, ti);
+                let cc = vec_get(d.tbl_col_counts, ti);
+                let mut c = 0;
+                while c < cc { vec_push(hdr, sp_get(d, vec_get(d.col_names, cs + c))); c = c + 1; }
+                t = t + 1;
+            }
+        } else {
+            let nm = vec_get(d.qs_name, ss + i);
+            if nm >= 0 { vec_push(hdr, sp_get(d, nm)); }
+            else { vec_push(hdr, "col" + int_to_str(vec_len(hdr) + 1)); }
+        }
+        i = i + 1;
+    }
+    let mut widths: Vec<i32> = vec![];
+    let mut c = 0;
+    while c < ncol {
+        let h: String = vec_get(hdr, c);
+        let mut w = h.len();
+        let mut r = 0;
+        while r < nrows {
+            let vl = dlen(sp_get(d, vec_get(rows, r * ncol + c)));
+            if vl > w { w = vl; }
+            r = r + 1;
+        }
+        vec_push(widths, w);
+        c = c + 1;
+    }
+    let mut hl = "";
+    let mut sl = "";
+    c = 0;
+    while c < ncol {
+        if c > 0 { hl = hl + " | "; sl = sl + "-+-"; }
+        let h: String = vec_get(hdr, c);
+        hl = hl + pad_right(h, vec_get(widths, c));
+        sl = sl + make_dashes(vec_get(widths, c));
+        c = c + 1;
+    }
+    println!("{}", hl);
+    println!("{}", sl);
+    let mut r = 0;
+    while r < nrows {
+        let mut line = "";
+        c = 0;
+        while c < ncol {
+            if c > 0 { line = line + " | "; }
+            let v = sp_get(d, vec_get(rows, r * ncol + c));
+            if is_numeric_str(v) { line = line + pad_left(v, vec_get(widths, c)); }
+            else { line = line + pad_right(v, vec_get(widths, c)); }
+            c = c + 1;
+        }
+        println!("{}", line);
+        r = r + 1;
+    }
+}
+
 fn exec_sql_no_wal(d: &mut DB, input: String) ~ Console + FileSystem + Process {
     reset_parser(d, input);
     parse_sql(d);
     let st = d.stmt_type;
     if st == 0 { exec_select(d); }
+    else if st == 20 { exec_xselect(d); }
     else if st == 1 { exec_insert(d); }
     else if st == 2 { exec_create(d); }
     else if st == 3 { exec_update(d); }
@@ -7206,7 +8612,7 @@ fn exec_sql(d: &mut DB, input: String) ~ Console + FileSystem + Process {
     // trailing ';' -- main() and run_repl() strip one, a direct caller may leave
     // one -- then refuse any other leftover. This runs before the WAL write, so
     // a rejected statement mutates nothing.
-    if st != 0 {
+    if st != 0 && st != 20 {
         if tk_is_punct(d, ";") == 1 { next_token(d); }
         if d.tk_type != 7 {
             println!("Error: unexpected trailing input near '{}'", d.tk_val);
@@ -7216,6 +8622,7 @@ fn exec_sql(d: &mut DB, input: String) ~ Console + FileSystem + Process {
 
     // Read-only: SELECT — no WAL
     if st == 0 { exec_select(d); return; }
+    if st == 20 { exec_xselect(d); return; }
 
     // Mutations: log to WAL, then execute in memory
     if st == 1 { exec_insert(d); wal_log_mutation(d, input); }

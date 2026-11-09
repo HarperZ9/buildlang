@@ -160,6 +160,26 @@ FAIL; P2 2,000 of 2,000; text, crash, WAL, library and reference-differential te
 Planted check: a build that evaluates EXCEPT as INTERSECT fails the new test_qdb.sh assertions
 and passes fewer P1 records.
 
+**P11. Expressions in the select list and WHERE (row 2b), written 2026-11-09 00:27 PT before the
+change.** After P10 the largest rejection class is the expression: 949 of the 1,000 queries in
+`select1.test` put arithmetic in the select list, and most also use CASE, `abs`, a column
+compared with a column, a correlated scalar subquery or EXISTS. A column compared with a column
+(`WHERE c > d`) is worse than refused today: the condition parser reads `d` as the text 'd'.
+Change: a second SELECT path parses an expression tree (arithmetic with SQLite's integer and
+real rules, comparisons, AND, OR, NOT with three-valued logic, IS NULL, BETWEEN, IN, LIKE,
+searched and simple CASE, `abs`, `coalesce`, `ifnull`, `nullif`, aggregates without GROUP BY,
+scalar and EXISTS and IN subqueries that may name the outer query's columns, ORDER BY over any
+number of keys, DISTINCT, LIMIT and OFFSET), and runs it over one or more FROM tables. A token
+scan picks the path before either parser runs: the new path takes a SELECT that uses one of these
+forms and none of GROUP BY, HAVING, JOIN or a compound operator; every other SELECT keeps the
+older path and its answer. Measured on P1 unchanged against the P10 result 1,084 of 9,202.
+Prediction: between 2,500 and 6,000 query records pass, the bulk from `select1` to `select3`;
+wrong answers stay under 2 percent of the records the new path answers. Guards: test_qdb.sh no
+FAIL; P2 2,000 of 2,000 (its generator uses only forms the older path keeps, so P2 also checks
+that the path choice leaves them alone); text, crash, WAL, library and reference-differential
+tests unchanged. Planted check: a build whose integer division returns a real (no truncation)
+passes fewer P1 records and fails a new test_qdb.sh assertion.
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
@@ -197,6 +217,14 @@ and passes fewer P1 records.
   differential against the pre-rewrite reference engine (`test_qdb_differential.py`) gains
   `--no-null`, a workload with no NULL and no `''`, because that engine stored both as one empty
   cell; with NULL data it fails 8 of 16 checks by design, and without it 16 of 16 pass.
+- **A6 (2026-11-09 01:15, during the P11 run, before its total).** The P11 run reached `select5.test`, whose
+  queries join 4 to 64 tables in a comma-separated FROM list. The new path loops over the tables
+  in FROM order and checks each conjunct once its tables are bound, so a FROM list that opens with
+  unconnected tables builds their cross product: three sampled queries took 0.07 s, 0.25 s and
+  over 120 s (stopped). At the runner's 60 s limit per record the file would take hours. The run
+  was stopped in `select5.test`; P11 is reported for the other 16 files with `select5.test` counted
+  at its P10 score (0 queries pass), and the planted check runs on the same 16 files. Ordering
+  the joins is P12, which measures all 17 files again.
 
 ## Baseline (qdb at the move, 2026-11-08, buildc 1.11.0)
 
@@ -300,11 +328,31 @@ harness unchanged. Before: 1,251 of 2,000 on this branch, re-run before the chan
   them, among them the `|` row-key collision); text 0 changed; crash 0 of 170; WAL 0; library 0;
   reference differential 16 of 16 with `--no-null --no-float-agg`.
 
+## After P11: expressions (2026-11-09, feat/bdb-expr)
+
+- **P1 sqllogictest** (A6: 16 files run, `select5.test` counted at its P10 score of 0): 8,186 of
+  9,202 query records pass (88.96 percent), 9 wrong, 1,007 rejected (275 in the 16 files run plus
+  `select5.test`'s 732). Before (P10): 1,084, 68, 8,050. `select1` to `select3` pass 5,320 of
+  5,320; `select4` 2,829 of 2,832 (2,830 in an earlier run of the same build: one record sits near
+  the 60 s limit). Statements 1,214 of 1,289 in the 16 files. Prediction (2,500 to 6,000) missed
+  on the high side. Wrong answers are 9 of the 8,195 answered (0.11 percent; bar 2 percent): two in
+  `slt_lang_aggfunc` (MIN over mixed text and numbers; `sum` overflow), seven in `slt_lang_replace`
+  and `slt_lang_update` (statements qdb does not run: REPLACE, UPDATE forms), none on the new path.
+- **Planted check, split result.** The build whose integer division returns a real fails two new
+  test_qdb.sh checks (`x_int_div`, `x_agg_expr`): caught. On P1 it passes 8,187, one more than the
+  real build: not caught. The runner prints an `I` column as `int(float(v))`, which truncates a
+  real quotient to the integer one, so P1 cannot see this fault; the one-record difference is the
+  record near the time limit. Kept as a null for P1's power over integer arithmetic.
+- **P2:** 2,000 of 2,000, unchanged: none of its queries takes the new path.
+- **Guards:** test_qdb.sh 274 pass, 0 fail (`where_arith_plus_closed` and `where_arith_pct_closed`
+  asserted a refusal and now assert answers; 17 checks added); text 0 changed; crash 0 of 170;
+  WAL 0; library 0; reference differential 16 of 16 with `--no-null --no-float-agg`.
+
 ## Stage 1: a correct, durable single-file engine
 
 | Row | Check (fails if) | Status | Evidence |
 |---|---|---|---|
-| 1a Regression gate | `bdb/tests/test_qdb.sh` reports any FAIL | PASS | 257 pass, 0 fail after P10; 250 after P9; 244 after P8; 241 after P7; 222 after the completion changes (214/0/1 at the move) |
+| 1a Regression gate | `bdb/tests/test_qdb.sh` reports any FAIL | PASS | 274 pass, 0 fail after P11; 257 after P10; 250 after P9; 244 after P8; 241 after P7; 222 after the completion changes (214/0/1 at the move) |
 | 1b SQLite differential | any of the P2 queries disagrees, with numbers compared as numbers | PASS | 2,000 of 2,000 after P8, a CI gate; 1,944 after P7; 1,251 at the move (519 null_vs_empty, 230 rows, 46 number_text) |
 | 1c Crash recovery | any P3 crash point breaks the rule | PASS | 0 violations of 170 (24 of 104 at the move); two mutants caught |
 | 1d Cross-process transaction | either P4 case misses | PASS | four checks in test_qdb.sh (`xproc_*`), differential process mode equals REPL mode on 8 seeds |
@@ -316,11 +364,11 @@ harness unchanged. Before: 1,251 of 2,000 on this branch, re-run before the chan
 
 | Row | Check (fails if) | Status | Evidence |
 |---|---|---|---|
-| 2a sqllogictest queries | any P1 query record does not pass | FAIL | 1,084 of 9,202 (11.78 percent) after P10; 199 after P9; 33 after P7 and P8; 32 at the move; `bdb/tests/slt_run.py` |
-| 2b Expressions in the select list | `SELECT a+1, a*b-c FROM t` refused or wrong | FAIL | refused: "expected keyword 'FROM'"; the largest single cause of P1 rejections |
+| 2a sqllogictest queries | any P1 query record does not pass | FAIL | 8,186 of 9,202 (88.96 percent) after P11, `select5.test` not run (A6); 1,084 after P10; 32 at the move; `bdb/tests/slt_run.py` |
+| 2b Expressions in the select list | `SELECT a+1, a*b-c FROM t` refused or wrong | PASS | P11: arithmetic, CASE, functions, correlated subqueries; `select1` to `select3` 5,320 of 5,320 |
 | 2c Column types with arguments and constraints | `VARCHAR(30)`, `INTEGER PRIMARY KEY`, `UNIQUE` refused | FAIL | P9: type arguments are read (`VARCHAR(30)`, `DECIMAL(10, 2)`), statements 134 to 1,918 of 1,993; `PRIMARY KEY` is parsed and not enforced; `UNIQUE` is refused |
-| 2d CASE, scalar functions (abs, coalesce) | refused or wrong | NOT BUILT | |
-| 2e Correlated subqueries, EXISTS | refused or wrong | NOT BUILT | |
+| 2d CASE, scalar functions (abs, coalesce) | refused or wrong | PASS | P11: searched and simple CASE, `abs`, `coalesce`, `ifnull`, `nullif` |
+| 2e Correlated subqueries, EXISTS | refused or wrong | PASS | P11: scalar, EXISTS and IN subqueries naming outer columns (`x_corr_subq`, `x_exists`) |
 
 ## Stage 3: scale
 
