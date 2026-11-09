@@ -1,7 +1,8 @@
 """Math in the PDF text layer: glyph runs go out in source order, so extraction and the reading-order check agree.
 
-A base with both scripts reads base, subscript, superscript (e_1^2 extracts as e12); a large operator with both
-limits reads operator, lower limit, upper limit; a multiplication sign is a symbol, not a letter, so
+A base with both scripts reads base, then its scripts in the order the source wrote them (e_1^2 extracts as e12,
+e^2_x as e2x); a large operator with both limits reads operator, then its limits as written
+(\\sum_{j=1}^{m} as j=1 m); a multiplication sign is a symbol, not a letter, so
 1.6 \\times 10^{-15} compares as 1 6 10 15.
 """
 import os
@@ -17,7 +18,7 @@ from buildtex.check import words  # noqa: E402
 from engine.pdfread import read_text  # noqa: E402
 
 CASES = [r"e_1^2", r"\sigma_{test}^2", r"x_{i}^{k+1}", r"\sum_{j=1}^{m} x_j", r"\int_{-\pi}^{\pi} f",
-         r"1.6 \times 10^{-15}"]
+         r"1.6 \times 10^{-15}", r"\sqrt{\sum e^2_x} + R^2_{1}", r"\sum^{n}_{k=0} c_k"]
 
 
 def math_ir(folder, cases):
@@ -54,6 +55,11 @@ class MathTextOrder(unittest.TestCase):
         self.assertIn("test2", self.flat)
         self.assertIn("xik1", self.flat)
 
+    def test_superscript_written_first_reads_first(self):
+        self.assertIn("e2x", self.flat)
+        self.assertIn("R21", self.flat)
+        self.assertIn("nk0ck", self.flat)
+
     def test_operator_lower_then_upper_limit(self):
         self.assertIn("j1mxj", self.flat)
         lower, upper = self.text.index("−π"), self.text.index("π", self.text.index("−π") + 2)
@@ -73,6 +79,8 @@ class MathBoxOrder(unittest.TestCase):
         plain = lambda box: "".join(p.text for _, _, p in box.glyphs)
         self.assertEqual(plain(ml.layout(parse("e_1^2"), T)), "\U0001D452" + "12")
         self.assertEqual(plain(ml.layout(parse(r"\sum_{j}^{m}"), D)), "∑\U0001D457\U0001D45A")
+        self.assertEqual(plain(ml.layout(parse("e^2_1"), T)), "\U0001D452" + "21")
+        self.assertEqual(plain(ml.layout(parse("-e^2_1"), T)), "−\U0001D452" + "21")   # Bin to Ord keeps the order
 
 
 if __name__ == "__main__":

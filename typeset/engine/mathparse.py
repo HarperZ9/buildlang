@@ -20,6 +20,7 @@ class Atom:
     nucleus: object            # str (characters) or list of Atoms or ("frac", a, b) or ("sqrt", a)
     sup: object = None
     sub: object = None
+    sup_first: bool = False    # the source wrote ^ before _, so the text layer gives the superscript first
 
 
 def parse(src):
@@ -50,6 +51,8 @@ def _parse_list(toks, i, until=None):
             arg, i = _parse_arg(toks, i)
             if not out:
                 out.append(Atom(ORD, ""))
+            if t == "^" and out[-1].sub is None:
+                out[-1].sup_first = True
             setattr(out[-1], "sup" if t == "^" else "sub", arg)
             continue
         if t == "{":
