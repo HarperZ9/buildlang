@@ -3,8 +3,9 @@
 The facts come from two places that do not share code paths: the layout
 report (what the line breaker and page builder decided) and the PDF bytes
 (what a reader will get). A build passes when both agree on the page
-count, no line is overfull, no glyph is missing, every font is embedded,
-and every block's text comes back out of the PDF in source order.
+count, no line is overfull, no glyph is missing, every math command is
+known, every font is embedded, and every block's text comes back out of
+the PDF in source order.
 """
 import re
 
@@ -60,6 +61,7 @@ def facts(pdf_path, result, doc):
         "overfull": [{"block": b, "line": ln, "excess_pt": round(x, 3)} for b, ln, x in diag.overfull],
         "underfull": len(diag.underfull),
         "missing_glyphs": sorted({f"U+{ord(ch):04X}" for ch, _ in diag.missing}),
+        "math_errors": [{"source": src, "error": err} for src, err in getattr(diag, "math_errors", [])],
         "fonts": [{"name": n, "embedded": e} for n, e in fonts(pdf)],
         "images": len(re.findall(rb"/Subtype /Image", data)),
         "blind_text_runs": sum(pdf.stream(pdf.ref(p, b"Contents")).count(b"3 Tr") for p in pdf.pages()),
@@ -77,10 +79,14 @@ def _plain_for_text(block):
 
 
 def _command_text(m):
-    """A math command that prints as letters (ln, log) keeps them; the rest print as symbols or layout."""
-    from engine.mathparse import SYMBOLS
-    sym = SYMBOLS.get(m.group(1))
-    return " " + sym[0] + " " if sym and sym[0].isalpha() else " "
+    """A math command that prints as letters keeps them: ln and log, and ell, whose glyph extracts as l (NFKC).
+    The rest print as symbols or layout."""
+    import unicodedata
+    from engine.mathparse import GREEK, SYMBOLS
+    name = m.group(1)
+    sym = SYMBOLS[name][0] if name in SYMBOLS else (chr(GREEK[name]) if name in GREEK else "")
+    sym = unicodedata.normalize("NFKC", sym)
+    return " " + sym + " " if sym and sym.isascii() and sym.isalpha() else " "
 
 
 def _letters(text):
@@ -121,6 +127,9 @@ def passed(f):
         bad.append(f"{len(f['overfull'])} overfull line(s)")
     if f["missing_glyphs"]:
         bad.append("missing glyphs " + ", ".join(f["missing_glyphs"]))
+    if f.get("math_errors"):
+        bad.append(f"{len(f['math_errors'])} math error(s): "
+                   + "; ".join(sorted({e['error'] for e in f['math_errors']})))
     if not f["fonts"] or not all(x["embedded"] for x in f["fonts"]):
         bad.append("a font is not embedded")
     if not f["reading_order"]:

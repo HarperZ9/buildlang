@@ -122,7 +122,11 @@ class ParagraphBuilder:
         if ml is None:
             self.math_cache = getattr(self, "math_cache", {})
             ml = self.math_cache[(key, size)] = MathLayout(self.shaper.reg[key], key, size)
-        box = ml.layout(parse(src), D if display else T)
+        errors = []
+        atoms = parse(src, errors)
+        # a command outside the subset is an error in the receipt, never set as raw source
+        self.shaper.diag.math_errors += [(src, e) for e in errors]
+        box = ml.layout(atoms, D if display else T)
         return Box(sp(box.width), payload=[box])
 
     def _emit_word(self, items, piece, hyphenate, exp, protrude, style):
