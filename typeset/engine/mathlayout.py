@@ -3,15 +3,16 @@
 Implemented: atom classes and inter-atom spacing (Rules 5, 6, 20 and the
 spacing table of Chapter 18), the four styles and cramping, scripts
 (Rule 18 a-f), fractions (Rule 15 a-e), radicals (Rule 11), large
-operators with display limits (Rule 13a). Not implemented: delimiters
-grown by \\left/\\right, accents, matrices, italic-correction kerning.
+operators with display limits (Rule 13a), accents as a rule or a centred
+combining mark. Not implemented: delimiters grown by \\left/\\right,
+matrices, italic-correction kerning.
 """
 import unicodedata
 from dataclasses import dataclass, field, replace
 
 from .mathfont import read_math_constants, glyph_bounds
 from .shape import Piece
-from .mathparse import Atom, parse  # noqa: F401  (parse re-exported)
+from .mathparse import Atom, LIMITS, parse  # noqa: F401  (parse re-exported)
 
 D, T, S, SS = 0, 1, 2, 3
 ORD, OP, BIN, REL, OPEN, CLOSE, PUNCT, INNER = range(8)
@@ -94,11 +95,15 @@ class MathLayout:
             nuc = self.fraction(n[1], n[2], style, cramped)
         elif isinstance(n, tuple) and n[0] == "sqrt":
             nuc = self.radical(n[1], style)
+        elif isinstance(n, tuple) and n[0] == "accent":
+            nuc = self.accent(n[1], n[2], style)
+        elif isinstance(n, tuple) and n[0] == "text":
+            nuc = self.char(n[1], style)
         else:
             nuc = self.layout(n, style, cramped)
         if a.sup is None and a.sub is None:
             return nuc
-        if a.cls == OP and style == D and isinstance(n, str) and len(n) == 1:
+        if a.cls == OP and style == D and isinstance(n, str) and (len(n) == 1 or n in LIMITS):
             return self.limits(nuc, a, style, cramped)
         return self.scripts(nuc, a, style, cramped, isinstance(n, str))
 
@@ -197,6 +202,30 @@ class MathLayout:
         out.add(num, (w - num.width) / 2, u)
         out.add(den, (w - den.width) / 2, -v)
         out.rules.append((0.0, axis - theta / 2, w, theta))
+        return out
+
+    def accent(self, mark, atoms, style):
+        """An accent over its base: "bar" is a rule (OverbarVerticalGap above the base), any other mark is a
+        combining glyph centred over the base and raised by how far the base stands above AccentBaseHeight.
+        The base goes out first, so the text layer reads the letter, then the mark."""
+        body = self.layout(atoms, style, True)
+        out = MBox(body.width, body.height, body.depth)
+        out.add(body, 0, 0)
+        if mark == "bar":
+            gap, theta = self.k("OverbarVerticalGap", style), self.k("OverbarRuleThickness", style)
+            inset = 0.08 * body.width if len(body.glyphs) == 1 else 0.0
+            out.rules.append((inset, body.height + gap, body.width - 2 * inset, theta))
+            out.height = body.height + gap + theta + self.k("OverbarExtraAscender", style)
+            return out
+        size = self.size * self.scale(style)
+        g = self.font.glyph(mark)
+        if not g:
+            return out
+        x0, _, x1, y1 = glyph_bounds(self.font, g)
+        dx = body.width / 2 - (x0 + x1) / 2 * size / self.u
+        dy = max(0.0, body.height - self.k("AccentBaseHeight", style))
+        out.glyphs.append((dx, dy, Piece(self.key, size, [g], [0.0], mark, [mark])))
+        out.height = max(out.height, dy + y1 * size / self.u)
         return out
 
     def radical(self, atoms, style):

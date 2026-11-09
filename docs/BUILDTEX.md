@@ -13,7 +13,7 @@ The engine in `typeset/engine` came out of the typeset field work (PR #115). Its
 | Line breaking | Knuth-Plass after tex.web 813 to 890: integer badness and demerits, three passes, emergency stretch, font expansion and margin protrusion. A BuildLang port (`kp/knuth_plass.bld`) chose the same breaks as the Python engine on every paragraph of a real paper. | `tests/test_breaker.py`; `kp/crosscheck.py` |
 | Hyphenation | Liang patterns from plain TeX `hyphen.tex` plus the TUGboat exception log; gives TeX's answers at `\lefthyphenmin=2 \righthyphenmin=3`. | `tests/test_engine.py` Hyphenation |
 | Inline rules | TeX space factors, url.sty break points, ligatures and kerning from GSUB, GPOS and `kern`. | `engine/hlist.py`, `engine/shape.py` |
-| Math | TeXbook Appendix G with OpenType MATH constants: scripts, fractions, radicals, display limits. Not done: `\left`/`\right` sizing, accents, matrices, MathVariants growth. | `tests/test_engine.py` MathBoxes |
+| Math | TeXbook Appendix G with OpenType MATH constants: scripts, fractions, radicals, display limits, accents. Not done: `\left`/`\right` sizing, matrices, MathVariants growth. | `tests/test_engine.py` MathBoxes; `tests/test_math_text.py`, `tests/test_math_vocab.py` |
 | Pages | TeX's page builder with club, widow and keep penalties, ragged or justified bottoms. | `engine/pages.py` |
 | Fonts | TrueType parsing and subsetting, CID fonts with ToUnicode so text extracts, CFF passthrough for harvested Latin Modern. | PDF round trip test |
 | Output | PDF with an sRGB OutputIntent, SVG and HTML with a selectable text layer, all from one layout. The PDF has no author, creator or XMP packet and is dated only by `SOURCE_DATE_EPOCH`; `--pdfa` adds the PDF/A-2b packet (not validated by veraPDF). | `engine/pdfout.py`, `engine/svgout.py` |
@@ -83,6 +83,21 @@ Text-layer rules a paper build keeps:
 
 Math in `paper` is set in Noto Sans Math (SIL OFL 1.1, `data/fonts/NotoSansMath-Regular.ttf`), so the theme
 builds on any machine.
+
+The math vocabulary (`engine/mathparse.py`):
+
+| Kind | Commands |
+|---|---|
+| Greek | every lower-case letter from `\alpha` to `\omega` in math italic, with `\varepsilon`, `\vartheta`, `\varphi`, `\varrho`, `\varpi`, `\varkappa` and `\ell`; the capitals `\Gamma`, `\Delta`, `\Theta`, `\Lambda`, `\Xi`, `\Pi`, `\Sigma`, `\Upsilon`, `\Phi`, `\Psi`, `\Omega`, upright as in TeX |
+| Text | `\text{..}`, `\textrm`, `\mbox` (upright, spaces kept); `\mathrm`, `\operatorname` (upright, spaces dropped); `\mathbf`, `\boldsymbol` (mathematical bold) |
+| Accents | `\bar` and `\overline` (a rule over the base), `\hat`, `\widehat`, `\tilde`, `\widetilde`, `\dot`, `\ddot`, `\vec` (a combining mark centred over the base; the text layer reads base then mark) |
+| Operators | `\log`, `\ln`, `\exp`, `\sin`, `\cos`, `\tan`, `\sinh`, `\cosh`, `\tanh`, the arc and other plain.tex names; upright with operator spacing. `\max`, `\min`, `\sup`, `\inf`, `\lim`, `\det`, `\gcd`, `\Pr` take limits in display |
+| Structure | `\frac`, `\sqrt`, `^`, `_`, `\left` and `\right` (delimiters at natural size), spaces `\,` `\:` `\;` `\!` `\quad` `\qquad` |
+| Symbols | relations, binary operators, arrows, set symbols, `\infty`, `\partial`, `\nabla`, `\hbar`, dots, angle brackets, `\{` `\}` |
+
+A command outside this list is an error. The parser sets nothing for it, the build records it under
+`facts.math_errors` in the receipt and lists it in `failed`, so raw source never reaches the page. A missing
+argument or an unbalanced group is an error the same way. `tests/test_math_vocab.py` holds the vocabulary.
 
 ## Migrating from .tex
 

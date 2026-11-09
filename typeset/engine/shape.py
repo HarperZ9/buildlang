@@ -24,6 +24,7 @@ class Diagnostics:
     overfull: list = field(default_factory=list)  # (block index, line, excess pt)
     underfull: list = field(default_factory=list)
     notes: list = field(default_factory=list)
+    math_errors: list = field(default_factory=list)  # (math source, error)
 
     def report(self):
         out = []
@@ -33,6 +34,8 @@ class Diagnostics:
             out.append(f"overfull line: block {b} line {line} by {excess:.2f}pt")
         for b, line, bad in self.underfull:
             out.append(f"underfull line: block {b} line {line} badness {bad}")
+        for src, err in self.math_errors:
+            out.append(f"math error: {err} in {src!r}")
         return out + list(self.notes)
 
 
