@@ -2637,6 +2637,12 @@ static BuildString build_read_line(void) {
         len += n;
         if (n > 0 && piece[n - 1] == '\n') break;
     }
+    /* Give back the unused part of the buffer: a short line in a 4 KB
+       buffer kept 4 KB per call, which the caller never frees. */
+    if (cap > len + 1) {
+        char* fit = (char*)realloc(buf, len + 1);
+        if (fit != NULL) { buf = fit; cap = len + 1; }
+    }
     BuildString qs; qs.ptr = buf; qs.len = len; qs.cap = cap;
     return qs;
 }
@@ -2791,6 +2797,25 @@ static BuildVecHandle build_hvec_new_str(void) {
 }
 static void build_hvec_push_str(BuildVecHandle h, BuildString val) { build_vec_push(h.inner, &val); }
 static BuildString build_hvec_get_str(BuildVecHandle h, size_t index) { return *(BuildString*)build_vec_get(h.inner, index); }
+/* `v.join(sep)` on a Vec<String>: one allocation of the exact size. A
+   chain of `+` copies the growing prefix for every part and leaves each copy
+   behind, which costs O(parts x length) bytes; this costs the result only. */
+static BuildString build_hvec_join_str(BuildVecHandle h, BuildString sep) {
+    size_t n = h.inner->len;
+    BuildString* items = (BuildString*)h.inner->ptr;
+    size_t total = 0;
+    for (size_t i = 0; i < n; i++) total += items[i].len;
+    if (n > 1) total += sep.len * (n - 1);
+    char* buf = (char*)malloc(total + 1);
+    size_t o = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (i > 0 && sep.len > 0) { memcpy(buf + o, sep.ptr, sep.len); o += sep.len; }
+        if (items[i].len > 0) { memcpy(buf + o, items[i].ptr, items[i].len); o += items[i].len; }
+    }
+    buf[total] = '\0';
+    BuildString qs; qs.ptr = buf; qs.len = total; qs.cap = total + 1;
+    return qs;
+}
 
 // --- TCP socket support (includes must come before windows.h) ---
 
