@@ -15,6 +15,7 @@ mod gpu;
 // GPU cross-check receipt (Layer C): emit + verify. Verification is pure JSON +
 // SHA-256, so it is ALWAYS compiled (even without the `gpu` feature) so
 // `receipt verify` works on a gpu receipt in the default build.
+mod build_hash_cli;
 mod gpu_receipt;
 mod lsp_dispatch;
 mod mcp;
@@ -483,6 +484,20 @@ enum Commands {
         json: bool,
     },
 
+    /// Hash the emitted C over several fresh compiler runs; exit 1 if any run differs
+    BuildHash {
+        /// Input file
+        file: PathBuf,
+
+        /// Number of separate compiler runs to compare (at least 2)
+        #[arg(long, default_value_t = 3)]
+        runs: usize,
+
+        /// Print the `buildlang-build-hash/v1` JSON record
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Check saved translation-validation certificates (the independent checker alone)
     TvCheck {
         /// The BuildLang source
@@ -891,6 +906,9 @@ fn run_cli(cli: Cli) -> Result<(), i32> {
         Some(Commands::Doctor) => cmd_doctor(),
         Some(Commands::Verify { file, json }) => verify_cli::cmd_verify(&file, json),
         Some(Commands::Tv { file, out, json }) => tv_cli::cmd_tv(&file, out.as_deref(), json),
+        Some(Commands::BuildHash { file, runs, json }) => {
+            build_hash_cli::cmd_build_hash(&file, runs, json)
+        }
         Some(Commands::TvCheck {
             source,
             c,

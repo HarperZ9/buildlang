@@ -750,6 +750,8 @@ static int32_t build_hvec_pop_i32(BuildVecHandle h) {
     return *(int32_t*)((char*)h.inner->ptr + h.inner->len * h.inner->elem_size);
 }
 static void build_hvec_free(BuildVecHandle h) { build_vec_free(h.inner); free(h.inner); }
+/* `clear` keeps the handle and the buffer: the length drops to zero. */
+static void build_hvec_clear(BuildVecHandle h) { h.inner->len = 0; }
 static int __build_cmp_i32(const void* a, const void* b) {
     int32_t x = *(const int32_t*)a, y = *(const int32_t*)b;
     return (x > y) - (x < y);
