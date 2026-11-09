@@ -160,6 +160,26 @@ Planted checks, each must hold or the change does not merge:
   3.141592653589793 (`lower_ident` checks `PI`, `E` and `TAU` before user constants). Modelling
   constants in the checker is the next widening; it turns this into a refusal.
 
+## Widening 2: named constants (preregistered 2026-11-09, before the run)
+
+After floats, 7 functions in `tests/programs` are refused only for an unknown name: five read the
+built-in `PI`, two read a user `const`. The change: a `const` with a literal value (integer, float or
+bool, possibly negated) is that literal on the source side; the built-ins `PI`, `E` and `TAU` are the
+`f64` constants from the language's table when the program defines no constant of that name. On the C
+side the checker reads each top-level `const` definition from the C text itself.
+
+Predictions: `tests/programs` gains 5 to 7 certified functions; 0 new not-certified on corpus
+programs.
+
+Planted checks:
+
+- K1. `tests/tv/consts.bld` uses a user integer constant, a user float constant, a negative constant
+  and the built-in `PI`; every such function is certified.
+- K2. A program that defines `const PI: f64 = 3.0;` and reads it: the function is not certified on
+  main today, because the backend uses the built-in value (issue #177). Once #177 is fixed it must be
+  certified.
+- K3. A C rewrite that changes one constant's initializer, with the hash rewritten, is refused.
+
 ## Verified
 
 - `compiler/tests/tv_c.rs` and `compiler/tests/tv_float.rs`: the planted checks above and the
