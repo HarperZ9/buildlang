@@ -117,6 +117,6 @@ single `DB` struct due to the flat-struct constraint. The SQL parser is embedded
 - A process that ends inside BEGIN without a clean exit (a crash, or a statement rejected with exit code 1) drops the open transaction
 - NULL and the empty string are stored alike, as an empty cell, so `IS NULL` matches `''` and `NOT (col = x)` keeps a NULL row; SQL's three-valued logic is not implemented
 - No query optimizer; all scans are sequential unless an index matches exactly
-- Writes: a bulk load is linear in the rows loaded (about 0.13 s per 1,000 rows, 15 to 28 s per 100,000, see ARCHITECTURE.md, Write Cost). Still superlinear: an INSERT followed by an indexed SELECT on every row, INSERT into a table that is not the last one created, UPDATE, DELETE, and ORDER BY (selection sort)
+- Writes: a bulk load is linear in the rows loaded (about 0.13 s per 1,000 rows, 15 to 28 s per 100,000, see ARCHITECTURE.md, Write Cost). Still superlinear: an INSERT followed by an indexed SELECT on every row, INSERT into a table that is not the last one created, UPDATE, DELETE, and the UNION, grouped and JOIN ORDER BY paths (selection sort; single-table ORDER BY is a merge sort)
 - During a REPL session, committed writes live in the append-only WAL and reach the .db at a checkpoint (when the WAL outgrows the .db, and at a clean exit). A crash loses nothing that was committed; the next start replays it
 - File format is not binary-compatible with SQLite

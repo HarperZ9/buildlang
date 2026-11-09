@@ -112,6 +112,18 @@ sort is stable.
   compared as numbers; the corrected run is in row 1b. The P1 runner had the same line and has the
   same fix; P1 results below are from after it.
 
+- **A3 (2026-11-08 18:40, after the first P5 runs).** Two harness faults, both in
+  `test_qdb_text.py`, were fixed before any result was recorded: the Windows C runtime writes each
+  line feed of qdb's output as CR LF, which the harness now undoes (the generated values hold no CR
+  LF pair, so the translation is exact); and the WAL case had sent the rows in 50-row chunks, where
+  the second process's own startup replay is a checkpoint that the crash point then hit. The WAL
+  case now sends one INSERT of all 1,000 rows and stops at its second durable write. The comparison
+  was also tightened to exact text (an earlier draft ignored trailing spaces).
+- **A4 (2026-11-08 18:55, before the P6 run).** The first P6 build of the 10,000-row table loaded
+  nothing: qdb's REPL read a 6 KB INSERT in 4,095-byte pieces, because the runtime's `read_line`
+  made one `fgets` call into a 4 KB buffer. That is a compiler runtime fault, fixed in this branch
+  (`compiler/tests/read_line_long.rs`); P6 ran on the fixed runtime.
+
 ## Baseline (qdb at the move, 2026-11-08, buildc 1.11.0)
 
 These are the runs on the engine as it arrived (build-universe 4a296c1, here d39dfc1), with only
@@ -138,15 +150,34 @@ the fault hook added. Later rows record the runs after each change.
   Every WAL append, torn or not, recovers by the rule (56 of 56). Planted check caught.
 - **P4:** the ROLLBACK case leaves one row (xfail `xproc_rollback`).
 
+## After the changes (2026-11-08, buildlang branch feat/bdb-completion)
+
+Built with buildc from the same branch (1.11.0 plus the `read_line` fix), gcc 13.2, Windows 11.
+
+- **P3 crash recovery:** 0 violations of 170 crash points (18 steps; more points than the baseline
+  because a checkpoint now has four writes). Mutants: replay without the txid skip, 30
+  violations; the `.ckpt` ignored at load, 14.
+- **P4:** BEGIN, INSERT and ROLLBACK as three processes leave the table empty; with COMMIT, one row.
+  The differential test's process mode now equals the same build's REPL run on all 8 seeds; the
+  build before the change fails it on 3 of 3 seeds tried.
+- **P5 text:** 1,000 of 1,000 values kept through the `.db` and 1,000 of 1,000 through the WAL
+  alone. Before: 142 of 1,000 and 0 of 1,000. A mutant that writes cells unescaped changes 1,760
+  of 2,000.
+- **P6 ORDER BY:** before, net 0.027 s, 2.98 s and 28.3 s at 1k, 10k and 30k rows (30k/10k ratio
+  9.51, slope 2.05; prediction above 6 held). After the merge sort: 0.015 s, 0.048 s and 0.296 s
+  at 10k, 30k and 100k (30k/10k ratio 3.29; slope 1.08, then 1.51 to 100k, cause not measured).
+- **P1 and P2** are unchanged by these changes (32 of 9,202; 1,251 of 2,000): none of them touched
+  the dialect or NULL handling.
+
 ## Stage 1: a correct, durable single-file engine
 
 | Row | Check (fails if) | Status | Evidence |
 |---|---|---|---|
-| 1a Regression gate | `bdb/tests/test_qdb.sh` reports any FAIL | PASS | 214 pass, 0 fail, 1 xfail at the move with buildc 1.11.0 (buildlang 3c7cc54), 2026-11-08 |
-| 1b SQLite differential | any of the P2 queries disagrees, with numbers compared as numbers | FAIL | baseline 1,251 of 2,000 (62.5 percent); `bdb/tests/test_qdb_sqlite_oracle.py` |
-| 1c Crash recovery | any P3 crash point breaks the rule | FAIL | baseline 24 violations of 104 points; `bdb/tests/test_qdb_crash.py` |
-| 1d Cross-process transaction | either P4 case misses | FAIL | documented null `xproc_rollback` |
-| 1e Text round trip | any P5 value changes | FAIL | `'x|y'` reads back as `x`; no escaping in the file or WAL format |
+| 1a Regression gate | `bdb/tests/test_qdb.sh` reports any FAIL | PASS | 222 pass, 0 fail, 0 xfail after the changes (214/0/1 at the move) |
+| 1b SQLite differential | any of the P2 queries disagrees, with numbers compared as numbers | FAIL | 1,251 of 2,000 (62.5 percent); 519 null_vs_empty, 230 rows, 46 number_text |
+| 1c Crash recovery | any P3 crash point breaks the rule | PASS | 0 violations of 170 (24 of 104 at the move); two mutants caught |
+| 1d Cross-process transaction | either P4 case misses | PASS | four checks in test_qdb.sh (`xproc_*`), differential process mode equals REPL mode on 8 seeds |
+| 1e Text round trip | any P5 value changes | PASS | 2,000 of 2,000 (`test_qdb_text.py`); format 0 files still load |
 | 1f NULL apart from '' | `INSERT (NULL)` and `INSERT ('')` are indistinguishable by `IS NULL`, or `NOT (NULL = x)` is true | FAIL | both store an empty cell; 519 P2 disagreements are this class directly, and the inspected examples of the 230 in the rows class are NULL semantics too |
 | 1g JOIN gaps that fail closed | a secondary ORDER BY key over a grouped JOIN, DISTINCT over a grouped JOIN, or COUNT(DISTINCT) over any JOIN is refused | FAIL | each refused with a specific message (`bdb/README.md`, Known limitations) |
 
@@ -154,7 +185,7 @@ the fault hook added. Later rows record the runs after each change.
 
 | Row | Check (fails if) | Status | Evidence |
 |---|---|---|---|
-| 2a sqllogictest queries | any P1 query record does not pass | FAIL | baseline 32 of 9,202 (0.35 percent); `bdb/tests/slt_run.py` |
+| 2a sqllogictest queries | any P1 query record does not pass | FAIL | 32 of 9,202 (0.35 percent); `bdb/tests/slt_run.py` |
 | 2b Expressions in the select list | `SELECT a+1, a*b-c FROM t` refused or wrong | FAIL | refused: "expected keyword 'FROM'"; the largest single cause of P1 rejections |
 | 2c Column types with arguments and constraints | `VARCHAR(30)`, `INTEGER PRIMARY KEY`, `UNIQUE` refused | FAIL | 581 P1 rejections follow from refused setup |
 | 2d CASE, scalar functions (abs, coalesce) | refused or wrong | NOT BUILT | |
@@ -164,25 +195,25 @@ the fault hook added. Later rows record the runs after each change.
 
 | Row | Check (fails if) | Status | Evidence |
 |---|---|---|---|
-| 3a Bulk load is linear | `bench_qdb_load.py` log-log slope k above 1.3 for autocommit or transactional indexed load | PASS | HarperZ9/build-universe#35: autocommit k 1.16, transactional indexed k 1.02. Limit stated there: interleaved INSERT plus indexed SELECT stays superlinear (k 1.52) |
-| 3b ORDER BY is n log n | P6 ratio 30k/10k above 6 | NOT BUILT | measurement pending |
+| 3a Bulk load is linear | `bench_qdb_load.py` log-log slope k above 1.3 for autocommit or transactional indexed load | PASS | HarperZ9/build-universe#35: autocommit k 1.16, transactional indexed k 1.02. Limit stated there: interleaved INSERT plus indexed SELECT stays superlinear (k 1.52). Not re-run after the checkpoint change, which writes the state twice per checkpoint |
+| 3b ORDER BY is n log n | P6 ratio 30k/10k above 6 | PASS (single-table) | 3.29 after, 9.51 before (`bench_qdb_sort.py`). The UNION, grouped, JOIN and grouped-JOIN sorts are still selection sorts and were not measured |
 | 3c Whole-program store of 10^5 rows | a `bql export` store of 100,000 rows loads and answers a GROUP BY in under 10 s | NOT BUILT | |
 
 ## Stage 4: an embeddable engine
 
 | Row | Check (fails if) | Status | Evidence |
 |---|---|---|---|
-| 4a Library entry point | a C program linked against a static library built from qdb's sources runs N statements on one open database in one process, and its output differs from the CLI's on the same statements | NOT BUILT | the C ABI (`extern "C"`, `buildc build --emit staticlib`) exists in buildlang 1.11.0 |
-| 4b Many queries per open | the compiler side runs more than one query without a process per statement | NOT BUILT | depends on 4a |
+| 4a Library entry point | a C program linked against a static library built from qdb's sources runs N statements on one open database in one process, and its output differs from the CLI's on the same statements | PASS | `bdb/lib` (qdb_open, qdb_exec, qdb_close); `test_qdb_lib.py`: 3 seeds of 129 statements, stdout and `.db` byte-identical to one CLI process per statement; dropping one statement is caught. Limit: a parser rejection exits the host with code 1 |
+| 4b Many queries per open | the compiler side runs more than one query without a process per statement | NOT BUILT | the library exists (4a); `buildc bql` does not link it yet. On the test workloads one process took 0.04 to 0.13 s against about 1 s for one process per statement |
 
 ## Stage 5: BuildQL over programs
 
 | Row | Check (fails if) | Status | Evidence |
 |---|---|---|---|
-| 5a Export, query, verify | `cargo test bql` fails | PASS (3c7cc54) | 15 bql tests pass, `in_process_subset_matches_qdb` included with `QDB_BIN` set; 35 of 35 sampled renames agree (2026-11-04) |
-| 5b `refs` table | resolved references are missing from the store, or a planted wrong span is not caught by `bql verify` | NOT BUILT | |
-| 5c Multi-file programs | a program with `mod name;` or `use` is refused by `bql export` | FAIL | refused by version 0 |
-| 5d Symbol text with `|` or line breaks | `bql export` refuses a cell | FAIL | refused because qdb's format has no escape; closes with 1e |
+| 5a Export, query, verify | `cargo test bql` fails | PASS (branch) | 19 bql tests pass, `in_process_subset_matches_qdb` included with `QDB_BIN` set; 35 of 35 sampled renames agree |
+| 5b `refs` table | resolved references are missing from the store, or a planted wrong span is not caught by `bql verify` | PASS (values and calls) | store schema `buildlang.bdb/v1`. For every function in `tests/programs` whose rename is accepted, refs equal its name tokens less the definition: 290 of 290 (139 programs); a checker that drops call references gives 19 of 289. A shifted or dropped ref span is drift. Not covered: type names, method calls, multiple dispatch |
+| 5c Multi-file programs | a program with `mod name;` or `use` is refused by `bql export` | FAIL | refused. Module resolution lives in the binary (`main.rs`), and spans would need a file column |
+| 5d Symbol text with `|` or line breaks | `bql export` refuses a cell | PASS | export writes format 1 and escapes; `export_escapes_a_pipe_and_a_line_break` |
 | 5e Transforms beyond rename | extract, inline or effect-row transforms missing | NOT BUILT | |
 | 5f qdb in the compiler's CI | qdb is not built and tested beside buildc (design milestone H2) | PASS (on merge of the move) | `.github/workflows/bdb.yml` builds qdb with the checkout's buildc and runs every gate above that is in CI |
 

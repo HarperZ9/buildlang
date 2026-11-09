@@ -141,8 +141,11 @@ fn qdb_export_has_every_table_and_row() {
     }
     assert!(text.contains("SCHEMA function:TEXT effect:TEXT how:TEXT via:TEXT\n"));
     let rows = text.lines().filter(|l| l.starts_with("ROW ")).count();
-    let expected =
-        store.functions.len() + store.effects.len() + store.calls.len() + store.items.len();
+    let expected = store.functions.len()
+        + store.effects.len()
+        + store.calls.len()
+        + store.items.len()
+        + store.refs.len();
     assert_eq!(rows, expected);
     assert!(
         text.contains("ROW main|Console|declared|\n"),

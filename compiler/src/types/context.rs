@@ -24,6 +24,15 @@ pub struct TypeContext {
     /// Stack of scopes for variable bindings.
     scopes: Vec<Scope>,
 
+    /// Resolved references to module-scope names, in check order: the name,
+    /// the byte span of the use and whether it is the callee of a call. The
+    /// BuildDB store reads them as its `refs` table. A use that a local,
+    /// parameter or pattern binding shadows resolves to that binding and is
+    /// not recorded.
+    module_refs: Vec<(Arc<str>, u32, u32, bool)>,
+    /// Set by call inference just before it infers a bare-name callee.
+    ref_in_call: bool,
+
     /// Type definitions (structs, enums).
     types: HashMap<DefId, TypeDef>,
 
@@ -333,6 +342,8 @@ impl TypeContext {
         super::ty::clear_def_names();
         let mut ctx = Self {
             scopes: vec![Scope::new(ScopeKind::Module)],
+            module_refs: Vec::new(),
+            ref_in_call: false,
             types: HashMap::new(),
             traits: HashMap::new(),
             impls: Vec::new(),
@@ -548,6 +559,33 @@ impl TypeContext {
             }
         }
         None
+    }
+
+    /// True when the innermost binding of `name` is in the module scope, so a
+    /// use of `name` here refers to a top-level definition.
+    pub fn binds_at_module_scope(&self, name: &str) -> bool {
+        for (depth, scope) in self.scopes.iter().enumerate().rev() {
+            if scope.bindings.contains_key(name) {
+                return depth == 0;
+            }
+        }
+        false
+    }
+
+    /// Record a resolved reference to a module-scope name.
+    pub fn record_module_ref(&mut self, name: &str, start: u32, end: u32) {
+        let call = std::mem::take(&mut self.ref_in_call);
+        self.module_refs.push((Arc::from(name), start, end, call));
+    }
+
+    /// Mark the next recorded reference as the callee of a call.
+    pub fn set_ref_in_call(&mut self, on: bool) {
+        self.ref_in_call = on;
+    }
+
+    /// Every resolved reference to a module-scope name, in check order.
+    pub fn module_refs(&self) -> &[(Arc<str>, u32, u32, bool)] {
+        &self.module_refs
     }
 
     /// Look up a variable's type scheme.
