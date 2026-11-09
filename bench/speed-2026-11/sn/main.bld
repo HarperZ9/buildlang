@@ -1,0 +1,65 @@
+fn a(i: i64, j: i64) -> f64 {
+    1.0 / (((i + j) * (i + j + 1) / 2 + i + 1) as f64)
+}
+
+fn mul_av(n: i64, v: &Vec<f64>, out: &mut Vec<f64>) {
+    let mut i = 0;
+    while i < n {
+        let mut s = 0.0;
+        let mut j = 0;
+        while j < n {
+            s = s + a(i, j) * v[j];
+            j = j + 1;
+        }
+        out[i] = s;
+        i = i + 1;
+    }
+}
+
+fn mul_atv(n: i64, v: &Vec<f64>, out: &mut Vec<f64>) {
+    let mut i = 0;
+    while i < n {
+        let mut s = 0.0;
+        let mut j = 0;
+        while j < n {
+            s = s + a(j, i) * v[j];
+            j = j + 1;
+        }
+        out[i] = s;
+        i = i + 1;
+    }
+}
+
+fn mul_atav(n: i64, v: &Vec<f64>, out: &mut Vec<f64>, tmp: &mut Vec<f64>) {
+    mul_av(n, v, tmp);
+    mul_atv(n, tmp, out);
+}
+
+fn main() ~ Console + Environment {
+    let n = args_get(1).parse_int();
+    let mut u: Vec<f64> = Vec::new();
+    let mut v: Vec<f64> = Vec::new();
+    let mut t: Vec<f64> = Vec::new();
+    let mut i = 0;
+    while i < n {
+        u.push(1.0);
+        v.push(0.0);
+        t.push(0.0);
+        i = i + 1;
+    }
+    let mut k = 0;
+    while k < 10 {
+        mul_atav(n, &u, &mut v, &mut t);
+        mul_atav(n, &v, &mut u, &mut t);
+        k = k + 1;
+    }
+    let mut vbv = 0.0;
+    let mut vv = 0.0;
+    i = 0;
+    while i < n {
+        vbv = vbv + u[i] * v[i];
+        vv = vv + v[i] * v[i];
+        i = i + 1;
+    }
+    println!("{:.9}", sqrt(vbv / vv));
+}

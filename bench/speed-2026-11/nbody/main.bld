@@ -1,0 +1,81 @@
+// n-body (Benchmarks Game): five planets, symplectic step, energy before and after.
+struct B { x: f64, y: f64, z: f64, vx: f64, vy: f64, vz: f64, m: f64 }
+
+fn energy(b: &Vec<B>) -> f64 {
+    let mut e = 0.0;
+    let mut i = 0;
+    while i < 5 {
+        let p = b[i];
+        e = e + 0.5 * p.m * (p.vx * p.vx + p.vy * p.vy + p.vz * p.vz);
+        let mut j = i + 1;
+        while j < 5 {
+            let q = b[j];
+            let dx = p.x - q.x;
+            let dy = p.y - q.y;
+            let dz = p.z - q.z;
+            e = e - p.m * q.m / sqrt(dx * dx + dy * dy + dz * dz);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    e
+}
+
+fn advance(b: &mut Vec<B>, dt: f64) {
+    let mut i = 0;
+    while i < 5 {
+        let mut j = i + 1;
+        while j < 5 {
+            let p = b[i];
+            let q = b[j];
+            let dx = p.x - q.x;
+            let dy = p.y - q.y;
+            let dz = p.z - q.z;
+            let d2 = dx * dx + dy * dy + dz * dz;
+            let mag = dt / (d2 * sqrt(d2));
+            b[i] = B { x: p.x, y: p.y, z: p.z, vx: p.vx - dx * q.m * mag, vy: p.vy - dy * q.m * mag, vz: p.vz - dz * q.m * mag, m: p.m };
+            b[j] = B { x: q.x, y: q.y, z: q.z, vx: q.vx + dx * p.m * mag, vy: q.vy + dy * p.m * mag, vz: q.vz + dz * p.m * mag, m: q.m };
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while i < 5 {
+        let p = b[i];
+        b[i] = B { x: p.x + dt * p.vx, y: p.y + dt * p.vy, z: p.z + dt * p.vz, vx: p.vx, vy: p.vy, vz: p.vz, m: p.m };
+        i = i + 1;
+    }
+}
+
+fn main() ~ Console + Environment {
+    let n = args_get(1).parse_int();
+    let pi = 3.141592653589793;
+    let sm = 4.0 * pi * pi;
+    let dp = 365.24;
+    let mut b: Vec<B> = Vec::new();
+    b.push(B { x: 0.0, y: 0.0, z: 0.0, vx: 0.0, vy: 0.0, vz: 0.0, m: sm });
+    b.push(B { x: 4.84143144246472090e+00, y: -1.16032004402742839e+00, z: -1.03622044471123109e-01, vx: 1.66007664274403694e-03 * dp, vy: 7.69901118419740425e-03 * dp, vz: -6.90460016972063023e-05 * dp, m: 9.54791938424326609e-04 * sm });
+    b.push(B { x: 8.34336671824457987e+00, y: 4.12479856412430479e+00, z: -4.03523417114321381e-01, vx: -2.76742510726862411e-03 * dp, vy: 4.99852801234917238e-03 * dp, vz: 2.30417297573763929e-05 * dp, m: 2.85885980666130812e-04 * sm });
+    b.push(B { x: 1.28943695621391310e+01, y: -1.51111514016986312e+01, z: -2.23307578892655734e-01, vx: 2.96460137564761618e-03 * dp, vy: 2.37847173959480950e-03 * dp, vz: -2.96589568540237556e-05 * dp, m: 4.36624404335156298e-05 * sm });
+    b.push(B { x: 1.53796971148509165e+01, y: -2.59193146099879641e+01, z: 1.79258772950371181e-01, vx: 2.68067772490389322e-03 * dp, vy: 1.62824170038242295e-03 * dp, vz: -9.51592254519715870e-05 * dp, m: 5.15138902046611451e-05 * sm });
+    let mut px = 0.0;
+    let mut py = 0.0;
+    let mut pz = 0.0;
+    let mut i = 0;
+    while i < 5 {
+        let p = b[i];
+        px = px + p.vx * p.m;
+        py = py + p.vy * p.m;
+        pz = pz + p.vz * p.m;
+        i = i + 1;
+    }
+    let s = b[0];
+    b[0] = B { x: s.x, y: s.y, z: s.z, vx: 0.0 - px / sm, vy: 0.0 - py / sm, vz: 0.0 - pz / sm, m: s.m };
+    println!("{:.9}", energy(&b));
+    let mut k = 0;
+    while k < n {
+        advance(&mut b, 0.01);
+        k = k + 1;
+    }
+    println!("{:.9}", energy(&b));
+}
