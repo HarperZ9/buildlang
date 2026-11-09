@@ -14,7 +14,10 @@ tracked in `STATUS.md`, `README.md`, and
 
 - `fn f(x: f64) -> i32 { floor(x) }` passed `buildc check`, and the C converted with a plain assignment (truncation, undefined out of range). `floor`, `sqrt`, `abs`, `min` and the other free maths builtins now take their float argument's type when no unit decides it, so the check reports BL0354 and asks for `as i32`. `tests/programs/80_icc_profile.bld` now says `floor(fixed) as i32`; its output is unchanged. `tests/reject/float_builtin_as_int_return.bld`.
 
-## Unreleased
+### Translation validation with effects
+
+- `buildc tv` certifies functions that print and functions that return nothing, `main` included. Each print and each call of a user function is an event; the checker proves that source and C write the same events in the same order on every input, including the output written before a trap. A call is a sync point, so calls in a different order are refused even when nothing prints. A function the backend renames (`max` to `_max`) is certified under its own name.
+- Coverage: `tests/programs` 160 of 435 to 194 of 437 (44 %), 0 not certified; `stdlib` unchanged at 58 of 139. Sixteen planted C rewrites (prints swapped, dropped, duplicated or moved after a trapping add; a changed literal, conversion, stream, precision or bool rendering; calls swapped or duplicated; `main` returning 1) are all refused. `compiler/tests/tv_effects.rs`, `docs/TRANSLATION-VALIDATION.md`.
 
 ### Word-level rules in buildc verify (V3)
 

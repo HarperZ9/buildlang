@@ -122,12 +122,7 @@ fn collect(
         .iter()
         .map(|(n, t)| Term::Var(n.clone(), *t))
         .collect();
-    let mut st0 = St {
-        conds: Vec::new(),
-        facts: Vec::new(),
-        vars: Vec::new(),
-        ret: None,
-    };
+    let mut st0 = St::new(Vec::new(), Vec::new(), None);
     for (a, (_, t)) in args.iter().zip(params) {
         st0.conds.push(term::in_range(a, *t));
     }

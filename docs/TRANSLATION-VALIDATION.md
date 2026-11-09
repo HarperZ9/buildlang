@@ -40,17 +40,27 @@ The checker in `compiler/src/tv/check` re-derives each certificate from the thre
    both run reach the same exit with equal variables or equal return values. Induction over the
    cuts gives equal behaviour for every input.
 
-Calls are uninterpreted on both sides: the same callee with the same arguments. Each callee is
-certified on its own.
+Calls are uninterpreted on both sides: the same callee with the same arguments, in the same order
+relative to every other call and print. Each callee is certified on its own.
 
 ## Scope
 
 Functions whose parameters, return and locals are integers up to 64 bits, `f32`, `f64` or `bool`,
 with `let`, assignment, `if`, `match`, `while`, `loop`, `break`, `continue`, `return` and calls.
 Named constants with a literal value, and the built-in `PI`, `E` and `TAU`, are their values; the C
-side's constants are read from the C file's top-level definitions. Everything else is reported as
-outside the subset with the reason: heap values, strings, effects, `for`, loops nested inside
-expressions, and C the parser does not read.
+side's constants are read from the C file's top-level definitions. Functions may return nothing,
+and `main` may print: `print!`, `println!`, `eprint!` and `eprintln!` are effects (below).
+Everything else is reported as outside the subset with the reason: heap values, strings other than
+format strings, other macros, `for`, loops nested inside expressions, and C the parser does not
+read.
+
+Effects are events in each path's trace: an output (stream, literal text and formatted values) or a
+call of a user function (callee and arguments). Each event records the path condition at the moment
+it happens, so output written before a trap is compared too. At each segment the checker proves
+that the source writes its j-th event on exactly the inputs where the C does, and that the two
+events are equal where both are written. A call is a sync point: after it a path continues only
+under an uninterpreted finish atom of that callee on those arguments, so a different order of calls
+is refused even when no call prints.
 
 Floats are opaque IEEE values. Each float operation is an uninterpreted function named by operator
 and width, each comparison an uninterpreted predicate (never rewritten: with NaN, `!(a < b)` is not
@@ -65,7 +75,11 @@ backend emits `x << (n & 31)` on signed types); a call whose result is dropped i
 dropped on both sides alike; the C compiler evaluates `double` and `float` arithmetic in IEEE 754
 binary64 and binary32 with no contraction (the prelude sets `FP_CONTRACT OFF`) and no excess
 precision; each C maths function named in the float table is the meaning of the source builtin that
-lowers to it.
+lowers to it; the formatting table holds (`{}` of an integer is C `%d`, `%u`, `%lld` or `%llu` at
+its width and sign, `{}` of a bool is `%s` of `b ? "true" : "false"`, `{}` and `{:?}` of a float
+are the runtime's `build_f64_to_string`, `build_f64_to_debug_string` and the `f32` pair, `{:.N}`
+is `%.Nf`); `__build_init_io` makes stdout and stderr unbuffered and, with `build_args_init` and
+`fflush(stdout)`, writes no output.
 
 ## Coverage
 
@@ -74,15 +88,14 @@ that compiles and every module in `stdlib`:
 
 | Corpus | Compiled | Certified | Not certified | Outside the subset |
 |---|---|---|---|---|
-| `tests/programs` (147 of 154 programs compile) | 435 | 159 (37 %) | 0 | 276 |
+| `tests/programs` (147 of 154 programs compile) | 437 | 194 (44 %) | 0 | 243 |
 | `stdlib` (14 of 16 modules compile) | 139 | 58 (42 %) | 0 | 81 |
 
 Before floats (main 7038d3d): 31 (7 %) and 22 (16 %); after floats 152 and 58; after constants 159
-and 58. Most functions still outside the subset print, or take or return strings, structs, arrays,
-tuples, `Result` or `Option` (266 of 276 in `tests/programs`; about 140 of them are `main` with
-`~ Console`). The other 10 use constructs the checker does not model yet: match patterns (4), C
-lines the parser does not read (3), a loop inside an expression, a callee that is not a name, and
-one implicit float to integer conversion (below).
+and 58; after the #178 fix 160; after effects 194 of 437 and 58. Of the 243 functions still outside
+the subset in `tests/programs`, 120 take or return structs, arrays, references, tuples, `Result` or
+`Option`; most of the 108 remaining `main` functions build struct values, arrays or strings, or call
+the runtime (`vec!`, file and argument builtins).
 
 ## Planted checks
 
@@ -198,6 +211,82 @@ Planted checks:
   `lower_ident`), `area` is certified and the test expects that.
 - K3 held: changing `SCALE`, `HALF` or `ENABLED` in the C makes its reader not certified
   (`compiler/tests/tv_consts.rs`).
+
+## Widening 3: effects (preregistered 2026-11-09, before the run)
+
+Measured on main ee630a1 with the #178 fix applied (`floor(fixed) as i32`): `tests/programs` 160 of
+435 certified, 0 not certified, 275 outside the subset. 141 of the 275 are `main`; 266 are refused
+by signature.
+
+The gap this closes is a soundness one as well as a coverage one. Calls are uninterpreted and were
+treated as total: two calls in a different order, where one traps and the other loops, were
+accepted. And a print has no meaning in the old model at all, so output written before a trap was
+never compared.
+
+The change:
+
+- Each path on both sides keeps a trace of events. An event is either an output (the stream, then
+  the literal text and the formatted values, adjacent text merged) or a call of a user function
+  (the callee and its arguments). Each event records the path condition at the moment it happens,
+  so a path that later traps still contributes the events it wrote before the trap.
+- A call is a sync point: after it, a path continues only under an uninterpreted finish atom of
+  that callee on those arguments, the same atom on both sides.
+- At each cut segment, two new conditions: (E1) for every index j, the source reaches its j-th
+  event on exactly the inputs where the C reaches its j-th event; (E2) for every source path and C
+  path that both reach their j-th event, the two events are equal. Two paths that both finish must
+  also have traces of the same length.
+- Formatting table (trusted base): `{}` and `{:?}` of an integer print its decimal value, matched
+  by C `%d`, `%u`, `%lld` or `%llu` at the argument's width and signedness; `{}` of a bool is C
+  `%s` of `b ? "true" : "false"`; `{}` and `{:?}` of `f64` and `f32` are `build_f64_to_string`,
+  `build_f64_to_debug_string` and the `f32` pair; `{:.N}` of a float is C `%.Nf`. The C string
+  table is read from the C file, and C escapes are decoded there. Width, alignment, sign and radix
+  specs stay outside the subset.
+- `main` with no parameters and no result is checked against C `main(argc, argv)`: the prologue
+  `__build_init_io()` (which makes stdout and stderr unbuffered) and `build_args_init` write no
+  output, `fflush(stdout)` writes nothing new on an unbuffered stream, and the C must return 0.
+  A function with no result is checked against a C `void` function.
+
+Prediction: `tests/programs` from 160 to between 185 and 240 of 435; `stdlib` up by fewer than 10.
+Mains that use strings other than literals, structs, arrays or vectors stay outside. Any
+not-certified corpus function is investigated as a possible real miscompile before the change
+merges. The 50 % target (218) may need structs as well; if it is missed, the miss is reported.
+
+Planted checks, each must hold or the change does not merge. Each is a rewrite of the emitted C of
+`tests/tv/effects.bld` fed to `tv-check` with the function's hash rewritten:
+
+- P1. Two `printf` lines swapped.
+- P2. A `printf` moved after a checked add that can trap (same output whenever no trap happens).
+- P3. A `printf` dropped; a `printf` duplicated.
+- P4. A literal changed in the C string table (not covered by the function hash).
+- P5. `%d` turned into `%u` for a signed value.
+- P6. `printf` turned into `fprintf(stderr, ...)`.
+- P7. The bool ternary swapped to `b ? "false" : "true"`.
+- P8. Two calls of pure user functions swapped, with no print between them.
+- P9. A call duplicated.
+- P10. `main` returning 1.
+- P11. The existing plants (`add-to-sub`, `fadd-to-fsub`, the IEEE rewrites, the constant
+  rewrites, the forged certificates) are still caught, and every function certified before the
+  change that is still in the corpus stays certified or the drop is explained.
+
+### Results (2026-11-09)
+
+- Coverage: `tests/programs` 160 of 435 to 194 of 437 certified (44 %), 0 not certified. The
+  denominator grew by two because the certificate now covers a function the backend renames (`max`
+  is emitted as `_max`); calls to it are mapped back to the source name. Inside the predicted 185 to
+  240, and short of the 50 % target: the next pool is structs (about 44 functions with struct
+  signatures whose fields are scalars, and most of the remaining mains, which build struct values).
+  `stdlib` unchanged at 58 of 139, as predicted.
+- 34 functions became certified, 33 of them `main`. None of the 160 functions certified before the
+  change was lost, so treating every call as a sync point cost no coverage.
+- P1 to P10 held, with six more rewrites (a printed value changed inside a loop, a precision and a
+  Debug rendering changed, stderr turned into stdout, two calls in `main` swapped): all sixteen are
+  refused as not certified (`compiler/tests/tv_effects.rs`). P2 is the case the old model missed:
+  the C writes the same output on every input that does not trap, and only E1 tells them apart.
+- P11 held: `tv_c.rs`, `tv_float.rs` and `tv_consts.rs` pass. The one expectation that changed is
+  `main` in `tests/tv/subset.bld`, which prints and is now certified instead of outside the subset.
+- A refusal found on the way: a source macro other than the four print macros (`vec!`, `assert!`)
+  can expand to C loops the source does not show, which first surfaced as "0 source loops but 2
+  loop heads". Such a function is now reported outside the subset, by name of the macro.
 
 ## Verified
 

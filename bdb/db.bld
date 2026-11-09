@@ -1952,6 +1952,7 @@ fn reset_parser(d: &mut DB, input: String) {
 fn parse_sql(d: &mut DB) ~ Console + Process {
     next_token(d);
     if tk_is_kw(d, "SELECT") == 1 {
+        x_in_table_rewrite(d);
         if x_wanted(d) { parse_xselect(d); return; }
         parse_select(d);
         return;
@@ -8069,6 +8070,31 @@ fn parse_xselect(d: &mut DB) ~ Console + Process {
 // form only it reads and nothing only the older path reads (GROUP BY,
 // HAVING, JOIN, a compound operator, at the top level). Scans the tokens and
 // puts the tokenizer back at the start.
+// SQLite reads `x IN t`, with a table name and no parenthesis, as
+// `x IN (SELECT * FROM t)`. Rewrite the input that way before either path
+// parses it (P18), and leave the tokenizer at the first token.
+fn x_in_table_rewrite(d: &mut DB) {
+    let src = d.input;
+    d.pos = 0;
+    d.tk_type = 7;
+    let mut out = "";
+    let mut copied: i64 = 0;
+    let mut prev_in = false;
+    next_token(d);
+    while d.tk_type != 7 {
+        let end = d.pos;
+        let n = d.tk_val.len();
+        if prev_in && d.tk_type == 1 && end >= n && src.substring(end - n, n) == d.tk_val {
+            out = out + src.substring(copied, end - n - copied) + "(SELECT * FROM " + d.tk_val + ")";
+            copied = end;
+        }
+        prev_in = tk_word(d) == "IN";
+        next_token(d);
+    }
+    if copied > 0 { reset_parser(d, out + src.substring(copied, src.len() - copied)); }
+    x_rewind(d);
+}
+
 fn x_wanted(d: &mut DB) -> bool {
     d.pos = 0;
     next_token(d);
@@ -8082,9 +8108,16 @@ fn x_wanted(d: &mut DB) -> bool {
     let mut prev_word = "SELECT";
     let mut prev_ident = false;
     let mut prev_comma = false;
+    // P18: whether the previous token, and the one before it, was a literal
+    // or NULL; the older path reads no IN with a literal on its left.
+    let mut prev_lit = false;
+    let mut prev2_lit = false;
     next_token(d);
     while d.tk_type != 7 && !legacy {
         let w = tk_word(d);
+        if w == "IN" && depth == 0 {
+            if section == 0 || prev_lit || (prev_word == "NOT" && prev2_lit) { feature = true; }
+        }
         if depth == 0 {
             if w == "GROUP" || w == "HAVING" || w == "JOIN" || w == "UNION" || w == "INTERSECT" ||
                w == "EXCEPT" || w == "LEFT" || w == "INNER" || w == "CROSS" {
@@ -8121,6 +8154,8 @@ fn x_wanted(d: &mut DB) -> bool {
         if is_operand && !(d.tk_type == 1 && x_reserved(w)) { prev_type = 1; }
         else if is_cmp { prev_type = 2; }
         else { prev_type = 3; }
+        prev2_lit = prev_lit;
+        prev_lit = d.tk_type == 2 || d.tk_type == 3 || w == "NULL";
         prev_word = w;
         prev_ident = d.tk_type == 1;
         prev_comma = tk_is_punct(d, ",") == 1;
@@ -8345,7 +8380,8 @@ fn x_eval(d: &mut DB, e: i32, fs: Vec<i32>, nf: i32, ag: Vec<i32>) -> String ~ C
         let a = x_eval(d, vec_get(d.x_a, e), fs, nf, ag);
         let n = vec_get(d.x_an, e);
         let mut r = 0;
-        if is_null(a) { r = 2; }
+        // x IN () is false and x NOT IN () true, NULL included (P18).
+        if is_null(a) && n > 0 { r = 2; }
         let mut i = 0;
         while i < n && r != 1 && !is_null(a) {
             let v = x_eval(d, x_arg(d, e, i), fs, nf, ag);
@@ -8386,6 +8422,10 @@ fn x_eval(d: &mut DB, e: i32, fs: Vec<i32>, nf: i32, ag: Vec<i32>) -> String ~ C
         let a = x_eval(d, vec_get(d.x_a, e), fs, nf, ag);
         let rows = xq_run(d, vec_get(d.x_c, e), fs, nf, -1);
         let w = d.x_ncol;
+        if w != 1 {
+            println!("Error: sub-select returns {} columns - expected 1", w);
+            process_exit(1);
+        }
         let nr = if w > 0 { vec_len(rows) / w } else { 0 };
         let mut r = 0;
         if is_null(a) && nr > 0 { r = 2; }
