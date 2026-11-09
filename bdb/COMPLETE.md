@@ -382,6 +382,24 @@ that drops the last row of the SELECT keeps most of those records wrong (at leas
 than the change). Guards as in P21, and new test_qdb.sh checks: rows copied, a column list, a
 SELECT of zero rows, a SELECT from the table itself, a constraint failure that inserts nothing.
 
+**P23. DISTINCT in every aggregate, TOTAL, group_concat and the refused aggregate forms (item 3),
+written 2026-11-09 before the full run.** After P22 the P1 rejections in
+`evidence/slt_lang_aggfunc.test` are: DISTINCT inside SUM, AVG, MIN, MAX or TOTAL (19, "DISTINCT
+is only supported inside COUNT"); `total(...)` and `group_concat(...)`, which the older path does
+not read (11 "expected keyword" and 9 "unexpected trailing input", some with `NOT INDEXED`); and
+`x NOT NULL` as a postfix test (4). The change: the older path accepts DISTINCT in every aggregate
+and feeds SUM, AVG, MIN and MAX the rows that first carry each distinct value (values compare as
+values, so 2 and 2.0 are one value; COUNT(DISTINCT) keeps its text comparison); a SELECT without
+GROUP BY that uses TOTAL, group_concat, DISTINCT in a non-COUNT aggregate, an index hint (`NOT
+INDEXED`, `INDEXED BY i`) or `NOT NULL`, `ISNULL`, `NOTNULL` as a postfix test goes to the
+expression path, which gains group_concat (with an optional separator; DISTINCT with a separator
+is an error, as in SQLite), the index hints (read and ignored) and the postfix tests. The
+expression path's DISTINCT also compares values. Disclosed: during development the aggfunc file
+alone was run on the change (61 of 67 query records, from 23), before this entry. Measured on P1.
+Predictions: total from 9,143 to between 9,175 and 9,185; `slt_lang_aggfunc.test` to at least 60
+of 67; no other file changes; statements not below 1,938. Planted check: a build whose DISTINCT is
+ignored in SUM, AVG and TOTAL loses at least 8 records of the aggfunc file. Guards as in P22.
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
