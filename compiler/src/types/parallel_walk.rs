@@ -19,8 +19,8 @@ use super::capabilities::{capability_effect_for_call, capability_effect_for_macr
 
 /// Methods that change their receiver in place.
 const MUTATING_METHODS: &[&str] = &[
-    "push", "pop", "insert", "remove", "clear", "set", "sort", "extend", "truncate", "push_str",
-    "append", "swap", "reverse", "retain", "drain", "fill",
+    "push", "pop", "insert", "remove", "clear", "release", "set", "sort", "extend", "truncate",
+    "push_str", "append", "swap", "reverse", "retain", "drain", "fill",
 ];
 
 fn macro_name(path: &ast::Path) -> String {

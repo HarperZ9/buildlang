@@ -811,9 +811,9 @@ INDEX ");
         ix = ix + 1;
     }
     let all = parts.join("");
-    // The vector's buffer goes back to the allocator (Vec.clear frees it);
+    // The vector's buffer goes back to the allocator (Vec.release frees it);
     // parts is not used again.
-    parts.clear();
+    parts.release();
     all
 }
 
@@ -3837,10 +3837,10 @@ fn exec_insert(d: &mut DB) ~ Console + Process {
         rsv[si] = vec_get(rsv, si) + added;
         si = si + 1;
     }
-    // Both are local to this call and held nowhere else; clear() returns
+    // Both are local to this call and held nowhere else; release() returns
     // their memory to the allocator.
-    row_cells.clear();
-    src_for_col.clear();
+    row_cells.release();
+    src_for_col.release();
 
     // Indexes need no work here. The new rows carry the highest row ids, so
     // an index whose key count is below the table's row count is behind by
@@ -4350,10 +4350,10 @@ fn exec_select(d: &mut DB) ~ Console + Process {
     }
     // The work lists are local and held nowhere else; free them, or every
     // SELECT leaves four lists behind (P29).
-    show_cols.clear();
-    match_rows.clear();
-    hdr_names.clear();
-    widths.clear();
+    show_cols.release();
+    match_rows.release();
+    hdr_names.release();
+    widths.release();
 }
 
 // --- 6c-union: SELECT ... UNION [ALL] ... ---
@@ -10124,7 +10124,7 @@ fn con_key(d: &DB, k: i32, cells: Vec<i32>, base: i32) -> String {
     while j < n {
         let v = sp_get(d, vec_get(cells, base + vec_get(d.con_cols, st + j)));
         if is_null(v) {
-            parts.clear();
+            parts.release();
             return "";
         }
         let nb = numeric_bytes(v);
@@ -10143,7 +10143,7 @@ fn con_key(d: &DB, k: i32, cells: Vec<i32>, base: i32) -> String {
         j = j + 1;
     }
     let key = parts.join("");
-    parts.clear();
+    parts.release();
     key
 }
 
@@ -10270,7 +10270,7 @@ fn con_check_insert(d: &mut DB, t: i32, rows: Vec<i32>, nrows: i32) -> String {
                     let key = con_key(d, k, rows, 0);
                     if key.len() > 0 {
                         if map_contains(d.con_map, key) {
-                            keys.clear();
+                            keys.release();
                             return con_fail_text(d, k, t);
                         }
                     }
@@ -10294,7 +10294,7 @@ fn con_check_insert(d: &mut DB, t: i32, rows: Vec<i32>, nrows: i32) -> String {
     // Every constraint holds: the rows go in, and so do their keys.
     if nrows == 1 && !stale { con_map_add_keys(d, t, rows, keys); }
     else { con_map_add(d, t, rows, 0, nrows, cc); }
-    keys.clear();
+    keys.release();
     ""
 }
 

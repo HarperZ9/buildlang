@@ -10,6 +10,12 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+### `Vec::release()`, and the database's memory bounds restored
+
+- `v.release()` returns a vector's buffer and handle to the allocator. The vector must not be used afterwards. `v.clear()` empties the vector and keeps the buffer for reuse (#227); in 1.13.0 it freed the handle, and the next push wrote through freed memory.
+- The database (`bdb/db.bld`) used `clear()` at 12 sites as its way to free a list, which was the old lowering. After the `clear` fix those lists were kept, and the memory test on `main` read 1560 bytes per loaded row (bound 1500) and 2033 bytes per SELECT (bound 1900). The sites now call `release()`: 987.5 bytes per row, 1207.2 per SELECT and 1041.7 per UPDATE on Windows with gcc 13.2.0, and the planted leak is still caught at 4432.8.
+- `compiler/tests/vec_clear.rs` gains `release_frees_the_vector`: the emitted C calls the free routine, and a program that releases a vector 2000 times prints the right sum.
+
 ### Miscompiles fixed: integer limits and a float local added as an integer (#212, #215, #203)
 
 - `i8::MAX`, `u16::MAX`, `isize::MIN` and every other integer limit now compile. Only five were mapped before; the rest lowered to an undeclared name such as `i8_MAX` and failed in the C compiler after `buildc check` passed (#212).
