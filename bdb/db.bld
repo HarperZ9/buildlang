@@ -1,6 +1,8 @@
 // =============================================================================
 // qdb — SQL Database Engine written in BuildLang
 // =============================================================================
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 Zain Dana Harper.
 //
 // Architecture (sections in order of appearance):
 //

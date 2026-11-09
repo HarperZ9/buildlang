@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
 """Randomized differential test: two qdb builds must agree on every output.
 
 Generates a seeded random workload (two tables, three indexes, single and

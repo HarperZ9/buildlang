@@ -177,8 +177,8 @@ plan: a document's IR (`buildlang.doc/v0`) becomes BuildDB tables like a program
 ## 8. Decisions for the author
 
 1. **Home for qdb.** Decided 2026-11-09: "Move into BuildLang". qdb is `bdb/` in this repo,
-   with its history, and CI builds it with the compiler. Open: `bdb/` keeps Build Universe's
-   FSL-1.1-MIT licence (`bdb/LICENSE`); relicensing it to AGPL-3.0-only is the author's call.
+   with its history, and CI builds it with the compiler. Licence decided 2026-11-09 ("for the
+   license, I think AGPL is good."): `bdb/` is AGPL-3.0-only like the rest of the repository.
 2. **The name.** The author said "BDB, not qdb" on 2026-10-29. A rename of the engine, its
    binary and its docs needs a written checklist. BDF (Build Data Format) and BDB are one
    letter apart; keep both or rename one.

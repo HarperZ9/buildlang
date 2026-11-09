@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
 # qdb regression harness -- the full SQL surface of bdb/db.bld in one run.
 #
 # Build bdb/qdb.exe first (see bdb/README.md), then: bash bdb/tests/test_qdb.sh
