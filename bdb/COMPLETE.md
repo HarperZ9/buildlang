@@ -329,6 +329,30 @@ indexed read rebuilds it. Whatever the ratio is, it is reported. No planted chec
 measurement, and its guard is that both engines end with the same table (checked by the benchmark
 counting rows with `v` changed).
 
+**P20. UPDATE and DELETE in place (item 1 of the 2026-11-09 continuation), written 2026-11-09 before
+the change.** Today an UPDATE copies the whole cell array into a new one, evaluates WHERE on every
+row of the table, and marks every index stale; a DELETE copies the array and marks every index
+stale; the next indexed read rebuilds each index with a sort. The change: an UPDATE or DELETE whose
+WHERE is one equality on an indexed column takes its candidate rows from the index (each candidate
+is still checked against the WHERE), computes every new value and checks constraints before it
+writes, then writes the changed cells into the array in place. Each index on a changed column
+moves the changed entries to their new sorted place (key, then row id, the order a rebuild gives);
+other indexes are untouched. A DELETE compacts the cell array in place and renumbers the row ids
+of every index on the table in one integer pass, with no sort. The key map of P17 stays valid
+across an UPDATE that changes no constrained column. Measured on the P19 benchmark, unchanged
+(Windows, 10,000 rows, 2,000 statements, median of 3). Predictions: `update` from 2,472 times
+SQLite's time to between 5 and 25 times; `mixed` to between 5 and 25 times; `select` unchanged
+within noise (8 to 14 times). Target: update and mixed within 10 times. Planted checks: a new
+`bdb/tests/test_qdb_mutations.py` runs seeded scripts of INSERT, UPDATE and DELETE on three
+indexed tables (a DELETE in the first table moves the later tables' cells), with indexed equality
+and range reads in between, through one qdb process and through Python's sqlite3, and compares
+every read as a multiset of rows. It must fail on (a) a build that skips the index move when an
+indexed column changes, and (b) a build whose DELETE does not renumber index row ids; and its
+harness must count a disagreement when one qdb row is altered. Guards: test_qdb.sh no FAIL, crash
+test 194 points 0 violations, seeded power cuts 0 of 10,000 with the P15 digest unchanged (the
+.db and WAL bytes must not change), P2 2,000 of 2,000, text 2,000 of 2,000, WAL recovery, library
+and reference differential unchanged.
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
