@@ -98,6 +98,8 @@ jobs:
         run: python3 bdb/tests/test_qdb_text.py bdb/qdb.exe
 
       - name: qdb as a C library (one handle, many statements, same output as the CLI)
+        env:
+          BUILDLANG_STDLIB: ${{ github.workspace }}/stdlib
         run: python3 bdb/tests/test_qdb_lib.py compiler/target/release/buildc bdb/qdb.exe --cc gcc
 
       - name: SQLite differential (measurement, not yet a gate; see bdb/COMPLETE.md row 1b)
