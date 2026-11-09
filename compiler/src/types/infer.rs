@@ -2202,6 +2202,9 @@ impl<'ctx> TypeInfer<'ctx> {
         let (params, ret) = match name {
             "read_file" | "read_bytes" => (vec![str_ty.clone()], str_ty.clone()),
             "write_file" | "append_file" => (vec![str_ty.clone(), str_ty.clone()], bool_ty.clone()),
+            // Atomic replace and flush (issue #166).
+            "rename_file" => (vec![str_ty.clone(), str_ty.clone()], bool_ty.clone()),
+            "fsync_file" => (vec![str_ty.clone()], bool_ty.clone()),
             "write_bytes" => (
                 vec![str_ty.clone(), str_ty.clone(), i64_ty.clone()],
                 bool_ty,
