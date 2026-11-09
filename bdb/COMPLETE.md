@@ -314,6 +314,20 @@ query records; `in2.test` from 0 to at least 35 of 45; every other file unchange
 8,921 to between 9,100 and 9,160. Planted check: a build without the table form loses the
 `IN t` records of `in1.test` (about 90). Guards: test_qdb.sh no FAIL, P2 2,000, statements not
 below 1,931.
+**P19. Throughput through bdb/lib against SQLite (item 5), written 2026-11-09 07:45 PT before any
+run.** A new `bdb/benchmarks/bench_qdb_throughput.py` builds the library in release mode and
+`bdb/benchmarks/throughput.c` twice: linked with `libmain.a`, and linked with SQLite (on Windows
+the `sqlite3.dll` that ships with Python 3.12, SQLite 3.49.1; see A11). Each run makes `t (id INTEGER
+PRIMARY KEY, v INTEGER)` with 10,000 rows (qdb also gets `CREATE INDEX t_id ON t (id)`, its only
+way to look a key up), then times 2,000 statements inside one transaction, passed as SQL text to
+both: `select` (`SELECT v FROM t WHERE id = k`), `update` (`UPDATE t SET v = v + 1 WHERE id = k`)
+and `mixed` (alternating). qdb prints each result to stdout, sent to the null device; SQLite's
+callback formats each row into a buffer. Median of 3 runs per engine and mode, one core, the same
+machine. The target is qdb within 10 times SQLite's time. Predictions: `select` 10 to 40 times;
+`update` and `mixed` 100 times or more, since an UPDATE marks every index stale and the next
+indexed read rebuilds it. Whatever the ratio is, it is reported. No planted check: this is a
+measurement, and its guard is that both engines end with the same table (checked by the benchmark
+counting rows with `v` changed).
 
 ### Amendments
 
@@ -403,6 +417,12 @@ below 1,931.
   second run. Most of the 58 wrong `in1.test` records read tables filled by `INSERT INTO t SELECT
   ...`, which qdb does not run (7 statement records), so they stay wrong. The predictions stand
   for the second run.
+- **A11 (2026-11-09 08:15 PT, before any P19 measurement).** Linking `throughput.c` with the
+  `sqlite3.dll` that ships with Python crashed at the first call (a null function pointer inside
+  the DLL, under MinGW, with direct linking and with an import library from `dlltool`). The SQLite
+  twin is compiled instead from the SQLite 3.49.1 amalgamation (`sqlite3.c`, public domain, from
+  sqlite.org; kept outside the repository with its SHA-256), with default options and -O2, the
+  same version as before. Nothing else in P19 changes.
 
 ## Baseline (qdb at the move, 2026-11-08, buildc 1.11.0)
 
@@ -677,6 +697,25 @@ harness unchanged. Before: 1,251 of 2,000 on this branch, re-run before the chan
   the REPLACE, UPDATE and aggregate files), 19 `DISTINCT` inside SUM, AVG, MIN, MAX or TOTAL, 11
   aggregate forms the parser refuses, 9 trailing input, then views (2), `group_concat` (1); and 62
   statements (triggers 20, views 10, DROP forms 9, `INSERT ... SELECT` 7, REPLACE 4, REINDEX 1).
+## After P19: throughput through bdb/lib against SQLite (2026-11-09, feat/bdb-throughput)
+
+Windows, one core, `bench_qdb_throughput.py`, 10,000 rows, 2,000 statements in one transaction,
+median of 3; SQLite 3.49.1 compiled from the amalgamation (A11).
+
+| Mode | qdb (statements per second) | SQLite | qdb's time against SQLite's |
+|---|---|---|---|
+| select (`WHERE id = k`) | 36,368 | 362,450 | 10.0 times |
+| update (`SET v = v + 1 WHERE id = k`) | 131 | 323,363 | 2,472 times |
+| mixed | 130 | 283,688 | 2,185 times |
+
+- Both engines end in the same state (SUM(v) 499,600 after 1,000 rows and 200 mixed statements).
+- Predictions (select 10 to 40 times; update and mixed 100 times or more) held. The target (within
+  10 times) is met by point selects at the boundary and missed by updates by a factor of about
+  250: one UPDATE takes about 7.6 ms on a 10,000-row table, where SQLite takes 3 microseconds.
+  The UPDATE path scans and rewrites the table's cells and marks every index stale, so the cost
+  grows with the table, not with the rows changed. That is the next throughput target.
+- qdb's select number includes printing each result to the null device (qdb has no row API);
+  SQLite's callback formats the row into a buffer.
 
 ## Stage 1: a correct, durable single-file engine
 
@@ -707,6 +746,7 @@ harness unchanged. Before: 1,251 of 2,000 on this branch, re-run before the chan
 |---|---|---|---|
 | 3a Bulk load is linear | `bench_qdb_load.py` log-log slope k above 1.3 for autocommit or transactional indexed load | PASS | HarperZ9/build-universe#35: autocommit k 1.16, transactional indexed k 1.02. Limit stated there: interleaved INSERT plus indexed SELECT stays superlinear (k 1.52). Not re-run after the checkpoint change, which writes the state twice per checkpoint |
 | 3b ORDER BY is n log n | P6 ratio 30k/10k above 6 | PASS (single-table) | 3.29 after, 9.51 before (`bench_qdb_sort.py`). The UNION, grouped, JOIN and grouped-JOIN sorts are still selection sorts and were not measured |
+| 3d Throughput through the library | a point select or update loop through `bdb/lib` takes more than 10 times SQLite's time on the same machine | FAIL | P19: select 10.0 times, update 2,472 times, mixed 2,185 times (10,000 rows, Windows) |
 | 3c Whole-program store of 10^5 rows | a `bql export` store of 100,000 rows loads and answers a GROUP BY in under 10 s | NOT BUILT | |
 
 ## Stage 4: an embeddable engine
