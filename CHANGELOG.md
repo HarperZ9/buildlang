@@ -20,6 +20,7 @@ tracked in `STATUS.md`, `README.md`, and
 - BuildDB: INTERSECT and EXCEPT, applied left to right with UNION and UNION ALL; compound rows no longer collide when a cell holds `|`. sqllogictest 199 to 1,084 of 9,202 query records (`bdb/COMPLETE.md` P10).
 - BuildDB: expressions in the select list, WHERE and ORDER BY (arithmetic with SQLite's integer rules, CASE, `abs`, `coalesce`, correlated scalar, EXISTS and IN subqueries, comma-separated FROM lists), on a second SELECT path chosen by a token scan; `WHERE c > d` no longer compares c with the text 'd'. sqllogictest 1,084 to 8,186 of 9,202 query records with `select5.test` not yet run (`bdb/COMPLETE.md` P11).
 - BuildDB: comma-separated FROM tables are joined in a greedy order (equality links first), so a 40-table join runs in milliseconds instead of building cross products. sqllogictest 8,921 of 9,202 query records, `select5.test` 732 of 732 (`bdb/COMPLETE.md` P12).
+- BuildDB: PRIMARY KEY, UNIQUE and NOT NULL (column and table constraints) are enforced by INSERT and UPDATE, written to the .db and restored by ROLLBACK; a NULL in an INTEGER PRIMARY KEY takes the next key. sqllogictest statements 1,918 to 1,931 of 1,993 (`bdb/COMPLETE.md` P13).
 
 ## Unreleased: unannotated integer `let` takes the checked type (#159)
 
