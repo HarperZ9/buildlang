@@ -8,6 +8,10 @@ tracked in `STATUS.md`, `README.md`, and
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
 `108/108` or `132/132` are not the current release gate.
 
+## Unreleased: unannotated integer `let` takes the checked type (#159)
+
+- An unannotated `let` whose integer type the checker infers as `i64`, `i128` or `isize` from its uses (a comparison, an assignment, the function's return) is now emitted at that type. Before, lowering typed it from the initializer alone, so `let mut i = 0;` compared with an `i64` became `int32_t`, passed `buildc check`, and trapped with an overflow at run time once it passed 2^31. `buildc tv` now certifies the `lp` example. Narrower and unsigned inferred types keep the old lowering for now; annotate those (`let i: usize = 0;`) where the width matters. Tests: `compiler/tests/int_let_inference.rs`.
+
 ## Unreleased: the Low Water kernels as BuildLang packages
 
 - `lw-hash`, `lw-codec`, `lw-cbegin` and `lw-moves` 0.1.0 (AGPL-3.0-only): Low Water's world hash, lw-trace/1 codec, corpus run selection with its cbegin records, and move-table expansion, in pure `.bld`. Against the game at origin/dev 8b49bdd: 611 of 611 world-hash states, 40 of 40 trace round trips, the 40 cbegin records and the 168,234-byte expanded move table, all byte-identical. Each package's `tests/SOURCES.txt` lists its fixtures with their SHA-256 and origin.

@@ -162,6 +162,9 @@ pub struct TypeInfer<'ctx> {
     loop_break_source_frames: Vec<BreakSourceFrame>,
     /// Whether any explicit `return` statement was found.
     has_return: bool,
+    /// Unannotated `let NAME = ...` bindings and their type variables, for
+    /// `record_inferred_local_ints` (issue #159).
+    unannotated_lets: Vec<(Span, Ty)>,
     /// Borrow tracking state for the current function body.
     borrow_state: super::ty::BorrowState,
     /// Source text used to recover identifier names from macro token spans.
@@ -491,6 +494,7 @@ impl<'ctx> TypeInfer<'ctx> {
             source_bindings: vec![BTreeMap::new()],
             loop_break_source_frames: Vec::new(),
             has_return: false,
+            unannotated_lets: Vec::new(),
             borrow_state: super::ty::BorrowState::new(),
             source_text: None,
             source_id: None,
@@ -538,6 +542,7 @@ impl<'ctx> TypeInfer<'ctx> {
             source_bindings: vec![BTreeMap::new()],
             loop_break_source_frames: Vec::new(),
             has_return: false,
+            unannotated_lets: Vec::new(),
             borrow_state: super::ty::BorrowState::new(),
             source_text: None,
             source_id: None,
@@ -2443,6 +2448,28 @@ impl<'ctx> TypeInfer<'ctx> {
     /// Check if any `return` statement was encountered during inference.
     pub fn has_explicit_return(&self) -> bool {
         self.has_return
+    }
+
+    /// After a function body is inferred, write the integer type of each
+    /// unannotated `let` into the context so lowering emits the checked type.
+    /// `tail` is the body's value type and the declared return type, unified
+    /// here (errors ignored; the caller reports them) so a binding whose only
+    /// wide use is the tail expression is resolved too.
+    ///
+    /// Only signed types wider than the `i32` default are recorded. Widening
+    /// a signed binding never adds a trap or changes a value that fit before;
+    /// narrower and unsigned types keep the lowering's own typing.
+    pub fn record_inferred_local_ints(&mut self, tail: Option<(&Ty, &Ty)>) {
+        if let Some((body_ty, ret_ty)) = tail {
+            let _ = self.unifier.unify(body_ty, ret_ty);
+        }
+        for (span, ty) in std::mem::take(&mut self.unannotated_lets) {
+            if let TyKind::Int(int_ty) = self.apply(&ty).kind {
+                if matches!(int_ty, IntTy::I64 | IntTy::I128 | IntTy::Isize) {
+                    self.ctx.record_inferred_local_int(span, int_ty);
+                }
+            }
+        }
     }
 
     /// Set well-known type definitions.
@@ -6744,6 +6771,9 @@ impl<'ctx> TypeInfer<'ctx> {
         } else {
             Ty::fresh_var()
         };
+        if local.ty.is_none() && matches!(local.pattern.kind, ast::PatternKind::Ident { .. }) {
+            self.unannotated_lets.push((local.pattern.span, ty.clone()));
+        }
 
         if let Some(init) = &local.init {
             let error_count = self.errors.len();

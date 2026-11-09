@@ -86,7 +86,9 @@ checker does not model yet (match patterns, enum constants, field access, a loop
 check`, but the backend declares `i` as `int32_t`, so the C traps once `i` passes 2^31 while the
 source, where `i` takes `n`'s type, does not. The checker reports `lp` not certified ("C traps where
 the source does not"). Running it with a step of 10^9 up to 5 * 10^9 aborts with "attempt to add with
-overflow". Filed as issue #159.
+overflow". Filed as issue #159 and fixed: the checker now records the integer type it infers for an
+unannotated `let`, lowering emits that type when it is a wider signed integer, and `lp` is certified.
+The regression tests are in `compiler/tests/int_let_inference.rs`.
 
 ## Verified
 
