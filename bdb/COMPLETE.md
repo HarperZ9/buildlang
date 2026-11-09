@@ -180,6 +180,19 @@ that the path choice leaves them alone); text, crash, WAL, library and reference
 tests unchanged. Planted check: a build whose integer division returns a real (no truncation)
 passes fewer P1 records and fails a new test_qdb.sh assertion.
 
+**P12. Join order for comma-separated FROM lists, written 2026-11-09 01:15 PT before the change.**
+Found by the P11 run (A6): `select5.test` joins up to 64 tables, and looping in FROM order builds
+cross products of tables no conjunct has linked yet. Change: before the loop, the tables are
+ordered greedily. Each step takes the unplaced table with an equality conjunct to a placed table,
+then one with a conjunct on itself alone (`a29 = 6`), then the first in FROM order; each conjunct
+is checked at the step where its last table is bound. The result rows and their order do not
+change: ORDER BY sorts after, and a query without ORDER BY is compared by the corpus's sort mode.
+Measured on P1 unchanged, all 17 files, against P11 (16 files, `select5.test` at 0). Prediction:
+`select5.test` passes at least 650 of its 732 queries; no query over 60 s; the other 16 files keep
+their P11 counts exactly. Guards: test_qdb.sh no FAIL, P2 2,000 of 2,000, the other tests
+unchanged. Planted check: a build that keeps FROM order times out on `select5.test` (fewer than
+100 passes inside the 60 s limit on its first 100 queries).
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
@@ -348,11 +361,29 @@ harness unchanged. Before: 1,251 of 2,000 on this branch, re-run before the chan
   asserted a refusal and now assert answers; 17 checks added); text 0 changed; crash 0 of 170;
   WAL 0; library 0; reference differential 16 of 16 with `--no-null --no-float-agg`.
 
+## After P12: join order (2026-11-09, feat/bdb-joinorder)
+
+- **P1 sqllogictest, all 17 files:** 8,921 of 9,202 query records pass (96.95 percent), 9 wrong,
+  272 rejected; statements 1,918 of 1,993; the whole run takes 269 s. `select5.test` passes 732 of
+  732 (P11: not run, counted 0); `select4.test` 2,832 of 2,832 (P11: 2,829, three records past the
+  60 s limit). Prediction: `select5` at least 650, held; no query over 60 s, held; the other files
+  unchanged, missed by those three `select4` records, which no longer time out.
+- **Planted check, as preregistered: not separating.** On the first 100 `select5.test` queries
+  the build that keeps FROM order also finishes all 100 inside 60 s; those queries join 4 to 12
+  tables. Kept as a null for the check as written. A second look, not preregistered: every 7th
+  query from 300 to 440 (21 queries, 28 to 40 tables) with a 30 s limit: FROM order finishes 0 of
+  21 in 649 s, the ordered build 21 of 21 in 1 s.
+- **P2:** 2,000 of 2,000. **Guards:** test_qdb.sh 277 pass, 0 fail (three comma-join checks added);
+  text 0 changed; crash 0 of 170; WAL 0; reference differential 16 of 16.
+- What is left in P1: 272 rejected and 9 wrong, all in `evidence/`: `IN ()` and literal-first
+  `IN` forms, `DISTINCT` inside SUM and AVG, triggers, views, REINDEX, REPLACE and UPDATE forms
+  qdb does not run.
+
 ## Stage 1: a correct, durable single-file engine
 
 | Row | Check (fails if) | Status | Evidence |
 |---|---|---|---|
-| 1a Regression gate | `bdb/tests/test_qdb.sh` reports any FAIL | PASS | 274 pass, 0 fail after P11; 257 after P10; 250 after P9; 244 after P8; 241 after P7; 222 after the completion changes (214/0/1 at the move) |
+| 1a Regression gate | `bdb/tests/test_qdb.sh` reports any FAIL | PASS | 277 pass, 0 fail after P12; 274 after P11; 257 after P10; 250 after P9; 244 after P8; 241 after P7; 222 after the completion changes (214/0/1 at the move) |
 | 1b SQLite differential | any of the P2 queries disagrees, with numbers compared as numbers | PASS | 2,000 of 2,000 after P8, a CI gate; 1,944 after P7; 1,251 at the move (519 null_vs_empty, 230 rows, 46 number_text) |
 | 1c Crash recovery | any P3 crash point breaks the rule | PASS | 0 violations of 170 (24 of 104 at the move); two mutants caught |
 | 1d Cross-process transaction | either P4 case misses | PASS | four checks in test_qdb.sh (`xproc_*`), differential process mode equals REPL mode on 8 seeds |
@@ -364,7 +395,7 @@ harness unchanged. Before: 1,251 of 2,000 on this branch, re-run before the chan
 
 | Row | Check (fails if) | Status | Evidence |
 |---|---|---|---|
-| 2a sqllogictest queries | any P1 query record does not pass | FAIL | 8,186 of 9,202 (88.96 percent) after P11, `select5.test` not run (A6); 1,084 after P10; 32 at the move; `bdb/tests/slt_run.py` |
+| 2a sqllogictest queries | any P1 query record does not pass | FAIL | 8,921 of 9,202 (96.95 percent) after P12; 8,186 after P11 (`select5` not run); 1,084 after P10; 32 at the move; `bdb/tests/slt_run.py` |
 | 2b Expressions in the select list | `SELECT a+1, a*b-c FROM t` refused or wrong | PASS | P11: arithmetic, CASE, functions, correlated subqueries; `select1` to `select3` 5,320 of 5,320 |
 | 2c Column types with arguments and constraints | `VARCHAR(30)`, `INTEGER PRIMARY KEY`, `UNIQUE` refused | FAIL | P9: type arguments are read (`VARCHAR(30)`, `DECIMAL(10, 2)`), statements 134 to 1,918 of 1,993; `PRIMARY KEY` is parsed and not enforced; `UNIQUE` is refused |
 | 2d CASE, scalar functions (abs, coalesce) | refused or wrong | PASS | P11: searched and simple CASE, `abs`, `coalesce`, `ifnull`, `nullif` |

@@ -684,6 +684,19 @@ chksel "x_three_valued" "SELECT id FROM emp WHERE NOT (CASE WHEN id = 1 THEN NUL
 chk    "x_no_function"  "$($QDB "$DB" "SELECT nosuch(id) FROM emp" 2>&1 | tr -d '\r' | grep -ci 'no such function')" "1"
 chk    "x_no_column"    "$($QDB "$DB" "SELECT id + nosuch FROM emp" 2>&1 | tr -d '\r' | grep -ci 'no such column')" "1"
 
+echo "== comma-separated FROM lists (P11, ordered by P12) =="
+rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
+$QDB "$DB" "CREATE TABLE j1 (a INTEGER, b INTEGER)" >/dev/null
+$QDB "$DB" "CREATE TABLE j2 (a INTEGER, b INTEGER)" >/dev/null
+$QDB "$DB" "CREATE TABLE j3 (a INTEGER, b INTEGER)" >/dev/null
+$QDB "$DB" "INSERT INTO j1 VALUES (1,10),(2,20),(3,30)" >/dev/null
+$QDB "$DB" "INSERT INTO j2 VALUES (10,1),(20,3),(30,3)" >/dev/null
+$QDB "$DB" "INSERT INTO j3 VALUES (1,100),(3,300)" >/dev/null
+chk "comma_join3" "$(xrows "SELECT j1.a, j3.b FROM j1, j2, j3 WHERE j3.a = 3 AND j2.b = j3.a AND j1.b = j2.a ORDER BY 1")" "$(printf '2 | 300\n3 | 300')"
+chk "comma_join_cross" "$(xrows "SELECT count(*) FROM j1, j3")" "6"
+chk "comma_join_alias" "$(xrows "SELECT x.a, y.a FROM j1 AS x, j1 AS y WHERE x.a + 1 = y.a ORDER BY 1")" "$(printf '1 | 2\n2 | 3')"
+rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
+
 echo "== ALTER / DROP =="
 reseed; $QDB "$DB" "ALTER TABLE emp ADD COLUMN active INTEGER" >/dev/null
 chkhdr "alter_add"     "SELECT * FROM emp LIMIT 0" "id | name | dept | salary | age | active"
