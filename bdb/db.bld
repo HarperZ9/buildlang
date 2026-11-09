@@ -711,78 +711,71 @@ fn unescape_text(s: String) -> String {
 }
 
 fn concat_parts(parts: Vec<String>) -> String {
-    let mut cur: Vec<String> = parts;
-    let mut n = vec_len(cur);
-    if n == 0 { return ""; }
-    while n > 1 {
-        let mut next: Vec<String> = vec![];
-        let mut i = 0;
-        while i < n {
-            let a: String = vec_get(cur, i);
-            if i + 1 < n {
-                let b: String = vec_get(cur, i + 1);
-                vec_push(next, a + b);
-            } else {
-                vec_push(next, a);
-            }
-            i = i + 2;
-        }
-        cur = next;
-        n = vec_len(cur);
-    }
-    vec_get(cur, 0)
+    // One allocation of the final size (Vec<String>.join, buildlang #224).
+    // The pairwise tree this replaces copied every byte once per level and
+    // kept every level: the runtime frees no string.
+    parts.join("")
 }
 
 // Serialize the entire database (all tables, rows, and index declarations)
 // to the text-based file format and write to d.db_path. Returns the number
 // of bytes written, which the checkpoint policy compares the WAL against.
 // Does NOT write WAL — this is the "clean" checkpoint format.
-// Output is built in chunks of about 64 KB, joined once by concat_parts.
 fn db_text(d: &DB) -> String {
+    // Every piece of the file is pushed once and joined once (P29). No piece
+    // is copied before the join: a cell with nothing to escape is the pool's
+    // own string.
     let mut parts: Vec<String> = vec![];
     // Format 2 header: every transaction up to txn_id is in this file.
-    let mut out = "QDB 2 " + to_string_i32(d.txn_id) + "\n";
+    vec_push(parts, "QDB 2 ");
+    vec_push(parts, to_string_i32(d.txn_id));
+    vec_push(parts, "
+");
     let mut t = 0;
     while t < d.tbl_count {
         let tname = sp_get(d, vec_get(d.tbl_names, t));
-        out = out + "TABLE " + tname + "\n";
+        vec_push(parts, "TABLE ");
+        vec_push(parts, tname);
+        vec_push(parts, "
+SCHEMA");
         // Schema line
         let cs = vec_get(d.tbl_col_starts, t);
         let cc = vec_get(d.tbl_col_counts, t);
-        let mut schema = "SCHEMA";
         let mut c = 0;
         while c < cc {
             let cname = sp_get(d, vec_get(d.col_names, cs + c));
             let ctype = vec_get(d.col_types, cs + c);
-            let tstr = if ctype == 0 { "INTEGER" } else if ctype == 1 { "REAL" } else { "TEXT" };
-            schema = schema + " " + cname + ":" + tstr;
+            let tstr = if ctype == 0 { ":INTEGER" } else if ctype == 1 { ":REAL" } else { ":TEXT" };
+            vec_push(parts, " ");
+            vec_push(parts, cname);
+            vec_push(parts, tstr);
             c = c + 1;
         }
-        out = out + schema + "\n";
-        out = out + con_text(d, t, cs);
+        vec_push(parts, "
+");
+        vec_push(parts, con_text(d, t, cs));
         // Rows
         let rs = vec_get(d.tbl_row_starts, t);
         let rc = vec_get(d.tbl_row_counts, t);
         let mut r = 0;
         while r < rc {
-            let mut row_str = "ROW ";
             let mut ci = 0;
             while ci < cc {
-                if ci > 0 { row_str = row_str + "|"; }
+                if ci == 0 { vec_push(parts, "ROW "); } else { vec_push(parts, "|"); }
                 let cell = sp_get(d, vec_get(d.cells, rs + r * cc + ci));
-                row_str = row_str + escape_cell(cell);
+                vec_push(parts, escape_cell(cell));
                 ci = ci + 1;
             }
-            out = out + row_str + "\n";
-            if out.len() > 65536 {
-                vec_push(parts, out);
-                out = "";
-            }
+            if cc == 0 { vec_push(parts, "ROW "); }
+            vec_push(parts, "
+");
             r = r + 1;
         }
-        out = out + "END\n";
+        vec_push(parts, "END
+");
         if t + 1 < d.tbl_count {
-            out = out + "\n";
+            vec_push(parts, "
+");
         }
         t = t + 1;
     }
@@ -795,11 +788,22 @@ fn db_text(d: &DB) -> String {
         let col_i = vec_get(d.idx_col_indices, ix);
         let tcs = vec_get(d.tbl_col_starts, tbl_idx);
         let cname = sp_get(d, vec_get(d.col_names, tcs + col_i));
-        out = out + "\nINDEX " + iname + " ON " + tname + " (" + cname + ")\n";
+        vec_push(parts, "
+INDEX ");
+        vec_push(parts, iname);
+        vec_push(parts, " ON ");
+        vec_push(parts, tname);
+        vec_push(parts, " (");
+        vec_push(parts, cname);
+        vec_push(parts, ")
+");
         ix = ix + 1;
     }
-    vec_push(parts, out);
-    concat_parts(parts)
+    let all = parts.join("");
+    // The vector's buffer goes back to the allocator (Vec.clear frees it);
+    // parts is not used again.
+    parts.clear();
+    all
 }
 
 // Rewrite the .db from memory. Returns the bytes written, which the
@@ -3651,28 +3655,16 @@ fn exec_insert(d: &mut DB) ~ Console + Process {
         d.cells = new_cells;
     }
 
-    // Update row count for this table (all nrows added).
-    let mut new_rc: Vec<i32> = vec![];
-    let mut ri = 0;
-    while ri < d.tbl_count {
-        if ri == tidx { vec_push(new_rc, rc + nrows); }
-        else { vec_push(new_rc, vec_get(d.tbl_row_counts, ri)); }
-        ri = ri + 1;
-    }
-    d.tbl_row_counts = new_rc;
-
-    // Shift row_starts for tables after this one by the cells we inserted.
-    let mut new_rs: Vec<i32> = vec![];
-    let mut si = 0;
+    // Row count for this table, and the row starts of the tables after it,
+    // changed in place (P29: two fresh vectors per INSERT were never freed).
+    let rcv = d.tbl_row_counts;
+    rcv[tidx] = rc + nrows;
+    let rsv = d.tbl_row_starts;
+    let mut si = tidx + 1;
     while si < d.tbl_count {
-        if si > tidx {
-            vec_push(new_rs, vec_get(d.tbl_row_starts, si) + added);
-        } else {
-            vec_push(new_rs, vec_get(d.tbl_row_starts, si));
-        }
+        rsv[si] = vec_get(rsv, si) + added;
         si = si + 1;
     }
-    d.tbl_row_starts = new_rs;
 
     // Indexes need no work here. The new rows carry the highest row ids, so
     // an index whose key count is below the table's row count is behind by
@@ -10013,15 +10005,23 @@ fn con_check_insert(d: &mut DB, t: i32, rows: Vec<i32>, nrows: i32) -> String {
                     r = r + 1;
                 }
             } else {
-                let batch: HashMap<String, f64> = map_new();
-                let mut r = 0;
-                while r < nrows {
-                    let key = con_key(d, k, rows, r * cc);
+                if nrows == 1 {
+                    // One row cannot collide with itself: no batch map (P29).
+                    let key = con_key(d, k, rows, 0);
                     if key.len() > 0 {
-                        if map_contains(d.con_map, key) || map_contains(batch, key) { return con_fail_text(d, k, t); }
-                        map_insert(batch, key, 1.0);
+                        if map_contains(d.con_map, key) { return con_fail_text(d, k, t); }
                     }
-                    r = r + 1;
+                } else {
+                    let batch: HashMap<String, f64> = map_new();
+                    let mut r = 0;
+                    while r < nrows {
+                        let key = con_key(d, k, rows, r * cc);
+                        if key.len() > 0 {
+                            if map_contains(d.con_map, key) || map_contains(batch, key) { return con_fail_text(d, k, t); }
+                            map_insert(batch, key, 1.0);
+                        }
+                        r = r + 1;
+                    }
                 }
             }
         }
