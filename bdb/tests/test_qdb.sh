@@ -83,11 +83,25 @@ chksel "paren_group"   "SELECT name FROM emp WHERE (dept='eng' OR dept='hr') AND
 chksel "not_between"   "SELECT name FROM emp WHERE salary NOT BETWEEN 80 AND 120 ORDER BY id" "eve"
 chksel "not_paren"     "SELECT name FROM emp WHERE NOT (dept='eng' OR dept='hr') ORDER BY id" "$(printf 'carol\ndave')"
 # IS NULL / IS NOT NULL need a null cell (emp has none), so use a dedicated table.
-# NULL in INSERT stores a blank cell; IS NULL matches it, IS NOT NULL matches the rest.
+# NULL in INSERT stores SQL NULL, apart from ''; IS NULL matches only NULL.
 $QDB "$DB" "CREATE TABLE nn (id INTEGER, name TEXT)" >/dev/null
-$QDB "$DB" "INSERT INTO nn VALUES (1,'alice'),(2,NULL),(3,'carol')" >/dev/null
+$QDB "$DB" "INSERT INTO nn VALUES (1,'alice'),(2,NULL),(3,'carol'),(4,'')" >/dev/null
 chksel "is_null"       "SELECT id FROM nn WHERE name IS NULL" "2"
-chksel "is_not_null"   "SELECT id FROM nn WHERE name IS NOT NULL ORDER BY id" "$(printf '1\n3')"
+chksel "is_not_null"   "SELECT id FROM nn WHERE name IS NOT NULL ORDER BY id" "$(printf '1\n3\n4')"
+chksel "empty_not_null" "SELECT id FROM nn WHERE name = ''" "4"
+# Three-valued logic: a comparison with NULL is unknown, and NOT unknown is unknown.
+chksel "not_eq_null"   "SELECT id FROM nn WHERE NOT name = 'alice' ORDER BY id" "$(printf '3\n4')"
+chksel "ne_null"       "SELECT id FROM nn WHERE name != 'alice' ORDER BY id" "$(printf '3\n4')"
+chksel "not_in_null"   "SELECT id FROM nn WHERE name NOT IN ('carol') ORDER BY id" "$(printf '1\n4')"
+chksel "or_unknown"    "SELECT id FROM nn WHERE name = 'x' OR id = 2" "2"
+chksel "null_renders"  "SELECT name FROM nn WHERE id = 2" "NULL"
+chksel "count_col_empty" "SELECT COUNT(name) FROM nn" "3"
+chksel "min_text_empty" "SELECT MIN(name) FROM nn" ""
+chksel "order_null_first" "SELECT id FROM nn ORDER BY name" "$(printf '2\n4\n1\n3')"
+chksel "order_null_last_desc" "SELECT id FROM nn ORDER BY name DESC" "$(printf '3\n1\n4\n2')"
+$QDB "$DB" "UPDATE nn SET name = NULL WHERE id = 1" >/dev/null
+chksel "update_set_null" "SELECT id FROM nn WHERE name IS NULL ORDER BY id" "$(printf '1\n2')"
+chk   "reserved_null_text" "$($QDB "$DB" "$(printf "INSERT INTO nn VALUES (9, '\001')")" 2>&1 | tr -d '\r' | grep -ci 'reserved')" "1"
 $QDB "$DB" "DROP TABLE nn" >/dev/null 2>&1
 
 echo "== WHERE operator fail-closed (arithmetic / doubled / stray) =="
@@ -186,15 +200,16 @@ chksel "group_max_name" "SELECT dept, MAX(name) FROM emp GROUP BY dept ORDER BY 
 chksel "subq_min_name" "SELECT id FROM emp WHERE name = (SELECT MIN(name) FROM emp)" "1"
 chksel "subq_max_name" "SELECT id FROM emp WHERE name = (SELECT MAX(name) FROM emp)" "5"
 # Empty match set. An aggregate with no GROUP BY still returns exactly one row.
-# MIN/MAX over zero rows is SQL NULL (blank); before, the internal float sentinel
+# MIN/MAX over zero rows is SQL NULL; before, the internal float sentinel
 # leaked out as 12157520.92 / -12157520.92 (a silent wrong answer). COUNT stays 0
 # (SQLite-correct); SUM/AVG stay 0 here (a kept divergence from SQLite's NULL, and
 # the AVG path returns 0 rather than dividing by a zero count).
-chksel "empty_min_num"  "SELECT MIN(salary) FROM emp WHERE id > 999" ""
-chksel "empty_max_num"  "SELECT MAX(salary) FROM emp WHERE id > 999" ""
+chksel "empty_min_num"  "SELECT MIN(salary) FROM emp WHERE id > 999" "NULL"
+chksel "empty_max_num"  "SELECT MAX(salary) FROM emp WHERE id > 999" "NULL"
 chksel "empty_count"    "SELECT COUNT(*) FROM emp WHERE id > 999" "0"
-chksel "empty_sum"      "SELECT SUM(salary) FROM emp WHERE id > 999" "0"
-chksel "empty_avg"      "SELECT AVG(salary) FROM emp WHERE id > 999" "0"
+# SUM and AVG over zero rows are NULL too, as in SQL (they were 0 before P7).
+chksel "empty_sum"      "SELECT SUM(salary) FROM emp WHERE id > 999" "NULL"
+chksel "empty_avg"      "SELECT AVG(salary) FROM emp WHERE id > 999" "NULL"
 chkhdr "hdr_count"     "SELECT COUNT(*) FROM emp" "COUNT(*)"
 chksel "group_count"   "SELECT dept, COUNT(*) FROM emp GROUP BY dept ORDER BY dept" "$(printf 'eng   | 2\nhr    | 1\nsales | 2')"
 chksel "group_desc"    "SELECT dept, COUNT(*) FROM emp GROUP BY dept ORDER BY dept DESC" "$(printf 'sales | 2\nhr    | 1\neng   | 2')"
@@ -406,7 +421,7 @@ chk "join_distinct_closed"     "$($QDB "$DB" "SELECT COUNT(DISTINCT emp.dept) FR
 
 echo "== LEFT [OUTER] JOIN (null-extend unmatched left rows) =="
 # Dedicated pair: la carries three tags, lb covers only x and z, so the 'y' row
-# has no match. INNER drops it; LEFT keeps it with a NULL (blank) right column.
+# has no match. INNER drops it; LEFT keeps it with a NULL right column.
 # These assertions select without ORDER BY, so rows render in left-table scan
 # order; la is inserted 1,2,3 so that order is already sorted. ORDER BY inside a
 # join is covered in the "ORDER BY inside JOIN" section below.
@@ -415,15 +430,15 @@ $QDB "$DB" "INSERT INTO la VALUES (1,'x'),(2,'y'),(3,'z')" >/dev/null
 $QDB "$DB" "CREATE TABLE lb (tag TEXT, note TEXT)" >/dev/null
 $QDB "$DB" "INSERT INTO lb VALUES ('x','has-x'),('z','has-z')" >/dev/null
 chksel "join_inner_drop"   "SELECT la.id, lb.note FROM la JOIN lb ON la.tag = lb.tag" "$(printf '1  | has-x\n3  | has-z')"
-chksel "left_join_null"    "SELECT la.id, lb.note FROM la LEFT JOIN lb ON la.tag = lb.tag" "$(printf '1  | has-x\n2  |\n3  | has-z')"
-chksel "left_outer_join"   "SELECT la.id, lb.note FROM la LEFT OUTER JOIN lb ON la.tag = lb.tag" "$(printf '1  | has-x\n2  |\n3  | has-z')"
+chksel "left_join_null"    "SELECT la.id, lb.note FROM la LEFT JOIN lb ON la.tag = lb.tag" "$(printf '1  | has-x\n2  | NULL\n3  | has-z')"
+chksel "left_outer_join"   "SELECT la.id, lb.note FROM la LEFT OUTER JOIN lb ON la.tag = lb.tag" "$(printf '1  | has-x\n2  | NULL\n3  | has-z')"
 # WHERE on the null-extended right column: IS NULL selects exactly the unmatched
 # left row; IS NOT NULL and equality keep matched rows only (null excluded).
 chksel "left_join_isnull"  "SELECT la.id FROM la LEFT JOIN lb ON la.tag = lb.tag WHERE lb.note IS NULL" "2"
 chksel "left_join_notnull" "SELECT la.id FROM la LEFT JOIN lb ON la.tag = lb.tag WHERE lb.note IS NOT NULL" "$(printf '1\n3')"
 chksel "left_join_reqeq"   "SELECT la.id FROM la LEFT JOIN lb ON la.tag = lb.tag WHERE lb.note = 'has-x'" "1"
 # WHERE on the preserved (left) column filters left rows, null-extension intact.
-chksel "left_join_leftwh"  "SELECT la.id, lb.note FROM la LEFT JOIN lb ON la.tag = lb.tag WHERE la.id > 1" "$(printf '2  |\n3  | has-z')"
+chksel "left_join_leftwh"  "SELECT la.id, lb.note FROM la LEFT JOIN lb ON la.tag = lb.tag WHERE la.id > 1" "$(printf '2  | NULL\n3  | has-z')"
 # Scalar aggregate over a LEFT JOIN folds the null-extended row in: COUNT(*) counts
 # all three left rows, but COUNT(right col) skips the unmatched row's blank cell.
 chksel "left_join_agg_cnt"     "SELECT COUNT(*) FROM la LEFT JOIN lb ON la.tag = lb.tag" "3"
@@ -577,7 +592,28 @@ $QDB "$DB" "INSERT INTO s VALUES (1, 'x|y'), (2, 'back\\slash'), (3, 'a\\|b')" >
 chksel "text_pipe"       "SELECT v FROM s WHERE id = 1" "x|y"
 chksel "text_backslash"  "SELECT v FROM s WHERE id = 2" 'back\slash'
 chksel "text_both"       "SELECT v FROM s WHERE id = 3" 'a\|b'
-chk   "text_format_header" "$(head -1 "$DB" | tr -d '\r' | cut -d' ' -f1-2)" "QDB 1"
+chk   "text_format_header" "$(head -1 "$DB" | tr -d '\r' | cut -d' ' -f1-2)" "QDB 2"
+rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
+
+echo "== NULL and '' through the file format =="
+# Format 2 writes NULL as \N and '' as an empty cell; both survive a checkpoint
+# (the .db written at exit) and a WAL replay (a crash before the checkpoint).
+rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
+$QDB "$DB" "CREATE TABLE z (id INTEGER, v TEXT)" >/dev/null
+$QDB "$DB" "INSERT INTO z VALUES (1, NULL), (2, ''), (3, '\\N')" >/dev/null
+chksel "fmt2_null_ckpt"  "SELECT id FROM z WHERE v IS NULL" "1"
+chksel "fmt2_empty_ckpt" "SELECT id FROM z WHERE v = ''" "2"
+chksel "fmt2_backslash_n" "SELECT v FROM z WHERE id = 3" '\N'
+chk   "fmt2_cells" "$(grep '^ROW' "$DB" | tr -d '\r' | tr '\n' ' ')" 'ROW 1|\N ROW 2| ROW 3|\\N '
+rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
+$QDB "$DB" "CREATE TABLE z (id INTEGER, v TEXT)" >/dev/null
+QDB_CRASH_AT=2 $QDB "$DB" "INSERT INTO z VALUES (1, NULL), (2, '')" >/dev/null 2>&1
+chksel "fmt2_null_wal"   "SELECT id FROM z WHERE v IS NULL" "1"
+chksel "fmt2_empty_wal"  "SELECT id FROM z WHERE v = ''" "2"
+# A format 1 file had one empty cell for NULL and ''; it loads as NULL.
+rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
+printf 'QDB 1 0\nTABLE z\nSCHEMA id:INTEGER v:TEXT\nROW 1|\nROW 2|b\nEND\n' > "$DB"
+chksel "fmt1_empty_is_null" "SELECT id FROM z WHERE v IS NULL" "1"
 rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
 
 echo "== ALTER / DROP =="

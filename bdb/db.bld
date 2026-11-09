@@ -76,13 +76,14 @@
 //   qdb test.db "CREATE INDEX idx_age ON users (age)"
 //   qdb test.db                         — interactive REPL mode
 //
-// Storage format (format 1; a file without the QDB line is format 0, read
-// the same way except that its cells are taken literally):
-//   QDB 1 <txid>          every transaction up to <txid> is in this file
+// Storage format (format 2; format 1 has a "QDB 1" header and format 0 none,
+// and both load an empty cell as NULL; format 0 takes cells literally):
+//   QDB 2 <txid>          every transaction up to <txid> is in this file
 //   TABLE users
 //   SCHEMA id:INTEGER name:TEXT age:INTEGER
 //   ROW 1|Zain|25
 //   ROW 2|a\|b|30          a cell escapes \\ \| \n \r
+//   ROW 3|\N|           NULL is \N; an empty cell is ''
 //   END
 //   INDEX idx_age ON users (age)
 // The checkpoint writes the same text to <db>.ckpt first, ending in
@@ -286,11 +287,13 @@ struct DB {
     // otherwise none of it does. QDB_TRACE_WRITES=1 prints one line per
     // durable write to stderr. Unset, every write goes straight through.
     // File format and recovery state. fmt_escaped is true when the .db
-    // began with a "QDB 1 <txid>" header (format 1: cells escaped); a file
-    // with no header is format 0 and is read as before. applied_txid is the
+    // began with a "QDB 1 <txid>" or "QDB 2 <txid>" header (cells escaped);
+    // fmt_nulls is true for format 2 (NULL written \N, an empty cell is '').
+    // A file with no header is format 0 and is read as before. applied_txid is the
     // <txid> of that header: every transaction with an id at or below it is
     // already in the .db, so replay skips it.
     fmt_escaped: bool,
+    fmt_nulls: bool,
     applied_txid: i32,
     ckpt_path: String,
     crash_at: i32,
@@ -385,7 +388,7 @@ fn db_new(db_path: String) -> DB {
         txn_id: 0,
         wal_buf: "",
         wal_bytes: 0, db_bytes: 0,
-        fmt_escaped: false, applied_txid: 0, ckpt_path: cp,
+        fmt_escaped: false, fmt_nulls: false, applied_txid: 0, ckpt_path: cp,
         crash_at: 0, crash_torn: false, trace_writes: false, write_seq: 0,
         idx_stale: false,
         snap_cells: vec![], snap_row_starts: vec![], snap_row_counts: vec![],
@@ -418,6 +421,28 @@ fn sp_get(d: &DB, id: i32) -> String {
     vec_get(d.pool, id)
 }
 
+// --- SQL NULL ---
+// NULL is one reserved cell text, the single character U+0001, kept apart
+// from the empty string. A text literal that is exactly that character is
+// refused (tok_value), so no stored text can be mistaken for NULL. Output
+// renders NULL as `NULL` (disp); the file writes it as \N (escape_cell).
+fn nullv() -> String { "\x01" }
+fn is_null(s: String) -> bool { s == "\x01" }
+fn disp(s: String) -> String { if s == "\x01" { "NULL" } else { s } }
+
+// Three-valued logic for WHERE: 0 false, 1 true, 2 unknown.
+fn not3(a: i32) -> i32 { if a == 2 { 2 } else { 1 - a } }
+fn and3(a: i32, b: i32) -> i32 {
+    if a == 0 || b == 0 { return 0; }
+    if a == 1 && b == 1 { return 1; }
+    2
+}
+fn or3(a: i32, b: i32) -> i32 {
+    if a == 1 || b == 1 { return 1; }
+    if a == 0 && b == 0 { return 0; }
+    2
+}
+
 // =========================================================================
 // SECTION 2: STORAGE — File Persistence (Save / Load)
 // =========================================================================
@@ -439,7 +464,7 @@ fn sp_get(d: &DB, id: i32) -> String {
 // Join strings pairwise, round by round, so each byte is copied O(log parts)
 // times. Appending every line to one growing String copied the whole output
 // per line, O(size^2) per save.
-// --- Escaped text (file format 1) ---
+// --- Escaped text (file formats 1 and 2) ---
 // A cell is written with four escapes: a backslash as \\, a pipe as \|, a
 // line feed as \n and a carriage return as \r. A WAL statement that holds a
 // line break is written as an OPX line with the same escapes, minus the pipe.
@@ -468,6 +493,12 @@ fn escape_text(s: String, pipe: bool) -> String {
         i = i + 1;
     }
     concat_parts(parts)
+}
+
+// A cell in format 2: NULL is \N, any other text is escape_text with pipes.
+fn escape_cell(s: String) -> String {
+    if is_null(s) { return "\\N"; }
+    escape_text(s, true)
 }
 
 // Inverse of escape_text. An unknown escape keeps both characters.
@@ -524,8 +555,8 @@ fn concat_parts(parts: Vec<String>) -> String {
 // Output is built in chunks of about 64 KB, joined once by concat_parts.
 fn db_text(d: &DB) -> String {
     let mut parts: Vec<String> = vec![];
-    // Format 1 header: every transaction up to txn_id is in this file.
-    let mut out = "QDB 1 " + to_string_i32(d.txn_id) + "\n";
+    // Format 2 header: every transaction up to txn_id is in this file.
+    let mut out = "QDB 2 " + to_string_i32(d.txn_id) + "\n";
     let mut t = 0;
     while t < d.tbl_count {
         let tname = sp_get(d, vec_get(d.tbl_names, t));
@@ -553,7 +584,7 @@ fn db_text(d: &DB) -> String {
             while ci < cc {
                 if ci > 0 { row_str = row_str + "|"; }
                 let cell = sp_get(d, vec_get(d.cells, rs + r * cc + ci));
-                row_str = row_str + escape_text(cell, true);
+                row_str = row_str + escape_cell(cell);
                 ci = ci + 1;
             }
             out = out + row_str + "\n";
@@ -649,8 +680,9 @@ fn db_load(d: &mut DB) ~ FileSystem {
             let clen2 = clean.len();
             if clen2 == 0 {
                 // skip empty
-            } else if clean.starts_with("QDB 1 ") {
+            } else if clean.starts_with("QDB 1 ") || clean.starts_with("QDB 2 ") {
                 d.fmt_escaped = true;
+                d.fmt_nulls = clean.starts_with("QDB 2 ");
                 d.applied_txid = parse_int_str(clean.substring(6, clen2 - 6));
                 d.txn_id = d.applied_txid;
             } else if clean.starts_with("TABLE ") {
@@ -743,7 +775,12 @@ fn db_load(d: &mut DB) ~ FileSystem {
                                 else { cell_val = cell_val + rc; rp = rp + 1; }
                             }
                         }
-                        let cell_text = if d.fmt_escaped { unescape_text(cell_val) } else { cell_val };
+                        // Format 2 writes NULL as \N; formats 0 and 1 had one empty
+                        // cell for NULL and '', read as NULL, which IS NULL matched.
+                        let cell_text = if d.fmt_nulls {
+                            if cell_val == "\\N" { nullv() } else { unescape_text(cell_val) }
+                        } else if cell_val.len() == 0 { nullv() }
+                        else if d.fmt_escaped { unescape_text(cell_val) } else { cell_val };
                         let cid = sp_add(d, cell_text);
                         vec_push(d.cells, cid);
                         cell_count_in_row = cell_count_in_row + 1;
@@ -755,7 +792,8 @@ fn db_load(d: &mut DB) ~ FileSystem {
                 let expected_cc = vec_get(d.tbl_col_counts, tidx);
                 let mut pad_i = cell_count_in_row;
                 while pad_i < expected_cc {
-                    let empty_id = sp_add(d, "");
+                    // Format 2 writes every cell, NULL as \N, so a missing trailing cell is ''.
+                    let empty_id = if d.fmt_nulls { sp_add(d, "") } else { sp_add(d, nullv()) };
                     vec_push(d.cells, empty_id);
                     pad_i = pad_i + 1;
                 }
@@ -1468,6 +1506,18 @@ fn next_token(d: &mut DB) {
     d.pos = d.pos + 1; d.tk_type = 1; d.tk_val = c;
 }
 
+// The value of the current token in a value position: the NULL keyword is
+// SQL NULL, any other token its text. Fails closed on a text literal that is
+// exactly the NULL sentinel.
+fn tok_value(d: &DB) -> String ~ Console + Process {
+    if d.tk_type == 0 && d.tk_val == "NULL" { return nullv(); }
+    if is_null(d.tk_val) {
+        println!("Error: the text value U+0001 alone is reserved for NULL");
+        process_exit(1);
+    }
+    d.tk_val
+}
+
 fn tk_is_kw(d: &DB, kw: String) -> i32 {
     if d.tk_type == 0 { if d.tk_val == kw { return 1; } }
     0
@@ -1900,8 +1950,8 @@ fn parse_insert(d: &mut DB) ~ Console + Process {
         expect_punct(d, "(");
         let mut vgo = true;
         while vgo {
-            // Unquoted NULL keyword stores SQL NULL (empty cell); quoted 'NULL' is text.
-            let vtext = if d.tk_type == 0 && d.tk_val == "NULL" { "" } else { d.tk_val };
+            // Unquoted NULL keyword stores SQL NULL; quoted 'NULL' is text.
+            let vtext = tok_value(d);
             let vid = sp_add(d, vtext);
             vec_push(d.p_vals, vid);
             d.p_val_count = d.p_val_count + 1;
@@ -2028,7 +2078,7 @@ fn parse_update(d: &mut DB) ~ Console + Process {
     d.set_col = sp_add(d, cname);
     next_token(d);
     if d.tk_type == 4 { if d.tk_val == "=" { next_token(d); } }
-    let vtext = d.tk_val;
+    let vtext = tok_value(d);
     d.set_val = sp_add(d, vtext);
     next_token(d);
     // Optional arithmetic RHS: SET col = <vtext> <op> <operand>. Match the
@@ -2159,7 +2209,7 @@ fn parse_condition(d: &mut DB) -> i32 ~ Console + Process {
     // LIKE
     if tk_is_kw(d, "LIKE") == 1 {
         next_token(d);
-        let pattern = d.tk_val;
+        let pattern = tok_value(d);
         let pat_id = sp_add(d, pattern);
         next_token(d);
         let ci = wc_push(d, left_id, 6, pat_id, neg);
@@ -2190,7 +2240,7 @@ fn parse_condition(d: &mut DB) -> i32 ~ Console + Process {
             let mut vcount = 0;
             let mut go = true;
             while go {
-                let vtext = d.tk_val;
+                let vtext = tok_value(d);
                 let vid = sp_add(d, vtext);
                 vec_push(vals, vid);
                 vcount = vcount + 1;
@@ -2209,11 +2259,11 @@ fn parse_condition(d: &mut DB) -> i32 ~ Console + Process {
     // the result is exact even inside a larger AND/OR expression.
     if tk_is_kw(d, "BETWEEN") == 1 {
         next_token(d);
-        let lo_val = d.tk_val;
+        let lo_val = tok_value(d);
         let lo_id = sp_add(d, lo_val);
         next_token(d);
         expect_kw(d, "AND");
-        let hi_val = d.tk_val;
+        let hi_val = tok_value(d);
         let hi_id = sp_add(d, hi_val);
         next_token(d);
         if neg == 1 {
@@ -2285,7 +2335,7 @@ fn parse_condition(d: &mut DB) -> i32 ~ Console + Process {
     }
 
     // Plain value
-    let rval = d.tk_val;
+    let rval = tok_value(d);
     let rid = sp_add(d, rval);
     next_token(d);
     let ci = wc_push(d, left_id, op_code, rid, neg);
@@ -2602,10 +2652,11 @@ fn exec_subquery_scalar(d: &mut DB, sql: String) -> String ~ Console + Process {
                 let row = vec_get(match_rows, mi);
                 if col_idx >= 0 {
                     let cell_str = sp_get(d, vec_get(d.cells, rs + row * cc + col_idx));
+                    if !is_null(cell_str) {
                     let nv = cell_str.parse_float();
                     sum_val = sum_val + nv;
-                    if nv < min_val { min_val = nv; }
-                    if nv > max_val { max_val = nv; }
+                    if cnt == 0 || nv < min_val { min_val = nv; }
+                    if cnt == 0 || nv > max_val { max_val = nv; }
                     if ct == 2 {
                         if cnt == 0 { min_str = cell_str; max_str = cell_str; }
                         else {
@@ -2614,6 +2665,7 @@ fn exec_subquery_scalar(d: &mut DB, sql: String) -> String ~ Console + Process {
                         }
                     }
                     cnt = cnt + 1;
+                    }
                 }
                 mi = mi + 1;
             }
@@ -2627,9 +2679,8 @@ fn exec_subquery_scalar(d: &mut DB, sql: String) -> String ~ Console + Process {
             let mut rstr = float_to_str(result_val);
             if ct == 2 && af == 4 { rstr = min_str; }
             if ct == 2 && af == 5 { rstr = max_str; }
-            // MIN/MAX over zero matching rows is SQL NULL (rendered empty), not
-            // the numeric sentinel. COUNT stays 0; SUM/AVG keep their 0 result.
-            if cnt == 0 && (af == 4 || af == 5) { rstr = ""; }
+            // SUM/AVG/MIN/MAX over no non-NULL value are NULL.
+            if cnt == 0 { rstr = nullv(); }
             vec_push(d.subq_vals, sp_add(d, rstr));
             d.subq_count = 1;
             return rstr;
@@ -2937,7 +2988,7 @@ fn exec_insert(d: &mut DB) ~ Console {
             let mut cell_id = 0;
             if d.p_col_count > 0 {
                 let src = vec_get(src_for_col, c2);
-                if src < 0 { cell_id = sp_add(d, ""); }
+                if src < 0 { cell_id = sp_add(d, nullv()); }
                 else { cell_id = vec_get(d.p_vals, r * vpr + src); }
             } else {
                 cell_id = vec_get(d.p_vals, r * cc + c2);
@@ -3096,42 +3147,53 @@ fn agg_cols_ok(d: &DB, cs: i32, cc: i32, tname: String, alias: i32) -> bool ~ Co
 }
 
 // True if cell_val is in condition ci's IN-list (its slice of wc_in_pool).
-fn eval_in_pool(d: &DB, cell_val: String, start: i32, len: i32) -> bool {
+// x IN (list): true if x equals a list value; unknown if x is NULL, or if no
+// value matches and the list holds a NULL; false otherwise.
+fn eval_in_pool(d: &DB, cell_val: String, start: i32, len: i32) -> i32 {
+    if is_null(cell_val) { return 2; }
+    let mut saw_null = false;
     let mut i = 0;
     while i < len {
         let v = sp_get(d, vec_get(d.wc_in_pool, start + i));
-        if cell_val == v { return true; }
+        if is_null(v) { saw_null = true; }
+        else if cell_val == v { return 1; }
         i = i + 1;
     }
-    false
+    if saw_null { return 2; }
+    0
 }
 
 // Evaluate condition ci's operator against an already-resolved cell value.
 // op 7 = IN (against the condition's wc_in_pool slice); all other ops go
 // through eval_where. Negation is applied by the caller.
-fn eval_cond_val(d: &DB, ci: i32, op: i32, cv: String) -> bool {
+// Returns 0 false, 1 true, 2 unknown (a NULL operand outside IS [NOT] NULL).
+fn eval_cond_val(d: &DB, ci: i32, op: i32, cv: String) -> i32 {
+    if op == 8 { if is_null(cv) { return 1; } return 0; }
+    if op == 9 { if is_null(cv) { return 0; } return 1; }
     if op == 7 {
         return eval_in_pool(d, cv, vec_get(d.wc_in_start, ci), vec_get(d.wc_in_len, ci));
     }
     let wr = sp_get(d, vec_get(d.wc_right, ci));
-    eval_where(cv, op, wr)
+    if is_null(cv) || is_null(wr) { return 2; }
+    if eval_where(cv, op, wr) { return 1; }
+    0
 }
 
 // Evaluate DNF condition ci for a single-table row, applying its negate flag.
 fn eval_cond_row(d: &DB, ci: i32, cs: i32, cc: i32, rs: i32, row: i32,
-                 tname: String, alias: i32) -> bool {
+                 tname: String, alias: i32) -> i32 {
     let wl = sp_get(d, vec_get(d.wc_left, ci));
     let wcol = resolve_col(d, cs, cc, tname, alias, wl);
     let op = vec_get(d.wc_op, ci);
-    let mut res = false;
+    let mut res = 0;
     if wcol >= 0 {
         let cv = sp_get(d, vec_get(d.cells, rs + row * cc + wcol));
         res = eval_cond_val(d, ci, op, cv);
     } else {
-        // Column not found — for IS NULL on missing cols, treat as NULL.
-        if op == 8 { res = true; }
+        // Column not found (where_cols_ok refuses these before a scan).
+        if op == 8 { res = 1; }
     }
-    if vec_get(d.wc_neg, ci) == 1 { res = !res; }
+    if vec_get(d.wc_neg, ci) == 1 { res = not3(res); }
     res
 }
 
@@ -3140,20 +3202,20 @@ fn eval_cond_row(d: &DB, ci: i32, cs: i32, cc: i32, rs: i32, row: i32,
 // condition via eval_cond_row; NOT (3) negates its one child; AND (1) / OR (2)
 // combine both children.
 fn eval_where_tree(d: &DB, node: i32, cs: i32, cc: i32, rs: i32, row: i32,
-                   tname: String, alias: i32) -> bool {
-    if node < 0 { return true; }
+                   tname: String, alias: i32) -> i32 {
+    if node < 0 { return 1; }
     let k = vec_get(d.wn_kind, node);
     if k == 0 {
         return eval_cond_row(d, vec_get(d.wn_a, node), cs, cc, rs, row, tname, alias);
     }
     if k == 3 {
-        return !eval_where_tree(d, vec_get(d.wn_a, node), cs, cc, rs, row, tname, alias);
+        return not3(eval_where_tree(d, vec_get(d.wn_a, node), cs, cc, rs, row, tname, alias));
     }
     let la = eval_where_tree(d, vec_get(d.wn_a, node), cs, cc, rs, row, tname, alias);
     let rb = eval_where_tree(d, vec_get(d.wn_b, node), cs, cc, rs, row, tname, alias);
-    if k == 1 { return la && rb; }
-    if k == 2 { return la || rb; }
-    true
+    if k == 1 { return and3(la, rb); }
+    if k == 2 { return or3(la, rb); }
+    1
 }
 
 // Evaluate the full WHERE clause for a single-table row by walking the
@@ -3163,7 +3225,8 @@ fn eval_compound_where(d: &DB, cs: i32, cc: i32, rs: i32, row: i32,
                        tname: String, alias: i32) -> bool {
     if d.has_where == 0 { return true; }
     if d.wc_count == 0 { return true; }
-    eval_where_tree(d, d.wc_root, cs, cc, rs, row, tname, alias)
+    // A row passes only when the condition is true; unknown drops it.
+    eval_where_tree(d, d.wc_root, cs, cc, rs, row, tname, alias) == 1
 }
 
 fn check_has_agg(d: &DB) -> i32 {
@@ -3452,7 +3515,7 @@ fn exec_select(d: &mut DB) ~ Console + Process {
         while ri < match_count {
             let row = vec_get(match_rows, ri);
             let val = sp_get(d, vec_get(d.cells, rs + row * cc + col_idx));
-            let vlen = val.len();
+            let vlen = dlen(val);
             if vlen > w { w = vlen; }
             ri = ri + 1;
         }
@@ -3833,7 +3896,7 @@ fn exec_select_union(d: &mut DB) ~ Console + Process {
         while wri < keep_count {
             let rr = vec_get(keep, wri);
             let val = sp_get(d, vec_get(d.union_vals, rr * ncol + wi));
-            let vlen = val.len();
+            let vlen = dlen(val);
             if vlen > w { w = vlen; }
             wri = wri + 1;
         }
@@ -3959,7 +4022,7 @@ fn compute_single_agg(d: &mut DB, af: i32, ac_name_id: i32, cs: i32, cc: i32,
     }
     if af == 1 {
         // COUNT(*) counts every matching row; COUNT(col) counts non-NULL
-        // cells (NULL is the empty string); COUNT(DISTINCT col) counts the
+        // cells ('' counts); COUNT(DISTINCT col) counts the
         // distinct non-NULL values.
         if ac_name == "*" {
             return sp_add(d, int_to_str(match_count));
@@ -3974,7 +4037,7 @@ fn compute_single_agg(d: &mut DB, af: i32, ac_name_id: i32, cs: i32, cc: i32,
                 if col_idx >= 0 {
                     let dcell_id = vec_get(d.cells, rs + drow * cc + col_idx);
                     let dcell = sp_get(d, dcell_id);
-                    if dcell.len() > 0 {
+                    if !is_null(dcell) {
                         let mut dfound = 0;
                         let mut dsi = 0;
                         while dsi < dcnt {
@@ -3997,7 +4060,7 @@ fn compute_single_agg(d: &mut DB, af: i32, ac_name_id: i32, cs: i32, cc: i32,
             let row = vec_get(match_rows, mi);
             if col_idx >= 0 {
                 let cell = sp_get(d, vec_get(d.cells, rs + row * cc + col_idx));
-                if cell.len() > 0 { cnt = cnt + 1; }
+                if !is_null(cell) { cnt = cnt + 1; }
             }
             mi = mi + 1;
         }
@@ -4017,13 +4080,13 @@ fn compute_single_agg(d: &mut DB, af: i32, ac_name_id: i32, cs: i32, cc: i32,
     let mut mi = 0;
     while mi < match_count {
         let row = vec_get(match_rows, mi);
-        if col_idx >= 0 {
-            let nv = get_cell_float(d, rs, row, cc, col_idx);
+        let cellv = if col_idx >= 0 { sp_get(d, vec_get(d.cells, rs + row * cc + col_idx)) } else { nullv() };
+        if !is_null(cellv) {
+            let nv = cellv.parse_float();
             sum_val = sum_val + nv;
-            if nv < min_val { min_val = nv; }
-            if nv > max_val { max_val = nv; }
+            if cnt == 0 || nv < min_val { min_val = nv; }
+            if cnt == 0 || nv > max_val { max_val = nv; }
             if ct == 2 {
-                let cellv = sp_get(d, vec_get(d.cells, rs + row * cc + col_idx));
                 if cnt == 0 { min_str = cellv; max_str = cellv; }
                 else {
                     if compare_vals(cellv, min_str, ct) < 0 { min_str = cellv; }
@@ -4034,9 +4097,8 @@ fn compute_single_agg(d: &mut DB, af: i32, ac_name_id: i32, cs: i32, cc: i32,
         }
         mi = mi + 1;
     }
-    // MIN/MAX over zero matching rows is SQL NULL (rendered empty), not the
-    // numeric sentinel. COUNT stays 0; SUM/AVG keep their 0 result.
-    if cnt == 0 && (af == 4 || af == 5) { return sp_add(d, ""); }
+    // SUM/AVG/MIN/MAX over no non-NULL value are NULL; COUNT stays 0.
+    if cnt == 0 { return sp_add(d, nullv()); }
     if af == 4 && ct == 2 { return sp_add(d, min_str); }
     if af == 5 && ct == 2 { return sp_add(d, max_str); }
     let mut result_val = sum_val;
@@ -4414,7 +4476,7 @@ fn exec_select_group(d: &mut DB) ~ Console {
         ci2 = 0;
         while ci2 < ncols {
             w2_val = sp_get(d, vec_get(final_results, ri2 * ncols + ci2));
-            w2_vlen = w2_val.len();
+            w2_vlen = dlen(w2_val);
             w2_cur = vec_get(widths2, ci2);
             if w2_vlen > w2_cur { widths2 = vec_replace(widths2, ncols, ci2, w2_vlen); }
             ci2 = ci2 + 1;
@@ -4489,8 +4551,7 @@ fn group_count_rows(d: &DB, gk: String, rs: i32, cc: i32, gcol: i32,
     cnt
 }
 
-// COUNT(col) within a group: rows in the group whose col cell is non-NULL
-// (NULL is the empty string).
+// COUNT(col) within a group: rows in the group whose col cell is non-NULL.
 fn group_count_col(d: &DB, gk: String, col_idx: i32, gcol: i32, rs: i32, cc: i32,
                    match_rows: Vec<i32>, match_count: i32) -> i32 {
     let mut cnt = 0;
@@ -4501,7 +4562,7 @@ fn group_count_col(d: &DB, gk: String, col_idx: i32, gcol: i32, rs: i32, cc: i32
         if cgv == gk {
             if col_idx >= 0 {
                 let cell = sp_get(d, vec_get(d.cells, rs + crow * cc + col_idx));
-                if cell.len() > 0 { cnt = cnt + 1; }
+                if !is_null(cell) { cnt = cnt + 1; }
             }
         }
         ci = ci + 1;
@@ -4525,7 +4586,7 @@ fn group_count_col_distinct(d: &DB, gk: String, col_idx: i32, gcol: i32, rs: i32
             if col_idx >= 0 {
                 let cell_id = vec_get(d.cells, rs + crow * cc + col_idx);
                 let cell = sp_get(d, cell_id);
-                if cell.len() > 0 {
+                if !is_null(cell) {
                     let mut found = 0;
                     let mut si = 0;
                     while si < dcnt {
@@ -4614,10 +4675,11 @@ fn compute_group_numeric(d: &mut DB, af: i32, ac_name: String, gk: String,
         if sgv == gk {
             if col_idx >= 0 {
                 let sv = sp_get(d, vec_get(d.cells, rs + srow * cc + col_idx));
+                if !is_null(sv) {
                 let nv = sv.parse_float();
                 sum_v = sum_v + nv;
-                if nv < min_v { min_v = nv; }
-                if nv > max_v { max_v = nv; }
+                if cnt == 0 || nv < min_v { min_v = nv; }
+                if cnt == 0 || nv > max_v { max_v = nv; }
                 if ct == 2 {
                     if cnt == 0 { min_str = sv; max_str = sv; }
                     else {
@@ -4626,13 +4688,13 @@ fn compute_group_numeric(d: &mut DB, af: i32, ac_name: String, gk: String,
                     }
                 }
                 cnt = cnt + 1;
+                }
             }
         }
         si = si + 1;
     }
-    // MIN/MAX over zero matching rows is SQL NULL (rendered empty), not the
-    // numeric sentinel. COUNT stays 0; SUM/AVG keep their 0 result.
-    if cnt == 0 && (af == 4 || af == 5) { return ""; }
+    // SUM/AVG/MIN/MAX over no non-NULL value are NULL; COUNT stays 0.
+    if cnt == 0 { return nullv(); }
     if af == 4 && ct == 2 { return min_str; }
     if af == 5 && ct == 2 { return max_str; }
     let mut result_val = sum_v;
@@ -4808,7 +4870,7 @@ fn exec_select_join(d: &mut DB) ~ Console {
                     while k < pcount {
                         let cv = join_cell_str(d, atab, acol, cc1, rs1, vec_get(pr1, k),
                                                cc2, rs2, vec_get(pr2, k));
-                        if cv.len() > 0 { cnt = cnt + 1; }
+                        if !is_null(cv) { cnt = cnt + 1; }
                         k = k + 1;
                     }
                     out = int_to_str(cnt);
@@ -4824,10 +4886,11 @@ fn exec_select_join(d: &mut DB) ~ Console {
                 while k < pcount {
                     let cv = join_cell_str(d, atab, acol, cc1, rs1, vec_get(pr1, k),
                                            cc2, rs2, vec_get(pr2, k));
+                    if !is_null(cv) {
                     let nv = cv.parse_float();
                     sum_val = sum_val + nv;
-                    if nv < min_val { min_val = nv; }
-                    if nv > max_val { max_val = nv; }
+                    if cnt == 0 || nv < min_val { min_val = nv; }
+                    if cnt == 0 || nv > max_val { max_val = nv; }
                     if atype == 2 {
                         if cnt == 0 { min_str = cv; max_str = cv; }
                         else {
@@ -4836,10 +4899,11 @@ fn exec_select_join(d: &mut DB) ~ Console {
                         }
                     }
                     cnt = cnt + 1;
+                    }
                     k = k + 1;
                 }
-                if cnt == 0 && (af == 4 || af == 5) {
-                    out = "";
+                if cnt == 0 {
+                    out = nullv();
                 } else if af == 4 && atype == 2 {
                     out = min_str;
                 } else if af == 5 && atype == 2 {
@@ -5078,7 +5142,7 @@ fn exec_select_join(d: &mut DB) ~ Console {
                             if gv == gkey {
                                 let cv = join_cell_str(d, atab, acol, cc1, rs1, vec_get(gpr1, k),
                                                        cc2, rs2, vec_get(gpr2, k));
-                                if cv.len() > 0 { cnt = cnt + 1; }
+                                if !is_null(cv) { cnt = cnt + 1; }
                             }
                             k = k + 1;
                         }
@@ -5098,10 +5162,11 @@ fn exec_select_join(d: &mut DB) ~ Console {
                         if gv == gkey {
                             let cv = join_cell_str(d, atab, acol, cc1, rs1, vec_get(gpr1, k),
                                                    cc2, rs2, vec_get(gpr2, k));
+                            if !is_null(cv) {
                             let nv = cv.parse_float();
                             sum_val = sum_val + nv;
-                            if nv < min_val { min_val = nv; }
-                            if nv > max_val { max_val = nv; }
+                            if cnt == 0 || nv < min_val { min_val = nv; }
+                            if cnt == 0 || nv > max_val { max_val = nv; }
                             if atype == 2 {
                                 if cnt == 0 { min_str = cv; max_str = cv; }
                                 else {
@@ -5110,11 +5175,12 @@ fn exec_select_join(d: &mut DB) ~ Console {
                                 }
                             }
                             cnt = cnt + 1;
+                            }
                         }
                         k = k + 1;
                     }
-                    if cnt == 0 && (af == 4 || af == 5) {
-                        out = "";
+                    if cnt == 0 {
+                        out = nullv();
                     } else if af == 4 && atype == 2 {
                         out = min_str;
                     } else if af == 5 && atype == 2 {
@@ -5291,7 +5357,7 @@ fn exec_select_join(d: &mut DB) ~ Console {
             let mut wc = 0;
             while wc < ncols {
                 let wv = sp_get(d, vec_get(grows, wr * ncols + wc));
-                let wl = wv.len();
+                let wl = dlen(wv);
                 if wl > vec_get(gwidths, wc) { gwidths = vec_replace(gwidths, ncols, wc, wl); }
                 wc = wc + 1;
             }
@@ -5463,7 +5529,7 @@ fn exec_select_join(d: &mut DB) ~ Console {
                         let val2 = if st2 == 1 {
                             sp_get(d, vec_get(d.cells, rs1 + r1 * cc1 + sc2))
                         } else {
-                            ""
+                            nullv()
                         };
                         let vid2 = sp_add(d, val2);
                         vec_push(result_vals, vid2);
@@ -5568,14 +5634,14 @@ fn exec_select_join(d: &mut DB) ~ Console {
                 let v1 = if k1_tab == 1 {
                     sp_get(d, vec_get(d.cells, rs1 + rr1 * cc1 + k1_col))
                 } else {
-                    if rr2 < 0 { "" } else { sp_get(d, vec_get(d.cells, rs2 + rr2 * cc2 + k1_col)) }
+                    if rr2 < 0 { nullv() } else { sp_get(d, vec_get(d.cells, rs2 + rr2 * cc2 + k1_col)) }
                 };
                 vec_push(k1_vals, sp_add(d, v1));
                 let v2 = if k2_tab == 1 {
                     sp_get(d, vec_get(d.cells, rs1 + rr1 * cc1 + k2_col))
                 } else {
                     if k2_tab == 2 {
-                        if rr2 < 0 { "" } else { sp_get(d, vec_get(d.cells, rs2 + rr2 * cc2 + k2_col)) }
+                        if rr2 < 0 { nullv() } else { sp_get(d, vec_get(d.cells, rs2 + rr2 * cc2 + k2_col)) }
                     } else {
                         ""
                     }
@@ -5662,7 +5728,7 @@ fn exec_select_join(d: &mut DB) ~ Console {
         let mut ci = 0;
         while ci < sel_count {
             let val = sp_get(d, vec_get(result_vals, ri * sel_count + ci));
-            let vlen = val.len();
+            let vlen = dlen(val);
             let old_w = vec_get(widths, ci);
             if vlen > old_w { widths = vec_replace(widths, sel_count, ci, vlen); }
             ci = ci + 1;
@@ -5703,13 +5769,13 @@ fn exec_select_join(d: &mut DB) ~ Console {
 
 // Fetch one cell value for an assembled JOIN pair. tab selects table 1 or 2;
 // col is that table's column index. A LEFT JOIN null-extended pair carries
-// r2 < 0, so a table-2 column reads as NULL (empty string).
+// r2 < 0, so a table-2 column reads as NULL.
 fn join_cell_str(d: &DB, tab: i32, col: i32, cc1: i32, rs1: i32, r1: i32,
                  cc2: i32, rs2: i32, r2: i32) -> String {
     if tab == 1 {
         return sp_get(d, vec_get(d.cells, rs1 + r1 * cc1 + col));
     }
-    if r2 < 0 { return ""; }
+    if r2 < 0 { return nullv(); }
     sp_get(d, vec_get(d.cells, rs2 + r2 * cc2 + col))
 }
 
@@ -5722,7 +5788,7 @@ fn join_having_agg(d: &DB, haf: i32, hstar: bool, atab: i32, acol: i32, atype: i
                    gtab: i32, gcol: i32, cc1: i32, rs1: i32, cc2: i32, rs2: i32,
                    gpr1: Vec<i32>, gpr2: Vec<i32>, gpc: i32, gkey: String) -> String {
     if haf == 1 {
-        // COUNT(*) counts bucket pairs; COUNT(col) counts non-empty cells.
+        // COUNT(*) counts bucket pairs; COUNT(col) counts non-NULL cells.
         let mut cnt = 0;
         let mut k = 0;
         while k < gpc {
@@ -5733,7 +5799,7 @@ fn join_having_agg(d: &DB, haf: i32, hstar: bool, atab: i32, acol: i32, atype: i
                 else {
                     let cv = join_cell_str(d, atab, acol, cc1, rs1, vec_get(gpr1, k),
                                            cc2, rs2, vec_get(gpr2, k));
-                    if cv.len() > 0 { cnt = cnt + 1; }
+                    if !is_null(cv) { cnt = cnt + 1; }
                 }
             }
             k = k + 1;
@@ -5754,10 +5820,11 @@ fn join_having_agg(d: &DB, haf: i32, hstar: bool, atab: i32, acol: i32, atype: i
         if gv == gkey {
             let cv = join_cell_str(d, atab, acol, cc1, rs1, vec_get(gpr1, k),
                                    cc2, rs2, vec_get(gpr2, k));
+            if !is_null(cv) {
             let nv = cv.parse_float();
             sum_val = sum_val + nv;
-            if nv < min_val { min_val = nv; }
-            if nv > max_val { max_val = nv; }
+            if cnt == 0 || nv < min_val { min_val = nv; }
+            if cnt == 0 || nv > max_val { max_val = nv; }
             if atype == 2 {
                 if cnt == 0 { min_str = cv; max_str = cv; }
                 else {
@@ -5766,10 +5833,11 @@ fn join_having_agg(d: &DB, haf: i32, hstar: bool, atab: i32, acol: i32, atype: i
                 }
             }
             cnt = cnt + 1;
+            }
         }
         k = k + 1;
     }
-    if cnt == 0 && (haf == 4 || haf == 5) { return ""; }
+    if cnt == 0 { return nullv(); }
     if haf == 4 && atype == 2 { return min_str; }
     if haf == 5 && atype == 2 { return max_str; }
     let mut rv = sum_val;
@@ -5784,24 +5852,24 @@ fn join_having_agg(d: &DB, haf: i32, hstar: bool, atab: i32, acol: i32, atype: i
 fn eval_cond_join(d: &DB, ci: i32, cs1: i32, cc1: i32, rs1: i32, r1: i32,
                   tname1: String, alias1: i32,
                   cs2: i32, cc2: i32, rs2: i32, r2: i32,
-                  tname2: String, alias2: i32) -> bool {
+                  tname2: String, alias2: i32) -> i32 {
     let wl = sp_get(d, vec_get(d.wc_left, ci));
     let op = vec_get(d.wc_op, ci);
     let c1 = resolve_col(d, cs1, cc1, tname1, alias1, wl);
     let c2 = resolve_col(d, cs2, cc2, tname2, alias2, wl);
-    let mut res = false;
+    let mut res = 0;
     if c1 >= 0 {
         let cv = sp_get(d, vec_get(d.cells, rs1 + r1 * cc1 + c1));
         res = eval_cond_val(d, ci, op, cv);
     } else if c2 >= 0 {
         // r2 < 0 marks a LEFT JOIN null-extended row: the right table has no
-        // matching row, so its columns evaluate as NULL (empty string).
-        let cv = if r2 < 0 { "" } else { sp_get(d, vec_get(d.cells, rs2 + r2 * cc2 + c2)) };
+        // matching row, so its columns evaluate as NULL.
+        let cv = if r2 < 0 { nullv() } else { sp_get(d, vec_get(d.cells, rs2 + r2 * cc2 + c2)) };
         res = eval_cond_val(d, ci, op, cv);
     } else {
-        if op == 8 { res = true; }
+        if op == 8 { res = 1; }
     }
-    if vec_get(d.wc_neg, ci) == 1 { res = !res; }
+    if vec_get(d.wc_neg, ci) == 1 { res = not3(res); }
     res
 }
 
@@ -5811,20 +5879,20 @@ fn eval_cond_join(d: &DB, ci: i32, cs1: i32, cc1: i32, rs1: i32, r1: i32,
 fn eval_join_tree(d: &DB, node: i32, cs1: i32, cc1: i32, rs1: i32, r1: i32,
                   tname1: String, alias1: i32,
                   cs2: i32, cc2: i32, rs2: i32, r2: i32,
-                  tname2: String, alias2: i32) -> bool {
-    if node < 0 { return true; }
+                  tname2: String, alias2: i32) -> i32 {
+    if node < 0 { return 1; }
     let k = vec_get(d.wn_kind, node);
     if k == 0 {
         return eval_cond_join(d, vec_get(d.wn_a, node), cs1, cc1, rs1, r1, tname1, alias1, cs2, cc2, rs2, r2, tname2, alias2);
     }
     if k == 3 {
-        return !eval_join_tree(d, vec_get(d.wn_a, node), cs1, cc1, rs1, r1, tname1, alias1, cs2, cc2, rs2, r2, tname2, alias2);
+        return not3(eval_join_tree(d, vec_get(d.wn_a, node), cs1, cc1, rs1, r1, tname1, alias1, cs2, cc2, rs2, r2, tname2, alias2));
     }
     let la = eval_join_tree(d, vec_get(d.wn_a, node), cs1, cc1, rs1, r1, tname1, alias1, cs2, cc2, rs2, r2, tname2, alias2);
     let rb = eval_join_tree(d, vec_get(d.wn_b, node), cs1, cc1, rs1, r1, tname1, alias1, cs2, cc2, rs2, r2, tname2, alias2);
-    if k == 1 { return la && rb; }
-    if k == 2 { return la || rb; }
-    true
+    if k == 1 { return and3(la, rb); }
+    if k == 2 { return or3(la, rb); }
+    1
 }
 
 // Evaluate WHERE for a JOIN row (checks both tables) by walking the
@@ -5835,7 +5903,7 @@ fn eval_join_where(d: &DB, cs1: i32, cc1: i32, rs1: i32, r1: i32,
                    tname2: String, alias2: i32) -> bool {
     if d.has_where == 0 { return true; }
     if d.wc_count == 0 { return true; }
-    eval_join_tree(d, d.wc_root, cs1, cc1, rs1, r1, tname1, alias1, cs2, cc2, rs2, r2, tname2, alias2)
+    eval_join_tree(d, d.wc_root, cs1, cc1, rs1, r1, tname1, alias1, cs2, cc2, rs2, r2, tname2, alias2) == 1
 }
 
 // Execute UPDATE. Scans all cells for the target table, replacing the
@@ -6166,8 +6234,8 @@ fn exec_alter_table(d: &mut DB) ~ Console {
     d.tbl_col_starts = new_tcs;
 
     // 4. For each existing row, insert an empty-string cell at the end of that row's data.
-    // The NULL sentinel is an empty string "".
-    let null_id = sp_add(d, "");
+    // New cells are SQL NULL.
+    let null_id = sp_add(d, nullv());
     let total_cells = vec_len(d.cells);
     let mut new_cells: Vec<i32> = vec![];
 
@@ -6254,6 +6322,11 @@ fn find_col(d: &DB, cs: i32, cc: i32, name: String) -> i32 {
 }
 
 fn eval_where(cell_val: String, op: i32, rval: String) -> bool {
+    // IS [NOT] NULL test the NULL value; any other operator with a NULL
+    // operand is unknown, which a filter treats as false.
+    if op == 8 { return is_null(cell_val); }
+    if op == 9 { return !is_null(cell_val); }
+    if is_null(cell_val) || is_null(rval) { return false; }
     // Try numeric comparison first
     let cv_num = cell_val.parse_float();
     let rv_num = rval.parse_float();
@@ -6261,16 +6334,6 @@ fn eval_where(cell_val: String, op: i32, rval: String) -> bool {
 
     // LIKE operator (op 6)
     if op == 6 { return eval_like(cell_val, rval); }
-    // IS NULL (op 8): cell is empty string
-    if op == 8 {
-        let clen = cell_val.len();
-        return clen == 0;
-    }
-    // IS NOT NULL (op 9): cell is not empty
-    if op == 9 {
-        let clen = cell_val.len();
-        return clen > 0;
-    }
     // IN (op 7) is handled separately in eval_compound_where
 
     if is_num_cmp {
@@ -6468,6 +6531,12 @@ fn sort_rows(d: &DB, rows: Vec<i32>, count: i32, rs: i32, cc: i32, ocol: i32, oc
 }
 
 fn compare_vals(a: String, b: String, col_type: i32) -> i64 {
+    // NULL sorts before every value, as in SQLite.
+    let an = is_null(a);
+    let bn = is_null(b);
+    if an && bn { return 0; }
+    if an { return 0 - 1; }
+    if bn { return 1; }
     if col_type == 0 || col_type == 1 {
         let na = a.parse_float();
         let nb = b.parse_float();
@@ -6478,7 +6547,11 @@ fn compare_vals(a: String, b: String, col_type: i32) -> i64 {
     a.compare(b)
 }
 
-fn pad_right(s: String, w: i32) -> String {
+// Display width of a cell: NULL renders as NULL.
+fn dlen(s: String) -> i64 { disp(s).len() }
+
+fn pad_right(s0: String, w: i32) -> String {
+    let s = disp(s0);
     let slen = s.len();
     let mut out = s;
     let mut i = slen;
@@ -6489,7 +6562,8 @@ fn pad_right(s: String, w: i32) -> String {
     out
 }
 
-fn pad_left(s: String, w: i32) -> String {
+fn pad_left(s0: String, w: i32) -> String {
+    let s = disp(s0);
     let slen = s.len();
     let mut out = "";
     let mut i = slen;
@@ -6632,7 +6706,7 @@ fn print_result_row(d: &DB, headers: Vec<i32>, results: Vec<i32>, count: i32) ~ 
         let hdr = sp_get(d, vec_get(headers, wi));
         let val = sp_get(d, vec_get(results, wi));
         let hw = hdr.len();
-        let vw = val.len();
+        let vw = dlen(val);
         let w = if hw > vw { hw } else { vw };
         vec_push(widths, w);
         wi = wi + 1;
