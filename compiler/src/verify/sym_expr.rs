@@ -6,6 +6,7 @@
 use super::float;
 use super::infer::{assoc_const, callee_name, is_float_lit, static_ty, var_name};
 use super::sym::{Out, Res, St, Sym};
+use super::sym_if::merge_bool_if;
 use super::sym_match::{match_arms, method_call};
 use super::sym_ops::{apply, binary};
 use super::term::*;
@@ -240,65 +241,6 @@ pub(super) fn expr(sym: &mut Sym<'_>, e: &Expr, st: St, expect: Option<Ty>) -> R
             Err("a loop (outside the symbolic subset)".into())
         }
         _ => Err("an expression kind outside the subset".into()),
-    }
-}
-
-/// An `if` whose branches each finish on one path, add no facts, assign
-/// nothing and yield a bool becomes one path with the value
-/// `(c && then) || (!c && else)`, instead of two paths.
-fn merge_bool_if(
-    sym: &mut Sym<'_>,
-    s: &St,
-    cond: &Term,
-    then_branch: &Block,
-    else_branch: Option<&Expr>,
-    expect: Option<Ty>,
-) -> Result<Option<Vec<(St, Out)>>, String> {
-    if matches!(cond, Term::Bool(_)) {
-        return Ok(None);
-    }
-    probe(sym, s, cond, then_branch, else_branch, expect)
-}
-
-fn probe(
-    sym: &mut Sym<'_>,
-    s: &St,
-    cond: &Term,
-    then_branch: &Block,
-    else_branch: Option<&Expr>,
-    expect: Option<Ty>,
-) -> Result<Option<Vec<(St, Out)>>, String> {
-    let Some(el) = else_branch else {
-        return Ok(None);
-    };
-    let mut ts = s.clone();
-    ts.assume(cond.clone());
-    let mut es = s.clone();
-    es.assume(not(cond.clone()));
-    let tr = sym.block(then_branch, ts.clone(), expect)?;
-    let er = expr(sym, el, es.clone(), expect)?;
-    let single = |r: &[(St, Out)], start: &St| -> Option<Term> {
-        match r {
-            [(st, Out::Val(v, Some(Ty::Bool)))]
-                if st.vars == start.vars
-                    && st.conds.len() == start.conds.len()
-                    && st.trace.len() == start.trace.len() =>
-            {
-                Some(v.clone())
-            }
-            _ => None,
-        }
-    };
-    match (single(&tr, &ts), single(&er, &es)) {
-        (Some(v), Some(w)) => {
-            let merged = or(and(cond.clone(), v), and(not(cond.clone()), w));
-            Ok(Some(vec![(s.clone(), Out::Val(merged, Some(Ty::Bool)))]))
-        }
-        _ => {
-            let mut out = tr;
-            out.extend(er);
-            Ok(Some(out))
-        }
     }
 }
 
