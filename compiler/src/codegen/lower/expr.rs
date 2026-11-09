@@ -4366,6 +4366,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 let no_arg_str_fn: Option<&str> = match method_name {
                     "to_uppercase" => Some("build_string_to_upper"),
                     "to_lowercase" => Some("build_string_to_lower"),
+                    "sha256" => Some("build_string_sha256"),
                     "trim" => Some("build_string_trim"),
                     _ => None,
                 };
