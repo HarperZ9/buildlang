@@ -1761,7 +1761,10 @@ impl CBackend {
         self.output
             .push_str("// Vtable types for dynamic dispatch\n");
 
-        for (trait_name, methods) in &module.trait_methods {
+        // Sorted by trait name so two runs of the compiler emit the same text.
+        let mut traits: Vec<_> = module.trait_methods.iter().collect();
+        traits.sort_by(|a, b| a.0.cmp(b.0));
+        for (trait_name, methods) in traits {
             write!(self.output, "typedef struct {}_vtable {{\n", trait_name).unwrap();
             for (method_name, sig) in methods {
                 let ret = self.type_to_c(&sig.ret);

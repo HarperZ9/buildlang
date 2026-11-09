@@ -5956,7 +5956,7 @@ impl<'ctx> TypeInfer<'ctx> {
             "push" | "push_str" | "push_back" | "push_front" | "insert" | "extend"
             | "extend_from_slice" | "copy_from_slice" | "clear" | "truncate" | "sort"
             | "sort_by" | "sort_unstable" | "reverse" | "reserve" | "shrink_to_fit" | "retain"
-            | "dedup" | "set" | "store" => {
+            | "dedup" | "set" | "store" | "release" => {
                 return Ty::unit();
             }
 
