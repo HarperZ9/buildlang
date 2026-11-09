@@ -412,6 +412,43 @@ compared with Python's sqlite3, before this entry. Measured on P1. Predictions: 
 removes nothing fails the replace file (at least 2 of its 6 queries wrong or rejected) and a new
 test_qdb.sh check. Guards as in P23.
 
+**P25. Prepared statements and a row API in bdb/lib (speed item 1), written 2026-11-09 before the
+measured runs below.** The P19 benchmark passes SQL text per statement and qdb prints each result,
+so it times qdb's parser and printer more than its engine: a probe on this machine put the parse of
+`SELECT v FROM t WHERE id = k` at about 22 microseconds of the 31. The change adds to bdb/lib
+`qdb_prepare` (`?` placeholders), `qdb_bind_int`/`_int64`/`_text`/`_null`, `qdb_step` (100 a row,
+101 done, as SQLite), `qdb_column_count`/`_name`/`_text`/`_int64`, `qdb_reset` and `qdb_finalize`.
+Results come back as rows, nothing is printed. A statement is planned once: a point select on an
+indexed column (`SELECT cols FROM t WHERE c = ?`) reads the index directly; an UPDATE with one
+equality WHERE sets the parse fields from the plan and runs exec_update, or, when the WHERE column
+is an indexed number column and no index is on the SET column, a direct path that computes the same
+rows and values and then shares exec_update's second half (`update_apply`) and the WAL line;
+anything else, and any statement with a text or NULL parameter, writes the parameters in as SQL
+literals and runs exec_sql with its rows captured. A schema change re-plans at the next step. Two
+engine changes serve the planned paths: each pool entry caches its number and kind on first use
+(`sp_kind`), read at index build for numeric index keys, so an equality search on a numeric index
+compares floats instead of parsing strings; and the fast paths reuse their buffers between steps.
+The text path and the CLI keep their output and WAL bytes. Disclosed: the design was explored on
+this machine before this entry, with single runs: prepared, both engines prepared, qdb's time was
+1.14, 1.6 and 1.2 times SQLite's (select, update, mixed); with text per statement it was 12.4, 7.4
+and 6.1 before the change. Measurement: P19's harness gains `--apis text,prep`. API prep prepares
+both statements once on both engines (SQLite through `sqlite3_prepare_v2`, `bind_int64`, `step`,
+`column_text` copied to a buffer) and runs one untimed select first, since qdb folds the loaded rows
+into its index at the first indexed read where SQLite built its key B-tree during the untimed load.
+Median of 3, Windows, one core, 10,000 rows, 2,000 statements in one transaction. Predictions: API
+text unchanged within noise (select 10 to 15 times SQLite's time, update and mixed 5 to 10 times);
+API prep select 0.8 to 1.6 times, update 1.2 to 2.5 times, mixed 1.0 to 2.0 times. The author's
+target is below 1 on all three; a miss is reported as one. Correctness: a new
+`bdb/tests/test_qdb_rows.py` runs the differential workloads and a keyed workload (an indexed
+INTEGER key holding integers, reals, text and NULL; updates by `+ - * =` inside and outside
+transactions; an index added on the SET column halfway) twice through the row API, once with every
+integer literal of a SELECT or UPDATE bound as a parameter and once as literal text; rows, column
+names, the .db and the .wal must be identical, and the literal run's rows must equal the CLI's
+output cell by cell. Planted check: a library whose numeric index search also accepts larger keys
+must show differences. Guards: test_qdb.sh, crash test (176 points, 0 violations), seeded power
+cuts (0 of 10,000, digest 77a49282... unchanged, since no WAL or .db bytes change), P2 2,000 of
+2,000, text round trip, WAL recovery, reference differential, library, receipts, mutations.
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
