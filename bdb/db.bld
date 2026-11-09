@@ -130,6 +130,12 @@ struct DB {
     // String pool: one entry per interned string, id = position.
     pool: Vec<String>,
     pn: i32,
+    // Per pool entry, filled on first use by sp_kind (P25): 0 not yet read,
+    // 1 an integer as is_int_str reads it, 4 another number as is_numeric_str
+    // reads it, 2 NULL, 3 other text; and the entry's parse_float, which
+    // compare_vals uses on a numeric column.
+    pool_nk: Vec<i32>,
+    pool_num: Vec<f64>,
 
     // Tables: parallel arrays indexed by table index
     tbl_names: Vec<i32>,
@@ -159,6 +165,14 @@ struct DB {
     idx_rowids: Vec<i32>,
     idx_key_starts: Vec<i32>,
     idx_key_counts: Vec<i32>,
+    // Typed key array (P27): idx_num[e] is entry e's key as a number (the
+    // pool entry's cached parse_float; NULL as minus infinity), so an equality
+    // search on a numeric index stays inside one f64 array instead of reading
+    // pool entries spread over memory. Valid while idx_num_ok; ix_move keeps
+    // it current, and every other write of idx_keys clears the flag, which
+    // rebuilds it on the next numeric search.
+    idx_num: Vec<f64>,
+    idx_num_ok: bool,
 
     // SQL parser state
     input: String,
@@ -412,6 +426,13 @@ struct DB {
     xq_n: i32,
     xq_root: i32,
     x_ncol: i32,
+    // Row API (P25): while rows_on, SELECT results go to row_names and
+    // row_cells (row-major, raw cell text) instead of stdout. schema_ver
+    // counts schema changes, so a prepared statement knows when to re-plan.
+    rows_on: bool,
+    row_names: Vec<String>,
+    row_cells: Vec<String>,
+    schema_ver: i32,
 }
 
 // Initialize a new empty DB. All parallel arrays start empty; pn (pool next
@@ -425,9 +446,12 @@ fn db_new(db_path: String) -> DB {
     let parts0: Vec<String> = vec![];
     let txp0: Vec<String> = vec![];
     let wpd0: Vec<String> = vec![];
+    let pnum0: Vec<f64> = vec![];
+    let rown0: Vec<String> = vec![];
+    let rowc0: Vec<String> = vec![];
     DB {
         db_path: db_path,
-        pool: pool0, pn: 0,
+        pool: pool0, pn: 0, pool_nk: vec![], pool_num: pnum0,
         tbl_names: vec![], tbl_count: 0,
         col_names: vec![], col_types: vec![],
         tbl_col_starts: vec![], tbl_col_counts: vec![],
@@ -435,6 +459,7 @@ fn db_new(db_path: String) -> DB {
         tbl_row_starts: vec![], tbl_row_counts: vec![],
         idx_names: vec![], idx_tables: vec![], idx_col_indices: vec![], idx_count: 0,
         idx_keys: vec![], idx_rowids: vec![], idx_key_starts: vec![], idx_key_counts: vec![],
+        idx_num: vec![], idx_num_ok: false,
         input: "", ilen: 0, pos: 0,
         tk_type: 7, tk_val: "",
         stmt_type: 0, p_table: -1,
@@ -493,6 +518,7 @@ fn db_new(db_path: String) -> DB {
         union_ncol: -1, union_rows: 0, union_started: 0,
         x_kind: vec![], x_a: vec![], x_b: vec![], x_c: vec![], x_s: vec![], x_as: vec![], x_an: vec![], x_args: vec![], qf_tbl: vec![], qf_alias: vec![], qs_expr: vec![], qs_name: vec![], qo_expr: vec![], qo_desc: vec![], q_fs: vec![], q_fn: vec![], q_ss: vec![], q_sn: vec![], q_where: vec![], q_os: vec![], q_on: vec![], q_limit: vec![], q_offset: vec![], q_distinct: vec![],
         xn: 0, xq_n: 0, xq_root: -1, x_ncol: 0,
+        rows_on: false, row_names: rown0, row_cells: rowc0, schema_ver: 0,
         con_tbl: vec![], con_kind: vec![], con_cs: vec![], con_cn: vec![], con_cols: vec![], snap_con_tbl: vec![], snap_con_kind: vec![], snap_con_cs: vec![], snap_con_cn: vec![], snap_con_cols: vec![], p_con_kind: vec![], p_con_cs: vec![], p_con_cn: vec![], p_con_names: vec![],
     }
 }
@@ -507,8 +533,49 @@ fn db_new(db_path: String) -> DB {
 fn sp_add(d: &mut DB, text: String) -> i32 {
     let id = d.pn;
     vec_push(d.pool, text);
+    vec_push(d.pool_nk, 0);
+    vec_push(d.pool_num, 0.0);
     d.pn = d.pn + 1;
     id
+}
+
+// is_numeric_str and is_int_str over the bytes (an optional '-', a digit,
+// then digits and at most one '.'): 1 an integer, 4 a number with a '.',
+// 3 not a number.
+fn numeric_bytes(t: String) -> i32 {
+    let b = t.as_bytes();
+    let n = t.len();
+    let mut i: i64 = 0;
+    if n > 0 && b[0] == 45 { i = 1; }
+    if i >= n { return 3; }
+    if b[i] < 48 || b[i] > 57 { return 3; }
+    let mut dot = false;
+    while i < n {
+        let c = b[i];
+        if c >= 48 && c <= 57 { i = i + 1; }
+        else if c == 46 && !dot { dot = true; i = i + 1; }
+        else { return 3; }
+    }
+    if dot { 4 } else { 1 }
+}
+
+// The kind of pool entry id (see pool_nk), read once and kept.
+fn sp_kind(d: &mut DB, id: i32) -> i32 {
+    let k = vec_get(d.pool_nk, id);
+    if k != 0 { return k; }
+    let t = vec_get(d.pool, id);
+    let mut nk = 3;
+    let mut x = 0.0;
+    if is_null(t) { nk = 2; }
+    else {
+        x = t.parse_float();
+        nk = numeric_bytes(t);
+    }
+    let kinds = d.pool_nk;
+    kinds[id] = nk;
+    let nums = d.pool_num;
+    nums[id] = x;
+    nk
 }
 
 fn sp_get(d: &DB, id: i32) -> String {
@@ -1426,6 +1493,7 @@ fn take_snapshot(d: &mut DB) {
 
 // Restore state from snapshot (for ROLLBACK)
 fn restore_snapshot(d: &mut DB) {
+    d.schema_ver = d.schema_ver + 1;
     // Copies, not the snapshot's own vectors: UPDATE and DELETE write the
     // live arrays in place (P20), which must never reach a snapshot.
     d.con_map_ok = false;
@@ -1448,6 +1516,7 @@ fn restore_snapshot(d: &mut DB) {
     d.idx_col_indices = d.snap_idx_col_indices;
     d.idx_count = d.snap_idx_count;
     d.idx_keys = copy_vec(d.snap_idx_keys);
+    d.idx_num_ok = false;
     d.idx_rowids = copy_vec(d.snap_idx_rowids);
     d.idx_key_starts = copy_vec(d.snap_idx_key_starts);
     d.idx_key_counts = copy_vec(d.snap_idx_key_counts);
@@ -1521,14 +1590,19 @@ fn wal_op_sql(line: String) -> String {
     ""
 }
 
+// Inside an explicit transaction: hold one OP line (with its line feed) for
+// the COMMIT append, as wal_log_mutation does for a statement's text.
+fn wal_hold_op(d: &mut DB, oln: String) {
+    d.txn_hash = fnv_extend(d.txn_hash, oln);
+    if d.hist_on { vec_push(d.txn_parts, oln); }
+    vec_push(d.wal_pend, oln);
+}
+
 // Write a mutation to WAL and optionally auto-commit
 fn wal_log_mutation(d: &mut DB, sql: String) ~ Console + FileSystem + Process {
     if d.in_transaction {
         // In explicit transaction — just append OP to WAL
-        let ol = wal_op_line(sql);
-        d.txn_hash = fnv_extend(d.txn_hash, ol + "\n");
-        if d.hist_on { vec_push(d.txn_parts, ol + "\n"); }
-        wal_hold_line(d, ol);
+        wal_hold_op(d, wal_op_line(sql) + "\n");
     } else {
         // Auto-commit: wrap in a single-statement transaction, written as one
         // append so a torn write cannot leave a COMMIT without its OP.
@@ -3342,6 +3416,7 @@ fn resolve_order_key(d: &DB, cs: i32, cc: i32, tname: String, key_id: i32) -> i3
 // Execute CREATE TABLE. Adds a new table entry to the parallel arrays.
 // Fails if a table with the same name already exists.
 fn exec_create(d: &mut DB) ~ Console {
+    d.schema_ver = d.schema_ver + 1;
     let tname = sp_get(d, d.p_table);
     let existing = find_table(d, tname);
     if existing >= 0 {
@@ -4048,6 +4123,7 @@ fn exec_select(d: &mut DB) ~ Console + Process {
     while hi < show_count {
         if hi > 0 { hdr_line = hdr_line + " | "; sep_line = sep_line + "-+-"; }
         let hdr = sp_get(d, vec_get(hdr_names, hi));
+        rows_hdr(d, hdr);
         let w = vec_get(widths, hi);
         hdr_line = hdr_line + pad_right(hdr, w);
         sep_line = sep_line + make_dashes(w);
@@ -4066,6 +4142,7 @@ fn exec_select(d: &mut DB) ~ Console + Process {
             if ci > 0 { row_line = row_line + " | "; }
             let col_idx = vec_get(show_cols, ci);
             let val = sp_get(d, vec_get(d.cells, rs + row * cc + col_idx));
+            rows_cell(d, val);
             let w = vec_get(widths, ci);
             let col_type = vec_get(d.col_types, cs + col_idx);
             if col_type == 0 || col_type == 1 {
@@ -4466,6 +4543,7 @@ fn exec_select_union(d: &mut DB) ~ Console + Process {
     while hi < ncol {
         if hi > 0 { hdr_line = hdr_line + " | "; sep_line = sep_line + "-+-"; }
         let hdr = sp_get(d, vec_get(d.union_headers, hi));
+        rows_hdr(d, hdr);
         let w = vec_get(widths, hi);
         hdr_line = hdr_line + pad_right(hdr, w);
         sep_line = sep_line + make_dashes(w);
@@ -4483,6 +4561,7 @@ fn exec_select_union(d: &mut DB) ~ Console + Process {
         while ci < ncol {
             if ci > 0 { row_line = row_line + " | "; }
             let val = sp_get(d, vec_get(d.union_vals, rr * ncol + ci));
+            rows_cell(d, val);
             let w = vec_get(widths, ci);
             let ct = vec_get(d.union_coltypes, ci);
             if ct == 0 || ct == 1 {
@@ -5092,6 +5171,7 @@ fn exec_select_group(d: &mut DB) ~ Console {
     while pi < ncols {
         if pi > 0 { hdr_line = hdr_line + " | "; sep_line = sep_line + "-+-"; }
         ph_hdr = sp_get(d, vec_get(headers, pi));
+        rows_hdr(d, ph_hdr);
         ph_w = vec_get(widths, pi);
         hdr_line = hdr_line + pad_right(ph_hdr, ph_w);
         sep_line = sep_line + make_dashes(ph_w);
@@ -5112,6 +5192,7 @@ fn exec_select_group(d: &mut DB) ~ Console {
         while pci < ncols {
             if pci > 0 { row_line = row_line + " | "; }
             pr_val = sp_get(d, vec_get(final_results, ri * ncols + pci));
+            rows_cell(d, pr_val);
             pr_w = vec_get(widths, pci);
             row_line = row_line + pad_right(pr_val, pr_w);
             pci = pci + 1;
@@ -5968,6 +6049,7 @@ fn exec_select_join(d: &mut DB) ~ Console {
         while hp < ncols {
             if hp > 0 { ghline = ghline + " | "; gsline = gsline + "-+-"; }
             let hh = sp_get(d, vec_get(gheaders, hp));
+            rows_hdr(d, hh);
             let hw = vec_get(gwidths, hp);
             ghline = ghline + pad_right(hh, hw);
             gsline = gsline + make_dashes(hw);
@@ -5982,6 +6064,7 @@ fn exec_select_join(d: &mut DB) ~ Console {
             while rc < ncols {
                 if rc > 0 { rline = rline + " | "; }
                 let rv = sp_get(d, vec_get(grows, rr * ncols + rc));
+                rows_cell(d, rv);
                 let rw = vec_get(gwidths, rc);
                 rline = rline + pad_right(rv, rw);
                 rc = rc + 1;
@@ -6342,6 +6425,7 @@ fn exec_select_join(d: &mut DB) ~ Console {
     while hi < sel_count {
         if hi > 0 { hdr_line = hdr_line + " | "; sep_line = sep_line + "-+-"; }
         let hdr = sp_get(d, vec_get(sel_names, hi));
+        rows_hdr(d, hdr);
         let w = vec_get(widths, hi);
         hdr_line = hdr_line + pad_right(hdr, w);
         sep_line = sep_line + make_dashes(w);
@@ -6357,6 +6441,7 @@ fn exec_select_join(d: &mut DB) ~ Console {
         while ci < sel_count {
             if ci > 0 { row_line = row_line + " | "; }
             let val = sp_get(d, vec_get(result_vals, ri * sel_count + ci));
+            rows_cell(d, val);
             let w = vec_get(widths, ci);
             row_line = row_line + pad_right(val, w);
             ci = ci + 1;
@@ -6585,12 +6670,15 @@ fn ix_move(d: &mut DB, ix: i32, row: i32, old_id: i32, new_id: i32, col_type: i3
     let mut q = ix_lower(d, ks, kc, sp_get(d, new_id), row, col_type);
     let keys = d.idx_keys;
     let rids = d.idx_rowids;
+    let nums = d.idx_num;
+    let typed = d.idx_num_ok;
     if q > p {
         q = q - 1;
         let mut i = p;
         while i < q {
             keys[i] = vec_get(keys, i + 1);
             rids[i] = vec_get(rids, i + 1);
+            if typed { nums[i] = vec_get(nums, i + 1); }
             i = i + 1;
         }
     } else {
@@ -6598,11 +6686,13 @@ fn ix_move(d: &mut DB, ix: i32, row: i32, old_id: i32, new_id: i32, col_type: i3
         while i > q {
             keys[i] = vec_get(keys, i - 1);
             rids[i] = vec_get(rids, i - 1);
+            if typed { nums[i] = vec_get(nums, i - 1); }
             i = i - 1;
         }
     }
     keys[q] = new_id;
     rids[q] = row;
+    if typed { nums[q] = ix_key_num(d, new_id); }
     true
 }
 
@@ -6625,8 +6715,7 @@ fn row_with(d: &DB, base: i32, cc: i32, scol: i32, new_id: i32) -> Vec<i32> {
 // another row that keeps its key holds it, or when two changed rows share
 // it. Returns the error text, or "". On success the map is brought up to
 // date (or marked for a rebuild when an INTEGER PRIMARY KEY changed).
-fn con_check_update(d: &mut DB, t: i32, rs: i32, cc: i32, scol: i32, rows: Vec<i32>, new_ids: Vec<i32>) -> String {
-    let n = vec_len(rows);
+fn con_check_update(d: &mut DB, t: i32, rs: i32, cc: i32, scol: i32, rows: Vec<i32>, new_ids: Vec<i32>, n: i32) -> String {
     let mut map_fix = false;
     let mut ipk_moved = false;
     let mut k = 0;
@@ -6782,7 +6871,15 @@ fn exec_update(d: &mut DB) ~ Console {
         println!("Error: UPDATE arithmetic on a non-integer value in column '{}'", set_col_name);
         return;
     }
-    let err = con_check_update(d, tidx, rs, cc, scol, rows, new_ids);
+    update_apply(d, tidx, cs, cc, rs, scol, rows, new_ids, n as i32);
+}
+
+// The second half of an UPDATE (P20): check the constraints, write the new
+// cells in place and move their entries in the indexes on the SET column.
+// exec_update and a prepared UPDATE (P25) both end here.
+fn update_apply(d: &mut DB, tidx: i32, cs: i32, cc: i32, rs: i32, scol: i32, rows: Vec<i32>, new_ids: Vec<i32>, n: i32) ~ Console {
+    let mut i = 0;
+    let err = con_check_update(d, tidx, rs, cc, scol, rows, new_ids, n);
     if err.len() > 0 {
         d.stmt_failed = true;
         println!("Error: {}", err);
@@ -7003,6 +7100,7 @@ fn delete_rows(d: &mut DB, tidx: i32, del: Vec<i32>) {
     // Renumber the table's indexes: drop the deleted rows' entries, map the
     // rest through newid (order kept, since newid is increasing), and close
     // the gap in the flattened arrays.
+    d.idx_num_ok = false;
     let keys = d.idx_keys;
     let rids = d.idx_rowids;
     let kcs = d.idx_key_counts;
@@ -7047,6 +7145,7 @@ fn delete_rows(d: &mut DB, tidx: i32, del: Vec<i32>) {
 }
 
 fn exec_drop(d: &mut DB) ~ Console {
+    d.schema_ver = d.schema_ver + 1;
     let tname = sp_get(d, d.p_table);
     let tidx = find_table(d, tname);
     if tidx < 0 {
@@ -7145,6 +7244,7 @@ fn exec_drop(d: &mut DB) ~ Console {
 // ALTER TABLE ADD COLUMN
 // =============================================================================
 fn exec_alter_table(d: &mut DB) ~ Console {
+    d.schema_ver = d.schema_ver + 1;
     let tname = sp_get(d, d.p_table);
     let tidx = find_table(d, tname);
     if tidx < 0 {
@@ -7623,8 +7723,16 @@ fn vec_replace(v: Vec<i32>, vlen: i32, idx: i32, new_val: i32) -> Vec<i32> {
 // =============================================================================
 
 // A result line of a SELECT: printed, and kept for the receipt when on.
+fn rows_hdr(d: &mut DB, name: String) {
+    if d.rows_on { vec_push(d.row_names, name); }
+}
+
+fn rows_cell(d: &mut DB, v: String) {
+    if d.rows_on { vec_push(d.row_cells, v); }
+}
+
 fn emit_line(d: &mut DB, line: String) ~ Console {
-    println!("{}", line);
+    if !d.rows_on { println!("{}", line); }
     if d.rcpt_on { vec_push(d.rcpt_parts, line + "\n"); }
 }
 
@@ -7648,6 +7756,7 @@ fn print_result_row(d: &mut DB, headers: Vec<i32>, results: Vec<i32>, count: i32
     while hi < count {
         if hi > 0 { hdr_line = hdr_line + " | "; sep_line = sep_line + "-+-"; }
         let hdr = sp_get(d, vec_get(headers, hi));
+        rows_hdr(d, hdr);
         let w = vec_get(widths, hi);
         hdr_line = hdr_line + pad_right(hdr, w);
         sep_line = sep_line + make_dashes(w);
@@ -7661,6 +7770,7 @@ fn print_result_row(d: &mut DB, headers: Vec<i32>, results: Vec<i32>, count: i32
     while ri < count {
         if ri > 0 { row_line = row_line + " | "; }
         let val = sp_get(d, vec_get(results, ri));
+        rows_cell(d, val);
         let w = vec_get(widths, ri);
         row_line = row_line + pad_right(val, w);
         ri = ri + 1;
@@ -7711,7 +7821,10 @@ fn rebuild_index(d: &mut DB, ix_id: i32) {
     let rs = vec_get(d.tbl_row_starts, tidx);
     let rc = vec_get(d.tbl_row_counts, tidx);
 
-    // Collect (key_pool_id, row_index) pairs
+    // Collect (key_pool_id, row_index) pairs; read each key's number now,
+    // for index_eq_num (P25).
+    let ct0 = vec_get(d.col_types, cs + col_i);
+    let numeric = ct0 == 0 || ct0 == 1;
     let mut keys: Vec<i32> = vec![];
     let mut rowids: Vec<i32> = vec![];
     let mut r = 0;
@@ -7719,6 +7832,7 @@ fn rebuild_index(d: &mut DB, ix_id: i32) {
         let cell_id = vec_get(d.cells, rs + r * cc + col_i);
         vec_push(keys, cell_id);
         vec_push(rowids, r);
+        if numeric { let kw = sp_kind(d, cell_id); }
         r = r + 1;
     }
 
@@ -7810,6 +7924,72 @@ fn index_scan(d: &DB, ix_id: i32, op: i32, rval: String) -> Vec<i32> {
             si3 = si3 + 1;
         }
     }
+    result
+}
+
+// Write x at position i of v, growing v by one when i is its length.
+fn vset_i32(v: Vec<i32>, i: i32, x: i32) {
+    if i < vec_len(v) { v[i] = x; } else { vec_push(v, x); }
+}
+
+fn vset_str(v: Vec<String>, i: i32, x: String) {
+    if i < vec_len(v) { v[i] = x; } else { vec_push(v, x); }
+}
+
+// index_scan's equality search on a numeric column (INTEGER or REAL) for the
+// number x, with each key's parse_float read once from the pool cache: the
+// row ids of every key compare_vals finds equal to x, in index order, written
+// to out from position 0. Returns their count.
+fn index_eq_num_into(d: &mut DB, ix_id: i32, x: f64, out: Vec<i32>) -> i32 {
+    if !d.idx_num_ok { idx_num_rebuild(d); }
+    let ks = vec_get(d.idx_key_starts, ix_id);
+    let kc = vec_get(d.idx_key_counts, ix_id);
+    let nums = d.idx_num;
+    let mut lo = ks;
+    let mut hi = ks + kc;
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if vec_get(nums, mid) < x { lo = mid + 1; } else { hi = mid; }
+    }
+    let mut n = 0;
+    let mut j = lo;
+    let end = ks + kc;
+    let mut go = true;
+    while go && j < end {
+        if vec_get(nums, j) == x {
+            vset_i32(out, n, vec_get(d.idx_rowids, j));
+            n = n + 1;
+            j = j + 1;
+        } else { go = false; }
+    }
+    n
+}
+
+// Entry key id as idx_num holds it: the pool entry's number, NULL as minus
+// infinity (NULL keys sort first and equal no number).
+fn ix_key_num(d: &mut DB, id: i32) -> f64 {
+    if sp_kind(d, id) == 2 { return 0.0 - 1.0e308 - 1.0e308; }
+    vec_get(d.pool_num, id)
+}
+
+// Fill idx_num from idx_keys, every index at once (the flattened arrays
+// shift together).
+fn idx_num_rebuild(d: &mut DB) {
+    let nk = vec_len(d.idx_keys) as i32;
+    let mut nums: Vec<f64> = vec![];
+    let mut e = 0;
+    while e < nk {
+        vec_push(nums, ix_key_num(d, vec_get(d.idx_keys, e)));
+        e = e + 1;
+    }
+    d.idx_num = nums;
+    d.idx_num_ok = true;
+}
+
+// index_eq_num_into into a new vector.
+fn index_eq_num(d: &mut DB, ix_id: i32, x: f64) -> Vec<i32> {
+    let result: Vec<i32> = vec![];
+    let n = index_eq_num_into(d, ix_id, x, result);
     result
 }
 
@@ -7924,6 +8104,7 @@ fn splice_index(d: &mut DB, ix_id: i32, new_keys: Vec<i32>, new_rowids: Vec<i32>
     }
     d.idx_keys = out_keys;
     d.idx_rowids = out_rowids;
+    d.idx_num_ok = false;
     let size_diff = count - old_count;
     d.idx_key_counts = vec_replace(d.idx_key_counts, d.idx_count, ix_id, count);
     let mut si2 = 0;
@@ -7953,8 +8134,11 @@ fn merge_new_rows(d: &mut DB, ix_id: i32, kc: i32) {
     let k = rc - kc;
     let mut add_keys: Vec<i32> = vec![];
     let mut r = kc;
+    let numeric = col_type == 0 || col_type == 1;
     while r < rc {
         vec_push(add_keys, vec_get(d.cells, rs + r * cc + col_i));
+        // Read each new key's number now, for index_eq_num (P25).
+        if numeric { let kw = sp_kind(d, vec_get(d.cells, rs + r * cc + col_i)); }
         r = r + 1;
     }
     let perm = sort_positions(d, add_keys, k, col_type);
@@ -7989,6 +8173,7 @@ fn merge_new_rows(d: &mut DB, ix_id: i32, kc: i32) {
 
 // Execute CREATE INDEX. Registers a new index entry and rebuilds its sorted data.
 fn exec_create_index(d: &mut DB) ~ Console {
+    d.schema_ver = d.schema_ver + 1;
     let iname = sp_get(d, d.idx_name);
     let tname = sp_get(d, d.idx_table_name);
     let cname = sp_get(d, d.idx_col_name);
@@ -9540,6 +9725,7 @@ fn exec_xselect(d: &mut DB) ~ Console + Process {
     while c < ncol {
         if c > 0 { hl = hl + " | "; sl = sl + "-+-"; }
         let h: String = vec_get(hdr, c);
+        rows_hdr(d, h);
         hl = hl + pad_right(h, vec_get(widths, c));
         sl = sl + make_dashes(vec_get(widths, c));
         c = c + 1;
@@ -9553,6 +9739,7 @@ fn exec_xselect(d: &mut DB) ~ Console + Process {
         while c < ncol {
             if c > 0 { line = line + " | "; }
             let v = sp_get(d, vec_get(rows, r * ncol + c));
+            rows_cell(d, v);
             if is_numeric_str(v) { line = line + pad_left(v, vec_get(widths, c)); }
             else { line = line + pad_right(v, vec_get(widths, c)); }
             c = c + 1;
@@ -10187,6 +10374,609 @@ fn run_repl(d: &mut DB) ~ Console + FileSystem + Process {
         }
     }
 }
+
+// =========================================================================
+// SECTION 10b: PREPARED STATEMENTS AND THE ROW API (bdb/lib, COMPLETE.md P25)
+// =========================================================================
+// A prepared statement is SQL text with `?` placeholders, planned once.
+// Each step binds the parameters and runs one of three paths:
+//
+//   plan 1  point select: SELECT cols FROM t WHERE c = ? on an indexed c,
+//           read straight from the index (the path exec_select takes for
+//           the same statement, without the parse and the formatting)
+//   plan 2  update: UPDATE ... SET ... WHERE c = ? (one equality); the
+//           parse fields are set from the plan and exec_update runs as for
+//           the same text, then the WAL gets the same text
+//   plan 0  anything else: the parameters are written into the text as SQL
+//           literals and exec_sql runs it with its rows captured
+//
+// Plans 1 and 2 need every parameter bound to an integer; with a text or
+// NULL parameter, or with receipts on, the step takes plan 0. A schema
+// change (d.schema_ver) re-plans the statement at its next step.
+
+struct QStmt {
+    sql: String,
+    parts: Vec<String>,
+    nparam: i32,
+    bind: Vec<String>,
+    bkind: Vec<i32>,
+    // An integer parameter's value; its text in bind is made when needed.
+    bint: Vec<i64>,
+    plan: i32,
+    ver: i32,
+    tidx: i32,
+    ix: i32,
+    wparam: i32,
+    show: Vec<i32>,
+    names: Vec<String>,
+    // plan 2 with u_fast: the UPDATE runs without exec_update's lookups
+    // (see stmt_update_fast); u_ix is the index on the WHERE column.
+    u_tidx: i32,
+    u_scol: i32,
+    u_ix: i32,
+    u_fast: bool,
+    // A literal operand read at plan time (u_op_lit), and the OP line of
+    // the WAL in two pieces around the one parameter (u_wal_ok).
+    u_op_lit: bool,
+    u_op_ok: bool,
+    u_op_int: i32,
+    u_wal_ok: bool,
+    u_wal_head: String,
+    u_wal_tail: String,
+    // Second reused buffer of the fast UPDATE (new cell ids).
+    ids2: Vec<i32>,
+    u_table: i32,
+    u_alias: i32,
+    u_set_col: i32,
+    u_set_val: i32,
+    u_set_op: i32,
+    u_operand: i32,
+    u_left: i32,
+    u_right: i32,
+    u_in_start: i32,
+    u_in_len: i32,
+    out_names: Vec<String>,
+    cells: Vec<String>,
+    // Row ids of the fast paths, reused from step to step.
+    rowids: Vec<i32>,
+    ncol: i32,
+    nrows: i32,
+    cur: i32,
+    done: bool,
+}
+
+// Parameter k of a plan field: -1000 - k (pool ids are >= 0, -1 is "none").
+fn stmt_pref(k: i32) -> i32 { 0 - 1000 - k }
+
+// The text before, between and after the `?` placeholders outside quotes.
+fn stmt_split(sql: String) -> Vec<String> {
+    let mut parts: Vec<String> = vec![];
+    let n = sql.len();
+    let mut start: i64 = 0;
+    let mut i: i64 = 0;
+    let mut q = "";
+    while i < n {
+        let c = sql.char_at(i);
+        if q.len() > 0 {
+            if c == q { q = ""; }
+        } else if c == "'" || c == "\"" {
+            q = c;
+        } else if c == "?" {
+            vec_push(parts, sql.substring(start, i - start));
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    vec_push(parts, sql.substring(start, n - start));
+    parts
+}
+
+// A SQL literal for a text value: quoted, with each quote doubled.
+fn sql_quote(s: String) -> String {
+    if s.index_of("'") < 0 { return "'" + s + "'"; }
+    let mut out = "'";
+    let n = s.len();
+    let mut i: i64 = 0;
+    while i < n {
+        let c = s.char_at(i);
+        if c == "'" { out = out + "''"; } else { out = out + c; }
+        i = i + 1;
+    }
+    out + "'"
+}
+
+fn i64_text(v: i64) -> String {
+    if v == 0 { return "0"; }
+    let digits = "0123456789";
+    let mut out = "";
+    let mut x = v;
+    let neg = x < 0;
+    while x != 0 {
+        let r = x % 10;
+        let dg = if r < 0 { 0 - r } else { r };
+        out = digits.char_at(dg) + out;
+        x = x / 10;
+    }
+    if neg { out = "-" + out; }
+    out
+}
+
+// The SQL literal of parameter k. An integer's text is made on first use.
+fn stmt_lit(st: &mut QStmt, k: i32) -> String {
+    let t = vec_get(st.bind, k);
+    if t.len() > 0 { return t; }
+    let v = vec_get(st.bint, k);
+    let mut lit = "";
+    if v >= 0 - 2147483647 && v <= 2147483647 { lit = to_string_i32(v as i32); }
+    else { lit = i64_text(v); }
+    let b = st.bind;
+    b[k] = lit;
+    lit
+}
+
+// The text of a statement with literals for its parameters.
+fn stmt_text(st: &mut QStmt) -> String {
+    if st.nparam == 0 { return st.sql; }
+    let mut out = vec_get(st.parts, 0);
+    let mut k = 0;
+    while k < st.nparam {
+        out = out + stmt_lit(st, k);
+        let tail = vec_get(st.parts, k + 1);
+        if tail.len() > 0 { out = out + tail; }
+        k = k + 1;
+    }
+    out
+}
+
+fn stmt_new(d: &mut DB, sql: String) -> QStmt ~ Console + Process {
+    let parts = stmt_split(sql);
+    let np = vec_len(parts) - 1;
+    let mut bind: Vec<String> = vec![];
+    let mut bkind: Vec<i32> = vec![];
+    let mut bint: Vec<i64> = vec![];
+    let mut k = 0;
+    while k < np {
+        vec_push(bind, "NULL");
+        vec_push(bkind, 0);
+        vec_push(bint, 0);
+        k = k + 1;
+    }
+    let names0: Vec<String> = vec![];
+    let onames0: Vec<String> = vec![];
+    let cells0: Vec<String> = vec![];
+    let mut st = QStmt {
+        sql: sql, parts: parts, nparam: np as i32, bind: bind, bkind: bkind, bint: bint,
+        plan: 0, ver: 0 - 1, tidx: 0 - 1, ix: 0 - 1, wparam: 0 - 1, show: vec![], names: names0,
+        u_tidx: 0 - 1, u_scol: 0 - 1, u_ix: 0 - 1, u_fast: false,
+        u_op_lit: false, u_op_ok: false, u_op_int: 0, u_wal_ok: false, u_wal_head: "", u_wal_tail: "",
+        ids2: vec![],
+        u_table: 0 - 1, u_alias: 0 - 1, u_set_col: 0 - 1, u_set_val: 0 - 1, u_set_op: 0 - 1,
+        u_operand: 0 - 1, u_left: 0 - 1, u_right: 0 - 1, u_in_start: 0 - 1, u_in_len: 0,
+        out_names: onames0, cells: cells0, rowids: vec![], ncol: 0, nrows: 0, cur: 0, done: false,
+    };
+    stmt_plan(d, &mut st);
+    st
+}
+
+// A field of the parse made from the sentinel text: a parameter reference
+// when it names one of the sentinel literals, else the field unchanged.
+fn stmt_field(d: &DB, v: i32, p0: i32, base: i32, np: i32) -> i32 {
+    if v < p0 { return v; }
+    let t = sp_get(d, v);
+    let mut k = 0;
+    while k < np {
+        if t == to_string_i32(base + k) { return stmt_pref(k); }
+        k = k + 1;
+    }
+    v
+}
+
+// Choose plan 1, 2 or 0 for the statement at the current schema.
+fn stmt_plan(d: &mut DB, st: &mut QStmt) ~ Console + Process {
+    st.plan = 0;
+    st.ver = d.schema_ver;
+    // A statement without parameters runs as text.
+    if st.nparam == 0 { return; }
+    let up = st.sql.to_uppercase();
+    let is_sel = up.starts_with("SELECT ");
+    let is_upd = up.starts_with("UPDATE ");
+    if !is_sel && !is_upd { return; }
+    if st.sql.index_of("(") >= 0 { return; }
+    // Sentinel literals stand in for the parameters during this parse.
+    let base = 734001;
+    let mut text = vec_get(st.parts, 0);
+    let mut k = 0;
+    while k < st.nparam {
+        let sv = to_string_i32(base + k);
+        if st.sql.index_of(sv) >= 0 { return; }
+        text = text + sv + vec_get(st.parts, k + 1);
+        k = k + 1;
+    }
+    if as_of_pos(text) >= 0 { return; }
+    let p0 = d.pn;
+    reset_parser(d, text);
+    parse_sql(d);
+    if d.tk_type != 7 { return; }
+    if d.has_where != 1 || d.wc_count != 1 || d.wn_count != 1 { return; }
+    if vec_get(d.wc_neg, 0) != 0 || vec_get(d.wc_op, 0) != 0 { return; }
+    let np = st.nparam;
+    let left = stmt_field(d, vec_get(d.wc_left, 0), p0, base, np);
+    let right = stmt_field(d, vec_get(d.wc_right, 0), p0, base, np);
+    if left < 0 { return; }
+    if d.stmt_type == 3 && is_upd {
+        if vec_len(d.wc_in_pool) > 0 { return; }
+        st.u_table = d.p_table;
+        st.u_alias = d.alias1;
+        st.u_set_col = d.set_col;
+        st.u_set_val = stmt_field(d, d.set_val, p0, base, np);
+        st.u_set_op = d.set_op;
+        st.u_operand = stmt_field(d, d.set_operand, p0, base, np);
+        st.u_left = left;
+        st.u_right = right;
+        st.u_in_start = if vec_len(d.wc_in_start) > 0 { vec_get(d.wc_in_start, 0) } else { 0 - 1 };
+        st.u_in_len = if vec_len(d.wc_in_len) > 0 { vec_get(d.wc_in_len, 0) } else { 0 };
+        st.plan = 2;
+        stmt_plan_fast_update(d, st);
+        return;
+    }
+    if d.stmt_type != 0 || !is_sel || right > 0 - 1000 { return; }
+    if d.has_join != 0 || d.has_group_by != 0 || d.has_order != 0 || d.has_limit != 0 { return; }
+    if d.has_offset != 0 || d.has_distinct != 0 || d.has_having != 0 { return; }
+    if d.p_agg_count > 0 && d.p_col_count == 0 { return; }
+    let mut ai = 0;
+    while ai < d.p_agg_count {
+        if vec_get(d.p_agg_funcs, ai) != 0 { return; }
+        ai = ai + 1;
+    }
+    let tname = sp_get(d, d.p_table);
+    let tidx = find_table(d, tname);
+    if tidx < 0 { return; }
+    let cs = vec_get(d.tbl_col_starts, tidx);
+    let cc = vec_get(d.tbl_col_counts, tidx);
+    let wcol = resolve_col(d, cs, cc, tname, d.alias1, sp_get(d, left));
+    if wcol < 0 { return; }
+    let ix = find_index_for(d, tidx, wcol);
+    if ix < 0 { return; }
+    let mut show: Vec<i32> = vec![];
+    let mut names: Vec<String> = vec![];
+    if d.select_star == 1 {
+        let mut ci = 0;
+        while ci < cc {
+            vec_push(show, ci);
+            vec_push(names, sp_get(d, vec_get(d.col_names, cs + ci)));
+            ci = ci + 1;
+        }
+    } else {
+        let mut ci = 0;
+        while ci < d.p_col_count {
+            let idx = resolve_col(d, cs, cc, tname, d.alias1, sp_get(d, vec_get(d.p_cols, ci)));
+            if idx < 0 { return; }
+            vec_push(show, idx);
+            let mut nm = sp_get(d, vec_get(d.col_names, cs + idx));
+            if ci < d.p_agg_count {
+                let al = vec_get(d.p_aliases, ci);
+                if al >= 0 { nm = sp_get(d, al); }
+            }
+            vec_push(names, nm);
+            ci = ci + 1;
+        }
+    }
+    st.tidx = tidx;
+    st.ix = ix;
+    st.wparam = 0 - 1000 - right;
+    st.show = show;
+    st.names = names;
+    st.plan = 1;
+}
+
+// A plan field as a pool id for this step: a parameter becomes a new pool
+// entry holding its value, as the parser makes one for each literal.
+fn stmt_val(d: &mut DB, st: &mut QStmt, v: i32) -> i32 {
+    if v > 0 - 1000 { return v; }
+    let k = 0 - 1000 - v;
+    let lit = stmt_lit(st, k);
+    sp_add(d, lit)
+}
+
+fn stmt_all_int(st: &QStmt) -> bool {
+    let mut k = 0;
+    while k < st.nparam {
+        if vec_get(st.bkind, k) != 1 { return false; }
+        k = k + 1;
+    }
+    true
+}
+
+fn stmt_point_select(d: &mut DB, st: &mut QStmt) {
+    let t = st.tidx;
+    let cc = vec_get(d.tbl_col_counts, t);
+    refresh_index(d, st.ix);
+    let rs = vec_get(d.tbl_row_starts, t);
+    let cs = vec_get(d.tbl_col_starts, t);
+    let wcol = vec_get(d.idx_col_indices, st.ix);
+    let ct = vec_get(d.col_types, cs + wcol);
+    let ns = vec_len(st.show) as i32;
+    let cells = st.cells;
+    let mut k = 0;
+    let mut n = 0;
+    if ct == 0 || ct == 1 {
+        n = index_eq_num_into(d, st.ix, vec_get(st.bint, st.wparam) as f64, st.rowids);
+        let mut i = 0;
+        while i < n {
+            let base = rs + vec_get(st.rowids, i) * cc;
+            let mut j = 0;
+            while j < ns {
+                vset_str(cells, k, sp_get(d, vec_get(d.cells, base + vec_get(st.show, j))));
+                k = k + 1;
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+    } else {
+        let rows = index_scan(d, st.ix, 0, stmt_lit(st, st.wparam));
+        n = vec_len(rows) as i32;
+        let mut i = 0;
+        while i < n {
+            let base = rs + vec_get(rows, i) * cc;
+            let mut j = 0;
+            while j < ns {
+                vset_str(cells, k, sp_get(d, vec_get(d.cells, base + vec_get(st.show, j))));
+                k = k + 1;
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+    }
+    st.out_names = st.names;
+    st.ncol = ns;
+    st.nrows = n;
+}
+
+fn stmt_update(d: &mut DB, st: &mut QStmt) ~ Console + FileSystem + Process {
+    let text = stmt_text(st);
+    reset_parser(d, text);
+    d.stmt_type = 3;
+    d.p_table = st.u_table;
+    d.alias1 = st.u_alias;
+    d.set_col = st.u_set_col;
+    d.set_val = stmt_val(d, st, st.u_set_val);
+    d.set_op = st.u_set_op;
+    d.set_operand = stmt_val(d, st, st.u_operand);
+    d.has_where = 1;
+    d.wc_count = 1;
+    vec_push(d.wc_left, stmt_val(d, st, st.u_left));
+    vec_push(d.wc_op, 0);
+    vec_push(d.wc_right, stmt_val(d, st, st.u_right));
+    vec_push(d.wc_neg, 0);
+    vec_push(d.wc_in_start, st.u_in_start);
+    vec_push(d.wc_in_len, st.u_in_len);
+    vec_push(d.wn_kind, 0);
+    vec_push(d.wn_a, 0);
+    vec_push(d.wn_b, 0 - 1);
+    d.wn_count = 1;
+    d.wc_root = 0;
+    // As exec_sql runs a mutation.
+    d.state_sha = "";
+    d.stmt_failed = false;
+    exec_update(d);
+    if !d.stmt_failed { wal_log_mutation(d, text); }
+    st.ncol = 0;
+    st.nrows = 0;
+}
+
+// Plan 0: the text with literals, through exec_sql, rows captured.
+fn stmt_text_run(d: &mut DB, st: &mut QStmt) ~ Console + FileSystem + Process {
+    let text = stmt_text(st);
+    let rn: Vec<String> = vec![];
+    let rc: Vec<String> = vec![];
+    d.rows_on = true;
+    d.row_names = rn;
+    d.row_cells = rc;
+    exec_sql(d, text);
+    d.rows_on = false;
+    st.out_names = d.row_names;
+    st.cells = d.row_cells;
+    let nc = vec_len(d.row_names);
+    st.ncol = nc as i32;
+    st.nrows = if nc > 0 { (vec_len(d.row_cells) / nc) as i32 } else { 0 };
+}
+
+// Plan 2 runs without exec_update's lookups when: the table, the SET column
+// and the WHERE column exist; the WHERE column has an index and a numeric type
+// (INTEGER or REAL), its right side is a parameter; no index is on the SET
+// column; and the SET is a parameter or literal, or the SET column itself
+// with + - * and a parameter or literal.
+fn stmt_plan_fast_update(d: &mut DB, st: &mut QStmt) {
+    st.u_fast = false;
+    if st.u_right > 0 - 1000 || st.u_alias >= 0 { return; }
+    let tname = sp_get(d, st.u_table);
+    let t = find_table(d, tname);
+    if t < 0 { return; }
+    let cs = vec_get(d.tbl_col_starts, t);
+    let cc = vec_get(d.tbl_col_counts, t);
+    let scol = find_col(d, cs, cc, sp_get(d, st.u_set_col));
+    if scol < 0 { return; }
+    let wcol = resolve_col(d, cs, cc, tname, st.u_alias, sp_get(d, st.u_left));
+    if wcol < 0 { return; }
+    let ct = vec_get(d.col_types, cs + wcol);
+    if ct != 0 && ct != 1 { return; }
+    let ix = find_index_for(d, t, wcol);
+    if ix < 0 { return; }
+    if find_index_for(d, t, scol) >= 0 { return; }
+    if st.u_set_op > 2 { return; }
+    if st.u_set_op >= 0 {
+        if st.u_set_val < 0 { return; }
+        if sp_get(d, st.u_set_val) != sp_get(d, st.u_set_col) { return; }
+    }
+    st.u_op_lit = st.u_set_op >= 0 && st.u_operand > 0 - 1000;
+    if st.u_op_lit {
+        st.u_op_ok = st.u_operand >= 0 && is_int_str(sp_get(d, st.u_operand));
+        if st.u_op_ok { st.u_op_int = parse_int_str(sp_get(d, st.u_operand)); }
+    }
+    // With one parameter and no character the WAL escapes, the OP line is
+    // "OP " + text + line feed, built from two fixed pieces and the number.
+    st.u_wal_ok = st.nparam == 1 && !needs_escape(st.sql, false);
+    if st.u_wal_ok {
+        st.u_wal_head = "OP " + vec_get(st.parts, 0);
+        st.u_wal_tail = vec_get(st.parts, 1) + "\n";
+    }
+    st.u_tidx = t;
+    st.u_scol = scol;
+    st.u_ix = ix;
+    st.u_fast = true;
+}
+
+// The operand of a fast UPDATE as an integer, or false when it is not one
+// that exec_update would take (then the step runs exec_update instead).
+fn stmt_operand_ok(d: &mut DB, st: &mut QStmt) -> bool {
+    if st.u_set_op < 0 { return true; }
+    if st.u_op_lit { return st.u_op_ok; }
+    let v = st.u_operand;
+    if v <= 0 - 1000 {
+        let x = vec_get(st.bint, 0 - 1000 - v);
+        return x >= 0 - 2147483647 && x <= 2147483647;
+    }
+    if v < 0 { return false; }
+    is_int_str(sp_get(d, v))
+}
+
+fn stmt_operand_int(d: &mut DB, st: &mut QStmt) -> i32 {
+    if st.u_op_lit { return st.u_op_int; }
+    let v = st.u_operand;
+    if v <= 0 - 1000 { return vec_get(st.bint, 0 - 1000 - v) as i32; }
+    parse_int_str(sp_get(d, v))
+}
+
+// A prepared UPDATE with u_fast: the rows exec_update would change, from the
+// numeric index search plus the check eval_where makes on each candidate
+// (an equal number, written as a number); the new values as exec_update
+// computes them; then update_apply and the WAL line, as exec_sql does.
+// Returns false, having changed nothing, when exec_update must run instead.
+fn stmt_update_fast(d: &mut DB, st: &mut QStmt) -> bool ~ Console + FileSystem + Process {
+    if !stmt_operand_ok(d, st) { return false; }
+    let t = st.u_tidx;
+    let cs = vec_get(d.tbl_col_starts, t);
+    let cc = vec_get(d.tbl_col_counts, t);
+    let scol = st.u_scol;
+    refresh_index(d, st.u_ix);
+    let rs = vec_get(d.tbl_row_starts, t);
+    let wcol = vec_get(d.idx_col_indices, st.u_ix);
+    let rows = st.rowids;
+    let new_ids = st.ids2;
+    let nc = index_eq_num_into(d, st.u_ix, vec_get(st.bint, 0 - 1000 - st.u_right) as f64, rows);
+    // Keep the candidates eval_where accepts, in place.
+    let mut n = 0;
+    let mut i = 0;
+    while i < nc {
+        let r = vec_get(rows, i);
+        let kd = sp_kind(d, vec_get(d.cells, rs + r * cc + wcol));
+        if kd == 1 || kd == 4 {
+            rows[n] = r;
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    if n > 0 {
+        if st.u_set_op < 0 {
+            let nv = sp_add(d, sp_get(d, stmt_val(d, st, st.u_set_val)));
+            i = 0;
+            while i < n { vset_i32(new_ids, i, nv); i = i + 1; }
+        } else {
+            let opnd = stmt_operand_int(d, st);
+            i = 0;
+            while i < n {
+                let cid = vec_get(d.cells, rs + vec_get(rows, i) * cc + scol);
+                if sp_kind(d, cid) != 1 { return false; }
+                let af = vec_get(d.pool_num, cid);
+                if af < 0.0 - 2147483647.0 || af > 2147483647.0 { return false; }
+                let a = af as i32;
+                let mut r = 0;
+                if st.u_set_op == 0 { r = a + opnd; }
+                else if st.u_set_op == 1 { r = a - opnd; }
+                else { r = a * opnd; }
+                vset_i32(new_ids, i, sp_add(d, to_string_i32(r)));
+                i = i + 1;
+            }
+        }
+    }
+    d.state_sha = "";
+    d.stmt_failed = false;
+    if n > 0 { update_apply(d, t, cs, cc, rs, scol, rows, new_ids, n); }
+    if !d.stmt_failed {
+        if st.u_wal_ok && d.in_transaction {
+            wal_hold_op(d, st.u_wal_head + stmt_lit(st, 0) + st.u_wal_tail);
+        } else {
+            wal_log_mutation(d, stmt_text(st));
+        }
+    }
+    st.ncol = 0;
+    st.nrows = 0;
+    true
+}
+
+// 100 when a row is ready (SQLite's SQLITE_ROW), 101 when there are no more.
+fn stmt_step(d: &mut DB, st: &mut QStmt) -> i32 ~ Console + FileSystem + Process {
+    if !st.done {
+        st.done = true;
+        st.cur = 0;
+        if st.ver != d.schema_ver { stmt_plan(d, st); }
+        if st.plan == 1 && !d.rcpt_on && vec_get(st.bkind, st.wparam) == 1 {
+            stmt_point_select(d, st);
+        } else if st.plan == 2 && stmt_all_int(st) {
+            let mut ran = false;
+            if st.u_fast { ran = stmt_update_fast(d, st); }
+            if !ran { stmt_update(d, st); }
+        } else {
+            stmt_text_run(d, st);
+        }
+    }
+    if st.cur < st.nrows {
+        st.cur = st.cur + 1;
+        return 100;
+    }
+    101
+}
+
+fn stmt_bind_int(st: &mut QStmt, i: i32, v: i64) -> i32 {
+    if i < 1 || i > st.nparam { return 1; }
+    let b = st.bind;
+    b[i - 1] = "";
+    let bk = st.bkind;
+    bk[i - 1] = 1;
+    let bi = st.bint;
+    bi[i - 1] = v;
+    0
+}
+
+fn stmt_bind(st: &mut QStmt, i: i32, lit: String, kind: i32) -> i32 {
+    if i < 1 || i > st.nparam { return 1; }
+    let b = st.bind;
+    b[i - 1] = lit;
+    let bk = st.bkind;
+    bk[i - 1] = kind;
+    0
+}
+
+// Cell i of the current row, or "" before the first step or past the end.
+fn stmt_cell(st: &QStmt, i: i32) -> String {
+    if st.cur < 1 || st.cur > st.nrows || i < 0 || i >= st.ncol { return ""; }
+    vec_get(st.cells, (st.cur - 1) * st.ncol + i)
+}
+
+fn text_i64(s: String) -> i64 {
+    let b = s.as_bytes();
+    let n = s.len();
+    let mut i: i64 = 0;
+    let mut neg = false;
+    if n > 0 && b[0] == 45 { neg = true; i = 1; }
+    let mut v: i64 = 0;
+    while i < n && b[i] >= 48 && b[i] <= 57 {
+        v = v * 10 + ((b[i] - 48) as i64);
+        i = i + 1;
+    }
+    if neg { 0 - v } else { v }
+}
+
 
 // =========================================================================
 // SECTION 11: MAIN — Entry Point

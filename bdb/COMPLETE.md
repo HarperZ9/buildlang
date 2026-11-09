@@ -412,6 +412,76 @@ compared with Python's sqlite3, before this entry. Measured on P1. Predictions: 
 removes nothing fails the replace file (at least 2 of its 6 queries wrong or rejected) and a new
 test_qdb.sh check. Guards as in P23.
 
+**P25. Prepared statements and a row API in bdb/lib (speed item 1), written 2026-11-09 before the
+measured runs below.** The P19 benchmark passes SQL text per statement and qdb prints each result,
+so it times qdb's parser and printer more than its engine: a probe on this machine put the parse of
+`SELECT v FROM t WHERE id = k` at about 22 microseconds of the 31. The change adds to bdb/lib
+`qdb_prepare` (`?` placeholders), `qdb_bind_int`/`_int64`/`_text`/`_null`, `qdb_step` (100 a row,
+101 done, as SQLite), `qdb_column_count`/`_name`/`_text`/`_int64`, `qdb_reset` and `qdb_finalize`.
+Results come back as rows, nothing is printed. A statement is planned once: a point select on an
+indexed column (`SELECT cols FROM t WHERE c = ?`) reads the index directly; an UPDATE with one
+equality WHERE sets the parse fields from the plan and runs exec_update, or, when the WHERE column
+is an indexed number column and no index is on the SET column, a direct path that computes the same
+rows and values and then shares exec_update's second half (`update_apply`) and the WAL line;
+anything else, and any statement with a text or NULL parameter, writes the parameters in as SQL
+literals and runs exec_sql with its rows captured. A schema change re-plans at the next step. Two
+engine changes serve the planned paths: each pool entry caches its number and kind on first use
+(`sp_kind`), read at index build for numeric index keys, so an equality search on a numeric index
+compares floats instead of parsing strings; and the fast paths reuse their buffers between steps.
+The text path and the CLI keep their output and WAL bytes. Disclosed: the design was explored on
+this machine before this entry, with single runs: prepared, both engines prepared, qdb's time was
+1.14, 1.6 and 1.2 times SQLite's (select, update, mixed); with text per statement it was 12.4, 7.4
+and 6.1 before the change. Measurement: P19's harness gains `--apis text,prep`. API prep prepares
+both statements once on both engines (SQLite through `sqlite3_prepare_v2`, `bind_int64`, `step`,
+`column_text` copied to a buffer) and runs one untimed select first, since qdb folds the loaded rows
+into its index at the first indexed read where SQLite built its key B-tree during the untimed load.
+Median of 3, Windows, one core, 10,000 rows, 2,000 statements in one transaction. Predictions: API
+text unchanged within noise (select 10 to 15 times SQLite's time, update and mixed 5 to 10 times);
+API prep select 0.8 to 1.6 times, update 1.2 to 2.5 times, mixed 1.0 to 2.0 times. The author's
+target is below 1 on all three; a miss is reported as one. Correctness: a new
+`bdb/tests/test_qdb_rows.py` runs the differential workloads and a keyed workload (an indexed
+INTEGER key holding integers, reals, text and NULL; updates by `+ - * =` inside and outside
+transactions; an index added on the SET column halfway) twice through the row API, once with every
+integer literal of a SELECT or UPDATE bound as a parameter and once as literal text; rows, column
+names, the .db and the .wal must be identical, and the literal run's rows must equal the CLI's
+output cell by cell. Planted check: a library whose numeric index search also accepts larger keys
+must show differences. Guards: test_qdb.sh, crash test (176 points, 0 violations), seeded power
+cuts (0 of 10,000, digest 77a49282... unchanged, since no WAL or .db bytes change), P2 2,000 of
+2,000, text round trip, WAL recovery, reference differential, library, receipts, mutations.
+
+**P26. Settling the P25 comparison (speed item 1), written 2026-11-09 before the runs below.** P25's
+prepared update and mixed ratios (0.97, 0.92) sat inside the machine's run-to-run spread, and each
+timed region was short: 2,000 statements take 1 to 3 ms, near the timer's and the scheduler's
+grain. No engine change. The harness gains paired runs (qdb and SQLite alternate, one pair per
+repetition, so a slow spell lands on both), the median of the per-pair ratios, and a
+distribution-free interval for that median (order statistics; with 11 pairs, the 3rd and 9th
+smallest ratios, exact coverage 93.5 percent). Two runs, prep API, 10,000 rows, 11 pairs each, at a
+moment with no cargo, rustc or render job and at least 8 GB free: run A repeats P25's 2,000
+statements; run B uses 200,000 statements so each timed region lasts about 0.1 to 0.3 s. Claim rule:
+qdb is called faster than SQLite on a mode only when the interval's upper end is below 1.0; slower
+only when its lower end is above 1.0; otherwise unsettled. Predictions (written before any paired
+run): select slower in both runs (B median 1.4 to 1.9); update and mixed unsettled in run A; in run
+B update 0.8 to 1.3 and mixed 0.8 to 1.2, with at most one of them settled faster. Planted check:
+`--aa` puts SQLite in qdb's place; its intervals must contain 1.0 on all three modes (run B
+settings, 7 pairs). A planted interval that excludes 1.0 means the interval method or the machine
+cannot support a claim, and no claim is made. Guards: the full set, on the unchanged engine.
+
+**P27. Typed key array in each index (speed item 2, first step), written 2026-11-09 before the
+measured runs below.** An index holds pool ids of its keys (`idx_keys`); an equality search on a
+numeric index reads each probed key's number from `pool_num` at that id, and since pool ids of keys
+are spread over the whole pool, most of the 14 probes of a 10,000-key search miss the cache (P25's
+profile). The change adds `idx_num`, an f64 array parallel to `idx_keys` holding each entry's key
+number (NULL as minus infinity, which sorts first and equals no number), and the numeric search
+runs over it alone. `ix_move` (UPDATE of an indexed column) keeps it current; every other write of
+the index arrays (splice_index, which every rebuild and merge uses, DELETE's renumbering, ROLLBACK's
+restore) clears a flag and the next numeric search rebuilds it from the pool cache in one pass. No
+.db, WAL or output byte changes, so the power-cut digest stays 77a49282.... Measurement: P26's run
+B settings (prep API, 10,000 rows, 200,000 statements, 11 pairs) and the same at 100,000 rows.
+Predictions: select ratio falls by 10 to 35 percent against P26 run B; update and mixed fall by 5 to
+25 percent; at 100,000 rows the select gain is at least as large as at 10,000. Planted check: a
+build whose `ix_move` leaves `idx_num` unchanged must fail test_qdb_rows.py (the keyed workload
+updates an indexed column and then searches it). Guards: the full set.
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
@@ -506,6 +576,11 @@ test_qdb.sh check. Guards as in P23.
   twin is compiled instead from the SQLite 3.49.1 amalgamation (`sqlite3.c`, public domain, from
   sqlite.org; kept outside the repository with its SHA-256), with default options and -O2, the
   same version as before. Nothing else in P19 changes.
+
+**A11 (2026-11-09, P27).** The keyed workload of `test_qdb_rows.py` gains a bound
+`SELECT id, v FROM t WHERE v = k` right after each `UPDATE t SET v = k` once the index on v exists,
+because P27's preregistered planted check (a stale `idx_num` after `ix_move`) was not caught
+without it. Written after that miss, before the after-measurements.
 
 ## Baseline (qdb at the move, 2026-11-08, buildc 1.11.0)
 
@@ -913,6 +988,112 @@ median of 3).
   of 16; library 0 failures; receipts reproduced; test_qdb_mutations.py 0 disagreements. The
   receipts overhead that run printed (-27.7 percent, one repetition while sqllogictest ran beside
   it) shows that single-repetition overhead figures on a loaded machine carry no information.
+
+## After P25: prepared statements and a row API in bdb/lib (2026-11-09, feat/bdb-rowapi)
+
+Windows, one core, `bench_qdb_throughput.py --apis text,prep`, 10,000 rows, 2,000 statements in one
+transaction, median of 3; SQLite 3.49.1 from the amalgamation. Another agent's compiler builds ran
+on the same machine during the run.
+
+| API, mode | qdb (statements per second) | SQLite | qdb's time against SQLite's | Before |
+|---|---|---|---|---|
+| text, select | 21,751 | 305,764 | 14.06 times | 12.9 (P21) |
+| text, update | 37,284 | 275,406 | 7.39 times | 7.5 |
+| text, mixed | 28,575 | 237,051 | 8.30 times | 8.3 |
+| prep, select | 1,607,717 | 2,624,672 | 1.63 times | none (no API) |
+| prep, update | 753,012 | 728,863 | 0.97 times | none |
+| prep, mixed | 1,044,386 | 959,233 | 0.92 times | none |
+
+- Both engines end in the same state under both APIs (SUM(v) 499,600).
+- Predictions: text held (select 14.06 within 10 to 15; update and mixed within 5 to 10). Prep
+  select MISSED (1.63 against 0.8 to 1.6, the slow side). Prep update (0.97 against 1.2 to 2.5)
+  and mixed (0.92 against 1.0 to 2.0) also fell outside their ranges, on the fast side. Target
+  (below 1): met by update and mixed in this run, missed by select. The margins are inside this
+  machine's run-to-run spread: in exploratory single runs SQLite's prepared update ran between
+  0.73 and 1.43 million per second, so "faster than SQLite" on update and mixed is not settled by
+  one median of 3.
+- Where qdb's time goes (exploratory, cycle counts on the prepared update): the WAL line (one
+  logical OP line, hashed and held, about a third), the index search (pool ids of keys spread over
+  the string pool, so most probes miss the cache), and one new pool string per changed cell. These
+  are the targets of the storage work (speed item 2): typed key arrays in the index, and cells that
+  are updated in place instead of appended to the pool.
+- Correctness: `test_qdb_rows.py`, seeds 1 to 3, differential and keyed workloads (1,029
+  statements, 540 bound parameters): bound against literal 0 differences, .db and .wal identical,
+  literal rows against the CLI 0 differences. Planted (index search accepts larger keys): 186
+  differences, caught.
+- Guards: test_qdb.sh 314 pass, 0 fail; crash test 176 points, 0 violations; seeded power cuts 0
+  of 10,000, digest 77a49282... unchanged; P2 2,000 of 2,000; text 0 changed; WAL recovery 0
+  failures; reference differential 16 of 16; library 0 failures; receipts reproduced; mutations 0
+  disagreements.
+
+## After P26: the prepared comparison settled (2026-11-09, feat/bdb-settle)
+
+Windows, one core per process, prep API, 10,000 rows, qdb and SQLite 3.49.1 alternating, 11 pairs
+per mode (planted check 7). Run at 10:28 to 10:33 PT with no cargo, rustc or render job and 10.7 GB
+free; a GPU scoring job held one of the 24 cores. Interval: order statistics of the per-pair ratio
+(qdb's time over SQLite's), exact coverage 93.5 percent for 11 pairs, 98.4 percent for 7.
+
+| Run | Mode | qdb (statements per second) | SQLite | Paired median ratio | Interval | Verdict |
+|---|---|---|---|---|---|---|
+| A (2,000 statements) | select | 2,118,644 | 2,538,071 | 1.23 | 1.18 to 1.29 | slower |
+| A | update | 852,152 | 1,040,583 | 1.21 | 1.13 to 1.33 | slower |
+| A | mixed | 1,094,092 | 997,506 | 0.86 | 0.76 to 0.95 | faster |
+| B (200,000 statements) | select | 2,899,223 | 2,584,013 | 0.89 | 0.84 to 1.08 | unsettled |
+| B | update | 1,004,394 | 2,512,153 | 2.51 | 2.43 to 2.60 | slower |
+| B | mixed | 1,190,221 | 2,465,878 | 2.05 | 1.99 to 2.08 | slower |
+| planted (SQLite against SQLite, B settings) | select | | | 0.99 | 0.88 to 1.02 | brackets 1 |
+| planted | update | | | 0.99 | 0.98 to 1.02 | brackets 1 |
+| planted | mixed | | | 1.00 | 0.96 to 1.06 | brackets 1 |
+
+- The claim is settled against qdb: on long runs SQLite's prepared UPDATE runs at about 2.5 million
+  per second, and qdb's at 1.0 million, so qdb takes 2.5 times SQLite's time on update and 2.05
+  times on mixed. P25's update and mixed ratios below 1 came from short timed regions where SQLite
+  had not yet reached its steady rate (about 1.0 million per second over the first 2,000
+  statements, 2.5 million over 200,000). qdb is not faster than SQLite on any mode of the long run;
+  point select is level within the interval.
+- Run A's mixed result (faster) does not carry to run B and is not claimed as a general result.
+- Predictions: select slower in A held; select in B MISSED (0.89, unsettled, predicted 1.4 to 1.9).
+  Update and mixed unsettled in A MISSED (update settled slower, mixed settled faster). Update in B
+  (0.8 to 1.3) and mixed in B (0.8 to 1.2) MISSED, both on the slow side.
+- Planted check held: all three A/A intervals contain 1.0, so the method separates; the measured
+  gaps are larger than the A/A spread.
+- From here the speed work is measured on run B's settings; run A stays only for continuity with
+  P25.
+- Guards on the unchanged engine (main a5fb755): test_qdb.sh 314 pass, 0 fail; rows 0 differences
+  (planted 186 caught); crash 176 points, 0 violations; power cuts 0 of 10,000, digest 77a49282...
+  equal; P2 2,000 of 2,000; text 0 changed; WAL recovery 0; reference differential 16 of 16;
+  library 0 failures; receipts reproduced; mutations 0 disagreements.
+
+## After P27: typed key array in each index (2026-11-09, feat/bdb-typedkeys)
+
+P26's harness, prep API, 200,000 statements, 11 pairs per mode, qdb before (P26 tip 2a4726b) and
+after, each against SQLite 3.49.1 in its own paired run. Run 11:06 to 11:22 PT, no cargo, rustc or
+render job, 12.8 GB free. Paired median of qdb's time over SQLite's, with the 93.5 percent interval.
+
+| Rows | Mode | Before | After | Change |
+|---|---|---|---|---|
+| 10,000 | select | 1.03 (0.93 to 1.23) | 0.82 (0.77 to 0.89) | -20% |
+| 10,000 | update | 2.55 (2.50 to 2.62) | 2.34 (2.33 to 2.41) | -8% |
+| 10,000 | mixed | 1.87 (1.84 to 1.93) | 1.76 (1.67 to 1.82) | -6% |
+| 100,000 | select | 1.59 (1.50 to 2.10) | 1.17 (1.02 to 1.25) | -26% |
+| 100,000 | update | 2.98 (2.80 to 3.21) | 2.40 (2.35 to 2.47) | -19% |
+| 100,000 | mixed | 2.16 (2.02 to 2.23) | 1.78 (1.63 to 2.02) | -18% |
+
+- qdb's prepared point select on 10,000 rows is now faster than SQLite's by the P26 rule (interval
+  0.77 to 0.89, all below 1): 3.14 million per second against 2.56 million. On 100,000 rows it is
+  still slower (1.02 to 1.25). Update and mixed stay slower at both sizes.
+- Predictions held: select fell 20 and 26 percent (10 to 35); update and mixed fell 8, 6, 19 and 18
+  percent (5 to 25); the 100,000-row select gain is the larger.
+- Planted check as preregistered MISSED at first: with `ix_move` leaving `idx_num` stale, the rows
+  test still passed, because its keyed workload never searched the moved key before something
+  rebuilt the array. Amendment A11 (below) adds a bound search of the new value right after each
+  `UPDATE t SET v = k` in the second half of the keyed workload. With it the planted build fails
+  (seeds 1 to 3: 1, 3 and 1 differences) and the real build passes. The rows test's own planted
+  anchor moved to the new search loop (188 differences, caught).
+- Guards: test_qdb.sh 314 pass, 0 fail; rows 0 differences; crash 176 points, 0 violations; power
+  cuts 0 of 10,000, digest 77a49282... equal (no byte change); P2 2,000 of 2,000; text 0 changed; WAL
+  recovery 0; reference differential 16 of 16; library 0 failures; receipts reproduced; mutations
+  0 disagreements.
 
 ## Stage 1: a correct, durable single-file engine
 

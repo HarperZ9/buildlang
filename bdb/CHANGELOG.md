@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- 2026-11-09: `bdb/lib` has prepared statements and a row API (`qdb_prepare`, `qdb_bind_*`,
+  `qdb_step`, `qdb_column_*`, `qdb_reset`, `qdb_finalize`). Point selects on an indexed column and
+  single-equality updates skip the parser; numeric index searches compare cached numbers. With
+  both engines prepared (10,000 rows, Windows, median of 3): select 1.63 times SQLite's time,
+  update 0.97 times, mixed 0.92 times. New test `bdb/tests/test_qdb_rows.py`.
+
 - 2026-11-09: `REPLACE INTO` and `INSERT OR REPLACE INTO` run with SQLite's rule: a new row removes
   the rows that share any of its UNIQUE or PRIMARY KEY keys. sqllogictest 9,181 to 9,185 of 9,202.
 
