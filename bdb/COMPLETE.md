@@ -235,6 +235,6 @@ nothing in it is built ahead of the core gaps.
 
 Decided by the author on 2026-11-09: "Move into BuildLang". qdb is `bdb/` in this repository, with
 its history, and `.github/workflows/bdb.yml` builds it with the compiler of each checkout, so a
-codegen regression that breaks qdb fails the compiler's own PR. Open: `bdb/` keeps Build
-Universe's FSL-1.1-MIT licence (`bdb/LICENSE`, `NOTICE`); relicensing it to AGPL-3.0-only is the
-author's call.
+codegen regression that breaks qdb fails the compiler's own PR. Licence, decided by the author on
+2026-11-09 ("for the license, I think AGPL is good."): `bdb/` is AGPL-3.0-only like the rest of
+the repository (`bdb/LICENSE`, `NOTICE`).

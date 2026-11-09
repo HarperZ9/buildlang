@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
 """qdb as a C library: one open database, many statements, same output as the CLI.
 
 Builds the library (bdb/lib/make_lib.py, then `buildc build --emit staticlib`),

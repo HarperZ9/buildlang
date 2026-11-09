@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
 """Crash test: stop qdb at every durable write of every statement and recover.
 
 qdb routes each durable write (WAL append, .db rewrite, WAL clear, and the

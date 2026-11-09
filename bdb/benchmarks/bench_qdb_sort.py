@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
 """ORDER BY cost: time a sort of N rows, net of loading the same file.
 
 For each N, builds a table t (id INTEGER, v INTEGER) of N rows with v drawn

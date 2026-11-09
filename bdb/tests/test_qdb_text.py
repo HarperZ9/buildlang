@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
 """Text round trip: values with |, backslash, line breaks and quotes survive.
 
 1,000 generated text values, each holding at least one of: a pipe, a

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
 /* Run a file of statements, one per line, on one open qdb database.
  *
  *   driver DB STATEMENTS_FILE

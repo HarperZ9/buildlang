@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // =========================================================================
 // C ABI: qdb as a library (bdb/lib). Appended to db.bld without its main()
 // by bdb/lib/make_lib.py; built with `buildc build --emit staticlib`.

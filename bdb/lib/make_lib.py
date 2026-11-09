@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
 """Write a staticlib project for qdb: db.bld without main(), plus exports.bld.
 
   python bdb/lib/make_lib.py OUT_DIR

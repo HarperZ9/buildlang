@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
 """Differential test of qdb against SQLite on generated queries in qdb's dialect.
 
 Each seed builds two tables (40 rows in `a`, 20 in `b`) and 200 SELECTs drawn
