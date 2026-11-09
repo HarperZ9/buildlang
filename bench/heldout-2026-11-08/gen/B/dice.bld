@@ -1,0 +1,21 @@
+fn main() ~ Console {
+    let mut x: i64 = 42;
+    let mut counts: Vec<i64> = vec_new();
+    let mut k: i64 = 0;
+    while k < 6 {
+        counts.push(0);
+        k = k + 1;
+    }
+    let mut roll: i64 = 0;
+    while roll < 1000 {
+        x = (1103515245 * x + 12345) % 2147483648;
+        let face: i64 = 1 + (x / 65536) % 6;
+        counts[(face - 1) as usize] = counts[(face - 1) as usize] + 1;
+        roll = roll + 1;
+    }
+    let mut f: i64 = 0;
+    while f < 6 {
+        println!("{} {}", f + 1, counts[f as usize]);
+        f = f + 1;
+    }
+}

@@ -1,0 +1,18 @@
+# BuildLang
+
+> BuildLang is a Rust-like systems language whose function signatures declare the capabilities the code may use (`~ Console + FileSystem`). `buildc check` rejects undeclared capability use and any program the C backend cannot compile, and reports errors as stable `BLxxxx` codes in JSON. Programs compile to C and native binaries.
+
+Agents writing BuildLang: run `buildc check FILE --error-format=json` after every edit, read each diagnostic's `code`, `help` and `suggestions`, and do not apply a suggestion marked `widens_authority` without deciding the code should have that capability.
+
+## Docs
+
+- [Agent skill](skills/buildlang/SKILL.md): the check loop, capabilities, and what the C backend supports today
+- [Specification](SPECIFICATION.md): syntax, types, ownership, effects; every example is checked in CI
+- [Effects guide](docs/EFFECTS_GUIDE.md): capabilities, effect declarations and one-shot handlers
+- [Diagnostic codes](docs/ERROR_CODES.md): every BLxxxx code and its meaning
+- [Diagnostics schema](docs/schemas/buildlang.diagnostics.v1.schema.json): the JSON report shape
+
+## Optional
+
+- [Changelog](CHANGELOG.md)
+- [Status](STATUS.md): what is verified and what is experimental

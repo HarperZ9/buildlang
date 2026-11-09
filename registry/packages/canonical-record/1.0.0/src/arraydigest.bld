@@ -1,0 +1,241 @@
+// =============================================================================
+// canonical-record: array file reading and packing
+// =============================================================================
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright 2026 Zain Dana Harper.
+// =============================================================================
+
+/// [overflow, negative, magnitude] of a JSON integer lexeme.
+fn cr_int_parts(lex: str) -> Vec<u64> {
+    let mut r: Vec<u64> = Vec::new();
+    let mut k: usize = 0;
+    let mut neg: u64 = 0;
+    if lex.as_bytes()[0] == 45_u8 {
+        neg = 1;
+        k = 1;
+    }
+    let mut mag: u64 = 0;
+    let mut over: u64 = 0;
+    while k < lex.len() {
+        let d = (lex.as_bytes()[k] as u64) - 48_u64;
+        if mag > 1844674407370955161_u64 || (mag == 1844674407370955161_u64 && d > 5_u64) {
+            over = 1;
+        } else {
+            mag = mag * 10_u64 + d;
+        }
+        k = k + 1;
+    }
+    r.push(over);
+    r.push(neg);
+    r.push(mag);
+    r
+}
+
+/// Pack one integer or bool leaf; returns [ok, bits].
+fn cr_pack_int(src: str, kind: i64, start: usize, end: usize, dtype: str, size: usize) -> Vec<u64> {
+    let mut r: Vec<u64> = Vec::new();
+    let mut over: u64 = 0;
+    let mut neg: u64 = 0;
+    let mut mag: u64 = 0;
+    if kind == 2 {
+        mag = 1;
+    } else if kind == 3 {
+        let p = cr_int_parts(src.substring(start, end - start));
+        over = p[0];
+        neg = p[1];
+        mag = p[2];
+    } else if kind != 1 {
+        r.push(0);
+        r.push(0);
+        return r;
+    }
+    let bits = (size * 8) as u64;
+    let signed = dtype.substring(0, 1) == "i";
+    let mut ok = over == 0;
+    if ok && signed {
+        let half = 1_u64 << (bits - 1_u64);
+        if neg == 1 {
+            ok = mag <= half;
+        } else {
+            ok = mag < half;
+        }
+    } else if ok {
+        if neg == 1 {
+            ok = mag == 0;
+        } else if bits < 64_u64 {
+            ok = mag < (1_u64 << bits);
+        }
+    }
+    let mut v = mag;
+    if neg == 1 {
+        v = (!mag).wrapping_add(1_u64);
+    }
+    if ok {
+        r.push(1);
+    } else {
+        r.push(0);
+    }
+    r.push(v);
+    r
+}
+
+/// The f64 of a float, int or bool leaf (float(v) in Python).
+fn cr_leaf_f64(src: str, kind: i64, start: usize, end: usize) -> f64 {
+    if kind == 2 {
+        return 1.0;
+    }
+    if kind == 1 {
+        return 0.0;
+    }
+    src.substring(start, end - start).parse_float()
+}
+
+/// Header, count and value checks, then the digest (array_sha256).
+fn cr_array_digest(src: str, b: Vec<u8>, dtype: str, dims: Vec<str>, vpos: usize) -> CrDoc {
+    let size = cr_dtype_size(dtype);
+    if size == 0 {
+        let names = "['bool', 'f32', 'f64', 'i16', 'i32', 'i64', 'i8', 'u16', 'u32', 'u64', 'u8']";
+        return CrDoc { ok: false, text: cr_refuse(format!("dtype {} is not one of {}", cr_repr(dtype), names)) };
+    }
+    let nd = vec_len(dims);
+    let mut k: usize = 0;
+    let mut joined = "";
+    let mut shown = "";
+    let mut count: u64 = 1;
+    let mut zero = false;
+    while k < nd {
+        let d = dims[k];
+        if d.substring(0, 1) == "-" {
+            return CrDoc { ok: false, text: cr_refuse("negative dimension") };
+        }
+        if k > 0 {
+            joined.push_str(",");
+            shown.push_str(", ");
+        }
+        joined.push_str(d);
+        shown.push_str(d);
+        let p = cr_int_parts(d);
+        if p[2] == 0 {
+            zero = true;
+        } else if p[0] == 1 || count > 4611686018427387904_u64 / p[2] {
+            count = 4611686018427387904_u64;
+        } else {
+            count = count * p[2];
+        }
+        k = k + 1;
+    }
+    if zero {
+        count = 0;
+    }
+    let mut data: Vec<u8> = str_bytes("cr1-array");
+    data.push(0_u8);
+    data = cr_cat(data, str_bytes(dtype));
+    data.push(0_u8);
+    data = cr_cat(data, str_bytes(joined));
+    data.push(0_u8);
+    let leaves = cr_flatten(b, vpos);
+    let nl = vec_len(leaves) / 3;
+    if (nl as u64) != count {
+        if nd == 1 {
+            shown.push_str(",");
+        }
+        return CrDoc { ok: false, text: cr_refuse(format!("{} values for shape ({})", nl, shown)) };
+    }
+    let is_float = dtype.substring(0, 1) == "f";
+    k = 0;
+    while is_float && k < nl {
+        let kind = leaves[3 * k] as i64;
+        if kind == 0 || kind == 6 {
+            return cr_pack_fail(dtype);
+        }
+        if kind == 5 {
+            return CrDoc { ok: false, text: "error: string values in a float array are not supported by this port" };
+        }
+        let f = cr_leaf_f64(src, kind, leaves[3 * k + 1], leaves[3 * k + 2]);
+        if cr_is_inf(f) {
+            if kind == 3 {
+                return cr_pack_fail(dtype);
+            }
+            return CrDoc { ok: false, text: cr_refuse("non-finite value in a float array") };
+        }
+        k = k + 1;
+    }
+    k = 0;
+    while k < nl {
+        let kind = leaves[3 * k] as i64;
+        let s = leaves[3 * k + 1];
+        let e = leaves[3 * k + 2];
+        if dtype == "bool" {
+            if cr_truthy(src, b, kind, s, e) {
+                data.push(1_u8);
+            } else {
+                data.push(0_u8);
+            }
+        } else if dtype == "f64" {
+            data = cr_push_le(data, cr_leaf_f64(src, kind, s, e).to_bits(), 8);
+        } else if dtype == "f32" {
+            let y = cr_leaf_f64(src, kind, s, e) as f32;
+            let bits = y.to_bits();
+            if (bits & 2139095040_u32) == 2139095040_u32 {
+                return cr_pack_fail(dtype);
+            }
+            data = cr_push_le(data, bits as u64, 4);
+        } else {
+            let p = cr_pack_int(src, kind, s, e, dtype, size);
+            if p[0] == 0 {
+                return cr_pack_fail(dtype);
+            }
+            data = cr_push_le(data, p[1], size);
+        }
+        k = k + 1;
+    }
+    CrDoc { ok: true, text: bytes_hex(sha256_digest(data)) }
+}
+
+fn cr_cat(a: Vec<u8>, b: Vec<u8>) -> Vec<u8> {
+    let mut o = a;
+    let mut k: usize = 0;
+    while k < vec_len(b) {
+        o.push(b[k]);
+        k = k + 1;
+    }
+    o
+}
+
+/// Python repr() of a printable-ASCII str.
+fn cr_repr(s: str) -> str {
+    let mut quote = "'";
+    if s.index_of("'") >= 0 && s.index_of("\"") < 0 {
+        quote = "\"";
+    }
+    let mut out = quote;
+    let mut k: usize = 0;
+    while k < s.len() {
+        let ch = s.substring(k, 1);
+        if ch == "\\" {
+            out.push_str("\\\\");
+        } else if ch == quote {
+            out.push_str("\\");
+            out.push_str(ch);
+        } else {
+            out.push_str(ch);
+        }
+        k = k + 1;
+    }
+    out.push_str(quote);
+    out
+}
+
+fn cr_push_le(o: Vec<u8>, v: u64, size: usize) -> Vec<u8> {
+    let mut r = o;
+    let mut k: usize = 0;
+    while k < size {
+        r.push(((v >> ((k * 8) as u64)) & 255_u64) as u8);
+        k = k + 1;
+    }
+    r
+}
+
+fn cr_pack_fail(dtype: str) -> CrDoc {
+    CrDoc { ok: false, text: format!("error: values do not pack as {}", dtype) }
+}

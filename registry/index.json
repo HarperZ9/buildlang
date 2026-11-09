@@ -1,6 +1,55 @@
 {
   "format": 2,
   "packages": {
+    "art-receipts": {
+      "version": "1.0.0",
+      "description": "Checks committed art files against the SHA-256 digests in docs/art/receipts.json",
+      "author": "Zain Dana Harper",
+      "license": "AGPL-3.0-only",
+      "checksum": "sha256:ef66a0003e14c06bb865b69071a7768a85580eaf50bdd631cbfb63964192ce97",
+      "path": "packages/art-receipts/1.0.0",
+      "versions": {
+        "1.0.0": {
+          "path": "packages/art-receipts/1.0.0",
+          "checksum": "sha256:ef66a0003e14c06bb865b69071a7768a85580eaf50bdd631cbfb63964192ce97",
+          "dependencies": {
+            "sha256": "^1.0.0"
+          }
+        }
+      }
+    },
+    "canonical-record": {
+      "version": "1.0.0",
+      "description": "RFC 8785 (JCS) canonical JSON, its SHA-256, and the cr1 numeric-array digest (port of Flywheel harness/canonical_record.py)",
+      "author": "Zain Dana Harper",
+      "license": "FSL-1.1-MIT",
+      "checksum": "sha256:9a4204f7accc9e3ad52406d0772d175e66e43fcb3383f5264215f955350ada4a",
+      "path": "packages/canonical-record/1.0.0",
+      "versions": {
+        "1.0.0": {
+          "path": "packages/canonical-record/1.0.0",
+          "checksum": "sha256:9a4204f7accc9e3ad52406d0772d175e66e43fcb3383f5264215f955350ada4a",
+          "dependencies": {
+            "sha256": "^1.0.0"
+          }
+        }
+      }
+    },
+    "color": {
+      "version": "1.0.0",
+      "description": "Colour difference metrics (CIE76, CIE94, CIEDE2000, CMC, HyAB) and sRGB, XYZ, xyY, Lab, LCh, Oklab and Oklch conversions in pure BuildLang",
+      "author": "Zain Dana Harper",
+      "license": "FSL-1.1-MIT",
+      "checksum": "sha256:987e6a831450d88611ebdfa45c315aecf73ac14e739bb34e6b5bbc9fb5668496",
+      "path": "packages/color/1.0.0",
+      "versions": {
+        "1.0.0": {
+          "path": "packages/color/1.0.0",
+          "checksum": "sha256:987e6a831450d88611ebdfa45c315aecf73ac14e739bb34e6b5bbc9fb5668496",
+          "dependencies": {}
+        }
+      }
+    },
     "merkle": {
       "version": "1.0.0",
       "description": "RFC 6962 Merkle roots, inclusion and consistency proofs (port of Flywheel harness/merkle.py)",
@@ -15,6 +64,36 @@
           "dependencies": {
             "sha256": "^1.0.0"
           }
+        }
+      }
+    },
+    "readability": {
+      "version": "1.0.0",
+      "description": "Flesch reading ease with word, sentence and syllable counts, ported from Flywheel's writing linter",
+      "author": "Zain Dana Harper",
+      "license": "FSL-1.1-MIT",
+      "checksum": "sha256:10785caef30da9e0c24aad37cb45fcd1673cf36939d04281fc9463f7a1d15ffe",
+      "path": "packages/readability/1.0.0",
+      "versions": {
+        "1.0.0": {
+          "path": "packages/readability/1.0.0",
+          "checksum": "sha256:10785caef30da9e0c24aad37cb45fcd1673cf36939d04281fc9463f7a1d15ffe",
+          "dependencies": {}
+        }
+      }
+    },
+    "repo-art": {
+      "version": "1.0.0",
+      "description": "BuildLang's repository-art flow diagrams and receipt cards, rendered from the art spec as byte-stable SVG",
+      "author": "Zain Dana Harper",
+      "license": "AGPL-3.0-only",
+      "checksum": "sha256:5005e04ceb66c38e0b56726771f68f81cb5ca689547435af7fd0ae377891a754",
+      "path": "packages/repo-art/1.0.0",
+      "versions": {
+        "1.0.0": {
+          "path": "packages/repo-art/1.0.0",
+          "checksum": "sha256:5005e04ceb66c38e0b56726771f68f81cb5ca689547435af7fd0ae377891a754",
+          "dependencies": {}
         }
       }
     },

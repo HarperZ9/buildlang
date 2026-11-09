@@ -1,0 +1,401 @@
+{
+  "header": {
+    "name": "x",
+    "role": "r",
+    "tagline": "t"
+  },
+  "flows": [
+    {
+      "file": "flow-1.svg",
+      "kicker": "kick & <tag> \"q\"",
+      "title": "Title with & and <b>",
+      "footnote": "Foot \"note\" & more",
+      "alt": "Alt <x> & \"y\"",
+      "stages": [
+        {
+          "title": "S0 & <t>",
+          "note": "Alpha & beta <gamma> \"delta\" epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega and then some more words to overflow"
+        }
+      ],
+      "outcomes": [
+        {
+          "label": "O0 &",
+          "note": "n <0>",
+          "tone": "verified"
+        }
+      ]
+    },
+    {
+      "file": "flow-5.svg",
+      "kicker": "kick & <tag> \"q\"",
+      "title": "Title with & and <b>",
+      "footnote": "Foot \"note\" & more",
+      "alt": "Alt <x> & \"y\"",
+      "stages": [
+        {
+          "title": "S0 & <t>",
+          "note": "Alpha & beta <gamma> \"delta\" epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega and then some more words to overflow"
+        },
+        {
+          "title": "S1 & <t>"
+        },
+        {
+          "title": "S2 & <t>",
+          "note": "short note here"
+        },
+        {
+          "title": "S3 & <t>",
+          "note": "Alpha & beta <gamma> \"delta\" epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega and then some more words to overflow"
+        },
+        {
+          "title": "S4 & <t>",
+          "note": "short note here"
+        }
+      ],
+      "returns": [
+        {
+          "from": 4,
+          "to": 0,
+          "label": "BACK & <AGAIN>"
+        },
+        {
+          "from": 1,
+          "to": 0,
+          "label": "two"
+        }
+      ],
+      "outcomes": [
+        {
+          "label": "O0 &",
+          "note": "n <0>",
+          "tone": "verified"
+        },
+        {
+          "label": "O1 &",
+          "note": "n <1>",
+          "tone": "drift"
+        },
+        {
+          "label": "O2 &",
+          "note": "n <2>",
+          "tone": "none"
+        },
+        {
+          "label": "O3 &",
+          "note": "n <3>",
+          "tone": "verified"
+        }
+      ]
+    },
+    {
+      "file": "flow-9.svg",
+      "kicker": "kick & <tag> \"q\"",
+      "title": "Title with & and <b>",
+      "footnote": "Foot \"note\" & more",
+      "alt": "Alt <x> & \"y\"",
+      "stages": [
+        {
+          "title": "S0 & <t>",
+          "note": "Alpha & beta <gamma> \"delta\" epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega and then some more words to overflow"
+        },
+        {
+          "title": "S1 & <t>"
+        },
+        {
+          "title": "S2 & <t>",
+          "note": "short note here"
+        },
+        {
+          "title": "S3 & <t>",
+          "note": "Alpha & beta <gamma> \"delta\" epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega and then some more words to overflow"
+        },
+        {
+          "title": "S4 & <t>",
+          "note": "short note here"
+        },
+        {
+          "title": "S5 & <t>"
+        },
+        {
+          "title": "S6 & <t>",
+          "note": "Alpha & beta <gamma> \"delta\" epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega and then some more words to overflow"
+        },
+        {
+          "title": "S7 & <t>",
+          "note": "short note here"
+        },
+        {
+          "title": "S8 & <t>",
+          "note": "short note here"
+        }
+      ],
+      "returns": [
+        {
+          "from": 8,
+          "to": 0,
+          "label": "BACK & <AGAIN>"
+        },
+        {
+          "from": 1,
+          "to": 0,
+          "label": "two"
+        }
+      ],
+      "outcomes": [
+        {
+          "label": "O0 &",
+          "note": "n <0>",
+          "tone": "verified"
+        },
+        {
+          "label": "O1 &",
+          "note": "n <1>",
+          "tone": "drift"
+        },
+        {
+          "label": "O2 &",
+          "note": "n <2>",
+          "tone": "none"
+        },
+        {
+          "label": "O3 &",
+          "note": "n <3>",
+          "tone": "verified"
+        },
+        {
+          "label": "O4 &",
+          "note": "n <4>",
+          "tone": "drift"
+        },
+        {
+          "label": "O5 &",
+          "note": "n <5>",
+          "tone": "none"
+        },
+        {
+          "label": "O6 &",
+          "note": "n <6>",
+          "tone": "verified"
+        }
+      ]
+    },
+    {
+      "file": "flow-12.svg",
+      "kicker": "kick & <tag> \"q\"",
+      "title": "Title with & and <b>",
+      "footnote": "Foot \"note\" & more",
+      "alt": "Alt <x> & \"y\"",
+      "stages": [
+        {
+          "title": "S0 & <t>",
+          "note": "Alpha & beta <gamma> \"delta\" epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega and then some more words to overflow"
+        },
+        {
+          "title": "S1 & <t>"
+        },
+        {
+          "title": "S2 & <t>",
+          "note": "short note here"
+        },
+        {
+          "title": "S3 & <t>",
+          "note": "Alpha & beta <gamma> \"delta\" epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega and then some more words to overflow"
+        },
+        {
+          "title": "S4 & <t>",
+          "note": "short note here"
+        },
+        {
+          "title": "S5 & <t>"
+        },
+        {
+          "title": "S6 & <t>",
+          "note": "Alpha & beta <gamma> \"delta\" epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega and then some more words to overflow"
+        },
+        {
+          "title": "S7 & <t>",
+          "note": "short note here"
+        },
+        {
+          "title": "S8 & <t>",
+          "note": "short note here"
+        },
+        {
+          "title": "S9 & <t>"
+        },
+        {
+          "title": "S10 & <t>",
+          "note": "short note here"
+        },
+        {
+          "title": "S11 & <t>",
+          "note": "short note here"
+        }
+      ],
+      "returns": [
+        {
+          "from": 11,
+          "to": 0,
+          "label": "BACK & <AGAIN>"
+        },
+        {
+          "from": 1,
+          "to": 0,
+          "label": "two"
+        }
+      ],
+      "outcomes": [
+        {
+          "label": "O0 &",
+          "note": "n <0>",
+          "tone": "verified"
+        },
+        {
+          "label": "O1 &",
+          "note": "n <1>",
+          "tone": "drift"
+        },
+        {
+          "label": "O2 &",
+          "note": "n <2>",
+          "tone": "none"
+        },
+        {
+          "label": "O3 &",
+          "note": "n <3>",
+          "tone": "verified"
+        },
+        {
+          "label": "O4 &",
+          "note": "n <4>",
+          "tone": "drift"
+        },
+        {
+          "label": "O5 &",
+          "note": "n <5>",
+          "tone": "none"
+        }
+      ]
+    },
+    {
+      "file": "flow-3.svg",
+      "kicker": "kick & <tag> \"q\"",
+      "title": "Title with & and <b>",
+      "footnote": "Foot \"note\" & more",
+      "alt": "Alt <x> & \"y\"",
+      "stages": [
+        {
+          "title": "S0 & <t>",
+          "note": "Alpha & beta <gamma> \"delta\" epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega and then some more words to overflow"
+        },
+        {
+          "title": "S1 & <t>"
+        },
+        {
+          "title": "S2 & <t>",
+          "note": "short note here"
+        }
+      ],
+      "returns": [
+        {
+          "from": 2,
+          "to": 0,
+          "label": "BACK & <AGAIN>"
+        },
+        {
+          "from": 1,
+          "to": 0,
+          "label": "two"
+        }
+      ],
+      "outcomes": [
+        {
+          "label": "O0 &",
+          "note": "n <0>",
+          "tone": "verified"
+        },
+        {
+          "label": "O1 &",
+          "note": "n <1>",
+          "tone": "drift"
+        },
+        {
+          "label": "O2 &",
+          "note": "n <2>",
+          "tone": "none"
+        },
+        {
+          "label": "O3 &",
+          "note": "n <3>",
+          "tone": "verified"
+        },
+        {
+          "label": "O4 &",
+          "note": "n <4>",
+          "tone": "drift"
+        }
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "file": "card-a.svg",
+      "kicker": "card kicker",
+      "title": "Card & title",
+      "source": "buildc <x> --y",
+      "alt": "a \"b\"",
+      "footnote": "Alpha & beta <gamma> \"delta\" epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega and then some more words to overflow Alpha & beta <gamma> \"delta\" epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega and then some more words to overflow Alpha & beta <gamma> \"delta\" epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega and then some more words to overflow",
+      "fields": [
+        {
+          "key": "k&0",
+          "value": "V<0>",
+          "note": "note 0 with words",
+          "tone": "verified"
+        },
+        {
+          "key": "k&1",
+          "value": "V<1>",
+          "note": "note 1 with words"
+        },
+        {
+          "key": "k&2",
+          "value": "V<2>",
+          "note": "Alpha & beta <gamma> \"delta\" epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega and then some more words to overflow",
+          "tone": "none"
+        },
+        {
+          "key": "k&3",
+          "value": "V<3>",
+          "note": "note 3 with words"
+        },
+        {
+          "key": "k&4",
+          "value": "V<4>",
+          "note": "note 4 with words",
+          "tone": "drift"
+        }
+      ]
+    },
+    {
+      "file": "card-b.svg",
+      "kicker": "card kicker",
+      "title": "Card & title",
+      "source": "buildc <x> --y",
+      "alt": "a \"b\"",
+      "footnote": "short",
+      "fields": [
+        {
+          "key": "a",
+          "value": "b",
+          "note": "one line"
+        }
+      ],
+      "heads": [
+        "x",
+        "y",
+        "z",
+        "w"
+      ]
+    }
+  ]
+}

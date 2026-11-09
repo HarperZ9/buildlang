@@ -1,0 +1,10 @@
+[package]
+name = "art-receipts"
+version = "1.0.0"
+edition = "2026"
+description = "Checks committed art files against the SHA-256 digests in docs/art/receipts.json"
+author = "Zain Dana Harper"
+license = "AGPL-3.0-only"
+
+[dependencies]
+sha256 = "^1.0"

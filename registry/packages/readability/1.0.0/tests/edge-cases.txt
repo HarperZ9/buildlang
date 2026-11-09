@@ -1,0 +1,10 @@
+The little bee flew over the table. Then she sat?! Yes... she did.
+Rock-and-roll isn't dead; it's 'alive'-- truly alive.
+
+Café owners love crème brûlée, said the large baker. Next sentence here.
+Wide space.　Ideographic space! Line separator? Para sep. Nextline.
+Fileseparator. Groupsep. Recordsep. Unitsep. Verticaltab. Formfeed.
+Ogham mark. Narrow nbsp. Math space. Hair space. En quad.
+Zero​width.joins and bom﻿stays. Agree, free, three, apple, fire, cycle, rhythm, queue.
+y yes eye -dash- 'quote' x'- e ee le ble a I.  .  !  ?
+Ends with a period and no newline.

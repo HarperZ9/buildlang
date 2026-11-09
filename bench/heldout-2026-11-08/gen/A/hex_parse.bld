@@ -1,0 +1,27 @@
+fn hex_digit(c: char) -> i64 {
+    let v = c as i64;
+    if v >= 48 && v <= 57 {
+        v - 48
+    } else if v >= 97 && v <= 102 {
+        v - 87
+    } else if v >= 65 && v <= 70 {
+        v - 55
+    } else {
+        0
+    }
+}
+
+fn parse_hex(s: str) -> i64 {
+    let mut n: i64 = 0;
+    for c in s.chars() {
+        n = n * 16 + hex_digit(c);
+    }
+    n
+}
+
+fn main() ~ Console {
+    println!("{}", parse_hex("ff"));
+    println!("{}", parse_hex("1A3"));
+    println!("{}", parse_hex("0"));
+    println!("{}", parse_hex("7fff"));
+}

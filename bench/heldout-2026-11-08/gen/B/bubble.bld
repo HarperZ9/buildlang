@@ -1,0 +1,38 @@
+fn main() ~ Console {
+    let mut v: Vec<i64> = vec_new();
+    v.push(29);
+    v.push(3);
+    v.push(17);
+    v.push(8);
+    v.push(42);
+    v.push(1);
+    v.push(15);
+    let n: i64 = v.len() as i64;
+    let mut swaps: i64 = 0;
+    let mut pass: i64 = 0;
+    while pass < n {
+        let mut j: i64 = 0;
+        while j + 1 < n - pass {
+            let a: i64 = v[j as usize];
+            let b: i64 = v[(j + 1) as usize];
+            if a > b {
+                v[j as usize] = b;
+                v[(j + 1) as usize] = a;
+                swaps = swaps + 1;
+            }
+            j = j + 1;
+        }
+        pass = pass + 1;
+    }
+    let mut line: str = "";
+    let mut i: i64 = 0;
+    while i < n {
+        if i > 0 {
+            line.push_str(" ");
+        }
+        line.push_str(format!("{}", v[i as usize]));
+        i = i + 1;
+    }
+    println!("{}", line);
+    println!("swaps {}", swaps);
+}

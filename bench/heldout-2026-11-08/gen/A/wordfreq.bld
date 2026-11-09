@@ -1,0 +1,45 @@
+fn main() ~ Console {
+    let text = "the cat and the hat and the bat sat on the mat";
+    let mut words: Vec<str> = vec_new();
+    let mut counts: Vec<i64> = vec_new();
+    for w in text.split(" ") {
+        let mut found = false;
+        let mut j: usize = 0;
+        while j < words.len() {
+            if words[j] == w {
+                counts[j] = counts[j] + 1;
+                found = true;
+            }
+            j = j + 1;
+        }
+        if !found {
+            words.push(w);
+            counts.push(1);
+        }
+    }
+    let n: usize = words.len();
+    let mut i: usize = 0;
+    while i < n {
+        let mut j: usize = 0;
+        while j + 1 < n - i {
+            let a = j;
+            let b = j + 1;
+            let swap = counts[b] > counts[a] || (counts[b] == counts[a] && words[b] < words[a]);
+            if swap {
+                let tc = counts[a];
+                counts[a] = counts[b];
+                counts[b] = tc;
+                let tw = words[a];
+                words[a] = words[b];
+                words[b] = tw;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    let mut k: usize = 0;
+    while k < n {
+        println!("{} {}", words[k], counts[k]);
+        k = k + 1;
+    }
+}

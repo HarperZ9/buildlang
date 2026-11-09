@@ -1,0 +1,61 @@
+fn main() ~ Console {
+    let text = "the cat and the hat and the bat sat on the mat";
+    let mut words: Vec<str> = vec_new();
+    let mut counts: Vec<i64> = vec_new();
+    for w in text.split(" ") {
+        if w.len() > 0 {
+            let mut found: i64 = -1;
+            let mut i: i64 = 0;
+            while i < words.len() as i64 {
+                if words[i as usize] == w {
+                    found = i;
+                }
+                i = i + 1;
+            }
+            if found >= 0 {
+                counts[found as usize] = counts[found as usize] + 1;
+            } else {
+                words.push(w);
+                counts.push(1);
+            }
+        }
+    }
+
+    let n: i64 = words.len() as i64;
+    let mut idx: Vec<i64> = vec_new();
+    let mut k: i64 = 0;
+    while k < n {
+        idx.push(k);
+        k = k + 1;
+    }
+
+    let mut pass: i64 = 0;
+    while pass < n {
+        let mut j: i64 = 0;
+        while j + 1 < n {
+            let a: i64 = idx[j as usize];
+            let b: i64 = idx[(j + 1) as usize];
+            let ca: i64 = counts[a as usize];
+            let cb: i64 = counts[b as usize];
+            let mut swap = false;
+            if cb > ca {
+                swap = true;
+            } else if cb == ca && words[b as usize] < words[a as usize] {
+                swap = true;
+            }
+            if swap {
+                idx[j as usize] = b;
+                idx[(j + 1) as usize] = a;
+            }
+            j = j + 1;
+        }
+        pass = pass + 1;
+    }
+
+    let mut m: i64 = 0;
+    while m < n {
+        let p: i64 = idx[m as usize];
+        println!("{} {}", words[p as usize], counts[p as usize]);
+        m = m + 1;
+    }
+}

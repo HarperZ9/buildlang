@@ -1,0 +1,41 @@
+fn reverse_str(s: str) -> str {
+    let mut cs: Vec<char> = vec_new();
+    for c in s.chars() {
+        cs.push(c);
+    }
+    let mut out = "";
+    let mut i: usize = cs.len();
+    while i > 0 {
+        i = i - 1;
+        out.push(cs[i]);
+    }
+    out
+}
+
+fn main() ~ Console {
+    let text = "one two three four five";
+    let mut words: Vec<str> = vec_new();
+    for w in text.split(" ") {
+        words.push(w);
+    }
+    let mut line1 = "";
+    let mut i: usize = words.len();
+    while i > 0 {
+        i = i - 1;
+        if line1.len() > 0 {
+            line1 = line1 + " ";
+        }
+        line1 = line1 + words[i];
+    }
+    println!("{}", line1);
+    let mut line2 = "";
+    let mut j: usize = 0;
+    while j < words.len() {
+        if j > 0 {
+            line2 = line2 + " ";
+        }
+        line2 = line2 + reverse_str(words[j]);
+        j = j + 1;
+    }
+    println!("{}", line2);
+}

@@ -1,0 +1,29 @@
+fn double(x: i64) -> i64 {
+    x * 2
+}
+
+fn add3(x: i64) -> i64 {
+    x + 3
+}
+
+fn square(x: i64) -> i64 {
+    x * x
+}
+
+fn apply_all(x: i64, f: fn(i64) -> i64, g: fn(i64) -> i64, h: fn(i64) -> i64) -> i64 {
+    h(g(f(x)))
+}
+
+fn main() ~ Console {
+    let mut line: str = "";
+    let mut x: i64 = 1;
+    while x <= 5 {
+        if x > 1 {
+            line.push_str(" ");
+        }
+        let r: i64 = apply_all(x, double, add3, square);
+        line.push_str(format!("{}", r));
+        x = x + 1;
+    }
+    println!("{}", line);
+}

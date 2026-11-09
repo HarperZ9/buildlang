@@ -1,0 +1,2 @@
+FAIL d.svg: receipt bc3da732e38e568a3544637d92e809aae0fe665b5ffe993adfef4fe7dc7579b0 stored bytes e9a21a790b54dbbbf1e8f0427773f2d4cdad5a24c2b1e1365145a421ecbd0945
+art receipts: 3 match, 1 mismatch, 2 not committed

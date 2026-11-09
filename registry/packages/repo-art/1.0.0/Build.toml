@@ -1,0 +1,9 @@
+[package]
+name = "repo-art"
+version = "1.0.0"
+edition = "2026"
+description = "BuildLang's repository-art flow diagrams and receipt cards, rendered from the art spec as byte-stable SVG"
+author = "Zain Dana Harper"
+license = "AGPL-3.0-only"
+
+[dependencies]

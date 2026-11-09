@@ -1,0 +1,29 @@
+fn double(x: i64) -> i64 {
+    x * 2
+}
+
+fn add3(x: i64) -> i64 {
+    x + 3
+}
+
+fn square(x: i64) -> i64 {
+    x * x
+}
+
+fn apply_chain(f: fn(i64) -> i64, g: fn(i64) -> i64, h: fn(i64) -> i64, x: i64) -> i64 {
+    h(g(f(x)))
+}
+
+fn main() ~ Console {
+    let mut line = "";
+    let mut x: i64 = 1;
+    while x <= 5 {
+        let r = apply_chain(double, add3, square, x);
+        if x > 1 {
+            line = line + " ";
+        }
+        line = line + format!("{}", r);
+        x = x + 1;
+    }
+    println!("{}", line);
+}

@@ -1,0 +1,36 @@
+fn valid(s: str) -> bool {
+    if s.len() != 10 {
+        return false;
+    }
+    let mut sum: i64 = 0;
+    let mut idx: i64 = 0;
+    for c in s.chars() {
+        let v = c as i64;
+        let mut d: i64 = 0;
+        if v >= 48 && v <= 57 {
+            d = v - 48;
+        } else if c == 'X' && idx == 9 {
+            d = 10;
+        } else {
+            return false;
+        }
+        sum = sum + d * (10 - idx);
+        idx = idx + 1;
+    }
+    idx == 10 && sum % 11 == 0
+}
+
+fn report(s: str) ~ Console {
+    if valid(s) {
+        println!("{} valid", s);
+    } else {
+        println!("{} invalid", s);
+    }
+}
+
+fn main() ~ Console {
+    report("0306406152");
+    report("0306406153");
+    report("080442957X");
+    report("12345");
+}

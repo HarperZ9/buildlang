@@ -3,8 +3,8 @@ message: "If you use this software, please cite it using these metadata."
 type: software
 title: "BuildLang"
 abstract: "A compiled language where function types list side effects such as file, network and C access. Builds native binaries through C and emits HLSL/GLSL shaders; other backends are experimental."
-version: "1.10.0"
-date-released: 2026-10-23
+version: "1.11.0"
+date-released: 2026-11-08
 authors:
   - family-names: "Harper"
     given-names: "Zain Dana"

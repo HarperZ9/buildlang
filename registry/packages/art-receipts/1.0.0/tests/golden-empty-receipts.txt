@@ -1,0 +1,2 @@
+art receipts: 0 match, 0 mismatch, 0 not committed
+FAIL no listed file was checked

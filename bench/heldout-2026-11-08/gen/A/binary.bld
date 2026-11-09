@@ -1,0 +1,20 @@
+fn to_bin(n: i64) -> str {
+    if n == 0 {
+        return "0";
+    }
+    let mut s = "";
+    let mut x: i64 = n;
+    while x > 0 {
+        let d = x % 2;
+        s = format!("{}{}", d, s);
+        x = x / 2;
+    }
+    s
+}
+
+fn main() ~ Console {
+    println!("{}", to_bin(37));
+    println!("{}", to_bin(255));
+    println!("{}", to_bin(1024));
+    println!("{}", to_bin(0));
+}

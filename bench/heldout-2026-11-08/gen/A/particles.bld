@@ -1,0 +1,48 @@
+fn main() ~ Console {
+    let mut pos: Vec<i64> = vec_new();
+    let mut vel: Vec<i64> = vec_new();
+    pos.push(5);
+    pos.push(20);
+    pos.push(50);
+    pos.push(77);
+    pos.push(95);
+    vel.push(7);
+    vel.push(0 - 9);
+    vel.push(13);
+    vel.push(4);
+    vel.push(0 - 6);
+    let n: usize = pos.len();
+    let mut bounces: i64 = 0;
+    let mut step: i64 = 0;
+    while step < 50 {
+        let mut i: usize = 0;
+        while i < n {
+            let mut p = pos[i] + vel[i];
+            let mut v = vel[i];
+            if p < 0 {
+                p = 0 - p;
+                v = 0 - v;
+                bounces = bounces + 1;
+            } else if p > 100 {
+                p = 200 - p;
+                v = 0 - v;
+                bounces = bounces + 1;
+            }
+            pos[i] = p;
+            vel[i] = v;
+            i = i + 1;
+        }
+        step = step + 1;
+    }
+    let mut line = "";
+    let mut k: usize = 0;
+    while k < n {
+        if k > 0 {
+            line = line + " ";
+        }
+        line = line + format!("{}", pos[k]);
+        k = k + 1;
+    }
+    println!("{}", line);
+    println!("bounces {}", bounces);
+}

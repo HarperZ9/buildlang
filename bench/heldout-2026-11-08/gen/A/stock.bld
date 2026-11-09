@@ -1,0 +1,46 @@
+struct Item {
+    name: str,
+    qty: i64,
+    price: i64,
+}
+
+impl Item {
+    fn sell(&mut self, n: i64) -> bool {
+        if n > self.qty {
+            false
+        } else {
+            self.qty = self.qty - n;
+            true
+        }
+    }
+
+    fn restock(&mut self, n: i64) {
+        self.qty = self.qty + n;
+    }
+
+    fn value(&self) -> i64 {
+        self.qty * self.price
+    }
+}
+
+fn main() ~ Console {
+    let mut apple = Item { name: "apple", qty: 10, price: 50 };
+    let mut pear = Item { name: "pear", qty: 4, price: 75 };
+    let mut plum = Item { name: "plum", qty: 0, price: 120 };
+    let mut refused: i64 = 0;
+    if !apple.sell(3) {
+        refused = refused + 1;
+    }
+    plum.restock(6);
+    if !pear.sell(5) {
+        refused = refused + 1;
+    }
+    if !plum.sell(2) {
+        refused = refused + 1;
+    }
+    apple.restock(1);
+    println!("{} {} {}", apple.name, apple.qty, apple.value());
+    println!("{} {} {}", pear.name, pear.qty, pear.value());
+    println!("{} {} {}", plum.name, plum.qty, plum.value());
+    println!("refused {}", refused);
+}

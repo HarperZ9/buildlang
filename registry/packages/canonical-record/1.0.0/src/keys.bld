@@ -1,0 +1,72 @@
+// =============================================================================
+// canonical-record: key order (RFC 8785 sorts by UTF-16 code unit)
+// =============================================================================
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright 2026 Zain Dana Harper.
+// =============================================================================
+//
+// Vec<str>.sort() is not available on the C backend, so the sort is written
+// out: a stable bottom-up merge sort over member indices.
+
+/// a < b as byte sequences (UTF-16BE bytes compare as UTF-16 code units).
+fn cr_u16_less(a: Vec<u8>, b: Vec<u8>) -> bool {
+    let na = vec_len(a);
+    let nb = vec_len(b);
+    let mut k: usize = 0;
+    while k < na && k < nb {
+        if a[k] != b[k] {
+            return a[k] < b[k];
+        }
+        k = k + 1;
+    }
+    na < nb
+}
+
+/// Indices s..e of `keys` in ascending key order (stable bottom-up merge sort).
+fn cr_sort_range(keys: Vec<Vec<u8>>, s: usize, e: usize) -> Vec<usize> {
+    let n = e - s;
+    let mut a: Vec<usize> = Vec::new();
+    let mut k: usize = 0;
+    while k < n {
+        a.push(s + k);
+        k = k + 1;
+    }
+    let mut width: usize = 1;
+    while width < n {
+        let mut out: Vec<usize> = Vec::new();
+        let mut lo: usize = 0;
+        while lo < n {
+            let mut mid = lo + width;
+            if mid > n {
+                mid = n;
+            }
+            let mut hi = lo + 2 * width;
+            if hi > n {
+                hi = n;
+            }
+            let mut x = lo;
+            let mut y = mid;
+            while x < mid && y < hi {
+                if cr_u16_less(keys[a[y]], keys[a[x]]) {
+                    out.push(a[y]);
+                    y = y + 1;
+                } else {
+                    out.push(a[x]);
+                    x = x + 1;
+                }
+            }
+            while x < mid {
+                out.push(a[x]);
+                x = x + 1;
+            }
+            while y < hi {
+                out.push(a[y]);
+                y = y + 1;
+            }
+            lo = hi;
+        }
+        a = out;
+        width = width * 2;
+    }
+    a
+}

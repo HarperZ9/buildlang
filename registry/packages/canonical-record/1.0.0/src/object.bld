@@ -1,0 +1,273 @@
+// =============================================================================
+// canonical-record: the iterative container walk and the entry points
+// =============================================================================
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright 2026 Zain Dana Harper.
+// =============================================================================
+//
+// The walk is iterative: open containers live on a frame stack and their
+// members on one flat member stack (a child's members sit above its parent's
+// and are dropped when the child closes). The member vectors keep their high
+// water mark and `m_len` is the live length, because Vec<str> has no pop()
+// on the C backend.
+
+/// Containers nested deeper than this fail in Python's json scanner
+/// (RecursionError while decoding, measured on CPython 3.12 through the
+/// reference driver); the port refuses at the same point in the text. Python
+/// spends a few more levels when it raises a parse error or calls
+/// parse_constant deep inside, so within about 4 levels of this limit the
+/// two can name different errors; that band is not modelled.
+fn cr_parse_depth() -> usize {
+    2997
+}
+
+/// Python's text() recurses: a container at depth p runs text() at frame
+/// 2p-1 and its join generator at 2p (a non-empty object also calls _key and
+/// string() at 2p+1); a scalar inside p containers runs text() at 2p+1, and
+/// number() or string() at 2p+2 (a negative float recurses once more). With
+/// the default recursion limit of 1000, the reference driver on CPython
+/// 3.12 has 996 frames for that under dumps() and 995 under sha256(), which
+/// calls dumps() one frame deeper; a deeper demand is a RecursionError, which
+/// the port refuses in the same traversal order.
+fn cr_frame_budget(sha: bool) -> usize {
+    if sha {
+        return 995;
+    }
+    996
+}
+
+fn cr_too_deep() -> str {
+    "error: nesting too deep"
+}
+
+/// Frames text() needs for the scalar at s..e inside `p` containers.
+fn cr_scalar_frames(b: Vec<u8>, s: usize, e: usize, out: str, p: usize) -> usize {
+    let c = b[s];
+    let mut need = 2 * p + 1;
+    if c == 34_u8 || c == 45_u8 || cr_is_digit(c) {
+        need = need + 1;
+        if out.len() > 0 && out.substring(0, 1) == "-" && cr_leaf_kind(b, s, e) == 4 {
+            need = need + 1;
+        }
+    }
+    need
+}
+
+/// Canonical text and first refusal of a container whose members are s..e.
+fn cr_close(budget: usize, kind: i64, depth: usize, s: usize, e: usize, m_u16: Vec<Vec<u8>>, m_key: Vec<str>, m_val: Vec<str>, m_err: Vec<str>, m_lone: Vec<i64>) -> CrVal {
+    let mut need = 2 * depth;
+    if kind == 1 && e > s {
+        need = need + 1;
+    }
+    if need > budget {
+        return CrVal { perr: "", cerr: cr_too_deep(), out: "", pos: 0 };
+    }
+    let mut cerr = "";
+    let mut out = "[";
+    let mut k = s;
+    if kind == 0 {
+        while k < e {
+            if cerr == "" {
+                cerr = m_err[k];
+            }
+            if k > s {
+                out.push_str(",");
+            }
+            out.push_str(m_val[k]);
+            k = k + 1;
+        }
+        out.push_str("]");
+        return CrVal { perr: "", cerr: cerr, out: out, pos: 0 };
+    }
+    while k < e {
+        // sorted(value, key=_key) checks every key before any value.
+        if m_lone[k] == 1 {
+            return CrVal { perr: "", cerr: cr_refuse("lone surrogate in a string"), out: "", pos: 0 };
+        }
+        k = k + 1;
+    }
+    let order = cr_sort_range(m_u16, s, e);
+    let n = vec_len(order);
+    out = "{";
+    let mut first = true;
+    k = 0;
+    while k < n {
+        let at = order[k];
+        // Equal keys sit together in input order; the last one is the value a
+        // Python dict keeps.
+        if k + 1 < n && !cr_u16_less(m_u16[at], m_u16[order[k + 1]]) {
+            k = k + 1;
+            continue;
+        }
+        if cerr == "" {
+            cerr = m_err[at];
+        }
+        if !first {
+            out.push_str(",");
+        }
+        first = false;
+        out.push_str(m_key[at]);
+        out.push_str(":");
+        out.push_str(m_val[at]);
+        k = k + 1;
+    }
+    out.push_str("}");
+    CrVal { perr: "", cerr: cerr, out: out, pos: 0 }
+}
+
+/// Parse and canonicalise the value at `start` (whitespace already skipped).
+fn cr_parse(src: str, b: Vec<u8>, start: usize, budget: usize) -> CrVal {
+    let n = vec_len(b);
+    let mut f_kind: Vec<i64> = Vec::new();
+    let mut f_start: Vec<usize> = Vec::new();
+    let mut m_len: usize = 0;
+    let mut m_u16: Vec<Vec<u8>> = Vec::new();
+    let mut m_key: Vec<str> = Vec::new();
+    let mut m_val: Vec<str> = Vec::new();
+    let mut m_err: Vec<str> = Vec::new();
+    let mut m_lone: Vec<i64> = Vec::new();
+    let none: Vec<u8> = Vec::new();
+    let mut i = start;
+    let mut state: i64 = 0;
+    let mut out = "";
+    let mut cerr = "";
+    while true {
+        if state == 1 || state == 4 {
+            // 1: a key and its colon; 4: an array slot. Both open a member.
+            let mut key = "";
+            let mut u16 = none;
+            let mut lone: i64 = 0;
+            if state == 1 {
+                if i >= n || b[i] != 34_u8 {
+                    return cr_perr(cr_err_json(), i);
+                }
+                let ks = cr_scan_string(src, b, i);
+                if !ks.ok {
+                    return cr_perr(cr_err_json(), ks.pos);
+                }
+                i = cr_ws(b, ks.pos);
+                if i >= n || b[i] != 58_u8 {
+                    return cr_perr(cr_err_json(), i);
+                }
+                i = cr_ws(b, i + 1);
+                key = ks.out;
+                u16 = ks.u16;
+                if ks.lone {
+                    lone = 1;
+                }
+            }
+            if m_len < vec_len(m_val) {
+                m_u16[m_len] = u16;
+                m_key[m_len] = key;
+                m_lone[m_len] = lone;
+            } else {
+                m_u16.push(u16);
+                m_key.push(key);
+                m_val.push("");
+                m_err.push("");
+                m_lone.push(lone);
+            }
+            m_len = m_len + 1;
+            state = 0;
+        } else if state == 0 {
+            if i < n && (b[i] == 123_u8 || b[i] == 91_u8) {
+                if vec_len(f_kind) + 1 > cr_parse_depth() {
+                    return cr_perr(cr_too_deep(), i);
+                }
+                let mut kind: i64 = 0;
+                let mut closer: u8 = 93_u8;
+                if b[i] == 123_u8 {
+                    kind = 1;
+                    closer = 125_u8;
+                }
+                f_kind.push(kind);
+                f_start.push(m_len);
+                i = cr_ws(b, i + 1);
+                if i < n && b[i] == closer {
+                    i = i + 1;
+                    state = 3;
+                } else {
+                    state = 4 - 3 * kind;
+                }
+            } else {
+                let v = cr_scalar(src, b, i);
+                if v.perr != "" {
+                    return v;
+                }
+                out = v.out;
+                cerr = v.cerr;
+                if cr_scalar_frames(b, i, v.pos, out, vec_len(f_kind)) > budget {
+                    cerr = cr_too_deep();
+                }
+                i = v.pos;
+                state = 2;
+            }
+        } else if state == 3 {
+            // Close the top frame; `i` is just past its closing bracket.
+            let depth = vec_len(f_kind);
+            let s = f_start[depth - 1];
+            let c = cr_close(budget, f_kind[depth - 1], depth, s, m_len, m_u16, m_key, m_val, m_err, m_lone);
+            out = c.out;
+            cerr = c.cerr;
+            m_len = s;
+            f_kind.pop();
+            f_start.pop();
+            state = 2;
+        } else {
+            // A value is complete: (out, cerr), ending at `i`.
+            let depth = vec_len(f_kind);
+            if depth == 0 {
+                return CrVal { perr: "", cerr: cerr, out: out, pos: i };
+            }
+            m_val[m_len - 1] = out;
+            m_err[m_len - 1] = cerr;
+            let kind = f_kind[depth - 1];
+            let mut closer: u8 = 93_u8;
+            if kind == 1 {
+                closer = 125_u8;
+            }
+            i = cr_ws(b, i);
+            if i < n && b[i] == closer {
+                i = i + 1;
+                state = 3;
+            } else if i < n && b[i] == 44_u8 {
+                i = cr_ws(b, i + 1);
+                state = 4 - 3 * kind;
+            } else {
+                return cr_perr(cr_err_json(), i);
+            }
+        }
+    }
+    cr_perr(cr_err_json(), i)
+}
+
+/// Canonicalise a whole JSON document. Returns the canonical text, or an
+/// error line ("no canonical form: ..." or "error: ...") with ok = false.
+/// `sha` selects the recursion budget of sha256() over dumps().
+struct CrDoc {
+    ok: bool,
+    text: str,
+}
+
+fn cr_document(src: str, sha: bool) -> CrDoc {
+    let b = str_bytes(src);
+    if !cr_utf8_ok(b) {
+        return CrDoc { ok: false, text: "error: input is not UTF-8" };
+    }
+    let v = cr_parse(src, b, cr_ws(b, 0), cr_frame_budget(sha));
+    if v.perr != "" {
+        return CrDoc { ok: false, text: v.perr };
+    }
+    if cr_ws(b, v.pos) != vec_len(b) {
+        return CrDoc { ok: false, text: cr_err_json() };
+    }
+    if v.cerr != "" {
+        return CrDoc { ok: false, text: v.cerr };
+    }
+    CrDoc { ok: true, text: v.out }
+}
+
+/// sha256 hex of the canonical bytes of `text` (a canonical form).
+fn cr_text_sha256(text: str) -> str {
+    bytes_hex(sha256_digest(str_bytes(text)))
+}

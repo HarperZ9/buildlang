@@ -1,0 +1,24 @@
+fn main() ~ Console {
+    // a is F(k), b is F(k+1)
+    let mut a: i64 = 1;
+    let mut b: i64 = 1;
+    let mut k: i64 = 1;
+    let mut sum20: i64 = 0;
+    let mut f90: i64 = 0;
+    while k <= 90 {
+        if k <= 20 {
+            sum20 = sum20 + a;
+        }
+        if k == 90 {
+            f90 = a;
+        }
+        if k < 90 {
+            let next: i64 = a + b;
+            a = b;
+            b = next;
+        }
+        k = k + 1;
+    }
+    println!("{}", f90);
+    println!("{}", sum20);
+}

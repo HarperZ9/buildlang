@@ -1,0 +1,35 @@
+fn to_chars(s: str) -> Vec<char> {
+    let mut cs: Vec<char> = vec_new();
+    for c in s.chars() {
+        cs.push(c);
+    }
+    cs
+}
+
+fn common(a: str, b: str) -> str {
+    let x = to_chars(a);
+    let y = to_chars(b);
+    let mut out: str = "";
+    let mut i: i64 = 0;
+    while i < x.len() as i64 && i < y.len() as i64 {
+        if x[i as usize] != y[i as usize] {
+            return out;
+        }
+        out.push(x[i as usize]);
+        i = i + 1;
+    }
+    out
+}
+
+fn main() ~ Console {
+    let p1 = common("interstellar", "internet");
+    let p2 = common(p1, "interval");
+    let p3 = common(p2, "internal");
+    println!("{}", p3);
+    let q = common("dog", "cat");
+    if q.len() == 0 {
+        println!("(none)");
+    } else {
+        println!("{}", q);
+    }
+}

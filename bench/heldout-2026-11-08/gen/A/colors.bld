@@ -1,0 +1,17 @@
+use std::collections::HashMap;
+
+fn main() ~ Console {
+    let mut counts: HashMap<str, i64> = HashMap::new();
+    for c in "red blue red green blue red yellow".split(" ") {
+        if counts.contains_key(c) {
+            let n: i64 = counts.get(c);
+            counts.insert(c, n + 1);
+        } else {
+            counts.insert(c, 1);
+        }
+    }
+    for k in counts.keys() {
+        let n: i64 = counts.get(k);
+        println!("{} {}", k, n);
+    }
+}

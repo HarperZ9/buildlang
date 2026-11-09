@@ -1,0 +1,57 @@
+// =============================================================================
+// canonical-record: the command line
+// =============================================================================
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright 2026 Zain Dana Harper.
+// =============================================================================
+//
+// Usage:
+//   canonical-record dumps FILE.json    canonical bytes, then a newline
+//   canonical-record sha256 FILE.json   sha256 hex of the canonical bytes
+//   canonical-record array FILE.json    cr1 array digest of {"dtype", "shape", "values"}
+//
+// A refusal prints one line to stdout and exits 1: "no canonical form: ..."
+// for the module's CanonicalError (the Python CLI's wording), "error: ..."
+// for input the json module itself rejects. Usage errors exit 2.
+
+fn cr_usage() ~ Console + Process {
+    println!("usage: canonical-record {{dumps|sha256|array}} FILE.json");
+    exit(2);
+}
+
+fn cr_fail(line: str) ~ Console + Process {
+    println!("{}", line);
+    exit(1);
+}
+
+fn main() ~ Console + FileSystem + Process + Environment {
+    if args_count() != 3 {
+        cr_usage();
+    }
+    let cmd = args_get(1);
+    let path = args_get(2);
+    if cmd != "dumps" && cmd != "sha256" && cmd != "array" {
+        cr_usage();
+    }
+    if !file_exists(path) {
+        cr_fail(format!("error: cannot read {}", path));
+    }
+    let src = read_bytes(path);
+    if cmd == "array" {
+        let r = cr_array_file(src);
+        if !r.ok {
+            cr_fail(r.text);
+        }
+        println!("{}", r.text);
+        return;
+    }
+    let d = cr_document(src, cmd == "sha256");
+    if !d.ok {
+        cr_fail(d.text);
+    }
+    if cmd == "dumps" {
+        println!("{}", d.text);
+    } else {
+        println!("{}", cr_text_sha256(d.text));
+    }
+}
