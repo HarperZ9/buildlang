@@ -114,6 +114,24 @@ violations; a format 1 file with an empty cell loads it as NULL; a format 2 file
 also matches `''` must lose at least 20 agreements on P2. P1 (sqllogictest) is re-run and
 reported; no prediction beyond "not lower than 32".
 
+**P8. AVG and aggregate number rendering, written 2026-11-08 21:36 PT before the change.** Found by the P7
+run: every one of the 56 P2 disagreements left is AVG. Two faults. `sum_val / cnt` divides a
+float by an `i32` count, and the C backend lowers it to `bl_idiv_i32`, an integer division, so
+AVG(60.3) over one row prints 60; and `float_to_str` rounds every aggregate to two decimals,
+so AVG(22.1, 22.1, 22.15) could never print SQLite's digits. Change: divide by the count as
+`f64`, and render SUM, AVG, MIN and MAX of numbers with the runtime's shortest round-trip
+digits (`to_string_f64`); integral values keep printing without a decimal point (`81`, where
+SQLite prints `81.0`, the number_text class). Measured on the P2 harness unchanged against the
+P7 result 1,944 of 2,000. Prediction: between 1,990 and 2,000 agree with numbers compared as
+numbers, and 0 AVG disagreements; SQLite 3.49 sums with Kahan-Babuska compensation and qdb
+sums plainly, so last-digit differences are possible and land in number_text, not rows.
+Guards: test_qdb.sh has no FAIL (assertions that encoded two-decimal rounding are rewritten and
+listed); differential against the reference engine with `--no-null` (its AVG and SUM print two
+decimals, so any check that differs only there is reported, not hidden); text, crash, WAL and
+library tests unchanged. Planted check: a build that keeps the integer division must lose at
+least 40 agreements on P2. The compiler fault (float divided by `i32` lowered as integer
+division) is filed as a BuildLang issue; qdb works around it with an explicit cast.
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
