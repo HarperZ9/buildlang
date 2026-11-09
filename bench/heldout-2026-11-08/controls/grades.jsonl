@@ -1,0 +1,34 @@
+{"outcome": "pass", "detail": "", "task": "fizzsum"}
+{"outcome": "missing", "detail": "", "task": "primes"}
+{"outcome": "missing", "detail": "", "task": "gcd_lcm"}
+{"outcome": "missing", "detail": "", "task": "wordfreq"}
+{"outcome": "missing", "detail": "", "task": "reverse_words"}
+{"outcome": "missing", "detail": "", "task": "transpose"}
+{"outcome": "missing", "detail": "", "task": "bubble"}
+{"outcome": "crash", "detail": "rc=3221225725\nstdout:\n\nstderr:\n", "task": "fib"}
+{"outcome": "missing", "detail": "", "task": "brackets"}
+{"outcome": "check_fail", "detail": "{\n  \"schema\": \"buildlang.diagnostics/v1\",\n  \"compiler_version\": \"1.11.0\",\n  \"file\": \"binary.bld\",\n  \"ok\": false,\n  \"error_count\": 1,\n  \"diagnostics\": [\n    {\n      \"code\": \"BL0301\",\n      \"severity\": \"error\",\n      \"message\": \"type mismatch: expected `i32`, found `str`\",\n      \"file\": \"binary.bld\",\n      \"span\": {\n        \"line\": 2,\n        \"column\": 5,\n        \"end_line\": 2,\n        \"end_column\": 25,\n        \"byte_start\": 26,\n        \"byte_end\": 46\n      },\n      \"help\": [\n        \"change this expression so it has type `i32`, or change the annotation or signature that requires `i32`\"\n      ],\n      \"notes\": [],\n      \"suggestions\": [\n        {\n          \"message\": \"change this expression so it has type `i32`, or change the annotation or signature that requires `i32`\",\n          \"applicability\": \"Unspecified\",\n          \"widens_authority\": false\n        }\n      ]\n    }\n  ]\n}\n", "task": "binary"}
+{"outcome": "missing", "detail": "", "task": "hex_parse"}
+{"outcome": "missing", "detail": "", "task": "josephus"}
+{"outcome": "missing", "detail": "", "task": "shapes"}
+{"outcome": "missing", "detail": "", "task": "stock"}
+{"outcome": "missing", "detail": "", "task": "compose"}
+{"outcome": "missing", "detail": "", "task": "first_over"}
+{"outcome": "missing", "detail": "", "task": "parse_sum"}
+{"outcome": "pass", "detail": "", "task": "score_check"}
+{"outcome": "pass", "detail": "", "task": "upper_file"}
+{"outcome": "wrong", "detail": "stdout:\na ###\r\nb ######\r\n\nexpected:\na ###\nb #######\nc ##\nd #####\nstderr:\n", "task": "histogram"}
+{"outcome": "missing", "detail": "", "task": "prefix"}
+{"outcome": "missing", "detail": "", "task": "isbn"}
+{"outcome": "missing", "detail": "", "task": "wrap"}
+{"outcome": "missing", "detail": "", "task": "hanoi"}
+{"outcome": "missing", "detail": "", "task": "expr_tree"}
+{"outcome": "missing", "detail": "", "task": "colors"}
+{"outcome": "missing", "detail": "", "task": "projectile"}
+{"outcome": "missing", "detail": "", "task": "particles"}
+{"outcome": "missing", "detail": "", "task": "units_table"}
+{"outcome": "missing", "detail": "", "task": "duel_trace"}
+{"outcome": "missing", "detail": "", "task": "dice"}
+{"outcome": "missing", "detail": "", "task": "grid_path"}
+{"outcome": "missing", "detail": "", "task": "life"}
+{"outcome": "missing", "detail": "", "task": "inventory_log"}

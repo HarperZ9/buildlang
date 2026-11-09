@@ -1,0 +1,43 @@
+fn opener_of(c: char) -> char {
+    if c == ')' {
+        '('
+    } else if c == ']' {
+        '['
+    } else {
+        '{'
+    }
+}
+
+fn balanced(s: str) -> bool {
+    let mut st: Vec<char> = vec_new();
+    for c in s.chars() {
+        if c == '(' || c == '[' || c == '{' {
+            st.push(c);
+        } else if c == ')' || c == ']' || c == '}' {
+            if st.len() == 0 {
+                return false;
+            }
+            let top = st.remove(st.len() - 1);
+            if top != opener_of(c) {
+                return false;
+            }
+        }
+    }
+    st.len() == 0
+}
+
+fn report(s: str) ~ Console {
+    if balanced(s) {
+        println!("yes");
+    } else {
+        println!("no");
+    }
+}
+
+fn main() ~ Console {
+    report("([]{})");
+    report("([)]");
+    report("((");
+    report("{[()()]}");
+    report("");
+}

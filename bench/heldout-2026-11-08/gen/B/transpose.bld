@@ -1,0 +1,26 @@
+fn main() ~ Console {
+    let rows: i64 = 3;
+    let cols: i64 = 4;
+    let mut m: Vec<i64> = vec_new();
+    let mut v: i64 = 1;
+    while v <= 12 {
+        m.push(v);
+        v = v + 1;
+    }
+    // Result has `cols` rows and `rows` columns.
+    let mut r: i64 = 0;
+    while r < cols {
+        let mut line: str = "";
+        let mut c: i64 = 0;
+        while c < rows {
+            if c > 0 {
+                line.push_str(" ");
+            }
+            let x: i64 = m[(c * cols + r) as usize];
+            line.push_str(format!("{}", x));
+            c = c + 1;
+        }
+        println!("{}", line);
+        r = r + 1;
+    }
+}

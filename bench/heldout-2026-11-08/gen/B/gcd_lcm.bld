@@ -1,0 +1,23 @@
+fn my_gcd(a: i64, b: i64) -> i64 {
+    let mut x: i64 = a;
+    let mut y: i64 = b;
+    while y != 0 {
+        let t: i64 = x % y;
+        x = y;
+        y = t;
+    }
+    x
+}
+
+fn show(a: i64, b: i64) ~ Console {
+    let g: i64 = my_gcd(a, b);
+    let l: i64 = (a / g) * b;
+    println!("{} {} {} {}", a, b, g, l);
+}
+
+fn main() ~ Console {
+    show(12, 18);
+    show(17, 5);
+    show(100, 75);
+    show(270, 192);
+}

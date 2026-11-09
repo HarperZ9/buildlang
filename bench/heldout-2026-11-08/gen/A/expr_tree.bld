@@ -1,0 +1,36 @@
+enum Expr {
+    Num(i64),
+    Add(Box<Expr>, Box<Expr>),
+    Sub(Box<Expr>, Box<Expr>),
+    Mul(Box<Expr>, Box<Expr>),
+}
+
+fn build() -> Expr {
+    let sum = Expr::Add(Box::new(Expr::Num(2)), Box::new(Expr::Num(3)));
+    let diff = Expr::Sub(Box::new(Expr::Num(4)), Box::new(Expr::Num(1)));
+    let prod = Expr::Mul(Box::new(sum), Box::new(diff));
+    Expr::Add(Box::new(prod), Box::new(Expr::Num(10)))
+}
+
+fn eval(e: Expr) -> i64 {
+    match e {
+        Expr::Num(n) => n,
+        Expr::Add(a, b) => eval(*a) + eval(*b),
+        Expr::Sub(a, b) => eval(*a) - eval(*b),
+        Expr::Mul(a, b) => eval(*a) * eval(*b),
+    }
+}
+
+fn show(e: Expr) -> str {
+    match e {
+        Expr::Num(n) => format!("{}", n),
+        Expr::Add(a, b) => format!("({} + {})", show(*a), show(*b)),
+        Expr::Sub(a, b) => format!("({} - {})", show(*a), show(*b)),
+        Expr::Mul(a, b) => format!("({} * {})", show(*a), show(*b)),
+    }
+}
+
+fn main() ~ Console {
+    println!("{}", eval(build()));
+    println!("{}", show(build()));
+}

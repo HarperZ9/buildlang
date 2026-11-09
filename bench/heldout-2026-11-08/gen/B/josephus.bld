@@ -1,0 +1,26 @@
+fn main() ~ Console {
+    let mut people: Vec<i64> = vec_new();
+    let mut i: i64 = 1;
+    while i <= 10 {
+        people.push(i);
+        i = i + 1;
+    }
+    let mut pos: i64 = 0;
+    let mut line: str = "";
+    let mut first = true;
+    while people.len() as i64 > 0 {
+        let len: i64 = people.len() as i64;
+        pos = (pos + 2) % len;
+        let out: i64 = people.remove(pos as usize);
+        if !first {
+            line.push_str(" ");
+        }
+        first = false;
+        line.push_str(format!("{}", out));
+        let rest: i64 = people.len() as i64;
+        if rest > 0 {
+            pos = pos % rest;
+        }
+    }
+    println!("{}", line);
+}

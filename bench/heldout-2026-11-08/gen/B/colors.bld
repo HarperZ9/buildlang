@@ -1,0 +1,25 @@
+use std::collections::HashMap;
+
+fn main() ~ Console {
+    let text = "red blue red green blue red yellow";
+    let mut counts: HashMap<str, i64> = HashMap::new();
+    let mut order: Vec<str> = vec_new();
+    for w in text.split(" ") {
+        if w.len() > 0 {
+            if counts.contains_key(w) {
+                let c: i64 = counts.get(w);
+                counts.insert(w, c + 1);
+            } else {
+                counts.insert(w, 1);
+                order.push(w);
+            }
+        }
+    }
+    let mut i: i64 = 0;
+    while i < order.len() as i64 {
+        let k = order[i as usize];
+        let c: i64 = counts.get(k);
+        println!("{} {}", k, c);
+        i = i + 1;
+    }
+}

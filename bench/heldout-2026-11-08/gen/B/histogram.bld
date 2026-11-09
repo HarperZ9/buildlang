@@ -1,0 +1,18 @@
+fn bar(label: str, n: i64) ~ Console {
+    let mut line: str = "";
+    line.push_str(label);
+    line.push_str(" ");
+    let mut i: i64 = 0;
+    while i < n {
+        line.push_str("#");
+        i = i + 1;
+    }
+    println!("{}", line);
+}
+
+fn main() ~ Console {
+    bar("a", 3);
+    bar("b", 7);
+    bar("c", 2);
+    bar("d", 5);
+}

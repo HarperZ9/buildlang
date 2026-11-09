@@ -1,0 +1,91 @@
+use std::collections::HashMap;
+
+fn strip_cr(s: str) -> str {
+    let mut out = "";
+    for c in s.chars() {
+        if (c as i64) != 13 {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn parse_int(s: str) -> i64 {
+    let mut n: i64 = 0;
+    let mut neg = false;
+    for c in s.chars() {
+        let v = c as i64;
+        if c == '-' {
+            neg = true;
+        } else if v >= 48 && v <= 57 {
+            n = n * 10 + (v - 48);
+        }
+    }
+    if neg {
+        0 - n
+    } else {
+        n
+    }
+}
+
+fn main() ~ Console + FileSystem {
+    let text = read_file("events.txt");
+    let mut stock: HashMap<str, i64> = HashMap::new();
+    let mut refused: i64 = 0;
+    for raw in text.split("\n") {
+        let line = strip_cr(raw);
+        let mut parts: Vec<str> = vec_new();
+        for p in line.split(" ") {
+            if p.len() > 0 {
+                parts.push(p);
+            }
+        }
+        if parts.len() < 3 {
+            continue;
+        }
+        let action = parts[0];
+        let item = parts[1];
+        let n = parse_int(parts[2]);
+        let mut cur: i64 = 0;
+        if stock.contains_key(item) {
+            cur = stock.get(item);
+        }
+        if action == "pickup" {
+            stock.insert(item, cur + n);
+        } else if action == "use" || action == "drop" {
+            if cur - n < 0 {
+                refused = refused + 1;
+            } else {
+                stock.insert(item, cur - n);
+            }
+        }
+    }
+    let mut names: Vec<str> = vec_new();
+    for k in stock.keys() {
+        let v: i64 = stock.get(k);
+        if v > 0 {
+            names.push(k);
+        }
+    }
+    let n: usize = names.len();
+    let mut i: usize = 0;
+    while i < n {
+        let mut j: usize = 0;
+        while j + 1 < n - i {
+            if names[j + 1] < names[j] {
+                let t = names[j];
+                names[j] = names[j + 1];
+                names[j + 1] = t;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    let mut k: usize = 0;
+    while k < n {
+        let v: i64 = stock.get(names[k]);
+        println!("{} {}", names[k], v);
+        k = k + 1;
+    }
+    println!("refused {}", refused);
+}

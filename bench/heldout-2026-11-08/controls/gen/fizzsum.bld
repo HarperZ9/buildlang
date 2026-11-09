@@ -1,0 +1,13 @@
+fn main() ~ Console {
+    let mut s = 0;
+    let mut n = 1;
+    while n <= 1000 {
+        let a = n % 3 == 0;
+        let b = n % 5 == 0;
+        if a != b {
+            s = s + n;
+        }
+        n = n + 1;
+    }
+    println!("{}", s);
+}

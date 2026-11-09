@@ -1,0 +1,19 @@
+fn solve(n: i64, from: char, to: char, via: char) ~ Console {
+    if n == 0 {
+        return;
+    }
+    solve(n - 1, from, via, to);
+    println!("{} {}", from, to);
+    solve(n - 1, via, to, from);
+}
+
+fn main() ~ Console {
+    let mut moves: i64 = 1;
+    let mut i: i64 = 0;
+    while i < 10 {
+        moves = moves * 2;
+        i = i + 1;
+    }
+    println!("{}", moves - 1);
+    solve(3, 'A', 'C', 'B');
+}

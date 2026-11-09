@@ -1,0 +1,25 @@
+fn main() ~ Console {
+    let mul: i64 = 1103515245;
+    let inc: i64 = 12345;
+    let modulus: i64 = 2147483648;
+    let mut x: i64 = 42;
+    let mut counts: Vec<i64> = vec_new();
+    let mut f: i64 = 0;
+    while f < 6 {
+        counts.push(0);
+        f = f + 1;
+    }
+    let mut r: i64 = 0;
+    while r < 1000 {
+        x = (mul * x + inc) % modulus;
+        let face = 1 + (x / 65536) % 6;
+        let idx = (face - 1) as usize;
+        counts[idx] = counts[idx] + 1;
+        r = r + 1;
+    }
+    let mut k: usize = 0;
+    while k < 6 {
+        println!("{} {}", k + 1, counts[k]);
+        k = k + 1;
+    }
+}
