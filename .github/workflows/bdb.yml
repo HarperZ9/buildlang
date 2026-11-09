@@ -122,6 +122,11 @@ jobs:
           BUILDLANG_STDLIB: ${{ github.workspace }}/stdlib
         run: python3 bdb/tests/test_qdb_lib.py compiler/target/release/buildc bdb/qdb.exe --cc gcc
 
+      - name: Prepared statements and rows through bdb/lib (bound against literal, planted check; bdb/COMPLETE.md P25)
+        env:
+          BUILDLANG_STDLIB: ${{ github.workspace }}/stdlib
+        run: python3 bdb/tests/test_qdb_rows.py compiler/target/release/buildc bdb/qdb.exe --cc gcc
+
       - name: SQLite differential (2,000 queries must agree; bdb/COMPLETE.md row 1b)
         run: python3 bdb/tests/test_qdb_sqlite_oracle.py bdb/qdb.exe
 

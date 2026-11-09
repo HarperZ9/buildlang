@@ -69,3 +69,108 @@ extern "C" fn qdb_close(h: *mut DB) ~ Foreign + Console + FileSystem + Process {
         free(h as *mut u8);
     }
 }
+
+// -------------------------------------------------------------------------
+// Prepared statements and rows (COMPLETE.md P25). The shape follows SQLite's:
+//
+//   QStmt* s = qdb_prepare(d, "SELECT v FROM t WHERE id = ?");
+//   qdb_bind_int64(s, 1, 42);                 parameters count from 1
+//   while (qdb_step(d, s) == 100) {           100 a row, 101 done
+//       qdb_column_text(s, 0, buf, sizeof buf);
+//   }
+//   qdb_reset(s);                             bindings stay
+//   qdb_finalize(s);
+//
+// Results come back as rows; nothing is printed except an error message,
+// which goes to stdout as the CLI prints it. Text cells are copied into the
+// host's buffer; qdb_column_text returns the cell's length, or -1 for NULL.
+// -------------------------------------------------------------------------
+
+extern "C" fn qdb_prepare(h: *mut DB, sql: *const u8) -> *mut QStmt ~ Foreign + Console + Process {
+    let text = qdb_from_c(sql);
+    let slen = text.len();
+    let mut clean_sql = text;
+    if slen > 0 {
+        if text.char_at(slen - 1) == ";" { clean_sql = text.substring(0, slen - 1); }
+    }
+    let st = unsafe { stmt_new(&mut *h, clean_sql.trim()) };
+    let b = Box::new(st);
+    b as *mut QStmt
+}
+
+extern "C" fn qdb_bind_count(s: *mut QStmt) -> i32 ~ Foreign {
+    unsafe { (*s).nparam }
+}
+
+extern "C" fn qdb_bind_int(s: *mut QStmt, i: i32, v: i32) -> i32 ~ Foreign {
+    unsafe { stmt_bind_int(&mut *s, i, v as i64) }
+}
+
+extern "C" fn qdb_bind_int64(s: *mut QStmt, i: i32, v: i64) -> i32 ~ Foreign {
+    unsafe { stmt_bind_int(&mut *s, i, v) }
+}
+
+extern "C" fn qdb_bind_text(s: *mut QStmt, i: i32, v: *const u8) -> i32 ~ Foreign {
+    unsafe { stmt_bind(&mut *s, i, sql_quote(qdb_from_c(v)), 2) }
+}
+
+extern "C" fn qdb_bind_null(s: *mut QStmt, i: i32) -> i32 ~ Foreign {
+    unsafe { stmt_bind(&mut *s, i, "NULL", 0) }
+}
+
+extern "C" fn qdb_step(h: *mut DB, s: *mut QStmt) -> i32 ~ Foreign + Console + FileSystem + Process {
+    unsafe { stmt_step(&mut *h, &mut *s) }
+}
+
+extern "C" fn qdb_reset(s: *mut QStmt) -> i32 ~ Foreign {
+    unsafe {
+        (*s).done = false;
+        (*s).cur = 0;
+        (*s).nrows = 0;
+    }
+    0
+}
+
+extern "C" fn qdb_column_count(s: *mut QStmt) -> i32 ~ Foreign {
+    unsafe { (*s).ncol }
+}
+
+fn qdb_copy_out(v: String, buf: *mut u8, cap: i32) -> i32 ~ Foreign {
+    let n = v.len();
+    if cap <= 0 { return n as i32; }
+    let b = v.as_bytes();
+    let out = unsafe { slice::from_raw_parts_mut(buf, cap as usize) };
+    let mut i: i64 = 0;
+    while i < n && i < (cap as i64) - 1 {
+        out[i] = b[i];
+        i = i + 1;
+    }
+    out[i] = 0 as u8;
+    n as i32
+}
+
+extern "C" fn qdb_column_name(s: *mut QStmt, i: i32, buf: *mut u8, cap: i32) -> i32 ~ Foreign {
+    unsafe {
+        if i < 0 || i >= (*s).ncol { return 0 - 1; }
+        qdb_copy_out(vec_get((*s).out_names, i), buf, cap)
+    }
+}
+
+extern "C" fn qdb_column_text(s: *mut QStmt, i: i32, buf: *mut u8, cap: i32) -> i32 ~ Foreign {
+    unsafe {
+        let v = stmt_cell(&*s, i);
+        if is_null(v) { return 0 - 1; }
+        qdb_copy_out(v, buf, cap)
+    }
+}
+
+extern "C" fn qdb_column_int64(s: *mut QStmt, i: i32) -> i64 ~ Foreign {
+    unsafe { text_i64(stmt_cell(&*s, i)) }
+}
+
+extern "C" fn qdb_finalize(s: *mut QStmt) ~ Foreign {
+    if s as usize == 0 {
+        return;
+    }
+    free(s as *mut u8);
+}

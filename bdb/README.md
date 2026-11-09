@@ -56,6 +56,23 @@ qdb_close(d);                             /* checkpoint, or HOLD an open BEGIN *
 one CLI process per statement and requires the same output and the same final `.db`. Limit: a
 statement the parser rejects ends the host process with exit code 1, as it ends the CLI.
 
+For results as rows, and for statements that run many times, prepare once and bind:
+
+```c
+QStmt* s = qdb_prepare(d, (uint8_t*)"SELECT v FROM t WHERE id = ?");
+qdb_bind_int64(s, 1, 42);                       /* parameters count from 1 */
+while (qdb_step(d, s) == 100) {                 /* 100 a row, 101 done */
+    char buf[256];
+    int n = qdb_column_text(s, 0, (uint8_t*)buf, sizeof buf);  /* -1 for NULL */
+}
+qdb_reset(s);                                   /* run again; bindings stay */
+qdb_finalize(s);
+```
+
+A point select on an indexed column and an UPDATE with one equality WHERE skip the parser; other
+statements run as text with the parameters written in as literals. `bdb/tests/test_qdb_rows.py`
+checks that both give the same rows and the same files.
+
 ## Where it came from
 
 qdb lived in HarperZ9/build-universe as `programs/db.bld` until 2026-11-09, and moved here with its
