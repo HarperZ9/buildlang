@@ -449,6 +449,23 @@ must show differences. Guards: test_qdb.sh, crash test (176 points, 0 violations
 cuts (0 of 10,000, digest 77a49282... unchanged, since no WAL or .db bytes change), P2 2,000 of
 2,000, text round trip, WAL recovery, reference differential, library, receipts, mutations.
 
+**P26. Settling the P25 comparison (speed item 1), written 2026-11-09 before the runs below.** P25's
+prepared update and mixed ratios (0.97, 0.92) sat inside the machine's run-to-run spread, and each
+timed region was short: 2,000 statements take 1 to 3 ms, near the timer's and the scheduler's
+grain. No engine change. The harness gains paired runs (qdb and SQLite alternate, one pair per
+repetition, so a slow spell lands on both), the median of the per-pair ratios, and a
+distribution-free interval for that median (order statistics; with 11 pairs, the 3rd and 9th
+smallest ratios, exact coverage 93.5 percent). Two runs, prep API, 10,000 rows, 11 pairs each, at a
+moment with no cargo, rustc or render job and at least 8 GB free: run A repeats P25's 2,000
+statements; run B uses 200,000 statements so each timed region lasts about 0.1 to 0.3 s. Claim rule:
+qdb is called faster than SQLite on a mode only when the interval's upper end is below 1.0; slower
+only when its lower end is above 1.0; otherwise unsettled. Predictions (written before any paired
+run): select slower in both runs (B median 1.4 to 1.9); update and mixed unsettled in run A; in run
+B update 0.8 to 1.3 and mixed 0.8 to 1.2, with at most one of them settled faster. Planted check:
+`--aa` puts SQLite in qdb's place; its intervals must contain 1.0 on all three modes (run B
+settings, 7 pairs). A planted interval that excludes 1.0 means the interval method or the machine
+cannot support a claim, and no claim is made. Guards: the full set, on the unchanged engine.
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
@@ -987,6 +1004,44 @@ on the same machine during the run.
   of 10,000, digest 77a49282... unchanged; P2 2,000 of 2,000; text 0 changed; WAL recovery 0
   failures; reference differential 16 of 16; library 0 failures; receipts reproduced; mutations 0
   disagreements.
+
+## After P26: the prepared comparison settled (2026-11-09, feat/bdb-settle)
+
+Windows, one core per process, prep API, 10,000 rows, qdb and SQLite 3.49.1 alternating, 11 pairs
+per mode (planted check 7). Run at 10:28 to 10:33 PT with no cargo, rustc or render job and 10.7 GB
+free; a GPU scoring job held one of the 24 cores. Interval: order statistics of the per-pair ratio
+(qdb's time over SQLite's), exact coverage 93.5 percent for 11 pairs, 98.4 percent for 7.
+
+| Run | Mode | qdb (statements per second) | SQLite | Paired median ratio | Interval | Verdict |
+|---|---|---|---|---|---|---|
+| A (2,000 statements) | select | 2,118,644 | 2,538,071 | 1.23 | 1.18 to 1.29 | slower |
+| A | update | 852,152 | 1,040,583 | 1.21 | 1.13 to 1.33 | slower |
+| A | mixed | 1,094,092 | 997,506 | 0.86 | 0.76 to 0.95 | faster |
+| B (200,000 statements) | select | 2,899,223 | 2,584,013 | 0.89 | 0.84 to 1.08 | unsettled |
+| B | update | 1,004,394 | 2,512,153 | 2.51 | 2.43 to 2.60 | slower |
+| B | mixed | 1,190,221 | 2,465,878 | 2.05 | 1.99 to 2.08 | slower |
+| planted (SQLite against SQLite, B settings) | select | | | 0.99 | 0.88 to 1.02 | brackets 1 |
+| planted | update | | | 0.99 | 0.98 to 1.02 | brackets 1 |
+| planted | mixed | | | 1.00 | 0.96 to 1.06 | brackets 1 |
+
+- The claim is settled against qdb: on long runs SQLite's prepared UPDATE runs at about 2.5 million
+  per second, and qdb's at 1.0 million, so qdb takes 2.5 times SQLite's time on update and 2.05
+  times on mixed. P25's update and mixed ratios below 1 came from short timed regions where SQLite
+  had not yet reached its steady rate (about 1.0 million per second over the first 2,000
+  statements, 2.5 million over 200,000). qdb is not faster than SQLite on any mode of the long run;
+  point select is level within the interval.
+- Run A's mixed result (faster) does not carry to run B and is not claimed as a general result.
+- Predictions: select slower in A held; select in B MISSED (0.89, unsettled, predicted 1.4 to 1.9).
+  Update and mixed unsettled in A MISSED (update settled slower, mixed settled faster). Update in B
+  (0.8 to 1.3) and mixed in B (0.8 to 1.2) MISSED, both on the slow side.
+- Planted check held: all three A/A intervals contain 1.0, so the method separates; the measured
+  gaps are larger than the A/A spread.
+- From here the speed work is measured on run B's settings; run A stays only for continuity with
+  P25.
+- Guards on the unchanged engine (main a5fb755): test_qdb.sh 314 pass, 0 fail; rows 0 differences
+  (planted 186 caught); crash 176 points, 0 violations; power cuts 0 of 10,000, digest 77a49282...
+  equal; P2 2,000 of 2,000; text 0 changed; WAL recovery 0; reference differential 16 of 16;
+  library 0 failures; receipts reproduced; mutations 0 disagreements.
 
 ## Stage 1: a correct, durable single-file engine
 
