@@ -68,6 +68,9 @@ static __int128 bl_f2i_i128(double v){
 // (exit 101). A float `/` stays IEEE (1.0/0.0 == inf) and a float `%` lowers to
 // fmod, so neither reaches here. Unsigned division cannot overflow, so those
 // helpers check only the zero divisor.
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noreturn, cold))
+#endif
 static void bl_arith_panic(const char* what) {
     fprintf(stderr, "%s\n", what);
     exit(101);
@@ -89,6 +92,41 @@ static __int128 bl_i128_min(void) {
     return -bl_i128_max() - 1;
 }
 
+// With gcc or clang the checks use the overflow builtins: the same result and
+// the same trap (the exact result does not fit TYPE), without the division the
+// portable multiply check needs. Other compilers take the portable helpers.
+#if defined(__GNUC__) || defined(__clang__)
+#define BL_DEFINE_SIGNED_ARITH(SUFFIX, TYPE, MINV, MAXV) \
+static inline TYPE bl_iadd_##SUFFIX(TYPE a, TYPE b){ \
+    TYPE r; if (__builtin_expect(__builtin_add_overflow(a, b, &r), 0)) bl_arith_panic("attempt to add with overflow"); \
+    return r; \
+} \
+static inline TYPE bl_isub_##SUFFIX(TYPE a, TYPE b){ \
+    TYPE r; if (__builtin_expect(__builtin_sub_overflow(a, b, &r), 0)) bl_arith_panic("attempt to subtract with overflow"); \
+    return r; \
+} \
+static inline TYPE bl_imul_##SUFFIX(TYPE a, TYPE b){ \
+    TYPE r; if (__builtin_expect(__builtin_mul_overflow(a, b, &r), 0)) bl_arith_panic("attempt to multiply with overflow"); \
+    return r; \
+} \
+static inline TYPE bl_ineg_##SUFFIX(TYPE a){ \
+    if (a == (MINV)) bl_arith_panic("attempt to negate with overflow"); \
+    return (TYPE)-a; \
+}
+#define BL_DEFINE_UNSIGNED_ARITH(SUFFIX, TYPE, MAXV) \
+static inline TYPE bl_uadd_##SUFFIX(TYPE a, TYPE b){ \
+    TYPE r; if (__builtin_expect(__builtin_add_overflow(a, b, &r), 0)) bl_arith_panic("attempt to add with overflow"); \
+    return r; \
+} \
+static inline TYPE bl_usub_##SUFFIX(TYPE a, TYPE b){ \
+    TYPE r; if (__builtin_expect(__builtin_sub_overflow(a, b, &r), 0)) bl_arith_panic("attempt to subtract with overflow"); \
+    return r; \
+} \
+static inline TYPE bl_umul_##SUFFIX(TYPE a, TYPE b){ \
+    TYPE r; if (__builtin_expect(__builtin_mul_overflow(a, b, &r), 0)) bl_arith_panic("attempt to multiply with overflow"); \
+    return r; \
+}
+#else
 #define BL_DEFINE_SIGNED_ARITH(SUFFIX, TYPE, MINV, MAXV) \
 static TYPE bl_iadd_##SUFFIX(TYPE a, TYPE b){ \
     if ((b > 0 && a > (TYPE)((MAXV) - b)) || (b < 0 && a < (TYPE)((MINV) - b))) bl_arith_panic("attempt to add with overflow"); \
@@ -120,6 +158,7 @@ static TYPE bl_ineg_##SUFFIX(TYPE a){ \
 static TYPE bl_uadd_##SUFFIX(TYPE a, TYPE b){ if (a > (TYPE)((MAXV) - b)) bl_arith_panic("attempt to add with overflow"); return (TYPE)(a + b); } \
 static TYPE bl_usub_##SUFFIX(TYPE a, TYPE b){ if (a < b) bl_arith_panic("attempt to subtract with overflow"); return (TYPE)(a - b); } \
 static TYPE bl_umul_##SUFFIX(TYPE a, TYPE b){ if (b != 0 && a > (TYPE)((MAXV) / b)) bl_arith_panic("attempt to multiply with overflow"); return (TYPE)(a * b); }
+#endif
 
 BL_DEFINE_SIGNED_ARITH(i8, int8_t, INT8_MIN, INT8_MAX)
 BL_DEFINE_SIGNED_ARITH(i16, int16_t, INT16_MIN, INT16_MAX)

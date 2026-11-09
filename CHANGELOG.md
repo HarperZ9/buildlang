@@ -8,6 +8,12 @@ tracked in `STATUS.md`, `README.md`, and
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
 `108/108` or `132/132` are not the current release gate.
 
+## Unreleased
+
+### Checked integer arithmetic through the overflow builtins
+
+- Plain `+`, `-` and `*` still trap on overflow, but under gcc and clang the C helpers use `__builtin_*_overflow` instead of comparisons and, for `*`, a division. spectral-norm (`bench/speed-2026-11`): 2.25x to 1.20x of C at gcc -O2, 1.01x at -O3; Rust 0.99x. Other compilers keep the portable helpers. `compiler/tests/checked_arith_builtins.rs` holds the edge results and traps for every width from `i8` to `u64`.
+
 ## 1.13.0 - 2026-11-09 - translation validation of effects and structs, verify V3, a speed baseline
 
 ### A float maths builtin no longer passes as an integer (#178)
