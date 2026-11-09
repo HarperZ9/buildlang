@@ -624,6 +624,19 @@ printf 'QDB 1 0\nTABLE z\nSCHEMA id:INTEGER v:TEXT\nROW 1|\nROW 2|b\nEND\n' > "$
 chksel "fmt1_empty_is_null" "SELECT id FROM z WHERE v IS NULL" "1"
 rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
 
+echo "== column type arguments and literal-first comparisons (P9) =="
+rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
+$QDB "$DB" "CREATE TABLE ta (a INTEGER, x VARCHAR(30), y DECIMAL(10, 2))" >/dev/null
+$QDB "$DB" "INSERT INTO ta VALUES (1,'p',2.5),(5,'q',3),(9,'r',4)" >/dev/null
+chksel "type_args"        "SELECT x FROM ta WHERE a = 5" "q"
+chksel "lit_first_lt"     "SELECT a FROM ta WHERE 5 < a" "9"
+chksel "lit_first_ge"     "SELECT a FROM ta WHERE 5 >= a ORDER BY a" "$(printf '1
+5')"
+chksel "lit_first_eq_and" "SELECT a FROM ta WHERE 'q' = x AND 1 < a" "5"
+chk   "lit_both_sides"   "$($QDB "$DB" "SELECT a FROM ta WHERE 1 = 1" 2>&1 | tr -d '' | grep -ci 'column on one side')" "1"
+chk   "type_arg_not_num" "$($QDB "$DB" "CREATE TABLE tb (a VARCHAR(x))" 2>&1 | tr -d '' | grep -ci 'expected a number')" "1"
+rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
+
 echo "== ALTER / DROP =="
 reseed; $QDB "$DB" "ALTER TABLE emp ADD COLUMN active INTEGER" >/dev/null
 chkhdr "alter_add"     "SELECT * FROM emp LIMIT 0" "id | name | dept | salary | age | active"

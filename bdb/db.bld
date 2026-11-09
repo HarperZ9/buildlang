@@ -1985,6 +1985,22 @@ fn parse_create_table(d: &mut DB) ~ Console + Process {
         let tid = sp_add(d, ctype);
         vec_push(d.p_types, tid);
         next_token(d);
+        // Type arguments, as in VARCHAR(30) or DECIMAL(10, 2), are read and
+        // dropped: the type keeps its storage class.
+        if tk_is_punct(d, "(") == 1 {
+            next_token(d);
+            let mut targ = true;
+            while targ {
+                if d.tk_type != 3 {
+                    println!("Error: expected a number in the arguments of type '{}', got '{}'", ctype, d.tk_val);
+                    process_exit(1);
+                }
+                next_token(d);
+                if tk_is_punct(d, ",") == 1 { next_token(d); }
+                else { targ = false; }
+            }
+            expect_punct(d, ")");
+        }
         // Skip optional PRIMARY KEY
         if tk_is_kw(d, "PRIMARY") == 1 {
             next_token(d);
@@ -2196,8 +2212,39 @@ fn wn_leaf(d: &mut DB, ci: i32) -> i32 {
 // IN (value-list or SELECT subquery), IS [NOT] NULL, and scalar subqueries each
 // become one leaf. BETWEEN expands to a real subtree: AND(>=lo,<=hi), or when
 // negated OR(<lo,>hi), so the compound case is exact rather than an honest null.
+// Mirror a comparison for swapped operands: lit < col is col > lit.
+fn op_mirror(op: i32) -> i32 {
+    if op == 1 { return 2; }
+    if op == 2 { return 1; }
+    if op == 3 { return 4; }
+    if op == 4 { return 3; }
+    op
+}
+
 fn parse_condition(d: &mut DB) -> i32 ~ Console + Process {
     let mut neg = 0;
+    // A literal first, as in 272 = e3: read it as e3 = 272, with the
+    // operator mirrored. Only a column may stand on the other side.
+    if d.tk_type == 2 || d.tk_type == 3 || (d.tk_type == 0 && d.tk_val == "NULL") {
+        let lit = tok_value(d);
+        next_token(d);
+        let lop = d.tk_val;
+        let lop_code = op_encode(lop);
+        if lop_code < 0 {
+            println!("Error: expected a comparison after the literal '{}' in WHERE, got '{}'", disp(lit), lop);
+            process_exit(1);
+        }
+        next_token(d);
+        if d.tk_type != 1 {
+            println!("Error: a comparison needs a column on one side; got '{}' {} '{}'", disp(lit), lop, d.tk_val);
+            process_exit(1);
+        }
+        let cref = read_col_ref(d);
+        let col_id = sp_add(d, cref);
+        let lit_id = sp_add(d, lit);
+        let ci = wc_push(d, col_id, op_mirror(lop_code), lit_id, 0);
+        return wn_leaf(d, ci);
+    }
     let lref = read_col_ref(d);
     let left_id = sp_add(d, lref);
     // Infix NOT: col NOT IN (...) / col NOT LIKE 'pat' / col NOT BETWEEN lo AND hi
