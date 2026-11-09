@@ -74,7 +74,7 @@ its commit 4a296c1 keep the FSL-1.1-MIT licence they were published under there.
 qdb is about 7,000 lines of BuildLang. BuildQL is the SQL dialect it runs:
 
 **SQL support:**
-- CREATE TABLE, INSERT, SELECT, UPDATE, DELETE, DROP TABLE
+- CREATE TABLE, INSERT (VALUES or SELECT), SELECT, UPDATE, DELETE, DROP TABLE
 - Column types INTEGER, REAL, and TEXT, with the common SQL aliases (INT, BIGINT, SMALLINT, FLOAT, DOUBLE, NUMERIC, and similar) recognized so a numeric column orders and right-aligns as a number
 - ALTER TABLE ADD COLUMN
 - UPDATE SET col = col OP literal, where OP is `+`, `-`, `*`, or `/` (arithmetic RHS, fail-closed on bad operand or division by zero)
@@ -120,6 +120,6 @@ single `DB` struct due to the flat-struct constraint. The SQL parser is embedded
 - A scalar aggregate, a GROUP BY, a HAVING, an ORDER BY, and a LIMIT/OFFSET over a grouped JOIN all fold, sort, or truncate over the joined rows (see Features above). What remains fail-closed over a JOIN: a secondary ORDER BY key over a grouped JOIN, DISTINCT over a grouped JOIN, and COUNT(DISTINCT ...) over any JOIN (`COUNT(DISTINCT) over a JOIN is not supported`). Each is tracked here rather than returning a silent wrong grouping, order, or count
 - A process that ends inside BEGIN without a clean exit (a crash, or a statement rejected with exit code 1) drops the open transaction
 - No query optimizer; all scans are sequential unless an index matches exactly
-- Writes: a bulk load is linear in the rows loaded (about 0.13 s per 1,000 rows, 15 to 28 s per 100,000, see ARCHITECTURE.md, Write Cost). Still superlinear: an INSERT followed by an indexed SELECT on every row, INSERT into a table that is not the last one created, UPDATE, DELETE, and the UNION, grouped and JOIN ORDER BY paths (selection sort; single-table ORDER BY is a merge sort)
+- Writes: a bulk load is linear in the rows loaded (about 0.13 s per 1,000 rows, 15 to 28 s per 100,000, see ARCHITECTURE.md, Write Cost). Still superlinear: an INSERT followed by an indexed SELECT on every row, INSERT into a table that is not the last one created, a run of DELETEs (each compacts the cells after the first deleted row in place), and the UNION, grouped and JOIN ORDER BY paths (selection sort; single-table ORDER BY is a merge sort)
 - During a REPL session, committed writes live in the append-only WAL and reach the .db at a checkpoint (when the WAL outgrows the .db, and at a clean exit). A crash loses nothing that was committed; the next start replays it
 - File format is not binary-compatible with SQLite

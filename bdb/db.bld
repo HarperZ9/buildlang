@@ -2266,6 +2266,18 @@ fn parse_insert(d: &mut DB) ~ Console + Process {
         }
     }
 
+    // INSERT ... SELECT (P22): the expression path parses the query; exec_insert
+    // runs it and inserts its rows as if they were VALUES tuples.
+    if tk_is_kw(d, "SELECT") == 1 {
+        d.xq_root = xp_query(d);
+        if tk_is_punct(d, ";") == 1 { next_token(d); }
+        if d.tk_type != 7 {
+            println!("Error: unexpected trailing input near '{}'", d.tk_val);
+            process_exit(1);
+        }
+        return;
+    }
+
     expect_kw(d, "VALUES");
     // One or more parenthesized value tuples: (..),(..),..
     // All tuples flow into d.p_vals; d.p_row_count records how many tuples.
@@ -3387,7 +3399,7 @@ fn exec_create(d: &mut DB) ~ Console {
 // Values are read from d.p_vals. The row is inserted at the correct
 // position in the flat cells array (after existing rows for this table),
 // and subsequent tables' row starts are shifted. Indexes are rebuilt.
-fn exec_insert(d: &mut DB) ~ Console {
+fn exec_insert(d: &mut DB) ~ Console + Process {
     let tname = sp_get(d, d.p_table);
     let tidx = find_table(d, tname);
     if tidx < 0 {
@@ -3401,6 +3413,22 @@ fn exec_insert(d: &mut DB) ~ Console {
     // Values per row: the named-column count when a column list was given,
     // otherwise the table's full column count. p_row_count tuples were parsed.
     let vpr = if d.p_col_count > 0 { d.p_col_count } else { cc };
+    if d.xq_root >= 0 {
+        // INSERT ... SELECT (P22): the query's rows become the value tuples.
+        let none: Vec<i32> = vec![];
+        let got = xq_run(d, d.xq_root, none, 0, -1);
+        let ncol = d.x_ncol;
+        if ncol != vpr {
+            d.stmt_failed = true;
+            println!("Error: table {} has {} columns but {} values were supplied", tname, vpr, ncol);
+            return;
+        }
+        let nv = vec_len(got);
+        if nv == 0 { return; }
+        d.p_vals = got;
+        d.p_val_count = nv;
+        d.p_row_count = nv / ncol;
+    }
     let nrows = d.p_row_count;
     if nrows < 1 {
         d.stmt_failed = true;

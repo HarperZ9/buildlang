@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- 2026-11-09: `INSERT INTO t [(cols)] SELECT ...` runs; the selected rows pass the same column and
+  constraint checks as VALUES rows. sqllogictest 9,087 to 9,143 of 9,202, wrong answers 65 to 9.
+
 - 2026-11-09: an explicit transaction writes its WAL lines once, with its COMMIT record (or with
   HOLD at a clean exit inside BEGIN), instead of one file append per statement. The WAL bytes are
   the same. Through `bdb/lib`: updates at 7.5 times SQLite's time (102.9 before), mixed at 8.3
