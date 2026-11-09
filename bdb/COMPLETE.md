@@ -251,6 +251,36 @@ of 10,000. Planted checks: (a) with `--plant-ignore-flush` every unflushed and f
 may be dropped, and the harness must report violations (acknowledged commits lost), or it cannot see
 a lost commit; (b) one per-seed hash altered in the Linux manifest must be reported as a difference.
 Cost (seeds per second on each platform) is reported; no bound.
+**P16. History, `AS OF` and receipts (scoreboard target 1), written 2026-11-09 05:20 PT before the
+change.** A database keeps an append-only history when `<db>.hist` exists. The first process run
+with `QDB_HISTORY=1` creates it: a `BASE <txid>` line, and when the database already holds tables,
+a copy of its state as `<db>.hist.base`. Every transaction that commits after that is appended to
+the history as the same `TXID`, OP and `COMMIT <hash>` record the WAL holds, after the WAL flush; a
+checkpoint flushes the history before it replaces the `.db`, and WAL replay appends the
+transactions it recovers, so a record lost from the history's cache comes back from the WAL. The
+history reader keeps the first record per txid whose hash matches and skips the rest.
+`SELECT ... AS OF <txid>` rebuilds the state at that txid from the base and the history in a
+separate in-memory database and runs the SELECT there. With `QDB_RECEIPTS=1` every SELECT result
+is followed by `RECEIPT <txid> <state> <query> <result>`: the txid the state reflects, and SHA-256
+of the state (the `.db` text without its header line), of the query (without the `AS OF` suffix)
+and of the printed result lines. A mutation that fails (constraint, missing table) no longer
+reaches the WAL, so neither replay nor history runs it again. Benchmark: a new
+`bdb/tests/test_qdb_receipts.py` on the P2 workload, seeds 1 to 5 (1,000 SELECTs), with a seeded
+mutation (UPDATE, DELETE or INSERT on `a` or `b`) after every 10 queries. Process A runs each seed
+in one REPL with history and receipts on; process B, started after A exits, runs every query as
+`<query> AS OF <txid from A's receipt>`. A query is reproduced when B's receipt line and result
+lines equal A's. Prediction: 1,000 of 1,000. Overhead: the same 1,000 queries against each seed's
+final state in one REPL per seed, receipts off and on, median of 5 runs; the bar is under 5
+percent, and the prediction is 2 to 15 percent (SHA-256 is written in BuildLang and hashes every
+result byte). The cost of `AS OF` (B's time against A's) and of history on a write load
+(`bench_qdb_load.py` with and without `QDB_HISTORY=1`) is reported with no bound. Planted checks:
+(a) the harness alters one of A's receipts and must count it as not reproduced; (b) one UPDATE in
+the history file gets another value and a recomputed hash (a history rewritten consistently), and
+B must then fail to reproduce every receipt at or after that txid that reads the changed row,
+with the count reported. Guards: test_qdb.sh no FAIL; crash test 0 violations; P15 0 violations
+with the digest unchanged (history is off by default); P2 2,000; text, WAL, library and reference
+differential unchanged. Limits stated in advance: the crash and power-cut tests do not run with
+history on; `AS OF` replays the history from the base on every query.
 
 ### Amendments
 
@@ -507,6 +537,37 @@ harness unchanged. Before: 1,251 of 2,000 on this branch, re-run before the chan
   treats a completed rename as durable. 10,000 seeds cover 35 to 38 distinct outcomes of one
   18-step workload, so the count of seeds overstates the variety.
 
+## After P16: history, AS OF and receipts (2026-11-09, feat/bdb-history)
+
+- **Reproduction:** 1,000 of 1,000 results reproduced by a second process with `AS OF` (P2 seeds 1
+  to 5, 200 queries each, a mutation after every 10 queries, so 21 states per seed), on Windows
+  and on Linux (WSL Ubuntu 24.04). Prediction held.
+- **Overhead of receipts: 44 percent on Linux, 347 percent on Windows. The bar (under 5 percent)
+  and the prediction (2 to 15 percent) both missed.** Linux: 0.049 s for the 1,000 queries with
+  receipts off, 0.071 s on (median of 5 per seed). Windows: 0.209 s off, 0.933 s on. These
+  queries are small (about 50 microseconds each on Linux), and SHA-256 written in BuildLang costs
+  about 6 microseconds per 64-byte block (every add is a checked call, every block allocates), so
+  hashing a result of a few hundred bytes costs more than the query. The next step is a SHA-256
+  builtin in the BuildLang runtime, measured again as P16b.
+- **Cost of AS OF:** process B, which rebuilds the state from the history for every query, took
+  0.51 s on Linux against 1.38 s for process A (which also ran the 62 setup statements and 100
+  mutations, each flushed); 1.94 s against 2.61 s on Windows.
+- **Cost of history on writes** (`bench_qdb_load.py`, Windows, WAL flushed): autocommit 3.97 to
+  4.14 ms per row at 16,000 rows (4 percent), one transaction 0.72 to 0.75 ms per row. A first
+  build kept the open transaction's text as one growing string, which made a 16,000-row
+  transaction quadratic (0.72 ms per row against 0.34 on main, with history off); it now keeps
+  parts, and the same load takes 0.338 ms per row (main 0.335).
+- **Planted checks:** (a) one altered receipt: counted as not reproduced, caught. (b) history
+  rewritten consistently at txid 63 (one UPDATE of row 13 with another value and a recomputed
+  hash): 190 of 190 later receipts not reproduced and none before, caught. Every later receipt
+  fails, more than the queries that read row 13, because the state hash covers the whole state.
+- **Guards:** test_qdb.sh 290 pass, 0 fail; crash test 194 points, 0 violations; P15 0 of 10,000
+  with the digest unchanged (Windows and Linux); P2 2,000 of 2,000; text 0 changed; WAL 0
+  failures with the reference engine; library 0 failures; reference differential 16 of 16.
+- Limits: the crash and power-cut tests do not run with history on; `AS OF` replays the history
+  from the base on every query; a receipt covers the state, the query text and the printed result,
+  and says nothing about who ran it.
+
 ## Stage 1: a correct, durable single-file engine
 
 | Row | Check (fails if) | Status | Evidence |
@@ -517,6 +578,7 @@ harness unchanged. Before: 1,251 of 2,000 on this branch, re-run before the chan
 | 1d Cross-process transaction | either P4 case misses | PASS | four checks in test_qdb.sh (`xproc_*`), differential process mode equals REPL mode on 8 seeds |
 | 1e Text round trip | any P5 value changes | PASS | 2,000 of 2,000 (`test_qdb_text.py`); format 0 files still load |
 | 1f NULL apart from '' | `INSERT (NULL)` and `INSERT ('')` are indistinguishable by `IS NULL`, or `NOT (NULL = x)` is true | PASS | P7: NULL is its own value with three-valued logic; 19 checks in test_qdb.sh; P2 null_vs_empty 519 to 0. Before: both stored an empty cell |
+| 1h History, AS OF and receipts | a second process with `AS OF` fails to reproduce any of the P16 results, or receipts cost 5 percent of query time or more | FAIL | P16: 1,000 of 1,000 reproduced on Windows and Linux; overhead 44 percent (Linux) and 347 percent (Windows) with SHA-256 written in BuildLang |
 | 1g JOIN gaps that fail closed | a secondary ORDER BY key over a grouped JOIN, DISTINCT over a grouped JOIN, or COUNT(DISTINCT) over any JOIN is refused | FAIL | each refused with a specific message (`bdb/README.md`, Known limitations) |
 
 ## Stage 2: SQL coverage against the outside corpus

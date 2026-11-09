@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- 2026-11-09: history, `AS OF` and receipts. Run qdb once with `QDB_HISTORY=1` and the database
+  keeps every committed transaction in `<db>.hist`; `SELECT ... AS OF <txid>` answers from the
+  state at that transaction. With `QDB_RECEIPTS=1` each result is followed by
+  `RECEIPT <txid> <state> <query> <result>` (SHA-256 of each), which a second process reproduces
+  with `AS OF`: 1,000 of 1,000 (`bdb/tests/test_qdb_receipts.py`). Receipts cost 44 percent of
+  query time on Linux, against a target under 5. A mutation that fails no longer reaches the WAL.
+
 - 2026-11-09: seeded power cuts (`bdb/tests/test_qdb_faults.py`). The harness learns every durable
   write of the crash workload and, from a seed, drops, tears and reorders the writes no flush had
   covered. It found a torn transaction replayed as committed (2 of 10,000 seeds, the recovering

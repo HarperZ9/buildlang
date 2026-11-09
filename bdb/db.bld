@@ -279,6 +279,20 @@ struct DB {
     // FNV-1a hash of the open transaction's TXID and OP lines; its COMMIT
     // record carries it so replay can tell a whole transaction from a torn one.
     txn_hash: i64,
+    // P16 history: the open transaction's TXID and OP lines as written, the
+    // history file and whether it has appends not yet flushed.
+    txn_parts: Vec<String>,
+    hist_on: bool,
+    hist_path: String,
+    hist_dirty: bool,
+    // Set by a mutation that printed an error and changed nothing; exec_sql
+    // then keeps it out of the WAL (and so out of replay and history).
+    stmt_failed: bool,
+    // P16 receipts: result lines captured while a SELECT prints, and the
+    // SHA-256 of the state, cached until the next statement that can change it.
+    rcpt_on: bool,
+    rcpt_parts: Vec<String>,
+    state_sha: String,
     wal_buf: String,
     // Bytes appended to the WAL since the last checkpoint, and the size of
     // the .db file that checkpoint wrote. maybe_checkpoint compares the two.
@@ -396,6 +410,8 @@ fn db_new(db_path: String) -> DB {
     // Typed local: a bare vec![] in the struct literal is built as a Vec<i32>
     // by the C backend, and pushing strings into that corrupts memory.
     let pool0: Vec<String> = vec![];
+    let parts0: Vec<String> = vec![];
+    let txp0: Vec<String> = vec![];
     DB {
         db_path: db_path,
         pool: pool0, pn: 0,
@@ -438,6 +454,14 @@ fn db_new(db_path: String) -> DB {
         in_transaction: false,
         txn_id: 0,
         txn_hash: 0,
+        txn_parts: txp0,
+        hist_on: false,
+        hist_path: db_path + ".hist",
+        hist_dirty: false,
+        stmt_failed: false,
+        rcpt_on: false,
+        rcpt_parts: parts0,
+        state_sha: "",
         wal_buf: "",
         wal_bytes: 0, db_bytes: 0,
         fmt_escaped: false, fmt_nulls: false, applied_txid: 0, ckpt_path: cp,
@@ -1056,6 +1080,161 @@ fn hex32(h: i64) -> String {
 
 fn commit_line(h: i64) -> String { "COMMIT " + hex32(h) }
 
+// SHA-256 (FIPS 180-4) of the bytes of s, as 64 hex digits. Receipts (P16)
+// name a state, a query and a result by it.
+fn sha256_k() -> Vec<i64> {
+    let mut k: Vec<i64> = vec![];
+    vec_push(k, 1116352408);
+    vec_push(k, 1899447441);
+    vec_push(k, 3049323471);
+    vec_push(k, 3921009573);
+    vec_push(k, 961987163);
+    vec_push(k, 1508970993);
+    vec_push(k, 2453635748);
+    vec_push(k, 2870763221);
+    vec_push(k, 3624381080);
+    vec_push(k, 310598401);
+    vec_push(k, 607225278);
+    vec_push(k, 1426881987);
+    vec_push(k, 1925078388);
+    vec_push(k, 2162078206);
+    vec_push(k, 2614888103);
+    vec_push(k, 3248222580);
+    vec_push(k, 3835390401);
+    vec_push(k, 4022224774);
+    vec_push(k, 264347078);
+    vec_push(k, 604807628);
+    vec_push(k, 770255983);
+    vec_push(k, 1249150122);
+    vec_push(k, 1555081692);
+    vec_push(k, 1996064986);
+    vec_push(k, 2554220882);
+    vec_push(k, 2821834349);
+    vec_push(k, 2952996808);
+    vec_push(k, 3210313671);
+    vec_push(k, 3336571891);
+    vec_push(k, 3584528711);
+    vec_push(k, 113926993);
+    vec_push(k, 338241895);
+    vec_push(k, 666307205);
+    vec_push(k, 773529912);
+    vec_push(k, 1294757372);
+    vec_push(k, 1396182291);
+    vec_push(k, 1695183700);
+    vec_push(k, 1986661051);
+    vec_push(k, 2177026350);
+    vec_push(k, 2456956037);
+    vec_push(k, 2730485921);
+    vec_push(k, 2820302411);
+    vec_push(k, 3259730800);
+    vec_push(k, 3345764771);
+    vec_push(k, 3516065817);
+    vec_push(k, 3600352804);
+    vec_push(k, 4094571909);
+    vec_push(k, 275423344);
+    vec_push(k, 430227734);
+    vec_push(k, 506948616);
+    vec_push(k, 659060556);
+    vec_push(k, 883997877);
+    vec_push(k, 958139571);
+    vec_push(k, 1322822218);
+    vec_push(k, 1537002063);
+    vec_push(k, 1747873779);
+    vec_push(k, 1955562222);
+    vec_push(k, 2024104815);
+    vec_push(k, 2227730452);
+    vec_push(k, 2361852424);
+    vec_push(k, 2428436474);
+    vec_push(k, 2756734187);
+    vec_push(k, 3204031479);
+    vec_push(k, 3329325298);
+    k
+}
+
+fn rotr32(x: i64, n: i64) -> i64 { ((x >> n) | (x << (32 - n))) & 4294967295 }
+
+fn sha256_hex(s: String) -> String {
+    let k = sha256_k();
+    let b = s.as_bytes();
+    let n = s.len();
+    let m32: i64 = 4294967295;
+    let mut h0: i64 = 1779033703; let mut h1: i64 = 3144134277;
+    let mut h2: i64 = 1013904242; let mut h3: i64 = 2773480762;
+    let mut h4: i64 = 1359893119; let mut h5: i64 = 2600822924;
+    let mut h6: i64 = 528734635; let mut h7: i64 = 1541459225;
+    let total = ((n + 9 + 63) / 64) * 64;
+    let mut off: i64 = 0;
+    while off < total {
+        let mut w: Vec<i64> = vec![];
+        let mut t: i64 = 0;
+        while t < 16 {
+            let mut v: i64 = 0;
+            let mut q: i64 = 0;
+            while q < 4 {
+                let p = off + t * 4 + q;
+                let mut byte: i64 = 0;
+                if p < n { byte = b[p] as i64; }
+                else if p == n { byte = 128; }
+                else if p >= total - 8 { byte = ((n * 8) >> ((total - 1 - p) * 8)) & 255; }
+                v = (v << 8) | byte;
+                q = q + 1;
+            }
+            vec_push(w, v);
+            t = t + 1;
+        }
+        while t < 64 {
+            let w15 = vec_get(w, t - 15);
+            let w2 = vec_get(w, t - 2);
+            let s0 = rotr32(w15, 7) ^ rotr32(w15, 18) ^ (w15 >> 3);
+            let s1 = rotr32(w2, 17) ^ rotr32(w2, 19) ^ (w2 >> 10);
+            vec_push(w, (vec_get(w, t - 16) + s0 + vec_get(w, t - 7) + s1) & m32);
+            t = t + 1;
+        }
+        let mut a = h0; let mut bb = h1; let mut c = h2; let mut dd = h3;
+        let mut e = h4; let mut f = h5; let mut g = h6; let mut h = h7;
+        t = 0;
+        while t < 64 {
+            let s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+            let ch = (e & f) ^ ((e ^ m32) & g);
+            let t1 = (h + s1 + ch + vec_get(k, t) + vec_get(w, t)) & m32;
+            let s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+            let mj = (a & bb) ^ (a & c) ^ (bb & c);
+            h = g; g = f; f = e; e = (dd + t1) & m32;
+            dd = c; c = bb; bb = a; a = (t1 + s0 + mj) & m32;
+            t = t + 1;
+        }
+        h0 = (h0 + a) & m32; h1 = (h1 + bb) & m32; h2 = (h2 + c) & m32; h3 = (h3 + dd) & m32;
+        h4 = (h4 + e) & m32; h5 = (h5 + f) & m32; h6 = (h6 + g) & m32; h7 = (h7 + h) & m32;
+        off = off + 64;
+    }
+    hex32(h0) + hex32(h1) + hex32(h2) + hex32(h3) + hex32(h4) + hex32(h5) + hex32(h6) + hex32(h7)
+}
+
+// Append one committed transaction record to the history (P16). The WAL holds
+// the durable copy until a checkpoint, which flushes the history first.
+// The TXID line at index from and the OP and OPX lines up to index to, each
+// with its line break: the body of a history record.
+fn txn_record_parts(lines: Vec<String>, from: i64, to: i64) -> Vec<String> {
+    let mut parts: Vec<String> = vec![];
+    let mut j = from;
+    while j < to {
+        let wl = strip_cr(vec_get(lines, j));
+        if j == from || wl.starts_with("OP ") || wl.starts_with("OPX ") { vec_push(parts, wl + "\n"); }
+        j = j + 1;
+    }
+    parts
+}
+
+fn txn_record(lines: Vec<String>, from: i64, to: i64) -> String {
+    concat_parts(txn_record_parts(lines, from, to))
+}
+
+fn hist_append(d: &mut DB, rec: String) ~ Console + FileSystem + Process {
+    if !d.hist_on { return; }
+    durable_write(d, d.hist_path, rec, true, "hist_append");
+    d.hist_dirty = true;
+}
+
 // Append newline-terminated text to the WAL in a single write.
 fn wal_append(d: &mut DB, text: String, tag: String) ~ Console + FileSystem + Process {
     durable_write(d, d.wal_path, text, true, tag);
@@ -1069,6 +1248,12 @@ fn wal_write(d: &mut DB, line: String, tag: String) ~ Console + FileSystem + Pro
 
 // Checkpoint: merge WAL into main .db file, then clear WAL
 fn wal_checkpoint(d: &mut DB) ~ Console + FileSystem + Process {
+    // Every transaction this checkpoint folds into the .db must be durable
+    // in the history before the WAL that also holds it is cleared.
+    if d.hist_dirty {
+        durable_sync(d, d.hist_path, "hist_sync");
+        d.hist_dirty = false;
+    }
     d.db_bytes = db_save(d);
     // Clear the WAL file
     if file_exists(d.wal_path) {
@@ -1178,6 +1363,11 @@ fn wal_replay(d: &mut DB) ~ Console + FileSystem + Process {
                     if sql.len() > 0 { exec_sql_no_wal(d, sql); }
                     j = j + 1;
                 }
+                // The history may have lost this record from its cache; its
+                // reader keeps the first whole copy of each txid.
+                if d.hist_on {
+                    hist_append(d, txn_record(lines, txn_start - 1, li) + commit_line(txn_h) + "\n");
+                }
                 txn_start = 0 - 1;
             }
         }
@@ -1200,6 +1390,8 @@ fn wal_replay(d: &mut DB) ~ Console + FileSystem + Process {
         d.in_transaction = true;
         d.txn_id = txn_open_id;
         d.txn_hash = txn_h;
+        let parts = txn_record_parts(lines, txn_start - 1, n);
+        d.txn_parts = parts;
         d.wal_bytes = clen;
         // Mark the resume, so the WAL no longer ends in HOLD: if this
         // process does not exit cleanly, the transaction is dropped.
@@ -1367,6 +1559,9 @@ fn wal_begin(d: &mut DB) ~ Console + FileSystem + Process {
     take_snapshot(d);
     let tl = "TXID " + to_string_i32(d.txn_id);
     d.txn_hash = fnv_extend(fnv_init(), tl + "\n");
+    let fresh: Vec<String> = vec![];
+    d.txn_parts = fresh;
+    if d.hist_on { vec_push(d.txn_parts, tl + "\n"); }
     wal_write(d, tl, "wal_begin");
 }
 
@@ -1378,6 +1573,11 @@ fn wal_commit(d: &mut DB) ~ Console + FileSystem + Process {
     }
     wal_write(d, commit_line(d.txn_hash), "wal_commit");
     durable_sync(d, d.wal_path, "wal_sync");
+    if d.hist_on {
+        hist_append(d, concat_parts(d.txn_parts) + commit_line(d.txn_hash) + "\n");
+    }
+    let fresh: Vec<String> = vec![];
+    d.txn_parts = fresh;
     d.in_transaction = false;
     maybe_checkpoint(d);
 }
@@ -1415,14 +1615,17 @@ fn wal_log_mutation(d: &mut DB, sql: String) ~ Console + FileSystem + Process {
         // In explicit transaction — just append OP to WAL
         let ol = wal_op_line(sql);
         d.txn_hash = fnv_extend(d.txn_hash, ol + "\n");
+        if d.hist_on { vec_push(d.txn_parts, ol + "\n"); }
         wal_write(d, ol, "wal_op");
     } else {
         // Auto-commit: wrap in a single-statement transaction, written as one
         // append so a torn write cannot leave a COMMIT without its OP.
         d.txn_id = d.txn_id + 1;
         let body = "TXID " + to_string_i32(d.txn_id) + "\n" + wal_op_line(sql) + "\n";
-        wal_append(d, body + commit_line(fnv_extend(fnv_init(), body)) + "\n", "wal_auto");
+        let rec = body + commit_line(fnv_extend(fnv_init(), body)) + "\n";
+        wal_append(d, rec, "wal_auto");
         durable_sync(d, d.wal_path, "wal_sync");
+        hist_append(d, rec);
         maybe_checkpoint(d);
     }
 }
@@ -3210,6 +3413,7 @@ fn exec_create(d: &mut DB) ~ Console {
     let tname = sp_get(d, d.p_table);
     let existing = find_table(d, tname);
     if existing >= 0 {
+        d.stmt_failed = true;
         println!("Error: table '{}' already exists", tname);
         return;
     }
@@ -3225,6 +3429,7 @@ fn exec_create(d: &mut DB) ~ Console {
             j = j + 1;
         }
         if found < 0 {
+            d.stmt_failed = true;
             println!("Error: no such column: {}", nm);
             return;
         }
@@ -3275,6 +3480,7 @@ fn exec_insert(d: &mut DB) ~ Console {
     let tname = sp_get(d, d.p_table);
     let tidx = find_table(d, tname);
     if tidx < 0 {
+        d.stmt_failed = true;
         println!("Error: table '{}' not found", tname);
         return;
     }
@@ -3286,10 +3492,12 @@ fn exec_insert(d: &mut DB) ~ Console {
     let vpr = if d.p_col_count > 0 { d.p_col_count } else { cc };
     let nrows = d.p_row_count;
     if nrows < 1 {
+        d.stmt_failed = true;
         println!("Error: INSERT has no values");
         return;
     }
     if d.p_val_count != vpr * nrows {
+        d.stmt_failed = true;
         println!("Error: expected {} values, got {}", vpr * nrows, d.p_val_count);
         return;
     }
@@ -3303,6 +3511,7 @@ fn exec_insert(d: &mut DB) ~ Console {
         while jv < d.p_col_count {
             let jn = sp_get(d, vec_get(d.p_cols, jv));
             if find_col(d, cs, cc, jn) < 0 {
+                d.stmt_failed = true;
                 println!("Error: no such column: {}", jn);
                 return;
             }
@@ -3346,6 +3555,7 @@ fn exec_insert(d: &mut DB) ~ Console {
     // Constraints (P13), before any cell changes.
     let err = con_check_insert(d, tidx, row_cells, nrows);
     if err.len() > 0 {
+        d.stmt_failed = true;
         println!("Error: {}", err);
         return;
     }
@@ -3886,8 +4096,8 @@ fn exec_select(d: &mut DB) ~ Console + Process {
         sep_line = sep_line + make_dashes(w);
         hi = hi + 1;
     }
-    println!("{}", hdr_line);
-    println!("{}", sep_line);
+    emit_line(d, hdr_line);
+    emit_line(d, sep_line);
 
     // Print rows
     let mut ri = 0;
@@ -3908,7 +4118,7 @@ fn exec_select(d: &mut DB) ~ Console + Process {
             }
             ci = ci + 1;
         }
-        println!("{}", row_line);
+        emit_line(d, row_line);
         ri = ri + 1;
     }
 }
@@ -4304,8 +4514,8 @@ fn exec_select_union(d: &mut DB) ~ Console + Process {
         sep_line = sep_line + make_dashes(w);
         hi = hi + 1;
     }
-    println!("{}", hdr_line);
-    println!("{}", sep_line);
+    emit_line(d, hdr_line);
+    emit_line(d, sep_line);
 
     // Rows.
     let mut ri = 0;
@@ -4325,7 +4535,7 @@ fn exec_select_union(d: &mut DB) ~ Console + Process {
             }
             ci = ci + 1;
         }
-        println!("{}", row_line);
+        emit_line(d, row_line);
         ri = ri + 1;
     }
 }
@@ -4887,8 +5097,8 @@ fn exec_select_group(d: &mut DB) ~ Console {
         sep_line = sep_line + make_dashes(ph_w);
         pi = pi + 1;
     }
-    println!("{}", hdr_line);
-    println!("{}", sep_line);
+    emit_line(d, hdr_line);
+    emit_line(d, sep_line);
 
     // Print rows
     let mut ri = 0;
@@ -4906,7 +5116,7 @@ fn exec_select_group(d: &mut DB) ~ Console {
             row_line = row_line + pad_right(pr_val, pr_w);
             pci = pci + 1;
         }
-        println!("{}", row_line);
+        emit_line(d, row_line);
         ri = ri + 1;
     }
 }
@@ -5762,8 +5972,8 @@ fn exec_select_join(d: &mut DB) ~ Console {
             gsline = gsline + make_dashes(hw);
             hp = hp + 1;
         }
-        println!("{}", ghline);
-        println!("{}", gsline);
+        emit_line(d, ghline);
+        emit_line(d, gsline);
         let mut rr = 0;
         while rr < gkc {
             let mut rline = "";
@@ -5775,7 +5985,7 @@ fn exec_select_join(d: &mut DB) ~ Console {
                 rline = rline + pad_right(rv, rw);
                 rc = rc + 1;
             }
-            println!("{}", rline);
+            emit_line(d, rline);
             rr = rr + 1;
         }
         return;
@@ -6136,8 +6346,8 @@ fn exec_select_join(d: &mut DB) ~ Console {
         sep_line = sep_line + make_dashes(w);
         hi = hi + 1;
     }
-    println!("{}", hdr_line);
-    println!("{}", sep_line);
+    emit_line(d, hdr_line);
+    emit_line(d, sep_line);
 
     ri = 0;
     while ri < result_count {
@@ -6150,7 +6360,7 @@ fn exec_select_join(d: &mut DB) ~ Console {
             row_line = row_line + pad_right(val, w);
             ci = ci + 1;
         }
-        println!("{}", row_line);
+        emit_line(d, row_line);
         ri = ri + 1;
     }
 }
@@ -6302,6 +6512,7 @@ fn exec_update(d: &mut DB) ~ Console {
     let tname = sp_get(d, d.p_table);
     let tidx = find_table(d, tname);
     if tidx < 0 {
+        d.stmt_failed = true;
         println!("Error: table '{}' not found", tname);
         return;
     }
@@ -6318,6 +6529,7 @@ fn exec_update(d: &mut DB) ~ Console {
     let set_val_text = sp_get(d, d.set_val);
     let scol = find_col(d, cs, cc, set_col_name);
     if scol < 0 {
+        d.stmt_failed = true;
         println!("Error: column '{}' not found", set_col_name);
         return;
     }
@@ -6327,17 +6539,20 @@ fn exec_update(d: &mut DB) ~ Console {
     if d.set_op >= 0 {
         let left_name = sp_get(d, d.set_val);
         if left_name != set_col_name {
+            d.stmt_failed = true;
             println!("Error: UPDATE arithmetic must reference column '{}'", set_col_name);
             return;
         }
         let operand_txt = sp_get(d, d.set_operand);
         if is_int_str(operand_txt) == false {
+            d.stmt_failed = true;
             println!("Error: UPDATE arithmetic operand must be an integer");
             return;
         }
         operand_int = parse_int_str(operand_txt);
         if d.set_op == 3 {
             if operand_int == 0 {
+                d.stmt_failed = true;
                 println!("Error: UPDATE division by zero");
                 return;
             }
@@ -6385,12 +6600,14 @@ fn exec_update(d: &mut DB) ~ Console {
         ci = ci + 1;
     }
     if arith_err {
+        d.stmt_failed = true;
         println!("Error: UPDATE arithmetic on a non-integer value in column '{}'", set_col_name);
         return;
     }
     if updated > 0 {
         let err = con_check_table(d, tidx, new_cells, rs, rc, cc, scol);
         if err.len() > 0 {
+            d.stmt_failed = true;
             println!("Error: {}", err);
             return;
         }
@@ -6406,6 +6623,7 @@ fn exec_delete(d: &mut DB) ~ Console {
     let tname = sp_get(d, d.p_table);
     let tidx = find_table(d, tname);
     if tidx < 0 {
+        d.stmt_failed = true;
         println!("Error: table '{}' not found", tname);
         return;
     }
@@ -6497,6 +6715,7 @@ fn exec_drop(d: &mut DB) ~ Console {
     let tname = sp_get(d, d.p_table);
     let tidx = find_table(d, tname);
     if tidx < 0 {
+        d.stmt_failed = true;
         println!("Error: table '{}' not found", tname);
         return;
     }
@@ -6594,6 +6813,7 @@ fn exec_alter_table(d: &mut DB) ~ Console {
     let tname = sp_get(d, d.p_table);
     let tidx = find_table(d, tname);
     if tidx < 0 {
+        d.stmt_failed = true;
         println!("Error: table '{}' not found", tname);
         return;
     }
@@ -7067,7 +7287,13 @@ fn vec_replace(v: Vec<i32>, vlen: i32, idx: i32, new_val: i32) -> Vec<i32> {
 // PRINT HELPERS
 // =============================================================================
 
-fn print_result_row(d: &DB, headers: Vec<i32>, results: Vec<i32>, count: i32) ~ Console {
+// A result line of a SELECT: printed, and kept for the receipt when on.
+fn emit_line(d: &mut DB, line: String) ~ Console {
+    println!("{}", line);
+    if d.rcpt_on { vec_push(d.rcpt_parts, line + "\n"); }
+}
+
+fn print_result_row(d: &mut DB, headers: Vec<i32>, results: Vec<i32>, count: i32) ~ Console {
     // Calculate widths
     let mut widths: Vec<i32> = vec![];
     let mut wi = 0;
@@ -7092,8 +7318,8 @@ fn print_result_row(d: &DB, headers: Vec<i32>, results: Vec<i32>, count: i32) ~ 
         sep_line = sep_line + make_dashes(w);
         hi = hi + 1;
     }
-    println!("{}", hdr_line);
-    println!("{}", sep_line);
+    emit_line(d, hdr_line);
+    emit_line(d, sep_line);
     // Print value row
     let mut row_line = "";
     let mut ri = 0;
@@ -7104,7 +7330,7 @@ fn print_result_row(d: &DB, headers: Vec<i32>, results: Vec<i32>, count: i32) ~ 
         row_line = row_line + pad_right(val, w);
         ri = ri + 1;
     }
-    println!("{}", row_line);
+    emit_line(d, row_line);
 }
 
 // =========================================================================
@@ -7433,6 +7659,7 @@ fn exec_create_index(d: &mut DB) ~ Console {
 
     let tidx = find_table(d, tname);
     if tidx < 0 {
+        d.stmt_failed = true;
         println!("Error: table '{}' not found", tname);
         return;
     }
@@ -7440,6 +7667,7 @@ fn exec_create_index(d: &mut DB) ~ Console {
     let cc = vec_get(d.tbl_col_counts, tidx);
     let col_i = find_col(d, cs, cc, cname);
     if col_i < 0 {
+        d.stmt_failed = true;
         println!("Error: column '{}' not found in table '{}'", cname, tname);
         return;
     }
@@ -7449,6 +7677,7 @@ fn exec_create_index(d: &mut DB) ~ Console {
     while ei < d.idx_count {
         let existing_name = sp_get(d, vec_get(d.idx_names, ei));
         if existing_name == iname {
+            d.stmt_failed = true;
             println!("Error: index '{}' already exists", iname);
             return;
         }
@@ -8891,8 +9120,8 @@ fn exec_xselect(d: &mut DB) ~ Console + Process {
         sl = sl + make_dashes(vec_get(widths, c));
         c = c + 1;
     }
-    println!("{}", hl);
-    println!("{}", sl);
+    emit_line(d, hl);
+    emit_line(d, sl);
     let mut r = 0;
     while r < nrows {
         let mut line = "";
@@ -8904,7 +9133,7 @@ fn exec_xselect(d: &mut DB) ~ Console + Process {
             else { line = line + pad_right(v, vec_get(widths, c)); }
             c = c + 1;
         }
-        println!("{}", line);
+        emit_line(d, line);
         r = r + 1;
     }
 }
@@ -9132,7 +9361,188 @@ fn exec_sql_no_wal(d: &mut DB, input: String) ~ Console + FileSystem + Process {
     else if st == 10 { exec_alter_table(d); }
 }
 
+// =========================================================================
+// History, AS OF and receipts (bdb/COMPLETE.md P16)
+// =========================================================================
+// <db>.hist holds "BASE <txid>" and then every committed transaction as the
+// WAL wrote it (TXID, OP lines, COMMIT <hash>). <db>.hist.base is the state
+// at that txid when the database already held tables. A record whose hash
+// does not match is skipped, and the first whole record of a txid wins, so a
+// record lost from the history's cache and appended again by WAL replay
+// leaves one copy in effect.
+
+// Position of a trailing "AS OF <digits>" (the space before AS), or -1.
+fn as_of_pos(s: String) -> i64 {
+    let digits = "0123456789";
+    let n = s.len();
+    let mut i = n;
+    while i > 0 && digits.index_of(s.char_at(i - 1)) >= 0 { i = i - 1; }
+    if i == n { return 0 - 1; }
+    let mut j = i;
+    while j > 0 && s.char_at(j - 1) == " " { j = j - 1; }
+    if j == i || j < 2 { return 0 - 1; }
+    if s.substring(j - 2, 2).to_uppercase() != "OF" { return 0 - 1; }
+    j = j - 2;
+    let k = j;
+    while j > 0 && s.char_at(j - 1) == " " { j = j - 1; }
+    if j == k || j < 3 { return 0 - 1; }
+    if s.substring(j - 2, 2).to_uppercase() != "AS" { return 0 - 1; }
+    j = j - 2;
+    if s.char_at(j - 1) != " " { return 0 - 1; }
+    j - 1
+}
+
+// The txid of the history's BASE line (0 for a history without one).
+fn hist_base(d: &DB) -> i32 ~ FileSystem {
+    let content = read_file(d.hist_path);
+    let nl = content.index_of("\n");
+    let first = if nl >= 0 { content.substring(0, nl) } else { content };
+    let f = strip_cr(first);
+    if f.starts_with("BASE ") { return parse_int_str(f.substring(5, f.len() - 5)); }
+    0
+}
+
+// The state after every committed transaction with txid <= n, rebuilt in a
+// separate in-memory database from the base and the history. Nothing is
+// written: replay goes through exec_sql_no_wal.
+fn hist_state(d: &DB, n: i32) -> DB ~ Console + FileSystem + Process {
+    let mut d2 = db_new(d.hist_path + ".base");
+    db_load(&mut d2);
+    let base = hist_base(d);
+    let content = read_file(d.hist_path);
+    let lines: Vec<String> = content.lines();
+    let nl = vec_len(lines);
+    let mut rec_id: Vec<i32> = vec![];
+    let mut rec_start: Vec<i64> = vec![];
+    let mut rec_end: Vec<i64> = vec![];
+    let mut max_id = base;
+    let mut txn_start: i64 = 0 - 1;
+    let mut txn_id = 0;
+    let mut txn_h = fnv_init();
+    let mut li: i64 = 0;
+    while li < nl {
+        let wl = strip_cr(vec_get(lines, li));
+        if wl.starts_with("TXID ") {
+            txn_h = fnv_extend(fnv_init(), wl + "\n");
+            txn_id = parse_int_str(wl.substring(5, wl.len() - 5));
+            txn_start = li + 1;
+        } else if wl.starts_with("OP ") || wl.starts_with("OPX ") {
+            txn_h = fnv_extend(txn_h, wl + "\n");
+        } else if wl.starts_with("COMMIT") {
+            if txn_start >= 0 && wl == commit_line(txn_h) {
+                vec_push(rec_id, txn_id);
+                vec_push(rec_start, txn_start);
+                vec_push(rec_end, li);
+                if txn_id > max_id { max_id = txn_id; }
+            }
+            txn_start = 0 - 1;
+        }
+        li = li + 1;
+    }
+    // slot[t - base] = the first whole record of txid t, or -1.
+    let mut slot: Vec<i32> = vec![];
+    let mut t = base;
+    while t <= max_id { vec_push(slot, 0 - 1); t = t + 1; }
+    let mut r = 0;
+    while r < vec_len(rec_id) {
+        let id = vec_get(rec_id, r);
+        if id > base && vec_get(slot, id - base) < 0 { slot[id - base] = r; }
+        r = r + 1;
+    }
+    t = base + 1;
+    while t <= n && t <= max_id {
+        let ri = vec_get(slot, t - base);
+        if ri >= 0 {
+            let mut j = vec_get(rec_start, ri);
+            let e = vec_get(rec_end, ri);
+            while j < e {
+                let sql = wal_op_sql(strip_cr(vec_get(lines, j)));
+                if sql.len() > 0 { exec_sql_no_wal(&mut d2, sql); }
+                j = j + 1;
+            }
+        }
+        t = t + 1;
+    }
+    d2.txn_id = n;
+    d2
+}
+
+// Start a history for this database (QDB_HISTORY=1 and no <db>.hist yet).
+fn hist_init(d: &mut DB) ~ Console + FileSystem + Process {
+    let base = d.hist_path + ".base";
+    if d.tbl_count > 0 {
+        durable_write(d, base, db_text(d), false, "hist_base");
+        durable_sync(d, base, "hist_base_sync");
+    } else if file_exists(base) {
+        durable_write(d, base, "", false, "hist_base");
+    }
+    durable_write(d, d.hist_path, "BASE " + to_string_i32(d.txn_id) + "\n", false, "hist_init");
+    durable_sync(d, d.hist_path, "hist_init_sync");
+    d.hist_on = true;
+}
+
+// SHA-256 of the state: the .db text without its header line, so the same
+// rows, schema and indexes hash the same whichever txid wrote them.
+fn state_sha(d: &mut DB) -> String {
+    if d.state_sha.len() == 0 {
+        let all = db_text(d);
+        let nl = all.index_of("\n");
+        d.state_sha = sha256_hex(all.substring(nl + 1, all.len() - nl - 1));
+    }
+    d.state_sha
+}
+
+// RECEIPT <txid> <state> <query> <result>, after a SELECT's result lines.
+fn print_receipt(d: &mut DB, txid: i32, query: String) ~ Console {
+    if d.in_transaction {
+        println!("RECEIPT - open transaction");
+        return;
+    }
+    let st = state_sha(d);
+    let res = sha256_hex(concat_parts(d.rcpt_parts));
+    println!("RECEIPT {} {} {} {}", txid, st, sha256_hex(query), res);
+}
+
+fn exec_as_of(d: &mut DB, input: String, pos: i64) ~ Console + FileSystem + Process {
+    let q = input.substring(0, pos).trim();
+    let tail = input.substring(pos, input.len() - pos).trim();
+    let sp = tail.len() - 1;
+    let mut k = sp;
+    while k > 0 && tail.char_at(k - 1) != " " { k = k - 1; }
+    let n = parse_int_str(tail.substring(k, tail.len() - k));
+    if !file_exists(d.hist_path) {
+        println!("Error: AS OF needs a history; start qdb with QDB_HISTORY=1");
+        return;
+    }
+    let base = hist_base(d);
+    if n < base {
+        println!("Error: AS OF {}: the history starts at txid {}", n, base);
+        return;
+    }
+    if n > d.txn_id {
+        println!("Error: AS OF {}: the latest txid is {}", n, d.txn_id);
+        return;
+    }
+    let mut d2 = hist_state(d, n);
+    d2.rcpt_on = d.rcpt_on;
+    reset_parser(&mut d2, q);
+    parse_sql(&mut d2);
+    let st = d2.stmt_type;
+    if st == 0 { exec_select(&mut d2); }
+    else if st == 20 { exec_xselect(&mut d2); }
+    else {
+        println!("Error: AS OF applies to SELECT only");
+        return;
+    }
+    if d2.rcpt_on { print_receipt(&mut d2, n, q); }
+}
+
 fn exec_sql(d: &mut DB, input: String) ~ Console + FileSystem + Process {
+    let aspos = as_of_pos(input);
+    if aspos >= 0 {
+        exec_as_of(d, input, aspos);
+        return;
+    }
     // Handle transaction control keywords before parsing
     let trimmed_upper = input.to_uppercase();
     if trimmed_upper == "BEGIN" {
@@ -9144,6 +9554,7 @@ fn exec_sql(d: &mut DB, input: String) ~ Console + FileSystem + Process {
         return;
     }
     if trimmed_upper == "ROLLBACK" {
+        d.state_sha = "";
         wal_rollback(d);
         return;
     }
@@ -9170,17 +9581,27 @@ fn exec_sql(d: &mut DB, input: String) ~ Console + FileSystem + Process {
     }
 
     // Read-only: SELECT — no WAL
-    if st == 0 { exec_select(d); return; }
-    if st == 20 { exec_xselect(d); return; }
+    if st == 0 || st == 20 {
+        let fresh: Vec<String> = vec![];
+        d.rcpt_parts = fresh;
+        if st == 0 { exec_select(d); } else { exec_xselect(d); }
+        if d.rcpt_on { print_receipt(d, d.txn_id, input); }
+        return;
+    }
 
-    // Mutations: log to WAL, then execute in memory
-    if st == 1 { exec_insert(d); wal_log_mutation(d, input); }
-    else if st == 2 { exec_create(d); wal_log_mutation(d, input); }
-    else if st == 3 { exec_update(d); wal_log_mutation(d, input); }
-    else if st == 4 { exec_delete(d); wal_log_mutation(d, input); }
-    else if st == 5 { exec_drop(d); wal_log_mutation(d, input); }
-    else if st == 6 { exec_create_index(d); wal_log_mutation(d, input); }
-    else if st == 10 { exec_alter_table(d); wal_log_mutation(d, input); }
+    // Mutations: execute in memory, then log to the WAL unless the statement
+    // printed an error and changed nothing (P16).
+    d.state_sha = "";
+    d.stmt_failed = false;
+    if st == 1 { exec_insert(d); }
+    else if st == 2 { exec_create(d); }
+    else if st == 3 { exec_update(d); }
+    else if st == 4 { exec_delete(d); }
+    else if st == 5 { exec_drop(d); }
+    else if st == 6 { exec_create_index(d); }
+    else if st == 10 { exec_alter_table(d); }
+    else { return; }
+    if !d.stmt_failed { wal_log_mutation(d, input); }
 }
 
 // =========================================================================
@@ -9334,9 +9755,12 @@ fn main() ~ Console + Environment + FileSystem + Process {
     d.crash_torn = getenv("QDB_CRASH_MODE") == "torn";
     d.sync_on = getenv("QDB_SYNC") != "off";
     d.trace_writes = getenv("QDB_TRACE_WRITES") == "1";
+    d.hist_on = file_exists(d.hist_path);
+    d.rcpt_on = getenv("QDB_RECEIPTS") == "1";
     db_load(&mut d);
     // Replay any committed transactions from WAL (crash recovery)
     wal_replay(&mut d);
+    if !d.hist_on && getenv("QDB_HISTORY") == "1" { hist_init(&mut d); }
 
     if nargs >= 3 {
         // Single command mode

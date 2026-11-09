@@ -106,6 +106,9 @@ qdb is about 7,000 lines of BuildLang. BuildQL is the SQL dialect it runs:
 - Write-Ahead Log (WAL) for crash recovery
 - BEGIN/COMMIT/ROLLBACK transaction support, in one process or across several: a clean exit inside BEGIN leaves `HOLD` in the WAL and the next process resumes the transaction
 - Interactive REPL with dot-commands (.tables, .schema, .wal)
+- History and time travel: run qdb once with `QDB_HISTORY=1` and the database keeps every committed transaction in `<db>.hist` (append-only, each record hashed). `SELECT ... AS OF <txid>` answers from the state right after that transaction
+- Receipts: with `QDB_RECEIPTS=1` each SELECT result is followed by `RECEIPT <txid> <state> <query> <result>`, the SHA-256 of the state, the query and the printed rows. Another process checks a result by running the same query `AS OF` that txid and comparing receipts (`bdb/tests/test_qdb_receipts.py`)
+- Seeded power cuts: `bdb/tests/test_qdb_faults.py` drops, tears and reorders the writes no flush covered, from a seed, and checks recovery; a COMMIT record carries a hash of its transaction, so a torn transaction is never replayed
 
 **Architecture:** All state (parser, storage, indexes, WAL, REPL) lives in a
 single `DB` struct due to the flat-struct constraint. The SQL parser is embedded in the same file.
