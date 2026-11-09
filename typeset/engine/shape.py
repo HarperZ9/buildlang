@@ -21,7 +21,7 @@ class Piece:
 @dataclass
 class Diagnostics:
     missing: list = field(default_factory=list)   # (char, font key)
-    overfull: list = field(default_factory=list)  # (block index, line, excess pt)
+    overfull: list = field(default_factory=list)  # (block index, line, excess pt[, table cell])
     underfull: list = field(default_factory=list)
     notes: list = field(default_factory=list)
     math_errors: list = field(default_factory=list)  # (math source, error)
@@ -30,8 +30,8 @@ class Diagnostics:
         out = []
         for ch, key in self.missing:
             out.append(f"missing glyph U+{ord(ch):04X} {ch!r} in {key} (and its fallbacks)")
-        for b, line, excess in self.overfull:
-            out.append(f"overfull line: block {b} line {line} by {excess:.2f}pt")
+        for entry in self.overfull:
+            out.append(f"overfull line: {overfull_where(entry)} by {entry[2]:.2f}pt")
         for b, line, bad in self.underfull:
             out.append(f"underfull line: block {b} line {line} badness {bad}")
         for src, err in self.math_errors:
@@ -122,3 +122,14 @@ def _ligate(ligs, gids, clusters):
             out_c.append(clusters[i])
             i += 1
     return out_g, out_c
+
+
+def overfull_where(entry):
+    """Where an overfull line is: "block 12 line 3", or for a table cell "block 12, table row 3, column 2"."""
+    b, line = entry[0], entry[1]
+    cell = entry[3] if len(entry) > 3 else None
+    if not cell:
+        return f"block {b} line {line}"
+    row = "the header row" if cell["row"] == "header" else f"table row {cell['row']}"
+    tail = f", line {cell['cell_line']} of the cell" if cell.get("cell_line", 1) > 1 else ""
+    return f"block {b}, {row}, column {cell['column']}{tail}"

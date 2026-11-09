@@ -125,7 +125,7 @@ The import runs once. After it, the `.bld` program is edited, and the `.tex` fil
 `python -m buildtex SOURCE OUT --theme NAME` lays the document out once and writes `OUT.pdf`, `OUT.html` and per-page SVG from the same pages, then reads its own PDF back and writes `OUT.buildtex.json`, the build receipt:
 
 - the source, IR and output SHA-256;
-- the facts: page count from the PDF and from the layout, overfull lines, underfull lines, missing glyphs, every font and whether it is embedded, images, blind text runs, and whether every block's words come out of the PDF in source order;
+- the facts: page count from the PDF and from the layout, overfull lines (each with `where`: the block and line, or for a line in a table cell the block, table row and column, as in `block 12, table row 3, column 2`; the header row is `header`), underfull lines, missing glyphs, every font and whether it is embedded, images, blind text runs, and whether every block's words come out of the PDF in source order;
 - `failed`, the list of broken conditions, empty for a passing build;
 - `external_programs`, every process the build started.
 
