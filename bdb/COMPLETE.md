@@ -449,6 +449,23 @@ must show differences. Guards: test_qdb.sh, crash test (176 points, 0 violations
 cuts (0 of 10,000, digest 77a49282... unchanged, since no WAL or .db bytes change), P2 2,000 of
 2,000, text round trip, WAL recovery, reference differential, library, receipts, mutations.
 
+**P26. Settling the P25 comparison (speed item 1), written 2026-11-09 before the runs below.** P25's
+prepared update and mixed ratios (0.97, 0.92) sat inside the machine's run-to-run spread, and each
+timed region was short: 2,000 statements take 1 to 3 ms, near the timer's and the scheduler's
+grain. No engine change. The harness gains paired runs (qdb and SQLite alternate, one pair per
+repetition, so a slow spell lands on both), the median of the per-pair ratios, and a
+distribution-free interval for that median (order statistics; with 11 pairs, the 3rd and 9th
+smallest ratios, exact coverage 93.5 percent). Two runs, prep API, 10,000 rows, 11 pairs each, at a
+moment with no cargo, rustc or render job and at least 8 GB free: run A repeats P25's 2,000
+statements; run B uses 200,000 statements so each timed region lasts about 0.1 to 0.3 s. Claim rule:
+qdb is called faster than SQLite on a mode only when the interval's upper end is below 1.0; slower
+only when its lower end is above 1.0; otherwise unsettled. Predictions (written before any paired
+run): select slower in both runs (B median 1.4 to 1.9); update and mixed unsettled in run A; in run
+B update 0.8 to 1.3 and mixed 0.8 to 1.2, with at most one of them settled faster. Planted check:
+`--aa` puts SQLite in qdb's place; its intervals must contain 1.0 on all three modes (run B
+settings, 7 pairs). A planted interval that excludes 1.0 means the interval method or the machine
+cannot support a claim, and no claim is made. Guards: the full set, on the unchanged engine.
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
