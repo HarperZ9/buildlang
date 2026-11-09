@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- 2026-11-09: the REPL ends at end of input. A script piped to `qdb` with no `.quit` used to loop
+  forever on the prompt; it now leaves the way `.quit` does (exit 0, the WAL folded into the `.db`,
+  `HOLD` inside an open BEGIN). New test `bdb/tests/test_qdb_eof.py`, in CI.
+
 - 2026-11-09: memory follows the data. A checkpoint and a COMMIT build their text with one join,
   the parser reuses its lists, the tokenizer reads bytes, and a single-row constraint check no
   longer builds a map. Through `bdb/lib`, loading 8,000 rows peaks at 9.7 MB where it took 953.8 MB;

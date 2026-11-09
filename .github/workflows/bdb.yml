@@ -12,6 +12,7 @@ name: bdb
 #   - bdb/tests/test_qdb_lib.py             the static library (bdb/lib) against the CLI
 #   - bdb/tests/test_qdb_mutations.py       INSERT, UPDATE and DELETE on indexed tables against SQLite
 #   - bdb/tests/test_qdb_memory.py          memory growth per row and per statement, planted leak
+#   - bdb/tests/test_qdb_eof.py             end of input ends the REPL (a script with no .quit)
 #   - bql::tests::in_process_subset_matches_qdb, the compiler's in-process BuildQL
 #     subset checked against this qdb binary (QDB_BIN)
 # A change to compiler/ runs it too: a codegen regression that breaks qdb fails here.
@@ -146,3 +147,6 @@ jobs:
           $BUILDC "$RUNNER_TEMP/planted.bld" --target c -o "$RUNNER_TEMP/planted.c"
           gcc -O2 -w -o "$RUNNER_TEMP/qdb_planted" "$RUNNER_TEMP/planted.c" -lm
           python3 bdb/tests/test_qdb_memory.py bdb/qdb.exe --planted "$RUNNER_TEMP/qdb_planted"
+
+      - name: End of input ends the REPL (a script with no .quit must exit 0)
+        run: python3 bdb/tests/test_qdb_eof.py bdb/qdb.exe
