@@ -71,7 +71,9 @@ mod tests {
 
     #[test]
     fn every_macro_round_trips_to_its_type() {
-        for ty in ["i8", "i16", "i32", "i64", "isize", "u8", "u16", "u32", "u64", "usize"] {
+        for ty in [
+            "i8", "i16", "i32", "i64", "isize", "u8", "u16", "u32", "u64", "usize",
+        ] {
             for bound in ["MIN", "MAX"] {
                 if let Some(m) = c_limit_macro(ty, bound) {
                     assert_eq!(c_limit_type(m), Some(int_type_by_name(ty)), "{ty}::{bound}");

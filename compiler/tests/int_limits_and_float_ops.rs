@@ -59,10 +59,14 @@ fn every_integer_limit_compiles_with_its_value() {
     ];
     let mut body = String::new();
     for (t, b, _) in &cases {
-        body.push_str(&format!("    let v_{t}_{b}: {t} = {t}::{b};\n    println!(\"{{}}\", v_{t}_{b});\n"));
+        body.push_str(&format!(
+            "    let v_{t}_{b}: {t} = {t}::{b};\n    println!(\"{{}}\", v_{t}_{b});\n"
+        ));
     }
     let src = format!("fn main() ~ Console {{\n{body}}}\n");
-    let Some((code, out, err)) = run("all", &src) else { return };
+    let Some((code, out, err)) = run("all", &src) else {
+        return;
+    };
     assert_eq!(code, 0, "stderr: {err}");
     let want: Vec<&str> = cases.iter().map(|c| c.2).collect();
     assert_eq!(out.lines().collect::<Vec<_>>(), want);
@@ -70,8 +74,11 @@ fn every_integer_limit_compiles_with_its_value() {
 
 #[test]
 fn i8_max_in_arithmetic_issue_212() {
-    let src = "fn main() ~ Console {\n    let t: i8 = i8::MAX / 2 + 1;\n    println!(\"{}\", t);\n}\n";
-    let Some((code, out, err)) = run("212", src) else { return };
+    let src =
+        "fn main() ~ Console {\n    let t: i8 = i8::MAX / 2 + 1;\n    println!(\"{}\", t);\n}\n";
+    let Some((code, out, err)) = run("212", src) else {
+        return;
+    };
     assert_eq!(code, 0, "stderr: {err}");
     assert_eq!(out, "64\n");
 }
@@ -85,7 +92,9 @@ fn u64_max_minus_literal_keeps_its_width_issue_215() {
                \x20   let r: u64 = mul((u64::MAX - 9223372036854775807), (2 as u64));\n\
                \x20   println!(\"{}\", r);\n\
                }\n";
-    let Some((code, out, err)) = run("215", src) else { return };
+    let Some((code, out, err)) = run("215", src) else {
+        return;
+    };
     assert_eq!(out, "18446744073709551614\n", "stderr: {err}");
     assert_eq!(code, 101, "2^63 * 2 must trap; stdout {out}");
     assert!(err.contains("attempt to multiply with overflow"), "{err}");
@@ -100,7 +109,9 @@ fn literal_local_unified_with_float_adds_as_float_issue_203() {
                \x20   x = x + 1;\n\
                \x20   println!(\"{}\", x);\n\
                }\n";
-    let Some((code, out, err)) = run("203", src) else { return };
+    let Some((code, out, err)) = run("203", src) else {
+        return;
+    };
     assert_eq!(code, 0, "stderr: {err}");
     assert_eq!(out, "1.5\n");
 }
