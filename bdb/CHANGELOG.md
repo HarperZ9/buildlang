@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- 2026-11-09: `REPLACE INTO` and `INSERT OR REPLACE INTO` run with SQLite's rule: a new row removes
+  the rows that share any of its UNIQUE or PRIMARY KEY keys. sqllogictest 9,181 to 9,185 of 9,202.
+
 - 2026-11-09: DISTINCT works in SUM, AVG, MIN, MAX and TOTAL, with or without GROUP BY; `total()`,
   `group_concat(x [, sep])`, `NOT INDEXED` / `INDEXED BY` and the postfix tests `x NOT NULL`,
   `ISNULL`, `NOTNULL` run. sqllogictest 9,143 to 9,181 of 9,202.

@@ -74,7 +74,7 @@ its commit 4a296c1 keep the FSL-1.1-MIT licence they were published under there.
 qdb is about 7,000 lines of BuildLang. BuildQL is the SQL dialect it runs:
 
 **SQL support:**
-- CREATE TABLE, INSERT (VALUES or SELECT), SELECT, UPDATE, DELETE, DROP TABLE
+- CREATE TABLE, INSERT (VALUES or SELECT), REPLACE and INSERT OR REPLACE, SELECT, UPDATE, DELETE, DROP TABLE
 - Column types INTEGER, REAL, and TEXT, with the common SQL aliases (INT, BIGINT, SMALLINT, FLOAT, DOUBLE, NUMERIC, and similar) recognized so a numeric column orders and right-aligns as a number
 - ALTER TABLE ADD COLUMN
 - UPDATE SET col = col OP literal, where OP is `+`, `-`, `*`, or `/` (arithmetic RHS, fail-closed on bad operand or division by zero)
