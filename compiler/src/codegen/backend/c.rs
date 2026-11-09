@@ -4906,6 +4906,15 @@ impl CBackend {
         right: &MirValue,
         locals: &[MirLocal],
     ) -> Option<(IntSize, bool)> {
+        // A float operand makes the whole operation a float one. Without this
+        // guard `x + 1` with `x: double` (an integer-literal local unified
+        // with a float) took the literal's i32 and emitted `bl_iadd_i32(x, 1)`,
+        // which truncates x to an integer (#203).
+        let is_float =
+            |v: &MirValue| matches!(self.value_mir_type(v, locals), Some(MirType::Float(_)));
+        if is_float(left) || is_float(right) {
+            return None;
+        }
         let local_ty = match left {
             MirValue::Local(_) => self.value_int_type(left, locals),
             _ => None,

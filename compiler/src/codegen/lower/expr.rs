@@ -17,6 +17,7 @@ use crate::codegen::builder::values;
 use crate::codegen::ir::*;
 use crate::codegen::runtime;
 
+use super::limits::{c_limit_macro, int_type_by_name};
 use super::{MirLowerer, OverloadTarget};
 
 /// Owned copy of a loop label for storage in `loop_stack`, or `None` for an
@@ -841,13 +842,20 @@ impl<'ctx> MirLowerer<'ctx> {
                 ("f32", "INFINITY") => return Ok(values::global("INFINITY".to_string())),
                 ("f32", "NEG_INFINITY") => return Ok(values::global("(-INFINITY)".to_string())),
                 ("f32", "NAN") => return Ok(values::global("NAN".to_string())),
-                ("i32", "MIN") => return Ok(values::global("INT32_MIN".to_string())),
-                ("i32", "MAX") => return Ok(values::global("INT32_MAX".to_string())),
-                ("i64", "MIN") => return Ok(values::global("INT64_MIN".to_string())),
-                ("i64", "MAX") => return Ok(values::global("INT64_MAX".to_string())),
-                ("u32", "MAX") => return Ok(values::global("UINT32_MAX".to_string())),
-                ("u64", "MAX") => return Ok(values::global("UINT64_MAX".to_string())),
-                ("usize", "MAX") => return Ok(values::global("SIZE_MAX".to_string())),
+                // Integer limits lower to the C limit macros. Their MIR type
+                // comes from `c_limit_type`, so a temporary such as
+                // `u64::MAX - 1` is declared with the operand's width (#215),
+                // and every integer width is covered (#212: `i8::MAX` used to
+                // fall through to an undeclared `i8_MAX`). Unsigned minimums
+                // are the typed constant 0.
+                (ty, "MIN") if matches!(ty, "u8" | "u16" | "u32" | "u64" | "usize") => {
+                    return Ok(MirValue::Const(MirConst::Uint(0, int_type_by_name(ty))));
+                }
+                (ty, bound @ ("MIN" | "MAX")) => {
+                    if let Some(name) = c_limit_macro(ty, bound) {
+                        return Ok(values::global(name.to_string()));
+                    }
+                }
                 _ => {}
             }
         }

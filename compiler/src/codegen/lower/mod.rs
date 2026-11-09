@@ -17,6 +17,7 @@
 mod c_abi;
 mod expr;
 mod format;
+mod limits;
 mod macros;
 pub(crate) mod parallel;
 #[cfg(test)]
@@ -2664,6 +2665,8 @@ impl<'ctx> MirLowerer<'ctx> {
                 // Look up the global's type from the module
                 if let Some(global) = self.module.find_global(name) {
                     global.ty.clone()
+                } else if let Some(ty) = limits::c_limit_type(name) {
+                    ty
                 } else {
                     MirType::i32()
                 }
