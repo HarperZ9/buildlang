@@ -297,6 +297,23 @@ Cost (seeds per second on each platform) is reported; no bound.
   was stopped in `select5.test`; P11 is reported for the other 16 files with `select5.test` counted
   at its P10 score (0 queries pass), and the planted check runs on the same 16 files. Ordering
   the joins is P12, which measures all 17 files again.
+- **A7 (2026-11-09 04:40, after the first P15 run, before any change to the engine).** The P15 run
+  on main 3aa051c found 2 violations in 10,000 seeds (9,351 and 9,570), the same on Windows and
+  Linux. Both cut the explicit transaction step before its `wal_sync`: one OP record torn, a later
+  record kept beyond a zero-filled hole, and the COMMIT record torn to `COMMIT` with no line break.
+  Replay took the prefix as a commit and ran the torn OP; the recovering process exited 1. The
+  commit was never acknowledged, so the rule allowed the state before or after, and neither came
+  out. The fix, P15b: a commit record becomes `COMMIT <h>`, where h is the FNV-1a 32-bit hash, in
+  8 hex digits, of the transaction's `TXID` line and each of its OP and OPX lines, each with its
+  line break. Replay applies a transaction only when h matches; a bare `COMMIT` from an older
+  build counts only when its line break survived. Prediction: 0 violations in seeds 1 to 10,000,
+  hashes still equal on Windows and Linux. Planted check: a build that accepts any line starting
+  with `COMMIT` (the old rule) shows the violations again on seeds 1 to 10,000. Guards: test_qdb.sh
+  no FAIL, crash test 0 violations, P2 2,000, text, library and reference differential unchanged.
+  `test_qdb_wal_recovery.py` truncates the WAL at every byte; its reference model now counts a
+  COMMIT line only when the whole record survived, and its comparison with the reference engine
+  skips offsets that cut inside a COMMIT record, where the reference engine accepts the torn
+  prefix (the behaviour this fix removes).
 
 ## Baseline (qdb at the move, 2026-11-08, buildc 1.11.0)
 
