@@ -1,0 +1,3 @@
+# mode golden args... (run from the package folder)
+# round trip: the golden is the input trace itself
+exact tests/08-lamp-hound.jsonl --stdout tests/08-lamp-hound.jsonl

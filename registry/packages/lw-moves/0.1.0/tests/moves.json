@@ -1,0 +1,2417 @@
+{
+ "format": "lw-moves",
+ "version": 1,
+ "fps": 60,
+ "common": {
+  "flinch": {
+   "kind": "stagger",
+   "recovery": 30,
+   "root": [
+    [
+     0,
+     5,
+     -0.8
+    ]
+   ],
+   "cancel": {
+    "roll": [
+     22,
+     29
+    ],
+    "step": [
+     22,
+     29
+    ]
+   }
+  },
+  "stagger": {
+   "kind": "stagger",
+   "recovery": 60,
+   "root": [
+    [
+     0,
+     10,
+     -1.2
+    ]
+   ],
+   "cancel": {
+    "roll": [
+     40,
+     59
+    ],
+    "step": [
+     40,
+     59
+    ]
+   }
+  },
+  "parried": {
+   "kind": "stagger",
+   "recovery": 62,
+   "root": [
+    [
+     0,
+     6,
+     -0.8
+    ]
+   ]
+  },
+  "ducked": {
+   "kind": "stagger",
+   "recovery": 54
+  },
+  "knockdown": {
+   "kind": "down",
+   "recovery": 48,
+   "then": "getup"
+  },
+  "getup": {
+   "kind": "down",
+   "recovery": 50,
+   "iframes": [
+    0,
+    30
+   ],
+   "cancel": {
+    "roll": [
+     30,
+     49
+    ]
+   }
+  },
+  "snared": {
+   "kind": "down",
+   "recovery": 150,
+   "then": "getup"
+  },
+  "fall": {
+   "kind": "fall",
+   "recovery": 70
+  },
+  "yield": {
+   "kind": "fall",
+   "recovery": 40
+  }
+ },
+ "body": {
+  "step": {
+   "kind": "dodge",
+   "recovery": 26,
+   "stamina": 1,
+   "iframes": [
+    2,
+    10
+   ],
+   "root": [
+    [
+     0,
+     10,
+     7
+    ]
+   ],
+   "dir": "input",
+   "cancel": {
+    "light": [
+     14,
+     25
+    ],
+    "heavy": [
+     14,
+     25
+    ],
+    "step": [
+     18,
+     25
+    ],
+    "roll": [
+     18,
+     25
+    ],
+    "catch": [
+     16,
+     25
+    ]
+   }
+  },
+  "roll_dash": {
+   "kind": "dodge",
+   "recovery": 36,
+   "stamina": 2,
+   "iframes": [
+    3,
+    17
+   ],
+   "root": [
+    [
+     0,
+     12,
+     8
+    ]
+   ],
+   "dir": "input",
+   "cancel": {
+    "light": [
+     15,
+     35
+    ],
+    "heavy": [
+     15,
+     35
+    ],
+    "step": [
+     28,
+     35
+    ],
+    "roll": [
+     28,
+     35
+    ],
+    "catch": [
+     30,
+     35
+    ]
+   }
+  },
+  "roll": {
+   "kind": "dodge",
+   "recovery": 60,
+   "stamina": 2,
+   "iframes": [
+    6,
+    26
+   ],
+   "root": [
+    [
+     0,
+     26,
+     7.4
+    ],
+    [
+     27,
+     40,
+     2.4
+    ]
+   ],
+   "dir": "input",
+   "cancel": {
+    "light": [
+     38,
+     59
+    ],
+    "heavy": [
+     38,
+     59
+    ],
+    "step": [
+     38,
+     59
+    ],
+    "roll": [
+     38,
+     59
+    ],
+    "catch": [
+     40,
+     59
+    ]
+   }
+  },
+  "roll_hop": {
+   "kind": "dodge",
+   "recovery": 110,
+   "stamina": 2,
+   "iframes": [
+    9,
+    25
+   ],
+   "root": [
+    [
+     4,
+     28,
+     6
+    ]
+   ],
+   "dir": "input",
+   "cancel": {
+    "light": [
+     60,
+     109
+    ],
+    "roll": [
+     60,
+     109
+    ],
+    "catch": [
+     64,
+     109
+    ]
+   }
+  },
+  "lurch": {
+   "kind": "dodge",
+   "recovery": 56,
+   "stamina": 2,
+   "iframes": [
+    6,
+    12
+   ],
+   "root": [
+    [
+     0,
+     30,
+     2.4
+    ]
+   ],
+   "dir": "input",
+   "cancel": {
+    "light": [
+     44,
+     55
+    ],
+    "roll": [
+     46,
+     55
+    ]
+   }
+  },
+  "riposte": {
+   "kind": "riposte",
+   "startup": 10,
+   "active": 3,
+   "recovery": 26,
+   "dmg": 3,
+   "poise": 0,
+   "hits": [
+    {
+     "arc": [
+      -40,
+      40
+     ],
+     "r": [
+      0.2,
+      2.4
+     ]
+    }
+   ],
+   "iframes": [
+    0,
+    30
+   ],
+   "root": [
+    [
+     0,
+     8,
+     1.6
+    ]
+   ],
+   "knockdown": true,
+   "track": 12,
+   "hitstop": 8,
+   "knock": 2,
+   "shake": 0.6
+  },
+  "takedown": {
+   "kind": "attack",
+   "startup": 8,
+   "active": 3,
+   "recovery": 34,
+   "stamina": 1,
+   "dmg": 4,
+   "poise": 4,
+   "hits": [
+    {
+     "arc": [
+      -45,
+      45
+     ],
+     "r": [
+      0.2,
+      1.7
+     ]
+    }
+   ],
+   "takedown": true,
+   "parryable": false,
+   "blockable": false,
+   "knockdown": true,
+   "root": [
+    [
+     0,
+     8,
+     1.5
+    ]
+   ],
+   "track": 20,
+   "hitstop": 8,
+   "knock": 0.5,
+   "shake": 0.4
+  },
+  "shove": {
+   "startup": 8,
+   "active": 3,
+   "recovery": 16,
+   "stamina": 1,
+   "dmg": 0,
+   "poise": 1,
+   "hits": [
+    {
+     "arc": [
+      -40,
+      40
+     ],
+     "r": [
+      0.2,
+      1.3
+     ]
+    }
+   ],
+   "shove": true,
+   "root": [
+    [
+     2,
+     10,
+     2.5
+    ]
+   ],
+   "track": 8,
+   "hitstop": 3,
+   "knock": 5,
+   "shake": 0.15
+  },
+  "grapple": {
+   "startup": 10,
+   "active": 3,
+   "recovery": 28,
+   "stamina": 2,
+   "dmg": 0,
+   "poise": 0,
+   "hits": [
+    {
+     "arc": [
+      -30,
+      30
+     ],
+     "r": [
+      0.2,
+      1.2
+     ]
+    }
+   ],
+   "grapple": true,
+   "parryable": false,
+   "blockable": false,
+   "root": [
+    [
+     0,
+     12,
+     2.5
+    ]
+   ],
+   "track": 8,
+   "hitstop": 8,
+   "knock": 0,
+   "shake": 0.2
+  },
+  "use_lantern": {
+   "kind": "item",
+   "startup": 14,
+   "active": 1,
+   "recovery": 18,
+   "stamina": 0,
+   "track": 10,
+   "cancel": {
+    "step": [
+     22,
+     32
+    ],
+    "roll": [
+     22,
+     32
+    ]
+   },
+   "item": {
+    "use": "lantern",
+    "proj": {
+     "speed": 9,
+     "mass": 1.2,
+     "dmg": 0.5,
+     "poise": 1,
+     "r": 0.25,
+     "light": {
+      "r": 4.5,
+      "k": 0.55,
+      "frames": 2400
+     }
+    }
+   }
+  },
+  "use_rope": {
+   "kind": "item",
+   "startup": 16,
+   "active": 1,
+   "recovery": 20,
+   "stamina": 0,
+   "track": 10,
+   "cancel": {
+    "step": [
+     26,
+     36
+    ],
+    "roll": [
+     26,
+     36
+    ]
+   },
+   "item": {
+    "use": "rope",
+    "proj": {
+     "speed": 10,
+     "mass": 1.5,
+     "dmg": 0.3,
+     "poise": 2,
+     "r": 0.45,
+     "knockdown": true,
+     "parryable": false,
+     "blockable": false
+    }
+   }
+  },
+  "use_salt": {
+   "kind": "item",
+   "startup": 12,
+   "active": 1,
+   "recovery": 18,
+   "stamina": 0,
+   "track": 10,
+   "cancel": {
+    "step": [
+     22,
+     32
+    ],
+    "roll": [
+     22,
+     32
+    ]
+   },
+   "item": {
+    "use": "salt",
+    "proj": {
+     "speed": 9,
+     "mass": 0.8,
+     "dmg": 0,
+     "poise": 0.5,
+     "r": 0.5,
+     "blind": 120
+    }
+   }
+  },
+  "use_bottle": {
+   "kind": "item",
+   "startup": 14,
+   "active": 1,
+   "recovery": 18,
+   "stamina": 0,
+   "track": 10,
+   "cancel": {
+    "step": [
+     22,
+     32
+    ],
+    "roll": [
+     22,
+     32
+    ]
+   },
+   "item": {
+    "use": "bottle",
+    "proj": {
+     "speed": 11,
+     "mass": 0.6,
+     "dmg": 1,
+     "poise": 1.5,
+     "r": 0.25
+    }
+   }
+  }
+ },
+ "bodyMoveset": {
+  "step": "step",
+  "riposte": "riposte",
+  "shove": "shove",
+  "grapple": "grapple",
+  "takedown": "takedown",
+  "roll": {
+   "light": "roll_dash",
+   "medium": "roll",
+   "heavy": "roll_hop",
+   "lurch": "lurch"
+  },
+  "use": [
+   "use_lantern",
+   "use_bottle"
+  ]
+ },
+ "toolClasses": {
+  "shield": {
+   "weight": 3,
+   "reach": 1.3,
+   "arc": 60,
+   "speed": 1.25,
+   "chain": 2,
+   "light": [
+    1,
+    1
+   ],
+   "heavy": [
+    2,
+    2
+   ],
+   "catch": [
+    5,
+    15
+   ],
+   "chip": 0,
+   "blockCost": [
+    1,
+    1
+   ],
+   "special": "bash"
+  },
+  "light": {
+   "weight": 1,
+   "reach": 1.5,
+   "arc": 55,
+   "speed": 0.8,
+   "chain": 3,
+   "light": [
+    0.7,
+    0.6
+   ],
+   "heavy": [
+    1.5,
+    1.2
+   ],
+   "catch": [
+    6,
+    14
+   ],
+   "chip": 0.5,
+   "blockCost": [
+    1,
+    2
+   ],
+   "special": "none"
+  },
+  "long": {
+   "weight": 4,
+   "reach": 2.6,
+   "arc": 22,
+   "speed": 1.15,
+   "chain": 2,
+   "light": [
+    1,
+    1
+   ],
+   "heavy": [
+    2,
+    2
+   ],
+   "catch": [
+    6,
+    14
+   ],
+   "chip": 0.25,
+   "blockCost": [
+    1,
+    2
+   ],
+   "special": "pull"
+  },
+  "short": {
+   "weight": 1,
+   "reach": 1.1,
+   "arc": 50,
+   "speed": 0.7,
+   "chain": 3,
+   "light": [
+    0.8,
+    0.5
+   ],
+   "heavy": [
+    1.6,
+    1
+   ],
+   "catch": [
+    6,
+    14
+   ],
+   "chip": 0.75,
+   "blockCost": [
+    1,
+    2
+   ],
+   "special": "slash"
+  },
+  "heavy": {
+   "weight": 6,
+   "reach": 1.5,
+   "arc": 45,
+   "speed": 1.6,
+   "chain": 1,
+   "light": [
+    2,
+    2
+   ],
+   "heavy": [
+    3,
+    3
+   ],
+   "catch": [
+    7,
+    14
+   ],
+   "chip": 0.25,
+   "blockCost": [
+    1,
+    2
+   ],
+   "special": "break"
+  },
+  "bar": {
+   "weight": 3,
+   "reach": 1.5,
+   "arc": 40,
+   "speed": 1,
+   "chain": 2,
+   "light": [
+    1.2,
+    1
+   ],
+   "heavy": [
+    2,
+    2
+   ],
+   "catch": [
+    6,
+    14
+   ],
+   "chip": 0.4,
+   "blockCost": [
+    1,
+    2
+   ],
+   "special": "break"
+  },
+  "unarmed": {
+   "weight": 0,
+   "reach": 1,
+   "arc": 50,
+   "speed": 0.85,
+   "chain": 3,
+   "light": [
+    0.5,
+    0.5
+   ],
+   "heavy": [
+    1,
+    1
+   ],
+   "catch": [
+    6,
+    14
+   ],
+   "chip": 1,
+   "blockCost": [
+    1,
+    2
+   ],
+   "special": "none"
+  }
+ },
+ "tools": {
+  "w.case": {
+   "name": "The claims case",
+   "cls": "shield"
+  },
+  "w.stick": {
+   "name": "The Vane's folding stick",
+   "cls": "light"
+  },
+  "w.boathook": {
+   "name": "A boathook",
+   "cls": "long",
+   "special": "pull"
+  },
+  "w.pole": {
+   "name": "A Lamplighter's brass pole",
+   "cls": "long",
+   "special": "sweep",
+   "arc": 30
+  },
+  "w.knife": {
+   "name": "A gutting knife",
+   "cls": "short"
+  },
+  "w.hammer": {
+   "name": "The weigh-house lump hammer",
+   "cls": "heavy"
+  },
+  "w.crowbar": {
+   "name": "A crowbar",
+   "cls": "bar"
+  },
+  "w.hands": {
+   "name": "Bare hands",
+   "cls": "unarmed"
+  }
+ },
+ "foeSpecials": {
+  "holder.drag": {
+   "startup": 44,
+   "active": 6,
+   "recovery": 40,
+   "stamina": 2,
+   "dmg": 1.5,
+   "poise": 3,
+   "hits": [
+    {
+     "arc": [
+      -14,
+      14
+     ],
+     "r": [
+      0.6,
+      3.4
+     ]
+    }
+   ],
+   "parryable": false,
+   "blockable": false,
+   "knockdown": true,
+   "toward": "water",
+   "tell": {
+    "at": [
+     6,
+     43
+    ],
+    "kind": "grab"
+   },
+   "track": 9,
+   "trackUntil": 34,
+   "hitstop": 9,
+   "knock": 3.6,
+   "shake": 0.5
+  },
+  "holder.chain": {
+   "startup": 30,
+   "active": 7,
+   "recovery": 34,
+   "stamina": 2,
+   "dmg": 1.5,
+   "poise": 2,
+   "hits": [
+    {
+     "arc": [
+      -100,
+      100
+     ],
+     "r": [
+      0.4,
+      2.6
+     ]
+    }
+   ],
+   "armor": [
+    8,
+    36,
+    2
+   ],
+   "guardBreak": true,
+   "tell": {
+    "at": [
+     6,
+     29
+    ],
+    "kind": "swing"
+   },
+   "track": 9,
+   "trackUntil": 24,
+   "hitstop": 5,
+   "knock": 3,
+   "shake": 0.45
+  },
+  "holder.braced": {
+   "startup": 18,
+   "active": 7,
+   "recovery": 34,
+   "stamina": 1,
+   "dmg": 1,
+   "poise": 2,
+   "hits": [
+    {
+     "arc": [
+      -100,
+      100
+     ],
+     "r": [
+      0.4,
+      2.6
+     ]
+    }
+   ],
+   "armor": [
+    0,
+    42,
+    4
+   ],
+   "tell": {
+    "at": [
+     0,
+     17
+    ],
+    "kind": "swing"
+   },
+   "track": 9,
+   "trackUntil": 14,
+   "hitstop": 6,
+   "knock": 3,
+   "shake": 0.45
+  },
+  "skirmisher.mud": {
+   "kind": "item",
+   "startup": 18,
+   "active": 1,
+   "recovery": 20,
+   "stamina": 1,
+   "tell": {
+    "at": [
+     0,
+     17
+    ],
+    "kind": "throw"
+   },
+   "track": 10,
+   "item": {
+    "use": "mud",
+    "proj": {
+     "speed": 12,
+     "mass": 0.5,
+     "dmg": 0.25,
+     "poise": 0.5,
+     "r": 0.3,
+     "blind": 150
+    }
+   }
+  },
+  "skirmisher.rope": {
+   "kind": "item",
+   "startup": 26,
+   "active": 1,
+   "recovery": 24,
+   "stamina": 2,
+   "tell": {
+    "at": [
+     6,
+     25
+    ],
+    "kind": "grab"
+   },
+   "track": 10,
+   "item": {
+    "use": "rope",
+    "proj": {
+     "speed": 10,
+     "mass": 1.5,
+     "dmg": 0.5,
+     "poise": 2,
+     "r": 0.45,
+     "knockdown": true,
+     "parryable": false,
+     "blockable": false
+    }
+   }
+  },
+  "skirmisher.scuttle": {
+   "kind": "dodge",
+   "recovery": 22,
+   "stamina": 1,
+   "iframes": [
+    2,
+    12
+   ],
+   "root": [
+    [
+     0,
+     14,
+     -6
+    ]
+   ]
+  },
+  "world.throw": {
+   "kind": "item",
+   "startup": 48,
+   "active": 1,
+   "recovery": 36,
+   "stamina": 1,
+   "tell": {
+    "at": [
+     6,
+     47
+    ],
+    "kind": "throw"
+   },
+   "track": 8,
+   "item": {
+    "use": "stone",
+    "proj": {
+     "speed": 13,
+     "mass": 1,
+     "dmg": 0.6,
+     "poise": 1.5,
+     "r": 0.35,
+     "knock": 2,
+     "hitstop": 5,
+     "shake": 0.2
+    }
+   }
+  },
+  "world.lunge": {
+   "startup": 28,
+   "active": 6,
+   "recovery": 26,
+   "stamina": 2,
+   "armor": [
+    0,
+    30,
+    2
+   ],
+   "dmg": 1,
+   "poise": 2,
+   "hits": [
+    {
+     "arc": [
+      -35,
+      35
+     ],
+     "r": [
+      0.3,
+      1.7
+     ]
+    }
+   ],
+   "root": [
+    [
+     12,
+     28,
+     15
+    ],
+    [
+     28,
+     34,
+     4
+    ]
+   ],
+   "tell": {
+    "at": [
+     4,
+     27
+    ],
+    "kind": "swing"
+   },
+   "track": 8,
+   "trackUntil": 22,
+   "hitstop": 6,
+   "knock": 3,
+   "shake": 0.35
+  }
+ },
+ "bossSpecials": {
+  "debtman.drag": {
+   "startup": 40,
+   "active": 8,
+   "recovery": 40,
+   "stamina": 2,
+   "dmg": 1.4,
+   "poise": 4,
+   "hits": [
+    {
+     "arc": [
+      -16,
+      16
+     ],
+     "r": [
+      0.6,
+      3.6
+     ]
+    }
+   ],
+   "knockdown": true,
+   "blockable": false,
+   "parryable": false,
+   "toward": "ropes",
+   "tell": {
+    "at": [
+     6,
+     39
+    ],
+    "kind": "grab"
+   },
+   "track": 9,
+   "trackUntil": 34,
+   "hitstop": 9,
+   "knock": 4.2,
+   "shake": 0.55
+  },
+  "debtman.whistle": {
+   "startup": 36,
+   "active": 2,
+   "recovery": 30,
+   "stamina": 1,
+   "summon": {
+    "style": "captain",
+    "n": 2
+   },
+   "armor": [
+    0,
+    38,
+    6
+   ],
+   "tell": {
+    "at": [
+     4,
+     36
+    ],
+    "kind": "shout"
+   }
+  },
+  "sergeant.bash": {
+   "startup": 30,
+   "active": 6,
+   "recovery": 30,
+   "stamina": 2,
+   "dmg": 1.3,
+   "poise": 4,
+   "hits": [
+    {
+     "arc": [
+      -40,
+      40
+     ],
+     "r": [
+      0.3,
+      1.8
+     ]
+    }
+   ],
+   "guardBreak": true,
+   "armor": [
+    0,
+    36,
+    4
+   ],
+   "root": [
+    [
+     14,
+     32,
+     5
+    ]
+   ],
+   "tell": {
+    "at": [
+     4,
+     29
+    ],
+    "kind": "swing"
+   },
+   "track": 9,
+   "trackUntil": 22,
+   "hitstop": 8,
+   "knock": 3.6,
+   "shake": 0.5
+  },
+  "sergeant.baton": {
+   "startup": 22,
+   "active": 6,
+   "recovery": 26,
+   "stamina": 1,
+   "dmg": 1.2,
+   "poise": 3,
+   "hits": [
+    {
+     "arc": [
+      -60,
+      40
+     ],
+     "r": [
+      0.4,
+      2
+     ]
+    }
+   ],
+   "tell": {
+    "at": [
+     4,
+     21
+    ],
+    "kind": "swing"
+   },
+   "track": 9,
+   "trackUntil": 16,
+   "hitstop": 6,
+   "knock": 1.8,
+   "shake": 0.3
+  },
+  "sergeant.whistle": {
+   "startup": 36,
+   "active": 2,
+   "recovery": 30,
+   "stamina": 1,
+   "summon": {
+    "style": "shield",
+    "n": 2
+   },
+   "armor": [
+    0,
+    38,
+    6
+   ],
+   "tell": {
+    "at": [
+     4,
+     36
+    ],
+    "kind": "shout"
+   }
+  },
+  "captain.drag": {
+   "startup": 40,
+   "active": 8,
+   "recovery": 40,
+   "stamina": 2,
+   "dmg": 1.6,
+   "poise": 4,
+   "hits": [
+    {
+     "arc": [
+      -16,
+      16
+     ],
+     "r": [
+      0.6,
+      4
+     ]
+    }
+   ],
+   "knockdown": true,
+   "blockable": false,
+   "parryable": false,
+   "toward": "chute",
+   "tell": {
+    "at": [
+     6,
+     39
+    ],
+    "kind": "grab"
+   },
+   "track": 9,
+   "trackUntil": 34,
+   "hitstop": 9,
+   "knock": 4.2,
+   "shake": 0.55
+  },
+  "captain.whistle": {
+   "startup": 36,
+   "active": 2,
+   "recovery": 30,
+   "stamina": 1,
+   "summon": {
+    "style": "captain",
+    "n": 2
+   },
+   "armor": [
+    0,
+    38,
+    6
+   ],
+   "tell": {
+    "at": [
+     4,
+     36
+    ],
+    "kind": "shout"
+   }
+  },
+  "foreman.slam": {
+   "startup": 42,
+   "active": 6,
+   "recovery": 40,
+   "stamina": 2,
+   "dmg": 1.8,
+   "poise": 5,
+   "hits": [
+    {
+     "arc": [
+      -35,
+      35
+     ],
+     "r": [
+      0.3,
+      2.4
+     ]
+    }
+   ],
+   "armor": [
+    0,
+    48,
+    4
+   ],
+   "guardBreak": true,
+   "parryable": false,
+   "tell": {
+    "at": [
+     6,
+     41
+    ],
+    "kind": "slam"
+   },
+   "track": 6,
+   "trackUntil": 30,
+   "hitstop": 10,
+   "knock": 3,
+   "shake": 0.7
+  },
+  "foreman.ringslam": {
+   "startup": 42,
+   "active": 22,
+   "recovery": 40,
+   "stamina": 2,
+   "dmg": 1.6,
+   "poise": 4,
+   "armor": [
+    0,
+    64,
+    4
+   ],
+   "guardBreak": true,
+   "parryable": false,
+   "hits": [
+    {
+     "arc": [
+      -180,
+      180
+     ],
+     "r": [
+      0,
+      1.6
+     ],
+     "at": [
+      42,
+      45
+     ],
+     "y": [
+      0,
+      0.7
+     ]
+    },
+    {
+     "arc": [
+      -180,
+      180
+     ],
+     "r": [
+      1.6,
+      2.9
+     ],
+     "at": [
+      50,
+      53
+     ],
+     "y": [
+      0,
+      0.7
+     ]
+    },
+    {
+     "arc": [
+      -180,
+      180
+     ],
+     "r": [
+      2.9,
+      4.2
+     ],
+     "at": [
+      58,
+      61
+     ],
+     "y": [
+      0,
+      0.7
+     ]
+    }
+   ],
+   "tell": {
+    "at": [
+     6,
+     41
+    ],
+    "kind": "slam"
+   },
+   "track": 6,
+   "trackUntil": 30,
+   "hitstop": 9,
+   "knock": 2.6,
+   "shake": 0.8
+  },
+  "foreman.sweep": {
+   "startup": 26,
+   "active": 8,
+   "recovery": 22,
+   "stamina": 1,
+   "dmg": 1.3,
+   "poise": 3,
+   "hits": [
+    {
+     "arc": [
+      -120,
+      60
+     ],
+     "r": [
+      0.4,
+      2.6
+     ]
+    }
+   ],
+   "armor": [
+    0,
+    30,
+    2
+   ],
+   "tell": {
+    "at": [
+     4,
+     25
+    ],
+    "kind": "swing"
+   },
+   "track": 10,
+   "trackUntil": 20,
+   "hitstop": 6,
+   "knock": 2.4,
+   "shake": 0.4
+  },
+  "foreman.charge": {
+   "startup": 30,
+   "active": 40,
+   "recovery": 36,
+   "stamina": 2,
+   "dmg": 1.4,
+   "poise": 5,
+   "hits": [
+    {
+     "arc": [
+      -40,
+      40
+     ],
+     "r": [
+      0.2,
+      1.4
+     ],
+     "at": [
+      30,
+      70
+     ]
+    }
+   ],
+   "knockdown": true,
+   "parryable": false,
+   "armor": [
+    0,
+    70,
+    5
+   ],
+   "root": [
+    [
+     30,
+     70,
+     8.5
+    ]
+   ],
+   "wallStun": "foreman.dazed",
+   "tell": {
+    "at": [
+     0,
+     29
+    ],
+    "kind": "pounce"
+   },
+   "track": 14,
+   "trackUntil": 28,
+   "hitstop": 8,
+   "knock": 3.6,
+   "shake": 0.6
+  },
+  "foreman.dazed": {
+   "kind": "stagger",
+   "startup": 0,
+   "active": 0,
+   "recovery": 150,
+   "stamina": 0,
+   "anim": "stagger"
+  },
+  "foreman.call": {
+   "startup": 40,
+   "active": 2,
+   "recovery": 26,
+   "stamina": 1,
+   "shout": {
+    "r": 14,
+    "cool": true,
+    "poise": 3,
+    "stamina": 3
+   },
+   "armor": [
+    0,
+    42,
+    6
+   ],
+   "tell": {
+    "at": [
+     4,
+     40
+    ],
+    "kind": "shout"
+   }
+  },
+  "warden.hook": {
+   "startup": 30,
+   "active": 6,
+   "recovery": 20,
+   "stamina": 2,
+   "dmg": 0.9,
+   "poise": 3,
+   "hits": [
+    {
+     "arc": [
+      -12,
+      12
+     ],
+     "r": [
+      1,
+      5
+     ]
+    }
+   ],
+   "knock": -6.5,
+   "blockable": false,
+   "tell": {
+    "at": [
+     4,
+     29
+    ],
+    "kind": "throw"
+   },
+   "track": 10,
+   "trackUntil": 24,
+   "hitstop": 8,
+   "shake": 0.35
+  },
+  "warden.spin": {
+   "startup": 34,
+   "active": 26,
+   "recovery": 36,
+   "stamina": 2,
+   "dmg": 1,
+   "poise": 3,
+   "armor": [
+    0,
+    60,
+    3
+   ],
+   "guardBreak": true,
+   "hits": [
+    {
+     "arc": [
+      -180,
+      180
+     ],
+     "r": [
+      0.4,
+      2.8
+     ],
+     "at": [
+      34,
+      38
+     ]
+    },
+    {
+     "arc": [
+      -180,
+      180
+     ],
+     "r": [
+      0.4,
+      2.8
+     ],
+     "at": [
+      43,
+      47
+     ]
+    },
+    {
+     "arc": [
+      -180,
+      180
+     ],
+     "r": [
+      0.4,
+      2.8
+     ],
+     "at": [
+      52,
+      56
+     ]
+    }
+   ],
+   "tell": {
+    "at": [
+     6,
+     33
+    ],
+    "kind": "sweep"
+   },
+   "hitstop": 6,
+   "knock": 2.6,
+   "shake": 0.5
+  },
+  "warden.thrust": {
+   "startup": 22,
+   "active": 6,
+   "recovery": 26,
+   "stamina": 1,
+   "dmg": 1.4,
+   "poise": 3,
+   "hits": [
+    {
+     "arc": [
+      -10,
+      10
+     ],
+     "r": [
+      0.6,
+      3.6
+     ]
+    }
+   ],
+   "tell": {
+    "at": [
+     4,
+     21
+    ],
+    "kind": "swing"
+   },
+   "track": 9,
+   "trackUntil": 16,
+   "hitstop": 7,
+   "knock": 2,
+   "shake": 0.35
+  },
+  "warden.drag": {
+   "startup": 40,
+   "active": 8,
+   "recovery": 40,
+   "stamina": 2,
+   "dmg": 1.6,
+   "poise": 4,
+   "hits": [
+    {
+     "arc": [
+      -16,
+      16
+     ],
+     "r": [
+      0.6,
+      4
+     ]
+    }
+   ],
+   "knockdown": true,
+   "blockable": false,
+   "parryable": false,
+   "toward": "water",
+   "tell": {
+    "at": [
+     6,
+     39
+    ],
+    "kind": "grab"
+   },
+   "track": 9,
+   "trackUntil": 34,
+   "hitstop": 9,
+   "knock": 4.2,
+   "shake": 0.55
+  },
+  "warden.whistle": {
+   "startup": 36,
+   "active": 2,
+   "recovery": 30,
+   "stamina": 1,
+   "summon": {
+    "style": "skirmisher",
+    "n": 2
+   },
+   "armor": [
+    0,
+    38,
+    6
+   ],
+   "tell": {
+    "at": [
+     4,
+     36
+    ],
+    "kind": "shout"
+   }
+  },
+  "boss.roar": {
+   "startup": 50,
+   "active": 2,
+   "recovery": 20,
+   "stamina": 0,
+   "iframes": [
+    0,
+    52
+   ],
+   "tell": {
+    "at": [
+     2,
+     50
+    ],
+    "kind": "shout"
+   }
+  }
+ },
+ "arenaSpecials": {
+  "sweeper.sweep": {
+   "startup": 34,
+   "active": 8,
+   "recovery": 36,
+   "stamina": 2,
+   "dmg": 1,
+   "poise": 2,
+   "hits": [
+    {
+     "arc": [
+      -110,
+      110
+     ],
+     "r": [
+      0.5,
+      3.2
+     ],
+     "y": [
+      0,
+      0.6
+     ]
+    }
+   ],
+   "knockdown": true,
+   "parryable": false,
+   "tell": {
+    "at": [
+     4,
+     33
+    ],
+    "kind": "sweep"
+   },
+   "track": 6,
+   "trackUntil": 26,
+   "hitstop": 6,
+   "knock": 2.2,
+   "shake": 0.35
+  },
+  "sweeper.pin": {
+   "startup": 26,
+   "active": 6,
+   "recovery": 28,
+   "stamina": 1,
+   "dmg": 1.2,
+   "poise": 3,
+   "hits": [
+    {
+     "arc": [
+      -12,
+      12
+     ],
+     "r": [
+      0.6,
+      3.4
+     ]
+    }
+   ],
+   "tell": {
+    "at": [
+     4,
+     25
+    ],
+    "kind": "swing"
+   },
+   "track": 8,
+   "trackUntil": 20,
+   "hitstop": 7,
+   "knock": 1,
+   "shake": 0.3
+  },
+  "sweeper.call": {
+   "startup": 30,
+   "active": 2,
+   "recovery": 30,
+   "stamina": 1,
+   "shout": {
+    "r": 9,
+    "cool": true,
+    "poise": 2
+   },
+   "tell": {
+    "at": [
+     4,
+     30
+    ],
+    "kind": "shout"
+   }
+  },
+  "shield.bash": {
+   "startup": 28,
+   "active": 6,
+   "recovery": 40,
+   "stamina": 2,
+   "dmg": 1.1,
+   "poise": 3.5,
+   "hits": [
+    {
+     "arc": [
+      -40,
+      40
+     ],
+     "r": [
+      0.3,
+      1.6
+     ]
+    }
+   ],
+   "guardBreak": true,
+   "armor": [
+    0,
+    34,
+    3
+   ],
+   "root": [
+    [
+     14,
+     30,
+     4.5
+    ]
+   ],
+   "tell": {
+    "at": [
+     4,
+     27
+    ],
+    "kind": "swing"
+   },
+   "track": 9,
+   "trackUntil": 20,
+   "hitstop": 8,
+   "knock": 3.4,
+   "shake": 0.5
+  },
+  "shield.brace": {
+   "startup": 10,
+   "active": 40,
+   "recovery": 14,
+   "stamina": 1,
+   "parry": [
+    10,
+    50
+   ],
+   "armor": [
+    0,
+    64,
+    6
+   ],
+   "anim": "block"
+  },
+  "cutter.flurry": {
+   "startup": 18,
+   "active": 22,
+   "recovery": 26,
+   "stamina": 2,
+   "dmg": 0.45,
+   "poise": 1,
+   "hits": [
+    {
+     "arc": [
+      -50,
+      30
+     ],
+     "r": [
+      0.3,
+      1.5
+     ],
+     "at": [
+      18,
+      21
+     ]
+    },
+    {
+     "arc": [
+      -30,
+      50
+     ],
+     "r": [
+      0.3,
+      1.5
+     ],
+     "at": [
+      26,
+      29
+     ]
+    },
+    {
+     "arc": [
+      -40,
+      40
+     ],
+     "r": [
+      0.3,
+      1.6
+     ],
+     "at": [
+      35,
+      39
+     ]
+    }
+   ],
+   "root": [
+    [
+     16,
+     38,
+     2
+    ]
+   ],
+   "tell": {
+    "at": [
+     0,
+     17
+    ],
+    "kind": "swing"
+   },
+   "track": 10,
+   "trackUntil": 32,
+   "hitstop": 4,
+   "knock": 1,
+   "shake": 0.15
+  },
+  "cutter.lash": {
+   "startup": 22,
+   "active": 5,
+   "recovery": 26,
+   "stamina": 1,
+   "dmg": 0.6,
+   "poise": 2,
+   "hits": [
+    {
+     "arc": [
+      -15,
+      15
+     ],
+     "r": [
+      1,
+      3.2
+     ]
+    }
+   ],
+   "knock": -2.5,
+   "tell": {
+    "at": [
+     4,
+     21
+    ],
+    "kind": "throw"
+   },
+   "track": 9,
+   "trackUntil": 18,
+   "hitstop": 5,
+   "shake": 0.2
+  },
+  "hound.pounce": {
+   "startup": 30,
+   "active": 8,
+   "recovery": 46,
+   "stamina": 2,
+   "dmg": 0.75,
+   "poise": 2,
+   "hits": [
+    {
+     "arc": [
+      -30,
+      30
+     ],
+     "r": [
+      0.2,
+      1.2
+     ]
+    }
+   ],
+   "parryable": false,
+   "root": [
+    [
+     20,
+     36,
+     9
+    ]
+   ],
+   "tell": {
+    "at": [
+     0,
+     29
+    ],
+    "kind": "pounce"
+   },
+   "track": 10,
+   "trackUntil": 22,
+   "hitstop": 7,
+   "knock": 2,
+   "shake": 0.35
+  },
+  "hound.bite": {
+   "startup": 18,
+   "active": 4,
+   "recovery": 16,
+   "stamina": 1,
+   "dmg": 0.5,
+   "poise": 1,
+   "hits": [
+    {
+     "arc": [
+      -35,
+      35
+     ],
+     "r": [
+      0.2,
+      1
+     ]
+    }
+   ],
+   "tell": {
+    "at": [
+     0,
+     17
+    ],
+    "kind": "swing"
+   },
+   "track": 12,
+   "hitstop": 3,
+   "knock": 0.6
+  },
+  "hound.circle": {
+   "kind": "dodge",
+   "recovery": 20,
+   "stamina": 1,
+   "iframes": [
+    2,
+    10
+   ],
+   "root": [
+    [
+     0,
+     16,
+     -5
+    ]
+   ]
+  },
+  "swarm.peck": {
+   "startup": 18,
+   "active": 30,
+   "recovery": 14,
+   "stamina": 1,
+   "dmg": 0.2,
+   "poise": 0.3,
+   "hits": [
+    {
+     "arc": [
+      -60,
+      60
+     ],
+     "r": [
+      0.1,
+      1
+     ],
+     "at": [
+      18,
+      21
+     ]
+    },
+    {
+     "arc": [
+      -60,
+      60
+     ],
+     "r": [
+      0.1,
+      1
+     ],
+     "at": [
+      24,
+      27
+     ]
+    },
+    {
+     "arc": [
+      -60,
+      60
+     ],
+     "r": [
+      0.1,
+      1
+     ],
+     "at": [
+      30,
+      33
+     ]
+    },
+    {
+     "arc": [
+      -60,
+      60
+     ],
+     "r": [
+      0.1,
+      1
+     ],
+     "at": [
+      36,
+      39
+     ]
+    },
+    {
+     "arc": [
+      -60,
+      60
+     ],
+     "r": [
+      0.1,
+      1
+     ],
+     "at": [
+      42,
+      45
+     ]
+    }
+   ],
+   "tell": {
+    "at": [
+     0,
+     17
+    ],
+    "kind": "swing"
+   },
+   "track": 14,
+   "trackUntil": 44,
+   "hitstop": 1,
+   "knock": 0.2
+  },
+  "swarm.snatch": {
+   "startup": 18,
+   "active": 4,
+   "recovery": 18,
+   "stamina": 1,
+   "dmg": 0.1,
+   "poise": 0,
+   "hits": [
+    {
+     "arc": [
+      -40,
+      40
+     ],
+     "r": [
+      0.1,
+      1.1
+     ]
+    }
+   ],
+   "drain": 2,
+   "tell": {
+    "at": [
+     0,
+     17
+    ],
+    "kind": "grab"
+   },
+   "track": 12,
+   "hitstop": 2
+  },
+  "grappler.grab": {
+   "startup": 32,
+   "active": 6,
+   "recovery": 52,
+   "stamina": 2,
+   "dmg": 1.2,
+   "poise": 4,
+   "hits": [
+    {
+     "arc": [
+      -30,
+      30
+     ],
+     "r": [
+      0.2,
+      1.4
+     ]
+    }
+   ],
+   "knockdown": true,
+   "blockable": false,
+   "parryable": false,
+   "root": [
+    [
+     10,
+     32,
+     2.2
+    ]
+   ],
+   "tell": {
+    "at": [
+     2,
+     31
+    ],
+    "kind": "grab"
+   },
+   "track": 9,
+   "trackUntil": 24,
+   "hitstop": 10,
+   "knock": 3.8,
+   "shake": 0.55
+  },
+  "grappler.slam": {
+   "startup": 40,
+   "active": 6,
+   "recovery": 40,
+   "stamina": 2,
+   "dmg": 1.8,
+   "poise": 5,
+   "hits": [
+    {
+     "arc": [
+      -180,
+      180
+     ],
+     "r": [
+      0,
+      2.2
+     ],
+     "y": [
+      0,
+      0.8
+     ]
+    }
+   ],
+   "armor": [
+    10,
+    46,
+    3
+   ],
+   "guardBreak": true,
+   "tell": {
+    "at": [
+     6,
+     39
+    ],
+    "kind": "sweep"
+   },
+   "hitstop": 9,
+   "knock": 3,
+   "shake": 0.6
+  },
+  "zealot.swing": {
+   "startup": 26,
+   "active": 7,
+   "recovery": 30,
+   "stamina": 1,
+   "dmg": 1.1,
+   "poise": 2,
+   "hits": [
+    {
+     "arc": [
+      -80,
+      80
+     ],
+     "r": [
+      0.4,
+      2
+     ]
+    }
+   ],
+   "armor": [
+    0,
+    33,
+    3
+   ],
+   "tell": {
+    "at": [
+     4,
+     25
+    ],
+    "kind": "swing"
+   },
+   "track": 8,
+   "trackUntil": 20,
+   "hitstop": 6,
+   "knock": 2,
+   "shake": 0.3
+  },
+  "zealot.frenzy": {
+   "startup": 22,
+   "active": 40,
+   "recovery": 40,
+   "stamina": 3,
+   "dmg": 0.6,
+   "poise": 1.5,
+   "armor": [
+    0,
+    62,
+    4
+   ],
+   "hits": [
+    {
+     "arc": [
+      -90,
+      20
+     ],
+     "r": [
+      0.3,
+      1.8
+     ],
+     "at": [
+      22,
+      26
+     ]
+    },
+    {
+     "arc": [
+      -20,
+      90
+     ],
+     "r": [
+      0.3,
+      1.8
+     ],
+     "at": [
+      32,
+      36
+     ]
+    },
+    {
+     "arc": [
+      -90,
+      20
+     ],
+     "r": [
+      0.3,
+      1.8
+     ],
+     "at": [
+      42,
+      46
+     ]
+    },
+    {
+     "arc": [
+      -20,
+      90
+     ],
+     "r": [
+      0.3,
+      1.8
+     ],
+     "at": [
+      54,
+      58
+     ]
+    }
+   ],
+   "root": [
+    [
+     22,
+     60,
+     1.6
+    ]
+   ],
+   "tell": {
+    "at": [
+     3,
+     21
+    ],
+    "kind": "swing"
+   },
+   "track": 8,
+   "trackUntil": 50,
+   "hitstop": 4,
+   "knock": 1.4,
+   "shake": 0.25
+  },
+  "captain.hook": {
+   "startup": 28,
+   "active": 6,
+   "recovery": 30,
+   "stamina": 2,
+   "dmg": 0.8,
+   "poise": 2,
+   "hits": [
+    {
+     "arc": [
+      -14,
+      14
+     ],
+     "r": [
+      1,
+      4
+     ]
+    }
+   ],
+   "knock": -4.5,
+   "blockable": false,
+   "tell": {
+    "at": [
+     4,
+     27
+    ],
+    "kind": "throw"
+   },
+   "track": 9,
+   "trackUntil": 22,
+   "hitstop": 7,
+   "shake": 0.3
+  },
+  "captain.rally": {
+   "startup": 36,
+   "active": 2,
+   "recovery": 30,
+   "stamina": 1,
+   "shout": {
+    "r": 10,
+    "cool": true,
+    "poise": 3,
+    "stamina": 2
+   },
+   "tell": {
+    "at": [
+     4,
+     36
+    ],
+    "kind": "shout"
+   }
+  }
+ }
+}

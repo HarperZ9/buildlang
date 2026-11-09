@@ -1,0 +1,9 @@
+[package]
+name = "lw-hash"
+version = "0.1.0"
+edition = "2026"
+description = "Low Water world hash (core/rng.mjs hashStr) and JSON text round-trip check over hash-payload rows"
+author = "Zain Dana Harper"
+license = "AGPL-3.0-only"
+
+[dependencies]

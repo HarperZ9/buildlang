@@ -1,0 +1,6 @@
+# mode golden args... (run from the package folder)
+# goldens for --text come from the game's core/rng.mjs hashStr run under node
+exact tests/golden-payloads-12.txt tests/payloads-12.jsonl
+exact tests/golden-text-abc-0.txt --text abc 0
+exact tests/golden-text-lamb-2654435769.txt --text lamb 2654435769
+exact tests/golden-text-move-7.txt --text foe0:light_1#3 7

@@ -1,0 +1,3 @@
+# mode golden args... (run from the package folder)
+# golden: combat/tests/moves-expanded.golden.json from the game repo
+exact tests/moves-expanded.golden.json --stdout tests/moves.json

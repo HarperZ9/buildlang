@@ -1,0 +1,29 @@
+// lw-cbegin: write each of the 40 corpus runs' cbegin record as lw-trace/1.
+// Compared line by line with the first line of each JS trace.
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 Zain Dana Harper. Port of the Low Water game (origin/dev 8b49bdd).
+//
+// Usage: lw-cbegin <corpus-inputs.json> <out.jsonl>   writes the file
+//        lw-cbegin --stdout <corpus-inputs.json>      prints the records only
+
+fn main() ~ Console + FileSystem + Process + Environment {
+    let n_args = args_count();
+    if n_args < 3 {
+        println!("usage: lw-cbegin <corpus-inputs.json> <out.jsonl> | lw-cbegin --stdout <corpus-inputs.json>");
+        exit(2);
+    }
+    let to_stdout = args_get(1) == "--stdout";
+    let src = read_file(args_get(if to_stdout { 2 } else { 1 }));
+    match json_parse(src) {
+        Ok(d) => {
+            let out = lwb_cbegin_lines(d);
+            if to_stdout {
+                print!("{}", out);
+            } else {
+                let ok = write_file(args_get(2), out);
+                println!("40 cbegin records, written {}", ok);
+            }
+        },
+        Err(e) => println!("cannot read inputs: {}", e),
+    }
+}

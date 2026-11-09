@@ -8,6 +8,10 @@ tracked in `STATUS.md`, `README.md`, and
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
 `108/108` or `132/132` are not the current release gate.
 
+## Unreleased: the Low Water kernels as BuildLang packages
+
+- `lw-hash`, `lw-codec`, `lw-cbegin` and `lw-moves` 0.1.0 (AGPL-3.0-only): Low Water's world hash, lw-trace/1 codec, corpus run selection with its cbegin records, and move-table expansion, in pure `.bld`. Against the game at origin/dev 8b49bdd: 611 of 611 world-hash states, 40 of 40 trace round trips, the 40 cbegin records and the 168,234-byte expanded move table, all byte-identical. Each package's `tests/SOURCES.txt` lists its fixtures with their SHA-256 and origin.
+
 ## Unreleased: translation validation for the C backend
 
 - `buildc tv FILE [--out DIR] [--json]`: compile through the C backend, write a `buildlang-tv-cert/v1` certificate per function (source and C hashes, loop heads, variable map), and check it. `buildc tv-check SOURCE C CERT` runs the checker alone.

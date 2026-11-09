@@ -1,0 +1,53 @@
+// lw-hash library: Low Water's core/rng.mjs hashStr, ported.
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 Zain Dana Harper. Port of the Low Water game (origin/dev 8b49bdd).
+//
+// Scope: lwh_hash_str iterates the bytes of `s`. The JS original iterates
+// UTF-16 code units. The two agree for ASCII text only, which is what the
+// world-state payloads hold. Non-ASCII input gives a different hash.
+mod json;
+
+// hashStr: FNV-1a style mix per byte, then a murmur3 fmix32 finaliser.
+fn lwh_hash_str(s: str, seed: u32) -> u32 {
+    let mut h: u32 = seed;
+    let bytes = s.as_bytes();
+    let mut i: usize = 0;
+    while i < s.len() {
+        h = h ^ (bytes[i] as u32);
+        h = h.wrapping_mul(0x01000193_u32);
+        i = i + 1;
+    }
+    h = h ^ (h >> 16);
+    h = h.wrapping_mul(0x85ebca6b_u32);
+    h = h ^ (h >> 13);
+    h = h.wrapping_mul(0xc2b2ae35_u32);
+    h ^ (h >> 16)
+}
+
+// One row {"payload": text, "seed": n, "hash": n}. Returns
+// (json_parse then json_stringify gives the payload back, hash matches).
+fn lwh_check_row(line: str) -> (bool, bool) {
+    match json_parse(line) {
+        Ok(row) => {
+            let payload = match field_str(row, "payload") {
+                Ok(p) => p,
+                Err(_) => "",
+            };
+            let seed = match field_f64(row, "seed") {
+                Ok(x) => x,
+                Err(_) => -1.0,
+            };
+            let want = match field_f64(row, "hash") {
+                Ok(x) => x,
+                Err(_) => -1.0,
+            };
+            let text_ok = match json_parse(payload) {
+                Ok(state) => json_stringify(state) == payload,
+                Err(_) => false,
+            };
+            let got = lwh_hash_str(payload, seed.to_uint32());
+            (text_ok, (got as f64) == want)
+        },
+        Err(_) => (false, false),
+    }
+}

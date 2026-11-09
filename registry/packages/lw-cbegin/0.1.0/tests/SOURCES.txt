@@ -1,0 +1,7 @@
+Test fixtures of lw-cbegin. Source: the Low Water game, origin/dev commit 8b49bdd, by the same author,
+released with these ports under AGPL-3.0-only. Columns: sha256, file, origin.
+
+e28c55bcc1c425597934c9777cccd9469bbf2004d6ca28121f77d3b4c5717457  corpus-inputs.json
+    pilot script export-corpus-inputs.mjs, run with node from game/engine at 8b49bdd (regenerated 2026-11-09: identical)
+2548a7c77da2aa5e8ed235e1d9e01926a610e203dde778ab73f0436c169a878e  js-cbegin.jsonl
+    the first line of each of the 40 corpus traces from `node combat/tools/trace.mjs DIR 40 900` at 8b49bdd (regenerated 2026-11-09: identical)

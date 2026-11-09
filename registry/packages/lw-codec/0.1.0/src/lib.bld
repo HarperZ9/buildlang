@@ -1,0 +1,12 @@
+// lw-codec library: lw-trace/1 records through the JSON module and back.
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 Zain Dana Harper. Port of the Low Water game (origin/dev 8b49bdd).
+mod json;
+
+// One record: parse, then json_stringify with keys in document order.
+fn lwc_reencode(line: str) -> Result<str, str> {
+    match json_parse(line) {
+        Ok(j) => Ok(json_stringify(j)),
+        Err(e) => Err(e),
+    }
+}

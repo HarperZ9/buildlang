@@ -50,6 +50,66 @@
         }
       }
     },
+    "lw-cbegin": {
+      "version": "0.1.0",
+      "description": "Low Water corpus run selection (trace.mjs corpusRun) and each run's cbegin record as lw-trace/1 JSON",
+      "author": "Zain Dana Harper",
+      "license": "AGPL-3.0-only",
+      "checksum": "sha256:f509793125be0d745db911c6ab9f43fabacc7a2c87ce587e7543565ad3cc37ab",
+      "path": "packages/lw-cbegin/0.1.0",
+      "versions": {
+        "0.1.0": {
+          "path": "packages/lw-cbegin/0.1.0",
+          "checksum": "sha256:f509793125be0d745db911c6ab9f43fabacc7a2c87ce587e7543565ad3cc37ab",
+          "dependencies": {}
+        }
+      }
+    },
+    "lw-codec": {
+      "version": "0.1.0",
+      "description": "Low Water lw-trace/1 codec: parse each trace record and write it back byte for byte",
+      "author": "Zain Dana Harper",
+      "license": "AGPL-3.0-only",
+      "checksum": "sha256:986f7eb67ab29bc10b3d8f26714ae96ff64f74ce815ff18c9b9e1c88f5243de6",
+      "path": "packages/lw-codec/0.1.0",
+      "versions": {
+        "0.1.0": {
+          "path": "packages/lw-codec/0.1.0",
+          "checksum": "sha256:986f7eb67ab29bc10b3d8f26714ae96ff64f74ce815ff18c9b9e1c88f5243de6",
+          "dependencies": {}
+        }
+      }
+    },
+    "lw-hash": {
+      "version": "0.1.0",
+      "description": "Low Water world hash (core/rng.mjs hashStr) and JSON text round-trip check over hash-payload rows",
+      "author": "Zain Dana Harper",
+      "license": "AGPL-3.0-only",
+      "checksum": "sha256:c88947398df1df3996ebfd48abe14fbccd78366212d52d71191ad3145f49add5",
+      "path": "packages/lw-hash/0.1.0",
+      "versions": {
+        "0.1.0": {
+          "path": "packages/lw-hash/0.1.0",
+          "checksum": "sha256:c88947398df1df3996ebfd48abe14fbccd78366212d52d71191ad3145f49add5",
+          "dependencies": {}
+        }
+      }
+    },
+    "lw-moves": {
+      "version": "0.1.0",
+      "description": "Low Water move expansion (defineMoves, profileOf, buildToolMoves) from combat/data/moves.json to one JSON line",
+      "author": "Zain Dana Harper",
+      "license": "AGPL-3.0-only",
+      "checksum": "sha256:6e581792350488c7c4c6c7dd229e328d8beaaa662bc12469cb41bd3dcfcc3ec4",
+      "path": "packages/lw-moves/0.1.0",
+      "versions": {
+        "0.1.0": {
+          "path": "packages/lw-moves/0.1.0",
+          "checksum": "sha256:6e581792350488c7c4c6c7dd229e328d8beaaa662bc12469cb41bd3dcfcc3ec4",
+          "dependencies": {}
+        }
+      }
+    },
     "merkle": {
       "version": "1.0.0",
       "description": "RFC 6962 Merkle roots, inclusion and consistency proofs (port of Flywheel harness/merkle.py)",
