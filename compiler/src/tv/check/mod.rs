@@ -12,10 +12,16 @@
 //! boundary.
 
 mod c_agg;
+mod c_call;
 pub mod c_effects;
 pub mod c_exec;
+mod c_expr;
+mod c_float;
+mod c_globals;
+mod c_ops;
 pub mod c_parse;
 pub mod relate;
+mod scan;
 pub mod src_exec;
 pub mod structs;
 pub mod trace;

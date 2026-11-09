@@ -9,6 +9,7 @@ use super::sat::{lit, Answer as SatAnswer, Solver};
 use super::*;
 use crate::verify::eval::bit_op;
 use crate::verify::term::{arith, bits, cast, cmp, neg as tneg};
+use crate::verify::term::{AOp, BOp};
 
 fn rng(seed: &mut u64) -> u64 {
     *seed ^= *seed << 13;
