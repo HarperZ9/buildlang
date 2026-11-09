@@ -353,6 +353,23 @@ test 194 points 0 violations, seeded power cuts 0 of 10,000 with the P15 digest 
 .db and WAL bytes must not change), P2 2,000 of 2,000, text 2,000 of 2,000, WAL recovery, library
 and reference differential unchanged.
 
+**P21. A transaction's WAL lines held until COMMIT, written 2026-11-09 after the P20 results, before
+the change.** P20 left about 330 microseconds per statement inside a transaction in the WAL append
+(one file open, write and close per OP line). The change: BEGIN's TXID line and each statement's
+OP line are held in memory and appended in one write together with the COMMIT record, or with
+HOLD at a clean exit inside BEGIN; ROLLBACK discards them; RESUME is still written at once. The
+WAL bytes after a clean COMMIT or HOLD are the same as before, line for line; only the number of
+writes changes. Nothing in an open transaction was durable before its COMMIT, and replay drops a
+transaction without one, so a crash loses nothing it could have kept. Measured on the P19
+benchmark unchanged. Predictions: `update` 4 to 12 times SQLite's time; `mixed` 5 to 12 times;
+`select` 8 to 14 times. Target: update and mixed within 10 times. The crash test has fewer crash
+points than 194 (the OP writes inside transactions go) and 0 violations. The seeded power cut
+digest changes, since the write sequence changes; the new digest must be equal on Windows and
+Linux, with 0 violations in 10,000 seeds, and replaces the CI value with this reason. Planted
+checks: a build that writes the held lines at COMMIT but not at HOLD fails the cross-process
+transaction checks of test_qdb.sh; a build that drops the held lines and writes only the COMMIT
+record shows violations in the crash test. Guards as in P20, and test_qdb_mutations.py.
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
