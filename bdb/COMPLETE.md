@@ -329,6 +329,30 @@ indexed read rebuilds it. Whatever the ratio is, it is reported. No planted chec
 measurement, and its guard is that both engines end with the same table (checked by the benchmark
 counting rows with `v` changed).
 
+**P20. UPDATE and DELETE in place (item 1 of the 2026-11-09 continuation), written 2026-11-09 before
+the change.** Today an UPDATE copies the whole cell array into a new one, evaluates WHERE on every
+row of the table, and marks every index stale; a DELETE copies the array and marks every index
+stale; the next indexed read rebuilds each index with a sort. The change: an UPDATE or DELETE whose
+WHERE is one equality on an indexed column takes its candidate rows from the index (each candidate
+is still checked against the WHERE), computes every new value and checks constraints before it
+writes, then writes the changed cells into the array in place. Each index on a changed column
+moves the changed entries to their new sorted place (key, then row id, the order a rebuild gives);
+other indexes are untouched. A DELETE compacts the cell array in place and renumbers the row ids
+of every index on the table in one integer pass, with no sort. The key map of P17 stays valid
+across an UPDATE that changes no constrained column. Measured on the P19 benchmark, unchanged
+(Windows, 10,000 rows, 2,000 statements, median of 3). Predictions: `update` from 2,472 times
+SQLite's time to between 5 and 25 times; `mixed` to between 5 and 25 times; `select` unchanged
+within noise (8 to 14 times). Target: update and mixed within 10 times. Planted checks: a new
+`bdb/tests/test_qdb_mutations.py` runs seeded scripts of INSERT, UPDATE and DELETE on three
+indexed tables (a DELETE in the first table moves the later tables' cells), with indexed equality
+and range reads in between, through one qdb process and through Python's sqlite3, and compares
+every read as a multiset of rows. It must fail on (a) a build that skips the index move when an
+indexed column changes, and (b) a build whose DELETE does not renumber index row ids; and its
+harness must count a disagreement when one qdb row is altered. Guards: test_qdb.sh no FAIL, crash
+test 194 points 0 violations, seeded power cuts 0 of 10,000 with the P15 digest unchanged (the
+.db and WAL bytes must not change), P2 2,000 of 2,000, text 2,000 of 2,000, WAL recovery, library
+and reference differential unchanged.
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
@@ -717,6 +741,34 @@ median of 3; SQLite 3.49.1 compiled from the amalgamation (A11).
 - qdb's select number includes printing each result to the null device (qdb has no row API);
   SQLite's callback formats the row into a buffer.
 
+## After P20: UPDATE and DELETE in place (2026-11-09, feat/bdb-inplace)
+
+Windows, one core, the P19 benchmark unchanged (10,000 rows, 2,000 statements in one transaction,
+median of 3, SQLite 3.49.1 from the amalgamation).
+
+| Mode | qdb (statements per second) | SQLite | qdb's time against SQLite's | Before (P19) |
+|---|---|---|---|---|
+| select | 30,196 | 364,432 | 12.1 times | 10.0 times |
+| update | 2,939 | 302,435 | 102.9 times | 2,472 times |
+| mixed | 5,362 | 276,702 | 51.6 times | 2,185 times |
+
+- Both engines end in the same state (SUM(v) 499,600).
+- Predictions: `select` 8 to 14 times held. `update` and `mixed` 5 to 25 times MISSED: update fell
+  24 times (7.6 ms to 340 microseconds per statement) and stays 103 times SQLite's. The target
+  (within 10 times) is missed.
+- Cause of the miss, found after the run: inside an explicit transaction each statement still
+  appends its `OP` line to the WAL with its own file open, write and close, which costs about 330
+  microseconds on this Windows machine. An exploratory build with that append removed (not a
+  candidate; it loses the transaction's lines) ran update at 6.7 times and select at 11.5 times
+  SQLite's time (1 run each). Holding a transaction's lines in memory until its COMMIT is P21.
+- Planted checks: `test_qdb_mutations.py` (20 seeds, 2,143 compared answers) finds 0 disagreements
+  with SQLite; a build that skips the index move finds 661; a build whose DELETE keeps the old row
+  ids in its indexes exits on an out-of-range read in the first seed (caught); an altered qdb row
+  is counted. The P19 build also passes it (it was slow, not wrong).
+- Guards: test_qdb.sh 293 pass, 0 fail; crash test 194 points, 0 violations; seeded power cuts 0
+  of 10,000 with the P15 digest unchanged (cd3ccf9f...); P2 2,000 of 2,000; text 0 changed; WAL
+  recovery 0 failures; reference differential 16 of 16; library 0 failures; receipts reproduced.
+
 ## Stage 1: a correct, durable single-file engine
 
 | Row | Check (fails if) | Status | Evidence |
@@ -746,7 +798,7 @@ median of 3; SQLite 3.49.1 compiled from the amalgamation (A11).
 |---|---|---|---|
 | 3a Bulk load is linear | `bench_qdb_load.py` log-log slope k above 1.3 for autocommit or transactional indexed load | PASS | HarperZ9/build-universe#35: autocommit k 1.16, transactional indexed k 1.02. Limit stated there: interleaved INSERT plus indexed SELECT stays superlinear (k 1.52). Not re-run after the checkpoint change, which writes the state twice per checkpoint |
 | 3b ORDER BY is n log n | P6 ratio 30k/10k above 6 | PASS (single-table) | 3.29 after, 9.51 before (`bench_qdb_sort.py`). The UNION, grouped, JOIN and grouped-JOIN sorts are still selection sorts and were not measured |
-| 3d Throughput through the library | a point select or update loop through `bdb/lib` takes more than 10 times SQLite's time on the same machine | FAIL | P19: select 10.0 times, update 2,472 times, mixed 2,185 times (10,000 rows, Windows) |
+| 3d Throughput through the library | a point select or update loop through `bdb/lib` takes more than 10 times SQLite's time on the same machine | FAIL | P20: select 12.1 times, update 102.9 times, mixed 51.6 times; P19: 10.0, 2,472 and 2,185 times (10,000 rows, Windows) |
 | 3c Whole-program store of 10^5 rows | a `bql export` store of 100,000 rows loads and answers a GROUP BY in under 10 s | NOT BUILT | |
 
 ## Stage 4: an embeddable engine
