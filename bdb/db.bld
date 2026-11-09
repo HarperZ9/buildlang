@@ -173,6 +173,12 @@ struct DB {
     // rebuilds it on the next numeric search.
     idx_num: Vec<f64>,
     idx_num_ok: bool,
+    // Pool id of the text of each integer 0..65535 a fast UPDATE wrote, or -1
+    // (P28). Pool entries are never changed after sp_add, so cells may share
+    // one; the cache saves a new string and pool entry per changed cell.
+    int_ids: Vec<i32>,
+    // update_apply's old cell ids, reused between calls (P28).
+    upd_old: Vec<i32>,
 
     // SQL parser state
     input: String,
@@ -459,7 +465,7 @@ fn db_new(db_path: String) -> DB {
         tbl_row_starts: vec![], tbl_row_counts: vec![],
         idx_names: vec![], idx_tables: vec![], idx_col_indices: vec![], idx_count: 0,
         idx_keys: vec![], idx_rowids: vec![], idx_key_starts: vec![], idx_key_counts: vec![],
-        idx_num: vec![], idx_num_ok: false,
+        idx_num: vec![], idx_num_ok: false, int_ids: vec![], upd_old: vec![],
         input: "", ilen: 0, pos: 0,
         tk_type: 7, tk_val: "",
         stmt_type: 0, p_table: -1,
@@ -576,6 +582,23 @@ fn sp_kind(d: &mut DB, id: i32) -> i32 {
     let nums = d.pool_num;
     nums[id] = x;
     nk
+}
+
+// The pool id of integer r's text: shared for 0..65535 through int_ids,
+// with its kind and number filled in; a new entry otherwise.
+fn sp_int(d: &mut DB, r: i32) -> i32 {
+    if r < 0 || r > 65535 { return sp_add(d, to_string_i32(r)); }
+    let ids = d.int_ids;
+    while vec_len(ids) <= r { vec_push(ids, -1); }
+    let have = vec_get(ids, r);
+    if have >= 0 { return have; }
+    let id = sp_add(d, to_string_i32(r));
+    let kinds = d.pool_nk;
+    kinds[id] = 1;
+    let nums = d.pool_num;
+    nums[id] = r as f64;
+    ids[r] = id;
+    id
 }
 
 fn sp_get(d: &DB, id: i32) -> String {
@@ -1142,7 +1165,9 @@ fn fnv_extend(h0: i64, s: String) -> i64 {
     let mut h = h0;
     let mut i: i64 = 0;
     while i < n {
-        h = ((h ^ (b[i] as i64)) * 16777619) % 4294967296;
+        // h ^ byte < 2^32, times 16777619 < 2^56: no overflow, and the mask
+        // equals the remainder by 2^32 for this non-negative value (P28).
+        h = ((h ^ (b[i] as i64)) * 16777619) & 4294967295;
         i = i + 1;
     }
     h
@@ -6885,12 +6910,12 @@ fn update_apply(d: &mut DB, tidx: i32, cs: i32, cc: i32, rs: i32, scol: i32, row
         println!("Error: {}", err);
         return;
     }
-    let mut old_ids: Vec<i32> = vec![];
+    let old_ids = d.upd_old;
     let cells = d.cells;
     i = 0;
     while i < n {
         let pos = rs + vec_get(rows, i) * cc + scol;
-        vec_push(old_ids, vec_get(cells, pos));
+        vset_i32(old_ids, i, vec_get(cells, pos));
         cells[pos] = vec_get(new_ids, i);
         i = i + 1;
     }
@@ -10894,7 +10919,7 @@ fn stmt_update_fast(d: &mut DB, st: &mut QStmt) -> bool ~ Console + FileSystem +
                 if st.u_set_op == 0 { r = a + opnd; }
                 else if st.u_set_op == 1 { r = a - opnd; }
                 else { r = a * opnd; }
-                vset_i32(new_ids, i, sp_add(d, to_string_i32(r)));
+                vset_i32(new_ids, i, sp_int(d, r));
                 i = i + 1;
             }
         }

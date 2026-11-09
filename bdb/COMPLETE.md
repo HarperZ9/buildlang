@@ -596,6 +596,11 @@ entry of r - 1 must fail test_qdb_rows.py. Guards: the full set; digest 77a49282
 because P27's preregistered planted check (a stale `idx_num` after `ix_move`) was not caught
 without it. Written after that miss, before the after-measurements.
 
+**A12 (2026-11-09, P28).** A change that claims no byte change on disk is also checked by
+`test_qdb_wal_recovery.py --old <previous build>`: WAL files written by the build before the
+change must recover under the new one. Added because P28's planted FNV change was invisible to the
+power-cut digest. Written after that miss, before the after-measurements.
+
 ## Baseline (qdb at the move, 2026-11-08, buildc 1.11.0)
 
 These are the runs on the engine as it arrived (build-universe 4a296c1, here d39dfc1), with only
@@ -1108,6 +1113,42 @@ render job, 12.8 GB free. Paired median of qdb's time over SQLite's, with the 93
   cuts 0 of 10,000, digest 77a49282... equal (no byte change); P2 2,000 of 2,000; text 0 changed; WAL
   recovery 0; reference differential 16 of 16; library 0 failures; receipts reproduced; mutations
   0 disagreements.
+
+## After P28: update path costs (2026-11-09, feat/bdb-updpath)
+
+P27's runs, against the P27 merge (c6397aa) as "before". Run 11:46 to 12:02 PT, no cargo, rustc or
+render job. Paired median of qdb's time over SQLite 3.49.1's, 93.5 percent interval; qdb's rate in
+statements per second.
+
+| Rows | Mode | Before | After | Change | qdb before | qdb after |
+|---|---|---|---|---|---|---|
+| 10,000 | select | 0.55 (0.55 to 0.60) | 0.56 (0.55 to 0.57) | +2% | 4,361,004 | 4,667,554 |
+| 10,000 | update | 2.25 (2.18 to 2.39) | 1.32 (1.28 to 1.40) | -41% | 1,084,875 | 1,927,358 |
+| 10,000 | mixed | 1.48 (1.42 to 1.65) | 1.00 (0.96 to 1.05) | -32% | 1,563,172 | 2,541,587 |
+| 100,000 | select | 1.14 (1.08 to 1.23) | 1.13 (1.09 to 1.33) | -1% | 1,963,653 | 1,864,976 |
+| 100,000 | update | 2.49 (2.36 to 2.64) | 1.74 (1.59 to 1.95) | -30% | 828,892 | 1,297,497 |
+| 100,000 | mixed | 1.91 (1.83 to 2.03) | 1.34 (1.25 to 1.64) | -30% | 1,065,042 | 1,582,917 |
+
+- Point select on 10,000 rows stays faster than SQLite (0.55 to 0.57); mixed on 10,000 rows is level
+  (0.96 to 1.05, unsettled); update at both sizes and everything at 100,000 rows stays slower.
+- Predictions: update fell 41 and 30 percent (10 to 30: MISSED at 10,000 on the fast side, held at
+  100,000); mixed fell 32 and 30 percent (5 to 20: MISSED twice, fast side); select moved under 10
+  percent (held).
+- Spread between sessions: the same engine (P27) measured 0.82 on 10,000-row select in P27's run
+  and 0.55 here, with qdb at 3.14 and 4.36 million per second. Pairing removes SQLite's drift within
+  a run; it does not remove a change in qdb's own rate between processes or sessions (memory layout
+  of the pool is the leading guess, not tested). Before/after comparisons are made only within one
+  session, as here.
+- Planted checks: the 2^32 - 2 FNV mask did NOT change the power-cut digest (MISSED as
+  preregistered): writer and reader in that test are the same build, so a self-consistent hash
+  change is invisible to it. Amendment A12: the WAL recovery test also runs with the previous build
+  as the writer; the planted build then fails 223 recovery checks and the real build 0. The `sp_int`
+  build that returns r - 1's entry fails the rows test (32 differences over two seeds, and .db/.wal
+  differ), caught.
+- Guards: test_qdb.sh 314 pass, 0 fail; rows 0 differences; crash 176 points, 0 violations; power
+  cuts 0 of 10,000, digest 77a49282... equal; P2 2,000 of 2,000; text 0 changed; WAL recovery 0 (old
+  reference writer) and 0 (P27 build writer); reference differential 16 of 16; library 0 failures;
+  receipts reproduced; mutations 0 disagreements.
 
 ## Stage 1: a correct, durable single-file engine
 
