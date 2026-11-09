@@ -2731,6 +2731,53 @@ static int64_t build_file_size(const char* path) {
     #endif
 }
 
+// --- Atomic replace and flush (issue #166) ---
+// rename_file replaces `to` with `from` in one step: MoveFileExA with
+// MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH on Windows, rename(2)
+// then an fsync of the directory elsewhere. fsync_file flushes a file's data
+// to the device (FlushFileBuffers / fsync). Both return false on failure.
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <fcntl.h>
+#endif
+
+static bool build_rename_file(const char* from, const char* to) {
+    #ifdef _WIN32
+    return MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    #else
+    if (rename(from, to) != 0) return false;
+    char dir[4096];
+    size_t n = strlen(to);
+    if (n >= sizeof dir) return true;
+    memcpy(dir, to, n + 1);
+    char* slash = strrchr(dir, '/');
+    if (slash == NULL) { dir[0] = '.'; dir[1] = 0; }
+    else if (slash == dir) { dir[1] = 0; }
+    else { *slash = 0; }
+    int fd = open(dir, O_RDONLY);
+    if (fd >= 0) { fsync(fd); close(fd); }
+    return true;
+    #endif
+}
+
+static bool build_fsync_file(const char* path) {
+    #ifdef _WIN32
+    HANDLE h = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    BOOL ok = FlushFileBuffers(h);
+    CloseHandle(h);
+    return ok != 0;
+    #else
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return false;
+    int r = fsync(fd);
+    close(fd);
+    return r == 0;
+    #endif
+}
+
 // --- TCP socket functions ---
 
 #ifdef _WIN32
@@ -3110,6 +3157,8 @@ pub const MATH_BUILTINS: &[&str] = &[
     "read_bytes",
     "write_bytes",
     "append_file",
+    "rename_file",
+    "fsync_file",
     // Vector math builtins
     "dot",
     "cross",
@@ -3243,6 +3292,8 @@ pub fn math_builtin_to_c(name: &str) -> Option<&'static str> {
         "read_bytes" => Some("build_read_bytes"),
         "write_bytes" => Some("build_write_bytes"),
         "append_file" => Some("build_append_file"),
+        "rename_file" => Some("build_rename_file"),
+        "fsync_file" => Some("build_fsync_file"),
         "vec_new" => Some("build_hvec_new_i32"),
         "vec_push" => Some("build_hvec_push_i32"),
         "vec_get" => Some("build_hvec_get_i32"),
@@ -3429,7 +3480,7 @@ mod tests {
 
     #[test]
     fn test_math_builtins_list() {
-        assert_eq!(MATH_BUILTINS.len(), 98);
+        assert_eq!(MATH_BUILTINS.len(), 100);
         assert!(MATH_BUILTINS.contains(&"abs"));
         assert!(MATH_BUILTINS.contains(&"random_f64"));
         assert!(MATH_BUILTINS.contains(&"model_complete"));
@@ -3439,6 +3490,8 @@ mod tests {
         assert!(MATH_BUILTINS.contains(&"cross"));
         assert!(MATH_BUILTINS.contains(&"normalize"));
         assert!(MATH_BUILTINS.contains(&"length"));
+        assert!(MATH_BUILTINS.contains(&"rename_file"));
+        assert!(MATH_BUILTINS.contains(&"fsync_file"));
     }
 
     #[test]

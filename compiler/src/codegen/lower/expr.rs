@@ -2686,6 +2686,8 @@ impl<'ctx> MirLowerer<'ctx> {
                     | "read_bytes"
                     | "write_bytes"
                     | "append_file"
+                    | "rename_file"
+                    | "fsync_file"
                     | "build_vk_load_shader_file"
                     | "build_vk_run_compute"
                     | "map_insert"
@@ -3871,6 +3873,8 @@ impl<'ctx> MirLowerer<'ctx> {
                 "read_bytes" => return MirType::Struct(Arc::from("BuildString")),
                 "write_bytes" => return MirType::Bool,
                 "append_file" => return MirType::Bool,
+                "rename_file" => return MirType::Bool,
+                "fsync_file" => return MirType::Bool,
                 // CLI / stdin builtins
                 "args_count" => return MirType::i64(),
                 "args_get" => return MirType::Struct(Arc::from("BuildString")),

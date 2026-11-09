@@ -81,7 +81,8 @@ pub fn capability_effect_for_call(name: &str) -> Option<&'static str> {
         | "build_read_all"
         | "build_stdin_is_pipe" => Some(CONSOLE),
         "read_file" | "write_file" | "file_exists" | "read_bytes" | "write_bytes"
-        | "append_file" | "list_dir" | "is_dir" | "file_size" | "build_read_file"
+        | "append_file" | "rename_file" | "fsync_file" | "list_dir" | "is_dir" | "file_size"
+        | "build_read_file" | "build_rename_file" | "build_fsync_file"
         | "build_write_file" | "build_file_exists" | "build_read_bytes" | "build_write_bytes"
         | "build_append_file" | "build_list_dir" | "build_is_dir" | "build_file_size" => {
             Some(FILE_SYSTEM)

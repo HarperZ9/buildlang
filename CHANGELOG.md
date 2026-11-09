@@ -8,6 +8,10 @@ tracked in `STATUS.md`, `README.md`, and
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
 `108/108` or `132/132` are not the current release gate.
 
+## Unreleased: rename_file and fsync_file (#166)
+
+- `rename_file(from, to) -> bool` replaces `to` with `from` in one step (MoveFileExA with MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH on Windows; rename(2) and an fsync of the directory elsewhere). `fsync_file(path) -> bool` flushes a file to the device (FlushFileBuffers / fsync). Both need the FileSystem effect and return false on failure. `compiler/tests/rename_fsync.rs`.
+
 ## Unreleased: an integer literal meeting a float is a float (#167)
 
 - `let s = 60.3; let mut c = 0; s / c` checked with the float literal's variable bound to the integer one, so the division was emitted as `bl_idiv_i32` and printed 60. The unifier now makes an integer literal that meets a float literal a float, and lowering takes the float type the checker inferred for an unannotated `let`, as #159 did for wide integers. `compiler/tests/float_let_inference.rs`: two programs print the truncated value on main before the fix (60 and 3 where 60.3 and 3.5 are right); a control keeps `7 / 2` at 3.

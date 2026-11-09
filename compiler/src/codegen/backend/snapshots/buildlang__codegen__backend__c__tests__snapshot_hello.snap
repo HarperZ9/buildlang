@@ -2768,6 +2768,53 @@ static int64_t build_file_size(const char* path) {
     #endif
 }
 
+// --- Atomic replace and flush (issue #166) ---
+// rename_file replaces `to` with `from` in one step: MoveFileExA with
+// MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH on Windows, rename(2)
+// then an fsync of the directory elsewhere. fsync_file flushes a file's data
+// to the device (FlushFileBuffers / fsync). Both return false on failure.
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <fcntl.h>
+#endif
+
+static bool build_rename_file(const char* from, const char* to) {
+    #ifdef _WIN32
+    return MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    #else
+    if (rename(from, to) != 0) return false;
+    char dir[4096];
+    size_t n = strlen(to);
+    if (n >= sizeof dir) return true;
+    memcpy(dir, to, n + 1);
+    char* slash = strrchr(dir, '/');
+    if (slash == NULL) { dir[0] = '.'; dir[1] = 0; }
+    else if (slash == dir) { dir[1] = 0; }
+    else { *slash = 0; }
+    int fd = open(dir, O_RDONLY);
+    if (fd >= 0) { fsync(fd); close(fd); }
+    return true;
+    #endif
+}
+
+static bool build_fsync_file(const char* path) {
+    #ifdef _WIN32
+    HANDLE h = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    BOOL ok = FlushFileBuffers(h);
+    CloseHandle(h);
+    return ok != 0;
+    #else
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return false;
+    int r = fsync(fd);
+    close(fd);
+    return r == 0;
+    #endif
+}
+
 // --- TCP socket functions ---
 
 #ifdef _WIN32
