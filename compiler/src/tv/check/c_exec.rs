@@ -13,6 +13,7 @@
 
 use super::c_parse::{CExpr, CFunc, CStmt};
 use crate::ast::BinOp;
+use crate::verify::effects::{call_event, finish_atom};
 use crate::verify::float;
 use crate::verify::sym::St;
 use crate::verify::sym_ops::apply;
@@ -47,12 +48,19 @@ pub fn c_ty(name: &str) -> Option<Ty> {
 pub struct CExec<'a> {
     pub f: &'a CFunc,
     pub cuts: &'a HashSet<String>,
-    /// Return types of the user functions the body may call.
-    pub callees: &'a HashMap<String, Ty>,
+    /// Return types of the user functions the body may call (`None` for
+    /// `void`).
+    pub callees: &'a HashMap<String, Option<Ty>>,
     /// The C file's top-level constants.
     pub globals: &'a HashMap<String, (Term, Ty)>,
+    /// The C file's string table.
+    pub strings: &'a HashMap<String, String>,
+    /// Renamed functions: C name to source name.
+    pub c_names: &'a HashMap<String, String>,
     labels: HashMap<String, usize>,
     types: HashMap<String, Ty>,
+    /// Locals that hold strings.
+    pub(super) strs: HashSet<String>,
 }
 
 type Paths = Vec<(St, CExit)>;
@@ -61,8 +69,8 @@ impl<'a> CExec<'a> {
     pub fn new(
         f: &'a CFunc,
         cuts: &'a HashSet<String>,
-        callees: &'a HashMap<String, Ty>,
-        globals: &'a HashMap<String, (Term, Ty)>,
+        callees: &'a HashMap<String, Option<Ty>>,
+        consts: &'a super::relate::Consts,
     ) -> Result<Self, String> {
         let mut labels = HashMap::new();
         for (i, s) in f.body.iter().enumerate() {
@@ -71,7 +79,15 @@ impl<'a> CExec<'a> {
             }
         }
         let mut types = HashMap::new();
+        let mut strs = HashSet::new();
         for (n, t) in f.params.iter().chain(&f.locals) {
+            if super::c_effects::is_string_ty(t) {
+                strs.insert(n.clone());
+                continue;
+            }
+            if is_main_arg(f, n, t) {
+                continue;
+            }
             let ty = c_ty(t)
                 .ok_or_else(|| format!("C local `{n}` has type `{t}`, outside the subset"))?;
             types.insert(n.clone(), ty);
@@ -80,9 +96,12 @@ impl<'a> CExec<'a> {
             f,
             cuts,
             callees,
-            globals,
+            globals: &consts.c,
+            strings: &consts.strings,
+            c_names: &consts.c_names,
             labels,
             types,
+            strs,
         })
     }
 
@@ -120,6 +139,17 @@ impl<'a> CExec<'a> {
                         }
                         seen.push(pc);
                         pc += 1
+                    }
+                    CStmt::Assign(x, e) if self.strs.contains(x) => {
+                        let v = self.str_value(e, &mut s)?;
+                        match s.strs.iter_mut().rev().find(|v| v.0 == *x) {
+                            Some(slot) => slot.1 = v,
+                            None => s.strs.push((x.clone(), v)),
+                        }
+                        pc += 1;
+                    }
+                    CStmt::Eval(CExpr::Call(name, args)) if self.effect(name, args, &mut s)? => {
+                        pc += 1;
                     }
                     CStmt::Assign(x, e) => {
                         let ty = self
@@ -211,7 +241,7 @@ impl<'a> CExec<'a> {
 
     /// The term and type of `e`. `top` marks the whole right side of an
     /// assignment, the one place narrow-type arithmetic is accepted.
-    fn expr(
+    pub(super) fn expr(
         &self,
         e: &CExpr,
         s: &mut St,
@@ -280,6 +310,9 @@ impl<'a> CExec<'a> {
             }
             CExpr::Bin(op, a, b) => self.binary(op, a, b, s, want, top)?,
             CExpr::Call(name, args) => self.call(name, args, s)?,
+            CExpr::Str(_) | CExpr::Cond(..) | CExpr::Member(..) => {
+                return Err("a C string or member expression outside the model".into())
+            }
         })
     }
 
@@ -429,10 +462,21 @@ impl<'a> CExec<'a> {
         for a in args {
             vals.push(self.expr(a, s, None, false)?.0);
         }
+        let name = self.c_names.get(name).map_or(name, String::as_str);
+        s.event(call_event(name, &vals));
+        s.assume(finish_atom(name, &vals));
+        let Some(rty) = rty else {
+            return Ok((Term::Int(0), None));
+        };
         let app = Term::App(name.to_string(), vals);
         s.fact(in_range(&app, rty));
         Ok((app, Some(rty)))
     }
+}
+
+/// `argc` and `argv` of a C `main`, which only the start-up call reads.
+fn is_main_arg(f: &CFunc, n: &str, t: &str) -> bool {
+    f.name == "main" && matches!((n, t), ("argc", "int") | ("argv", "char**"))
 }
 
 fn set(s: &mut St, n: &str, v: Term, ty: Ty) {

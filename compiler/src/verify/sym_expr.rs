@@ -221,6 +221,9 @@ pub(super) fn expr(sym: &mut Sym<'_>, e: &Expr, st: St, expect: Option<Ty>) -> R
             args,
             ..
         } => method_call(sym, receiver, &method.name, args, st, expect),
+        ExprKind::Macro { path, .. } if sym.source.is_some() => {
+            super::sym_effects::print_macro(sym, e, path, st)
+        }
         ExprKind::Break {
             value: None,
             label: None,
@@ -270,7 +273,9 @@ fn probe(
     let single = |r: &[(St, Out)], start: &St| -> Option<Term> {
         match r {
             [(st, Out::Val(v, Some(Ty::Bool)))]
-                if st.vars == start.vars && st.conds.len() == start.conds.len() =>
+                if st.vars == start.vars
+                    && st.conds.len() == start.conds.len()
+                    && st.trace.len() == start.trace.len() =>
             {
                 Some(v.clone())
             }

@@ -11,10 +11,12 @@
 //! and AST, and the verifier's term and proof modules. A test holds that
 //! boundary.
 
+pub mod c_effects;
 pub mod c_exec;
 pub mod c_parse;
 pub mod relate;
 pub mod src_exec;
+pub mod trace;
 
 use crate::ast::{FnDef, ItemKind};
 use crate::lexer::{Lexer, SourceFile};
@@ -67,24 +69,37 @@ pub fn check(source: &str, c: &str, cert: &Value) -> Result<Vec<FnResult>, Strin
         }
     }
     let sigs = Sigs::from_module_tv(&module.items);
-    let consts = relate::Consts {
-        source: source_consts(&module.items),
-        c: c_parse::c_consts(c),
-    };
     let entries = cert["functions"]
         .as_array()
         .ok_or("certificate has no functions")?;
     let mut callees = HashMap::new();
+    let mut c_names = HashMap::new();
     for e in entries {
-        let name = e["name"].as_str().unwrap_or_default();
+        let src_name = e["name"].as_str().unwrap_or_default();
+        let name = e["c_name"].as_str().unwrap_or(src_name);
+        if name != src_name {
+            if name != format!("_{src_name}") || fns.contains_key(name) {
+                continue;
+            }
+            c_names.insert(name.to_string(), src_name.to_string());
+        }
         if let Some(text) = c_parse::function_text(c, name) {
             if let Ok(f) = c_parse::parse_function(text) {
-                if let Some(t) = c_exec::c_ty(&f.ret) {
-                    callees.insert(name.to_string(), t);
+                if f.ret == "void" {
+                    callees.insert(name.to_string(), None);
+                } else if let Some(t) = c_exec::c_ty(&f.ret) {
+                    callees.insert(name.to_string(), Some(t));
                 }
             }
         }
     }
+    let consts = relate::Consts {
+        source: source_consts(&module.items),
+        c: c_parse::c_consts(c),
+        strings: c_effects::string_table(c),
+        text: source.to_string(),
+        c_names,
+    };
     let mut out = Vec::new();
     for e in entries {
         let name = e["name"]
@@ -106,7 +121,7 @@ fn check_one(
     sf: &SourceFile,
     sigs: &Sigs,
     c: &str,
-    callees: &HashMap<String, Ty>,
+    callees: &HashMap<String, Option<Ty>>,
     consts: &relate::Consts,
 ) -> Status {
     let not = |reason: String| Status::NotCertified { reason };
@@ -127,7 +142,11 @@ fn check_one(
     if e["source_sha256"].as_str() != Some(sha256_hex(src_text).as_str()) {
         return not("the source hash does not match".into());
     }
-    let Some(c_text) = c_parse::function_text(c, name) else {
+    let c_name = e["c_name"].as_str().unwrap_or(name);
+    if c_name != name && consts.c_names.get(c_name).map(String::as_str) != Some(name) {
+        return not("the certificate names another C function".into());
+    }
+    let Some(c_text) = c_parse::function_text(c, c_name) else {
         return not("the C file does not define it".into());
     };
     if e["c_sha256"].as_str() != Some(sha256_hex(c_text).as_str()) {

@@ -35,6 +35,11 @@ pub struct St {
     pub facts: Vec<Term>,
     pub vars: Vec<(String, Term, Ty)>,
     pub ret: Option<Ty>,
+    /// Effects in order (translation validation): each is the number of
+    /// path conditions in force when it happened, and the event term.
+    pub trace: Vec<(usize, Term)>,
+    /// Opaque string values by variable name (the C side's string locals).
+    pub strs: Vec<(String, Term)>,
 }
 
 impl St {
@@ -69,6 +74,23 @@ impl St {
         let mut h = self.conds.clone();
         h.extend(self.facts.iter().cloned());
         h
+    }
+
+    /// A fresh state with these conditions and variables and no effects.
+    pub fn new(conds: Vec<Term>, vars: Vec<(String, Term, Ty)>, ret: Option<Ty>) -> St {
+        St {
+            conds,
+            facts: Vec::new(),
+            vars,
+            ret,
+            trace: Vec::new(),
+            strs: Vec::new(),
+        }
+    }
+
+    /// Record an effect under the conditions in force now.
+    pub fn event(&mut self, ev: Term) {
+        self.trace.push((self.conds.len(), ev));
     }
 
     pub fn assume(&mut self, t: Term) {
@@ -109,6 +131,9 @@ pub struct Sym<'a> {
     pub floats: bool,
     /// Named constants by value (translation validation).
     pub consts: HashMap<String, (Term, Ty)>,
+    /// The source text, for the arguments of print macros (translation
+    /// validation, where prints are effects).
+    pub source: Option<&'a str>,
 }
 
 impl<'a> Sym<'a> {
@@ -122,6 +147,7 @@ impl<'a> Sym<'a> {
             inline_calls: true,
             floats: false,
             consts: HashMap::new(),
+            source: None,
         }
     }
 
@@ -175,6 +201,8 @@ impl<'a> Sym<'a> {
                 .map(|((n, t), a)| (n.clone(), a, *t))
                 .collect(),
             ret,
+            trace: st.trace.clone(),
+            strs: st.strs.clone(),
         };
         for (n, t) in &params {
             let (v, _) = inner.get(n).unwrap();
@@ -193,6 +221,8 @@ impl<'a> Sym<'a> {
                 facts: s.facts,
                 vars: st.vars.clone(),
                 ret: st.ret,
+                trace: s.trace,
+                strs: st.strs.clone(),
             };
             out.push((back, Out::Val(v, t)));
         }
@@ -212,8 +242,10 @@ impl<'a> Sym<'a> {
                 });
             }
         }
-        let recursive =
-            !self.inline_calls || self.stack.iter().any(|s| s == name) || self.stack.len() > 24;
+        if !self.inline_calls {
+            return super::sym_effects::opaque_call(self, name, args, st);
+        }
+        let recursive = self.stack.iter().any(|s| s == name) || self.stack.len() > 24;
         if !recursive {
             return self.call(name, args, st);
         }
@@ -225,7 +257,7 @@ impl<'a> Sym<'a> {
         let mut st = st;
         st.fact(in_range(&app, rty));
         let ens = format!("{ENSURES_PREFIX}{name}");
-        if !self.inline_calls || !self.fns.contains_key(&ens) || self.stack.contains(&ens) {
+        if !self.fns.contains_key(&ens) || self.stack.contains(&ens) {
             return Ok(vec![(st, Out::Val(app, Some(rty)))]);
         }
         let mut eargs = args;

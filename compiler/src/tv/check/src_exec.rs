@@ -170,6 +170,7 @@ impl<'a> SrcExec<'a> {
                         st.vars.truncate(top.depth);
                         out.push((st, SExit::Cut(k)));
                     }
+                    None if self.ret.is_none() => out.push((st, SExit::Ret(Term::Int(0)))),
                     None => return Err("the function ends without a value".into()),
                 }
                 continue;
