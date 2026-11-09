@@ -4,16 +4,15 @@
 
 Builds the static library (bdb/lib/make_lib.py, `buildc build --release
 --emit staticlib`), then throughput.c twice: once linked with libmain.a, once
-with the SQLite library. Each run builds a table of N rows and times OPS
+compiled with the SQLite amalgamation (sqlite3.c, default options, -O2). Each run builds a table of N rows and times OPS
 point selects, updates or both, inside one transaction (see throughput.c).
 qdb's stdout goes to the null device. Reports the median of --reps runs per
 engine and mode, and qdb's time as a multiple of SQLite's.
 
-  python bench_qdb_throughput.py BUILDC --sqlite-lib PATH [--n 10000]
+  python bench_qdb_throughput.py BUILDC --sqlite-src DIR [--n 10000]
          [--ops 2000] [--reps 3] [--modes select,update,mixed] [--json OUT]
 
-On Windows PATH can be the sqlite3.dll that ships with Python; on Linux,
--lsqlite3 (pass --sqlite-lib -lsqlite3).
+DIR holds sqlite3.c from https://www.sqlite.org (public domain).
 """
 import argparse
 import json
@@ -26,7 +25,7 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
-def build(buildc, cc, sqlite_lib, wd):
+def build(buildc, cc, sqlite_src, wd):
     proj = os.path.join(wd, "lib")
     subprocess.run([sys.executable, os.path.join(HERE, "..", "lib", "make_lib.py"), proj], check=True,
                    capture_output=True)
@@ -46,7 +45,8 @@ def build(buildc, cc, sqlite_lib, wd):
     qexe = os.path.join(wd, "tp_qdb" + ext)
     sexe = os.path.join(wd, "tp_sqlite" + ext)
     for cmd in ([cc, "-O2", "-w", "-DUSE_QDB", "-I", lib, src, os.path.join(lib, "libmain.a")] + flags + ["-lm", "-o", qexe],
-                [cc, "-O2", "-w", src, sqlite_lib, "-lm", "-o", sexe]):
+                [cc, "-O2", "-w", src, os.path.join(sqlite_src, "sqlite3.c"), "-lm"]
+                + ([] if os.name == "nt" else ["-lpthread", "-ldl"]) + ["-o", sexe]):
         p = subprocess.run(cmd, capture_output=True)
         if p.returncode != 0:
             raise SystemExit("compile failed: %s\n%s" % (" ".join(cmd), p.stderr.decode(errors="replace")))
@@ -79,7 +79,7 @@ def end_sum(exe, wd, tag):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("buildc")
-    ap.add_argument("--sqlite-lib", required=True)
+    ap.add_argument("--sqlite-src", required=True)
     ap.add_argument("--cc", default="gcc")
     ap.add_argument("--n", type=int, default=10000)
     ap.add_argument("--ops", type=int, default=2000)
@@ -89,7 +89,7 @@ def main():
     a = ap.parse_args()
     out = {}
     with tempfile.TemporaryDirectory() as wd:
-        qexe, sexe = build(a.buildc, a.cc, a.sqlite_lib, wd)
+        qexe, sexe = build(a.buildc, a.cc, a.sqlite_src, wd)
         sq, ss = end_sum(qexe, wd, "qdb"), end_sum(sexe, wd, "sqlite")
         print("end state check (SUM(v) after 1,000 rows and 200 mixed statements): qdb %s, sqlite %s: %s"
               % (sq, ss, "equal" if sq == ss and sq else "DIFFERENT"))

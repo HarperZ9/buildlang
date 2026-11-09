@@ -317,7 +317,7 @@ below 1,931.
 **P19. Throughput through bdb/lib against SQLite (item 5), written 2026-11-09 07:45 PT before any
 run.** A new `bdb/benchmarks/bench_qdb_throughput.py` builds the library in release mode and
 `bdb/benchmarks/throughput.c` twice: linked with `libmain.a`, and linked with SQLite (on Windows
-the `sqlite3.dll` that ships with Python 3.12, SQLite 3.49.1). Each run makes `t (id INTEGER
+the `sqlite3.dll` that ships with Python 3.12, SQLite 3.49.1; see A11). Each run makes `t (id INTEGER
 PRIMARY KEY, v INTEGER)` with 10,000 rows (qdb also gets `CREATE INDEX t_id ON t (id)`, its only
 way to look a key up), then times 2,000 statements inside one transaction, passed as SQL text to
 both: `select` (`SELECT v FROM t WHERE id = k`), `update` (`UPDATE t SET v = v + 1 WHERE id = k`)
@@ -417,6 +417,12 @@ counting rows with `v` changed).
   second run. Most of the 58 wrong `in1.test` records read tables filled by `INSERT INTO t SELECT
   ...`, which qdb does not run (7 statement records), so they stay wrong. The predictions stand
   for the second run.
+- **A11 (2026-11-09 08:15 PT, before any P19 measurement).** Linking `throughput.c` with the
+  `sqlite3.dll` that ships with Python crashed at the first call (a null function pointer inside
+  the DLL, under MinGW, with direct linking and with an import library from `dlltool`). The SQLite
+  twin is compiled instead from the SQLite 3.49.1 amalgamation (`sqlite3.c`, public domain, from
+  sqlite.org; kept outside the repository with its SHA-256), with default options and -O2, the
+  same version as before. Nothing else in P19 changes.
 
 ## Baseline (qdb at the move, 2026-11-08, buildc 1.11.0)
 

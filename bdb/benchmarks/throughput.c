@@ -14,7 +14,7 @@
  * callback formats each row into a buffer. Prints one line to stderr:
  *   ENGINE MODE N OPS SECONDS OPS_PER_SECOND
  * The qdb build defines USE_QDB and links libmain.a; the SQLite build declares
- * the five functions it calls and links the sqlite3 library. */
+ * the functions it calls and is compiled with the SQLite amalgamation. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
