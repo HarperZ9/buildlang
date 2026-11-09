@@ -196,6 +196,62 @@ Planted checks:
 - K3 held: changing `SCALE`, `HALF` or `ENABLED` in the C makes its reader not certified
   (`compiler/tests/tv_consts.rs`).
 
+## Widening 3: effects (preregistered 2026-11-09, before the run)
+
+Measured on main ee630a1 with the #178 fix applied (`floor(fixed) as i32`): `tests/programs` 160 of
+435 certified, 0 not certified, 275 outside the subset. 141 of the 275 are `main`; 266 are refused
+by signature.
+
+The gap this closes is a soundness one as well as a coverage one. Calls are uninterpreted and were
+treated as total: two calls in a different order, where one traps and the other loops, were
+accepted. And a print has no meaning in the old model at all, so output written before a trap was
+never compared.
+
+The change:
+
+- Each path on both sides keeps a trace of events. An event is either an output (the stream, then
+  the literal text and the formatted values, adjacent text merged) or a call of a user function
+  (the callee and its arguments). Each event records the path condition at the moment it happens,
+  so a path that later traps still contributes the events it wrote before the trap.
+- A call is a sync point: after it, a path continues only under an uninterpreted finish atom of
+  that callee on those arguments, the same atom on both sides.
+- At each cut segment, two new conditions: (E1) for every index j, the source reaches its j-th
+  event on exactly the inputs where the C reaches its j-th event; (E2) for every source path and C
+  path that both reach their j-th event, the two events are equal. Two paths that both finish must
+  also have traces of the same length.
+- Formatting table (trusted base): `{}` and `{:?}` of an integer print its decimal value, matched
+  by C `%d`, `%u`, `%lld` or `%llu` at the argument's width and signedness; `{}` of a bool is C
+  `%s` of `b ? "true" : "false"`; `{}` and `{:?}` of `f64` and `f32` are `build_f64_to_string`,
+  `build_f64_to_debug_string` and the `f32` pair; `{:.N}` of a float is C `%.Nf`. The C string
+  table is read from the C file, and C escapes are decoded there. Width, alignment, sign and radix
+  specs stay outside the subset.
+- `main` with no parameters and no result is checked against C `main(argc, argv)`: the prologue
+  `__build_init_io()` (which makes stdout and stderr unbuffered) and `build_args_init` write no
+  output, `fflush(stdout)` writes nothing new on an unbuffered stream, and the C must return 0.
+  A function with no result is checked against a C `void` function.
+
+Prediction: `tests/programs` from 160 to between 185 and 240 of 435; `stdlib` up by fewer than 10.
+Mains that use strings other than literals, structs, arrays or vectors stay outside. Any
+not-certified corpus function is investigated as a possible real miscompile before the change
+merges. The 50 % target (218) may need structs as well; if it is missed, the miss is reported.
+
+Planted checks, each must hold or the change does not merge. Each is a rewrite of the emitted C of
+`tests/tv/effects.bld` fed to `tv-check` with the function's hash rewritten:
+
+- P1. Two `printf` lines swapped.
+- P2. A `printf` moved after a checked add that can trap (same output whenever no trap happens).
+- P3. A `printf` dropped; a `printf` duplicated.
+- P4. A literal changed in the C string table (not covered by the function hash).
+- P5. `%d` turned into `%u` for a signed value.
+- P6. `printf` turned into `fprintf(stderr, ...)`.
+- P7. The bool ternary swapped to `b ? "false" : "true"`.
+- P8. Two calls of pure user functions swapped, with no print between them.
+- P9. A call duplicated.
+- P10. `main` returning 1.
+- P11. The existing plants (`add-to-sub`, `fadd-to-fsub`, the IEEE rewrites, the constant
+  rewrites, the forged certificates) are still caught, and every function certified before the
+  change that is still in the corpus stays certified or the drop is explained.
+
 ## Verified
 
 - `compiler/tests/tv_c.rs`, `compiler/tests/tv_float.rs` and `compiler/tests/tv_consts.rs`: the
