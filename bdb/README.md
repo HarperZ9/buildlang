@@ -35,6 +35,27 @@ python3 bdb/tests/test_qdb_sqlite_oracle.py bdb/qdb.exe  # 2,000 generated queri
 python3 bdb/tests/slt_run.py CORPUS --qdb bdb/qdb.exe    # sqllogictest (corpus not vendored)
 ```
 
+## Use it as a library
+
+The same source builds as a static library with a three-call C interface, so a host (the
+compiler, a game, a test) opens a database once and runs many statements in one process:
+
+```bash
+python3 bdb/lib/make_lib.py build/qdblib          # db.bld without main(), plus lib/exports.bld
+buildc build --emit staticlib build/qdblib        # target/debug/libmain.a, main.h, main.link
+cc host.c -I build/qdblib/target/debug build/qdblib/target/debug/libmain.a -lm -o host
+```
+
+```c
+DB* d = qdb_open((uint8_t*)"app.db");     /* load the .db, replay the WAL */
+qdb_exec(d, (uint8_t*)"SELECT * FROM t"); /* prints what the CLI prints */
+qdb_close(d);                             /* checkpoint, or HOLD an open BEGIN */
+```
+
+`bdb/tests/test_qdb_lib.py` runs the differential workloads through `bdb/lib/driver.c` and through
+one CLI process per statement and requires the same output and the same final `.db`. Limit: a
+statement the parser rejects ends the host process with exit code 1, as it ends the CLI.
+
 ## Where it came from
 
 qdb lived in HarperZ9/build-universe as `programs/db.bld` until 2026-11-09, and moved here with its
