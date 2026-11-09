@@ -2671,7 +2671,7 @@ fn exec_subquery_scalar(d: &mut DB, sql: String) -> String ~ Console + Process {
             }
             let mut result_val = sum_val;
             if af == 3 {
-                if cnt > 0 { result_val = sum_val / cnt; }
+                if cnt > 0 { result_val = sum_val / (cnt as f64); }
                 else { result_val = 0.0; }
             }
             if af == 4 { result_val = min_val; }
@@ -4103,7 +4103,7 @@ fn compute_single_agg(d: &mut DB, af: i32, ac_name_id: i32, cs: i32, cc: i32,
     if af == 5 && ct == 2 { return sp_add(d, max_str); }
     let mut result_val = sum_val;
     if af == 3 {
-        if cnt > 0 { result_val = sum_val / cnt; }
+        if cnt > 0 { result_val = sum_val / (cnt as f64); }
         else { result_val = 0.0; }
     }
     if af == 4 { result_val = min_val; }
@@ -4699,7 +4699,7 @@ fn compute_group_numeric(d: &mut DB, af: i32, ac_name: String, gk: String,
     if af == 5 && ct == 2 { return max_str; }
     let mut result_val = sum_v;
     if af == 3 {
-        if cnt > 0 { result_val = sum_v / cnt; }
+        if cnt > 0 { result_val = sum_v / (cnt as f64); }
         else { result_val = 0.0; }
     }
     if af == 4 { result_val = min_v; }
@@ -4910,7 +4910,7 @@ fn exec_select_join(d: &mut DB) ~ Console {
                     out = max_str;
                 } else {
                     let mut rv = sum_val;
-                    if af == 3 { if cnt > 0 { rv = sum_val / cnt; } else { rv = 0.0; } }
+                    if af == 3 { if cnt > 0 { rv = sum_val / (cnt as f64); } else { rv = 0.0; } }
                     if af == 4 { rv = min_val; }
                     if af == 5 { rv = max_val; }
                     out = float_to_str(rv);
@@ -5187,7 +5187,7 @@ fn exec_select_join(d: &mut DB) ~ Console {
                         out = max_str;
                     } else {
                         let mut rv = sum_val;
-                        if af == 3 { if cnt > 0 { rv = sum_val / cnt; } else { rv = 0.0; } }
+                        if af == 3 { if cnt > 0 { rv = sum_val / (cnt as f64); } else { rv = 0.0; } }
                         if af == 4 { rv = min_val; }
                         if af == 5 { rv = max_val; }
                         out = float_to_str(rv);
@@ -5841,7 +5841,7 @@ fn join_having_agg(d: &DB, haf: i32, hstar: bool, atab: i32, acol: i32, atype: i
     if haf == 4 && atype == 2 { return min_str; }
     if haf == 5 && atype == 2 { return max_str; }
     let mut rv = sum_val;
-    if haf == 3 { if cnt > 0 { rv = sum_val / cnt; } else { rv = 0.0; } }
+    if haf == 3 { if cnt > 0 { rv = sum_val / (cnt as f64); } else { rv = 0.0; } }
     if haf == 4 { rv = min_val; }
     if haf == 5 { rv = max_val; }
     float_to_str(rv)
@@ -6585,8 +6585,8 @@ fn make_dashes(w: i32) -> String {
 }
 
 // --- Numeric / String Conversion ---
-// BuildLang has limited stdlib for number formatting, so these are
-// hand-rolled: int_to_str, float_to_str, digit_char, int_part_str.
+// int_to_str and digit_char are hand-rolled; float_to_str uses the
+// runtime's shortest round-trip formatter.
 
 fn int_to_str(n: i32) -> String {
     if n == 0 { return "0"; }
@@ -6625,59 +6625,14 @@ fn digit_char(d: i32) -> String {
     "9"
 }
 
+// An aggregate's number: the shortest decimal that reads back as the same
+// f64 (the runtime's to_string_f64), so AVG and SUM keep every digit. An
+// integral value prints without a decimal point. The divide in AVG is by the
+// count as f64: an unannotated integer divisor was lowered as an integer
+// division, which truncated every AVG.
 fn float_to_str(f: f64) -> String {
-    // Handle zero
     if f == 0.0 { return "0"; }
-    let neg = f < 0.0;
-    let abs_f = if neg { 0.0 - f } else { f };
-    // Multiply by 100, round to integer, then extract int and decimal parts
-    // Use i32 cast via parse trick: format as int
-    let scaled = abs_f * 100.0 + 0.5;
-    // Floor to integer by subtracting 0.5 and comparing
-    let int_val = parse_int_str(int_part_str(scaled));
-    let int_portion = int_val / 100;
-    let rem = int_val - int_portion * 100;
-    let d1 = rem / 10;
-    let d0 = rem - d1 * 10;
-    let int_str = int_to_str(int_portion);
-    let prefix = if neg { "-" + int_str } else { int_str };
-    if d1 == 0 && d0 == 0 { return prefix; }
-    if d0 == 0 { return prefix + "." + digit_char(d1); }
-    prefix + "." + digit_char(d1) + digit_char(d0)
-}
-
-// Extract integer part of a float as a string (manual floor)
-fn int_part_str(f: f64) -> String {
-    // Build string by extracting digits from the integer portion
-    if f < 1.0 { return "0"; }
-    let mut result = "";
-    let mut remaining = f;
-    // Find the largest power of 10
-    let mut pow10 = 1.0;
-    let mut going = true;
-    while going {
-        if pow10 * 10.0 > remaining { going = false; }
-        else { pow10 = pow10 * 10.0; }
-    }
-    // Extract digits
-    let mut extracting = true;
-    while extracting {
-        if pow10 < 1.0 { extracting = false; }
-        else {
-            let mut digit = 0;
-            let mut sub = true;
-            while sub {
-                if remaining >= pow10 {
-                    remaining = remaining - pow10;
-                    digit = digit + 1;
-                } else { sub = false; }
-            }
-            result = result + digit_char(digit);
-            pow10 = pow10 / 10.0;
-        }
-    }
-    if result == "" { return "0"; }
-    result
+    to_string_f64(f)
 }
 
 // =============================================================================
