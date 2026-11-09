@@ -147,6 +147,19 @@ tables in FROM, which qdb refuses. Guards: test_qdb.sh no FAIL; P2 2,000 of 2,00
 WAL, library and reference-differential tests unchanged. Planted check: a build that reads
 `5 < a` as `a < 5` (no swap) fails the new test_qdb.sh assertions.
 
+**P10. INTERSECT and EXCEPT (row 2a), written 2026-11-08 21:58 PT before the change.** Found by the P9 run:
+878 of the 2,832 query records in `select4.test` combine single-table branches with INTERSECT or
+EXCEPT, which qdb refuses (`expected keyword`). Change: a compound SELECT takes UNION, UNION ALL,
+INTERSECT and EXCEPT, evaluated left to right with equal precedence, as SQLite does; INTERSECT
+and EXCEPT return distinct rows. Rows compare by every cell, NULL equal to NULL, as SQLite's
+compound operators do. The row key that UNION used joined cells with `|`, so `('a|b','c')` and
+`('a','b|c')` were one row; the key now uses a separator no cell holds. Measured on P1 unchanged
+against the P9 result 199 of 9,202. Prediction: between 500 and 1,100 query records pass; most
+of the 878 have no ORDER BY and are scored by the corpus's own sort mode. Guards: test_qdb.sh no
+FAIL; P2 2,000 of 2,000; text, crash, WAL, library and reference-differential tests unchanged.
+Planted check: a build that evaluates EXCEPT as INTERSECT fails the new test_qdb.sh assertions
+and passes fewer P1 records.
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
