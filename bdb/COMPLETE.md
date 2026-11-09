@@ -400,6 +400,18 @@ Predictions: total from 9,143 to between 9,175 and 9,185; `slt_lang_aggfunc.test
 of 67; no other file changes; statements not below 1,938. Planted check: a build whose DISTINCT is
 ignored in SUM, AVG and TOTAL loses at least 8 records of the aggfunc file. Guards as in P22.
 
+**P24. REPLACE (item 5), written 2026-11-09 before the full run.** `REPLACE INTO t ...` and `INSERT OR
+REPLACE INTO t ...` are refused, so `evidence/slt_lang_replace.test` has 4 wrong answers and 4
+statements fail. The change follows SQLite: each new row removes every row whose UNIQUE or PRIMARY
+KEY key equals its own (NULL keys never clash), then goes in; within one statement a later row
+replaces an earlier one; a NOT NULL failure is found before anything is removed, so a failing
+REPLACE changes nothing. Removal uses the in-place DELETE of P20. Disclosed: during development the
+replace file alone was run on the change (6 of 6 queries, 8 of 8 statements) and one script was
+compared with Python's sqlite3, before this entry. Measured on P1. Predictions: total 9,181 to
+9,185; statements 1,938 to 1,942; no other file changes. Planted check: a build whose REPLACE
+removes nothing fails the replace file (at least 2 of its 6 queries wrong or rejected) and a new
+test_qdb.sh check. Guards as in P23.
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
