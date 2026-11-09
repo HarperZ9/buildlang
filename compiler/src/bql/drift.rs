@@ -127,6 +127,7 @@ pub fn diff_stores(stored: &Store, rebuilt: &Store) -> DriftReport {
             table("effects", &stored.effects, &rebuilt.effects),
             table("calls", &stored.calls, &rebuilt.calls),
             table("items", &stored.items, &rebuilt.items),
+            table("refs", &stored.refs, &rebuilt.refs),
         ],
     }
 }
@@ -190,9 +191,17 @@ pub fn rename_rows(
     for i in &mut out.items {
         sub(&mut i.name, old, new);
     }
+    for r in &mut out.refs {
+        sub(&mut r.symbol, old, new);
+        r.span = (
+            shifted(r.span.0, edits, old, new),
+            shifted(r.span.1, edits, old, new),
+        );
+    }
     out.functions.sort();
     out.effects.sort();
     out.calls.sort();
     out.items.sort();
+    out.refs.sort();
     out
 }

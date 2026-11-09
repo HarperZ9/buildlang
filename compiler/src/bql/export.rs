@@ -3,10 +3,11 @@
 
 //! Store tables as rows, and the qdb checkpoint file format.
 //!
-//! qdb (`bdb/db.bld`) saves a database as text: `TABLE name`, a
-//! `SCHEMA col:TYPE ...` line, one `ROW a|b|c` line per row and `END`. An empty
-//! cell reads back as NULL. The format has no escape for `|` or a line break,
-//! so a cell holding either is refused rather than written.
+//! qdb (`bdb/db.bld`) saves a database as text: a `QDB 1 <txid>` header,
+//! then per table `TABLE name`, a `SCHEMA col:TYPE ...` line, one `ROW a|b|c`
+//! line per row and `END`. An empty cell reads back as NULL. Format 1 escapes
+//! a backslash as `\\`, a pipe as `\|`, a line feed as `\n` and a carriage
+//! return as `\r`, so any text is stored; format 0 (no header) had no escapes.
 
 use super::store::Store;
 use super::BqlError;
@@ -42,7 +43,7 @@ fn int(v: impl ToString) -> Option<String> {
 }
 
 /// Table names in export order.
-pub const TABLES: &[&str] = &["functions", "effects", "calls", "items"];
+pub const TABLES: &[&str] = &["functions", "effects", "calls", "items", "refs"];
 
 /// Every table of the store, in [`TABLES`] order.
 pub fn tables(store: &Store) -> Vec<Table> {
@@ -111,12 +112,41 @@ pub fn tables(store: &Store) -> Vec<Table> {
             .map(|i| vec![text(&i.name), text(&i.kind)])
             .collect(),
     };
-    vec![functions, effects, calls, items]
+    let refs = Table {
+        name: "refs",
+        columns: vec![
+            ("symbol", Text),
+            ("span_start", Integer),
+            ("span_end", Integer),
+            ("role", Text),
+        ],
+        rows: store
+            .refs
+            .iter()
+            .map(|r| vec![text(&r.symbol), int(r.span.0), int(r.span.1), text(&r.role)])
+            .collect(),
+    };
+    vec![functions, effects, calls, items, refs]
 }
 
 /// Write the store in qdb's checkpoint format.
+/// A cell in qdb's format 1.
+fn escape_cell(cell: &str) -> String {
+    let mut out = String::with_capacity(cell.len());
+    for c in cell.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '|' => out.push_str("\\|"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 pub fn to_qdb(store: &Store) -> Result<String, BqlError> {
-    let mut out = String::new();
+    let mut out = String::from("QDB 1 0\n");
     let all = tables(store);
     for (i, table) in all.iter().enumerate() {
         out.push_str("TABLE ");
@@ -134,14 +164,7 @@ pub fn to_qdb(store: &Store) -> Result<String, BqlError> {
         for row in &table.rows {
             let mut cells = Vec::with_capacity(row.len());
             for cell in row {
-                let cell = cell.as_deref().unwrap_or("");
-                if cell.contains(['|', '\n', '\r']) {
-                    return Err(BqlError::Unsupported(format!(
-                        "table {} has a cell qdb cannot store (a '|' or a line break): {cell:?}",
-                        table.name
-                    )));
-                }
-                cells.push(cell);
+                cells.push(escape_cell(cell.as_deref().unwrap_or("")));
             }
             out.push_str("ROW ");
             out.push_str(&cells.join("|"));

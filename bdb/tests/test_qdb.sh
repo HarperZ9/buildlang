@@ -554,6 +554,32 @@ chk "trail_union_final" "$($QDB "$DB" "SELECT id FROM ua UNION SELECT id FROM ub
 $QDB "$DB" "DROP TABLE ua" >/dev/null 2>&1
 $QDB "$DB" "DROP TABLE ub" >/dev/null 2>&1
 
+echo "== transactions across processes =="
+rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
+$QDB "$DB" "CREATE TABLE t (id INTEGER)" >/dev/null
+$QDB "$DB" "BEGIN" >/dev/null; $QDB "$DB" "INSERT INTO t VALUES (1)" >/dev/null; $QDB "$DB" "ROLLBACK" >/dev/null
+chk "xproc_rollback" "$($QDB "$DB" "SELECT COUNT(*) FROM t" | tr -d '\r' | tail -n +3 | tr -d ' ')" "0"
+$QDB "$DB" "BEGIN" >/dev/null; $QDB "$DB" "INSERT INTO t VALUES (2)" >/dev/null; $QDB "$DB" "COMMIT" >/dev/null
+chk "xproc_commit" "$($QDB "$DB" "SELECT id FROM t" | tr -d '\r' | tail -n +3 | tr -d ' ')" "2"
+# A transaction is visible to the process that resumes it before COMMIT.
+$QDB "$DB" "BEGIN" >/dev/null; $QDB "$DB" "INSERT INTO t VALUES (3)" >/dev/null
+chk "xproc_resumed_sees_own_rows" "$($QDB "$DB" "SELECT COUNT(*) FROM t" | tr -d '\r' | tail -n +3 | tr -d ' ')" "2"
+# A process rejected with exit code 1 inside the transaction leaves no HOLD,
+# so the open transaction is dropped, as a crash would drop it.
+$QDB "$DB" "NOT_A_STATEMENT" >/dev/null 2>&1
+chk "xproc_unclean_exit_drops" "$($QDB "$DB" "SELECT COUNT(*) FROM t" | tr -d '\r' | tail -n +3 | tr -d ' ')" "1"
+rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
+
+echo "== text with separators and line breaks round-trips =="
+rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
+$QDB "$DB" "CREATE TABLE s (id INTEGER, v TEXT)" >/dev/null
+$QDB "$DB" "INSERT INTO s VALUES (1, 'x|y'), (2, 'back\\slash'), (3, 'a\\|b')" >/dev/null
+chksel "text_pipe"       "SELECT v FROM s WHERE id = 1" "x|y"
+chksel "text_backslash"  "SELECT v FROM s WHERE id = 2" 'back\slash'
+chksel "text_both"       "SELECT v FROM s WHERE id = 3" 'a\|b'
+chk   "text_format_header" "$(head -1 "$DB" | tr -d '\r' | cut -d' ' -f1-2)" "QDB 1"
+rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
+
 echo "== ALTER / DROP =="
 reseed; $QDB "$DB" "ALTER TABLE emp ADD COLUMN active INTEGER" >/dev/null
 chkhdr "alter_add"     "SELECT * FROM emp LIMIT 0" "id | name | dept | salary | age | active"
@@ -574,14 +600,10 @@ reseed
 # as an order key and the grouped-sort path matches it against the aggregate
 # output column and compares numerically. It moved up to chksel assertions in the
 # aggregates section (group_ord_agg, group_ord_cnt_desc, group_ord_sum_desc).
-# Cross-process transactions: each statement is its own process and
-# auto-commit checkpoints, so a later ROLLBACK cannot undo an earlier
-# INSERT. SQL-correct would drop the row; here it persists (count 6).
-rm -f "$DB" "$DB".wal 2>/dev/null
-$QDB "$DB" "CREATE TABLE t (id INTEGER)" >/dev/null
-$QDB "$DB" "BEGIN" >/dev/null; $QDB "$DB" "INSERT INTO t VALUES (1)" >/dev/null; $QDB "$DB" "ROLLBACK" >/dev/null
-xfail "xproc_rollback" "$($QDB "$DB" "SELECT COUNT(*) FROM t" | tr -d '\r' | tail -n +3 | tr -d ' ')" "0"
-
+# Cross-process transactions are no longer a null: a clean exit inside BEGIN
+# appends HOLD to the WAL and the next process resumes the transaction, so a
+# later ROLLBACK undoes an earlier INSERT and a later COMMIT keeps it. They
+# moved up to the "transactions across processes" section.
 rm -f "$DB" "$DB".wal 2>/dev/null
 echo
 echo "QDB: pass=$pass fail=$fail xfail=$xfail xpass=$xpass"

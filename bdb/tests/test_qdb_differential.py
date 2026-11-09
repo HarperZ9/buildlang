@@ -10,7 +10,16 @@ GROUP BY) and runs it through both binaries two ways:
   repl     the whole script piped into one REPL session per binary
   process  each statement as its own `qdb DB "<sql>"` process
 
-Both ways compare the full stdout and the final .db file byte for byte.
+The repl way compares the full stdout and the final .db file byte for byte
+between the two builds, after removing a format-1 header line ("QDB 1 <txid>")
+from either .db: the header names the last transaction in the file, which
+the reference engine does not write. The process way runs the new build
+only, and compares its per-statement output and final .db with the same
+build's repl run, byte for byte, header included. Since BEGIN in one process
+can be finished by COMMIT or ROLLBACK in a later one (HOLD in the WAL), the
+two ways must agree; the reference engine, which drops a transaction at
+every process exit, is not compared there.
+
 Typical use is the build before a change against the build after it:
 
   python test_qdb_differential.py OLD_QDB NEW_QDB [--seeds 1,2,3] [--ops 400]
@@ -131,6 +140,19 @@ def read_db(db):
         return f.read()
 
 
+def body(db_bytes):
+    """The .db without a format-1 header line."""
+    if db_bytes.startswith(b"QDB 1 "):
+        return db_bytes[db_bytes.index(b"\n") + 1:]
+    return db_bytes
+
+
+def repl_chunks(out, n):
+    """Split a REPL transcript into per-statement outputs, as run_process prints them."""
+    parts = out.split("qdb> ")[1:n + 1]
+    return parts
+
+
 def first_diff(a, b):
     la, lb = a.split("\n"), b.split("\n")
     for i in range(max(len(la), len(lb))):
@@ -159,8 +181,14 @@ def main():
         for seed in [int(s) for s in a.seeds.split(",")]:
             for mode, runner, nops in (("repl", run_repl, a.ops), ("process", run_process, a.process_ops)):
                 stmts = gen_workload(seed, nops)
-                o_out, o_db = runner(a.old, os.path.join(wd, "old.db"), stmts)
-                n_out, n_db = runner(a.new, os.path.join(wd, "new.db"), stmts)
+                if mode == "repl":
+                    o_out, o_db = runner(a.old, os.path.join(wd, "old.db"), stmts)
+                    n_out, n_db = runner(a.new, os.path.join(wd, "new.db"), stmts)
+                    o_db, n_db = body(o_db), body(n_db)
+                else:
+                    r_out, o_db = run_repl(a.new, os.path.join(wd, "old.db"), stmts)
+                    o_out = "".join("> " + st + "\n" + chunk for st, chunk in zip(stmts, repl_chunks(r_out, len(stmts))))
+                    n_out, n_db = runner(a.new, os.path.join(wd, "new.db"), stmts)
                 checks += 1
                 if o_out != n_out:
                     line, x, y = first_diff(o_out, n_out)
