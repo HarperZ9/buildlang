@@ -114,6 +114,24 @@ violations; a format 1 file with an empty cell loads it as NULL; a format 2 file
 also matches `''` must lose at least 20 agreements on P2. P1 (sqllogictest) is re-run and
 reported; no prediction beyond "not lower than 32".
 
+**P8. AVG and aggregate number rendering, written 2026-11-08 21:36 PT before the change.** Found by the P7
+run: every one of the 56 P2 disagreements left is AVG. Two faults. `sum_val / cnt` divides a
+float by an `i32` count, and the C backend lowers it to `bl_idiv_i32`, an integer division, so
+AVG(60.3) over one row prints 60; and `float_to_str` rounds every aggregate to two decimals,
+so AVG(22.1, 22.1, 22.15) could never print SQLite's digits. Change: divide by the count as
+`f64`, and render SUM, AVG, MIN and MAX of numbers with the runtime's shortest round-trip
+digits (`to_string_f64`); integral values keep printing without a decimal point (`81`, where
+SQLite prints `81.0`, the number_text class). Measured on the P2 harness unchanged against the
+P7 result 1,944 of 2,000. Prediction: between 1,990 and 2,000 agree with numbers compared as
+numbers, and 0 AVG disagreements; SQLite 3.49 sums with Kahan-Babuska compensation and qdb
+sums plainly, so last-digit differences are possible and land in number_text, not rows.
+Guards: test_qdb.sh has no FAIL (assertions that encoded two-decimal rounding are rewritten and
+listed); differential against the reference engine with `--no-null` (its AVG and SUM print two
+decimals, so any check that differs only there is reported, not hidden); text, crash, WAL and
+library tests unchanged. Planted check: a build that keeps the integer division must lose at
+least 40 agreements on P2. The compiler fault (float divided by `i32` lowered as integer
+division) is filed as a BuildLang issue; qdb works around it with an explicit cast.
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
@@ -214,12 +232,26 @@ harness unchanged. Before: 1,251 of 2,000 on this branch, re-run before the chan
   library 0 failures; bql's in-process check against qdb passes. The differential against the
   reference engine fails 8 of 16 with NULL data, by design, and passes 16 of 16 with `--no-null`.
 
+## After P8: AVG and aggregate digits (2026-11-08, buildlang branch feat/bdb-avg)
+
+- **P2 SQLite differential:** 2,000 of 2,000 agree with numbers compared as numbers (1,873 as
+  text, 127 number_text: qdb prints an integral value as `81` where SQLite prints `81.0`, and a
+  few sums differ in the last digit). Before: 1,944 (56 rows, all AVG). Prediction (1,990 to
+  2,000, no AVG left) held. Planted check: a build that keeps the integer division scores
+  1,944 (56 fewer; the bar was 40). The CI step becomes a gate.
+- **P1 sqllogictest:** 33 of 9,202, unchanged.
+- **Guards:** test_qdb.sh 244 pass, 0 fail (no assertion rewritten; three AVG checks added, which
+  fail on the build before); text 0 changed; crash 0 of 170; WAL 0; library 0. The differential
+  against the reference engine differs on 8 of 16 checks with SUM and AVG asked, as the
+  preregistration said it would (that engine divides AVG as integers and rounds to two
+  decimals), and passes 16 of 16 with `--no-null --no-float-agg`, which CI now runs.
+
 ## Stage 1: a correct, durable single-file engine
 
 | Row | Check (fails if) | Status | Evidence |
 |---|---|---|---|
-| 1a Regression gate | `bdb/tests/test_qdb.sh` reports any FAIL | PASS | 241 pass, 0 fail after P7; 222 after the completion changes (214/0/1 at the move) |
-| 1b SQLite differential | any of the P2 queries disagrees, with numbers compared as numbers | FAIL | 1,944 of 2,000 (97.2 percent) after P7; 56 rows, all AVG. 1,251 at the move (519 null_vs_empty, 230 rows, 46 number_text) |
+| 1a Regression gate | `bdb/tests/test_qdb.sh` reports any FAIL | PASS | 244 pass, 0 fail after P8; 241 after P7; 222 after the completion changes (214/0/1 at the move) |
+| 1b SQLite differential | any of the P2 queries disagrees, with numbers compared as numbers | PASS | 2,000 of 2,000 after P8, a CI gate; 1,944 after P7; 1,251 at the move (519 null_vs_empty, 230 rows, 46 number_text) |
 | 1c Crash recovery | any P3 crash point breaks the rule | PASS | 0 violations of 170 (24 of 104 at the move); two mutants caught |
 | 1d Cross-process transaction | either P4 case misses | PASS | four checks in test_qdb.sh (`xproc_*`), differential process mode equals REPL mode on 8 seeds |
 | 1e Text round trip | any P5 value changes | PASS | 2,000 of 2,000 (`test_qdb_text.py`); format 0 files still load |

@@ -35,7 +35,7 @@ import sys
 import tempfile
 
 
-def gen_workload(seed, nops, no_null=False):
+def gen_workload(seed, nops, no_null=False, no_float_agg=False):
     rnd = random.Random(seed)
     names = ["ann", "bob", "cy", "dee", "ed", "flo", "", "gus"]
     if no_null:
@@ -103,9 +103,16 @@ def gen_workload(seed, nops, no_null=False):
             # SUM, MIN and MAX over no rows are NULL since P7 (0 and blank in the
             # reference engine), so the no-null workload asks only once a has rows.
             if not (no_null and next_id == 1):
-                stmts.append("SELECT COUNT(*), SUM(score), MIN(score), MAX(name) FROM a")
+                if no_float_agg:
+                    stmts.append("SELECT COUNT(*), MIN(score), MAX(name) FROM a")
+                else:
+                    stmts.append("SELECT COUNT(*), SUM(score), MIN(score), MAX(name) FROM a")
         elif r < 0.95:
-            stmts.append("SELECT name, COUNT(*), AVG(score) FROM a GROUP BY name ORDER BY name")
+            # The reference engine divides AVG as integers and rounds SUM and AVG to
+            # two decimals (P8); --no-float-agg asks MIN instead, and SUM and AVG are
+            # checked against SQLite (test_qdb_sqlite_oracle.py).
+            agg = "MIN(score)" if no_float_agg else "AVG(score)"
+            stmts.append("SELECT name, COUNT(*), %s FROM a GROUP BY name ORDER BY name" % agg)
         else:
             stmts.append("SELECT tag, COUNT(*) FROM b GROUP BY tag ORDER BY tag")
     if in_txn:
@@ -180,6 +187,8 @@ def main():
     ap.add_argument("--process-ops", type=int, default=80)
     ap.add_argument("--no-null", action="store_true",
                     help="generate no NULL and no '' (for a reference engine older than P7)")
+    ap.add_argument("--no-float-agg", action="store_true",
+                    help="ask no SUM or AVG (for a reference engine older than P8)")
     a = ap.parse_args()
     for exe in (a.old, a.new):
         if not os.path.isfile(exe):
@@ -190,7 +199,7 @@ def main():
     with tempfile.TemporaryDirectory() as wd:
         for seed in [int(s) for s in a.seeds.split(",")]:
             for mode, runner, nops in (("repl", run_repl, a.ops), ("process", run_process, a.process_ops)):
-                stmts = gen_workload(seed, nops, a.no_null)
+                stmts = gen_workload(seed, nops, a.no_null, a.no_float_agg)
                 if mode == "repl":
                     o_out, o_db = runner(a.old, os.path.join(wd, "old.db"), stmts)
                     n_out, n_db = runner(a.new, os.path.join(wd, "new.db"), stmts)

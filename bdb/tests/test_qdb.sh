@@ -210,6 +210,14 @@ chksel "empty_count"    "SELECT COUNT(*) FROM emp WHERE id > 999" "0"
 # SUM and AVG over zero rows are NULL too, as in SQL (they were 0 before P7).
 chksel "empty_sum"      "SELECT SUM(salary) FROM emp WHERE id > 999" "NULL"
 chksel "empty_avg"      "SELECT AVG(salary) FROM emp WHERE id > 999" "NULL"
+# AVG divides by the count as a float and keeps every digit (P8): before, the
+# divide was an integer division and AVG(age) printed 37.
+chksel "avg_fraction"   "SELECT AVG(age) FROM emp" "37.6"
+chksel "avg_group_fraction" "SELECT dept, AVG(age) FROM emp GROUP BY dept ORDER BY dept" "$(printf 'eng   | 37.5
+hr    | 28
+sales | 42.5')"
+chksel "avg_having_fraction" "SELECT dept FROM emp GROUP BY dept HAVING AVG(age) > 37 ORDER BY dept" "$(printf 'eng
+sales')"
 chkhdr "hdr_count"     "SELECT COUNT(*) FROM emp" "COUNT(*)"
 chksel "group_count"   "SELECT dept, COUNT(*) FROM emp GROUP BY dept ORDER BY dept" "$(printf 'eng   | 2\nhr    | 1\nsales | 2')"
 chksel "group_desc"    "SELECT dept, COUNT(*) FROM emp GROUP BY dept ORDER BY dept DESC" "$(printf 'sales | 2\nhr    | 1\neng   | 2')"

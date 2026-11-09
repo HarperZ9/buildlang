@@ -15,6 +15,7 @@ tracked in `STATUS.md`, `README.md`, and
 - `bql` store schema `buildlang.bdb/v1` adds the `refs` table: the uses of module-scope names the type checker binds, as calls or values. For every accepted rename in `tests/programs` the refs equal the name's tokens (290 of 290). `bql export` writes qdb's format 1 and no longer refuses a cell holding `|` or a line break.
 - Runtime: `read_line` returns a whole line of any length; it cut lines longer than 4,095 bytes into pieces (`compiler/tests/read_line_long.rs`).
 - BuildDB: SQL NULL is its own value, apart from `''`, with three-valued logic in WHERE, NULL-skipping aggregates (SUM, AVG, MIN and MAX of no value are NULL), NULL first in ORDER BY and `NULL` in output; file format 2 writes NULL as `\N` and loads format 0 and 1 files with an empty cell as NULL. SQLite differential 1,251 to 1,944 of 2,000 (null_vs_empty 519 to 0); sqllogictest 32 to 33 of 9,202 (`bdb/COMPLETE.md` P7).
+- BuildDB: AVG divides by the count as a float (an unannotated integer divisor was lowered as an integer division, so AVG printed truncated values), and SUM, AVG, MIN and MAX print shortest round-trip digits instead of two decimals. The SQLite differential agrees on 2,000 of 2,000 queries and is now a CI gate (`bdb/COMPLETE.md` P8).
 
 ## Unreleased: unannotated integer `let` takes the checked type (#159)
 
