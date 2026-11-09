@@ -197,23 +197,40 @@ Built with buildc from the same branch (1.11.0 plus the `read_line` fix), gcc 13
 - **P1 and P2** are unchanged by these changes (32 of 9,202; 1,251 of 2,000): none of them touched
   the dialect or NULL handling.
 
+## After P7: NULL apart from '' (2026-11-08, buildlang branch feat/bdb-null)
+
+Same compiler build (1.11.0 at the rebased completion branch, plus the `read_line` fix), the P2
+harness unchanged. Before: 1,251 of 2,000 on this branch, re-run before the change.
+
+- **P2 SQLite differential:** 1,944 of 2,000 agree with numbers compared as numbers (97.2
+  percent; 1,880 as text). Classes: null_vs_empty 519 to 0; rows 230 to 56; number_text 46 to 64.
+  Prediction (1,800 to 1,960) held. Every one of the 56 left is AVG: qdb divided AVG as integers
+  and printed two decimals, which P8 takes up. Planted check: a build whose `IS NULL` also
+  matches `''` scores 1,829 (115 fewer; the bar was 20).
+- **P1 sqllogictest** (A5): 33 of 9,202 query records pass, 59 wrong, 9,110 rejected (before,
+  re-run with `--empty-is-null`: 32, 60, 9,110). Statements 134 of 1,993 in both.
+- **Guards:** test_qdb.sh 241 pass, 0 fail (8 assertions rewritten to the SQL answer, 19 added);
+  text round trip 0 values changed; crash 0 violations of 170; WAL recovery 0 failures; the C
+  library 0 failures; bql's in-process check against qdb passes. The differential against the
+  reference engine fails 8 of 16 with NULL data, by design, and passes 16 of 16 with `--no-null`.
+
 ## Stage 1: a correct, durable single-file engine
 
 | Row | Check (fails if) | Status | Evidence |
 |---|---|---|---|
 | 1a Regression gate | `bdb/tests/test_qdb.sh` reports any FAIL | PASS | 222 pass, 0 fail, 0 xfail after the changes (214/0/1 at the move) |
-| 1b SQLite differential | any of the P2 queries disagrees, with numbers compared as numbers | FAIL | 1,251 of 2,000 (62.5 percent); 519 null_vs_empty, 230 rows, 46 number_text |
+| 1b SQLite differential | any of the P2 queries disagrees, with numbers compared as numbers | FAIL | 1,944 of 2,000 (97.2 percent) after P7; 56 rows, all AVG. 1,251 at the move (519 null_vs_empty, 230 rows, 46 number_text) |
 | 1c Crash recovery | any P3 crash point breaks the rule | PASS | 0 violations of 170 (24 of 104 at the move); two mutants caught |
 | 1d Cross-process transaction | either P4 case misses | PASS | four checks in test_qdb.sh (`xproc_*`), differential process mode equals REPL mode on 8 seeds |
 | 1e Text round trip | any P5 value changes | PASS | 2,000 of 2,000 (`test_qdb_text.py`); format 0 files still load |
-| 1f NULL apart from '' | `INSERT (NULL)` and `INSERT ('')` are indistinguishable by `IS NULL`, or `NOT (NULL = x)` is true | FAIL | both store an empty cell; 519 P2 disagreements are this class directly, and the inspected examples of the 230 in the rows class are NULL semantics too |
+| 1f NULL apart from '' | `INSERT (NULL)` and `INSERT ('')` are indistinguishable by `IS NULL`, or `NOT (NULL = x)` is true | PASS | P7: NULL is its own value with three-valued logic; 19 checks in test_qdb.sh; P2 null_vs_empty 519 to 0. Before: both stored an empty cell |
 | 1g JOIN gaps that fail closed | a secondary ORDER BY key over a grouped JOIN, DISTINCT over a grouped JOIN, or COUNT(DISTINCT) over any JOIN is refused | FAIL | each refused with a specific message (`bdb/README.md`, Known limitations) |
 
 ## Stage 2: SQL coverage against the outside corpus
 
 | Row | Check (fails if) | Status | Evidence |
 |---|---|---|---|
-| 2a sqllogictest queries | any P1 query record does not pass | FAIL | 32 of 9,202 (0.35 percent); `bdb/tests/slt_run.py` |
+| 2a sqllogictest queries | any P1 query record does not pass | FAIL | 33 of 9,202 (0.36 percent) after P7, 32 before; `bdb/tests/slt_run.py` |
 | 2b Expressions in the select list | `SELECT a+1, a*b-c FROM t` refused or wrong | FAIL | refused: "expected keyword 'FROM'"; the largest single cause of P1 rejections |
 | 2c Column types with arguments and constraints | `VARCHAR(30)`, `INTEGER PRIMARY KEY`, `UNIQUE` refused | FAIL | 581 P1 rejections follow from refused setup |
 | 2d CASE, scalar functions (abs, coalesce) | refused or wrong | NOT BUILT | |
