@@ -15,13 +15,17 @@ tracked in `STATUS.md`, `README.md`, and
 - `buildc check` fails on a refuted claim (BL0801) and on a verifier that disagrees with itself (BL0802).
 - `tests/verify`: Bend 2's published numeric, parallel-sum and Pong laws ported, BuildLang's own DETMATH integer, trace-codec and conservation laws, and planted checks. Details and limits: `docs/VERIFY.md`.
 
-## Unreleased: a working package manager, and our first tools as packages
+## 1.11.0 - 2026-11-08 - parallel by default, packages, opaque handles, units through powers, BuildTeX and the proof kernel
+
+Everything merged since 1.10.0, M5 (`par_for` and `par_map`) and the package manager included. M4's last two checks run on this release: the combat-step traces and the C ABI check (`docs/LANGUAGE-COMPLETE.md`, stage 1).
+
+### A working package manager, and our first tools as packages
 
 - `buildc pkg publish`, `resolve`, `verify`, `build`, `check-registry`, plus `init --lib` and a fixed `add`: publish into the in-repo registry with a SHA-256 content hash per version, resolve versions, write `Build.lock`, and build offline from it. `registry/index.json` moves to format 2 (a `versions` map per package; the first-format fields stay). The three existing packages now carry checksums. Codes BL0701 to BL0708. `docs/PACKAGES.md` describes the flow.
 - Published `sha256` and `merkle` 1.0.0, both pure BuildLang. `merkle` ports Flywheel's RFC 6962 tree (FSL-1.1-MIT) and matches the original byte for byte on every root, inclusion and consistency proof for trees of 0 to 40 leaves.
 - Tests: `compiler/tests/pkg_flow.rs` (two clean copies build the same C artifact from one lock; a tampered package fails with BL0702; an unmeetable range fails with BL0701; stale lock BL0703; missing version BL0704; republish BL0707) and `compiler/tests/registry_packages.rs` (every tool package builds from its own lock and matches the goldens its original wrote).
 
-## Unreleased: `par_for` and `par_map` (M5, parallel by default)
+### `par_for` and `par_map` (M5, parallel by default)
 
 - `par_for(n, &ctx, f)` and `par_map(xs, f)` run `f` over every index on a fixed thread pool on the C backend and return a `Vec` in index order. Each index writes its own slot, so the result equals the serial loop's byte for byte at every thread count. `BUILD_PAR_THREADS` sets the pool size; `1` runs in order on the calling thread. On Linux and macOS the C compile now links `-pthread`.
 - The checker proves a parallel body safe from the source. BL0406: its effect row must be empty; the fix is exact edits that move the effectful top-level statements into a serial loop after the call (`MaybeIncorrect`, since it adds the effect to the enclosing function). BL0515: no `&mut` or `*mut` parameter, no `static mut` write (also through called functions), no closure write to an outer variable. BL0407: the body must be a named function or a capture-free closure with written types.
@@ -30,99 +34,99 @@ tracked in `STATUS.md`, `README.md`, and
 - BuildLang does not claim Bend's annotation-free parallelism: the parallel call is explicit, and the claim is that its safety is checked.
 - Tests: `compiler/tests/parallel.rs` (3 programs at 1, 2 and 3 threads; 9 planted unsafe bodies with their codes; the BL0406 edits applied to 3 of them build and print the serial bytes), `SPECIFICATION.md` 6.4 doc blocks, `docs/PARALLEL.md`, benchmarks and a planted completion-order reduction control in `bench/parallel-2026-11`.
 
-## Unreleased: opaque handles across the C ABI; a stateful C library in BuildLang
+### Opaque handles across the C ABI; a stateful C library in BuildLang
 
 - An `extern "C"` export may take and return a raw pointer to a struct without `#[repr(C)]`. That pointer is an opaque handle: the header forward-declares the struct (`typedef struct LwRules LwRules;`) and states no fields, so the host holds and passes the pointer and never relies on the layout. A struct passed by value still needs `#[repr(C)]` (BL0901).
 - `examples/lowwater-rules` implements raw-native's `raw/game/lowwater/rules_c.h` (the Low Water rules: LWD records, sheet, skill checks with labels, meters and their scene queue) in BuildLang. raw-native's own C++ test, `tests/test_lowwater_c.cpp`, linked against this library through the C++ host's header, passes 16 of 16 checks, as it does against the C++ module. The story expression language is not ported: a record that needs it (`base:`, `requires:`, a mod's `? cond`, a modifier's `when:`) makes `lw_rules_create` return NULL with an error naming the record. Test: `compiler/tests/c_abi_rules.rs` with `tests/c-abi-rules/driver.c` (19 checks, the C++ test's 16 restated in C plus the refusal).
 - Fixed while writing it, each refused with BL0901 on 1.10.0, each with a program in `tests/heldout`: `v.len()` and `v.push(x)` on a `&Vec<T>` or `&mut Vec<T>` parameter (`borrowed_vec_methods`); `v.insert(i, x)` and `v.remove(i)` (`vec_insert_remove`); `s.push(c)` on a string (`string_push_char`); a call to an `extern "C"` function named like a C library function, such as `strtod`, which was renamed `_strtod` (`extern_libc_name`).
 - Check-pass-but-fail fixed: `"2.5" as *const u8` passed `buildc check` and failed in the C compiler. A cast from `str` to a pointer or a number is now BL0383 with a fix. Test: `tests/reject/str_cast_to_c_pointer.bld`.
 
-## Unreleased: measured constants with provenance
+### Measured constants with provenance
 
 - `#[measured(source = "...", uncertainty = ...)]` on a `const` records where a measured value came from. `buildc check` refuses a missing or empty source, an unknown key, a negative uncertainty, or the attribute on anything but a `const` (BL0605). The check receipt lists each measured constant (name, value as written, canonical unit, source, uncertainty) under `measured_constants`, and `receipt verify` re-derives the list, so an edited source fails verification. Programs without measured constants get byte-identical receipts. The attribute changes no emitted C. Docs: `docs/MEASURED-CONSTANTS.md`. Tests: `compiler/tests/measured_constants.rs`, `tests/reject/measured_without_source.bld`.
 
-## Unreleased: units through roots and powers; typed maths builtins
+### Units through roots and powers; typed maths builtins
 
 - Unit-carrying values now go through `**`, `.powi()`, `.powf()` and `pow` with an integer-literal exponent, and through `.sqrt()`, `.cbrt()` and `sqrt`, with the exponents scaled. Slice one refused all of these. A root that leaves a fraction is BL0604; a runtime exponent on a unit is still refused (BL0383).
 - `.recip()` inverts the unit (it kept it), and trigonometric, exponential and logarithmic methods and builtins need a dimensionless value (BL0603); `d.sin()` on metres checked before. `.min`, `.max`, `.clamp`, `.hypot`, `.atan2`, `.rem_euclid` and `.mul_add` check their arguments' units (BL0602).
 - Free maths builtins (`sin`, `sqrt`, `pow`, `clamp`, ...) had no signature: `sin(true)` and `pow(2.0)` checked and then failed in the C compiler. They now check the argument count (BL0305) and refuse bool, string, char, unit and function arguments (BL0301).
 - Tests: `compiler/tests/units_powers.rs` (a pendulum fixture pair that checks, emits byte-identical C to its unannotated twin and runs; a one-annotation mutation fails with BL0601), unit tests in `types/unit_methods.rs` and `types/check.rs`, and four programs in `tests/reject`. `docs/DIMENSIONAL-ANALYSIS.md` has the rule table.
 
-## Unreleased: `x.log(base)` builds
+### `x.log(base)` builds
 
 - `x.log(base)` on an f64 checked and then failed in the C compiler, because the lowering passed two arguments to the one-argument portable `log`. It now calls `build_det_log_base`, which is `build_det_log(x) / build_det_log(base)`, so the result keeps DETMATH's same-bits-everywhere rule. Test: `compiler/tests/float_methods_compile.rs` checks, builds and runs every f64 method the checker accepts (35 calls) and compares each value with Rust's; it failed on `log(3.0)` before the fix.
 
-## Unreleased: audio binding, performance cores, shorter periods and events
+### Audio binding, performance cores, shorter periods and events
 
 - `bl_audio_pin_performance_cores()` restricts the audio thread to the cores of the highest efficiency class (the performance cores of a hybrid CPU), read from `GetLogicalProcessorInformationEx`.
 - A period below the engine default is requested through `IAudioClient3` and rounded to the engine's step; drivers whose shared-mode engine period is fixed keep their default, and `bl_audio_period()` says what was granted.
 - `bl_events_start()` and `bl_events_pop()`: events from another process, one line of six numbers on standard input, read by a thread into a lock-free single-producer single-consumer ring the audio thread pops without blocking. `bl_audio_now()` is the shared monotonic clock. `examples/audio-events` and a test in `extern_c_source.rs` check three events and a skipped bad line.
 - `bl_audio.c` now includes `bl_audio_win.c` and `bl_events.c` from its own directory; a program still names only `bl_audio.c`.
 
-## Unreleased: unchecked slice access and vectorised release builds
+### Unchecked slice access and vectorised release builds
 
 - `xs.get_unchecked(i)` and `xs.set_unchecked(i, v)` on slices: element access with no bounds check, for a loop whose range the program checked once before it (the check hoisted by hand). The C is a plain subscript. It needs `unsafe` (BL0382), and the write needs a `&mut [T]`. Test: `compiler/tests/unchecked_slices.rs`.
 - Release builds with gcc or clang add `-ftree-vectorize -fvect-cost-model=dynamic`. At plain `-O2` gcc's "very cheap" cost model will not version a loop for aliasing, so a loop over several slices stayed scalar. DETMATH (`-ffp-contract=off -fno-fast-math`) stays, so vectorising reassociates and fuses nothing and every result is unchanged. In the superframe voice bank the f32 path runs 0.41 ns per mode-sample against 0.67 for the f64 scalar loop.
 - Found, not fixed: an `extern "C" fn` inside a module gets the module prefix in its C name (`dsp_daw_modal_coeffs`), so a host linking against it by its declared name fails.
 
-## Unreleased: pointers to fixed arrays; no reassigning a fixed `let`
+### Pointers to fixed arrays; no reassigning a fixed `let`
 
 - A reference or raw pointer to a fixed array (`&[f64; 4]`, `&mut buf`, `p as *mut [f64; 4]`) is now a pointer to the first element in C. The C backend wrote `double[4]*`, which no C compiler accepts, after the check had passed, so any function taking `&[T; N]` failed to build; and `&mut arr as *mut [f64; N] as *mut f64` likewise. Indexing through such a pointer was already written `p[i]`, and the address of an array local is now the array name. Test: `compiler/tests/array_refs.rs` runs `&[f64; 4]`, `&mut [f64; 4]` and the cast through C.
 - `let x = 1; x = 2;` is refused with BL0333 ("cannot assign to immutable variable"). `let mut` assigns as before, and a `let` declared without a value may be assigned (deferred initialisation). Tests: `tests/reject/assign_to_immutable_let.bld` and `array_refs.rs`.
 
-## Unreleased: maths builtins keep f64; no writes through read-only slices
+### Maths builtins keep f64; no writes through read-only slices
 
 - `exp`, `exp2`, `log`, `log2`, `log10`, `sinh`, `cosh`, `tanh`, `asin`, `acos`, `atan` and `atan2` now type their result as f64 in the C lowering. Before, `let r = exp(x);` bound an `int32_t` and truncated, and the program still checked. Test: `compiler/tests/math_builtin_types.rs` runs all twelve through an unannotated binding.
 - `xs[i] = v` where `xs` is a shared `&[T]` or `&[T; N]` (including a slice from `slice::from_raw_parts`) is refused with BL0303, naming the variable and the `&mut [T]` fix. Tests: `tests/reject/write_through_shared_slice.bld`, `tests/reject/write_through_from_raw_parts.bld`; the GPU read-only buffer check still names writability.
 - Known and not changed here: assignment to an immutable `let` binding still checks.
 
-## Unreleased: C sources in extern blocks, and a real-time audio binding
+### C sources in extern blocks, and a real-time audio binding
 
 - `extern "C" source "file.c" { ... }` compiles a C file into the program's own translation unit: the generated C ends with `#include "<absolute path>"`, so `run`, `build` and `--emit staticlib` all carry it with no extra arguments. The path resolves against the directory of the file that declares the block.
 - `runtime/audio/bl_audio.c` and `bl_audio.h`: an audio output with a deadline counter. Device 0 is a clock-paced null device for any OS and for CI; device 1 is WASAPI shared mode on Windows (event driven, pro-audio thread class, ole32 and avrt loaded at run time so no link flags are needed). The program waits for each period, renders into the binding's buffer, writes, and every period over its deadline counts as a miss. `bl_audio_loopback_ms` times a click through WASAPI loopback; `bl_audio_roundtrip_ms` times one to the default input. `examples/audio` plays a sine through it.
 - Tests: `compiler/tests/extern_c_source.rs` (a C source beside the program returns its value; a missing source fails the build; the audio example runs 50 null-device periods with 0 misses).
 - Found, not fixed: casting `&mut arr as *mut [f64; N] as *mut f64` checks and then emits `double[4096]*`, which C rejects. The binding hands out its own buffer instead.
 
-## Unreleased: writable slices over host buffers
+### Writable slices over host buffers
 
 - `slice::from_raw_parts_mut(p, n)` over a `*mut T` gives a `&mut [T]`. A C host can hand an export an output buffer, such as an audio period, and the export writes it with every index checked against `n`. Like `from_raw_parts`, it needs `unsafe`; a `*const T` is refused (BL0303).
 - Tests: `compiler/tests/c_abi_slices.rs` scales a host buffer, writes one index, and checks that a write at `n` traps with exit 101.
 - Found while writing the first real-time audio kernel, and not fixed here: `let r = exp(x);` with no annotation is typed `i32`, so the C output truncates the result and the program still checks; annotating `let r: f64` gives the right code. Writing through a slice from `from_raw_parts` (immutable) also checks.
 
-## Unreleased: BuildTeX publish metadata
+### BuildTeX publish metadata
 
 - BuildTeX PDFs carry no `/Author`, `/Creator` or XMP packet and pass Flywheel's `check_publish_metadata.py`. The date comes from `SOURCE_DATE_EPOCH` and is absent without it; the writer no longer stamps a fixed `D:20261031000000Z`. `layout.json` lists output files by name, not by the build directory. The receipt gains `pdf_metadata`.
 - **Behavior change.** BuildTeX writes the PDF/A-2b XMP packet only with `--pdfa`, and that packet no longer holds `dc:creator` or `CreatorTool`. `engine.render` keeps PDF/A on by default, without the author.
 - Measured on the fixture resume with the `ats` theme: the build from main had 5 findings under the check (`/Creator`, the XMP packet and 3 local paths in `layout.json`); this build has 0. Test: `typeset/tests/test_publish_metadata.py`.
 
-## Unreleased: PTX litmus test for mmk
+### PTX litmus test for mmk
 
 - `tests/proofkernel/ptx_mp.mm`: message passing under a simplified PTX memory model, with the causality axiom as a Metamath axiom. mmk accepts the fenced proof and refuses four faults: an unfenced proof that passes program order as a fence, an unfenced proof that cites an axiom the model lacks, the fenced proof without the causality axiom, and the fenced proof without the reader's fence. The limits of the encoding are in `tools/proofkernel/README.md`.
 
-## Unreleased: BQL drift check
+### BQL drift check
 
 - `buildc bql verify FILE STORE.json`: rebuild the store from FILE and compare it with a stored JSON store table by table. It lists missing and extra rows and exits 1 on any drift.
 - The first incremental view: the store after a rename, made from the old rows with spans shifted, without lowering again. `bql rename` receipts gain `store_incremental_agrees`; the rebuild stays the authority.
 - Acceptance rule, after CodeNib (arXiv 2607.25431, 13 of 24 incremental repairs matched a rebuild): no incremental view ships without sampled agreement against a rebuild. `compiler/src/bql/drift_tests.rs` samples renames over `tests/programs` (35 of 35 agree, 1 refused) and plants two faults the diff must catch.
 
-## Unreleased: proof kernel
+### Proof kernel
 
 - `tools/proofkernel`: mmk, a Metamath database verifier written in BuildLang, built through the C target. `tests/proofkernel/test_mmk.py` holds it to a valid database and four planted faults; CI runs it on Linux.
 
-## Unreleased: BuildTeX
+### BuildTeX
 
 - `typeset/buildtex`: one build command from a BuildLang document program, its IR, or a LaTeX subset (one-way import) to PDF and HTML, with a receipt of layout facts: page count, overfull lines, missing glyphs, embedded fonts and reading order. No TeX or Lean program runs; a guard refuses them and the receipt lists every program a build started.
 - The press finish inside the page (`engine/press.py`): the emboss and deboss relief as an image on page one, the name inked or blind with its text layer kept. The PDF writer gains image XObjects and invisible-text runs; SVG and HTML draw the same images.
 - Themes `press` and `ats`. A theme without a math font sets math source as text and records a note.
 - Design note: `docs/BUILDTEX.md`, covering the document syntax, the LaTeX migration path, outputs, finishes, and the native proof checker that replaces Lean (design only).
 
-## Unreleased: typeset and the field spec
+### Typeset and the field spec
 
 - `typeset/`: BuildLang as a document language: Knuth-Plass in BuildLang, a stdlib Python layout engine, and themes as data.
 - `docs/FIELD.md`: the contract for a field type, whose reference implementation is superframe `packages/field`. Spec only; nothing in the compiler yet.
 - `tests/differential/test_saxpy_rounding.py`: exact answers for both float32 rounding classes of saxpy, the seed of a backend differential test.
 
-## Unreleased
+### Other changes
 
 - **`buildc bql`: a compiled program as BuildDB tables.** The compiler writes one
   program as four tables (`functions`, `calls`, `effects`, `items`) built from MIR, the
