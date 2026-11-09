@@ -180,6 +180,19 @@ that the path choice leaves them alone); text, crash, WAL, library and reference
 tests unchanged. Planted check: a build whose integer division returns a real (no truncation)
 passes fewer P1 records and fails a new test_qdb.sh assertion.
 
+**P12. Join order for comma-separated FROM lists, written 2026-11-09 01:15 PT before the change.**
+Found by the P11 run (A6): `select5.test` joins up to 64 tables, and looping in FROM order builds
+cross products of tables no conjunct has linked yet. Change: before the loop, the tables are
+ordered greedily. Each step takes the unplaced table with an equality conjunct to a placed table,
+then one with a conjunct on itself alone (`a29 = 6`), then the first in FROM order; each conjunct
+is checked at the step where its last table is bound. The result rows and their order do not
+change: ORDER BY sorts after, and a query without ORDER BY is compared by the corpus's sort mode.
+Measured on P1 unchanged, all 17 files, against P11 (16 files, `select5.test` at 0). Prediction:
+`select5.test` passes at least 650 of its 732 queries; no query over 60 s; the other 16 files keep
+their P11 counts exactly. Guards: test_qdb.sh no FAIL, P2 2,000 of 2,000, the other tests
+unchanged. Planted check: a build that keeps FROM order times out on `select5.test` (fewer than
+100 passes inside the 60 s limit on its first 100 queries).
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
