@@ -193,6 +193,22 @@ their P11 counts exactly. Guards: test_qdb.sh no FAIL, P2 2,000 of 2,000, the ot
 unchanged. Planted check: a build that keeps FROM order times out on `select5.test` (fewer than
 100 passes inside the 60 s limit on its first 100 queries).
 
+**P13. PRIMARY KEY, UNIQUE and NOT NULL enforced (row 2c), written 2026-11-09 01:59 PT before the change.**
+`PRIMARY KEY` is parsed and dropped, so `INSERT INTO t VALUES (1), (1)` into a key column keeps
+both rows, and `UNIQUE` is refused. Change: column constraints `PRIMARY KEY`, `UNIQUE` and
+`NOT NULL`, and table constraints `PRIMARY KEY (a, b)` and `UNIQUE (a, b)`, are stored with the
+table, written to the file as `PRIMARY KEY a,b`, `UNIQUE a,b` and `NOT NULL a` lines after
+SCHEMA (an older reader skips them), restored by ROLLBACK, and checked by INSERT and UPDATE
+before any cell changes: a duplicate key prints `Error: UNIQUE constraint failed: t.a` and the
+statement changes nothing. NULLs in a UNIQUE key are distinct, as in SQLite; a NULL inserted
+into a single `INTEGER PRIMARY KEY` column takes the largest key plus one, as SQLite's rowid
+alias does. Measured on P1 unchanged against P12. Prediction: query records unchanged at 8,921
+(no query in the corpus depends on a rejected duplicate); statements as expected rise from 1,918
+by 0 to 30, from `statement error` records that expect a constraint failure. Guards: test_qdb.sh
+no FAIL; P2 2,000 of 2,000; text, crash, WAL, library and reference differential unchanged; bulk
+load slope (row 3a) is unchanged for a table with no constraint. Planted check: a build that
+skips the check on UPDATE fails a new test_qdb.sh assertion.
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
@@ -379,11 +395,26 @@ harness unchanged. Before: 1,251 of 2,000 on this branch, re-run before the chan
   `IN` forms, `DISTINCT` inside SUM and AVG, triggers, views, REINDEX, REPLACE and UPDATE forms
   qdb does not run.
 
+## After P13: constraints (2026-11-09, feat/bdb-constraints)
+
+- **P1 sqllogictest:** query records 8,921 of 9,202, unchanged (prediction held); statements as
+  expected 1,918 to 1,931 of 1,993 (+13, all in `evidence/in1.test`, which creates tables with
+  `UNIQUE` and `PRIMARY KEY`; prediction 0 to 30 held).
+- **Planted check:** a build that skips the UPDATE check fails `update_dup` and `update_kept`:
+  caught.
+- **P2:** 2,000 of 2,000. **Guards:** test_qdb.sh 290 pass, 0 fail (thirteen checks added); text 0
+  changed; crash 0 of 170; WAL 0; library 0; reference differential 16 of 16. Bulk load with no
+  constraint (`bench_qdb_load.py`, 1,000 to 16,000 rows): exponent 1.00 and 1.05 before, 0.96 and
+  1.02 after.
+- Limits: the duplicate check scans the table (O(rows) per inserted row, O(rows^2) for an UPDATE of
+  a key column); a constrained bulk load is quadratic until keys get an index. DEFAULT, CHECK and
+  FOREIGN KEY are not read.
+
 ## Stage 1: a correct, durable single-file engine
 
 | Row | Check (fails if) | Status | Evidence |
 |---|---|---|---|
-| 1a Regression gate | `bdb/tests/test_qdb.sh` reports any FAIL | PASS | 277 pass, 0 fail after P12; 274 after P11; 257 after P10; 250 after P9; 244 after P8; 241 after P7; 222 after the completion changes (214/0/1 at the move) |
+| 1a Regression gate | `bdb/tests/test_qdb.sh` reports any FAIL | PASS | 290 pass, 0 fail after P13; 277 after P12; 274 after P11; 257 after P10; 250 after P9; 244 after P8; 241 after P7; 222 after the completion changes (214/0/1 at the move) |
 | 1b SQLite differential | any of the P2 queries disagrees, with numbers compared as numbers | PASS | 2,000 of 2,000 after P8, a CI gate; 1,944 after P7; 1,251 at the move (519 null_vs_empty, 230 rows, 46 number_text) |
 | 1c Crash recovery | any P3 crash point breaks the rule | PASS | 0 violations of 170 (24 of 104 at the move); two mutants caught |
 | 1d Cross-process transaction | either P4 case misses | PASS | four checks in test_qdb.sh (`xproc_*`), differential process mode equals REPL mode on 8 seeds |
@@ -397,7 +428,7 @@ harness unchanged. Before: 1,251 of 2,000 on this branch, re-run before the chan
 |---|---|---|---|
 | 2a sqllogictest queries | any P1 query record does not pass | FAIL | 8,921 of 9,202 (96.95 percent) after P12; 8,186 after P11 (`select5` not run); 1,084 after P10; 32 at the move; `bdb/tests/slt_run.py` |
 | 2b Expressions in the select list | `SELECT a+1, a*b-c FROM t` refused or wrong | PASS | P11: arithmetic, CASE, functions, correlated subqueries; `select1` to `select3` 5,320 of 5,320 |
-| 2c Column types with arguments and constraints | `VARCHAR(30)`, `INTEGER PRIMARY KEY`, `UNIQUE` refused | FAIL | P9: type arguments are read (`VARCHAR(30)`, `DECIMAL(10, 2)`), statements 134 to 1,918 of 1,993; `PRIMARY KEY` is parsed and not enforced; `UNIQUE` is refused |
+| 2c Column types with arguments and constraints | `VARCHAR(30)`, `INTEGER PRIMARY KEY`, `UNIQUE` refused | PASS | P9 type arguments; P13 PRIMARY KEY, UNIQUE and NOT NULL enforced on INSERT and UPDATE, kept in the file and through ROLLBACK; statements 1,931 of 1,993 |
 | 2d CASE, scalar functions (abs, coalesce) | refused or wrong | PASS | P11: searched and simple CASE, `abs`, `coalesce`, `ifnull`, `nullif` |
 | 2e Correlated subqueries, EXISTS | refused or wrong | PASS | P11: scalar, EXISTS and IN subqueries naming outer columns (`x_corr_subq`, `x_exists`) |
 

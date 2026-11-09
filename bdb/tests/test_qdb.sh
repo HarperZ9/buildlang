@@ -697,6 +697,30 @@ chk "comma_join_cross" "$(xrows "SELECT count(*) FROM j1, j3")" "6"
 chk "comma_join_alias" "$(xrows "SELECT x.a, y.a FROM j1 AS x, j1 AS y WHERE x.a + 1 = y.a ORDER BY 1")" "$(printf '1 | 2\n2 | 3')"
 rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
 
+echo "== PRIMARY KEY, UNIQUE and NOT NULL (P13) =="
+rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
+$QDB "$DB" "CREATE TABLE ku (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, a INTEGER, b INTEGER, UNIQUE (a, b))" >/dev/null
+$QDB "$DB" "INSERT INTO ku VALUES (1,'x',1,1),(NULL,'y',1,2)" >/dev/null
+chksel "ipk_autonumber"  "SELECT id FROM ku WHERE name = 'y'" "2"
+errk() { chk "$1" "$($QDB "$DB" "$2" 2>&1 | tr -d '\r' | grep -ci "$3")" "1"; }
+errk "pk_dup"            "INSERT INTO ku VALUES (1,'z',3,3)"          "UNIQUE constraint failed: ku.id"
+errk "unique_dup"        "INSERT INTO ku VALUES (5,'x',3,3)"          "UNIQUE constraint failed: ku.name"
+errk "not_null"          "INSERT INTO ku VALUES (5,NULL,3,3)"         "NOT NULL constraint failed: ku.name"
+errk "unique_pair"       "INSERT INTO ku VALUES (5,'w',1,1)"          "UNIQUE constraint failed: ku.a, ku.b"
+errk "dup_in_batch"      "INSERT INTO ku VALUES (7,'p',7,7),(8,'p',8,8)" "UNIQUE constraint failed: ku.name"
+errk "update_dup"        "UPDATE ku SET name = 'x' WHERE id = 2"      "UNIQUE constraint failed: ku.name"
+chksel "rejected_atomic" "SELECT count(*) FROM ku" "2"
+chksel "update_kept"     "SELECT name FROM ku WHERE id = 2" "y"
+$QDB "$DB" "INSERT INTO ku VALUES (5,'w',NULL,1),(6,'v',NULL,1)" >/dev/null
+chksel "unique_nulls_distinct" "SELECT count(*) FROM ku" "4"
+chk   "con_in_file"      "$(grep -c '^UNIQUE a,b\|^PRIMARY KEY id\|^NOT NULL name' "$DB")" "3"
+errk "con_after_reload"  "INSERT INTO ku VALUES (9,'w',9,9)"          "UNIQUE constraint failed: ku.name"
+$QDB "$DB" "BEGIN" >/dev/null; $QDB "$DB" "CREATE TABLE kv (k INTEGER PRIMARY KEY)" >/dev/null; $QDB "$DB" "ROLLBACK" >/dev/null
+$QDB "$DB" "CREATE TABLE kv (k INTEGER)" >/dev/null
+$QDB "$DB" "INSERT INTO kv VALUES (1),(1)" >/dev/null
+chksel "rollback_drops_con" "SELECT count(*) FROM kv" "2"
+rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
+
 echo "== ALTER / DROP =="
 reseed; $QDB "$DB" "ALTER TABLE emp ADD COLUMN active INTEGER" >/dev/null
 chkhdr "alter_add"     "SELECT * FROM emp LIMIT 0" "id | name | dept | salary | age | active"
