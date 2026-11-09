@@ -39,7 +39,7 @@ fn to_fixed_16_16(val: f64) -> i32 {
         if fixed < 0.0 {
             0
         } else {
-            floor(fixed)
+            floor(fixed) as i32
         }
     }
 }
