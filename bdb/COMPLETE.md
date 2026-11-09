@@ -382,6 +382,24 @@ that drops the last row of the SELECT keeps most of those records wrong (at leas
 than the change). Guards as in P21, and new test_qdb.sh checks: rows copied, a column list, a
 SELECT of zero rows, a SELECT from the table itself, a constraint failure that inserts nothing.
 
+**P23. DISTINCT in every aggregate, TOTAL, group_concat and the refused aggregate forms (item 3),
+written 2026-11-09 before the full run.** After P22 the P1 rejections in
+`evidence/slt_lang_aggfunc.test` are: DISTINCT inside SUM, AVG, MIN, MAX or TOTAL (19, "DISTINCT
+is only supported inside COUNT"); `total(...)` and `group_concat(...)`, which the older path does
+not read (11 "expected keyword" and 9 "unexpected trailing input", some with `NOT INDEXED`); and
+`x NOT NULL` as a postfix test (4). The change: the older path accepts DISTINCT in every aggregate
+and feeds SUM, AVG, MIN and MAX the rows that first carry each distinct value (values compare as
+values, so 2 and 2.0 are one value; COUNT(DISTINCT) keeps its text comparison); a SELECT without
+GROUP BY that uses TOTAL, group_concat, DISTINCT in a non-COUNT aggregate, an index hint (`NOT
+INDEXED`, `INDEXED BY i`) or `NOT NULL`, `ISNULL`, `NOTNULL` as a postfix test goes to the
+expression path, which gains group_concat (with an optional separator; DISTINCT with a separator
+is an error, as in SQLite), the index hints (read and ignored) and the postfix tests. The
+expression path's DISTINCT also compares values. Disclosed: during development the aggfunc file
+alone was run on the change (61 of 67 query records, from 23), before this entry. Measured on P1.
+Predictions: total from 9,143 to between 9,175 and 9,185; `slt_lang_aggfunc.test` to at least 60
+of 67; no other file changes; statements not below 1,938. Planted check: a build whose DISTINCT is
+ignored in SUM, AVG and TOTAL loses at least 8 records of the aggfunc file. Guards as in P22.
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
@@ -845,6 +863,28 @@ median of 3).
   77a49282... unchanged; P2 2,000 of 2,000; text 0 changed; WAL recovery 0; reference differential
   16 of 16; library 0 failures; receipts reproduced; test_qdb_mutations.py 0 disagreements.
 
+## After P23: DISTINCT in every aggregate, TOTAL, group_concat (2026-11-09, feat/bdb-agg-distinct)
+
+| Measure | P22 | P23 | Prediction |
+|---|---|---|---|
+| P1 query records passing | 9,143 of 9,202 | 9,181 (99.77 percent) | 9,175 to 9,185: held |
+| `slt_lang_aggfunc.test` | 23 of 67 | 61 | at least 60: held |
+| rejected | 50 | 8 | |
+| wrong | 9 | 13 | |
+| statements as expected | 1,938 | 1,938 | not below 1,938: held |
+
+- No other file changed. The 4 more wrong answers are the integer-overflow records of A1 (sum and
+  total over 1<<63, which SQLite itself does not reproduce), now answered instead of refused.
+  The other 2 wrong aggfunc records read `min(y)` where y holds the text 'NULL'; the runner
+  reads a printed NULL as SQL NULL (A5), so qdb's 'NULL' text and SQL NULL look alike to it.
+- Planted check MISSED its bar: the build that ignores DISTINCT in SUM, AVG and TOTAL passes 55
+  aggfunc records, 6 fewer (bar: at least 8 fewer). It separates, by less than predicted.
+- Remaining P1 rejections: 6 views (`unexpected trailing input`), 2 dropped tables read later.
+- test_qdb.sh 308 pass, 0 fail (the fail-closed DISTINCT check became 8 positive checks, each
+  matched against Python's sqlite3 first). Guards: crash 176 points, 0 violations; power cuts 0 of
+  10,000, digest unchanged; P2 2,000 of 2,000; text 0 changed; WAL recovery 0; reference
+  differential 16 of 16; library 0 failures; receipts reproduced; test_qdb_mutations.py 0.
+
 ## Stage 1: a correct, durable single-file engine
 
 | Row | Check (fails if) | Status | Evidence |
@@ -862,7 +902,7 @@ median of 3).
 
 | Row | Check (fails if) | Status | Evidence |
 |---|---|---|---|
-| 2a sqllogictest queries | any P1 query record does not pass | FAIL | 9,143 of 9,202 (99.36 percent) after P22; 9,087 (98.75 percent) after P18; 8,921 (96.95 percent) after P12; 8,186 after P11 (`select5` not run); 1,084 after P10; 32 at the move; `bdb/tests/slt_run.py` |
+| 2a sqllogictest queries | any P1 query record does not pass | FAIL | 9,181 of 9,202 (99.77 percent) after P23; 9,143 (99.36 percent) after P22; 9,087 (98.75 percent) after P18; 8,921 (96.95 percent) after P12; 8,186 after P11 (`select5` not run); 1,084 after P10; 32 at the move; `bdb/tests/slt_run.py` |
 | 2b Expressions in the select list | `SELECT a+1, a*b-c FROM t` refused or wrong | PASS | P11: arithmetic, CASE, functions, correlated subqueries; `select1` to `select3` 5,320 of 5,320 |
 | 2c Column types with arguments and constraints | `VARCHAR(30)`, `INTEGER PRIMARY KEY`, `UNIQUE` refused | PASS | P9 type arguments; P13 PRIMARY KEY, UNIQUE and NOT NULL enforced on INSERT and UPDATE, kept in the file and through ROLLBACK; statements 1,931 of 1,993 |
 | 2d CASE, scalar functions (abs, coalesce) | refused or wrong | PASS | P11: searched and simple CASE, `abs`, `coalesce`, `ifnull`, `nullif` |

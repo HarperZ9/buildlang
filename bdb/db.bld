@@ -2066,17 +2066,13 @@ fn parse_select(d: &mut DB) ~ Console + Process {
             if agg > 0 {
                 next_token(d);
                 expect_punct(d, "(");
-                // Optional DISTINCT inside the aggregate. Only COUNT(DISTINCT col)
-                // is supported; DISTINCT in any other aggregate, or COUNT(DISTINCT *),
+                // Optional DISTINCT inside the aggregate (P23: in every aggregate;
+                // the value set is taken by distinct_rows). COUNT(DISTINCT *)
                 // fails closed rather than silently ignoring the keyword.
                 let mut is_distinct = 0;
                 if tk_is_kw(d, "DISTINCT") == 1 {
                     is_distinct = 1;
                     next_token(d);
-                    if agg != 1 {
-                        println!("Error: DISTINCT is only supported inside COUNT");
-                        process_exit(1);
-                    }
                 }
                 if d.tk_type == 6 {
                     // COUNT(*)
@@ -4606,6 +4602,12 @@ fn compute_single_agg(d: &mut DB, af: i32, ac_name_id: i32, cs: i32, cc: i32,
     // SUM/AVG/MIN/MAX
     let col_idx = resolve_col(d, cs, cc, tname, alias_val, ac_name);
     let ct = if col_idx >= 0 { vec_get(d.col_types, cs + col_idx) } else { 0 };
+    let mut match_rows = match_rows;
+    let mut match_count = match_count;
+    if distinct == 1 {
+        match_rows = distinct_rows(d, match_rows, match_count, rs, cc, col_idx, 0 - 1);
+        match_count = vec_len(match_rows);
+    }
     let mut sum_val = 0.0;
     let mut min_val = 999999999.0;
     let mut max_val = 0.0 - 999999999.0;
@@ -4649,6 +4651,35 @@ fn compute_single_agg(d: &mut DB, af: i32, ac_name_id: i32, cs: i32, cc: i32,
     sp_add(d, result_str)
 }
 
+// The rows of rows[0..n] that first carry each distinct non-NULL value of
+// column col (cell position rs + row * cc + col), within each value of the
+// group column gcol when gcol >= 0. Values compare as values, the way the
+// key map compares them (con_part: 1 equals 1.0, text as is). Feeding these
+// rows to SUM, AVG, MIN or MAX gives the aggregate over DISTINCT values (P23).
+fn distinct_rows(d: &DB, rows: Vec<i32>, n: i32, rs: i32, cc: i32, col: i32, gcol: i32) -> Vec<i32> {
+    let mut out: Vec<i32> = vec![];
+    if col < 0 { return out; }
+    let seen: HashMap<String, f64> = map_new();
+    let mut i = 0;
+    while i < n {
+        let r = vec_get(rows, i);
+        let v = sp_get(d, vec_get(d.cells, rs + r * cc + col));
+        if !is_null(v) {
+            let mut key = con_part(v);
+            if gcol >= 0 {
+                let g = sp_get(d, vec_get(d.cells, rs + r * cc + gcol));
+                key = to_string_i32(g.len()) + ":" + g + "|" + key;
+            }
+            if !map_contains(seen, key) {
+                map_insert(seen, key, 1.0);
+                vec_push(out, r);
+            }
+        }
+        i = i + 1;
+    }
+    out
+}
+
 // Build the header string pool id for an aggregate
 fn build_agg_header(d: &mut DB, af: i32, ac_name_id: i32, al_id: i32, distinct: i32) -> i32 {
     if al_id >= 0 { return al_id; }
@@ -4663,7 +4694,8 @@ fn build_agg_header(d: &mut DB, af: i32, ac_name_id: i32, al_id: i32, distinct: 
     if af == 3 { func_name = "AVG"; }
     if af == 4 { func_name = "MIN"; }
     if af == 5 { func_name = "MAX"; }
-    let hname = func_name + "(" + ac_name + ")";
+    let mut hname = func_name + "(" + ac_name + ")";
+    if distinct == 1 { hname = func_name + "(DISTINCT " + ac_name + ")"; }
     sp_add(d, hname)
 }
 
@@ -4801,8 +4833,15 @@ fn exec_select_group(d: &mut DB) ~ Console {
                 gi2_vid = sp_add(d, gi2_val_str);
                 vec_push(all_results, gi2_vid);
             } else if gi2_af >= 2 {
-                gi2_val_str = compute_group_numeric(d, gi2_af, gi2_ac_name, gi2_gk, cs, cc, rs, tname, gcol,
-                                                    match_rows, match_count);
+                if vec_get(local_agg_distinct, gi2_ai) == 1 {
+                    let dcol = resolve_col(d, cs, cc, tname, alias1_val, gi2_ac_name);
+                    let drows = distinct_rows(d, match_rows, match_count, rs, cc, dcol, gcol);
+                    gi2_val_str = compute_group_numeric(d, gi2_af, gi2_ac_name, gi2_gk, cs, cc, rs, tname, gcol,
+                                                        drows, vec_len(drows));
+                } else {
+                    gi2_val_str = compute_group_numeric(d, gi2_af, gi2_ac_name, gi2_gk, cs, cc, rs, tname, gcol,
+                                                        match_rows, match_count);
+                }
                 gi2_vid = sp_add(d, gi2_val_str);
                 vec_push(all_results, gi2_vid);
             } else {
@@ -5187,7 +5226,8 @@ fn push_agg_header(d: &mut DB, hi: i32, headers: Vec<i32>) {
     if af == 3 { func_name = "AVG"; }
     if af == 4 { func_name = "MIN"; }
     if af == 5 { func_name = "MAX"; }
-    let hname = func_name + "(" + ac_name + ")";
+    let mut hname = func_name + "(" + ac_name + ")";
+    if dist == 1 { hname = func_name + "(DISTINCT " + ac_name + ")"; }
     let hid = sp_add(d, hname);
     vec_push(headers, hid);
 }
@@ -7940,7 +7980,8 @@ fn tk_word(d: &DB) -> String {
 }
 
 fn is_agg_name(w: String) -> bool {
-    w == "COUNT" || w == "SUM" || w == "AVG" || w == "MIN" || w == "MAX" || w == "TOTAL"
+    w == "COUNT" || w == "SUM" || w == "AVG" || w == "MIN" || w == "MAX" || w == "TOTAL" ||
+    w == "GROUP_CONCAT"
 }
 
 // Words that end an expression or a select item; never an alias.
@@ -7949,7 +7990,7 @@ fn x_reserved(w: String) -> bool {
     w == "OR" || w == "NOT" || w == "WHEN" || w == "THEN" || w == "ELSE" || w == "END" ||
     w == "AS" || w == "ASC" || w == "DESC" || w == "IS" || w == "IN" || w == "BETWEEN" ||
     w == "LIKE" || w == "GROUP" || w == "HAVING" || w == "UNION" || w == "INTERSECT" ||
-    w == "EXCEPT" || w == "JOIN" || w == "ON" || w == "BY"
+    w == "EXCEPT" || w == "JOIN" || w == "ON" || w == "BY" || w == "INDEXED"
 }
 
 fn x_expect(d: &mut DB, p: String) ~ Console + Process {
@@ -8017,9 +8058,12 @@ fn xp_pred(d: &mut DB) -> i32 ~ Console + Process {
         x_expect_word(d, "NULL");
         return xp_new(d, 8, l, -1, neg, -1);
     }
+    if tk_word(d) == "ISNULL" { next_token(d); return xp_new(d, 8, l, -1, 0, -1); }
+    if tk_word(d) == "NOTNULL" { next_token(d); return xp_new(d, 8, l, -1, 1, -1); }
     let mut neg = 0;
     if tk_word(d) == "NOT" { neg = 1; next_token(d); }
     let w = tk_word(d);
+    if neg == 1 && w == "NULL" { next_token(d); return xp_new(d, 8, l, -1, 1, -1); }
     if w == "BETWEEN" {
         next_token(d);
         let lo = xp_add(d);
@@ -8192,8 +8236,17 @@ fn xp_primary(d: &mut DB) -> i32 ~ Console + Process {
                 let mut arg = -1;
                 if d.tk_type == 6 { next_token(d); }
                 else { arg = xp_expr(d); }
+                let mut sep = -1;
+                if fname == "GROUP_CONCAT" && tk_is_punct(d, ",") == 1 {
+                    next_token(d);
+                    sep = xp_expr(d);
+                    if dist == 1 {
+                        println!("Error: DISTINCT aggregates must have exactly one argument");
+                        process_exit(1);
+                    }
+                }
                 x_expect(d, ")");
-                return xp_new(d, 18, arg, -1, dist, sp_add(d, fname));
+                return xp_new(d, 18, arg, sep, dist, sp_add(d, fname));
             }
             let mut args: Vec<i32> = vec![];
             let mut n = 0;
@@ -8281,6 +8334,14 @@ fn xp_query(d: &mut DB) -> i32 ~ Console + Process {
                 next_token(d);
             } else if d.tk_type == 1 && !x_reserved(tk_word(d)) {
                 al = sp_add(d, d.tk_val);
+                next_token(d);
+            }
+            if tk_word(d) == "NOT" {
+                next_token(d);
+                x_expect_word(d, "INDEXED");
+            } else if tk_word(d) == "INDEXED" {
+                next_token(d);
+                x_expect_word(d, "BY");
                 next_token(d);
             }
             vec_push(ftab, ti);
@@ -8401,8 +8462,13 @@ fn x_wanted(d: &mut DB) -> bool {
     // or NULL; the older path reads no IN with a literal on its left.
     let mut prev_lit = false;
     let mut prev2_lit = false;
+    let mut agg_open = false;
+    let mut prev2_word = "";
+    let mut total_next = false;
     next_token(d);
     while d.tk_type != 7 && !legacy {
+        if total_next && tk_is_punct(d, "(") == 1 { feature = true; }
+        total_next = false;
         let w = tk_word(d);
         if w == "IN" && depth == 0 {
             if section == 0 || prev_lit || (prev_word == "NOT" && prev2_lit) { feature = true; }
@@ -8420,6 +8486,12 @@ fn x_wanted(d: &mut DB) -> bool {
             if section == 3 && tk_is_punct(d, ",") == 1 { order_commas = order_commas + 1; }
         }
         if w == "CASE" || w == "EXISTS" { feature = true; }
+        // P23: TOTAL() and DISTINCT inside an aggregate other than COUNT.
+        if w == "TOTAL" && tk_is_punct(d, "(") == 0 { total_next = true; }
+        if w == "DISTINCT" && agg_open { feature = true; }
+        if w == "GROUP_CONCAT" || w == "INDEXED" || w == "ISNULL" || w == "NOTNULL" { feature = true; }
+        if w == "NULL" && prev_word == "NOT" && prev2_word != "IS" { feature = true; }
+        agg_open = tk_is_punct(d, "(") == 1 && is_agg_name(prev_word) && prev_word != "COUNT";
         if d.tk_type == 4 && (d.tk_val == "+" || d.tk_val == "/" || d.tk_val == "-") { feature = true; }
         if d.tk_type == 1 && d.tk_val == "%" { feature = true; }
         if d.tk_type == 3 && d.tk_val.starts_with("-") && prev_type == 1 { feature = true; }
@@ -8445,6 +8517,7 @@ fn x_wanted(d: &mut DB) -> bool {
         else { prev_type = 3; }
         prev2_lit = prev_lit;
         prev_lit = d.tk_type == 2 || d.tk_type == 3 || w == "NULL";
+        prev2_word = prev_word;
         prev_word = w;
         prev_ident = d.tk_type == 1;
         prev_comma = tk_is_punct(d, ",") == 1;
@@ -8786,8 +8859,9 @@ fn x_agg(d: &mut DB, e: i32, fs: Vec<i32>, nf: i32, ag: Vec<i32>) -> String ~ Co
     let mut all_int = true;
     let mut sum = 0.0;
     let mut best = nullv();
-    let mut seen: Vec<String> = vec![];
-    let mut sn = 0;
+    let sepx = vec_get(d.x_b, e);
+    let mut gc: Vec<String> = vec![];
+    let seen: HashMap<String, f64> = map_new();
     let none = x_no_agg();
     let mut t = 0;
     while t < count {
@@ -8805,13 +8879,9 @@ fn x_agg(d: &mut DB, e: i32, fs: Vec<i32>, nf: i32, ag: Vec<i32>) -> String ~ Co
             let v = x_eval(d, arg, f2, nf, none);
             let mut take = !is_null(v);
             if take && dist == 1 {
-                let mut si = 0;
-                while si < sn {
-                    let sv: String = vec_get(seen, si);
-                    if sv == v { take = false; }
-                    si = si + 1;
-                }
-                if take { vec_push(seen, v); sn = sn + 1; }
+                let key = con_part(v);
+                if map_contains(seen, key) { take = false; }
+                else { map_insert(seen, key, 1.0); }
             }
             if take {
                 cnt = cnt + 1;
@@ -8819,6 +8889,15 @@ fn x_agg(d: &mut DB, e: i32, fs: Vec<i32>, nf: i32, ag: Vec<i32>) -> String ~ Co
                 if !xv_is_intlike(v) { all_int = false; }
                 if name == "MIN" { if is_null(best) || xv_cmp_nn(v, best) < 0 { best = v; } }
                 if name == "MAX" { if is_null(best) || xv_cmp_nn(v, best) > 0 { best = v; } }
+                if name == "GROUP_CONCAT" {
+                    // SQLite puts the row's separator before every value but the first.
+                    if cnt > 1 {
+                        let mut sv = ",";
+                        if sepx >= 0 { sv = disp_or_empty(x_eval(d, sepx, f2, nf, none)); }
+                        vec_push(gc, sv);
+                    }
+                    vec_push(gc, v);
+                }
             }
         }
         t = t + 1;
@@ -8826,9 +8905,19 @@ fn x_agg(d: &mut DB, e: i32, fs: Vec<i32>, nf: i32, ag: Vec<i32>) -> String ~ Co
     if name == "COUNT" { return xv_int(cnt as f64); }
     if name == "MIN" || name == "MAX" { return best; }
     if name == "TOTAL" { return xv_real(sum); }
+    if name == "GROUP_CONCAT" {
+        if cnt == 0 { return nullv(); }
+        return concat_parts(gc);
+    }
     if cnt == 0 { return nullv(); }
     if name == "SUM" { if all_int { return xv_int(sum); } return xv_real(sum); }
     xv_real(sum / (cnt as f64))
+}
+
+// A NULL separator joins with nothing, as in SQLite.
+fn disp_or_empty(v: String) -> String {
+    if is_null(v) { return ""; }
+    v
 }
 
 fn x_has_agg(d: &DB, e: i32) -> bool {

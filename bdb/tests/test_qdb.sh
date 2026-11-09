@@ -295,10 +295,23 @@ chksel "count_distinct_grouped"     "SELECT dept, COUNT(DISTINCT salary) FROM em
 # ORDER BY the distinct-count alias, DESC; eng/sales tie at 2 -> discovery order.
 chksel "count_distinct_alias_order" "SELECT dept, COUNT(DISTINCT salary) AS ds FROM emp GROUP BY dept ORDER BY ds DESC" "$(printf 'eng   | 2\nsales | 2\nhr    | 1')"
 reseed
-# Fail closed: DISTINCT outside COUNT, and COUNT(DISTINCT *), are rejected rather
-# than silently ignored; the table stays intact.
-errchk "count_distinct_sum_closed"  "SELECT SUM(DISTINCT salary) FROM emp" "DISTINCT is only supported inside COUNT"
+# COUNT(DISTINCT *) is rejected rather than silently ignored; the table stays intact.
+# DISTINCT in the other aggregates runs (P23): values compare as values.
 errchk "count_distinct_star_closed" "SELECT COUNT(DISTINCT *) FROM emp"    "is not supported; use COUNT"
+
+rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
+$QDB "$DB" "CREATE TABLE ds (g TEXT, v INTEGER)" >/dev/null
+$QDB "$DB" "INSERT INTO ds VALUES ('a',1),('a',1),('a',2),('b',2),('b',NULL)" >/dev/null
+chk "agg_distinct_all"   "$(rows 'SELECT SUM(DISTINCT v), AVG(DISTINCT v), MIN(DISTINCT v), MAX(DISTINCT v) FROM ds' | tr -s ' ')" "3 | 1.5 | 1 | 2"
+chk "agg_distinct_group" "$(rows 'SELECT g, SUM(DISTINCT v), AVG(DISTINCT v) FROM ds GROUP BY g ORDER BY g' | tr -s ' ')" "$(printf 'a | 3 | 1.5
+b | 2 | 2')"
+chk "total_distinct"  "$(rows 'SELECT TOTAL(DISTINCT v), total(v) FROM ds' | tr -s ' ')" "3.0 | 6.0"
+chksel "group_concat_distinct" "SELECT group_concat(DISTINCT v) FROM ds" "1,2"
+chksel "group_concat_sep" "SELECT group_concat(g, ';') FROM ds NOT INDEXED" "a;a;a;b;b"
+chksel "postfix_not_null" "SELECT COUNT(*) FROM ds WHERE v NOT NULL" "4"
+chksel "postfix_isnull"  "SELECT COUNT(*) FROM ds WHERE v ISNULL" "1"
+chk "group_concat_distinct_sep" "$($QDB "$DB" "SELECT group_concat(DISTINCT v, ';') FROM ds" 2>&1 | tr -d '' | grep -c 'exactly one argument')" "1"
+reseed
 
 echo "== subqueries (scalar + IN) =="
 reseed
