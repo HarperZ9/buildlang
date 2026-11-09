@@ -2812,7 +2812,7 @@ static BuildString build_hvec_join_str(BuildVecHandle h, BuildString sep) {
         if (i > 0 && sep.len > 0) { memcpy(buf + o, sep.ptr, sep.len); o += sep.len; }
         if (items[i].len > 0) { memcpy(buf + o, items[i].ptr, items[i].len); o += items[i].len; }
     }
-    buf[total] = ' ';
+    buf[total] = '\0';
     BuildString qs; qs.ptr = buf; qs.len = total; qs.cap = total + 1;
     return qs;
 }
