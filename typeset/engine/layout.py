@@ -10,6 +10,9 @@ from .refs import resolve_refs
 from .shape import Shaper, Diagnostics
 
 
+CELL_ALIGN = {"l": "left", "r": "right", "c": "center"}
+
+
 def merged(base, over):
     out = copy.deepcopy(base)
     for k, v in over.items():
@@ -52,14 +55,14 @@ class Layout:
         hang = st.get("hang", 0.0)              # first-line offset relative to `left`
         width = self.text_width - left - right
         align = st.get("align", "justify")
-        items = self.pb.build(block.spans, st, lead, ragged=align in ("ragged", "center"))
+        items = self.pb.build(block.spans, st, lead, ragged=align in ("ragged", "center", "right"))
         first_w = width - hang
         lw = lambda n: sp(first_w if n == 1 else width)
         if align == "firstfit":
             res = first_fit(items, lw)
         else:
             params = self.params
-            if align in ("ragged", "center"):
+            if align in ("ragged", "center", "right"):
                 import dataclasses
                 params = dataclasses.replace(self.params, rightskip_stretch=sp(2 * st["size"]))
             res = break_lines(items, lw, params, has_hyphens=True)
@@ -73,6 +76,8 @@ class Layout:
             w = first_w if n == 1 else width
             if align == "center":
                 x0 += (w - nat) / 2
+            elif align == "right":
+                x0 += w - nat
             flat, gfx = [], []
             h, d = st.get("height", st["size"] * 0.72), st.get("depth", st["size"] * 0.25)
             for x, pc, hs in runs:
@@ -113,7 +118,7 @@ class Layout:
             return self.figure_lines(block, st, lead)
         if block.cells:
             return [self.row_line(block, st)]
-        self.cols = None
+        self.cols = self.aligns = None
         return self.lines_for(block, st, lead)
 
     def figure_lines(self, block, st, lead):
@@ -140,7 +145,11 @@ class Layout:
         n = len(block.cells)
         if block.attrs.get("cols"):
             self.cols = [float(c) for c in block.attrs["cols"].split(",")]
+        if block.attrs.get("align"):
+            # align=l,r,c on a row holds for the rest of the table, as cols= does
+            self.aligns = [CELL_ALIGN.get(a.strip(), "") for a in block.attrs["align"].split(",")]
         cols = self.cols if getattr(self, "cols", None) and len(self.cols) == n else [1.0 / n] * n
+        aligns = getattr(self, "aligns", None) or []
         total, gutter = sum(cols), st.get("gutter", 8.0)
         x, runs, gfx, height, depth = 0.0, [], [], 0.0, 0.0
         from .docir import Block
@@ -148,6 +157,8 @@ class Layout:
             w = self.text_width * frac / total
             right = self.text_width - x - w + (gutter if k < n - 1 else 0.0)
             cst = dict(st, left=x, right=right, hang=0.0)
+            if k < len(aligns) and aligns[k]:
+                cst["align"] = aligns[k] if aligns[k] != "left" else st.get("align", "ragged")
             cell = Block(block.kind, spans or [], index=block.index)
             lines = self.lines_for(cell, cst) if cell.plain.strip() else []
             for j, ln in enumerate(lines):

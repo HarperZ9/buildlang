@@ -58,10 +58,11 @@ text layer is the paper alone. `paper-plain` is the same theme with every embell
 | `section`, `subsection` | label optional | Sections are numbered; `{ref:label}` gives the number |
 | `eq` | label optional | Display math, numbered `(n)` at the right margin |
 | `figure` | fifth field `src=chart.png;width=0.8;alt=...` | A PNG beside the IR, scaled to the width fraction, captioned "Figure n." and kept with its caption |
-| `tablecap`, `thead`, `row` | cells split by U+00A6; `cols=0.5,0.25,0.25` on the first row; `last=1` on the last | A table: caption "Table n.", a ruled header, wrapped cells, a closing rule |
+| `tablecap`, `thead`, `row` | cells split by U+00A6; `cols=0.5,0.25,0.25` and `align=l,r,r` on the first row; `last=1` on the last | A table: caption "Table n.", a ruled header, wrapped cells, a closing rule. `align` sets each column left (`l`), right (`r`) or centred (`c`) and holds for the rest of the table, as `cols` does; numbers go in `r` columns so their last digits line up |
 | `bib` | label is the cite key | Numbered references; `{cite:key}` gives `[n]` |
 
-In a BuildLang program, `attributed(&mut d, kind, label, text, attrs)` writes the fifth field. The PNG reader
+In a BuildLang program, `attributed(&mut d, kind, label, text, attrs)` writes the fifth field; attributes are
+separated by `;`, as in `cols=0.5,0.25,0.25;align=l,r,r`. The PNG reader
 (`engine/pngread.py`) takes 8-bit grey, RGB, grey with alpha and RGBA, and lays alpha over the theme's paper.
 
 Text-layer rules a paper build keeps:
@@ -176,7 +177,7 @@ SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) python -m buildtex resume.tex out/r
 ## Limits
 
 - The engine is Python; only line breaking also runs as BuildLang.
-- Figures are PNG only; tables do not break inside a row and have no right-aligned columns; figures do not float.
+- Figures are PNG only; tables do not break inside a row; a right-aligned column lines up last digits, not decimal points; figures do not float.
 - Math needs an OpenType MATH font. The `paper` theme ships one (Noto Sans Math); the `press` and `ats` themes carry none, so they set math source as plain text and record a note in the receipt; a math-heavy document uses a theme with a MATH font, such as `latex-article` where Cambria Math is installed.
 - PDF/A-2b metadata is written only with `--pdfa`, and no validator has run. A publish-metadata check reports that packet even though it holds no author. Decoration is marked as `/Artifact` content so extraction and assistive technology skip it, but no structure tree (tagged PDF) is written.
 - The relief is a raster at the theme's dpi (150 for `press`); text and rules stay vector.
