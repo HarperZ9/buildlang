@@ -58,13 +58,9 @@ const ADDS: [&str; 3] = ["sum_to", "clamp_add", "twice_max"];
 fn every_subset_function_is_certified() {
     let (doc, code) = tv(false, None);
     assert_eq!(code, 0, "{doc}");
+    // `main` prints; since widening 3 (effects) it is certified too.
     for (name, status) in statuses(&doc) {
-        let want = if name == "main" {
-            "outside-subset"
-        } else {
-            "certified"
-        };
-        assert_eq!(status, want, "{name}: {doc}");
+        assert_eq!(status, "certified", "{name}: {doc}");
     }
 }
 
@@ -75,8 +71,6 @@ fn the_planted_miscompilation_is_caught() {
     for (name, status) in statuses(&doc) {
         let want = if ADDS.contains(&name.as_str()) {
             "not-certified"
-        } else if name == "main" {
-            "outside-subset"
         } else {
             "certified"
         };

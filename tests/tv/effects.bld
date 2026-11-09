@@ -1,0 +1,50 @@
+// Translation validation with effects (docs/TRANSLATION-VALIDATION.md,
+// "Widening 3: effects"). Prints and calls are events; every function here
+// is certified, and compiler/tests/tv_effects.rs plants C rewrites that
+// change what is printed, in what order, or when a trap cuts it short.
+
+fn sq(x: i32) -> i32 {
+    x * x
+}
+
+fn inc(x: i32) -> i32 {
+    x + 1
+}
+
+fn note(x: i32) ~ Console {
+    println!("note {}", x);
+}
+
+fn report(a: i32, b: i64, f: bool) ~ Console {
+    println!("a={} b={}", a, b);
+    let c = a + 1;
+    println!("c={}", c);
+    println!("flag {}", f);
+}
+
+fn calls(x: i32) -> i32 {
+    let p = sq(x);
+    let q = inc(x);
+    p + q
+}
+
+fn loop_print(n: i32) ~ Console {
+    let mut i = 0;
+    while i < n {
+        print!("{} ", i);
+        i += 1;
+    }
+    println!("");
+}
+
+fn floats(x: f64) ~ Console {
+    println!("{} {:?} {:.3}", x, x, x);
+    eprintln!("warn {}", x);
+}
+
+fn main() ~ Console {
+    report(3, 4, true);
+    note(calls(5));
+    loop_print(3);
+    floats(2.5);
+}

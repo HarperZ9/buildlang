@@ -34,6 +34,13 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 pub struct Consts {
     pub source: HashMap<String, (Term, Ty)>,
     pub c: HashMap<String, (Term, Ty)>,
+    /// The C file's string table.
+    pub strings: HashMap<String, String>,
+    /// The source text, for print macro arguments.
+    pub text: String,
+    /// C function names the backend gave a renamed source function, to the
+    /// source name (`_max` to `max`).
+    pub c_names: HashMap<String, String>,
 }
 
 /// The relation a certificate claims for one function.
@@ -71,33 +78,59 @@ pub fn check(
     sigs: &Sigs,
     c: &CFunc,
     hints: &Hints,
-    callees: &HashMap<String, Ty>,
+    callees: &HashMap<String, Option<Ty>>,
     consts: &Consts,
 ) -> Result<usize, String> {
     let body = src.body.as_deref().ok_or("no body")?;
-    let ret = src
-        .sig
-        .return_ty
-        .as_deref()
-        .and_then(Ty::from_ast_tv)
-        .ok_or("return type outside the subset")?;
+    let ret = match src.sig.return_ty.as_deref() {
+        None => None,
+        Some(t) => Some(Ty::from_ast_tv(t).ok_or("return type outside the subset")?),
+    };
     let mut sym = Sym::new(fns, sigs);
     sym.inline_calls = false;
     sym.floats = true;
     sym.consts = consts.source.clone();
+    sym.source = Some(consts.text.as_str());
     let params = sym.params(&src.name.name)?;
-    if c.params.len() != params.len() {
+    let is_main = src.name.name.as_ref() == "main" && params.is_empty() && ret.is_none();
+    let c_params: Vec<_> = if is_main {
+        let want = [("argc", "int"), ("argv", "char**")];
+        let same = c.params.len() == 2
+            && c.params
+                .iter()
+                .zip(want)
+                .all(|(p, w)| p.0 == w.0 && p.1 == w.1);
+        if !same {
+            return Err("mismatch: C `main` does not take `argc, argv`".into());
+        }
+        Vec::new()
+    } else {
+        c.params.clone()
+    };
+    if c_params.len() != params.len() {
         return Err("mismatch: parameter count differs".into());
     }
-    for ((n, t), (cn, ct)) in params.iter().zip(&c.params) {
+    for ((n, t), (cn, ct)) in params.iter().zip(&c_params) {
         if n != cn || c_ty(ct) != Some(*t) {
             return Err(format!(
                 "mismatch: parameter `{n}: {t}` is `{ct} {cn}` in C"
             ));
         }
     }
-    if c_ty(&c.ret) != Some(ret) {
-        return Err(format!("mismatch: returns {ret} but C returns `{}`", c.ret));
+    let c_ret_ok = match ret {
+        Some(r) => c_ty(&c.ret) == Some(r),
+        None if is_main => c.ret == "int32_t",
+        None => c.ret == "void",
+    };
+    if !c_ret_ok {
+        return Err(format!(
+            "mismatch: returns {} but C returns `{}`",
+            ret.map_or("()".to_string(), |r| r.to_string()),
+            c.ret
+        ));
+    }
+    if let Some(m) = other_macro(body) {
+        return Err(format!("macro `{m}!` outside the subset"));
     }
     let src_loops = loops(body);
     let all_loops = count_loops(body);
@@ -118,12 +151,12 @@ pub fn check(
         .enumerate()
         .map(|(k, l)| (l.as_str(), k))
         .collect();
-    let cexec = CExec::new(c, &cuts, callees, &consts.c)?;
+    let cexec = CExec::new(c, &cuts, callees, consts)?;
     let mut sx = SrcExec {
         sym,
         body,
         loops: src_loops,
-        ret: Some(ret),
+        ret,
         arrivals: HashMap::new(),
     };
     let mut todo: Vec<Option<usize>> = vec![None];
@@ -139,18 +172,8 @@ pub fn check(
             Some(k) => sx.arrivals[&k].vars.clone(),
         };
         let mut base = Vec::new();
-        let mut s_st = St {
-            conds: Vec::new(),
-            facts: Vec::new(),
-            vars: Vec::new(),
-            ret: Some(ret),
-        };
-        let mut c_st = St {
-            conds: Vec::new(),
-            facts: Vec::new(),
-            vars: Vec::new(),
-            ret: Some(ret),
-        };
+        let mut s_st = St::new(Vec::new(), Vec::new(), ret);
+        let mut c_st = St::new(Vec::new(), Vec::new(), ret);
         let mut c_bound: HashSet<String> = HashSet::new();
         for (n, t) in &related {
             let v = Term::Var(n.clone(), *t);
@@ -164,8 +187,8 @@ pub fn check(
             c_st.vars.push((cn.clone(), v, ct));
             c_bound.insert(cn);
         }
-        for (n, t) in c.params.iter().chain(&c.locals) {
-            if !c_bound.contains(n) {
+        for (n, t) in c_params.iter().chain(&c.locals) {
+            if !c_bound.contains(n) && !super::c_effects::is_string_ty(t) {
                 let ty = c_ty(t).ok_or("C local type")?;
                 c_st.vars
                     .push((n.clone(), Term::Var(format!("c${n}"), ty), ty));
@@ -205,6 +228,7 @@ pub fn check(
             &s_any,
             &format!("at {at}, the source traps where C does not"),
         )?;
+        super::trace::check(base.len(), &facts, &s_paths, &c_paths, &at)?;
         for (ss, se) in &s_paths {
             if let SExit::Cut(k) = se {
                 todo.push(Some(*k));
@@ -214,7 +238,14 @@ pub fn check(
                 hyps.extend(cs.conds[base.len().min(cs.conds.len())..].iter().cloned());
                 hyps.extend(cs.facts.iter().cloned());
                 let goal = match (se, ce) {
-                    (SExit::Ret(v), CExit::Ret(Some(w))) => eq(v, w, Some(ret)),
+                    _ if ss.trace.len() != cs.trace.len() => Term::Bool(false),
+                    (SExit::Ret(v), CExit::Ret(Some(w))) if ret.is_some() => eq(v, w, ret),
+                    (SExit::Ret(_), CExit::Ret(Some(w))) if is_main => {
+                        cmp(COp::Eq, w.clone(), Term::Int(0))
+                    }
+                    (SExit::Ret(_), CExit::Ret(None)) if ret.is_none() && !is_main => {
+                        Term::Bool(true)
+                    }
                     (SExit::Cut(k), CExit::Cut(l)) if label_of.get(l.as_str()) == Some(k) => {
                         c_seen.insert(*k);
                         let vars = &sx.arrivals[k].vars;
@@ -255,6 +286,27 @@ pub fn check(
         ));
     }
     Ok(done.len())
+}
+
+/// The first macro in `body` other than the print macros. Others (`vec!`,
+/// `assert!`) may expand to loops and calls the source does not show.
+fn other_macro(body: &crate::ast::Block) -> Option<String> {
+    use crate::ast::{ExprKind, StmtKind};
+    use crate::verify::infer::children;
+    fn expr(e: &crate::ast::Expr) -> Option<String> {
+        if let ExprKind::Macro { path, .. } = &e.kind {
+            let n = path.segments.last()?.ident.name.to_string();
+            if !matches!(n.as_str(), "print" | "println" | "eprint" | "eprintln") {
+                return Some(n);
+            }
+        }
+        children(e).into_iter().find_map(expr)
+    }
+    body.stmts.iter().find_map(|s| match &s.kind {
+        StmtKind::Expr(e) | StmtKind::Semi(e) => expr(e),
+        StmtKind::Local(l) => l.init.as_ref().and_then(|i| expr(&i.expr)),
+        _ => None,
+    })
 }
 
 /// Every `while` and `loop` in `body`, at any depth.

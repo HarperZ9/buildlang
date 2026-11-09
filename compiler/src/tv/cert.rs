@@ -125,7 +125,14 @@ pub fn generate(file: &str, sf: &SourceFile, module: &Module, c: &str) -> Value 
             continue;
         };
         let name = f.name.name.to_string();
-        let Some(c_text) = c_function(c, &name) else {
+        // The backend renames a function whose name C or its runtime already
+        // uses (`max` becomes `_max`).
+        let Some((c_name, c_text)) =
+            c_function(c, &name).map(|t| (name.clone(), t)).or_else(|| {
+                let alt = format!("_{name}");
+                c_function(c, &alt).map(|t| (alt, t))
+            })
+        else {
             continue;
         };
         let scalar_sig = f
@@ -136,13 +143,15 @@ pub fn generate(file: &str, sf: &SourceFile, module: &Module, c: &str) -> Value 
             && f.sig
                 .return_ty
                 .as_deref()
-                .and_then(Ty::from_ast_tv)
-                .is_some()
+                .map_or(true, |t| Ty::from_ast_tv(t).is_some())
             && f.generics.params.is_empty();
         let mut entry = Map::new();
         entry.insert("name".into(), json!(name));
         entry.insert("source_sha256".into(), json!(sha(sf.slice(item.span))));
         entry.insert("c_sha256".into(), json!(sha(c_text)));
+        if c_name != name {
+            entry.insert("c_name".into(), json!(c_name));
+        }
         entry.insert("in_subset".into(), json!(scalar_sig));
         if !scalar_sig {
             entry.insert(

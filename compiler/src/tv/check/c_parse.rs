@@ -19,6 +19,12 @@ pub enum CExpr {
     Un(char, Box<CExpr>),
     Cast(String, Box<CExpr>),
     Call(String, Vec<CExpr>),
+    /// A string literal, C escapes decoded.
+    Str(String),
+    /// `c ? a : b`.
+    Cond(Box<CExpr>, Box<CExpr>, Box<CExpr>),
+    /// `e.field`.
+    Member(Box<CExpr>, String),
 }
 
 /// A C statement.
@@ -177,12 +183,13 @@ enum Tok {
     Id(String),
     Num(i128),
     Flt(String),
+    Str(String),
     Op(&'static str),
 }
 
-const OPS: [&str; 24] = [
+const OPS: [&str; 26] = [
     "<<", ">>", "<=", ">=", "==", "!=", "&&", "||", "+", "-", "*", "/", "%", "<", ">", "&", "|",
-    "^", "!", "~", "(", ")", ",", "?",
+    "^", "!", "~", "(", ")", ",", "?", ":", ".",
 ];
 
 fn lex(s: &str) -> Result<Vec<Tok>, String> {
@@ -193,6 +200,10 @@ fn lex(s: &str) -> Result<Vec<Tok>, String> {
         let c = b[i] as char;
         if c.is_whitespace() {
             i += 1;
+        } else if c == '"' {
+            let (text, end) = super::c_effects::c_string(s, i)?;
+            out.push(Tok::Str(text));
+            i = end;
         } else if c.is_ascii_digit() && float_end(b, i).is_some() {
             let end = float_end(b, i).unwrap_or(i);
             out.push(Tok::Flt(s[i..end].to_string()));
@@ -268,7 +279,7 @@ fn float_end(b: &[u8], i: usize) -> Option<usize> {
 pub fn parse_expr(s: &str) -> Result<CExpr, String> {
     let toks = lex(s)?;
     let mut p = P { t: toks, i: 0 };
-    let e = p.binary(0)?;
+    let e = p.ternary()?;
     if p.i != p.t.len() {
         return Err(format!("trailing tokens in `{s}`"));
     }
@@ -310,6 +321,19 @@ impl P {
         }
     }
 
+    fn ternary(&mut self) -> Result<CExpr, String> {
+        let c = self.binary(0)?;
+        if !self.eat("?") {
+            return Ok(c);
+        }
+        let a = self.ternary()?;
+        if !self.eat(":") {
+            return Err("a `?` without `:`".into());
+        }
+        let b = self.ternary()?;
+        Ok(CExpr::Cond(Box::new(c), Box::new(a), Box::new(b)))
+    }
+
     fn binary(&mut self, level: usize) -> Result<CExpr, String> {
         if level == LEVELS.len() {
             return self.unary();
@@ -338,7 +362,25 @@ impl P {
     }
 
     fn primary(&mut self) -> Result<CExpr, String> {
+        let mut e = self.atom()?;
+        while self.eat(".") {
+            match self.t.get(self.i).cloned() {
+                Some(Tok::Id(f)) => {
+                    self.i += 1;
+                    e = CExpr::Member(Box::new(e), f);
+                }
+                _ => return Err("a member name".into()),
+            }
+        }
+        Ok(e)
+    }
+
+    fn atom(&mut self) -> Result<CExpr, String> {
         match self.t.get(self.i).cloned() {
+            Some(Tok::Str(t)) => {
+                self.i += 1;
+                Ok(CExpr::Str(t))
+            }
             Some(Tok::Num(v)) => {
                 self.i += 1;
                 Ok(CExpr::Int(v))
@@ -356,7 +398,7 @@ impl P {
                     let mut args = Vec::new();
                     if !self.eat(")") {
                         loop {
-                            args.push(self.binary(0)?);
+                            args.push(self.ternary()?);
                             if self.eat(")") {
                                 break;
                             }
@@ -381,7 +423,7 @@ impl P {
                         return Ok(CExpr::Cast(ty, Box::new(inner)));
                     }
                 }
-                let e = self.binary(0)?;
+                let e = self.ternary()?;
                 if !self.eat(")") {
                     return Err("unclosed parenthesis".into());
                 }
