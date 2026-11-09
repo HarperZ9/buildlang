@@ -11,7 +11,7 @@
 //! call depth of finishing runs). Each call to a function with `requires`
 //! records a side obligation that the clause holds at that call.
 
-use super::infer::{let_ty_from_uses, static_ty, Sigs};
+use super::infer::{is_float_lit, let_ty_from_uses, static_ty, Sigs};
 use super::term::*;
 use super::ty::Ty;
 use crate::ast::*;
@@ -104,6 +104,9 @@ pub struct Sym<'a> {
     /// term constrained only to its return type's range (translation
     /// validation, where both sides call the same function).
     pub inline_calls: bool,
+    /// Admit `f32` and `f64` as opaque IEEE values (translation validation
+    /// only; `buildc verify` keeps floats outside its subset).
+    pub floats: bool,
 }
 
 impl<'a> Sym<'a> {
@@ -115,6 +118,16 @@ impl<'a> Sym<'a> {
             side: Vec::new(),
             max_paths: 2048,
             inline_calls: true,
+            floats: false,
+        }
+    }
+
+    /// The subset type of an AST type under this executor's mode.
+    pub fn ty_of_ast(&self, t: &Type) -> Option<Ty> {
+        if self.floats {
+            Ty::from_ast_tv(t)
+        } else {
+            Ty::from_ast(t)
         }
     }
 
@@ -128,7 +141,7 @@ impl<'a> Sym<'a> {
                 let PatternKind::Ident { name: n, .. } = &p.pattern.kind else {
                     return Err("a pattern parameter".to_string());
                 };
-                let ty = Ty::from_ast(&p.ty).ok_or(format!(
+                let ty = self.ty_of_ast(&p.ty).ok_or(format!(
                     "parameter `{}` has a type outside the subset",
                     n.name
                 ))?;
@@ -145,7 +158,7 @@ impl<'a> Sym<'a> {
             .get(name)
             .ok_or(format!("call to `{name}` outside the subset"))?;
         let params = self.params(name)?;
-        let ret = f.sig.return_ty.as_deref().and_then(Ty::from_ast);
+        let ret = f.sig.return_ty.as_deref().and_then(|t| self.ty_of_ast(t));
         if f.sig.return_ty.is_some() && ret.is_none() {
             return Err(format!("`{name}` returns a type outside the subset"));
         }
@@ -294,10 +307,17 @@ impl<'a> Sym<'a> {
         let ty = {
             let env = |n: &str| st.ty_of(n);
             match l.ty.as_deref() {
-                Some(t) => Some(Ty::from_ast(t).ok_or("a let type outside the subset")?),
+                Some(t) => Some(self.ty_of_ast(t).ok_or("a let type outside the subset")?),
                 None => static_ty(&init.expr, &env, self.sigs),
             }
-            .unwrap_or_else(|| let_ty_from_uses(&name.name, rest, &env, self.sigs, st.ret, Ty::I32))
+            .unwrap_or_else(|| {
+                let fallback = if self.floats && is_float_lit(&init.expr) {
+                    Ty::F64
+                } else {
+                    Ty::I32
+                };
+                let_ty_from_uses(&name.name, rest, &env, self.sigs, st.ret, fallback)
+            })
         };
         let mut out = Vec::new();
         for (mut s, o) in self.expr(&init.expr, st, Some(ty))? {

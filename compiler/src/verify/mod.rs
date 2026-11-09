@@ -18,6 +18,7 @@
 pub mod eval;
 mod eval_expr;
 mod eval_match;
+pub mod float;
 mod fm;
 pub mod infer;
 mod obligation;

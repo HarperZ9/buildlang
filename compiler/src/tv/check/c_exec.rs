@@ -13,6 +13,7 @@
 
 use super::c_parse::{CExpr, CFunc, CStmt};
 use crate::ast::BinOp;
+use crate::verify::float;
 use crate::verify::sym::St;
 use crate::verify::sym_ops::apply;
 use crate::verify::term::*;
@@ -30,6 +31,8 @@ pub enum CExit {
 pub fn c_ty(name: &str) -> Option<Ty> {
     match name {
         "bool" => Some(Ty::Bool),
+        "double" => Some(Ty::F64),
+        "float" => Some(Ty::F32),
         _ => {
             let core = name.strip_suffix("_t")?;
             let (signed, bits) = match core.strip_prefix("uint") {
@@ -119,7 +122,15 @@ impl<'a> CExec<'a> {
                             .ty_of(x)
                             .ok_or(format!("assignment to unknown `{x}`"))?;
                         let (v, from) = self.expr(e, &mut s, Some(ty), true)?;
+                        let v = if ty.is_float() || from.is_some_and(|f| f.is_float()) {
+                            let c = c_conv(ty, from, v)?;
+                            s.fact(in_range(&c, ty));
+                            c
+                        } else {
+                            v
+                        };
                         let v = match (from, ty) {
+                            (Some(f), _) if f.is_float() || ty.is_float() => v,
                             (Some(f), t) if f != t && t != Ty::Bool => {
                                 let c = cast(t, Some(f), v);
                                 s.fact(in_range(&c, t));
@@ -173,6 +184,11 @@ impl<'a> CExec<'a> {
                             Some(e) => {
                                 let (v, from) = self.expr(e, &mut s, rty, true)?;
                                 Some(match (from, rty) {
+                                    (_, Some(t))
+                                        if t.is_float() || from.is_some_and(|f| f.is_float()) =>
+                                    {
+                                        c_conv(t, from, v)?
+                                    }
                                     (Some(f), Some(t)) if f != t && t != Ty::Bool => {
                                         cast(t, Some(f), v)
                                     }
@@ -200,6 +216,19 @@ impl<'a> CExec<'a> {
     ) -> Result<(Term, Option<Ty>), String> {
         Ok(match e {
             CExpr::Int(v) => (Term::Int(*v), want.filter(|t| t.is_int())),
+            CExpr::Float(text) => {
+                let (body, f32) = match text.strip_suffix(['f', 'F']) {
+                    Some(b) => (b, true),
+                    None => (text.as_str(), false),
+                };
+                if f32 {
+                    let v: f32 = body.parse().map_err(|_| format!("float `{text}`"))?;
+                    (float::fconst32_bits(v.to_bits()), Some(Ty::F32))
+                } else {
+                    let v: f64 = body.parse().map_err(|_| format!("float `{text}`"))?;
+                    (float::fconst(Ty::F64, v), Some(Ty::F64))
+                }
+            }
             CExpr::Bool(b) => (Term::Bool(*b), Some(Ty::Bool)),
             CExpr::Var(n) => {
                 let ty = self.ty_of(n).ok_or(format!("unknown C name `{n}`"))?;
@@ -215,6 +244,11 @@ impl<'a> CExec<'a> {
             CExpr::Cast(t, inner) => {
                 let to = c_ty(t).ok_or("cast type")?;
                 let (v, from) = self.expr(inner, s, None, false)?;
+                if to.is_float() || from.is_some_and(|f| f.is_float()) {
+                    let r = c_conv(to, from, v)?;
+                    s.fact(in_range(&r, to));
+                    return Ok((r, Some(to)));
+                }
                 let r = if from == Some(Ty::Bool) && to.is_int() {
                     v
                 } else {
@@ -227,6 +261,7 @@ impl<'a> CExec<'a> {
                 let (v, ty) = self.expr(inner, s, want, false)?;
                 match (op, ty) {
                     ('!', Some(Ty::Bool)) => (not(v), ty),
+                    ('-', Some(f @ Ty::Float { .. })) => (float::fop("neg", f, vec![v]), ty),
                     ('~', Some(t @ Ty::Int { bits, .. })) if bits >= 32 || top => {
                         let r = Term::BitNot(t, Box::new(v));
                         s.fact(in_range(&r, t));
@@ -266,7 +301,10 @@ impl<'a> CExec<'a> {
         let shift = matches!(op, "<<" | ">>");
         let ty = hint(a).or(if shift { None } else { hint(b) }).or(want);
         let (x, xt) = self.expr(a, s, ty, false)?;
-        let (y, _) = self.expr(b, s, if shift { None } else { ty }, false)?;
+        let (y, yt) = self.expr(b, s, if shift { None } else { ty }, false)?;
+        if xt.is_some_and(|t| t.is_float()) || yt.is_some_and(|t| t.is_float()) {
+            return float_binary(op, x, xt, y, yt);
+        }
         let ty = xt.or(ty).ok_or("an expression of unknown type")?;
         let c = match op {
             "==" => Some(COp::Eq),
@@ -339,6 +377,42 @@ impl<'a> CExec<'a> {
             };
             return Ok((r, Some(ty)));
         }
+        if let Some(to) = name.strip_prefix("bl_f2i_").and_then(Ty::from_name) {
+            let [a] = args else {
+                return Err(format!("helper `{name}` arity"));
+            };
+            let (v, from) = self.expr(a, s, Some(Ty::F64), false)?;
+            if from != Some(Ty::F64) {
+                return Err(format!("`{name}` on a non-double"));
+            }
+            let r = float::conv(to, from, v)?;
+            s.fact(in_range(&r, to));
+            return Ok((r, Some(to)));
+        }
+        if !self.callees.contains_key(name) {
+            let math = match name {
+                "fmod" => Some(None),
+                _ => float::c_math(name).map(|_| Some(name)),
+            };
+            if let Some(math) = math {
+                let mut vals = Vec::new();
+                for a in args {
+                    let (v, t) = self.expr(a, s, Some(Ty::F64), false)?;
+                    vals.push(if t == Some(Ty::F64) {
+                        v
+                    } else {
+                        float::conv(Ty::F64, t, v)?
+                    });
+                }
+                return Ok((
+                    match math {
+                        None => float::fop("rem", Ty::F64, vals),
+                        Some(n) => float::math_call(n, vals),
+                    },
+                    Some(Ty::F64),
+                ));
+            }
+        }
         let rty = *self
             .callees
             .get(name)
@@ -387,4 +461,63 @@ fn helper(name: &str) -> Option<(H, Ty)> {
         _ => return None,
     };
     Some((op, ty))
+}
+
+/// A C binary operator with a float operand: the same opaque IEEE operation
+/// or predicate the source side produces. An integer literal operand converts
+/// exactly as C converts it.
+fn float_binary(
+    op: &str,
+    x: Term,
+    xt: Option<Ty>,
+    y: Term,
+    yt: Option<Ty>,
+) -> Result<(Term, Option<Ty>), String> {
+    let ty = match (xt, yt) {
+        (Some(a), Some(b)) if a.is_float() && b.is_float() && a != b => {
+            return Err("C arithmetic on mixed float widths".into())
+        }
+        (Some(a), _) if a.is_float() => a,
+        (_, Some(b)) => b,
+        _ => return Err("a float expression of unknown type".into()),
+    };
+    let lift = |v: Term, t: Option<Ty>| -> Result<Term, String> {
+        match t {
+            Some(t) if t == ty => Ok(v),
+            None if matches!(v, Term::Int(_)) => float::conv(ty, None, v),
+            _ => Err("C converts an integer operand inside a float expression".into()),
+        }
+    };
+    let (x, y) = (lift(x, xt)?, lift(y, yt)?);
+    let c = match op {
+        "==" => Some(COp::Eq),
+        "!=" => Some(COp::Ne),
+        "<" => Some(COp::Lt),
+        "<=" => Some(COp::Le),
+        ">" => Some(COp::Gt),
+        ">=" => Some(COp::Ge),
+        _ => None,
+    };
+    if let Some(c) = c {
+        return Ok((float::fcmp(c, ty, x, y), Some(Ty::Bool)));
+    }
+    let name = match op {
+        "+" => "add",
+        "-" => "sub",
+        "*" => "mul",
+        "/" => "div",
+        _ => return Err(format!("C `{op}` on a float")),
+    };
+    Ok((float::fop(name, ty, vec![x, y]), Some(ty)))
+}
+
+/// A conversion C performs (a cast, an assignment, a return). C turns a float
+/// into an integer by truncation with undefined behaviour out of range, which
+/// is not the source's saturating cast, so that direction is refused; the
+/// backend converts through `bl_f2i_T` instead.
+fn c_conv(to: Ty, from: Option<Ty>, v: Term) -> Result<Term, String> {
+    if to.is_int() && from.is_some_and(|f| f.is_float()) {
+        return Err("C converts a float to an integer directly".into());
+    }
+    float::conv(to, from, v)
 }

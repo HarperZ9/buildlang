@@ -1,0 +1,50 @@
+// Translation-validation fixture: float functions inside the checker's subset.
+// Functions that add floats: fadd2, poly2, lerp, sum_n, hyp, assoc.
+
+fn fadd2(a: f64, b: f64) -> f64 { a + b }
+
+fn poly2(x: f64) -> f64 { x * x * 0.5 + x - 1.0 }
+
+fn clampf(x: f64) -> f64 {
+    if x < 0.0 { 0.0 } else if x > 1.0 { 1.0 } else { x }
+}
+
+fn lerp(a: f64, b: f64, t: f64) -> f64 { a + (b - a) * t }
+
+fn sum_n(x: f64, n: i64) -> f64 {
+    let mut s = 0.0;
+    let mut i: i64 = 0;
+    while i < n {
+        s = s + x;
+        i = i + 1;
+    }
+    s
+}
+
+fn to_int(x: f64) -> i32 { x as i32 }
+
+fn half_of(n: i64) -> f64 { n as f64 / 2.0 }
+
+fn hyp(x: f64, y: f64) -> f64 { (x * x + y * y).sqrt() }
+
+fn neg_sub(a: f64, b: f64) -> f64 { -(a - b) }
+
+fn quarter(x: f32) -> f32 { x * 0.25f32 }
+
+fn eq_self(x: f64) -> bool { x == x }
+
+fn sub_self(x: f64) -> f64 { x - x }
+
+fn mul_zero(x: f64) -> f64 { x * 0.0 }
+
+fn not_lt(a: f64, b: f64) -> bool { !(a < b) }
+
+fn assoc(a: f64, b: f64, c: f64) -> f64 { (a + b) + c }
+
+fn round_trip(x: f64) -> f64 { (x as f32) as f64 }
+
+fn tenth() -> f64 { 0.1 }
+
+fn main() ~ Console {
+    println!("{}", lerp(1.0, 3.0, 0.5));
+}

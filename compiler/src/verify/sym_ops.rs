@@ -12,6 +12,9 @@ use crate::ast::*;
 
 /// The term for `a op b` at integer type `ty`, adding its definedness facts.
 pub fn apply(op: BinOp, ty: Ty, a: Term, b: Term, s: &mut St) -> Result<Term, String> {
+    if !ty.is_int() {
+        return Err(format!("integer arithmetic at type {ty}"));
+    }
     let r = match op {
         BinOp::Add => arith(AOp::Add, a, b),
         BinOp::Sub => arith(AOp::Sub, a, b),
@@ -140,6 +143,12 @@ pub(super) fn binary(
     } else {
         operand_ty(sym, l, r, &st, if is_cmp { None } else { expect })
     };
+    if ty.is_float() {
+        if !sym.floats {
+            return Err("float arithmetic (outside the subset)".into());
+        }
+        return float_binary(sym, op, l, r, st, ty);
+    }
     let left = expr(sym, l, st, Some(ty))?;
     then(sym, left, |sym, s, a, aty| {
         let right = expr(sym, r, s, if shift { None } else { Some(ty) })?;
@@ -175,6 +184,48 @@ pub(super) fn binary(
             }
             let t = apply(op, ty, a.clone(), b, &mut s2)?;
             val(s2, t, Some(ty))
+        })
+    })
+}
+
+/// `l op r` at float type `ty`: opaque IEEE operations and predicates.
+fn float_binary(sym: &mut Sym<'_>, op: BinOp, l: &Expr, r: &Expr, st: St, ty: Ty) -> Res {
+    use super::float::{conv, fcmp, fop};
+    let left = expr(sym, l, st, Some(ty))?;
+    then(sym, left, |sym, s, a, aty| {
+        let a = if aty == Some(ty) {
+            a
+        } else {
+            conv(ty, aty, a)?
+        };
+        let right = expr(sym, r, s, Some(ty))?;
+        then(sym, right, |_, s2, b, bty| {
+            let b = if bty == Some(ty) {
+                b
+            } else {
+                conv(ty, bty, b)?
+            };
+            let c = match op {
+                BinOp::Eq => Some(COp::Eq),
+                BinOp::Ne => Some(COp::Ne),
+                BinOp::Lt => Some(COp::Lt),
+                BinOp::Le => Some(COp::Le),
+                BinOp::Gt => Some(COp::Gt),
+                BinOp::Ge => Some(COp::Ge),
+                _ => None,
+            };
+            if let Some(c) = c {
+                return val(s2, fcmp(c, ty, a.clone(), b), Some(Ty::Bool));
+            }
+            let name = match op {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::Mul => "mul",
+                BinOp::Div => "div",
+                BinOp::Rem => "rem",
+                _ => return Err("a float operator outside the subset".into()),
+            };
+            val(s2, fop(name, ty, vec![a.clone(), b]), Some(ty))
         })
     })
 }

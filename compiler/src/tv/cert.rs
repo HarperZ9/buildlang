@@ -128,8 +128,16 @@ pub fn generate(file: &str, sf: &SourceFile, module: &Module, c: &str) -> Value 
         let Some(c_text) = c_function(c, &name) else {
             continue;
         };
-        let scalar_sig = f.sig.params.iter().all(|p| Ty::from_ast(&p.ty).is_some())
-            && f.sig.return_ty.as_deref().and_then(Ty::from_ast).is_some()
+        let scalar_sig = f
+            .sig
+            .params
+            .iter()
+            .all(|p| Ty::from_ast_tv(&p.ty).is_some())
+            && f.sig
+                .return_ty
+                .as_deref()
+                .and_then(Ty::from_ast_tv)
+                .is_some()
             && f.generics.params.is_empty();
         let mut entry = Map::new();
         entry.insert("name".into(), json!(name));
@@ -139,7 +147,7 @@ pub fn generate(file: &str, sf: &SourceFile, module: &Module, c: &str) -> Value 
         if !scalar_sig {
             entry.insert(
                 "reason".into(),
-                json!("a parameter or the return type is not an integer or bool"),
+                json!("a parameter or the return type is not an integer, float or bool"),
             );
         }
         entry.insert("loop_heads".into(), json!(back_edge_targets(c_text)));

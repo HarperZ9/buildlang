@@ -24,6 +24,22 @@ pub(super) fn method_call(
             .or(expect)
             .unwrap_or(Ty::I32)
     };
+    if ty.is_float() {
+        let c = super::float::method_c_name(m, args.len(), ty)
+            .filter(|_| sym.floats)
+            .ok_or(format!("float method `{m}` outside the subset"))?;
+        let r = expr(sym, recv, st, Some(ty))?;
+        return then(sym, r, |sym, s, x, _| {
+            let rest = match args {
+                [a] => expr(sym, a, s, Some(ty))?,
+                [] => return val(s, super::float::math_call(c, vec![x]), Some(ty)),
+                _ => return Err("method arity".into()),
+            };
+            then(sym, rest, |_, s2, y, _| {
+                val(s2, super::float::math_call(c, vec![x.clone(), y]), Some(ty))
+            })
+        });
+    }
     let r = expr(sym, recv, st, Some(ty))?;
     then(sym, r, |sym, s, x, _| {
         let argv = match args {

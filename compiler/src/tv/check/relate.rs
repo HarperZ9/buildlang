@@ -70,10 +70,11 @@ pub fn check(
         .sig
         .return_ty
         .as_deref()
-        .and_then(Ty::from_ast)
+        .and_then(Ty::from_ast_tv)
         .ok_or("return type outside the subset")?;
     let mut sym = Sym::new(fns, sigs);
     sym.inline_calls = false;
+    sym.floats = true;
     let params = sym.params(&src.name.name)?;
     if c.params.len() != params.len() {
         return Err("mismatch: parameter count differs".into());
