@@ -1,0 +1,18 @@
+// Translation-validation fixture: named constants.
+
+const SCALE: i64 = 1000;
+const OFFSET: i64 = -7;
+const HALF: f64 = 0.5;
+const ENABLED: bool = true;
+
+fn scaled(x: i64) -> i64 { x * SCALE + OFFSET }
+
+fn halve(x: f64) -> f64 { x * HALF }
+
+fn circle(r: f64) -> f64 { PI * r * r }
+
+fn gate(x: i64) -> i64 { if ENABLED { x } else { 0 } }
+
+fn main() ~ Console {
+    println!("{}", scaled(2));
+}

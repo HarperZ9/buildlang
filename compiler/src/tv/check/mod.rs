@@ -19,7 +19,9 @@ pub mod src_exec;
 use crate::ast::{FnDef, ItemKind};
 use crate::lexer::{Lexer, SourceFile};
 use crate::parser::Parser;
+use crate::verify::float;
 use crate::verify::infer::Sigs;
+use crate::verify::term::Term;
 use crate::verify::ty::Ty;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -65,6 +67,10 @@ pub fn check(source: &str, c: &str, cert: &Value) -> Result<Vec<FnResult>, Strin
         }
     }
     let sigs = Sigs::from_module_tv(&module.items);
+    let consts = relate::Consts {
+        source: source_consts(&module.items),
+        c: c_parse::c_consts(c),
+    };
     let entries = cert["functions"]
         .as_array()
         .ok_or("certificate has no functions")?;
@@ -85,7 +91,7 @@ pub fn check(source: &str, c: &str, cert: &Value) -> Result<Vec<FnResult>, Strin
             .as_str()
             .ok_or("a function without a name")?
             .to_string();
-        let status = check_one(&name, e, &fns, &spans, &sf, &sigs, c, &callees);
+        let status = check_one(&name, e, &fns, &spans, &sf, &sigs, c, &callees, &consts);
         out.push(FnResult { name, status });
     }
     Ok(out)
@@ -101,6 +107,7 @@ fn check_one(
     sigs: &Sigs,
     c: &str,
     callees: &HashMap<String, Ty>,
+    consts: &relate::Consts,
 ) -> Status {
     let not = |reason: String| Status::NotCertified { reason };
     let Some(f) = fns.get(name) else {
@@ -153,13 +160,69 @@ fn check_one(
             .unwrap_or_default(),
     };
     let fns_ref: HashMap<String, &FnDef> = fns.iter().map(|(k, v)| (k.clone(), *v)).collect();
-    match relate::check(f, &fns_ref, sigs, &cf, &hints, callees) {
+    match relate::check(f, &fns_ref, sigs, &cf, &hints, callees, consts) {
         Ok(segments) => Status::Certified { segments },
         Err(why) => match why.strip_prefix("mismatch: ") {
             Some(m) => not(m.to_string()),
             None => Status::OutsideSubset { reason: why },
         },
     }
+}
+
+/// The source's named constants with a literal value, and the built-in
+/// `PI`, `E` and `TAU` where the program defines no constant of that name.
+fn source_consts(items: &[crate::ast::Item]) -> HashMap<String, (Term, Ty)> {
+    use crate::ast::{ExprKind, Literal, UnaryOp};
+    let mut out = HashMap::new();
+    for item in items {
+        let ItemKind::Const(k) = &item.kind else {
+            continue;
+        };
+        let name = k.name.name.to_string();
+        let Some(ty) = Ty::from_ast_tv(&k.ty) else {
+            out.remove(&name);
+            continue;
+        };
+        let (negate, lit) = match k.value.as_deref().map(|e| &e.kind) {
+            Some(ExprKind::Unary {
+                op: UnaryOp::Neg,
+                expr,
+            }) => (true, &expr.kind),
+            Some(other) => (false, other),
+            None => continue,
+        };
+        let term = match (lit, ty) {
+            (ExprKind::Literal(Literal::Int { value, .. }), t) if t.is_int() => {
+                let v = i128::try_from(*value)
+                    .ok()
+                    .map(|v| if negate { -v } else { v });
+                match v.filter(|v| t.holds(*v)) {
+                    Some(v) => Term::Int(v),
+                    None => continue,
+                }
+            }
+            (ExprKind::Literal(Literal::Float { value, .. }), t) if t.is_float() => {
+                float::fconst(t, if negate { -*value } else { *value })
+            }
+            (ExprKind::Literal(Literal::Bool(b)), Ty::Bool) if !negate => Term::Bool(*b),
+            _ => continue,
+        };
+        out.insert(name, (term, ty));
+    }
+    let user: Vec<String> = items
+        .iter()
+        .filter_map(|i| i.name().map(|n| n.name.to_string()))
+        .collect();
+    for (n, v) in [
+        ("PI", std::f64::consts::PI),
+        ("E", std::f64::consts::E),
+        ("TAU", std::f64::consts::TAU),
+    ] {
+        if !user.iter().any(|u| u == n) {
+            out.insert(n.to_string(), (float::fconst(Ty::F64, v), Ty::F64));
+        }
+    }
+    out
 }
 
 /// The `buildlang-tv-report/v1` JSON and the counts behind it.

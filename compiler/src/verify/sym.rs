@@ -107,6 +107,8 @@ pub struct Sym<'a> {
     /// Admit `f32` and `f64` as opaque IEEE values (translation validation
     /// only; `buildc verify` keeps floats outside its subset).
     pub floats: bool,
+    /// Named constants by value (translation validation).
+    pub consts: HashMap<String, (Term, Ty)>,
 }
 
 impl<'a> Sym<'a> {
@@ -119,6 +121,7 @@ impl<'a> Sym<'a> {
             max_paths: 2048,
             inline_calls: true,
             floats: false,
+            consts: HashMap::new(),
         }
     }
 
@@ -305,7 +308,7 @@ impl<'a> Sym<'a> {
         };
         let init = l.init.as_ref().ok_or("a let without a value")?;
         let ty = {
-            let env = |n: &str| st.ty_of(n);
+            let env = |n: &str| st.ty_of(n).or_else(|| self.consts.get(n).map(|c| c.1));
             match l.ty.as_deref() {
                 Some(t) => Some(self.ty_of_ast(t).ok_or("a let type outside the subset")?),
                 None => static_ty(&init.expr, &env, self.sigs),

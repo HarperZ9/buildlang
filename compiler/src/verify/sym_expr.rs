@@ -36,7 +36,7 @@ pub(super) fn then(
 }
 
 pub(super) fn operand_ty(sym: &Sym<'_>, l: &Expr, r: &Expr, st: &St, expect: Option<Ty>) -> Ty {
-    let env = |n: &str| st.ty_of(n);
+    let env = |n: &str| st.ty_of(n).or_else(|| sym.consts.get(n).map(|c| c.1));
     static_ty(l, &env, sym.sigs)
         .or_else(|| static_ty(r, &env, sym.sigs))
         .or(expect)
@@ -76,7 +76,10 @@ pub(super) fn expr(sym: &mut Sym<'_>, e: &Expr, st: St, expect: Option<Ty>) -> R
                 return val(st, Term::Int(v), Some(ty));
             }
             let n = var_name(e).ok_or("a path")?;
-            let (t, ty) = st.get(&n).ok_or(format!("unknown name `{n}`"))?;
+            let (t, ty) = st
+                .get(&n)
+                .or_else(|| sym.consts.get(&n).cloned())
+                .ok_or(format!("unknown name `{n}`"))?;
             val(st, t, Some(ty))
         }
         ExprKind::Unary { op, expr: inner } => {

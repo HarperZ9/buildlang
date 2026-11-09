@@ -49,6 +49,8 @@ pub struct CExec<'a> {
     pub cuts: &'a HashSet<String>,
     /// Return types of the user functions the body may call.
     pub callees: &'a HashMap<String, Ty>,
+    /// The C file's top-level constants.
+    pub globals: &'a HashMap<String, (Term, Ty)>,
     labels: HashMap<String, usize>,
     types: HashMap<String, Ty>,
 }
@@ -60,6 +62,7 @@ impl<'a> CExec<'a> {
         f: &'a CFunc,
         cuts: &'a HashSet<String>,
         callees: &'a HashMap<String, Ty>,
+        globals: &'a HashMap<String, (Term, Ty)>,
     ) -> Result<Self, String> {
         let mut labels = HashMap::new();
         for (i, s) in f.body.iter().enumerate() {
@@ -77,6 +80,7 @@ impl<'a> CExec<'a> {
             f,
             cuts,
             callees,
+            globals,
             labels,
             types,
         })
@@ -230,6 +234,10 @@ impl<'a> CExec<'a> {
                 }
             }
             CExpr::Bool(b) => (Term::Bool(*b), Some(Ty::Bool)),
+            CExpr::Var(n) if self.ty_of(n).is_none() && self.globals.contains_key(n) => {
+                let (t, ty) = self.globals[n].clone();
+                (t, Some(ty))
+            }
             CExpr::Var(n) => {
                 let ty = self.ty_of(n).ok_or(format!("unknown C name `{n}`"))?;
                 let v = s

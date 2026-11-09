@@ -28,6 +28,14 @@ use crate::verify::term::*;
 use crate::verify::ty::Ty;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+/// Named constants: the source's, from its `const` items and the built-ins,
+/// and the C file's, from its top-level `const` definitions.
+#[derive(Default)]
+pub struct Consts {
+    pub source: HashMap<String, (Term, Ty)>,
+    pub c: HashMap<String, (Term, Ty)>,
+}
+
 /// The relation a certificate claims for one function.
 pub struct Hints {
     /// C label of the head of source loop `k`, in source pre-order.
@@ -64,6 +72,7 @@ pub fn check(
     c: &CFunc,
     hints: &Hints,
     callees: &HashMap<String, Ty>,
+    consts: &Consts,
 ) -> Result<usize, String> {
     let body = src.body.as_deref().ok_or("no body")?;
     let ret = src
@@ -75,6 +84,7 @@ pub fn check(
     let mut sym = Sym::new(fns, sigs);
     sym.inline_calls = false;
     sym.floats = true;
+    sym.consts = consts.source.clone();
     let params = sym.params(&src.name.name)?;
     if c.params.len() != params.len() {
         return Err("mismatch: parameter count differs".into());
@@ -108,7 +118,7 @@ pub fn check(
         .enumerate()
         .map(|(k, l)| (l.as_str(), k))
         .collect();
-    let cexec = CExec::new(c, &cuts, callees)?;
+    let cexec = CExec::new(c, &cuts, callees, &consts.c)?;
     let mut sx = SrcExec {
         sym,
         body,
