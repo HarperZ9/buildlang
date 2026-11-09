@@ -577,6 +577,11 @@ updates an indexed column and then searches it). Guards: the full set.
   sqlite.org; kept outside the repository with its SHA-256), with default options and -O2, the
   same version as before. Nothing else in P19 changes.
 
+**A11 (2026-11-09, P27).** The keyed workload of `test_qdb_rows.py` gains a bound
+`SELECT id, v FROM t WHERE v = k` right after each `UPDATE t SET v = k` once the index on v exists,
+because P27's preregistered planted check (a stale `idx_num` after `ix_move`) was not caught
+without it. Written after that miss, before the after-measurements.
+
 ## Baseline (qdb at the move, 2026-11-08, buildc 1.11.0)
 
 These are the runs on the engine as it arrived (build-universe 4a296c1, here d39dfc1), with only
@@ -1058,6 +1063,37 @@ free; a GPU scoring job held one of the 24 cores. Interval: order statistics of 
   (planted 186 caught); crash 176 points, 0 violations; power cuts 0 of 10,000, digest 77a49282...
   equal; P2 2,000 of 2,000; text 0 changed; WAL recovery 0; reference differential 16 of 16;
   library 0 failures; receipts reproduced; mutations 0 disagreements.
+
+## After P27: typed key array in each index (2026-11-09, feat/bdb-typedkeys)
+
+P26's harness, prep API, 200,000 statements, 11 pairs per mode, qdb before (P26 tip 2a4726b) and
+after, each against SQLite 3.49.1 in its own paired run. Run 11:06 to 11:22 PT, no cargo, rustc or
+render job, 12.8 GB free. Paired median of qdb's time over SQLite's, with the 93.5 percent interval.
+
+| Rows | Mode | Before | After | Change |
+|---|---|---|---|---|
+| 10,000 | select | 1.03 (0.93 to 1.23) | 0.82 (0.77 to 0.89) | -20% |
+| 10,000 | update | 2.55 (2.50 to 2.62) | 2.34 (2.33 to 2.41) | -8% |
+| 10,000 | mixed | 1.87 (1.84 to 1.93) | 1.76 (1.67 to 1.82) | -6% |
+| 100,000 | select | 1.59 (1.50 to 2.10) | 1.17 (1.02 to 1.25) | -26% |
+| 100,000 | update | 2.98 (2.80 to 3.21) | 2.40 (2.35 to 2.47) | -19% |
+| 100,000 | mixed | 2.16 (2.02 to 2.23) | 1.78 (1.63 to 2.02) | -18% |
+
+- qdb's prepared point select on 10,000 rows is now faster than SQLite's by the P26 rule (interval
+  0.77 to 0.89, all below 1): 3.14 million per second against 2.56 million. On 100,000 rows it is
+  still slower (1.02 to 1.25). Update and mixed stay slower at both sizes.
+- Predictions held: select fell 20 and 26 percent (10 to 35); update and mixed fell 8, 6, 19 and 18
+  percent (5 to 25); the 100,000-row select gain is the larger.
+- Planted check as preregistered MISSED at first: with `ix_move` leaving `idx_num` stale, the rows
+  test still passed, because its keyed workload never searched the moved key before something
+  rebuilt the array. Amendment A11 (below) adds a bound search of the new value right after each
+  `UPDATE t SET v = k` in the second half of the keyed workload. With it the planted build fails
+  (seeds 1 to 3: 1, 3 and 1 differences) and the real build passes. The rows test's own planted
+  anchor moved to the new search loop (188 differences, caught).
+- Guards: test_qdb.sh 314 pass, 0 fail; rows 0 differences; crash 176 points, 0 violations; power
+  cuts 0 of 10,000, digest 77a49282... equal (no byte change); P2 2,000 of 2,000; text 0 changed; WAL
+  recovery 0; reference differential 16 of 16; library 0 failures; receipts reproduced; mutations
+  0 disagreements.
 
 ## Stage 1: a correct, durable single-file engine
 
