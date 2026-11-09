@@ -6102,7 +6102,8 @@ impl<'ctx> TypeInfer<'ctx> {
             // =================================================================
             "trim" | "trim_start" | "trim_end" | "trim_matches" | "trim_start_matches"
             | "trim_end_matches" | "to_uppercase" | "to_lowercase" | "to_ascii_uppercase"
-            | "to_ascii_lowercase" | "replace" | "replacen" | "char_at" | "substring" => {
+            | "to_ascii_lowercase" | "replace" | "replacen" | "char_at" | "substring"
+            | "sha256" => {
                 return Ty::str();
             }
             "index_of" => return Ty::int(IntTy::I64),
