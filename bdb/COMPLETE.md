@@ -302,6 +302,19 @@ whose map is never marked stale fails a new test_qdb.sh check (DELETE a keyed ro
 again: must succeed); a build that compares key cells as text fails another (`1.0` after `1` in an
 INTEGER PRIMARY KEY column: must fail).
 
+**P18. IN with a literal on the left, and IN of a table (item 4), written 2026-11-09 06:50 PT before
+the change.** The largest groups of P1 rejections are `evidence/in1.test` (183, "expected keyword
+'FROM', got 'IN'": `SELECT 1 IN (...)` with no FROM) and `evidence/in2.test` (45, "expected a
+comparison after the literal"): `WHERE 1 IN (...)`. The expression path (P11) already reads IN
+with a list, an empty list and a subquery, with SQL's NULL rules; the older path is chosen for
+these statements. The change routes a SELECT to the expression path when IN or NOT IN follows a
+literal or NULL, or appears in the select list, and reads `x IN t` (SQLite's table form) as
+`x IN (SELECT * FROM t)`. Measured on P1. Predictions: `in1.test` from 4 to at least 150 of 187
+query records; `in2.test` from 0 to at least 35 of 45; every other file unchanged; total from
+8,921 to between 9,100 and 9,160. Planted check: a build without the table form loses the
+`IN t` records of `in1.test` (about 90). Guards: test_qdb.sh no FAIL, P2 2,000, statements not
+below 1,931.
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
