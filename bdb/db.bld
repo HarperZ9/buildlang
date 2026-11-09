@@ -274,6 +274,16 @@ struct DB {
     // the .db file that checkpoint wrote. maybe_checkpoint compares the two.
     wal_bytes: i64,
     db_bytes: i64,
+    // Fault injection for the crash tests (bdb/tests/test_qdb_crash.py),
+    // read once from the environment in main. QDB_CRASH_AT=k stops the
+    // process at its k-th durable write with exit code 77; with
+    // QDB_CRASH_MODE=torn the first half of that write lands first,
+    // otherwise none of it does. QDB_TRACE_WRITES=1 prints one line per
+    // durable write to stderr. Unset, every write goes straight through.
+    crash_at: i32,
+    crash_torn: bool,
+    trace_writes: bool,
+    write_seq: i32,
     // Set by any mutation that moves or rewrites existing rows (UPDATE,
     // DELETE, DROP, ALTER, ROLLBACK). The next index read then rebuilds
     // every index from scratch. INSERT leaves it alone: appended rows are
@@ -361,6 +371,7 @@ fn db_new(db_path: String) -> DB {
         txn_id: 0,
         wal_buf: "",
         wal_bytes: 0, db_bytes: 0,
+        crash_at: 0, crash_torn: false, trace_writes: false, write_seq: 0,
         idx_stale: false,
         snap_cells: vec![], snap_row_starts: vec![], snap_row_counts: vec![],
         snap_tbl_names: vec![], snap_tbl_count: 0,
@@ -441,7 +452,7 @@ fn concat_parts(parts: Vec<String>) -> String {
 // of bytes written, which the checkpoint policy compares the WAL against.
 // Does NOT write WAL — this is the "clean" checkpoint format.
 // Output is built in chunks of about 64 KB, joined once by concat_parts.
-fn db_save(d: &DB) -> i64 ~ FileSystem {
+fn db_text(d: &DB) -> String {
     let mut parts: Vec<String> = vec![];
     let mut out = "";
     let mut t = 0;
@@ -500,8 +511,14 @@ fn db_save(d: &DB) -> i64 ~ FileSystem {
         ix = ix + 1;
     }
     vec_push(parts, out);
-    let all = concat_parts(parts);
-    write_file(d.db_path, all);
+    concat_parts(parts)
+}
+
+// Rewrite the .db from memory. Returns the bytes written, which the
+// checkpoint policy compares the WAL against.
+fn db_save(d: &mut DB) -> i64 ~ Console + FileSystem + Process {
+    let all = db_text(d);
+    durable_write(d, d.db_path, all, false, "db");
     all.len()
 }
 
@@ -748,23 +765,40 @@ fn db_load(d: &mut DB) ~ FileSystem {
 
 fn wal_checkpoint_slack() -> i64 { 65536 }
 
+// Every write that changes durable state goes through here: WAL appends,
+// the .db rewrite and the WAL clear. `tag` names the write in the trace.
+fn durable_write(d: &mut DB, path: String, text: String, append: bool, tag: String) ~ Console + FileSystem + Process {
+    d.write_seq = d.write_seq + 1;
+    if d.trace_writes {
+        eprintln!("QDB_WRITE {} {} {}", d.write_seq, tag, text.len());
+    }
+    if d.crash_at > 0 && d.write_seq == d.crash_at {
+        if d.crash_torn {
+            let half = text.substring(0, text.len() / 2);
+            if append { append_file(path, half); } else { write_file(path, half); }
+        }
+        process_exit(77);
+    }
+    if append { append_file(path, text); } else { write_file(path, text); }
+}
+
 // Append newline-terminated text to the WAL in a single write.
-fn wal_append(d: &mut DB, text: String) ~ FileSystem {
-    append_file(d.wal_path, text);
+fn wal_append(d: &mut DB, text: String, tag: String) ~ Console + FileSystem + Process {
+    durable_write(d, d.wal_path, text, true, tag);
     d.wal_bytes = d.wal_bytes + text.len();
 }
 
 // Append a line to the WAL file
-fn wal_write(d: &mut DB, line: String) ~ FileSystem {
-    wal_append(d, line + "\n");
+fn wal_write(d: &mut DB, line: String, tag: String) ~ Console + FileSystem + Process {
+    wal_append(d, line + "\n", tag);
 }
 
 // Checkpoint: merge WAL into main .db file, then clear WAL
-fn wal_checkpoint(d: &mut DB) ~ FileSystem {
+fn wal_checkpoint(d: &mut DB) ~ Console + FileSystem + Process {
     d.db_bytes = db_save(d);
     // Clear the WAL file
     if file_exists(d.wal_path) {
-        write_file(d.wal_path, "");
+        durable_write(d, d.wal_path, "", false, "wal_clear");
     }
     d.wal_bytes = 0;
 }
@@ -772,7 +806,7 @@ fn wal_checkpoint(d: &mut DB) ~ FileSystem {
 // Checkpoint once the WAL has grown past the .db it would be merged into.
 // Never inside an explicit transaction: db_save would persist uncommitted
 // in-memory changes.
-fn maybe_checkpoint(d: &mut DB) ~ FileSystem {
+fn maybe_checkpoint(d: &mut DB) ~ Console + FileSystem + Process {
     if d.in_transaction { return; }
     if d.wal_bytes > d.db_bytes + wal_checkpoint_slack() {
         wal_checkpoint(d);
@@ -781,7 +815,7 @@ fn maybe_checkpoint(d: &mut DB) ~ FileSystem {
 
 // Checkpoint at a clean exit so the .db file is current between processes.
 // Skipped inside an open transaction, which stays uncommitted as before.
-fn wal_close(d: &mut DB) ~ FileSystem {
+fn wal_close(d: &mut DB) ~ Console + FileSystem + Process {
     if d.in_transaction { return; }
     if d.wal_bytes > 0 { wal_checkpoint(d); }
 }
@@ -976,7 +1010,7 @@ fn restore_snapshot(d: &mut DB) {
 }
 
 // BEGIN — start a new explicit transaction
-fn wal_begin(d: &mut DB) ~ Console + FileSystem {
+fn wal_begin(d: &mut DB) ~ Console + FileSystem + Process {
     if d.in_transaction {
         println!("Error: transaction already in progress");
         return;
@@ -984,22 +1018,22 @@ fn wal_begin(d: &mut DB) ~ Console + FileSystem {
     d.in_transaction = true;
     d.txn_id = d.txn_id + 1;
     take_snapshot(d);
-    wal_write(d, "TXID " + to_string_i32(d.txn_id));
+    wal_write(d, "TXID " + to_string_i32(d.txn_id), "wal_begin");
 }
 
 // COMMIT — finalize the current transaction
-fn wal_commit(d: &mut DB) ~ Console + FileSystem {
+fn wal_commit(d: &mut DB) ~ Console + FileSystem + Process {
     if !d.in_transaction {
         println!("Error: no transaction in progress");
         return;
     }
-    wal_write(d, "COMMIT");
+    wal_write(d, "COMMIT", "wal_commit");
     d.in_transaction = false;
     maybe_checkpoint(d);
 }
 
 // ROLLBACK — discard changes since BEGIN
-fn wal_rollback(d: &mut DB) ~ Console + FileSystem {
+fn wal_rollback(d: &mut DB) ~ Console + FileSystem + Process {
     if !d.in_transaction {
         println!("Error: no transaction in progress");
         return;
@@ -1011,15 +1045,15 @@ fn wal_rollback(d: &mut DB) ~ Console + FileSystem {
 }
 
 // Write a mutation to WAL and optionally auto-commit
-fn wal_log_mutation(d: &mut DB, sql: String) ~ FileSystem {
+fn wal_log_mutation(d: &mut DB, sql: String) ~ Console + FileSystem + Process {
     if d.in_transaction {
         // In explicit transaction — just append OP to WAL
-        wal_write(d, "OP " + sql);
+        wal_write(d, "OP " + sql, "wal_op");
     } else {
         // Auto-commit: wrap in a single-statement transaction, written as one
         // append so a torn write cannot leave a COMMIT without its OP.
         d.txn_id = d.txn_id + 1;
-        wal_append(d, "TXID " + to_string_i32(d.txn_id) + "\nOP " + sql + "\nCOMMIT\n");
+        wal_append(d, "TXID " + to_string_i32(d.txn_id) + "\nOP " + sql + "\nCOMMIT\n", "wal_auto");
         maybe_checkpoint(d);
     }
 }
@@ -7049,6 +7083,10 @@ fn main() ~ Console + Environment + FileSystem + Process {
 
     let db_path = arg1;
     let mut d = db_new(db_path);
+    let crash_at = getenv("QDB_CRASH_AT");
+    if crash_at.len() > 0 { d.crash_at = parse_int_str(crash_at); }
+    d.crash_torn = getenv("QDB_CRASH_MODE") == "torn";
+    d.trace_writes = getenv("QDB_TRACE_WRITES") == "1";
     db_load(&mut d);
     // Replay any committed transactions from WAL (crash recovery)
     wal_replay(&mut d);
