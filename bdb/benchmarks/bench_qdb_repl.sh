@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
 # In-process qdb benchmark — all queries in one REPL session
 # Compares against the per-process bench_qdb.sh to show startup overhead savings.
 set -e
