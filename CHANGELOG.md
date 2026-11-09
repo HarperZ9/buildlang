@@ -12,6 +12,10 @@ tracked in `STATUS.md`, `README.md`, and
 
 - qdb, the SQL engine in BuildLang, moved from HarperZ9/build-universe `programs/db.bld` to `bdb/db.bld` with its 46-commit history (author decision 2026-11-09, "Move into BuildLang"). `.github/workflows/bdb.yml` builds it with the buildc of each checkout and runs its regression harness (214 pass, 1 expected failure), the differential and WAL recovery tests against the pre-rewrite reference engine, and `bql::tests::in_process_subset_matches_qdb` with `QDB_BIN` set. `bdb/` is relicensed from FSL-1.1-MIT to AGPL-3.0-only, the licence of the rest of the repository (author decision 2026-11-09; `bdb/LICENSE`, `NOTICE`).
 
+## Unreleased: unannotated integer `let` takes the checked type (#159)
+
+- An unannotated `let` whose integer type the checker infers as `i64`, `i128` or `isize` from its uses (a comparison, an assignment, the function's return) is now emitted at that type. Before, lowering typed it from the initializer alone, so `let mut i = 0;` compared with an `i64` became `int32_t`, passed `buildc check`, and trapped with an overflow at run time once it passed 2^31. `buildc tv` now certifies the `lp` example. Narrower and unsigned inferred types keep the old lowering for now; annotate those (`let i: usize = 0;`) where the width matters. Tests: `compiler/tests/int_let_inference.rs`.
+
 ## Unreleased: the Low Water kernels as BuildLang packages
 
 - `lw-hash`, `lw-codec`, `lw-cbegin` and `lw-moves` 0.1.0 (AGPL-3.0-only): Low Water's world hash, lw-trace/1 codec, corpus run selection with its cbegin records, and move-table expansion, in pure `.bld`. Against the game at origin/dev 8b49bdd: 611 of 611 world-hash states, 40 of 40 trace round trips, the 40 cbegin records and the 168,234-byte expanded move table, all byte-identical. Each package's `tests/SOURCES.txt` lists its fixtures with their SHA-256 and origin.

@@ -80,6 +80,12 @@ pub struct TypeContext {
     /// a name with two or more is resolved by the argument-type tuple in
     /// `infer_call` via the shared `resolve_overload`.
     multi_methods: HashMap<Arc<str>, Vec<MethodCandidate>>,
+
+    /// Integer type the checker inferred for an unannotated `let NAME = ...`,
+    /// keyed by the binding pattern's span. Lowering reads it so the emitted
+    /// C type matches the checked type (issue #159). `None` marks a span that
+    /// two checks resolved differently; lowering then keeps its own typing.
+    inferred_local_ints: HashMap<crate::lexer::Span, Option<IntTy>>,
 }
 
 /// One candidate method for an overloaded (or singly-defined) function name.
@@ -342,6 +348,7 @@ impl TypeContext {
             generic_function_types: HashMap::new(),
             foreign_statics: HashSet::new(),
             multi_methods: HashMap::new(),
+            inferred_local_ints: HashMap::new(),
         };
         ctx.init_builtins();
         ctx
@@ -490,6 +497,25 @@ impl TypeContext {
         if let Some(scope) = self.scopes.last_mut() {
             scope.bindings.insert(name, scheme);
         }
+    }
+
+    /// Record the integer type inferred for the unannotated `let` binding at
+    /// `span`. A second, different record for the same span clears it.
+    pub fn record_inferred_local_int(&mut self, span: crate::lexer::Span, ty: IntTy) {
+        self.inferred_local_ints
+            .entry(span)
+            .and_modify(|e| {
+                if *e != Some(ty) {
+                    *e = None;
+                }
+            })
+            .or_insert(Some(ty));
+    }
+
+    /// The integer type the checker inferred for the unannotated `let`
+    /// binding at `span`, if one was recorded without conflict.
+    pub fn inferred_local_int(&self, span: crate::lexer::Span) -> Option<IntTy> {
+        self.inferred_local_ints.get(&span).copied().flatten()
     }
 
     /// Mark whether the binding `name` in the current scope may be assigned.
