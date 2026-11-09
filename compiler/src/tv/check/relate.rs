@@ -89,9 +89,13 @@ pub fn check(
         return Err(format!("mismatch: returns {ret} but C returns `{}`", c.ret));
     }
     let src_loops = loops(body);
+    let all_loops = count_loops(body);
+    if all_loops != src_loops.len() {
+        return Err("a loop nested inside an expression (outside the checker's subset)".into());
+    }
     if src_loops.len() != hints.loop_heads.len() {
         return Err(format!(
-            "{} source loops but {} loop heads in the certificate",
+            "mismatch: {} source loops but {} loop heads in the certificate",
             src_loops.len(),
             hints.loop_heads.len()
         ));
@@ -240,4 +244,25 @@ pub fn check(
         ));
     }
     Ok(done.len())
+}
+
+/// Every `while` and `loop` in `body`, at any depth.
+fn count_loops(body: &crate::ast::Block) -> usize {
+    use crate::ast::{ExprKind, StmtKind};
+    use crate::verify::infer::children;
+    fn expr(e: &crate::ast::Expr) -> usize {
+        let here = matches!(
+            e.kind,
+            ExprKind::While { .. } | ExprKind::Loop { .. } | ExprKind::For { .. }
+        ) as usize;
+        here + children(e).into_iter().map(expr).sum::<usize>()
+    }
+    body.stmts
+        .iter()
+        .map(|s| match &s.kind {
+            StmtKind::Expr(e) | StmtKind::Semi(e) => expr(e),
+            StmtKind::Local(l) => l.init.as_ref().map_or(0, |i| expr(&i.expr)),
+            _ => 0,
+        })
+        .sum()
 }

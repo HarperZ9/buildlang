@@ -90,8 +90,8 @@ impl<'a> CExec<'a> {
             Some(l) => *self.labels.get(l).ok_or(format!("no label `{l}`"))? + 1,
         };
         let mut out = Vec::new();
-        let mut work = vec![(st, pc, 0usize)];
-        while let Some((mut s, mut pc, mut steps)) = work.pop() {
+        let mut work = vec![(st, pc, 0usize, Vec::<usize>::new())];
+        while let Some((mut s, mut pc, mut steps, mut seen)) = work.pop() {
             loop {
                 steps += 1;
                 if steps > 20_000 || out.len() + work.len() > 4096 {
@@ -105,7 +105,15 @@ impl<'a> CExec<'a> {
                         out.push((s, CExit::Cut(l.clone())));
                         break;
                     }
-                    CStmt::Label(_) => pc += 1,
+                    CStmt::Label(_) => {
+                        // A label met twice on one path closes a cycle that
+                        // has no cut label: the certificate's loop heads are wrong.
+                        if seen.contains(&pc) {
+                            return Err("mismatch: a C cycle with no cut label (the certificate's loop heads are wrong)".into());
+                        }
+                        seen.push(pc);
+                        pc += 1
+                    }
                     CStmt::Assign(x, e) => {
                         let ty = self
                             .ty_of(x)
@@ -153,7 +161,7 @@ impl<'a> CExec<'a> {
                                     .labels
                                     .get(target)
                                     .ok_or(format!("no label `{target}`"))?;
-                                work.push((ns, t, steps));
+                                work.push((ns, t, steps, seen.clone()));
                             }
                         }
                         break;
