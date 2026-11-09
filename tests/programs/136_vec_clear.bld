@@ -1,0 +1,24 @@
+// Vec::clear empties a vector and keeps it usable: later pushes and reads
+// work, and a second vector is untouched.
+fn main() ~ Console {
+    let mut v: Vec<i64> = Vec::new();
+    let mut w: Vec<i64> = Vec::new();
+    w.push(7);
+    let mut round = 0;
+    let mut total = 0;
+    while round < 3 {
+        v.clear();
+        let mut i = 0;
+        while i < 1000 {
+            v.push(i + round);
+            i = i + 1;
+        }
+        total = total + v[999] + v.len() as i64;
+        round = round + 1;
+    }
+    println!("{}", total);
+    v.clear();
+    println!("{}", v.len());
+    v.push(5);
+    println!("{} {}", v[0], w[0]);
+}
