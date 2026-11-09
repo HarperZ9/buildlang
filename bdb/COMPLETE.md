@@ -217,6 +217,14 @@ passes fewer P1 records and fails a new test_qdb.sh assertion.
   differential against the pre-rewrite reference engine (`test_qdb_differential.py`) gains
   `--no-null`, a workload with no NULL and no `''`, because that engine stored both as one empty
   cell; with NULL data it fails 8 of 16 checks by design, and without it 16 of 16 pass.
+- **A6 (2026-11-09 01:15, during the P11 run, before its total).** The P11 run reached `select5.test`, whose
+  queries join 4 to 64 tables in a comma-separated FROM list. The new path loops over the tables
+  in FROM order and checks each conjunct once its tables are bound, so a FROM list that opens with
+  unconnected tables builds their cross product: three sampled queries took 0.07 s, 0.25 s and
+  over 120 s (stopped). At the runner's 60 s limit per record the file would take hours. The run
+  was stopped in `select5.test`; P11 is reported for the other 16 files with `select5.test` counted
+  at its P10 score (0 queries pass), and the planted check runs on the same 16 files. Ordering
+  the joins is P12, which measures all 17 files again.
 
 ## Baseline (qdb at the move, 2026-11-08, buildc 1.11.0)
 
