@@ -314,6 +314,20 @@ query records; `in2.test` from 0 to at least 35 of 45; every other file unchange
 8,921 to between 9,100 and 9,160. Planted check: a build without the table form loses the
 `IN t` records of `in1.test` (about 90). Guards: test_qdb.sh no FAIL, P2 2,000, statements not
 below 1,931.
+**P19. Throughput through bdb/lib against SQLite (item 5), written 2026-11-09 07:45 PT before any
+run.** A new `bdb/benchmarks/bench_qdb_throughput.py` builds the library in release mode and
+`bdb/benchmarks/throughput.c` twice: linked with `libmain.a`, and linked with SQLite (on Windows
+the `sqlite3.dll` that ships with Python 3.12, SQLite 3.49.1). Each run makes `t (id INTEGER
+PRIMARY KEY, v INTEGER)` with 10,000 rows (qdb also gets `CREATE INDEX t_id ON t (id)`, its only
+way to look a key up), then times 2,000 statements inside one transaction, passed as SQL text to
+both: `select` (`SELECT v FROM t WHERE id = k`), `update` (`UPDATE t SET v = v + 1 WHERE id = k`)
+and `mixed` (alternating). qdb prints each result to stdout, sent to the null device; SQLite's
+callback formats each row into a buffer. Median of 3 runs per engine and mode, one core, the same
+machine. The target is qdb within 10 times SQLite's time. Predictions: `select` 10 to 40 times;
+`update` and `mixed` 100 times or more, since an UPDATE marks every index stale and the next
+indexed read rebuilds it. Whatever the ratio is, it is reported. No planted check: this is a
+measurement, and its guard is that both engines end with the same table (checked by the benchmark
+counting rows with `v` changed).
 
 ### Amendments
 
