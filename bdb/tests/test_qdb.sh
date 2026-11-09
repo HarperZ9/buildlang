@@ -719,6 +719,13 @@ $QDB "$DB" "BEGIN" >/dev/null; $QDB "$DB" "CREATE TABLE kv (k INTEGER PRIMARY KE
 $QDB "$DB" "CREATE TABLE kv (k INTEGER)" >/dev/null
 $QDB "$DB" "INSERT INTO kv VALUES (1),(1)" >/dev/null
 chksel "rollback_drops_con" "SELECT count(*) FROM kv" "2"
+# P17: the key map in one process. A DELETE and an UPDATE must free their keys,
+# and 1.0 must collide with 1 in an INTEGER PRIMARY KEY column.
+rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
+km=$(printf "CREATE TABLE km (id INTEGER PRIMARY KEY, name TEXT UNIQUE)\nINSERT INTO km VALUES (1,'a')\nINSERT INTO km VALUES (2,'b')\nDELETE FROM km WHERE id = 1\nINSERT INTO km VALUES (1,'a')\nINSERT INTO km VALUES (1.0,'c')\nUPDATE km SET name = 'z' WHERE id = 2\nINSERT INTO km VALUES (3,'b')\nSELECT count(*) FROM km\n.quit\n" | $QDB "$DB" | tr -d '\r')
+chk "map_numeric_key"    "$(echo "$km" | grep -c 'UNIQUE constraint failed: km.id')" "1"
+chk "map_freed_keys"     "$(echo "$km" | grep -c 'constraint failed')" "1"
+chk "map_count"          "$(echo "$km" | grep -c '^ *3 *$')" "1"
 rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
 
 echo "== ALTER / DROP =="
