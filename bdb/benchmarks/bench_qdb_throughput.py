@@ -14,7 +14,13 @@ alike.
 
   python bench_qdb_throughput.py BUILDC --sqlite-src DIR [--n 10000]
          [--ops 2000] [--reps 3] [--modes select,update,mixed]
-         [--apis text,prep] [--json OUT]
+         [--apis text,prep] [--json OUT] [--aa]
+
+The engines run in turn, one pair per repetition. Besides the ratio of the
+medians, each line gives the median of the per-pair ratios with a
+distribution-free interval (order statistics, exact binomial coverage of at
+least 90 percent when there are enough pairs). --aa puts SQLite in qdb's
+place: the planted check that the interval brackets 1 for equal engines.
 
 DIR holds sqlite3.c from https://www.sqlite.org (public domain).
 """
@@ -80,6 +86,21 @@ def end_sum(exe, wd, tag, api="text"):
     return lines[-1] if lines else None
 
 
+def median_interval(xs):
+    """Distribution-free interval for the median of sorted xs: order statistics k and n-1-k,
+    with k the largest index whose exact binomial coverage stays at or above 90 percent."""
+    n = len(xs)
+    if n < 3:
+        return xs[0], xs[-1], 0.0
+    from math import comb
+    def cover(k):
+        return 1.0 - 2.0 * sum(comb(n, i) for i in range(k + 1)) / 2.0 ** n
+    k = 0
+    while k + 1 < n // 2 and cover(k + 1) >= 0.90:
+        k += 1
+    return xs[k], xs[n - 1 - k], cover(k)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("buildc")
@@ -91,10 +112,14 @@ def main():
     ap.add_argument("--modes", default="select,update,mixed")
     ap.add_argument("--apis", default="text")
     ap.add_argument("--json")
+    ap.add_argument("--aa", action="store_true",
+                    help="planted check: run SQLite in qdb's place, so every ratio should be 1")
     a = ap.parse_args()
     out = {}
     with tempfile.TemporaryDirectory() as wd:
         qexe, sexe = build(a.buildc, a.cc, a.sqlite_src, wd)
+        if a.aa:
+            qexe = sexe
         out["end_state_equal"] = True
         for api in a.apis.split(","):
             sq, ss = end_sum(qexe, wd, "qdb", api), end_sum(sexe, wd, "sqlite", api)
@@ -103,13 +128,24 @@ def main():
             out["end_state_equal"] = out["end_state_equal"] and sq == ss and bool(sq)
         for api in a.apis.split(","):
             for mode in a.modes.split(","):
-                tq = statistics.median(run(qexe, wd, a.n, a.ops, mode, "qdb", api) for _ in range(a.reps))
-                ts = statistics.median(run(sexe, wd, a.n, a.ops, mode, "sqlite", api) for _ in range(a.reps))
+                # Alternate the engines so a slow spell on the machine falls on both.
+                qs, ss = [], []
+                for _ in range(a.reps):
+                    qs.append(run(qexe, wd, a.n, a.ops, mode, "qdb", api))
+                    ss.append(run(sexe, wd, a.n, a.ops, mode, "sqlite", api))
+                tq, ts = statistics.median(qs), statistics.median(ss)
+                ratios = sorted(q / s for q, s in zip(qs, ss))
+                lo, hi, cover = median_interval(ratios)
                 key = mode if api == "text" else api + "_" + mode
                 out[key] = {"qdb_s": tq, "sqlite_s": ts, "qdb_ops_per_s": a.ops / tq,
-                            "sqlite_ops_per_s": a.ops / ts, "ratio": tq / ts}
+                            "sqlite_ops_per_s": a.ops / ts, "ratio": tq / ts,
+                            "pair_ratio_median": statistics.median(ratios), "pair_ratio_lo": lo,
+                            "pair_ratio_hi": hi, "pair_ratio_coverage": cover,
+                            "qdb_runs_s": qs, "sqlite_runs_s": ss}
                 print("%-4s %-7s N=%d ops=%d  qdb %10.1f ops/s  sqlite %10.1f ops/s  qdb takes %.2fx SQLite's time"
-                      % (api, mode, a.n, a.ops, a.ops / tq, a.ops / ts, tq / ts))
+                      "  (paired median %.2f, %.0f%% interval %.2f to %.2f, %d pairs)"
+                      % (api, mode, a.n, a.ops, a.ops / tq, a.ops / ts, tq / ts,
+                         statistics.median(ratios), 100 * cover, lo, hi, len(ratios)))
     if a.json:
         with open(a.json, "w") as f:
             json.dump(out, f, indent=1)
