@@ -282,6 +282,26 @@ with the digest unchanged (history is off by default); P2 2,000; text, WAL, libr
 differential unchanged. Limits stated in advance: the crash and power-cut tests do not run with
 history on; `AS OF` replays the history from the base on every query.
 
+**P17. Constraint checks through a key map (scoreboard target, item 3), written 2026-11-09 06:05 PT
+before the change.** P13 checks a new row against every row of its table and an UPDATE of a key
+column compares every pair of rows, so a keyed bulk load is quadratic and one key UPDATE is
+quadratic in the table. The change keeps one hash map from canonical key text (constraint number,
+then each key cell as a number in shortest form or as text, length-prefixed) to presence, plus the
+largest key of each `INTEGER PRIMARY KEY` for numbering NULLs. INSERT checks and extends it; any
+other mutation, ROLLBACK and a new constraint mark it stale, and the next INSERT rebuilds it in one
+pass. An UPDATE of a key column checks the table through a fresh map in one pass. NULL keys stay
+distinct, and two keys equal as numbers (`1` and `1.0`) stay equal, as in P13. Benchmark: two new
+scenarios in `bench_qdb_load.py`: `txn_keyed` loads N rows into `(id INTEGER PRIMARY KEY, name
+TEXT UNIQUE, age INTEGER)` inside one transaction; `txn_keyed_update` does the same and then one
+UPDATE of the `name` column. N = 1,000, 2,000, 4,000 and 8,000, before (main ee630a1) and after.
+Predictions: before, exponent k of 1.7 or more for both; after, k at most 1.3 for both, and 8,000
+rows at least 5 times faster than before. Guards: test_qdb.sh no FAIL (P13's thirteen constraint
+checks included); P1 statements 1,931 of 1,993 unchanged and queries 8,921; P2 2,000; crash 0; P15
+digest unchanged; text, WAL, library and reference differential unchanged. Planted checks: a build
+whose map is never marked stale fails a new test_qdb.sh check (DELETE a keyed row, insert its key
+again: must succeed); a build that compares key cells as text fails another (`1.0` after `1` in an
+INTEGER PRIMARY KEY column: must fail).
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of

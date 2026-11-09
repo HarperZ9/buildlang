@@ -14,6 +14,9 @@ Scenarios:
                SELECT after COMMIT, so deferred index work is inside the timing
   interleaved  autocommit INSERT, each followed by an indexed SELECT: the
                worst case for index upkeep, every read sees one new row
+  txn_keyed    as txn, into (id INTEGER PRIMARY KEY, name TEXT UNIQUE, age
+               INTEGER), so every row is checked against both keys (P17)
+  txn_keyed_update  as txn_keyed, then one UPDATE of the UNIQUE column
 
 Usage:
   python bench_qdb_load.py QDB_EXE [--sizes 1000,2000,4000] [--budget 120]
@@ -33,11 +36,14 @@ import time
 
 
 def script(scenario, n):
-    lines = ["CREATE TABLE t (id INTEGER, name TEXT, age INTEGER)"]
+    if scenario.startswith("txn_keyed"):
+        lines = ["CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT UNIQUE, age INTEGER)"]
+    else:
+        lines = ["CREATE TABLE t (id INTEGER, name TEXT, age INTEGER)"]
     if scenario in ("txn_indexed", "interleaved"):
         lines.append("CREATE INDEX t_age ON t (age)")
         lines.append("CREATE INDEX t_name ON t (name)")
-    if scenario in ("txn", "txn_indexed"):
+    if scenario in ("txn", "txn_indexed", "txn_keyed", "txn_keyed_update"):
         lines.append("BEGIN")
     # A fixed permutation of ids so index inserts land in the middle, not
     # only at the end (the sorted-append case would flatter an index).
@@ -46,8 +52,10 @@ def script(scenario, n):
         lines.append("INSERT INTO t VALUES (%d, 'u%d', %d)" % (k, k, 20 + k % 50))
         if scenario == "interleaved":
             lines.append("SELECT id FROM t WHERE age = %d" % (20 + k % 50))
-    if scenario in ("txn", "txn_indexed"):
+    if scenario in ("txn", "txn_indexed", "txn_keyed", "txn_keyed_update"):
         lines.append("COMMIT")
+    if scenario == "txn_keyed_update":
+        lines.append("UPDATE t SET name = 'renamed' WHERE id = 0")
     if scenario == "txn_indexed":
         lines.append("SELECT id FROM t WHERE age = 33")
     lines.append(".quit")
