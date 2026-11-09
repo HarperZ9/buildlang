@@ -50,8 +50,9 @@
 //     lazily, on the next index read: rows appended by INSERT are sorted and
 //     merged in, and any other mutation triggers one full merge-sort rebuild.
 //
-//   - Selection sort for ORDER BY: O(n^2) but simple and correct. Index
-//     builds use a stable merge sort (sort_positions), O(n log n).
+//   - Single-table ORDER BY and index builds use a stable merge sort
+//     (sort_rows, sort_positions), O(n log n). The UNION, grouped, JOIN and
+//     grouped-JOIN sorts are still stable selection sorts, O(n^2).
 //
 //   - WAL for crash recovery: Append-only log of mutations, written with
 //     append_file. On startup, committed transactions are replayed. The .db
@@ -3188,7 +3189,7 @@ fn check_has_agg(d: &DB) -> i32 {
 //   3. Handle COUNT(*) shortcut
 //   4. Dispatch to exec_select_agg_no_group if aggregates present
 //   5. Otherwise: scan all rows, evaluate WHERE for each, collect matches
-//   6. Apply ORDER BY via sort_rows() (selection sort)
+//   6. Apply ORDER BY via sort_rows() (stable merge sort)
 //   7. Apply LIMIT to truncate result set
 //   8. Apply DISTINCT to remove duplicates
 //   9. Print formatted table output (header + separator + rows)
@@ -6229,7 +6230,7 @@ fn exec_alter_table(d: &mut DB) ~ Console {
 //   eval_in_pool()        — IN membership test against a condition's pool slice
 //
 // Sorting:
-//   sort_rows()           — selection sort on row indices by column value
+//   sort_rows()           — stable merge sort on row indices by column value
 //   compare_vals()        — compare two values (numeric or string)
 //
 // Formatting:
@@ -6422,46 +6423,48 @@ fn cmp_rows_2key(d: &DB, rowa: i32, rowb: i32, rs: i32, cc: i32, ocol: i32, ocol
 }
 
 fn sort_rows(d: &DB, rows: Vec<i32>, count: i32, rs: i32, cc: i32, ocol: i32, ocol_type: i32, desc: i32, ocol2: i32, ocol2_type: i32, desc2: i32) -> Vec<i32> {
-    // Selection sort, stable: primary key, then secondary key on ties, then
-    // original insertion order (a strict `< 0` pick never displaces an equal).
-    let mut used: Vec<i32> = vec![];
+    // Stable bottom-up merge sort: primary key, then secondary key on ties,
+    // then input order (on equal keys the left run is taken first). Same
+    // order as the selection sort it replaced, which took the first minimum
+    // on each pick, at O(n log n) instead of O(n^2) (bench_qdb_sort.py).
+    let mut src: Vec<i32> = vec![];
+    let mut dst: Vec<i32> = vec![];
     let mut i = 0;
     while i < count {
-        vec_push(used, 0);
+        vec_push(src, vec_get(rows, i));
+        vec_push(dst, vec_get(rows, i));
         i = i + 1;
     }
-
-    let mut result: Vec<i32> = vec![];
-    let mut picked = 0;
-    while picked < count {
-        let mut best = 0 - 1;
-        let mut j = 0;
-        while j < count {
-            if vec_get(used, j) == 0 {
-                if best < 0 {
-                    best = j;
-                } else {
-                    let cand_row = vec_get(rows, j);
-                    let best_row = vec_get(rows, best);
-                    let c = cmp_rows_2key(d, cand_row, best_row, rs, cc, ocol, ocol_type, desc, ocol2, ocol2_type, desc2);
-                    if c < 0 { best = j; }
+    let mut width = 1;
+    while width < count {
+        let mut lo = 0;
+        while lo < count {
+            let mid = if lo + width < count { lo + width } else { count };
+            let hi = if lo + 2 * width < count { lo + 2 * width } else { count };
+            let mut a = lo;
+            let mut b = mid;
+            let mut o = lo;
+            while o < hi {
+                let mut take_a = false;
+                if a < mid {
+                    if b >= hi { take_a = true; }
+                    else {
+                        let c = cmp_rows_2key(d, vec_get(src, a), vec_get(src, b), rs, cc, ocol, ocol_type, desc, ocol2, ocol2_type, desc2);
+                        if c <= 0 { take_a = true; }
+                    }
                 }
+                if take_a { dst[o] = vec_get(src, a); a = a + 1; }
+                else { dst[o] = vec_get(src, b); b = b + 1; }
+                o = o + 1;
             }
-            j = j + 1;
+            lo = lo + 2 * width;
         }
-        // Mark used
-        let mut new_used: Vec<i32> = vec![];
-        let mut k = 0;
-        while k < count {
-            if k == best { vec_push(new_used, 1); }
-            else { vec_push(new_used, vec_get(used, k)); }
-            k = k + 1;
-        }
-        used = new_used;
-        vec_push(result, vec_get(rows, best));
-        picked = picked + 1;
+        let tmp = src;
+        src = dst;
+        dst = tmp;
+        width = width * 2;
     }
-    result
+    src
 }
 
 fn compare_vals(a: String, b: String, col_type: i32) -> i64 {
