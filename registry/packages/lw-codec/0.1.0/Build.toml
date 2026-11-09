@@ -1,0 +1,9 @@
+[package]
+name = "lw-codec"
+version = "0.1.0"
+edition = "2026"
+description = "Low Water lw-trace/1 codec: parse each trace record and write it back byte for byte"
+author = "Zain Dana Harper"
+license = "AGPL-3.0-only"
+
+[dependencies]

@@ -1,0 +1,5 @@
+Test fixtures of lw-codec. Source: the Low Water game, origin/dev commit 8b49bdd, by the same author,
+released with these ports under AGPL-3.0-only. Columns: sha256, file, origin.
+
+4f78b2b4a394298e1361f0e8fe872fd2b01175aaeb2d9e21bf16513b9f3b00b9  08-lamp-hound.jsonl
+    trace 8 of the 40-fight corpus: `node combat/tools/trace.mjs DIR 40 900` from game/engine at 8b49bdd (regenerated 2026-11-09: identical); it is its own golden (decode then encode gives the same bytes)

@@ -1,0 +1,9 @@
+[package]
+name = "lw-moves"
+version = "0.1.0"
+edition = "2026"
+description = "Low Water move expansion (defineMoves, profileOf, buildToolMoves) from combat/data/moves.json to one JSON line"
+author = "Zain Dana Harper"
+license = "AGPL-3.0-only"
+
+[dependencies]

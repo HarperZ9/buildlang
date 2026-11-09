@@ -1,0 +1,510 @@
+// lw-moves library: Low Water's move expansion. Expands every table and tool
+// the way combat/tools/export-data.mjs does (defineMoves, profileOf,
+// buildToolMoves in sim/moves.mjs and data/tools.mjs).
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 Zain Dana Harper. Port of the Low Water game (origin/dev 8b49bdd).
+mod json;
+
+// ------------------------------------------------------------ Json helpers
+
+fn lwm_jnum(x: f64) -> Json {
+    Json::Num(x)
+}
+
+fn lwm_jstr(t: str) -> Json {
+    Json::Str(t)
+}
+
+fn lwm_jbool(b: bool) -> Json {
+    Json::Bool(b)
+}
+
+fn lwm_jpair(a: f64, b: f64) -> Json {
+    let mut v: Vec<Json> = Vec::new();
+    v.push(Json::Num(a));
+    v.push(Json::Num(b));
+    Json::Arr(v)
+}
+
+fn lwm_jtriple(a: f64, b: f64, c: f64) -> Json {
+    let mut v: Vec<Json> = Vec::new();
+    v.push(Json::Num(a));
+    v.push(Json::Num(b));
+    v.push(Json::Num(c));
+    Json::Arr(v)
+}
+
+fn lwm_jlist1(x: Json) -> Json {
+    let mut v: Vec<Json> = Vec::new();
+    v.push(x);
+    Json::Arr(v)
+}
+
+fn lwm_jobj() -> Json {
+    let k: Vec<str> = Vec::new();
+    let v: Vec<Json> = Vec::new();
+    Json::Obj(k, v)
+}
+
+// A copy of `o` with `key` set to `val`: a present key keeps its place, a new
+// one goes last (the order JS object spread gives).
+fn lwm_set(o: Json, key: str, val: Json) -> Json {
+    match o {
+        Json::Obj(keys, vals) => {
+            let mut nk: Vec<str> = Vec::new();
+            let mut nv: Vec<Json> = Vec::new();
+            let mut found = false;
+            let mut i: usize = 0;
+            while i < keys.len() {
+                nk.push(keys[i]);
+                if keys[i] == key {
+                    nv.push(val);
+                    found = true;
+                } else {
+                    nv.push(vals[i]);
+                }
+                i = i + 1;
+            }
+            if !found {
+                nk.push(key);
+                nv.push(val);
+            }
+            Json::Obj(nk, nv)
+        },
+        other => other,
+    }
+}
+
+fn lwm_get(o: Json, key: str) -> Json {
+    match json_get(o, key) {
+        Ok(v) => v,
+        Err(_) => Json::Null,
+    }
+}
+
+fn lwm_num(o: Json, key: str) -> f64 {
+    match lwm_get(o, key) {
+        Json::Num(x) => x,
+        _ => 0.0,
+    }
+}
+
+fn lwm_text(o: Json, key: str) -> str {
+    match lwm_get(o, key) {
+        Json::Str(t) => t,
+        _ => "",
+    }
+}
+
+fn lwm_at(a: Json, i: usize) -> f64 {
+    match a {
+        Json::Arr(items) => {
+            if i < items.len() {
+                match items[i] {
+                    Json::Num(x) => x,
+                    _ => 0.0,
+                }
+            } else {
+                0.0
+            }
+        },
+        _ => 0.0,
+    }
+}
+
+// {...a, ...b}
+fn lwm_merge(a: Json, b: Json) -> Json {
+    let mut out = a;
+    match b {
+        Json::Obj(keys, vals) => {
+            let mut i: usize = 0;
+            while i < keys.len() {
+                out = lwm_set(out, keys[i], vals[i]);
+                i = i + 1;
+            }
+        },
+        _ => {},
+    }
+    out
+}
+
+fn lwm_obj_keys(o: Json) -> Vec<str> {
+    match json_keys(o) {
+        Ok(k) => k,
+        Err(_) => Vec::new(),
+    }
+}
+
+// Keys sorted by byte order (insertion sort).
+fn lwm_sorted(keys: Vec<str>) -> Vec<str> {
+    let mut out: Vec<str> = Vec::new();
+    let mut i: usize = 0;
+    while i < keys.len() {
+        out.push(keys[i]);
+        let mut j = out.len() - 1;
+        while j > 0 && out[j] < out[j - 1] {
+            let t = out[j];
+            out[j] = out[j - 1];
+            out[j - 1] = t;
+            j = j - 1;
+        }
+        i = i + 1;
+    }
+    out
+}
+
+// ------------------------------------------------------------ numbers
+
+// JS Math.round: the nearest integer, halves toward +infinity.
+fn lwm_js_round(x: f64) -> f64 {
+    let r = x.floor();
+    if x - r >= 0.5 {
+        r + 1.0
+    } else {
+        r
+    }
+}
+
+// F(n, s) = Math.max(1, Math.round(n * s))
+fn lwm_frames(n: f64, s: f64) -> f64 {
+    max(1.0, lwm_js_round(n * s))
+}
+
+fn lwm_tell_start(su: f64) -> f64 {
+    max(0.0, min(3.0, su - 18.0))
+}
+
+// ------------------------------------------------------------ tools.mjs
+
+fn lwm_light_link(p: Json, i: i64, n: i64, s: f64, prefix: str, w: f64) -> Json {
+    let last = i == n;
+    let heavy_last = last && n > 1;
+    let fi = i as f64;
+    let mut base_su = 14.0 + 2.0 * (fi - 1.0);
+    if heavy_last {
+        base_su = base_su + 3.0;
+    }
+    let floor_su = if w > 1.0 { 18.0 } else { 0.0 };
+    let su = max(floor_su, lwm_frames(base_su * w, s));
+    let ac = 6.0;
+    let rc = lwm_frames(if last { 28.0 } else { 22.0 }, s);
+    let commit = su + ac + 5.0;
+    let end = su + ac + rc - 1.0;
+    let light = lwm_get(p, "light");
+    let arc = lwm_num(p, "arc");
+    let reach = lwm_num(p, "reach");
+    let cls = lwm_text(p, "cls");
+    let mut m = lwm_jobj();
+    m = lwm_set(m, "startup", lwm_jnum(su));
+    m = lwm_set(m, "active", lwm_jnum(ac));
+    m = lwm_set(m, "recovery", lwm_jnum(rc));
+    m = lwm_set(m, "stamina", lwm_jnum(1.0));
+    m = lwm_set(m, "dmg", lwm_jnum(lwm_at(light, 0) * (if heavy_last { 1.4 } else { 1.0 })));
+    m = lwm_set(m, "poise", lwm_jnum(lwm_at(light, 1) * (if heavy_last { 1.5 } else { 1.0 })));
+    let mut hit = lwm_jobj();
+    hit = lwm_set(hit, "arc", lwm_jpair(-arc - (if i == 2 { 15.0 } else { 0.0 }), arc));
+    hit = lwm_set(hit, "r", lwm_jpair(0.25, reach + 0.4));
+    m = lwm_set(m, "hits", lwm_jlist1(hit));
+    m = lwm_set(m, "root", lwm_jlist1(lwm_jtriple(2.0, su, 1.8 + (if last { 0.8 } else { 0.0 }))));
+    let mut cancel = lwm_jobj();
+    cancel = lwm_set(cancel, "step", lwm_jpair(commit, end));
+    cancel = lwm_set(cancel, "roll", lwm_jpair(commit, end));
+    m = lwm_set(m, "track", lwm_jnum(6.0));
+    m = lwm_set(m, "hitstop", lwm_jnum(if last { 6.0 } else { 4.0 }));
+    m = lwm_set(m, "knock", lwm_jnum(if last { 2.2 } else { 1.0 }));
+    m = lwm_set(m, "shake", lwm_jnum(if last { 0.3 } else { 0.15 }));
+    m = lwm_set(m, "anim", lwm_jstr(format!("{}.light_{}", cls, i)));
+    if w > 1.0 {
+        let mut tell = lwm_jobj();
+        tell = lwm_set(tell, "at", lwm_jpair(lwm_tell_start(su), su - 1.0));
+        tell = lwm_set(tell, "kind", lwm_jstr("swing"));
+        m = lwm_set(m, "tell", tell);
+        m = lwm_set(m, "track", lwm_jnum(9.0));
+        m = lwm_set(m, "trackUntil", lwm_jnum(su - 3.0));
+    }
+    let sweep_len = lwm_frames(if heavy_last { 7.0 } else { 4.0 }, s);
+    m = lwm_set(m, "sweep", lwm_jpair(su - min(su - 1.0, sweep_len), su));
+    if !last {
+        let mut next = lwm_jobj();
+        next = lwm_set(next, "light", lwm_jstr(format!("{}light_{}", prefix, i + 1)));
+        m = lwm_set(m, "next", next);
+        cancel = lwm_set(cancel, "light", lwm_jpair(su + ac + 3.0, end));
+    }
+    m = lwm_set(m, "cancel", cancel);
+    m
+}
+
+fn lwm_heavy_pair(p: Json, s: f64, prefix: str, w: f64) -> (Json, Json) {
+    let sp = lwm_text(p, "special");
+    let su = lwm_frames(26.0 * w, s);
+    let rc = lwm_frames(34.0, s);
+    let arc = lwm_num(p, "arc");
+    let reach = lwm_num(p, "reach");
+    let heavy_n = lwm_get(p, "heavy");
+    let cls = lwm_text(p, "cls");
+    let wide = if sp == "sweep" { 75.0 } else { arc + 10.0 };
+    let pull = sp == "pull";
+    let mut h = lwm_jobj();
+    h = lwm_set(h, "startup", lwm_jnum(su));
+    h = lwm_set(h, "active", lwm_jnum(6.0));
+    h = lwm_set(h, "recovery", lwm_jnum(rc));
+    h = lwm_set(h, "stamina", lwm_jnum(2.0));
+    h = lwm_set(h, "dmg", lwm_jnum(lwm_at(heavy_n, 0)));
+    h = lwm_set(h, "poise", lwm_jnum(lwm_at(heavy_n, 1)));
+    let mut hit = lwm_jobj();
+    hit = lwm_set(hit, "arc", lwm_jpair(-wide, wide));
+    hit = lwm_set(hit, "r", lwm_jpair(0.25, reach + 0.6));
+    h = lwm_set(h, "hits", lwm_jlist1(hit));
+    h = lwm_set(h, "root", lwm_jlist1(lwm_jtriple(lwm_frames(16.0, s), su + 3.0, 2.0)));
+    h = lwm_set(h, "armor", lwm_jtriple(6.0, su + 4.0, 1.0));
+    let mut charge = lwm_jobj();
+    charge = lwm_set(charge, "at", lwm_jnum(lwm_frames(14.0, s)));
+    charge = lwm_set(charge, "max", lwm_jnum(48.0));
+    charge = lwm_set(charge, "min", lwm_jnum(15.0));
+    charge = lwm_set(charge, "into", lwm_jstr(format!("{}heavy_charged", prefix)));
+    h = lwm_set(h, "charge", charge);
+    let mut cancel = lwm_jobj();
+    cancel = lwm_set(cancel, "step", lwm_jpair(su + 6.0 + 6.0, su + 6.0 + rc - 1.0));
+    cancel = lwm_set(cancel, "roll", lwm_jpair(su + 6.0 + 6.0, su + 6.0 + rc - 1.0));
+    h = lwm_set(h, "cancel", cancel);
+    h = lwm_set(h, "track", lwm_jnum(4.0));
+    h = lwm_set(h, "guardBreak", lwm_jbool(true));
+    h = lwm_set(h, "hitstop", lwm_jnum(4.0));
+    h = lwm_set(h, "knock", lwm_jnum(if pull { -3.4 } else { 3.0 }));
+    h = lwm_set(h, "shake", lwm_jnum(0.4));
+    h = lwm_set(h, "knockdown", lwm_jbool(pull || sp == "sweep"));
+    h = lwm_set(h, "anim", lwm_jstr(format!("{}.heavy", cls)));
+
+    let rc2 = lwm_frames(32.0, s);
+    let mut c = lwm_jobj();
+    c = lwm_set(c, "startup", lwm_jnum(8.0));
+    c = lwm_set(c, "active", lwm_jnum(6.0));
+    c = lwm_set(c, "recovery", lwm_jnum(rc2));
+    c = lwm_set(c, "stamina", lwm_jnum(1.0));
+    c = lwm_set(c, "dmg", lwm_jnum(lwm_at(heavy_n, 0) * 1.5));
+    c = lwm_set(c, "poise", lwm_jnum(lwm_at(heavy_n, 1) + 1.5));
+    let mut chit = lwm_jobj();
+    chit = lwm_set(chit, "arc", lwm_jpair(-wide - 10.0, wide + 10.0));
+    chit = lwm_set(chit, "r", lwm_jpair(0.25, reach + 0.8));
+    c = lwm_set(c, "hits", lwm_jlist1(chit));
+    c = lwm_set(c, "root", lwm_jlist1(lwm_jtriple(0.0, 10.0, 3.0)));
+    c = lwm_set(c, "armor", lwm_jtriple(0.0, 12.0, 2.0));
+    c = lwm_set(c, "knockdown", lwm_jbool(true));
+    c = lwm_set(c, "guardBreak", lwm_jbool(true));
+    let mut ccancel = lwm_jobj();
+    ccancel = lwm_set(ccancel, "step", lwm_jpair(24.0, 8.0 + 6.0 + rc2 - 1.0));
+    ccancel = lwm_set(ccancel, "roll", lwm_jpair(24.0, 8.0 + 6.0 + rc2 - 1.0));
+    c = lwm_set(c, "cancel", ccancel);
+    c = lwm_set(c, "track", lwm_jnum(2.0));
+    c = lwm_set(c, "hitstop", lwm_jnum(6.0));
+    c = lwm_set(c, "knock", lwm_jnum(if pull { -4.2 } else { 4.2 }));
+    c = lwm_set(c, "shake", lwm_jnum(0.75));
+    c = lwm_set(c, "anim", lwm_jstr(format!("{}.heavy_charged", cls)));
+    if w > 1.0 {
+        let mut tell = lwm_jobj();
+        tell = lwm_set(tell, "at", lwm_jpair(lwm_tell_start(su), su - 1.0));
+        tell = lwm_set(tell, "kind", lwm_jstr("swing"));
+        h = lwm_set(h, "tell", tell);
+        h = lwm_set(h, "track", lwm_jnum(9.0));
+        h = lwm_set(h, "trackUntil", lwm_jnum(su - 4.0));
+    }
+    h = lwm_set(h, "sweep", lwm_jpair(su - min(su - lwm_frames(14.0, s) - 1.0, lwm_frames(10.0, s)), su));
+    c = lwm_set(c, "sweep", lwm_jpair(2.0, 8.0));
+    (h, c)
+}
+
+fn lwm_build_tool_moves(p: Json, prefix: str, slow: bool, windup: f64) -> Json {
+    let s = lwm_num(p, "speed") * (if slow { 1.3 } else { 1.0 });
+    let chain = lwm_num(p, "chain") as i64;
+    let mut out = lwm_jobj();
+    let mut i: i64 = 1;
+    while i <= chain {
+        out = lwm_set(out, format!("{}light_{}", prefix, i), lwm_light_link(p, i, chain, s, prefix, windup));
+        i = i + 1;
+    }
+    let hc = lwm_heavy_pair(p, s, prefix, windup);
+    out = lwm_set(out, format!("{}heavy", prefix), hc.0);
+    out = lwm_set(out, format!("{}heavy_charged", prefix), hc.1);
+    let catch_w = lwm_get(p, "catch");
+    let cls = lwm_text(p, "cls");
+    let mut c = lwm_jobj();
+    c = lwm_set(c, "kind", lwm_jstr("parry"));
+    c = lwm_set(c, "startup", lwm_jnum(lwm_at(catch_w, 0)));
+    c = lwm_set(c, "active", lwm_jnum(lwm_at(catch_w, 1) - lwm_at(catch_w, 0) + 1.0));
+    c = lwm_set(c, "recovery", lwm_jnum(20.0));
+    c = lwm_set(c, "stamina", lwm_jnum(1.0));
+    c = lwm_set(c, "parry", catch_w);
+    c = lwm_set(c, "anim", lwm_jstr(format!("{}.catch", cls)));
+    out = lwm_set(out, format!("{}catch", prefix), c);
+    if slow {
+        let keys = lwm_obj_keys(out);
+        let mut k: usize = 0;
+        while k < keys.len() {
+            let m = lwm_get(out, keys[k]);
+            let doubled = lwm_set(m, "stamina", lwm_jnum(lwm_num(m, "stamina") * 2.0));
+            out = lwm_set(out, keys[k], doubled);
+            k = k + 1;
+        }
+    }
+    out
+}
+
+// ------------------------------------------------------------ moves.mjs
+
+fn lwm_defaults() -> Json {
+    let mut d = lwm_jobj();
+    d = lwm_set(d, "kind", lwm_jstr("attack"));
+    d = lwm_set(d, "startup", lwm_jnum(0.0));
+    d = lwm_set(d, "active", lwm_jnum(0.0));
+    d = lwm_set(d, "recovery", lwm_jnum(0.0));
+    d = lwm_set(d, "stamina", lwm_jnum(0.0));
+    d = lwm_set(d, "dmg", lwm_jnum(0.0));
+    d = lwm_set(d, "poise", lwm_jnum(0.0));
+    let none: Vec<Json> = Vec::new();
+    d = lwm_set(d, "hits", Json::Arr(none));
+    let none2: Vec<Json> = Vec::new();
+    d = lwm_set(d, "root", Json::Arr(none2));
+    d = lwm_set(d, "iframes", Json::Null);
+    d = lwm_set(d, "armor", Json::Null);
+    d = lwm_set(d, "cancel", lwm_jobj());
+    d = lwm_set(d, "next", lwm_jobj());
+    d = lwm_set(d, "track", lwm_jnum(0.0));
+    d = lwm_set(d, "trackUntil", Json::Null);
+    d = lwm_set(d, "hitstop", lwm_jnum(0.0));
+    d = lwm_set(d, "knock", lwm_jnum(0.0));
+    d = lwm_set(d, "shake", lwm_jnum(0.0));
+    d = lwm_set(d, "dir", lwm_jstr("facing"));
+    d = lwm_set(d, "parry", Json::Null);
+    d = lwm_set(d, "parryable", lwm_jbool(true));
+    d = lwm_set(d, "tell", Json::Null);
+    d = lwm_set(d, "charge", Json::Null);
+    d = lwm_set(d, "item", Json::Null);
+    d = lwm_set(d, "then", Json::Null);
+    d = lwm_set(d, "knockdown", lwm_jbool(false));
+    d = lwm_set(d, "anim", Json::Null);
+    d = lwm_set(d, "shove", lwm_jbool(false));
+    d = lwm_set(d, "grapple", lwm_jbool(false));
+    d = lwm_set(d, "blockable", lwm_jbool(true));
+    d = lwm_set(d, "guardBreak", lwm_jbool(false));
+    d = lwm_set(d, "toward", Json::Null);
+    d = lwm_set(d, "takedown", lwm_jbool(false));
+    d = lwm_set(d, "tap", Json::Null);
+    d = lwm_set(d, "composure", lwm_jnum(0.0));
+    d = lwm_set(d, "pierce", lwm_jbool(false));
+    d = lwm_set(d, "through", lwm_jbool(false));
+    d = lwm_set(d, "snare", lwm_jbool(false));
+    d = lwm_set(d, "resetRead", lwm_jbool(false));
+    d = lwm_set(d, "behind", lwm_jbool(false));
+    d = lwm_set(d, "wide", lwm_jnum(0.0));
+    d = lwm_set(d, "baseTotal", Json::Null);
+    d = lwm_set(d, "sweep", Json::Null);
+    d
+}
+
+fn lwm_is_falsy(v: Json) -> bool {
+    match v {
+        Json::Null => true,
+        Json::Bool(b) => !b,
+        Json::Num(x) => x == 0.0 || x != x,
+        Json::Str(t) => t.len() == 0,
+        _ => false,
+    }
+}
+
+fn lwm_is_nullish(v: Json) -> bool {
+    match v {
+        Json::Null => true,
+        _ => false,
+    }
+}
+
+fn lwm_define_moves(table: Json, defs: Json) -> Json {
+    let ids = lwm_obj_keys(table);
+    let mut out = lwm_jobj();
+    let mut k: usize = 0;
+    while k < ids.len() {
+        let id = ids[k];
+        let mut m = lwm_merge(defs, lwm_get(table, id));
+        m = lwm_set(m, "id", lwm_jstr(id));
+        let startup = lwm_num(m, "startup");
+        let active = lwm_num(m, "active");
+        m = lwm_set(m, "total", lwm_jnum(startup + active + lwm_num(m, "recovery")));
+        if lwm_is_falsy(lwm_get(m, "anim")) {
+            m = lwm_set(m, "anim", lwm_jstr(id));
+        }
+        let mut hits: Vec<Json> = Vec::new();
+        match lwm_get(m, "hits") {
+            Json::Arr(items) => {
+                let mut h: usize = 0;
+                while h < items.len() {
+                    let mut base = lwm_jobj();
+                    base = lwm_set(base, "y", lwm_jpair(0.0, 2.2));
+                    base = lwm_set(base, "at", lwm_jpair(startup, startup + active - 1.0));
+                    hits.push(lwm_merge(base, items[h]));
+                    h = h + 1;
+                }
+            },
+            _ => {},
+        }
+        m = lwm_set(m, "hits", Json::Arr(hits));
+        if lwm_is_nullish(lwm_get(m, "trackUntil")) {
+            m = lwm_set(m, "trackUntil", lwm_jnum(startup));
+        }
+        out = lwm_set(out, id, m);
+        k = k + 1;
+    }
+    out
+}
+
+// ------------------------------------------------------------ export-data.mjs
+
+fn lwm_profile_of(tool_classes: Json, tools: Json, tool_id: str) -> Json {
+    let t = lwm_get(tools, tool_id);
+    let cls = lwm_text(t, "cls");
+    let mut p = lwm_merge(lwm_get(tool_classes, cls), t);
+    p = lwm_set(p, "id", lwm_jstr(tool_id));
+    p
+}
+
+fn lwm_with_id(o: Json, id: str) -> Json {
+    lwm_set(o, "id", lwm_jstr(id))
+}
+
+fn lwm_expand(data: Json) -> str {
+    let defs = lwm_defaults();
+    let tool_classes = lwm_get(data, "toolClasses");
+    let tools = lwm_get(data, "tools");
+    let mut base = lwm_jobj();
+    base = lwm_merge(base, lwm_get(data, "common"));
+    base = lwm_merge(base, lwm_get(data, "body"));
+    base = lwm_merge(base, lwm_get(data, "arenaSpecials"));
+    base = lwm_merge(base, lwm_get(data, "foeSpecials"));
+    base = lwm_merge(base, lwm_get(data, "bossSpecials"));
+    base = lwm_merge(base, lwm_get(data, "arenaSpecials"));
+    let classes = lwm_sorted(lwm_obj_keys(tool_classes));
+    let mut c: usize = 0;
+    while c < classes.len() {
+        let cls = classes[c];
+        let mut p = lwm_set(lwm_get(tool_classes, cls), "cls", lwm_jstr(cls));
+        p = lwm_with_id(p, cls);
+        base = lwm_merge(base, lwm_build_tool_moves(p, format!("{}:", cls), false, 1.0));
+        c = c + 1;
+    }
+    let mut top = lwm_jobj();
+    top = lwm_set(top, "base", lwm_define_moves(base, defs));
+    let ids = lwm_sorted(lwm_obj_keys(tools));
+    let mut per_tool = lwm_jobj();
+    let mut t: usize = 0;
+    while t < ids.len() {
+        let p = lwm_profile_of(tool_classes, tools, ids[t]);
+        let mut e = lwm_jobj();
+        e = lwm_set(e, "lamb", lwm_define_moves(lwm_build_tool_moves(p, "", false, 1.0), defs));
+        e = lwm_set(e, "slow", lwm_define_moves(lwm_build_tool_moves(p, "", true, 1.0), defs));
+        e = lwm_set(e, "foe", lwm_define_moves(lwm_build_tool_moves(p, "", false, 1.6), defs));
+        per_tool = lwm_set(per_tool, ids[t], e);
+        t = t + 1;
+    }
+    top = lwm_set(top, "tools", per_tool);
+    json_stringify_sorted(top)
+}
+

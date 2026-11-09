@@ -1,0 +1,138 @@
+// lw-cbegin library: choose the corpus runs the way combat/tools/trace.mjs
+// does (corpusRun) and build each run's first trace record, `cbegin`.
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 Zain Dana Harper. Port of the Low Water game (origin/dev 8b49bdd).
+mod json;
+
+const LWB_PI: f64 = 3.141592653589793;
+
+// Keys sorted by byte order (insertion sort).
+fn lwb_sorted(keys: Vec<str>) -> Vec<str> {
+    let mut out: Vec<str> = Vec::new();
+    let mut i: usize = 0;
+    while i < keys.len() {
+        out.push(keys[i]);
+        let mut j = out.len() - 1;
+        while j > 0 && out[j] < out[j - 1] {
+            let t = out[j];
+            out[j] = out[j - 1];
+            out[j - 1] = t;
+            j = j - 1;
+        }
+        i = i + 1;
+    }
+    out
+}
+
+fn lwb_pick(j: Json, key: str) -> Json {
+    match json_get(j, key) {
+        Ok(v) => v,
+        Err(_) => Json::Null,
+    }
+}
+
+fn lwb_num_at(a: Json, i: usize) -> f64 {
+    match a {
+        Json::Arr(items) => match items[i] {
+            Json::Num(x) => x,
+            _ => 0.0,
+        },
+        _ => 0.0,
+    }
+}
+
+fn lwb_items(a: Json) -> Vec<Json> {
+    match a {
+        Json::Arr(v) => v,
+        _ => Vec::new(),
+    }
+}
+
+fn lwb_has_foe_spawns(a: Json) -> bool {
+    match lwb_pick(lwb_pick(a, "spawns"), "foes") {
+        Json::Arr(_) => true,
+        _ => false,
+    }
+}
+
+// {"id":..,"team":..,"kind":..,"x":..,"z":..,"face":..}
+fn lwb_fighter(id: str, team: str, kind: str, at: Json, face: f64) -> str {
+    let mut k: Vec<str> = Vec::new();
+    let mut v: Vec<str> = Vec::new();
+    k.push("id");
+    v.push(json_quote(id));
+    k.push("team");
+    v.push(json_quote(team));
+    k.push("kind");
+    v.push(json_quote(kind));
+    k.push("x");
+    v.push(lwb_num_at(at, 0).to_json());
+    k.push("z");
+    v.push(lwb_num_at(at, 1).to_json());
+    k.push("face");
+    v.push(face.to_json());
+    json_obj(k, v)
+}
+
+// The 40 cbegin records for corpus-inputs `data`, one JSON line each.
+fn lwb_cbegin_lines(data: Json) -> str {
+    let arenas = lwb_pick(data, "arenas");
+    let all_ids: Vec<str> = match json_keys(arenas) {
+        Ok(k) => k,
+        Err(_) => Vec::new(),
+    };
+    let mut with_foes: Vec<str> = Vec::new();
+    let mut a: usize = 0;
+    while a < all_ids.len() {
+        if lwb_has_foe_spawns(lwb_pick(arenas, all_ids[a])) {
+            with_foes.push(all_ids[a]);
+        }
+        a = a + 1;
+    }
+    let arena_ids = lwb_sorted(with_foes);
+    let mut style_list: Vec<str> = Vec::new();
+    let arch = lwb_items(lwb_pick(data, "archetypes"));
+    let mut s: usize = 0;
+    while s < arch.len() {
+        match arch[s] {
+            Json::Str(t) => style_list.push(t),
+            _ => {},
+        }
+        s = s + 1;
+    }
+    let style_ids = lwb_sorted(style_list);
+    let mut out = "";
+    let mut i: usize = 0;
+    while i < 40 {
+        let arena = arena_ids[i % arena_ids.len()];
+        let spawns = lwb_pick(lwb_pick(arenas, arena), "spawns");
+        let spots = lwb_items(lwb_pick(spawns, "foes"));
+        let mut fs: Vec<str> = Vec::new();
+        fs.push(lwb_fighter("lamb", "lamb", "lamb", lwb_pick(spawns, "lamb"), LWB_PI / 2.0));
+        let mut k: usize = 0;
+        while k < 2 && k < spots.len() {
+            let style = style_ids[(i * 2 + k) % style_ids.len()];
+            let id = format!("foe{}", k);
+            fs.push(lwb_fighter(id, "foe", style, spots[k], -LWB_PI / 2.0));
+            k = k + 1;
+        }
+        let mut rk: Vec<str> = Vec::new();
+        let mut rv: Vec<str> = Vec::new();
+        rk.push("t");
+        rv.push(json_quote("cbegin"));
+        rk.push("v");
+        rv.push("1");
+        rk.push("seed");
+        rv.push(((i + 1) as i64).to_json());
+        rk.push("arena");
+        rv.push(json_quote(arena));
+        rk.push("fighters");
+        rv.push(json_arr(fs));
+        rk.push("s");
+        rv.push(json_quote("h"));
+        let line = json_obj(rk, rv);
+        out = out + line + "\n";
+        i = i + 1;
+    }
+    out
+}

@@ -39,7 +39,7 @@ original run on the same inputs).
 | Flywheel `hash_chain.py`, `canonical_bytes.py`, `byte_witness*.py` | next wave | build on `canonical-record`; need their own byte-form spec |
 | Flywheel `ed25519_verify.py` | later | needs SHA-512 and 255-bit field arithmetic; u128 multiply not probed |
 | BuildLang `scripts/check_art_receipts.py` | ported | malformed-JSON messages are the port's own wording after the shared `FAIL cannot read` prefix |
-| Low Water hash, trace codec, cbegin, move tables (2026-10-23 pilot) | packaged privately | the game is private with no public licence, so these packages live in a private registry outside this repository until its licence is decided |
+| Low Water hash, trace codec, cbegin, move tables (2026-10-23 pilot) | ported | `lw-hash`, `lw-codec`, `lw-cbegin`, `lw-moves` 0.1.0 under AGPL-3.0-only (author decision 2026-11-09); fixtures from Low Water origin/dev 8b49bdd, listed with their hashes in each package's `tests/SOURCES.txt` |
 | Low Water DETMATH | done earlier | already in `tests/detmath` |
 | build-color adaptation, appearance, tonemap, spectral | next wave | numpy matrix code; float bounds as in `color` |
 | build-color ICC, LUT and image I/O | later | binary I/O through `str`-typed bytes |

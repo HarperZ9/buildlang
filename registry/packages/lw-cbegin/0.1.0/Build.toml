@@ -1,0 +1,9 @@
+[package]
+name = "lw-cbegin"
+version = "0.1.0"
+edition = "2026"
+description = "Low Water corpus run selection (trace.mjs corpusRun) and each run's cbegin record as lw-trace/1 JSON"
+author = "Zain Dana Harper"
+license = "AGPL-3.0-only"
+
+[dependencies]

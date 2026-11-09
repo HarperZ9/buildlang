@@ -1,0 +1,13 @@
+Test fixtures of lw-hash. Source: the Low Water game, origin/dev commit 8b49bdd, by the same author,
+released with these ports under AGPL-3.0-only. Columns: sha256, file, origin.
+
+1921b52d20b9533454622a445bea7ea3078e73a4da3645234e87857bdce535fc  golden-payloads-12.txt
+    the summary the original pilot program prints over payloads-12.jsonl: the payload text and the hash field the JS game computed agree on all 12 rows
+08a77069c50f24b8d495fb74a30072506e0d2fbe6eb73cc845010ac797a6dfb0  golden-text-abc-0.txt
+    hashStr('abc', 0) from game/engine/core/rng.mjs at 8b49bdd, run with node
+3132f6d95697d97ab47273e40ecdedc16b7c34ff3206a1218a17c3f0aed25b1e  golden-text-lamb-2654435769.txt
+    hashStr('lamb', 2654435769) from game/engine/core/rng.mjs at 8b49bdd, run with node
+0555307c7e03cd34f0de215379bd69e1065e691d3e9177d381d342791e21f309  golden-text-move-7.txt
+    hashStr('foe0:light_1#3', 7) from game/engine/core/rng.mjs at 8b49bdd, run with node
+4f2b728ba1762f432e1971ff70b546ba306d19845510aae54db0ead0e89b9eb0  payloads-12.jsonl
+    first 12 lines of the 611-line export from the pilot script export-hash-payloads.mjs, run with node from game/engine at Low Water origin/dev 8b49bdd (regenerated 2026-11-09: identical)

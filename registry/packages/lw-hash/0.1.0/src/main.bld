@@ -1,0 +1,41 @@
+// lw-hash: check every hash-payload row against the ported world hash.
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 Zain Dana Harper. Port of the Low Water game (origin/dev 8b49bdd).
+//
+// Usage: lw-hash <hash-payloads.jsonl>
+//        lw-hash --text WORD SEED   prints hashStr(WORD, SEED) as an integer
+
+fn main() ~ Console + FileSystem + Process + Environment {
+    let n_args = args_count();
+    if n_args < 2 {
+        println!("usage: lw-hash <hash-payloads.jsonl> | lw-hash --text WORD SEED");
+        exit(2);
+    }
+    if args_get(1) == "--text" {
+        let seed = args_get(3).parse_int() as u32;
+        println!("{}", lwh_hash_str(args_get(2), seed));
+        return;
+    }
+    let text = read_file(args_get(1));
+    let lines = text.split("\n");
+    let mut rows: i64 = 0;
+    let mut text_same: i64 = 0;
+    let mut hash_same: i64 = 0;
+    let mut i: usize = 0;
+    while i < lines.len() {
+        if lines[i].len() > 0 {
+            let r = lwh_check_row(lines[i]);
+            rows = rows + 1;
+            if r.0 {
+                text_same = text_same + 1;
+            }
+            if r.1 {
+                hash_same = hash_same + 1;
+            } else {
+                println!("hash differs on line {}", i + 1);
+            }
+        }
+        i = i + 1;
+    }
+    println!("{} states: text identical {}, hash identical {}", rows, text_same, hash_same);
+}

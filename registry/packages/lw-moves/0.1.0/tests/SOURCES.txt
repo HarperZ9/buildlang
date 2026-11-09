@@ -1,0 +1,7 @@
+Test fixtures of lw-moves. Source: the Low Water game, origin/dev commit 8b49bdd, by the same author,
+released with these ports under AGPL-3.0-only. Columns: sha256, file, origin.
+
+edf2024ac5493c022ae108a7561875b722c297aae41e14d79019f05826a840fb  moves-expanded.golden.json
+    game/engine/combat/tests/moves-expanded.golden.json at 8b49bdd, byte for byte (the game's own golden)
+21948e0e48ccf32ee9f9dfc948b68033a5ec28fec8e0df36bc407efce6571f0c  moves.json
+    game/engine/combat/data/moves.json at 8b49bdd, byte for byte

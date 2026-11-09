@@ -1,0 +1,46 @@
+// lw-codec: read one lw-trace/1 file, parse every record, write it back with
+// json_stringify (keys in document order). The output must equal the input
+// byte for byte.
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 Zain Dana Harper. Port of the Low Water game (origin/dev 8b49bdd).
+//
+// Usage: lw-codec <trace.jsonl> <out.jsonl>   writes the file, prints a summary
+//        lw-codec --stdout <trace.jsonl>      prints the records only
+
+fn main() ~ Console + FileSystem + Process + Environment {
+    let n_args = args_count();
+    if n_args < 3 {
+        println!("usage: lw-codec <trace.jsonl> <out.jsonl> | lw-codec --stdout <trace.jsonl>");
+        exit(2);
+    }
+    let to_stdout = args_get(1) == "--stdout";
+    let input = args_get(if to_stdout { 2 } else { 1 });
+    let text = read_file(input);
+    let lines = text.split("\n");
+    let mut out = "";
+    let mut bad: i64 = 0;
+    let mut n: i64 = 0;
+    let mut i: usize = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        if line.len() > 0 {
+            match lwc_reencode(line) {
+                Ok(w) => {
+                    out = out + w + "\n";
+                },
+                Err(e) => {
+                    bad = bad + 1;
+                    println!("line {}: {}", i + 1, e);
+                },
+            }
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    if to_stdout {
+        print!("{}", out);
+    } else {
+        let ok = write_file(args_get(2), out);
+        println!("{} records, {} unreadable, written {}", n, bad, ok);
+    }
+}

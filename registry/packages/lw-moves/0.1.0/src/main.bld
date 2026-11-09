@@ -1,0 +1,30 @@
+// lw-moves: expand combat/data/moves.json and write the result as one JSON
+// line. The output must equal combat/tests/moves-expanded.golden.json byte
+// for byte.
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 Zain Dana Harper. Port of the Low Water game (origin/dev 8b49bdd).
+//
+// Usage: lw-moves <moves.json> <out.json>   writes the file, prints a summary
+//        lw-moves --stdout <moves.json>      prints the expanded line only
+
+fn main() ~ Console + FileSystem + Process + Environment {
+    let n_args = args_count();
+    if n_args < 3 {
+        println!("usage: lw-moves <moves.json> <out.json> | lw-moves --stdout <moves.json>");
+        exit(2);
+    }
+    let to_stdout = args_get(1) == "--stdout";
+    let src = read_file(args_get(if to_stdout { 2 } else { 1 }));
+    match json_parse(src) {
+        Ok(data) => {
+            let line = lwm_expand(data);
+            if to_stdout {
+                println!("{}", line);
+            } else {
+                let ok = write_file(args_get(2), line + "\n");
+                println!("written {} ({} bytes)", ok, line.len() + 1);
+            }
+        },
+        Err(e) => println!("cannot read moves: {}", e),
+    }
+}

@@ -1,0 +1,3 @@
+# mode golden args... (run from the package folder)
+# golden: the first record of each of the 40 JS traces
+exact tests/js-cbegin.jsonl --stdout tests/corpus-inputs.json
