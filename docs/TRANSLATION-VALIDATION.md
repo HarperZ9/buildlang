@@ -47,8 +47,10 @@ certified on its own.
 
 Functions whose parameters, return and locals are integers up to 64 bits, `f32`, `f64` or `bool`,
 with `let`, assignment, `if`, `match`, `while`, `loop`, `break`, `continue`, `return` and calls.
-Everything else is reported as outside the subset with the reason: heap values, strings, effects,
-`for`, loops nested inside expressions, constants, and C the parser does not read.
+Named constants with a literal value, and the built-in `PI`, `E` and `TAU`, are their values; the C
+side's constants are read from the C file's top-level definitions. Everything else is reported as
+outside the subset with the reason: heap values, strings, effects, `for`, loops nested inside
+expressions, and C the parser does not read.
 
 Floats are opaque IEEE values. Each float operation is an uninterpreted function named by operator
 and width, each comparison an uninterpreted predicate (never rewritten: with NaN, `!(a < b)` is not
@@ -72,15 +74,15 @@ that compiles and every module in `stdlib`:
 
 | Corpus | Compiled | Certified | Not certified | Outside the subset |
 |---|---|---|---|---|
-| `tests/programs` (147 of 154 programs compile) | 435 | 152 (35 %) | 0 | 283 |
+| `tests/programs` (147 of 154 programs compile) | 435 | 159 (37 %) | 0 | 276 |
 | `stdlib` (14 of 16 modules compile) | 139 | 58 (42 %) | 0 | 81 |
 
-Before floats (main 7038d3d): 31 (7 %) and 22 (16 %). Most functions still outside the subset
-print, or take or return strings, structs, arrays, tuples, `Result` or `Option` (266 of 283 in
-`tests/programs`; about 140 of them are `main` with `~ Console`). The other 17 use constructs the
-checker does not model yet: named constants (7), match patterns (4), C lines the parser does not
-read (3), a loop inside an expression, a callee that is not a name, and one implicit float to
-integer conversion (below).
+Before floats (main 7038d3d): 31 (7 %) and 22 (16 %); after floats 152 and 58; after constants 159
+and 58. Most functions still outside the subset print, or take or return strings, structs, arrays,
+tuples, `Result` or `Option` (266 of 276 in `tests/programs`; about 140 of them are `main` with
+`~ Console`). The other 10 use constructs the checker does not model yet: match patterns (4), C
+lines the parser does not read (3), a loop inside an expression, a callee that is not a name, and
+one implicit float to integer conversion (below).
 
 ## Planted checks
 
@@ -160,10 +162,43 @@ Planted checks, each must hold or the change does not merge:
   3.141592653589793 (`lower_ident` checks `PI`, `E` and `TAU` before user constants). Modelling
   constants in the checker is the next widening; it turns this into a refusal.
 
+## Widening 2: named constants (preregistered 2026-11-09, before the run)
+
+After floats, 7 functions in `tests/programs` are refused only for an unknown name: five read the
+built-in `PI`, two read a user `const`. The change: a `const` with a literal value (integer, float or
+bool, possibly negated) is that literal on the source side; the built-ins `PI`, `E` and `TAU` are the
+`f64` constants from the language's table when the program defines no constant of that name. On the C
+side the checker reads each top-level `const` definition from the C text itself.
+
+Predictions: `tests/programs` gains 5 to 7 certified functions; 0 new not-certified on corpus
+programs.
+
+Planted checks:
+
+- K1. `tests/tv/consts.bld` uses a user integer constant, a user float constant, a negative constant
+  and the built-in `PI`; every such function is certified.
+- K2. A program that defines `const PI: f64 = 3.0;` and reads it: the function is not certified on
+  main today, because the backend uses the built-in value (issue #177). Once #177 is fixed it must be
+  certified.
+- K3. A C rewrite that changes one constant's initializer is refused. (The function hashes do not
+  cover top-level C definitions, so no hash needs rewriting: the checker reads the initializer.)
+
+### Results (2026-11-09)
+
+- Coverage: `tests/programs` 152 to 159 of 435 (37 %), at the top of the predicted 5 to 7; the five
+  `PI` readers and both user constants are certified. `stdlib` unchanged at 58 of 139. 0 not
+  certified in either corpus.
+- K1 held: the four constant readers in `tests/tv/consts.bld` are certified.
+- K2 held as predicted: `area` in `tests/tv/shadow_pi.bld` is not certified ("a source path and a C
+  path disagree"): the source multiplies by 3.0, the C by 3.141592653589793. The checker now
+  catches issue #177.
+- K3 held: changing `SCALE`, `HALF` or `ENABLED` in the C makes its reader not certified
+  (`compiler/tests/tv_consts.rs`).
+
 ## Verified
 
-- `compiler/tests/tv_c.rs` and `compiler/tests/tv_float.rs`: the planted checks above and the
-  import boundary.
+- `compiler/tests/tv_c.rs`, `compiler/tests/tv_float.rs` and `compiler/tests/tv_consts.rs`: the
+  planted checks above and the import boundary.
 - The coverage table: `buildc tv --json` over `tests/programs/*.bld` and `stdlib/*.bld`, counts summed
   from the reports.
 

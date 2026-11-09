@@ -1,0 +1,10 @@
+// Translation-validation fixture: a user constant that shadows the built-in PI.
+// The backend used the built-in value here (issue #177).
+
+const PI: f64 = 3.0;
+
+fn area(r: f64) -> f64 { PI * r * r }
+
+fn main() ~ Console {
+    println!("{}", area(1.0));
+}
