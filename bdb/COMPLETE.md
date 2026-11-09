@@ -496,6 +496,52 @@ by less than 10 percent. Planted checks: a build whose FNV mask is 2^32 - 2 must
 power-cut digest (the fault test's expected-digest check fails); a build whose `sp_int` returns the
 entry of r - 1 must fail test_qdb_rows.py. Guards: the full set; digest 77a49282... unchanged.
 
+**P29. Memory that follows the data (speed item 3), written 2026-11-09 before the measured runs
+below.** The runtime frees no string and no list on its own, so every temporary a statement makes
+stays until the process ends. Found while reading the hot paths: `db_text` and `concat_parts` grew
+one string by repeated `+` (each step a new copy of everything so far); `reset_parser` gave every
+statement about 48 new lists; the tokenizer made one string per character; `con_check_insert` built
+a map for a single row; `qdb_from_c` grew the statement text a byte at a time. Changes, none of
+which may change a byte of output, of the `.db` file or of the WAL: one `join` per checkpoint and
+per COMMIT (`Vec<String>.join`, buildlang #224); parser lists emptied in place outside a subquery
+(`reset_fresh` keeps new lists where a subquery saves the old ones); a byte tokenizer with one
+`substring` per token; a one-row constraint probe that reuses the keys it built; constraint keys
+from cached pieces; row counts written in place; the statement text from the host in one
+allocation; an unescaped WAL line held as three pieces instead of two copies; `exec_select` frees
+its four work lists. Exploratory numbers already seen (scratch builds, not the committed tree):
+through `bdb/lib`, load of 8,000 rows peaked at 0.888 GB before; after, 10.6, 45.6 and 89.1 MB at
+10,000, 50,000 and 100,000 rows, against 0.9, 1.3 and 2.0 MB for SQLite 3.54.1. Measurement:
+`throughput` mixed, prepared API, 1,000 statements after the load, peak commit and peak working set
+of the process read by the watchdog (PeakPagefileUsage, PeakWorkingSetSize), median of 3 runs, rows
+10,000, 50,000 and 100,000, SQLite 3.54.1 (the current release; earlier sections used 3.49.1). The
+build before this change runs at 1,000, 2,000, 4,000 and 8,000 rows only, under a 6 GB cap, because
+its growth is faster than linear. Predictions: (1) qdb's peak commit is linear in rows: bytes per
+row from 10,000 to 50,000 and from 50,000 to 100,000 differ by less than 15 percent; (2) the target
+is peak commit within 10 times SQLite's at 100,000 rows, and from the exploratory runs I expect it
+MISSED at about 45 times; (3) speed, P28's runs against SQLite 3.54.1 (prepared, 200,000
+statements, 11 pairs, 10,000 and 100,000 rows): no ratio rises more than 10 percent above P28's
+published value (0.56, 1.32, 1.00 at 10,000; 1.13, 1.74, 1.34 at 100,000), with the caveat that the
+SQLite release differs. Planted checks: a build whose `con_key` joins with `;` in place of `|`
+between the constraint number and the length must fail `test_qdb.sh`; a build that drops the
+newline piece of a held WAL line must fail `test_qdb_wal_recovery.py` or change the power-cut
+digest; a build that empties parser lists in place inside a subquery too (`reset_fresh` never set)
+must fail `test_qdb.sh`. Guards: the full set, digest 77a49282... unchanged, sqllogictest 9,185 of
+9,202, SQLite differential 2,000 of 2,000, and `cmp` of output and `.db` against the build before.
+
+**P30. A memory growth test with a planted leak (speed item 3), written 2026-11-09 before the
+measured runs below.** `bdb/tests/test_qdb_memory.py` runs the CLI on three workloads at 20,000 and
+80,000 statements and takes the slope of peak memory (PeakPagefileUsage on Windows, `ru_maxrss` on
+POSIX) in bytes per statement: load (single-row INSERTs in one transaction), select (point SELECTs
+on 5,000 rows), update (UPDATEs, 1,000 to a transaction). Exploratory slopes on Windows for the
+P29 scratch build: 989, 1,207 and 1,045. Bounds: 1.5 times the slope measured on the committed
+tree on Windows, rounded up to the next 100; they are regression limits, not targets. The slope on
+the CI runner (Linux, another allocator) is unknown until it runs; if it exceeds a bound the result
+is logged as an amendment and that bound is reset to 1.5 times the Linux slope. Planted check, run
+in CI on every push: a build whose `reset_parser` always takes new lists (`reset_fresh` forced
+true) must exceed the select bound, or the test fails. Exploratory: that plant measured 4,947 bytes
+per statement when the unplanted build measured 3,162. What the test does not show: the text path
+still leaves about 1 KB per statement, which the P29 changes do not remove.
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
