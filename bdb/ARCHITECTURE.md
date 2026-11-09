@@ -165,7 +165,7 @@ sort. With an index, the load was closer to O(N^3). Each path now costs
 O(statement) or is amortized (see String Pool, WAL and Index Implementation
 above).
 
-Measured with `programs/benchmarks/bench_qdb_load.py`: one REPL process per run,
+Measured with `bdb/benchmarks/bench_qdb_load.py`: one REPL process per run,
 a fresh database, rows inserted in a fixed scrambled order, a row-count check
 after each run. k is the least-squares slope of log(time) against log(N).
 Windows 11, buildc 1.4.0, gcc 13.2 -O2, one run per size, so treat single

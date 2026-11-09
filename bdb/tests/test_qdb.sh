@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# qdb regression harness -- the full SQL surface of programs/db.bld in one run.
+# qdb regression harness -- the full SQL surface of bdb/db.bld in one run.
 #
-# Build qdb.exe first (see programs/build.bat), then: bash programs/tests/test_qdb.sh
+# Build bdb/qdb.exe first (see bdb/README.md), then: bash bdb/tests/test_qdb.sh
 # Every qdb invocation is a separate process: main() loads the db, replays the
 # WAL, runs one statement, and auto-commit checkpoints back to disk. Mutations
 # therefore persist across calls, which is why each group re-seeds a pristine
@@ -19,7 +19,7 @@ DB=/tmp/qdb_regress.db
 pass=0; fail=0; xfail=0; xpass=0
 
 if [ ! -x "$QDB" ] && [ ! -f "$QDB" ]; then
-  echo "SKIP: $QDB not found -- build it first (programs/build.bat), then rerun."
+  echo "SKIP: $QDB not found -- build it first (see bdb/README.md), then rerun."
   exit 0
 fi
 

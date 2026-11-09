@@ -3,8 +3,8 @@
 
 //! BuildDB tables for a compiled program, and BuildQL over them.
 //!
-//! BuildDB is qdb, the SQL engine written in BuildLang (`programs/db.bld` in
-//! the Build Universe repository), and BuildQL is qdb's SQL dialect. This
+//! BuildDB is qdb, the SQL engine written in BuildLang (`bdb/db.bld` in this
+//! repository), and BuildQL is qdb's SQL dialect. This
 //! module is the compiler side of that pair:
 //!
 //! - [`Store`] turns one compiled program into tables: `functions`, `effects`,

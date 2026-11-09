@@ -8,6 +8,10 @@ tracked in `STATUS.md`, `README.md`, and
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
 `108/108` or `132/132` are not the current release gate.
 
+## Unreleased: BuildDB (qdb) moves into bdb/
+
+- qdb, the SQL engine in BuildLang, moved from HarperZ9/build-universe `programs/db.bld` to `bdb/db.bld` with its 46-commit history (author decision 2026-11-09, "Move into BuildLang"). `.github/workflows/bdb.yml` builds it with the buildc of each checkout and runs its regression harness (214 pass, 1 expected failure), the differential and WAL recovery tests against the pre-rewrite reference engine, and `bql::tests::in_process_subset_matches_qdb` with `QDB_BIN` set. `bdb/` keeps its FSL-1.1-MIT licence (`bdb/LICENSE`, `NOTICE`).
+
 ## Unreleased: canonical-record, color, repo-art, readability and art-receipts as BuildLang packages
 
 - `canonical-record` 1.0.0 ports Flywheel's RFC 8785 canonical JSON, its SHA-256 and the array digest (FSL-1.1-MIT): 190 of 190 cases byte-identical with the original. `color` 1.0.0 ports build-color's colour differences and colour spaces (FSL-1.1-MIT): the 34 Sharma CIEDE2000 pairs identical, the rest within 6.42e-12. `repo-art` 1.0.0 ports this repository's flow and card renderers: the committed artworks byte-identical. `readability` 1.0.0 ports Flywheel's Flesch reading ease (FSL-1.1-MIT) and `art-receipts` 1.0.0 ports `scripts/check_art_receipts.py`; both byte-identical on every case. All five are pure `.bld`, built with `buildc pkg build`.
