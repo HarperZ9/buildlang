@@ -140,6 +140,47 @@ Trusted base, in plain words: the bit-blasting in `smt/enc.rs` encodes each oper
 evaluator defines it (checked by the differential test on random terms and by the self-check at each
 width); the replay checker in `smt/rup.rs` is correct.
 
+## V3: word-level rules for the multiplication claims V2 left open (preregistered 2026-11-09, before the run)
+
+After V2 three claims stay unknown: `mul_div` (`(a * b) / b == a`) and `inverse_round_trip`
+(`x.wrapping_mul(3).wrapping_mul(12297829382473034411) == x`) in the true set, and `sum_sq`
+(`a * a + b * b != 2.5e17`) in the false set. The brief suggested a better multiplier encoding or
+bit-blasting with stronger propagation. This plan takes a different route, stated here before any
+run: the first two are ring identities that hold before any bit is looked at, and proving that two
+64-bit multiplier circuits agree is a known hard case for resolution-based SAT solvers, so a
+stronger encoding is unlikely to close them within a conflict budget. The third has an easy witness
+(`a = 500000000, b = 0`) that a sampler misses. Three word-level rules, each sound on every run that
+finishes:
+
+- M1, exact division. In the polynomial normal form, `n / d` is `q` and `n % d` is `0` when `d` is a
+  single monomial `c * m` and every monomial of `n` is `m` times a monomial with a coefficient
+  divisible by `c`, so that `n = d * q` exactly. Division by zero traps, so on every finishing run
+  `d != 0` and the quotient is exact. No other division is rewritten.
+- M2, wrapping identities. In the flattened form of `wrapping_mul`, constants fold modulo `2^bits`
+  (already the case), and now a folded constant of 1 is dropped and a folded constant of 0 makes the
+  product 0. `3 * 12297829382473034411` is 1 modulo `2^64`.
+- M3, a root search for counterexamples. For a goal that is a disequality or an equality between
+  integer polynomials in the parameters, each parameter in turn is solved for with the others fixed
+  at small values and the bounds of their domains: the univariate polynomial is scanned at 64
+  points across the domain and bisected on each sign change, and every integer root found is a
+  candidate. A candidate is only a candidate: the concrete evaluator runs it, and only a run that
+  makes the claim false is reported.
+
+Bounds and predictions, each a merge condition unless marked as a prediction:
+
+- V1 (condition). `smt_false.bld`, extended with five false claims aimed at the new rules
+  (`(a * b + 1) / b == a`, `(a * b + 1) % b == 0`, `(a * b) / c == a`, a wrapping inverse off by two,
+  and a wrapping product folded to 0): 0 proved, 0 inconsistent. Prediction: all refuted, `sum_sq`
+  included, so 29 of 29.
+- V2 (condition). `smt_true.bld`, extended with two exact-division claims (`(a * b * 2) / (b * 2) ==
+  a`, `(a * b) % b == 0`): 0 refuted, 0 inconsistent. Prediction: 16 of 16 proved, `mul_div` and
+  `inverse_round_trip` by M1 and M2.
+- V3 (condition). Every verdict in `compiler/tests/verify_laws.rs`, the V2 tests and the false-accept
+  set in `src/verify/tests.rs` is unchanged.
+- V4 (condition). A planted fault, `BUILDLANG_PLANT_POLY=div-inexact` (test only), makes M1 drop the
+  divisibility check. Under it the extended false set must show at least one proved or inconsistent
+  verdict, so the refusal set is shown to catch a wrong division rule.
+
 ## Laws in the repository
 
 `tests/verify` holds three files whose expected verdicts are fixed in `compiler/tests/verify_laws.rs`.
