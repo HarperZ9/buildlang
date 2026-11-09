@@ -1051,6 +1051,8 @@ impl<'ctx> TypeChecker<'ctx> {
                 let capability_sources = infer.capability_sources().clone();
                 let propagated_effect_sources = infer.propagated_effect_sources().clone();
                 let has_return = infer.has_explicit_return();
+                let tail = (!has_return && !is_generic).then_some((&body_ty, &expected_ret));
+                infer.record_inferred_local_ints(tail);
                 (
                     body_ty,
                     body_effects,

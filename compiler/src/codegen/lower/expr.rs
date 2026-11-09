@@ -142,6 +142,18 @@ impl<'ctx> MirLowerer<'ctx> {
         }
     }
 
+    /// The MIR type of a wide signed integer recorded by the checker for an
+    /// unannotated `let`; the recorder only stores these three.
+    fn wide_signed_mir_int(ty: crate::types::IntTy) -> Option<MirType> {
+        use crate::types::IntTy;
+        match ty {
+            IntTy::I64 => Some(MirType::i64()),
+            IntTy::I128 => Some(MirType::Int(IntSize::I128, true)),
+            IntTy::Isize => Some(MirType::Int(IntSize::ISize, true)),
+            _ => None,
+        }
+    }
+
     fn lower_local(&mut self, local: &ast::Local) -> CodegenResult<()> {
         // Handle tuple destructuring: `let (a, b) = (expr1, expr2);`
         // We handle this before the general init lowering because we want to
@@ -237,6 +249,17 @@ impl<'ctx> MirLowerer<'ctx> {
             .as_ref()
             .map(|t| self.lower_type_from_ast(t))
             .filter(|t| !Self::mentions_placeholder(t));
+        // No annotation: take the wider signed integer type the checker
+        // inferred from the binding's uses, as if it were written (issue #159).
+        // Without it `let mut i = 0;` compared with an `i64` was `int32_t`.
+        let explicit_ty = explicit_ty.or_else(|| {
+            if local.ty.is_some() {
+                return None;
+            }
+            self.ctx
+                .inferred_local_int(local.pattern.span)
+                .and_then(Self::wide_signed_mir_int)
+        });
 
         // Propagate expected type to init expression lowering so that
         // constructor calls (HashMap::new, Vec::new, etc.) can use the
