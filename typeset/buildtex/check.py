@@ -58,7 +58,7 @@ def facts(pdf_path, result, doc):
     return {
         "pages": len(pages),
         "pages_layout": result["pages"],
-        "overfull": [{"block": b, "line": ln, "excess_pt": round(x, 3)} for b, ln, x in diag.overfull],
+        "overfull": [_overfull(e) for e in diag.overfull],
         "underfull": len(diag.underfull),
         "missing_glyphs": sorted({f"U+{ord(ch):04X}" for ch, _ in diag.missing}),
         "math_errors": [{"source": src, "error": err} for src, err in getattr(diag, "math_errors", [])],
@@ -69,6 +69,15 @@ def facts(pdf_path, result, doc):
         "blocks_missing_from_text": lost,
         "pdf_bytes": len(data),
     }
+
+
+def _overfull(entry):
+    """One overfull line for the receipt; a line in a table cell carries its row and column."""
+    from engine.shape import overfull_where
+    out = {"block": entry[0], "line": entry[1], "excess_pt": round(entry[2], 3), "where": overfull_where(entry)}
+    if len(entry) > 3 and entry[3]:
+        out.update(row=entry[3]["row"], column=entry[3]["column"], line=entry[3]["cell_line"])
+    return out
 
 
 def reading_order(blocks, moves):
@@ -139,7 +148,7 @@ def passed(f):
     if f["pages"] != f["pages_layout"]:
         bad.append(f"PDF has {f['pages']} pages, layout made {f['pages_layout']}")
     if f["overfull"]:
-        bad.append(f"{len(f['overfull'])} overfull line(s)")
+        bad.append(f"{len(f['overfull'])} overfull line(s): " + "; ".join(o["where"] for o in f["overfull"]))
     if f["missing_glyphs"]:
         bad.append("missing glyphs " + ", ".join(f["missing_glyphs"]))
     if f.get("math_errors"):

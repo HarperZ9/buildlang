@@ -120,6 +120,7 @@ class Layout:
         if block.cells:
             return [self.row_line(block, st)]
         self.cols = self.aligns = None
+        self.table_row = 0
         return self.lines_for(block, st, lead)
 
     def figure_lines(self, block, st, lead):
@@ -151,6 +152,10 @@ class Layout:
             self.aligns = [CELL_ALIGN.get(a.strip(), "") for a in block.attrs["align"].split(",")]
         cols = self.cols if getattr(self, "cols", None) and len(self.cols) == n else [1.0 / n] * n
         aligns = getattr(self, "aligns", None) or []
+        # rows are counted from the first body row; the header is "header"
+        row = "header" if block.kind == "thead" else getattr(self, "table_row", 0) + 1
+        if row != "header":
+            self.table_row = row
         total, gutter = sum(cols), st.get("gutter", 8.0)
         x, runs, gfx, height, depth = 0.0, [], [], 0.0, 0.0
         from .docir import Block
@@ -161,7 +166,11 @@ class Layout:
             if k < len(aligns) and aligns[k]:
                 cst["align"] = aligns[k] if aligns[k] != "left" else st.get("align", "ragged")
             cell = Block(block.kind, spans or [], index=block.index)
+            seen = len(self.diag.overfull)
             lines = self.lines_for(cell, cst) if cell.plain.strip() else []
+            # an overfull line in a cell is reported by its row and column, not as a line of the block
+            self.diag.overfull[seen:] = [(b, ln, ex, {"row": row, "column": k + 1, "cell_line": ln})
+                                         for b, ln, ex, *_ in self.diag.overfull[seen:]]
             for j, ln in enumerate(lines):
                 shift = -j * st["leading"]
                 runs += [(rx, dy + shift, pc, hs) for rx, dy, pc, hs in ln.runs]
