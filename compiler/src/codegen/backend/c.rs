@@ -25,6 +25,7 @@ mod header;
 mod parallel;
 mod vec_hoist;
 mod vec_hoist_emit;
+mod vec_hoist_stores;
 
 /// Floating-point pragmas at the top of every generated C file (DETMATH): each
 /// `a * b + c` rounds twice, as written, under gcc, clang and MSVC alike, even
@@ -104,6 +105,8 @@ pub struct CBackend {
     current_vec_hoist: Option<vec_hoist::VecHoist>,
     /// User functions that cannot resize any vector (see `c/vec_hoist.rs`).
     vector_free_fns: std::collections::HashSet<String>,
+    /// Structs of plain numbers: storing one cannot replace a vector handle.
+    plain_structs: std::collections::HashSet<String>,
     /// Increment 5: guarded frees at block START for flag owners, keyed by
     /// the block's `bb<id>`. Same key space as `current_fn_block_frees`, but
     /// emitted through the flag guard (`if (__bl_live_N) { ...; __bl_live_N =
@@ -142,6 +145,7 @@ impl CBackend {
             current_fn_flag_owners: Vec::new(),
             current_vec_hoist: None,
             vector_free_fns: std::collections::HashSet::new(),
+            plain_structs: std::collections::HashSet::new(),
             current_fn_flag_block_frees: std::collections::HashMap::new(),
             experimental_free_override_for_test: None,
         }
@@ -1260,6 +1264,7 @@ impl CBackend {
 
         // Function definitions
         self.vector_free_fns = vec_hoist::vector_free_functions(module);
+        self.plain_structs = vec_hoist_stores::plain_structs(module);
         for func in &module.functions {
             if !func.is_declaration() {
                 self.generate_function(func)?;
@@ -2279,7 +2284,8 @@ impl CBackend {
 
         // Vector buffers and lengths loaded once, when nothing in the function
         // can resize or replace a vector (see `c/vec_hoist.rs`).
-        self.current_vec_hoist = vec_hoist::VecHoist::plan(func, &self.vector_free_fns);
+        self.current_vec_hoist =
+            vec_hoist::VecHoist::plan(func, &self.vector_free_fns, &self.plain_structs);
         if let Some(plan) = self.current_vec_hoist.clone() {
             self.emit_vec_hoist_decls(&plan, &func.locals);
         }
