@@ -114,7 +114,10 @@ fn the_prover_never_accepts_a_false_law() {
         "law f3(a: i64, b: i64) requires a > 0 { a * b != 7 * b + 1 }",
         "law f4(a: i64, b: i64) { a <= b || a > b + 1 }",
         "law f5(a: u64) { a % 1000003 != 999999 }",
-        "law f6(a: i32, b: i32) { a.wrapping_add(b) != 77 || a + b == 77 }",
+        // `a + b` traps exactly where the wrapping sum differs, so the earlier
+        // `|| a + b == 77` form is true on every run that finishes (proved
+        // since V2; see `wrapping_law_true_on_finishing_runs`). This form is false.
+        "law f6(a: i32, b: i32) { a.wrapping_add(b) != 77 || (a as i64) + (b as i64) == 77 }",
         "law f7(a: i64) { a * a != 4 }",
         "law f8(x: i64) { (x ^ 5) != 0 }",
         "law f9(a: i64, b: i64) requires a >= 0 && b >= 0 { a + b >= 1 }",
@@ -130,6 +133,23 @@ fn the_prover_never_accepts_a_false_law() {
             );
         }
     }
+}
+
+/// True under the stated meaning (every run that finishes makes it true):
+/// its only failing inputs make `a + b` trap.
+#[test]
+fn wrapping_law_true_on_finishing_runs() {
+    let out = run(
+        "law f6(a: i32, b: i32) { a.wrapping_add(b) != 77 || a + b == 77 }
+fn main() {}",
+    );
+    assert!(
+        !matches!(
+            verdict(&out, "f6"),
+            Verdict::Refuted { .. } | Verdict::Inconsistent { .. }
+        ),
+        "{out:?}"
+    );
 }
 
 #[test]

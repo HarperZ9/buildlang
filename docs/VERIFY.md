@@ -72,9 +72,10 @@ integer methods `abs`, `min`, `max`, `wrapping_add`, `wrapping_sub`, `wrapping_m
 concrete side only. Floats, heap values, effects, user-defined methods and generics are outside the subset and
 leave a claim unknown. Shift amounts are taken modulo the type's width, as the C backend emits them.
 
-No SMT solver is required. An external solver may be added as an optional executable: Z3 (MIT) and
-cvc5 (BSD-3-Clause) fit AGPL-3.0 distribution because nothing is linked or bundled. No Lean or TeX
-toolchain is used.
+**The bit-precise solver** (V2, below) takes each obligation the prover leaves open: it bit-blasts
+it at a width where no arithmetic wraps and runs a CDCL SAT solver inside `buildc`. An UNSAT answer
+is replayed by an independent checker before it counts; a SAT answer is an input the concrete side
+runs. No outside solver is downloaded, linked or run, and no Lean or TeX toolchain is used.
 
 ## V2: a bit-precise solver inside `buildc` (preregistered 2026-11-09, before the run)
 
@@ -105,6 +106,39 @@ Bounds and predictions, each a merge condition unless marked as a prediction:
 - S5 (condition). The replay checker refuses a forged learned clause and a proof that stops short.
 - S6 (condition). The SAT solver agrees with brute force on 300 random 3-SAT formulas, and every
   UNSAT answer among them replays.
+
+### V2 results (2026-11-09)
+
+| Set | Before (main 88ede1e) | After |
+|---|---|---|
+| `smt_false.bld`, 24 false claims | 6 refuted, 18 unknown, 0 proved | 23 refuted, 1 unknown, 0 proved |
+| `smt_true.bld`, 14 true claims | 5 proved, 9 unknown, 0 refuted | 12 proved, 2 unknown, 0 refuted |
+
+- S1 held: 0 proved, 0 inconsistent. The prediction of 24 refuted missed by one: `sum_sq`
+  (`a * a + b * b != 2.5e17`, a Diophantine needle) stays unknown within 30,000 conflicts. Seventeen
+  refutations come from solver inputs that the concrete evaluator re-ran.
+- S2 held: 0 refuted. 12 of 14 proved, at the predicted floor. The prediction named only
+  `inverse_round_trip` as at risk; `mul_div` (`(a * b) / b == a`) also stays unknown. Both are
+  multiplier equivalences, which bit-blasting with a plain SAT solver handles poorly.
+- S3 held, with one reclassification made in the open: the false-accept set's `f6`,
+  `a.wrapping_add(b) != 77 || a + b == 77`, was proved. Under this document's meaning it is true:
+  its only failing inputs make `a + b` overflow, so every run that finishes makes it true. It moves to
+  its own test (`wrapping_law_true_on_finishing_runs`, never refuted), and the set gains a form that
+  is false (`|| (a as i64) + (b as i64) == 77`), which the solver refutes.
+- S4 held, and showed a gap first. With `drop-carry` planted, the differential unit test fails as
+  required. But the first planted run of the two sets reported 17 false claims proved and refuted a
+  true one at an input outside `u64`: the replay checks the SAT proof, not the encoding. Two guards
+  were added before the final run. The encoder now checks itself on constant arithmetic at the
+  chosen width before any use (a faulty adder or multiplier makes the answer unknown), and a solver
+  input outside a parameter's type is never run. With both, the planted run gives the baseline
+  verdicts exactly: 0 proved, 6 refuted, 18 unknown, and 5 proved, 9 unknown.
+- S5 and S6 held (`compiler/src/verify/smt/tests.rs`).
+- Cost: the false set runs in about 15 s and the true set in about 48 s on this machine, most of it
+  in the two multiplier claims that hit the conflict budget.
+
+Trusted base, in plain words: the bit-blasting in `smt/enc.rs` encodes each operator as the concrete
+evaluator defines it (checked by the differential test on random terms and by the self-check at each
+width); the replay checker in `smt/rup.rs` is correct.
 
 ## Laws in the repository
 
