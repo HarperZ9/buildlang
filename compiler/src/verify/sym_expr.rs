@@ -69,7 +69,7 @@ pub(super) fn expr(sym: &mut Sym<'_>, e: &Expr, st: St, expect: Option<Ty>) -> R
                 (UnaryOp::Not, Some(Ty::Bool)) => val(s, not(t), ty),
                 (UnaryOp::Not | UnaryOp::BitNot, Some(it @ Ty::Int { .. })) => {
                     let r = Term::BitNot(it, Box::new(t));
-                    s.assume(in_range(&r, it));
+                    s.fact(in_range(&r, it));
                     val(s, r, ty)
                 }
                 (UnaryOp::Neg, Some(it @ Ty::Int { .. })) => {
@@ -156,7 +156,7 @@ pub(super) fn expr(sym: &mut Sym<'_>, e: &Expr, st: St, expect: Option<Ty>) -> R
                     Some(Ty::Bool) => t,
                     _ => cast(to, from, t),
                 };
-                s.assume(in_range(&t, to));
+                s.fact(in_range(&t, to));
                 val(s, t, Some(to))
             })
         }
@@ -181,6 +181,11 @@ pub(super) fn expr(sym: &mut Sym<'_>, e: &Expr, st: St, expect: Option<Ty>) -> R
             args,
             ..
         } => method_call(sym, receiver, &method.name, args, st, expect),
+        ExprKind::Break {
+            value: None,
+            label: None,
+        } => Ok(vec![(st, Out::Break)]),
+        ExprKind::Continue { label: None } => Ok(vec![(st, Out::Continue)]),
         ExprKind::While { .. } | ExprKind::Loop { .. } | ExprKind::For { .. } => {
             Err("a loop (outside the symbolic subset)".into())
         }

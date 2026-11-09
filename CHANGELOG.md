@@ -8,6 +8,13 @@ tracked in `STATUS.md`, `README.md`, and
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
 `108/108` or `132/132` are not the current release gate.
 
+## Unreleased: translation validation for the C backend
+
+- `buildc tv FILE [--out DIR] [--json]`: compile through the C backend, write a `buildlang-tv-cert/v1` certificate per function (source and C hashes, loop heads, variable map), and check it. `buildc tv-check SOURCE C CERT` runs the checker alone.
+- The checker parses the emitted C itself and imports nothing from the code generator or the MIR. It runs source and C symbolically between loop heads and proves that both trap on the same inputs and end each segment with equal variables or return values. Subset: integers up to 64 bits and bool, branches, `match`, `while`, `loop`, `break`, `continue`, `return`, calls.
+- Coverage, functions certified out of functions compiled: `tests/programs` 31 of 435, `stdlib` 22 of 139, none refused; most functions print or use strings, floats or structs. A planted miscompilation (`BUILDLANG_PLANT_MISCOMPILE=add-to-sub`) is caught in every function that adds; forged certificates and tampered C are refused. Details: `docs/TRANSLATION-VALIDATION.md`.
+- Found: an unannotated integer `let` used against an `i64` is emitted as `int32_t` (#159).
+
 ## Unreleased: laws and contracts
 
 - `law name(params) requires P { body }` and `fn f(..) -> T requires P ensures Q { .. }`: claims beside the code, type-checked like any function. `law`, `requires`, `ensures` and `result` are contextual words.

@@ -28,6 +28,7 @@ mod staticlib;
 mod stdlib_embed;
 mod symbol_graph;
 mod tool_receipt;
+mod tv_cli;
 mod verify_cli;
 
 use clap::{Parser as ClapParser, Subcommand};
@@ -468,6 +469,34 @@ enum Commands {
         json: bool,
     },
 
+    /// Translation validation: compile to C, certify each function, check the certificates
+    Tv {
+        /// Input file
+        file: PathBuf,
+
+        /// Keep the C file and the certificate in this directory
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+
+        /// Print the `buildlang-tv-report/v1` JSON report
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Check saved translation-validation certificates (the independent checker alone)
+    TvCheck {
+        /// The BuildLang source
+        source: PathBuf,
+        /// The C the backend emitted for it
+        c: PathBuf,
+        /// The certificate
+        cert: PathBuf,
+
+        /// Print the `buildlang-tv-report/v1` JSON report
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Mid-level IR (MIR) interlingua: emit and load the versioned JSON form
     Mir {
         #[command(subcommand)]
@@ -861,6 +890,13 @@ fn run_cli(cli: Cli) -> Result<(), i32> {
         Some(Commands::Lint { file }) => cmd_lint(&file),
         Some(Commands::Doctor) => cmd_doctor(),
         Some(Commands::Verify { file, json }) => verify_cli::cmd_verify(&file, json),
+        Some(Commands::Tv { file, out, json }) => tv_cli::cmd_tv(&file, out.as_deref(), json),
+        Some(Commands::TvCheck {
+            source,
+            c,
+            cert,
+            json,
+        }) => tv_cli::cmd_tv_check(&source, &c, &cert, json),
         Some(Commands::Mir { command }) => cmd_mir(command),
         Some(Commands::Bdf { command }) => cmd_bdf(command),
         Some(Commands::Bql { command }) => bql_cli::cmd_bql(command),

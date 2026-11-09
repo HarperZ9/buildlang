@@ -54,7 +54,7 @@ pub(super) fn method_call(
             "wrapping_sub" => {
                 let t = Term::App(format!("wrapping_sub_{ty}"), vec![x.clone(), y]);
                 let mut s3 = s2;
-                s3.assume(in_range(&t, ty));
+                s3.fact(in_range(&t, ty));
                 val(s3, t, Some(ty))
             }
             "min" | "max" => {

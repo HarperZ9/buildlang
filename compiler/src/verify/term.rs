@@ -97,6 +97,17 @@ pub fn neg(a: Term) -> Term {
 }
 
 pub fn bits(op: BOp, ty: Ty, a: Term, b: Term) -> Term {
+    // A shift amount is taken modulo the width; the mask is part of the term,
+    // so `x << n` and `x << (n & 31)` on an i32 are one term.
+    let b = if matches!(op, BOp::Shl | BOp::Shr) && !matches!(b, Term::Int(_)) {
+        let mask = Term::Int(ty.bits() as i128 - 1);
+        match &b {
+            Term::Bits(BOp::And, _, _, m) if **m == mask => b,
+            _ => Term::Bits(BOp::And, ty, Box::new(b), Box::new(mask)),
+        }
+    } else {
+        b
+    };
     if let (Term::Int(x), Term::Int(y)) = (&a, &b) {
         if let Some(v) = super::eval::bit_op(op, ty, *x, *y) {
             return Term::Int(v);

@@ -4927,7 +4927,13 @@ impl CBackend {
     }
 
     fn checked_int_binop_helper(op: BinOp, signed: bool) -> Option<&'static str> {
+        // A planted miscompilation for the translation-validation checks:
+        // with BUILDLANG_PLANT_MISCOMPILE=add-to-sub, a checked `+` emits the
+        // subtract helper. Never set outside those tests.
+        let planted = std::env::var("BUILDLANG_PLANT_MISCOMPILE").as_deref() == Ok("add-to-sub");
         match (op, signed) {
+            (BinOp::Add, true) if planted => Some("bl_isub_"),
+            (BinOp::Add, false) if planted => Some("bl_usub_"),
             (BinOp::Add, true) => Some("bl_iadd_"),
             (BinOp::Sub, true) => Some("bl_isub_"),
             (BinOp::Mul, true) => Some("bl_imul_"),

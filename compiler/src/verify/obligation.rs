@@ -53,6 +53,7 @@ pub(super) fn prove_symbolic(
         .collect();
     let mut st0 = St {
         conds: Vec::new(),
+        facts: Vec::new(),
         vars: Vec::new(),
         ret: None,
     };
@@ -76,13 +77,13 @@ pub(super) fn prove_symbolic(
         for (s2, o) in sym.call(name, args.clone(), s)? {
             let Out::Val(v, _) = o else { continue };
             match kind {
-                Kind::Law => goals.push((s2.conds, v)),
+                Kind::Law => goals.push((s2.hyps(), v)),
                 Kind::Ensures => {
                     let mut eargs = args.clone();
                     eargs.push(v);
                     for (s3, o3) in sym.call(&format!("{ENSURES_PREFIX}{name}"), eargs, s2)? {
                         if let Out::Val(g, _) = o3 {
-                            goals.push((s3.conds, g));
+                            goals.push((s3.hyps(), g));
                         }
                     }
                 }

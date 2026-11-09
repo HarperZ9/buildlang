@@ -28,7 +28,7 @@ pub mod search;
 pub mod sym;
 mod sym_expr;
 mod sym_match;
-mod sym_ops;
+pub mod sym_ops;
 pub mod term;
 pub mod ty;
 
