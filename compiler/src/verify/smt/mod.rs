@@ -49,7 +49,7 @@ fn conjuncts<'t>(t: &'t Term, out: &mut Vec<&'t Term>) {
 
 /// Bounds the hypotheses state for parameters and call results: `t >= c`,
 /// `t <= c` as top-level conjuncts.
-fn stated_bounds(hyps: &[Term]) -> HashMap<Term, (i128, i128)> {
+pub(crate) fn stated_bounds(hyps: &[Term]) -> HashMap<Term, (i128, i128)> {
     let mut out: HashMap<Term, (i128, i128)> = HashMap::new();
     let mut cs = Vec::new();
     for h in hyps {

@@ -59,4 +59,22 @@ law shr_needle(x: i64) { (x >> 40) != -123456 }
 
 law sub_needle(a: u32, b: u32) requires a >= b { a - b != 3141592653 }
 
+// V3 refusal claims, aimed at the word-level rules.
+
+law div_plus_one(a: i64, b: i64) requires b > 0 && b < 1000000000 && a > -1000000000 && a < 1000000000 {
+    (a * b + 1) / b == a
+}
+
+law rem_plus_one(a: i64, b: i64) requires b > 1 && b < 1000000000 && a > -1000000000 && a < 1000000000 {
+    (a * b + 1) % b == 0
+}
+
+law div_other(a: i64, b: i64, c: i64) requires a > 0 && a < 1000 && b > 0 && b < 1000 && c > 0 && c < 1000 {
+    (a * b) / c == a
+}
+
+law inverse_off_by_two(x: u64) { x.wrapping_mul(3).wrapping_mul(12297829382473034413) == x }
+
+law wmul_to_zero(x: u64) { x.wrapping_mul(4611686018427387904).wrapping_mul(4) != 0 || x == 0 }
+
 fn main() {}

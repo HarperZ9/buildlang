@@ -30,4 +30,14 @@ law xor_self(x: i64) { (x ^ x) == 0 }
 
 law avg_no_overflow(a: u32, b: u32) { ((a & b) as u64) + (((a ^ b) >> 1) as u64) == ((a as u64) + (b as u64)) / 2 }
 
+// V3 acceptance claims: exact division.
+
+law div_exact_scaled(a: i64, b: i64) requires b != 0 && a > -1000000000 && a < 1000000000 && b > -1000000000 && b < 1000000000 {
+    (a * b * 2) / (b * 2) == a
+}
+
+law rem_exact(a: i64, b: i64) requires b != 0 && a > -1000000000 && a < 1000000000 && b > -1000000000 && b < 1000000000 {
+    (a * b) % b == 0
+}
+
 fn main() {}

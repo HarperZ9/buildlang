@@ -132,6 +132,10 @@ pub fn poly(t: &Term) -> Option<Poly> {
                             }));
                         }
                     }
+                    if let Some(q) = super::poly_div::exact_div(&pa, &pb) {
+                        // `n = d * q` exactly; every finishing run has `d != 0`.
+                        return Some(if *op == AOp::Div { q } else { Poly::default() });
+                    }
                     let tag = if *op == AOp::Div { "div" } else { "rem" };
                     Poly::atom(format!("{tag}({},{})", pa.canon(), pb.canon()))
                 }
@@ -233,6 +237,11 @@ fn bits_poly(op: BOp, ty: super::ty::Ty, a: &Term, b: &Term) -> Option<Poly> {
                 konst = None;
             }
         }
+        BOp::WMul => match konst {
+            Some(1) => konst = None,
+            Some(0) => return Some(Poly::constant(0)),
+            _ => {}
+        },
         _ => {}
     }
     if names.is_empty() {

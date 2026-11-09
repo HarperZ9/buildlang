@@ -78,7 +78,12 @@ pub(super) fn prove_symbolic(
             prove::Proof::Valid => continue,
             prove::Proof::NotShown(why) => why,
         };
-        match smt::decide(hyps, goal, planted()) {
+        let decided = smt::decide(hyps, goal, planted());
+        if decided != smt::Answer::Valid {
+            // Roots of a polynomial (dis)equality: candidates only, run below.
+            candidates.extend(super::roots::candidates(hyps, goal, params, 16));
+        }
+        match decided {
             smt::Answer::Valid => by_smt += 1,
             smt::Answer::Candidate(m) => {
                 candidates.push(m);
