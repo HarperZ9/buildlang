@@ -16,6 +16,10 @@ tracked in `STATUS.md`, `README.md`, and
 
 - `let s = 60.3; let mut c = 0; s / c` checked with the float literal's variable bound to the integer one, so the division was emitted as `bl_idiv_i32` and printed 60. The unifier now makes an integer literal that meets a float literal a float, and lowering takes the float type the checker inferred for an unannotated `let`, as #159 did for wide integers. `compiler/tests/float_let_inference.rs`: two programs print the truncated value on main before the fix (60 and 3 where 60.3 and 3.5 are right); a control keeps `7 / 2` at 3.
 
+## Unreleased: BuildDB checkpoints by rename and flushes its WAL
+
+- A checkpoint writes `<db>.tmp`, flushes it and renames it over `<db>` (`rename_file`, `fsync_file`, #166), half the bytes of the old `.ckpt`-then-`.db` double write; a commit flushes the WAL. Crash test 194 points, 0 violations. Flushing costs an autocommit INSERT process 4.24 ms per row against 0.43 ms; `QDB_SYNC=off` skips the flushes (`bdb/COMPLETE.md` P14).
+
 ## Unreleased: BuildDB (qdb) moves into bdb/
 
 - qdb, the SQL engine in BuildLang, moved from HarperZ9/build-universe `programs/db.bld` to `bdb/db.bld` with its 46-commit history (author decision 2026-11-09, "Move into BuildLang"). `.github/workflows/bdb.yml` builds it with the buildc of each checkout and runs its regression harness (214 pass, 1 expected failure), the differential and WAL recovery tests against the pre-rewrite reference engine, and `bql::tests::in_process_subset_matches_qdb` with `QDB_BIN` set. `bdb/` is relicensed from FSL-1.1-MIT to AGPL-3.0-only, the licence of the rest of the repository (author decision 2026-11-09; `bdb/LICENSE`, `NOTICE`).

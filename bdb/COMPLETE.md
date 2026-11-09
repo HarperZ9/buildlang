@@ -427,13 +427,29 @@ harness unchanged. Before: 1,251 of 2,000 on this branch, re-run before the chan
   a key column); a constrained bulk load is quadratic until keys get an index. DEFAULT, CHECK and
   FOREIGN KEY are not read.
 
+## After P14: atomic replace and fsync (2026-11-09, feat/bdb-atomic)
+
+- **Crash test:** 194 crash points, 0 violations (170 and 0 before). Prediction (150 to 260
+  points, 0 violations) held. Planted check: a build that renames first and then rewrites the
+  live `.db` shows 14 violations at 166 points: caught.
+- **Bytes per checkpoint:** a 500-row checkpoint wrote 17,674 bytes (`.ckpt` 8,849 plus `.db`
+  8,825) and now writes 8,825 (`.tmp`), half as predicted.
+- **The cost of flushing** (`bench_qdb_load.py`, 16,000 rows): one process per autocommit INSERT
+  goes from 0.43 ms to 4.24 ms per row with the WAL flushed at each commit (exponent 1.00), and
+  0.40 ms with `QDB_SYNC=off`; inside a transaction 0.33 to 0.35 ms either way. P1 takes 463 s
+  instead of 269 s for the same 8,921 passes.
+- **Guards:** test_qdb.sh no FAIL; P1 8,921 of 9,202; P2 2,000 of 2,000; text 0 changed; WAL 0;
+  library 0; reference differential 16 of 16.
+- Not covered: a power cut can drop or reorder writes that were never flushed; this run stops
+  processes only. The seeded-fault simulation is next.
+
 ## Stage 1: a correct, durable single-file engine
 
 | Row | Check (fails if) | Status | Evidence |
 |---|---|---|---|
 | 1a Regression gate | `bdb/tests/test_qdb.sh` reports any FAIL | PASS | 290 pass, 0 fail after P13; 277 after P12; 274 after P11; 257 after P10; 250 after P9; 244 after P8; 241 after P7; 222 after the completion changes (214/0/1 at the move) |
 | 1b SQLite differential | any of the P2 queries disagrees, with numbers compared as numbers | PASS | 2,000 of 2,000 after P8, a CI gate; 1,944 after P7; 1,251 at the move (519 null_vs_empty, 230 rows, 46 number_text) |
-| 1c Crash recovery | any P3 crash point breaks the rule | PASS | 0 violations of 170 (24 of 104 at the move); two mutants caught |
+| 1c Crash recovery | any P3 crash point breaks the rule | PASS | 0 violations of 194 after P14 (checkpoint by rename, WAL flushed at commit); 0 of 170 with `.ckpt`; 24 of 104 at the move. Process stops only; power cuts are not simulated |
 | 1d Cross-process transaction | either P4 case misses | PASS | four checks in test_qdb.sh (`xproc_*`), differential process mode equals REPL mode on 8 seeds |
 | 1e Text round trip | any P5 value changes | PASS | 2,000 of 2,000 (`test_qdb_text.py`); format 0 files still load |
 | 1f NULL apart from '' | `INSERT (NULL)` and `INSERT ('')` are indistinguishable by `IS NULL`, or `NOT (NULL = x)` is true | PASS | P7: NULL is its own value with three-valued logic; 19 checks in test_qdb.sh; P2 null_vs_empty 519 to 0. Before: both stored an empty cell |

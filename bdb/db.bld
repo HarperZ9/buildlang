@@ -86,8 +86,9 @@
 //   ROW 3|\N|           NULL is \N; an empty cell is ''
 //   END
 //   INDEX idx_age ON users (age)
-// The checkpoint writes the same text to <db>.ckpt first, ending in
-// "QDB CHECKPOINT COMPLETE"; a complete .ckpt wins over the .db at load.
+// The checkpoint writes the text to <db>.tmp, flushes it and renames it
+// over <db> (P14). A complete <db>.ckpt, ending in "QDB CHECKPOINT
+// COMPLETE", left by a build before P14 still wins over the .db at load.
 // =============================================================================
 
 // =========================================================================
