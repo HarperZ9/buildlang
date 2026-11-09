@@ -71,3 +71,29 @@ multiply check, which divides, was nearly the whole gap there.
   at 0.99x, so BuildLang at -O3 is level with Rust while still checking every overflow Rust wraps.
 - n-body did not move: its cost is the generic vector (runtime calls through a `void*` with the
   element size read at run time), not arithmetic.
+
+## Third run: vector accesses as plain C array reads (2026-11-09, `results/run-2026-11-09-typed-vec.json`)
+
+Preregistered before the timed run: a function that cannot resize or replace a vector loads the
+vector's buffer and length once at entry and indexes them with `sizeof(T)` as the stride; every
+bounds check stays, with the same message and exit code 101. The struct setter stores through a
+typed pointer instead of `memcpy`. Prediction: n-body 0.95 to 1.15x of C at -O2 with the hoisting,
+1.2 to 1.5x with the typed store alone. Hand edits of the emitted C, timed while a test suite ran
+(noisy, directional only): 1167 ms base, about 590 ms typed store alone, about 430 ms hoisted, C
+about 410 ms.
+
+| Benchmark | `bl_O2` | `bl_O3` | `rust` | `c_O2` |
+|---|---|---|---|---|
+| n-body, 5,000,000 steps | 0.319 s, 0.98x (0.93-1.07) | 0.313 s, 0.98x (0.92-1.01) | 0.319 s, 1.02x (0.95-1.04) | 0.324 s |
+| spectral-norm, n = 3000 | 0.790 s, 1.06x (1.04-1.09) | 0.749 s, 1.01x (0.99-1.02) | 0.740 s, 1.00x (0.97-1.02) | 0.743 s |
+
+- n-body: from 3.35x to 0.98x of C at -O2, level with Rust (1.02x), every bounds check kept. The
+  prediction held. The intervals overlap, so this is a tie with C and Rust, not a lead.
+- spectral-norm: from 1.20x to 1.06x at -O2 (its `mul_av` loops now hoist; the call to the scalar
+  function `a` is allowed because `a` cannot reach a vector), 1.01x at -O3.
+- Which part did what, from the hand edits: a constant stride (`sizeof(T)` instead of the runtime
+  element size) was worth about 110 ms of n-body; an entry check that called an abort function
+  cost about 100 ms, so a vector whose element size does not match its type gets a hoisted length
+  of 0 instead, and its first access stops with a layout message.
+- Removing the bounds checks entirely after hoisting (hand edit) showed no difference outside the
+  noise on n-body, so proved-check removal has little left to win on this kernel.

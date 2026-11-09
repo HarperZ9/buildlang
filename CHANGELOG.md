@@ -10,6 +10,12 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+### Vector accesses as plain C array reads, bounds checks kept
+
+- A function that cannot resize or replace a vector (every call is a maths routine, an element store or a user function that cannot reach a vector) loads each vector parameter's buffer and length once and indexes them with a constant stride. Each access keeps its bounds check, message and exit code 101. A vector whose runtime element size differs from its type stops at its first access with a layout message instead of being read at the wrong offsets.
+- The struct-element setter stores through a typed pointer instead of `memcpy`, and the index abort is marked cold.
+- n-body (`bench/speed-2026-11`): 3.35x to 0.98x of C at gcc -O2 (Rust 1.02x); spectral-norm 1.20x to 1.06x (-O3: 1.01x, Rust 1.00x). `compiler/tests/vec_hoist.rs`.
+
 ### Checked integer arithmetic through the overflow builtins
 
 - Plain `+`, `-` and `*` still trap on overflow, but under gcc and clang the C helpers use `__builtin_*_overflow` instead of comparisons and, for `*`, a division. spectral-norm (`bench/speed-2026-11`): 2.25x to 1.20x of C at gcc -O2, 1.01x at -O3; Rust 0.99x. Other compilers keep the portable helpers. `compiler/tests/checked_arith_builtins.rs` holds the edge results and traps for every width from `i8` to `u64`.
