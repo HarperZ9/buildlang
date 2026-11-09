@@ -1,0 +1,76 @@
+// fannkuch-redux: checksum and maximum flip count over all permutations of n.
+fn fannkuch(n: i64, perm: &mut Vec<i64>, perm1: &mut Vec<i64>, count: &mut Vec<i64>, res: &mut Vec<i64>) {
+    let mut max_flips = 0;
+    let mut checksum = 0;
+    let mut odd = false;
+    let mut r = n;
+    let mut done = false;
+    while !done {
+        while r != 1 {
+            count[r - 1] = r;
+            r = r - 1;
+        }
+        let mut i = 0;
+        while i < n {
+            perm[i] = perm1[i];
+            i = i + 1;
+        }
+        let mut flips = 0;
+        let mut k = perm[0];
+        while k != 0 {
+            let mut lo = 0;
+            let mut hi = k;
+            while lo < hi {
+                let t = perm[lo];
+                perm[lo] = perm[hi];
+                perm[hi] = t;
+                lo = lo + 1;
+                hi = hi - 1;
+            }
+            flips = flips + 1;
+            k = perm[0];
+        }
+        if flips > max_flips { max_flips = flips; }
+        if odd { checksum = checksum - flips; } else { checksum = checksum + flips; }
+        odd = !odd;
+        let mut next = false;
+        while !next {
+            if r == n {
+                done = true;
+                next = true;
+            } else {
+                let p0 = perm1[0];
+                let mut j = 0;
+                while j < r {
+                    perm1[j] = perm1[j + 1];
+                    j = j + 1;
+                }
+                perm1[r] = p0;
+                count[r] = count[r] - 1;
+                if count[r] > 0 { next = true; } else { r = r + 1; }
+            }
+        }
+    }
+    res[0] = checksum;
+    res[1] = max_flips;
+}
+
+fn main() ~ Console + Environment {
+    let n = args_get(1).parse_int();
+    let mut perm: Vec<i64> = Vec::new();
+    let mut perm1: Vec<i64> = Vec::new();
+    let mut count: Vec<i64> = Vec::new();
+    let mut res: Vec<i64> = Vec::new();
+    let mut i = 0;
+    while i < n {
+        perm.push(0);
+        perm1.push(i);
+        count.push(0);
+        i = i + 1;
+    }
+    res.push(0);
+    res.push(0);
+    fannkuch(n, &mut perm, &mut perm1, &mut count, &mut res);
+    println!("{}", res[0]);
+    println!("Pfannkuchen({}) = {}", n, res[1]);
+}

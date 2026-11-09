@@ -1,0 +1,47 @@
+// binary-trees, arena form: nodes live in two index vectors; a tree is built
+// bottom-up and walked to count its nodes. Same iteration plan as the
+// benchmarks-game program.
+fn build(d: i64, left: &mut Vec<i64>, right: &mut Vec<i64>) -> i64 {
+    let mut l = 0 - 1;
+    let mut r = 0 - 1;
+    if d > 0 {
+        l = build(d - 1, left, right);
+        r = build(d - 1, left, right);
+    }
+    left.push(l);
+    right.push(r);
+    left.len() as i64 - 1
+}
+
+fn check(i: i64, left: &Vec<i64>, right: &Vec<i64>) -> i64 {
+    let l = left[i];
+    if l < 0 { return 1; }
+    1 + check(l, left, right) + check(right[i], left, right)
+}
+
+fn main() ~ Console + Environment {
+    let n = args_get(1).parse_int();
+    let mut ll: Vec<i64> = Vec::new();
+    let mut lr: Vec<i64> = Vec::new();
+    let long_root = build(n, &mut ll, &mut lr);
+    let mut left: Vec<i64> = Vec::new();
+    let mut right: Vec<i64> = Vec::new();
+    let mut d = 4;
+    while d <= n {
+        let mut iters = 1;
+        let mut s = 0;
+        while s < n - d + 4 { iters = iters * 2; s = s + 1; }
+        let mut total = 0;
+        let mut k = 0;
+        while k < iters {
+            left.clear();
+            right.clear();
+            let root = build(d, &mut left, &mut right);
+            total = total + check(root, &left, &right);
+            k = k + 1;
+        }
+        println!("{} trees of depth {} check: {}", iters, d, total);
+        d = d + 2;
+    }
+    println!("long lived tree of depth {} check: {}", n, check(long_root, &ll, &lr));
+}

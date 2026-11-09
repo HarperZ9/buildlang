@@ -1,0 +1,38 @@
+// mandelbrot: n by n grid, 50 iterations; prints the in-set count and a hash
+// of the in-set bits in row order.
+fn main() ~ Console + Environment {
+    let n = args_get(1).parse_int();
+    let nf = n as f64;
+    let mut inside: i64 = 0;
+    let mut h: u64 = 1469598103934665603;
+    let mut y = 0;
+    while y < n {
+        let ci = 2.0 * (y as f64) / nf - 1.0;
+        let mut x = 0;
+        while x < n {
+            let cr = 2.0 * (x as f64) / nf - 1.5;
+            let mut zr = 0.0;
+            let mut zi = 0.0;
+            let mut tr = 0.0;
+            let mut ti = 0.0;
+            let mut i = 0;
+            while i < 50 && tr + ti <= 4.0 {
+                zi = 2.0 * zr * zi + ci;
+                zr = tr - ti + cr;
+                tr = zr * zr;
+                ti = zi * zi;
+                i = i + 1;
+            }
+            let mut bit: u64 = 0;
+            if tr + ti <= 4.0 {
+                bit = 1;
+                inside = inside + 1;
+            }
+            h = (h ^ bit).wrapping_mul(1099511628211);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    println!("{}", inside);
+    println!("{}", h);
+}
