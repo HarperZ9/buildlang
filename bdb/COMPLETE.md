@@ -208,6 +208,23 @@ by 0 to 30, from `statement error` records that expect a constraint failure. Gua
 no FAIL; P2 2,000 of 2,000; text, crash, WAL, library and reference differential unchanged; bulk
 load slope (row 3a) is unchanged for a table with no constraint. Planted check: a build that
 skips the check on UPDATE fails a new test_qdb.sh assertion.
+**P14. Atomic replace and fsync (scoreboard target 2, issue #166), written 2026-11-09 03:14 PT before the
+change.** The checkpoint wrote the whole state twice (`<db>.ckpt` with a completion line, then
+`<db>`), and nothing was flushed, so a power cut could lose committed rows. With the new
+`rename_file` and `fsync_file` builtins, a checkpoint writes `<db>.tmp`, flushes it and renames
+it over `<db>`; a commit flushes the WAL after appending it. Both the flush and the rename are
+crash points of the fault hook, so `test_qdb_crash.py` stops the process before each. A complete
+`.ckpt` left by an older build still wins at load and is cleared at the next checkpoint.
+`QDB_SYNC=off` skips the flushes (the rename stays). Measured on `test_qdb_crash.py` unchanged:
+prediction 0 violations, at a different number of crash points (each statement gains a WAL
+flush; each checkpoint swaps two `.ckpt` writes for a flush and a rename), between 150 and 260.
+Bytes written per checkpoint fall by half (one copy of the state instead of two), measured with
+`QDB_TRACE_WRITES=1` on the crash workload. The cost of flushing: `bench_qdb_load.py` at 1,000,
+4,000 and 16,000 rows, reported with and without `QDB_SYNC=off`; no bound is set, the number is
+reported. Guards: test_qdb.sh no FAIL, P1 8,921, P2 2,000, text, WAL, library and reference
+differential unchanged. Planted check: a build that renames before the `.tmp` write completes
+(rename, then write) shows violations in the crash test. Power loss itself (dropped or reordered
+unflushed writes) is not simulated here; that is the seeded-fault work that follows.
 
 ### Amendments
 
