@@ -86,8 +86,9 @@
 //   ROW 3|\N|           NULL is \N; an empty cell is ''
 //   END
 //   INDEX idx_age ON users (age)
-// The checkpoint writes the same text to <db>.ckpt first, ending in
-// "QDB CHECKPOINT COMPLETE"; a complete .ckpt wins over the .db at load.
+// The checkpoint writes the text to <db>.tmp, flushes it and renames it
+// over <db> (P14). A complete <db>.ckpt, ending in "QDB CHECKPOINT
+// COMPLETE", left by a build before P14 still wins over the .db at load.
 // =============================================================================
 
 // =========================================================================
@@ -298,6 +299,7 @@ struct DB {
     ckpt_path: String,
     crash_at: i32,
     crash_torn: bool,
+    sync_on: bool,
     trace_writes: bool,
     write_seq: i32,
     // Set by any mutation that moves or rewrites existing rows (UPDATE,
@@ -435,7 +437,7 @@ fn db_new(db_path: String) -> DB {
         wal_buf: "",
         wal_bytes: 0, db_bytes: 0,
         fmt_escaped: false, fmt_nulls: false, applied_txid: 0, ckpt_path: cp,
-        crash_at: 0, crash_torn: false, trace_writes: false, write_seq: 0,
+        crash_at: 0, crash_torn: false, sync_on: true, trace_writes: false, write_seq: 0,
         idx_stale: false,
         snap_cells: vec![], snap_row_starts: vec![], snap_row_counts: vec![],
         snap_tbl_names: vec![], snap_tbl_count: 0,
@@ -676,9 +678,14 @@ fn db_text(d: &DB) -> String {
 fn ckpt_marker() -> String { "QDB CHECKPOINT COMPLETE\n" }
 
 fn db_save(d: &mut DB) -> i64 ~ Console + FileSystem + Process {
+    // P14: one copy of the state, made atomic by rename: write <db>.tmp,
+    // flush it, rename it over <db>. A crash before the rename leaves the old
+    // .db and the WAL, which replay recovers; after it, the new .db.
     let all = db_text(d);
-    durable_write(d, d.ckpt_path, all + ckpt_marker(), false, "ckpt");
-    durable_write(d, d.db_path, all, false, "db");
+    let tmp = d.db_path + ".tmp";
+    durable_write(d, tmp, all, false, "db_tmp");
+    durable_sync(d, tmp, "db_tmp_sync");
+    durable_rename(d, tmp, d.db_path, "db_rename");
     all.len()
 }
 
@@ -984,6 +991,32 @@ fn durable_write(d: &mut DB, path: String, text: String, append: bool, tag: Stri
     if append { append_file(path, text); } else { write_file(path, text); }
 }
 
+// Flush a file to the device (P14). A crash point of the fault hook like a
+// write: stopped before it, the bytes are written and not flushed, which a
+// process crash cannot tell from flushed. QDB_SYNC=off skips the flush.
+fn durable_sync(d: &mut DB, path: String, tag: String) ~ Console + FileSystem + Process {
+    d.write_seq = d.write_seq + 1;
+    if d.trace_writes {
+        eprintln!("QDB_WRITE {} {} 0", d.write_seq, tag);
+    }
+    if d.crash_at > 0 && d.write_seq == d.crash_at { process_exit(77); }
+    if d.sync_on { fsync_file(path); }
+}
+
+// Replace `to` with `from` in one step (P14). A crash point; a rename is
+// never torn, so the torn mode stops before it as well.
+fn durable_rename(d: &mut DB, from: String, to: String, tag: String) ~ Console + FileSystem + Process {
+    d.write_seq = d.write_seq + 1;
+    if d.trace_writes {
+        eprintln!("QDB_WRITE {} {} 0", d.write_seq, tag);
+    }
+    if d.crash_at > 0 && d.write_seq == d.crash_at { process_exit(77); }
+    if !rename_file(from, to) {
+        eprintln!("Error: could not replace {} with {}", to, from);
+        process_exit(1);
+    }
+}
+
 // Append newline-terminated text to the WAL in a single write.
 fn wal_append(d: &mut DB, text: String, tag: String) ~ Console + FileSystem + Process {
     durable_write(d, d.wal_path, text, true, tag);
@@ -1002,7 +1035,11 @@ fn wal_checkpoint(d: &mut DB) ~ Console + FileSystem + Process {
     if file_exists(d.wal_path) {
         durable_write(d, d.wal_path, "", false, "wal_clear");
     }
-    durable_write(d, d.ckpt_path, "", false, "ckpt_clear");
+    // A complete .ckpt from a build before P14 would win over this .db at
+    // the next load; clear it once.
+    if file_exists(d.ckpt_path) {
+        durable_write(d, d.ckpt_path, "", false, "ckpt_clear");
+    }
     d.wal_bytes = 0;
 }
 
@@ -1286,6 +1323,7 @@ fn wal_commit(d: &mut DB) ~ Console + FileSystem + Process {
         return;
     }
     wal_write(d, "COMMIT", "wal_commit");
+    durable_sync(d, d.wal_path, "wal_sync");
     d.in_transaction = false;
     maybe_checkpoint(d);
 }
@@ -1327,6 +1365,7 @@ fn wal_log_mutation(d: &mut DB, sql: String) ~ Console + FileSystem + Process {
         // append so a torn write cannot leave a COMMIT without its OP.
         d.txn_id = d.txn_id + 1;
         wal_append(d, "TXID " + to_string_i32(d.txn_id) + "\n" + wal_op_line(sql) + "\nCOMMIT\n", "wal_auto");
+        durable_sync(d, d.wal_path, "wal_sync");
         maybe_checkpoint(d);
     }
 }
@@ -9236,6 +9275,7 @@ fn main() ~ Console + Environment + FileSystem + Process {
     let crash_at = getenv("QDB_CRASH_AT");
     if crash_at.len() > 0 { d.crash_at = parse_int_str(crash_at); }
     d.crash_torn = getenv("QDB_CRASH_MODE") == "torn";
+    d.sync_on = getenv("QDB_SYNC") != "off";
     d.trace_writes = getenv("QDB_TRACE_WRITES") == "1";
     db_load(&mut d);
     // Replay any committed transactions from WAL (crash recovery)
