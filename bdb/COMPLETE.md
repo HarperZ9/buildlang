@@ -261,11 +261,25 @@ harness unchanged. Before: 1,251 of 2,000 on this branch, re-run before the chan
   preregistration said it would (that engine divides AVG as integers and rounds to two
   decimals), and passes 16 of 16 with `--no-null --no-float-agg`, which CI now runs.
 
+## After P9: sqllogictest setup and literal-first comparisons (2026-11-08, feat/bdb-slt-setup)
+
+- **P1 sqllogictest:** 199 of 9,202 query records pass (2.16 percent), 75 wrong, 8,928 rejected;
+  statements 1,918 of 1,993 as expected. Before (P8): 33, 59, 9,110; statements 134. Prediction
+  (statements at least 1,800; queries 45 to 300) held. By file: `select4.test` 0 to 133 queries
+  and 0 to 1,019 statements; `select5.test` 0 to 704 statements, its 732 queries still rejected
+  (comma-separated FROM lists of several tables, refused as trailing input). The rest of the gain is in `evidence/`. The largest rejection
+  classes left are expressions in the select list (row 2b), INTERSECT and EXCEPT, and comma-separated FROM lists
+  of more than two tables.
+- **P2:** 2,000 of 2,000, unchanged.
+- **Guards:** test_qdb.sh 250 pass, 0 fail (six checks added; a build that does not mirror the
+  operator fails three); text 0 changed; crash 0 of 170; WAL 0; library 0; reference differential
+  16 of 16 with `--no-null --no-float-agg`.
+
 ## Stage 1: a correct, durable single-file engine
 
 | Row | Check (fails if) | Status | Evidence |
 |---|---|---|---|
-| 1a Regression gate | `bdb/tests/test_qdb.sh` reports any FAIL | PASS | 244 pass, 0 fail after P8; 241 after P7; 222 after the completion changes (214/0/1 at the move) |
+| 1a Regression gate | `bdb/tests/test_qdb.sh` reports any FAIL | PASS | 250 pass, 0 fail after P9; 244 after P8; 241 after P7; 222 after the completion changes (214/0/1 at the move) |
 | 1b SQLite differential | any of the P2 queries disagrees, with numbers compared as numbers | PASS | 2,000 of 2,000 after P8, a CI gate; 1,944 after P7; 1,251 at the move (519 null_vs_empty, 230 rows, 46 number_text) |
 | 1c Crash recovery | any P3 crash point breaks the rule | PASS | 0 violations of 170 (24 of 104 at the move); two mutants caught |
 | 1d Cross-process transaction | either P4 case misses | PASS | four checks in test_qdb.sh (`xproc_*`), differential process mode equals REPL mode on 8 seeds |
@@ -277,9 +291,9 @@ harness unchanged. Before: 1,251 of 2,000 on this branch, re-run before the chan
 
 | Row | Check (fails if) | Status | Evidence |
 |---|---|---|---|
-| 2a sqllogictest queries | any P1 query record does not pass | FAIL | 33 of 9,202 (0.36 percent) after P7, 32 before; `bdb/tests/slt_run.py` |
+| 2a sqllogictest queries | any P1 query record does not pass | FAIL | 199 of 9,202 (2.16 percent) after P9; 33 after P7 and P8; 32 at the move; `bdb/tests/slt_run.py` |
 | 2b Expressions in the select list | `SELECT a+1, a*b-c FROM t` refused or wrong | FAIL | refused: "expected keyword 'FROM'"; the largest single cause of P1 rejections |
-| 2c Column types with arguments and constraints | `VARCHAR(30)`, `INTEGER PRIMARY KEY`, `UNIQUE` refused | FAIL | 581 P1 rejections follow from refused setup |
+| 2c Column types with arguments and constraints | `VARCHAR(30)`, `INTEGER PRIMARY KEY`, `UNIQUE` refused | FAIL | P9: type arguments are read (`VARCHAR(30)`, `DECIMAL(10, 2)`), statements 134 to 1,918 of 1,993; `PRIMARY KEY` is parsed and not enforced; `UNIQUE` is refused |
 | 2d CASE, scalar functions (abs, coalesce) | refused or wrong | NOT BUILT | |
 | 2e Correlated subqueries, EXISTS | refused or wrong | NOT BUILT | |
 
