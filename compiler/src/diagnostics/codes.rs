@@ -20,6 +20,7 @@
 //! - `BL0500`..`BL0599`: ownership, borrows and linear values
 //! - `BL0600`..`BL0699`: units, modules and macros
 //! - `BL0700`..`BL0799`: packages, the registry and the lockfile
+//! - `BL0800`..`BL0899`: laws and contracts (`buildc verify`)
 //! - `BL0900`..`BL0999`: backend
 
 use crate::lexer::LexerErrorKind;
@@ -228,6 +229,8 @@ pub fn type_code(error: &TypeError) -> &'static str {
         E::MeasuredConstantInvalid { .. } => "BL0605",
         E::ModuleImportCycle { .. } => "BL0610",
         E::FormatArgNotStringLiteral { .. } => "BL0620",
+        E::SpecRefuted { .. } => "BL0801",
+        E::SpecInconsistent { .. } => "BL0802",
         E::BackendRejected { .. } => "BL0901",
     }
 }
@@ -419,6 +422,11 @@ pub const CODES: &[CodeInfo] = &[
         "that package version is already published with other contents",
     ),
     c("BL0708", "a package file could not be read or written"),
+    c("BL0801", "a law or contract is false on a concrete input"),
+    c(
+        "BL0802",
+        "the verifier's proof and a counterexample disagree",
+    ),
     c("BL0901", "the C backend cannot compile the program"),
 ];
 

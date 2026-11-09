@@ -211,6 +211,13 @@ A test in `compiler/src/diagnostics/tests.rs` fails if this table and the compil
 | BL0707 | that package version is already published with other contents |
 | BL0708 | a package file could not be read or written |
 
+## Laws and contracts
+
+| Code | Meaning |
+|---|---|
+| BL0801 | a law or contract is false on a concrete input |
+| BL0802 | the verifier's proof and a counterexample disagree |
+
 ## Backend
 
 | Code | Meaning |

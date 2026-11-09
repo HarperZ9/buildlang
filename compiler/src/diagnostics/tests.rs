@@ -235,6 +235,12 @@ fn type_samples() -> Vec<TypeError> {
             macro_name: s("println"),
             found: s("a raw string literal"),
         },
+        E::SpecRefuted {
+            message: s("law refuted"),
+        },
+        E::SpecInconsistent {
+            message: s("verifier disagrees"),
+        },
         E::BackendRejected {
             message: s("cannot compile"),
         },

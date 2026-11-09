@@ -8,6 +8,13 @@ tracked in `STATUS.md`, `README.md`, and
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
 `108/108` or `132/132` are not the current release gate.
 
+## Unreleased: laws and contracts
+
+- `law name(params) requires P { body }` and `fn f(..) -> T requires P ensures Q { .. }`: claims beside the code, type-checked like any function. `law`, `requires`, `ensures` and `result` are contextual words.
+- `buildc verify FILE [--json]`: each claim is proved, refuted with a counterexample the evaluator re-ran, or unknown with the reason. Two looks per claim: a concrete run (every input of a domain up to 2^20 points, else boundary values and a fixed sample) and a symbolic proof (path-by-path execution, polynomial normal form over Z, case splitting with Fourier-Motzkin and integer tightening). Trapping inputs are listed apart from the verdict.
+- `buildc check` fails on a refuted claim (BL0801) and on a verifier that disagrees with itself (BL0802).
+- `tests/verify`: Bend 2's published numeric, parallel-sum and Pong laws ported, BuildLang's own DETMATH integer, trace-codec and conservation laws, and planted checks. Details and limits: `docs/VERIFY.md`.
+
 ## Unreleased: canonical-record, color, repo-art, readability and art-receipts as BuildLang packages
 
 - `canonical-record` 1.0.0 ports Flywheel's RFC 8785 canonical JSON, its SHA-256 and the array digest (FSL-1.1-MIT): 190 of 190 cases byte-identical with the original. `color` 1.0.0 ports build-color's colour differences and colour spaces (FSL-1.1-MIT): the 34 Sharma CIEDE2000 pairs identical, the rest within 6.42e-12. `repo-art` 1.0.0 ports this repository's flow and card renderers: the committed artworks byte-identical. `readability` 1.0.0 ports Flywheel's Flesch reading ease (FSL-1.1-MIT) and `art-receipts` 1.0.0 ports `scripts/check_art_receipts.py`; both byte-identical on every case. All five are pure `.bld`, built with `buildc pkg build`.

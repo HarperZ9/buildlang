@@ -31,6 +31,7 @@
 //! let ast = parser.parse()?;
 //! ```
 
+mod contract;
 mod error;
 mod expr;
 mod item;
@@ -39,6 +40,7 @@ mod stmt;
 mod ty;
 
 pub use crate::ast::Module;
+pub use contract::{ENSURES_PREFIX, LAW_ATTR, REQUIRES_PREFIX};
 pub use error::{ParseError, ParseErrorKind, ParseResult};
 
 use crate::ast::*;
@@ -56,6 +58,9 @@ pub struct Parser<'a> {
     errors: Vec<ParseError>,
     /// Restriction flags for expression parsing.
     restrictions: Restrictions,
+    /// Items made by the parser itself (the hidden spec functions of a
+    /// `requires`/`ensures` contract), emitted after the item that made them.
+    pending_items: Vec<Item>,
 }
 
 /// Restrictions on expression parsing.
@@ -74,6 +79,7 @@ impl<'a> Parser<'a> {
             pos: 0,
             errors: Vec::new(),
             restrictions: Restrictions::default(),
+            pending_items: Vec::new(),
         }
     }
 
@@ -99,6 +105,7 @@ impl<'a> Parser<'a> {
                     self.recover_to_item();
                 }
             }
+            self.drain_pending_items(&mut items);
         }
 
         let span = start.merge(&self.current_span());

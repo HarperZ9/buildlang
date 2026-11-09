@@ -533,6 +533,16 @@ pub enum TypeError {
     /// as by `build` and `run`: a passing check means the program compiles.
     #[error("{message}")]
     BackendRejected { message: String },
+
+    /// A `law` or an `ensures` clause is false on a concrete input that
+    /// `buildc verify` found and re-ran.
+    #[error("{message}")]
+    SpecRefuted { message: String },
+
+    /// The verifier's prover claimed an obligation that a concrete input
+    /// refutes: a defect in the verifier, never reported as proved.
+    #[error("{message}")]
+    SpecInconsistent { message: String },
 }
 
 impl TypeError {

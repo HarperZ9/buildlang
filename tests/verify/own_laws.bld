@@ -1,0 +1,69 @@
+// BuildLang's own laws: DETMATH integer rules, the integer pieces of the
+// trace codec, and conservation laws from the scientific-runtime invariant
+// family. Planted false laws are marked; they must be refuted.
+
+// ---- DETMATH integer rules (hashStr uses i32 wrapping multiply and xor) ---
+
+law imul_comm(a: i32, b: i32) { a.wrapping_mul(b) == b.wrapping_mul(a) }
+law imul_assoc(a: i32, b: i32, c: i32) {
+    a.wrapping_mul(b).wrapping_mul(c) == a.wrapping_mul(b.wrapping_mul(c))
+}
+law xor_self(a: i32) { a ^ a == 0 }
+law xor_assoc(a: i32, b: i32, c: i32) { (a ^ b) ^ c == a ^ (b ^ c) }
+law xor_cancel(a: i32, b: i32) { (a ^ b) ^ b == a }
+// The JS-style int8 conversion round trip.
+law i8_u8_roundtrip(x: i8) { ((x as u8) as i8) == x }
+// Planted: wrapping add is not plain add (it wraps). Must be refuted.
+law planted_wadd_is_add(a: i8, b: i8) { (a.wrapping_add(b) as i64) == (a as i64) + (b as i64) }
+
+// ---- trace codec, integer pieces ---------------------------------------
+
+fn zigzag(x: i16) -> u16 { ((x << 1) ^ (x >> 15)) as u16 }
+fn unzigzag(z: u16) -> i16 { ((z >> 1) as i16) ^ (-((z & 1) as i16)) }
+law zigzag_roundtrip(x: i16) { unzigzag(zigzag(x)) == x }
+
+fn pack(hi: u8, lo: u8) -> u16 { ((hi as u16) << 8) | (lo as u16) }
+law pack_roundtrip(hi: u8, lo: u8) {
+    ((pack(hi, lo) >> 8) as u8) == hi && ((pack(hi, lo) & 255) as u8) == lo
+}
+// Planted: unpacking with the wrong shift. Must be refuted.
+law planted_bad_unpack(hi: u8, lo: u8) { ((pack(hi, lo) >> 7) as u8) == hi }
+
+// ---- conservation (invariant family) -----------------------------------
+
+// A + B <=> C, k units forward: atoms of A and of B are each conserved.
+law reaction_atoms(a: i64, b: i64, c: i64, k: i64) {
+    let a2 = a - k;
+    let b2 = b - k;
+    let c2 = c + k;
+    a2 + c2 == a + c && b2 + c2 == b + c
+}
+
+// Planted: a step that leaks one unit. Must be refuted.
+law planted_leaky_transfer(x: i64, y: i64, k: i64) {
+    (x - k) + (y + k - 1) == x + y
+}
+
+// bounded: an integer averaging step stays inside its neighbours' range.
+fn min3(a: i64, b: i64, c: i64) -> i64 { if a < b { if a < c { a } else { c } } else { if b < c { b } else { c } } }
+fn max3(a: i64, b: i64, c: i64) -> i64 { if a > b { if a > c { a } else { c } } else { if b > c { b } else { c } } }
+
+fn smooth(l: i64, m: i64, r: i64) -> i64
+    requires l >= -1000000000 && l <= 1000000000 && m >= -1000000000 && m <= 1000000000
+        && r >= -1000000000 && r <= 1000000000
+    ensures result >= min3(l, m, r) && result <= max3(l, m, r)
+{
+    (l + m + r) / 3
+}
+
+// energy-monotone: damping never raises the energy and keeps it non-negative.
+fn damp(e: i64) -> i64 requires e >= 0 ensures result <= e && result >= 0 {
+    e - e / 4
+}
+
+// A caller that respects damp's requires, and one that does not (planted).
+law damp_twice(e: i64) requires e >= 0 { damp(damp(e)) <= e }
+law planted_damp_negative(e: i64) requires e >= -5 { damp(e) <= e + 1 }
+
+fn main() {
+}
