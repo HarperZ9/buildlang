@@ -1,0 +1,70 @@
+// =========================================================================
+// C ABI: qdb as a library (bdb/lib). Appended to db.bld without its main()
+// by bdb/lib/make_lib.py; built with `buildc build --emit staticlib`.
+// =========================================================================
+// A host opens a database once and runs any number of statements on it in
+// one process. Output goes to the host's stdout, exactly as the CLI prints
+// it. The handle is opaque: the header forward-declares DB.
+//
+//   DB* d = qdb_open("app.db");          load the .db and replay the WAL
+//   qdb_exec(d, "SELECT * FROM t");      one statement, as the CLI runs it
+//   qdb_close(d);                        checkpoint (or HOLD) and free
+//
+// Limit: a statement the parser rejects ends the process with exit code 1,
+// as the CLI does (24 process_exit sites in db.bld). A host must pass
+// statements it trusts to parse, or run qdb in a child process.
+
+extern "C" {
+    fn strlen(p: *const u8) -> usize;
+    fn free(p: *mut u8);
+}
+
+fn qdb_from_c(p: *const u8) -> String ~ Foreign {
+    let mut out = String::new();
+    if p as usize == 0 {
+        return out;
+    }
+    let n = unsafe { strlen(p) };
+    let bytes = unsafe { slice::from_raw_parts(p, n) };
+    let mut i: usize = 0;
+    while i < n {
+        out.push(bytes[i] as char);
+        i = i + 1;
+    }
+    out
+}
+
+extern "C" fn qdb_open(path: *const u8) -> *mut DB ~ Foreign + Console + FileSystem + Process {
+    let mut d = db_new(qdb_from_c(path));
+    db_load(&mut d);
+    wal_replay(&mut d);
+    let b = Box::new(d);
+    b as *mut DB
+}
+
+extern "C" fn qdb_exec(h: *mut DB, sql: *const u8) -> i32 ~ Foreign + Console + FileSystem + Process {
+    if h as usize == 0 {
+        return 1;
+    }
+    let text = qdb_from_c(sql);
+    let slen = text.len();
+    let mut clean_sql = text;
+    if slen > 0 {
+        if text.char_at(slen - 1) == ";" { clean_sql = text.substring(0, slen - 1); }
+    }
+    let trimmed = clean_sql.trim();
+    if trimmed.len() > 0 {
+        unsafe { exec_sql(&mut *h, trimmed); }
+    }
+    0
+}
+
+extern "C" fn qdb_close(h: *mut DB) ~ Foreign + Console + FileSystem + Process {
+    if h as usize == 0 {
+        return;
+    }
+    unsafe {
+        wal_close(&mut *h);
+        free(h as *mut u8);
+    }
+}

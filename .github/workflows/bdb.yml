@@ -8,6 +8,7 @@ name: bdb
 #   - bdb/tests/test_qdb_text.py            text with | \ and line breaks round-trips
 #   - bdb/tests/test_qdb_sqlite_oracle.py   2,000 generated queries against SQLite
 #                                           (reported; it fails until NULL is apart from '')
+#   - bdb/tests/test_qdb_lib.py             the static library (bdb/lib) against the CLI
 #   - bql::tests::in_process_subset_matches_qdb, the compiler's in-process BuildQL
 #     subset checked against this qdb binary (QDB_BIN)
 # A change to compiler/ runs it too: a codegen regression that breaks qdb fails here.
@@ -95,6 +96,9 @@ jobs:
 
       - name: Text round trip
         run: python3 bdb/tests/test_qdb_text.py bdb/qdb.exe
+
+      - name: qdb as a C library (one handle, many statements, same output as the CLI)
+        run: python3 bdb/tests/test_qdb_lib.py compiler/target/release/buildc bdb/qdb.exe --cc gcc
 
       - name: SQLite differential (measurement, not yet a gate; see bdb/COMPLETE.md row 1b)
         continue-on-error: true
