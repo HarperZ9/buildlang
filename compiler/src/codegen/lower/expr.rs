@@ -5395,7 +5395,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     );
                     return Ok(values::local(result));
                 }
-                "clear" => (Some("build_hvec_free".to_string()), MirType::Void),
+                "clear" => (Some("build_hvec_clear".to_string()), MirType::Void),
                 "contains" => (
                     Some(format!("build_hvec_contains_{}", type_suffix)),
                     MirType::Bool,
