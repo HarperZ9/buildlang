@@ -160,6 +160,26 @@ FAIL; P2 2,000 of 2,000; text, crash, WAL, library and reference-differential te
 Planted check: a build that evaluates EXCEPT as INTERSECT fails the new test_qdb.sh assertions
 and passes fewer P1 records.
 
+**P11. Expressions in the select list and WHERE (row 2b), written 2026-11-09 00:27 PT before the
+change.** After P10 the largest rejection class is the expression: 949 of the 1,000 queries in
+`select1.test` put arithmetic in the select list, and most also use CASE, `abs`, a column
+compared with a column, a correlated scalar subquery or EXISTS. A column compared with a column
+(`WHERE c > d`) is worse than refused today: the condition parser reads `d` as the text 'd'.
+Change: a second SELECT path parses an expression tree (arithmetic with SQLite's integer and
+real rules, comparisons, AND, OR, NOT with three-valued logic, IS NULL, BETWEEN, IN, LIKE,
+searched and simple CASE, `abs`, `coalesce`, `ifnull`, `nullif`, aggregates without GROUP BY,
+scalar and EXISTS and IN subqueries that may name the outer query's columns, ORDER BY over any
+number of keys, DISTINCT, LIMIT and OFFSET), and runs it over one or more FROM tables. A token
+scan picks the path before either parser runs: the new path takes a SELECT that uses one of these
+forms and none of GROUP BY, HAVING, JOIN or a compound operator; every other SELECT keeps the
+older path and its answer. Measured on P1 unchanged against the P10 result 1,084 of 9,202.
+Prediction: between 2,500 and 6,000 query records pass, the bulk from `select1` to `select3`;
+wrong answers stay under 2 percent of the records the new path answers. Guards: test_qdb.sh no
+FAIL; P2 2,000 of 2,000 (its generator uses only forms the older path keeps, so P2 also checks
+that the path choice leaves them alone); text, crash, WAL, library and reference-differential
+tests unchanged. Planted check: a build whose integer division returns a real (no truncation)
+passes fewer P1 records and fails a new test_qdb.sh assertion.
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
