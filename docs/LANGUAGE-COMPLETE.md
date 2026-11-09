@@ -107,9 +107,9 @@ the wedge (`docs/STRATEGY-2026-10-SURPASS.md`).
 | S1 Specs in the same language | spec-breaking edits fail `buildc check` with a BL code, spec-preserving edits pass (either error) | 2.1.0 | NOT BUILT | |
 | S2 Spec quality tools | every mutant in each spec's mutation set fails the spec; `buildc spec explain` exists (a weak spec) | 2.1.0 | NOT BUILT | |
 | S3 Property library | round-trip, idempotence, no data races, crash consistency, authorisation, deterministic replay, frame budget: each applied to a right and a seeded wrong implementation (a wrong one passes) | 2.1.0 | NOT BUILT | |
-| V2 Contracts through SMT, exported to Rocq or Lean (P5 laws) | a contract suite including Bend 2's published `LAWS.bend` examples, ported, plus false contracts; every export loads in its prover (a false contract accepted, or an export that does not load) | 2.2.0 | NOT BUILT | parts in 1.12.0: `buildc verify` (laws and contracts, #138) with a bit-precise SAT solver inside `buildc` (#186): 24 false claims in `tests/verify/smt_false.bld`, 0 accepted, 23 refuted; Bend's numeric laws ported (`tests/verify/bend_laws.bld`). No Rocq or Lean export yet (author ruling 2026-11-02: no Lean) |
+| V2 Contracts through SMT, exported to Rocq or Lean (P5 laws) | a contract suite including Bend 2's published `LAWS.bend` examples, ported, plus false contracts; every export loads in its prover (a false contract accepted, or an export that does not load) | 2.2.0 | NOT BUILT | parts in 1.13.0: `buildc verify` (laws and contracts, #138) with a bit-precise SAT solver inside `buildc` (#186) and word-level rules (V3, #202): 29 false claims in `tests/verify/smt_false.bld`, 0 accepted, 29 refuted; 16 of 16 true claims proved; Bend's numeric laws ported (`tests/verify/bend_laws.bld`). No Rocq or Lean export yet (author ruling 2026-11-02: no Lean) |
 | S4 Abstract interpretation | interval, sign and nullness domains prove the bounds in an indexing corpus and refuse a seeded unsound product (an unsound product accepted, or a false "safe") | 2.2.0 | NOT BUILT | |
-| V4 Translation validation | per-function certificates that the C output matches the source for the semantic corpus and the pilot, and a mutation run where every injected miscompilation is caught (any missed) | 2.3.0 | NOT BUILT | parts in 1.12.0: `buildc tv` certifies 159 of 435 functions in `tests/programs` and 58 of 139 in `stdlib` (integers, bool, floats, constants); planted `add-to-sub` and `fadd-to-fsub` miscompilations caught in every affected function (`docs/TRANSLATION-VALIDATION.md`). Not yet: structs, strings, effects, the pilot |
+| V4 Translation validation | per-function certificates that the C output matches the source for the semantic corpus and the pilot, and a mutation run where every injected miscompilation is caught (any missed) | 2.3.0 | NOT BUILT | parts in 1.13.0: `buildc tv` certifies 247 of 437 functions in `tests/programs` and 58 of 139 in `stdlib` (integers, bool, floats, constants, prints and calls as ordered effects, scalar structs; #199, #205); planted `add-to-sub` and `fadd-to-fsub` miscompilations caught in every affected function (`docs/TRANSLATION-VALIDATION.md`). Not yet: strings, arrays, enums, the pilot |
 | V5 E-graph substitution with certificates | rewrites equal to the unrewritten program on a frozen input set, every certificate re-checked independently, a forged one refused (any difference or accepted forgery) | 2.3.0 | NOT BUILT | |
 
 ## Stage 7: parity where competitors excel (target 2.4.0 to 2.8.0)
@@ -150,7 +150,8 @@ value carries what it means.
 |---|---|---|
 | 1.11.0 | released 2026-11-08 | M4 and M3 met; M5 and P7 shipped, to be scored on this build |
 | 1.12.0 | M5 and P7 pass on a crates.io build | M5, P7 |
-| 1.13.0 | M6 passes | M6 |
+| 1.13.0 | released 2026-11-09 with translation validation of effects and structs and verify V3; M6 not met, it moves to 1.14.0 | M6 |
+| 1.14.0 | M6 passes | M6 |
 | 2.0.0 | stages 1 to 4 pass and F1 to F3 pass | the frozen language |
 | 2.1.0 to 2.3.0 | each verification row passes | V1, V3, S1 to S3; V2, S4; V4, V5 |
 | 2.4.0 to 2.8.0 | each parity row passes, with its dated comparison | P1 to P4, P6 to P8, V6 to V8 |

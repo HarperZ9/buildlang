@@ -8,7 +8,7 @@ tracked in `STATUS.md`, `README.md`, and
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
 `108/108` or `132/132` are not the current release gate.
 
-## Unreleased
+## 1.13.0 - 2026-11-09 - translation validation of effects and structs, verify V3, a speed baseline
 
 ### A float maths builtin no longer passes as an integer (#178)
 
@@ -27,6 +27,18 @@ tracked in `STATUS.md`, `README.md`, and
 ### Word-level rules in buildc verify (V3)
 
 - Exact division (`(a * b) / b` is `a` when the divisor is a monomial that divides every term), the wrapping identity (`x.wrapping_mul(1)` is `x`, a folded 0 makes the product 0), and a root search that proposes counterexample inputs for polynomial (dis)equalities, each re-run on the concrete evaluator. `tests/verify/smt_true.bld`: 16 of 16 proved (12 of 16 before); `smt_false.bld`: 29 of 29 refuted (28 before), none proved. A planted inexact division rule is caught by the refusal set. `docs/VERIFY.md`, V3.
+
+### Checker files split (#209)
+
+- Every file in `compiler/src/tv` and `compiler/src/verify` is at most 300 lines. Items moved, behaviour unchanged: `buildc tv --json` over `tests/programs` and `stdlib` and `buildc verify --json` over `tests/verify` give identical results before and after.
+
+### A speed baseline against Rust and C (#210)
+
+- `bench/speed-2026-11`: n-body and spectral-norm in BuildLang, Rust and C on one machine, 10 rounds, medians with bootstrap intervals. BuildLang is 3.36x (n-body) and 2.25x (spectral-norm) the time of gcc -O2 C; Rust is 1.02x and 0.99x. No lead over Rust is claimed.
+
+### Issues found and filed
+
+- #203: an integer-literal local unified with a float is `double` in C but incremented through `bl_iadd_i32`, which truncates (found by `buildc tv`). #212: `i8::MAX` passes `buildc check` and fails in the C compiler.
 
 ## 1.12.0 - 2026-11-09 - translation validation for floats, a bit-precise verifier, BuildDB in the repository
 
