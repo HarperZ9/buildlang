@@ -61,6 +61,8 @@ def facts(pdf_path, result, doc):
         "overfull": [_overfull(e) for e in diag.overfull],
         "underfull": len(diag.underfull),
         "missing_glyphs": sorted({f"U+{ord(ch):04X}" for ch, _ in diag.missing}),
+        "glyph_fallbacks": [{"char": f"U+{ord(ch):04X}", "font_asked": key, "font_used": file}
+                            for ch, key, file in sorted(set(getattr(diag, "fallbacks", [])))],
         "math_errors": [{"source": src, "error": err} for src, err in getattr(diag, "math_errors", [])],
         "fonts": [{"name": n, "embedded": e} for n, e in fonts(pdf)],
         "images": len(re.findall(rb"/Subtype /Image", data)),
