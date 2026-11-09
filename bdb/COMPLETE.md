@@ -147,6 +147,19 @@ tables in FROM, which qdb refuses. Guards: test_qdb.sh no FAIL; P2 2,000 of 2,00
 WAL, library and reference-differential tests unchanged. Planted check: a build that reads
 `5 < a` as `a < 5` (no swap) fails the new test_qdb.sh assertions.
 
+**P10. INTERSECT and EXCEPT (row 2a), written 2026-11-08 21:58 PT before the change.** Found by the P9 run:
+878 of the 2,832 query records in `select4.test` combine single-table branches with INTERSECT or
+EXCEPT, which qdb refuses (`expected keyword`). Change: a compound SELECT takes UNION, UNION ALL,
+INTERSECT and EXCEPT, evaluated left to right with equal precedence, as SQLite does; INTERSECT
+and EXCEPT return distinct rows. Rows compare by every cell, NULL equal to NULL, as SQLite's
+compound operators do. The row key that UNION used joined cells with `|`, so `('a|b','c')` and
+`('a','b|c')` were one row; the key now uses a separator no cell holds. Measured on P1 unchanged
+against the P9 result 199 of 9,202. Prediction: between 500 and 1,100 query records pass; most
+of the 878 have no ORDER BY and are scored by the corpus's own sort mode. Guards: test_qdb.sh no
+FAIL; P2 2,000 of 2,000; text, crash, WAL, library and reference-differential tests unchanged.
+Planted check: a build that evaluates EXCEPT as INTERSECT fails the new test_qdb.sh assertions
+and passes fewer P1 records.
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
@@ -275,11 +288,23 @@ harness unchanged. Before: 1,251 of 2,000 on this branch, re-run before the chan
   operator fails three); text 0 changed; crash 0 of 170; WAL 0; library 0; reference differential
   16 of 16 with `--no-null --no-float-agg`.
 
+## After P10: INTERSECT and EXCEPT (2026-11-08, feat/bdb-compound)
+
+- **P1 sqllogictest:** 1,084 of 9,202 query records pass (11.78 percent), 68 wrong, 8,050
+  rejected; statements 1,918 of 1,993. Before (P9): 199, 75, 8,928. Prediction (500 to 1,100)
+  held. `select4.test` passes 1,018 of its 2,832 queries with 0 wrong; the rest are rejected,
+  mostly comma-separated FROM lists. Planted check: a build that evaluates EXCEPT as INTERSECT
+  passes 304 (780 fewer) and answers 848 wrong.
+- **P2:** 2,000 of 2,000, unchanged.
+- **Guards:** test_qdb.sh 257 pass, 0 fail (seven checks added; the build before fails six of
+  them, among them the `|` row-key collision); text 0 changed; crash 0 of 170; WAL 0; library 0;
+  reference differential 16 of 16 with `--no-null --no-float-agg`.
+
 ## Stage 1: a correct, durable single-file engine
 
 | Row | Check (fails if) | Status | Evidence |
 |---|---|---|---|
-| 1a Regression gate | `bdb/tests/test_qdb.sh` reports any FAIL | PASS | 250 pass, 0 fail after P9; 244 after P8; 241 after P7; 222 after the completion changes (214/0/1 at the move) |
+| 1a Regression gate | `bdb/tests/test_qdb.sh` reports any FAIL | PASS | 257 pass, 0 fail after P10; 250 after P9; 244 after P8; 241 after P7; 222 after the completion changes (214/0/1 at the move) |
 | 1b SQLite differential | any of the P2 queries disagrees, with numbers compared as numbers | PASS | 2,000 of 2,000 after P8, a CI gate; 1,944 after P7; 1,251 at the move (519 null_vs_empty, 230 rows, 46 number_text) |
 | 1c Crash recovery | any P3 crash point breaks the rule | PASS | 0 violations of 170 (24 of 104 at the move); two mutants caught |
 | 1d Cross-process transaction | either P4 case misses | PASS | four checks in test_qdb.sh (`xproc_*`), differential process mode equals REPL mode on 8 seeds |
@@ -291,7 +316,7 @@ harness unchanged. Before: 1,251 of 2,000 on this branch, re-run before the chan
 
 | Row | Check (fails if) | Status | Evidence |
 |---|---|---|---|
-| 2a sqllogictest queries | any P1 query record does not pass | FAIL | 199 of 9,202 (2.16 percent) after P9; 33 after P7 and P8; 32 at the move; `bdb/tests/slt_run.py` |
+| 2a sqllogictest queries | any P1 query record does not pass | FAIL | 1,084 of 9,202 (11.78 percent) after P10; 199 after P9; 33 after P7 and P8; 32 at the move; `bdb/tests/slt_run.py` |
 | 2b Expressions in the select list | `SELECT a+1, a*b-c FROM t` refused or wrong | FAIL | refused: "expected keyword 'FROM'"; the largest single cause of P1 rejections |
 | 2c Column types with arguments and constraints | `VARCHAR(30)`, `INTEGER PRIMARY KEY`, `UNIQUE` refused | FAIL | P9: type arguments are read (`VARCHAR(30)`, `DECIMAL(10, 2)`), statements 134 to 1,918 of 1,993; `PRIMARY KEY` is parsed and not enforced; `UNIQUE` is refused |
 | 2d CASE, scalar functions (abs, coalesce) | refused or wrong | NOT BUILT | |

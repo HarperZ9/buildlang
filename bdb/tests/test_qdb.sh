@@ -637,6 +637,30 @@ chk   "lit_both_sides"   "$($QDB "$DB" "SELECT a FROM ta WHERE 1 = 1" 2>&1 | tr 
 chk   "type_arg_not_num" "$($QDB "$DB" "CREATE TABLE tb (a VARCHAR(x))" 2>&1 | tr -d '' | grep -ci 'expected a number')" "1"
 rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
 
+echo "== INTERSECT and EXCEPT, left to right (P10) =="
+rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
+$QDB "$DB" "CREATE TABLE cp (a INTEGER, s TEXT)" >/dev/null
+$QDB "$DB" "CREATE TABLE cq (a INTEGER, s TEXT)" >/dev/null
+$QDB "$DB" "INSERT INTO cp VALUES (1,'x'),(2,'y'),(2,'y'),(3,'z'),(4,NULL)" >/dev/null
+$QDB "$DB" "INSERT INTO cq VALUES (2,'y'),(3,'w'),(4,NULL),(5,'v')" >/dev/null
+chksel "intersect"        "SELECT a FROM cp INTERSECT SELECT a FROM cq ORDER BY 1" "$(printf '2
+3
+4')"
+chksel "except_null_eq"   "SELECT a, s FROM cp EXCEPT SELECT a, s FROM cq ORDER BY 1" "$(printf '1 | x
+3 | z')"
+chksel "union_then_except" "SELECT a FROM cp UNION SELECT a FROM cq EXCEPT SELECT a FROM cq WHERE a > 3 ORDER BY 1" "$(printf '1
+2
+3')"
+chksel "union_then_all"   "SELECT a FROM cp WHERE a < 3 UNION SELECT a FROM cp WHERE a < 3 UNION ALL SELECT a FROM cq WHERE a = 2 ORDER BY 1" "$(printf '1
+2
+2')"
+chk   "intersect_all_closed" "$($QDB "$DB" "SELECT a FROM cp INTERSECT ALL SELECT a FROM cq" 2>&1 | tr -d '' | grep -ci 'not supported')" "1"
+$QDB "$DB" "CREATE TABLE cr (u TEXT, v TEXT)" >/dev/null
+$QDB "$DB" "INSERT INTO cr VALUES ('a|b','c'),('a','b|c')" >/dev/null
+chksel "union_key_pipe"   "SELECT COUNT(*) FROM cr" "2"
+chk   "union_key_pipe_rows" "$(rows "SELECT u, v FROM cr UNION SELECT u, v FROM cr" | wc -l | tr -d ' ')" "2"
+rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
+
 echo "== ALTER / DROP =="
 reseed; $QDB "$DB" "ALTER TABLE emp ADD COLUMN active INTEGER" >/dev/null
 chkhdr "alter_add"     "SELECT * FROM emp LIMIT 0" "id | name | dept | salary | age | active"
