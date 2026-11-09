@@ -12,8 +12,14 @@ tracked in `STATUS.md`, `README.md`, and
 
 - `law name(params) requires P { body }` and `fn f(..) -> T requires P ensures Q { .. }`: claims beside the code, type-checked like any function. `law`, `requires`, `ensures` and `result` are contextual words.
 - `buildc verify FILE [--json]`: each claim is proved, refuted with a counterexample the evaluator re-ran, or unknown with the reason. Two looks per claim: a concrete run (every input of a domain up to 2^20 points, else boundary values and a fixed sample) and a symbolic proof (path-by-path execution, polynomial normal form over Z, case splitting with Fourier-Motzkin and integer tightening). Trapping inputs are listed apart from the verdict.
-- `buildc check` fails on a refuted claim (BL0701) and on a verifier that disagrees with itself (BL0702).
+- `buildc check` fails on a refuted claim (BL0801) and on a verifier that disagrees with itself (BL0802).
 - `tests/verify`: Bend 2's published numeric, parallel-sum and Pong laws ported, BuildLang's own DETMATH integer, trace-codec and conservation laws, and planted checks. Details and limits: `docs/VERIFY.md`.
+
+## Unreleased: a working package manager, and our first tools as packages
+
+- `buildc pkg publish`, `resolve`, `verify`, `build`, `check-registry`, plus `init --lib` and a fixed `add`: publish into the in-repo registry with a SHA-256 content hash per version, resolve versions, write `Build.lock`, and build offline from it. `registry/index.json` moves to format 2 (a `versions` map per package; the first-format fields stay). The three existing packages now carry checksums. Codes BL0701 to BL0708. `docs/PACKAGES.md` describes the flow.
+- Published `sha256` and `merkle` 1.0.0, both pure BuildLang. `merkle` ports Flywheel's RFC 6962 tree (FSL-1.1-MIT) and matches the original byte for byte on every root, inclusion and consistency proof for trees of 0 to 40 leaves.
+- Tests: `compiler/tests/pkg_flow.rs` (two clean copies build the same C artifact from one lock; a tampered package fails with BL0702; an unmeetable range fails with BL0701; stale lock BL0703; missing version BL0704; republish BL0707) and `compiler/tests/registry_packages.rs` (every tool package builds from its own lock and matches the goldens its original wrote).
 
 ## Unreleased: `par_for` and `par_map` (M5, parallel by default)
 

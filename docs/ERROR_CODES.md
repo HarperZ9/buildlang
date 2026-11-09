@@ -196,12 +196,27 @@ A test in `compiler/src/diagnostics/tests.rs` fails if this table and the compil
 | BL0610 | module import cycle |
 | BL0620 | formatting macro needs a string literal first |
 
+## Packages, registry and lockfile
+
+`buildc pkg` reports these. See [PACKAGES.md](PACKAGES.md).
+
+| Code | Meaning |
+|---|---|
+| BL0701 | no published version meets every version requirement |
+| BL0702 | a locked package does not match its checksum |
+| BL0703 | the lockfile is missing, malformed or out of date |
+| BL0704 | a locked package is not in the registry |
+| BL0705 | the package manifest is invalid |
+| BL0706 | the registry index is missing or invalid |
+| BL0707 | that package version is already published with other contents |
+| BL0708 | a package file could not be read or written |
+
 ## Laws and contracts
 
 | Code | Meaning |
 |---|---|
-| BL0701 | a law or contract is false on a concrete input |
-| BL0702 | the verifier's proof and a counterexample disagree |
+| BL0801 | a law or contract is false on a concrete input |
+| BL0802 | the verifier's proof and a counterexample disagree |
 
 ## Backend
 

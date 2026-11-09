@@ -352,6 +352,14 @@ fn produced_codes() -> Vec<&'static str> {
         codes::IO_ERROR,
         codes::INPUT_GRAPH_ERROR,
         codes::POLICY_VIOLATION,
+        codes::PKG_UNRESOLVABLE,
+        codes::PKG_CHECKSUM,
+        codes::PKG_LOCK,
+        codes::PKG_MISSING,
+        codes::PKG_MANIFEST,
+        codes::PKG_REGISTRY,
+        codes::PKG_PUBLISHED,
+        codes::PKG_IO,
     ];
     let mut seen_types = std::collections::HashSet::new();
     for e in type_samples() {
