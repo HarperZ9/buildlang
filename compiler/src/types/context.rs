@@ -95,6 +95,11 @@ pub struct TypeContext {
     /// C type matches the checked type (issue #159). `None` marks a span that
     /// two checks resolved differently; lowering then keeps its own typing.
     inferred_local_ints: HashMap<crate::lexer::Span, Option<IntTy>>,
+
+    /// Float type the checker inferred for an unannotated `let` whose
+    /// initializer is an unsuffixed integer literal, as in `let mut c = 0;`
+    /// used against an `f64` (issue #167). Same conflict rule as above.
+    inferred_local_floats: HashMap<crate::lexer::Span, Option<super::ty::FloatTy>>,
 }
 
 /// One candidate method for an overloaded (or singly-defined) function name.
@@ -360,6 +365,7 @@ impl TypeContext {
             foreign_statics: HashSet::new(),
             multi_methods: HashMap::new(),
             inferred_local_ints: HashMap::new(),
+            inferred_local_floats: HashMap::new(),
         };
         ctx.init_builtins();
         ctx
@@ -521,6 +527,29 @@ impl TypeContext {
                 }
             })
             .or_insert(Some(ty));
+    }
+
+    /// Record the float type inferred for the unannotated `let` binding at
+    /// `span`. A second, different record for the same span clears it.
+    pub fn record_inferred_local_float(
+        &mut self,
+        span: crate::lexer::Span,
+        ty: super::ty::FloatTy,
+    ) {
+        self.inferred_local_floats
+            .entry(span)
+            .and_modify(|e| {
+                if *e != Some(ty) {
+                    *e = None;
+                }
+            })
+            .or_insert(Some(ty));
+    }
+
+    /// The float type the checker inferred for the unannotated `let` binding
+    /// at `span`, if one was recorded without conflict.
+    pub fn inferred_local_float(&self, span: crate::lexer::Span) -> Option<super::ty::FloatTy> {
+        self.inferred_local_floats.get(&span).copied().flatten()
     }
 
     /// The integer type the checker inferred for the unannotated `let`

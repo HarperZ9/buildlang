@@ -149,6 +149,24 @@ impl Unifier {
                 })
             }
 
+            // An integer literal meeting a float literal becomes a float, as
+            // `let s = 60.3; let c = 0; s / c` should check (issue #167). The
+            // generic arm below bound the float literal's variable to the
+            // integer one instead, so `60.3` checked as an integer and the
+            // division was emitted as an integer division.
+            (TyKind::Infer(i1), TyKind::Infer(i2))
+                if i1.kind == InferKind::Int && i2.kind == InferKind::Float =>
+            {
+                self.bind(i1.var, t2.clone())?;
+                Ok(())
+            }
+            (TyKind::Infer(i1), TyKind::Infer(i2))
+                if i1.kind == InferKind::Float && i2.kind == InferKind::Int =>
+            {
+                self.bind(i2.var, t1.clone())?;
+                Ok(())
+            }
+
             // Inference variables
             (TyKind::Infer(infer1), _) => {
                 self.bind(infer1.var, t2.clone())?;

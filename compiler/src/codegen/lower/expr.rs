@@ -259,6 +259,17 @@ impl<'ctx> MirLowerer<'ctx> {
             self.ctx
                 .inferred_local_int(local.pattern.span)
                 .and_then(Self::wide_signed_mir_int)
+                .or_else(|| {
+                    // A float the checker inferred for an integer literal
+                    // (issue #167): without it `let mut c = 0;` divided into
+                    // an f64 was `int32_t` and the division an integer one.
+                    use crate::types::FloatTy;
+                    match self.ctx.inferred_local_float(local.pattern.span)? {
+                        FloatTy::F64 => Some(MirType::f64()),
+                        FloatTy::F32 => Some(MirType::f32()),
+                        _ => None,
+                    }
+                })
         });
 
         // Propagate expected type to init expression lowering so that

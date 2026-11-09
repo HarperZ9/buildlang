@@ -2464,10 +2464,24 @@ impl<'ctx> TypeInfer<'ctx> {
             let _ = self.unifier.unify(body_ty, ret_ty);
         }
         for (span, ty) in std::mem::take(&mut self.unannotated_lets) {
-            if let TyKind::Int(int_ty) = self.apply(&ty).kind {
-                if matches!(int_ty, IntTy::I64 | IntTy::I128 | IntTy::Isize) {
-                    self.ctx.record_inferred_local_int(span, int_ty);
+            match self.apply(&ty).kind {
+                TyKind::Int(int_ty) => {
+                    if matches!(int_ty, IntTy::I64 | IntTy::I128 | IntTy::Isize) {
+                        self.ctx.record_inferred_local_int(span, int_ty);
+                    }
                 }
+                // An unsuffixed integer literal unifies with a float (issue
+                // #167): `let mut c = 0;` divided into an f64 checks as f64.
+                TyKind::Float(float_ty) => {
+                    if matches!(float_ty, FloatTy::F32 | FloatTy::F64) {
+                        self.ctx.record_inferred_local_float(span, float_ty);
+                    }
+                }
+                // Still a float literal's variable: it defaults to f64.
+                TyKind::Infer(ref infer) if infer.kind == InferKind::Float => {
+                    self.ctx.record_inferred_local_float(span, FloatTy::F64);
+                }
+                _ => {}
             }
         }
     }
