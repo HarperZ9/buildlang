@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- 2026-11-09: DISTINCT works in SUM, AVG, MIN, MAX and TOTAL, with or without GROUP BY; `total()`,
+  `group_concat(x [, sep])`, `NOT INDEXED` / `INDEXED BY` and the postfix tests `x NOT NULL`,
+  `ISNULL`, `NOTNULL` run. sqllogictest 9,143 to 9,181 of 9,202.
+
 - 2026-11-09: `INSERT INTO t [(cols)] SELECT ...` runs; the selected rows pass the same column and
   constraint checks as VALUES rows. sqllogictest 9,087 to 9,143 of 9,202, wrong answers 65 to 9.
 
