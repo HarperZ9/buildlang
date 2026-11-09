@@ -8,6 +8,12 @@ tracked in `STATUS.md`, `README.md`, and
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
 `108/108` or `132/132` are not the current release gate.
 
+## Unreleased
+
+### A float maths builtin no longer passes as an integer (#178)
+
+- `fn f(x: f64) -> i32 { floor(x) }` passed `buildc check`, and the C converted with a plain assignment (truncation, undefined out of range). `floor`, `sqrt`, `abs`, `min` and the other free maths builtins now take their float argument's type when no unit decides it, so the check reports BL0354 and asks for `as i32`. `tests/programs/80_icc_profile.bld` now says `floor(fixed) as i32`; its output is unchanged. `tests/reject/float_builtin_as_int_return.bld`.
+
 ## 1.12.0 - 2026-11-09 - translation validation for floats, a bit-precise verifier, BuildDB in the repository
 
 ### Translation validation for floats and named constants (#176, #180)
