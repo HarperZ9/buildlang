@@ -55,8 +55,10 @@ def read_cell(qdb, db, i):
     p = subprocess.run([qdb, db, "SELECT v FROM t WHERE id = %d" % i], capture_output=True, timeout=60)
     out = p.stdout.decode("utf-8", errors="replace")
     # The Windows C runtime writes each line feed as CR LF. The generated
-    # values hold no CR LF pair, so this undoes exactly that translation.
-    out = out.replace(chr(13) + chr(10), chr(10))
+    # values hold no CR LF pair, so this undoes exactly that translation. On
+    # other systems nothing is translated, and a value ending in CR must keep it.
+    if os.name == "nt":
+        out = out.replace(chr(13) + chr(10), chr(10))
     # Header "v...", separator "-...", then the padded cell; print adds "\n".
     first = out.find("\n")
     second = out.find("\n", first + 1) if first >= 0 else -1
