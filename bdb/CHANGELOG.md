@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- 2026-11-09: an explicit transaction writes its WAL lines once, with its COMMIT record (or with
+  HOLD at a clean exit inside BEGIN), instead of one file append per statement. The WAL bytes are
+  the same. Through `bdb/lib`: updates at 7.5 times SQLite's time (102.9 before), mixed at 8.3
+  times (51.6 before).
+
 - 2026-11-09: UPDATE and DELETE change rows in place. An UPDATE writes only the changed cells and
   moves their entries in the indexes on the changed column; a DELETE compacts the table in place
   and renumbers its indexes without a sort; a WHERE of one equality on an indexed column finds its

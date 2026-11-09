@@ -47,7 +47,9 @@ concurrency:
 
 env:
   QDB_ORACLE_REF: 7efcedd935467fc298e20035ebd3468099164f54  # build-universe 577abe4
-  QDB_FAULTS_DIGEST: cd3ccf9f60f3ccabca7ab742c62388d93618458db638565fa2e7b321b8807c92
+  # P21 (2026-11-09): a transaction writes its WAL lines once, at COMMIT, so the write sequence
+  # and the digest changed; equal on Windows and Linux.
+  QDB_FAULTS_DIGEST: 77a49282bfb71d4786b2a8ac6be890f1e5952b2e6dc960b26033ccbdaa24c47f
 
 jobs:
   qdb:
