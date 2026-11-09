@@ -7,7 +7,7 @@ operators with display limits (Rule 13a). Not implemented: delimiters
 grown by \\left/\\right, accents, matrices, italic-correction kerning.
 """
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .mathfont import read_math_constants, glyph_bounds
 from .shape import Piece
@@ -146,15 +146,14 @@ class MathLayout:
                         u += psi
                         v -= psi
         x = nuc.width
-        w = 0.0
+        # glyph runs go out in source order: e_1^2 reads e12 and e^2_1 reads e21
+        for part, dy in _source_order(a, (sub, -v), (sup, u)):
+            out.add(part, x, dy)
         if sup is not None:
-            out.add(sup, x, u)
             out.height = max(out.height, sup.height + u)
-            w = sup.width
         if sub is not None:
-            out.add(sub, x, -v)
             out.depth = max(out.depth, sub.depth + v)
-            w = max(w, sub.width)
+        w = max(sup.width if sup is not None else 0.0, sub.width if sub is not None else 0.0)
         out.width = x + w + self.k("SpaceAfterScript", style)
         return out
 
@@ -164,14 +163,18 @@ class MathLayout:
         w = max(nuc.width, sup.width if sup else 0, sub.width if sub else 0)
         out = MBox(w, nuc.height, nuc.depth)
         out.add(nuc, (w - nuc.width) / 2, 0)
-        if sup:
-            rise = max(self.k("UpperLimitBaselineRiseMin", style), self.k("UpperLimitGapMin", style) + sup.depth)
-            out.add(sup, (w - sup.width) / 2, nuc.height + rise)
-            out.height = nuc.height + rise + sup.height
+        lo = hi = None
         if sub:
             drop = max(self.k("LowerLimitBaselineDropMin", style), self.k("LowerLimitGapMin", style) + sub.height)
-            out.add(sub, (w - sub.width) / 2, -(nuc.depth + drop))
+            lo = -(nuc.depth + drop)
             out.depth = nuc.depth + drop + sub.depth
+        if sup:
+            rise = max(self.k("UpperLimitBaselineRiseMin", style), self.k("UpperLimitGapMin", style) + sup.depth)
+            hi = nuc.height + rise
+            out.height = nuc.height + rise + sup.height
+        # source order in the text layer: operator, then the limits as written (lower first for \sum_{j=1}^{m})
+        for part, dy in _source_order(a, (sub, lo), (sup, hi)):
+            out.add(part, (w - part.width) / 2, dy)
         return out
 
     def fraction(self, num_atoms, den_atoms, style, cramped):
@@ -216,14 +219,20 @@ class MathLayout:
         return out
 
 
+def _source_order(a, sub, sup):
+    """The (box, shift) pairs of the scripts that exist, in the order the source wrote them."""
+    pair = (sup, sub) if a.sup_first else (sub, sup)
+    return [p for p in pair if p[0] is not None]
+
+
 def _fix_bins(atoms):
     """Rules 5 and 6: a Bin with no left operand, or before Rel/Close/Punct, becomes Ord."""
     out, prev = [], None
     for k, a in enumerate(atoms):
         if a.cls == BIN and (prev is None or prev in (BIN, OP, REL, OPEN, PUNCT)):
-            a = Atom(ORD, a.nucleus, a.sup, a.sub)
+            a = replace(a, cls=ORD)
         if a.cls in (REL, CLOSE, PUNCT) and out and out[-1].cls == BIN:
-            out[-1] = Atom(ORD, out[-1].nucleus, out[-1].sup, out[-1].sub)
+            out[-1] = replace(out[-1], cls=ORD)
         out.append(a)
         if a.cls != -1:
             prev = a.cls
