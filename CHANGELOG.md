@@ -10,6 +10,13 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+### A differential fuzz target and lint in CI
+
+- `compiler/tests/fuzz_int_expr.rs` generates `i64` expressions from fixed seeds, takes the reference value from Rust checked arithmetic, and compiles and runs one batched program per seed. 450 values over 3 seeds match, and 8 expressions that overflow or divide by zero stop with exit code 101. A mismatch is shrunk to a small expression. Two planted defects (a wrong remainder sign in the reference, one corrupted output line) must be caught.
+- CI runs `buildc lint` over the sources under `examples/` and `bench/`: 208 files must pass and 2 control programs with planted type faults must be refused.
+- `buildc lint` reported trailing whitespace only on indented lines; it now reports it on every line (`compiler/tests/lint.rs`).
+- `docs/FUZZING.md` lists the rules for a fuzz target and the targets planned for each compiler stage.
+
 ### Miscompiles fixed: integer limits and a float local added as an integer (#212, #215, #203)
 
 - `i8::MAX`, `u16::MAX`, `isize::MIN` and every other integer limit now compile. Only five were mapped before; the rest lowered to an undeclared name such as `i8_MAX` and failed in the C compiler after `buildc check` passed (#212).
