@@ -811,9 +811,9 @@ INDEX ");
         ix = ix + 1;
     }
     let all = parts.join("");
-    // The vector's buffer goes back to the allocator (Vec.clear frees it);
+    // The vector's buffer goes back to the allocator (Vec.release frees it);
     // parts is not used again.
-    parts.clear();
+    parts.release();
     all
 }
 
@@ -889,7 +889,8 @@ fn db_load(d: &mut DB) ~ FileSystem {
             } else if clean.starts_with("QDB 1 ") || clean.starts_with("QDB 2 ") {
                 d.fmt_escaped = true;
                 d.fmt_nulls = clean.starts_with("QDB 2 ");
-                d.applied_txid = parse_int_str(clean.substring(6, clen2 - 6));
+                let hid = txid_text(clean.substring(6, clen2 - 6));
+                d.applied_txid = if hid < 0 { 0 } else { hid };
                 d.txn_id = d.applied_txid;
             } else if clean.starts_with("TABLE ") {
                 let tname = clean.substring(6, clen2 - 6);
@@ -1331,6 +1332,20 @@ fn strip_cr(line: String) -> String {
 //
 // Assumes: DB is already loaded from the .db file. WAL contains only
 // mutations that happened after the last checkpoint.
+// A transaction id as written by this engine: 1 to 9 digits and nothing else.
+// Anything else is damage and gives -1; parse_int_str would run every digit on
+// the line together and stop the process on overflow (found by the WAL fuzzer).
+fn txid_text(s: String) -> i32 {
+    let n = s.len();
+    if n < 1 || n > 9 { return 0 - 1; }
+    let mut i = 0;
+    while i < n {
+        if !is_digit(s.char_at(i)) { return 0 - 1; }
+        i = i + 1;
+    }
+    parse_int_str(s)
+}
+
 fn wal_replay(d: &mut DB) ~ Console + FileSystem + Process {
     if !file_exists(d.wal_path) { return; }
     let content = read_file(d.wal_path);
@@ -1356,7 +1371,7 @@ fn wal_replay(d: &mut DB) ~ Console + FileSystem + Process {
         }
         if wl.starts_with("TXID ") {
             txn_h = fnv_extend(fnv_init(), wl + "\n");
-            let id = parse_int_str(wl.substring(5, wl.len() - 5));
+            let id = txid_text(wl.substring(5, wl.len() - 5));
             if id > max_id { max_id = id; }
             // A transaction at or below the .db's applied id is already in
             // the .db: a crash came after the checkpoint and before the WAL
@@ -3822,10 +3837,10 @@ fn exec_insert(d: &mut DB) ~ Console + Process {
         rsv[si] = vec_get(rsv, si) + added;
         si = si + 1;
     }
-    // Both are local to this call and held nowhere else; clear() returns
+    // Both are local to this call and held nowhere else; release() returns
     // their memory to the allocator.
-    row_cells.clear();
-    src_for_col.clear();
+    row_cells.release();
+    src_for_col.release();
 
     // Indexes need no work here. The new rows carry the highest row ids, so
     // an index whose key count is below the table's row count is behind by
@@ -4335,10 +4350,10 @@ fn exec_select(d: &mut DB) ~ Console + Process {
     }
     // The work lists are local and held nowhere else; free them, or every
     // SELECT leaves four lists behind (P29).
-    show_cols.clear();
-    match_rows.clear();
-    hdr_names.clear();
-    widths.clear();
+    show_cols.release();
+    match_rows.release();
+    hdr_names.release();
+    widths.release();
 }
 
 // --- 6c-union: SELECT ... UNION [ALL] ... ---
@@ -10109,7 +10124,7 @@ fn con_key(d: &DB, k: i32, cells: Vec<i32>, base: i32) -> String {
     while j < n {
         let v = sp_get(d, vec_get(cells, base + vec_get(d.con_cols, st + j)));
         if is_null(v) {
-            parts.clear();
+            parts.release();
             return "";
         }
         let nb = numeric_bytes(v);
@@ -10128,7 +10143,7 @@ fn con_key(d: &DB, k: i32, cells: Vec<i32>, base: i32) -> String {
         j = j + 1;
     }
     let key = parts.join("");
-    parts.clear();
+    parts.release();
     key
 }
 
@@ -10255,7 +10270,7 @@ fn con_check_insert(d: &mut DB, t: i32, rows: Vec<i32>, nrows: i32) -> String {
                     let key = con_key(d, k, rows, 0);
                     if key.len() > 0 {
                         if map_contains(d.con_map, key) {
-                            keys.clear();
+                            keys.release();
                             return con_fail_text(d, k, t);
                         }
                     }
@@ -10279,7 +10294,7 @@ fn con_check_insert(d: &mut DB, t: i32, rows: Vec<i32>, nrows: i32) -> String {
     // Every constraint holds: the rows go in, and so do their keys.
     if nrows == 1 && !stale { con_map_add_keys(d, t, rows, keys); }
     else { con_map_add(d, t, rows, 0, nrows, cc); }
-    keys.clear();
+    keys.release();
     ""
 }
 
@@ -10366,8 +10381,8 @@ fn hist_state(d: &DB, n: i32) -> DB ~ Console + FileSystem + Process {
         let wl = strip_cr(vec_get(lines, li));
         if wl.starts_with("TXID ") {
             txn_h = fnv_extend(fnv_init(), wl + "\n");
-            txn_id = parse_int_str(wl.substring(5, wl.len() - 5));
-            txn_start = li + 1;
+            txn_id = txid_text(wl.substring(5, wl.len() - 5));
+            txn_start = if txn_id < 0 { 0 - 1 } else { li + 1 };
         } else if wl.starts_with("OP ") || wl.starts_with("OPX ") {
             txn_h = fnv_extend(txn_h, wl + "\n");
         } else if wl.starts_with("COMMIT") {
